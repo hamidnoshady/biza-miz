@@ -261,6 +261,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       "missing_token",
       "unsupported_token",
       "unknown_purpose",
+      "variables_mismatch",
       "template_archived",
     ];
     if (known.some((code) => message.startsWith(code)) || message.startsWith("message_variable_missing") || message.startsWith("unknown_template_variable")) {

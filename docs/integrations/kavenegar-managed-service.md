@@ -345,6 +345,10 @@ and nothing provisions until it is on.
 - `template-variables.ts` — the pure rendering boundary (§5): six domain variables, one renderer
   each, positional `%token` slots, and errors instead of silent truncation. The same call produces
   the sample a tenant sees, so what is previewed is what will be sent.
+- `lookup-send-service.ts` — sending one approved message (§5): the child's own key, retail reserved
+  and settled once by the §4 engine, the provider's reported cost recorded tenant-invisibly, a
+  definitive refusal refunded in full, and an **ambiguous** transport failure kept as `unknown`
+  rather than refunded. `buildLookupSendRequest` takes no master key by design.
 - `reconciliation-service.ts` — stored wholesale balance/margin evidence.
 - `/api/platform/sms/accounts` — Superadmin reads (accounts, margin, reconciliation, template
   catalog) and actions (policy, probe, transfer, fund, reconcile, template submit/archive/sync,
@@ -362,7 +366,10 @@ and nothing provisions until it is on.
 - `integration/kavenegar-managed-accounts.integration.test.ts` — 46 database cases with a
   fake transport (no network)
 - `integration/kavenegar-master-templates.integration.test.ts` — 16 database cases for the
-  library: trade/plan targeting, idempotent instantiation, versioned rollout, lineage, RLS: one-child-per-activation, lost-response recovery, funding
+  library: trade/plan targeting, idempotent instantiation, versioned rollout, lineage, RLS
+- `integration/kavenegar-lookup-send.integration.test.ts` — 8 database cases for the send: the
+  refusals that must precede a charge, one charge per message, a tenant-invisible wholesale cost,
+  a full refund on a definitive refusal, and the kept reservation on an ambiguous outcome: one-child-per-activation, lost-response recovery, funding
   idempotency and caps, template approval, reconciliation bucketing, RLS under an
   unprivileged role, and the app-availability regression.
 
