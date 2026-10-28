@@ -31,6 +31,7 @@ import { ServicesSettings } from "./services-settings";
 import { PERMISSIONS } from "@/lib/permissions";
 import { PLATFORM_SETTINGS_HOME } from "@/lib/app-routes";
 import type { Industry } from "@/lib/industries";
+import { isProductWorkspaceIndustry } from "@/lib/product-workspace";
 import { settingsTabHref } from "@/lib/settings-routes";
 import { SectionNav, type Section } from "@/app/dashboard/section-nav";
 import { BackupManager } from "@/app/dashboard/backup/backup-manager";
@@ -50,6 +51,7 @@ import { OnlinePlatformsSettings } from "./online-platforms-settings";
 import { OrderControlsSettings } from "./order-controls-settings";
 import { PaymentMethodsSettings } from "./payment-methods-settings";
 import { PricingSettings } from "./pricing-settings";
+import { RetailPricingSettings } from "./retail-pricing-settings";
 import { PrintingManager } from "./printing/printing-manager";
 import { SecurityCenterSettings } from "./security-center-settings";
 import { TwoFactorSettings } from "./two-factor-settings";
@@ -253,7 +255,7 @@ export function SettingsManager({
         </div>
       ) : null}
       {activeTab === "tax" ? <TaxSettings industry={industry} /> : null}
-      {activeTab === "pricing" ? <PricingSettings /> : null}
+      {activeTab === "pricing" ? (isProductWorkspaceIndustry(industry) ? <RetailPricingSettings /> : <PricingSettings />) : null}
       {activeTab === "online-platforms" ? <OnlinePlatformsSettings /> : null}
       {activeTab === "payment-methods" ? <PaymentMethodsSettings /> : null}
       {activeTab === "orders" ? <OrderControlsSettings /> : null}
