@@ -182,6 +182,14 @@ export async function changeBusinessPlan(input: {
   source: "admin" | "purchase" | "trial";
   /** Admin may set this. A purchase always enables auto-renew. */
   autoRenew?: boolean;
+  /**
+   * The verified plan-purchase payment this change fulfils. When given, the
+   * payment's `plan_activated_at` is read under lock and stamped in this same
+   * transaction: a retried or concurrent fulfilment of one payment applies the
+   * plan once, instead of treating the second call as a fresh same-plan
+   * purchase and extending the period again.
+   */
+  paymentId?: string | null;
   now?: Date;
 }): Promise<ChangePlanResult> {
   const now = input.now ?? new Date();
@@ -224,6 +232,19 @@ export async function changeBusinessPlan(input: {
     const lockedCurrent: BusinessSubscription | null = subRows[0] ? toSubscription(subRows[0] as SubscriptionRow) : null;
     // Use locked current for decision to prevent stale-state races (#928 P1 atomic transitions)
     existing = lockedCurrent;
+    if (input.paymentId) {
+      const { rows: paymentRows } = await client.query<{ plan_activated_at: string | null }>(
+        `SELECT plan_activated_at FROM billing_payments
+          WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+        [input.paymentId, input.businessId],
+      );
+      if (paymentRows[0]?.plan_activated_at) {
+        await client.query("ROLLBACK");
+        const current = existing ?? (await getBusinessSubscription(input.businessId));
+        if (!current) throw new SubscriptionError("subscription_not_found");
+        return { subscription: current, plan, outcome: "unchanged" };
+      }
+    }
     samePlan = existing?.planKey === input.planKey;
     const lockedClosed = !existing || existing.status === "expired" || existing.status === "cancelled";
     if (plan.status === "retired" && (!samePlan || lockedClosed)) throw new SubscriptionError("plan_retired");
@@ -329,6 +350,13 @@ export async function changeBusinessPlan(input: {
       input.businessId,
       plan.key,
     ]);
+    if (input.paymentId) {
+      await client.query(
+        `UPDATE billing_payments SET plan_activated_at = now()
+          WHERE id = $1 AND business_id = $2 AND plan_activated_at IS NULL`,
+        [input.paymentId, input.businessId],
+      );
+    }
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -1050,6 +1078,16 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
     } catch (error) {
       console.error("subscription renewal tick failed for business:", row.business_id, error);
     }
+  }
+  // A purchase invoice that failed to issue at fulfilment is resumable; retry
+  // the recent ones here. Older history is repaired deliberately, not by a tick
+  // (scripts/backfill-purchase-invoices.ts), because it dates platform-company
+  // postings to today.
+  try {
+    const { backfillPurchaseInvoices } = await import("./purchase-invoice-service");
+    await backfillPurchaseInvoices({ sinceDays: 7, dryRun: false, limit: 50 });
+  } catch (error) {
+    console.error("purchase invoice repair failed:", error);
   }
   const result = { checked: due.length, renewed, pastDue, expired, cancelled };
   billingLog("billing.renewal.tick", { ...result, durationMs: Date.now() - started });

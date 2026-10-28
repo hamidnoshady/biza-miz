@@ -51,13 +51,22 @@ function tour(overrides: Partial<TourSummary["progress"]> = {}): TourSummary {
 const guide = { slug: "products", title: "راهنمای محصولات" };
 
 /** Route each endpoint independently so one can fail while the other answers. */
-function answer(options: { tours?: TourSummary[] | "fail"; guide?: typeof guide | null }) {
+function answer(options: {
+  tours?: TourSummary[] | "fail";
+  guide?: typeof guide | null;
+  relatedGuides?: { slug: string; title: string; summary: string; sectionKeys: string[] }[];
+}) {
   api.mockImplementation(async (url: string) => {
     if (url.startsWith("/api/knowledge/tours")) {
       if (options.tours === "fail") throw new Error("offline");
       return { ok: true, status: 200, aborted: false, data: { tours: options.tours ?? [] } };
     }
-    return { ok: true, status: 200, aborted: false, data: { entry: null, guide: options.guide ?? null } };
+    return {
+      ok: true,
+      status: 200,
+      aborted: false,
+      data: { entry: null, guide: options.guide ?? null, relatedGuides: options.relatedGuides ?? [] },
+    };
   });
 }
 
@@ -85,6 +94,36 @@ describe("KnowledgeHelpButton with a guided tour", () => {
     expect(document.querySelectorAll('button[aria-label^="آموزش"]')).toHaveLength(1);
   });
 
+  it("shows the current-page guide first, then independent links for the other Products pages", async () => {
+    answer({
+      guide,
+      relatedGuides: [
+        { slug: "products-new", title: "افزودن محصول", summary: "ثبت محصول و تنوع‌ها", sectionKeys: ["page:/accounting/products/new"] },
+        { slug: "products-prices", title: "به‌روزرسانی قیمت‌ها", summary: "قیمت خرید و فروش", sectionKeys: ["page:/accounting/products/prices"] },
+      ],
+    });
+    render(<KnowledgeHelpButton section="pos" />);
+    await openModal();
+    const primary = await screen.findByRole("link", { name: /راهنمای داخلی: راهنمای محصولات/ });
+    expect(primary.getAttribute("href")).toBe("/knowledge/a/products");
+    expect(screen.getByText("سایر راهنماهای این بخش")).toBeTruthy();
+    const add = screen.getByRole("link", { name: /افزودن محصول/ });
+    const prices = screen.getByRole("link", { name: /به‌روزرسانی قیمت‌ها/ });
+    expect(add.getAttribute("href")).toBe("/knowledge/a/products-new");
+    expect(prices.getAttribute("href")).toBe("/knowledge/a/products-prices");
+    expect(screen.getByText("ثبت محصول و تنوع‌ها")).toBeTruthy();
+    // Current-page guidance precedes the related list in the document.
+    expect(primary.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelectorAll('button[aria-label^="آموزش"]')).toHaveLength(1);
+  });
+
+  it("preserves the single-guide UI when no related articles are returned", async () => {
+    answer({ guide, relatedGuides: [] });
+    render(<KnowledgeHelpButton section="pos" />);
+    await openModal();
+    expect(await screen.findByRole("link", { name: /راهنمای داخلی: راهنمای محصولات/ })).toBeTruthy();
+    expect(screen.queryByText("سایر راهنماهای این بخش")).toBeNull();
+  });
   it("shows the article while the tour lookup is still pending", async () => {
     api.mockImplementation((url: string) =>
       url.startsWith("/api/knowledge/tours")

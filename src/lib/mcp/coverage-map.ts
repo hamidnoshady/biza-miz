@@ -784,6 +784,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     note: "batch BH: four grouped verbs dispatch the 54 uniform lanes entity-by-entity with the exact route capability gates (workspaceManage, workspaceApprove for review-side status actions like the routes, settingsManage for the org profile); record deletes and participant removal are always_approve/high (data-record deletes); review actions likewise (money-state decisions); the field photo upload carries media bytes and stays route-only by design, like the other media lanes",
     test: "integration/aec-rfi.integration.test.ts + aec-boq + aec-commercial + aec-document-control + aec-procurement + aec-site",
   },
+  {
+    id: "workspace.agency",
+    module: "Workspace",
+    entity: "Agency commercial registers (billing schedule & milestones, change requests)",
+    routes: ["agency"],
+    note: "issue #1128 §D: one project's billing schedule, the milestones in it and the change requests that revise its value. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — exposing these as tools has to satisfy §F's rule that an assistant drafts and a human approves, and agreeing more money with a client is exactly the kind of act that rule exists for. Two things a future tool must keep: approving a milestone does NOT bill it (issuing the invoice is a separate act gated on the invoice screen's own permissions, paymentsTake + ordersCreate, as well as workspaceApprove), and an approved change request moves only the engagement's revised value, never the figure the client signed",
+    test: "src/lib/agency-commercial.test.ts",
+  },
 
   // ============================ Business configuration ============================
   {

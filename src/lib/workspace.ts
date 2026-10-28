@@ -321,6 +321,15 @@ export async function resolveWorkspaceSubject(
                  WHERE id = $1 AND business_id = $2`,
     commitment: `SELECT project_id, created_by FROM aec_commitments
                  WHERE id = $1 AND business_id = $2`,
+    // Issue #1128 §D — an agency's billing milestone and change request carry
+    // their project directly, like the commercial and procurement subjects
+    // above. Both registers are project-scoped on purpose: the number series is
+    // per project (`nextRegisterNumber`), §D's campaign P&L has a key to hang
+    // off, and a comment on either lands in the right project's feed.
+    billing_milestone: `SELECT project_id, created_by FROM agency_billing_milestones
+                 WHERE id = $1 AND business_id = $2`,
+    change_request: `SELECT project_id, created_by FROM agency_change_requests
+                 WHERE id = $1 AND business_id = $2`,
   };
   const { rows } = await query<{ project_id: string | null; created_by: string | null }>(
     sql[subjectType],
