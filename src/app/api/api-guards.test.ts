@@ -528,6 +528,26 @@ function isAecGuarded(src: string): boolean {
   );
 }
 
+/**
+ * Issue #1128 §D — `agencyOwner(PERMISSIONS.workspace…)`, the same shape again:
+ * `src/app/api/agency/guard.ts`'s only body is `workspaceOwner(permission,
+ * request)`, which is `requirePermission` behind one shared helper plus the
+ * workspace module's service-activation gate. Recognising it narrows the scan
+ * rather than loosening it, and it is a *stronger* guard than the AEC one —
+ * these routes cannot write while the tenant's projects service is deactivated.
+ *
+ * The three keys are named exactly (read, write, and the determination key §24
+ * requires to be separate from ordinary editing) rather than accepting any
+ * string, so a future route cannot satisfy the scanner with a permission it
+ * does not actually check.
+ */
+function isAgencyGuarded(src: string): boolean {
+  return (
+    /agencyOwner\(/.test(src) &&
+    /PERMISSIONS\.workspace(?:View|Manage|Approve)/.test(src)
+  );
+}
+
 /** Public API routes are session-less only because api-auth.ts authenticates a scoped key. */
 function isApiKeyGuarded(src: string): boolean {
   return /withApiKeyScope\(/.test(src) && /requireApiScope\(/.test(src);
@@ -696,6 +716,9 @@ describe("every API route is guarded", () => {
       if (isDataTransferGuarded(src)) return;
       // Issue #799 Wave 2 — `aecOwner(PERMISSIONS.…)`. See isAecGuarded.
       if (isAecGuarded(src)) return;
+      // Issue #1128 §D — `agencyOwner(PERMISSIONS.workspace…)`, which delegates
+      // to the workspace owner gate. See isAgencyGuarded.
+      if (isAgencyGuarded(src)) return;
       // Phase 35 — `requireMember` is the fourth guard: any signed-in member,
       // for endpoints where every member acts only on their own rows and there
       // is therefore no role left to gate (notification devices, rules, inbox).
