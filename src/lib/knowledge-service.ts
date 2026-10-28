@@ -486,12 +486,12 @@ export async function kbRelatedGuidesForArticle(
     `${VISIBLE_CATEGORIES_CTE}
      SELECT a.slug, a.title, a.summary, a.section_keys
        FROM knowledge_articles a
-       JOIN knowledge_articles current ON current.slug = $1
-      WHERE current.status = 'published'
-        AND current.category_id IS NOT NULL
-        AND current.category_id IN (SELECT id FROM visible_categories)
-        AND a.category_id = current.category_id
-        AND a.id <> current.id
+       JOIN knowledge_articles chosen ON chosen.slug = $1
+      WHERE chosen.status = 'published'
+        AND chosen.category_id IS NOT NULL
+        AND chosen.category_id IN (SELECT id FROM visible_categories)
+        AND a.category_id = chosen.category_id
+        AND a.id <> chosen.id
         AND a.status = 'published'
         AND ${ARTICLE_IN_VISIBLE_CATEGORY}
       ORDER BY a.sort_order, a.title, a.id
