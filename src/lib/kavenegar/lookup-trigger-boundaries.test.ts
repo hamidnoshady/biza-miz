@@ -28,10 +28,25 @@ function code(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
 }
 
+/**
+ * A hand-rolled walk rather than `readdirSync({recursive:true})`: the shape of
+ * that option (and of the paths it hands back) is the one thing about this file
+ * that would differ between the Node the sandbox runs and the Node CI runs, and
+ * a boundary test that silently enumerates nothing is worse than no test.
+ */
 function sources(dir: string, filter: (name: string) => boolean): { name: string; source: string }[] {
-  return readdirSync(`${ROOT}${dir}`, { recursive: true, encoding: "utf8" })
-    .filter((name) => filter(name))
-    .map((name) => ({ name: `${dir}${name}`, source: code(readFileSync(`${ROOT}${dir}${name}`, "utf8")) }));
+  const found: { name: string; source: string }[] = [];
+  const walk = (relative: string) => {
+    for (const entry of readdirSync(`${ROOT}${dir}${relative}`, { withFileTypes: true })) {
+      const path = `${relative}${entry.name}`;
+      if (entry.isDirectory()) walk(`${path}/`);
+      else if (filter(entry.name)) {
+        found.push({ name: `${dir}${path}`, source: code(readFileSync(`${ROOT}${dir}${path}`, "utf8")) });
+      }
+    }
+  };
+  walk("");
+  return found;
 }
 
 const sourceFiles = [
@@ -39,22 +54,53 @@ const sourceFiles = [
   ...sources("src/app/", (name) => name.endsWith(".ts") || name.endsWith(".tsx")),
 ];
 
+/**
+ * The files that carry the platform-auth transport, named rather than discovered.
+ *
+ * A sweep alone answers "who imports the config today"; it cannot tell a
+ * reviewer that the sweep looked at anything at all. These are read
+ * unconditionally — a renamed or deleted file fails here rather than quietly
+ * leaving the family — and the sweep adds anything new that imports the config.
+ */
+const AUTH_TRANSPORT_FILES = [
+  "src/lib/sms-config.ts",
+  "src/lib/sms-kavenegar.ts",
+  "src/lib/phone-otp.ts",
+  "src/lib/mfa-enrol.ts",
+  "src/lib/owner-activation.ts",
+  "src/app/api/auth/phone-otp/request/route.ts",
+  "src/app/api/auth/phone-otp/verify/route.ts",
+  "src/app/api/platform/sms/route.ts",
+];
+
+const IMPORTS_SMS_CONFIG = /from\s+"(?:\.\.?\/)*(?:\.\.\/)*(@\/lib\/|\.\/)sms-config"/;
+
 /** Every module that resolves the platform-auth transport — the OTP family. */
 function authTransportFiles(): { name: string; source: string }[] {
-  return sourceFiles.filter((file) =>
-    /from\s+"(\.\.?\/)*(\.\.\/)*(@\/lib\/)?sms-config"/.test(file.source) ||
-    /from\s+"@\/lib\/sms-config"/.test(file.source),
-  );
+  const named = AUTH_TRANSPORT_FILES.map((name) => ({
+    name,
+    source: code(readFileSync(`${ROOT}${name}`, "utf8")),
+  }));
+  const swept = sourceFiles.filter((file) => IMPORTS_SMS_CONFIG.test(file.source));
+  const byName = new Map(named.map((file) => [file.name, file]));
+  for (const file of swept) byName.set(file.name, file);
+  return [...byName.values()];
 }
 
 describe("the auth OTP path never borrows a business's child account", () => {
   it("finds the OTP family it is checking", () => {
-    // A rule that silently matches nothing is worse than no rule: the regexes
-    // above would keep passing after the imports were renamed.
+    // A rule that silently matches nothing is worse than no rule: the named
+    // files are read whether or not the sweep finds them, and at least the two
+    // modules that own the transport must be recognised as importing it.
     const names = authTransportFiles().map((file) => file.name);
-    expect(names).toContain("src/lib/phone-otp.ts");
-    expect(names).toContain("src/lib/mfa-enrol.ts");
-    expect(names.some((name) => name.includes("api/auth/phone-otp/"))).toBe(true);
+    for (const expected of AUTH_TRANSPORT_FILES) {
+      expect(names, `auth-path files found: ${names.join(", ")}`).toContain(expected);
+    }
+    const importers = names.filter((name) =>
+      IMPORTS_SMS_CONFIG.test(code(readFileSync(`${ROOT}${name}`, "utf8"))),
+    );
+    expect(importers).toContain("src/lib/phone-otp.ts");
+    expect(importers).toContain("src/app/api/auth/phone-otp/request/route.ts");
   });
 
   it("imports no child credential, no managed send and no trigger", () => {

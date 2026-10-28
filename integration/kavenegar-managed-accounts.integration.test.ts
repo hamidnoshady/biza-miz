@@ -532,6 +532,12 @@ describe("tenancy and platform-only storage", () => {
       { tablename: "kavenegar_business_accounts", policyname: "tenant_isolation" },
       { tablename: "kavenegar_credit_transfers", policyname: "tenant_isolation" },
       { tablename: "kavenegar_lookup_templates", policyname: "tenant_isolation" },
+      // Issue #902 §5e — the business's own automation choices and the send log
+      // that makes one fact one message. Both are tenant-scoped: the row names a
+      // message the business owns, and the log is evidence about its own
+      // customers (with no recipient column, deliberately).
+      { tablename: "kavenegar_lookup_trigger_sends", policyname: "tenant_isolation" },
+      { tablename: "kavenegar_lookup_triggers", policyname: "tenant_isolation" },
       // Issue #902 §5 — the platform's approved message library. A business
       // reaches it only through a copy in its own catalog; the trade/plan rules
       // live here, so reading the table would be reading the operators' plans.
