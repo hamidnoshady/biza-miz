@@ -679,7 +679,8 @@ export async function loadAgencyCommercial(
  * ======================================================================== */
 
 export interface AgencyScheduleCreateInput {
-  base: unknown;
+  /** One of `AGENCY_BILLING_BASES`; anything else is `invalid_billing_base`. */
+  base?: unknown;
   /** Overrides the engagement's revised value, for a schedule priced first. */
   contractValueRial?: unknown;
   periods?: unknown;
