@@ -533,7 +533,14 @@ describe("a milestone's journey to an invoice", () => {
     );
     expect(summary.report.booked.invoicedRial).toBe(0);
     expect(summary.report.booked.scheduledRial).toBe(30_000_000);
-    expect(summary.report.posted.revenueRial).toBe(0);
+    // The ledger holds nothing on this project, so its half reads as unknown
+    // rather than as four zeros: "nothing has posted yet" and "this campaign
+    // earned nothing" are different claims, and a P&L that cannot tell them
+    // apart is one nobody can defend. The margin follows the same rule.
+    expect(summary.report.posted.revenueRial).toBeNull();
+    expect(summary.report.posted.actualCostRial).toBeNull();
+    expect(summary.report.grossMarginRial).toBeNull();
+    expect(summary.report.grossMarginPercent).toBeNull();
   });
 
   it("bills through the invoice engine, and the entry carries the project's own dimension", async () => {

@@ -459,9 +459,10 @@ async function loadInvoiceFigures(
 async function loadPostedFigures(
   businessId: string,
   projectId: string,
-): Promise<{ revenueRial: number; actualCostRial: number }> {
-  const { rows } = await query<{ revenue_rial: string; cost_rial: string }>(
-    `SELECT COALESCE(sum(CASE WHEN a.type = 'revenue' THEN l.credit - l.debit ELSE 0 END), 0) AS revenue_rial,
+): Promise<{ entries: number; revenueRial: number; actualCostRial: number }> {
+  const { rows } = await query<{ entries: string; revenue_rial: string; cost_rial: string }>(
+    `SELECT count(DISTINCT e.id)::text AS entries,
+            COALESCE(sum(CASE WHEN a.type = 'revenue' THEN l.credit - l.debit ELSE 0 END), 0) AS revenue_rial,
             COALESCE(sum(CASE WHEN a.type = 'expense' THEN l.debit - l.credit ELSE 0 END), 0) AS cost_rial
        FROM journal_entries e
        JOIN journal_lines l ON l.entry_id = e.id
@@ -470,6 +471,11 @@ async function loadPostedFigures(
     [businessId, projectId],
   );
   return {
+    // Whether the ledger holds anything at all on this project. Without it the
+    // two sums cannot tell "nothing has posted yet" from "this campaign earned
+    // nothing and cost nothing" — both arrive as zero — and `AgencyCommercialPosted`
+    // promises the first reads as unknown rather than as a figure.
+    entries: Number(rows[0]?.entries ?? "0"),
     revenueRial: money(rows[0]?.revenue_rial),
     actualCostRial: money(rows[0]?.cost_rial),
   };
@@ -676,11 +682,18 @@ export async function loadAgencyCommercial(
       (milestone.invoiceOrderId ? (invoices.get(milestone.invoiceOrderId)?.onAccountRial ?? 0) : 0),
     0,
   );
+  // A project the ledger holds nothing on yet reports an unknown posted half,
+  // not four zeros. `commercialMargin` already answers null for an unknown
+  // input, so the margin follows: a campaign that has not been billed has no
+  // margin, and printing 0٪ for one is a statement about money that nobody has
+  // made. Once anything has posted, every figure is real — including a genuine
+  // zero, which then means what it says.
+  const nothingPosted = postedLedger.entries === 0;
   const posted: AgencyCommercialPosted = {
-    revenueRial: postedLedger.revenueRial,
-    collectedRial,
-    receivableRial,
-    actualCostRial: postedLedger.actualCostRial,
+    revenueRial: nothingPosted ? null : postedLedger.revenueRial,
+    collectedRial: nothingPosted ? null : collectedRial,
+    receivableRial: nothingPosted ? null : receivableRial,
+    actualCostRial: nothingPosted ? null : postedLedger.actualCostRial,
   };
 
   const report: AgencyCommercialReport = {
