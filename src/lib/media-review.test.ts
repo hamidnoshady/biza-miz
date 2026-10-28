@@ -39,6 +39,8 @@ import {
   reviewLinkPurposeAllowsDownload,
   reviewLinkRefusal,
   reviewRoundActionTarget,
+  agencyReviewActionsFrom,
+  isReviewRoundIdentityFrozen,
   reviewRoundActionsFrom,
   reviewRoundStateFromItems,
   reviewRoundTargetsFrom,
@@ -473,3 +475,67 @@ describe("the module's own shape", () => {
     expect(Object.keys(MEDIA_REVIEW_ROUND_ACTION_LABELS)).toEqual(actions);
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * Two doors over one act table, and the identity freeze
+ * ------------------------------------------------------------------------- */
+
+describe("who may act on a round (issue #1128 §E)", () => {
+  it("splits the act catalogue into two doors that never overlap", () => {
+    for (const status of MEDIA_REVIEW_ROUND_STATUSES) {
+      const all = reviewRoundActionsFrom(status);
+      const agency = agencyReviewActionsFrom(status);
+      const client = clientReviewActionsFrom(status);
+      // Every act the state machine allows belongs to exactly one door, and the
+      // two doors together are the whole catalogue. A screen rendering either list
+      // can therefore never offer a move the API would refuse.
+      expect([...agency, ...client].sort(), status + ": doors do not cover the catalogue").toEqual(
+        [...all].sort(),
+      );
+      expect(agency.filter((a) => client.includes(a)), status + ": doors overlap").toEqual([]);
+    }
+  });
+
+  it("never offers a member the client's decision", () => {
+    // Approving on a client's behalf is exactly what makes the approval worth
+    // having, so the agency's door on a sent round is withdraw and nothing else.
+    expect(agencyReviewActionsFrom("sent")).toEqual(["withdraw"]);
+    expect(clientReviewActionsFrom("sent")).toEqual(["approve", "request_changes", "reject"]);
+  });
+
+  it("gives the client nothing to do until the round is sent", () => {
+    expect(agencyReviewActionsFrom("draft")).toEqual(["send"]);
+    expect(clientReviewActionsFrom("draft")).toEqual([]);
+    expect(clientReviewActionsFrom("approved")).toEqual([]);
+    // A withdrawn round's link must stop working even before it expires.
+    expect(clientReviewActionsFrom("withdrawn")).toEqual([]);
+    expect(agencyReviewActionsFrom("withdrawn")).toEqual(["send"]);
+  });
+
+  it("closes both doors on an approved round", () => {
+    expect(agencyReviewActionsFrom("approved")).toEqual([]);
+    expect(clientReviewActionsFrom("approved")).toEqual([]);
+  });
+});
+
+describe("the identity freeze (issue #1128 §E)", () => {
+  it("matches migration 0265's title-and-scope freeze exactly", () => {
+    // 0265 freezes title and scope for sent/withdrawn, and freezes the whole row
+    // for approved/rejected. draft and changes_requested stay editable.
+    expect(isReviewRoundIdentityFrozen("draft")).toBe(false);
+    expect(isReviewRoundIdentityFrozen("changes_requested")).toBe(false);
+    for (const status of ["sent", "withdrawn", "approved", "rejected"] as const) {
+      expect(isReviewRoundIdentityFrozen(status), status).toBe(true);
+    }
+  });
+
+  it("is not the same set as the item freeze", () => {
+    // The distinction is the point: a rejected round may still take assets, so it
+    // is not "frozen" for items — yet its title and its client are fixed, because
+    // those are what the client was shown.
+    expect(isReviewRoundOpenForItems("rejected")).toBe(true);
+    expect(isReviewRoundIdentityFrozen("rejected")).toBe(true);
+    expect(isReviewRoundFrozen("rejected")).toBe(false);
+  });
+});
+
