@@ -225,6 +225,51 @@ Surfaces: `GET /api/platform/sms/accounts` returns `masterTemplates` (with `samp
 enables/disables, `template_from_master` gives one business a copy — all audited. Tenants get
 `templateLibrary` on `GET /api/messaging` and `lookup_template_from_library` on its POST.
 
+## 5d. Sending one approved message (§5)
+
+A library entry, a copy and a rendered token list are still not a message that reached anyone.
+`sendManagedLookup` (`lookup-send-service.ts`) is that last step, and it is deliberately the only
+place where the three things that can go wrong at once — credentials, money and the provider's own
+rules — are decided together.
+
+**The child's key, not the master's.** `verify/lookup` is authenticated by the key in the URL, so
+`buildLookupSendRequest` takes no master key at all: the message leaves the business's own account
+and is paid for out of its provider credit. A business with no active child, a suspended one, or an
+undecryptable key is refused (`sms_not_ready`) — the managed path never falls back to the platform
+key, because that would bill the platform for a tenant's message.
+
+**Retail first, wholesale second.** The tenant is charged Bizamiz retail, priced by the §4 engine
+in force at send time; the provider's reported `cost` becomes a `billing_vendor_cost_events` row
+with `tenant_visible = false`, so the supplier tariff and the margin never reach the tenant. One
+message, one reserve, one settle, at most one refund — the same contract the outbox drain uses.
+With no base rate in `platform_message_config` there is nothing honest to charge and the send is
+refused (`pricing_unavailable`) rather than priced at a guess; an unreadable *version* table falls
+back to the base rate, exactly as the drain does.
+
+**An unknown outcome is not a failure.** `verify/lookup` is a POST: a dropped connection may mean
+the message went out. A definitive provider answer (424 template not approved on that child, 411
+bad recipient, 418 no credit) refunds in full and reports the provider-neutral code; an *ambiguous*
+transport failure keeps the reservation and reports `unknown`. Refunding there would make the same
+message free to send twice, and retrying would bill the tenant twice.
+
+**Approved only, mapped only.** A draft, a submitted or a rejected template cannot send — the
+provider's rule (424) enforced before the request leaves the building, so the operator sees the
+refusal in the console rather than in a failed delivery report. A template with no declared
+`variables` (migration `0265`) is refused as `template_variables_undeclared`: positional mapping is
+the whole contract, and guessing it would put the wrong value in the wrong sentence. A tenant edit
+that would change the number of slots is refused at save time (`variables_mismatch`), so a mapping
+cannot be silently invalidated by an edit.
+
+`normalizeReceptor` is the other half of "no billed mistakes": `+98`, `0098`, `98`, Persian digits
+and stray separators all become one canonical `09xxxxxxxxx`, and anything that is not an Iranian
+mobile is refused before a call is made.
+
+Surfaces: the console's «ارسال آزمایشی» on an approved row — one receptor for the page, a value
+input per declared variable, and a notice that distinguishes sent / refused / unknown. The action is
+`POST {action:"template_send_test"}`, audited (`sms.managed_account.template_send_test`) with the
+outcome, the provider message id and the retail charged. A refusal answers 400 with its code: it is
+the operator's answer, not a server fault.
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -356,9 +401,11 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | --- | --- |
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
 | `npx vitest run` — new unit files | 170 tests pass across 11 files (`retail-pricing` adds 27, `alert-service` adds 13, `template-variables` adds 21) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
-| `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
+| `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Bizamiz`→`Bizamiz` copy slip in new comments; fixed) |
 | `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass
-| `npm run test:db` — `kavenegar-master-templates` | 16/16 pass (targeting by trade and plan, idempotent instantiation of a copy, versioned rollout that leaves the live copy alone, lineage through a revision, platform-only RLS) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
+| `npm run test:db` — `kavenegar-master-templates` | 16/16 pass (targeting by trade and plan, idempotent instantiation of a copy, versioned rollout that leaves the live copy alone, lineage through a revision, platform-only RLS) |
+| `npm run test:db` — `kavenegar-lookup-send` | 8/8 pass (approved-only, undeclared mapping, bad receptor, no child, invalid value → refused before a charge; a successful send charges retail once, records the wholesale cost tenant-invisibly and calls the child's key; a definitive refusal refunds in full; an ambiguous failure keeps the reservation) |
+| `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
@@ -379,12 +426,12 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 
 ## 9. Follow-ups (each needs its own issue)
 
-0. **Trigger wiring and `sendManagedLookup`** (#902 §5, P0): the library, the copy, the revision
-   lifecycle and the renderer exist; what is left is the send itself — reserve retail, call
-   `verify/lookup` on the child's own key with the rendered tokens, then settle or refund exactly
-   once — and the concrete triggers (login code, order ready, payment received) that call it.
-   Login OTP is part of this: it must keep working when Growth is off, the child is suspended or
-   the marketing wallet is empty.
+0. **Trigger wiring** (#902 §5, P0): the send path exists (`sendManagedLookup`, §5d) and is driven
+   from the console's test send; what is left is the product half — the concrete triggers (login
+   code, order ready, payment received) that call it, including a login OTP that must keep working
+   when Growth is off, the child is suspended or the marketing wallet is empty. That last case needs
+   the reserved capacity in follow-up 1: today a business whose wallet is empty gets
+   `insufficient_credit` even for a login code.
 1. **Campaign-budget and OTP reserved capacity** (#902 §3, P0): the three strategies and the
    guards are in place; "approved campaign budget" as a distinct funding trigger, and a
    reserved slice of master credit that marketing can never consume (so a login OTP is funded

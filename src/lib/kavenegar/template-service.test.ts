@@ -137,6 +137,9 @@ describe("tenant-facing template status", () => {
         // library origin and no declared variables.
         master_template_id: null,
         master_version: null,
+        // A message a tenant wrote by hand has no declared mapping; the managed
+        // send path refuses it rather than guessing one (issue #902 §5).
+        variables: [],
         archived_at: null,
         submitted_at: new Date(),
         decided_at: new Date(),

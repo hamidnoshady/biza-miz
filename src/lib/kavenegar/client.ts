@@ -630,6 +630,88 @@ export function buildDeleteTemplateRequest(input: {
 }
 
 /**
+ * Issue #902 §5 — one `verify/lookup` send.
+ *
+ * Unlike the customer-management calls, a lookup send is authenticated by the
+ * **child's own key in the URL** (`/{key}/verify/lookup.json`): the message goes
+ * out of the business's account, is billed to that business's provider credit,
+ * and the master key never appears. That is why this builder takes no
+ * `masterApiKey` — there is nothing here for the master to do.
+ *
+ * `template` is the derived provider name (`bm<8 hex>`), never the tenant's
+ * title: `template-service.lookupTemplateName` is the single place that maps one
+ * to the other, so a rename can never silently change which approved message
+ * sends.
+ */
+export interface LookupSendInput {
+  /** The child account's own API key. */
+  apiKey: string;
+  /** The provider template name, already derived and approved. */
+  template: string;
+  receptor: string;
+  /** Positional token values: `tokens[0]` → `%token`, `[1]` → `%token2`. */
+  tokens: string[];
+  /** The child's assigned line, when the policy fixes one. */
+  sender?: string | null;
+}
+
+/**
+ * Iranian mobile numbers, as people and CRMs actually store them.
+ *
+ * A bad receptor is a billed provider failure (411), so the normalisation is
+ * here rather than left to whatever a caller happened to type: `+98`, `0098`,
+ * `98`, Persian digits and stray separators all have to become one canonical
+ * `09xxxxxxxxx`.
+ */
+export function normalizeReceptor(value: string): string | null {
+  const digits = String(value)
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[^0-9]/g, "")
+    // `0098…` is the same subscriber as `+98…`: strip the international prefix
+    // before deciding what the number is.
+    .replace(/^0098/, "98");
+  if (/^09\d{9}$/.test(digits)) return digits;
+  if (/^989\d{9}$/.test(digits)) return `0${digits.slice(2)}`;
+  return null;
+}
+
+export function buildLookupSendRequest(input: LookupSendInput): KavenegarRequest {
+  const params: Record<string, string> = {
+    receptor: input.receptor,
+    template: input.template,
+  };
+  // The provider's slot names, spelled the way its own substitution pass reads
+  // them: `token`, `token2`, `token3`.
+  input.tokens.forEach((value, index) => {
+    params[index === 0 ? "token" : `token${index + 1}`] = value;
+  });
+  if (input.sender) params.sender = input.sender;
+  return { url: verifyUrl(input.apiKey, "lookup"), method: "POST", params };
+}
+
+export interface LookupSendResult {
+  /** The provider's message id, for support and delivery tracking. */
+  messageId: string | null;
+  /**
+   * What the provider says the message cost, in rial. Null when it did not say
+   * — the margin report prefers an honest null to a zero.
+   */
+  costRial: number | null;
+  status: number | null;
+}
+
+export function mapLookupEntry(raw: Record<string, unknown>): LookupSendResult {
+  const messageId = raw.messageid ?? raw.messageId ?? raw.id;
+  const cost = Number(raw.cost);
+  const status = Number(raw.status);
+  return {
+    messageId: messageId === undefined || messageId === null ? null : String(messageId),
+    costRial: Number.isFinite(cost) && cost > 0 ? Math.round(cost) : null,
+    status: Number.isFinite(status) ? status : null,
+  };
+}
+
+/**
  * Strip the credential out of a provider URL before it reaches a log line.
  *
  * Three things can carry a secret: the master/child key in the path, the

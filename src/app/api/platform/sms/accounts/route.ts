@@ -21,6 +21,7 @@ import {
   getServiceAlertSummary,
   listServiceAlerts,
 } from "@/lib/kavenegar/alert-service";
+import { sendManagedLookup } from "@/lib/kavenegar/lookup-send-service";
 import {
   archiveLookupTemplate,
   listAllLookupTemplates,
@@ -528,6 +529,46 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       },
     });
     return NextResponse.json({ template });
+  }
+
+  if (action === "template_send_test") {
+    // Issue #902 §5 — the operator's proof that a message works: reserve retail,
+    // send on the business's own child key, settle once. It is also how a
+    // template is verified before automation is wired to it, so the answer says
+    // exactly what happened (sent, refused, or an unknown outcome) instead of a
+    // bare success.
+    if (!UUID.test(businessId)) {
+      return NextResponse.json({ error: "invalid_business" }, { status: 400 });
+    }
+    const templateId = typeof body.templateId === "string" ? body.templateId : "";
+    if (!UUID.test(templateId)) {
+      return NextResponse.json({ error: "invalid_template" }, { status: 400 });
+    }
+    const variables =
+      body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
+        ? (body.variables as Record<string, string>)
+        : {};
+    const outcome = await sendManagedLookup({
+      businessId,
+      templateId,
+      receptor: typeof body.receptor === "string" ? body.receptor : "",
+      variables,
+    });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId,
+      action: "sms.managed_account.template_send_test",
+      entity: "kavenegar_lookup_templates",
+      entityId: templateId,
+      payload: {
+        status: outcome.status,
+        code: outcome.status === "blocked" || outcome.status === "failed" ? outcome.code : null,
+        messageId: outcome.status === "sent" ? outcome.messageId : null,
+        chargedRial: outcome.status === "sent" ? outcome.chargedRial : null,
+      },
+    });
+    // A refusal is the operator's answer, not a server error.
+    return NextResponse.json({ outcome }, { status: outcome.status === "blocked" ? 400 : 200 });
   }
 
   if (action === "template_sync") {

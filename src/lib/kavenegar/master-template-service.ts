@@ -350,6 +350,8 @@ export async function instantiateMasterTemplate(input: {
     title: master.title,
     body: master.body,
     purpose: master.purpose,
+    // The mapping travels with the copy: it is what makes the copy safe to send.
+    variables: master.variables,
   });
 
   await withoutTenantScope(SCOPE, async () => {

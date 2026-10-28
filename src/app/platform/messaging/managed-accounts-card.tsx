@@ -117,6 +117,8 @@ interface CatalogTemplate {
   provider_template_id: string | number | null;
   last_sync_error: string | null;
   revision: number;
+  /** Ordered variable names; empty means the managed send path refuses it (§5). */
+  variables: string[];
   archived_at: string | null;
   updated_at: string;
 }
@@ -264,6 +266,42 @@ const PURPOSE_LABELS: Record<"verification" | "transactional", string> = {
   transactional: "اطلاع‌رسانی تراکنشی",
 };
 
+/** Why a test send was refused, in the console's own words. */
+const SEND_BLOCK_LABELS: Record<string, string> = {
+  template_not_found: "پیام یافت نشد",
+  template_not_approved: "پیام هنوز تأیید نشده است",
+  template_archived: "پیام از فهرست خارج شده است",
+  template_variables_undeclared: "متغیرهای پیام تعریف نشده‌اند",
+  invalid_receptor: "شمارهٔ گیرنده معتبر نیست",
+  sms_not_ready: "حساب پیامکی این کسب‌وکار آماده نیست",
+  insufficient_credit: "اعتبار کیف پول کسب‌وکار کافی نیست",
+  pricing_unavailable: "تعرفهٔ ارسال در دسترس نیست",
+  variable_missing: "مقدار یکی از متغیرها وارد نشده است",
+  variable_invalid: "مقدار یکی از متغیرها معتبر نیست",
+  variables_mismatch: "تعداد متغیرها با متن پیام هم‌خوان نیست",
+  variable_not_allowed: "متغیر ناشناخته",
+};
+
+/** What each variable means, for the operator's input label. */
+const VARIABLE_LABELS: Record<string, string> = {
+  code: "کد",
+  customer_name: "نام مشتری",
+  store_name: "نام فروشگاه",
+  order_number: "شمارهٔ سفارش",
+  amount: "مبلغ (ریال)",
+  date: "تاریخ",
+};
+
+/** Believable values, so a test send needs no typing at all. */
+const SAMPLE_VALUES: Record<string, string> = {
+  code: "482913",
+  customer_name: "سارا محمدی",
+  store_name: "فروشگاه نمونه",
+  order_number: "1042",
+  amount: "250000",
+  date: "2026-10-28",
+};
+
 const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
   draft: "پیش‌نویس",
   submitted: "در حال بررسی",
@@ -317,6 +355,9 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
   const [notice, setNotice] = useState("");
   const [transfer, setTransfer] = useState({ businessId: "", amountRial: "", reason: "" });
   const [probe, setProbe] = useState<{ eligible: boolean; code: string | null } | null>(null);
+  // Issue #902 §5 — the operator's test send: one number, re-used per message.
+  const [testReceptor, setTestReceptor] = useState("");
+  const [testValues, setTestValues] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     const result = await api<Snapshot>("/api/platform/sms/accounts");
@@ -421,6 +462,44 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
           : `«${template.title}» برای کسب‌وکارهای هدف فعال شد.`,
       );
     }
+  }
+
+  /**
+   * Issue #902 §5 — prove a message works before automation depends on it.
+   *
+   * The receptor and the values are the operator's; the send itself is the real
+   * path (retail reserved, child key, settle once), so a success here means a
+   * trigger will work too.
+   */
+  async function sendTest(template: CatalogTemplate) {
+    if (!testReceptor.trim()) {
+      setError("شمارهٔ آزمایشی را وارد کنید.");
+      return;
+    }
+    const values: Record<string, string> = {};
+    for (const name of template.variables) {
+      const raw = (testValues[`${template.id}:${name}`] ?? "").trim();
+      values[name] = raw || SAMPLE_VALUES[name] || "";
+    }
+    const result = await post(
+      {
+        action: "template_send_test",
+        businessId: template.business_id,
+        templateId: template.id,
+        receptor: testReceptor.trim(),
+        variables: values,
+      },
+      `send:${template.id}`,
+    );
+    if (!result) return;
+    const outcome = (result as { outcome?: { status?: string; code?: string } }).outcome;
+    setNotice(
+      outcome?.status === "sent"
+        ? `پیام آزمایشی «${template.title}» ارسال شد.`
+        : outcome?.status === "unknown"
+          ? `نتیجهٔ ارسال «${template.title}» نامشخص است؛ مبلغ رزروشده بازگردانده نشد.`
+          : `ارسال «${template.title}» انجام نشد: ${SEND_BLOCK_LABELS[outcome?.code ?? ""] ?? outcome?.code ?? "نامشخص"}`,
+    );
   }
 
   async function archiveTemplate(template: CatalogTemplate) {
@@ -957,6 +1036,19 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
           provider's; submission and retirement are ours. Rejected rows sort
           first in the API so the operator's next action is at the top. */}
       <Card title={`کاتالوگ الگوهای تأییدشده (${formatPersianNumber((snapshot.templates ?? []).length)})`}>
+        <label className="mb-3 block text-sm">
+          <span className="mb-1 block text-muted-foreground">
+            شمارهٔ آزمایشی (پیام آزمایشی با اعتبار همین کسب‌وکار ارسال می‌شود)
+          </span>
+          <input
+            className="min-h-10 w-full rounded-md border border-border bg-background px-3 py-2"
+            dir="ltr"
+            inputMode="tel"
+            placeholder="09121234567"
+            value={testReceptor}
+            onChange={(event) => setTestReceptor(event.target.value)}
+          />
+        </label>
         {(snapshot.templates ?? []).length === 0 ? (
           <p className="text-sm text-muted-foreground">هنوز الگویی ساخته نشده است.</p>
         ) : (
@@ -988,6 +1080,17 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                           {busy === `template:${template.id}` ? "…" : submitted ? "ارسال ویرایش برای بررسی" : "ارسال برای بررسی"}
                         </Button>
                       ) : null}
+                      {canManage && template.state === "approved" ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="min-h-9"
+                          disabled={busy === `send:${template.id}`}
+                          onClick={() => void sendTest(template)}
+                        >
+                          {busy === `send:${template.id}` ? "…" : "ارسال آزمایشی"}
+                        </Button>
+                      ) : null}
                       {canManage && !template.archived_at ? (
                         <Button
                           type="button"
@@ -1002,6 +1105,21 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                     </span>
                   </div>
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{template.body}</p>
+                  {canManage && template.state === "approved" && template.variables.length > 0 ? (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {template.variables.map((name, index) => (
+                        <input
+                          key={name}
+                          className="min-h-9 w-36 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                          placeholder={`${VARIABLE_LABELS[name] ?? name} (%token${index === 0 ? "" : index + 1})`}
+                          value={testValues[`${template.id}:${name}`] ?? ""}
+                          onChange={(event) =>
+                            setTestValues((current) => ({ ...current, [`${template.id}:${name}`]: event.target.value }))
+                          }
+                        />
+                      ))}
+                    </div>
+                  ) : null}
                   {template.last_sync_error ? (
                     <p className="mt-1 text-xs text-destructive" dir="ltr">{template.last_sync_error}</p>
                   ) : null}

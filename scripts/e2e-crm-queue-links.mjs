@@ -27,6 +27,17 @@ const AT_RISK_NAME = `${FIXTURE_PREFIX} at-risk ${RUN_ID}`;
 const FOLLOW_UP_NAME = `${FIXTURE_PREFIX} follow-up ${RUN_ID}`;
 const FOLLOW_UP_SUBJECT = `${FIXTURE_PREFIX} overdue call ${RUN_ID}`;
 const AT_RISK_STAGES = ["at_risk", "cant_lose", "needs_attention"];
+/**
+ * How long the sidebar gets to mount on the first navigation.
+ *
+ * `page.goto(..., "domcontentloaded")` returns before React has hydrated, and
+ * `/crm` is a data-heavy page on a server that has just started. 15s was tight
+ * enough to time out intermittently on CI — the same wait never misses locally —
+ * so the shell gets the budget the rest of this script already uses for its
+ * heavier waits. It is a wait, not a sleep: a fast run still finishes as soon as
+ * the link appears.
+ */
+const SHELL_TIMEOUT = 45_000;
 
 if (!DATABASE_URL) throw new Error("DATABASE_URL is required for the CRM queue E2E test.");
 
@@ -70,13 +81,13 @@ async function navigateToToday(page, isMobile) {
     // The mobile trigger's accessible label changes with state and viewport;
     // target the stable controlled sidebar and open it only when collapsed.
     const menuToggle = page.locator('button[aria-controls="dashboard-sidebar"]:visible').first();
-    await menuToggle.waitFor({ state: "visible", timeout: 15_000 });
+    await menuToggle.waitFor({ state: "visible", timeout: SHELL_TIMEOUT });
     if (await menuToggle.getAttribute("aria-expanded") !== "true") await menuToggle.click();
   }
 
   const crmNavigation = page.getByRole("navigation", { name: "بخش‌های ارتباط با مشتری" });
   const todayLink = crmNavigation.getByRole("link", { name: /^امروز/ });
-  await todayLink.waitFor({ state: "visible", timeout: 15_000 });
+  await todayLink.waitFor({ state: "visible", timeout: SHELL_TIMEOUT });
   const todayHref = await todayLink.getAttribute("href");
   await assert(Boolean(todayHref?.startsWith("/crm/")), "CRM «امروز» navigation link has no CRM route");
   await todayLink.click();

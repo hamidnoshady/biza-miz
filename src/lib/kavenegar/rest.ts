@@ -29,6 +29,7 @@ import {
   buildGetTemplateRequest,
   buildListChildrenRequest,
   buildListTemplatesRequest,
+  buildLookupSendRequest,
   buildRenewChildKeyRequest,
   buildSetChildStatusRequest,
   buildUpdateChildAccountRequest,
@@ -41,7 +42,10 @@ import {
   type KavenegarRequest,
   type KavenegarTemplate,
   mapChildAccount,
+  mapLookupEntry,
   mapTemplate,
+  type LookupSendInput,
+  type LookupSendResult,
   parseKavenegarEnvelope,
   redactKavenegarUrl,
   type UpdateChildAccountInput,
@@ -287,6 +291,22 @@ export class KavenegarManagementClient {
     );
   }
 
+  /**
+   * Issue #902 §5 — send one approved lookup message from a child account.
+   *
+   * Authenticated by the child's key in the URL, so this is the one call in this
+   * class that does not involve the master account at all: the message leaves the
+   * business's own account and is paid for out of its provider credit.
+   *
+   * A POST, so a transport failure is AMBIGUOUS and never retried here. The
+   * caller must treat `KavenegarTransportError.ambiguous` as "unknown outcome":
+   * the platform's money is reserved rather than refunded, because the provider
+   * may well have sent the message.
+   */
+  sendLookup(input: LookupSendInput): Promise<LookupSendResult> {
+    return this.call(buildLookupSendRequest(input), mapLookupEntry, { retries: 0 }).then(first);
+  }
+
   private async call<T>(
     request: KavenegarRequest,
     mapEntry: (raw: Record<string, unknown>) => T,
@@ -347,6 +367,31 @@ export class KavenegarManagementClient {
       timeout: false,
     });
   }
+}
+
+/**
+ * Issue #902 §5 — the child-side sending seam.
+ *
+ * `sendLookup` is the only provider call that must run on a business's own key,
+ * and the send service is the one that knows which child an account maps to.
+ * Rather than have that service construct a privileged adapter it has no
+ * business holding, sending goes through this function: a default that posts to
+ * the provider, or an injected executor in tests.
+ */
+export type LookupSendExecutor = (input: LookupSendInput) => Promise<LookupSendResult>;
+
+export type LookupSendExecutorOptions = {
+  transport?: KavenegarTransport;
+  timeoutMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+export async function executeLookupSend(
+  input: LookupSendInput,
+  options: LookupSendExecutorOptions = {},
+): Promise<LookupSendResult> {
+  const client = new KavenegarManagementClient(input.apiKey, options);
+  return client.sendLookup(input);
 }
 
 function classificationRetryable(error: KavenegarManagementError): boolean {
