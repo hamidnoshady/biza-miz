@@ -135,3 +135,130 @@ settings, owned-key tampering and the unchanged central physical prohibition.
 TypeScript and diff checks. These mocked tests do not establish FORCE RLS or
 real recovery acceptance. Full build, integration suite and recovery drills were
 not run for this increment. All undelivered epic gates above remain open.
+
+## Increment: typed inventory, managed custody, fair settlement, restore preview
+
+This increment builds the managed-service layer the previous slices said was
+missing, and deliberately stops short of routing production artifacts through it.
+
+### Delivered
+
+- **Migration 0264** adds four tables, all forward-only and additive:
+  `tenant_backup_artifacts` (one row per destination, sharing one `artifact_id`
+  so a Hybrid mirror is one backup), `backup_key_versions` (platform-only,
+  `subject_business_id`, wrapped per-business artifact secrets),
+  `tenant_backup_restore_jobs` (preview/apply journal with an enforced single
+  open apply per business) and `tenant_backup_storage_samples` (retained managed
+  cloud bytes over time — the evidence behind `backup.storage_byte_day`).
+  Every tenant table carries `ENABLE`/`FORCE ROW LEVEL SECURITY` with the
+  canonical `tenant_isolation` policy; key custody carries `platform_only` and
+  is never readable from a tenant connection.
+- **`src/lib/backup-manifest.ts`** — versioned, typed artifact manifests with an
+  HMAC signature derived from the platform key-encryption key. Manifests name the
+  business scope tag, the format, the schema version, the encryption generation
+  and every component as `included` / `external` / `excluded` / `unavailable`, so
+  completeness is `partial` unless every declared component was captured. Unknown
+  fields, unknown components, a relabelled scope and a newer manifest version are
+  refused rather than ignored.
+- **`src/lib/backup-key-custody.ts`** — managed encryption custody without
+  changing the artifact file format: a generated per-business secret replaces the
+  Owner's passphrase, wrapped under the KEK with AES-256-GCM and bound (as AAD)
+  to the business and key version. Rotation retires a generation and mints the
+  next one; revoked keys refuse to open. Historic passphrase artifacts stay
+  labelled `legacy_passphrase_v1` and are never silently reclassified. An
+  optional portable recovery envelope lets a tenant open a downloaded artifact
+  with a passphrase they hold, for the case where the platform itself is gone.
+- **`src/lib/tenant-backup-inventory.ts`** — one provider-neutral inventory over
+  the rows: mirrors collapse to one entry with two destination views (no double
+  counting), Local-only tenants never see a cloud row, queued uploads are
+  `uploading` and never "ready in the cloud", retention expiry is `expired`,
+  unverified uploads are not restorable, and nothing carries a key, endpoint,
+  bucket, prefix or internal error. Search, filter, sort and pagination are
+  bounded (50 per page maximum).
+- **`src/lib/tenant-restore-preview.ts`** — the dry-run preview required before
+  any central tenant-only restore: affected datasets with incoming and current
+  row counts, what is retained because the artifact does not contain it, what the
+  artifact admits it never captured, RPO hours, an estimated downtime, the lock
+  key, every blocker (collected, not short-circuited) and the exact typed
+  confirmation phrase. Physical artifacts are refused on central with the same
+  error the #807 guards use; a payload from a newer schema is refused; an
+  unsigned or foreign manifest is refused.
+- **`src/lib/backup-billing-settlement.ts`** — settlement policy:
+  a use charge only after a verified, non-empty success; nothing for a failed,
+  cancelled or unverified attempt; one settlement identity per logical backup so
+  a local+cloud mirror is not billed twice; time-weighted byte-days for retained
+  managed cloud bytes only; and an explicit refund decision for pre-charges that
+  the old flow took before doing the work.
+- **`/api/backup/run`** now preflights entitlement and affordability, runs the
+  work, and settles only on success (`preflightFeatureUse` + `chargeForFeature`).
+  The response states the settlement action and reason.
+- **New tenant APIs**: `GET /api/backup/artifacts` (inventory, `backup.manage`)
+  and `POST /api/backup/restores/preview` (Owner-only `backup.restore`; computes
+  and journals a preview, returns `applyAvailable: false`).
+- **New Superadmin API** `GET /api/platform/businesses/[id]/backups/artifacts`
+  (`tenant_backup.read`, audited as `tenant_backup.artifacts_viewed`) plus the
+  matching section on `/platform/businesses/[id]/backups`, showing the managed
+  inventory, storage usage against plan inclusion and custody generation — no key
+  material, no provider detail.
+- **Tenant UI**: a «نسخه‌های پشتیبان این کسب‌وکار» card on the existing backup
+  settings surface: status KPIs, state filters, search, pagination, Jalali
+  timestamps and an Owner-only preview dialog. The dialog says the apply step is
+  not enabled rather than implying a recovery it cannot perform.
+
+### Permission mapping (no new permission keys)
+
+| Action | Permission | Reach |
+| --- | --- | --- |
+| List/detail inventory, run, verify | `backup.manage` | Owner + Manager |
+| Download/export an artifact | `backup.export` | Owner only |
+| Upload/register, restore preview, future apply | `backup.restore` | Owner only |
+| Schedule, retention, policy | `backup.configure` | Owner only |
+
+### Explicitly NOT delivered by this increment
+
+1. The backup **pipeline** still writes its artifacts with the existing
+   configuration (`runTenantPhysicalBackup` / `runTenantLogicalBackup`
+   unchanged), so new artifacts are still `legacy_passphrase_v1`. The inventory
+   does show them: `tenant_backup_artifacts` rows are merged with a read-only
+   projection of successful `backup_runs`, marked `legacy_passphrase_v1`,
+   `unverified` and `partial` (unknown coverage), and never restorable until
+   something verifies them. Wiring manifest generation, custody key selection,
+   secondary-destination registration and the cloud mirror into those two paths
+   is the next step; until then nothing is written into
+   `tenant_backup_artifacts` by the runner, and a legacy row's preview correctly
+   reports `artifact_manifest_missing`.
+2. No binary download endpoint, no chunked/resumable upload, no quarantine. The
+   inventory marks what would be downloadable; the transport is still the
+   existing restore paths.
+3. No restore **apply** engine. The preview, journal, guards, lock key and
+   checkpoint requirement exist; the two-stage central logical executor
+   (decrypt → validate → checkpoint → pause writes → transactional replacement →
+   verify → rollback) does not. `POST /api/backup/restores/preview` never
+   mutates tenant data.
+4. No plan-price/price-version management for backup specifically, and no
+   overage invoicing. Settlement decisions and byte-day quantities exist; the
+   scheduled job that calls `emitBackupStorageUsage` for a closed period is not
+   scheduled.
+5. Hybrid reconnect reconciliation, device heartbeat freshness and the sync
+   generation fence remain open. The inventory therefore reports connectivity as
+   `unknown` off a cloud profile instead of inventing `online`.
+6. Media/attachment and external website capture are still `external` /
+   `unavailable` in any manifest that mentions them — no bridge yet.
+7. Component row counts in the preview cover Accounting, CRM and Growth cores
+   only; Website Management components report `null` (unknown, not zero).
+
+### Validation of this increment
+
+Run locally in this sandbox (Node 22; the repository requires Node ≥ 24):
+
+- `npm test` (unit suite) — see the PR for the final counts.
+- `npx tsc --noEmit` with the pinned heap.
+- `npm run test:design` (design + primitive lint, loading coverage, reference
+  screenshots).
+- `npm run lint` on the changed files.
+- **Not run**: `npm run test:db` (no PostgreSQL in this sandbox),
+  `npm run test:visual` (no seeded browser run) and `npm run build`. The migration
+  is therefore validated by unit contract tests
+  (`src/lib/managed-tenant-backup-schema.test.ts`) and by review, not by an
+  applied-migration run or a FORCE RLS integration test. Treat the RLS claim as
+  unproven until the DB slice runs.

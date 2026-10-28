@@ -21,7 +21,7 @@
  * withTenantScope; this only handles the *price* of an entitled function.
  */
 import { NextResponse } from "next/server";
-import { billFeatureUse } from "./billing-service";
+import { billFeatureUse, previewFeatureUse } from "./billing-service";
 
 export type BillingGateResult =
   | {
@@ -39,6 +39,86 @@ export type BillingGateResult =
       priceRial?: number;
       error: "insufficient_credits" | "feature_not_entitled";
     };
+
+export type BillingPreflightResult =
+  | {
+      ok: true;
+      /** True when settling after the work would debit the wallet. */
+      willCharge: boolean;
+      priceRial: number;
+      balanceRial: number;
+    }
+  | {
+      ok: false;
+      charged: false;
+      response: NextResponse;
+      balanceRial?: number;
+      priceRial?: number;
+      error: "insufficient_credits" | "feature_not_entitled";
+    };
+
+/**
+ * Check entitlement and affordability **without debiting anything**.
+ *
+ * Issue #903: a route whose work can fail must not buy a charge before it
+ * starts. `/api/backup/run` uses this to refuse early (402/403, the same
+ * responses `chargeForFeature` returns) and then settles with
+ * `chargeForFeature` only after an artifact actually exists.
+ */
+export async function preflightFeatureUse(
+  businessId: string,
+  featureKey: string,
+): Promise<BillingPreflightResult> {
+  try {
+    const preview = await previewFeatureUse({ businessId, featureKey });
+    if (!preview.entitled) {
+      return {
+        ok: false,
+        charged: false,
+        error: "feature_not_entitled",
+        priceRial: preview.priceRial,
+        balanceRial: preview.balanceRial,
+        response: NextResponse.json(
+          {
+            error: "feature_not_entitled",
+            message: "این قابلیت برای پلن شما فعال نیست. از بخش «اعتبار و پرداخت‌ها» می‌توانید پلن یا افزونهٔ آن را تهیه کنید.",
+            topUpUrl: "/settings/billing",
+          },
+          { status: 403 },
+        ),
+      };
+    }
+    const willCharge = preview.priceRial > 0;
+    if (preview.priceRial > 0 && preview.balanceRial < preview.priceRial) {
+      return {
+        ok: false,
+        charged: false,
+        error: "insufficient_credits",
+        balanceRial: preview.balanceRial,
+        priceRial: preview.priceRial,
+        response: NextResponse.json(
+          {
+            error: "insufficient_credits",
+            message: "اعتبار حساب شما برای این عملیات کافی نیست. از بخش «اعتبار و پرداخت‌ها» حساب خود را شارژ کنید.",
+            balanceRial: preview.balanceRial,
+            requiredRial: preview.priceRial,
+            topUpUrl: "/settings/billing",
+          },
+          { status: 402 },
+        ),
+      };
+    }
+    return {
+      ok: true,
+      willCharge,
+      priceRial: preview.priceRial,
+      balanceRial: preview.balanceRial,
+    };
+  } catch (err) {
+    // An entitlement read that fails is not permission to run the work free.
+    throw err;
+  }
+}
 
 export async function chargeForFeature(
   businessId: string,

@@ -19,6 +19,7 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { uploadRestoreFile } from "@/lib/restore-upload-client";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { ArtifactInventoryCard } from "./artifact-inventory";
 import { ErrorBox, Field, InfoBox, PrimaryButton, api, inputClass } from "../ui";
 import { Button } from "@/components/ui/button";
 import { EmptyState, SectionCard, StatusBadge } from "../page-chrome";
@@ -189,6 +190,7 @@ export function BackupManager({ isOwner }: { isOwner: boolean }) {
   return (
     <div className="space-y-6">
       <StatusCard health={health} runs={runs} onChanged={loadStatus} />
+      <ArtifactInventoryCard isOwner={isOwner} />
       {isOwner ? <RestoreCard onChanged={loadStatus} /> : null}
       {isOwner ? <ExportCard /> : null}
       {isOwner ? <SettingsCard onSaved={loadStatus} /> : null}
