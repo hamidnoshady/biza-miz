@@ -25,7 +25,12 @@ import { query, withoutTenantScope } from "../db";
 import { readAccountApiKey } from "./credentials";
 import type { KavenegarManagementClient } from "./rest";
 import type { KavenegarTemplate } from "./client";
-import { tokenSlots } from "./template-variables";
+import { isTemplateVariable, tokenSlots } from "./template-variables";
+import {
+  MANAGED_LOOKUP_TRIGGERS,
+  checkTriggerTemplate,
+  type ManagedLookupTrigger,
+} from "./lookup-trigger-facts";
 
 export type LookupPurpose = "verification" | "transactional";
 export type LookupTemplateState = "draft" | "submitted" | "approved" | "rejected" | "disabled";
@@ -252,11 +257,19 @@ export interface TenantLookupTemplate {
   status: TenantTemplateStatus;
   statusLabel: string;
   updatedAt: string;
+  /**
+   * Which business events this message can serve (issue #902 §5): a trigger the
+   * template's own declared variables can fill. Empty for a message still in
+   * review, and for one whose variables no event supplies — the screen then
+   * cannot offer an automation that would be refused at send time.
+   */
+  triggers: ManagedLookupTrigger[];
 }
 
 export function toTenantLookupTemplates(rows: LookupTemplateRow[]): TenantLookupTemplate[] {
   return rows.map((row) => {
     const status = tenantTemplateStatus(row.state);
+    const declared = row.variables.filter(isTemplateVariable);
     return {
       id: row.id,
       title: row.title,
@@ -264,6 +277,10 @@ export function toTenantLookupTemplates(rows: LookupTemplateRow[]): TenantLookup
       status,
       statusLabel: TENANT_TEMPLATE_STATUS_LABELS[status],
       updatedAt: row.updated_at.toISOString(),
+      triggers:
+        status === "ready"
+          ? MANAGED_LOOKUP_TRIGGERS.filter((trigger) => checkTriggerTemplate(trigger, declared) === null)
+          : [],
     };
   });
 }

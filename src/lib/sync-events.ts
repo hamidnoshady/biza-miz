@@ -26,6 +26,7 @@ import { classifyStatusReplay, replayPermissionsFor } from "./offline-sync";
 import { transitionKitchenItem } from "./kitchen-item-transition";
 import type { OrderItemStatus } from "./order-item-status";
 import { recordCoworkerEvent } from "./ai-coworker-events";
+import { notifyOrderReady, notifyPaymentReceived } from "./kavenegar/lookup-triggers";
 import {
   applySyncDomainHandler,
   SyncPayloadError,
@@ -270,7 +271,7 @@ async function dispatch(
                              WHERE oi.order_id = o.id AND oi.status NOT IN ('ready','served','voided'))`,
         [orderId],
       );
-      if (readyOrders[0])
+      if (readyOrders[0]) {
         await recordCoworkerEvent({
           businessId: readyOrders[0].business_id,
           locationId,
@@ -281,6 +282,15 @@ async function dispatch(
           },
           dedupeKey: `order-ready:${orderId}`,
         });
+        // Issue #902 §5 — the same customer message the online bump sends, on
+        // the same fact key. A replay that arrives after the online path has
+        // already sent is a `duplicate` in the send log, not a second SMS.
+        void notifyOrderReady({
+          businessId: readyOrders[0].business_id,
+          locationId,
+          orderId,
+        });
+      }
     }
     return { data: { status: payload.status } };
   }
@@ -856,6 +866,21 @@ async function applyTransactionalSyncEvent(
         [syncEventId],
       );
       await client.query("COMMIT");
+      // Issue #902 §5 — a settlement replayed from an offline terminal notifies
+      // the customer too, on the same fact key as the counter's own checkout.
+      // After COMMIT and not awaited: the replay acknowledges the queued event,
+      // and a provider round trip must not hold it open.
+      if (effect.effectType === "order_payment" && effect.effectId) {
+        const amount = Number((effect.result as { amount?: unknown } | null)?.amount ?? 0);
+        if (Number.isSafeInteger(amount) && amount > 0) {
+          void notifyPaymentReceived({
+            businessId: scope.businessId,
+            locationId,
+            orderId: effect.effectId,
+            amountRial: amount,
+          });
+        }
+      }
       return {
         clientEventId: event.clientEventId,
         ok: true,
