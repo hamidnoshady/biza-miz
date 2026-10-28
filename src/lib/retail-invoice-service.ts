@@ -175,6 +175,15 @@ export interface CreateRetailInvoiceInput {
   note?: string | null;
   /** Branch business date supplied by the route for loyalty-point expiry. */
   businessDate?: string;
+  /**
+   * The project this invoice bills, when it bills one (issue #1128 §D).
+   *
+   * Carried into the service line's `service.sale_revenue` event so the entry
+   * it posts is tagged with `journal_entries.project_id` — the dimension §D's
+   * project P&L reads. Only the service trades have a project to bill; a till
+   * sale leaves it unset and nothing changes for it.
+   */
+  projectId?: string | null;
   createdBy?: string | null;
   /**
    * The till's submission key (issue #913 item 2): with a stable key, a
@@ -904,6 +913,9 @@ async function settleLine(
         vat: breakdown.vat,
         total: breakdown.total,
         tenders: resolveLineTenders({ tenders: tenderQueue }, breakdown.total),
+        // Issue #1128 §D — the project being billed, so the entry this line
+        // posts carries the dimension its P&L is read by.
+        projectId: input.projectId ?? null,
       },
       sourceType: "service_sale",
       sourceId: orderId,

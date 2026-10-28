@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
+import { AGENCY_INDUSTRY } from "@/lib/agency";
 import { listAecParticipantRoleOptions, loadAecProjectCockpit } from "@/lib/aec-service";
+import { getBusinessIndustry } from "@/lib/industry-guard";
 import { listWorkspaceProjects } from "@/lib/workspace";
 import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
 
@@ -84,6 +86,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     // the same resolved profile, so they can never disagree about which
     // sections exist. A non-AEC tenant gets neither field.
     const cockpit = await loadAecProjectCockpit(owner.businessId);
+    // Issue #1128 §D — the same arrangement for an agency's billing panel, and
+    // for the same reason: the flag is answered here so the project page never
+    // has to call `/api/agency/**` to discover that it is not an agency. That
+    // call would answer `industry_mismatch`, and a café's project page would
+    // render an error banner for a request it had to make.
+    const isAgency = (await getBusinessIndustry(owner.businessId)) === AGENCY_INDUSTRY;
     return NextResponse.json({
       members: members.rows.map((r) => ({ id: r.id, fullName: r.full_name, role: r.role })),
       parties: parties.rows,
@@ -93,6 +101,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       // tell "this industry has no such list" from "the list is empty".
       ...(participantRoles ? { participantRoles } : {}),
       ...(cockpit.aec ? { aecCapabilities: cockpit.capabilities } : {}),
+      ...(isAgency ? { agencyCommercial: true as const } : {}),
     });
   } catch (err) {
     return handleWorkspaceError(err);
