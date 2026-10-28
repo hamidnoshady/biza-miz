@@ -81,6 +81,7 @@ import { AecProcurementTab } from "./procurement-panel";
 import { AecReportsTab } from "./reports-panel";
 import { AecVariationsTab } from "./variations-panel";
 import { AecCertificatesTab } from "./certificates-panel";
+import { AgencyBillingCard } from "./agency-billing-panel";
 import { AecCommercialCard } from "./commercial-panel";
 
 interface ProjectDetail {
@@ -508,6 +509,23 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               projectId={projectId}
               canManage={canManageProject}
               lookups={lookups}
+            />
+          ) : null}
+          {/* Issue #1128 §D — an agency's billing documents: the schedule, its
+              milestones, the change requests that revise the engagement, and the
+              project P&L with its booked half kept apart from its posted half.
+
+              It is in the money tab rather than a tab of its own for the same
+              reason the AEC cockpit is: this is the money tab's own summary of
+              this project. Mounted only when the lookups say the tenant is an
+              advertising agency, which is also what stops a project page of any
+              other trade from calling `/api/agency/**` and rendering an
+              `industry_mismatch` banner for a request it had to make. */}
+          {lookups.agencyCommercial ? (
+            <AgencyBillingCard
+              projectId={projectId}
+              canManage={canManageProject}
+              canApprove={canApprove}
             />
           ) : null}
           </div>
