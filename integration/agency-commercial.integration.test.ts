@@ -480,6 +480,21 @@ describe("a percentage milestone", () => {
         amountRial: -15_000_000,
       }),
     );
+
+    // Sending a request to a client needs the days it moves the schedule by, and
+    // says so: one code for "no description" and "no schedule impact" sent the
+    // author to fix whichever they read first.
+    await expect(
+      withTenant(fixture.businessId, () =>
+        commercial.applyChangeRequestAction(fixture.owner, draft.id, "submit", {}),
+      ),
+    ).rejects.toMatchObject({ code: "schedule_impact_required" });
+
+    // A priced request is still the author's to correct — otherwise this one
+    // could never be sent, never be fixed, and could only be withdrawn.
+    await withTenant(fixture.businessId, () =>
+      commercial.updateAgencyChangeRequest(fixture.owner, draft.id, { scheduleImpactDays: -3 }),
+    );
     await withTenant(fixture.businessId, () =>
       commercial.applyChangeRequestAction(fixture.owner, draft.id, "submit", {}),
     );
@@ -516,7 +531,11 @@ describe("a milestone's journey to an invoice", () => {
     // Nothing was sold, nothing was posted: the approval said "this may be
     // billed", and billing is its own act with its own permissions.
     const { rows: orders } = await db.query(
-      "SELECT id FROM orders WHERE business_id = $1",
+      // `orders` carries no business_id of its own; it belongs to a location,
+      // and the location belongs to the business.
+      `SELECT o.id FROM orders o
+         JOIN locations l ON l.id = o.location_id
+        WHERE l.business_id = $1`,
       [fixture.businessId],
     );
     expect(orders).toHaveLength(0);
@@ -566,7 +585,9 @@ describe("a milestone's journey to an invoice", () => {
 
     // An ordinary service invoice: one `orders` row, on account with the client.
     const { rows: orders } = await db.query<{ id: string; total: string; tax: string }>(
-      "SELECT id, total::text, tax::text FROM orders WHERE business_id = $1",
+      `SELECT o.id, o.total::text, o.tax::text FROM orders o
+         JOIN locations l ON l.id = o.location_id
+        WHERE l.business_id = $1`,
       [fixture.businessId],
     );
     expect(orders).toHaveLength(1);
