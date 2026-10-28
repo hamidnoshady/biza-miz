@@ -17,6 +17,7 @@ import {
   type FeatureAccess,
 } from "./billing-plans-service";
 import { changeBusinessPlan } from "./subscription-service";
+import { issuePurchaseInvoice } from "./purchase-invoice-service";
 
 export { WalletInsufficientFundsError };
 
@@ -191,7 +192,6 @@ export async function fulfilPurchasedPayment(payment: {
       // invoice must not turn that into a failed fulfilment. It is resumable
       // and `backfillPurchaseInvoices` (run from the renewal tick) retries it.
       try {
-        const { issuePurchaseInvoice } = await import("./purchase-invoice-service");
         await issuePurchaseInvoice(payment.id);
       } catch (err) {
         console.error("purchase invoice failed for payment:", payment.id, err);
