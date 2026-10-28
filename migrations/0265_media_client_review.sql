@@ -264,7 +264,22 @@ CREATE POLICY tenant_isolation ON media_review_links FOR ALL
 CREATE TABLE media_review_events (
     id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     business_id   uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
-    round_id      uuid NOT NULL REFERENCES media_review_rounds(id) ON DELETE CASCADE,
+    -- Composite key at the foot of this table, as for items and links. A plain
+    -- foreign key would prove only that the round *exists*, not that it is this
+    -- tenant's round — and an audit row filed under one business about another
+    -- business's round is readable by the tenant it was filed under. A narrow
+    -- leak, but §E's whole subject is that nothing about one tenant reaches
+    -- another, and the audit trail is the last place to leave one.
+    round_id      uuid NOT NULL,
+    -- These two stay plain references, and that is a decision rather than an
+    -- oversight. Neither can be a composite foreign key: `media_assets` has no
+    -- UNIQUE (business_id, id) to point at, and §E is no reason to add one to a
+    -- table every trade in the product reads; and a composite key on `link_id`
+    -- would make ON DELETE SET NULL try to null `business_id` as well, which is
+    -- NOT NULL. What either could leak is the existence of a UUID — the token
+    -- itself is stored only as a hash, and no bytes are ever resolved through
+    -- this table. The reference capable of leaking a *subject* is `round_id`,
+    -- which is exactly why that one is composite.
     asset_id      uuid REFERENCES media_assets(id) ON DELETE SET NULL,
     link_id       uuid REFERENCES media_review_links(id) ON DELETE SET NULL,
 
@@ -289,7 +304,12 @@ CREATE TABLE media_review_events (
     -- has a user — would turn deleting a user into being unable to delete them,
     -- or into deleting the record of what they did. `actor_label` is NOT NULL
     -- precisely so the name outlives the id.
-    CHECK (actor_user_id IS NULL OR actor_kind = 'member')
+    CHECK (actor_user_id IS NULL OR actor_kind = 'member'),
+
+    -- Proves the round and the tenant together, so an audit row cannot be filed
+    -- under one business about another business's round.
+    FOREIGN KEY (business_id, round_id)
+        REFERENCES media_review_rounds (business_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_media_review_events_round
@@ -430,27 +450,40 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF OLD.revoked_at IS NOT NULL THEN
-        -- The only columns a revoked link may still move are the access
-        -- counters, and even those only for a use that happened before the
-        -- revocation was noticed. Nothing about its authority may change.
-        IF NEW.token_hash <> OLD.token_hash
-           OR NEW.token_prefix <> OLD.token_prefix
-           OR NEW.purpose <> OLD.purpose
-           OR NEW.expires_at <> OLD.expires_at
-           OR NEW.ttl_days <> OLD.ttl_days
-           OR NEW.round_id <> OLD.round_id
-           OR NEW.business_id <> OLD.business_id
-           OR NEW.revoked_at IS NULL THEN
-            RAISE EXCEPTION 'media_review_links: a revoked link is history'
-                USING ERRCODE = '23514';
-        END IF;
-    END IF;
-
-    -- A token is what authenticates; it is never rotated in place. Re-issuing
-    -- is a new row, so the old one stays in the audit trail as revoked.
-    IF NEW.token_hash <> OLD.token_hash THEN
-        RAISE EXCEPTION 'media_review_links: a token is replaced, never rewritten'
+    -- A link is minted, used and revoked. Nothing about its authority ever
+    -- moves, live or revoked: only the revocation stamp — set once, never
+    -- cleared, never moved — and the access counters may change.
+    --
+    -- Freezing a *live* link, not merely a revoked one, is the part that is easy
+    -- to omit and expensive to omit. Each field earns its place:
+    --
+    --   expires_at, ttl_days  a link whose expiry can be pushed out is not
+    --                         short-lived, it is permanent with extra steps, and
+    --                         §E asks for short-lived.
+    --   purpose               widening review to download hands over bytes the
+    --                         agency may still be owed for. That is a privilege
+    --                         escalation wearing the costume of a preference.
+    --   round_id, business_id moving a token hands a working authenticator to a
+    --                         different subject.
+    --   token_hash            a token is replaced by a new row, never rotated in
+    --                         place, so the old one stays in the trail as
+    --                         revoked rather than silently becoming somebody
+    --                         else's credential.
+    --
+    -- Re-issuing is the supported answer to all five: revoke, mint a new row,
+    -- and both facts are on the record.
+    IF NEW.id <> OLD.id
+       OR NEW.token_hash <> OLD.token_hash
+       OR NEW.token_prefix <> OLD.token_prefix
+       OR NEW.purpose <> OLD.purpose
+       OR NEW.expires_at <> OLD.expires_at
+       OR NEW.ttl_days <> OLD.ttl_days
+       OR NEW.round_id <> OLD.round_id
+       OR NEW.business_id <> OLD.business_id
+       OR NEW.created_by IS DISTINCT FROM OLD.created_by
+       OR NEW.created_at <> OLD.created_at
+       OR (OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at) THEN
+        RAISE EXCEPTION 'media_review_links: a link is minted, used and revoked'
             USING ERRCODE = '23514';
     END IF;
 
@@ -465,33 +498,80 @@ CREATE TRIGGER trg_media_review_links_guard
 -- The audit trail is append-only. An audit log that can be edited is a
 -- suggestion, and §E asks for a trail — so both statements are refused here
 -- rather than being left to the service to remember.
---
--- With one deliberate exception, which is the same exception the round guard
--- makes: a *draft* round's events may go, because a draft round may go. A round
--- nobody outside the agency ever saw holds no client-facing fact, and refusing
--- to let an agency clean up a round they created by mistake would be a stronger
--- guarantee than §E asks for at the cost of a real one — that the record of what
--- a client saw and decided cannot be altered.
 CREATE OR REPLACE FUNCTION media_review_event_immutable() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE
-    round_state text;
 BEGIN
-    -- Rewriting history is refused outright, including on a draft: an edited
-    -- event is indistinguishable from one that was recorded correctly.
+    -- On the way in, a 'member' event must name its member. The UPDATE branch
+    -- below has to tolerate a member event whose user id the foreign key nulled,
+    -- so the CHECK constraint deliberately cannot ask for this — but the insert
+    -- can. Without it a service bug could record "a member did this" with
+    -- nobody attached, and an audit entry that cannot be attributed is worse
+    -- than no entry, because it reads as though it could be.
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.actor_kind = 'member' AND NEW.actor_user_id IS NULL THEN
+            RAISE EXCEPTION 'media_review_events: a member event names its member'
+                USING ERRCODE = '23514';
+        END IF;
+        -- This RETURN NEW is load-bearing in a way that is easy to miss. A
+        -- BEFORE INSERT row trigger that returns NULL does not raise an error:
+        -- PostgreSQL silently skips the row. Falling through to the DELETE path
+        -- below — where OLD is NULL, so no round is found and the function
+        -- returns OLD — would therefore discard every event ever written, with
+        -- nothing failing anywhere and an audit trail that is simply, quietly
+        -- empty. Each branch returns its own row.
+        RETURN NEW;
+    END IF;
+
+    -- Rewriting history is refused, including on a draft: an edited event is
+    -- indistinguishable from one that was recorded correctly.
+    --
+    -- One edit is permitted, and it is not ours to make or refuse: the foreign
+    -- key's own ON DELETE SET NULL, firing when a member's user row goes. A
+    -- blanket refusal here would mean the audit trail holds that member hostage
+    -- — the agency could never delete a departed colleague's account once they
+    -- had appeared in a review. Permitting edits generally would mean it is not
+    -- a trail. So exactly that column may move, only to NULL, and only with
+    -- every other field byte-identical.
+    --
+    -- This is the moment `actor_label` being NOT NULL pays for: the name
+    -- outlives the id, so the row still says who did it after the account is
+    -- gone, which is also why the CHECK below runs one direction only.
     IF TG_OP = 'UPDATE' THEN
+        IF NEW.actor_user_id IS NULL
+           AND OLD.actor_user_id IS NOT NULL
+           AND NEW.id = OLD.id
+           AND NEW.business_id = OLD.business_id
+           AND NEW.round_id = OLD.round_id
+           AND NEW.asset_id IS NOT DISTINCT FROM OLD.asset_id
+           AND NEW.link_id IS NOT DISTINCT FROM OLD.link_id
+           AND NEW.actor_kind = OLD.actor_kind
+           AND NEW.actor_label = OLD.actor_label
+           AND NEW.action = OLD.action
+           AND NEW.from_state IS NOT DISTINCT FROM OLD.from_state
+           AND NEW.to_state IS NOT DISTINCT FROM OLD.to_state
+           AND NEW.note IS NOT DISTINCT FROM OLD.note
+           AND NEW.created_at = OLD.created_at THEN
+            RETURN NEW;
+        END IF;
         RAISE EXCEPTION 'media_review_events: the audit trail is append-only'
             USING ERRCODE = '23514';
     END IF;
 
-    SELECT state INTO round_state FROM media_review_rounds WHERE id = OLD.round_id;
-    -- No round means this delete is the cascade from deleting the round itself,
-    -- which the round guard already limits to drafts. Refusing here would make
-    -- that allowance unreachable, since every round has at least one event.
-    IF NOT FOUND THEN
-        RETURN OLD;
-    END IF;
-    IF round_state <> 'draft' THEN
+    -- A delete is refused while the round still exists, whatever its state. The
+    -- one deletion that gets through is the cascade from deleting the round
+    -- itself: PostgreSQL fires a foreign-key cascade after the parent row is
+    -- gone, so "the round is no longer there" is exactly how a cascade is told
+    -- apart from somebody erasing a line of history — the same distinction
+    -- migration 0262's version guard relies on.
+    --
+    -- It is tempting to also permit deleting a *draft* round's events directly,
+    -- on the grounds that a draft holds no client-facing fact. The cascade does
+    -- not need that permission: the round guard already limits round deletion to
+    -- drafts, so an agency cleaning up a round it created by mistake takes the
+    -- events with the round. Granting line-by-line erasure on top would open a
+    -- hole precisely where the guarantee is meant to be strongest, for no gain.
+    PERFORM 1 FROM media_review_rounds WHERE id = OLD.round_id;
+    IF FOUND THEN
         RAISE EXCEPTION 'media_review_events: the audit trail is append-only'
             USING ERRCODE = '23514';
     END IF;
@@ -501,7 +581,7 @@ END;
 $$;
 
 CREATE TRIGGER trg_media_review_events_immutable
-    BEFORE UPDATE OR DELETE ON media_review_events
+    BEFORE INSERT OR UPDATE OR DELETE ON media_review_events
     FOR EACH ROW EXECUTE FUNCTION media_review_event_immutable();
 
 -- A round's contents freeze when it goes to the client, and a settled round is
