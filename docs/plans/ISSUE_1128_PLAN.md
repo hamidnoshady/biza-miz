@@ -1,9 +1,12 @@
 # Issue #1128 — Advertising Agency business type (آژانس تبلیغاتی)
 
-**Status of this change:** Waves 1, 2 and 3, plus two merges of `main` — the first gave wave 2
-something to bill with, the second (#1171 and a desktop bump) landed while wave 3 was in CI and
-touched only the generated MCP matrix, which was regenerated from the merged source rather than
-hand-merged.
+**Status of this change:** Waves 1, 2 and 3, plus three merges of `main`. The first gave wave 2
+something to bill with. The second (#1171 and a desktop bump) and the third (#1174, one
+effective-access resolver) both landed while wave 3 was in CI, and both touched only the generated
+MCP matrix among this branch's files — so each conflict was resolved by regenerating both artifacts
+from the merged source rather than hand-merging a diff of generated text. #1174 matters beyond that:
+it rewrote the access resolver `agencyOwner` delegates to, so the merge was gated on the whole suite
+and the type check rather than on the merge reporting clean.
 
 *Wave 1* is the industry foundation: registry, migration, chart of accounts and profile, plus the
 posting/report wiring those four cannot be separated from, and the tests and CI guard that hold them
@@ -429,9 +432,10 @@ reader's guess:
 
 ## Tests
 
-Unit (`npx vitest run`, whole suite green — 1285 files / 15970 tests after wave 3 and the merge of
-`main`'s #1171, 1281 / 15929 at wave 3's own tip, 1256 / 15604 at the wave-2 merge commit,
-1243 / 15435 after wave 2, 1241 / 15407 after wave 1; each jump is mostly `main`'s own new tests):
+Unit (`npx vitest run`, whole suite green — 1288 files / 16013 tests after the merges of `main`'s
+#1171 and #1174, 1285 / 15970 after #1171 alone, 1281 / 15929 at wave 3's own tip, 1256 / 15604 at
+the wave-2 merge commit, 1243 / 15435 after wave 2, 1241 / 15407 after wave 1; each jump is mostly
+`main`'s own new tests):
 
 * `coa-template.test.ts` — the trade's eleven accounts, their side of the book and their parent
   heading; no hospitality account and no 1230; exactly one «پیش‌دریافت» liability; 1300 and 5600
