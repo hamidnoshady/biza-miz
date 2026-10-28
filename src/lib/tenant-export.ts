@@ -37,6 +37,20 @@ const TRANSPORT_LOCAL_COLUMNS: Record<string, readonly string[]> = {
   sync_row_clocks: ["txid"],
 };
 
+/**
+ * Columns that point at a platform row which is itself never exported.
+ *
+ * Issue #902 §5: a business's message copy records which library entry it came
+ * from (`master_template_id`). The library is platform data in `EXEMPT_TABLES`,
+ * so its rows are not in the artifact — and their ids are minted per deployment,
+ * which means a kept reference would either dangle or, on restore, collide with
+ * whatever entry the target seeded. Dropped like a derived column: the copy keeps
+ * its own approved text and its `master_version`, and only loses the pointer.
+ */
+const PLATFORM_REFERENCE_COLUMNS: Record<string, readonly string[]> = {
+  kavenegar_lookup_templates: ["master_template_id"],
+};
+
 /** Postgres identifiers can't be parameterised; table/column names here come only from information_schema, but validate anyway rather than trust that blindly. */
 function assertSafeIdentifier(name: string): string {
   if (!/^[a-z_][a-z0-9_]*$/.test(name)) throw new Error(`unsafe_identifier: ${name}`);
@@ -103,6 +117,7 @@ export async function exportTenantData(businessId: string): Promise<TenantExport
       // one from the column default instead of scrambling the target's sync
       // feed order.
       for (const column of TRANSPORT_LOCAL_COLUMNS[name] ?? []) derived.add(column);
+      for (const column of PLATFORM_REFERENCE_COLUMNS[name] ?? []) derived.add(column);
       const columns = fields.map((f) => f.name).filter((c) => !generated?.has(c) && !derived.has(c));
       out.push({ name, columns, rows: orderedRows });
     }

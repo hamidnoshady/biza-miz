@@ -121,6 +121,31 @@ interface CatalogTemplate {
   updated_at: string;
 }
 
+/**
+ * Issue #902 §5 — one entry of the platform's own message library.
+ *
+ * This is the layer above the catalog: the operator decides which first-party
+ * message exists, which trades/plans may have it, and whether it is offered at
+ * all. `sample` arrives rendered by the server with representative values, so
+ * the console never has to guess what `%token` will become.
+ */
+interface MasterTemplate {
+  id: string;
+  key: string;
+  title: string;
+  body: string;
+  purpose: "verification" | "transactional";
+  variables: string[];
+  industries: string[];
+  plans: string[];
+  enabled: boolean;
+  version: number;
+  notes: string | null;
+  business_copies: number;
+  sample: string;
+  updated_at: string;
+}
+
 /** Issue #902 §6 — acceptance vs. delivery, per business, last 24 hours. */
 interface DeliveryRow {
   businessId: string;
@@ -152,6 +177,7 @@ interface Snapshot {
   policy: ManagedPolicy;
   accounts: ManagedAccount[];
   templates: CatalogTemplate[];
+  masterTemplates: MasterTemplate[];
   delivery: DeliveryRow[];
   alerts: ServiceAlert[];
   alertSummary: { critical: number; warning: number; info: number; unacknowledged: number; total: number };
@@ -231,6 +257,11 @@ const STATE_LABELS: Record<ManagedAccount["state"], string> = {
   retry_pending: "تلاش دوباره",
   attention_required: "نیازمند اقدام",
   suspended: "معلق",
+};
+
+const PURPOSE_LABELS: Record<"verification" | "transactional", string> = {
+  verification: "ورود و تأیید",
+  transactional: "اطلاع‌رسانی تراکنشی",
 };
 
 const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
@@ -374,6 +405,22 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
   async function submitTemplate(template: CatalogTemplate) {
     const done = await post({ action: "template_submit", templateId: template.id }, `template:${template.id}`);
     if (done) setNotice(`«${template.title}» برای بررسی ارسال شد.`);
+  }
+
+  async function toggleMasterTemplate(template: MasterTemplate) {
+    // Enabling/disabling is not a new version: no business's approved copy
+    // changes, so nothing needs re-approval.
+    const done = await post(
+      { action: "master_template_toggle", masterTemplateId: template.id, enabled: !template.enabled },
+      `master:${template.id}`,
+    );
+    if (done) {
+      setNotice(
+        template.enabled
+          ? `«${template.title}» از کتابخانه کنار گذاشته شد؛ نسخه‌های موجود کسب‌وکارها دست‌نخورده می‌مانند.`
+          : `«${template.title}» برای کسب‌وکارهای هدف فعال شد.`,
+      );
+    }
   }
 
   async function archiveTemplate(template: CatalogTemplate) {
@@ -853,6 +900,57 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
           «پذیرفته» یعنی ارائه‌دهنده پیام را قبول کرده؛ «تحویل» یعنی بعداً تأیید شده است. ردیف‌ها بر
           اساس بیشترین خطا مرتب شده‌اند.
         </p>
+      </Card>
+
+      {/* Issue #902 §5 — the library the catalog is built from. An entry is
+          offered only to the trades and plans it names, so a message a business
+          does not need never appears on its screen; disabling one withdraws it
+          from new businesses without touching a copy already approved. */}
+      <Card title={`کتابخانهٔ الگوها (${formatPersianNumber((snapshot.masterTemplates ?? []).length)})`}>
+        {(snapshot.masterTemplates ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">کتابخانه خالی است.</p>
+        ) : (
+          <div className="space-y-2 text-sm">
+            {(snapshot.masterTemplates ?? []).map((template) => (
+              <div key={template.id} className="rounded-lg border border-border px-3 py-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0 break-words">
+                    <b>{template.title}</b>
+                    <span className="ms-2 text-xs text-muted-foreground">
+                      {PURPOSE_LABELS[template.purpose]} • نسخهٔ {formatPersianNumber(template.version)}
+                      {template.enabled ? "" : " • کنارگذاشته‌شده"}
+                      {template.business_copies > 0
+                        ? ` • ${formatPersianNumber(template.business_copies)} نسخه نزد کسب‌وکارها`
+                        : ""}
+                    </span>
+                  </span>
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-muted-foreground" dir="ltr">
+                      {template.key}
+                    </span>
+                    {canManage ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="min-h-9"
+                        disabled={busy === `master:${template.id}`}
+                        onClick={() => void toggleMasterTemplate(template)}
+                      >
+                        {busy === `master:${template.id}` ? "…" : template.enabled ? "کنار گذاشتن" : "فعال‌سازی"}
+                      </Button>
+                    ) : null}
+                  </span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{template.sample}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  مخاطب: {template.industries.length ? template.industries.join("، ") : "همهٔ کسب‌وکارها"}
+                  {" • "}
+                  طرح: {template.plans.length ? template.plans.join("، ") : "همهٔ طرح‌ها"}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
 
       {/* Issue #902 §5 — the catalog the tenants created. Approvals are the

@@ -171,6 +171,60 @@ Surfaces: `GET /api/platform/sms/accounts` returns `alerts` + `alertSummary`, th
 shows «نیازمند اقدام» above the fleet with the severity, the occurrence count, the remedy and
 a «بررسی کردم» acknowledgement (`POST {action:"acknowledge_alert"}`, audited).
 
+## 5c. The message library: targeting, versions, safe rendering (§5)
+
+§5 asks the platform to own the *messages* — not just approve what tenants write. Three sentences
+from the issue drove this slice: "Allow Superadmin enable/disable catalog entries by business
+type/channel/plan", "Updating master template must support safe versioned rollout and reapproval
+without breaking active sends", and "business-supplied name/amount/order info maps to approved
+variables, not arbitrary backend syntax".
+
+**The library is a platform table** (`0264`, `kavenegar_master_templates`): a `key`, a first-party
+title, the body the provider will approve, the ordered variables it accepts, and two targeting
+arrays — `industries`, `plans`. Empty means everyone, which is the honest default for a login code;
+a campaign receipt that only the upper plan pays for is a rule, not a permission, and it is applied
+server-side from `businesses.industry` and the subscription's plan. A tenant never reads the table
+(platform-only RLS) and never passes an id to get around a rule: it names an entry, and the server
+re-resolves eligibility for *that* business. Disabling an entry withdraws the offer and touches
+nothing a business already has.
+
+**A copy is a copy** (`instantiateMasterTemplate`): the business gets a `draft` row carrying the
+library body, `master_template_id` and the `master_version` it came from. It is created through the
+tenant-facing path, so the derived provider name makes the operation idempotent — adding the same
+entry twice lands on the same draft. Approval is still the platform's submit path: an unapproved
+copy cannot send.
+
+**Versions move only when the message moves.** Saving a changed body/title bumps `version`;
+enabling, disabling or retargeting does not, because no business's approved text changes. An
+existing copy keeps its own body and its origin version, so a rollout is "instantiate the new
+version, approve it, then retire the old one" (the `0260` revision flow already keeps the live row
+sending until the successor is approved). A tenant revision of a library copy inherits the lineage.
+
+**Rendering is the security boundary** (`template-variables.ts`, pure): six variables — `code`,
+`customer_name`, `store_name`, `order_number`, `amount`, `date` — each with exactly one renderer.
+A template declares its variables **in order**, and position is the mapping: `variables[0]` fills
+`%token`, `[1]` fills `%token2`, `[2]` fills `%token3`. A body may only use those slots, as a
+prefix (no `%token2` without `%token`, no `%token10`, no repeated slot), and a body that cannot be
+rendered cannot be saved — so a library entry is never something a business discovers is broken
+after approval.
+
+| Variable | Rendered as | Why |
+| --- | --- | --- |
+| `code` | ASCII digits, 4–8 | a human types an OTP back from the message |
+| `customer_name`, `store_name` | whitespace-collapsed text, `%` and control characters stripped, ≤ 25 chars | a `%` in a value would look like a token to the provider's own substitution; a newline breaks the segment |
+| `order_number` | `[A-Za-z0-9-]`, ≤ 20 chars | a reference, not a place to put a URL or SQL |
+| `amount` | Persian grouped digits, in **rial** | the seeded messages say «ریال», so the unit is never guessed |
+| `date` | Jalali `۱۴۰۵/۰۸/۰۶` | a Gregorian date in a Persian SMS reads as foreign |
+
+An invalid value is an error (`variable_invalid`), never a silent truncation into a customer's
+inbox; a missing one is `variable_missing`. The same renderer produces the **sample** the tenant
+sees before approving — first-party title, readable text, no `%token` and no provider vocabulary.
+
+Surfaces: `GET /api/platform/sms/accounts` returns `masterTemplates` (with `sample` and a
+`business_copies` count), `POST {action:"master_template_save"}` upserts, `master_template_toggle`
+enables/disables, `template_from_master` gives one business a copy — all audited. Tenants get
+`templateLibrary` on `GET /api/messaging` and `lookup_template_from_library` on its POST.
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -225,8 +279,9 @@ missing was the rest of the provider's documented surface and the tenant screen 
 | Growth screen «پیام‌های خودکار» | The tenant finally sees its approved messages with a first-party status label, can add one, revise the text of a `needs_action` row, and remove it from the catalog |
 | Console «کاتالوگ الگوهای تأییدشده» | Rejections first, then reviews in flight: submit (add or update, chosen by the service), retire, and the stored provider-neutral error code |
 
-Still open in §5/§6 and left for the follow-ups below: enabling catalog entries **by business
-type/plan**, the delivery/health dashboard, and wiring approved templates to concrete triggers.
+Still open in §5/§6 and left for the follow-ups below: the dedicated audit view, and wiring an
+approved template to a concrete send (`sendManagedLookup`) once reserve/settle is in place.
+Targeting by business type/plan shipped in §5c, the delivery dashboard in §6c.
 
 ## 6c. Delivery and health reporting (§6)
 
@@ -300,9 +355,10 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | Gate | Result |
 | --- | --- |
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
-| `npx vitest run` — new unit files | 149 tests pass across 10 files (`retail-pricing` adds 27, `alert-service` adds 13) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
+| `npx vitest run` — new unit files | 170 tests pass across 11 files (`retail-pricing` adds 27, `alert-service` adds 13, `template-variables` adds 21) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
-| `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
+| `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass
+| `npm run test:db` — `kavenegar-master-templates` | 16/16 pass (targeting by trade and plan, idempotent instantiation of a copy, versioned rollout that leaves the live copy alone, lineage through a revision, platform-only RLS) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
@@ -323,15 +379,18 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 
 ## 9. Follow-ups (each needs its own issue)
 
-0. **Campaign-budget and OTP reserved capacity** (#902 §3, P0): the three strategies and the
+0. **Trigger wiring and `sendManagedLookup`** (#902 §5, P0): the library, the copy, the revision
+   lifecycle and the renderer exist; what is left is the send itself — reserve retail, call
+   `verify/lookup` on the child's own key with the rendered tokens, then settle or refund exactly
+   once — and the concrete triggers (login code, order ready, payment received) that call it.
+   Login OTP is part of this: it must keep working when Growth is off, the child is suspended or
+   the marketing wallet is empty.
+1. **Campaign-budget and OTP reserved capacity** (#902 §3, P0): the three strategies and the
    guards are in place; "approved campaign budget" as a distinct funding trigger, and a
    reserved slice of master credit that marketing can never consume (so a login OTP is funded
    even when every child is capped), are still open.
-1. **Delivery/health dashboards** (#902 P1): per-campaign delivery and provider latency are
-   visible through the existing outbox/billing screens; a dedicated panel is a follow-up.
-2. **Template automation wiring** (#902 P1): the catalog, the revision/reapproval lifecycle and
-   the tenant screen exist; tying approved templates to concrete triggers (login code, order
-   ready) is product work. Enabling catalog entries *by business type or plan* is the other half.
+2. **Delivery/health dashboards** (#902 P1): the fleet-level delivery card (§6c) exists;
+   per-campaign delivery, provider latency and a historical view are follow-ups.
 3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions (§6d), the
    margin report and `billing_vendor_cost_events` (§6a) exist; emitting
    `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier
