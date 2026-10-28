@@ -48,6 +48,9 @@ export const POST = withTenantScope(
     try {
       const changeRequest = await applyChangeRequestAction(owner, id, action, {
         note: body.note,
+        // Two different figures, two different fields: what the change costs
+        // (`price`, `reprice`) and what the client agreed to (`approve`).
+        amountRial: body.amountRial,
         approvedAmountRial: body.approvedAmountRial,
       });
       return NextResponse.json({ changeRequest });

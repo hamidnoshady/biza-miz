@@ -1644,6 +1644,15 @@ export async function deleteAgencyChangeRequest(
 
 export interface AgencyChangeRequestActionInput {
   note?: unknown;
+  /**
+   * What this change costs — the figure `price` and `reprice` write.
+   *
+   * Its own field rather than a shared one: "what the change costs" and "what
+   * the client agreed to" are two different figures that can legitimately
+   * differ, and one parameter meaning both would let a caller price a request
+   * with a field whose name says the client has already approved it.
+   */
+  amountRial?: unknown;
   /** The figure the client agreed to, when approving at a different amount. */
   approvedAmountRial?: unknown;
 }
@@ -1704,7 +1713,7 @@ export async function applyChangeRequestAction(
   // constraint violation from the database.
   if (action === "price" || action === "reprice") {
     const priced =
-      input.approvedAmountRial === undefined ? moneyOrNull(row.amount_rial) : money(input.approvedAmountRial);
+      input.amountRial === undefined ? moneyOrNull(row.amount_rial) : money(input.amountRial);
     if (priced === null || !isSignedRial(priced)) {
       throw new AgencyCommercialError("change_request_amount_required");
     }
@@ -1745,9 +1754,9 @@ export async function applyChangeRequestAction(
           changeRequestId,
           target,
           action === "price" || action === "reprice"
-            ? input.approvedAmountRial === undefined
+            ? input.amountRial === undefined
               ? null
-              : money(input.approvedAmountRial)
+              : money(input.amountRial)
             : null,
           approvedAmount,
           today,
