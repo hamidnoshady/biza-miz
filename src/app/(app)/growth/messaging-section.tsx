@@ -72,6 +72,27 @@ interface LookupTemplate {
   status: "in_review" | "ready" | "needs_action" | "disabled";
   statusLabel: string;
   updatedAt: string;
+  /** The business events this message's own variables can serve (issue #902 §5). */
+  triggers?: LookupTriggerKey[];
+}
+
+/** The closed vocabulary the server accepts for automations. */
+type LookupTriggerKey = "order_ready" | "payment_received";
+
+/**
+ * Issue #902 §5 — one "when X happens, send this" decision, as the server
+ * describes it. `problem` is why the attached message cannot be used, in
+ * first-party words; `login_code` is deliberately not a trigger, because a
+ * login OTP runs on the platform transport and never on this business's wallet.
+ */
+interface TriggerSetting {
+  trigger: LookupTriggerKey;
+  label: string;
+  description: string;
+  enabled: boolean;
+  templateId: string | null;
+  templateTitle: string | null;
+  problem: string | null;
 }
 
 interface Data {
@@ -95,6 +116,7 @@ interface Data {
   billing: { balanceRial: number };
   templates: Template[];
   lookupTemplates?: LookupTemplate[];
+  triggers?: TriggerSetting[];
   campaigns: Campaign[];
   segments: Segment[];
   projects: Project[];
@@ -208,6 +230,9 @@ export function MessagingSection({
   const [lookupBody, setLookupBody] = useState("");
   const [lookupPurpose, setLookupPurpose] = useState<LookupTemplate["purpose"]>("verification");
   const [editingLookupId, setEditingLookupId] = useState("");
+  // Issue #902 §5 — the trigger form: which approved message each automation is
+  // attached to, before it is saved.
+  const [triggerPick, setTriggerPick] = useState<Record<string, string>>({});
   const audienceRequest = useRef(0);
   const messagePreviewRequest = useRef(0);
 
@@ -369,6 +394,27 @@ export function MessagingSection({
   async function removeLookup(id: string) {
     const saved = await send({ action: "lookup_template_disable", templateId: id }, `lookup-remove:${id}`);
     if (saved) setNotice("این پیام از فهرست پیام‌های خودکار خارج شد.");
+  }
+
+  /**
+   * Turn one automation on or off. The chosen message is what the server
+   * validates against the event's own variables, so a mismatch comes back as a
+   * refusal in this form rather than as a message sent with a blank.
+   */
+  async function saveTrigger(trigger: LookupTriggerKey, enabled: boolean) {
+    const chosen = triggerPick[trigger] ?? data?.triggers?.find((item) => item.trigger === trigger)?.templateId ?? "";
+    if (!chosen) {
+      setError("برای این رویداد یک پیام آمادهٔ استفاده انتخاب کنید.");
+      return;
+    }
+    const saved = await send({ action: "lookup_trigger", trigger, templateId: chosen, enabled }, `trigger:${trigger}`);
+    if (saved) {
+      setNotice(
+        enabled
+          ? "این رویداد فعال شد؛ از این پس برای هر اتفاق، یک پیامک برای مشتری همان سفارش می‌رود."
+          : "این رویداد خاموش شد؛ دیگر پیامکی برای آن فرستاده نمی‌شود.",
+      );
+    }
   }
 
   async function addCampaign(event: FormEvent) {
@@ -692,6 +738,98 @@ export function MessagingSection({
         ) : (
           <EmptyState>هنوز پیام خودکاری ثبت نشده است. کد ورود یا پیام تراکنشی را از فرم پایین اضافه کنید.</EmptyState>
         )}
+
+        {/* Issue #902 §5 — the product half: when a real event happens, one of
+            these messages goes to the customer of that order. Off until the
+            business turns one on. */}
+        {(data.triggers ?? []).length ? (
+          <div className="mt-4 grid gap-3 border-t border-border/80 pt-4">
+            <div>
+              <p className="text-sm font-medium">اطلاع‌رسانی خودکار برای رویدادها</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                هر پیامک از حساب پیامکی همین کسب‌وکار ارسال و از کیف پول مرکزی کسر می‌شود. فقط مشتری همان سفارشِ پیام را
+                می‌گیرد، و اگر مشتری اجازهٔ پیامک نداده باشد پیامی فرستاده نمی‌شود.
+              </p>
+            </div>
+            {(data.triggers ?? []).map((setting) => {
+              const options = (data.lookupTemplates ?? []).filter(
+                (item) => item.status === "ready" && (item.triggers ?? []).includes(setting.trigger),
+              );
+              const chosen = triggerPick[setting.trigger] ?? setting.templateId ?? options[0]?.id ?? "";
+              return (
+                <div key={setting.trigger} className="grid gap-2 rounded-xl border border-border/70 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">
+                        {setting.label}{" "}
+                        <StatusBadge tone={setting.enabled && !setting.problem ? "positive" : "neutral"}>
+                          {setting.problem
+                            ? "نیازمند رسیدگی"
+                            : setting.enabled
+                              ? "فعال"
+                              : "خاموش"}
+                        </StatusBadge>
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">{setting.description}</p>
+                      {setting.problem ? (
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                          پیام انتخاب‌شده با این رویداد سازگار نیست؛ پیامی انتخاب کنید که متغیرهایش با این رویداد پر می‌شود.
+                        </p>
+                      ) : setting.templateTitle ? (
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">پیام: {setting.templateTitle}</p>
+                      ) : null}
+                    </div>
+                  </div>
+                  {canManage ? (
+                    options.length ? (
+                      <div className="flex flex-wrap items-end gap-2">
+                        <label className="min-w-0 flex-1">
+                          <span className="mb-1 block text-xs font-medium text-foreground">پیام این رویداد</span>
+                          <select
+                            className={inputClass}
+                            value={chosen}
+                            onChange={(event) =>
+                              setTriggerPick((current) => ({ ...current, [setting.trigger]: event.target.value }))
+                            }
+                          >
+                            {options.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.title}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {setting.enabled ? (
+                          <Button
+                            variant="outline"
+                            className="min-h-11"
+                            disabled={busy === `trigger:${setting.trigger}`}
+                            onClick={() => void saveTrigger(setting.trigger, false)}
+                          >
+                            {busy === `trigger:${setting.trigger}` ? "در حال ذخیره…" : "خاموش کردن"}
+                          </Button>
+                        ) : (
+                          <Button
+                            className="min-h-11"
+                            disabled={!chosen || busy === `trigger:${setting.trigger}`}
+                            onClick={() => void saveTrigger(setting.trigger, true)}
+                          >
+                            {busy === `trigger:${setting.trigger}` ? "در حال ذخیره…" : "فعال کردن"}
+                          </Button>
+                        )}
+                      </div>
+                    ) : (
+                      <InfoBox>
+                        برای این رویداد هنوز پیام آمادهٔ استفاده‌ای ندارید. یکی از پیام‌های تراکنشی را از فهرست بالا اضافه
+                        کنید؛ پس از تأیید، همین‌جا قابل انتخاب می‌شود.
+                      </InfoBox>
+                    )
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
 
         {canManage ? (
           <form className="mt-4 grid gap-3 border-t border-border/80 pt-4" onSubmit={saveLookup}>

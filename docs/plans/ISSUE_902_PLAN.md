@@ -270,6 +270,68 @@ input per declared variable, and a notice that distinguishes sent / refused / un
 outcome, the provider message id and the retail charged. A refusal answers 400 with its code: it is
 the operator's answer, not a server fault.
 
+## 5e. Triggers: an event becomes one message (§5)
+
+§5d made a message sendable; nothing yet gave it a reason. The only caller was the console's
+«ارسال آزمایشی» — an operator proving a template, not a business telling a customer their order is
+ready. `lookup-triggers.ts` is the product half, and it is deliberately small: a closed vocabulary,
+the facts each event really has, and a claim that makes one fact one message.
+
+**Two events, and deliberately not a third.** The vocabulary is `order_ready` and
+`payment_received`, listed in `lookup-trigger-facts.ts` and again in migration `0266`'s `CHECK`.
+`login_code` is absent from both, and that absence is the point: every trigger in this module is a
+send on the **business's** child account charged to the **business's** wallet, while a login OTP must
+keep working when Growth is off, the child is suspended or the marketing wallet is empty (issue DoD
+#9). Adding it would be exactly the outage the issue rules out, so the refusal is in the schema as
+well as in the code — and `lookup-trigger-boundaries.test.ts` reads the auth path's imports to prove
+the two families cannot borrow each other's credentials in either direction.
+
+**The business's decision, not a default.** `kavenegar_lookup_triggers` holds one row per (business,
+trigger) pointing at one of that business's approved messages; the migration seeds none. A trigger
+with no row is `trigger_disabled`, and the send log says so — an automation nobody turned on is not
+a silent success.
+
+**Facts, not strings.** A trigger is handed typed facts (`customerName`, `amountRial`) and the token
+values are built by `triggerValues` against the variables the *template* declares. Formatting stays
+in `template-variables.ts` (Persian digits, grouping, a Jalali date), so there is exactly one
+formatter in front of the provider. A template declaring a fact its event does not have is refused
+at configuration time *and* again at send time (`trigger_variable_unsupported`), because the row
+could have been edited in between: positional mapping is what makes the sentence true.
+
+**One fact, one attempt.** `kavenegar_lookup_trigger_sends` is claimed (`pending`) before the
+provider is called, with `UNIQUE (business_id, trigger_key, event_key)` on the identity of the
+*fact* (`order:<uuid>`) rather than of the attempt. A replayed offline bump, a second terminal
+bumping another line of the same ticket, and two bumps racing all resolve to one send — the tests
+assert that for both the sequential and the concurrent case. There is no retry queue on purpose:
+telling a customer their order is ready twenty minutes later is worse than not telling them, and a
+retry is a second charge for one event.
+
+**Consent before money.** A transactional message is not an unconsented one. The dispatcher reads
+the customer's own `parties.sms_consent` and a reachable mobile first; a "no" is recorded as
+`skipped` with `no_consent` (or `missing_phone`, `no_customer`) so support can answer «چرا پیامک
+نیامد؟» with a fact. A skipped or blocked fact is consumed — the event has happened either way.
+
+**Never on the critical path.** Both kitchen sites — the online bump
+(`/api/kitchen/items/[itemId]`) and the offline replay (`sync-events.ts`) — fire
+`notifyOrderReady` without awaiting it, for the same reason the outbox drain exists: a kitchen bump
+must not wait on a provider round trip, and taking money has already committed. Nothing in the
+module throws.
+
+**Both product events, wired where they commit.** `order_ready` fires from the online kitchen bump
+and from the offline replay; `payment_received` fires from the counter's checkout route and from
+the offline replay of a settlement, after `COMMIT` in both cases and never awaited. The other
+payment writers — the Woo/CMS importers and the closed-order amendment bridge — write inside their
+own transactions and have no post-commit point yet; they are named in the follow-ups rather than
+given a hook that would run before the money committed. The receipt carries the amount the cashier
+actually took, passed by the caller rather than re-read from `orders.total`, which a later tender or
+amendment will have moved.
+
+Surfaces: the Growth card's «پیام‌های خودکار» section now lists both triggers with the approved
+messages that can serve them, a status that says «فعال»/«خاموش»/«نیازمند رسیدگی», and one
+«فعال کردن»/«خاموش کردن» action (`POST {action:"lookup_trigger"}`). `toTenantLookupTemplates` now
+carries `triggers` — the events a message's own variables can fill — so the screen cannot offer an
+automation that would be refused at send time.
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -405,6 +467,8 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass
 | `npm run test:db` — `kavenegar-master-templates` | 16/16 pass (targeting by trade and plan, idempotent instantiation of a copy, versioned rollout that leaves the live copy alone, lineage through a revision, platform-only RLS) |
 | `npm run test:db` — `kavenegar-lookup-send` | 8/8 pass (approved-only, undeclared mapping, bad receptor, no child, invalid value → refused before a charge; a successful send charges retail once, records the wholesale cost tenant-invisibly and calls the child's key; a definitive refusal refunds in full; an ambiguous failure keeps the reservation) |
+| `npm run test:db` — `kavenegar-lookup-triggers` | 17/17 pass (a message that is not approved, has no mapping or wants a fact the event does not have is refused when the automation is saved; `login_code` is refused as a trigger; an unconfigured trigger sends nothing; one event sends once on the child's key, charges retail once and logs it; a replay is `duplicate`; two racing bumps produce one provider call; an empty wallet blocks before the provider is called; `notifyOrderReady` reads the order/customer/store, honours «پیامک نفرست», skips an anonymous order and an unusable mobile; `notifyPaymentReceived` sends the receipt with the amount in Persian digits and one receipt per replayed settlement; neither notifier throws) |
+| `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
@@ -426,12 +490,13 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 
 ## 9. Follow-ups (each needs its own issue)
 
-0. **Trigger wiring** (#902 §5, P0): the send path exists (`sendManagedLookup`, §5d) and is driven
-   from the console's test send; what is left is the product half — the concrete triggers (login
-   code, order ready, payment received) that call it, including a login OTP that must keep working
-   when Growth is off, the child is suspended or the marketing wallet is empty. That last case needs
-   the reserved capacity in follow-up 1: today a business whose wallet is empty gets
-   `insufficient_credit` even for a login code.
+0. **The rest of the triggers** (#902 §5, P1): both events are wired from the paths that commit a
+   customer-facing action (§5e). What remains: the payment writers that are not the counter or the
+   offline queue — the WooCommerce/CMS importers and the closed-order amendment bridge — which write
+   inside their own transactions and need a post-commit point before a receipt can be honest; a
+   tenant preview of a trigger's exact text before enabling it; and a per-trigger delivery view.
+   The login code is deliberately *not* one of these triggers: it stays on the platform-auth
+   transport (§5e), which is what keeps it working with an empty wallet.
 1. **Campaign-budget and OTP reserved capacity** (#902 §3, P0): the three strategies and the
    guards are in place; "approved campaign budget" as a distinct funding trigger, and a
    reserved slice of master credit that marketing can never consume (so a login OTP is funded

@@ -28,6 +28,11 @@ import {
   MasterTemplateError,
   tenantTemplateLibrary,
 } from "@/lib/kavenegar/master-template-service";
+import {
+  LookupTriggerError,
+  listTriggerSettings,
+  saveTriggerSetting,
+} from "@/lib/kavenegar/lookup-triggers";
 
 const channel = (value: unknown): "sms" | "email" | null =>
   value === "sms" || value === "email" ? value : null;
@@ -54,6 +59,10 @@ export const GET = withTenantScope(async () => {
     promotions,
     lookupTemplates,
     templateLibrary,
+    // Issue #902 §5 — the business's own "when X happens, send this" decisions.
+    // Off until the business turns one on; the login code is deliberately not
+    // among them (auth runs on the platform transport, never a tenant wallet).
+    triggers,
   ] = await Promise.all([
       getTenantMessagingConfig(session.businessId),
       getMessageBusinessBilling(session.businessId),
@@ -70,6 +79,7 @@ export const GET = withTenantScope(async () => {
       // business's trade and plan server-side. First-party titles and a rendered
       // sample only: no provider template name, id or approval vocabulary.
       tenantTemplateLibrary(session.businessId),
+      listTriggerSettings(session.businessId),
     ]);
   return NextResponse.json({
     config,
@@ -81,6 +91,7 @@ export const GET = withTenantScope(async () => {
     promotions,
     lookupTemplates,
     templateLibrary,
+    triggers,
   });
 });
 
@@ -190,6 +201,31 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       if (!owned) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
       const template = await disableLookupTemplate(owned.id);
       return NextResponse.json({ template: toTenantLookupTemplates([template])[0] });
+    }
+
+    if (body.action === "lookup_trigger") {
+      // Turning one automation on, attached to one of this business's approved
+      // messages. Every check the dispatcher makes (ownership, approval, and a
+      // mapping the event can actually fill) happens here too, so the operator
+      // reads the refusal in the form rather than in a send log.
+      if (typeof body.trigger !== "string" || typeof body.templateId !== "string") {
+        return NextResponse.json({ error: "invalid_trigger" }, { status: 400 });
+      }
+      try {
+        const trigger = await saveTriggerSetting({
+          businessId: session.businessId,
+          trigger: body.trigger,
+          templateId: body.templateId,
+          enabled: body.enabled === undefined ? true : body.enabled === true,
+        });
+        return NextResponse.json({ trigger });
+      } catch (error) {
+        if (error instanceof LookupTriggerError) {
+          const status = error.code === "template_not_found" ? 404 : 400;
+          return NextResponse.json({ error: error.code }, { status });
+        }
+        throw error;
+      }
     }
 
     if (body.action === "campaign") {
