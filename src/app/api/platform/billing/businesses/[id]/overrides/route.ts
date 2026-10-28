@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requirePlatformCapability, platformAudit, withPlatformScope } from "@/lib/platform-auth";
 import { parseSafeIntInput } from "@/lib/platform-money";
 import { query } from "@/lib/db";
+import { declarationFor } from "@/lib/billing/catalog/declarations";
 
 /**
  * Per-business commercial overrides (§25, migration 0176): a super-admin
@@ -108,6 +109,17 @@ export const POST = withPlatformScope(
         valueInt = parsed;
       }
     } else {
+      // A capability override only does anything when its target is a key the
+      // gate or the resolver reads. A typo here used to be accepted, audited as
+      // a real exception, and then change nothing — the worst way for a
+      // «temporary access» grant to fail.
+      const { rows: known } = await query<{ key: string }>(
+        `SELECT key FROM feature_flags WHERE key = $1`,
+        [target],
+      );
+      if (!known[0] && !declarationFor(target)) {
+        return NextResponse.json({ error: "unknown_capability", target }, { status: 400 });
+      }
       valueBool = body.enabled === true;
     }
 

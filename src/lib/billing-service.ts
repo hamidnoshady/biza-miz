@@ -8,7 +8,7 @@
  * continues (charged or free) or catches `FeatureNotEntitledError` /
  * `WalletInsufficientFundsError` and shows the buy-credits prompt.
  */
-import { query, withoutTenantScope } from "./db";
+import { getPool, query, withoutTenantScope } from "./db";
 import { chargeFeatureUse, WalletInsufficientFundsError } from "./wallet-service";
 import {
   grantEntitlement,
@@ -109,12 +109,15 @@ export async function activatePurchasedPlan(input: {
   businessId: string;
   planKey: string;
   source?: "purchase" | "admin";
+  /** The payment being fulfilled — makes the activation apply once per payment. */
+  paymentId?: string | null;
 }): Promise<void> {
   await withoutTenantScope("plan_purchase", () =>
     changeBusinessPlan({
       businessId: input.businessId,
       planKey: input.planKey,
       source: input.source ?? "purchase",
+      paymentId: input.paymentId ?? null,
     }),
   );
 }
@@ -137,61 +140,103 @@ export async function fulfilPurchasedPayment(payment: {
   planKey: string | null;
   featureKey: string | null;
 }): Promise<void> {
-  if (payment.id) {
-    const { rows } = await query<{ fulfilment_status: string }>(
-      `SELECT fulfilment_status FROM billing_payments WHERE id = $1`,
-      [payment.id],
-    );
-    if (rows[0]?.fulfilment_status === "succeeded") {
-      return;
-    }
+  if (!payment.id) {
+    await applyPurchasedPayment(payment);
+    return;
   }
 
+  // The status check below is a read followed by writes. The gateway callback,
+  // the return page's verify call and a manual reconcile can all reach here for
+  // one payment at the same moment, and each would pass the check and activate
+  // the plan: because a same-plan purchase extends the period, one payment then
+  // bought two months. A session advisory lock on a dedicated connection makes
+  // the whole fulfilment a critical section per payment (it is released if the
+  // process dies, because the connection closes), and the status is re-read
+  // once the lock is held.
+  const lockClient = await getPool().connect();
   try {
-    if (payment.purpose === "addon_purchase" && payment.featureKey) {
-      await fulfilPurchasedEntitlement({
-        businessId: payment.businessId,
-        featureKey: payment.featureKey,
-        source: "addon",
-      });
-    } else if (payment.purpose === "plan_purchase" && payment.planKey) {
-      await activatePurchasedPlan({ businessId: payment.businessId, planKey: payment.planKey });
-      const features = await listPlanFeatures(payment.planKey);
-      for (const f of features) {
-        if (f.pricingModel === "included" || f.pricingModel === "monthly") {
-          await fulfilPurchasedEntitlement({
-            businessId: payment.businessId,
-            featureKey: f.featureKey,
-            source: "plan",
-            freeUntil: f.freeUntil,
-            freeLimit: f.freeLimit,
-          });
-        }
-      }
-    }
-
-    if (payment.id) {
-      await query(
-        `UPDATE billing_payments
-            SET fulfilment_status = 'succeeded',
-                fulfilled_at = COALESCE(fulfilled_at, now()),
-                fulfilment_error = NULL
-          WHERE id = $1`,
+    await lockClient.query(`SELECT pg_advisory_lock(hashtextextended($1, 0))`, [
+      `billing-fulfil:${payment.id}`,
+    ]);
+    try {
+      const { rows } = await query<{ fulfilment_status: string }>(
+        `SELECT fulfilment_status FROM billing_payments WHERE id = $1`,
         [payment.id],
       );
+      if (rows[0]?.fulfilment_status === "succeeded") return;
+
+      try {
+        await applyPurchasedPayment(payment);
+        await query(
+          `UPDATE billing_payments
+              SET fulfilment_status = 'succeeded',
+                  fulfilled_at = COALESCE(fulfilled_at, now()),
+                  fulfilment_error = NULL
+            WHERE id = $1`,
+          [payment.id],
+        );
+      } catch (err) {
+        const errMessage = err instanceof Error ? err.message : String(err);
+        await query(
+          `UPDATE billing_payments
+              SET fulfilment_status = 'failed',
+                  fulfilment_error = $2
+            WHERE id = $1`,
+          [payment.id, errMessage],
+        ).catch(() => {});
+        throw err;
+      }
+
+      // The customer has paid and the purchase is applied; a hiccup issuing the
+      // invoice must not turn that into a failed fulfilment. It is resumable
+      // and `backfillPurchaseInvoices` (run from the renewal tick) retries it.
+      try {
+        const { issuePurchaseInvoice } = await import("./purchase-invoice-service");
+        await issuePurchaseInvoice(payment.id);
+      } catch (err) {
+        console.error("purchase invoice failed for payment:", payment.id, err);
+      }
+    } finally {
+      await lockClient
+        .query(`SELECT pg_advisory_unlock(hashtextextended($1, 0))`, [`billing-fulfil:${payment.id}`])
+        .catch(() => {});
     }
-  } catch (err) {
-    if (payment.id) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      await query(
-        `UPDATE billing_payments
-            SET fulfilment_status = 'failed',
-                fulfilment_error = $2
-          WHERE id = $1`,
-        [payment.id, errMessage],
-      ).catch(() => {});
+  } finally {
+    lockClient.release();
+  }
+}
+
+async function applyPurchasedPayment(payment: {
+  id?: string;
+  businessId: string;
+  purpose: string;
+  planKey: string | null;
+  featureKey: string | null;
+}): Promise<void> {
+  if (payment.purpose === "addon_purchase" && payment.featureKey) {
+    await fulfilPurchasedEntitlement({
+      businessId: payment.businessId,
+      featureKey: payment.featureKey,
+      source: "addon",
+    });
+  } else if (payment.purpose === "plan_purchase" && payment.planKey) {
+    await activatePurchasedPlan({
+      businessId: payment.businessId,
+      planKey: payment.planKey,
+      paymentId: payment.id ?? null,
+    });
+    const features = await listPlanFeatures(payment.planKey);
+    for (const f of features) {
+      if (f.pricingModel === "included" || f.pricingModel === "monthly") {
+        await fulfilPurchasedEntitlement({
+          businessId: payment.businessId,
+          featureKey: f.featureKey,
+          source: "plan",
+          freeUntil: f.freeUntil,
+          freeLimit: f.freeLimit,
+        });
+      }
     }
-    throw err;
   }
 }
 
