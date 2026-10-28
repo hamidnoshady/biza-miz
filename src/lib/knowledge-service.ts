@@ -473,6 +473,38 @@ export async function kbGuideForSection(
   return rows[0] ?? null;
 }
 
+/**
+ * Other published guides in the same *exact* Knowledge category as the current guide.
+ * This keeps a Products help modal within Products (not its parent Inventory
+ * category), and works equally for POS, Inventory, and future sections.
+ * A missing or inactive category returns nothing; draft articles never leak.
+ */
+export async function kbRelatedGuidesForArticle(
+  slug: string,
+): Promise<{ slug: string; title: string; summary: string; sectionKeys: string[] }[]> {
+  const { rows } = await query<{ slug: string; title: string; summary: string; section_keys: string[] }>(
+    `${VISIBLE_CATEGORIES_CTE}
+     SELECT a.slug, a.title, a.summary, a.section_keys
+       FROM knowledge_articles a
+       JOIN knowledge_articles current ON current.slug = $1
+      WHERE current.status = 'published'
+        AND current.category_id IS NOT NULL
+        AND current.category_id IN (SELECT id FROM visible_categories)
+        AND a.category_id = current.category_id
+        AND a.id <> current.id
+        AND a.status = 'published'
+        AND ${ARTICLE_IN_VISIBLE_CATEGORY}
+      ORDER BY a.sort_order, a.title, a.id
+      LIMIT 24`,
+    [slug],
+  );
+  return rows.map((row) => ({
+    slug: row.slug,
+    title: row.title,
+    summary: row.summary,
+    sectionKeys: row.section_keys ?? [],
+  }));
+}
 // ---------------------------------------------------------------------------
 // Platform writes (categories — the console's «دسته‌ساز»)
 // ---------------------------------------------------------------------------
