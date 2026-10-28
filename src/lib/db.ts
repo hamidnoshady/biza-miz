@@ -531,6 +531,17 @@ export async function withTenantTransaction<T>(
  *     every statement predicates on the business id the job already carries
  *     rather than on a request body.
  *
+ *   - **kavenegar-alerts** (issue #902) — the managed service's attention
+ *     ledger. Conditions are raised by whichever pass observes them (the
+ *     funding tick, reconciliation, a provisioning job that will not be
+ *     retried), and a fleet-level condition such as "the master account is
+ *     nearly out of credit" belongs to no tenant at all. The rows are
+ *     platform-only under FORCE RLS; a business is named at most as the
+ *     *subject* of a condition (`subject_business_id`), never as the owner, so
+ *     no tenant policy may return them and this bypass is the console's only
+ *     way in. Every statement is written by the platform and read by the
+ *     console; nothing here is ever returned by a tenant route.
+ *
  *   - **kavenegar-credentials** (issue #902) — reading or writing ONE child
  *     API key by the account id the caller already established. The credential
  *     table is platform-only under FORCE RLS so that no tenant policy can

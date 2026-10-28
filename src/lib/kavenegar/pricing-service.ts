@@ -19,11 +19,18 @@
  * provider minimum are all decisions, not SQL.
  */
 import { smsSegmentCount } from "../messaging-billing-pure";
-import { query, withoutTenantScope } from "../db";
+import { query, withoutTenantScope, withoutTenantScopeTransaction } from "../db";
 import type { KavenegarManagementClient } from "./rest";
 import type { FundingStrategy } from "./policy";
 import { getManagedChildPolicy } from "./policy";
-import { transferManagedCredit } from "./provisioning-service";
+import { applyReservedCreditTransfer, type CreditTransferRow } from "./provisioning-service";
+import {
+  alertForFundingBlock,
+  alertForTransferState,
+  raiseServiceAlert,
+  resolveOtherBusinessAlerts,
+  resolveServiceAlert,
+} from "./alert-service";
 
 /** Wholesale tariff of one child, exactly as the provider reports it. */
 export interface ProviderTariff {
@@ -443,7 +450,15 @@ export async function getBusinessPriceSnapshot(
   };
 }
 
-/** How much this child received in the last 24 hours, and what is unresolved. */
+/**
+ * How much this child received in the last 24 hours, and what is unresolved.
+ *
+ * An in-flight `pending` row counts against the day's cap even before it is
+ * applied: the provider may already have moved that credit, and a cap that only
+ * counted *applied* rows would let two workers plan past it. Because a transfer
+ * is one row that changes state, the figure does not double-count when the row
+ * becomes `applied` — it was already in the sum.
+ */
 export async function getFundingWindow(
   businessId: string,
 ): Promise<{ transferredTodayRial: number; unresolvedTransferRial: number }> {
@@ -451,7 +466,9 @@ export async function getFundingWindow(
     query<{ transferred_today: string | number | null; unresolved: string | number | null }>(
       `SELECT
          COALESCE(sum(amount_rial) FILTER (
-           WHERE state = 'applied' AND amount_rial > 0 AND applied_at >= now() - interval '24 hours'
+           WHERE amount_rial > 0
+             AND ((state = 'applied' AND applied_at >= now() - interval '24 hours')
+                  OR (state = 'pending' AND created_at >= now() - interval '24 hours'))
          ), 0) AS transferred_today,
          COALESCE(sum(abs(amount_rial)) FILTER (WHERE state IN ('pending', 'unknown')), 0) AS unresolved
        FROM kavenegar_credit_transfers
@@ -474,8 +491,9 @@ export async function getFleetFundingWindow(): Promise<{ transferredTodayAllChil
   const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
     query<{ transferred_today: string | number | null }>(
       `SELECT COALESCE(sum(amount_rial) FILTER (
-                WHERE state = 'applied' AND amount_rial > 0
-                  AND applied_at >= now() - interval '24 hours'
+                WHERE amount_rial > 0
+                  AND ((state = 'applied' AND applied_at >= now() - interval '24 hours')
+                       OR (state = 'pending' AND created_at >= now() - interval '24 hours'))
               ), 0) AS transferred_today
          FROM kavenegar_credit_transfers`,
     ),
@@ -635,6 +653,130 @@ export interface FundingExecution {
     balanceAfterRial: number | null;
   } | null;
   duplicate: boolean;
+  /**
+   * Set when this pass did not even get to decide: another worker holds the
+   * child's funding lock. Deferring is the correct answer — the worker that
+   * holds the lock is about to do the same thing.
+   */
+  skipped?: "busy" | null;
+}
+
+/**
+ * The advisory-lock keys.
+ *
+ * Two guards make concurrent funding safe (issue #902 §3: "concurrent business
+ * demand", "avoid duplicate transfers"):
+ *
+ *   * a **per-child** key, so a tick and an operator click — or two ticks on
+ *     two instances — cannot both decide for the same child;
+ *   * a **fleet** key, taken only when a global daily cap is configured, so two
+ *     different children cannot each read "the fleet has room" and then both
+ *     take it.
+ *
+ * `hashtext` maps the child's account UUID into the advisory-lock space; the
+ * fleet key is a fixed constant. Locks are transaction-scoped, so a crash
+ * releases them with the transaction — there is no lock to leak.
+ */
+const FLEET_FUNDING_LOCK_KEY = 902_003;
+
+async function tryLockChildFunding(accountId: string): Promise<boolean> {
+  const { rows } = await query<{ locked: boolean }>(
+    `SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS locked`,
+    [`kavenegar-funding:${accountId}`],
+  );
+  return rows[0]?.locked === true;
+}
+
+async function lockFleetFunding(): Promise<void> {
+  await query(`SELECT pg_advisory_xact_lock($1::bigint)`, [FLEET_FUNDING_LOCK_KEY]);
+}
+
+export interface ReservedFunding {
+  plan: FundingPlan | null;
+  /** The committed `pending` transfer awaiting a provider call. */
+  transfer: CreditTransferRow | null;
+  skipped: "busy" | null;
+}
+
+/**
+ * Decide, and reserve the decision, in one short transaction.
+ *
+ * This is the concurrency guard, and it is deliberately the *only* place a
+ * plan becomes money. Inside one transaction that holds the child's advisory
+ * lock (and the fleet lock when a global cap is configured) we:
+ *
+ *   1. re-read the snapshot and both windows — now including in-flight
+ *      reservations, so a transfer another worker has already committed counts
+ *      against the caps;
+ *   2. re-run the pure planner against those fresh numbers;
+ *   3. allocate the day's idempotency key and commit the row as `pending`.
+ *
+ * The provider call then happens *outside* the transaction: a network round
+ * trip must never be made while holding a database lock, and a decision must
+ * never be taken without one. If the provider later reports a definite failure
+ * the row becomes `failed` and the amount stops counting; if the outcome is
+ * unknown it stays `unknown`, keeps counting, and blocks the child until the
+ * reconciliation read resolves it.
+ */
+export async function reserveAutomaticTransfer(input: {
+  businessId: string;
+  masterBalanceRial: number | null;
+  now?: Date;
+}): Promise<ReservedFunding> {
+  const now = input.now ?? new Date();
+  return withoutTenantScopeTransaction("kavenegar-provisioning", async () => {
+    const snapshot = await getBusinessPriceSnapshot(input.businessId);
+    if (!snapshot) return { plan: null, transfer: null, skipped: null };
+    if (!(await tryLockChildFunding(snapshot.accountId))) {
+      return { plan: null, transfer: null, skipped: "busy" as const };
+    }
+    if (snapshot.policy.globalDailyCapRial !== null) await lockFleetFunding();
+
+    const [window, fleet] = await Promise.all([
+      getFundingWindow(input.businessId),
+      getFleetFundingWindow(),
+    ]);
+    const plan: FundingPlan = {
+      businessId: input.businessId,
+      snapshot,
+      transferredTodayRial: window.transferredTodayRial,
+      unresolvedTransferRial: window.unresolvedTransferRial,
+      decision: planFunding({
+        policy: snapshot.policy,
+        tariff: snapshot.tariff,
+        childBalanceRial: snapshot.childBalanceRial ?? 0,
+        hourOfDay: now.getUTCHours(),
+        transferredTodayRial: window.transferredTodayRial,
+        transferredTodayAllChildrenRial: fleet.transferredTodayAllChildrenRial,
+        masterBalanceRial: input.masterBalanceRial,
+        unresolvedTransferRial: window.unresolvedTransferRial,
+      }),
+    };
+    if (plan.decision.action !== "transfer") {
+      return { plan, transfer: null, skipped: null };
+    }
+    if (snapshot.provisionState !== "active") {
+      return { plan, transfer: null, skipped: null };
+    }
+
+    const key = await nextAutomaticTransferKey(snapshot.accountId, now);
+    const { rows } = await query<CreditTransferRow>(
+      `INSERT INTO kavenegar_credit_transfers
+         (business_id, account_id, amount_rial, idempotency_key, reason)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id, business_id, account_id, amount_rial, idempotency_key, state,
+                 last_error_code, balance_after_rial, created_at, applied_at`,
+      [
+        input.businessId,
+        snapshot.accountId,
+        plan.decision.amountRial,
+        key,
+        "automatic managed-service buffer",
+      ],
+    );
+    return { plan, transfer: rows[0] ?? null, skipped: null };
+  });
 }
 
 /**
@@ -651,39 +793,33 @@ export async function fundManagedChild(input: {
   masterBalanceRial: number | null;
   now?: Date;
 }): Promise<FundingExecution | null> {
-  const plan = await planBusinessFunding(input.businessId, {
+  const reserved = await reserveAutomaticTransfer({
+    businessId: input.businessId,
     masterBalanceRial: input.masterBalanceRial,
-    hourOfDay: (input.now ?? new Date()).getUTCHours(),
+    now: input.now,
   });
-  if (!plan) return null;
-  if (plan.decision.action !== "transfer") {
-    return { plan, transfer: null, duplicate: false };
+  if (reserved.skipped === "busy") {
+    // Another worker is deciding for this child right now. There is nothing to
+    // do and nothing to report: it is about to do exactly what this pass would.
+    return null;
   }
-  // Never pre-fund a child that is not usable: a suspended child's credit would
-  // sit idle, and a pending one may still fail to exist.
-  if (plan.snapshot.provisionState !== "active") {
-    return { plan, transfer: null, duplicate: false };
+  if (!reserved.plan) return null;
+  if (!reserved.transfer) {
+    return { plan: reserved.plan, transfer: null, duplicate: false };
   }
 
-  const key = await nextAutomaticTransferKey(plan.snapshot.accountId, input.now ?? new Date());
-  const result = await transferManagedCredit({
-    businessId: input.businessId,
-    amountRial: plan.decision.amountRial,
-    idempotencyKey: key,
-    reason: "automatic managed-service buffer",
-    client: input.client,
-  });
+  // The decision is committed; the provider call happens outside any
+  // transaction and outside any lock.
+  const applied = await applyReservedCreditTransfer({ transfer: reserved.transfer, client: input.client });
   return {
-    plan,
-    duplicate: result.duplicate,
+    plan: reserved.plan,
+    duplicate: false,
     transfer: {
-      id: result.transfer.id,
-      state: result.transfer.state,
-      amountRial: Number(result.transfer.amount_rial),
+      id: applied.id,
+      state: applied.state,
+      amountRial: Number(applied.amount_rial),
       balanceAfterRial:
-        result.transfer.balance_after_rial === null
-          ? null
-          : Number(result.transfer.balance_after_rial),
+        applied.balance_after_rial === null ? null : Number(applied.balance_after_rial),
     },
   };
 }
@@ -712,7 +848,24 @@ export interface FundingTickResult {
   planned: number;
   funded: number;
   failed: number;
+  /** Children another worker held the funding lock for; deliberately untouched. */
+  deferred: number;
+  /** Alerts raised or refreshed by this pass. */
+  alerts: number;
 }
+
+/**
+ * Funding outcomes that describe *cap or policy pressure* rather than a fault.
+ * When one of these clears, the alert it raised is closed by the same pass that
+ * sees it clear — otherwise the panel would keep a resolved condition forever.
+ */
+const BUSINESS_FUNDING_ALERTS = [
+  "child_cap_reached",
+  "daily_cap_reached",
+  "unresolved_transfer",
+  "funding_failed",
+  "tariff_missing",
+] as const;
 
 /**
  * One bounded funding pass over the active children that need it most.
@@ -731,7 +884,7 @@ export async function runManagedFundingTick(input: {
   // decisions.
   const policy = await getManagedChildPolicy();
   if (!policy.enabled || policy.fundingStrategy === "manual" || policy.fundingBufferMessages <= 0) {
-    return { planned: 0, funded: 0, failed: 0 };
+    return { planned: 0, funded: 0, failed: 0, deferred: 0, alerts: 0 };
   }
   const limit = Math.min(Math.max(1, input.limit ?? 25), 100);
   const businessIds = await withoutTenantScope("platform", async () => {
@@ -746,7 +899,7 @@ export async function runManagedFundingTick(input: {
     return rows.map((row) => row.business_id);
   });
 
-  const result: FundingTickResult = { planned: 0, funded: 0, failed: 0 };
+  const result: FundingTickResult = { planned: 0, funded: 0, failed: 0, deferred: 0, alerts: 0 };
   for (const businessId of businessIds) {
     try {
       const execution = await fundManagedChild({
@@ -754,16 +907,94 @@ export async function runManagedFundingTick(input: {
         client: input.client,
         masterBalanceRial: input.masterBalanceRial ?? null,
       });
-      if (!execution) continue;
+      if (!execution) {
+        result.deferred += 1;
+        continue;
+      }
       result.planned += 1;
       if (execution.transfer?.state === "applied") result.funded += 1;
       if (execution.transfer && execution.transfer.state !== "applied") result.failed += 1;
+      result.alerts += await recordFundingAlerts(businessId, execution);
     } catch (error) {
       console.error(
         `kavenegar funding failed for business ${businessId}:`,
         error instanceof Error ? error.message : error,
       );
+      // A throw is an incident, not a quiet pass: the next tick will most
+      // likely throw the same way, so an operator has to hear about it.
+      await raiseServiceAlert({
+        kind: "funding_failed",
+        businessId,
+        detail: { reason: error instanceof Error ? error.message : String(error) },
+      }).then(
+        () => undefined,
+        () => undefined,
+      );
+      result.alerts += 1;
     }
   }
+
+  // Fleet-level evidence. One applied transfer proves the master had spendable
+  // credit and that the fleet cap had room *at that moment*; a supplied master
+  // balance proves the figure is no longer unknown. Each clears exactly its own
+  // condition — a healthy pass that funded nothing proves nothing about either,
+  // because it may simply not have needed money.
+  if (result.funded > 0) {
+    await resolveServiceAlert({ kind: "master_credit_low" });
+    await resolveServiceAlert({ kind: "fleet_cap_reached" });
+  }
+  if (input.masterBalanceRial !== null && input.masterBalanceRial !== undefined) {
+    await resolveServiceAlert({ kind: "master_balance_unknown" });
+  }
   return result;
+}
+
+/**
+ * Turn one funding outcome into alerts — raising what needs a human, closing
+ * what no longer does.
+ *
+ * A pass that *did* move money, or found the child healthy, is positive
+ * evidence about every business-scoped funding condition at once, so it closes
+ * them. A pass that was blocked by a cap raises exactly that cap's alert and
+ * leaves the others alone: guessing why the earlier ones are still open is how
+ * an alert ledger starts lying.
+ */
+async function recordFundingAlerts(businessId: string, execution: FundingExecution): Promise<number> {
+  let raised = 0;
+  const transferState = execution.transfer?.state ?? null;
+  const transferAlert =
+    transferState && execution.transfer
+      ? alertForTransferState(transferState, businessId, execution.transfer.id)
+      : null;
+  if (transferAlert) {
+    await raiseServiceAlert(transferAlert);
+    raised += 1;
+  }
+
+  const blocked =
+    execution.plan.decision.action === "none"
+      ? alertForFundingBlock(execution.plan.decision.reason, businessId)
+      : null;
+  if (blocked) {
+    await raiseServiceAlert({
+      ...blocked,
+      accountId: blocked.businessId ? execution.plan.snapshot.accountId : null,
+      detail: {
+        reason: execution.plan.decision.action === "none" ? execution.plan.decision.reason : "blocked",
+        targetBalanceRial: execution.plan.decision.targetBalanceRial,
+        transferredTodayRial: execution.plan.transferredTodayRial,
+        childBalanceRial: execution.plan.snapshot.childBalanceRial,
+      },
+    });
+    raised += 1;
+  } else if (transferAlert === null) {
+    // Nothing is wrong for this child: close the cap/unresolved alerts an
+    // earlier pass may have opened.
+    await resolveOtherBusinessAlerts({
+      businessId,
+      keepKind: null,
+      kinds: [...BUSINESS_FUNDING_ALERTS],
+    });
+  }
+  return raised;
 }
