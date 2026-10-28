@@ -266,14 +266,14 @@ async function agencyWithEngagement(valueRial = 100_000_000) {
     valueRial,
     owner.actorUserId,
   );
-  // The provisioned owner is the business's owner but not automatically a member
-  // of this project: membership is what `requireProjectCapability` reads, and
-  // seeding it is what makes the gate under test a real gate.
-  await db.query(
-    `INSERT INTO workspace_members (project_id, user_id, role, added_by)
-     VALUES ($1, $2, 'manager', 'test')`,
-    [projectId, owner.actorUserId],
-  );
+  // No membership row for the owner: migration 0194's
+  // `trg_workspace_sync_project_owner` fires on the project INSERT above and
+  // adds `owner_user_id` to `workspace_members` as `'owner'`, which holds every
+  // capability `requireProjectCapability` can ask for. Adding a second row for
+  // the same pair is a duplicate-key violation, not a stronger fixture.
+  //
+  // The approver does need one: they are a different user, and the whole point
+  // of the decision tests is that somebody other than the sender decides.
   const approver = await addProjectManager(businessId, projectId, "مدیر اجرایی");
   return { businessId, locationId, owner, approver, projectId, clientId, contractId };
 }
@@ -367,11 +367,8 @@ describe("an agency's billing schedule", () => {
       fixture.owner.actorUserId,
       "کمپین پاییزه",
     );
-    await db.query(
-      `INSERT INTO workspace_members (project_id, user_id, role, added_by)
-       VALUES ($1, $2, 'manager', 'test')`,
-      [secondProject, fixture.owner.actorUserId],
-    );
+    // No membership row: 0194's trigger already made the project's owner a
+    // member of it, as it did for the first project.
     const summary = await withTenant(fixture.businessId, () =>
       commercial.createAgencySchedule(fixture.owner, secondProject, { base: "fixed_price" }),
     );
@@ -616,11 +613,7 @@ describe("a milestone's journey to an invoice", () => {
   it("refuses to bill a milestone whose engagement has no client to bill", async () => {
     const { businessId, locationId, owner } = await provisionAgency();
     const projectId = await createProject(businessId, owner.actorUserId, "پروژه بدون کارفرما");
-    await db.query(
-      `INSERT INTO workspace_members (project_id, user_id, role, added_by)
-       VALUES ($1, $2, 'manager', 'test')`,
-      [projectId, owner.actorUserId],
-    );
+    // No membership row: 0194's trigger already made the owner a member.
     // No contract at all: a percentage then has no value to be taken of, and an
     // invoice then has nobody to be raised against.
     const milestone = await withTenant(businessId, () =>
