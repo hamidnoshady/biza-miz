@@ -138,7 +138,11 @@ const MILESTONE_TRANSITIONS: Record<AgencyMilestoneStatus, readonly AgencyMilest
   draft: ["submitted", "cancelled"],
   // Decided through the workspace's own approvals queue (`billing_milestone`),
   // under `workspace.approve` — never by the person who wrote the schedule.
-  submitted: ["approved", "rejected", "cancelled"],
+  // `draft` is reachable from here too, and only by withdrawal: the person who
+  // sent it takes it back before anybody decides. Without that move a request
+  // nobody will decide would leave the row frozen in `submitted`, since the
+  // freeze that protects an approver also protects the row from its author.
+  submitted: ["approved", "rejected", "cancelled", "draft"],
   // Only `billMilestone` may write `invoiced`, and only from here.
   approved: ["invoiced", "cancelled"],
   // A rejected milestone is re-priced and re-submitted; the refusal stays on the
@@ -682,18 +686,38 @@ export interface AgencyCommercialAction {
   from?: readonly (AgencyMilestoneStatus | AgencyChangeRequestStatus)[];
 }
 
+/**
+ * Which acts are determinations is §24's rule, and it is narrower than "every
+ * act that changes a status".
+ *
+ * Sending something for approval is the *requester's* act — the person who
+ * wrote the schedule is the one who sends it, and the approvals engine refuses
+ * a self-approval on the other side, so gating `submit` on `workspace.approve`
+ * would not make it safer, it would make it impossible for the project manager
+ * who owns the schedule to ask anybody to look at it. Withdrawing is the same
+ * person taking their own request back. Both are therefore `workspace.manage`,
+ * exactly as the AEC registers treat `price`, `submit` and `reopen`.
+ *
+ * What *is* a determination is agreeing or refusing somebody else's figure,
+ * cancelling a stage, and issuing an invoice — the last being a money act that
+ * the route gates on the invoice screen's own permissions as well.
+ */
 export const AGENCY_MILESTONE_ACTIONS: readonly AgencyCommercialAction[] = [
-  { action: "submit", label: "ارسال برای تأیید", target: "submitted", determination: true },
+  { action: "submit", label: "ارسال برای تأیید", target: "submitted", determination: false },
   { action: "approve", label: "تأیید مرحله", target: "approved", determination: true },
   { action: "reject", label: "رد مرحله", target: "rejected", determination: true },
   { action: "invoice", label: "صدور صورتحساب", target: "invoiced", determination: true },
-  { action: "reopen", label: "بازگردانی به پیش‌نویس", target: "draft", determination: false },
+  { action: "reopen", label: "بازگردانی به پیش‌نویس", target: "draft", determination: false, from: ["rejected"] },
+  // Withdrawing and reopening land on the same status but mean different things
+  // and are offered from different places: one takes back a request nobody has
+  // decided, the other picks up a refusal to re-price it.
+  { action: "withdraw", label: "پس‌گرفتن درخواست", target: "draft", determination: false, from: ["submitted"] },
   { action: "cancel", label: "لغو مرحله", target: "cancelled", determination: true },
 ];
 
 export const AGENCY_CHANGE_REQUEST_ACTIONS: readonly AgencyCommercialAction[] = [
   { action: "price", label: "قیمت‌گذاری", target: "priced", determination: false, from: ["draft"] },
-  { action: "submit", label: "ارسال به کارفرما", target: "submitted", determination: true },
+  { action: "submit", label: "ارسال به کارفرما", target: "submitted", determination: false },
   { action: "approve", label: "تأیید تغییر", target: "approved", determination: true },
   { action: "reject", label: "رد تغییر", target: "rejected", determination: true },
   { action: "implement", label: "اعمال تغییر", target: "implemented", determination: false },
@@ -704,7 +728,7 @@ export const AGENCY_CHANGE_REQUEST_ACTIONS: readonly AgencyCommercialAction[] = 
     determination: false,
     from: ["rejected"],
   },
-  { action: "withdraw", label: "پس‌گرفتن", target: "withdrawn", determination: true },
+  { action: "withdraw", label: "پس‌گرفتن", target: "withdrawn", determination: false },
 ];
 
 /** The actions that need `workspace.approve` rather than `workspace.manage`. */

@@ -68,6 +68,7 @@ import {
   splitPercentOf,
   toPersianOrdinal,
   unscheduledValueRial,
+  type AgencyCommercialAction,
   type AgencyMilestoneDraft,
   type AgencyMilestoneStatus,
 } from "./agency-commercial";
@@ -503,21 +504,18 @@ describe("which acts are decisions", () => {
   });
 
   it("gates the determinations apart from ordinary edits", () => {
-    // §24's rule, inherited: writing a register is `workspace.manage`, deciding
-    // is `workspace.approve`. Stated here once so six route handlers cannot
-    // each invent their own split.
+    // §24's rule, inherited: agreeing or refusing somebody else's figure, and
+    // issuing an invoice, are decisions. Stated here once so six route handlers
+    // cannot each invent their own split.
     expect(agencyCommercialDeterminationActions(AGENCY_MILESTONE_ACTIONS)).toEqual([
-      "submit",
       "approve",
       "reject",
       "invoice",
       "cancel",
     ]);
     expect(agencyCommercialDeterminationActions(AGENCY_CHANGE_REQUEST_ACTIONS)).toEqual([
-      "submit",
       "approve",
       "reject",
-      "withdraw",
     ]);
     // Issuing an invoice is a decision, and pricing a change is not.
     expect(AGENCY_MILESTONE_ACTIONS.find((entry) => entry.action === "invoice")?.determination).toBe(
@@ -527,22 +525,53 @@ describe("which acts are decisions", () => {
       AGENCY_CHANGE_REQUEST_ACTIONS.find((entry) => entry.action === "price")?.determination,
     ).toBe(false);
   });
+
+  it("leaves sending and withdrawing to the person who wrote the row", () => {
+    // A determination is somebody deciding on a figure they did not write. The
+    // act of asking for that decision belongs to its author: gating `submit` on
+    // `workspace.approve` would not make a schedule safer, it would make it
+    // impossible for the project manager who owns the schedule to send it — and
+    // the approvals engine refuses a self-approval on the other side anyway, so
+    // the safety the gate would have bought is already bought.
+    for (const entry of [...AGENCY_MILESTONE_ACTIONS, ...AGENCY_CHANGE_REQUEST_ACTIONS]) {
+      const isRequesters = entry.action === "submit" || entry.action === "withdraw";
+      expect(entry.determination, entry.action).toBe(!isRequesters && entry.determination);
+    }
+    expect(
+      AGENCY_MILESTONE_ACTIONS.filter((entry) => entry.action === "submit")[0].determination,
+    ).toBe(false);
+    expect(
+      AGENCY_CHANGE_REQUEST_ACTIONS.filter((entry) => entry.action === "withdraw")[0].determination,
+    ).toBe(false);
+    // Reopening a refusal and implementing an agreed change are edits too: the
+    // decision was already taken, and these are what follow from it.
+    expect(AGENCY_MILESTONE_ACTIONS.find((e) => e.action === "reopen")?.determination).toBe(false);
+    expect(AGENCY_CHANGE_REQUEST_ACTIONS.find((e) => e.action === "implement")?.determination).toBe(
+      false,
+    );
+  });
 });
 
 describe("the acts a row can take, derived from its chain", () => {
   it("offers exactly what the transition table allows, and nothing at the end", () => {
+    // Both halves of the rule, spelled out: the chain allows the move, and —
+    // for the acts that share a target — the act is offered from this status.
+    const offered = (entry: AgencyCommercialAction, status: AgencyMilestoneStatus) =>
+      canTransitionMilestone(status, entry.target as AgencyMilestoneStatus) &&
+      (entry.from === undefined || (entry.from as readonly string[]).includes(status));
+
     for (const status of AGENCY_MILESTONE_STATUSES) {
       const actions = milestoneActionsFrom(status);
       expect(actions.map((entry) => entry.action), status).toEqual(
-        AGENCY_MILESTONE_ACTIONS.filter((entry) =>
-          canTransitionMilestone(status, entry.target as AgencyMilestoneStatus),
-        ).map((entry) => entry.action),
+        AGENCY_MILESTONE_ACTIONS.filter((entry) => offered(entry, status)).map(
+          (entry) => entry.action,
+        ),
       );
       // A button a screen could render but the service would refuse is the bug
       // this derivation exists to make impossible, in both directions.
       for (const entry of AGENCY_MILESTONE_ACTIONS) {
         expect(actions.some((a) => a.action === entry.action), `${status}/${entry.action}`).toBe(
-          canTransitionMilestone(status, entry.target as AgencyMilestoneStatus),
+          offered(entry, status),
         );
       }
     }
@@ -567,6 +596,34 @@ describe("the acts a row can take, derived from its chain", () => {
     expect(changeRequestActionsFrom("variation" as never)).toEqual([]);
   });
 
+  it("takes a sent request back, and reopens a refused one, by different acts", () => {
+    // Both land on `draft`, and the difference is not cosmetic: withdrawing is
+    // the author taking back a request nobody has decided, reopening is picking
+    // up a refusal to re-price it. Without the withdrawal the row would be
+    // frozen in `submitted` forever, because the freeze that protects an
+    // approver from a changing row also protects it from its own author.
+    expect(canTransitionMilestone("submitted", "draft")).toBe(true);
+    expect(canTransitionMilestone("draft", "draft")).toBe(false);
+    expect(milestoneActionsFrom("submitted").map((entry) => entry.action)).toEqual([
+      "approve",
+      "reject",
+      "withdraw",
+      "cancel",
+    ]);
+    expect(milestoneActionsFrom("draft").map((entry) => entry.action)).toEqual([
+      "submit",
+      "cancel",
+    ]);
+    // Neither act is offered where it does not belong.
+    expect(milestoneActionsFrom("approved").some((entry) => entry.action === "withdraw")).toBe(
+      false,
+    );
+    expect(milestoneActionsFrom("rejected").some((entry) => entry.action === "withdraw")).toBe(
+      false,
+    );
+    expect(milestoneActionsFrom("submitted").some((entry) => entry.action === "reopen")).toBe(false);
+  });
+
   it("keeps the two chains apart where they share a status name", () => {
     // `draft`, `submitted`, `approved` and `rejected` mean the same thing in
     // both registers, so the chain has to be named by the caller rather than
@@ -582,9 +639,13 @@ describe("the acts a row can take, derived from its chain", () => {
       "withdraw",
     ]);
     // Same for the statuses the two chains spell identically further along.
+    // A milestone can be taken back by its author; a change request can be
+    // withdrawn outright — the same word, two different registers, and neither
+    // may reach for the other's act.
     expect(milestoneActionsFrom("submitted").map((entry) => entry.action)).toEqual([
       "approve",
       "reject",
+      "withdraw",
       "cancel",
     ]);
     expect(changeRequestActionsFrom("submitted").map((entry) => entry.action)).toEqual([
