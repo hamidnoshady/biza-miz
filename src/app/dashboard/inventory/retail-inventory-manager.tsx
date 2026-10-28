@@ -147,6 +147,7 @@ export function RetailInventoryManager({
         </p>
       ) : null}
 
+      <div data-tour-id="inventory.workspace">
       <SectionNav
         idPrefix="stock"
         label="بخش‌های خرید و انبار"
@@ -202,6 +203,7 @@ export function RetailInventoryManager({
         {tab === "returns" ? <ReturnsSection /> : null}
         {tab === "reports" ? <ReportsSection /> : null}
       </SectionNav>
+      </div>
     </div>
   );
 }

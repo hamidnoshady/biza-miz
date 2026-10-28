@@ -55,6 +55,20 @@ function readBox(el: Element): Box {
   return { top: r.top, left: r.left, width: r.width, height: r.height };
 }
 
+/**
+ * The element a step points at. An anchor id may be drawn twice when a screen
+ * has a phone layout and a desktop one (a sticky bottom bar and a side panel,
+ * the cart bar and the cart column); only one of them has a box at a time, so
+ * the first one that does is the target rather than whichever comes first in
+ * the document.
+ */
+function findAnchor(selector: string): HTMLElement | null {
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>(selector))) {
+    if (isPointable(readBox(el))) return el;
+  }
+  return null;
+}
+
 function prefersReducedMotion(): boolean {
   return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
@@ -111,8 +125,8 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
     let settled = false;
     const tryLocate = () => {
       if (settled) return;
-      const el = document.querySelector<HTMLElement>(selector);
-      if (!el || !isPointable(readBox(el))) return;
+      const el = findAnchor(selector);
+      if (!el) return;
       settled = true;
       observer.disconnect();
       window.clearTimeout(timeout);
@@ -152,7 +166,7 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
       let el = targetRef.current;
       if (!el) return;
       if (!el.isConnected) {
-        el = document.querySelector<HTMLElement>(selector);
+        el = findAnchor(selector);
         if (!el) {
           // Unmounted by a re-render: go back to waiting for it.
           targetRef.current = null;

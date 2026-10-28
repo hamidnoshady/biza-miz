@@ -843,6 +843,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
         ) : null}
 
         <fieldset disabled={busy} className="min-w-0 space-y-4 disabled:opacity-75">
+          <div data-tour-id="product-new.identity">
           <SectionCard
             title="مشخصات اصلی"
             description="نام محصول الزامی است. کد کالا و بارکد را دستی وارد کنید یا بسازید."
@@ -966,7 +967,9 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
               </div>
             </div>
           </SectionCard>
+          </div>
 
+          <div data-tour-id="product-new.tabs">
           <TabBar
             idPrefix="product-add"
             label="بخش‌های فرم محصول"
@@ -977,6 +980,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
               setError("");
             }}
           />
+          </div>
           <TabPanel idPrefix="product-add" active={tab}>
             {tab === "pricing" ? (
               <>
@@ -1426,13 +1430,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
           </TabPanel>
         </fieldset>
 
-        <div className={`${cardClass} sticky bottom-3 z-20 grid gap-2 bg-card/95 p-3 backdrop-blur-sm lg:hidden`}>
+        <div data-tour-id="product-new.save" className={`${cardClass} sticky bottom-3 z-20 grid gap-2 bg-card/95 p-3 backdrop-blur-sm lg:hidden`}>
           {actionButtons}
         </div>
       </form>
 
       <aside className="min-w-0 lg:sticky lg:top-4">
-        <section className={`${cardClass} min-w-0 overflow-hidden`} aria-label="پیش‌نویس‌های محصول">
+        <section data-tour-id="product-new.drafts" className={`${cardClass} min-w-0 overflow-hidden`} aria-label="پیش‌نویس‌های محصول">
           <div className="border-b border-border/80 px-4 py-4">
             <div className="flex items-center gap-2">
               <BarcodeIcon aria-hidden="true" className="size-4 text-amber-700 dark:text-amber-300" />
@@ -1492,7 +1496,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
             )}
           </div>
 
-          <div className="hidden space-y-2 border-t border-border/80 bg-muted/40 p-3 lg:block">{actionButtons}</div>
+          <div data-tour-id="product-new.save" className="hidden space-y-2 border-t border-border/80 bg-muted/40 p-3 lg:block">{actionButtons}</div>
         </section>
       </aside>
     </div>

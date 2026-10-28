@@ -587,6 +587,7 @@ export function RetailInvoiceScreen({
         </div>
       ) : null}
 
+      <div data-tour-id="pos.invoice-mode">
       <TabBar
         idPrefix="retail-invoice"
         label="بخش‌های فروش"
@@ -598,12 +599,14 @@ export function RetailInvoiceScreen({
         onChange={setView}
         className="mb-4"
       />
+      </div>
       <TabPanel idPrefix="retail-invoice" active={view}>
       {view === "issue" ? (
       <DefaultVatContext.Provider value={defaultVatPercent}>
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem] xl:grid-cols-[minmax(0,1fr)_26rem]">
-        <div className="min-w-0 space-y-4">
+        <div data-tour-id="pos.invoice-items" className="min-w-0 space-y-4">
           {hasCapability(industry, "barcode") ? (
+            <div data-tour-id="pos.invoice-barcode">
             <BarcodeScanField
               industry={industry}
               variants={variants}
@@ -612,6 +615,7 @@ export function RetailInvoiceScreen({
               units={units}
               onAdd={addLine}
             />
+            </div>
           ) : null}
           {industry === "jewelry" ? (
             <GoldLineForm industry={industry} items={weightItems} prices={prices} onAdd={addLine} loading={loading} />
@@ -634,6 +638,7 @@ export function RetailInvoiceScreen({
 
         <aside className="min-w-0">
           <div className={`${cardClass} p-4 lg:sticky lg:top-4 sm:p-5`}>
+            <div data-tour-id="pos.invoice-lines">
             <h2 className="font-semibold text-foreground">فاکتور جاری</h2>
 
             {lines.length === 0 ? (
@@ -682,8 +687,10 @@ export function RetailInvoiceScreen({
               <Row label="مالیات" value={money.format(totals.vat)} />
               <Row label="جمع کل" value={money.format(totals.total)} strong />
             </dl>
+            </div>
 
             <div className="mt-4">
+              <div data-tour-id="pos.invoice-customer">
               <Field
                 label="مشتری"
                 hint={
@@ -704,7 +711,9 @@ export function RetailInvoiceScreen({
                   canCreate={false}
                 />
               </Field>
+              </div>
 
+              <div data-tour-id="pos.invoice-payment">
               <div className="mb-1 flex items-center justify-between gap-2">
                 <span className="text-sm font-medium text-foreground">روش پرداخت</span>
                 {settlementWays.length > 0 ? (
@@ -872,11 +881,14 @@ export function RetailInvoiceScreen({
                 </div>
               )}
 
+              </div>
+
               <Field label="توضیح">
                 <input className={inputClass} value={note} onChange={(e) => setNote(e.target.value)} />
               </Field>
             </div>
 
+            <div data-tour-id="pos.invoice-submit">
             <HoldToConfirmButton
               durationMs={2000}
               label="ثبت فاکتور"
@@ -891,6 +903,7 @@ export function RetailInvoiceScreen({
               onComplete={() => void submit()}
               className="min-h-12 w-full rounded-xl bg-amber-500 dark:bg-amber-400 px-4 text-sm font-bold text-amber-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 disabled:opacity-55"
             />
+            </div>
           </div>
         </aside>
       </div>
