@@ -254,10 +254,13 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
             NODE_OPTIONS=--max-old-space-size=4096
-          # The push and pull_request triggers run concurrently for the same PR.
-          # Separate scopes avoid racing BuildKit cache manifests, and cache export
-          # is only an optimization: a GHA cache outage must not fail image validation.
-          cache-from: type=gha,scope=verify-shippables-${{ github.event_name }}-${{ github.ref_name }}
+          # The production-publish cache is a read-only warm source for PR/main
+          # validation. Verification writes only to its event/ref-specific scope,
+          # so it cannot overwrite the release cache or race other ref builds.
+          # Cache failure stays non-fatal: the image is always built and checked.
+          cache-from: |
+            type=gha,scope=production-publish
+            type=gha,scope=verify-shippables-${{ github.event_name }}-${{ github.ref_name }}
           cache-to: type=gha,scope=verify-shippables-${{ github.event_name }}-${{ github.ref_name }},mode=min,ignore-error=true
 
       - name: Assert supported production Node.js and required runtime tools
