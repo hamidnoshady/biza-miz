@@ -17,6 +17,11 @@ import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricin
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
 import { getDeliveryReport } from "@/lib/messaging-delivery-report";
 import {
+  acknowledgeServiceAlert,
+  getServiceAlertSummary,
+  listServiceAlerts,
+} from "@/lib/kavenegar/alert-service";
+import {
   archiveLookupTemplate,
   listAllLookupTemplates,
   submitLookupTemplate,
@@ -48,7 +53,7 @@ export const GET = withPlatformScope(async () => {
 
   const until = new Date();
   const since = new Date(until.getTime() - 30 * 24 * 60 * 60_000);
-  const [snapshot, margin, reconciliation, templates, delivery] = await Promise.all([
+  const [snapshot, margin, reconciliation, templates, delivery, alerts, alertSummary] = await Promise.all([
     getManagedServiceConsoleSnapshot(),
     getManagedMarginReport({ since, until }),
     listReconciliationRuns({ limit: 25 }),
@@ -56,9 +61,15 @@ export const GET = withPlatformScope(async () => {
     // Issue #902 §6 — acceptance ≠ delivery. A funded, active child can still be
     // failing every send, and only this view shows it.
     getDeliveryReport({ sinceHours: 24 }),
+    // Issue #902 §3 — what needs a human right now: low master credit, cap
+    // pressure, unknown transfers, drift, a child the provider disagrees about.
+    listServiceAlerts({ limit: 50 }),
+    getServiceAlertSummary(),
   ]);
   return NextResponse.json({
     ...snapshot,
+    alerts,
+    alertSummary,
     // Issue #902 §5 — the catalog behind every business's approved messages.
     // Rejections first, then reviews in flight, so the operator's next action is
     // at the top. Provider ids are fine here; tenants never receive this list.
@@ -88,6 +99,26 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
 
   const action = typeof body.action === "string" ? body.action : "";
   const businessId = typeof body.businessId === "string" ? body.businessId : "";
+
+  if (action === "acknowledge_alert") {
+    const alertId = typeof body.alertId === "string" ? body.alertId : "";
+    if (!UUID.test(alertId)) return NextResponse.json({ error: "invalid_alert" }, { status: 400 });
+    const alert = await acknowledgeServiceAlert({
+      alertId,
+      adminId: session.padmin,
+      note: typeof body.note === "string" ? body.note.slice(0, 500) : null,
+    });
+    if (!alert) return NextResponse.json({ error: "alert_not_found" }, { status: 404 });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId: alert.businessId,
+      action: "sms.managed_service.alert_acknowledged",
+      entity: "kavenegar_service_alerts",
+      entityId: alert.id,
+      payload: { kind: alert.kind, severity: alert.severity, note: alert.acknowledgementNote },
+    });
+    return NextResponse.json({ alert });
+  }
 
   if (action === "policy") {
     if (body.senderLines !== undefined && typeof body.senderLines === "string" && !isValidSenderLines(body.senderLines)) {

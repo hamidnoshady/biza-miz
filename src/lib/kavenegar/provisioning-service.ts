@@ -35,6 +35,7 @@ import {
 } from "./client";
 import { KavenegarManagementClient, KavenegarManagementError, KavenegarTransportError } from "./rest";
 import { getManagedChildPolicy, type ManagedChildPolicy } from "./policy";
+import { raiseServiceAlert, resolveServiceAlert } from "./alert-service";
 import {
   buildChildProvisioningRequest,
   decideProvisionAction,
@@ -325,6 +326,15 @@ async function failPermanently(job: ProvisioningJobRow, code: string, detail: st
       [job.id, code, truncate(detail)],
     );
   });
+  // A job that will never be retried is a Superadmin action item, not a log
+  // line (issue #902 §3: "failed transfers", and the same reasoning applies to a
+  // child that could not be created at all). Raised after the state change so a
+  // failed alert write cannot roll back a job outcome.
+  await raiseServiceAlert({
+    kind: "provisioning_failed",
+    businessId: job.business_id,
+    detail: { code, jobKind: job.job_kind, attempts: job.attempts },
+  }).catch(() => undefined);
   return { jobId: job.id, businessId: job.business_id, kind: job.job_kind, result: "failed", code };
 }
 
@@ -375,6 +385,12 @@ export async function processProvisioningJob(
       }
     });
     await finishJob(job.id, "succeeded");
+    // The account is in step again: whatever the last attempt failed at is no
+    // longer true. Closing here (rather than in the console) is what keeps the
+    // alert ledger a statement about now.
+    await resolveServiceAlert({ kind: "provisioning_failed", businessId: job.business_id }).catch(
+      () => undefined,
+    );
     return { jobId: job.id, businessId: job.business_id, kind: job.job_kind, result: "succeeded", code: null };
   } catch (error) {
     return handleJobError(job, error);
@@ -778,35 +794,53 @@ export async function transferManagedCredit(input: {
     return { transfer: existing, duplicate: true };
   }
 
-  const credential = await readAccountApiKey(account.id);
-  if (!credential.ok) {
-    return { transfer: await markTransfer(inserted.id, "failed", "credential_unavailable", null), duplicate: false };
-  }
-
   const client = input.client ?? (await requireClient());
+  return {
+    transfer: await applyReservedCreditTransfer({ transfer: inserted, client }),
+    duplicate: false,
+  };
+}
+
+/**
+ * Attempt a transfer row that is already committed as `pending`.
+ *
+ * Splitting the request out of `transferManagedCredit` is what makes the
+ * funding pass safe under concurrency (issue #902 §3): the *decision* — caps,
+ * limits, the master floor, the idempotency key — is taken and committed inside
+ * one short transaction that holds an advisory lock, and only then does the
+ * provider call happen, outside any transaction. A provider call must never be
+ * made while holding a database lock, and a decision must never be taken
+ * without one.
+ *
+ * Every failure lands in a state that reconciles:
+ *   * a transport failure whose request may have arrived ⇒ `unknown`, never
+ *     retried automatically (the reconciliation read resolves it);
+ *   * a definite provider rejection ⇒ `failed` with its internal code;
+ *   * a missing credential ⇒ `failed`, because nothing was sent.
+ */
+export async function applyReservedCreditTransfer(input: {
+  transfer: CreditTransferRow;
+  client: KavenegarManagementClient;
+}): Promise<CreditTransferRow> {
+  const amount = Number(input.transfer.amount_rial);
+  const credential = await readAccountApiKey(input.transfer.account_id);
+  if (!credential.ok) {
+    return markTransfer(input.transfer.id, "failed", "credential_unavailable", null);
+  }
   try {
-    const child = await client.chargeChildCredit({
+    const child = await input.client.chargeChildCredit({
       childApiKey: credential.credential.apiKey,
       creditRial: amount,
       description: "Bizamiz managed service funding",
     });
-    return {
-      transfer: await markTransfer(inserted.id, "applied", null, child.remainCreditRial),
-      duplicate: false,
-    };
+    return markTransfer(input.transfer.id, "applied", null, child.remainCreditRial);
   } catch (error) {
     if (error instanceof KavenegarTransportError) {
       const code = error.ambiguous ? "outcome_unknown" : error.timeout ? "timeout" : "network";
-      return {
-        transfer: await markTransfer(inserted.id, error.ambiguous ? "unknown" : "failed", code, null),
-        duplicate: false,
-      };
+      return markTransfer(input.transfer.id, error.ambiguous ? "unknown" : "failed", code, null);
     }
     if (error instanceof KavenegarManagementError) {
-      return {
-        transfer: await markTransfer(inserted.id, "failed", error.classification.code, null),
-        duplicate: false,
-      };
+      return markTransfer(input.transfer.id, "failed", error.classification.code, null);
     }
     throw error;
   }
