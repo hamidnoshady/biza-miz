@@ -205,6 +205,10 @@ export type LookupTemplateRow = {
   submitted_body: string | null;
   /** The approved row this one was created to replace, if any. */
   supersedes_id: string | null;
+  /** Which library entry this copy came from (issue #902 §5), if any. */
+  master_template_id: string | null;
+  /** The library version at the moment the copy was made. */
+  master_version: number | null;
   archived_at: Date | null;
   submitted_at: Date | null;
   decided_at: Date | null;
@@ -215,8 +219,9 @@ export type LookupTemplateRow = {
 
 const TEMPLATE_COLUMNS = `id, business_id, name, title, body, purpose, state,
        provider_template_id, last_sync_error, revision, submitted_title,
-       submitted_body, supersedes_id, archived_at, submitted_at, decided_at,
-       last_synced_at, created_at, updated_at`;
+       submitted_body, supersedes_id, master_template_id, master_version,
+       archived_at, submitted_at, decided_at, last_synced_at, created_at,
+       updated_at`;
 
 /** Tenant-scoped read: the business's own catalog, never another's. */
 export async function listLookupTemplates(businessId: string): Promise<LookupTemplateRow[]> {
@@ -384,10 +389,15 @@ export async function reviseLookupTemplate(input: {
   const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
     query<LookupTemplateRow>(
       `UPDATE kavenegar_lookup_templates
-          SET supersedes_id = $2, updated_at = now()
+          SET supersedes_id = $2,
+              -- A revision of a library copy is still that library message, at
+              -- the version it was taken from (issue #902 §5 lineage).
+              master_template_id = COALESCE(master_template_id, $3),
+              master_version = COALESCE(master_version, $4),
+              updated_at = now()
         WHERE id = $1
         RETURNING ${TEMPLATE_COLUMNS}`,
-      [next.id, current.id],
+      [next.id, current.id, current.master_template_id, current.master_version],
     ),
   );
   return { template: rows[0] ?? next, created: true };
@@ -451,7 +461,8 @@ export async function listAllLookupTemplates(input: { limit?: number } = {}): Pr
     const { rows } = await query<LookupTemplateRow & { business_name: string | null }>(
       `SELECT t.id, t.business_id, t.name, t.title, t.body, t.purpose, t.state,
               t.provider_template_id, t.last_sync_error, t.revision,
-              t.submitted_title, t.submitted_body, t.supersedes_id, t.archived_at,
+              t.submitted_title, t.submitted_body, t.supersedes_id,
+              t.master_template_id, t.master_version, t.archived_at,
               t.submitted_at, t.decided_at, t.last_synced_at, t.created_at, t.updated_at,
               b.name AS business_name
          FROM kavenegar_lookup_templates t
