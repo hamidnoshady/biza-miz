@@ -43,6 +43,7 @@ import {
 import { planLimitsFor } from "./plan-limits";
 import { declarationFor } from "./billing/catalog/declarations";
 import { evaluateBusinessSpend } from "./billing/runtime";
+import { resolveCommercialLayer, resolveFlagLayer } from "./effective-access";
 import {
   APP_AVAILABILITY_META,
   type AppAvailabilityState,
@@ -158,6 +159,13 @@ export async function getBusinessEntitlements(
   const planKey = bizRow.rows[0]?.plan ?? "free";
   const capabilityOverrides = new Map<string, boolean>();
   const limitOverrides = new Map<LimitKey, number | null>();
+  // The legacy per-business feature-flag rows are the rollout-layer exception
+  // list. They go in first so an audited billing override naming the same
+  // capability (it carries a reason, an author and an expiry) replaces them —
+  // the precedence `resolveFlagLayer` documents and the request gate applies.
+  for (const row of flagOverrides.rows) {
+    capabilityOverrides.set(row.flag_key, row.enabled);
+  }
   for (const row of overrides.rows) {
     if (row.kind === "capability" && row.value_bool != null) {
       capabilityOverrides.set(row.target, row.value_bool);
@@ -165,11 +173,6 @@ export async function getBusinessEntitlements(
       const key = row.target as LimitKey;
       if (key in LIMIT_OVERRIDE_TARGETS) limitOverrides.set(key, row.value_int);
     }
-  }
-  // The legacy per-business feature-flag overrides remain the rollout-layer
-  // exception list; they ride along so the resolver sees one merged view.
-  for (const row of flagOverrides.rows) {
-    capabilityOverrides.set(row.flag_key, row.enabled);
   }
 
   // Resolve the plan's commercial rows in one batched call, on the same
@@ -259,39 +262,36 @@ export async function resolveBusinessCapability(
     }
   }
 
-  // 2 — global rollout / emergency kill switch (feature_flags default).
-  //     A flag that is globally off makes the capability unavailable to every
-  //     business; a business-level override (the rollout exception list)
-  //     may re-enable it.
+  // 2 — rollout / emergency switch (feature_flags default, business overrides).
+  //     The same rule the request gate applies (`resolveFlagLayer`): the
+  //     audited billing override outranks the legacy business row, and either
+  //     may re-enable a globally-off flag or switch a default-on one off.
   const { rows: flagRow } = await query<{ default_enabled: boolean }>(
     `SELECT default_enabled FROM feature_flags WHERE key = $1`,
     [capabilityKey],
   );
-  if (flagRow[0] && !flagRow[0].default_enabled) {
-    const override = snapshot.capabilityOverrides.get(capabilityKey);
-    if (override !== true) return deny(capabilityKey, "platform_unavailable");
-  }
-  // A business-level override can also switch a capability off explicitly.
-  if (snapshot.capabilityOverrides.get(capabilityKey) === false) {
-    return deny(capabilityKey, "platform_unavailable");
-  }
+  const flagLayer = resolveFlagLayer({
+    catalogueDefault: flagRow[0]?.default_enabled ?? null,
+    // Already merged by getBusinessEntitlements: the audited billing override
+    // replaced any legacy business row naming the same capability.
+    businessOverride: snapshot.capabilityOverrides.get(capabilityKey) ?? null,
+    billingOverride: null,
+  });
+  if (!flagLayer.enabled) return deny(capabilityKey, "platform_unavailable");
 
   // 3 — the commercial layer (plan / addon / promo / manual grant).
   const access = snapshot.featureAccess.get(capabilityKey);
-  // 3a — subscription state (§19): an included/monthly plan feature reads
-  //      entitled:false precisely when the subscription stopped carrying the
-  //      business (resolveFeatureAccess's planEffective). Deny it with the
-  //      honest reason instead of falling through to addon_required. Owned
-  //      add-ons, promos/manual grants, pay-as-you-go metered use and
-  //      unpriced (flag-governed) features all survive the lapse.
-  if (
-    access &&
-    !access.entitled &&
-    access.source === "plan" &&
-    !access.metered &&
-    !subscriptionCarrying(snapshot, now)
-  ) {
-    return deny(capabilityKey, "subscription_expired");
+  const commercial = resolveCommercialLayer({
+    access: access ?? null,
+    subscriptionCarrying: subscriptionCarrying(snapshot, now),
+  });
+  // 3a — a plan inclusion that stopped because the subscription lapsed reads
+  //      entitled:false (resolveFeatureAccess's planEffective). Deny it with
+  //      the honest reason instead of falling through to addon_required. Owned
+  //      add-ons, promos/manual grants, pay-as-you-go metered use and unpriced
+  //      (flag-governed) features all survive the lapse.
+  if (!commercial.allowed) {
+    return deny(capabilityKey, commercial.reason ?? "addon_required");
   }
   if (access) {
     if (access.metered) {
@@ -313,10 +313,6 @@ export async function resolveBusinessCapability(
         }
       }
       return finishAllowed(allowMetered(capabilityKey, access), businessId, opts.permissions);
-    }
-    if (!access.entitled) {
-      // An addon row without purchase is addon_required.
-      return deny(capabilityKey, "addon_required");
     }
     return finishAllowed(
       {

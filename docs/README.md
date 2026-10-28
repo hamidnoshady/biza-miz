@@ -6,7 +6,7 @@ CI and CODEOWNERS, so their paths are fixed; everything else is grouped by purpo
 | Folder | What belongs there |
 |---|---|
 | [`phases/`](phases/README.md) | One file per development phase: scope, decisions, exit criteria. |
-| [`architecture/`](architecture) | Cross-cutting design: app boundaries, branding (Bizamiz / بیزامیز), tenancy/authorization, sync, AI subsystem, CRM, accounting workspace IA. |
+| [`architecture/`](architecture) | Cross-cutting design: app boundaries, branding (Bizamiz / بیزامیز), tenancy/authorization, effective feature access, sync, AI subsystem, CRM, accounting workspace IA. |
 | [`features/`](features) | Per-feature references: payroll, tax invoicing, printing, commission, platform billing, … |
 | [`integrations/`](integrations) | External systems: Eshobe CMS, WooCommerce/WordPress, integration contracts. |
 | [`deployment/`](deployment) | Installing, updating, migrating and backing up: server, desktop, Android, monitoring. |
