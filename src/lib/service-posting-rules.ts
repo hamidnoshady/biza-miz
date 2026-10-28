@@ -41,6 +41,18 @@ interface ServiceSaleRevenuePayload {
   vat: RialText;
   total: RialText;
   tenders: RetailTender[];
+  /**
+   * The project this invoice bills, when it bills one (issue #1128 §D).
+   *
+   * Carried to the accounting document rather than read back later: an agency
+   * bills a client project's milestone, and §D's project P&L is one read over
+   * `journal_entries.project_id` — revenue on one side, the project's own
+   * expenses on the other. Without the tag the invoice's revenue lands in the
+   * ledger unattributed and the P&L would have to be assembled from the
+   * invoice documents instead of from the books, which is exactly the
+   * booked/posted confusion §D forbids.
+   */
+  projectId?: string | null;
 }
 
 registerPostingRule("service.sale_revenue", async (event, client): Promise<PostingResult | null> => {
@@ -61,5 +73,10 @@ registerPostingRule("service.sale_revenue", async (event, client): Promise<Posti
     ],
     memo: "فروش خدمات",
     postingKind: "service_sale_revenue",
+    // Issue #1128 §D — the project this invoice bills, so the entry it posts is
+    // attributable in the ledger rather than only in the register that asked
+    // for it. Null for an invoice with no project, which is every invoice the
+    // till writes: the dimension is carried, never invented.
+    projectId: payload.projectId ?? null,
   };
 });
