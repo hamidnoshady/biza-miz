@@ -123,6 +123,24 @@ export function isReviewRoundFrozen(status: MediaReviewRoundStatus): boolean {
   return !isReviewRoundOpenForItems(status);
 }
 
+/**
+ * Whether a round's *identity* — its title and the project, client and campaign
+ * it is for — is frozen.
+ *
+ * Deliberately not the same set as `isReviewRoundFrozen`, which governs items, and
+ * the difference is the whole point. A round sent back for changes is still being
+ * assembled, so it may take assets; but it keeps the title and the client it was
+ * raised for, because those are what the client was shown. Conversely a rejected
+ * round may take assets and is not "frozen" for items, yet its identity is fixed.
+ *
+ * Mirrors migration 0265's `media_review_round_guard`, which freezes title and
+ * scope for `sent`/`withdrawn` and freezes the whole row for `approved`/`rejected`.
+ * The union of those two is exactly "not draft and not changes_requested".
+ */
+export function isReviewRoundIdentityFrozen(status: MediaReviewRoundStatus): boolean {
+  return status !== "draft" && status !== "changes_requested";
+}
+
 /* ===========================================================================
  * Item states
  * ======================================================================== */
@@ -442,6 +460,22 @@ export function clientReviewActionsFrom(
 ): readonly MediaReviewRoundAction[] {
   if (!MEDIA_REVIEW_DECIDABLE_STATUSES.includes(status)) return [];
   return reviewRoundActionsFrom(status).filter(isClientReviewAction);
+}
+
+/**
+ * The acts an *agency member* may take on this round.
+ *
+ * The complement of the client's, and the list a member's screen should render.
+ * Without it a screen reading the both-sides catalogue would offer an agency
+ * member an "approve" button on work their own client is still deciding — and the
+ * API would then refuse the click, because approving on a client's behalf is
+ * precisely what makes the approval worth having. Two doors over one act table,
+ * each showing only its own.
+ */
+export function agencyReviewActionsFrom(
+  status: MediaReviewRoundStatus,
+): readonly MediaReviewRoundAction[] {
+  return reviewRoundActionsFrom(status).filter((action) => !isClientReviewAction(action));
 }
 
 /* ===========================================================================
