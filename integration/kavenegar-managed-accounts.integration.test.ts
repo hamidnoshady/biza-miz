@@ -43,6 +43,7 @@ let reconciliation: typeof import("../src/lib/kavenegar/reconciliation-service")
 let vendorCost: typeof import("../src/lib/messaging-vendor-cost");
 let jwt: typeof import("../src/lib/jwt-secret");
 let delivery: typeof import("../src/lib/messaging-delivery-report");
+let alerts: typeof import("../src/lib/kavenegar/alert-service");
 
 const alpha = { businessId: "", slug: "" };
 const beta = { businessId: "", slug: "" };
@@ -190,6 +191,7 @@ beforeAll(async () => {
   vendorCost = await import("../src/lib/messaging-vendor-cost");
   jwt = await import("../src/lib/jwt-secret");
   delivery = await import("../src/lib/messaging-delivery-report");
+  alerts = await import("../src/lib/kavenegar/alert-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -238,6 +240,7 @@ beforeEach(async () => {
   await db.query("DELETE FROM kavenegar_provisioning_jobs");
   await db.query("DELETE FROM kavenegar_credit_transfers");
   await db.query("DELETE FROM platform_sms_config");
+  await db.query("DELETE FROM kavenegar_service_alerts");
   Object.assign(alpha, await seedBusiness("Alpha"));
   Object.assign(beta, await seedBusiness("Beta"));
   await enablePolicy();
@@ -539,6 +542,11 @@ describe("tenancy and platform-only storage", () => {
       { tablename: "kavenegar_retail_price_overrides", policyname: "platform_only" },
       { tablename: "kavenegar_retail_price_slabs", policyname: "platform_only" },
       { tablename: "kavenegar_retail_price_versions", policyname: "platform_only" },
+      // Issue #902 §3 — the Superadmin attention ledger. Platform-only for the
+      // obvious reason: "the master account is nearly out of credit" is not one
+      // business's information, and an alert naming business A must not be
+      // readable by business B.
+      { tablename: "kavenegar_service_alerts", policyname: "platform_only" },
     ]);
   });
 });
@@ -855,6 +863,286 @@ describe("JIT funding", () => {
       masterBalanceRial: 1_000_000,
     });
     expect(plan?.decision).toMatchObject({ action: "none", reason: "unresolved_transfer" });
+  });
+});
+
+describe("funding is safe under concurrent workers", () => {
+  /** Provision a second child so the fleet cap can be exercised. */
+  async function activateBeta() {
+    await service.enqueueManagedAccountJob({ businessId: beta.businessId, kind: "provision" });
+    const script = scripted([
+      ok(childEntry({ localid: beta.businessId, username: "bmbeta0000000000" })),
+    ]);
+    expect((await runNextJobWith(clientFor(script)))?.result).toBe("succeeded");
+  }
+
+  it("reserves inside one transaction so a second pass cannot fund the same child twice", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({ fundingBufferMessages: 100 });
+
+    const reserved = await pricing.reserveAutomaticTransfer({
+      businessId: alpha.businessId,
+      masterBalanceRial: 10_000_000,
+    });
+    expect(reserved.plan?.decision.action).toBe("transfer");
+    expect(reserved.transfer?.state).toBe("pending");
+
+    // Nothing has been sent to the provider yet, but the reservation is already
+    // committed — which is exactly what makes the next pass safe to run.
+    const again = await pricing.reserveAutomaticTransfer({
+      businessId: alpha.businessId,
+      masterBalanceRial: 10_000_000,
+    });
+    expect(again.transfer).toBeNull();
+    expect(again.plan?.decision).toMatchObject({ action: "none", reason: "unresolved_transfer" });
+
+    const { rows } = await db.query<{ n: string }>(
+      `SELECT count(*) AS n FROM kavenegar_credit_transfers WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    expect(Number(rows[0]!.n)).toBe(1);
+  });
+
+  it("defers to whoever holds the child's advisory lock", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({ fundingBufferMessages: 100 });
+    const { rows } = await db.query<{ account_id: string }>(
+      `SELECT id AS account_id FROM kavenegar_business_accounts WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    const accountId = rows[0]!.account_id;
+
+    // Stand in for the other worker: this connection holds the same advisory
+    // lock the funding transaction takes, inside an open transaction.
+    const rival = new Client({ connectionString: urlFor(databaseName) });
+    await rival.connect();
+    try {
+      await rival.query("BEGIN");
+      const locked = await rival.query<{ locked: boolean }>(
+        `SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS locked`,
+        [`kavenegar-funding:${accountId}`],
+      );
+      expect(locked.rows[0]!.locked).toBe(true);
+
+      const deferred = await pricing.reserveAutomaticTransfer({
+        businessId: alpha.businessId,
+        masterBalanceRial: 10_000_000,
+      });
+      expect(deferred.skipped).toBe("busy");
+      expect(deferred.transfer).toBeNull();
+      expect(
+        Number((await db.query(`SELECT count(*) AS n FROM kavenegar_credit_transfers`)).rows[0]!.n),
+      ).toBe(0);
+    } finally {
+      await rival.query("ROLLBACK").catch(() => undefined);
+      await rival.end();
+    }
+
+    // Once the lock is released the same call proceeds normally.
+    const afterRelease = await pricing.reserveAutomaticTransfer({
+      businessId: alpha.businessId,
+      masterBalanceRial: 10_000_000,
+    });
+    expect(afterRelease.skipped).toBeNull();
+    expect(afterRelease.transfer?.state).toBe("pending");
+  });
+
+  it("counts an in-flight reservation against the fleet ceiling for every other child", async () => {
+    await activate(alpha.businessId);
+    await activateBeta();
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingGlobalDailyCapRial: 20_000,
+    });
+
+    // Alpha reserves the whole ceiling and nobody has called the provider yet.
+    const alphaReserved = await pricing.reserveAutomaticTransfer({
+      businessId: alpha.businessId,
+      masterBalanceRial: 10_000_000,
+    });
+    expect(alphaReserved.transfer?.state).toBe("pending");
+    // Clamped to what the ceiling still allows (20,000), not the full 36,000
+    // deficit — a partial top-up is the correct answer to a cap.
+    expect(Number(alphaReserved.transfer?.amount_rial)).toBe(20_000);
+
+    // Beta must see that credit as already spoken for. Before this guard the
+    // fleet window counted only `applied` rows, so two workers could each read
+    // "there is room" and both take it.
+    const betaBlocked = await pricing.reserveAutomaticTransfer({
+      businessId: beta.businessId,
+      masterBalanceRial: 10_000_000,
+    });
+    expect(betaBlocked.transfer).toBeNull();
+    expect(betaBlocked.plan?.decision).toMatchObject({ action: "none", reason: "global_daily_cap_reached" });
+
+    // Raising the ceiling lets it through.
+    await policy.saveManagedChildPolicy({ fundingGlobalDailyCapRial: 200_000 });
+    const betaAllowed = await pricing.reserveAutomaticTransfer({
+      businessId: beta.businessId,
+      masterBalanceRial: 10_000_000,
+    });
+    expect(betaAllowed.transfer?.state).toBe("pending");
+  });
+
+  it("never loses the automatic-transfer key to a collision inside one day", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({ fundingBufferMessages: 100 });
+
+    const first = await pricing.reserveAutomaticTransfer({
+      businessId: alpha.businessId,
+      masterBalanceRial: 10_000_000,
+    });
+    // Apply it, spend the balance back down, and reserve again the same day: the
+    // second key must be new, or the provider would be asked for nothing.
+    await service.applyReservedCreditTransfer({
+      transfer: first.transfer!,
+      client: clientFor(scripted([ok(childEntry({ remaincredit: 36_000 }))])),
+    });
+    await db.query(
+      `UPDATE kavenegar_business_accounts SET provider_balance_rial = 0 WHERE business_id = $1`,
+      [alpha.businessId],
+    );
+    const second = await pricing.reserveAutomaticTransfer({
+      businessId: alpha.businessId,
+      masterBalanceRial: 10_000_000,
+    });
+    expect(second.transfer).not.toBeNull();
+    expect(second.transfer!.idempotency_key).not.toBe(first.transfer!.idempotency_key);
+    expect(Number(second.transfer!.amount_rial)).toBe(36_000);
+  });
+});
+
+describe("Superadmin alerts", () => {
+  it("keeps one open row per condition and counts the occurrences", async () => {
+    const raised = await alerts.raiseServiceAlert({
+      kind: "master_credit_low",
+      businessId: null,
+      detail: { masterBalanceRial: 1_000 },
+    });
+    const again = await alerts.raiseServiceAlert({
+      kind: "master_credit_low",
+      businessId: null,
+      detail: { masterBalanceRial: 500 },
+    });
+    expect(again.id).toBe(raised.id);
+    expect(again.occurrences).toBe(2);
+    // The latest numbers are the ones an operator acts on.
+    expect(again.detail).toEqual({ masterBalanceRial: 500 });
+    expect(again.severity).toBe("critical");
+
+    const { rows } = await db.query<{ n: string }>(
+      `SELECT count(*) AS n FROM kavenegar_service_alerts WHERE resolved_at IS NULL`,
+    );
+    expect(Number(rows[0]!.n)).toBe(1);
+  });
+
+  it("resolves a condition and starts a fresh row when it returns", async () => {
+    const first = await alerts.raiseServiceAlert({
+      kind: "reconciliation_drift",
+      businessId: alpha.businessId,
+      detail: { deltaRial: -6_000 },
+    });
+    expect(await alerts.resolveServiceAlert({ kind: "reconciliation_drift", businessId: alpha.businessId })).toBe(1);
+    expect(await alerts.getServiceAlertSummary()).toMatchObject({ total: 0 });
+
+    const second = await alerts.raiseServiceAlert({
+      kind: "reconciliation_drift",
+      businessId: alpha.businessId,
+      detail: { deltaRial: -9_000 },
+    });
+    expect(second.id).not.toBe(first.id);
+    expect(second.occurrences).toBe(1);
+  });
+
+  it("records acknowledgement as a human act without resolving the condition", async () => {
+    const raised = await alerts.raiseServiceAlert({
+      kind: "unresolved_transfer",
+      businessId: alpha.businessId,
+      subjectKey: "transfer-1",
+    });
+    // `acknowledged_by` records who, and is not a foreign key: an alert must be
+    // acknowledgeable even after the admin who raised it is gone.
+    const adminId = randomUUID();
+    const acknowledged = await alerts.acknowledgeServiceAlert({
+      alertId: raised.id,
+      adminId,
+      note: "بررسی شد؛ تأمین‌کننده تأیید کرد",
+    });
+    expect(acknowledged?.acknowledgedAt).not.toBeNull();
+    expect(acknowledged?.acknowledgementNote).toContain("بررسی شد");
+    // Still open: acknowledged is not resolved.
+    expect(acknowledged?.resolvedAt).toBeNull();
+    expect(await alerts.getServiceAlertSummary()).toMatchObject({ total: 1, unacknowledged: 0 });
+  });
+
+  it("is unreadable through a tenant connection", async () => {
+    await alerts.raiseServiceAlert({ kind: "master_credit_low", businessId: null });
+    await db.query(`GRANT SELECT ON kavenegar_service_alerts TO ${probeRole}`);
+    const probeClient = new Client({ connectionString: urlFor(databaseName) });
+    await probeClient.connect();
+    try {
+      await probeClient.query(`SET ROLE ${probeRole}`);
+      await probeClient.query(`SELECT set_config('app.business_id', $1, false)`, [alpha.businessId]);
+      const { rows } = await probeClient.query(`SELECT count(*)::int AS n FROM kavenegar_service_alerts`);
+      expect(rows[0].n).toBe(0);
+    } finally {
+      await probeClient.end();
+    }
+  });
+
+  it("raises a critical alert when the master account cannot cover the floor, and closes it once funded", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingMasterFloorRial: 1_000_000,
+    });
+
+    const starved = await pricing.runManagedFundingTick({
+      client: clientFor(scripted([])),
+      masterBalanceRial: 500_000,
+    });
+    expect(starved.funded).toBe(0);
+    const open = await alerts.listServiceAlerts();
+    expect(open.map((alert) => alert.kind)).toContain("master_credit_low");
+
+    // A supplied balance above the floor proves the figure is known and the
+    // master can pay: the pass funds, and both fleet conditions close.
+    const funded = await pricing.runManagedFundingTick({
+      client: clientFor(scripted([ok(childEntry({ remaincredit: 36_000 }))])),
+      masterBalanceRial: 10_000_000,
+    });
+    expect(funded.funded).toBe(1);
+    const after = await alerts.listServiceAlerts();
+    expect(after.map((alert) => alert.kind)).not.toContain("master_credit_low");
+    expect(after.map((alert) => alert.kind)).not.toContain("master_balance_unknown");
+  });
+
+  it("raises drift on a mismatch and closes it on the next clean run", async () => {
+    await activate(alpha.businessId);
+    const funded = scripted([ok(childEntry({ remaincredit: 36_000 }))]);
+    await service.transferManagedCredit({
+      businessId: alpha.businessId,
+      amountRial: 36_000,
+      idempotencyKey: `fund-${randomUUID()}`,
+      client: clientFor(funded),
+    });
+
+    const now = new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000 + 60_000);
+    const drift = await reconciliation.reconcileManagedChild({
+      businessId: alpha.businessId,
+      client: clientFor(scripted([ok(childEntry({ remaincredit: 30_000 }))])),
+      now,
+    });
+    expect(drift?.state).toBe("drift");
+    expect((await alerts.listServiceAlerts()).map((alert) => alert.kind)).toContain("reconciliation_drift");
+
+    const clean = await reconciliation.reconcileManagedChild({
+      businessId: alpha.businessId,
+      client: clientFor(scripted([ok(childEntry({ remaincredit: 36_000 }))])),
+      now: new Date(now.getTime() + 2 * 60 * 60_000),
+    });
+    expect(clean?.state).toBe("ok");
+    expect((await alerts.listServiceAlerts()).map((alert) => alert.kind)).not.toContain("reconciliation_drift");
   });
 });
 
@@ -1278,7 +1566,7 @@ describe("scheduled provider traffic follows the opt-in switch", () => {
       client: clientFor(scripted([])),
       masterBalanceRial: 1_000_000,
     });
-    expect(funding).toEqual({ planned: 0, funded: 0, failed: 0 });
+    expect(funding).toEqual({ planned: 0, funded: 0, failed: 0, deferred: 0, alerts: 0 });
 
     const sweep = await reconciliation.runManagedReconciliationSweep({
       client: clientFor(scripted([])),

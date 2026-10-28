@@ -41,6 +41,21 @@ function installFetch(definitions: AttributeDefinition[], onCreate?: (payload: R
   fetchMock.mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     if (url === "/api/products/attributes") return jsonResponse({ definitions });
+    if (url === "/api/settings/retail-pricing") {
+      return jsonResponse({
+        policy: {
+          fixedOverheadRial: null,
+          percentOverhead: null,
+          overheadBase: "reference",
+          profitMode: "markup",
+          profitPercent: 20,
+          rounding: "none",
+          roundStepRial: 10_000,
+          taxMode: "exclusive",
+        },
+        defaultTaxPercent: null,
+      });
+    }
     if (url === "/api/products/items" && init?.method === "POST") {
       onCreate?.(JSON.parse(String(init.body)) as Record<string, unknown>);
       return jsonResponse({ ok: true, message: "created" });
@@ -77,9 +92,9 @@ describe("ProductAddSection attribute drafts", () => {
     if (!(purchasePrice instanceof HTMLInputElement) || !(sellPrice instanceof HTMLInputElement)) return;
     await user.type(purchasePrice, "1000");
     expect(sellPrice.value).toBe("");
-    await user.click(screen.getByRole("button", { name: "پیش‌نمایش محاسبه" }));
-    await user.click(screen.getByRole("button", { name: /اعمال قیمت پیشنهادی/ }));
-    expect(sellPrice.value).toBe("۱٬۰۰۰");
+    // The suggestion comes from the business policy (20% markup) and waits to be applied.
+    await user.click(await screen.findByRole("button", { name: "اعمال قیمت پیشنهادی" }));
+    expect(sellPrice.value).toBe("۱٬۲۰۰");
 
     await user.clear(sellPrice);
     await user.type(sellPrice, "1250");

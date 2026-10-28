@@ -317,6 +317,15 @@ and nothing provisions until it is on.
   `business_id` is tenant-scoped under FORCE RLS; the platform code reaches it only through
   the documented bypass.
 - `pricing-service.ts` — wholesale→retail quotes/margins and the JIT funding planner.
+- `alert-service.ts` — the §3 Superadmin attention ledger: twelve conditions, first-party copy
+  and a stated remedy each, one open row per condition with an occurrence count, resolution by
+  the pass that sees the condition clear, and a recorded acknowledgement. Backed by migration
+  `0263` (`kavenegar_service_alerts`, platform-only; the business an alert is *about* is
+  `subject_business_id`, not ownership).
+- `reserveAutomaticTransfer()` (pricing-service) — the concurrency guard: per-child advisory
+  lock (plus a fleet lock when a global cap is set), caps re-read *including* in-flight
+  reservations, the idempotency key allocated inside the lock, and the provider call made
+  afterwards, outside the transaction.
 - `retail-pricing.ts` / `retail-pricing-service.ts` — the §4 retail *policy*: versioned
   markup, per-message surcharge, volume slabs from month-to-date segments, per-channel and
   per-business exceptions, promotion window, tax, monthly free allowance and the failed-send
@@ -343,7 +352,7 @@ and nothing provisions until it is on.
   windows and back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from
   recorded usage, business/channel exceptions, reserve → settle → refund-once, supplier cost
   posted once and invisible to a tenant, RLS forced on the three new tables.
-- `integration/kavenegar-managed-accounts.integration.test.ts` — 33 database cases with a
+- `integration/kavenegar-managed-accounts.integration.test.ts` — 46 database cases with a
   fake transport (no network): one-child-per-activation, lost-response recovery, funding
   idempotency and caps, template approval, reconciliation bucketing, RLS under an
   unprivileged role, and the app-availability regression.

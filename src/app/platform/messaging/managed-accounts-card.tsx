@@ -132,17 +132,96 @@ interface DeliveryRow {
   lastAttemptAt: string | null;
 }
 
+/** Issue #902 §3 — what needs a human, in the service's own words. */
+interface ServiceAlert {
+  id: string;
+  kind: string;
+  severity: "critical" | "warning" | "info";
+  businessId: string | null;
+  businessName: string | null;
+  occurrences: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  acknowledgedAt: string | null;
+  acknowledgementNote: string | null;
+  detail: Record<string, unknown>;
+}
+
 interface Snapshot {
   error?: string;
   policy: ManagedPolicy;
   accounts: ManagedAccount[];
   templates: CatalogTemplate[];
   delivery: DeliveryRow[];
+  alerts: ServiceAlert[];
+  alertSummary: { critical: number; warning: number; info: number; unacknowledged: number; total: number };
   recentJobs: ManagedJob[];
   unresolvedTransfers: UnresolvedTransfer[];
   margin: MarginRow[];
   reconciliation: ReconciliationRow[];
 }
+
+/**
+ * The operator copy for each alert kind, mirrored from `alert-service.ts`.
+ * Duplicated rather than imported because the API sends a kind and the console
+ * decides how to say it — the server's copy is for logs and API consumers.
+ */
+const ALERT_COPY: Record<string, { title: string; action: string }> = {
+  master_credit_low: {
+    title: "اعتبار حساب اصلی در آستانهٔ پایان است",
+    action: "اعتبار حساب اصلی را شارژ کنید یا سقف‌های شارژ خودکار را بازبینی کنید.",
+  },
+  master_balance_unknown: {
+    title: "موجودی حساب اصلی نامشخص است؛ شارژ خودکار متوقف شد",
+    action: "موجودی حساب اصلی را از پنل تأمین‌کننده بخوانید و در پنل ثبت کنید.",
+  },
+  fleet_cap_reached: {
+    title: "سقف روزانهٔ شارژ همهٔ کسب‌وکارها پر شده است",
+    action: "سقف روزانهٔ سراسری را بالا ببرید یا تا فردا صبر کنید.",
+  },
+  child_cap_reached: {
+    title: "سقف اعتبار مجاز این کسب‌وکار پر شده است",
+    action: "سقف اعتبار این کسب‌وکار را بالا ببرید یا موجودی آن را بازبینی کنید.",
+  },
+  daily_cap_reached: {
+    title: "سقف شارژ روزانهٔ این کسب‌وکار پر شده است",
+    action: "سقف شارژ روزانهٔ این کسب‌وکار را بازبینی کنید.",
+  },
+  unresolved_transfer: {
+    title: "یک انتقال اعتبار با نتیجهٔ نامشخص در انتظار بررسی است",
+    action: "انتقال را در پنل تأمین‌کننده بررسی کنید؛ انتقال دوباره انجام ندهید.",
+  },
+  funding_failed: {
+    title: "انتقال اعتبار به حساب سرویس این کسب‌وکار ناموفق بود",
+    action: "پس از بررسی وضعیت حساب، شارژ دستی همان مبلغ را انجام دهید.",
+  },
+  reconciliation_drift: {
+    title: "مغایرت بین موجودی تأمین‌کننده و دفتر داخلی",
+    action: "گردش حساب سرویس را بررسی و مغایرت را ثبت کنید.",
+  },
+  reconciliation_incomplete: {
+    title: "بازخوانی موجودی تأمین‌کننده انجام نشد",
+    action: "اتصال به تأمین‌کننده را بررسی کنید؛ پاس بعدی دوباره تلاش می‌کند.",
+  },
+  account_suspended: {
+    title: "وضعیت حساب سرویس با تأمین‌کننده هم‌خوان نیست",
+    action: "وضعیت حساب را با پنل تأمین‌کننده هم‌خوان کنید و در صورت نیاز دوباره فعال کنید.",
+  },
+  provisioning_failed: {
+    title: "راه‌اندازی حساب سرویس این کسب‌وکار ناموفق بود",
+    action: "کار راه‌اندازی را از پنل دوباره اجرا کنید و علت را بررسی کنید.",
+  },
+  tariff_missing: {
+    title: "تعرفهٔ تأمین‌کننده برای این کسب‌وکار ثبت نشده است",
+    action: "حساب را با تأمین‌کننده همگام کنید تا تعرفه ثبت شود.",
+  },
+};
+
+const SEVERITY_LABELS: Record<ServiceAlert["severity"], string> = {
+  critical: "بحرانی",
+  warning: "هشدار",
+  info: "اطلاع",
+};
 
 const STATE_LABELS: Record<ManagedAccount["state"], string> = {
   not_provisioned: "در انتظار",
@@ -248,6 +327,10 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
     }
     await load();
     return result.data;
+  }
+
+  async function acknowledgeAlert(alertId: string) {
+    await post({ action: "acknowledge_alert", alertId }, `ack:${alertId}`);
   }
 
   async function savePolicy(event: FormEvent) {
@@ -656,6 +739,72 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
             ))
           )}
         </div>
+      </Card>
+
+      {/* Issue #902 §3 — the attention ledger. Deliberately above the fleet and
+          the delivery table: "what needs me" outranks "what is the state". */}
+      <Card
+        title={`نیازمند اقدام (${formatPersianNumber(snapshot.alertSummary?.total ?? 0)}${
+          (snapshot.alertSummary?.critical ?? 0) > 0
+            ? ` — ${formatPersianNumber(snapshot.alertSummary.critical)} بحرانی`
+            : ""
+        })`}
+      >
+        {(snapshot.alerts ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            هیچ موردی نیازمند اقدام نیست. شارژ خودکار، مغایرت‌گیری و وضعیت حساب‌ها سالم است.
+          </p>
+        ) : (
+          <div className="space-y-2 text-sm">
+            {(snapshot.alerts ?? []).map((alert) => {
+              const copy = ALERT_COPY[alert.kind] ?? {
+                title: alert.kind,
+                action: "این مورد را در گزارش‌های سرویس بررسی کنید.",
+              };
+              const critical = alert.severity === "critical";
+              return (
+                <div
+                  key={alert.id}
+                  className={`rounded-lg border px-3 py-2 ${
+                    critical ? "border-destructive/50 bg-destructive/5" : "border-border"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium">
+                      {copy.title}
+                      {alert.businessName ? ` — ${alert.businessName}` : ""}
+                    </span>
+                    <span className={critical ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+                      {SEVERITY_LABELS[alert.severity]} • {formatPersianNumber(alert.occurrences)} بار • آخرین{" "}
+                      {dateTime(alert.lastSeenAt)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">{copy.action}</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {alert.acknowledgedAt ? (
+                      <span className="text-xs text-muted-foreground">
+                        بررسی شد در {dateTime(alert.acknowledgedAt)}
+                        {alert.acknowledgementNote ? ` — ${alert.acknowledgementNote}` : ""}
+                      </span>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        disabled={!canManage || busy === `ack:${alert.id}`}
+                        onClick={() => void acknowledgeAlert(alert.id)}
+                      >
+                        بررسی کردم
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          هر مورد یک ردیف باز است، نه یک گزارش تکراری؛ با برطرف‌شدن شرط، خودکار بسته می‌شود. «بررسی کردم»
+          یعنی یک اپراتور آن را دیده است، نه اینکه برطرف شده.
+        </p>
       </Card>
 
       {/* Issue #902 §6 — acceptance ≠ delivery. A child can be active and funded

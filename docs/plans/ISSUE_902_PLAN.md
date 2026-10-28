@@ -118,6 +118,59 @@ Still open in §3 and left for a follow-up: funding from an **authoritative** ma
 customer API does not expose the master's credit), and the `approved campaign budget` strategy —
 that needs a product decision on which campaigns count as approved spend.
 
+## 5b. Funding under concurrency, and the Superadmin attention ledger (§3)
+
+§3 asks for two things the first funding pass did not do: *"concurrent business demand"*
+must be bounded, and the operator must be **alerted** — "low master credit, child
+discrepancies, suspended accounts, failed transfers".
+
+**The caps were read, not reserved.** `planFunding` was already correct in isolation, but
+the pass read the day's transfers, decided, and only then wrote a `pending` row — so two
+workers (a tick on each instance, or a tick and an operator click) could both read "there is
+room" and both take it. Fixed by making the decision *atomic with its reservation*
+(`reserveAutomaticTransfer`):
+
+1. one transaction takes a **per-child advisory lock** (`pg_try_advisory_xact_lock`, so a
+   second worker defers instead of queueing behind a slow pass) and, only when a global cap
+   is configured, the **fleet lock**;
+2. inside it, the snapshot and both windows are re-read — and both windows now count
+   `pending` reservations as already spent, because the provider may already have moved that
+   credit (a transfer is one row changing state, so the figure does not double-count when it
+   becomes `applied`);
+3. the pure planner runs against those fresh numbers, the day's idempotency key is allocated
+   inside the lock, and the row is committed as `pending`;
+4. **only then** is the provider called, outside every transaction and lock
+   (`applyReservedCreditTransfer`). A network round trip never happens under a database lock;
+   a decision never happens without one.
+
+The fleet ceiling is exact rather than approximately right: with a global cap set, competing
+children serialise on the fleet lock for the few milliseconds it takes to insert one row, and
+the transfer is clamped to whatever the ceiling still allows (a partial top-up, asserted in
+the suite).
+
+**Alerts are a ledger, not a log** (`0263`, `alert-service.ts`). One *open* row per condition
+with `occurrences`/`last_seen_at` moving while it persists; `resolved_at` set by the pass that
+sees it clear; acknowledgement recorded as a human act with who and when. Twelve kinds, each
+with first-party Persian copy and a stated remedy, and — deliberately — **nothing** for the
+conditions that are not incidents: `automatic_top_up_off` and `outside_funding_window` are the
+operator's own settings, `below_provider_minimum` is a rounding remainder the next cycle
+closes, and an in-flight reservation (which blocks the next pass for a few seconds by design)
+is the double-funding guard working. The incident is an `unknown` *outcome*, which raises
+`unresolved_transfer` from the transfer state instead.
+
+Wiring: the funding tick raises on the blocking reason and closes business-scoped conditions
+when it finds the child healthy; a fleet-level alert is closed only by evidence that clears it
+(one applied transfer for the master floor and the fleet cap, a supplied balance for
+`master_balance_unknown`). The reconciliation pass raises `reconciliation_drift` (critical) vs.
+`reconciliation_incomplete` (info, an unreadable balance) and closes both on a clean run, and
+— because it is the one pass that reads a child's provider status on a timer — it raises
+`account_suspended` when our row says `active` and the provider disagrees. A provisioning job
+that will not be retried raises `provisioning_failed`, and the next success closes it.
+
+Surfaces: `GET /api/platform/sms/accounts` returns `alerts` + `alertSummary`, the console
+shows «نیازمند اقدام» above the fleet with the severity, the occurrence count, the remedy and
+a «بررسی کردم» acknowledgement (`POST {action:"acknowledge_alert"}`, audited).
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -247,9 +300,9 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | Gate | Result |
 | --- | --- |
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
-| `npx vitest run` — new unit files | 136 tests pass across 9 files (`retail-pricing` adds 27) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
+| `npx vitest run` — new unit files | 149 tests pass across 10 files (`retail-pricing` adds 27, `alert-service` adds 13) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Biza-Miz`→`Bizamiz` copy slip in new comments; fixed) |
-| `npm run test:db` — `kavenegar-managed-accounts` | 36/36 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
+| `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
@@ -270,6 +323,10 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 
 ## 9. Follow-ups (each needs its own issue)
 
+0. **Campaign-budget and OTP reserved capacity** (#902 §3, P0): the three strategies and the
+   guards are in place; "approved campaign budget" as a distinct funding trigger, and a
+   reserved slice of master credit that marketing can never consume (so a login OTP is funded
+   even when every child is capped), are still open.
 1. **Delivery/health dashboards** (#902 P1): per-campaign delivery and provider latency are
    visible through the existing outbox/billing screens; a dedicated panel is a follow-up.
 2. **Template automation wiring** (#902 P1): the catalog, the revision/reapproval lifecycle and

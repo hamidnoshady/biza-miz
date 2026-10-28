@@ -21,6 +21,7 @@ import { query, withoutTenantScope } from "../db";
 import type { KavenegarManagementClient } from "./rest";
 import type { ProvisionState } from "./provisioning";
 import { getManagedChildPolicy } from "./policy";
+import { alertForAccount, alertForReconciliation, raiseServiceAlert, resolveServiceAlert } from "./alert-service";
 
 export type ReconciliationState = "ok" | "drift" | "incomplete";
 
@@ -260,7 +261,27 @@ export async function reconcileManagedChild(
       ],
     ),
   );
-  return rows[0] ?? null;
+  const run = rows[0] ?? null;
+  if (run) await recordReconciliationAlerts(input.businessId, run.state);
+  return run;
+}
+
+/**
+ * Mirror one run's verdict into the Superadmin attention ledger.
+ *
+ * `drift` is money and is critical; `incomplete` only means the provider read
+ * failed, so the next pass will try again and an operator only needs to know if
+ * it keeps happening. Either way a clean run closes both, which is what stops
+ * the panel accumulating conditions that are no longer true.
+ */
+async function recordReconciliationAlerts(businessId: string, state: string): Promise<void> {
+  if (state === "ok") {
+    await resolveServiceAlert({ kind: "reconciliation_drift", businessId }).catch(() => undefined);
+    await resolveServiceAlert({ kind: "reconciliation_incomplete", businessId }).catch(() => undefined);
+    return;
+  }
+  const descriptor = alertForReconciliation(state === "drift" ? "drift" : "incomplete", businessId);
+  if (descriptor) await raiseServiceAlert(descriptor).catch(() => undefined);
 }
 
 export interface ReconciliationSweepResult {
@@ -313,6 +334,10 @@ export async function runManagedReconciliationSweep(input: {
         console.error(`kavenegar reconciliation drift for business ${businessId}`);
       }
       if (run.state === "incomplete") result.incomplete += 1;
+      // The sweep is the one place that reads a child's provider status on a
+      // timer, so it is where "our row says active, the provider disagrees"
+      // becomes visible (issue #902 §3: suspended accounts).
+      await recordAccountStatusAlert(businessId);
     } catch (error) {
       console.error(
         `kavenegar reconciliation failed for business ${businessId}:`,
@@ -321,6 +346,34 @@ export async function runManagedReconciliationSweep(input: {
     }
   }
   return result;
+}
+
+/**
+ * Raise or close the "our row and the provider disagree" alert for one child.
+ *
+ * Reads the account row the same pass just refreshed, so the verdict is about
+ * the state the provider reported moments ago rather than a cached one.
+ */
+async function recordAccountStatusAlert(businessId: string): Promise<void> {
+  const account = await withoutTenantScope("kavenegar-provisioning", async () => {
+    const { rows } = await query<{ account_id: string; provision_state: ProvisionState; provider_status: string | null }>(
+      `SELECT id AS account_id, provision_state, provider_status
+         FROM kavenegar_business_accounts WHERE business_id = $1`,
+      [businessId],
+    );
+    return rows[0] ?? null;
+  });
+  if (!account) return;
+  const descriptor = alertForAccount({
+    businessId,
+    provisionState: account.provision_state,
+    providerStatus: account.provider_status,
+  });
+  if (descriptor) {
+    await raiseServiceAlert({ ...descriptor, accountId: account.account_id }).catch(() => undefined);
+    return;
+  }
+  await resolveServiceAlert({ kind: "account_suspended", businessId }).catch(() => undefined);
 }
 
 /** Console read: newest runs, drift first. */

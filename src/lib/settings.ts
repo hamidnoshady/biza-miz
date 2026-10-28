@@ -84,6 +84,8 @@ export const SETTING_KEYS = {
   backupConfig: "backup.config",
   /** PricingConfig — menu cost-plus margin, overhead policy and cost-drift threshold */
   pricing: "pricing.config",
+  /** RetailPricingPolicy (src/lib/retail-pricing-policy.ts) — overhead, profit target, rounding and tax basis behind the New Product price suggestion */
+  retailPricing: "pricing.retail_suggestion",
   /** AppUpdateStatus — local cache of the authenticated Desktop release target and separated Central provenance */
   appUpdateStatus: "app_update.status",
   /** Desktop update check/download policy; executable installation is always explicit. */
