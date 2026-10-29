@@ -1628,10 +1628,11 @@ export async function decideReviewRound(
  *
  * Three gates, in the order that leaks least:
  *
- *   1. The token resolves, and its purpose must be `download`. A `review` link
- *      lets a client look and decide; it does not hand over the file. Approving a
- *      print-ready proof is not the same as being given it, and an agency still
- *      owed for the work decides when the bytes move.
+ *   1. The token resolves. Its purpose then decides whether an explicit request
+ *      to *take the file* is honoured: a `review` link may be looked at, and only
+ *      a `download` link may be asked for the file itself. See the note at the
+ *      gate below for what that distinction honestly buys — it records intent, it
+ *      is not a barrier a browser cannot step over.
  *   2. The asset is in *this* round. The token grants a round, not the library, so
  *      a client who guesses another asset's UUID gets nothing. This is the check
  *      that makes the link scoped rather than merely authenticated.
@@ -1661,12 +1662,27 @@ export type ReviewAssetAuthorization =
 export async function authorizeReviewAsset(
   raw: unknown,
   assetId: unknown,
+  options: { wantsDownload?: boolean } = {},
 ): Promise<ReviewAssetAuthorization> {
   const resolved = await resolveReviewToken(raw);
   if (!resolved.ok) return { ok: false, code: resolved.code };
   const { businessId, roundId, purpose } = resolved.grant;
 
-  if (!reviewLinkPurposeAllowsDownload(purpose)) return { ok: false, code: "download_not_permitted" };
+  // Purpose governs disposition and intent, NOT whether bytes may be served at
+  // all. Refusing a `review` link every fetch would make the default link
+  // useless: `review` is what a link is minted as unless an agency asks for
+  // `download`, and a client who cannot see the artwork cannot approve it.
+  //
+  // What the distinction honestly buys is narrower than it sounds, so it is worth
+  // being plain: bytes served for viewing can always be saved by the browser, and
+  // no response header prevents a determined client from keeping the file. The
+  // purpose records the agency's *intent* — a `review` link was shared to look
+  // at, a `download` link to hand over — so the audit trail can say which
+  // happened. Keeping print-ready originals away from an unpaid client is a
+  // watermarking problem, not a disposition problem, and is out of scope here.
+  if (options.wantsDownload && !reviewLinkPurposeAllowsDownload(purpose)) {
+    return { ok: false, code: "download_not_permitted" };
+  }
   const id = String(assetId);
   if (!isValidMediaUuid(id)) return { ok: false, code: "asset_not_found" };
 
@@ -1715,7 +1731,7 @@ export async function streamReviewAssetBytes(
   assetId: string,
   options: { range?: { start: number; end: number }; signal?: AbortSignal } = {},
 ): Promise<{ stream: ReadableStream<Uint8Array>; contentLength: number; status: number } | null> {
-  const { businessId, roundId, linkId } = grant;
+  const { businessId, roundId, linkId, purpose } = grant;
   return withTenant(businessId, async () => {
     const found = await getActiveMediaAssetWithStorageKey(businessId, assetId);
     if (!found) return null;
@@ -1733,7 +1749,7 @@ export async function streamReviewAssetBytes(
     // bury the decisions the trail exists to preserve — the same reasoning that
     // keeps page views out of it. The counter still moves on every request, so
     // "was this link used" stays answerable either way.
-    void noteReviewAssetDownload(businessId, roundId, linkId, assetId, options.range !== undefined);
+    void noteReviewAssetAccess(businessId, roundId, linkId, assetId, purpose, options.range !== undefined);
 
     return {
       stream: streamed.stream,
@@ -1743,12 +1759,19 @@ export async function streamReviewAssetBytes(
   });
 }
 
-/** Record that a client fetched bytes. Best-effort; see the caller. */
-async function noteReviewAssetDownload(
+/**
+ * Record that a client fetched bytes. Best-effort; see the caller.
+ *
+ * The action names the link's purpose rather than the request's disposition, so
+ * the trail can answer "did they only look, or did they take the file?" — which
+ * is the one question the purpose distinction exists to answer.
+ */
+async function noteReviewAssetAccess(
   businessId: string,
   roundId: string,
   linkId: string,
   assetId: string,
+  purpose: MediaReviewLinkPurpose,
   partial: boolean,
 ): Promise<void> {
   try {
@@ -1766,7 +1789,7 @@ async function noteReviewAssetDownload(
           linkId,
           actorKind: "client",
           actorLabel: CLIENT_ACTOR_FALLBACK,
-          action: "asset.downloaded",
+          action: purpose === "download" ? "asset.downloaded" : "asset.viewed",
         });
       }
       return null;

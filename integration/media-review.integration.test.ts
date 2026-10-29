@@ -472,12 +472,18 @@ describe("media client review against a real database (issue #1128 §E)", () => 
     });
     await review.transitionReviewRound(tenant.businessId, tenant.actor, draft.id, "send");
 
-    // A review link lets a client look and decide. Approving a print-ready proof is
-    // not the same as being handed it.
+    // A review link may be *looked at* — refusing it every fetch would make the
+    // default link useless, because a client who cannot see the artwork cannot
+    // approve it. What it may not do is be asked for the file itself.
     const reviewLink = await review.createReviewLink(tenant.businessId, tenant.actor, draft.id, {
       purpose: "review",
     });
-    const refusedPurpose = await review.authorizeReviewAsset(reviewLink.token, inRound.id);
+    const viewable = await review.authorizeReviewAsset(reviewLink.token, inRound.id);
+    expect(viewable.ok, "a review link must still render the artwork").toBe(true);
+
+    const refusedPurpose = await review.authorizeReviewAsset(reviewLink.token, inRound.id, {
+      wantsDownload: true,
+    });
     expect(refusedPurpose.ok).toBe(false);
     if (!refusedPurpose.ok) expect(refusedPurpose.code).toBe("download_not_permitted");
 

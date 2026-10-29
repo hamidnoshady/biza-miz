@@ -39,10 +39,15 @@ export async function GET(
   context: { params: Promise<{ token: string; assetId: string }> },
 ): Promise<NextResponse> {
   const { token, assetId } = await context.params;
+  // An explicit ask to take the file, as opposed to rendering it on screen. Only
+  // a `download`-purpose link may be asked this way; see authorizeReviewAsset
+  // for what that distinction does and does not guarantee.
+  const search = request.nextUrl.searchParams;
+  const wantsDownload = search.get("download") === "1" || search.get("disposition") === "attachment";
 
-  // Authorise before touching storage: purpose, then round membership, then
+  // Authorise before touching storage: intent, then round membership, then
   // existence. A refused request must not cost an object-store read.
-  const authorized = await authorizeReviewAsset(token, assetId);
+  const authorized = await authorizeReviewAsset(token, assetId, { wantsDownload });
   if (!authorized.ok) return refused(authorized.code);
   const { grant, asset } = authorized;
 
@@ -89,11 +94,23 @@ export async function GET(
   if (!streamed) return refused("storage_unavailable");
 
   // Inline for images and video so a client can actually look at what they are
-  // approving; SVG is forced to an octet-stream attachment exactly as the tenant
-  // route does, because rendering an uploaded SVG inline is script execution in
-  // the app's own origin.
+  // approving — that is the whole job of a review link. An explicit ask to take
+  // the file (`?download=1`) is served as an attachment instead, and only a
+  // `download`-purpose link is allowed to make that ask.
+  //
+  // Note what is deliberately NOT here: the link's own purpose must not force an
+  // attachment. `Content-Disposition: attachment` on an `<img src>` makes the
+  // browser save the file instead of rendering it, so keying the disposition off
+  // the purpose would break the on-screen preview for exactly the `download`
+  // links that ought to show the most. Purpose gates the explicit take-the-file
+  // request; the default render stays inline either way.
+  //
+  // SVG is forced to an octet-stream attachment exactly as the tenant route does,
+  // because rendering an uploaded SVG inline is script execution in the app's own
+  // origin — and this route is reachable without a session, so the bar is higher
+  // here than inside the product, not lower.
   const isSvg = asset.mimeType === "image/svg+xml";
-  const inline = (asset.kind === "image" || asset.kind === "video") && !isSvg;
+  const inline = !wantsDownload && (asset.kind === "image" || asset.kind === "video") && !isSvg;
   const fileName = encodeURIComponent(asset.fileName);
   const headers: Record<string, string> = {
     "Content-Type": isSvg ? "application/octet-stream" : asset.mimeType,
