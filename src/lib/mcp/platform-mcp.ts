@@ -133,6 +133,7 @@ import {
   adminUpdateKbTag,
   adminDeleteKbTag,
 } from "../knowledge-service";
+import { listStudioTours, getStudioTour, saveStudioTour, listStudioTourRevisions, rollbackStudioTour, deleteDraftStudioTour } from "../tour-catalogue-service";
 import {
   listMirroredCmsSites,
   resolvePlatformCmsConfig,
@@ -469,6 +470,8 @@ interface PlatformToolInput {
   record?: Record<string, unknown>;
   categoryId?: string;
   query?: string;
+  version?: number;
+  expectedVersion?: number;
   // Batch BN2 inputs.
   kind?: string;
   app?: string;
@@ -1167,6 +1170,37 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
     capability: "knowledge.manage",
     bridged: false,
     stepUp: true,
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  // Issue #972: shared Studio backend for both Superadmin UI and platform MCP.
+  {
+    name: "list_guided_tours",
+    description: "List platform-authored tours, code fallback tours, registered page keys and spotlight anchors.",
+    capability: "knowledge.manage", bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_guided_tour",
+    description: "Load a tour's full definition and saved revisions (including drafts).",
+    capability: "knowledge.manage", bridged: false,
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "save_guided_tour",
+    description: "Create/update draft or publish a tour (record.input: id,pageKey,title,description,eligibility,steps,status,expectedVersion). Same validation and optimistic version checks as Tour Studio.",
+    capability: "knowledge.manage", bridged: false,
+    inputSchema: { type: "object", properties: { record: { type: "object" } }, required: ["record"] },
+  },
+  {
+    name: "rollback_guided_tour",
+    description: "Restore an earlier tour revision as a new version; supply id,version,expectedVersion.",
+    capability: "knowledge.manage", bridged: false,
+    inputSchema: { type: "object", properties: { id: { type: "string" }, version: { type: "number" }, expectedVersion: { type: "number" } }, required: ["id","version","expectedVersion"] },
+  },
+  {
+    name: "delete_draft_guided_tour",
+    description: "Delete only an unpublished tour, including its revisions; published tours must be unpublished first.",
+    capability: "knowledge.manage", bridged: false, stepUp: true,
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
   },
   {
@@ -1978,6 +2012,28 @@ async function executePlatformTool(
         if (!arg.id) throw new Error("missing_fields");
         await adminDeleteKbArticle(arg.id);
         await platformAuditSafe(connection, arg.id, tool.name, "ok", { action: "knowledge_article.delete" });
+        return { ok: true, id: arg.id };
+      }
+      case "list_guided_tours": {
+        return await listStudioTours();
+      }
+      case "get_guided_tour": {
+        if (!arg.id) throw new Error("missing_fields");
+        return { tour: await getStudioTour(arg.id), revisions: await listStudioTourRevisions(arg.id) };
+      }
+      case "save_guided_tour": {
+        const input = (arg.record?.input ?? arg.record) as Record<string, unknown> | undefined;
+        const result = await saveStudioTour(input, connection.adminId);
+        return { ok: true, ...result };
+      }
+      case "rollback_guided_tour": {
+        if (!arg.id || arg.version === undefined || arg.expectedVersion === undefined) throw new Error("missing_fields");
+        const result = await rollbackStudioTour(arg.id, arg.version, arg.expectedVersion, connection.adminId);
+        return { ok: true, ...result };
+      }
+      case "delete_draft_guided_tour": {
+        if (!arg.id) throw new Error("missing_fields");
+        await deleteDraftStudioTour(arg.id);
         return { ok: true, id: arg.id };
       }
       case "list_cms_sites": {
