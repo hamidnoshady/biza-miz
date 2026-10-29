@@ -176,6 +176,9 @@ export const EXEMPT_TABLES = new Set([
   "knowledge_categories",
   "knowledge_tags",
   "knowledge_articles",
+  // Issue #972: platform-authored guided-tour definitions and audit revisions.
+  "knowledge_tours",
+  "knowledge_tour_revisions",
   "knowledge_article_tags",
   // Migration 0132 — the super-admin console's whole-system backup: its config,
   // its run history, the hashed tokens that let another server pull artifacts,

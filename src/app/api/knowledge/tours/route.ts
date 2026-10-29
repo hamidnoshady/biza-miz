@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { knowledgePage } from "@/lib/knowledge-base";
-import { tourForViewer, tourSummary, toursForPage } from "@/lib/tours";
+import { tourForViewer, tourSummary } from "@/lib/tours";
+import { publishedToursForPage } from "@/lib/tour-catalogue-service";
 import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
 
 /**
@@ -23,7 +24,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const page = knowledgePage((request.nextUrl.searchParams.get("page") ?? "").trim());
   if (!page) return NextResponse.json({ error: "unknown_page" }, { status: 400 });
 
-  const candidates = toursForPage(page.key);
+  const candidates = await publishedToursForPage(page.key);
   const viewer = await tourViewerFor(guard.session.businessId, guard.membership.permissions, candidates);
   const tours = candidates.flatMap((tour) => {
     const visible = tourForViewer(tour, viewer);

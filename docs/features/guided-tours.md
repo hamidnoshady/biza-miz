@@ -136,3 +136,45 @@ AI discovery tool, Hybrid cloud-pane handling (the overlay runs in the page that
 renders it; across the pane's origin boundary a route-based explanation is the
 fallback), and per-tenant analytics. Each needs its own design decision on the
 epic.
+
+## Editable tour catalogue (Tour Studio; PR for #972)
+
+The existing code tours remain the compatibility fallback. The Superadmin
+Knowledge page has a fourth tab «تورهای تعاملی» for drafting, editing,
+reordering steps, versioning, publishing and restoring immutable revisions.
+The authoritative shared table is `knowledge_tours` (migration
+`0267_knowledge_tours.sql`) with `knowledge_tour_revisions` audit snapshots;
+member progress remains separately in `tour_member_progress`. A published DB
+tour of the same id takes precedence over the old code tour.
+
+Server API:
+- `GET /api/platform/knowledge/tours`: all authored tours, built-in tours, page
+  registry and known anchor ids, platform-admin session required.
+- `POST /api/platform/knowledge/tours`: author or publish a tour, requires
+  `knowledge.manage` and an `expectedVersion` for updates; version conflict
+  returns 409. Publishing requires explicit permission/eligibility.
+- `GET /api/platform/knowledge/tours/[tourId]`: full record and revisions.
+- `POST /api/platform/knowledge/tours/[tourId]`: restore a saved version as a
+  **new** version (requires the currently expected version).
+- `DELETE /api/platform/knowledge/tours/[tourId]`: draft only.
+
+The platform MCP reuses the exact service through
+`list_guided_tours`, `get_guided_tour`, `save_guided_tour`,
+`rollback_guided_tour` and `delete_draft_guided_tour`. These are available
+only to credentials with the `knowledge.manage` capability; writes remain
+audited. The live member endpoints and overlays remain unchanged in shape.
+
+**One-time implementation requirement:** `data-tour-id` spotlight anchors
+must be registered by the owning UI component and in `TOUR_ANCHORS`. Existing
+registered anchors are reusable through Studio and MCP. Routes without anchors
+can still use safe `explain` steps; a site-wide arbitrary CSS selector,
+client-supplied JavaScript or automatic button click is never permitted.
+Superadmin tours are informational, not claims of completed real-world actions.
+Editors should match a page's route-level access rules with the tour and step
+eligibility; the platform rejects publishing with no access condition.
+
+This catalogue is a base for the *remaining* epic deliverables (full dynamic
+page coverage audit, route-specific guard consistency checks, online Studio
+preview across responsive modes, real-action verification, cross-page learning
+paths, tenant analytics and automated anchor-provisioning). Do not report
+those as shipped solely on the basis of the global authoring API.
