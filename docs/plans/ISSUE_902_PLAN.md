@@ -138,7 +138,8 @@ stronger of the two rules.
   entirely — double-funding is the failure this journal exists to prevent.
 - `runManagedFundingTick` funds a bounded set of active children every 15 minutes; automatic
   top-up is **off by default** (`funding_buffer_messages = 0`) and a configured floor refuses
-  to act when the master balance is unknown rather than funding through it.
+  to act when the master balance is unknown rather than funding through it. The pass reads that
+  balance from the provider itself (`account/info`, §5g) once per pass.
 - Console: policy form, per-account “تأمین اعتبار”, and a manual transfer form with a
   per-click idempotency key.
 
@@ -161,9 +162,9 @@ A watermark of 0 (or ≥ the buffer) clamps to the target, so a typo can never f
 operator chose. The console exposes all of it; the route rejects an unknown strategy instead of
 silently treating it as `jit`.
 
-Still open in §3 and left for a follow-up: funding from an **authoritative** master balance (the
-customer API does not expose the master's credit), and the `approved campaign budget` strategy —
-that needs a product decision on which campaigns count as approved spend.
+Still open in §3 and left for a follow-up: the `approved campaign budget` strategy — that needs a
+product decision on which campaigns count as approved spend. (The **authoritative master balance**
+that used to head this list is closed by §5g.)
 
 ## 5b. Funding under concurrency, and the Superadmin attention ledger (§3)
 
@@ -406,6 +407,35 @@ vocabulary and no wholesale price: `managed-services/inventory.test.ts` reads ev
 for supplier names, and `template-library-view.test.ts` checks the rendered view against the same
 pattern.
 
+## 5g. The master's own balance, read instead of typed (§3, plan item 4)
+
+The funding plan has refused to move money through a floor it could not see since §5 — and the
+scheduled pass had no balance to give it. Every automatic top-up therefore died on
+`master_balance_unknown` for exactly the operators careful enough to configure a floor, and the
+fleet was only funded when a human read the provider's panel and typed a number into the console.
+The guard was right; what was missing was the number.
+
+**The customer API does not expose the parent's credit, but the account endpoint does.** `GET
+/v1/{KEY}/account/info.json` describes whichever account the key belongs to, so the master key's own
+answer *is* the master's credit. `KavenegarManagementClient.fetchAccountInfo()` reads it once per
+pass — not once per child, because the figure is the same for the fleet and the alternative
+multiplies provider traffic by the number of tenants.
+
+Three decisions matter:
+
+| Decision | Why |
+| --- | --- |
+| A missing or unparseable `remaincredit` is `null`, never `0` | "The provider said zero" and "the provider said nothing I could read" are opposite facts to a floor; collapsing the second into the first would make a funded master look empty |
+| A failed read is swallowed into `null`, with one log line | A provider hiccup must not turn a funding pass into an incident, and `null` already has an honest meaning: refuse, and raise `master_balance_unknown` for the operator |
+| An explicit `masterBalanceRial` still wins | The console's manual transfer and every existing test pass a figure on purpose; the read is the *default*, not a replacement |
+
+The provider's echo of the key in that payload is dropped during mapping, the read is a GET (so the
+transport may retry it), and the log line carries the reason rather than the URL.
+
+With the figure real, `master_balance_unknown` stops being a routine warning: it now means the read
+failed, so its remedy in both the alert ledger and the console changed from «read the panel and type
+it in» to «check the master key and the connection; the pass reads the balance itself».
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -538,7 +568,10 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
 | `npx vitest run` — new unit files | 170 tests pass across 11 files (`retail-pricing` adds 27, `alert-service` adds 13, `template-variables` adds 21) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Bizamiz`→`Bizamiz` copy slip in new comments; fixed) |
-| `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass
+| `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass |
+| `npx vitest run` — `client` + `rest` + `pricing-service` (§5g) | 4 new fixtures: `account/info` addressed under the master key and never a child's, a real `0` kept distinct from an unreadable balance, the key the payload echoes dropped, a refused read surfacing as an error the pass turns into `null` (and a log line with no credential in it) |
+| `npm run test:db` — `kavenegar-managed-accounts` (§5g) | two added cases: a floored fleet funds with no operator figure (the pass calls `account/info` first, then `chargecredit`), and an unreadable master balance funds nothing and leaves `master_balance_unknown` open |
+
 | `npm run test:db` — `kavenegar-master-templates` | 16/16 pass (targeting by trade and plan, idempotent instantiation of a copy, versioned rollout that leaves the live copy alone, lineage through a revision, platform-only RLS) |
 | `npm run test:db` — `kavenegar-lookup-send` | 8/8 pass (approved-only, undeclared mapping, bad receptor, no child, invalid value → refused before a charge; a successful send charges retail once, records the wholesale cost tenant-invisibly and calls the child's key; a definitive refusal refunds in full; an ambiguous failure keeps the reservation) |
 | `npm run test:db` — `kavenegar-lookup-triggers` | 17/17 pass (a message that is not approved, has no mapping or wants a fact the event does not have is refused when the automation is saved; `login_code` is refused as a trigger; an unconfigured trigger sends nothing; one event sends once on the child's key, charges retail once and logs it; a replay is `duplicate`; two racing bumps produce one provider call; an empty wallet blocks before the provider is called; `notifyOrderReady` reads the order/customer/store, honours «پیامک نفرست», skips an anonymous order and an unusable mobile; `notifyPaymentReceived` sends the receipt with the amount in Persian digits and one receipt per replayed settlement; neither notifier throws) |
@@ -584,9 +617,10 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
    margin report and `billing_vendor_cost_events` (§6a) exist; emitting
    `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier
    invoice against them, belongs to Billing.
-4. **Funding from an authoritative master balance**: the provider's customer API does not
-   expose the master's credit, so the floor accepts an operator-supplied balance and refuses
-   to fund blindly. A mirror of the panel balance would close the loop.
+4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g): the account endpoint
+   reports the master's own credit, and the funding pass reads it once per pass, so a configured
+   floor no longer stops automation. What remains is a *mirror* of the figure for the console —
+   showing an operator the balance the last pass saw instead of making them ask the provider.
 5. **Managed-service rollout for other integrations**: #894 Torob, #896 Divar, payments,
    media, AI — apply the contract and add leak-guard tests per integration.
 6. **`resolveBusinessCapability` follow-up**: audit other callers for the same stale

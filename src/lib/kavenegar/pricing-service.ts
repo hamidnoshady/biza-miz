@@ -868,6 +868,30 @@ const BUSINESS_FUNDING_ALERTS = [
 ] as const;
 
 /**
+ * The master's credit as the provider reports it, or `null` when it will not say.
+ *
+ * Deliberately collapsed to `null` rather than thrown: a provider hiccup must
+ * not turn a funding pass into an incident, and `null` already has an honest
+ * meaning downstream — with a floor configured the plan refuses to move money,
+ * and the pass raises `master_balance_unknown` for the operator. The log line
+ * is the trail, and it never contains the key (the transport redacts the URL).
+ */
+export async function readMasterBalanceRial(
+  client: KavenegarManagementClient,
+): Promise<number | null> {
+  try {
+    const info = await client.fetchAccountInfo();
+    return info.remainCreditRial;
+  } catch (error) {
+    console.error(
+      "kavenegar master balance unavailable; funding will refuse while a floor is configured:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+/**
  * One bounded funding pass over the active children that need it most.
  *
  * Children whose balance the provider reported longest ago (or never) come
@@ -876,6 +900,12 @@ const BUSINESS_FUNDING_ALERTS = [
  */
 export async function runManagedFundingTick(input: {
   client: KavenegarManagementClient;
+  /**
+   * Overrides the provider read. `undefined` — the scheduled pass — asks the
+   * provider; an explicit number is an operator's figure; an explicit `null`
+   * means "unknown on purpose", which the plan refuses to fund through while a
+   * floor is configured.
+   */
   masterBalanceRial?: number | null;
   limit?: number;
 }): Promise<FundingTickResult> {
@@ -886,6 +916,18 @@ export async function runManagedFundingTick(input: {
   if (!policy.enabled || policy.fundingStrategy === "manual" || policy.fundingBufferMessages <= 0) {
     return { planned: 0, funded: 0, failed: 0, deferred: 0, alerts: 0 };
   }
+  // The master's own credit, read once for the whole pass (plan §9 item 4).
+  //
+  // Before this, the scheduled pass had no figure to pass, so it refused every
+  // child with `master_balance_unknown` whenever a floor was configured — which
+  // is exactly what a careful operator configures. Automation was therefore
+  // dead in the configuration that needs it, and the fleet only got funded when
+  // a human typed a number into the console.
+  const masterBalanceRial =
+    input.masterBalanceRial !== undefined
+      ? input.masterBalanceRial
+      : await readMasterBalanceRial(input.client);
+
   const limit = Math.min(Math.max(1, input.limit ?? 25), 100);
   const businessIds = await withoutTenantScope("platform", async () => {
     const { rows } = await query<{ business_id: string }>(
@@ -905,7 +947,7 @@ export async function runManagedFundingTick(input: {
       const execution = await fundManagedChild({
         businessId,
         client: input.client,
-        masterBalanceRial: input.masterBalanceRial ?? null,
+        masterBalanceRial,
       });
       if (!execution) {
         result.deferred += 1;
@@ -935,15 +977,16 @@ export async function runManagedFundingTick(input: {
   }
 
   // Fleet-level evidence. One applied transfer proves the master had spendable
-  // credit and that the fleet cap had room *at that moment*; a supplied master
-  // balance proves the figure is no longer unknown. Each clears exactly its own
-  // condition — a healthy pass that funded nothing proves nothing about either,
-  // because it may simply not have needed money.
+  // credit and that the fleet cap had room *at that moment*; any real master
+  // balance — read from the provider or supplied by an operator — proves the
+  // figure is no longer unknown. Each clears exactly its own condition: a
+  // healthy pass that funded nothing proves nothing about either, because it
+  // may simply not have needed money.
   if (result.funded > 0) {
     await resolveServiceAlert({ kind: "master_credit_low" });
     await resolveServiceAlert({ kind: "fleet_cap_reached" });
   }
-  if (input.masterBalanceRial !== null && input.masterBalanceRial !== undefined) {
+  if (masterBalanceRial !== null) {
     await resolveServiceAlert({ kind: "master_balance_unknown" });
   }
   return result;

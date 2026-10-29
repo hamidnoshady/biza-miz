@@ -11,6 +11,8 @@
  *        &Status=2&Mininumallowedcredit=<rial>&Planid=<id>&Lines=<a,b>
  *   GET  …/client/fetchbylocalid.json?Localid=<our id>
  *   GET  …/verify/templatelist.json?apiKey=<child key>&page=1
+ *   GET  https://api.kavenegar.com/v1/{MASTER_KEY}/account/info.json
+ *        — the *master's own* credit and expiry (see `KavenegarAccountInfo`)
  *
  * The reply envelope (verified against the provider's own documented examples,
  * which are recorded as fixtures in `client.test.ts`) puts the result in
@@ -59,6 +61,37 @@ export interface KavenegarChildAccount {
   assignedLines: string[];
   expireAtUnix: number | null;
   lastLoginAtUnix: number | null;
+}
+
+/**
+ * The master account's own credit — issue #902 §3 / plan §9 item 4.
+ *
+ * The customer-management API reports a *child's* `remaincredit` and says
+ * nothing about the parent, which is why the funding plan accepted an
+ * operator-supplied master balance for so long. The account endpoint answers
+ * the question directly: it describes whichever account the key belongs to, so
+ * the master key's own answer is the master's credit.
+ *
+ * `remainCreditRial` is `null` when the reply carried no usable number, and is
+ * never coerced to `0`: "the provider said zero" and "the provider said nothing
+ * I could parse" are opposite facts to a funding decision, and the second one
+ * must not quietly look like an empty wallet.
+ */
+export interface KavenegarAccountInfo {
+  remainCreditRial: number | null;
+  /** Unix seconds the account expires, or `null` when absent. */
+  expireAtUnix: number | null;
+  /** The provider's own account type label, when it sends one. */
+  type: string | null;
+}
+
+/** Map the `account/info` payload. Unrecognised fields are dropped, not copied. */
+export function mapAccountInfo(raw: Record<string, unknown>): KavenegarAccountInfo {
+  return {
+    remainCreditRial: numberValue(pick(raw, "remaincredit")),
+    expireAtUnix: numberValue(pick(raw, "expiredate")),
+    type: stringValue(pick(raw, "type")) || null,
+  };
 }
 
 export interface KavenegarTemplate {
@@ -443,6 +476,21 @@ export function buildFetchChildByLocalIdRequest(input: {
     url: clientUrl(input.masterApiKey, "fetchbylocalid"),
     method: "GET",
     params: { Localid: input.localId },
+  };
+}
+
+/**
+ * `account/info.json` — the credit of the account the key belongs to.
+ *
+ * A GET, so it is safe to retry (`rest.ts` retries idempotent GETs); the key
+ * travels in the path like every other endpoint, which is why the caller logs
+ * only the redacted URL.
+ */
+export function buildAccountInfoRequest(input: { masterApiKey: string }): KavenegarRequest {
+  return {
+    url: `${KAVENEGAR_API_BASE}/${encodeURIComponent(input.masterApiKey)}/account/info.json`,
+    method: "GET",
+    params: {},
   };
 }
 

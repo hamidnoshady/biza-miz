@@ -89,7 +89,7 @@ export const ALERT_TITLE: Readonly<Record<ServiceAlertKind, string>> = {
 /** The remedy an operator is expected to take, in the same first-party voice. */
 export const ALERT_ACTION: Readonly<Record<ServiceAlertKind, string>> = {
   master_credit_low: "اعتبار حساب اصلی را شارژ کنید یا سقف‌های شارژ خودکار را بازبینی کنید.",
-  master_balance_unknown: "موجودی حساب اصلی را از پنل تأمین‌کننده بخوانید و در پنل ثبت کنید.",
+  master_balance_unknown: "کلید حساب اصلی و اتصال به تأمین‌کننده را بررسی کنید؛ شارژ خودکار موجودی را خودش می‌خواند.",
   fleet_cap_reached: "سقف روزانهٔ سراسری را بالا ببرید یا تا فردا صبر کنید.",
   child_cap_reached: "سقف اعتبار این کسب‌وکار را بالا ببرید یا موجودی آن را بازبینی کنید.",
   daily_cap_reached: "سقف شارژ روزانهٔ این کسب‌وکار را بازبینی کنید.",

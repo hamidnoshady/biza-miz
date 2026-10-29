@@ -179,8 +179,9 @@ is a pure decision over explicit inputs (`planFunding`):
 4. target = `buffer_messages × the dearer wholesale segment` (English is ~2.3× Persian, so
    planning on Persian would under-fund English traffic);
 5. deficit clamped by the per-child ceiling and the rolling 24-hour cap;
-6. the master floor is subtracted from what the master may spend — and if a floor is set
-   while the master balance is unknown, the plan refuses rather than fund through it;
+6. the master floor is subtracted from what the master may spend — the balance itself is read
+   from `account/info` once per pass, and if that read fails (or a floor is set with no figure
+   at all) the plan refuses rather than fund through it;
 7. the remainder is rounded **down** to 1,000 Rial; below that the provider refuses (±1,000
    minimum), so nothing is attempted.
 
@@ -400,6 +401,6 @@ and nothing provisions until it is on.
 | Delivery/health dashboard | Delivery is visible through the outbox and Billing's usage screens; a dedicated latency/failure panel is a follow-up. |
 | Payment receipts from every writer | `notifyPaymentReceived` fires from the counter checkout and the offline replay, after `COMMIT`. The Woo/CMS importers and the amendment bridge settle inside their own transactions and have no post-commit point yet. |
 | Invoice lines from price versions, supplier-invoice reconciliation | The versions, the margin report and `billing_vendor_cost_events` exist; emitting `billing_usage_ratings`/invoice lines from the same versions is Billing's change, and confirming accepted-but-undelivered billing needs real invoices. |
-| Authoritative master balance | The customer API exposes a child's balance only. The floor accepts an operator-supplied balance and refuses to fund blindly without one. |
+| Authoritative master balance | Read from `account/info` once per funding pass (`client.fetchAccountInfo`): it describes the account the key belongs to, so the master key's answer is the master's credit. A missing figure is `null` — never `0` — and the plan still refuses to fund through a floor it cannot see. |
 | Bulk adoption of pre-existing children | Single adoption by `localid` exists (`adopt` job); bulk mapping needs operator-supplied data. |
 | Cross-integration managed-service migration (#894, #896, payments, media, AI) | The contract is shared here; each migration is tracked on its own issue, per the epic. |

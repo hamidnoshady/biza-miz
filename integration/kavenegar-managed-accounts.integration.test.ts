@@ -740,6 +740,52 @@ describe("JIT funding", () => {
     expect(second?.decision).toMatchObject({ action: "none", reason: "healthy" });
   });
 
+  it("funds a floored fleet from the provider's own balance, with no operator typing it in (plan §9 item 4)", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 500_000,
+    });
+
+    // One pass, three provider calls in order: the master's own balance, then
+    // the charge, then the child read that records the new balance. Before this
+    // slice the pass had no figure to give the plan, so a configured floor —
+    // the careful configuration — refused every child forever.
+    const script = scripted([
+      ok({ remaincredit: 10_000_000, expiredate: 1_767_225_600, type: "Master" }),
+      ok(childEntry({ remaincredit: 36_000 })),
+    ]);
+    const pass = await pricing.runManagedFundingTick({ client: clientFor(script) });
+
+    expect(pass.funded).toBe(1);
+    expect(script.calls[0]?.url).toContain("/account/info.json");
+    // Never the child's key: this read is about the account paying the bill.
+    expect(script.calls[0]?.url).toContain("MASTERKEEPSECRET");
+    expect(script.calls.map((call) => call.url.split("/").pop())).toContain("chargecredit.json");
+  });
+
+  it("refuses to fund through a floor it cannot see", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 500_000,
+    });
+
+    // A refused account read is "unknown", and unknown must not fund through a
+    // floor: the pass moves nothing and leaves the operator an alert to read.
+    const script = scripted([providerStatus(403)]);
+    const pass = await pricing.runManagedFundingTick({ client: clientFor(script) });
+
+    expect(pass.funded).toBe(0);
+    expect(script.calls.filter((call) => call.url.includes("chargecredit"))).toHaveLength(0);
+    const open = await alerts.listServiceAlerts();
+    expect(open.map((alert) => alert.kind)).toContain("master_balance_unknown");
+  });
+
   it("follows the operator's funding strategy, not just the buffer", async () => {
     await activate(alpha.businessId);
     const at = (hour: number) => new Date(`2026-03-02T${String(hour).padStart(2, "0")}:30:00Z`);
