@@ -12,6 +12,7 @@ import { readDeploymentProfile } from "./deployment-mode";
 import { classifyLocalEnrollmentCode } from "./connection-code";
 import { localInstallationId } from "./pairing-apply";
 import { SETTING_KEYS } from "./settings";
+import { isAppAvailabilityState } from "./app-availability";
 import {
   computeNextActivationState,
   computeValidationBackoffMs,
@@ -433,9 +434,13 @@ export async function applyCloudAuthoritativeBusinessBundleLocally(
 
     // Sync per-business app availability overrides.
     if (Array.isArray(bundle.appAvailability)) {
-      const validStates = new Set(["available", "beta", "coming_soon", "maintenance", "disabled"]);
+      // Issue #902 §9 item 6 — the vocabulary lives in `app-availability.ts` and
+      // nowhere else. This used to be a copy of the five state strings, so a
+      // state added to the registry would have been silently dropped here: the
+      // bundle would carry it, the deploy would skip it, and the app would come
+      // back up in its previous state with nothing to report.
       for (const app of bundle.appAvailability) {
-        if (!validStates.has(app.state)) continue;
+        if (!isAppAvailabilityState(app.state)) continue;
         await query(
           `INSERT INTO business_app_availability (business_id, app_key, state, note, updated_at)
            VALUES ($1, $2, $3, $4, now())

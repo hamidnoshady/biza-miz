@@ -97,6 +97,31 @@ enforced by `kavenegar/lookup-trigger-boundaries.test.ts`: the files that send a
 the child credential store, the managed send service or the trigger path, and they resolve their key
 only from `platform_sms_config` / `KAVENEGAR_API_KEY`.
 
+## 3b. The audit behind one stale comparison (§9 item 6)
+
+The resolver fix in §3 replaced `state === "enabled"` with the registry's `usable`. That raised the
+obvious follow-up — *who else keeps a copy of this vocabulary?* — and the answer was nobody, and that
+was the problem: the vocabulary was copied by hand in three places that could each drift from
+`app-availability.ts` without a single test failing.
+
+| Finding | Why it mattered |
+| --- | --- |
+| `setBusinessAppAvailability` / `setPlatformAppAvailability` wrote `write.state` straight to the column | The console route validated with `isAppAvailabilityState`; the MCP tool passed `write as never`. An unknown state from a tool call therefore reached the SQL CHECK and came back as a database error, for what is a client mistake |
+| `local-activation-site-service.ts` kept its own `Set(["available", "beta", …])` | A state added to the registry would have been silently dropped when a cloud bundle was applied: the bundle carries it, the deploy skips it, and the app comes back up unchanged with nothing to report |
+| `resolveBusinessCapability` cast `state as AppAvailabilityState` | A cast is how the original comparison stayed wrong for so long: the type said the string was a state, so the compiler had nothing to say about it |
+
+The write now validates once, in the one function every caller passes through
+(`assertWritable`), refuses with `InvalidAppAvailabilityStateError`, and the MCP tool turns that
+refusal into its own `invalid_state` rather than letting a Postgres error escape. The local-activation
+importer asks `isAppAvailabilityState`. The resolver asks the type guard and then reads `usable`, so
+neither branch can be reached with a string the registry does not know.
+
+**The rule, as a test** (`app-availability-callers.test.ts`): no file outside the registry and its
+presentation-only allowlist may decide availability from a hand-written state string; the allowlist
+is checked to still exist, so it cannot rot into a no-op; the resolver is checked for the bug's exact
+shape (`"enabled"`); both writers are checked to validate; and the TypeScript states are reconciled
+against migration `0128`'s two `CHECK` clauses — a state may not exist in one half only.
+
 ## 4. Account model and provisioning (§2)
 
 - Migration `0258_kavenegar_managed_accounts.sql`: `kavenegar_business_accounts` (tenant-scoped,
@@ -610,6 +635,7 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `app-availability-callers` (§3b) | 11/11 (the sweep over ~1,100 source files finds no hand-written state decision; every allowlisted presentation file still exists; the resolver carries neither `"enabled"` nor a cast; both writers validate; the SQL CHECK matches the TypeScript states exactly; and `enabled`/`off`/`""`/`null`/`3` are all refused before any query runs) |
 | `npx vitest run` — `sms-noop` (§3a) | 7/7 pass (the code is printed in `development`/`test`; `production`, `staging` and an unset `NODE_ENV` all throw `SmsNotConfiguredError` with neither the code nor the number in the log or the error; the resolver really returns this fallback) |
 | `npx vitest run` — `template-library-view` (§5f) | 6/6 pass (Persian variable names in mapping order, the automation each entry can serve computed by the send path's own check, no automation for an unfillable message, unknown variables dropped rather than shown as `%token4`, supplier-free copy) |
 | `npx vitest run` — `managed-services` (§0) | 23/23 pass (inventory covers every registered service, paths exist, maturities are honest with their follow-ups, plus the source guard over ~100 tenant screens and a positive/negative control for the supplier pattern) |
@@ -655,8 +681,10 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
    showing an operator the balance the last pass saw instead of making them ask the provider.
 5. **Managed-service rollout for other integrations**: #894 Torob, #896 Divar, payments,
    media, AI — apply the contract and add leak-guard tests per integration.
-6. **`resolveBusinessCapability` follow-up**: audit other callers for the same stale
-   `"enabled"` comparison (this change fixed the one in the resolver itself).
+6. ~~**`resolveBusinessCapability` follow-up**: audit other callers for the same stale
+   `"enabled"` comparison~~ — **closed** (§3b): the audit found the same class of drift in three
+   more places (an unvalidated write, a hand-copied vocabulary and a cast in the resolver), all
+   fixed, and the rule is now a test rather than a note.
 
 ## 10. Environment notes
 

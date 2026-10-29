@@ -191,12 +191,42 @@ export interface AppAvailabilityWrite {
   availableFrom?: string | null;
 }
 
+/**
+ * Issue #902 §9 item 6 — the state the caller asked to write is not one this
+ * deployment knows.
+ *
+ * The console route validated with `isAppAvailabilityState` and the MCP tool
+ * did not (`write as never`), so an unknown state from a tool call reached the
+ * column's CHECK and came back as a database error — a 500 for what is a client
+ * mistake. Validating at the write, the one place every caller passes through,
+ * makes the answer the same whoever asked.
+ */
+export class InvalidAppAvailabilityStateError extends Error {
+  constructor(readonly value: unknown) {
+    super("invalid_app_state");
+    this.name = "InvalidAppAvailabilityStateError";
+  }
+}
+
+/**
+ * The guard both writers share.
+ *
+ * `write` is typed, but a typed parameter is not a check: the MCP bridge, a
+ * JSON body and a local-activation bundle all arrive as `unknown` and are cast
+ * on the way in. This is where the cast stops being trusted.
+ */
+function assertWritable(write: AppAvailabilityWrite): AppAvailabilityWrite {
+  if (!isAppAvailabilityState(write?.state)) throw new InvalidAppAvailabilityStateError(write?.state);
+  return write;
+}
+
 /** Set the platform-wide state of one app (`features.write`). */
 export async function setPlatformAppAvailability(
   app: AppKey,
-  write: AppAvailabilityWrite,
+  writeInput: AppAvailabilityWrite,
   adminId: string | null,
 ): Promise<void> {
+  const write = assertWritable(writeInput);
   await withoutTenantScope("platform", () =>
     query(
       `INSERT INTO app_availability (app_key, state, note, available_from, updated_by, updated_at)
@@ -222,9 +252,10 @@ export async function setPlatformAppAvailability(
 export async function setBusinessAppAvailability(
   businessId: string,
   app: AppKey,
-  write: AppAvailabilityWrite | null,
+  writeInput: AppAvailabilityWrite | null,
   adminId: string | null,
 ): Promise<void> {
+  const write = writeInput ? assertWritable(writeInput) : null;
   await withoutTenantScope("platform", async () => {
     if (!write) {
       await query(`DELETE FROM business_app_availability WHERE business_id = $1 AND app_key = $2`, [
