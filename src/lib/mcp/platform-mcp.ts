@@ -134,6 +134,8 @@ import {
   adminDeleteKbTag,
 } from "../knowledge-service";
 import { listStudioTours, getStudioTour, saveStudioTour, listStudioTourRevisions, rollbackStudioTour, deleteDraftStudioTour } from "../tour-catalogue-service";
+import { KNOWLEDGE_PAGES } from "../knowledge-base";
+import { TOUR_ANCHORS } from "../tours";
 import {
   listMirroredCmsSites,
   resolvePlatformCmsConfig,
@@ -2015,7 +2017,7 @@ async function executePlatformTool(
         return { ok: true, id: arg.id };
       }
       case "list_guided_tours": {
-        return await listStudioTours();
+        return { ...(await listStudioTours()), pages: KNOWLEDGE_PAGES, anchors: Object.values(TOUR_ANCHORS) };
       }
       case "get_guided_tour": {
         if (!arg.id) throw new Error("missing_fields");
