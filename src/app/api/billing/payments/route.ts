@@ -31,7 +31,15 @@ export const GET = withTenantScope(async (req: Request) => {
     countPayments({ businessId: session.businessId, status: status as never ?? undefined }),
     getPaymentConfig(),
   ]);
-  return NextResponse.json({ payments, total, gateway: config.gateway });
+  // Issue #902 §0 — a tenant screen needs to know *how* a top-up is taken, not
+  // which company takes it. `gateway` used to be returned raw and the billing
+  // page compared it to a supplier's name; `paymentMode` is the same decision in
+  // first-party words, and the supplier's name never leaves the platform.
+  return NextResponse.json({
+    payments,
+    total,
+    paymentMode: config.gateway === "manual" ? "manual" : "online",
+  });
 });
 
 /**

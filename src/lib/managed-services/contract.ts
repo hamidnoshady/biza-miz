@@ -37,6 +37,7 @@
  */
 
 import type { AppKey } from "../apps";
+import { SUPPLIER_NAME_PATTERN } from "./inventory";
 
 /** The four states a tenant is ever shown. Nothing else reaches a tenant UI. */
 export type ManagedServiceStatus = "ready" | "preparing" | "action_required" | "unavailable";
@@ -359,10 +360,11 @@ export const TENANT_FORBIDDEN_FIELDS: readonly string[] = [
  *
  * `kaveh`/`kavenegar` covers the Persian spellings «کاوه‌نگار» and «کاوه نگار»
  * as well; the pattern is intentionally narrow so ordinary words are not
- * flagged by accident.
+ * flagged by accident. It is the *same* constant the §0 inventory uses
+ * (`SUPPLIER_NAME_PATTERN`), because a payload guard and a source guard that
+ * disagreed would let each other's leaks through.
  */
-export const TENANT_PROVIDER_NAME_PATTERN =
-  /kavenegar|kaveh\s*-?\s*negar|کاوه\s*-?\s*نگار|kavehnegar/i;
+export const TENANT_PROVIDER_NAME_PATTERN = SUPPLIER_NAME_PATTERN;
 
 export interface TenantLeak {
   /** Dotted path to the offending entry, e.g. `config.provider`. */

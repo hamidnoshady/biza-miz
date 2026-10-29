@@ -30,6 +30,23 @@ provider facts live in
   `getTenantMessagingConfig()`.
 - Registered SMS and email in `MANAGED_SERVICES`; #894/#896 add entries rather than new
   shapes.
+- **The §0 inventory is code, not prose** (`src/lib/managed-services/inventory.ts`): every
+  provider-backed capability, its credential store, its console and tenant files, and an honest
+  maturity (`managed` / `partial` / `vendor_visible` with the issue that finishes it). The table is
+  tested like code — the paths it names must exist, a `vendor_visible` entry must carry its
+  follow-up, and a service in `MANAGED_SERVICES` must appear in it.
+- **The rules are documented once** (`docs/integrations/managed-services.md`), including the
+  exceptions that are stated rather than hidden (a gateway's own hosted page during a redirect; the
+  MCP panel's Claude/ChatGPT, which are the tenant's own clients; a tenant's own WordPress or SMTP).
+- Two real leaks the inventory's guard turned up, both fixed in this slice:
+  - the security centre's phone-OTP notice read «سرویس پیامک (کاوه‌نگار)», naming our SMS supplier to
+    every owner;
+  - the billing page decided its copy from a raw `gateway` string returned by
+    `/api/billing/payments`, so the supplier's name travelled into a tenant payload. The API now
+    returns `paymentMode: "online" | "manual"` — the distinction the screen actually needs.
+- `SUPPLIER_NAME_PATTERN` is now the single definition shared by the payload guard and the source
+  guard, and it matches zero-width non-joiner separators: the old pattern only caught «کاوه نگار»
+  with a space, not the «کاوه‌نگار» people actually type.
 
 ## 3. Existing risks in §1 reconciled
 
@@ -471,6 +488,7 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `managed-services` (§0) | 23/23 pass (inventory covers every registered service, paths exist, maturities are honest with their follow-ups, plus the source guard over ~100 tenant screens and a positive/negative control for the supplier pattern) |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |
 | `npm run db:migrate` | 419 migrations apply from an empty database, including `0258` and `0259` |
