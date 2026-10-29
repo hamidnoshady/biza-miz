@@ -59,6 +59,7 @@ provider facts live in
 | `/api/platform/sms` guarded by `ai.config.manage` | Now `messaging.manage` (the capability migration 0176 created for SMS/provider config); console card gate updated to match. |
 | Second ledger | Provider funding is `kavenegar_credit_transfers` (internal, tenant-scoped rows but no tenant surface at all). Tenants keep the central wallet. |
 | Phase 31 automation limits | Untouched: this slice sends nothing new; it only routes existing campaigns through the right account. |
+| A login code in a production log | The offline fallback logs a live code only when `NODE_ENV` is `development` or `test`; anything else, including unset, refuses (§3a). |
 
 **Discovered while wiring eligibility:** `resolveBusinessCapability()` treated
 `app_availability.state` values as `enabled`/`beta`; migration 0128's vocabulary is
@@ -66,6 +67,35 @@ provider facts live in
 `platform_unavailable`. Fixed to use `APP_AVAILABILITY_META[state].usable` (the pure rule the
 pages and API guards already use). Without it, no business could ever be eligible for
 provisioning.
+
+## 3a. DoD #9: the fallback that wrote login codes into a log
+
+DoD #9 ends with a sentence that is easy to read past — *"No OTP logged in production plaintext via
+noop fallback."* The fallback exists for a real reason: an install with no SMS account must still
+boot and enrol TOTP, and a developer without a modem has to finish a login somewhere. It printed
+`[SMS NOOP] To: … OTP: …`, which is a fine thing for a terminal and a bad thing anywhere else: a
+deployment that lost its key, or never had one, answered a login request by writing a live code to
+stdout — into a container log, an aggregator, and whoever can read them — while the person waiting
+for the SMS got nothing and the challenge stayed worth five minutes of guessing.
+
+The fallback now reads `NODE_ENV` at call time:
+
+| `NODE_ENV` | Behaviour |
+| --- | --- |
+| `development`, `test` | logs the code, as before — the terminal is the developer's own |
+| `production`, `staging`, **unset** | writes one operator line naming the missing configuration (no number, no code) and throws `SmsNotConfiguredError` |
+
+Unset fails closed on purpose: a deployment that forgot to declare its environment is not evidence
+that printing login codes is safe. Nothing had to change downstream — every caller already treats a
+failed dispatch honestly (`phone-otp` and `mfa-enrol` consume the challenge, `password-reset` revokes
+the link, `owner-activation` refuses earlier with a 503 it can explain), so the refusal reaches the
+screen as «ارسال پیامک ممکن نشد» instead of a "sent" screen for a message that was never sent.
+
+The other half of DoD #9 — that a login keeps working when Growth is off, a marketing wallet is
+empty, a campaign is paused, or a child account is suspended — is structural, and is already
+enforced by `kavenegar/lookup-trigger-boundaries.test.ts`: the files that send an OTP may not import
+the child credential store, the managed send service or the trigger path, and they resolve their key
+only from `platform_sms_config` / `KAVENEGAR_API_KEY`.
 
 ## 4. Account model and provisioning (§2)
 
@@ -515,6 +545,7 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `sms-noop` (§3a) | 7/7 pass (the code is printed in `development`/`test`; `production`, `staging` and an unset `NODE_ENV` all throw `SmsNotConfiguredError` with neither the code nor the number in the log or the error; the resolver really returns this fallback) |
 | `npx vitest run` — `template-library-view` (§5f) | 6/6 pass (Persian variable names in mapping order, the automation each entry can serve computed by the send path's own check, no automation for an unfillable message, unknown variables dropped rather than shown as `%token4`, supplier-free copy) |
 | `npx vitest run` — `managed-services` (§0) | 23/23 pass (inventory covers every registered service, paths exist, maturities are honest with their follow-ups, plus the source guard over ~100 tenant screens and a positive/negative control for the supplier pattern) |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
