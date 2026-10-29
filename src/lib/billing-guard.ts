@@ -61,9 +61,12 @@ export type BillingPreflightResult =
  * Check entitlement and affordability **without debiting anything**.
  *
  * Issue #903: a route whose work can fail must not buy a charge before it
- * starts. `/api/backup/run` uses this to refuse early (402/403, the same
- * responses `chargeForFeature` returns) and then settles with
- * `chargeForFeature` only after an artifact actually exists.
+ * starts. It makes that two-phase shape (refuse early with the 402/403 that
+ * `chargeForFeature` also returns, then settle only after the work succeeded)
+ * expressible; the tenant `POST /api/backup/run` route that first used it was
+ * removed by the same epic's owner decision — see §3 of
+ * `docs/deployment/managed-tenant-backup-rollout.md` — so managed backups are
+ * now charged from verified storage byte-days instead of a per-use debit.
  */
 export async function preflightFeatureUse(
   businessId: string,

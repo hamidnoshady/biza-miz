@@ -378,9 +378,9 @@ export type ActionType =
   // Batch AF — table sessions (floor-plan table CRUD stays designer-side).
   | "table.session.open"
   | "table.session.update"
-  // Batch AH — backup config/run/restore (restore replaces the tenant DB).
-  | "backup.config.set"
-  | "backup.run_now"
+  // Batch AH — tenant restore only. Issue #903 §3 removed `backup.config.set`
+  // and `backup.run_now`: creating, scheduling and running a backup belongs to
+  // the managed service, not to a tenant (or a tenant's model).
   | "backup.restore.apply"
   // Batch AI — devices: rename + revoke (pairing stays browser-bound).
   | "device.rename"
@@ -652,8 +652,6 @@ export type AutopilotExecutorKey =
   | "messagingCampaignPause"
   | "messagingCampaignResume"
   | "giftCardRedeem"
-  | "backupConfigSet"
-  | "backupRunNow"
   | "backupRestoreApply"
   | "jewelryItemSell"
   | "jewelryBuybackCreate"
@@ -2953,22 +2951,6 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "لغو دستگاه — اعتبارنامهٔ بیومتریک آن هم از کار می‌افتد؛ هر بار تأیید انسان",
     payloadHint: '{ id: string }',
     executor: "deviceRevoke",
-  },
-  "backup.config.set": {
-    type: "backup.config.set",
-    endpoint: "/api/backup/config",
-    method: "PUT",
-    label: "تنظیم زمان‌بندی/مقصد بکاپ — فقط Owner؛ رمز نسخه اگر خالی بماند تغییر نمی‌کند",
-    payloadHint: '{ enabled: boolean, intervalHours?: number, retentionDays?: number, localDir?: string, cloud?: object, passphrase?: string }',
-    executor: "backupConfigSet",
-  },
-  "backup.run_now": {
-    type: "backup.run_now",
-    endpoint: "/api/backup/run",
-    method: "POST",
-    label: "اجرای فوری بکاپ — وقتی پلن قیمت‌گذاری کرده باشد از کیف پول کسر می‌کند؛ هر بار تأیید انسان",
-    payloadHint: "{}",
-    executor: "backupRunNow",
   },
   "backup.restore.apply": {
     type: "backup.restore.apply",

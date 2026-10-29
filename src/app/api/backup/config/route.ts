@@ -1,51 +1,49 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { applyTenantBackupSettings, tenantBackupSettings } from "@/lib/tenant-backup-contract";
-import { aliasedBackupDestination, getBackupConfig, setBackupConfig } from "@/lib/backup-service";
+import { tenantBackupSettings } from "@/lib/tenant-backup-contract";
+import { getBackupConfig } from "@/lib/backup-service";
+import { resolveTenantBackupPolicy } from "@/lib/tenant-backup-storage";
 import { isLocalOnly } from "@/lib/deployment-mode";
 import { deploymentRole } from "@/lib/deployment-role";
 
-/** Site Owners manage local paths; central tenants remain schedule-only. */
+/**
+ * Issue #903 §3 (owner decision 2026-10-28) — **read-only**.
+ *
+ * This route used to accept a schedule/infrastructure mutation from a business
+ * user. The epic supersedes that: Superadmin owns schedules, retention,
+ * destinations, encryption and pricing, and the tenant surface is limited to
+ * selecting a recovery point, downloading a backup and restoring. So the PUT is
+ * removed rather than hidden, and what remains reports the policy actually in
+ * force (the fleet's, or the device defaults where no fleet row is reachable).
+ * A stale client that still sends a PUT now gets 405 from the framework — which
+ * is the honest answer, not a silent no-op.
+ */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.backupConfigure);
   if (error) return error;
 
   const siteInstall = deploymentRole() === "site";
-  return NextResponse.json({
-    config: tenantBackupSettings(await getBackupConfig(session.businessId), {
-      includeSiteInfrastructure: siteInstall,
-    }),
-    siteInstall,
-    desktop: siteInstall && Boolean(process.env.DESKTOP_INSTANCE_ID),
-    // A local-only install has no cloud story: the client hides the whole
-    // S3 section, and the PUT below refuses to enable it.
-    localOnly: await isLocalOnly(session.businessId),
-  }, { headers: { "Cache-Control": "no-store" } });
-});
-
-export const PUT = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.backupConfigure);
-  if (error) return error;
-
-  let body: Record<string, unknown>;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  }
-
-  const current = await getBackupConfig(session.businessId);
-  const validated = applyTenantBackupSettings(current, body, {
-    allowSiteInfrastructure: deploymentRole() === "site",
-  });
-  if (!validated.ok) {
-    return NextResponse.json({ error: validated.error }, { status: 400 });
-  }
-  if (deploymentRole() === "site" && aliasedBackupDestination(validated.config)) {
-    return NextResponse.json({ error: "backup_directories_must_differ" }, { status: 400 });
-  }
-
-  await setBackupConfig(session.businessId, validated.config);
-  return NextResponse.json({ ok: true });
+  const [config, policy] = await Promise.all([
+    getBackupConfig(session.businessId),
+    resolveTenantBackupPolicy(),
+  ]);
+  return NextResponse.json(
+    {
+      config: tenantBackupSettings(config, { includeSiteInfrastructure: siteInstall }),
+      siteInstall,
+      desktop: siteInstall && Boolean(process.env.DESKTOP_INSTANCE_ID),
+      // A local-only install has no cloud story at all.
+      localOnly: await isLocalOnly(session.businessId),
+      // Whether this caller may change any of the above: never, on the tenant
+      // surface. The setup wizard has its own one-time endpoint.
+      editable: false,
+      policy: {
+        intervalHours: policy.intervalHours,
+        retentionDays: policy.retentionDays,
+        source: policy.source,
+      },
+    },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 });

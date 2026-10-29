@@ -91,7 +91,7 @@ import {
   writeTenantArchive,
   withLogicalStaging,
 } from "./tenant-backup-runner";
-import { resolveTenantStorage, tenantObjectPrefix } from "./tenant-backup-storage";
+import { resolveTenantBackupPolicy, resolveTenantStorage, tenantObjectPrefix } from "./tenant-backup-storage";
 import {
   acceptGeneration,
   drainUploadQueue,
@@ -982,9 +982,17 @@ async function maybeCatchUpCloud(businessId: string, config: BackupConfig): Prom
 
 /** One schedule check for one business, shared by both deployment roles. */
 async function tickBusiness(businessId: string): Promise<void> {
+  // Issue #903 §3 (owner decision): the schedule is the platform's, not the
+  // tenant's. The cadence always comes from the fleet policy; the stored
+  // `enabled`/`intervalHours` fields are only the on-device default for an
+  // install that has never been reached by a managed service (a Local/exe
+  // desktop with no platform row).
+  const policy = await resolveTenantBackupPolicy();
   await withTenant(businessId, async () => {
     const config = await getBackupConfig(businessId);
-    if (!config.enabled) return;
+    const managedSchedule = policy.source === "managed" && policy.managedCloud;
+    if (!config.enabled && !managedSchedule) return;
+    const schedule = { ...config, intervalHours: policy.intervalHours };
 
     const { rows: lastRows } = await query<{ started_at: Date; status: string }>(
       `SELECT started_at, status FROM backup_runs
@@ -996,8 +1004,8 @@ async function tickBusiness(businessId: string): Promise<void> {
     const timeZone = await getBusinessTimezone(businessId);
     const now = new Date();
     if (
-      isBackupDue(last?.started_at ?? null, now, config, timeZone) ||
-      isFailedRunRetryDue(last?.started_at ?? null, last?.status ?? null, now, config, timeZone)
+      isBackupDue(last?.started_at ?? null, now, schedule, timeZone) ||
+      isFailedRunRetryDue(last?.started_at ?? null, last?.status ?? null, now, schedule, timeZone)
     ) {
       const local = await runLocalBackup(businessId, "scheduled");
       if (local.status === "ok" && config.cloud.enabled) {
@@ -1130,6 +1138,10 @@ export interface BackupHealth {
   enabled: boolean;
   cloudEnabled: boolean;
   intervalHours: number;
+  /** Issue #903 §3: the fleet's retention, shown read-only to the tenant. */
+  retentionDays: number;
+  /** `managed` when the platform's policy answered, `default` otherwise. */
+  policySource: "managed" | "default";
   scope: TenantBackupMode;
   localLastSuccessAt: string | null;
   localLastError: string | null;
@@ -1161,7 +1173,10 @@ async function latestRuns(businessId: string, kind: RunKind) {
 
 export async function getBackupHealth(businessId: string): Promise<BackupHealth> {
   const localOnly = await isLocalOnly(businessId);
-  const config = await getBackupConfig(businessId);
+  const [config, policy] = await Promise.all([
+    getBackupConfig(businessId),
+    resolveTenantBackupPolicy(),
+  ]);
   const [local, cloud] = await Promise.all([
     latestRuns(businessId, "local"),
     latestRuns(businessId, "cloud"),
@@ -1170,7 +1185,12 @@ export async function getBackupHealth(businessId: string): Promise<BackupHealth>
     localOnly,
     enabled: config.enabled,
     cloudEnabled: !localOnly && config.cloud.enabled,
-    intervalHours: config.intervalHours,
+    // Never the stored tenant value: the tenant cannot retune the schedule any
+    // more, so reporting a stale local number would describe a plan that is not
+    // the one running.
+    intervalHours: policy.intervalHours,
+    retentionDays: policy.retentionDays,
+    policySource: policy.source,
     localLastSuccessAt: local.lastSuccessAt,
     localLastError: local.lastError,
     cloudLastSuccessAt: localOnly ? null : cloud.lastSuccessAt,

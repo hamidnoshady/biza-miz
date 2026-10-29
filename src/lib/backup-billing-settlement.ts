@@ -2,11 +2,18 @@
  * Issue #903 §7 and definition-of-done item 10 — fair settlement for managed
  * backup.
  *
- * The behaviour being replaced is small and wrong: `/api/backup/run` calls
- * `chargeForFeature("backup")` *before* the work, so a run that fails on a full
- * disk, an unreachable database or an empty scope still debits a nonrefundable
- * wallet charge. The epic's rule is the opposite — reserve/settle/refund, or
- * charge only after a verified, billable success.
+ * The behaviour being replaced is small and wrong: the former tenant
+ * `POST /api/backup/run` route called `chargeForFeature("backup")` *before* the
+ * work, so a run that failed on a full disk, an unreachable database or an
+ * empty scope still debited a nonrefundable wallet charge. The epic's rule is
+ * the opposite — reserve/settle/refund, or charge only after a verified,
+ * billable success.
+ *
+ * That route is gone (issue #903 §3: a business user does not create backups),
+ * so the per-use decision below has no production caller today. It is kept as
+ * the platform's stated policy — and its refund reconciliation still runs — so
+ * that any future operator-triggered, tenant-billed run reuses one rule instead
+ * of inventing a second one.
  *
  * Two commercial facts are separated here, because conflating them is how
  * tenants get double-billed:

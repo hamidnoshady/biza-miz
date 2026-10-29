@@ -390,3 +390,59 @@ the end, still explicitly.
   is not reachable, so `external.woocommerce` remains honest-by-declaration rather
   than captured.
 - Media **binary** capture remains out of scope and is labelled `excluded`.
+
+## Increment: tenant surface superseded (issue #903 §10, first P0 line)
+
+The owner decision of 2026-10-28 says a business user does not manage backups.
+The code now says the same thing, and the *routes* are gone rather than merely
+unlinked from the UI — hiding a control in the browser is explicitly not what
+the epic asks for.
+
+**Removed**
+
+- `POST /api/backup/run` («پشتیبان‌گیری هم‌اکنون»). No tenant-triggered run,
+  no per-use wallet debit, no manual trigger that bypasses the schedule.
+  `runBackupNow`/`runLocalBackup` remain for the platform path and the
+  scheduler, which are the only callers a managed service should have.
+- `PUT /api/backup/config` — schedule, interval, retention and local paths are
+  no longer tenant-writable in any deployment. `GET` stays and is read-only:
+  it reports the policy in force plus `editable: false`, and a stale client's
+  `PUT` now gets the framework's 405 instead of a silent no-op.
+- The «تنظیمات پشتیبان‌گیری» card, the interval/retention/folder form and the
+  run-now button in `/dashboard/backup` (and therefore `/settings/backup`).
+- The two tenant AI/MCP verbs that wrapped them — `backup.config.set`
+  (`write_backup_config_set`) and `backup.run_now` (`write_backup_run_now`),
+  with their registry entries, capability map and coverage rows. A model cannot
+  reach a capability the product no longer offers. `backup.restore.apply` stays:
+  restoring your own verified backup is allowed, creating one is not.
+
+**Kept, deliberately**
+
+- Read-only status, artifact inventory, download/verify, restore (cloud or
+  file, behind preview + re-auth + typed confirmation) and the Owner data
+  export — the surface §2 permits.
+- The Owner Recovery Kit (desktop), which used to live inside the schedule
+  card. It recovers *local* encrypted fields and sync credentials, a different
+  key from any artifact's; it is now its own card.
+- Onboarding. The wizard step at `/setup/backup` still writes the **safe
+  on-device defaults** (§1) for a single-business site install, through a new
+  `GET|PUT /api/setup/backup` that refuses a central deployment outright
+  (`not_site_install`) and accepts only the same narrow allow-list as before.
+  This is the install engineer's one-time choice, not a tenant setting.
+
+**Where the schedule now comes from**
+
+`resolveTenantBackupPolicy()` (`tenant-backup-storage.ts`) reads
+`platform_tenant_backup_service` — platform-only, never tenant-writable — and
+returns the interval, retention ceiling and keep count. It falls back to
+documented safe defaults (24 h, 30 days, 30 copies, `source: "default"`) only
+when that row cannot be read at all. Both scheduler ticks and the health DTO use
+it; neither reads the tenant's former `intervalHours` any more. Managed
+scheduling is switched on by the fleet (`managed_cloud` with a usable
+destination) even where a business had once disabled its own schedule, and the
+status card shows the cadence and retention read-only with one sentence saying
+who decides them.
+
+**Unchanged and still open**: everything listed under "Still open" above —
+notably the absence of PostgreSQL/S3/Node ≥ 24 in this environment, so the
+integration suite, `test:db`, `build` and a live drill remain unexecuted here.

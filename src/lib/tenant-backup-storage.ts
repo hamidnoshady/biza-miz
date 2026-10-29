@@ -335,6 +335,78 @@ export async function resolveTenantStorage(input: ResolveStorageInput): Promise<
   return { mode: "unavailable", reason: "managed_storage_disabled" };
 }
 
+/**
+ * Issue #903 §3 (owner decision 2026-10-28) — **the schedule is the fleet's**.
+ *
+ * The epic's supersession removes scheduling, retention and run-now from the
+ * tenant surface: a business user does not manage backup creation. What is left
+ * is a read-only policy the scheduler obeys and the tenant merely sees, so this
+ * resolver is the single place a schedule number comes from. It reads
+ * `platform_tenant_backup_service` (platform-only, never tenant-writable) and
+ * falls back to safe defaults only when that row cannot be read at all — a
+ * pre-migration database, or a database whose platform configuration is
+ * unavailable. It deliberately does **not** read the tenant's stored
+ * `BackupConfig` for the interval: that field is former tenant input, kept only
+ * so an on-device install that has never seen a fleet row keeps its historic
+ * cadence.
+ */
+export interface TenantBackupPolicy {
+  /** Scheduled run spacing, from the fleet row. */
+  intervalHours: number;
+  /** Default retention for a new artifact. */
+  retentionDays: number;
+  /** Ceiling retention may never exceed. */
+  maxRetentionDays: number;
+  /** Cloud copies kept per business. */
+  keepCount: number;
+  /**
+   * `managed` — the platform answered, so this policy is authoritative.
+   * `default` — the row was unreadable and these are the safe on-device
+   * defaults.
+   */
+  source: "managed" | "default";
+  /** Whether the fleet has a *usable* managed destination configured. */
+  managedCloud: boolean;
+}
+
+/** What a device without a reachable fleet row protects itself with. */
+export const SAFE_TENANT_BACKUP_POLICY: TenantBackupPolicy = {
+  intervalHours: 24,
+  retentionDays: 30,
+  maxRetentionDays: 365,
+  keepCount: 30,
+  source: "default",
+  managedCloud: false,
+};
+
+/** The allowed cadences, mirrored from the migration's CHECK constraint. */
+const SCHEDULE_HOURS = [1, 2, 3, 4, 6, 8, 12, 24] as const;
+
+function scheduleHours(value: number): number {
+  if ((SCHEDULE_HOURS as readonly number[]).includes(value)) return value;
+  // A corrupted/older value snaps to the nearest allowed cadence rather than
+  // producing a schedule the rest of the system cannot express.
+  return SCHEDULE_HOURS.reduce((best, option) =>
+    Math.abs(option - value) < Math.abs(best - value) ? option : best,
+  );
+}
+
+export async function resolveTenantBackupPolicy(): Promise<TenantBackupPolicy> {
+  try {
+    const config = await readTenantBackupService();
+    return {
+      intervalHours: scheduleHours(config.defaultIntervalHours),
+      retentionDays: Math.max(1, config.defaultRetentionDays),
+      maxRetentionDays: Math.max(1, config.maxRetentionDays),
+      keepCount: Math.max(1, config.cloudKeepCount),
+      source: "managed",
+      managedCloud: config.cloudEnabled,
+    };
+  } catch {
+    return { ...SAFE_TENANT_BACKUP_POLICY };
+  }
+}
+
 /** `tenants/<scope tag>/<artifact>` — derived, never supplied by a request. */
 export function tenantObjectPrefix(basePrefix: string, businessId: string): string {
   return `${normalizeKeyPrefix(basePrefix)}tenants/${logicalSnapshotScopeTag(businessId)}/`;

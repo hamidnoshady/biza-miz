@@ -1,24 +1,26 @@
 "use client";
 
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
-import { PersianNumberInput } from "@/components/ui/persian-number-input";
 
 /**
- * Backup dashboard (Phase 10). Four cards:
- *  1. Status — health badges, last successful local/cloud backup, a manual
- *     «پشتیبان‌گیری هم‌اکنون» button, and the recent run history.
- *  2. Restore (Owner only) — the counterpart of 1: verify a stored artifact
- *     into a scratch database, then replace the live one with it after an
- *     explicit confirmation. Hidden unless the install holds one business.
- *  3. Export (Owner only) — this business's own data, as SQL or xlsx.
- *  4. Settings (Owner only) — schedule only; infrastructure and encryption
- *     settings are not tenant-editable.
+ * Backup dashboard (Phase 10), reduced to the recovery surface issue #903 §2
+ * allows (owner decision 2026-10-28):
+ *  1. Status — an honest health badge, the last successful points, the schedule
+ *     and retention **as decided by the platform** (read-only), and history.
+ *  2. Inventory — this business's own artifacts, with download/verify.
+ *  3. Restore (Owner only) — cloud or file recovery behind a preview,
+ *     re-authentication and a typed confirmation.
+ *  4. Export (Owner only) — this business's own data, as SQL or xlsx.
+ *
+ * There is deliberately no «backup now» button, no schedule editor and no
+ * destination/retention form: creating, scheduling, retaining, encrypting and
+ * pricing backups is the Superadmin's job, and the routes that did it are gone
+ * rather than merely hidden.
  */
 import { useCallback, useEffect, useState } from "react";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { uploadRestoreFile } from "@/lib/restore-upload-client";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ArtifactInventoryCard } from "./artifact-inventory";
 import { ErrorBox, Field, InfoBox, PrimaryButton, api, inputClass } from "../ui";
 import { Button } from "@/components/ui/button";
@@ -37,7 +39,12 @@ interface Health {
   localOnly: boolean;
   enabled: boolean;
   cloudEnabled: boolean;
+  /** The cadence actually in force — the fleet policy's, not a tenant setting. */
   intervalHours: number;
+  /** Retention the platform applies to new artifacts (read-only here). */
+  retentionDays: number;
+  /** `managed` when the platform's policy answered; `default` on a bare device. */
+  policySource: "managed" | "default";
   /** `physical` = the whole database (site installs); `logical` = this tenant only (central). */
   scope: "physical" | "logical";
   localLastSuccessAt: string | null;
@@ -58,15 +65,6 @@ interface RunRow {
   sizeBytes: number | null;
   error: string | null;
   startedAt: string;
-}
-
-interface ConfigForm {
-  enabled: boolean;
-  intervalHours: number;
-  anchorTime: string;
-  localRetention: number;
-  directory?: string;
-  secondaryDirectory?: string;
 }
 
 interface RestoreArtifact {
@@ -189,11 +187,11 @@ export function BackupManager({ isOwner }: { isOwner: boolean }) {
 
   return (
     <div className="space-y-6">
-      <StatusCard health={health} runs={runs} onChanged={loadStatus} />
+      <StatusCard health={health} runs={runs} />
       <ArtifactInventoryCard isOwner={isOwner} />
       {isOwner ? <RestoreCard onChanged={loadStatus} /> : null}
       {isOwner ? <ExportCard /> : null}
-      {isOwner ? <SettingsCard onSaved={loadStatus} /> : null}
+      {isOwner ? <RecoveryKitCard /> : null}
     </div>
   );
 }
@@ -730,52 +728,12 @@ function ExportCard() {
 function StatusCard({
   health,
   runs,
-  onChanged,
 }: {
   health: Health | null;
   runs: RunRow[] | null;
-  onChanged: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function backupNow() {
-    setBusy(true);
-    setMessage(null);
-    setError(null);
-    const res = await api<{
-      result?: {
-        local: { status: string; artifact?: string; error?: string };
-        cloud: { status: string; error?: string };
-      };
-    }>("/api/backup/run", { method: "POST" });
-    setBusy(false);
-    const result = res.data.result;
-    if (result?.local.status === "ok") {
-      if (result.cloud.status === "ok") setMessage("پشتیبان محلی و ابری با موفقیت ساخته شد.");
-      else if (result.cloud.status === "disabled") setMessage("پشتیبان محلی با موفقیت ساخته شد.");
-      else setError(`پشتیبان محلی ساخته شد اما بارگذاری ابری ناموفق بود: ${result.cloud.error ?? ""}`);
-    } else if (result?.local.status === "busy") {
-      setError("یک پشتیبان‌گیری دیگر در حال اجراست؛ کمی بعد دوباره تلاش کنید.");
-    } else {
-      setError(`پشتیبان‌گیری ناموفق بود: ${result?.local.error ?? "خطای نامشخص"}`);
-    }
-    onChanged();
-  }
-
   return (
-    <SectionCard
-      title="وضعیت پشتیبان‌گیری"
-      actions={
-        <Button type="button" onClick={backupNow} disabled={busy}>
-          {busy ? "در حال پشتیبان‌گیری…" : "پشتیبان‌گیری هم‌اکنون"}
-        </Button>
-      }
-    >
-      {error ? <ErrorBox>{error}</ErrorBox> : null}
-      {message ? <InfoBox>{message}</InfoBox> : null}
-
+    <SectionCard title="وضعیت پشتیبان‌گیری">
       {!health ? (
         <LoadingSkeleton rows={3} />
       ) : (
@@ -804,7 +762,22 @@ function StatusCard({
               <dt className="text-muted-foreground">نوع نسخه:</dt>
               <dd title={SCOPE_LABELS[health.scope].hint}>{SCOPE_LABELS[health.scope].label}</dd>
             </div>
+            <div className="flex justify-between gap-2 sm:justify-start">
+              <dt className="text-muted-foreground">زمان‌بندی خودکار:</dt>
+              <dd>
+                {health.enabled || health.policySource === "managed"
+                  ? `هر ${toPersianDigits(String(health.intervalHours))} ساعت`
+                  : "غیرفعال"}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2 sm:justify-start">
+              <dt className="text-muted-foreground">نگهداری نسخه‌ها:</dt>
+              <dd>{toPersianDigits(String(health.retentionDays))} روز</dd>
+            </div>
           </dl>
+          <p className="mt-3 text-xs text-muted-foreground">
+            زمان‌بندی، نگهداری، مقصد و رمزنگاری نسخه‌ها را مدیر سامانه تعیین می‌کند؛ این صفحه فقط وضعیت و بازیابی را نشان می‌دهد.
+          </p>
         </>
       )}
 
@@ -849,103 +822,35 @@ function StatusCard({
 }
 
 // ---------------------------------------------------------------------------
-// 2. Settings (Owner only)
+// 4. Owner Recovery Kit (desktop only)
 // ---------------------------------------------------------------------------
 
-const INTERVAL_OPTIONS = [
-  { value: 24, label: "شبانه (هر ۲۴ ساعت)" },
-  { value: 12, label: "هر ۱۲ ساعت" },
-  { value: 8, label: "هر ۸ ساعت" },
-  { value: 6, label: "هر ۶ ساعت" },
-  { value: 4, label: "هر ۴ ساعت" },
-  { value: 2, label: "هر ۲ ساعت" },
-  { value: 1, label: "هر ساعت" },
-];
-
-function SettingsCard({ onSaved }: { onSaved: () => void }) {
-  const [config, setConfig] = useState<ConfigForm | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [siteInstall, setSiteInstall] = useState(false);
+/**
+ * Issue #903 §6 keeps the Desktop Owner Recovery Kit: it unlocks the *local*
+ * database's encrypted fields and sync credentials, which is a different key
+ * from any backup artifact's. It used to live inside the schedule card; the card
+ * is gone with tenant scheduling, the kit is not.
+ */
+function RecoveryKitCard() {
   const [desktop, setDesktop] = useState(false);
   useEffect(() => {
-    void api<{ config?: ConfigForm; siteInstall?: boolean; desktop?: boolean }>("/api/backup/config").then((res) => {
-      if (res.ok && res.data.config) {
-        setConfig(res.data.config);
-        setSiteInstall(Boolean(res.data.siteInstall));
-        setDesktop(Boolean(res.data.desktop));
-      } else setError("دریافت تنظیمات ناموفق بود.");
-    }).catch(() => setError("دریافت تنظیمات ناموفق بود."));
+    void api<{ desktop?: boolean }>("/api/backup/config").then((res) => {
+      if (res.ok) setDesktop(Boolean(res.data.desktop));
+    }).catch(() => setDesktop(false));
   }, []);
-  async function save(e: React.FormEvent) {
-    e.preventDefault();
-    if (!config) return;
-    setBusy(true);
-    setError(null);
-    setSaved(false);
-    try {
-      const res = await api<{ error?: string }>("/api/backup/config", {
-        method: "PUT",
-        body: JSON.stringify({
-          enabled: config.enabled,
-          intervalHours: config.intervalHours,
-          anchorTime: config.anchorTime,
-          ...(siteInstall ? {
-            localRetention: config.localRetention,
-            directory: config.directory ?? "",
-            secondaryDirectory: config.secondaryDirectory ?? "",
-          } : {}),
-        }),
-      });
-      if (!res.ok) setError(res.data.error === "backup_directories_must_differ"
-        ? "پوشهٔ دوم باید با پوشهٔ اصلی متفاوت باشد."
-        : "ذخیرهٔ تنظیمات ناموفق بود.");
-      else { setSaved(true); onSaved(); }
-    } catch { setError("ذخیرهٔ تنظیمات ناموفق بود."); }
-    finally { setBusy(false); }
-  }
+  if (!desktop) return null;
   return (
-    <SectionCard title="تنظیمات پشتیبان‌گیری">
-      <InfoBox>{siteInstall
-        ? "مسیرهای محلی و نگهداری را برای این دستگاه تنظیم کنید. کلید بازیابی را جداگانه و آفلاین نگهداری کنید."
-        : "تنظیمات زیرساخت، رمزنگاری و نگهداری فقط در اختیار مدیر سامانه است. وضعیت موفقیت نسخه‌ها را در گزارش پشتیبان‌گیری بررسی کنید."}</InfoBox>
-      {error ? <ErrorBox>{error}</ErrorBox> : null}
-      {saved ? <InfoBox>ذخیره شد.</InfoBox> : null}
-      {!config ? (!error ? <LoadingSkeleton rows={3} /> : null) : (
-        <form onSubmit={save} className="space-y-4">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={config.enabled} onChange={(e) => setConfig({ ...config, enabled: e.target.checked })} />
-            پشتیبان‌گیری خودکار
-          </label>
-          <Field label="بازهٔ پشتیبان‌گیری">
-            <SearchableSelect value={String(config.intervalHours)} options={INTERVAL_OPTIONS.map((o) => ({ ...o, value: String(o.value) }))} onChange={(value) => setConfig({ ...config, intervalHours: Number(value) })} />
-          </Field>
-          <Field label="ساعت شروع">
-            <input type="time" className={inputClass} value={config.anchorTime} onChange={(e) => setConfig({ ...config, anchorTime: e.target.value })} />
-          </Field>
-          {siteInstall ? (
-            <>
-              <Field label="مسیر اصلی پشتیبان‌گیری" hint="خالی یعنی پوشهٔ استاندارد Backup برنامه">
-                <input dir="ltr" className={inputClass} value={config.directory ?? ""} onChange={(e) => setConfig({ ...config, directory: e.target.value })} />
-              </Field>
-              <Field label="مسیر دوم پشتیبان‌گیری" hint="ترجیحاً روی یک دیسک یا فضای ذخیره‌سازی جداگانه">
-                <input dir="ltr" className={inputClass} value={config.secondaryDirectory ?? ""} onChange={(e) => setConfig({ ...config, secondaryDirectory: e.target.value })} />
-              </Field>
-              <Field label="تعداد نسخه‌های نگهداری‌شده در هر مسیر">
-                <PersianNumberInput min={1} max={365} inputMode="numeric" grouping={false} className={inputClass} value={config.localRetention} onChange={(e) => setConfig({ ...config, localRetention: Number(e.target.value) })} />
-              </Field>
-            </>
-          ) : <p className="text-sm text-muted-foreground">تعداد نسخه‌های نگهداری‌شده: {toPersianDigits(String(config.localRetention))}</p>}
-          <div className="flex flex-wrap gap-3">
-            <PrimaryButton type="submit" disabled={busy}>{busy ? "در حال ذخیره…" : "ذخیره"}</PrimaryButton>
-            {desktop ? <RecoveryKitButton /> : null}
-          </div>
-        </form>
-      )}
+    <SectionCard title="کیت بازیابی مالک">
+      <InfoBox>
+        این کلید، داده‌های رمزنگاری‌شدهٔ همین دستگاه و اعتبارنامه‌های همگام‌سازی را باز می‌کند و با عبارت عبور فایل پشتیبان تفاوت دارد. آن را جدا از دستگاه و آفلاین نگهداری کنید.
+      </InfoBox>
+      <div className="mt-4">
+        <RecoveryKitButton />
+      </div>
     </SectionCard>
   );
 }
+
 
 function RecoveryKitButton() {
   const [open, setOpen] = useState(false);

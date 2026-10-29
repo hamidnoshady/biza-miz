@@ -23,8 +23,7 @@ import { redeemGiftCard, expireGiftCards } from "./promotions-service";
 import { redeemPoints, issueStoreCredit, useStoreCredit as payOutStoreCredit, storeCreditBalance, upsertProgram } from "./loyalty-service";
 import { openSession, releaseSessionWithoutOrders, mergeTableIntoSession, setSessionGuests } from "./table-session-service";
 import { broadcast } from "./realtime";
-import { getBackupConfig, setBackupConfig, runBackupNow, restoreAvailable, restoreFromArtifact } from "./backup-service";
-import { chargeForFeature } from "./billing-guard";
+import { restoreAvailable, restoreFromArtifact } from "./backup-service";
 import { DeviceError, renameDevice, revokeDevice, listDevices, findActiveDeviceId } from "./device-service";
 import { updateAttributeDefinition, deleteAttributeDefinition } from "./product-attributes-service";
 import { parseAttributeDefinitionInput } from "./product-attributes";
@@ -6732,37 +6731,12 @@ const deviceRevoke: AutopilotExecutor = async (ctx) => {
   }
 };
 
-// ── Issue #883 package 2, batch AH — backup config, manual run, restore ───
-// run-now rides the route's own billing gate (chargeForFeature) so a priced
-// run charges the wallet exactly once, same as the button. Restore is the
-// whole-database replacement the Owner-only route performs; verifyOnly maps
-// to the route's apply:false (validate into scratch, touch nothing).
-const backupConfigSet: AutopilotExecutor = async (ctx) => {
-  const payload = { ...(ctx.payload as Record<string, unknown>) };
-  if (payload.passphrase === "" || payload.passphrase === undefined) {
-    const current = await getBackupConfig(ctx.businessId);
-    if (current) payload.passphrase = (current as { passphrase?: string }).passphrase;
-  }
-  try {
-    await setBackupConfig(ctx.businessId, payload as never);
-    return { ok: true, result: { ok: true } };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "";
-    if (message.startsWith("invalid_") || message.includes("required")) return fail("bad_request");
-    throw err;
-  }
-};
-const backupRunNow: AutopilotExecutor = async (ctx) => {
-  const gate = await chargeForFeature(ctx.businessId, "backup", {
-    note: "پشتیبان‌گیری دستی",
-    userId: ctx.authorizedByUserId ?? null,
-  });
-  if (!gate.ok) {
-    return { ok: false, result: { error: "backup_not_chargeable", detail: gate.response }, errorCode: "backup_not_chargeable" };
-  }
-  const result = await runBackupNow(ctx.businessId);
-  return { ok: true, result: { result: { ...(result as object) }, charged: gate.charged ?? null, balanceRial: gate.balanceRial ?? null } };
-};
+// ── Issue #883 package 2, batch AH — tenant restore ───────────────────────
+// Issue #903 §3 (owner decision 2026-10-28) removed the two sibling verbs that
+// lived here — `backup.config.set` and `backup.run_now`. Creating, scheduling
+// and running a backup is the Superadmin's job; a tenant model may still *read*
+// status (`get_backup_status`) and apply a verified restore on a single-tenant
+// install, which is what remains below.
 const backupRestoreApply: AutopilotExecutor = async (ctx) => {
   const artifactId = str(ctx.payload.artifactId) ?? str(ctx.payload.id);
   if (!artifactId) return fail("missing_artifact");
@@ -8661,8 +8635,6 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   barcodeTemplateDelete,
   deviceRename,
   deviceRevoke,
-  backupConfigSet,
-  backupRunNow,
   backupRestoreApply,
   tableSessionOpen,
   tableSessionUpdate,

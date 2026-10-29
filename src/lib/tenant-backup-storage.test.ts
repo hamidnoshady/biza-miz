@@ -15,12 +15,14 @@ vi.mock("./master-key", () => ({ getMasterKey: () => mocks.getMasterKey() }));
 import {
   normalizeKeyPrefix,
   readTenantBackupService,
+  resolveTenantBackupPolicy,
   resolveTenantStorage,
   serviceConfigView,
   tenantFacingStorageStatus,
   tenantObjectKey,
   tenantObjectPrefix,
   updateTenantBackupService,
+  SAFE_TENANT_BACKUP_POLICY,
 } from "./tenant-backup-storage";
 
 const BUSINESS = "11111111-1111-4111-8111-111111111111";
@@ -262,5 +264,37 @@ describe("updateTenantBackupService", () => {
         secretAccessKey: "secret",
       }),
     ).toEqual({ ok: false, error: "invalid_endpoint" });
+  });
+});
+
+describe("resolveTenantBackupPolicy", () => {
+  it("takes the schedule and retention from the platform row, not from a tenant", async () => {
+    mocks.query.mockResolvedValue({
+      rows: [serviceRow({ default_interval_hours: 6, default_retention_days: 90, max_retention_days: 365, cloud_keep_count: 12, managed_cloud: true, endpoint: "https://s3.example", bucket: "b" })],
+    });
+    mocks.getMasterKey.mockReturnValue(Buffer.alloc(32, 7));
+    const policy = await resolveTenantBackupPolicy();
+    expect(policy).toMatchObject({
+      intervalHours: 6,
+      retentionDays: 90,
+      maxRetentionDays: 365,
+      keepCount: 12,
+      source: "managed",
+    });
+    // No usable sealed credential was configured, so the fleet has no usable
+    // cloud destination even though `managed_cloud` is on.
+    expect(policy.managedCloud).toBe(false);
+  });
+
+  it("snaps an out-of-catalogue cadence to a representable one instead of failing", async () => {
+    mocks.query.mockResolvedValue({ rows: [serviceRow({ default_interval_hours: 5 })] });
+    await expect(resolveTenantBackupPolicy()).resolves.toMatchObject({ intervalHours: 4 });
+    mocks.query.mockResolvedValue({ rows: [serviceRow({ default_interval_hours: 30 })] });
+    await expect(resolveTenantBackupPolicy()).resolves.toMatchObject({ intervalHours: 24 });
+  });
+
+  it("falls back to safe defaults, and says so, when the row cannot be read", async () => {
+    mocks.query.mockRejectedValue(new Error("relation does not exist"));
+    await expect(resolveTenantBackupPolicy()).resolves.toEqual(SAFE_TENANT_BACKUP_POLICY);
   });
 });
