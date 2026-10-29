@@ -349,6 +349,33 @@ messages that can serve them, a status that says «فعال»/«خاموش»/«�
 carries `triggers` — the events a message's own variables can fill — so the screen cannot offer an
 automation that would be refused at send time.
 
+## 5f. The library a business can actually use (§5, tenant surface)
+
+§5c gave the platform a curated message library and §5e gave a business automations to point at an
+approved message. Nothing joined them: the API had returned `templateLibrary` since §5, and no
+tenant screen rendered it, so a business's only route to a template was writing one by hand and
+waiting for the console to submit it. `template-library-view.ts` and the Growth card close that.
+
+**The screen shows three things, and each is computed rather than copied.** The *sample* is rendered
+by `renderTemplateSample` — the same renderer a real send uses — so a preview cannot promise
+formatting the send will not produce. The *variables* are the entry's ordered domain vocabulary,
+named in Persian (`نام مشتری`, `مبلغ (ریال)`) instead of `%token2`, and a variable outside that
+vocabulary is dropped rather than displayed as our notation. The *automations* an entry can serve are
+computed by `checkTriggerTemplate` — the same check `sendManagedLookup` refuses with — so the screen
+cannot offer a pairing the server would reject.
+
+**Adding one is a draft, not a switch.** The action is the existing
+`POST {action:"lookup_template_from_library"}`; the server re-resolves eligibility by id (a disabled
+entry, or one targeted at another trade, is a refusal, not "look it up by id"), creates a `draft`,
+and the platform's submit path asks the provider for approval. The notice therefore says «برای
+بررسی ثبت می‌شود», and the entry stays visible in the list marked «در فهرست شما» — a person should
+not have to guess whether the click worked.
+
+**What the screen does not say.** No provider name, no provider template id, no approval
+vocabulary and no wholesale price: `managed-services/inventory.test.ts` reads every tenant screen
+for supplier names, and `template-library-view.test.ts` checks the rendered view against the same
+pattern.
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -488,6 +515,7 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `template-library-view` (§5f) | 6/6 pass (Persian variable names in mapping order, the automation each entry can serve computed by the send path's own check, no automation for an unfillable message, unknown variables dropped rather than shown as `%token4`, supplier-free copy) |
 | `npx vitest run` — `managed-services` (§0) | 23/23 pass (inventory covers every registered service, paths exist, maturities are honest with their follow-ups, plus the source guard over ~100 tenant screens and a positive/negative control for the supplier pattern) |
 | `npm run test:design` | platform console is outside the design-lint realms; tenant Growth card changed only its copy — run recorded with the change |
 | `npm run lint` (whole repository, `--max-warnings=0`) | clean |

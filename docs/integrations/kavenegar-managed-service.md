@@ -345,6 +345,10 @@ and nothing provisions until it is on.
 - `template-variables.ts` — the pure rendering boundary (§5): six domain variables, one renderer
   each, positional `%token` slots, and errors instead of silent truncation. The same call produces
   the sample a tenant sees, so what is previewed is what will be sent.
+- `template-library-view.ts` — the library as a tenant may read it (§5f): the sample rendered by
+  the sending renderer, the declared variables named in Persian, and the automations an entry can
+  serve computed by the same check the send path refuses with. A variable outside the closed
+  vocabulary is dropped rather than shown as `%token4`.
 - `lookup-send-service.ts` — sending one approved message (§5): the child's own key, retail reserved
   and settled once by the §4 engine, the provider's reported cost recorded tenant-invisibly, a
   definitive refusal refunded in full, and an **ambiguous** transport failure kept as `unknown`

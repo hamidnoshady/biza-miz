@@ -286,6 +286,12 @@ export type TenantLibraryEntry = {
   title: string;
   purpose: LookupPurpose;
   sample: string;
+  /**
+   * The ordered domain variables the message declares, so the tenant screen can
+   * name what the message needs (issue #902 §5) instead of showing `%token2`.
+   * Safe to send: they are this product's own vocabulary, not the provider's.
+   */
+  variables: string[];
   alreadyAdded: boolean;
 };
 
@@ -306,6 +312,7 @@ export async function tenantTemplateLibrary(businessId: string): Promise<TenantL
     title: entry.title,
     purpose: entry.purpose,
     sample: renderTemplateSample({ body: entry.body, variables: entry.variables }),
+    variables: [...entry.variables],
     alreadyAdded: existing.has(entry.id),
   }));
 }
