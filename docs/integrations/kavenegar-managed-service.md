@@ -349,6 +349,16 @@ and nothing provisions until it is on.
   and settled once by the §4 engine, the provider's reported cost recorded tenant-invisibly, a
   definitive refusal refunded in full, and an **ambiguous** transport failure kept as `unknown`
   rather than refunded. `buildLookupSendRequest` takes no master key by design.
+- `lookup-trigger-facts.ts` — the closed event vocabulary (§5): `order_ready` and
+  `payment_received`, the facts each event really has, and the check that a template's declared
+  variables can be filled from them. `login_code` is deliberately absent — every trigger here is a
+  send on a business's child account charged to that business's wallet, while a login OTP must
+  survive an empty wallet, a suspended child or Growth being off.
+- `lookup-triggers.ts` — the product half (§5): the business's per-trigger choice
+  (`kavenegar_lookup_triggers`, seeded empty), a consent-and-reachability check before any provider
+  call, and a claim row in `kavenegar_lookup_trigger_sends` whose UNIQUE fact key makes a replayed
+  or racing event one message. Entry point: `notifyOrderReady`, called un-awaited from both the
+  kitchen bump and the offline replay; nothing in the module throws.
 - `reconciliation-service.ts` — stored wholesale balance/margin evidence.
 - `/api/platform/sms/accounts` — Superadmin reads (accounts, margin, reconciliation, template
   catalog) and actions (policy, probe, transfer, fund, reconcile, template submit/archive/sync,
@@ -367,6 +377,12 @@ and nothing provisions until it is on.
   fake transport (no network)
 - `integration/kavenegar-master-templates.integration.test.ts` — 16 database cases for the
   library: trade/plan targeting, idempotent instantiation, versioned rollout, lineage, RLS
+- `integration/kavenegar-lookup-triggers.integration.test.ts` — 17 database cases for the trigger
+  layer: refusals at configuration time (not approved, no mapping, a fact the event lacks, and
+  `login_code` as a trigger), nothing sent until the business turns an event on, one send on the
+  child's key per fact (replay and two racing bumps included), an empty wallet blocked before the
+  provider is called, consent honoured for a transactional message, and one receipt per replayed
+  settlement.
 - `integration/kavenegar-lookup-send.integration.test.ts` — 8 database cases for the send: the
   refusals that must precede a charge, one charge per message, a tenant-invisible wholesale cost,
   a full refund on a definitive refusal, and the kept reservation on an ambiguous outcome: one-child-per-activation, lost-response recovery, funding
@@ -378,7 +394,7 @@ and nothing provisions until it is on.
 | Item | Why it is not in this slice |
 | --- | --- |
 | Delivery/health dashboard | Delivery is visible through the outbox and Billing's usage screens; a dedicated latency/failure panel is a follow-up. |
-| Tying approved templates to concrete triggers | The catalog and approval lifecycle exist; wiring «کد ورود»/«سفارش آماده است» to product events is product work. |
+| Payment receipts from every writer | `notifyPaymentReceived` fires from the counter checkout and the offline replay, after `COMMIT`. The Woo/CMS importers and the amendment bridge settle inside their own transactions and have no post-commit point yet. |
 | Invoice lines from price versions, supplier-invoice reconciliation | The versions, the margin report and `billing_vendor_cost_events` exist; emitting `billing_usage_ratings`/invoice lines from the same versions is Billing's change, and confirming accepted-but-undelivered billing needs real invoices. |
 | Authoritative master balance | The customer API exposes a child's balance only. The floor accepts an operator-supplied balance and refuses to fund blindly without one. |
 | Bulk adoption of pre-existing children | Single adoption by `localid` exists (`adopt` job); bulk mapping needs operator-supplied data. |
