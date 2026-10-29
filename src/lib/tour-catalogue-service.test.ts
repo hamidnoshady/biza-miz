@@ -33,6 +33,8 @@ describe("platform-authored tour validation", () => {
   });
   it("does not allow public publishing of an unguarded page", () => {
     expect(() => parseTourStudioInput({ ...base, eligibility: {} })).toThrowError("publishing_requires_eligibility");
+    expect(() => parseTourStudioInput({ ...base, eligibility: { permissions: [] } })).toThrowError("publishing_requires_eligibility");
+    expect(() => parseTourStudioInput({ ...base, eligibility: { withoutPermissions: [PERMISSIONS.inventoryView] } })).toThrowError("publishing_requires_eligibility");
     expect(parseTourStudioInput({ ...base, status: "draft", eligibility: {} }).status).toBe("draft");
   });
   it("validates per-step eligibility and refuses malicious or unknown access flags", () => {
