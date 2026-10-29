@@ -24,19 +24,22 @@ import {
   FolderTreeIcon,
   NewspaperIcon,
   TagIcon,
+  RouteIcon,
 } from "lucide-react";
 import { api, useCan } from "../ui";
 import { ArticlesPanel } from "./kb-articles-panel";
 import { CategoriesPanel } from "./kb-categories-panel";
 import { TagsPanel } from "./kb-tags-panel";
+import { TourStudioPanel } from "./tour-studio-panel";
 import type { ConsoleCategory, ConsoleTag } from "./kb-types";
 
-type Tab = "articles" | "categories" | "tags";
+type Tab = "articles" | "categories" | "tags" | "tours";
 
 const TABS: { key: Tab; label: string; icon: typeof NewspaperIcon }[] = [
   { key: "articles", label: "مقالات", icon: NewspaperIcon },
   { key: "categories", label: "دسته‌بندی‌ها", icon: FolderTreeIcon },
   { key: "tags", label: "برچسب‌ها", icon: TagIcon },
+  { key: "tours", label: "تورهای تعاملی", icon: RouteIcon },
 ];
 
 export default function KnowledgePage() {
@@ -68,7 +71,7 @@ export default function KnowledgePage() {
         <div className="min-w-0">
           <h1 className="text-xl font-bold">پایگاه دانش</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            محتوای «مرکز آموزش» کاربران را اینجا بسازید: مقاله، دسته و برچسب.
+            محتوای «مرکز آموزش» را اینجا بسازید: مقاله، دسته، برچسب و تور تعاملی.
             صفحه‌های مقصد هر راهنما را در همان فرم ایجاد یا ویرایش مقاله انتخاب کنید.
             {canManage ? "" : " (فقط مشاهده — تغییر در اختیار مهندس و مدیر ارشد است.)"}
           </p>
@@ -103,9 +106,11 @@ export default function KnowledgePage() {
         <ArticlesPanel categories={categories} tags={tags} onChanged={loadTaxonomy} />
       ) : tab === "categories" ? (
         <CategoriesPanel />
-      ) : (
+      ) : tab === "tags" ? (
         <TagsPanel />
-      )}
+      ) : (
+        <TourStudioPanel />
+      )
     </div>
   );
 }
