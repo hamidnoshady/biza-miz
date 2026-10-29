@@ -25,6 +25,7 @@ const ALL_KINDS: ServiceAlertKind[] = [
   "account_suspended",
   "provisioning_failed",
   "tariff_missing",
+  "transactional_reserve_held",
 ];
 
 const BUSINESS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -62,6 +63,18 @@ describe("funding blocks become alerts only when a human must act", () => {
       kind: "master_balance_unknown",
       businessId: null,
     });
+  });
+
+  it("reports a held reserve as its own condition, not as a credit shortage (issue #902 #3)", () => {
+    // The money is there; it is reserved. An operator told "credit low" would
+    // top up a master account that is not short, so the reserve gets its own
+    // alert and its own sentence.
+    expect(alertForFundingBlock("transactional_reserve", BUSINESS)).toMatchObject({
+      kind: "transactional_reserve_held",
+      businessId: null,
+    });
+    expect(ALERT_SEVERITY.transactional_reserve_held).toBe("warning");
+    expect(ALERT_TITLE.transactional_reserve_held).not.toBe(ALERT_TITLE.master_credit_low);
   });
 
   it("attributes a cap to the business, and the fleet cap to nobody", () => {

@@ -141,6 +141,19 @@ export interface FundingPolicy {
   globalDailyCapRial: number | null;
   /** Wholesale credit the master account must retain. */
   masterFloorRial: number;
+  /**
+   * Issue #902 #3 — credit above the floor that only *transactional* funding
+   * may spend (migration 0267). 0 means no reserve, which is the default: the
+   * guard only ever protects capacity once an operator asks for it.
+   */
+  transactionalReserveRial: number;
+  /**
+   * How this fleet's provider spend is classified. `marketing` — the default —
+   * may not spend the reserve; `transactional` may. The platform cannot infer
+   * this: the same child account sends a campaign and an order-ready message,
+   * so only an operator knows which side of the line a fleet is on.
+   */
+  fundingPurpose: FundingPurpose;
 }
 
 export const NO_FUNDING: FundingPolicy = {
@@ -155,7 +168,24 @@ export const NO_FUNDING: FundingPolicy = {
   dailyCapRial: null,
   globalDailyCapRial: null,
   masterFloorRial: 0,
+  transactionalReserveRial: 0,
+  fundingPurpose: "marketing",
 };
+
+/**
+ * How a fleet's provider spend is classified for the reserve (issue #902 #3).
+ *
+ * `marketing` is deliberately the default and the restrictive side: it cannot
+ * touch the reserved slice, so switching the reserve on can only ever hold
+ * capacity back, never let more money out.
+ */
+export type FundingPurpose = "marketing" | "transactional";
+
+export const FUNDING_PURPOSES: readonly FundingPurpose[] = ["marketing", "transactional"] as const;
+
+export function isFundingPurpose(value: unknown): value is FundingPurpose {
+  return typeof value === "string" && (FUNDING_PURPOSES as readonly string[]).includes(value);
+}
 
 /**
  * Is the `scheduled` strategy inside its window right now?
@@ -215,7 +245,8 @@ export type FundingBlockedReason =
   | "unresolved_transfer"
   | "below_provider_minimum"
   | "outside_funding_window"
-  | "global_daily_cap_reached";
+  | "global_daily_cap_reached"
+  | "transactional_reserve";
 
 export type FundingDecision =
   | { action: "none"; amountRial: 0; reason: FundingBlockedReason; targetBalanceRial: number | null }
@@ -240,7 +271,8 @@ export function roundToProviderMinimum(amountRial: number): number {
  *      (double-funding is the failure mode the journal exists to prevent);
  *   3. unknown tariff ⇒ cannot compute a target, so guess nothing;
  *   4. ceiling and daily cap clamp the amount;
- *   5. the master floor is subtracted from what the master may spend;
+ *   5. the master floor is subtracted from what the master may spend, and the
+ *      transactional reserve on top of it for marketing-classified spend;
  *   6. anything below the provider's 1,000 Rial minimum is not attempted.
  *
  * Negative values (a child whose balance the provider reported above target)
@@ -334,6 +366,16 @@ export function planFunding(input: {
     available = Math.min(available, fleetRoom);
   }
 
+  // Issue #902 #3 — the reserved slice. A marketing-classified fleet may not
+  // spend the last `transactionalReserveRial` above the floor; a transactional
+  // one may. This is the only thing that keeps a login code funded when every
+  // child is capped and the master has drifted down to the floor, because the
+  // floor alone stops funding *everyone* — the waiting customer included.
+  const reserveRial =
+    policy.fundingPurpose === "transactional"
+      ? 0
+      : Math.max(0, Math.trunc(policy.transactionalReserveRial ?? 0));
+
   if (input.masterBalanceRial === null) {
     if (policy.masterFloorRial > 0) {
       return { action: "none", amountRial: 0, reason: "master_balance_unknown", targetBalanceRial };
@@ -346,7 +388,14 @@ export function planFunding(input: {
     if (spendableMaster <= 0) {
       return { action: "none", amountRial: 0, reason: "master_floor", targetBalanceRial };
     }
-    available = Math.min(available, spendableMaster);
+    // The reserve is reported as its own reason rather than as `master_floor`:
+    // an operator looking at a fleet that stopped funding needs to know which
+    // guard stopped it, and "the money is there but held for transactional
+    // traffic" is a different instruction from "there is no money".
+    if (spendableMaster <= reserveRial) {
+      return { action: "none", amountRial: 0, reason: "transactional_reserve", targetBalanceRial };
+    }
+    available = Math.min(available, spendableMaster - reserveRial);
   }
 
   const amountRial = roundToProviderMinimum(available);
@@ -391,6 +440,8 @@ type SnapshotRow = {
   managed_funding_window_start_hour: number;
   managed_funding_window_end_hour: number;
   managed_funding_global_daily_cap_rial: string | number | null;
+  managed_funding_transactional_reserve_rial: string | number;
+  managed_funding_purpose: FundingPurpose;
 };
 
 /** One business's retail rate, wholesale tariff and funding policy. */
@@ -411,7 +462,9 @@ export async function getBusinessPriceSnapshot(
               s.managed_funding_low_watermark_messages,
               s.managed_funding_window_start_hour,
               s.managed_funding_window_end_hour,
-              s.managed_funding_global_daily_cap_rial
+              s.managed_funding_global_daily_cap_rial,
+              s.managed_funding_transactional_reserve_rial,
+              s.managed_funding_purpose
          FROM kavenegar_business_accounts a
          LEFT JOIN platform_message_config c ON c.id
          LEFT JOIN platform_sms_config s ON s.id = 1
@@ -446,6 +499,10 @@ export async function getBusinessPriceSnapshot(
       dailyCapRial: nullableNumber(row.managed_funding_daily_cap_rial),
       globalDailyCapRial: nullableNumber(row.managed_funding_global_daily_cap_rial),
       masterFloorRial: numberOr(row.managed_funding_master_floor_rial, 0),
+      transactionalReserveRial: numberOr(row.managed_funding_transactional_reserve_rial, 0),
+      fundingPurpose: isFundingPurpose(row.managed_funding_purpose)
+        ? row.managed_funding_purpose
+        : "marketing",
     },
   };
 }

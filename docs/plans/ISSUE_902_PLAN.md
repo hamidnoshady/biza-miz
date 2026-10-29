@@ -164,7 +164,8 @@ silently treating it as `jit`.
 
 Still open in §3 and left for a follow-up: the `approved campaign budget` strategy — that needs a
 product decision on which campaigns count as approved spend. (The **authoritative master balance**
-that used to head this list is closed by §5g.)
+that used to head this list is closed by §5g; the second half of the same item — a **reserved slice
+of master credit that marketing can never consume** — is §5h.)
 
 ## 5b. Funding under concurrency, and the Superadmin attention ledger (§3)
 
@@ -436,6 +437,35 @@ With the figure real, `master_balance_unknown` stops being a routine warning: it
 failed, so its remedy in both the alert ledger and the console changed from «read the panel and type
 it in» to «check the master key and the connection; the pass reads the balance itself».
 
+## 5h. A reserved slice marketing can never spend (§3, DoD #9)
+
+DoD #9 says a login OTP must keep working when "every child is capped" and when "tenant marketing
+credit is exhausted". §5g made the funding pass able to *see* the master's credit; it did not give
+the fleet a way to keep any of it. The floor alone cannot do this job: once the master drifts down to
+the floor, automation stops funding **everyone** — the message that then fails to go out is the login
+code a customer is waiting for, while a campaign funded an hour earlier has already been sent.
+
+The distinction the floor cannot make is *why* a message is being sent, and the platform cannot infer
+it: the same child account carries a campaign and an order-ready message. So migration `0267` adds
+the two things only an operator can decide, and `planFunding` enforces them:
+
+| Column | Meaning |
+| --- | --- |
+| `managed_funding_transactional_reserve_rial` | credit above the floor that marketing may not spend; `0` (the default) means no reserve |
+| `managed_funding_purpose` | `marketing` (default) or `transactional` — how this fleet's provider spend is classified |
+
+The rule is one line in the planner: spendable = master − floor, and marketing may use
+`spendable − reserve`. A blocked marketing transfer reports `transactional_reserve`, **not**
+`master_floor`, and raises its own warning (`transactional_reserve_held`): an operator told "credit
+low" would top up a master account that is not short, so the words have to distinguish "the money is
+gone" from "the money is held". `marketing` is the default and the restrictive side, so enabling a
+reserve can only ever hold capacity back — never let more money out by accident.
+
+**What this does not do.** The provider has no concept of a reserved balance, so this is enforced on
+our side of the call, not in the provider's ledger: it governs *funding*, and it protects the
+transactional lane from being starved by funding decisions. It is not a second wallet, and a child
+that already holds credit is unaffected by it.
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -570,6 +600,8 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Bizamiz`→`Bizamiz` copy slip in new comments; fixed) |
 | `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass |
 | `npx vitest run` — `client` + `rest` + `pricing-service` (§5g) | 4 new fixtures: `account/info` addressed under the master key and never a child's, a real `0` kept distinct from an unreadable balance, the key the payload echoes dropped, a refused read surfacing as an error the pass turns into `null` (and a log line with no credential in it) |
+| `npx vitest run` — `pricing-service` + `alert-service` (§5h) | 6 new fixtures: marketing clamped to `spendable − reserve` rather than the target, the reserve's own blocked reason, transactional funding reaching the same target, the floor still ahead of the reserve for both purposes, the rule inert at reserve `0`, and `transactional_reserve_held` carrying its own copy rather than "credit low" |
+| `npm run test:db` — `kavenegar-managed-accounts` (§5h) | one added case: the policy round-trips, marketing funds the buffer while it has room above the reserve, is refused with `transactional_reserve` once only the reserve is left, and funds again the moment the fleet is classified `transactional` |
 | `npm run test:db` — `kavenegar-managed-accounts` (§5g) | two added cases: a floored fleet funds with no operator figure (the pass calls `account/info` first, then `chargecredit`), and an unreadable master balance funds nothing and leaves `master_balance_unknown` open |
 
 | `npm run test:db` — `kavenegar-master-templates` | 16/16 pass (targeting by trade and plan, idempotent instantiation of a copy, versioned rollout that leaves the live copy alone, lineage through a revision, platform-only RLS) |
@@ -607,10 +639,10 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
    tenant preview of a trigger's exact text before enabling it; and a per-trigger delivery view.
    The login code is deliberately *not* one of these triggers: it stays on the platform-auth
    transport (§5e), which is what keeps it working with an empty wallet.
-1. **Campaign-budget and OTP reserved capacity** (#902 §3, P0): the three strategies and the
-   guards are in place; "approved campaign budget" as a distinct funding trigger, and a
-   reserved slice of master credit that marketing can never consume (so a login OTP is funded
-   even when every child is capped), are still open.
+1. **Campaign-budget funding trigger** (#902 §3, P0): the three strategies and the guards are in
+   place, and the **reserved slice** is closed by §5h (a marketing-classified fleet can no longer
+   spend the credit held for transactional traffic). Still open: "approved campaign budget" as a
+   distinct funding trigger, which needs a product decision on which campaigns count.
 2. **Delivery/health dashboards** (#902 P1): the fleet-level delivery card (§6c) exists;
    per-campaign delivery, provider latency and a historical view are follow-ups.
 3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions (§6d), the

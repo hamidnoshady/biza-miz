@@ -786,6 +786,49 @@ describe("JIT funding", () => {
     expect(open.map((alert) => alert.kind)).toContain("master_balance_unknown");
   });
 
+  it("holds the transactional reserve back from marketing, and lets transactional funding use it (issue #902 #3)", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 500_000,
+      fundingTransactionalReserveRial: 200_000,
+      fundingPurpose: "marketing",
+    });
+    // The policy round-trips: a save the console makes is a read the pass sees.
+    const saved = await policy.getManagedChildPolicy();
+    expect(saved.fundingTransactionalReserveRial).toBe(200_000);
+    expect(saved.fundingPurpose).toBe("marketing");
+
+    // Master 800,000: floor 500,000 leaves 300,000, of which 200,000 is held,
+    // leaving 100,000 for marketing — more than the 36,000 target, so it funds.
+    const marketing = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 800_000,
+    });
+    expect(marketing?.decision).toMatchObject({ action: "transfer", amountRial: 36_000 });
+
+    // Tighten the master until only the reserve is left above the floor: the
+    // same child is now refused, and refused for the reserve's own reason.
+    const held = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 660_000,
+    });
+    expect(held?.decision).toMatchObject({ action: "none", reason: "transactional_reserve" });
+
+    // Classified as transactional, the same master funds it again.
+    await policy.saveManagedChildPolicy({ fundingPurpose: "transactional" });
+    const transactional = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 660_000,
+    });
+    expect(transactional?.decision).toMatchObject({ action: "transfer", amountRial: 36_000 });
+
+    // Leave the fleet as the other cases expect it.
+    await policy.saveManagedChildPolicy({
+      fundingPurpose: "marketing",
+      fundingTransactionalReserveRial: 0,
+    });
+  });
+
   it("follows the operator's funding strategy, not just the buffer", async () => {
     await activate(alpha.businessId);
     const at = (hour: number) => new Date(`2026-03-02T${String(hour).padStart(2, "0")}:30:00Z`);
