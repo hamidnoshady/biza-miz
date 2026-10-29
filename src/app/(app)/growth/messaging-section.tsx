@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { formatPersianNumber } from "@/lib/digits";
 import { templateVariableTokens } from "@/lib/message-template";
+import { libraryEntryView, splitLibrary, type LibraryEntryView } from "@/lib/kavenegar/template-library-view";
 import {
   cardClass,
   EmptyState,
@@ -85,6 +86,21 @@ type LookupTriggerKey = "order_ready" | "payment_received";
  * first-party words; `login_code` is deliberately not a trigger, because a
  * login OTP runs on the platform transport and never on this business's wallet.
  */
+/**
+ * Issue #902 §5 — one of Bizamiz's own approved messages, as offered to this
+ * business. The server filters by trade and plan and renders the sample with the
+ * same renderer a real send uses; `variables` is the ordered domain vocabulary,
+ * never the provider's notation.
+ */
+interface LibraryEntry {
+  id: string;
+  title: string;
+  purpose: "verification" | "transactional";
+  sample: string;
+  variables?: string[];
+  alreadyAdded: boolean;
+}
+
 interface TriggerSetting {
   trigger: LookupTriggerKey;
   label: string;
@@ -117,6 +133,7 @@ interface Data {
   templates: Template[];
   lookupTemplates?: LookupTemplate[];
   triggers?: TriggerSetting[];
+  templateLibrary?: LibraryEntry[];
   campaigns: Campaign[];
   segments: Segment[];
   projects: Project[];
@@ -401,6 +418,21 @@ export function MessagingSection({
    * validates against the event's own variables, so a mismatch comes back as a
    * refusal in this form rather than as a message sent with a blank.
    */
+  /**
+   * Add one of Bizamiz's library messages to this business's catalog.
+   *
+   * The server re-resolves eligibility by id (a disabled entry or another
+   * trade's entry is refused), creates a draft, and the platform asks the
+   * provider for approval — which is why the notice below says «برای بررسی»
+   * rather than «آماده».
+   */
+  async function addFromLibrary(libraryId: string, title: string) {
+    const saved = await send({ action: "lookup_template_from_library", libraryId }, `library:${libraryId}`);
+    if (saved) {
+      setNotice(`«${title}» به فهرست پیام‌های خودکار اضافه شد و برای بررسی ثبت می‌شود.`);
+    }
+  }
+
   async function saveTrigger(trigger: LookupTriggerKey, enabled: boolean) {
     const chosen = triggerPick[trigger] ?? data?.triggers?.find((item) => item.trigger === trigger)?.templateId ?? "";
     if (!chosen) {
@@ -738,6 +770,83 @@ export function MessagingSection({
         ) : (
           <EmptyState>هنوز پیام خودکاری ثبت نشده است. کد ورود یا پیام تراکنشی را از فرم پایین اضافه کنید.</EmptyState>
         )}
+
+        {/* Issue #902 §5 — Bizamiz's own message library. The server offers only
+            entries matching this business's trade and plan, renders the sample
+            with the renderer a real send uses, and re-checks eligibility when
+            an entry is added by id. */}
+        <div className="mt-4 grid gap-3 border-t border-border/80 pt-4">
+          <div>
+            <p className="text-sm font-medium">پیام‌های آمادهٔ بیزامیز</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              این متن‌ها از پیش نوشته و بررسی شده‌اند. با افزودن یکی، نسخهٔ خودتان ساخته می‌شود و پس از تأیید در
+              اطلاع‌رسانی خودکار همین صفحه قابل استفاده است.
+            </p>
+          </div>
+          {(() => {
+            const library = splitLibrary((data.templateLibrary ?? []).map((entry) => libraryEntryView(entry)));
+            if (!library.available.length && !library.added.length) {
+              return <EmptyState>در حال حاضر پیام آماده‌ای برای این کسب‌وکار وجود ندارد.</EmptyState>;
+            }
+            const renderEntry = (entry: LibraryEntryView) => (
+              <li key={entry.id} className="grid gap-2 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="leading-6 font-medium">
+                      {entry.title}{" "}
+                      {entry.alreadyAdded ? <StatusBadge tone="neutral">در فهرست شما</StatusBadge> : null}
+                    </p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{entry.purposeLabel}</p>
+                  </div>
+                  {canManage && !entry.alreadyAdded ? (
+                    <Button
+                      variant="outline"
+                      className="min-h-11"
+                      disabled={busy === `library:${entry.id}`}
+                      onClick={() => void addFromLibrary(entry.id, entry.title)}
+                    >
+                      {busy === `library:${entry.id}` ? "در حال افزودن…" : <><PlusIcon aria-hidden="true" /> افزودن</>}
+                    </Button>
+                  ) : null}
+                </div>
+                <p className="rounded-lg bg-muted/40 px-3 py-2 text-sm leading-6">{entry.sample}</p>
+                <div className="flex flex-wrap items-center gap-2 text-xs leading-5 text-muted-foreground">
+                  <span>متغیرها:</span>
+                  {entry.variables.length ? (
+                    entry.variables.map((variable) => (
+                      <span key={variable.name} className="rounded-md border border-border/70 px-2 py-0.5">
+                        {variable.label}
+                      </span>
+                    ))
+                  ) : (
+                    <span>متن ثابت</span>
+                  )}
+                  {entry.triggers.length ? (
+                    <>
+                      <span>· کاربرد خودکار:</span>
+                      <span>{entry.triggers.map((trigger) => trigger.label).join("، ")}</span>
+                    </>
+                  ) : null}
+                </div>
+              </li>
+            );
+            return (
+              <>
+                {library.available.length ? (
+                  <ul className="divide-y divide-border/60">{library.available.map(renderEntry)}</ul>
+                ) : null}
+                {library.added.length ? (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-sm font-medium">
+                      افزوده‌شده‌ها ({formatPersianNumber(library.added.length)})
+                    </summary>
+                    <ul className="divide-y divide-border/60">{library.added.map(renderEntry)}</ul>
+                  </details>
+                ) : null}
+              </>
+            );
+          })()}
+        </div>
 
         {/* Issue #902 §5 — the product half: when a real event happens, one of
             these messages goes to the customer of that order. Off until the

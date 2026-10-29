@@ -27,9 +27,21 @@ import {
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 
-/** Strip comments: the inventory's own explanations must not trip the guard. */
+/**
+ * Strip comments and module specifiers: neither is copy a tenant reads.
+ *
+ * Module paths matter here for a boring reason — this product's own adapter is
+ * imported as `@/lib/kavenegar/...`, so an un-stripped import would fail the
+ * guard on every file that uses it. Import specifiers are internal addresses,
+ * not text on a screen.
+ */
 function code(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ")
+    .replace(/\bfrom\s+"[^"]*"/g, " ")
+    .replace(/\bimport\s*\(\s*"[^"]*"\s*\)/g, " ")
+    .replace(/\bimport\s+"[^"]*"/g, " ");
 }
 
 function tenantScreens(): { name: string; source: string }[] {
