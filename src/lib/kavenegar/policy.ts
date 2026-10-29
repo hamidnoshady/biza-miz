@@ -44,6 +44,10 @@ export interface ManagedChildPolicy {
   fundingWindowEndHour: number;
   /** Cross-business demand guard: the fleet's ceiling for one rolling day. */
   fundingGlobalDailyCapRial: number | null;
+  /** Issue #902 #3 — credit above the floor that only transactional spend may use. */
+  fundingTransactionalReserveRial: number;
+  /** How this fleet's spend is classified for the reserve (migration 0267). */
+  fundingPurpose: FundingPurpose;
   updatedAt: string | null;
 }
 
@@ -57,6 +61,22 @@ export interface ManagedChildPolicy {
  *   * `manual`        — never automatically; every transfer is an operator act.
  */
 export type FundingStrategy = "jit" | "low_watermark" | "scheduled" | "manual";
+
+/**
+ * How a fleet's provider spend is classified for the transactional reserve
+ * (issue #902 #3, migration 0267).
+ *
+ * `marketing` is the default and the restrictive side: it may not spend the
+ * reserved slice, so enabling a reserve can only hold capacity back — never let
+ * more money out by accident.
+ */
+export type FundingPurpose = "marketing" | "transactional";
+
+export const FUNDING_PURPOSES: readonly FundingPurpose[] = ["marketing", "transactional"] as const;
+
+export function isFundingPurpose(value: unknown): value is FundingPurpose {
+  return typeof value === "string" && (FUNDING_PURPOSES as readonly string[]).includes(value);
+}
 
 export const FUNDING_STRATEGIES: readonly FundingStrategy[] = [
   "jit",
@@ -84,6 +104,8 @@ const DISABLED: ManagedChildPolicy = {
   fundingWindowStartHour: 0,
   fundingWindowEndHour: 0,
   fundingGlobalDailyCapRial: null,
+  fundingTransactionalReserveRial: 0,
+  fundingPurpose: "marketing",
   updatedAt: null,
 };
 
@@ -103,6 +125,8 @@ type PolicyRow = {
   managed_funding_window_start_hour: number;
   managed_funding_window_end_hour: number;
   managed_funding_global_daily_cap_rial: string | number | null;
+  managed_funding_transactional_reserve_rial: string | number;
+  managed_funding_purpose: FundingPurpose;
 };
 
 export async function getManagedChildPolicy(): Promise<ManagedChildPolicy> {
@@ -115,7 +139,8 @@ export async function getManagedChildPolicy(): Promise<ManagedChildPolicy> {
               managed_funding_daily_cap_rial, managed_funding_master_floor_rial,
               managed_funding_strategy, managed_funding_low_watermark_messages,
               managed_funding_window_start_hour, managed_funding_window_end_hour,
-              managed_funding_global_daily_cap_rial
+              managed_funding_global_daily_cap_rial,
+              managed_funding_transactional_reserve_rial, managed_funding_purpose
          FROM platform_sms_config WHERE id = 1`,
     );
     return rows[0] ?? null;
@@ -136,6 +161,13 @@ export async function getManagedChildPolicy(): Promise<ManagedChildPolicy> {
     fundingWindowStartHour: clampHour(row.managed_funding_window_start_hour),
     fundingWindowEndHour: clampHour(row.managed_funding_window_end_hour),
     fundingGlobalDailyCapRial: nullableInteger(row.managed_funding_global_daily_cap_rial),
+    fundingTransactionalReserveRial: Math.max(
+      0,
+      Number(row.managed_funding_transactional_reserve_rial) || 0,
+    ),
+    fundingPurpose: isFundingPurpose(row.managed_funding_purpose)
+      ? row.managed_funding_purpose
+      : "marketing",
     updatedAt: row.managed_policy_updated_at?.toISOString() ?? null,
   };
 }
@@ -155,6 +187,8 @@ export interface SaveManagedChildPolicyInput {
   fundingWindowStartHour?: number;
   fundingWindowEndHour?: number;
   fundingGlobalDailyCapRial?: number | null;
+  fundingTransactionalReserveRial?: number;
+  fundingPurpose?: FundingPurpose;
 }
 
 /** A console write. Validation belongs to the route, which reports which field failed. */
@@ -215,6 +249,11 @@ export async function saveManagedChildPolicy(
         : input.fundingGlobalDailyCapRial === null
           ? null
           : Math.max(0, Math.trunc(input.fundingGlobalDailyCapRial)),
+    fundingTransactionalReserveRial:
+      input.fundingTransactionalReserveRial === undefined
+        ? current.fundingTransactionalReserveRial
+        : Math.max(0, Math.trunc(input.fundingTransactionalReserveRial)),
+    fundingPurpose: input.fundingPurpose ?? current.fundingPurpose,
     updatedAt: null,
   };
 
@@ -228,8 +267,9 @@ export async function saveManagedChildPolicy(
           managed_funding_daily_cap_rial, managed_funding_master_floor_rial,
           managed_funding_strategy, managed_funding_low_watermark_messages,
           managed_funding_window_start_hour, managed_funding_window_end_hour,
-          managed_funding_global_daily_cap_rial)
-       VALUES (1, $1, $2, $3, $4, $5, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
+          managed_funding_global_daily_cap_rial,
+          managed_funding_transactional_reserve_rial, managed_funding_purpose)
+       VALUES (1, $1, $2, $3, $4, $5, now(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
        ON CONFLICT (id) DO UPDATE
          SET managed_child_accounts_enabled = $1,
              managed_plan_id = $2,
@@ -245,7 +285,9 @@ export async function saveManagedChildPolicy(
              managed_funding_low_watermark_messages = $11,
              managed_funding_window_start_hour = $12,
              managed_funding_window_end_hour = $13,
-             managed_funding_global_daily_cap_rial = $14`,
+             managed_funding_global_daily_cap_rial = $14,
+             managed_funding_transactional_reserve_rial = $15,
+             managed_funding_purpose = $16`,
       [
         next.enabled,
         next.planId,
@@ -261,6 +303,8 @@ export async function saveManagedChildPolicy(
         next.fundingWindowStartHour,
         next.fundingWindowEndHour,
         next.fundingGlobalDailyCapRial,
+        next.fundingTransactionalReserveRial,
+        next.fundingPurpose,
       ],
     );
   });

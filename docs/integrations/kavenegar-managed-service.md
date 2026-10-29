@@ -198,6 +198,13 @@ target:
 | `scheduled` | Only inside a UTC hour window (wraps midnight; `start = end` means all day). An unset window funds normally rather than never: an accidental strategy must not silently stop the fleet |
 | `manual` | Never automatically; distinct from a zero buffer, which reads like a misconfiguration |
 
+**The transactional reserve** (migration `0267`) decides *whose* money a transfer spends. The floor
+alone stops funding everyone once the master reaches it — including the login code a customer is
+waiting for — so `managed_funding_transactional_reserve_rial` holds back a slice above the floor that
+a `marketing`-classified fleet may not touch, while a `transactional` one may. A marketing transfer
+blocked by it reports `transactional_reserve` and raises `transactional_reserve_held`: the money is
+there, it is held, and an operator told "credit low" would top up an account that is not short.
+
 A watermark of 0 (or ≥ the buffer) clamps to the buffer, so a typo cannot fund above what the
 operator chose. `funding_global_daily_cap_rial` is the **cross-business demand guard**: a ceiling
 on what *all* children may receive in one rolling day, checked before the per-child caps so one

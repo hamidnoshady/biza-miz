@@ -33,6 +33,9 @@ interface ManagedPolicy {
   fundingWindowStartHour: number;
   fundingWindowEndHour: number;
   fundingGlobalDailyCapRial: number | null;
+  /** Issue #902 #3 — credit above the floor that only transactional spend may use. */
+  fundingTransactionalReserveRial: number;
+  fundingPurpose: "marketing" | "transactional";
   updatedAt: string | null;
 }
 
@@ -203,6 +206,11 @@ const ALERT_COPY: Record<string, { title: string; action: string }> = {
     title: "موجودی حساب اصلی نامشخص است؛ شارژ خودکار متوقف شد",
     action: "کلید حساب اصلی و اتصال به تأمین‌کننده را بررسی کنید؛ شارژ خودکار موجودی را خودش می‌خواند.",
   },
+  transactional_reserve_held: {
+    title: "شارژ خودکار بازاریابی به ذخیرهٔ تراکنشی رسیده است",
+    action:
+      "اعتبار حساب مادر را شارژ کنید؛ این سهم برای پیام ورود و پیام سفارش نگه داشته شده است.",
+  },
   fleet_cap_reached: {
     title: "سقف روزانهٔ شارژ همهٔ کسب‌وکارها پر شده است",
     action: "سقف روزانهٔ سراسری را بالا ببرید یا تا فردا صبر کنید.",
@@ -308,6 +316,12 @@ const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
   approved: "تأییدشده",
   rejected: "رد‌شده",
   disabled: "غیرفعال",
+};
+
+/** Issue #902 #3 — how the fleet's spend is classified for the reserve. */
+const FUNDING_PURPOSE_LABELS: Record<ManagedPolicy["fundingPurpose"], string> = {
+  marketing: "بازاریابی — ذخیرهٔ تراکنشی را مصرف نمی‌کند",
+  transactional: "تراکنشی — می‌تواند از ذخیرهٔ تراکنشی استفاده کند",
 };
 
 const STRATEGY_LABELS: Record<ManagedPolicy["fundingStrategy"], string> = {
@@ -425,6 +439,8 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
         fundingWindowStartHour: policy.fundingWindowStartHour,
         fundingWindowEndHour: policy.fundingWindowEndHour,
         fundingGlobalDailyCapRial: policy.fundingGlobalDailyCapRial,
+        fundingTransactionalReserveRial: policy.fundingTransactionalReserveRial,
+        fundingPurpose: policy.fundingPurpose,
       },
       "policy",
     );
@@ -658,6 +674,48 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                 })
               }
             />
+          </Field>
+          <Field
+            label="ذخیرهٔ تراکنشی حساب مادر (ریال)"
+            hint="بالای کف، سهمی که شارژ بازاریابی نمی‌تواند مصرف کند؛ برای بازگرداندن پیام ورود و پیام سفارش وقتی همهٔ حساب‌ها پر شده‌اند. ۰ = بدون ذخیره."
+          >
+            <input
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              value={policy.fundingTransactionalReserveRial}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingTransactionalReserveRial: Number(event.target.value) || 0,
+                })
+              }
+            />
+          </Field>
+          <Field
+            label="دستهٔ مصرف این ناوگان"
+            hint="بازاریابی از ذخیرهٔ تراکنشی استفاده نمی‌کند؛ تراکنشی می‌تواند. پیش‌فرض بازاریابی است تا فعال‌کردن ذخیره هرگز پول بیشتری آزاد نکند."
+          >
+            <select
+              className={inputClass}
+              value={policy.fundingPurpose}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingPurpose: event.target.value as ManagedPolicy["fundingPurpose"],
+                })
+              }
+            >
+              {(Object.keys(FUNDING_PURPOSE_LABELS) as ManagedPolicy["fundingPurpose"][]).map(
+                (key) => (
+                  <option key={key} value={key}>
+                    {FUNDING_PURPOSE_LABELS[key]}
+                  </option>
+                ),
+              )}
+            </select>
           </Field>
           <Field label="کف اعتبار حساب مادر (ریال)" hint="با مقدار مثبت، تأمین خودکار بدون موجودی مشخص انجام نمی‌شود.">
             <input

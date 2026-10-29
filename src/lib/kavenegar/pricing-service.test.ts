@@ -31,6 +31,8 @@ const policy: FundingPolicy = {
   childCapRial: 500_000,
   dailyCapRial: 200_000,
   masterFloorRial: 1_000_000,
+  transactionalReserveRial: 0,
+  fundingPurpose: "marketing",
 };
 
 describe("wholesale → retail quoting", () => {
@@ -306,6 +308,81 @@ describe("funding strategies (issue #902 §3)", () => {
     expect(decide({ policy: funded(), childBalanceRial: 0, masterBalanceRial: 1_000_000 })).toMatchObject({
       action: "none",
       reason: "master_floor",
+    });
+  });
+});
+
+describe("the transactional reserve (issue #902 #3, DoD #9)", () => {
+  const decide = (policy: FundingPolicy, masterBalanceRial: number | null) =>
+    planFunding({
+      policy,
+      tariff,
+      childBalanceRial: 0,
+      hourOfDay: 12,
+      masterBalanceRial,
+      transferredTodayRial: 0,
+      transferredTodayAllChildrenRial: 0,
+      unresolvedTransferRial: 0,
+    });
+  // Floor 1,000,000 and reserve 500,000 of a 1,400,000 master: 400,000 is
+  // spendable for marketing, 900,000 for transactional traffic.
+  const reserved = (overrides: Partial<FundingPolicy> = {}): FundingPolicy => ({
+    ...policy,
+    strategy: "jit",
+    bufferMessages: 100,
+    childCapRial: null,
+    dailyCapRial: null,
+    masterFloorRial: 1_000_000,
+    transactionalReserveRial: 500_000,
+    fundingPurpose: "marketing",
+    ...overrides,
+  });
+
+  it("clamps marketing to what the reserve leaves, not to the target", () => {
+    // Master 1,600,000 − 1,000,000 floor = 600,000 spendable; the 500,000
+    // reserve leaves 100,000 for marketing, which is less than the child's
+    // 207,000 target — so the reserve, not the target, is what binds.
+    const decision = decide(reserved(), 1_600_000);
+    expect(decision.action).toBe("transfer");
+    expect(decision.action === "transfer" && decision.amountRial).toBe(100_000);
+  });
+
+  it("stops marketing at the reserve with its own reason, because the money is not missing", () => {
+    expect(decide(reserved(), 1_150_000)).toMatchObject({
+      action: "none",
+      reason: "transactional_reserve",
+    });
+  });
+
+  it("lets transactional funding spend the same slice in full", () => {
+    // Same master, same fleets: the target is reachable once the reserve is
+    // this fleet's own money.
+    expect(decide(reserved({ fundingPurpose: "transactional" }), 1_600_000)).toMatchObject({
+      action: "transfer",
+      amountRial: 207_000,
+    });
+  });
+
+  it("keeps the floor itself ahead of the reserve", () => {
+    // At or under the floor nothing is spendable by anyone: the reserve is a
+    // slice above the floor, not a second floor.
+    for (const fundingPurpose of ["marketing", "transactional"] as const) {
+      expect(decide(reserved({ fundingPurpose }), 1_000_000)).toMatchObject({
+        action: "none",
+        reason: "master_floor",
+      });
+    }
+  });
+
+  it("is inert until an operator sets it, so a default fleet behaves exactly as before", () => {
+    expect(decide(reserved({ transactionalReserveRial: 0 }), 1_150_000)).toMatchObject({
+      action: "transfer",
+      amountRial: 150_000,
+    });
+    // And an unknown master balance is still refused rather than funded blindly.
+    expect(decide(reserved(), null)).toMatchObject({
+      action: "none",
+      reason: "master_balance_unknown",
     });
   });
 });

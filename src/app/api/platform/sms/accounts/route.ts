@@ -12,7 +12,12 @@ import {
   transferManagedCredit,
   type ProvisioningJobKind,
 } from "@/lib/kavenegar/provisioning-service";
-import { isFundingStrategy, isValidSenderLines, saveManagedChildPolicy } from "@/lib/kavenegar/policy";
+import {
+  isFundingPurpose,
+  isFundingStrategy,
+  isValidSenderLines,
+  saveManagedChildPolicy,
+} from "@/lib/kavenegar/policy";
 import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricing-service";
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
 import { getDeliveryReport } from "@/lib/messaging-delivery-report";
@@ -186,6 +191,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       "fundingDailyCapRial",
       "fundingMasterFloorRial",
       "fundingGlobalDailyCapRial",
+      "fundingTransactionalReserveRial",
     ] as const) {
       if (body[key] !== undefined && body[key] !== null && !isNonNegativeInteger(body[key])) {
         return NextResponse.json({ error: "invalid_funding_cap" }, { status: 400 });
@@ -195,6 +201,12 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     // unknown value must be refused rather than silently treated as `jit`.
     if (body.fundingStrategy !== undefined && !isFundingStrategy(body.fundingStrategy)) {
       return NextResponse.json({ error: "invalid_funding_strategy" }, { status: 400 });
+    }
+    // Issue #902 #3 — how the fleet's spend is classified for the reserve. An
+    // unknown value would silently mean "marketing", which is the side that
+    // cannot spend the reserve, so it is refused rather than guessed.
+    if (body.fundingPurpose !== undefined && !isFundingPurpose(body.fundingPurpose)) {
+      return NextResponse.json({ error: "invalid_funding_purpose" }, { status: 400 });
     }
     if (
       body.fundingLowWatermarkMessages !== undefined &&
@@ -240,6 +252,11 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       fundingWindowEndHour:
         body.fundingWindowEndHour === undefined ? undefined : Number(body.fundingWindowEndHour),
       fundingGlobalDailyCapRial: optionalNumberOrNull(body.fundingGlobalDailyCapRial),
+      fundingTransactionalReserveRial:
+        body.fundingTransactionalReserveRial === undefined
+          ? undefined
+          : Number(body.fundingTransactionalReserveRial),
+      fundingPurpose: isFundingPurpose(body.fundingPurpose) ? body.fundingPurpose : undefined,
     });
     await platformAudit({
       adminId: session.padmin,
