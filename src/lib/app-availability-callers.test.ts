@@ -178,14 +178,17 @@ describe("an unknown state is refused at the write, not by the database", () => 
   });
 
   it("names the value it refused, so the caller's log says what was wrong", async () => {
-    const error = await setBusinessAppAvailability(
+    const error: unknown = await setBusinessAppAvailability(
       BUSINESS,
       "growth",
       { state: "enabled" } as never,
       null,
-    ).catch((err: unknown) => err as InvalidAppAvailabilityStateError);
+    ).then(
+      () => null,
+      (err: unknown) => err,
+    );
 
     expect(error).toBeInstanceOf(InvalidAppAvailabilityStateError);
-    expect(error.value).toBe("enabled");
+    expect((error as InvalidAppAvailabilityStateError).value).toBe("enabled");
   });
 });
