@@ -15,6 +15,7 @@ import {
 } from "@/lib/message-campaigns-service";
 import { getMessageBusinessBilling } from "@/lib/messaging-billing";
 import { getTenantMessagingConfig } from "@/lib/messaging-service-readiness";
+import { tenantCampaignDelivery } from "@/lib/campaign-delivery-report";
 import {
   createLookupTemplate,
   disableLookupTemplate,
@@ -63,6 +64,10 @@ export const GET = withTenantScope(async () => {
     // Off until the business turns one on; the login code is deliberately not
     // among them (auth runs on the platform transport, never a tenant wallet).
     triggers,
+    // Issue #902 §9 item 2 — did this business's campaigns arrive? Scoped to its
+    // own campaigns by the caller and by RLS, and carrying no provider name,
+    // provider error string or wholesale cost (campaign-delivery-report.ts).
+    campaignDelivery,
   ] = await Promise.all([
       getTenantMessagingConfig(session.businessId),
       getMessageBusinessBilling(session.businessId),
@@ -80,6 +85,7 @@ export const GET = withTenantScope(async () => {
       // sample only: no provider template name, id or approval vocabulary.
       tenantTemplateLibrary(session.businessId),
       listTriggerSettings(session.businessId),
+      tenantCampaignDelivery(session.businessId, { sinceHours: 24 * 7, limit: 10 }),
     ]);
   return NextResponse.json({
     config,
@@ -92,6 +98,7 @@ export const GET = withTenantScope(async () => {
     lookupTemplates,
     templateLibrary,
     triggers,
+    campaignDelivery,
   });
 });
 

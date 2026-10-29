@@ -616,6 +616,34 @@ and the version history. `/platform/messaging` links to it and keeps the wholesa
 Still open in §4: wiring `billing_usage_ratings`/invoice lines to the same versions, and the
 supplier-invoice reconciliation that would confirm accepted-but-undelivered billing in practice.
 
+## 6e. Delivery per campaign, with the two waits apart (§6, plan item 2)
+
+§6c answered the fleet question — "are messages arriving, and for whom" — from the outbox, per
+business, over 24 hours. The question a *business* asks is smaller and sharper: did my campaign
+arrive, and if it was slow, was it us or the carrier? Answering it needed a different grouping and a
+second clock.
+
+**Only half the latency was provable.** `0134` records when a row was queued (`created_at`), when it
+was attempted (`last_attempt_at`) and when the provider accepted it (`sent_at`), so the *queue* wait
+is derivable — `sent_at − created_at`. The provider's own answer time was thrown away by the drain the
+moment `send()` returned, which made "backed-up drain" and "slow carrier" indistinguishable even
+though they have opposite fixes. Migration `0268` adds `send_latency_ms`, written on every attempt
+(accepted or refused) from the drain's own clock, nullable because every row queued before it has no
+measurement.
+
+`campaign-delivery-report.ts` then answers per campaign: accepted, delivered, failed, still queued,
+the verdict from §6c's `deliveryHealth`, and **two** percentile summaries — queue and send.
+
+| Rule | Why |
+| --- | --- |
+| Percentiles, not an average | One 90-second retry moves an average far enough to hide a healthy fleet; p50 answers "is it fine", p95 answers "is anyone hurting" |
+| `null` for no measurement, never `0` | "We measured nothing" and "it took no time" are opposite statements, and `0 ms` for silence is a number an operator quotes in a meeting |
+| A tenant sees its own campaigns only | The platform report names businesses and reads across tenants under the bypass; `tenantCampaignDelivery` is scoped by the caller *and* by RLS, and neither carries a provider error string, provider name or wholesale cost |
+
+Surfaces: the console's «تحویل به تفکیک کمپین (۷ روز اخیر)» table under the 24-hour fleet card, and a
+second line under each campaign on the tenant's Growth messaging screen («تأخیر صف» / «تأخیر ارسال»,
+in «—» when nothing was measured).
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -635,6 +663,8 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `campaign-delivery-report` (§6e) | 8/8 (nearest-rank percentiles where one 90 s retry still shows at p95, `null` for silence rather than `0`, unmeasured rows excluded from the statistics, unsorted input not mutated; and the source guards: no provider name, no `o.error`/`provider_message_id` in the shared row shape, the tenant query scoped by business *and* RLS, the cross-tenant read behind the documented bypass) |
+| `npm run test:db` — `kavenegar-managed-accounts` (§6e) | one added case: a campaign with two accepted sends (2 s/4 s queue, 100 ms/300 ms provider), one queued and one refused reports `{p50: 2 000, p95: 4 000}` and `{p50: 100, p95: 300}` with health `attention`; the tenant copy is its own campaign with no business or provider field, another business sees none of it, and `[null, null]` is "no measurement" |
 | `npx vitest run` — `app-availability-callers` (§3b) | 11/11 (the sweep over ~1,100 source files finds no hand-written state decision; every allowlisted presentation file still exists; the resolver carries neither `"enabled"` nor a cast; both writers validate; the SQL CHECK matches the TypeScript states exactly; and `enabled`/`off`/`""`/`null`/`3` are all refused before any query runs) |
 | `npx vitest run` — `sms-noop` (§3a) | 7/7 pass (the code is printed in `development`/`test`; `production`, `staging` and an unset `NODE_ENV` all throw `SmsNotConfiguredError` with neither the code nor the number in the log or the error; the resolver really returns this fallback) |
 | `npx vitest run` — `template-library-view` (§5f) | 6/6 pass (Persian variable names in mapping order, the automation each entry can serve computed by the send path's own check, no automation for an unfillable message, unknown variables dropped rather than shown as `%token4`, supplier-free copy) |
@@ -669,8 +699,11 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
    place, and the **reserved slice** is closed by §5h (a marketing-classified fleet can no longer
    spend the credit held for transactional traffic). Still open: "approved campaign budget" as a
    distinct funding trigger, which needs a product decision on which campaigns count.
-2. **Delivery/health dashboards** (#902 P1): the fleet-level delivery card (§6c) exists;
-   per-campaign delivery, provider latency and a historical view are follow-ups.
+2. ~~**Delivery/health dashboards** (#902 P1): per-campaign delivery and provider latency~~
+   — **closed** (§6e): the console and the tenant screen now show delivery per campaign with the
+   queue wait and the provider wait separately, over a week. A longer *historical* view (trend over
+   months rather than a window) is still open; the outbox rows it would read are retained, so it is
+   a query and a chart, not new data.
 3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions (§6d), the
    margin report and `billing_vendor_cost_events` (§6a) exist; emitting
    `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier

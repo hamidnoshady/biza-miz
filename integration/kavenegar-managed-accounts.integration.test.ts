@@ -43,6 +43,7 @@ let reconciliation: typeof import("../src/lib/kavenegar/reconciliation-service")
 let vendorCost: typeof import("../src/lib/messaging-vendor-cost");
 let jwt: typeof import("../src/lib/jwt-secret");
 let delivery: typeof import("../src/lib/messaging-delivery-report");
+let campaignDelivery: typeof import("../src/lib/campaign-delivery-report");
 let alerts: typeof import("../src/lib/kavenegar/alert-service");
 
 const alpha = { businessId: "", slug: "" };
@@ -191,6 +192,7 @@ beforeAll(async () => {
   vendorCost = await import("../src/lib/messaging-vendor-cost");
   jwt = await import("../src/lib/jwt-secret");
   delivery = await import("../src/lib/messaging-delivery-report");
+  campaignDelivery = await import("../src/lib/campaign-delivery-report");
   alerts = await import("../src/lib/kavenegar/alert-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -1628,6 +1630,80 @@ describe("delivery report (acceptance is not delivery)", () => {
     const alphaRow = report.find((row) => row.businessId === alpha.businessId);
     expect(alphaRow).toMatchObject({ sent: 1, delivered: 1, failed: 0, pending: 1 });
     expect(delivery.deliveryHealth(alphaRow!)).toBe("degraded");
+  });
+});
+
+describe("per-campaign delivery and latency (issue #902 §9 item 2)", () => {
+  it("reports both waits per campaign, keeps tenants to their own, and never renders silence as zero", async () => {
+    const business = await seedBusiness("Latency");
+    const { rows: campaignRows } = await db.query<{ id: string }>(
+      `INSERT INTO message_campaigns (business_id, channel, name, status)
+       VALUES ($1, 'sms', 'Slow campaign', 'completed') RETURNING id`,
+      [business.businessId],
+    );
+    const campaignId = campaignRows[0]!.id;
+
+    const enqueue = async (status: string, extra: Partial<Record<string, string | number>> = {}) => {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
+         VALUES ($1, $2, 'sms', '+989120000000', 'سلام') RETURNING id`,
+        [business.businessId, campaignId],
+      );
+      await db.query(
+        `INSERT INTO message_outbox
+           (business_id, recipient_id, campaign_id, status, last_attempt_at,
+            created_at, sent_at, send_latency_ms)
+         VALUES ($1, $2, $3, $4, now(), now() - ($5::int * interval '1 millisecond'),
+                 CASE WHEN $6::int IS NULL THEN NULL ELSE now() END, $6)`,
+        [
+          business.businessId,
+          rows[0]!.id,
+          campaignId,
+          status,
+          extra.queueMs ?? 0,
+          extra.sendLatencyMs ?? null,
+        ],
+      );
+    };
+
+    // Two accepted sends with a 2 s and 4 s queue wait and a 100 ms / 300 ms
+    // provider answer; one still queued, one refused.
+    await enqueue("sent", { queueMs: 2_000, sendLatencyMs: 100 });
+    await enqueue("delivered", { queueMs: 4_000, sendLatencyMs: 300 });
+    await enqueue("queued");
+    await enqueue("failed");
+
+    const platform = await campaignDelivery.getCampaignDeliveryReport({ sinceHours: 24 });
+    const row = platform.find((entry) => entry.campaignId === campaignId)!;
+    expect(row).toMatchObject({
+      campaignName: "Slow campaign",
+      channel: "sms",
+      sent: 1,
+      delivered: 1,
+      failed: 1,
+      pending: 1,
+      health: "attention",
+    });
+    expect(row.businessId).toBe(business.businessId);
+    expect(row.queueLatency).toMatchObject({ count: 2, p50: 2_000, p95: 4_000, max: 4_000 });
+    expect(row.sendLatency).toMatchObject({ count: 2, p50: 100, p95: 300, max: 300 });
+
+    // The tenant's copy is its own campaign, with the same numbers and nothing
+    // a tenant may not see.
+    const tenant = await campaignDelivery.tenantCampaignDelivery(business.businessId, {
+      sinceHours: 24,
+    });
+    expect(tenant.map((entry) => entry.campaignId)).toEqual([campaignId]);
+    expect(tenant[0]).toMatchObject({ queueLatency: row.queueLatency, sendLatency: row.sendLatency });
+    expect(JSON.stringify(tenant[0])).not.toMatch(/businessId|businessName|kavenegar|provider_/i);
+
+    // Another business sees none of it.
+    const other = await campaignDelivery.tenantCampaignDelivery(alpha.businessId, { sinceHours: 24 });
+    expect(other.some((entry) => entry.campaignId === campaignId)).toBe(false);
+
+    // A row nobody measured (queued before migration 0268) reads as "unknown",
+    // never as a zero-millisecond send.
+    expect(campaignDelivery.latencyStats([null, null])).toBeNull();
   });
 });
 

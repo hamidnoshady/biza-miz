@@ -162,6 +162,30 @@ interface DeliveryRow {
   lastAttemptAt: string | null;
 }
 
+/** Issue #902 §9 item 2 — the same question per campaign, with both latencies. */
+interface LatencyStats {
+  count: number;
+  p50: number;
+  p95: number;
+  max: number;
+}
+
+interface CampaignDeliveryRow {
+  campaignId: string;
+  businessId?: string;
+  businessName?: string | null;
+  campaignName: string | null;
+  channel: "sms" | "email";
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  queueLatency: LatencyStats | null;
+  sendLatency: LatencyStats | null;
+  lastAttemptAt: string | null;
+  health: keyof typeof DELIVERY_LABELS;
+}
+
 /** Issue #902 §3 — what needs a human, in the service's own words. */
 interface ServiceAlert {
   id: string;
@@ -184,6 +208,7 @@ interface Snapshot {
   templates: CatalogTemplate[];
   masterTemplates: MasterTemplate[];
   delivery: DeliveryRow[];
+  campaignDelivery: CampaignDeliveryRow[];
   alerts: ServiceAlert[];
   alertSummary: { critical: number; warning: number; info: number; unacknowledged: number; total: number };
   recentJobs: ManagedJob[];
@@ -337,6 +362,18 @@ const DELIVERY_LABELS: Record<"healthy" | "degraded" | "attention" | "idle", str
   attention: "نرخ خطای بالا",
   idle: "بدون ارسال",
 };
+
+/**
+ * Milliseconds as seconds, or «—» when nothing was measured.
+ *
+ * A `null` percentile is "no measurement", never `0 ms`: an operator reading
+ * "0" concludes the end is fast, which is the one thing the report cannot say.
+ */
+function latencyLabel(stats: LatencyStats | null): string {
+  if (!stats) return "—";
+  const seconds = (ms: number) => (ms / 1000).toFixed(ms < 1_000 ? 2 : 1);
+  return `${seconds(stats.p50)} / ${seconds(stats.p95)}`;
+}
 
 /** Mirrors `deliveryHealth` on the server; kept here for a per-row label. */
 function healthOf(row: DeliveryRow): keyof typeof DELIVERY_LABELS {
@@ -1036,6 +1073,71 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
         <p className="mt-3 text-xs text-muted-foreground">
           «پذیرفته» یعنی ارائه‌دهنده پیام را قبول کرده؛ «تحویل» یعنی بعداً تأیید شده است. ردیف‌ها بر
           اساس بیشترین خطا مرتب شده‌اند.
+        </p>
+      </Card>
+
+      {/* Issue #902 §9 item 2 — the fleet row above answers "are messages
+          arriving"; this answers "is one campaign stuck, and at which end".
+          Queue and send latency are shown apart on purpose: a backed-up drain
+          and a slow carrier have opposite fixes, and one averaged number would
+          hide which one is happening. */}
+      <Card title={`تحویل به تفکیک کمپین (۷ روز اخیر)`}>
+        {(snapshot.campaignDelivery ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">در این بازه کمپینی ارسال نشده است.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th className="p-2 text-right">کمپین</th>
+                  <th className="p-2 text-right">کسب‌وکار</th>
+                  <th className="p-2 text-right">پذیرفته</th>
+                  <th className="p-2 text-right">تحویل</th>
+                  <th className="p-2 text-right">ناموفق</th>
+                  <th className="p-2 text-right">در صف</th>
+                  <th className="p-2 text-right">تأخیر صف (میانه / صدک ۹۵)</th>
+                  <th className="p-2 text-right">تأخیر ارائه‌دهنده (میانه / صدک ۹۵)</th>
+                  <th className="p-2 text-right">وضعیت</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(snapshot.campaignDelivery ?? []).map((row) => (
+                  <tr key={row.campaignId} className="border-t border-border/60">
+                    <td className="p-2">
+                      {row.campaignName ?? "—"}
+                      <span className="ms-1 text-xs text-muted-foreground">
+                        {row.channel === "email" ? "ایمیل" : "پیامک"}
+                      </span>
+                    </td>
+                    <td className="p-2 text-xs text-muted-foreground">
+                      {row.businessName ?? row.businessId ?? "—"}
+                    </td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.sent)}</td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.delivered)}</td>
+                    <td className={`p-2 tabular-nums ${row.failed > 0 ? "text-destructive" : ""}`}>
+                      {formatPersianNumber(row.failed)}
+                    </td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.pending)}</td>
+                    <td className="p-2 text-xs text-muted-foreground tabular-nums">
+                      {latencyLabel(row.queueLatency)}
+                    </td>
+                    <td className="p-2 text-xs text-muted-foreground tabular-nums">
+                      {latencyLabel(row.sendLatency)}
+                    </td>
+                    <td
+                      className={`p-2 ${row.health === "attention" ? "text-destructive" : "text-muted-foreground"}`}
+                    >
+                      {DELIVERY_LABELS[row.health]}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          «تأخیر صف» مدت انتظار پیام در صف ارسال است و «تأخیر ارائه‌دهنده» مدت پاسخ ارائه‌دهنده.
+          ردیف‌ها بر اساس بیشترین خطا مرتب شده‌اند.
         </p>
       </Card>
 

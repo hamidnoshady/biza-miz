@@ -4,10 +4,18 @@ import { describe, expect, it } from "vitest";
 
 const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 
+/**
+ * Comments and module specifiers are not copy.
+ *
+ * The specifier half is load-bearing since #902 §5f: this screen imports the
+ * library view from `@/lib/kavenegar/…`, an internal address nobody reads, and
+ * the supplier-name assertions below are about what a tenant can see.
+ */
 function code(source: string): string {
   return source
     .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 ")
+    .replace(/\bfrom\s+"[^"]*"/g, " ");
 }
 
 const SECTION_SOURCE = code(read("./messaging-section.tsx"));
@@ -47,6 +55,30 @@ describe("the Growth messaging workbench", () => {
     expect(SECTION_SOURCE).toMatch(/usesVariable\(template, "کد_تخفیف"\)/);
     expect(SECTION_SOURCE).toMatch(/discountCode/);
     expect(SECTION_SOURCE).toMatch(/کد تخفیف در پیام/);
+  });
+});
+
+describe("a campaign's delivery is explained, not just counted (issue #902 §9 item 2)", () => {
+  it("shows the two waits apart, because only one of them is the carrier's", () => {
+    // A queue wait and a carrier wait have opposite fixes; one averaged
+    // "latency" number would hide which is happening.
+    expect(SECTION_SOURCE).toMatch(/delivery\.queueLatency/);
+    expect(SECTION_SOURCE).toMatch(/delivery\.sendLatency/);
+    expect(SECTION_SOURCE).toMatch(/تأخیر صف/);
+  });
+
+  it("never renders an unmeasured latency as zero", () => {
+    // `null` is "nothing was measured"; printing ۰.۰ would tell a business its
+    // messages are instant when nobody ever measured them.
+    expect(SECTION_SOURCE).toMatch(/if \(!stats\) return "—"/);
+    expect(SECTION_SOURCE).not.toMatch(/stats\?\.p50 \?\? 0/);
+  });
+
+  it("reads its own delivery from the scoped server field, not from the campaign counts", () => {
+    expect(ROUTE_SOURCE).toMatch(/tenantCampaignDelivery\(session\.businessId/);
+    expect(SECTION_SOURCE).toMatch(/data\.campaignDelivery/);
+    // Provider vocabulary, error strings and prices stay server-side.
+    expect(SECTION_SOURCE).not.toMatch(/kavenegar/i);
   });
 });
 
