@@ -143,7 +143,7 @@ export function TourStudioPanel() {
         <p className="text-sm text-muted-foreground">انتخاب صفحه، ساخت مراحل، پیش‌نویس، انتشار و بازگردانی نسخه‌های قبلی؛ بدون تغییر کد.</p>
       </div>
       <div className="flex gap-2">
-        <Button onClick={() => void refresh()} variant="outline">بازخوانی</Button>
+        <Button onClick={() => void refresh()} variant="ghost">بازخوانی</Button>
         {canManage ? <Button onClick={() => startEdit(emptyTour())}>تور جدید</Button> : null}
       </div>
     </div>
@@ -157,7 +157,7 @@ export function TourStudioPanel() {
       <div className="mt-3 grid max-h-72 gap-2 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
         {uncovered.map((page) => <div key={page.key} className="flex items-center justify-between gap-2 rounded-lg border border-border p-2 text-xs">
           <span>{page.group} / {page.label}</span>
-          {canManage ? <Button variant="outline" size="sm" onClick={() => startEdit({
+          {canManage ? <Button variant="ghost" onClick={() => startEdit({
             ...emptyTour(), pageKey: page.key,
           })}>ایجاد تور</Button> : null}
         </div>)}
@@ -178,7 +178,7 @@ export function TourStudioPanel() {
             <td className="p-3">{groupOf(tour.pageKey)}</td>
             <td className="p-3">{existing ? (tour as Stored).status === "published" ? "منتشرشده" : "پیش‌نویس" : "داخلی (کد)"}</td>
             <td className="p-3">{tour.steps.length}</td>
-            <td className="p-3"><Button variant="outline" size="sm" onClick={() => {
+            <td className="p-3"><Button variant="ghost" onClick={() => {
               const value = asEditor(tour);
               startEdit(value);
             }}>{existing ? "ویرایش" : "ورود به استودیو"}</Button></td>
@@ -187,7 +187,7 @@ export function TourStudioPanel() {
       </table>
     </div>
     {editing ? <section className="space-y-4 rounded-xl border border-border p-4" aria-label="ویرایش تور">
-      <div className="flex items-center justify-between gap-3"><h3 className="font-bold">ویرایش تور: {editing.title || "تور جدید"}</h3><Button variant="outline" onClick={() => setEditing(null)}>بستن</Button></div>
+      <div className="flex items-center justify-between gap-3"><h3 className="font-bold">ویرایش تور: {editing.title || "تور جدید"}</h3><Button variant="ghost" onClick={() => setEditing(null)}>بستن</Button></div>
       <div className="grid gap-3 md:grid-cols-2">
         <label className="block text-sm">شناسهٔ یکتای تور
           <input dir="ltr" className="mt-1 w-full rounded-lg border bg-card p-2 font-mono" value={editing.id} disabled={editing.expectedVersion !== undefined || !canManage} onChange={(e) => patch({ id: e.target.value })} placeholder="accounting.cosmetics.start" />
@@ -208,15 +208,15 @@ export function TourStudioPanel() {
         <textarea dir="ltr" rows={3} className="mt-1 w-full rounded-lg border bg-card p-2 font-mono text-xs" value={eligibilityJson} disabled={!canManage} onChange={(e) => setEligibilityJson(e.target.value)} />
         <span className="block text-xs text-muted-foreground">مثال: {JSON.stringify({ permissions: ["inventory.view"], industries: ["cosmetics"] })} — محدودیت‌ها در سرور اعتبارسنجی می‌شوند.</span>
       </label>
-      <div className="flex items-center justify-between"><h4 className="font-semibold">مراحل تور</h4>{canManage && editing.steps.length < 60 ? <Button variant="outline" onClick={() => patch({ steps: [...editing.steps, initialStep()] })}>افزودن مرحله</Button> : null}</div>
+      <div className="flex items-center justify-between"><h4 className="font-semibold">مراحل تور</h4>{canManage && editing.steps.length < 60 ? <Button variant="ghost" onClick={() => patch({ steps: [...editing.steps, initialStep()] })}>افزودن مرحله</Button> : null}</div>
       {pageAnchors.length === 0 ? <p className="rounded-lg bg-muted p-3 text-sm">برای این صفحه هدف برجسته‌سازی ثبت نشده است. می‌توانید با مراحل «توضیحی» تور بسازید. برای برجسته‌سازی کنترل جدید، ابتدا باید هدف امن در کد صفحه ثبت شود.</p> : null}
       <ol className="space-y-3">{editing.steps.map((step, index) =>
         <li key={index} className="space-y-2 rounded-xl border border-border p-3">
           <div className="flex flex-wrap items-center justify-between gap-2"><strong>مرحلهٔ {index + 1}</strong>
             {canManage ? <div className="flex gap-1">
-              <Button size="sm" variant="outline" disabled={index === 0} onClick={() => moveStep(index, index - 1)}>بالا</Button>
-              <Button size="sm" variant="outline" disabled={index === editing.steps.length - 1} onClick={() => moveStep(index, index + 1)}>پایین</Button>
-              <Button size="sm" variant="outline" disabled={editing.steps.length <= 1} onClick={() => patch({ steps: editing.steps.filter((_, i) => i !== index) })}>حذف</Button>
+              <Button variant="ghost" disabled={index === 0} onClick={() => moveStep(index, index - 1)}>بالا</Button>
+              <Button variant="ghost" disabled={index === editing.steps.length - 1} onClick={() => moveStep(index, index + 1)}>پایین</Button>
+              <Button variant="ghost" disabled={editing.steps.length <= 1} onClick={() => patch({ steps: editing.steps.filter((_, i) => i !== index) })}>حذف</Button>
             </div> : null}
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
@@ -244,13 +244,13 @@ export function TourStudioPanel() {
         </li>,
       )}</ol>
       {canManage ? <div className="flex flex-wrap gap-2">
-        <Button disabled={busy} variant="outline" onClick={() => void save("draft")}>ذخیره پیش‌نویس</Button>
+        <Button disabled={busy} variant="ghost" onClick={() => void save("draft")}>ذخیره پیش‌نویس</Button>
         <Button disabled={busy} onClick={() => void save("published")}>انتشار تور</Button>
-        {editing.status === "draft" && editing.expectedVersion !== undefined ? <Button variant="outline" disabled={busy} onClick={() => void remove()}>حذف پیش‌نویس</Button> : null}
+        {editing.status === "draft" && editing.expectedVersion !== undefined ? <Button variant="ghost" disabled={busy} onClick={() => void remove()}>حذف پیش‌نویس</Button> : null}
       </div> : null}
       {history.length > 0 ? <div className="space-y-2"><h4 className="font-semibold">تاریخچهٔ نسخه‌ها</h4>
         {history.map((item) => <div key={item.version} className="flex items-center justify-between border-b py-2 text-sm"><span>نسخه {item.version}</span>
-          {canManage ? <Button variant="outline" size="sm" disabled={busy} onClick={() => void restore(item.version)}>بازگردانی</Button> : null}
+          {canManage ? <Button variant="ghost" disabled={busy} onClick={() => void restore(item.version)}>بازگردانی</Button> : null}
         </div>)}
       </div> : null}
     </section> : null}
