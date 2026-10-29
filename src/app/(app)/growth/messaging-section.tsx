@@ -134,10 +134,54 @@ interface Data {
   lookupTemplates?: LookupTemplate[];
   triggers?: TriggerSetting[];
   templateLibrary?: LibraryEntry[];
+  /**
+   * Issue #902 §9 item 2 — this business's own delivery, per campaign, with the
+   * two latencies. Counts are already on `campaigns`; what this adds is the
+   * wait, split into "the queue" and "the carrier", because only one of those is
+   * something this page can explain. No provider name, code or price travels
+   * here (`campaign-delivery-report.ts`).
+   */
+  campaignDelivery?: CampaignDelivery[];
   campaigns: Campaign[];
   segments: Segment[];
   projects: Project[];
   promotions: Promotion[];
+}
+
+interface Latency {
+  count: number;
+  p50: number;
+  p95: number;
+  max: number;
+}
+
+/** One campaign's delivery from the server (`campaign-delivery-report.ts`). */
+interface CampaignDelivery {
+  campaignId: string;
+  campaignName: string | null;
+  channel: "sms" | "email";
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  queueLatency: Latency | null;
+  sendLatency: Latency | null;
+  lastAttemptAt: string | null;
+  health: "healthy" | "degraded" | "attention" | "idle";
+}
+
+/**
+ * Seconds, with «—» for "not measured".
+ *
+ * `null` must never render as `۰`: a business reading "zero delay" for a value
+ * nobody measured would stop asking the one question this line exists to
+ * answer. Rounded to one decimal so a queue wait and a carrier wait are
+ * comparable at a glance.
+ */
+function latencyText(stats: Latency | null): string {
+  if (!stats) return "—";
+  const seconds = (ms: number) => (ms / 1000).toFixed(1);
+  return `${seconds(stats.p50)} / ${seconds(stats.p95)}`;
 }
 
 /** `excludedByConsent` is the API field; `missingContact` is a separate, actionable data-quality gap. */
@@ -497,6 +541,12 @@ export function MessagingSection({
     ? sendableAudience * messagePreview.costRial
     : sendableAudience * costPerRecipient;
   const insufficientCredit = audience !== null && estimatedAudienceCost > data.billing.balanceRial;
+
+  // Issue #902 §9 item 2 — one lookup, so the campaign list below reads the
+  // delivery of a campaign without a second pass over the array per row.
+  const deliveryByCampaign = new Map(
+    (data.campaignDelivery ?? []).map((row) => [row.campaignId, row]),
+  );
 
   return (
     <div className="space-y-4 sm:space-y-5">
@@ -999,6 +1049,7 @@ export function MessagingSection({
         {data.campaigns.length ? (
           <ul className="divide-y divide-border/80">
             {data.campaigns.map((campaign) => {
+              const delivery = deliveryByCampaign.get(campaign.id) ?? null;
               const template = data.templates.find((item) => item.id === campaign.templateId);
               const needsDiscountCode = usesVariable(template, "کد_تخفیف");
               const discountCode = discountCodes[campaign.id] ?? "";
@@ -1012,6 +1063,16 @@ export function MessagingSection({
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
                       {channelLabel[campaign.channel]} · {formatPersianNumber(campaign.sentCount)} ارسال‌شده از {formatPersianNumber(campaign.totalRecipients)} · تحویل {formatPersianNumber(campaign.deliveredCount)} · ناموفق {formatPersianNumber(campaign.failedCount)} · {campaign.promotionId ? "بازده با پروموشن اختصاصی در گزارش حسابداری" : "بازده: قابل محاسبه نیست (پروموشن اختصاصی ندارد)"}
                     </p>
+                    {delivery ? (
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {delivery.pending > 0
+                          ? `${formatPersianNumber(delivery.pending)} در صف · `
+                          : ""}
+                        {`تأخیر صف (میانه/صدک ۹۵): ${latencyText(delivery.queueLatency)} ثانیه`}
+                        {" · "}
+                        {`تأخیر ارسال: ${latencyText(delivery.sendLatency)} ثانیه`}
+                      </p>
+                    ) : null}
                   </div>
 
                   {!canManage ? null : campaign.status === "draft" ? (
