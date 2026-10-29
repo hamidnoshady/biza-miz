@@ -28,16 +28,26 @@ const FOLLOW_UP_NAME = `${FIXTURE_PREFIX} follow-up ${RUN_ID}`;
 const FOLLOW_UP_SUBJECT = `${FIXTURE_PREFIX} overdue call ${RUN_ID}`;
 const AT_RISK_STAGES = ["at_risk", "cant_lose", "needs_attention"];
 /**
- * How long the sidebar gets to mount on the first navigation.
+ * How long the sidebar gets to mount on one attempt.
  *
  * `page.goto(..., "domcontentloaded")` returns before React has hydrated, and
- * `/crm` is a data-heavy page on a server that has just started. 15s was tight
- * enough to time out intermittently on CI — the same wait never misses locally —
- * so the shell gets the budget the rest of this script already uses for its
- * heavier waits. It is a wait, not a sleep: a fast run still finishes as soon as
- * the link appears.
+ * `/crm` is a data-heavy page on a server that has just started. A wait, not a
+ * sleep: a fast run finishes as soon as the link appears.
  */
-const SHELL_TIMEOUT = 45_000;
+const SHELL_TIMEOUT = 30_000;
+
+/**
+ * How many times the shell may be (re)opened before a viewport fails.
+ *
+ * `media E2E tests` kept timing out on the CRM «امروز» link — first at 15s, then
+ * at 45s — on a page that had answered 200 and on a job that only starts this
+ * server a minute earlier, so the budget was never the whole story. What a
+ * timeout here actually says is "the app shell is not mounted yet", and a
+ * reload is the honest recovery: the server has warmed up by the second attempt
+ * and the client bundle is cached. Bounding it at three keeps a genuinely broken
+ * shell failing in about the time one long wait used to take.
+ */
+const SHELL_ATTEMPTS = 3;
 
 if (!DATABASE_URL) throw new Error("DATABASE_URL is required for the CRM queue E2E test.");
 
@@ -76,7 +86,12 @@ async function removeStaleFixtures() {
   await deleteTemporaryFixtures(ids);
 }
 
-async function navigateToToday(page, isMobile) {
+/**
+ * Open the CRM app's own sidebar and choose «امروز».
+ *
+ * One attempt. Throws if the shell or the link is not there in `SHELL_TIMEOUT`.
+ */
+async function openToday(page, isMobile) {
   if (isMobile) {
     // The mobile trigger's accessible label changes with state and viewport;
     // target the stable controlled sidebar and open it only when collapsed.
@@ -97,6 +112,72 @@ async function navigateToToday(page, isMobile) {
   // is no longer mounted/accessible for an aria-current check in that viewport.
   if (!isMobile) await assert(await todayLink.getAttribute("aria-current") === "page", "CRM «امروز» tab did not become active");
   await page.locator("#crm-queue-at_risk_customers").waitFor({ state: "visible", timeout: 30_000 });
+}
+
+/**
+ * What the page actually was when the shell never appeared.
+ *
+ * A bare `TimeoutError` from an accessibility locator says nothing about *why*:
+ * a server error, a redirect to the sign-in screen and a shell that rendered
+ * with the wrong menu all look identical. This reads the parts of the page that
+ * tell them apart, so the next failure is diagnosed from the job log instead of
+ * from a re-run.
+ */
+async function describePage(page) {
+  const summary = {
+    url: page.url(),
+    title: await page.title().catch(() => ""),
+    navigations: 0,
+    navLabels: "",
+    links: "",
+    bodyStart: "",
+  };
+  try {
+    summary.navigations = await page.locator("nav, [role=navigation]").count();
+    summary.navLabels = (await page
+      .locator("nav, [role=navigation]")
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-label") ?? "(no label)")))
+      .join(" | ");
+    summary.links = (await page.locator("a").evaluateAll((nodes) =>
+      nodes.slice(0, 25).map((node) => (node.textContent ?? "").trim()).filter(Boolean),
+    )).join(" | ");
+    summary.bodyStart = ((await page.locator("body").innerText()) ?? "").replace(/\s+/g, " ").slice(0, 400);
+  } catch {
+    // A page mid-navigation may refuse to answer; the fields read so far stand.
+  }
+  return summary;
+}
+
+/**
+ * The navigation every viewport uses: try the shell, reload if it was not up
+ * yet, and — if it never turns up — fail with the page's own description and a
+ * screenshot instead of a locator timeout.
+ */
+async function navigateToToday(page, isMobile) {
+  let lastError;
+  for (let attempt = 1; attempt <= SHELL_ATTEMPTS; attempt += 1) {
+    try {
+      await openToday(page, isMobile);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === SHELL_ATTEMPTS) break;
+      console.log(`  · app shell not ready (attempt ${attempt}/${SHELL_ATTEMPTS}); reloading`);
+      await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+      await page.waitForTimeout(1_000 * attempt);
+    }
+  }
+
+  const summary = await describePage(page);
+  const viewport = isMobile ? "mobile" : "desktop";
+  const screenshot = `.cache/crm-queue-links-${viewport}.png`;
+  await page.screenshot({ path: screenshot, fullPage: true }).catch(() => {});
+  const detail = lastError instanceof Error ? lastError.message.split("\n")[0] : String(lastError);
+  throw new Error(
+    `CRM shell never appeared (${viewport}): ${detail} — url=${summary.url} title=${JSON.stringify(summary.title)} ` +
+      `navigations=${summary.navigations} navLabels=${JSON.stringify(summary.navLabels)} ` +
+      `links=${JSON.stringify(summary.links)} body=${JSON.stringify(summary.bodyStart)} screenshot=${screenshot}`,
+  );
 }
 
 async function followCustomerQueueLink(page, queueKey, customerId, customerName, viewportName, routeFailures) {
