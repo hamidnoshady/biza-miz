@@ -85,6 +85,9 @@ export function parseTourStudioInput(raw: unknown): TourStudioInput {
   if (status !== "draft" && status !== "published") error("invalid_status");
   if (!Array.isArray(steps) || steps.length < 1 || steps.length > 60) error("invalid_steps");
   const eligibility = parseEligibility(raw.eligibility ?? {});
+  // A published tour is metadata about a protected page. Never offer one to
+  // everyone merely because an editor omitted its access guard.
+  if (status === "published" && !Object.keys(eligibility).length) error("publishing_requires_eligibility");
   const parsedSteps: TourStep[] = steps.map((value: unknown) => {
     if (!obj(value)) return error("invalid_step");
     const { id: stepId, title: stepTitle, body, kind, anchor } = value;
@@ -140,7 +143,10 @@ export async function getStudioTour(id: string): Promise<AuthoredTour | null> {
 export async function saveStudioTour(raw: unknown, actor: string): Promise<{ id: string; version: number }> {
   const input = parseTourStudioInput(raw);
   return withoutTenantScopeTransaction("save authored tour", async () => {
-    const current = await getStudioTour(input.id);
+    const { rows: locked } = await query<TourRow>(
+      `SELECT ${COLUMNS} FROM knowledge_tours WHERE id=$1 FOR UPDATE`, [input.id],
+    );
+    const current = locked[0] ? mapTour(locked[0]) : null;
     if (current && input.expectedVersion !== current.version) error("version_conflict");
     if (!current && input.expectedVersion !== undefined) error("version_conflict");
     const version = current ? current.version + 1 : 1;
