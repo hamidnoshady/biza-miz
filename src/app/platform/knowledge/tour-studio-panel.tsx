@@ -72,8 +72,12 @@ export function TourStudioPanel() {
   };
   const authored = catalogue?.tours ?? [];
   const codeOnly = (catalogue?.codeTours ?? []).filter((x) => !authored.some((a) => a.id === x.id));
-  const rows = [...authored, ...codeOnly].filter((x) =>
+  const allTours = [...authored, ...codeOnly];
+  const rows = allTours.filter((x) =>
     !filter || x.title.includes(filter) || x.id.includes(filter) || x.pageKey.includes(filter));
+  const coveredPages = new Set(allTours.filter((tour) =>
+    !("status" in tour) || tour.status === "published").map((tour) => tour.pageKey));
+  const uncovered = KNOWLEDGE_PAGES.filter((page) => !coveredPages.has(page.key));
   const groupOf = (key: string) => KNOWLEDGE_PAGES.find((p) => p.key === key)?.label ?? key;
   const pageAnchors = useMemo(() => {
     const codeSteps = catalogue?.codeTours.filter((t) => t.pageKey === editing?.pageKey).flatMap((t) => t.steps) ?? [];
@@ -143,6 +147,22 @@ export function TourStudioPanel() {
         {canManage ? <Button onClick={() => startEdit(emptyTour())}>تور جدید</Button> : null}
       </div>
     </div>
+    <details className="rounded-xl border border-border p-3">
+      <summary className="cursor-pointer font-semibold">
+        پوشش صفحات: {coveredPages.size} صفحه با تور فعال از {KNOWLEDGE_PAGES.length} صفحهٔ ثبت‌شده
+      </summary>
+      <p className="mt-2 text-sm text-muted-foreground">
+        برای صفحه‌های فاقد تور، یک راهنمای توضیحی بسازید. برای راهنمای برجسته‌سازی، ابتدا باید هدف پایدار در رابط صفحه ثبت شود.
+      </p>
+      <div className="mt-3 grid max-h-72 gap-2 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
+        {uncovered.map((page) => <div key={page.key} className="flex items-center justify-between gap-2 rounded-lg border border-border p-2 text-xs">
+          <span>{page.group} / {page.label}</span>
+          {canManage ? <Button variant="outline" size="sm" onClick={() => startEdit({
+            ...emptyTour(), pageKey: page.key,
+          })}>ایجاد تور</Button> : null}
+        </div>)}
+      </div>
+    </details>
     {error ? <ErrorBox>{error}</ErrorBox> : null}
     {message ? <p role="status" className="rounded-lg bg-muted px-3 py-2 text-sm">{message}</p> : null}
     <label className="block space-y-1 text-sm">جست‌وجوی تور
