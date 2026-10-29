@@ -309,6 +309,36 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "payment id + Authority + Status; the route verifies the payment with Zarinpal server-side " +
     "using the stored gateway snapshot (no session required) and 302-redirects to /settings/billing; " +
     "authority mismatch is rejected and no session is created",
+  // Issue #1128 §E — the external client review door. These three are session-less
+  // because the party using them is not a member and must never become one: §B asks
+  // for "revocable scoped external review links" and for "resource scheduling
+  // without a new staff identity system", so the credential is the token, not a
+  // role. Authorising by membership would mean inviting the client onto the staff
+  // list to look at their own proofs, which is the second identity system §B rules
+  // out. There is deliberately no approve-style media permission for the same
+  // reason.
+  //
+  // The token is 256-bit random, stored only as sha-256 (0265 pins the hash to
+  // ^[0-9a-f]{64}$ so plaintext could not be persisted even by a bug), shown to the
+  // member who minted it exactly once, expires in ≤30 days, and is revocable with
+  // effect on the next request. resolveReviewToken runs before a single row is
+  // read, then every query runs inside withTenant(businessId) resolved *from* the
+  // link, and bytes additionally require the link's purpose to be `download` and
+  // the asset to be a member of that round — a token grants one round, never the
+  // library. streamMediaObject's keyBelongsToBusiness is the last backstop.
+  // Responses are no-store, since the URL carries the secret.
+  "media/review/[token]":
+    "client review screen for a scoped media link (issue #1128 §E) — the token is the credential; " +
+    "no session exists or may exist for an external client, and the token is resolved before any row " +
+    "is read, then every query is tenant-scoped to the business the link belongs to",
+  "media/review/[token]/items/[assetId]":
+    "client decision on one asset in a linked review round (issue #1128 §E) — same token credential; " +
+    "the item must be a member of the round the token grants, and the round must still be in `sent`",
+  "media/review/[token]/assets/[assetId]/file":
+    "byte streaming for a `download`-purpose media link (issue #1128 §E) — streamed through the app " +
+    "rather than presigned so revocation takes effect immediately and every fetch is counted; " +
+    "requires the token, the download purpose, round membership of the asset, and then defers to " +
+    "streamMediaObject's own keyBelongsToBusiness check",
 };
 
 

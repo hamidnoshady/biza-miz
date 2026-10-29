@@ -630,6 +630,32 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
       "A document filed against the customer. Leaving it on the loser removes it from the surviving file's document list, which is how a signed contract scan goes missing.",
   },
 
+  // -- Media client review (issue #1128 §E) ---------------------------------
+  // `move`, for the same reason as the project a round hangs off: the round is
+  // the client-approval step of work being delivered FOR that customer, and it
+  // is live rather than archival. An open round has a short-lived link in the
+  // client's hands, and the agency filters rounds by client — so leaving the
+  // column on the loser hides those rounds from the surviving file's review list,
+  // and a filter by the winner silently omits them. That is the quiet symptom
+  // this registry exists to prevent.
+  //
+  // Moving it costs no history, which is worth stating because that is the usual
+  // argument for `historical`: §E snapshots the actor independently of the
+  // foreign key. `media_review_events.actor_label` is NOT NULL and the round
+  // keeps the client's own name, so who approved what survives a merge as text
+  // wherever the pointer lands. The FK is a filter dimension, not the record of
+  // the decision.
+  {
+    table: "media_review_rounds",
+    column: "client_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The client a review round was sent to. The round belongs to a project still being delivered for that customer and an open round has a live link in their hands; left on the loser it vanishes from the surviving file's review list and from a filter by the winner.",
+    preview: true,
+    previewLabel: "دورهای بررسی",
+  },
+
   // -- AEC (issue #799 Wave 2) ----------------------------------------------
   // Migration 0194's three party columns. All four are `move`: they name a live
   // counterparty on a project that is still running, and the migration's own
