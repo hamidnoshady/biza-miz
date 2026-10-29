@@ -12,6 +12,7 @@
  * nowhere else — tenant screens receive `getTenantMessagingConfig()` instead.
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { Loader2Icon, RefreshCwIcon, SaveIcon, ShieldCheckIcon, WalletCardsIcon } from "lucide-react";
 import { formatPersianNumber } from "@/lib/digits";
 import { tomanLabel } from "@/lib/platform-money";
@@ -910,6 +911,18 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       </Card>
 
       <Card title={`حساب‌ها (${formatPersianNumber(snapshot.accounts.length)})`}>
+        {/* Issue #902 §6 — the dedicated audit view is the shared log, filtered
+            rather than copied: the family filter narrows it to `sms.*`, so the
+            operator reads this card's own actions instead of the whole console's. */}
+        <p className="mb-2 text-xs text-muted-foreground">
+          <Link
+            href="/platform/audit?actionFamily=sms"
+            className="text-sky-700 hover:underline dark:text-sky-300"
+          >
+            همهٔ رویدادهای پیامک مدیریت‌شده ←
+          </Link>{" "}
+          — ساخت حساب، تعلیق، تأمین اعتبار و تغییر الگوها، با دادهٔ کامل هر رویداد.
+        </p>
         <div className="space-y-2">
           {snapshot.accounts.length === 0 ? (
             <p className="text-sm text-muted-foreground">هنوز حسابی ساخته نشده است.</p>
@@ -925,6 +938,14 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                     {account.username} • {account.keyHint ? `••••${account.keyHint.replace(/^•+/, "")}` : "بدون کلید"}
                   </span>
                 </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  <Link
+                    href={`/platform/audit?actionFamily=sms&businessId=${account.businessId}`}
+                    className="text-sky-700 hover:underline dark:text-sky-300"
+                  >
+                    رویدادهای این حساب ←
+                  </Link>
+                </p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   تعرفه: {account.pricingName ?? "—"} • فارسی {tomanLabel(account.smsFarsiCostRial ?? 0)} • انگلیسی{" "}
                   {tomanLabel(account.smsEnglishCostRial ?? 0)} • موجودی داخلی{" "}
