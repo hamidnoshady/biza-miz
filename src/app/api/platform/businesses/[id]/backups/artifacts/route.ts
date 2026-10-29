@@ -24,10 +24,14 @@ import {
  * business.
  *
  * Capability: `tenant_backup.read`, the metadata-read capability admin presets
- * already hold. Mutating operations (trigger, verify, download, policy edit and
- * tenant restore) need their own scoped capabilities and are not exposed here;
- * the tenant restore preview lives behind the Owner's `backup.restore` on the
- * tenant route.
+ * already hold. The mutating operations live beside this one, each behind its
+ * own capability and its own audit entry: `…/backups/run` (trigger and
+ * catch-up, `tenant_backup.verify`), `…/artifacts/[ref]/verify`
+ * (`tenant_backup.verify`), `…/artifacts/[ref]` (download on
+ * `tenant_backup.download`, retention delete on `tenant_backup.policy`) and
+ * `…/custody` (rotation and legacy unlock). A tenant restore is never launched
+ * from the console: it stays behind the Owner's `backup.restore` on the tenant
+ * route, after re-authentication.
  */
 export const GET = withPlatformScope(
   async (request: NextRequest, ctx: { params: Promise<{ id: string }> }) => {

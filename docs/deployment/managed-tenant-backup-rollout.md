@@ -446,3 +446,45 @@ who decides them.
 **Unchanged and still open**: everything listed under "Still open" above —
 notably the absence of PostgreSQL/S3/Node ≥ 24 in this environment, so the
 integration suite, `test:db`, `build` and a live drill remain unexecuted here.
+
+## Increment: Superadmin per-business operations (issue #903 §10, third P1 line)
+
+`/platform/businesses/[id]/backups` was a read-only metadata page. It now acts,
+through a new `platform-tenant-backup-ops.ts` and four route files, each with its
+own capability and audit entry:
+
+| Route | Capability | What it does |
+| --- | --- | --- |
+| `GET  …/backups/diagnose` | `tenant_backup.read` | Policy in force, destination resolution (including the legacy-bucket case), custody generation and KEK presence, managed bytes, queue depth, device heartbeat, artifact-state histogram and a list of `actions` codes |
+| `POST …/backups/run` `{action:"run"}` | `tenant_backup.verify` | The shipped `runBackupNow` — same pipeline, same gates, no tenant charge |
+| `POST …/backups/run` `{action:"catch_up"}` | `tenant_backup.verify` | Drains the durable upload queue with its own backoff and generation fence |
+| `POST …/backups/artifacts/[ref]/verify` | `tenant_backup.verify` | Re-reads the bytes (local file, or a fresh staging copy of the cloud object), checks checksum + signature + archive parse, then `ready` or `failed` |
+| `GET  …/backups/artifacts/[ref]` | `tenant_backup.download` | Streams a local artifact or redirects to a 5-minute presigned URL; never returns a key |
+| `DELETE …/backups/artifacts/[ref]` | `tenant_backup.policy` | Retention delete, refusing to cross `protected_recovery_copies` |
+
+Design points worth keeping:
+
+- **Logical backups, not rows, are counted for protection.** A mirror's local and
+  cloud halves are one backup; destroying the second half of the last backup is
+  impossible just because two rows existed.
+- **Verify is the way back.** It deliberately does *not* apply the download
+  plan's "must be ready" rule — verifying an artifact a failed run left `failed`
+  is the point — but it still resolves the reference against the path business,
+  so another tenant's reference is simply not found.
+- **Delete is retention, not destruction.** Bytes are removed, the row becomes
+  `expired` with `failure_code = deleted_by_operator`, and a storage failure is
+  reported as `storage_delete_failed` rather than as success.
+- **No charge.** An operator action is not a billable tenant use; §8 bills
+  verified managed byte-days.
+- **The console never starts a tenant restore.** That stays with the Owner on the
+  tenant route, after re-authentication, exactly as before.
+
+**Deliberately not delivered: `import/register`.** A backup the platform did not
+write has no signed manifest and no component list, and the epic forbids
+inventing one — so an "import" button could only either trust an operator-supplied
+manifest (which the inventory would then present to the tenant as a verified
+backup) or fabricate coverage. Neither is acceptable. Artifacts already inside
+the platform's own lanes are covered by `verify`; anything else must be restored
+through the file-restore workflow, which validates before it applies. If the
+capability is wanted later, the honest form is a sidecar manifest written next to
+the artifact at capture time, which is a pipeline change rather than a button.

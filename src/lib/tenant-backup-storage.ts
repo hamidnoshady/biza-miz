@@ -360,6 +360,12 @@ export interface TenantBackupPolicy {
   /** Cloud copies kept per business. */
   keepCount: number;
   /**
+   * Restorable backups retention may never prune — the floor a delete request
+   * cannot cross (issue #903 §3, "retention/delete with protected recovery
+   * copies").
+   */
+  protectedCopies: number;
+  /**
    * `managed` — the platform answered, so this policy is authoritative.
    * `default` — the row was unreadable and these are the safe on-device
    * defaults.
@@ -375,6 +381,7 @@ export const SAFE_TENANT_BACKUP_POLICY: TenantBackupPolicy = {
   retentionDays: 30,
   maxRetentionDays: 365,
   keepCount: 30,
+  protectedCopies: 1,
   source: "default",
   managedCloud: false,
 };
@@ -399,6 +406,7 @@ export async function resolveTenantBackupPolicy(): Promise<TenantBackupPolicy> {
       retentionDays: Math.max(1, config.defaultRetentionDays),
       maxRetentionDays: Math.max(1, config.maxRetentionDays),
       keepCount: Math.max(1, config.cloudKeepCount),
+      protectedCopies: Math.max(0, config.protectedRecoveryCopies),
       source: "managed",
       managedCloud: config.cloudEnabled,
     };
