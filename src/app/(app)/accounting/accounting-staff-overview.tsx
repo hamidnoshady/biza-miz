@@ -7,6 +7,7 @@ import type { MemberAccess } from "@/lib/member-access";
 import { accessibleNavItemsFor } from "@/app/dashboard/workspace-shell";
 import { navIconFor } from "@/app/dashboard/sidebar-nav-icons";
 import { DestinationCard, EmptyState, PageHeader, PageShell, SectionCard } from "@/app/dashboard/page-chrome";
+import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { accountingOverviewShortcuts } from "./accounting-workspace";
 
 /**
@@ -55,6 +56,7 @@ export async function AccountingStaffOverview({
       <PageHeader
         title="حسابداری"
         description="میز کار شما — میان‌برهای بخش‌هایی که نقش شما به آن‌ها دسترسی دارد. ارقام مالی دفتر فقط برای نقش‌های دارای دسترسی به دفتر نمایش داده می‌شود."
+        actions={<KnowledgeHelpButton />}
       />
       {!admitted || groups.length === 0 ? (
         <EmptyState title="دسترسی به این برنامه ندارید">
@@ -62,7 +64,7 @@ export async function AccountingStaffOverview({
           تماس بگیرید.
         </EmptyState>
       ) : (
-        <div className="space-y-4">
+        <div data-tour-id="overview.staff-shortcuts" className="space-y-4">
           {groups.map((group) => (
             <SectionCard key={group.key} title={group.label ?? ""}>
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">

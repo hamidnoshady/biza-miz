@@ -1286,7 +1286,7 @@ export function PosScreen({
             جستجوی محصول یا کد کالا
           </label>
           <div className="flex items-center gap-2">
-            <div className="relative min-w-0 flex-1">
+            <div data-tour-id="pos.search" className="relative min-w-0 flex-1">
               <SearchIcon
                 className="pointer-events-none absolute inset-y-0 start-3 my-auto size-4 text-muted-foreground"
                 aria-hidden="true"
@@ -1375,6 +1375,7 @@ export function PosScreen({
             the panel's real edge so neither looks clipped mid-scroll.
           */}
           <div
+            data-tour-id="pos.categories"
             className="-mx-2 mt-2 flex min-h-11 flex-nowrap gap-1.5 overflow-x-auto px-2 pb-0.5 [scrollbar-width:none] md:-mx-0 md:mt-3 md:min-h-14 md:gap-2 md:px-0 md:pb-1 [&::-webkit-scrollbar]:hidden"
             aria-label="دسته‌های فعال"
           >
@@ -1404,6 +1405,7 @@ export function PosScreen({
         </div>
         <div
           id="pos-product-results"
+          data-tour-id="pos.products"
           role="listbox"
           /*
             Sized by the space the tiles actually get, not by the viewport. Fixed
@@ -1632,6 +1634,7 @@ export function PosScreen({
         scrolls once the three sections together outgrow the viewport.
       */}
       <div
+        data-tour-id="pos.cart"
         className={`hidden max-h-[46dvh] w-full shrink-0 flex-col overflow-y-auto ${cardClass} md:flex md:max-h-none md:w-[23rem] xl:w-[25rem]`}
       >
         <div className="shrink-0 border-b border-border/80 p-4">
@@ -1884,6 +1887,7 @@ export function PosScreen({
       */}
       <div
         data-bottom-dock
+        data-tour-id="pos.cart"
         className="fixed inset-x-2 bottom-[var(--app-bottom-nav)] z-30 md:hidden"
       >
         <button

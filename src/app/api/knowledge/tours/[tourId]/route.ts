@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { tourPlayback, tourProgressView } from "@/lib/tours";
-import { eligibleTourById, loadTourProgress, tourViewerFor } from "@/lib/tours-service";
+import { eligibleTourById, loadTourProgress } from "@/lib/tours-service";
 
 /**
  * The steps of one tour plus the caller's resume point, fetched when the
@@ -15,8 +15,7 @@ export const GET = withTenantScope(
     if (guard.error) return guard.error;
 
     const { tourId } = await context.params;
-    const viewer = await tourViewerFor(guard.session.businessId, guard.membership.permissions);
-    const tour = eligibleTourById(tourId, viewer);
+    const tour = await eligibleTourById(tourId, guard.session.businessId, guard.membership.permissions);
     if (!tour) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
     const progress = (await loadTourProgress(guard.session.businessId, guard.session.sub, [tour.id])).get(tour.id) ?? null;
