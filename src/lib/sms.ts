@@ -36,8 +36,21 @@ export class SmsNotConfiguredError extends Error {
 /** Prefix on the development-only fallback line, kept as a constant so a test can assert its absence. */
 export const SMS_NOOP_LOG_PREFIX = "[SMS NOOP]";
 
+/**
+ * The little bit of the environment this decision depends on.
+ *
+ * Narrower than `NodeJS.ProcessEnv` on purpose: Next's global types pin
+ * `NODE_ENV` to a three-value union and require it, which would make the
+ * "unset" branch untestable and reject a value like `staging` that a
+ * deployment may well use. `process.env` satisfies this shape, so the default
+ * stays honest while a test can pass one.
+ */
+export interface SmsEnvironment {
+  NODE_ENV?: string;
+}
+
 /** The two environments where printing a live code is a developer's own terminal. */
-function isDevelopmentLike(environment: NodeJS.ProcessEnv): boolean {
+function isDevelopmentLike(environment: SmsEnvironment): boolean {
   return environment.NODE_ENV === "development" || environment.NODE_ENV === "test";
 }
 
@@ -47,7 +60,7 @@ export class NoopProvider implements SmsProvider {
    * testing: `NODE_ENV` is read at call time, not import time, and a test that
    * mutated the process-global would leak into every other file in the run.
    */
-  constructor(private readonly environment: NodeJS.ProcessEnv = process.env) {}
+  constructor(private readonly environment: SmsEnvironment = process.env) {}
 
   async sendOtp(phoneE164: string, otp: string): Promise<void> {
     if (isDevelopmentLike(this.environment)) {
