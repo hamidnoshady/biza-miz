@@ -37,7 +37,12 @@ import {
   tenantStagingDir,
   type TenantStorageTarget,
 } from "./tenant-backup-storage";
-import { artifactEncryptionFor, decryptionSecretFor, verifyStoredArtifact } from "./tenant-backup-runner";
+import {
+  artifactEncryptionFor,
+  decryptionSecretFor,
+  deterministicArtifactId,
+  verifyStoredArtifact,
+} from "./tenant-backup-runner";
 import { parseTenantArchive, tenantTableSet } from "./tenant-archive";
 import { tenantBackupArtifactRef } from "./tenant-backup-artifact-ref";
 import { buildBackupManifest } from "./backup-manifest";
@@ -420,10 +425,7 @@ export async function completeTenantUpload(input: {
   const masterKey = getMasterKey();
   if (!masterKey) return { ok: false, error: "backup_encryption_unconfigured" };
   const capturedAt = new Date();
-  const artifactId = createHash("sha256")
-    .update(JSON.stringify(["tenant-backup-upload", input.businessId, input.token]))
-    .digest("hex")
-    .slice(0, 32);
+  const artifactId = deterministicArtifactId(["upload", input.businessId, input.token]);
   const manifest = buildBackupManifest({
     artifactId,
     businessId: input.businessId,

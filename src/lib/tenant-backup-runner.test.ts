@@ -21,6 +21,7 @@ import {
   buildComponentInventory,
   capturedAtOf,
   decryptionSecretFor,
+  deterministicArtifactId,
   mediaAttachmentCount,
   physicalComponentInventory,
 } from "./tenant-backup-runner";
@@ -151,6 +152,28 @@ describe("mediaAttachmentCount", () => {
   it("reports zero on an installation without a media table", async () => {
     mocks.query.mockRejectedValue(new Error('relation "media_assets" does not exist'));
     expect(await mediaAttachmentCount("b1")).toBe(0);
+  });
+});
+
+describe("deterministicArtifactId", () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+  it("produces a real UUID the inventory column can accept", () => {
+    expect(deterministicArtifactId(["business-a", "artifact.enc"])).toMatch(UUID);
+  });
+
+  it("is stable, so a retried publish updates the same logical backup", () => {
+    const first = deterministicArtifactId(["business-a", "artifact.enc"]);
+    const second = deterministicArtifactId(["business-a", "artifact.enc"]);
+    expect(second).toBe(first);
+  });
+
+  it("separates businesses, artifacts and purposes", () => {
+    const a = deterministicArtifactId(["business-a", "artifact.enc"]);
+    const b = deterministicArtifactId(["business-b", "artifact.enc"]);
+    const c = deterministicArtifactId(["business-a", "other.enc"]);
+    const d = deterministicArtifactId(["upload", "business-a", "token"]);
+    expect(new Set([a, b, c, d]).size).toBe(4);
   });
 });
 

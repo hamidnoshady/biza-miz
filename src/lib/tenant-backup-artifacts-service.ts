@@ -337,7 +337,13 @@ export interface RecordArtifactInput {
  * storage_ref)` constraint makes a retried publish idempotent, and a mirror's
  * second row updates rather than duplicates.
  */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function recordTenantArtifact(input: RecordArtifactInput): Promise<RecordArtifactResult> {
+  // Fail loudly here rather than letting Postgres reject the insert: an
+  // artifact id that is not a UUID is a caller bug, and the error code must say
+  // so instead of surfacing as a generic write failure.
+  if (!UUID.test(input.artifactId)) return { ok: false, error: "invalid_artifact_id" };
   if (!input.storageRef) return { ok: false, error: "storage_ref_required" };
   if (input.encryption === "managed_envelope_v1" && !input.keyVersion) {
     return { ok: false, error: "key_version_required" };

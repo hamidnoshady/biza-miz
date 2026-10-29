@@ -266,6 +266,26 @@ export async function writeTenantArchive(
   };
 }
 
+/**
+ * A deterministic **UUID** (version 5 shape) for one logical backup.
+ *
+ * The column is `uuid`, and a bare 32-character hex digest is not a UUID — it
+ * would be rejected by Postgres at insert time. Determinism is the point: the
+ * local and cloud rows of one mirror must land on the same `artifact_id`, so a
+ * retried publish is an update rather than a second backup.
+ */
+export function deterministicArtifactId(parts: readonly string[]): string {
+  const hex = createHash("sha256").update(JSON.stringify(["tenant-backup-artifact-v1", ...parts])).digest("hex");
+  const variant = ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    `5${hex.slice(13, 16)}`,
+    `${variant}${hex.slice(17, 20)}`,
+    hex.slice(20, 32),
+  ].join("-");
+}
+
 export interface FinalizeArtifactInput {
   businessId: string;
   /** Path of the encrypted artifact as it will be stored. */
@@ -303,10 +323,7 @@ export async function registerFinishedArtifact(input: FinalizeArtifactInput): Pr
 
   // The artifact id is derived from the stored artifact's identity, so the local
   // and cloud rows of one run collapse into one logical backup.
-  const artifactId = createHash("sha256")
-    .update(JSON.stringify(["tenant-backup-artifact-v1", input.businessId, input.artifactName]))
-    .digest("hex")
-    .slice(0, 32);
+  const artifactId = deterministicArtifactId([input.businessId, input.artifactName]);
 
   const manifestInput = {
     artifactId,
