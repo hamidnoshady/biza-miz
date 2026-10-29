@@ -137,6 +137,13 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'media_collection_items.added_by': 'media library tooling',
   'media_collections.created_by': 'media library tooling',
   'media_folders.created_by': 'media library tooling',
+  // Issue #1128 §E — the client review round. Three of its four attribution
+  // columns are excused here; the fourth, media_review_links.created_by, is
+  // catalogued into the sweep instead, because issuing a link hands an external
+  // party a door to the tenant's files and that column keeps no name snapshot.
+  'media_review_rounds.created_by': 'media library tooling; created_by_name snapshots the author',
+  'media_review_round_items.added_by': 'media library tooling; the shape of media_collection_items.added_by',
+  'media_review_events.actor_user_id': 'the review trail itself; actor_label is NOT NULL, so the actor outlives the member',
   'message_credit_ledger.created_by_user_id': 'platform messaging credits',
   'native_app_devices.reactivated_by': 'device registry for the account',
   'native_app_devices.revoked_by': 'device registry for the account',

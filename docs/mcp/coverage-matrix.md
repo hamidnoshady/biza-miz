@@ -11,11 +11,11 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1151**. Rows: tenant **101**, platform **21**.
+Route files scanned: **1161**. Rows: tenant **103**, platform **21**.
 
 ## Summary of remaining gaps
 
-### Tenant (9)
+### Tenant (10)
 - **accounting.currencies** (Accounting · Currencies and exchange rates) — MCP gap
 - **accounting.multicurrency** (Accounting · Multi-currency entries, settlements and revaluations) — MCP gap
 - **accounting.opening-balances** (Accounting · Opening balances & fiscal carry-forward) — MCP gap
@@ -25,6 +25,7 @@ Route files scanned: **1151**. Rows: tenant **101**, platform **21**.
 - **automotive.vehicles** (Automotive · Vehicles, leads, reservations and transfers) — MCP gap
 - **accounting.ar** (Accounting · Receivables (receipts, aging, customers)) — partial
 - **workspace.agency** (Workspace · Agency commercial registers (billing schedule & milestones, change requests)) — MCP gap
+- **media.client_review** (Media · Client review rounds (assemble a batch, send it, collect the client's decisions)) — MCP gap
 
 ### Platform (0)
 _none_
@@ -33,7 +34,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 63 · partial: 1 · MCP gap: 8 · backend gap: 0 · n/a (infra): 13 · duplicate surface: 1 · route-only (by design): 15
+Counts — covered: 63 · partial: 1 · MCP gap: 9 · backend gap: 0 · n/a (infra): 13 · duplicate surface: 1 · route-only (by design): 16
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -114,6 +115,8 @@ Counts — covered: 63 · partial: 1 · MCP gap: 8 · backend gap: 0 · n/a (inf
 | Business config | Devices & printing config, pairing<br>_device PAIRING stays route-only by design: the POST returns a plaintext device token exactly once, meant for the calling browser's local storage — a chat-initiated pair would mint an orphaned credential; printing jobs/test lanes drive physical printers on a branch's own runtime (route-owned); payment-method edits are Owner-side POS settings rides_ | list_devices | (route only) | device.rename | device.revoke | — | orders.amend_closed, payments.refund, payments.take, printing.execute, settings.manage, woocommerce.view | connection mode; step-up (always approve) | list_devices, device.rename, device.revoke | integration/printing.integration.test.ts | route-only (by design) |
 | Business config | Onboarding wizard routes<br>_first-run wizard flow — UI-only; nothing to operate once a business exists_ | (route only) | (route only) | — | (route only) | (route only) | settings.manage | — | — | — | n/a (infra) |
 | Media | Media assets, folders, collections, AI transforms | get_media_asset, list_media_assets, list_media_collections, list_media_folders | media.collection.create | media.asset.set_collection, media.collection.rename | media.asset.restore, media.asset.trash, media.collection.delete | — | inventory.view, ledger.view, media.manage, media.view, menu.view, parties.view, vehicles.view, woocommerce.manage | connection mode | get_media_asset, list_media_assets, list_media_collections, list_media_folders, media.collection.create, media.asset.set_collection, media.collection.rename, media.asset.restore, media.asset.trash, media.collection.delete | integration/media-library.integration.test.ts | covered |
+| Media | Client review rounds (assemble a batch, send it, collect the client's decisions)<br>_issue #1128 §E: the agency's side of client review. A round, and not an asset, is the unit of approval — agencies send a batch, collect decisions, revise and resend, and the sequence of rounds over one asset is its version history (approved is terminal because the next round supersedes it). No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion; exposing these has to satisfy §F's rule that an assistant drafts and a human approves, and sending work to a client for sign-off is precisely that kind of act. Three things a future tool must keep: a round in «sent» is frozen so a client never finds the batch changed underneath them, approving a round requires every item decided AND every item approved, and minting a link returns a plaintext token exactly once — it is unrecoverable afterwards, which makes it a poor fit for a request/response verb_ | (route only) | (route only) | (route only) | (route only) | — | media.manage, media.view | — | — | src/lib/media-review.test.ts | MCP gap |
+| Media | Scoped client review links — the external token door and its byte stream<br>_issue #1128 §E: the client's door, addressed by token alone. Route-only by design and not by omission — there is no session here and there must never be one. §B asks for revocable scoped external review links without a new staff identity system, so the client is authorised by holding a short-lived token, never by a tenant role, and there is deliberately no approve-style media permission (the party who approves is not a member and must not become one). An MCP connection cannot hold that token: minting one for an agent would hand a credential that opens a tenant's files to a party outside it, when the entire point of the link is that a human at the client decides. The byte route is also not a JSON envelope, for the same reason media.assets keeps upload screen-side. Bytes stream through the app rather than a presigned URL so revocation takes effect on the next request and every fetch is counted against the link_ | (route only) | — | — | (route only) | — | — | — | — | src/app/api/media/review-guard.test.ts | route-only (by design) |
 | Knowledge base | Knowledge articles & search<br>_authoring (articles/categories/tags) lives under the platform console by design — the tenant exposes the help it reads, not the help it writes_ | list_kb_catalogue, search_kb_articles | — | — | — | — | — | — | list_kb_catalogue, search_kb_articles | src/lib/knowledge.test.ts | covered |
 | Knowledge base | Guided tours — lookup and the caller's own learning progress (issue #972)<br>_a member's own walk-through state on the page they are looking at, written only by the browser overlay; it moves no business data, so an AI client has nothing to operate_ | (route only) | (route only) | — | — | — | — | — | — | integration/tours.integration.test.ts | n/a (infra) |
 | Reports | Reports (standard, saved, export, query, drill-down, views)<br>_the bulk column is the POST /reports/export lane — XLSX/PDF byte export stays route-only (binary payloads aren't JSON envelopes, so no MCP verb can ever fill it honestly); dashboard-widget layout save stays UI-only_ | list_reports, list_saved_reports, run_report | report.saved.create | report.saved.update | report.saved.delete | (route only) | ledger.view, reports.business_wide, reports.export, reports.manage, reports.view, vehicles.cost_view, vehicles.view | connection mode | list_reports, list_saved_reports, run_report, report.saved.create, report.saved.update, report.saved.delete | integration/ledger-reports.integration.test.ts + aec-reports/industry-reports/vat-report | route-only (by design) |

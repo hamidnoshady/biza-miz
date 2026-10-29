@@ -95,6 +95,14 @@ way round. See «What this change does not build».
 | **Wave 3** — the screen | `src/app/(app)/workspace/projects/[id]/agency-billing-panel.tsx` in the project's «مالی» tab, mounted only when `/api/workspace/lookups` answers `agencyCommercial` — a new flag, absent rather than `false` for every other trade, so no project page has to call `/api/agency/**` to discover it is not an agency and render an `industry_mismatch` banner for the request |
 | **Wave 3** — tests | `agency-commercial.test.ts` (43, pure), `api/agency/guard.test.ts` (7, including an exhaustive status table typed over the union so a new refusal code cannot silently default to 400), and `integration/agency-commercial.integration.test.ts` (17, real database: the schedule, the percentage resolved at invoice time, the posted entry and its project dimension, approving-without-billing, the self-approval refusal, and migration 0260's guards as database facts) |
 
+| **Wave 4** — §E schema | `migrations/0265_media_client_review.sql`: four tables (`media_review_rounds`, `media_review_round_items`, `media_review_links`, `media_review_events`) and six triggers. Refs into §E's own tables are composite foreign keys; refs into the four shared tables (`media_assets`, `ai_projects`, `parties`, `growth_campaigns`) are trigger-validated, because none has `UNIQUE(business_id, id)` and `media_assets` stays untouched. `media_review_round_guard` is the state machine's backstop: DELETE only from `draft`, the whole row immutable once `approved`/`rejected`, title and scope frozen for `sent`/`withdrawn` with `note` still editable, and nothing frozen for `changes_requested`. Links are append-only except `revoked_at` and the use counters, events are append-only with no draft exception, `sent_at` is set once and never cleared, one live link per (round, purpose), sha-256 stored as 64 hex, TTL clamped 1–30 days. All additive, no backfill, and nothing in it posts a journal entry |
+| **Wave 4** — the pure module | `src/lib/media-review.ts`: the round and item vocabularies, `REVIEW_ROUND_TRANSITIONS` with `canTransitionReviewRound` (two *statuses*, not a status and an act), the two freeze predicates, `reviewRoundStateFromItems` (null while anything is undecided; rejected outranks changes-requested outranks all-approved), the link purpose and TTL rules with revocation winning over expiry, the token's shape and display prefix, both act catalogues, and «۳ از ۵» progress. It imports `./digits` and nothing else — asserted by a source scan, because a module that decides what a client may do must not be able to reach a database |
+| **Wave 4** — the service | `src/lib/media-review-service.ts`: 23 refusal codes, the round's whole lifecycle, items added/removed/relabelled/repositioned under a 50-item cap, links minted (plaintext returned exactly once) and revoked idempotently, and the client's three verbs. The security spine resolves a token once under a named `withoutTenantScope`, checks liveness with a reason, requires `sent`, then does everything else inside `withTenant` **plus an explicit `business_id` predicate** — 32 of them, because `withTenant` sets the RLS scope and never injects the column (decision 31). Approving a round requires every item decided and every item approved. Bytes are authorised separately from streaming so a 304 or 416 costs no storage read |
+| **Wave 4** — HTTP (agency) | Seven routes under `/api/media/review-rounds/**` behind inline `requirePermission(PERMISSIONS.mediaView | mediaManage)`, so the static guard scan sees them: list, read, create, patch, transition (send/withdraw only), delete (draft only, writing `audit_log`), mint a link, revoke a link, and manage items. Revoke is a POST to `revoke`, not a DELETE, because it records an act rather than removing a row |
+| **Wave 4** — HTTP (client) | Three routes under `/api/media/review/[token]/**`, added to `api-guards.test.ts`'s `PUBLIC_ROUTES` in the same commit as the routes (that test asserts every exemption key has a real file behind it). They are plain handlers with no session to require — the token *is* the guard — and they answer `Cache-Control: private, no-store`, unlike the tenant's own file route, because a token-bearing URL must never be cached. One error map in `src/app/api/media/review-guard.ts`, exhaustive over the 23 codes and pinned by a `Record<MediaReviewErrorCode, number>` in its test, so a new code without a status fails the compiler |
+| **Wave 4** — the client screen | `/review/[token]`, public in exactly the way `/invite` is, plus its middleware entries. Renders each item's preview inline from its token-scoped URL, takes a per-item decision with a note, then a whole-round decision, and maps the refusal codes onto instructions split by whether the outcome is terminal or fixable. Its wire types are redeclared locally: the service imports the Postgres driver, and importing it into a client component would drag `pg` into the browser bundle |
+| **Wave 4** — tests | `src/lib/media-review.test.ts` (42, pure), `src/app/api/media/review-guard.test.ts` (7, exhaustive status map), `integration/media-review.integration.test.ts` (18, real database), and 72 assertions against 0265 run directly over Postgres. Two MCP coverage rows were added and both generated matrices regenerated, because `media.assets`'s broad `routes: ["media"]` prefix silently absorbed all ten new route files — the only symptom was a stale route count |
+
 ## Decisions
 
 ### 1 — the family is `service`, and Workspace eligibility is a separate axis
@@ -378,6 +386,146 @@ stored". Hours describe what an amount covers, so they fall away with it unless 
 too. A priced change request stays editable for the same reason: otherwise one priced before its
 schedule impact was known could never be sent, never be corrected, and could only be withdrawn.
 
+### 24 — the round is the version: §E adds no version table and reuses no `ai_status`
+
+§E asks for "versions". The tempting read is a `media_asset_versions` table, and the library already
+has a column that looks like a review state: `media_assets.ai_status`. Both were refused.
+
+`ai_status` records an operator confirming a label the AI proposed. It is about metadata provenance,
+not about a client's verdict on an artwork, and overloading it would make the two questions
+unanswerable separately — a file whose AI caption was confirmed would look client-approved.
+
+Versions are rounds instead. A round is a set of assets put to the client at one moment; `approved` is
+terminal precisely because the next revision is a *new* round that supersedes it, and the chain of
+rounds over a project is the version history. `version_label` names one («نسخهٔ ۲», «چاپ نهایی»)
+without inventing storage for it. This is also why no round may return to `draft`: a round a client has
+seen is a fact about the project, and unseeing it would erase the trail.
+
+### 25 — shared tables get trigger-validated refs; §E's own get composite foreign keys
+
+Every reference a round makes has to be tenant-checked, and the two kinds of table available do not
+offer the same tool. §E's own tables carry `(business_id, id)` uniqueness, so their internal refs are
+plain composite foreign keys — the database refuses a cross-tenant child row outright, which is why the
+guard suite can prove that with a raw insert.
+
+The four shared tables a round points at (`media_assets`, `ai_projects`, `parties`,
+`growth_campaigns`) have no `UNIQUE(business_id, id)`, and adding one to `media_assets` would touch a
+table §E has no business changing. Those refs are validated by triggers asserting the owner matches,
+which gives the same guarantee in a place that can be reasoned about per-table. The guard suite names
+each one, so a future migration that drops a trigger fails a test instead of silently opening a
+cross-tenant reference.
+
+### 26 — bytes stream through the app; the presigned URL is left unused
+
+`presignS3Get` exists and would have been one line. It was refused because a presigned URL cannot be
+revoked once issued and leaves no trail: the object store answers the client directly, so the app never
+learns that a fetch happened, and §B's "revocable scoped" links stop being revocable for as long as the
+URL lives.
+
+Bytes therefore stream through `/api/media/review/[token]/assets/[assetId]/file`, which resolves the
+token, checks the asset's membership in *that* round, and only then reads storage. Revocation bites on
+the next request, the use counters move, and a whole-file fetch writes an event. `storage_key` never
+leaves the service, and the streaming call still goes through `streamMediaObject`'s
+`keyBelongsToBusiness`, so the defence does not rest on §E's own query being right.
+
+Authorisation is a separate function from streaming for one reason: answering a conditional request
+(304, 416) must not cost a storage read, and bundling the two would have made every `If-None-Match` a
+full authorise-plus-fetch.
+
+### 27 — the token is a hash at rest, and its shape is checked before any lookup
+
+The token follows `api-auth.ts` exactly: `bmrl_` plus 32 random bytes base64url, with only its sha-256
+hex digest stored. The plaintext is returned once, to the member who minted it, and cannot be recovered
+afterwards — so reading the database does not hand over working links, and the 64-hex CHECK in 0265
+means a malformed digest cannot be stored at all.
+
+Shape is validated before any lookup, and the shape functions live in the pure module so the service
+and the client screen agree on what a token looks like. A random string in a URL therefore costs one
+comparison, not a query. A 16-character display prefix is stored alongside, so an agency can tell two
+links apart in a list without ever seeing either secret.
+
+### 28 — purpose governs intent and disposition, not whether bytes may be served
+
+This one was wrong first, and the client screen is what proved it. `createReviewLink` mints a link as
+`review` unless an agency asks for `download`, and the first cut of `authorizeReviewAsset` refused
+*every* byte fetch for a `review` link. That made the default link render broken images: a client who
+cannot see the artwork cannot approve it, so the gate contradicted the feature it guarded.
+
+Purpose now gates an explicit ask to take the file (`?download=1`), which only a `download` link may
+make; the default render is inline either way. Two honest notes sit in the code, because the
+distinction is narrower than it sounds. Bytes served for viewing can always be saved by a browser, so
+no response header prevents a determined client from keeping the file — what purpose buys is a truthful
+audit trail (`asset.viewed` vs `asset.downloaded`), and keeping print-ready originals away from an
+unpaid client is a watermarking problem that is out of scope here. And the purpose must not force
+`attachment` on its own: that disposition on an `<img src>` makes the browser save instead of render,
+which would break the preview for exactly the `download` links that ought to show the most.
+
+A link's authority never moves, live or revoked. Only `revoked_at` (once) and the use counters change,
+so a revoked link still records that someone tried it — which is the evidence an agency wants.
+
+### 29 — the client is an actor, never a member
+
+The person at the far end of a review link has no `users` row and must never get one: §B asks for
+external review "without a new staff identity system", and a user row would be exactly that. They are
+recorded as an *actor* — `actor_kind` of `member | client | system`, with `actor_label` NOT NULL so the
+trail names who decided even when there is no account to join to. The client's own name is captured on
+the round when they decide, defaulting to «کارفرما» rather than left blank.
+
+This is also why there is no approve-style media permission, and why the page is public in exactly the
+way `/invite` is. Authorisation here *is* the token: `withTenantScope` reads `cookies()`, so the client
+routes cannot use it and are plain handlers. The middleware entry is prefix-matched, which is what makes
+the spelling safe — `/api/media/review` publishes the three token routes and does not publish the
+agency's own `/api/media/review-rounds/…`, because that path does not start with `/api/media/review/`.
+The `PUBLIC_ROUTES` entries in `api-guards.test.ts` landed in the same commit as the routes, since that
+test asserts every exemption key has a real file behind it.
+
+Events are append-only with no draft exception. A draft deletion is recorded in the surviving
+`audit_log` instead, so nothing a member did disappears without a trace even when the row does.
+
+### 30 — two doors and two freezes, mirrored from the database guard
+
+`reviewRoundActionsFrom` deliberately returns *both* sides' acts, which made it unusable as
+`ReviewRound.actions`: a screen reading that field would offer a member an **approve** button the API
+then refuses. There are now two doors over one act table — `actions` for the agency
+(`agencyReviewActionsFrom`) and `clientActions` for the client — and `ClientReviewView.actions` is the
+client's door, assigned from `round.clientActions`.
+
+Freezes are two, and they are not the same set. `media_review_round_guard` freezes title and scope for
+`sent | withdrawn`, the whole row for `approved | rejected`, and nothing for `changes_requested`; items
+are governed by a different predicate again. Collapsing them would make the `changes_requested` case
+unsayable — frozen in title and scope, yet happily taking assets again — so item mutations raise
+`round_not_open_for_items` while identity mutations raise `round_frozen`. Both mirror the trigger so a
+screen gets a translatable code instead of a raw 23514: mirroring only in the database gives the UI
+nothing to say, and mirroring too strictly blocks a legitimate typo fix on sent-back work.
+
+`sent_at` is set once by `coalesce` and never cleared nor overwritten on re-send, because when the
+client first saw the round is a fact, not a property of the current send.
+
+### 31 — tenant scoping is a predicate, not an ambient assumption
+
+`withTenant(businessId, …)` establishes the RLS scope and nothing else; it never injects `business_id`
+into the SQL. The first cut of this service had zero `business_id` predicates and fourteen id-alone
+lookups, and it passed every unit test — because the integration harness connects as `pos`, a
+superuser, and a superuser bypasses RLS even under FORCE. Against a real tenant the only thing standing
+between one agency's rounds and another's was a policy the connection was exempt from.
+
+The service now carries 32 explicit `business_id` predicates, which is the house style: `workspace.ts`
+has 80, `media-service.ts` 30, `agency-commercial-service.ts` 22 with no id-alone lookups at all, and
+no service uses `app_current_business()` in application SQL. RLS is the backstop, not the plan. The one
+intentionally unscoped query is the token hash lookup, which must find the business before it can scope
+to it, and it runs under `withoutTenantScope("media-review-token")` so the exemption is named.
+
+### 32 — §E is not industry-gated, and it posts nothing
+
+§D asserts `advertising_agency` before it will act. §E deliberately does not: the Media Library is a
+platform feature, and the agency-specific part is only the nullable format vocabulary (`copy`, `logo`,
+`print_ready`, …) that labels an item. Gating review rounds by industry would deny every other trade a
+client-approval flow for no reason, and the whole flow is proven on a `jewelry` tenant in the
+integration suite.
+
+Nothing here posts a journal entry or moves money. §E is a review and handover surface, so it stays out
+of the accounting path entirely — the media recharge in §D's P&L is a different concern.
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -568,6 +716,27 @@ Database (`npm run test:db`, needs `DATABASE_URL`):
   integration shard was the first execution of any of it — and the first execution of the service
   against a real database found both faults, neither of which a unit test on mocked rows could have
   reached.
+
+* `media-review.test.ts` (42) — the pure module: every legal and illegal round transition, both
+  freeze predicates against each status, `reviewRoundStateFromItems` including the null-while-undecided
+  and rejected-outranks cases, TTL clamping, expiry, revocation beating expiry, token shape and
+  display prefix, both act catalogues, and the progress string. A source scan asserts the module
+  imports `./digits` and nothing else.
+* `review-guard.test.ts` (7) — the error map is typed `Record<MediaReviewErrorCode, number>`, so
+  adding a refusal code without giving it a status fails the compiler rather than defaulting to 400.
+* `integration/media-review.integration.test.ts` (18) — the whole flow against a real database on a
+  `jewelry` tenant, which is what proves §E is not industry-gated: minting and revoking, the trail
+  never rewritten, withdraw revoking live links in the same act, progress and live-link counts in the
+  list, and two tenants kept out of each other's reach. Link expiry is tested by disabling
+  `media_review_links`' user triggers through a `pg_trigger` lookup, moving `expires_at`, and
+  re-enabling them in a `finally` — 0265 freezes the stamp on a live link, so it cannot be updated
+  directly.
+
+Two faults only a real database could find, and both are recorded as decisions: the service had no
+`business_id` predicates at all and passed every unit test because the harness connects as the `pos`
+superuser, which bypasses RLS even under FORCE (decision 31); and the purpose gate refused a `review`
+link every byte fetch, which made the default link unable to show the artwork it exists to show
+(decision 28).
 
 ## Rollout checklist
 
