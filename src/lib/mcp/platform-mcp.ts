@@ -113,6 +113,7 @@ import { listSiteDevices } from "../site-device-service";
 // stays console-side).
 import {
   businessAppAvailability,
+  InvalidAppAvailabilityStateError,
   setBusinessAppAvailability,
 } from "../app-availability-service";
 import { appForKey } from "../apps";
@@ -2098,7 +2099,16 @@ async function executePlatformTool(
         for (const id of targets) {
           try {
             if (!(await getBusiness(id))) throw new Error("not_found");
-            await setBusinessAppAvailability(id, appKey, write as never, connection.adminId);
+            // Issue #902 §9 item 6 — `write as never` used to hand an unknown
+            // state straight to the column's CHECK, so a tool call with a typo
+            // reported a database error. The write validates now; this catches
+            // its refusal and answers in the tool's own vocabulary.
+            try {
+              await setBusinessAppAvailability(id, appKey, write as never, connection.adminId);
+            } catch (error) {
+              if (error instanceof InvalidAppAvailabilityStateError) throw new Error("invalid_state");
+              throw error;
+            }
             await platformAuditSafe(connection, id, tool.name, "ok", {
               action: "business.app_availability.write",
               app: appKey,

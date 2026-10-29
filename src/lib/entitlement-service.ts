@@ -44,10 +44,7 @@ import { planLimitsFor } from "./plan-limits";
 import { declarationFor } from "./billing/catalog/declarations";
 import { evaluateBusinessSpend } from "./billing/runtime";
 import { resolveCommercialLayer, resolveFlagLayer } from "./effective-access";
-import {
-  APP_AVAILABILITY_META,
-  type AppAvailabilityState,
-} from "./app-availability";
+import { APP_AVAILABILITY_META, isAppAvailabilityState } from "./app-availability";
 
 export type DenialReason =
   | "platform_unavailable"
@@ -249,15 +246,18 @@ export async function resolveBusinessCapability(
       `SELECT state FROM app_availability WHERE app_key = $1`,
       [appKey],
     );
-    const state = rows[0]?.state;
+    const state: unknown = rows[0]?.state;
     // Issue #902: this compared against "enabled", which is not a state the
     // app-availability vocabulary has had since migration 0128 introduced
     // available/beta/coming_soon/maintenance/disabled. Every app whose row said
     // "available" was therefore denied as platform_unavailable. The single
     // source of truth for "is this state usable" is the pure registry, so a
     // future state is one entry there rather than a second comparison here.
-    // A missing row keeps the historical default: available.
-    if (state && APP_AVAILABILITY_META[state as AppAvailabilityState]?.usable !== true) {
+    // A missing row keeps the historical default: available — and a state the
+    // registry does not know is treated the same way rather than being cast,
+    // because a cast is exactly how the original comparison stayed wrong for so
+    // long without a single failing test.
+    if (isAppAvailabilityState(state) && !APP_AVAILABILITY_META[state].usable) {
       return deny(capabilityKey, "platform_unavailable");
     }
   }
