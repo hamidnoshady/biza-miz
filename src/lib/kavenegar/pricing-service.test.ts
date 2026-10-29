@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MIN_PROVIDER_TRANSFER_RIAL,
   NO_FUNDING,
@@ -6,11 +6,13 @@ import {
   planFunding,
   refillTriggerMessages,
   quoteSmsPrice,
+  readMasterBalanceRial,
   roundToProviderMinimum,
   tariffBucketFor,
   type FundingPolicy,
   type ProviderTariff,
 } from "./pricing-service";
+import type { KavenegarManagementClient } from "./rest";
 
 const tariff: ProviderTariff = {
   farsiRialPerSegment: 900,
@@ -305,5 +307,44 @@ describe("funding strategies (issue #902 §3)", () => {
       action: "none",
       reason: "master_floor",
     });
+  });
+});
+
+describe("the master's balance comes from the provider (issue #902 §3, plan §9 item 4)", () => {
+  function client(info: () => Promise<{ remainCreditRial: number | null }>) {
+    return { fetchAccountInfo: info } as unknown as KavenegarManagementClient;
+  }
+
+  it("returns the figure the provider reports", async () => {
+    expect(await readMasterBalanceRial(client(async () => ({ remainCreditRial: 4_200_000 })))).toBe(
+      4_200_000,
+    );
+  });
+
+  it("keeps a genuine zero a zero, which the floor then respects", async () => {
+    expect(await readMasterBalanceRial(client(async () => ({ remainCreditRial: 0 })))).toBe(0);
+  });
+
+  it("turns a provider failure into 'unknown' rather than an exception", async () => {
+    // A funding pass must not become an incident because the balance read
+    // timed out. `null` already means something honest downstream: with a floor
+    // configured the plan refuses to move money, and the pass raises
+    // `master_balance_unknown` for the operator.
+    const read = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(
+        await readMasterBalanceRial(
+          client(async () => {
+            throw new Error("provider: timeout");
+          }),
+        ),
+      ).toBeNull();
+      // Logged for the operator...
+      expect(read).toHaveBeenCalled();
+      // ...and the message is the reason, never a credential.
+      expect(JSON.stringify(read.mock.calls)).not.toContain("MASTER");
+    } finally {
+      read.mockRestore();
+    }
   });
 });
