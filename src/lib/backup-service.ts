@@ -733,9 +733,10 @@ export async function runCloudUpload(
     legacyCloud: config.cloud.enabled ? config.cloud : undefined,
   });
   if (storage.mode === "unavailable") {
-    // `local_profile` is not a failure: there is nothing to upload to. Every
-    // other reason is recorded as a failed cloud attempt so the operator sees it.
-    if (storage.reason === "local_profile") return { status: "disabled" };
+    // Nothing to upload to. That is `disabled`, not `failed`: a Local profile has
+    // no cloud destination by definition, and an incomplete managed destination
+    // is reported on the service page (`last_check_ok`/`lastErrorCode`) rather
+    // than as a failed tenant backup every tick.
     return { status: "disabled" };
   }
 
@@ -866,9 +867,12 @@ async function registerCloudCopy(
   );
   const masterKey = getMasterKey();
   if (!masterKey) return;
-  const encryption =
-    local?.manifest?.encryption ??
-    ({ scheme: "legacy_passphrase_v1", keyVersion: null } as const);
+  // A pre-#903 artifact has no manifest, so there is no honest way to describe
+  // what it contains. It is already visible through the legacy run projection;
+  // registering it here with an invented component list would be the lie the
+  // epic forbids.
+  if (!local?.manifest) return;
+  const encryption = local.manifest.encryption;
   const capturedAt = capturedAtOf(input.artifact);
   const registered = await registerFinishedArtifact({
     businessId,
@@ -877,7 +881,7 @@ async function registerCloudCopy(
     destination: "cloud",
     origin: input.trigger,
     mode: input.mode,
-    payloadFormat: local?.manifest?.payloadFormat ?? (input.mode === "physical" ? "physical_dump_v1" : "tenant_archive_v1"),
+    payloadFormat: local.manifest.payloadFormat,
     sizeBytes: input.sizeBytes,
     sha256: input.sha256,
     // The encryption *generation* of the bytes that were uploaded — the mirror
@@ -887,13 +891,12 @@ async function registerCloudCopy(
         ? { scheme: "managed_envelope_v1", keyVersion: encryption.keyVersion ?? 0, secret: "" }
         : { scheme: "legacy_passphrase_v1", keyVersion: null, secret: "" },
     capturedAt,
-    components:
-      local?.manifest?.components.map((component) => ({
-        key: component.key,
-        state: component.state,
-        rows: component.rows ?? 0,
-      })) ?? physicalComponentInventory(),
-    schemaVersion: local?.manifest?.schemaVersion ?? (await installedSchemaVersion()),
+    components: local.manifest.components.map((component) => ({
+      key: component.key,
+      state: component.state,
+      rows: component.rows ?? 0,
+    })),
+    schemaVersion: local.manifest.schemaVersion,
     retentionUntil: await retentionUntilFor(businessId, new Date()),
   });
   if (!registered.ok) return;
@@ -909,21 +912,34 @@ async function registerCloudCopy(
  * isn't hammering its (dead) uplink every tick.
  */
 async function maybeCatchUpCloud(businessId: string, config: BackupConfig): Promise<void> {
-  if (!config.cloud.enabled || (await isLocalOnly(businessId))) return;
+  if (await isLocalOnly(businessId)) return;
   const profile = (await readDeploymentProfile(businessId)).profile;
+
+  // The platform-managed destination is a property of the deployment, not of the
+  // tenant's historic bucket settings: a Hybrid/Cloud install whose own
+  // `cloud.enabled` is false still mirrors managed copies, so the queue must
+  // drain on that path too (issue #903 §2/§5).
+  const target = await resolveTenantStorage({
+    businessId,
+    profile,
+    role: deploymentRole(),
+    legacyCloud: config.cloud.enabled ? config.cloud : undefined,
+  });
+  const managedDestination = target.mode === "managed";
+  if (!managedDestination && !config.cloud.enabled) return;
 
   // Issue #903 §5 — the durable queue is the source of truth for "what still
   // needs uploading". It survives restarts, keeps order and backs off, so an
   // offline café catches up instead of forgetting. `superseded` rows are the
   // fence refusing an artifact from an older install generation.
-  const drained = await drainUploadQueue(businessId, async (artifactName, generation) => {
+  await drainUploadQueue(businessId, async (artifactName) => {
     const result = await runCloudUpload(businessId, artifactName, "scheduled");
     if (result.status === "ok") return { ok: true };
-    if (result.status === "disabled") return { ok: true }; // nothing to do; not a failure to retry
-    void generation;
+    // "disabled" means there is no destination right now, not that this artifact
+    // is wrong: it stays queued and is retried on a later tick.
+    if (result.status === "disabled") return { ok: false, error: "storage_unavailable" };
     return { ok: false, error: result.error };
   });
-  void drained;
 
   // Then the pre-queue behaviour, kept for artifacts that predate the queue: the
   // newest successful local artifact, retried with the same backoff.
