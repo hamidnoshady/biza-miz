@@ -42,7 +42,8 @@ const errMsg = (raw: string | undefined) => {
   return messages[raw ?? ""] ?? raw ?? "ذخیره انجام نشد.";
 };
 export function TourStudioPanel() {
-  const canManage = useCan()("knowledge.manage");
+  const can = useCan();
+  const canManage = can("knowledge.manage");
   const [catalogue, setCatalogue] = useState<Result | null>(null);
   const [editing, setEditing] = useState<EditorTour | null>(null);
   const [filter, setFilter] = useState("");
