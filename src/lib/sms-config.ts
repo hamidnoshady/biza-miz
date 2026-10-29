@@ -138,8 +138,12 @@ export async function getSmsProvider(): Promise<SmsProvider> {
   if (config.apiKey) {
     return new KavenegarProvider(config.apiKey, config.template);
   }
-  // No key anywhere: log the OTP instead of throwing. An offline/local install
-  // has no SMS by definition and must still boot — it enrols TOTP instead.
+  // No key anywhere: the fallback logs the code in development and test, and
+  // refuses outside them — an offline/local install has no SMS by definition
+  // and must still boot (it enrols TOTP instead), but a deployed install must
+  // not answer a login by writing a live code into a log (issue #902 DoD #9).
+  // Every caller already consumes the challenge and reports
+  // `sms_dispatch_failed`, so the refusal arrives on screen as a real failure.
   return new NoopProvider();
 }
 
