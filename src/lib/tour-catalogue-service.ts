@@ -87,7 +87,10 @@ export function parseTourStudioInput(raw: unknown): TourStudioInput {
   const eligibility = parseEligibility(raw.eligibility ?? {});
   // A published tour is metadata about a protected page. Never offer one to
   // everyone merely because an editor omitted its access guard.
-  if (status === "published" && !Object.keys(eligibility).length) error("publishing_requires_eligibility");
+  const hasPositiveGate = (rule: TourEligibility): boolean =>
+    Boolean(rule.permissions?.length || rule.industries?.length || rule.features?.length
+      || rule.inventorySystem || rule.anyOf?.some(hasPositiveGate));
+  if (status === "published" && !hasPositiveGate(eligibility)) error("publishing_requires_eligibility");
   const parsedSteps: TourStep[] = steps.map((value: unknown) => {
     if (!obj(value)) return error("invalid_step");
     const { id: stepId, title: stepTitle, body, kind, anchor } = value;
