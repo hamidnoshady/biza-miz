@@ -32,6 +32,7 @@ export function CosmeticsManager() {
   const [tab, setTab] = useState<TabKey>("batches");
 
   return (
+    <div data-tour-id="cosmetics.workspace">
     <IndustryManagerShell
       idPrefix="cosmetics"
       navLabel="بخش‌های آرایشی و بهداشتی"
@@ -43,5 +44,6 @@ export function CosmeticsManager() {
       {tab === "batches" ? <BatchesSection /> : null}
       {tab === "merchandising" ? <MerchandisingSection /> : null}
     </IndustryManagerShell>
+    </div>
   );
 }
