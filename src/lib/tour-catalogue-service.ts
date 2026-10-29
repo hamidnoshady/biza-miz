@@ -84,6 +84,11 @@ export function parseTourStudioInput(raw: unknown): TourStudioInput {
   if (typeof description !== "string" || description.length > 1000) error("invalid_description");
   if (status !== "draft" && status !== "published") error("invalid_status");
   if (!Array.isArray(steps) || steps.length < 1 || steps.length > 60) error("invalid_steps");
+  // An existing code tour is a stable progress identity: Studio must not
+  // attach that same ID to a different page, or old progress would follow
+  // someone to an unrelated screen.
+  const legacy = TOURS.find((tour) => tour.id === id);
+  if (legacy && legacy.pageKey !== pageKey) error("immutable_tour_page");
   const eligibility = parseEligibility(raw.eligibility ?? {});
   // A published tour is metadata about a protected page. Never offer one to
   // everyone merely because an editor omitted its access guard.
