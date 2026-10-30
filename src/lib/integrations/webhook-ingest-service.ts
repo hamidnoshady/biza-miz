@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
+import { notifyPaymentReceived } from "../kavenegar/lookup-triggers";
 import { WELL_KNOWN_CODES } from "../coa-template";
 import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
 import { deductForOrder } from "../inventory-service";
@@ -878,6 +879,20 @@ async function ingestFnBOrder(connection: ConnectionRow, order: WooOrder): Promi
     );
     await client.query("COMMIT");
 
+    // Issue #902 §9 item 0 — the storefront's own checkout is a payment the
+    // customer made, and the receipt trigger was wired only to the counter and
+    // to the offline replay. After COMMIT and deliberately not awaited: the
+    // webhook response must not wait on a provider round trip, and a message
+    // that fails must never fail an import which has already committed.
+    // Scoped explicitly: this is a public webhook with no request session, and
+    // the lookup tables are tenant-RLS — an unscoped read would find no order
+    // and the receipt would silently never be attempted.
+    if (total > 0n) {
+      void withTenant(businessId, () =>
+        notifyPaymentReceived({ businessId, locationId, orderId, amountRial: Number(total) }),
+      );
+    }
+
     await writeIntegrationAudit({
       businessId,
       connectionId: connection.id,
@@ -1161,6 +1176,20 @@ async function ingestRetailOrder(
       [businessId, connection.id, remoteId, orderId],
     );
     await client.query("COMMIT");
+
+    // Issue #902 §9 item 0 — the storefront's own checkout is a payment the
+    // customer made, and the receipt trigger was wired only to the counter and
+    // to the offline replay. After COMMIT and deliberately not awaited: the
+    // webhook response must not wait on a provider round trip, and a message
+    // that fails must never fail an import which has already committed.
+    // Scoped explicitly: this is a public webhook with no request session, and
+    // the lookup tables are tenant-RLS — an unscoped read would find no order
+    // and the receipt would silently never be attempted.
+    if (total > 0n) {
+      void withTenant(businessId, () =>
+        notifyPaymentReceived({ businessId, locationId, orderId, amountRial: Number(total) }),
+      );
+    }
 
     await writeIntegrationAudit({
       businessId,

@@ -774,6 +774,41 @@ Codes are translated by one shared map (`TRIGGER_CODE_LABELS`), imported by the 
 copied into it — a code this build does not know becomes «پیام ارسال نشد», never the raw string, so a
 future or provider-shaped code cannot reach a tenant screen verbatim.
 
+## 5l. Every payment path tells the customer (§9 item 0)
+
+§5e wired the receipt trigger into the two paths that existed for the *counter*: the checkout route and
+the offline replay. Three paths that also record a payment were left out, and they are the ones where a
+receipt matters most — the customer is not standing in front of you:
+
+| Path | What it records |
+| --- | --- |
+| `ingestFnBOrder` (plugin/WooCommerce) | an online ticket, closed to `completed` with an `online` payment |
+| `ingestRetailOrder` (plugin/WooCommerce) | the same for a goods retailer, through the batch/FEFO service |
+| `importPaidCmsOrder` (CMS storefront) | a `order.paid` delivery from the business's own site |
+
+All three now call `notifyPaymentReceived` **after** their `COMMIT` and **not awaited**: notifying
+inside the transaction would send a receipt for a sale that could still roll back, and awaiting would
+put a provider round trip between the webhook and its response — then a failed message would fail an
+import that had already committed.
+
+Two details that are easy to get wrong and are now asserted:
+
+- **The scope.** A webhook and a CMS delivery carry no request session, and the lookup tables are
+  tenant-RLS, so an unscoped read finds no order and the receipt is silently never attempted. Each
+  call is wrapped in `withTenant(businessId, …)`.
+- **The amount.** `Number(total)` — the figure on the payment row that was just committed, not the
+  order's `total` re-read later (an amendment moves that, and a receipt has to say what the customer
+  paid).
+
+**The amendment bridge is deliberately excluded,** with the reason written next to the code: an
+amendment *rewrites* what was already paid (old rows superseded, new rows tagged), so no money changed
+hands again. A second «پرداخت ثبت شد» would tell the customer they had been charged twice. A refund or
+a genuine additional tender has its own path and its own trigger. `imported-payment-receipts.test.ts`
+fails if someone adds the call back without reading that note.
+
+The same guard test checks the shape of all three wirings: the call exists, it follows `COMMIT`, it is
+not awaited, and it is business-scoped — because "the dispatcher works" was never the missing part.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -793,6 +828,7 @@ future or provider-shaped code cannot reach a tenant screen verbatim.
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `imported-payment-receipts` (§5l) | 6/6: both plugin importers (F&B and retail) and the CMS importer call the receipt trigger, in every case after `COMMIT`, never awaited, and wrapped in `withTenant` — plus the amount being the same `total` the payment row was written with; and the amendment bridge carrying no call at all, with its reason still in the file |
 | `npx vitest run` — `lookup-trigger-facts` (§5k) | 6 new fixtures: the preview rendered by the dispatcher's renderer (no `%token` left, the amount formatted as money and the date as Jalali rather than the raw rial integer or an ISO string); a template whose variables the event cannot fill previewing as `null` rather than blank; and the code map translating the refusals a tenant can act on while a code it does not know — `http_429`, `kavenegar_418` — becomes a generic sentence instead of leaking |
 | `npx vitest run` — Growth messaging section (§5k) | 3 new source guards: the screen renders `setting.preview` from the server and hard-codes no sample text of its own; the delivery line exists and speaks its zeros; and the code labels are imported from the shared map rather than copied into the component |
 | `npm run test:db` — `kavenegar-lookup-triggers` (§5k) | one added case (CI only; no Postgres here): the setting carries a real preview before anything has been sent, `delivery` reads `{sent: 0, skipped: 0}`; after one sent row, one consent refusal and one unknown payment row the two triggers report `{sent: 1, skipped: 1}` and `{unknown: 1}` with `lastCode` `no_consent`, and another business sees none of it |
@@ -827,13 +863,12 @@ future or provider-shaped code cannot reach a tenant screen verbatim.
 
 ## 9. Follow-ups (each needs its own issue)
 
-0. **The rest of the triggers** (#902 §5, P1): both events are wired from the paths that commit a
-   customer-facing action (§5e), and the tenant now sees each automation's **exact text** and its
-   **per-trigger record** (§5k). What remains is the wiring side: the payment writers that are not the
-   counter or the offline queue — the WooCommerce/CMS importers and the closed-order amendment bridge —
-   which write inside their own transactions and need a post-commit point before a receipt can be
-   honest. The login code is deliberately *not* one of these triggers: it stays on the platform-auth
-   transport (§5e), which is what keeps it working with an empty wallet.
+0. ~~**The rest of the triggers**~~ — **closed** (§5k, §5l): both events are wired from every path
+   that commits a customer-facing action — the counter, the offline replay, both plugin importers and
+   the CMS storefront — and the tenant sees each automation's **exact text** and its **per-trigger
+   record**. The amendment bridge is excluded on purpose and says so in the file: a correction is not
+   a second payment. The login code is deliberately *not* one of these triggers: it stays on the
+   platform-auth transport (§5e), which is what keeps it working with an empty wallet.
 1. ~~**Campaign-budget funding trigger**~~ — **closed** (§5j): the three strategies and the guards
    were already in place, and the reserved slice closed in §5h. The "approved campaign budget" turn
    out not to need a product decision after all: the approval is *materialized*, so the trigger is the
