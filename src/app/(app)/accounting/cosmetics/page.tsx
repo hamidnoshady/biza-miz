@@ -28,9 +28,11 @@ export default async function CosmeticsPage() {
               door to them, so the page that used to hold a «گزارش‌ها» tab does
               not simply lose it without saying where it went.
             */}
-            <Button asChild variant="outline">
-              <Link href={reportsTabHref("standard")}>گزارش‌های آماده</Link>
-            </Button>
+            <span data-tour-id="cosmetics.reports">
+              <Button asChild variant="outline">
+                <Link href={reportsTabHref("standard")}>گزارش‌های آماده</Link>
+              </Button>
+            </span>
             <KnowledgeHelpButton section="cosmetics" />
           </>
         }
