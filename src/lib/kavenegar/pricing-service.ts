@@ -24,6 +24,13 @@ import type { KavenegarManagementClient } from "./rest";
 import type { FundingStrategy } from "./policy";
 import { getManagedChildPolicy } from "./policy";
 import { recordMasterBalanceObservation } from "./master-balance";
+import {
+  EMPTY_CAMPAIGN_DEMAND,
+  PENDING_OUTBOX_STATES,
+  priceCampaignDemand,
+  smsSegmentsSql,
+  type CampaignDemand,
+} from "./campaign-demand";
 import { applyReservedCreditTransfer, type CreditTransferRow } from "./provisioning-service";
 import {
   alertForFundingBlock,
@@ -251,7 +258,18 @@ export type FundingBlockedReason =
 
 export type FundingDecision =
   | { action: "none"; amountRial: 0; reason: FundingBlockedReason; targetBalanceRial: number | null }
-  | { action: "transfer"; amountRial: number; reason: "top_up"; targetBalanceRial: number };
+  | {
+      action: "transfer";
+      amountRial: number;
+      /**
+       * `top_up` — the standing buffer asked for credit. `campaign_demand` — an
+       * approved campaign's queued segments raised the target above the buffer,
+       * which is a different instruction for whoever reads the ledger: one says
+       * "running low", the other says "500 messages are waiting".
+       */
+      reason: "top_up" | "campaign_demand";
+      targetBalanceRial: number;
+    };
 
 /** The provider rejects transfers below 1,000 Rial (`client/chargecredit`). */
 export const MIN_PROVIDER_TRANSFER_RIAL = 1_000;
@@ -297,6 +315,13 @@ export function planFunding(input: {
   masterBalanceRial: number | null;
   transferredTodayRial: number;
   unresolvedTransferRial: number;
+  /**
+   * Wholesale credit already owed to approved, queued work (issue #902 §9 item
+   * 1). The target becomes `max(buffer, demand)`: a business that approved 500
+   * recipients needs 500 messages of credit, not the policy's standing 100, or
+   * the queue dies mid-campaign with the provider's credit error.
+   */
+  pendingDemandRial?: number;
 }): FundingDecision {
   const { policy } = input;
   if (policy.strategy === "manual" || policy.bufferMessages <= 0) {
@@ -327,8 +352,18 @@ export function planFunding(input: {
     };
   }
 
-  const targetBalanceRial = policy.bufferMessages * perSegment;
-  const triggerBalanceRial = refillTriggerMessages(policy) * perSegment;
+  // The standing order, then the approved queue on top of it. Both the target
+  // and the trigger move: a child that cannot pay for the work it is holding is
+  // short no matter what the policy's buffer says, and `low_watermark`'s
+  // hysteresis must not delay a campaign that is already draining.
+  const demandRial = Math.max(0, Math.trunc(input.pendingDemandRial ?? 0));
+  const bufferTargetRial = policy.bufferMessages * perSegment;
+  const targetBalanceRial = Math.max(bufferTargetRial, demandRial);
+  const triggerBalanceRial = Math.max(refillTriggerMessages(policy) * perSegment, demandRial);
+  // A pass is only "demand-driven" when the queue, not the buffer, is what asked
+  // for the money — reporting every campaign-era top-up as `campaign_demand`
+  // would make the reason meaningless.
+  const drivenByDemand = demandRial > bufferTargetRial;
   const balance = Math.max(0, Math.trunc(input.childBalanceRial));
   // `low_watermark` refills to the target but only once the child is below the
   // trigger; every other strategy triggers at the target itself.
@@ -403,7 +438,12 @@ export function planFunding(input: {
   if (amountRial < MIN_PROVIDER_TRANSFER_RIAL) {
     return { action: "none", amountRial: 0, reason: "below_provider_minimum", targetBalanceRial };
   }
-  return { action: "transfer", amountRial, reason: "top_up", targetBalanceRial };
+  return {
+    action: "transfer",
+    amountRial,
+    reason: drivenByDemand ? "campaign_demand" : "top_up",
+    targetBalanceRial,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +599,100 @@ export async function getFleetFundingWindow(): Promise<{ transferredTodayAllChil
   return { transferredTodayAllChildrenRial: numberOr(rows[0]?.transferred_today ?? 0, 0) };
 }
 
+/**
+ * The wholesale credit this business's approved queue already owes.
+ *
+ * Read with the **ambient** query so it joins the caller's transaction: the
+ * reservation path already runs inside the child's funding lock, and a demand
+ * read from outside it could size a transfer against a queue that has since
+ * drained. Segments are counted by SQL built from the billing constants
+ * (`smsSegmentsSql`), so a three-segment notice is three units of credit here
+ * exactly as it is on the invoice.
+ *
+ * A tariff the provider has not given us yet is `perSegment = 0`, which prices
+ * the queue at zero — and that is correct, not a bug: with no tariff
+ * `planFunding` already refuses with `tariff_unknown` before a target matters.
+ */
+export async function readPendingCampaignDemand(
+  businessId: string,
+  perSegmentRial: number,
+): Promise<CampaignDemand> {
+  const { rows } = await query<{
+    messages: string | number | null;
+    segments: string | number | null;
+    campaigns: string | number | null;
+  }>(
+    `SELECT count(*) AS messages,
+            COALESCE(sum(${smsSegmentsSql("r.body")}), 0) AS segments,
+            count(DISTINCT o.campaign_id) AS campaigns
+       FROM message_outbox o
+       JOIN message_recipients r ON r.id = o.recipient_id
+      WHERE o.business_id = $1
+        AND o.channel = 'sms'
+        AND o.status = ANY($2::text[])`,
+    [businessId, [...PENDING_OUTBOX_STATES]],
+  );
+  const row = rows[0];
+  if (!row) return EMPTY_CAMPAIGN_DEMAND;
+  return priceCampaignDemand({
+    messages: numberOr(row.messages ?? 0, 0),
+    segments: numberOr(row.segments ?? 0, 0),
+    campaigns: numberOr(row.campaigns ?? 0, 0),
+    perSegmentRial,
+  });
+}
+
+/**
+ * Every business's queued demand, in one query, for the console.
+ *
+ * The funding rule is per-child; the operator's question is fleet-wide ("who is
+ * holding a queue we have not funded yet?"), and N per-child queries on a page
+ * load is not an answer. Counts only — no money — so the screen can say how much
+ * work is waiting without a second, subtly different pricing rule appearing in
+ * a React file.
+ */
+export async function listFleetCampaignDemand(): Promise<
+  { businessId: string; messages: number; segments: number; campaigns: number }[]
+> {
+  const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
+    query<{
+      business_id: string;
+      messages: string | number | null;
+      segments: string | number | null;
+      campaigns: string | number | null;
+    }>(
+      `SELECT o.business_id,
+              count(*) AS messages,
+              COALESCE(sum(${smsSegmentsSql("r.body")}), 0) AS segments,
+              count(DISTINCT o.campaign_id) AS campaigns
+         FROM message_outbox o
+         JOIN message_recipients r ON r.id = o.recipient_id
+        WHERE o.channel = 'sms'
+          AND o.status = ANY($1::text[])
+        GROUP BY o.business_id`,
+      [[...PENDING_OUTBOX_STATES]],
+    ),
+  );
+  return rows.map((row) => ({
+    businessId: row.business_id,
+    messages: numberOr(row.messages ?? 0, 0),
+    segments: numberOr(row.segments ?? 0, 0),
+    campaigns: numberOr(row.campaigns ?? 0, 0),
+  }));
+}
+
+/**
+ * The dearest script's wholesale rate — the same conservative choice the buffer
+ * makes: under-funding strands a queue, over-funding does not, because the child
+ * keeps the credit either way.
+ */
+function conservativePerSegment(tariff: ProviderTariff): number {
+  return Math.max(
+    wholesalePerSegment(tariff, "persian") ?? 0,
+    wholesalePerSegment(tariff, "english") ?? 0,
+  );
+}
+
 export interface FundingPlan {
   businessId: string;
   snapshot: BusinessPriceSnapshot;
@@ -580,7 +714,15 @@ export async function planBusinessFunding(
 ): Promise<FundingPlan | null> {
   const snapshot = await getBusinessPriceSnapshot(businessId);
   if (!snapshot) return null;
-  const [window, fleet] = await Promise.all([getFundingWindow(businessId), getFleetFundingWindow()]);
+  const [window, fleet, demand] = await Promise.all([
+    getFundingWindow(businessId),
+    getFleetFundingWindow(),
+    // The console must answer "what would a pass do" with the same inputs the
+    // pass uses — including the approved queue (issue #902 §9 item 1). A
+    // preview that ignored demand would promise a healthy child a transfer it
+    // is about to receive, or the reverse.
+    readPendingCampaignDemand(businessId, conservativePerSegment(snapshot.tariff)),
+  ]);
   return {
     businessId,
     snapshot,
@@ -595,6 +737,7 @@ export async function planBusinessFunding(
       transferredTodayAllChildrenRial: fleet.transferredTodayAllChildrenRial,
       masterBalanceRial: input.masterBalanceRial,
       unresolvedTransferRial: window.unresolvedTransferRial,
+      pendingDemandRial: demand.estimatedWholesaleRial,
     }),
   };
 }
@@ -790,9 +933,13 @@ export async function reserveAutomaticTransfer(input: {
     }
     if (snapshot.policy.globalDailyCapRial !== null) await lockFleetFunding();
 
-    const [window, fleet] = await Promise.all([
+    const [window, fleet, demand] = await Promise.all([
       getFundingWindow(input.businessId),
       getFleetFundingWindow(),
+      // Issue #902 §9 item 1: what the approved queue already owes. Read inside
+      // the same transaction as the decision, so the planner sizes the transfer
+      // for the work that exists now, not for the work a previous pass saw.
+      readPendingCampaignDemand(input.businessId, conservativePerSegment(snapshot.tariff)),
     ]);
     const plan: FundingPlan = {
       businessId: input.businessId,
@@ -808,6 +955,7 @@ export async function reserveAutomaticTransfer(input: {
         transferredTodayAllChildrenRial: fleet.transferredTodayAllChildrenRial,
         masterBalanceRial: input.masterBalanceRial,
         unresolvedTransferRial: window.unresolvedTransferRial,
+        pendingDemandRial: demand.estimatedWholesaleRial,
       }),
     };
     if (plan.decision.action !== "transfer") {

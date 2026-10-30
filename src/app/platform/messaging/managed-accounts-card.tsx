@@ -212,10 +212,19 @@ interface MasterBalance {
   ageMinutes: number | null;
 }
 
+/** Issue #902 §9 item 1 — the queued work the funding planner sizes against. */
+interface PendingDemand {
+  businessId: string;
+  messages: number;
+  segments: number;
+  campaigns: number;
+}
+
 interface Snapshot {
   error?: string;
   policy: ManagedPolicy;
   masterBalance: MasterBalance;
+  pendingDemand: PendingDemand[];
   accounts: ManagedAccount[];
   templates: CatalogTemplate[];
   masterTemplates: MasterTemplate[];
@@ -467,6 +476,14 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       attention: accounts.filter((account) => account.state === "attention_required").length,
       suspended: accounts.filter((account) => account.state === "suspended").length,
     };
+  }, [snapshot]);
+
+  // §9 item 1: queued work by business, so the account row can say why a child
+  // was funded above its standing buffer.
+  const demandByBusiness = useMemo(() => {
+    const map = new Map<string, PendingDemand>();
+    for (const row of snapshot?.pendingDemand ?? []) map.set(row.businessId, row);
+    return map;
   }, [snapshot]);
 
   async function post(body: Record<string, unknown>, key: string) {
@@ -994,6 +1011,20 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                   </Link>
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
+                  {(() => {
+                    // §9 item 1: a child holding an approved queue is being
+                    // funded for that queue, not just for the standing buffer.
+                    // Without this line the transfer looks arbitrary.
+                    const demand = demandByBusiness.get(account.businessId);
+                    if (!demand || demand.messages === 0) return null;
+                    return (
+                      <>
+                        صف فعال: {formatPersianNumber(demand.messages)} پیام (
+                        {formatPersianNumber(demand.segments)} قطعه) در{" "}
+                        {formatPersianNumber(demand.campaigns)} کمپین •{" "}
+                      </>
+                    );
+                  })()}
                   تعرفه: {account.pricingName ?? "—"} • فارسی {tomanLabel(account.smsFarsiCostRial ?? 0)} • انگلیسی{" "}
                   {tomanLabel(account.smsEnglishCostRial ?? 0)} • موجودی داخلی{" "}
                   {account.providerBalanceRial === null ? "نامشخص" : tomanLabel(account.providerBalanceRial)} •{" "}

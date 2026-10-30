@@ -707,6 +707,37 @@ not an observation, and must never overwrite evidence about what the provider sa
 `runManagedFundingTick` guards the write on `masterBalanceRial === undefined`, and why a mirror write
 that fails is logged and swallowed: the money decision is the job, the evidence is the bonus.
 
+## 5j. An approved campaign is a funding trigger of its own (§9 item 1)
+
+Funding was sized by the *policy*: "keep 100 messages of credit on every child". That is a standing
+order, and it is right for a steady trickle. It is wrong for the thing this platform is actually used
+for — a business approves an audience of 500 and sends it. The pool then needs 500 messages of
+provider credit while the standing order still asks for 100, so the drain runs out mid-campaign, the
+provider refuses the tail with its credit error, and every remaining recipient is marked `failed` for
+a reason the business never chose and cannot see.
+
+The missing trigger is the **work already queued**, and no product decision is needed to define it: an
+approved campaign has its recipients materialized in `message_recipients` and its sends queued in
+`message_outbox` — that pair *is* the approval, because nothing is enqueued for an audience nobody
+approved. So the demand is a query, not a forecast.
+
+| Rule | Why |
+| --- | --- |
+| Demand is counted in **segments**, not recipients | The provider bills per 70-character segment. A per-recipient count under-funds every multipart campaign by a factor of two or three, and does it quietly |
+| The SQL segment expression is built from the billing constants | `smsSegmentsSql()` interpolates `SMS_FIRST_SEGMENT_CHARS`/`SMS_NEXT_SEGMENT_CHARS`, so the funding target and the invoice cannot drift; it refuses anything that is not a plain column reference |
+| The target becomes `max(buffer, demand)`, never `demand` alone | A small campaign must not let the standing order lapse. Demand raises the target; it does not replace it |
+| The **trigger** moves with the target | `low_watermark`'s hysteresis would otherwise pace a campaign that is already draining |
+| Only `queued` and `sending` count | `sent`/`delivered`/`failed` are settled questions; counting them would make the target grow forever on a busy business's history |
+| The transfer reason distinguishes the two triggers | `campaign_demand` versus `top_up`: "running low" and "500 messages are waiting" are different instructions to whoever reads the ledger |
+| Everything else still applies | Caps, the master floor, the transactional reserve and the fleet cap clamp the amount exactly as before. Demand is a target, not a bypass |
+| Read inside the funding transaction, scoped to the child | The decision must see the queue as it is at the moment of the decision, and one tenant's campaign must never fund another tenant's child |
+
+`planBusinessFunding` reads the same demand, so the console's "what would a pass do" preview cannot
+promise a healthy child a transfer it is about to receive — or the reverse. The console's account rows
+add «صف فعال: N پیام (M قطعه) در K کمپین» when a queue exists, which is the sentence that makes a
+transfer above the buffer legible instead of arbitrary. Counts only: the money it implies is the
+planner's arithmetic, and a second copy of it in a React file is how two answers start.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -726,6 +757,9 @@ that fails is logged and swallowed: the money decision is the job, the evidence 
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `campaign-demand` (§5j) | 8/8: demand priced per segment rather than per recipient, zero for an empty queue and never negative, zero when there is no tariff; only `queued`/`sending` counted; the SQL segment expression built from the billing constants and reproducing `smsSegmentCount` at every boundary (0, 70, 71, 137, 138, 205, 500) and on a Persian body; a non-column reference refused; and the read happening inside the funding transaction, scoped to one child |
+| `npx vitest run` — `pricing-service` (§5j) | 5 new fixtures: demand raising the target above the buffer and reporting `campaign_demand`; a child that satisfies the buffer but not its queue now being funded; demand below the buffer leaving the standing order in charge (`top_up`); caps, the master floor and the transactional reserve still clamping a demand-sized target; `low_watermark`'s trigger rising to the queue, and the child healthy again once it is above |
+| `npm run test:db` — `kavenegar-managed-accounts` (§5j) | two added cases (CI only; no Postgres here): a three-recipient queue whose multipart bodies total five segments reads `{messages: 3, segments: 5, campaigns: 1}` and funds the queue rather than the 10-message buffer, while another tenant's queue reads zero; and a small queue leaves the 100-message buffer as the target with reason `top_up` |
 | `npx vitest run` — `master-balance` (§5i) | 10/10: `unknown` rather than zero when nothing was observed; `current` for a fresh figure; `unreadable` when a later read failed — and outranking `stale`, because the failure is the more urgent fact; `stale` only after six hours; a future clock skew is age 0. Plus the source rules: the mirror is written only when the pass read the provider, a failed mirror write cannot fail the pass, both halves are written in one statement, both queries run in the documented platform scope with no `withTenant`, and the console reads the snapshot rather than calling the provider |
 | `npm run test:db` — `kavenegar-managed-accounts` (§5i) | one added case (CI only; no Postgres here): a live pass mirrors `10 000 000` as `current`; a pass whose read is refused leaves the figure and moves `checkedAt`, reading as `unreadable`; an operator-supplied figure does not overwrite the observation and makes no `/account/info.json` call; the console snapshot carries the mirrored value |
 | `npx vitest run` — `audit/action-meta` (§6f) | 4/4: every `sms.*` action the two SMS routes write has a label that is not the key echoed back; the `jobKindFor` switch is followed so a new job kind cannot ship unlabeled; the `sms` family exists and prefixes every one of them; and both console deep links still carry `actionFamily=sms` |
@@ -761,10 +795,12 @@ that fails is logged and swallowed: the money decision is the job, the evidence 
    tenant preview of a trigger's exact text before enabling it; and a per-trigger delivery view.
    The login code is deliberately *not* one of these triggers: it stays on the platform-auth
    transport (§5e), which is what keeps it working with an empty wallet.
-1. **Campaign-budget funding trigger** (#902 §3, P0): the three strategies and the guards are in
-   place, and the **reserved slice** is closed by §5h (a marketing-classified fleet can no longer
-   spend the credit held for transactional traffic). Still open: "approved campaign budget" as a
-   distinct funding trigger, which needs a product decision on which campaigns count.
+1. ~~**Campaign-budget funding trigger**~~ — **closed** (§5j): the three strategies and the guards
+   were already in place, and the reserved slice closed in §5h. The "approved campaign budget" turn
+   out not to need a product decision after all: the approval is *materialized*, so the trigger is the
+   queue of sends the business already approved (`message_outbox` still `queued`/`sending`), counted
+   in the segments the provider bills and priced at the child's wholesale rate. The target becomes
+   `max(buffer, demand)` and the transfer reports `campaign_demand` rather than `top_up`.
 2. ~~**Delivery/health dashboards** (#902 P1): per-campaign delivery and provider latency~~
    — **closed** (§6e): the console and the tenant screen now show delivery per campaign with the
    queue wait and the provider wait separately, over a week. A longer *historical* view (trend over
