@@ -671,6 +671,42 @@ that write them **and** follows the `jobKindFor` switch that produces
 `sms.managed_account.${action}`, so a tenth job kind cannot ship unlabeled. It also asserts the two
 deep links keep their `actionFamily=sms` parameter — the exact thing that was missing.
 
+## 5i. The master balance the last pass saw (§9 item 4, second half)
+
+§5g made the funding pass read the master's own credit from the provider instead of trusting a number
+an operator typed once. That fixed the *decision* and left the *evidence* missing: the figure lived in
+the tick's local variable and vanished when the tick returned, so the console could not show it, and
+an operator asking "how much headroom is left above the floor?" had to read it live, by hand, from the
+provider — from a screen, on a whim, with their own eyes.
+
+Migration `0269` adds three columns to `platform_sms_config` (one row, the same row the policy lives
+in — no new table, no new key, no tenant scope):
+
+| Column | Why it is separate |
+| --- | --- |
+| `managed_master_balance_rial` | the figure the provider reported; `NULL` when it never said |
+| `managed_master_balance_at` | when that figure was observed — a balance with no age is a rumour |
+| `managed_master_balance_checked_at` | when a pass last *tried*; newer than `..._at` means the last read failed |
+
+Collapsing those last two into one timestamp is exactly how a stale figure comes to look live. A
+pairing `CHECK` forbids a value without its observation time.
+
+`masterBalanceView()` turns the stored triple into one of four verdicts, and the console renders each
+differently: `unknown` (never observed — not zero, not "fine"), `current` (recent, last read did not
+fail), `unreadable` (observed once, a later pass could not read it — honest history, not a claim about
+now), `stale` (older than six hours, i.e. six missed passes). `unreadable` outranks `stale`: the
+failure is the more urgent fact.
+
+The rules live in `master-balance-facts.ts` and the two statements in `master-balance.ts`, because the
+console is a client component: `client-bundle-boundary.test.ts` refused the first version, which
+imported the constant straight from the module that owns the pool. The split is the fix it asked for,
+not a suppression.
+
+Only a pass that read the provider writes the value. An operator's typed figure is an *instruction*,
+not an observation, and must never overwrite evidence about what the provider said — which is why
+`runManagedFundingTick` guards the write on `masterBalanceRial === undefined`, and why a mirror write
+that fails is logged and swallowed: the money decision is the job, the evidence is the bonus.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -690,6 +726,8 @@ deep links keep their `actionFamily=sms` parameter — the exact thing that was 
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `master-balance` (§5i) | 10/10: `unknown` rather than zero when nothing was observed; `current` for a fresh figure; `unreadable` when a later read failed — and outranking `stale`, because the failure is the more urgent fact; `stale` only after six hours; a future clock skew is age 0. Plus the source rules: the mirror is written only when the pass read the provider, a failed mirror write cannot fail the pass, both halves are written in one statement, both queries run in the documented platform scope with no `withTenant`, and the console reads the snapshot rather than calling the provider |
+| `npm run test:db` — `kavenegar-managed-accounts` (§5i) | one added case (CI only; no Postgres here): a live pass mirrors `10 000 000` as `current`; a pass whose read is refused leaves the figure and moves `checkedAt`, reading as `unreadable`; an operator-supplied figure does not overwrite the observation and makes no `/account/info.json` call; the console snapshot carries the mirrored value |
 | `npx vitest run` — `audit/action-meta` (§6f) | 4/4: every `sms.*` action the two SMS routes write has a label that is not the key echoed back; the `jobKindFor` switch is followed so a new job kind cannot ship unlabeled; the `sms` family exists and prefixes every one of them; and both console deep links still carry `actionFamily=sms` |
 | `npx vitest run` — `campaign-delivery-report` (§6e) | 8/8 (nearest-rank percentiles where one 90 s retry still shows at p95, `null` for silence rather than `0`, unmeasured rows excluded from the statistics, unsorted input not mutated; and the source guards: no provider name, no `o.error`/`provider_message_id` in the shared row shape, the tenant query scoped by business *and* RLS, the cross-tenant read behind the documented bypass) |
 | `npm run test:db` — `kavenegar-managed-accounts` (§6e) | one added case: a campaign with two accepted sends (2 s/4 s queue, 100 ms/300 ms provider), one queued and one refused reports `{p50: 2 000, p95: 4 000}` and `{p50: 100, p95: 300}` with health `attention`; the tenant copy is its own campaign with no business or provider field, another business sees none of it, and `[null, null]` is "no measurement" |
@@ -736,10 +774,10 @@ deep links keep their `actionFamily=sms` parameter — the exact thing that was 
    margin report and `billing_vendor_cost_events` (§6a) exist; emitting
    `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier
    invoice against them, belongs to Billing.
-4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g): the account endpoint
-   reports the master's own credit, and the funding pass reads it once per pass, so a configured
-   floor no longer stops automation. What remains is a *mirror* of the figure for the console —
-   showing an operator the balance the last pass saw instead of making them ask the provider.
+4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g and §5i): the account
+   endpoint reports the master's own credit, the funding pass reads it once per pass, and the figure
+   is now mirrored with its age and its failed-read flag, so a configured floor neither stops
+   automation nor forces an operator to ask the provider what the balance is.
 5. **Managed-service rollout for other integrations**: #894 Torob, #896 Divar, payments,
    media, AI — apply the contract and add leak-guard tests per integration.
 6. ~~**`resolveBusinessCapability` follow-up**: audit other callers for the same stale

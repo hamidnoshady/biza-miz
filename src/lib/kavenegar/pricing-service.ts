@@ -23,6 +23,7 @@ import { query, withoutTenantScope, withoutTenantScopeTransaction } from "../db"
 import type { KavenegarManagementClient } from "./rest";
 import type { FundingStrategy } from "./policy";
 import { getManagedChildPolicy } from "./policy";
+import { recordMasterBalanceObservation } from "./master-balance";
 import { applyReservedCreditTransfer, type CreditTransferRow } from "./provisioning-service";
 import {
   alertForFundingBlock,
@@ -984,6 +985,21 @@ export async function runManagedFundingTick(input: {
     input.masterBalanceRial !== undefined
       ? input.masterBalanceRial
       : await readMasterBalanceRial(input.client);
+
+  // Issue #902 §9 item 4, second half: keep the figure rather than spending it
+  // and dropping it. Only a pass that actually asked the provider writes the
+  // mirror — an operator's typed number is an instruction, not an observation.
+  // A mirror write failing must not fail the funding pass it is describing, so
+  // it is logged and swallowed: the money decision is the job, the evidence is
+  // the bonus.
+  if (input.masterBalanceRial === undefined) {
+    await recordMasterBalanceObservation({ rial: masterBalanceRial }).catch((error: unknown) => {
+      console.error(
+        "kavenegar master balance mirror not written:",
+        error instanceof Error ? error.message : error,
+      );
+    });
+  }
 
   const limit = Math.min(Math.max(1, input.limit ?? 25), 100);
   const businessIds = await withoutTenantScope("platform", async () => {

@@ -35,6 +35,7 @@ import {
 } from "./client";
 import { KavenegarManagementClient, KavenegarManagementError, KavenegarTransportError } from "./rest";
 import { getManagedChildPolicy, type ManagedChildPolicy } from "./policy";
+import { readMasterBalanceMirror, type MasterBalanceMirror } from "./master-balance";
 import { raiseServiceAlert, resolveServiceAlert } from "./alert-service";
 import {
   buildChildProvisioningRequest,
@@ -1128,6 +1129,12 @@ export async function listManagedAccountsForConsole(): Promise<ManagedAccountCon
 export interface ManagedServiceConsoleSnapshot {
   policy: ManagedChildPolicy;
   accounts: ManagedAccountConsoleRow[];
+  /**
+   * The master's credit as the last funding pass observed it, with the age and
+   * the failed-read flag — `masterBalanceView` turns it into a verdict for the
+   * screen. Provider-facing and platform-only, like every other field here.
+   */
+  masterBalance: MasterBalanceMirror;
   recentJobs: {
     id: string;
     businessId: string;
@@ -1147,8 +1154,11 @@ export interface ManagedServiceConsoleSnapshot {
 }
 
 export async function getManagedServiceConsoleSnapshot(): Promise<ManagedServiceConsoleSnapshot> {
-  const [policy, accounts, jobs, transfers] = await Promise.all([
+  const [policy, masterBalance, accounts, jobs, transfers] = await Promise.all([
     getManagedChildPolicy(),
+    // Issue #902 §9 item 4: what the last funding pass saw the provider report,
+    // so an operator reads the console instead of asking the provider by hand.
+    readMasterBalanceMirror(),
     listManagedAccountsForConsole(),
     withoutTenantScope("platform", async () => {
       const { rows } = await query<{
@@ -1188,6 +1198,7 @@ export async function getManagedServiceConsoleSnapshot(): Promise<ManagedService
   return {
     policy,
     accounts,
+    masterBalance,
     recentJobs: jobs.map((row) => ({
       id: row.id,
       businessId: row.business_id,

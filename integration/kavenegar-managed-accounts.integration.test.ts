@@ -1732,6 +1732,57 @@ describe("the canonical resolver reads the app-availability vocabulary", () => {
   });
 });
 
+describe("the master balance the last pass saw (plan §9 item 4)", () => {
+  it("records the figure, its age and the failed read, instead of spending it and dropping it", async () => {
+    const masterBalance = await import("../src/lib/kavenegar/master-balance");
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 500_000,
+    });
+
+    // A pass that reads the provider leaves the figure behind for the console.
+    const read = scripted([
+      ok({ remaincredit: 10_000_000, expiredate: 1_767_225_600, type: "Master" }),
+      ok(childEntry({ remaincredit: 36_000 })),
+    ]);
+    await pricing.runManagedFundingTick({ client: clientFor(read) });
+
+    const afterRead = masterBalance.masterBalanceView(await masterBalance.readMasterBalanceMirror());
+    expect(afterRead).toMatchObject({ state: "current", rial: 10_000_000 });
+    expect(afterRead.observedAt).not.toBeNull();
+
+    // A pass whose read fails keeps the old figure but moves the checked time,
+    // so the console shows leftover evidence rather than a live balance.
+    const failed = scripted([providerStatus(403)]);
+    await pricing.runManagedFundingTick({ client: clientFor(failed) });
+
+    const afterFailure = masterBalance.masterBalanceView(
+      await masterBalance.readMasterBalanceMirror(),
+    );
+    expect(afterFailure).toMatchObject({ state: "unreadable", rial: 10_000_000 });
+    expect(Date.parse(afterFailure.checkedAt!)).toBeGreaterThanOrEqual(
+      Date.parse(afterFailure.observedAt!),
+    );
+
+    // An operator's typed figure is an instruction, not an observation: it must
+    // not overwrite what the provider said.
+    const typed = scripted([ok(childEntry({ remaincredit: 36_000 }))]);
+    await pricing.runManagedFundingTick({ client: clientFor(typed), masterBalanceRial: 1 });
+    expect(typed.calls.some((call) => call.url.includes("/account/info.json"))).toBe(false);
+    expect((await masterBalance.readMasterBalanceMirror()).rial).toBe(10_000_000);
+
+    // And the console snapshot carries it, from one cached read.
+    const { getManagedServiceConsoleSnapshot } = await import(
+      "../src/lib/kavenegar/provisioning-service"
+    );
+    const snapshot = await getManagedServiceConsoleSnapshot();
+    expect(snapshot.masterBalance.rial).toBe(10_000_000);
+  });
+});
+
 describe("scheduled provider traffic follows the opt-in switch", () => {
   it("runs no funding or reconciliation pass while the policy is off", async () => {
     await activate(alpha.businessId);
