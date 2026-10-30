@@ -112,7 +112,7 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
   const config = await getBackupConfig(businessId);
 
   const [policy, storage, rows, custody, includedBytes, pending, heartbeat] = await Promise.all([
-    resolveTenantBackupPolicy(),
+    resolveTenantBackupPolicy(businessId),
     resolveTenantStorage({
       businessId,
       profile,
@@ -345,7 +345,7 @@ export async function deleteBusinessArtifact(
   if (!row) return { ok: false, error: "artifact_not_found" };
 
   const [policy, rows] = await Promise.all([
-    resolveTenantBackupPolicy(),
+    resolveTenantBackupPolicy(businessId),
     listStoredArtifactRows(businessId),
   ]);
   const restorable = new Set(

@@ -488,3 +488,54 @@ the platform's own lanes are covered by `verify`; anything else must be restored
 through the file-restore workflow, which validates before it applies. If the
 capability is wanted later, the honest form is a sidecar manifest written next to
 the artifact at capture time, which is a pipeline change rather than a button.
+
+## Increment: the gaps the checklist still named (issue #903 §3)
+
+Four items the epic lists and the service could not yet do.
+
+**1. The Owner can apply a logical restore.** The apply engine shipped with no
+caller: the inventory offered a dry run whose own copy promised a confirmation
+step that no button performed. `/settings/backup → نسخههای پشتیبان` now offers
+the apply inside the preview, and only when the server's own preview says
+`canApply` with no blockers. It stays disabled until the typed phrase matches the
+server-derived one (the business name). A stale session comes back as
+`reauthentication_required`, which opens the shared step-up prompt and re-reads
+the preview afterwards — no sign-out needed. Every refusal has its own sentence,
+including `restore_approval_required`; success reports tables/rows written and
+refreshes the inventory.
+
+**2. The AI verb reaches the same engine.** `backup.restore.apply` gated on
+`restoreAvailable()` — the *physical, single-tenant* capability — so on a central
+deployment it answered `restore_not_available` while a logical engine sat behind
+it. On central it now computes the real preview through `previewOwnedRestore`,
+returns it with `owner_reauthentication_required`, and leaves the apply to the
+Owner in the app: an executor cannot prove a fresh re-authentication, and
+inventing one would defeat the epic's own gate. A site install keeps the physical
+replacement, still behind `restoreAvailable()`.
+
+**3. Per-business policy overrides** (migration 0269,
+`tenant_backup_business_policy`, platform-only). `resolveTenantBackupPolicy(
+businessId)` merges the fleet row with the business's override and **clamps** it
+to the fleet's envelope: retention cannot pass `max_retention_days`, the keep
+count cannot exceed `cloud_keep_count`, and the cadence must be one the scheduler
+can express. A NULL column means "inherit", not zero. The override reaches the
+pipeline, not only the console: `retentionUntilFor` and both scheduler ticks read
+the business's own policy. `GET|PUT|DELETE /api/platform/businesses/[id]/backups/
+policy` (capability `tenant_backup.policy`) shows the effective policy beside the
+fleet envelope, audits the **effective** before/after numbers (so clamping is
+visible), and `DELETE` returns the business to the fleet policy.
+
+**4. Recovery approvals** (`tenant_backup_restore_approvals`, platform-only).
+A named, expiring, single-use consent for one artifact, granted by a Superadmin
+with `tenant_backup.restore` through `…/backups/approvals`. **Off by default**:
+the apply route only checks when that business's `require_restore_approval` is
+on, so no existing restore changed behaviour. The consent is consumed by a
+conditional update *after* a restore commits, so a failed attempt never burns it,
+and a consumed approval cannot be revoked — the restore it authorised already
+happened.
+
+**Still open.** `import/register` (no signed manifest for an artifact the
+platform did not write — see the previous increment), media binaries, the
+WordPress/WooCommerce database, and the whole "Real acceptance" line: no
+PostgreSQL, S3 or Node ≥ 24 here, so `test:db` (including the extended RLS
+suite), `build`, and a live drill remain unexecuted in this environment.

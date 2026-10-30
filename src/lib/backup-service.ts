@@ -987,7 +987,7 @@ async function tickBusiness(businessId: string): Promise<void> {
   // `enabled`/`intervalHours` fields are only the on-device default for an
   // install that has never been reached by a managed service (a Local/exe
   // desktop with no platform row).
-  const policy = await resolveTenantBackupPolicy();
+  const policy = await resolveTenantBackupPolicy(businessId);
   await withTenant(businessId, async () => {
     const config = await getBackupConfig(businessId);
     const managedSchedule = policy.source === "managed" && policy.managedCloud;
@@ -1175,7 +1175,7 @@ export async function getBackupHealth(businessId: string): Promise<BackupHealth>
   const localOnly = await isLocalOnly(businessId);
   const [config, policy] = await Promise.all([
     getBackupConfig(businessId),
-    resolveTenantBackupPolicy(),
+    resolveTenantBackupPolicy(businessId),
   ]);
   const [local, cloud] = await Promise.all([
     latestRuns(businessId, "local"),

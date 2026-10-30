@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
 
 const mocks = vi.hoisted(() => ({
@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   preview: vi.fn(),
   apply: vi.fn(),
   query: vi.fn(),
+  approvalGate: vi.fn(),
+  consume: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -17,6 +19,10 @@ vi.mock("@/lib/db", () => ({ query: mocks.query }));
 vi.mock("@/lib/deployment-mode", () => ({ readDeploymentProfile: mocks.profile }));
 vi.mock("@/lib/deployment-role", () => ({ deploymentRole: () => "central" }));
 vi.mock("@/lib/tenant-backup-artifacts-service", () => ({ previewOwnedRestore: mocks.preview }));
+vi.mock("@/lib/tenant-backup-approvals", () => ({
+  checkRestoreApproval: mocks.approvalGate,
+  consumeRestoreApproval: mocks.consume,
+}));
 vi.mock("@/lib/tenant-restore-apply", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tenant-restore-apply")>();
   return { ...actual, applyTenantRestore: mocks.apply };
@@ -52,6 +58,8 @@ beforeEach(() => {
     verified: true,
   });
   mocks.query.mockResolvedValue({ rows: [{ id: "job-2" }], rowCount: 1 });
+  mocks.approvalGate.mockResolvedValue({ ok: true, approval: null });
+  mocks.consume.mockResolvedValue(true);
 });
 
 it("requires the Owner's destructive-restore capability", async () => {
@@ -113,4 +121,38 @@ it("rejects a malformed or oversized body without touching the engine", async ()
   expect((await POST(request({ ref: "", confirmation: "x" }))).status).toBe(400);
   expect((await POST(request({ ref: "x".repeat(200), confirmation: "x" }))).status).toBe(400);
   expect(mocks.apply).not.toHaveBeenCalled();
+});
+
+describe("recovery approvals (issue #903 §3)", () => {
+  it("refuses before anything is journaled when the business requires consent", async () => {
+    mocks.approvalGate.mockResolvedValue({ ok: false, error: "restore_approval_required" });
+    const response = await POST(request({ ref: "ref-1", confirmation: "کافه" }));
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "restore_approval_required" });
+    // Nothing was applied and no restore job row was written.
+    expect(mocks.apply).not.toHaveBeenCalled();
+    expect(mocks.query).not.toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO tenant_backup_restore_jobs"),
+      expect.anything(),
+    );
+  });
+
+  it("consumes the approval only after the restore committed", async () => {
+    mocks.approvalGate.mockResolvedValue({ ok: true, approval: { id: "approval-1" } });
+    await POST(request({ ref: "ref-1", confirmation: "کافه" }));
+    expect(mocks.consume).toHaveBeenCalledWith("approval-1", "journal-1");
+  });
+
+  it("does not burn consent when the restore failed", async () => {
+    mocks.approvalGate.mockResolvedValue({ ok: true, approval: { id: "approval-1" } });
+    mocks.apply.mockResolvedValue({ ok: false, error: "restore_busy" });
+    expect((await POST(request({ ref: "ref-1", confirmation: "کافه" }))).status).toBe(409);
+    expect(mocks.consume).not.toHaveBeenCalled();
+  });
+
+  it("does nothing extra when the business has not opted in", async () => {
+    await POST(request({ ref: "ref-1", confirmation: "کافه" }));
+    expect(mocks.approvalGate).toHaveBeenCalledWith("business-a", "ref-1");
+    expect(mocks.consume).not.toHaveBeenCalled();
+  });
 });

@@ -36,7 +36,7 @@ export const GET = withTenantScope(async () => {
 
   const [config, policy] = await Promise.all([
     getBackupConfig(session.businessId),
-    resolveTenantBackupPolicy(),
+    resolveTenantBackupPolicy(session.businessId),
   ]);
   return NextResponse.json(
     {

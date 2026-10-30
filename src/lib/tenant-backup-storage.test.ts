@@ -14,6 +14,7 @@ vi.mock("./master-key", () => ({ getMasterKey: () => mocks.getMasterKey() }));
 
 import {
   normalizeKeyPrefix,
+  readBusinessPolicyOverride,
   readTenantBackupService,
   resolveTenantBackupPolicy,
   resolveTenantStorage,
@@ -296,5 +297,76 @@ describe("resolveTenantBackupPolicy", () => {
   it("falls back to safe defaults, and says so, when the row cannot be read", async () => {
     mocks.query.mockRejectedValue(new Error("relation does not exist"));
     await expect(resolveTenantBackupPolicy()).resolves.toEqual(SAFE_TENANT_BACKUP_POLICY);
+  });
+});
+
+describe("per-business policy override", () => {
+  it("returns the fleet policy when the business has no override row", async () => {
+    // First call: the fleet singleton. Second: this business's override (absent).
+    mocks.query
+      .mockResolvedValueOnce({ rows: [serviceRow({ default_interval_hours: 12, default_retention_days: 45 })] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(resolveTenantBackupPolicy(BUSINESS)).resolves.toMatchObject({
+      intervalHours: 12,
+      retentionDays: 45,
+      override: false,
+    });
+  });
+
+  it("applies the business's own numbers inside the fleet envelope", async () => {
+    mocks.query
+      .mockResolvedValueOnce({
+        rows: [serviceRow({ default_interval_hours: 24, default_retention_days: 30, max_retention_days: 365, cloud_keep_count: 30 })],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          interval_hours: 6,
+          retention_days: 120,
+          keep_count: 12,
+          protected_recovery_copies: 2,
+          max_artifact_bytes: null,
+          require_restore_approval: true,
+          note: "legal retention",
+          updated_at: new Date(0),
+        }],
+      });
+    await expect(resolveTenantBackupPolicy(BUSINESS)).resolves.toMatchObject({
+      intervalHours: 6,
+      retentionDays: 120,
+      keepCount: 12,
+      protectedCopies: 2,
+      requireRestoreApproval: true,
+      override: true,
+    });
+  });
+
+  it("clamps an override that would escape the fleet ceiling", async () => {
+    mocks.query
+      .mockResolvedValueOnce({
+        rows: [serviceRow({ default_retention_days: 30, max_retention_days: 90, cloud_keep_count: 10 })],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          interval_hours: null,
+          retention_days: 3650,
+          keep_count: 400,
+          protected_recovery_copies: null,
+          max_artifact_bytes: null,
+          require_restore_approval: false,
+          note: "",
+          updated_at: new Date(0),
+        }],
+      });
+    const policy = await resolveTenantBackupPolicy(BUSINESS);
+    expect(policy.retentionDays).toBe(90);
+    expect(policy.keepCount).toBe(10);
+    // Null means inherit, not zero.
+    expect(policy.intervalHours).toBe(24);
+    expect(policy.protectedCopies).toBe(1);
+  });
+
+  it("answers null (inherit) when the override table is unavailable", async () => {
+    mocks.query.mockRejectedValueOnce(new Error("relation does not exist"));
+    await expect(readBusinessPolicyOverride(BUSINESS)).resolves.toBeNull();
   });
 });

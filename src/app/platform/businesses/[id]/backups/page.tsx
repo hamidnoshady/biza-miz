@@ -58,7 +58,15 @@ const CUSTODY = {
 interface Diagnosis {
   destination: { mode: "managed" | "legacy" | "unavailable"; reason: string | null };
   custody: { keyVersion: number | null; kekAvailable: boolean } | null;
-  policy: { intervalHours: number; retentionDays: number; source: "managed" | "default" };
+  policy: {
+    intervalHours: number;
+    retentionDays: number;
+    source: "managed" | "default";
+    /** True when a Superadmin override applies to this business instead of the fleet row. */
+    override?: boolean;
+    /** Whether a destructive restore needs a Superadmin approval here. */
+    requireRestoreApproval?: boolean;
+  };
   storage: { includedBytes: number };
   queue: { pending: number };
   device: { connectivity: "online" | "offline" | "unknown"; lastSeenAt: string | null };
@@ -286,6 +294,20 @@ function OperationsCard({ id, onChanged }: { id: string; onChanged: () => void }
             <div className="flex justify-between gap-2 sm:justify-start">
               <dt className="text-muted-foreground">نگهداری:</dt>
               <dd>{toPersianDigits(String(diagnosis.policy.retentionDays))} روز</dd>
+            </div>
+            <div className="flex justify-between gap-2 sm:justify-start">
+              <dt className="text-muted-foreground">منبع سیاست:</dt>
+              <dd>
+                {diagnosis.policy.override
+                  ? "بازنویسی این کسب‌وکار"
+                  : diagnosis.policy.source === "managed"
+                    ? "سیاست سراسری سکو"
+                    : "پیش‌فرض ایمن دستگاه"}
+              </dd>
+            </div>
+            <div className="flex justify-between gap-2 sm:justify-start">
+              <dt className="text-muted-foreground">تأیید بازگردانی:</dt>
+              <dd>{diagnosis.policy.requireRestoreApproval ? "لازم است" : "لازم نیست"}</dd>
             </div>
             <div className="flex justify-between gap-2 sm:justify-start">
               <dt className="text-muted-foreground">کلید رمزنگاری:</dt>

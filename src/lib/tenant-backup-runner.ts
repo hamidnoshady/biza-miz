@@ -501,11 +501,15 @@ export function artifactScopeTag(businessId: string): string {
   return logicalSnapshotScopeTag(businessId);
 }
 
-/** Retention expiry for a run, from the service's defaults. */
+/**
+ * Retention expiry for a run: the policy **in force for this business**, so a
+ * per-business override (issue #903 §3) is honoured by the pipeline that writes
+ * the row, not only by the console that displays it. `resolveTenantBackupPolicy`
+ * already clamps to the fleet ceiling.
+ */
 export async function retentionUntilFor(businessId: string, from: Date): Promise<Date | null> {
-  void businessId;
-  const { readTenantBackupService } = await import("./tenant-backup-storage");
-  const config = await readTenantBackupService();
-  const days = Math.min(Math.max(1, config.defaultRetentionDays), Math.max(1, config.maxRetentionDays));
+  const { resolveTenantBackupPolicy } = await import("./tenant-backup-storage");
+  const policy = await resolveTenantBackupPolicy(businessId);
+  const days = Math.max(1, policy.retentionDays);
   return new Date(from.getTime() + days * 24 * 60 * 60 * 1000);
 }

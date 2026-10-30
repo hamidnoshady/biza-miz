@@ -113,6 +113,8 @@ beforeEach(async () => {
     "tenant_backup_artifacts",
     "tenant_backup_restore_jobs",
     "tenant_backup_storage_samples",
+    "tenant_backup_business_policy",
+    "tenant_backup_restore_approvals",
     "backup_key_versions",
     "wallet_ledger",
     "business_wallets",
@@ -351,5 +353,80 @@ describe("wallet_ledger_refund_once (0267)", () => {
 
     await expect(refund(charge.rows[0].id)).resolves.toBeTruthy();
     await expect(refund(charge.rows[0].id)).rejects.toThrow();
+  });
+});
+
+describe("0269 — per-business overrides and recovery approvals", () => {
+  it("hides a business's policy override from that business", async () => {
+    const a = await makeBusiness("Alpha");
+    await owner.query(
+      `INSERT INTO tenant_backup_business_policy
+         (business_id, interval_hours, retention_days, keep_count, require_restore_approval, note)
+       VALUES ($1, 6, 120, 12, true, 'legal retention')`,
+      [a],
+    );
+
+    // A business is *subject* to its policy, never a reader of it: the table is
+    // platform-only, so the tenant connection sees no rows at all.
+    const visible = await asTenant(app, a, async () => {
+      const result = await app.query("SELECT interval_hours FROM tenant_backup_business_policy");
+      return result.rowCount;
+    });
+    expect(visible).toBe(0);
+
+    await expect(
+      asTenant(app, a, () =>
+        app.query("UPDATE tenant_backup_business_policy SET retention_days = 3650").then((result) => {
+          if ((result.rowCount ?? 0) > 0) throw new Error("tenant rewrote its own retention");
+          return true;
+        }),
+      ),
+    ).resolves.toBe(true);
+
+    const row = await owner.query<{ retention_days: number }>(
+      "SELECT retention_days FROM tenant_backup_business_policy WHERE business_id = $1",
+      [a],
+    );
+    expect(row.rows[0]?.retention_days).toBe(120);
+  });
+
+  it("keeps an approval invisible to the tenant it is about", async () => {
+    const a = await makeBusiness("Alpha");
+    await owner.query(
+      `INSERT INTO tenant_backup_restore_approvals (business_id, artifact_ref, expires_at, note)
+       VALUES ($1, 'ref-1', now() + interval '1 hour', 'owner called')`,
+      [a],
+    );
+
+    const visible = await asTenant(app, a, async () => {
+      const result = await app.query("SELECT id FROM tenant_backup_restore_approvals");
+      return result.rowCount;
+    });
+    expect(visible).toBe(0);
+  });
+
+  it("refuses an approval window that has already closed when it opens", async () => {
+    const a = await makeBusiness("Alpha");
+    await expect(
+      owner.query(
+        `INSERT INTO tenant_backup_restore_approvals (business_id, artifact_ref, approved_at, expires_at)
+         VALUES ($1, 'ref-1', now(), now() - interval '1 minute')`,
+        [a],
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("still accepts a zero protected-copy floor, so the console can turn it off", async () => {
+    const a = await makeBusiness("Alpha");
+    await owner.query(
+      `INSERT INTO tenant_backup_business_policy (business_id, protected_recovery_copies)
+       VALUES ($1, 0)`,
+      [a],
+    );
+    const row = await owner.query<{ protected_recovery_copies: number }>(
+      "SELECT protected_recovery_copies FROM tenant_backup_business_policy WHERE business_id = $1",
+      [a],
+    );
+    expect(row.rows[0]?.protected_recovery_copies).toBe(0);
   });
 });

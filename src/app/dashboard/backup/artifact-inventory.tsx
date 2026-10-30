@@ -233,6 +233,11 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
         case "confirmation_required":
           setApplyError("عبارت تأیید با آنچه نمایش داده شد مطابقت ندارد.");
           break;
+        case "restore_approval_required":
+          setApplyError(
+            "برای این کسب‌وکار، بازگردانی نیازمند تأیید مدیر سامانه است. پس از دریافت تأیید، دوباره تلاش کنید.",
+          );
+          break;
         case "restore_busy":
           setApplyError("یک بازگردانی دیگر برای این کسب‌وکار در حال اجراست؛ کمی بعد دوباره تلاش کنید.");
           break;

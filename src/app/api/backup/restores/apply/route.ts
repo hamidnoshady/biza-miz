@@ -6,6 +6,10 @@ import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { deploymentRole } from "@/lib/deployment-role";
 import { previewOwnedRestore } from "@/lib/tenant-backup-artifacts-service";
 import { applyTenantRestore, mapApplyError } from "@/lib/tenant-restore-apply";
+import {
+  checkRestoreApproval,
+  consumeRestoreApproval,
+} from "@/lib/tenant-backup-approvals";
 
 /**
  * Issue #903 §4 — apply a central, tenant-only logical restore.
@@ -55,6 +59,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   });
   if ("error" in previewed) {
     return NextResponse.json({ error: "artifact_not_found" }, { status: 404 });
+  }
+
+  // Issue #903 §3 — a business may require a Superadmin's consent for a
+  // destructive restore. Off by default, so this is a no-op unless that
+  // business opted in; when it is on, the refusal happens before anything is
+  // journaled, and the approval is consumed only after a restore commits (see
+  // below), so a failed attempt never burns it.
+  const approvalGate = await checkRestoreApproval(session.businessId, ref);
+  if (!approvalGate.ok) {
+    return NextResponse.json({ error: "restore_approval_required" }, { status: 403 });
   }
 
   const minutesSinceReauthentication =
@@ -122,6 +136,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             ? 403
             : 422;
     return NextResponse.json({ error, journalId: outcome.journalId ?? null }, { status });
+  }
+
+  if (approvalGate.approval) {
+    // Single use, and only now that the restore actually committed. A conditional
+    // update is what makes it single use: a racing second apply cannot claim the
+    // same consent twice.
+    await consumeRestoreApproval(approvalGate.approval.id, outcome.journalId ?? null).catch(() => false);
   }
 
   return NextResponse.json(

@@ -26,7 +26,7 @@ export const GET = withTenantScope(async () => {
   const siteInstall = deploymentRole() === "site";
   const [config, policy] = await Promise.all([
     getBackupConfig(session.businessId),
-    resolveTenantBackupPolicy(),
+    resolveTenantBackupPolicy(session.businessId),
   ]);
   return NextResponse.json(
     {

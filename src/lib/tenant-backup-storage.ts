@@ -373,6 +373,14 @@ export interface TenantBackupPolicy {
   source: "managed" | "default";
   /** Whether the fleet has a *usable* managed destination configured. */
   managedCloud: boolean;
+  /**
+   * True when a Superadmin override was applied for this business (issue #903
+   * §3). The fleet's ceilings still bound it: an override can tighten or extend
+   * *inside* `maxRetentionDays` / `keepCount`, never past them.
+   */
+  override: boolean;
+  /** Whether a destructive restore needs a Superadmin approval for this business. */
+  requireRestoreApproval: boolean;
 }
 
 /** What a device without a reachable fleet row protects itself with. */
@@ -384,6 +392,8 @@ export const SAFE_TENANT_BACKUP_POLICY: TenantBackupPolicy = {
   protectedCopies: 1,
   source: "default",
   managedCloud: false,
+  override: false,
+  requireRestoreApproval: false,
 };
 
 /** The allowed cadences, mirrored from the migration's CHECK constraint. */
@@ -398,10 +408,59 @@ function scheduleHours(value: number): number {
   );
 }
 
-export async function resolveTenantBackupPolicy(): Promise<TenantBackupPolicy> {
+/** The per-business override row, as stored. Absent means "inherit". */
+export interface BusinessPolicyOverrideRow extends Record<string, unknown> {
+  interval_hours: number | null;
+  retention_days: number | null;
+  keep_count: number | null;
+  protected_recovery_copies: number | null;
+  max_artifact_bytes: string | null;
+  require_restore_approval: boolean;
+  note: string;
+  updated_at: Date;
+}
+
+/**
+ * Read one business's override. Server-side only: the table is `platform_only`,
+ * so a tenant connection cannot see it at all — the business is *subject* to the
+ * policy, never a reader of it.
+ *
+ * A missing row (or a database migrated before 0269) is `null`, not an error.
+ */
+export async function readBusinessPolicyOverride(
+  businessId: string,
+): Promise<BusinessPolicyOverrideRow | null> {
+  try {
+    return await withoutTenantScope("tenant-backup-business-policy", async () => {
+      const { rows } = await query<BusinessPolicyOverrideRow>(
+        `SELECT interval_hours, retention_days, keep_count, protected_recovery_copies,
+                max_artifact_bytes, require_restore_approval, note, updated_at
+           FROM tenant_backup_business_policy WHERE business_id = $1`,
+        [businessId],
+      );
+      return rows[0] ?? null;
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the policy in force for a business: fleet defaults, then that
+ * business's override, clamped to the fleet's own ceilings.
+ *
+ * Clamping is the point. An override is an operator decision *inside* the
+ * platform's envelope — retention cannot outlive `maxRetentionDays`, the keep
+ * count cannot exceed the fleet's, and the cadence must be one the scheduler can
+ * express. A value that would breach the envelope is clamped rather than
+ * rejected, because refusing the whole override would leave the business on the
+ * old policy without saying why.
+ */
+export async function resolveTenantBackupPolicy(businessId?: string): Promise<TenantBackupPolicy> {
+  let base: TenantBackupPolicy;
   try {
     const config = await readTenantBackupService();
-    return {
+    base = {
       intervalHours: scheduleHours(config.defaultIntervalHours),
       retentionDays: Math.max(1, config.defaultRetentionDays),
       maxRetentionDays: Math.max(1, config.maxRetentionDays),
@@ -409,10 +468,37 @@ export async function resolveTenantBackupPolicy(): Promise<TenantBackupPolicy> {
       protectedCopies: Math.max(0, config.protectedRecoveryCopies),
       source: "managed",
       managedCloud: config.cloudEnabled,
+      override: false,
+      requireRestoreApproval: false,
     };
   } catch {
     return { ...SAFE_TENANT_BACKUP_POLICY };
   }
+  if (!businessId) return base;
+
+  const override = await readBusinessPolicyOverride(businessId);
+  if (!override) return base;
+
+  const retentionDays =
+    override.retention_days !== null
+      ? Math.min(Math.max(1, override.retention_days), base.maxRetentionDays)
+      : base.retentionDays;
+  const keepCount =
+    override.keep_count !== null ? Math.min(Math.max(1, override.keep_count), base.keepCount) : base.keepCount;
+
+  return {
+    ...base,
+    intervalHours:
+      override.interval_hours !== null ? scheduleHours(override.interval_hours) : base.intervalHours,
+    retentionDays,
+    keepCount,
+    protectedCopies:
+      override.protected_recovery_copies !== null
+        ? Math.max(0, override.protected_recovery_copies)
+        : base.protectedCopies,
+    requireRestoreApproval: override.require_restore_approval === true,
+    override: true,
+  };
 }
 
 /** `tenants/<scope tag>/<artifact>` — derived, never supplied by a request. */

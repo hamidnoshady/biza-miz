@@ -29,6 +29,7 @@ const SERVICE = ddl(read("0265_tenant_backup_service.sql"));
 const HYBRID = ddl(read("0266_tenant_backup_hybrid.sql"));
 const BILLING = ddl(read("0267_tenant_backup_billing_jobs.sql"));
 const CUSTODY = ddl(read("0268_tenant_backup_custody_ops.sql"));
+const OVERRIDES = ddl(read("0269_tenant_backup_overrides.sql"));
 
 describe("migration 0265 — managed service and upload sessions", () => {
   it("adds a platform-only singleton service row", () => {
@@ -107,5 +108,36 @@ describe("migration 0268 — custody operations", () => {
       expect(CUSTODY).toMatch(new RegExp(`'${state}'`));
     }
     expect(CUSTODY).toMatch(/ADD COLUMN IF NOT EXISTS superseded_by text/);
+  });
+});
+
+describe("migration 0269 — per-business overrides and recovery approvals", () => {
+  it("makes both new tables platform-only, so a tenant sees no rows at all", () => {
+    for (const table of ["tenant_backup_business_policy", "tenant_backup_restore_approvals"]) {
+      expect(OVERRIDES).toMatch(new RegExp(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY`));
+      expect(OVERRIDES).toMatch(new RegExp(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`));
+      expect(OVERRIDES).toMatch(new RegExp(`CREATE POLICY platform_only ON ${table} FOR ALL`));
+    }
+    // Neither table grants a tenant path at all: `app_rls_bypass()` is the
+    // whole rule, so there is no `app_current_business()` clause to widen.
+    expect(OVERRIDES).not.toContain("app_current_business()");
+  });
+
+  it("lets an override be NULL (inherit) and bounds each number", () => {
+    expect(OVERRIDES).toMatch(/interval_hours\s+integer CHECK \(interval_hours IS NULL OR interval_hours IN/);
+    expect(OVERRIDES).toMatch(/retention_days\s+integer CHECK \(retention_days IS NULL OR retention_days BETWEEN 1 AND 3650\)/);
+    expect(OVERRIDES).toMatch(/keep_count\s+integer CHECK \(keep_count IS NULL OR keep_count BETWEEN 1 AND 500\)/);
+    expect(OVERRIDES).toMatch(/max_artifact_bytes\s+bigint\s+CHECK \(max_artifact_bytes IS NULL OR max_artifact_bytes > 0\)/);
+  });
+
+  it("defaults the approval control off, so enabling the table changes no restore", () => {
+    expect(OVERRIDES).toMatch(/require_restore_approval boolean NOT NULL DEFAULT false/);
+  });
+
+  it("makes an approval named, expiring and single use", () => {
+    expect(OVERRIDES).toMatch(/approved_by\s+uuid REFERENCES platform_admins\(id\)/);
+    expect(OVERRIDES).toMatch(/expires_at\s+timestamptz NOT NULL/);
+    expect(OVERRIDES).toMatch(/consumed_at\s+timestamptz/);
+    expect(OVERRIDES).toMatch(/CHECK \(expires_at > approved_at\)/);
   });
 });
