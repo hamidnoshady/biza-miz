@@ -6,6 +6,7 @@ import { MessageCircleIcon, PlusIcon, SendIcon, WalletCardsIcon } from "lucide-r
 import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { formatPersianNumber } from "@/lib/digits";
+import { triggerCodeLabel } from "@/lib/kavenegar/lookup-trigger-facts";
 import { templateVariableTokens } from "@/lib/message-template";
 import { libraryEntryView, splitLibrary, type LibraryEntryView } from "@/lib/kavenegar/template-library-view";
 import {
@@ -101,6 +102,17 @@ interface LibraryEntry {
   alreadyAdded: boolean;
 }
 
+/** Issue #902 §9 item 0 — what the automation actually did, in first-party words. */
+interface TriggerDelivery {
+  sent: number;
+  skipped: number;
+  blocked: number;
+  failed: number;
+  unknown: number;
+  lastAttemptAt: string | null;
+  lastCode: string | null;
+}
+
 interface TriggerSetting {
   trigger: LookupTriggerKey;
   label: string;
@@ -109,6 +121,9 @@ interface TriggerSetting {
   templateId: string | null;
   templateTitle: string | null;
   problem: string | null;
+  /** The exact text this event would send, rendered by the server's dispatcher. */
+  preview: string | null;
+  delivery: TriggerDelivery;
 }
 
 interface Data {
@@ -247,14 +262,27 @@ function displayMessagingError(code: string | undefined, fallback: string): stri
 export const CENTRAL_BILLING_HREF = "/settings/billing";
 
 /**
- * Outbound SMS/email campaigns: templates, audience (a CRM segment, filtered
- * for consent server-side), a real sample, cost estimate and send status.
+ * What this automation did in the last week, in one sentence.
  *
- * Growth does not run a second billing centre. The balance shown is the
- * platform wallet's, the estimate is checked against it, and buying credit is
- * a link to `/settings/billing` (issue #764). Composing and sending need
- * `campaigns.manage`; `campaigns.view` sees the campaigns and their results.
+ * The zeros are deliberately spoken aloud: "no message has been sent yet" and
+ * "every message was refused because the customer did not consent" are both
+ * quiet on a screen that only shows a switch, and only one of them is fine.
  */
+function deliveryLine(delivery: TriggerDelivery): string {
+  const total =
+    delivery.sent + delivery.skipped + delivery.blocked + delivery.failed + delivery.unknown;
+  if (total === 0) {
+    return "در ۷ روز اخیر رویدادی برای این اطلاع‌رسانی ثبت نشده است.";
+  }
+  const parts = [`${formatPersianNumber(delivery.sent)} ارسال‌شده`];
+  if (delivery.skipped > 0) parts.push(`${formatPersianNumber(delivery.skipped)} رد‌شده`);
+  if (delivery.blocked > 0) parts.push(`${formatPersianNumber(delivery.blocked)} متوقف‌شده`);
+  if (delivery.failed > 0) parts.push(`${formatPersianNumber(delivery.failed)} ناموفق`);
+  if (delivery.unknown > 0) parts.push(`${formatPersianNumber(delivery.unknown)} نامشخص`);
+  const reason = triggerCodeLabel(delivery.lastCode);
+  return `۷ روز اخیر: ${parts.join(" • ")}${reason ? ` — آخرین دلیل: ${reason}` : ""}`;
+}
+
 export function MessagingSection({
   canManage,
   initialPromotionId,
@@ -937,6 +965,16 @@ export function MessagingSection({
                       ) : setting.templateTitle ? (
                         <p className="mt-1 text-xs leading-5 text-muted-foreground">پیام: {setting.templateTitle}</p>
                       ) : null}
+                      {/* §9 item 0: the exact text, rendered on the server by the
+                          dispatcher's own functions over fake facts — so what the
+                          business approves is what its customer receives. */}
+                      {setting.preview ? (
+                        <p className="mt-2 rounded-lg border border-border/70 bg-muted/40 px-2 py-1.5 text-xs leading-5 text-foreground">
+                          <span className="text-muted-foreground">پیش‌نمایش با دادهٔ نمونه: </span>
+                          {setting.preview}
+                        </p>
+                      ) : null}
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">{deliveryLine(setting.delivery)}</p>
                     </div>
                   </div>
                   {canManage ? (
