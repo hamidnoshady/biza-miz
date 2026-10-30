@@ -811,6 +811,8 @@ not awaited, and it is business-scoped — because "the dispatcher works" was ne
 
 ## 5m. A rating cites the price that produced it (§9 item 3, part one)
 
+_Merged as `be20062` (PR #1200)._
+
 Two ledgers record every message. The **wallet** says what the business paid; the **Billing rating**
 (`billing_usage_ratings`) says what the platform booked as usage. The margin report is the subtraction
 of the two, and the supplier reconciliation is the comparison of the second against
