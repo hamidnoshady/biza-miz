@@ -932,14 +932,22 @@ async function maybeCatchUpCloud(businessId: string, config: BackupConfig): Prom
   // needs uploading". It survives restarts, keeps order and backs off, so an
   // offline café catches up instead of forgetting. `superseded` rows are the
   // fence refusing an artifact from an older install generation.
-  await drainUploadQueue(businessId, async (artifactName) => {
-    const result = await runCloudUpload(businessId, artifactName, "scheduled");
-    if (result.status === "ok") return { ok: true };
-    // "disabled" means there is no destination right now, not that this artifact
-    // is wrong: it stays queued and is retried on a later tick.
-    if (result.status === "disabled") return { ok: false, error: "storage_unavailable" };
-    return { ok: false, error: result.error };
-  });
+  await drainUploadQueue(
+    businessId,
+    async (artifactName) => {
+      const result = await runCloudUpload(businessId, artifactName, "scheduled");
+      if (result.status === "ok") return { ok: true };
+      // "disabled" means there is no destination right now, not that this
+      // artifact is wrong: it stays queued and is retried on a later tick.
+      if (result.status === "disabled") return { ok: false, error: "storage_unavailable" };
+      return { ok: false, error: result.error };
+    },
+    new Date(),
+    // Issue #903 §3: the fleet's own concurrency bound, not one-at-a-time by
+    // accident. Default 2 matches the migration; a fleet that wants strict
+    // ordering sets it to 1.
+    { concurrency: (await resolveTenantBackupPolicy(businessId)).maxParallelUploads },
+  );
 
   // Then the pre-queue behaviour, kept for artifacts that predate the queue: the
   // newest successful local artifact, retried with the same backoff.
@@ -1140,8 +1148,12 @@ export interface BackupHealth {
   intervalHours: number;
   /** Issue #903 §3: the fleet's retention, shown read-only to the tenant. */
   retentionDays: number;
-  /** `managed` when the platform's policy answered, `default` otherwise. */
-  policySource: "managed" | "default";
+  /**
+   * `managed` when the platform's policy answered, `cached` when the platform is
+   * unreachable and this device is honouring the last policy it actually saw,
+   * `default` when there is nothing to remember (issue #903 §3).
+   */
+  policySource: "managed" | "cached" | "default";
   scope: TenantBackupMode;
   localLastSuccessAt: string | null;
   localLastError: string | null;

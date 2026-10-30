@@ -30,6 +30,7 @@ import path from "node:path";
 import { query, withoutTenantScope } from "./db";
 import { getMasterKey } from "./master-key";
 import { logicalSnapshotScopeTag } from "./backup-policy";
+import { readCachedPolicy, writeCachedPolicy } from "./tenant-backup-policy-cache";
 import { sha256Hex, signS3Request, type S3Config } from "./s3-lite";
 import type { DeploymentProfile } from "./deployment-mode";
 import type { DeploymentRole } from "./deployment-role";
@@ -350,6 +351,8 @@ export async function resolveTenantStorage(input: ResolveStorageInput): Promise<
  * so an on-device install that has never seen a fleet row keeps its historic
  * cadence.
  */
+export type TenantBackupPolicySource = "managed" | "cached" | "default";
+
 export interface TenantBackupPolicy {
   /** Scheduled run spacing, from the fleet row. */
   intervalHours: number;
@@ -370,7 +373,12 @@ export interface TenantBackupPolicy {
    * `default` — the row was unreadable and these are the safe on-device
    * defaults.
    */
-  source: "managed" | "default";
+  /**
+   * Where the numbers came from: the fleet row, the last policy this device saw
+   * while the platform was reachable (`cached`), or the hard-coded safe
+   * defaults. See `tenant-backup-policy-cache.ts`.
+   */
+  source: TenantBackupPolicySource;
   /** Whether the fleet has a *usable* managed destination configured. */
   managedCloud: boolean;
   /**
@@ -381,6 +389,12 @@ export interface TenantBackupPolicy {
   override: boolean;
   /** Whether a destructive restore needs a Superadmin approval for this business. */
   requireRestoreApproval: boolean;
+  /**
+   * How many queued uploads one business may run at once. The fleet's
+   * `max_parallel_uploads`, which is what makes that setting mean something
+   * (issue #903 §3, "background job concurrency").
+   */
+  maxParallelUploads: number;
 }
 
 /** What a device without a reachable fleet row protects itself with. */
@@ -394,6 +408,7 @@ export const SAFE_TENANT_BACKUP_POLICY: TenantBackupPolicy = {
   managedCloud: false,
   override: false,
   requireRestoreApproval: false,
+  maxParallelUploads: 2,
 };
 
 /** The allowed cadences, mirrored from the migration's CHECK constraint. */
@@ -470,14 +485,22 @@ export async function resolveTenantBackupPolicy(businessId?: string): Promise<Te
       managedCloud: config.cloudEnabled,
       override: false,
       requireRestoreApproval: false,
+      maxParallelUploads: Math.min(Math.max(1, config.maxParallelUploads), 16),
     };
   } catch {
-    return { ...SAFE_TENANT_BACKUP_POLICY };
+    // The fleet row is unreachable. On a device that has seen one before, that
+    // remembered policy is the honest fallback: it is what this business was
+    // actually being protected by, not a hard-coded guess. `cached` says so.
+    const cached = await readCachedPolicy(businessId);
+    return cached ? { ...cached } : { ...SAFE_TENANT_BACKUP_POLICY };
   }
   if (!businessId) return base;
 
   const override = await readBusinessPolicyOverride(businessId);
-  if (!override) return base;
+  if (!override) {
+    await writeCachedPolicy(base, { businessId });
+    return base;
+  }
 
   const retentionDays =
     override.retention_days !== null
@@ -486,7 +509,7 @@ export async function resolveTenantBackupPolicy(businessId?: string): Promise<Te
   const keepCount =
     override.keep_count !== null ? Math.min(Math.max(1, override.keep_count), base.keepCount) : base.keepCount;
 
-  return {
+  const effective: TenantBackupPolicy = {
     ...base,
     intervalHours:
       override.interval_hours !== null ? scheduleHours(override.interval_hours) : base.intervalHours,
@@ -499,6 +522,12 @@ export async function resolveTenantBackupPolicy(businessId?: string): Promise<Te
     requireRestoreApproval: override.require_restore_approval === true,
     override: true,
   };
+  // Reconcile: the platform answered, so the cache becomes the effective policy
+  // — including the override, which is what this business must keep honouring
+  // while it is offline. Cached per business, so an override can never leak to
+  // the next business this device resolves.
+  await writeCachedPolicy(effective, { businessId });
+  return effective;
 }
 
 /** `tenants/<scope tag>/<artifact>` — derived, never supplied by a request. */

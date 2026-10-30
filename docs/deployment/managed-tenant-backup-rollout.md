@@ -539,3 +539,53 @@ platform did not write — see the previous increment), media binaries, the
 WordPress/WooCommerce database, and the whole "Real acceptance" line: no
 PostgreSQL, S3 or Node ≥ 24 here, so `test:db` (including the extended RLS
 suite), `build`, and a live drill remain unexecuted in this environment.
+
+## Increment: three knobs that were not wired (issue #903 §3, §12)
+
+Settings the console showed or the repo shipped that nothing consumed.
+
+**1. `max_parallel_uploads` now bounds real work.** The fleet row has carried the
+number since 0265, the console showed it, and `drainUploadQueue` ignored it: the
+queue was strictly one artifact per tick, per business. It now plans the whole
+queue in order (backoff, dead letters and the generation fence are decided
+sequentially, before any upload starts) and then runs up to
+`min(fleet value, MAX_UPLOAD_CONCURRENCY = 16)` uploads together. The default —
+`1` on a fleet row nobody has touched, `2` in `SAFE_TENANT_BACKUP_POLICY` — keeps
+the historic behaviour, so no deployment changes speed by upgrading.
+
+**2. The device remembers the policy it was told.** A site install that could not
+read the fleet row used to fall back to a hard-coded 24 h / 30 days, which is a
+guess: an operator who had set 6 h / 90 days got a silently different protection
+level the moment the platform was unreachable. `tenant-backup-policy-cache.ts`
+writes every policy the platform actually answered with (never a default) to
+`backups/tenant-backup-policy-cache.json`, keyed **per business** so one
+business's override can never be handed to another, and expires an entry after
+30 days so a device offline for months does not claim to follow a policy nobody
+has confirmed. `resolveTenantBackupPolicy` reports `source: "cached"` in that
+case, the health payload carries it, and the tenant card says so in words rather
+than presenting a remembered number as the platform's current one. When the
+platform answers again the entry is simply rewritten — the platform is always
+authoritative while reachable, so there is no merge rule to get wrong.
+
+**3. Drills run on a schedule.** `npm run backup:drill` existed and nothing ran
+it. `tenant-backup-drills-job.ts` runs from `server.ts` on an hourly tick, drills
+every business with a `ready` logical artifact at most once a day
+(`DRILL_INTERVAL_MS`, idempotent through the new `tenant_backup_drills` table
+rather than through a lock alone), writes what it proved, and notifies the Owner
+through the new `backup.drill_failed` catalogue event when a backup that exists
+does not open. Two honest details:
+
+- The platform holds no tenant recovery passphrase, so the `portable_envelope`
+  step is **skipped by design** in a scheduled run and recorded in
+  `missing_steps`. `drillVerdict(steps, required)` takes the narrowed list, so a
+  routine skip is not a nightly false failure while a failure of any step the
+  platform *can* prove still fails the drill.
+- 0270 is tenant-readable for its own business and platform-only for writes: a
+  tenant can see "my last drill passed", and cannot manufacture that sentence.
+  `diagnoseBusinessBackup` now reports the last run and adds `drill_failed` to
+  `actions`, which the Superadmin page renders.
+
+**Still open.** `import/register` (no signed manifest for an artifact the platform
+did not write), media binaries, the WordPress/WooCommerce database, and a CI job
+for the drill: the scheduler now covers production, but nothing runs a drill on a
+pull request, which needs a seeded PostgreSQL and S3 stand-in in CI.

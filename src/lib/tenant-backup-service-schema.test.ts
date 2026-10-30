@@ -30,6 +30,7 @@ const HYBRID = ddl(read("0266_tenant_backup_hybrid.sql"));
 const BILLING = ddl(read("0267_tenant_backup_billing_jobs.sql"));
 const CUSTODY = ddl(read("0268_tenant_backup_custody_ops.sql"));
 const OVERRIDES = ddl(read("0269_tenant_backup_overrides.sql"));
+const DRILLS = ddl(read("0270_tenant_backup_drills.sql"));
 
 describe("migration 0265 — managed service and upload sessions", () => {
   it("adds a platform-only singleton service row", () => {
@@ -139,5 +140,36 @@ describe("migration 0269 — per-business overrides and recovery approvals", () 
     expect(OVERRIDES).toMatch(/expires_at\s+timestamptz NOT NULL/);
     expect(OVERRIDES).toMatch(/consumed_at\s+timestamptz/);
     expect(OVERRIDES).toMatch(/CHECK \(expires_at > approved_at\)/);
+  });
+});
+
+describe("migration 0270 — drill history", () => {
+  it("lets a business read its own drill evidence but never write it", () => {
+    expect(DRILLS).toMatch(/ALTER TABLE tenant_backup_drills ENABLE ROW LEVEL SECURITY/);
+    expect(DRILLS).toMatch(/ALTER TABLE tenant_backup_drills FORCE ROW LEVEL SECURITY/);
+    // Read: own business. Write: platform only, because evidence a tenant can
+    // manufacture is not evidence.
+    expect(DRILLS).toMatch(
+      /CREATE POLICY tenant_read_drills ON tenant_backup_drills FOR SELECT\s+USING \(app_rls_bypass\(\) OR business_id = app_current_business\(\)\)/,
+    );
+    expect(DRILLS).toMatch(/CREATE POLICY platform_write_drills ON tenant_backup_drills FOR ALL\s+USING \(app_rls_bypass\(\)\)/);
+    expect(DRILLS).not.toMatch(/FOR INSERT/);
+    expect(DRILLS).not.toMatch(/FOR UPDATE/);
+  });
+
+  it("records what a drill could not prove, separately from whether it passed", () => {
+    expect(DRILLS).toMatch(/missing_steps\s+text\[\] NOT NULL DEFAULT '\{\}'/);
+    expect(DRILLS).toMatch(/ok\s+boolean NOT NULL/);
+    expect(DRILLS).toMatch(/source\s+text NOT NULL DEFAULT 'schedule'\s+CHECK \(source IN \('schedule', 'manual', 'ci'\)\)/);
+  });
+
+  it("keeps the artifact reference as text, so a drill outlives the artifact it tested", () => {
+    expect(DRILLS).toMatch(/artifact_ref\s+text NOT NULL/);
+    expect(DRILLS).not.toMatch(/artifact_ref\s+uuid/);
+    expect(DRILLS).toMatch(/CONSTRAINT tenant_backup_drills_window CHECK \(finished_at >= started_at\)/);
+  });
+
+  it("indexes the question the console and the scheduler both ask", () => {
+    expect(DRILLS).toMatch(/CREATE INDEX IF NOT EXISTS tenant_backup_drills_recent\s+ON tenant_backup_drills \(business_id, finished_at DESC\)/);
   });
 });

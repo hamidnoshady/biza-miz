@@ -314,6 +314,19 @@ app.prepare().then(async () => {
     runBackupLegacyRefundJob().catch((err) => console.error("backup refund reconciliation failed:", err));
   scheduleCentralTick(backupRefundTick, 24 * 60 * 60 * 1000, 8 * 60_000);
 
+  // Issue #903 §12 — automated recovery drills. Until now `npm run backup:drill`
+  // existed and nothing ran it, so "we can restore you" was a claim nobody
+  // exercised. This tick walks the businesses that have a restorable logical
+  // artifact and drills each one at most once a day (`runScheduledBackupDrills`
+  // owns that idempotency through `tenant_backup_drills`), notifying the Owner
+  // when a backup that exists does not open. Run on *every* role: a site install
+  // protects itself too, and the drill proves exactly the chain that role would
+  // have to walk on the day it needs the backup.
+  const { runScheduledBackupDrills } = await import("./src/lib/tenant-backup-drills-job");
+  const backupDrillTick = () =>
+    runScheduledBackupDrills().catch((err) => console.error("backup drill failed:", err));
+  scheduleBackgroundTick(backupDrillTick, 60 * 60 * 1000, 12 * 60_000);
+
   // Phase 11: bidirectional server-to-server sync (café laptop ←→ VPS). Each
   // tick pushes locally-born sync_events to the configured remote and pulls
   // the remote's events back, replaying both through the same idempotent

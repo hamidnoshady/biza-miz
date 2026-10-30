@@ -86,6 +86,8 @@ const ACTION_LABELS: Record<string, string> = {
   uploads_dead: "آخرین تلاش بارگذاری خطا داشته است.",
   device_offline: "دستگاه از آخرین همگام‌سازی فاصله دارد؛ دسترسی به فایل‌های محلی تأیید نشده است.",
   no_artifact_yet: "هنوز هیچ نسخه‌ای ثبت نشده است.",
+  drill_failed:
+    "آزمایش بازیابی زمان‌بندی‌شده ناموفق بود: نسخهٔ ثبت‌شده باز نشد یا بازیابی آن مجاز نیست. پیش از نیاز واقعی بررسی کنید.",
 };
 
 export default function BusinessBackupsPage() {

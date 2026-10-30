@@ -44,7 +44,7 @@ interface Health {
   /** Retention the platform applies to new artifacts (read-only here). */
   retentionDays: number;
   /** `managed` when the platform's policy answered; `default` on a bare device. */
-  policySource: "managed" | "default";
+  policySource: "managed" | "cached" | "default";
   /** `physical` = the whole database (site installs); `logical` = this tenant only (central). */
   scope: "physical" | "logical";
   localLastSuccessAt: string | null;
@@ -765,11 +765,17 @@ function StatusCard({
             <div className="flex justify-between gap-2 sm:justify-start">
               <dt className="text-muted-foreground">زمان‌بندی خودکار:</dt>
               <dd>
-                {health.enabled || health.policySource === "managed"
+                {health.enabled || health.policySource !== "default"
                   ? `هر ${toPersianDigits(String(health.intervalHours))} ساعت`
                   : "غیرفعال"}
               </dd>
             </div>
+            {health.policySource === "cached" ? (
+              <p className="text-xs text-muted-foreground">
+                سیاست نمایش‌داده‌شده آخرین سیاستی است که این دستگاه از سکو دریافت کرده؛ سکو در دسترس نیست و مقدار
+                تازه‌تری تأیید نشده است.
+              </p>
+            ) : null}
             <div className="flex justify-between gap-2 sm:justify-start">
               <dt className="text-muted-foreground">نگهداری نسخه‌ها:</dt>
               <dd>{toPersianDigits(String(health.retentionDays))} روز</dd>

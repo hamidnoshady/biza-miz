@@ -115,6 +115,7 @@ beforeEach(async () => {
     "tenant_backup_storage_samples",
     "tenant_backup_business_policy",
     "tenant_backup_restore_approvals",
+    "tenant_backup_drills",
     "backup_key_versions",
     "wallet_ledger",
     "business_wallets",
@@ -428,5 +429,60 @@ describe("0269 — per-business overrides and recovery approvals", () => {
       [a],
     );
     expect(row.rows[0]?.protected_recovery_copies).toBe(0);
+  });
+});
+
+describe("0270 — drill history", () => {
+  it("shows a business its own drill result and hides another business's", async () => {
+    const a = await makeBusiness("Alpha");
+    const b = await makeBusiness("Beta");
+    for (const [businessId, ok] of [[a, true], [b, false]] as const) {
+      await owner.query(
+        `INSERT INTO tenant_backup_drills
+           (business_id, artifact_ref, source, ok, missing_steps, steps, started_at, finished_at)
+         VALUES ($1, 'ref-1', 'schedule', $2, '{}', '[]'::jsonb, now(), now())`,
+        [businessId, ok],
+      );
+    }
+
+    const seen = await asTenant(app, a, async () => {
+      const result = await app.query<{ business_id: string; ok: boolean }>(
+        "SELECT business_id, ok FROM tenant_backup_drills",
+      );
+      return result.rows;
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.business_id).toBe(a);
+    expect(seen[0]?.ok).toBe(true);
+  });
+
+  it("refuses a tenant-written drill row", async () => {
+    const a = await makeBusiness("Alpha");
+    // A drill result is evidence; a business that could insert one could claim a
+    // passing drill it never had.
+    await expect(
+      asTenant(app, a, () =>
+        app.query(
+          `INSERT INTO tenant_backup_drills
+             (business_id, artifact_ref, ok, started_at, finished_at)
+           VALUES ($1, 'ref-forged', true, now(), now())`,
+          [a],
+        ),
+      ),
+    ).rejects.toThrow();
+
+    const rows = await owner.query("SELECT id FROM tenant_backup_drills WHERE artifact_ref = 'ref-forged'");
+    expect(rows.rowCount).toBe(0);
+  });
+
+  it("refuses a drill whose window runs backwards", async () => {
+    const a = await makeBusiness("Alpha");
+    await expect(
+      owner.query(
+        `INSERT INTO tenant_backup_drills (business_id, artifact_ref, ok, started_at, finished_at)
+         VALUES ($1, 'ref-1', true, now(), now() - interval '1 second')`,
+        [a],
+      ),
+    ).rejects.toThrow();
   });
 });

@@ -49,6 +49,8 @@ export interface DrillReport {
   startedAt: string;
   finishedAt: string;
   ok: boolean;
+  /** Steps the drill did not prove. Non-empty does not imply `ok: false`. */
+  missing: DrillStep[];
   steps: DrillStepResult[];
 }
 
@@ -69,9 +71,18 @@ export function drillPlan(): { step: DrillStep; requires: DrillStep | null; why:
  * step is reported as skipped and does **not** count as success — the drill
  * says what it proved and what it did not.
  */
-export function drillVerdict(steps: DrillStepResult[]): { ok: boolean; missing: DrillStep[] } {
+export function drillVerdict(
+  steps: DrillStepResult[],
+  /**
+   * The steps this drill was asked to prove. Defaults to all of them, which is
+   * what `npm run backup:drill` wants; the scheduler narrows it, because the
+   * platform never holds the tenant's recovery passphrase and the portable
+   * envelope therefore cannot be opened by a scheduled run at all.
+   */
+  required: readonly DrillStep[] = DRILL_STEPS,
+): { ok: boolean; missing: DrillStep[] } {
   const missing = DRILL_STEPS.filter((step) => !steps.some((result) => result.step === step && result.status === "ok"));
-  return { ok: missing.length === 0, missing };
+  return { ok: required.every((step) => !missing.includes(step)), missing };
 }
 
 export type DrillPlan = ReturnType<typeof drillPlan>;
@@ -83,6 +94,12 @@ export interface RunDrillInput {
   deployment: { role: DeploymentRole; profile: DeploymentProfile };
   /** Required for the portable-envelope step; without it the step is skipped. */
   recoveryPassphrase?: string | null;
+  /**
+   * Which steps this run must actually prove. Omitted means all of them
+   * (`npm run backup:drill`). The scheduler passes every step it can prove, so a
+   * routine skip is reported as `missing` rather than as a nightly failure.
+   */
+  requiredSteps?: readonly DrillStep[];
   now?: Date;
 }
 
@@ -247,12 +264,14 @@ function finish(
   startedAt: string,
   steps: DrillStepResult[],
 ): DrillReport {
+  const verdict = drillVerdict(steps, input.requiredSteps);
   return {
     businessId: input.businessId,
     ref,
     startedAt,
     finishedAt: new Date().toISOString(),
-    ok: drillVerdict(steps).ok,
+    ok: verdict.ok,
+    missing: verdict.missing,
     steps,
   };
 }

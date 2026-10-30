@@ -307,17 +307,38 @@ export async function checkUploadFence(
   return fenceDecision({ generation, acceptedGeneration: heartbeat?.acceptedGeneration ?? 0 });
 }
 
+/** Most uploads one business may run at once, whatever the fleet asks for. */
+export const MAX_UPLOAD_CONCURRENCY = 16;
+
 /**
- * Drain the queue for one business: at most one artifact per call, in order.
- * Returns what happened so the tick can log honestly.
+ * Drain the queue for one business, in order, up to `concurrency` artifacts at a
+ * time.
+ *
+ * Issue #903 §3 stores `max_parallel_uploads` on the fleet row and the console
+ * shows it; this is where that number finally means something. The bound is
+ * per-business (a site's uplink is the bottleneck, not the fleet) and clamped to
+ * `MAX_UPLOAD_CONCURRENCY`, and `1` — the default — keeps the historic
+ * behaviour of attempting exactly one artifact per tick and stopping after it,
+ * whether it worked or not.
+ *
+ * Order is preserved in the sense that matters: entries are planned (skip / wait
+ * / dead / generation fence) sequentially in queue order before any upload
+ * starts, so a backoff or a superseded generation is never bypassed by a
+ * neighbour that happened to be faster. Within a batch the uploads are
+ * independent artifacts, so running them together cannot reorder a mirror.
  */
 export async function drainUploadQueue(
   businessId: string,
   upload: (artifactName: string, generation: number) => Promise<{ ok: true } | { ok: false; error: string }>,
   now: Date = new Date(),
+  options: { concurrency?: number } = {},
 ): Promise<{ uploaded: number; waiting: number; dead: number; superseded: number }> {
   const result = { uploaded: 0, waiting: 0, dead: 0, superseded: 0 };
+  const requested = Math.trunc(options.concurrency ?? 1);
+  const concurrency = Math.min(Math.max(1, Number.isFinite(requested) ? requested : 1), MAX_UPLOAD_CONCURRENCY);
+
   const entries = await pendingUploads(businessId);
+  const eligible: QueueEntry[] = [];
   for (const entry of entries) {
     const plan = planQueueEntry(entry, now);
     if (plan.action === "skip") continue;
@@ -341,15 +362,21 @@ export async function drainUploadQueue(
       result.superseded += 1;
       continue;
     }
-    const attempt = await upload(entry.artifactName, entry.generation);
-    if (attempt.ok) {
-      await acceptGeneration(businessId, entry.generation);
-      await markUploadAttempt(businessId, entry.artifactName, { ok: true }, now);
-      result.uploaded += 1;
-      break;
-    }
-    await markUploadAttempt(businessId, entry.artifactName, { ok: false, errorCode: attempt.error }, now);
-    break;
+    eligible.push(entry);
   }
+
+  const batch = eligible.slice(0, concurrency);
+  await Promise.all(
+    batch.map(async (entry) => {
+      const attempt = await upload(entry.artifactName, entry.generation);
+      if (attempt.ok) {
+        await acceptGeneration(businessId, entry.generation);
+        await markUploadAttempt(businessId, entry.artifactName, { ok: true }, now);
+        result.uploaded += 1;
+        return;
+      }
+      await markUploadAttempt(businessId, entry.artifactName, { ok: false, errorCode: attempt.error }, now);
+    }),
+  );
   return result;
 }

@@ -48,6 +48,7 @@ import {
   resolveTenantStorage,
   type TenantBackupPolicy,
 } from "./tenant-backup-storage";
+import { lastDrillSummary } from "./tenant-backup-drills-job";
 import type { ArtifactRowState } from "./tenant-backup-inventory";
 
 // ---------------------------------------------------------------------------
@@ -63,7 +64,9 @@ export type OperatorActionCode =
   | "uploads_pending"
   | "uploads_dead"
   | "device_offline"
-  | "no_artifact_yet";
+  | "no_artifact_yet"
+  /** Issue #903 §12: the scheduled drill could not prove the last backup opens. */
+  | "drill_failed";
 
 export interface BusinessBackupDiagnosis {
   businessId: string;
@@ -87,6 +90,17 @@ export interface BusinessBackupDiagnosis {
     lastErrorCode: string | null;
   };
   artifacts: Record<ArtifactRowState, number> & { total: number };
+  /**
+   * The last scheduled drill for this business, or `null` when none has run yet.
+   * `ok: false` is the fact the console escalates: the backup exists and does
+   * not open.
+   */
+  drill: {
+    ok: boolean;
+    artifactRef: string;
+    missingSteps: string[];
+    finishedAt: string;
+  } | null;
   /** Codes, not prose: the console translates, the route stays stable. */
   actions: OperatorActionCode[];
 }
@@ -111,7 +125,7 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
   const profile = (await readDeploymentProfile(businessId)).profile;
   const config = await getBackupConfig(businessId);
 
-  const [policy, storage, rows, custody, includedBytes, pending, heartbeat] = await Promise.all([
+  const [policy, storage, rows, custody, includedBytes, pending, heartbeat, drill] = await Promise.all([
     resolveTenantBackupPolicy(businessId),
     resolveTenantStorage({
       businessId,
@@ -128,6 +142,9 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
     storageIncludedBytes(businessId),
     queueDepth(businessId).catch(() => 0),
     readHeartbeat(businessId).catch(() => null),
+    // A deployment that has not run migration 0270 yet reports `null`, not an
+    // error: "no drill has run" is a truthful answer to "did the drill pass?".
+    lastDrillSummary(businessId).catch(() => null),
   ]);
 
   const artifacts = Object.fromEntries(ARTIFACT_STATES.map((state) => [state, 0])) as Record<
@@ -150,6 +167,7 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
   if (pending > 0) actions.push("uploads_pending");
   if (heartbeat?.lastErrorCode && heartbeat.lastErrorCode !== "ok") actions.push("uploads_dead");
   if (heartbeat && heartbeat.connectivity === "offline") actions.push("device_offline");
+  if (drill && !drill.ok) actions.push("drill_failed");
 
   return {
     businessId,
@@ -173,6 +191,14 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
       lastErrorCode: heartbeat?.lastErrorCode ?? null,
     },
     artifacts,
+    drill: drill
+      ? {
+          ok: drill.ok,
+          artifactRef: drill.artifactRef,
+          missingSteps: drill.missingSteps,
+          finishedAt: drill.finishedAt,
+        }
+      : null,
     actions: [...new Set(actions)],
   };
 }

@@ -40,3 +40,29 @@ describe("drillVerdict", () => {
     expect(drillVerdict(results).missing).toEqual(["archive_parsed"]);
   });
 });
+
+describe("drillVerdict with a narrowed requirement", () => {
+  const ok = (step: DrillStepResult["step"]): DrillStepResult => ({ step, status: "ok", detail: "" });
+
+  it("passes a scheduled drill that proved everything it is allowed to prove", () => {
+    // The platform never holds the tenant's recovery passphrase, so the envelope
+    // step is skipped by design — and still named as unproven.
+    const results: DrillStepResult[] = [
+      ...DRILL_STEPS.filter((step) => step !== "portable_envelope").map(ok),
+      { step: "portable_envelope", status: "skipped", detail: "no passphrase" },
+    ];
+    expect(drillVerdict(results, DRILL_STEPS.filter((step) => step !== "portable_envelope"))).toEqual({
+      ok: true,
+      missing: ["portable_envelope"],
+    });
+  });
+
+  it("still fails a required step that did not prove anything", () => {
+    const results: DrillStepResult[] = [
+      ...DRILL_STEPS.filter((step) => step !== "restore_preview").map(ok),
+      { step: "restore_preview", status: "failed", detail: "restore_busy" },
+    ];
+    const required = DRILL_STEPS.filter((step) => step !== "portable_envelope");
+    expect(drillVerdict(results, required)).toEqual({ ok: false, missing: ["restore_preview"] });
+  });
+});
