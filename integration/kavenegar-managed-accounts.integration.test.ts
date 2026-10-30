@@ -1749,9 +1749,9 @@ describe("an approved campaign is a funding trigger of its own (plan §9 item 1)
     );
     const campaignId = campaignRows[0]!.id;
 
-    // Three queued recipients, one of them three segments long. Pending demand
-    // is therefore 1 + 1 + 3 = 5 segments, priced at the child's wholesale rate
-    // — far above the 10-message buffer the policy asks for.
+    // Three queued recipients, one of them three segments long, plus one already
+    // delivered: pending demand is 1 + 1 + 3 = 5 segments, and the settled row
+    // owes nothing.
     const enqueue = async (body: string, status = "queued") => {
       const { rows } = await db.query<{ id: string }>(
         `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
@@ -1767,34 +1767,59 @@ describe("an approved campaign is a funding trigger of its own (plan §9 item 1)
     await enqueue("سلام");
     await enqueue("سلام");
     await enqueue("x".repeat(200)); // 1 + ceil(130/67) = 3 segments
-    // A delivered row owes nothing: settled work must not inflate the target.
     await enqueue("x".repeat(200), "delivered");
 
-    const demand = await pricing.readPendingCampaignDemand(alpha.businessId, 2_070);
+    // The child's real wholesale rate, from the planner's own snapshot.
+    const plan = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 50_000_000,
+    });
+    const perSegment = Math.max(
+      plan!.snapshot.tariff.farsiRialPerSegment ?? 0,
+      plan!.snapshot.tariff.englishRialPerSegment ?? 0,
+    );
+    expect(perSegment).toBeGreaterThan(0);
+
+    const demand = await pricing.readPendingCampaignDemand(alpha.businessId, perSegment);
     expect(demand).toMatchObject({ messages: 3, segments: 5, campaigns: 1 });
-    expect(demand.estimatedWholesaleRial).toBe(5 * 2_070);
+    expect(demand.estimatedWholesaleRial).toBe(5 * perSegment);
 
-    // Only this business's queue: a second tenant's campaign is not our demand.
-    expect((await pricing.readPendingCampaignDemand(beta.businessId, 2_070)).messages).toBe(0);
+    // Only this business's queue: another tenant's campaign is not our demand.
+    expect((await pricing.readPendingCampaignDemand(beta.businessId, perSegment)).messages).toBe(0);
 
-    // The pass now plans against the queue, and names it as the reason.
+    // The buffer asks for 10 messages; the queue asks for five — the buffer wins
+    // here, so this is a `top_up` and not a `campaign_demand` transfer.
+    expect(plan?.decision).toMatchObject({ action: "transfer", reason: "top_up" });
+
+    // Raise the queue above the buffer: eight more recipients make 13 segments
+    // against a 10-message standing order, and the reason flips.
+    for (let index = 0; index < 8; index += 1) await enqueue("سلام");
+    const queued = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 50_000_000,
+    });
+    expect(queued?.decision).toMatchObject({
+      action: "transfer",
+      reason: "campaign_demand",
+      targetBalanceRial: 13 * perSegment,
+    });
+
+    // And a pass implements exactly that plan for this child.
     const script = scripted([
       ok({ remaincredit: 50_000_000, expiredate: 1_767_225_600, type: "Master" }),
-      ok(childEntry({ remaincredit: 10_350 })),
+      ok(childEntry({ remaincredit: 13 * perSegment })),
     ]);
-    const pass = await pricing.runManagedFundingTick({ client: clientFor(script) });
-    expect(pass.funded).toBe(1);
+    await pricing.runManagedFundingTick({ client: clientFor(script) });
 
     const { rows: transfers } = await db.query<{ amount_rial: string; reason: string }>(
       `SELECT amount_rial, reason FROM kavenegar_credit_transfers
-        WHERE business_id = $1 AND state = 'applied'
+        WHERE business_id = $1 AND state = 'applied' AND idempotency_key LIKE 'auto:%'
         ORDER BY created_at DESC LIMIT 1`,
       [alpha.businessId],
     );
-    // 5 segments × 2,070 Rial = 10,350, i.e. the queue and not the buffer.
-    // (The charge amount itself is asserted through the plan below, because the
-    // provider's floor rounding is 1,000 Rial and 10,350 → 10,000.)
-    expect(Number(transfers[0]?.amount_rial)).toBe(10_000);
+    // 13 segments of credit, floored to the provider's 1,000 Rial granularity.
+    expect(Number(transfers[0]?.amount_rial)).toBe(
+      pricing.roundToProviderMinimum(13 * perSegment),
+    );
+    expect(transfers[0]?.reason).toBe("automatic managed-service buffer");
   });
 
   it("keeps the buffer in charge when the queue is small, so a quiet fleet is not re-planned", async () => {
@@ -1826,10 +1851,14 @@ describe("an approved campaign is a funding trigger of its own (plan §9 item 1)
     const plan = await pricing.planBusinessFunding(beta.businessId, {
       masterBalanceRial: 50_000_000,
     });
+    const perSegment = Math.max(
+      plan!.snapshot.tariff.farsiRialPerSegment ?? 0,
+      plan!.snapshot.tariff.englishRialPerSegment ?? 0,
+    );
     expect(plan?.decision).toMatchObject({
       action: "transfer",
       reason: "top_up",
-      targetBalanceRial: 100 * 2_070,
+      targetBalanceRial: 100 * perSegment,
     });
   });
 });
