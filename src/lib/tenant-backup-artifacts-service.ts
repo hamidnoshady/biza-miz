@@ -740,9 +740,13 @@ export async function recordStorageSample(
   at: Date = new Date(),
 ): Promise<{ cloudBytes: number; artifactCount: number }> {
   const { rows } = await query<{ cloud_bytes: string; artifact_count: string }>(
+    // Expired rows are excluded on purpose (issue #903 §8): their bytes were
+    // removed by `tenant-backup-lifecycle.ts`, so sampling them would bill a
+    // business for storage it no longer uses.
     `SELECT COALESCE(sum(stored_bytes), 0)::text AS cloud_bytes, count(*)::text AS artifact_count
        FROM tenant_backup_artifacts
-      WHERE business_id = $1 AND destination = 'cloud' AND state <> 'pending_upload'`,
+      WHERE business_id = $1 AND destination = 'cloud'
+        AND state NOT IN ('pending_upload', 'expired')`,
     [businessId],
   );
   const cloudBytes = Number(rows[0]?.cloud_bytes ?? 0);
@@ -784,7 +788,9 @@ export async function emitBackupStorageUsage(
   window: { from: Date; to: Date },
 ): Promise<{ status: string; byteDays: number }> {
   const rows = await listStoredArtifactRows(businessId);
-  const cloudRows = rows.filter((row) => row.destination === "cloud");
+  // A row that retention already removed is not a retained byte, so it must not
+  // be the reason a settlement event is emitted at all.
+  const cloudRows = rows.filter((row) => row.destination === "cloud" && row.state !== "expired");
   const byteDays = await storageByteDays(businessId, window);
   if (cloudRows.length === 0 || byteDays === 0) return { status: "skipped", byteDays: 0 };
   const artifactIds = uniqueArtifactIds(

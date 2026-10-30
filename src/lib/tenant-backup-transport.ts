@@ -43,6 +43,7 @@ import {
   deterministicArtifactId,
   verifyStoredArtifact,
 } from "./tenant-backup-runner";
+import { tenantBackupDir } from "./backup-service";
 import { parseTenantArchive, tenantTableSet } from "./tenant-archive";
 import { tenantBackupArtifactRef } from "./tenant-backup-artifact-ref";
 import { buildBackupManifest } from "./backup-manifest";
@@ -543,7 +544,11 @@ export async function planArtifactDownload(input: {
     return { kind: "redirect", url: presignS3Get(storage.s3, key, PRESIGN_TTL_SECONDS), expiresIn: PRESIGN_TTL_SECONDS };
   }
 
-  const directory = input.directory ?? path.join(process.cwd(), "backups");
+  // Through `tenantBackupDir`, not a flat root: on central each business's
+  // artifacts live in their own `tenants/<scope>` subdirectory, so resolving
+  // `config.directory/<ref>` here reported `artifact_missing` for a file that
+  // exists — the tenant's own download failing for a reason it could not see.
+  const directory = tenantBackupDir(input.businessId, input.directory ?? undefined);
   const filePath = path.join(directory, row.storageRef);
   const resolved = path.resolve(filePath);
   // Belt and braces: the stored reference cannot escape its directory even if a

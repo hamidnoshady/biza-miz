@@ -30,6 +30,7 @@ vi.mock("./s3-lite", () => ({
 
 import {
   DOWNLOAD_TICKET_TTL_SECONDS,
+  planArtifactDownload,
   checkChunk,
   checkCompletion,
   isTransportableState,
@@ -182,6 +183,55 @@ describe("isTransportableState", () => {
     expect(isTransportableState("ready")).toBe(true);
     for (const state of ["verifying", "uploading", "pending_upload", "failed", "expired", "superseded"]) {
       expect(isTransportableState(state)).toBe(false);
+    }
+  });
+});
+
+describe("planArtifactDownload — where a local artifact actually lives", () => {
+  const businessId = "11111111-1111-4111-8111-111111111111";
+
+  async function localRow(storageRef: string) {
+    const { promises: fs } = await import("node:fs");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const root = await fs.mkdtemp(nodePath.join(os.tmpdir(), "download-plan-"));
+    return { fs, nodePath, root, storageRef };
+  }
+
+  it("resolves into the tenant's own subdirectory on central", async () => {
+    const { fs, nodePath, root, storageRef } = await localRow("a.dump.enc");
+    const { logicalSnapshotScopeTag } = await import("./backup-policy");
+    const tenantDir = nodePath.join(root, "tenants", logicalSnapshotScopeTag(businessId));
+    await fs.mkdir(tenantDir, { recursive: true });
+    await fs.writeFile(nodePath.join(tenantDir, storageRef), "ciphertext");
+    // A same-named file at the flat root must not be what the tenant receives.
+    await fs.writeFile(nodePath.join(root, storageRef), "someone-else");
+
+    const previous = process.env.DEPLOYMENT_ROLE;
+    process.env.DEPLOYMENT_ROLE = "central";
+    try {
+      mocks.resolveOwnedArtifact.mockResolvedValue({
+        destination: "local",
+        state: "ready",
+        storageRef,
+        encryption: "managed_envelope_v1",
+      });
+
+      const plan = await planArtifactDownload({
+        businessId,
+        ref: "ref-1",
+        destination: "local",
+        profile: "cloud",
+        role: "central",
+        directory: root,
+      });
+
+      expect(plan.kind).toBe("stream");
+      if (plan.kind === "stream") expect(plan.path).toBe(nodePath.join(tenantDir, storageRef));
+    } finally {
+      if (previous === undefined) delete process.env.DEPLOYMENT_ROLE;
+      else process.env.DEPLOYMENT_ROLE = previous;
+      await fs.rm(root, { recursive: true, force: true });
     }
   });
 });

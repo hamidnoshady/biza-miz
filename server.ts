@@ -327,6 +327,18 @@ app.prepare().then(async () => {
     runScheduledBackupDrills().catch((err) => console.error("backup drill failed:", err));
   scheduleBackgroundTick(backupDrillTick, 60 * 60 * 1000, 12 * 60_000);
 
+  // Issue #903 §1/§7 — artifact lifecycle. Three passes, bounded per business:
+  // verify the cloud copies that were registered `verifying` (nothing ever ran
+  // that pass, so a cloud backup stayed unproven and unrestorable), reclaim the
+  // staged local twin on a Cloud deployment (its managed-storage-only rule), and
+  // expire what `retention_until` has retired. Runs on every role: a Local or
+  // Hybrid device owns its own local retention, and a Cloud server is the only
+  // place a managed object can be removed.
+  const { runBackupLifecycleTick } = await import("./src/lib/tenant-backup-lifecycle");
+  const backupLifecycleTick = () =>
+    runBackupLifecycleTick().catch((err) => console.error("backup lifecycle tick failed:", err));
+  scheduleBackgroundTick(backupLifecycleTick, 60 * 60 * 1000, 15 * 60_000);
+
   // Phase 11: bidirectional server-to-server sync (café laptop ←→ VPS). Each
   // tick pushes locally-born sync_events to the configured remote and pulls
   // the remote's events back, replaying both through the same idempotent

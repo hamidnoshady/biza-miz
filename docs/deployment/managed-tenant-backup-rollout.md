@@ -589,3 +589,57 @@ does not open. Two honest details:
 did not write), media binaries, the WordPress/WooCommerce database, and a CI job
 for the drill: the scheduler now covers production, but nothing runs a drill on a
 pull request, which needs a seeded PostgreSQL and S3 stand-in in CI.
+
+## Increment: artifact lifecycle — Cloud keeps nothing local, and retention is enforced
+
+Two gaps the epic names and nothing closed: a Cloud deployment kept a second copy
+of every tenant backup on its own disk (§1), and `retention_until` was written on
+every artifact and never read (§7), while the byte sample billed expired bytes
+anyway (§8).
+
+**`tenant-backup-lifecycle.ts`** owns "remove it". One hourly tick
+(`server.ts`, every role) runs three passes per business:
+
+1. **verify** — cloud copies registered `verifying` are re-read from the
+   provider, checked (checksum, manifest signature, archive parse) and promoted
+   to `ready`. This is the "later verify pass" the upload path has always
+   promised and nothing performed, which is why a Cloud backup never became
+   restorable without an operator clicking verify. Bounded to
+   `VERIFY_BATCH = 2` per business per tick; a transient provider failure leaves
+   the row alone (the next tick retries) and only bytes that arrived and failed
+   their own checks mark a row `failed`.
+2. **reclaim** — on a **Cloud** profile with a **managed** destination, once the
+   cloud copy is `ready`, the staged local twin's file and row are removed. The
+   backup itself does not disappear: same `artifact_id`, still restorable. The
+   row is *deleted*, not marked `expired`, because `expired` outranks `ready` in
+   the inventory's precedence and would make every cloud backup read as expired.
+   Hybrid and Local keep their local copies, and a legacy self-hosted bucket is
+   not platform-managed storage, so it is left alone.
+3. **expire** — rows past `retention_until`, oldest first, grouped by
+   `artifact_id` so a mirror expires as one backup, and never crossing
+   `protected_recovery_copies` (counted in distinct restorable backups, not
+   rows). **Bytes first, always**: a row is marked `expired` only after the file
+   or object is gone, so the platform can never stop showing a backup it is
+   still storing and still paying for. A failed removal is counted and left
+   alone, never recorded as a deletion.
+
+`recordStorageSample` now excludes `expired` rows (and the settlement's
+"has cloud bytes" test does too), so a business stops being billed the moment its
+retention-retired bytes are actually removed.
+
+**Path fix found on the way, same defect in three places.** On central a tenant's
+artifacts live in `backups/tenants/<scope>/`, but the operator verify/delete
+path, the operator diagnosis and the tenant download plan all resolved
+`config.directory/<ref>` — the flat root a *site* uses. They now go through
+`tenantBackupDir`, so a central local artifact is found instead of reported
+`artifact_missing`. Regression tests cover the tenant download and the sweep.
+
+**New diagnosis code.** `cloud_unverified` appears for a business with a cloud
+copy the platform has not read back yet, so the console says "not yet proved
+restorable" instead of showing an unverified row as fine.
+
+**Still open.** Cloud's file-restore (`/api/backup/restore` and the chunked
+upload remain physical, site-only, exactly-one-business), the tenant upload
+endpoints that §2 forbids, post-restore accounting/permission checks, per-plan
+schedules and alert thresholds, a route for the margin report, and the real
+acceptance matrix — unchanged by this increment.

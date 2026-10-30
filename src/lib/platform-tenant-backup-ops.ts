@@ -26,7 +26,6 @@
  *     the fact that this backup is gone — stays visible.
  */
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import { deploymentRole } from "./deployment-role";
 import { readDeploymentProfile, type DeploymentProfile } from "./deployment-mode";
 import { getBackupConfig, runBackupNow, runCloudUpload } from "./backup-service";
@@ -49,6 +48,7 @@ import {
   type TenantBackupPolicy,
 } from "./tenant-backup-storage";
 import { lastDrillSummary } from "./tenant-backup-drills-job";
+import { pendingVerificationCount, localArtifactPath as resolveLocalArtifactPath } from "./tenant-backup-lifecycle";
 import type { ArtifactRowState } from "./tenant-backup-inventory";
 
 // ---------------------------------------------------------------------------
@@ -66,7 +66,9 @@ export type OperatorActionCode =
   | "device_offline"
   | "no_artifact_yet"
   /** Issue #903 §12: the scheduled drill could not prove the last backup opens. */
-  | "drill_failed";
+  | "drill_failed"
+  /** Issue #903 §1: a cloud copy the platform wrote has not been re-read yet. */
+  | "cloud_unverified";
 
 export interface BusinessBackupDiagnosis {
   businessId: string;
@@ -125,7 +127,7 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
   const profile = (await readDeploymentProfile(businessId)).profile;
   const config = await getBackupConfig(businessId);
 
-  const [policy, storage, rows, custody, includedBytes, pending, heartbeat, drill] = await Promise.all([
+  const [policy, storage, rows, custody, includedBytes, pending, heartbeat, drill, unverified] = await Promise.all([
     resolveTenantBackupPolicy(businessId),
     resolveTenantStorage({
       businessId,
@@ -145,6 +147,9 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
     // A deployment that has not run migration 0270 yet reports `null`, not an
     // error: "no drill has run" is a truthful answer to "did the drill pass?".
     lastDrillSummary(businessId).catch(() => null),
+    // A cloud copy is registered `verifying` when it is uploaded and promoted by
+    // the lifecycle pass once the object has actually been read back.
+    pendingVerificationCount(businessId).catch(() => 0),
   ]);
 
   const artifacts = Object.fromEntries(ARTIFACT_STATES.map((state) => [state, 0])) as Record<
@@ -168,6 +173,7 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
   if (heartbeat?.lastErrorCode && heartbeat.lastErrorCode !== "ok") actions.push("uploads_dead");
   if (heartbeat && heartbeat.connectivity === "offline") actions.push("device_offline");
   if (drill && !drill.ok) actions.push("drill_failed");
+  if (unverified > 0) actions.push("cloud_unverified");
 
   return {
     businessId,
@@ -327,24 +333,16 @@ export async function verifyBusinessArtifact(
   }
 }
 
-/** The artifact's file, with the same containment rule the download plan uses. */
-async function localArtifactPath(
-  businessId: string,
-  storageRef: string,
-): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+/**
+ * The artifact's file. Delegated to the lifecycle module rather than resolved
+ * here: on central a tenant's artifacts live in `backups/tenants/<scope>/`, so a
+ * flat `config.directory` path would miss them and report `artifact_missing` for
+ * a file that is sitting right there.
+ */
+const localArtifactPath = async (businessId: string, storageRef: string) => {
   const config = await getBackupConfig(businessId);
-  const directory = config.directory || path.join(process.cwd(), "backups");
-  const resolved = path.resolve(path.join(directory, storageRef));
-  if (!resolved.startsWith(path.resolve(directory) + path.sep)) {
-    return { ok: false, error: "artifact_not_found" };
-  }
-  try {
-    await fs.stat(resolved);
-  } catch {
-    return { ok: false, error: "artifact_missing" };
-  }
-  return { ok: true, path: resolved };
-}
+  return resolveLocalArtifactPath(businessId, storageRef, config.directory);
+};
 
 // ---------------------------------------------------------------------------
 // Retention delete

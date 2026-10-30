@@ -22,14 +22,24 @@ const mocks = vi.hoisted(() => ({
   storage: vi.fn(),
   fsStat: vi.fn(),
   fsRm: vi.fn(),
+  lifecycleRows: vi.fn(),
 }));
 
+vi.mock("./db", () => ({
+  // The diagnosis asks the lifecycle module how many cloud copies are still
+  // awaiting their first read-back; that is a real query over the artifact rows.
+  query: mocks.lifecycleRows,
+  withoutTenantScope: async (_tag: string, fn: () => Promise<unknown>) => fn(),
+}));
 vi.mock("./deployment-role", () => ({ deploymentRole: mocks.role }));
 vi.mock("./deployment-mode", () => ({ readDeploymentProfile: mocks.profile }));
 vi.mock("./backup-service", () => ({
   getBackupConfig: mocks.config,
   runBackupNow: mocks.runNow,
   runCloudUpload: mocks.cloudUpload,
+  // The lifecycle module resolves a local artifact through this (central keeps
+  // one directory per business), so the mock has to answer it.
+  tenantBackupDir: () => "/srv/backups/tenants/scope",
 }));
 vi.mock("./s3-lite", () => ({ s3Delete: mocks.s3Delete }));
 vi.mock("./tenant-backup-artifacts-service", () => ({
@@ -122,6 +132,7 @@ beforeEach(() => {
   mocks.schemaVersion.mockResolvedValue(268);
   mocks.fsStat.mockResolvedValue({ size: 10 });
   mocks.fsRm.mockResolvedValue(undefined);
+  mocks.lifecycleRows.mockResolvedValue({ rows: [], rowCount: 0 });
 });
 
 describe("diagnoseBusinessBackup", () => {
@@ -164,6 +175,24 @@ describe("diagnoseBusinessBackup", () => {
         "device_offline",
       ]),
     );
+  });
+
+  it("flags a cloud copy the platform has not read back yet (issue #903 §1)", async () => {
+    mocks.lifecycleRows.mockResolvedValue({
+      rows: [{
+        id: "row-1",
+        artifact_id: "artifact-1",
+        destination: "cloud",
+        storage_ref: "a.dump.enc",
+        state: "verifying",
+        retention_until: null,
+        stored_bytes: "10",
+      }],
+      rowCount: 1,
+    });
+
+    const diagnosis = await diagnoseBusinessBackup(BUSINESS);
+    expect(diagnosis.actions).toContain("cloud_unverified");
   });
 
   it("says a business has nothing yet instead of implying it is protected", async () => {
