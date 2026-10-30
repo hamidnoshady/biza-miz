@@ -743,6 +743,32 @@ add «صف فعال: N پیام (M قطعه) در K کمپین» when a queue ex
 transfer above the buffer legible instead of arbitrary. Counts only: the money it implies is the
 planner's arithmetic, and a second copy of it in a React file is how two answers start.
 
+## 5k. A trigger shows its text and its record (§9 item 0)
+
+§5e/§5f gave the tenant a switch per automation: on or off, attached to an approved message. A switch
+is not an answer to either question a business actually has — *what will my customer read?* and *did
+it work?*
+
+**The preview is the message.** §9 item 0 asked for "a tenant preview of a trigger's exact text before
+enabling it", and the word *exact* is the whole design: a hand-written sample on the screen can
+disagree with the message that goes out, and the tenant would find out from a customer. So
+`previewTriggerMessage()` runs the dispatcher's own two functions — `triggerValues()` then
+`renderTemplateTokens()` — over obviously-fake facts («سارا محمدی», a 250,000 Rial payment). The
+preview therefore shows the renderer's money formatting and Jalali date, not a second formatter's
+idea of them. A pair that cannot render is `null` and renders nothing: "we cannot show this" and "the
+message is blank" are different claims, and only one of them is true.
+
+**The record is per trigger.** `kavenegar_lookup_trigger_sends` already holds one row per (business,
+trigger, fact) with a status and a provider-neutral code; `listTriggerSettings` now aggregates it over
+a week — sent, skipped, blocked, failed, unknown, the last attempt and the last code. Sent and skipped
+are counted **apart** on purpose: a screen showing only zeros must let a business tell "nobody ordered"
+from "we are refusing every message because consent is missing", and those two have completely
+different fixes.
+
+Codes are translated by one shared map (`TRIGGER_CODE_LABELS`), imported by the client rather than
+copied into it — a code this build does not know becomes «پیام ارسال نشد», never the raw string, so a
+future or provider-shaped code cannot reach a tenant screen verbatim.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -762,6 +788,9 @@ planner's arithmetic, and a second copy of it in a React file is how two answers
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `lookup-trigger-facts` (§5k) | 6 new fixtures: the preview rendered by the dispatcher's renderer (no `%token` left, the amount formatted as money and the date as Jalali rather than the raw rial integer or an ISO string); a template whose variables the event cannot fill previewing as `null` rather than blank; and the code map translating the refusals a tenant can act on while a code it does not know — `http_429`, `kavenegar_418` — becomes a generic sentence instead of leaking |
+| `npx vitest run` — Growth messaging section (§5k) | 3 new source guards: the screen renders `setting.preview` from the server and hard-codes no sample text of its own; the delivery line exists and speaks its zeros; and the code labels are imported from the shared map rather than copied into the component |
+| `npm run test:db` — `kavenegar-lookup-triggers` (§5k) | one added case (CI only; no Postgres here): the setting carries a real preview before anything has been sent, `delivery` reads `{sent: 0, skipped: 0}`; after one sent row, one consent refusal and one unknown payment row the two triggers report `{sent: 1, skipped: 1}` and `{unknown: 1}` with `lastCode` `no_consent`, and another business sees none of it |
 | `npx vitest run` — `campaign-demand` (§5j) | 8/8: demand priced per segment rather than per recipient, zero for an empty queue and never negative, zero when there is no tariff; only `queued`/`sending` counted; the SQL segment expression built from the billing constants and reproducing `smsSegmentCount` at every boundary (0, 70, 71, 137, 138, 205, 500) and on a Persian body; a non-column reference refused; and the read happening inside the funding transaction, scoped to one child |
 | `npx vitest run` — `pricing-service` (§5j) | 5 new fixtures: demand raising the target above the buffer and reporting `campaign_demand`; a child that satisfies the buffer but not its queue now being funded; demand below the buffer leaving the standing order in charge (`top_up`); caps, the master floor and the transactional reserve still clamping a demand-sized target; `low_watermark`'s trigger rising to the queue, and the child healthy again once it is above |
 | `npm run test:db` — `kavenegar-managed-accounts` (§5j) | two added cases (CI only; no Postgres here): a three-recipient queue whose multipart bodies total five segments reads `{messages: 3, segments: 5, campaigns: 1}` and funds the queue rather than the 10-message buffer, while another tenant's queue reads zero; and a small queue leaves the 100-message buffer as the target with reason `top_up` |
@@ -794,11 +823,11 @@ planner's arithmetic, and a second copy of it in a React file is how two answers
 ## 9. Follow-ups (each needs its own issue)
 
 0. **The rest of the triggers** (#902 §5, P1): both events are wired from the paths that commit a
-   customer-facing action (§5e). What remains: the payment writers that are not the counter or the
-   offline queue — the WooCommerce/CMS importers and the closed-order amendment bridge — which write
-   inside their own transactions and need a post-commit point before a receipt can be honest; a
-   tenant preview of a trigger's exact text before enabling it; and a per-trigger delivery view.
-   The login code is deliberately *not* one of these triggers: it stays on the platform-auth
+   customer-facing action (§5e), and the tenant now sees each automation's **exact text** and its
+   **per-trigger record** (§5k). What remains is the wiring side: the payment writers that are not the
+   counter or the offline queue — the WooCommerce/CMS importers and the closed-order amendment bridge —
+   which write inside their own transactions and need a post-commit point before a receipt can be
+   honest. The login code is deliberately *not* one of these triggers: it stays on the platform-auth
    transport (§5e), which is what keeps it working with an empty wallet.
 1. ~~**Campaign-budget funding trigger**~~ — **closed** (§5j): the three strategies and the guards
    were already in place, and the reserved slice closed in §5h. The "approved campaign budget" turn

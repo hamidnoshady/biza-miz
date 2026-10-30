@@ -30,7 +30,11 @@
  * `template-variables.ts`, and letting a caller pre-format would put a second,
  * unaudited formatter in front of the one that already refuses bad input.
  */
-import type { TemplateVariable, TemplateValues } from "./template-variables";
+import {
+  renderTemplateTokens,
+  type TemplateVariable,
+  type TemplateValues,
+} from "./template-variables";
 
 /** The events a business may turn into a message. Deliberately closed. */
 export const MANAGED_LOOKUP_TRIGGERS = ["order_ready", "payment_received"] as const;
@@ -152,4 +156,82 @@ export function checkTriggerTemplate(
 export function triggerEventKey(trigger: ManagedLookupTrigger, subjectId: string): string {
   const prefix = trigger === "order_ready" ? "order" : "payment";
   return `${prefix}:${subjectId}`;
+}
+
+/**
+ * The facts a *sample* event would carry, for the tenant's preview only.
+ *
+ * Issue #902 §9 item 0 asks for "a tenant preview of a trigger's exact text
+ * before enabling it". The point of the word *exact* is that the preview must
+ * come from the same renderer the send uses: a hand-written example on the
+ * screen can disagree with the message that actually goes out, and the tenant
+ * would only find out from a customer. So the preview runs
+ * `triggerValues` → `renderTemplateTokens`, the two functions the dispatcher
+ * runs, over obviously-fake values.
+ *
+ * The values are fake on purpose — «سارا محمدی», a 250,000 Rial payment — so the
+ * preview is never mistaken for a real customer's message, and they are the same
+ * samples the message library already renders on the console.
+ */
+export const TRIGGER_SAMPLE_FACTS: TriggerFactsByKind = {
+  order_ready: {
+    customerName: "سارا محمدی",
+    storeName: "فروشگاه نمونه",
+    orderNumber: 1042,
+  },
+  payment_received: {
+    amountRial: 250_000,
+    storeName: "فروشگاه نمونه",
+    receivedAt: new Date("2026-10-28T09:30:00.000Z"),
+  },
+};
+
+/**
+ * The message this template would produce for this trigger, with sample facts.
+ *
+ * `null` when the template cannot be rendered for the event — a declared
+ * variable the event cannot fill, or a body that fails validation. A caller
+ * must render nothing rather than an empty string: an empty preview reads as
+ * "the message is blank", which is a different and much more alarming claim
+ * than "this pair does not fit".
+ */
+export function previewTriggerMessage(input: {
+  trigger: ManagedLookupTrigger;
+  body: string;
+  declared: readonly TemplateVariable[];
+}): string | null {
+  const values = triggerValues(input.trigger, TRIGGER_SAMPLE_FACTS[input.trigger], input.declared);
+  const rendered = renderTemplateTokens({
+    body: input.body,
+    variables: input.declared,
+    values,
+  });
+  return rendered.ok ? rendered.preview : null;
+}
+
+/**
+ * The refusal codes a tenant may read, in first-party words.
+ *
+ * A send log is only useful if the tenant can act on what it says. These codes
+ * are the platform's own (`kavenegar_lookup_trigger_sends.code`), never provider
+ * text — the supplier's vocabulary stays on the console — and a code this map
+ * does not know is shown as a generic sentence rather than as the raw string,
+ * because a future code is not an excuse to leak internals into a tenant screen.
+ */
+export const TRIGGER_CODE_LABELS: Record<string, string> = {
+  no_consent: "مشتری اجازهٔ دریافت پیامک نداده است",
+  no_customer: "این سفارش مشتری ثبت‌شده ندارد",
+  missing_phone: "شمارهٔ موبایل مشتری ثبت نشده است",
+  trigger_disabled: "این اطلاع‌رسانی خاموش بود",
+  template_not_approved: "پیام انتخاب‌شده تأیید نشده است",
+  insufficient_credit: "اعتبار کیف پول کافی نبود",
+  wallet_empty: "اعتبار کیف پول کافی نبود",
+  delivery_failed: "ارسال ناموفق بود",
+  unknown_outcome: "نتیجهٔ ارسال نامشخص است",
+};
+
+/** A first-party sentence for a stored code; never the raw code. */
+export function triggerCodeLabel(code: string | null): string | null {
+  if (!code) return null;
+  return TRIGGER_CODE_LABELS[code] ?? "پیام ارسال نشد";
 }

@@ -54,6 +54,7 @@ import {
   TRIGGER_LABELS,
   checkTriggerTemplate,
   isManagedLookupTrigger,
+  previewTriggerMessage,
   triggerEventKey,
   triggerValues,
   type ManagedLookupTrigger,
@@ -95,6 +96,38 @@ export type TriggerDispatchResult =
   /** Something in this module's own machinery broke. Logged; never thrown. */
   | { status: "error" };
 
+/**
+ * What this automation actually did over the last week.
+ *
+ * Issue #902 §9 item 0: the tenant screen could say "on" but not "and it sent
+ * something". A per-trigger view is the difference between trusting an
+ * automation and hoping: `sent` proves the path works, `skipped` proves the
+ * consent rule is real, and `lastCode` says *why* the most recent attempt did
+ * not go out — in first-party words, never a provider code.
+ */
+export interface TriggerDelivery {
+  sent: number;
+  skipped: number;
+  blocked: number;
+  failed: number;
+  unknown: number;
+  lastAttemptAt: string | null;
+  lastCode: string | null;
+}
+
+export const EMPTY_TRIGGER_DELIVERY: TriggerDelivery = {
+  sent: 0,
+  skipped: 0,
+  blocked: 0,
+  failed: 0,
+  unknown: 0,
+  lastAttemptAt: null,
+  lastCode: null,
+};
+
+/** How far back the tenant's per-trigger view looks. */
+export const TRIGGER_DELIVERY_DAYS = 7;
+
 export interface TriggerSetting {
   trigger: ManagedLookupTrigger;
   label: string;
@@ -105,6 +138,14 @@ export interface TriggerSetting {
   templateState: LookupTemplateState | null;
   /** Why the attached template cannot be used, or null when it can. */
   problem: TriggerTemplateProblem | "template_not_approved" | null;
+  /**
+   * The exact text the attached message would produce for this event, rendered
+   * by the same functions the dispatcher uses over obviously-fake facts — so
+   * what the tenant approves is what the customer receives. `null` when there is
+   * no renderable template.
+   */
+  preview: string | null;
+  delivery: TriggerDelivery;
   updatedAt: string | null;
 }
 
@@ -129,10 +170,11 @@ export async function listTriggerSettings(businessId: string): Promise<TriggerSe
     title: string | null;
     state: LookupTemplateState | null;
     variables: string[] | null;
+    body: string | null;
     updated_at: Date;
   }>(
     `SELECT t.trigger_key, t.enabled, t.template_id, t.updated_at,
-            lt.title, lt.state, lt.variables
+            lt.title, lt.state, lt.variables, lt.body
        FROM kavenegar_lookup_triggers t
        LEFT JOIN kavenegar_lookup_templates lt
               ON lt.id = t.template_id AND lt.business_id = t.business_id
@@ -140,6 +182,7 @@ export async function listTriggerSettings(businessId: string): Promise<TriggerSe
     [businessId],
   );
   const byTrigger = new Map(rows.map((row) => [row.trigger_key, row]));
+  const delivery = await readTriggerDelivery(businessId);
 
   return MANAGED_LOOKUP_TRIGGERS.map((trigger) => {
     const row = byTrigger.get(trigger);
@@ -160,9 +203,69 @@ export async function listTriggerSettings(businessId: string): Promise<TriggerSe
       templateTitle: row?.title ?? null,
       templateState: row?.state ?? null,
       problem,
+      // Rendering the preview is pure and cheap; it is computed here rather than
+      // stored so it can never describe a body the tenant has since edited.
+      preview:
+        row?.body && declared
+          ? previewTriggerMessage({ trigger, body: row.body, declared })
+          : null,
+      delivery: delivery.get(trigger) ?? EMPTY_TRIGGER_DELIVERY,
       updatedAt: row?.updated_at?.toISOString() ?? null,
     };
   });
+}
+
+/**
+ * What each trigger did over the last week, in one query.
+ *
+ * The window is stated in the answer (`TRIGGER_DELIVERY_DAYS`) rather than
+ * implied, and `sent` is deliberately separate from `skipped`: a business that
+ * sees zeros must be able to tell "nobody ordered" from "we are refusing every
+ * message because consent is missing", and those two have completely different
+ * fixes.
+ */
+async function readTriggerDelivery(
+  businessId: string,
+): Promise<Map<ManagedLookupTrigger, TriggerDelivery>> {
+  const { rows } = await query<{
+    trigger_key: string;
+    sent: string | number | null;
+    skipped: string | number | null;
+    blocked: string | number | null;
+    failed: string | number | null;
+    unknown: string | number | null;
+    last_at: Date | null;
+    last_code: string | null;
+  }>(
+    `SELECT trigger_key,
+            count(*) FILTER (WHERE status = 'sent')    AS sent,
+            count(*) FILTER (WHERE status = 'skipped') AS skipped,
+            count(*) FILTER (WHERE status = 'blocked') AS blocked,
+            count(*) FILTER (WHERE status = 'failed')  AS failed,
+            count(*) FILTER (WHERE status = 'unknown') AS unknown,
+            max(created_at) AS last_at,
+            (array_agg(code ORDER BY created_at DESC))[1] AS last_code
+       FROM kavenegar_lookup_trigger_sends
+      WHERE business_id = $1
+        AND created_at >= now() - ($2::int * interval '1 day')
+      GROUP BY trigger_key`,
+    [businessId, TRIGGER_DELIVERY_DAYS],
+  );
+
+  const byTrigger = new Map<ManagedLookupTrigger, TriggerDelivery>();
+  for (const row of rows) {
+    if (!isManagedLookupTrigger(row.trigger_key)) continue;
+    byTrigger.set(row.trigger_key, {
+      sent: Number(row.sent ?? 0),
+      skipped: Number(row.skipped ?? 0),
+      blocked: Number(row.blocked ?? 0),
+      failed: Number(row.failed ?? 0),
+      unknown: Number(row.unknown ?? 0),
+      lastAttemptAt: row.last_at?.toISOString() ?? null,
+      lastCode: row.last_code,
+    });
+  }
+  return byTrigger;
 }
 
 /**
