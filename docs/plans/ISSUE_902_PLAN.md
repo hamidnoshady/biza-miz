@@ -765,6 +765,11 @@ are counted **apart** on purpose: a screen showing only zeros must let a busines
 from "we are refusing every message because consent is missing", and those two have completely
 different fixes.
 
+`lastCode` is the most recent attempt that *had* a code, not the most recent attempt: a successful
+send stores `NULL`, so "latest row wins" made the reason vanish the moment a retry worked — and a
+batch written in one statement shares a timestamp, which made it arbitrary as well. The first CI run
+of the database case caught exactly that.
+
 Codes are translated by one shared map (`TRIGGER_CODE_LABELS`), imported by the client rather than
 copied into it — a code this build does not know becomes «پیام ارسال نشد», never the raw string, so a
 future or provider-shaped code cannot reach a tenant screen verbatim.

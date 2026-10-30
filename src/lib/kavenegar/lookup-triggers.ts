@@ -244,7 +244,13 @@ async function readTriggerDelivery(
             count(*) FILTER (WHERE status = 'failed')  AS failed,
             count(*) FILTER (WHERE status = 'unknown') AS unknown,
             max(created_at) AS last_at,
-            (array_agg(code ORDER BY created_at DESC))[1] AS last_code
+            -- The most recent attempt that *had* a code, not the most recent
+            -- attempt. A successful send stores NULL, so "latest row wins" made
+            -- the reason flicker to nothing the moment a retry worked — and a
+            -- whole batch written in one statement shares a timestamp, which
+            -- made it arbitrary as well.
+            (array_agg(code ORDER BY created_at DESC, id DESC)
+               FILTER (WHERE code IS NOT NULL))[1] AS last_code
        FROM kavenegar_lookup_trigger_sends
       WHERE business_id = $1
         AND created_at >= now() - ($2::int * interval '1 day')
