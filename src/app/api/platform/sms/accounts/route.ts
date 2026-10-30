@@ -20,6 +20,7 @@ import {
 } from "@/lib/kavenegar/policy";
 import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricing-service";
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
+import { masterBalanceView } from "@/lib/kavenegar/master-balance-facts";
 import { getDeliveryReport } from "@/lib/messaging-delivery-report";
 import { getCampaignDeliveryReport } from "@/lib/campaign-delivery-report";
 import {
@@ -109,6 +110,10 @@ export const GET = withPlatformScope(async () => {
     // §5 library entries with their targeting and a rendered sample, so the
     // console can show what a business would actually receive.
     masterTemplates: masterTemplates.map(toConsoleMasterTemplate),
+    // §9 item 4: the master's credit as the last funding pass observed it, aged
+    // and flagged. Reading providers live from a screen is how an operator ends
+    // up quoting a number nobody recorded.
+    masterBalance: masterBalanceView(snapshot.masterBalance),
     delivery,
     // §6 one level down: per campaign, over a week, with queue and send latency.
     campaignDelivery,

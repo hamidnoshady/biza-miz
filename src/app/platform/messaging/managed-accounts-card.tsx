@@ -16,6 +16,7 @@ import Link from "next/link";
 import { Loader2Icon, RefreshCwIcon, SaveIcon, ShieldCheckIcon, WalletCardsIcon } from "lucide-react";
 import { formatPersianNumber } from "@/lib/digits";
 import { tomanLabel } from "@/lib/platform-money";
+import { MASTER_BALANCE_STALE_HOURS } from "@/lib/kavenegar/master-balance-facts";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass } from "../ui";
 
 interface ManagedPolicy {
@@ -202,9 +203,19 @@ interface ServiceAlert {
   detail: Record<string, unknown>;
 }
 
+/** Issue #902 §9 item 4 — the master credit the last funding pass observed. */
+interface MasterBalance {
+  rial: number | null;
+  observedAt: string | null;
+  checkedAt: string | null;
+  state: "unknown" | "current" | "unreadable" | "stale";
+  ageMinutes: number | null;
+}
+
 interface Snapshot {
   error?: string;
   policy: ManagedPolicy;
+  masterBalance: MasterBalance;
   accounts: ManagedAccount[];
   templates: CatalogTemplate[];
   masterTemplates: MasterTemplate[];
@@ -349,6 +360,31 @@ const FUNDING_PURPOSE_LABELS: Record<ManagedPolicy["fundingPurpose"], string> = 
   marketing: "بازاریابی — ذخیرهٔ تراکنشی را مصرف نمی‌کند",
   transactional: "تراکنشی — می‌تواند از ذخیرهٔ تراکنشی استفاده کند",
 };
+
+/**
+ * One line about the master's credit, saying how old it is and whether the last
+ * read worked — because a figure with no age is a number an operator will
+ * quote as if it were current.
+ */
+function masterBalanceLine(balance: MasterBalance): string {
+  if (balance.state === "unknown" || balance.rial === null) {
+    return "موجودی حساب اصلی: هنوز خوانده نشده است؛ پاس بعدی شارژ خودکار آن را می‌خواند.";
+  }
+  const age =
+    balance.ageMinutes === null
+      ? ""
+      : balance.ageMinutes < 60
+        ? ` (${formatPersianNumber(balance.ageMinutes)} دقیقه پیش)`
+        : ` (${formatPersianNumber(Math.floor(balance.ageMinutes / 60))} ساعت پیش)`;
+  const value = `موجودی حساب اصلی: ${tomanLabel(balance.rial)}${age}`;
+  if (balance.state === "unreadable") {
+    return `${value} — آخرین خواندن ناموفق بود؛ این عدد مربوط به آخرین خواندن موفق است.`;
+  }
+  if (balance.state === "stale") {
+    return `${value} — قدیمی‌تر از ${formatPersianNumber(Math.floor(MASTER_BALANCE_STALE_HOURS))} ساعت؛ وضعیت فعلی حساب اصلی نامعلوم است.`;
+  }
+  return value;
+}
 
 const STRATEGY_LABELS: Record<ManagedPolicy["fundingStrategy"], string> = {
   jit: "به‌موقع (JIT) — هر بار زیر هدف",
@@ -623,6 +659,17 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       </Card>
 
       <Card title="سیاست ساخت و تأمین اعتبار">
+        {/* §9 item 4: the balance behind every funding decision on this card,
+            with its age — read, not asked for. */}
+        <p
+          className="mb-4 rounded-lg border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          data-testid="master-balance-mirror"
+        >
+          {masterBalanceLine(snapshot.masterBalance)}
+          {snapshot.masterBalance.checkedAt ? (
+            <span dir="ltr"> · {dateTime(snapshot.masterBalance.checkedAt)}</span>
+          ) : null}
+        </p>
         <form onSubmit={savePolicy} className="grid gap-3 sm:grid-cols-2">
           <Field label="ساخت خودکار حساب فرزند" hint="تا روشن نشدن این گزینه هیچ حسابی ساخته نمی‌شود.">
             <select
