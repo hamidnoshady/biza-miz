@@ -17,6 +17,7 @@ import {
   type CommercialQuoteResult,
   type PriceVersionPoint,
 } from "./rating/engine";
+import { resolveRatingBasis } from "./rating-basis";
 import { evaluateSpend, type SpendEvaluation, type SpendLimitAction } from "./policy/spend";
 import { tehranMonthWindow } from "../ai-plan-allowance";
 import { verifyBillingServiceRequest as verifyBillingServiceRequestV1 } from "./auth/verify-service-request";
@@ -67,6 +68,14 @@ export interface AppendUsageInput {
   eventKind?: "usage" | "correction";
   ratedAmountRial?: number | null;
   priceVersionId?: string | null;
+  /**
+   * Issue #902 §9 item 3 — the retail version that priced this charge, when the
+   * amount came from §4's retail pricing rather than a meter price. Passing it
+   * makes the rating cite the version that actually produced the number; the
+   * meter column then stays NULL, because the two are different catalogues.
+   */
+  retailPriceVersionId?: string | null;
+  retailPriceVersion?: number | null;
 }
 
 export type AppendUsageResult =
@@ -119,15 +128,40 @@ export async function appendUsageEvent(input: AppendUsageInput, client?: PoolCli
       input.priceVersionId != null
         ? null
         : await priceAtDb(db, "meter", input.meterKey, occurredAtIso);
-    const resolvedPriceVersionId = input.priceVersionId ?? activePrice?.id ?? null;
+
+    // What may this rating row claim about its price? (issue #902 §9 item 3)
+    //
+    // The runtime used to stamp the *active meter* version on every rating,
+    // including the ones whose amount the caller computed from a feature price
+    // or the retail catalogue — so "which version priced this?" was answered
+    // confidently and wrongly. `resolveRatingBasis` is the one place that decides,
+    // and it is a pure function precisely so the decision is testable.
+    const basis = resolveRatingBasis({
+      ratedAmountRial: input.ratedAmountRial ?? null,
+      priceVersionId: input.priceVersionId ?? null,
+      retailPriceVersionId: input.retailPriceVersionId ?? null,
+      retailPriceVersion: input.retailPriceVersion ?? null,
+      resolvedMeterPriceVersionId: activePrice?.id ?? null,
+    });
 
     if (input.ratedAmountRial != null) {
       await db.query(
         `INSERT INTO billing_usage_ratings
-           (usage_event_id, business_id, price_version_id, rated_amount_rial, allowance_quantity, overage_quantity)
-         VALUES ($1,$2,$3,$4,0,$5)
+           (usage_event_id, business_id, price_version_id, rated_amount_rial,
+            allowance_quantity, overage_quantity, price_basis,
+            retail_price_version_id, retail_price_version)
+         VALUES ($1,$2,$3,$4,0,$5,$6,$7,$8)
          ON CONFLICT (usage_event_id) DO NOTHING`,
-        [rows[0].id, input.businessId, resolvedPriceVersionId, Math.max(0, Math.floor(input.ratedAmountRial)), input.quantity],
+        [
+          rows[0].id,
+          input.businessId,
+          basis.priceVersionId,
+          Math.max(0, Math.floor(input.ratedAmountRial)),
+          input.quantity,
+          basis.basis,
+          basis.retailPriceVersionId,
+          basis.retailPriceVersion,
+        ],
       );
     } else if (activePrice) {
       const rated = await rateMeterEventDb(db, {
@@ -140,16 +174,21 @@ export async function appendUsageEvent(input: AppendUsageInput, client?: PoolCli
       });
       await db.query(
         `INSERT INTO billing_usage_ratings
-           (usage_event_id, business_id, price_version_id, rated_amount_rial, allowance_quantity, overage_quantity)
-         VALUES ($1,$2,$3,$4,$5,$6)
+           (usage_event_id, business_id, price_version_id, rated_amount_rial,
+            allowance_quantity, overage_quantity, price_basis,
+            retail_price_version_id, retail_price_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT (usage_event_id) DO NOTHING`,
         [
           rows[0].id,
           input.businessId,
-          activePrice.id,
+          basis.priceVersionId ?? activePrice.id,
           rated.amountRial,
           rated.includedConsumed,
           rated.overageQuantity,
+          basis.basis,
+          basis.retailPriceVersionId,
+          basis.retailPriceVersion,
         ],
       );
     }

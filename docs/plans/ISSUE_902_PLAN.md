@@ -809,6 +809,77 @@ fails if someone adds the call back without reading that note.
 The same guard test checks the shape of all three wirings: the call exists, it follows `COMMIT`, it is
 not awaited, and it is business-scoped — because "the dispatcher works" was never the missing part.
 
+## 5m. A rating cites the price that produced it (§9 item 3, part one)
+
+Two ledgers record every message. The **wallet** says what the business paid; the **Billing rating**
+(`billing_usage_ratings`) says what the platform booked as usage. The margin report is the subtraction
+of the two, and the supplier reconciliation is the comparison of the second against
+`billing_vendor_cost_events` — which means the rating's *provenance* is not documentation, it is the
+control. If a rating cannot name the price version that produced its amount, neither report means
+anything: they are comparing two numbers whose origins nobody can check.
+
+The rating had exactly one provenance column, `price_version_id`, foreign-keyed to
+`billing_price_versions` — the **meter** catalogue. Messaging is priced by
+`kavenegar_retail_price_versions` instead, so every messaging rating cited a version whose numbers had
+never been used to compute the amount beside it. The true version existed only inside
+`billing_vendor_cost_events.metadata` and the wallet metadata: JSON, unjoinable, and invisible to the
+two reports that most need it.
+
+The advice to follow here is Billing's own: *an amount is not evidence of how it was computed.* So the
+fix is not to change any money. It is to make the row say what happened to it:
+
+| `price_basis` | When | What it cites |
+| --- | --- | --- |
+| `retail_price_version` | the send was priced by the published retail version (§6d) | `retail_price_version_id` + the human-readable `retail_price_version`; `price_version_id` is **NULL** |
+| `explicit_amount` | the caller computed the amount itself (`ratedAmountRial`) and no retail version applies | nothing — a price version it did not use is not a citation |
+| `meter_price_version` | ordinary metered usage rated from `billing_price_versions` | `price_version_id`, as before |
+| `NULL` | the row was written before this migration | nothing, and it says nothing — a guess would be indistinguishable from evidence |
+
+Three details that make this safe to ship over existing data:
+
+- **No backfill.** `0270` adds the column with no default and no `UPDATE`. A row written before today
+  genuinely has no recorded basis, and the same rule as `0268`'s `send_latency_ms` applies: unknown is a
+  real answer.
+- **The CHECKs let legacy rows pass.** Each is written as a pairing over `IS NOT NULL`, so an all-NULL
+  row evaluates to NULL rather than FALSE and is accepted, while a row that claims
+  `retail_price_version` without an id is refused at insert time.
+- **A retail row cannot point at the meter catalogue.** The third CHECK enforces
+  `price_version_id IS NULL` when the basis is retail. This is what stops someone from "helpfully"
+  filling both columns later and restoring exactly the false provenance this replaces.
+
+The rule itself is one pure function, `resolveRatingBasis()` in `src/lib/billing/rating-basis.ts` — pure
+because the callers include a React-adjacent module, and a browser import of `../db` is a build failure
+(`client-bundle-boundary.test.ts`). `runtime.appendUsageEvent` makes the decision once and both INSERT
+branches (rating created vs. rating upserted under a correction) write the same three columns, so a
+correction cannot silently keep an older basis. `message-outbox-service` passes the exact version the
+drain priced with — the same object whose `version.id` the retail quote already used.
+
+**A bug this slice found, and had to fix.** Writing the case that asserts "what left the wallet equals
+what was rated" is what made it visible: the drain's success branch added `rowCost` to `sentCost`
+twice. Because `settleMessageSend` charges `min(actual, reserved)`, doubling `actual` did not overcharge
+a clean batch — it charged the **entire reservation** for any batch containing one refused row, and
+refunded nothing. In other words the §4 `refund` policy — "a send the provider never accepted is not
+charged to the tenant" — was inverted in the one case it exists for, and the business paid for messages
+that were never sent. Nothing tested it: no unit test drove the drain, and every database test settled
+through `settleMessageSend` directly. The duplicate is gone, the increment is now guarded (one occurrence,
+counted by `rating-basis.test.ts`), and `messaging-usage-rating` drives a real drain with a scripted
+provider that refuses one row of three and asserts the money out equals the sum of the ratings.
+
+Two smaller notes. The database test needed a transport seam — the drain builds its providers from
+config, and a test may not call a real provider — so `runBusinessMessageDrain` takes an optional third
+argument that defaults to `buildProviders(effective)`; production passes nothing. And the meter-version
+publish in that test is back-dated by a minute on purpose: `publishPriceVersion` defaults to `now()`
+while the event is rated at the JS clock's `now()`, which can sit a millisecond behind the database's.
+
+One correction worth recording: the first version of `resolveRatingBasis` *clamped* a negative version
+number to `0`. Zero already means "the built-in default", so that turned nonsense into a specific and
+wrong claim — the same class of bug this slice exists to remove. It now rejects a non-finite or
+negative version and falls through to `explicit_amount`, and `rating-basis.test.ts` pins it.
+
+What this does **not** do, and should not pretend to: generate invoice lines from ratings, or reconcile a
+supplier's invoice against `billing_vendor_cost_events`. Those are Billing's own work (§9 item 3's other
+half) and now have the join they were missing.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -829,6 +900,8 @@ not awaited, and it is business-scoped — because "the dispatcher works" was ne
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npx vitest run` — `imported-payment-receipts` (§5l) | 6/6: both plugin importers (F&B and retail) and the CMS importer call the receipt trigger, in every case after `COMMIT`, never awaited, and wrapped in `withTenant` — plus the amount being the same `total` the payment row was written with; and the amendment bridge carrying no call at all, with its reason still in the file |
+| `npx vitest run` — `rating-basis` (§5m) | 11/11: retail wins and nulls the meter column; explicit amount cites nothing; meter stays the fallback; a zero version is a real default while a negative or non-finite one is rejected rather than clamped; plus source guards on both INSERT branches, the migration's pairing CHECK, and the drain passing the version it priced with |
+| `npm run test:db` — `messaging-usage-rating` (§5m) | CI only (no Postgres here): a drained send takes exactly what it rates out of the wallet and cites `retail_price_version` `7` by id and number with `price_version_id` NULL; a three-recipient batch rates as one version and sums to the single reservation; a batch where the provider refuses one of three charges and rates only the two that went out (the case the double-count broke); an `explicit_amount` rating stays uncited even with a meter version published; a metered event still cites the published meter version |
 | `npx vitest run` — `lookup-trigger-facts` (§5k) | 6 new fixtures: the preview rendered by the dispatcher's renderer (no `%token` left, the amount formatted as money and the date as Jalali rather than the raw rial integer or an ISO string); a template whose variables the event cannot fill previewing as `null` rather than blank; and the code map translating the refusals a tenant can act on while a code it does not know — `http_429`, `kavenegar_418` — becomes a generic sentence instead of leaking |
 | `npx vitest run` — Growth messaging section (§5k) | 3 new source guards: the screen renders `setting.preview` from the server and hard-codes no sample text of its own; the delivery line exists and speaks its zeros; and the code labels are imported from the shared map rather than copied into the component |
 | `npm run test:db` — `kavenegar-lookup-triggers` (§5k) | one added case (CI only; no Postgres here): the setting carries a real preview before anything has been sent, `delivery` reads `{sent: 0, skipped: 0}`; after one sent row, one consent refusal and one unknown payment row the two triggers report `{sent: 1, skipped: 1}` and `{unknown: 1}` with `lastCode` `no_consent`, and another business sees none of it |
@@ -880,10 +953,11 @@ not awaited, and it is business-scoped — because "the dispatcher works" was ne
    queue wait and the provider wait separately, over a week. A longer *historical* view (trend over
    months rather than a window) is still open; the outbox rows it would read are retained, so it is
    a query and a chart, not new data.
-3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions (§6d), the
-   margin report and `billing_vendor_cost_events` (§6a) exist; emitting
-   `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier
-   invoice against them, belongs to Billing.
+3. **Retail ↔ wholesale settlement in invoicing** (billing): the rating now cites the version that
+   produced its amount — `price_basis` distinguishes `retail_price_version` from `explicit_amount` and
+   from the meter catalogue, and `retail_price_version_id`/`retail_price_version` name it (§5m). Still
+   Billing's: emitting **invoice lines** from those ratings (`billing_invoice_lines` has no rating
+   linkage at all today), and reconciling a supplier invoice against `billing_vendor_cost_events`.
 4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g and §5i): the account
    endpoint reports the master's own credit, the funding pass reads it once per pass, and the figure
    is now mirrored with its age and its failed-read flag, so a configured floor neither stops
