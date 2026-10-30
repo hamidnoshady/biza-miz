@@ -118,7 +118,10 @@ describe("where the demand is read", () => {
     // fund another tenant's child.
     const reader = pricing.slice(pricing.indexOf("export async function readPendingCampaignDemand"));
     expect(reader).toMatch(/WHERE o\.business_id = \$1/);
-    expect(reader).toMatch(/o\.channel = 'sms'/);
+    // The channel lives on the recipient, not on the outbox row — the first
+    // version filtered `o.channel` and only the database suite caught it.
+    expect(reader).toMatch(/r\.channel = 'sms'/);
+    expect(reader).not.toMatch(/o\.channel/);
     expect(reader).toMatch(/smsSegmentsSql\("r\.body"\)/);
   });
 });

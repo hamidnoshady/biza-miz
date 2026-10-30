@@ -732,6 +732,11 @@ approved. So the demand is a query, not a forecast.
 | Everything else still applies | Caps, the master floor, the transactional reserve and the fleet cap clamp the amount exactly as before. Demand is a target, not a bypass |
 | Read inside the funding transaction, scoped to the child | The decision must see the queue as it is at the moment of the decision, and one tenant's campaign must never fund another tenant's child |
 
+One correction worth recording: the channel lives on `message_recipients`, not on `message_outbox`,
+and the first version filtered `o.channel` — a column that does not exist. Only the database suite
+caught it; the unit guards now assert `r.channel` and the absence of `o.channel` so the mistake cannot
+return quietly.
+
 `planBusinessFunding` reads the same demand, so the console's "what would a pass do" preview cannot
 promise a healthy child a transfer it is about to receive — or the reverse. The console's account rows
 add «صف فعال: N پیام (M قطعه) در K کمپین» when a queue exists, which is the sentence that makes a

@@ -628,7 +628,7 @@ export async function readPendingCampaignDemand(
        FROM message_outbox o
        JOIN message_recipients r ON r.id = o.recipient_id
       WHERE o.business_id = $1
-        AND o.channel = 'sms'
+        AND r.channel = 'sms'
         AND o.status = ANY($2::text[])`,
     [businessId, [...PENDING_OUTBOX_STATES]],
   );
@@ -667,7 +667,7 @@ export async function listFleetCampaignDemand(): Promise<
               count(DISTINCT o.campaign_id) AS campaigns
          FROM message_outbox o
          JOIN message_recipients r ON r.id = o.recipient_id
-        WHERE o.channel = 'sms'
+        WHERE r.channel = 'sms'
           AND o.status = ANY($1::text[])
         GROUP BY o.business_id`,
       [[...PENDING_OUTBOX_STATES]],
