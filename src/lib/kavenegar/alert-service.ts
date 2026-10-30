@@ -43,7 +43,8 @@ export type ServiceAlertKind =
   | "reconciliation_incomplete"
   | "account_suspended"
   | "provisioning_failed"
-  | "tariff_missing";
+  | "tariff_missing"
+  | "transactional_reserve_held";
 
 export type ServiceAlertSeverity = "critical" | "warning" | "info";
 
@@ -68,6 +69,7 @@ export const ALERT_SEVERITY: Readonly<Record<ServiceAlertKind, ServiceAlertSever
   account_suspended: "critical",
   provisioning_failed: "warning",
   tariff_missing: "warning",
+  transactional_reserve_held: "warning",
 };
 
 /** First-party operator copy. Never a supplier name, never a provider code. */
@@ -84,12 +86,13 @@ export const ALERT_TITLE: Readonly<Record<ServiceAlertKind, string>> = {
   account_suspended: "وضعیت حساب سرویس با تأمین‌کننده هم‌خوان نیست",
   provisioning_failed: "راه‌اندازی حساب سرویس این کسب‌وکار ناموفق بود",
   tariff_missing: "تعرفهٔ تأمین‌کننده برای این کسب‌وکار ثبت نشده است",
+  transactional_reserve_held: "شارژ خودکار بازاریابی به ذخیرهٔ تراکنشی رسیده است",
 };
 
 /** The remedy an operator is expected to take, in the same first-party voice. */
 export const ALERT_ACTION: Readonly<Record<ServiceAlertKind, string>> = {
   master_credit_low: "اعتبار حساب اصلی را شارژ کنید یا سقف‌های شارژ خودکار را بازبینی کنید.",
-  master_balance_unknown: "موجودی حساب اصلی را از پنل تأمین‌کننده بخوانید و در پنل ثبت کنید.",
+  master_balance_unknown: "کلید حساب اصلی و اتصال به تأمین‌کننده را بررسی کنید؛ شارژ خودکار موجودی را خودش می‌خواند.",
   fleet_cap_reached: "سقف روزانهٔ سراسری را بالا ببرید یا تا فردا صبر کنید.",
   child_cap_reached: "سقف اعتبار این کسب‌وکار را بالا ببرید یا موجودی آن را بازبینی کنید.",
   daily_cap_reached: "سقف شارژ روزانهٔ این کسب‌وکار را بازبینی کنید.",
@@ -100,6 +103,7 @@ export const ALERT_ACTION: Readonly<Record<ServiceAlertKind, string>> = {
   account_suspended: "وضعیت حساب را با پنل تأمین‌کننده هم‌خوان کنید و در صورت نیاز دوباره فعال کنید.",
   provisioning_failed: "کار راه‌اندازی را از پنل دوباره اجرا کنید و علت را بررسی کنید.",
   tariff_missing: "حساب را با تأمین‌کننده همگام کنید تا تعرفه ثبت شود.",
+  transactional_reserve_held: "اعتبار حساب مادر را شارژ کنید؛ این سهم برای پیام ورود و پیام سفارش نگه داشته شده است.",
 };
 
 export interface ServiceAlertDescriptor {
@@ -129,6 +133,11 @@ export function alertForFundingBlock(
   switch (reason) {
     case "master_floor":
       return { kind: "master_credit_low", businessId: null };
+    case "transactional_reserve":
+      // Issue #902 #3 — the money is there, it is held for transactional
+      // traffic. That is a *warning about a deliberate guard*, not a shortage,
+      // so it maps to the reserve's own operator copy instead of "credit low".
+      return { kind: "transactional_reserve_held", businessId: null };
     case "master_balance_unknown":
       return { kind: "master_balance_unknown", businessId: null };
     case "global_daily_cap_reached":

@@ -19,6 +19,7 @@
 import {
   type AddChildAccountInput,
   type AddTemplateInput,
+  buildAccountInfoRequest,
   buildAddChildAccountRequest,
   buildAddTemplateRequest,
   buildChargeChildCreditRequest,
@@ -35,12 +36,14 @@ import {
   buildUpdateChildAccountRequest,
   buildUpdateTemplateRequest,
   classifyKavenegarStatus,
+  type KavenegarAccountInfo,
   type KavenegarChildAccount,
   type KavenegarClassification,
   type KavenegarEnvelope,
   type KavenegarErrorCode,
   type KavenegarRequest,
   type KavenegarTemplate,
+  mapAccountInfo,
   mapChildAccount,
   mapLookupEntry,
   mapTemplate,
@@ -183,6 +186,19 @@ export class KavenegarManagementClient {
       buildFetchChildByLocalIdRequest({ masterApiKey: this.masterApiKey, localId }),
       mapChildAccount,
     ).then(first);
+  }
+
+  /**
+   * The master account's own credit (issue #902 §3 / plan §9 item 4).
+   *
+   * Read by the scheduled funding pass once per pass rather than once per
+   * child: the figure is the same for the whole fleet, and a per-child read
+   * would multiply provider traffic by the number of tenants.
+   */
+  fetchAccountInfo(): Promise<KavenegarAccountInfo> {
+    return this.call(buildAccountInfoRequest({ masterApiKey: this.masterApiKey }), mapAccountInfo).then(
+      first,
+    );
   }
 
   listChildren(): Promise<KavenegarChildAccount[]> {

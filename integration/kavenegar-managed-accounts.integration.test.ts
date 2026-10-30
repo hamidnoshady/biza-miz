@@ -43,6 +43,7 @@ let reconciliation: typeof import("../src/lib/kavenegar/reconciliation-service")
 let vendorCost: typeof import("../src/lib/messaging-vendor-cost");
 let jwt: typeof import("../src/lib/jwt-secret");
 let delivery: typeof import("../src/lib/messaging-delivery-report");
+let campaignDelivery: typeof import("../src/lib/campaign-delivery-report");
 let alerts: typeof import("../src/lib/kavenegar/alert-service");
 
 const alpha = { businessId: "", slug: "" };
@@ -191,6 +192,7 @@ beforeAll(async () => {
   vendorCost = await import("../src/lib/messaging-vendor-cost");
   jwt = await import("../src/lib/jwt-secret");
   delivery = await import("../src/lib/messaging-delivery-report");
+  campaignDelivery = await import("../src/lib/campaign-delivery-report");
   alerts = await import("../src/lib/kavenegar/alert-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -738,6 +740,95 @@ describe("JIT funding", () => {
       masterBalanceRial: 1_000_000,
     });
     expect(second?.decision).toMatchObject({ action: "none", reason: "healthy" });
+  });
+
+  it("funds a floored fleet from the provider's own balance, with no operator typing it in (plan §9 item 4)", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 500_000,
+    });
+
+    // One pass, three provider calls in order: the master's own balance, then
+    // the charge, then the child read that records the new balance. Before this
+    // slice the pass had no figure to give the plan, so a configured floor —
+    // the careful configuration — refused every child forever.
+    const script = scripted([
+      ok({ remaincredit: 10_000_000, expiredate: 1_767_225_600, type: "Master" }),
+      ok(childEntry({ remaincredit: 36_000 })),
+    ]);
+    const pass = await pricing.runManagedFundingTick({ client: clientFor(script) });
+
+    expect(pass.funded).toBe(1);
+    expect(script.calls[0]?.url).toContain("/account/info.json");
+    // Never the child's key: this read is about the account paying the bill.
+    expect(script.calls[0]?.url).toContain("MASTERKEEPSECRET");
+    expect(script.calls.map((call) => call.url.split("/").pop())).toContain("chargecredit.json");
+  });
+
+  it("refuses to fund through a floor it cannot see", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 500_000,
+    });
+
+    // A refused account read is "unknown", and unknown must not fund through a
+    // floor: the pass moves nothing and leaves the operator an alert to read.
+    const script = scripted([providerStatus(403)]);
+    const pass = await pricing.runManagedFundingTick({ client: clientFor(script) });
+
+    expect(pass.funded).toBe(0);
+    expect(script.calls.filter((call) => call.url.includes("chargecredit"))).toHaveLength(0);
+    const open = await alerts.listServiceAlerts();
+    expect(open.map((alert) => alert.kind)).toContain("master_balance_unknown");
+  });
+
+  it("holds the transactional reserve back from marketing, and lets transactional funding use it (issue #902 #3)", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 500_000,
+      fundingTransactionalReserveRial: 200_000,
+      fundingPurpose: "marketing",
+    });
+    // The policy round-trips: a save the console makes is a read the pass sees.
+    const saved = await policy.getManagedChildPolicy();
+    expect(saved.fundingTransactionalReserveRial).toBe(200_000);
+    expect(saved.fundingPurpose).toBe("marketing");
+
+    // Master 800,000: floor 500,000 leaves 300,000, of which 200,000 is held,
+    // leaving 100,000 for marketing — more than the 36,000 target, so it funds.
+    const marketing = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 800_000,
+    });
+    expect(marketing?.decision).toMatchObject({ action: "transfer", amountRial: 36_000 });
+
+    // Tighten the master until only the reserve is left above the floor: the
+    // same child is now refused, and refused for the reserve's own reason.
+    const held = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 660_000,
+    });
+    expect(held?.decision).toMatchObject({ action: "none", reason: "transactional_reserve" });
+
+    // Classified as transactional, the same master funds it again.
+    await policy.saveManagedChildPolicy({ fundingPurpose: "transactional" });
+    const transactional = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 660_000,
+    });
+    expect(transactional?.decision).toMatchObject({ action: "transfer", amountRial: 36_000 });
+
+    // Leave the fleet as the other cases expect it.
+    await policy.saveManagedChildPolicy({
+      fundingPurpose: "marketing",
+      fundingTransactionalReserveRial: 0,
+    });
   });
 
   it("follows the operator's funding strategy, not just the buffer", async () => {
@@ -1539,6 +1630,80 @@ describe("delivery report (acceptance is not delivery)", () => {
     const alphaRow = report.find((row) => row.businessId === alpha.businessId);
     expect(alphaRow).toMatchObject({ sent: 1, delivered: 1, failed: 0, pending: 1 });
     expect(delivery.deliveryHealth(alphaRow!)).toBe("degraded");
+  });
+});
+
+describe("per-campaign delivery and latency (issue #902 §9 item 2)", () => {
+  it("reports both waits per campaign, keeps tenants to their own, and never renders silence as zero", async () => {
+    const business = await seedBusiness("Latency");
+    const { rows: campaignRows } = await db.query<{ id: string }>(
+      `INSERT INTO message_campaigns (business_id, channel, name, status)
+       VALUES ($1, 'sms', 'Slow campaign', 'completed') RETURNING id`,
+      [business.businessId],
+    );
+    const campaignId = campaignRows[0]!.id;
+
+    const enqueue = async (status: string, extra: Partial<Record<string, string | number>> = {}) => {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
+         VALUES ($1, $2, 'sms', '+989120000000', 'سلام') RETURNING id`,
+        [business.businessId, campaignId],
+      );
+      await db.query(
+        `INSERT INTO message_outbox
+           (business_id, recipient_id, campaign_id, status, last_attempt_at,
+            created_at, sent_at, send_latency_ms)
+         VALUES ($1, $2, $3, $4, now(), now() - ($5::int * interval '1 millisecond'),
+                 CASE WHEN $6::int IS NULL THEN NULL ELSE now() END, $6)`,
+        [
+          business.businessId,
+          rows[0]!.id,
+          campaignId,
+          status,
+          extra.queueMs ?? 0,
+          extra.sendLatencyMs ?? null,
+        ],
+      );
+    };
+
+    // Two accepted sends with a 2 s and 4 s queue wait and a 100 ms / 300 ms
+    // provider answer; one still queued, one refused.
+    await enqueue("sent", { queueMs: 2_000, sendLatencyMs: 100 });
+    await enqueue("delivered", { queueMs: 4_000, sendLatencyMs: 300 });
+    await enqueue("queued");
+    await enqueue("failed");
+
+    const platform = await campaignDelivery.getCampaignDeliveryReport({ sinceHours: 24 });
+    const row = platform.find((entry) => entry.campaignId === campaignId)!;
+    expect(row).toMatchObject({
+      campaignName: "Slow campaign",
+      channel: "sms",
+      sent: 1,
+      delivered: 1,
+      failed: 1,
+      pending: 1,
+      health: "attention",
+    });
+    expect(row.businessId).toBe(business.businessId);
+    expect(row.queueLatency).toMatchObject({ count: 2, p50: 2_000, p95: 4_000, max: 4_000 });
+    expect(row.sendLatency).toMatchObject({ count: 2, p50: 100, p95: 300, max: 300 });
+
+    // The tenant's copy is its own campaign, with the same numbers and nothing
+    // a tenant may not see.
+    const tenant = await campaignDelivery.tenantCampaignDelivery(business.businessId, {
+      sinceHours: 24,
+    });
+    expect(tenant.map((entry) => entry.campaignId)).toEqual([campaignId]);
+    expect(tenant[0]).toMatchObject({ queueLatency: row.queueLatency, sendLatency: row.sendLatency });
+    expect(JSON.stringify(tenant[0])).not.toMatch(/businessId|businessName|kavenegar|provider_/i);
+
+    // Another business sees none of it.
+    const other = await campaignDelivery.tenantCampaignDelivery(alpha.businessId, { sinceHours: 24 });
+    expect(other.some((entry) => entry.campaignId === campaignId)).toBe(false);
+
+    // A row nobody measured (queued before migration 0268) reads as "unknown",
+    // never as a zero-millisecond send.
+    expect(campaignDelivery.latencyStats([null, null])).toBeNull();
   });
 });
 

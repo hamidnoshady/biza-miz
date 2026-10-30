@@ -97,6 +97,31 @@ enforced by `kavenegar/lookup-trigger-boundaries.test.ts`: the files that send a
 the child credential store, the managed send service or the trigger path, and they resolve their key
 only from `platform_sms_config` / `KAVENEGAR_API_KEY`.
 
+## 3b. The audit behind one stale comparison (§9 item 6)
+
+The resolver fix in §3 replaced `state === "enabled"` with the registry's `usable`. That raised the
+obvious follow-up — *who else keeps a copy of this vocabulary?* — and the answer was nobody, and that
+was the problem: the vocabulary was copied by hand in three places that could each drift from
+`app-availability.ts` without a single test failing.
+
+| Finding | Why it mattered |
+| --- | --- |
+| `setBusinessAppAvailability` / `setPlatformAppAvailability` wrote `write.state` straight to the column | The console route validated with `isAppAvailabilityState`; the MCP tool passed `write as never`. An unknown state from a tool call therefore reached the SQL CHECK and came back as a database error, for what is a client mistake |
+| `local-activation-site-service.ts` kept its own `Set(["available", "beta", …])` | A state added to the registry would have been silently dropped when a cloud bundle was applied: the bundle carries it, the deploy skips it, and the app comes back up unchanged with nothing to report |
+| `resolveBusinessCapability` cast `state as AppAvailabilityState` | A cast is how the original comparison stayed wrong for so long: the type said the string was a state, so the compiler had nothing to say about it |
+
+The write now validates once, in the one function every caller passes through
+(`assertWritable`), refuses with `InvalidAppAvailabilityStateError`, and the MCP tool turns that
+refusal into its own `invalid_state` rather than letting a Postgres error escape. The local-activation
+importer asks `isAppAvailabilityState`. The resolver asks the type guard and then reads `usable`, so
+neither branch can be reached with a string the registry does not know.
+
+**The rule, as a test** (`app-availability-callers.test.ts`): no file outside the registry and its
+presentation-only allowlist may decide availability from a hand-written state string; the allowlist
+is checked to still exist, so it cannot rot into a no-op; the resolver is checked for the bug's exact
+shape (`"enabled"`); both writers are checked to validate; and the TypeScript states are reconciled
+against migration `0128`'s two `CHECK` clauses — a state may not exist in one half only.
+
 ## 4. Account model and provisioning (§2)
 
 - Migration `0258_kavenegar_managed_accounts.sql`: `kavenegar_business_accounts` (tenant-scoped,
@@ -138,7 +163,8 @@ stronger of the two rules.
   entirely — double-funding is the failure this journal exists to prevent.
 - `runManagedFundingTick` funds a bounded set of active children every 15 minutes; automatic
   top-up is **off by default** (`funding_buffer_messages = 0`) and a configured floor refuses
-  to act when the master balance is unknown rather than funding through it.
+  to act when the master balance is unknown rather than funding through it. The pass reads that
+  balance from the provider itself (`account/info`, §5g) once per pass.
 - Console: policy form, per-account “تأمین اعتبار”, and a manual transfer form with a
   per-click idempotency key.
 
@@ -161,9 +187,10 @@ A watermark of 0 (or ≥ the buffer) clamps to the target, so a typo can never f
 operator chose. The console exposes all of it; the route rejects an unknown strategy instead of
 silently treating it as `jit`.
 
-Still open in §3 and left for a follow-up: funding from an **authoritative** master balance (the
-customer API does not expose the master's credit), and the `approved campaign budget` strategy —
-that needs a product decision on which campaigns count as approved spend.
+Still open in §3 and left for a follow-up: the `approved campaign budget` strategy — that needs a
+product decision on which campaigns count as approved spend. (The **authoritative master balance**
+that used to head this list is closed by §5g; the second half of the same item — a **reserved slice
+of master credit that marketing can never consume** — is §5h.)
 
 ## 5b. Funding under concurrency, and the Superadmin attention ledger (§3)
 
@@ -406,6 +433,64 @@ vocabulary and no wholesale price: `managed-services/inventory.test.ts` reads ev
 for supplier names, and `template-library-view.test.ts` checks the rendered view against the same
 pattern.
 
+## 5g. The master's own balance, read instead of typed (§3, plan item 4)
+
+The funding plan has refused to move money through a floor it could not see since §5 — and the
+scheduled pass had no balance to give it. Every automatic top-up therefore died on
+`master_balance_unknown` for exactly the operators careful enough to configure a floor, and the
+fleet was only funded when a human read the provider's panel and typed a number into the console.
+The guard was right; what was missing was the number.
+
+**The customer API does not expose the parent's credit, but the account endpoint does.** `GET
+/v1/{KEY}/account/info.json` describes whichever account the key belongs to, so the master key's own
+answer *is* the master's credit. `KavenegarManagementClient.fetchAccountInfo()` reads it once per
+pass — not once per child, because the figure is the same for the fleet and the alternative
+multiplies provider traffic by the number of tenants.
+
+Three decisions matter:
+
+| Decision | Why |
+| --- | --- |
+| A missing or unparseable `remaincredit` is `null`, never `0` | "The provider said zero" and "the provider said nothing I could read" are opposite facts to a floor; collapsing the second into the first would make a funded master look empty |
+| A failed read is swallowed into `null`, with one log line | A provider hiccup must not turn a funding pass into an incident, and `null` already has an honest meaning: refuse, and raise `master_balance_unknown` for the operator |
+| An explicit `masterBalanceRial` still wins | The console's manual transfer and every existing test pass a figure on purpose; the read is the *default*, not a replacement |
+
+The provider's echo of the key in that payload is dropped during mapping, the read is a GET (so the
+transport may retry it), and the log line carries the reason rather than the URL.
+
+With the figure real, `master_balance_unknown` stops being a routine warning: it now means the read
+failed, so its remedy in both the alert ledger and the console changed from «read the panel and type
+it in» to «check the master key and the connection; the pass reads the balance itself».
+
+## 5h. A reserved slice marketing can never spend (§3, DoD #9)
+
+DoD #9 says a login OTP must keep working when "every child is capped" and when "tenant marketing
+credit is exhausted". §5g made the funding pass able to *see* the master's credit; it did not give
+the fleet a way to keep any of it. The floor alone cannot do this job: once the master drifts down to
+the floor, automation stops funding **everyone** — the message that then fails to go out is the login
+code a customer is waiting for, while a campaign funded an hour earlier has already been sent.
+
+The distinction the floor cannot make is *why* a message is being sent, and the platform cannot infer
+it: the same child account carries a campaign and an order-ready message. So migration `0267` adds
+the two things only an operator can decide, and `planFunding` enforces them:
+
+| Column | Meaning |
+| --- | --- |
+| `managed_funding_transactional_reserve_rial` | credit above the floor that marketing may not spend; `0` (the default) means no reserve |
+| `managed_funding_purpose` | `marketing` (default) or `transactional` — how this fleet's provider spend is classified |
+
+The rule is one line in the planner: spendable = master − floor, and marketing may use
+`spendable − reserve`. A blocked marketing transfer reports `transactional_reserve`, **not**
+`master_floor`, and raises its own warning (`transactional_reserve_held`): an operator told "credit
+low" would top up a master account that is not short, so the words have to distinguish "the money is
+gone" from "the money is held". `marketing` is the default and the restrictive side, so enabling a
+reserve can only ever hold capacity back — never let more money out by accident.
+
+**What this does not do.** The provider has no concept of a reserved balance, so this is enforced on
+our side of the call, not in the provider's ledger: it governs *funding*, and it protects the
+transactional lane from being starved by funding decisions. It is not a second wallet, and a child
+that already holds credit is unaffected by it.
+
 ## 6. Lookup templates and wholesale reconciliation (§4, §7 of the issue)
 
 - `template-service.ts`: tenant creates a **draft** with a first-party title; the provider
@@ -531,6 +616,34 @@ and the version history. `/platform/messaging` links to it and keeps the wholesa
 Still open in §4: wiring `billing_usage_ratings`/invoice lines to the same versions, and the
 supplier-invoice reconciliation that would confirm accepted-but-undelivered billing in practice.
 
+## 6e. Delivery per campaign, with the two waits apart (§6, plan item 2)
+
+§6c answered the fleet question — "are messages arriving, and for whom" — from the outbox, per
+business, over 24 hours. The question a *business* asks is smaller and sharper: did my campaign
+arrive, and if it was slow, was it us or the carrier? Answering it needed a different grouping and a
+second clock.
+
+**Only half the latency was provable.** `0134` records when a row was queued (`created_at`), when it
+was attempted (`last_attempt_at`) and when the provider accepted it (`sent_at`), so the *queue* wait
+is derivable — `sent_at − created_at`. The provider's own answer time was thrown away by the drain the
+moment `send()` returned, which made "backed-up drain" and "slow carrier" indistinguishable even
+though they have opposite fixes. Migration `0268` adds `send_latency_ms`, written on every attempt
+(accepted or refused) from the drain's own clock, nullable because every row queued before it has no
+measurement.
+
+`campaign-delivery-report.ts` then answers per campaign: accepted, delivered, failed, still queued,
+the verdict from §6c's `deliveryHealth`, and **two** percentile summaries — queue and send.
+
+| Rule | Why |
+| --- | --- |
+| Percentiles, not an average | One 90-second retry moves an average far enough to hide a healthy fleet; p50 answers "is it fine", p95 answers "is anyone hurting" |
+| `null` for no measurement, never `0` | "We measured nothing" and "it took no time" are opposite statements, and `0 ms` for silence is a number an operator quotes in a meeting |
+| A tenant sees its own campaigns only | The platform report names businesses and reads across tenants under the bypass; `tenantCampaignDelivery` is scoped by the caller *and* by RLS, and neither carries a provider error string, provider name or wholesale cost |
+
+Surfaces: the console's «تحویل به تفکیک کمپین (۷ روز اخیر)» table under the 24-hour fleet card, and a
+second line under each campaign on the tenant's Growth messaging screen («تأخیر صف» / «تأخیر ارسال»,
+in «—» when nothing was measured).
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -538,13 +651,21 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
 | `npx tsc -p <scoped tsconfig>` covering every changed file and its dependency graph | pass (the repository-wide `tsc --noEmit` exceeds this sandbox's 3.9 GB and is killed by the OOM killer; see §10) |
 | `npx vitest run` — new unit files | 170 tests pass across 11 files (`retail-pricing` adds 27, `alert-service` adds 13, `template-variables` adds 21) (`contract`, `client`, `rest`, `secrets`, `provisioning`, `pricing-service`, `template-service`, `reconciliation-service`) |
 | `npm test` (full suite) | 1223 files, 15,333 tests pass, 7 skipped, exit 0 (one unrelated guard, `brand-coverage`, caught a `Bizamiz`→`Bizamiz` copy slip in new comments; fixed) |
-| `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass
+| `npm run test:db` — `kavenegar-managed-accounts` | 46/46 pass |
+| `npx vitest run` — `client` + `rest` + `pricing-service` (§5g) | 4 new fixtures: `account/info` addressed under the master key and never a child's, a real `0` kept distinct from an unreadable balance, the key the payload echoes dropped, a refused read surfacing as an error the pass turns into `null` (and a log line with no credential in it) |
+| `npx vitest run` — `pricing-service` + `alert-service` (§5h) | 6 new fixtures: marketing clamped to `spendable − reserve` rather than the target, the reserve's own blocked reason, transactional funding reaching the same target, the floor still ahead of the reserve for both purposes, the rule inert at reserve `0`, and `transactional_reserve_held` carrying its own copy rather than "credit low" |
+| `npm run test:db` — `kavenegar-managed-accounts` (§5h) | one added case: the policy round-trips, marketing funds the buffer while it has room above the reserve, is refused with `transactional_reserve` once only the reserve is left, and funds again the moment the fleet is classified `transactional` |
+| `npm run test:db` — `kavenegar-managed-accounts` (§5g) | two added cases: a floored fleet funds with no operator figure (the pass calls `account/info` first, then `chargecredit`), and an unreadable master balance funds nothing and leaves `master_balance_unknown` open |
+
 | `npm run test:db` — `kavenegar-master-templates` | 16/16 pass (targeting by trade and plan, idempotent instantiation of a copy, versioned rollout that leaves the live copy alone, lineage through a revision, platform-only RLS) |
 | `npm run test:db` — `kavenegar-lookup-send` | 8/8 pass (approved-only, undeclared mapping, bad receptor, no child, invalid value → refused before a charge; a successful send charges retail once, records the wholesale cost tenant-invisibly and calls the child's key; a definitive refusal refunds in full; an ambiguous failure keeps the reservation) |
 | `npm run test:db` — `kavenegar-lookup-triggers` | 17/17 pass (a message that is not approved, has no mapping or wants a fact the event does not have is refused when the automation is saved; `login_code` is refused as a trigger; an unconfigured trigger sends nothing; one event sends once on the child's key, charges retail once and logs it; a replay is `duplicate`; two racing bumps produce one provider call; an empty wallet blocks before the provider is called; `notifyOrderReady` reads the order/customer/store, honours «پیامک نفرست», skips an anonymous order and an unusable mobile; `notifyPaymentReceived` sends the receipt with the amount in Persian digits and one receipt per replayed settlement; neither notifier throws) |
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `campaign-delivery-report` (§6e) | 8/8 (nearest-rank percentiles where one 90 s retry still shows at p95, `null` for silence rather than `0`, unmeasured rows excluded from the statistics, unsorted input not mutated; and the source guards: no provider name, no `o.error`/`provider_message_id` in the shared row shape, the tenant query scoped by business *and* RLS, the cross-tenant read behind the documented bypass) |
+| `npm run test:db` — `kavenegar-managed-accounts` (§6e) | one added case: a campaign with two accepted sends (2 s/4 s queue, 100 ms/300 ms provider), one queued and one refused reports `{p50: 2 000, p95: 4 000}` and `{p50: 100, p95: 300}` with health `attention`; the tenant copy is its own campaign with no business or provider field, another business sees none of it, and `[null, null]` is "no measurement" |
+| `npx vitest run` — `app-availability-callers` (§3b) | 11/11 (the sweep over ~1,100 source files finds no hand-written state decision; every allowlisted presentation file still exists; the resolver carries neither `"enabled"` nor a cast; both writers validate; the SQL CHECK matches the TypeScript states exactly; and `enabled`/`off`/`""`/`null`/`3` are all refused before any query runs) |
 | `npx vitest run` — `sms-noop` (§3a) | 7/7 pass (the code is printed in `development`/`test`; `production`, `staging` and an unset `NODE_ENV` all throw `SmsNotConfiguredError` with neither the code nor the number in the log or the error; the resolver really returns this fallback) |
 | `npx vitest run` — `template-library-view` (§5f) | 6/6 pass (Persian variable names in mapping order, the automation each entry can serve computed by the send path's own check, no automation for an unfillable message, unknown variables dropped rather than shown as `%token4`, supplier-free copy) |
 | `npx vitest run` — `managed-services` (§0) | 23/23 pass (inventory covers every registered service, paths exist, maturities are honest with their follow-ups, plus the source guard over ~100 tenant screens and a positive/negative control for the supplier pattern) |
@@ -574,23 +695,29 @@ supplier-invoice reconciliation that would confirm accepted-but-undelivered bill
    tenant preview of a trigger's exact text before enabling it; and a per-trigger delivery view.
    The login code is deliberately *not* one of these triggers: it stays on the platform-auth
    transport (§5e), which is what keeps it working with an empty wallet.
-1. **Campaign-budget and OTP reserved capacity** (#902 §3, P0): the three strategies and the
-   guards are in place; "approved campaign budget" as a distinct funding trigger, and a
-   reserved slice of master credit that marketing can never consume (so a login OTP is funded
-   even when every child is capped), are still open.
-2. **Delivery/health dashboards** (#902 P1): the fleet-level delivery card (§6c) exists;
-   per-campaign delivery, provider latency and a historical view are follow-ups.
+1. **Campaign-budget funding trigger** (#902 §3, P0): the three strategies and the guards are in
+   place, and the **reserved slice** is closed by §5h (a marketing-classified fleet can no longer
+   spend the credit held for transactional traffic). Still open: "approved campaign budget" as a
+   distinct funding trigger, which needs a product decision on which campaigns count.
+2. ~~**Delivery/health dashboards** (#902 P1): per-campaign delivery and provider latency~~
+   — **closed** (§6e): the console and the tenant screen now show delivery per campaign with the
+   queue wait and the provider wait separately, over a week. A longer *historical* view (trend over
+   months rather than a window) is still open; the outbox rows it would read are retained, so it is
+   a query and a chart, not new data.
 3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions (§6d), the
    margin report and `billing_vendor_cost_events` (§6a) exist; emitting
    `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier
    invoice against them, belongs to Billing.
-4. **Funding from an authoritative master balance**: the provider's customer API does not
-   expose the master's credit, so the floor accepts an operator-supplied balance and refuses
-   to fund blindly. A mirror of the panel balance would close the loop.
+4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g): the account endpoint
+   reports the master's own credit, and the funding pass reads it once per pass, so a configured
+   floor no longer stops automation. What remains is a *mirror* of the figure for the console —
+   showing an operator the balance the last pass saw instead of making them ask the provider.
 5. **Managed-service rollout for other integrations**: #894 Torob, #896 Divar, payments,
    media, AI — apply the contract and add leak-guard tests per integration.
-6. **`resolveBusinessCapability` follow-up**: audit other callers for the same stale
-   `"enabled"` comparison (this change fixed the one in the resolver itself).
+6. ~~**`resolveBusinessCapability` follow-up**: audit other callers for the same stale
+   `"enabled"` comparison~~ — **closed** (§3b): the audit found the same class of drift in three
+   more places (an unvalidated write, a hand-copied vocabulary and a cast in the resolver), all
+   fixed, and the rule is now a test rather than a note.
 
 ## 10. Environment notes
 

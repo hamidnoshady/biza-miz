@@ -33,6 +33,9 @@ interface ManagedPolicy {
   fundingWindowStartHour: number;
   fundingWindowEndHour: number;
   fundingGlobalDailyCapRial: number | null;
+  /** Issue #902 #3 — credit above the floor that only transactional spend may use. */
+  fundingTransactionalReserveRial: number;
+  fundingPurpose: "marketing" | "transactional";
   updatedAt: string | null;
 }
 
@@ -159,6 +162,30 @@ interface DeliveryRow {
   lastAttemptAt: string | null;
 }
 
+/** Issue #902 §9 item 2 — the same question per campaign, with both latencies. */
+interface LatencyStats {
+  count: number;
+  p50: number;
+  p95: number;
+  max: number;
+}
+
+interface CampaignDeliveryRow {
+  campaignId: string;
+  businessId?: string;
+  businessName?: string | null;
+  campaignName: string | null;
+  channel: "sms" | "email";
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  queueLatency: LatencyStats | null;
+  sendLatency: LatencyStats | null;
+  lastAttemptAt: string | null;
+  health: keyof typeof DELIVERY_LABELS;
+}
+
 /** Issue #902 §3 — what needs a human, in the service's own words. */
 interface ServiceAlert {
   id: string;
@@ -181,6 +208,7 @@ interface Snapshot {
   templates: CatalogTemplate[];
   masterTemplates: MasterTemplate[];
   delivery: DeliveryRow[];
+  campaignDelivery: CampaignDeliveryRow[];
   alerts: ServiceAlert[];
   alertSummary: { critical: number; warning: number; info: number; unacknowledged: number; total: number };
   recentJobs: ManagedJob[];
@@ -201,7 +229,12 @@ const ALERT_COPY: Record<string, { title: string; action: string }> = {
   },
   master_balance_unknown: {
     title: "موجودی حساب اصلی نامشخص است؛ شارژ خودکار متوقف شد",
-    action: "موجودی حساب اصلی را از پنل تأمین‌کننده بخوانید و در پنل ثبت کنید.",
+    action: "کلید حساب اصلی و اتصال به تأمین‌کننده را بررسی کنید؛ شارژ خودکار موجودی را خودش می‌خواند.",
+  },
+  transactional_reserve_held: {
+    title: "شارژ خودکار بازاریابی به ذخیرهٔ تراکنشی رسیده است",
+    action:
+      "اعتبار حساب مادر را شارژ کنید؛ این سهم برای پیام ورود و پیام سفارش نگه داشته شده است.",
   },
   fleet_cap_reached: {
     title: "سقف روزانهٔ شارژ همهٔ کسب‌وکارها پر شده است",
@@ -310,6 +343,12 @@ const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
   disabled: "غیرفعال",
 };
 
+/** Issue #902 #3 — how the fleet's spend is classified for the reserve. */
+const FUNDING_PURPOSE_LABELS: Record<ManagedPolicy["fundingPurpose"], string> = {
+  marketing: "بازاریابی — ذخیرهٔ تراکنشی را مصرف نمی‌کند",
+  transactional: "تراکنشی — می‌تواند از ذخیرهٔ تراکنشی استفاده کند",
+};
+
 const STRATEGY_LABELS: Record<ManagedPolicy["fundingStrategy"], string> = {
   jit: "به‌موقع (JIT) — هر بار زیر هدف",
   low_watermark: "خط آب پایین — فقط پس از افت به آستانه",
@@ -323,6 +362,18 @@ const DELIVERY_LABELS: Record<"healthy" | "degraded" | "attention" | "idle", str
   attention: "نرخ خطای بالا",
   idle: "بدون ارسال",
 };
+
+/**
+ * Milliseconds as seconds, or «—» when nothing was measured.
+ *
+ * A `null` percentile is "no measurement", never `0 ms`: an operator reading
+ * "0" concludes the end is fast, which is the one thing the report cannot say.
+ */
+function latencyLabel(stats: LatencyStats | null): string {
+  if (!stats) return "—";
+  const seconds = (ms: number) => (ms / 1000).toFixed(ms < 1_000 ? 2 : 1);
+  return `${seconds(stats.p50)} / ${seconds(stats.p95)}`;
+}
 
 /** Mirrors `deliveryHealth` on the server; kept here for a per-row label. */
 function healthOf(row: DeliveryRow): keyof typeof DELIVERY_LABELS {
@@ -425,6 +476,8 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
         fundingWindowStartHour: policy.fundingWindowStartHour,
         fundingWindowEndHour: policy.fundingWindowEndHour,
         fundingGlobalDailyCapRial: policy.fundingGlobalDailyCapRial,
+        fundingTransactionalReserveRial: policy.fundingTransactionalReserveRial,
+        fundingPurpose: policy.fundingPurpose,
       },
       "policy",
     );
@@ -658,6 +711,48 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                 })
               }
             />
+          </Field>
+          <Field
+            label="ذخیرهٔ تراکنشی حساب مادر (ریال)"
+            hint="بالای کف، سهمی که شارژ بازاریابی نمی‌تواند مصرف کند؛ برای بازگرداندن پیام ورود و پیام سفارش وقتی همهٔ حساب‌ها پر شده‌اند. ۰ = بدون ذخیره."
+          >
+            <input
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              value={policy.fundingTransactionalReserveRial}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingTransactionalReserveRial: Number(event.target.value) || 0,
+                })
+              }
+            />
+          </Field>
+          <Field
+            label="دستهٔ مصرف این ناوگان"
+            hint="بازاریابی از ذخیرهٔ تراکنشی استفاده نمی‌کند؛ تراکنشی می‌تواند. پیش‌فرض بازاریابی است تا فعال‌کردن ذخیره هرگز پول بیشتری آزاد نکند."
+          >
+            <select
+              className={inputClass}
+              value={policy.fundingPurpose}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingPurpose: event.target.value as ManagedPolicy["fundingPurpose"],
+                })
+              }
+            >
+              {(Object.keys(FUNDING_PURPOSE_LABELS) as ManagedPolicy["fundingPurpose"][]).map(
+                (key) => (
+                  <option key={key} value={key}>
+                    {FUNDING_PURPOSE_LABELS[key]}
+                  </option>
+                ),
+              )}
+            </select>
           </Field>
           <Field label="کف اعتبار حساب مادر (ریال)" hint="با مقدار مثبت، تأمین خودکار بدون موجودی مشخص انجام نمی‌شود.">
             <input
@@ -978,6 +1073,71 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
         <p className="mt-3 text-xs text-muted-foreground">
           «پذیرفته» یعنی ارائه‌دهنده پیام را قبول کرده؛ «تحویل» یعنی بعداً تأیید شده است. ردیف‌ها بر
           اساس بیشترین خطا مرتب شده‌اند.
+        </p>
+      </Card>
+
+      {/* Issue #902 §9 item 2 — the fleet row above answers "are messages
+          arriving"; this answers "is one campaign stuck, and at which end".
+          Queue and send latency are shown apart on purpose: a backed-up drain
+          and a slow carrier have opposite fixes, and one averaged number would
+          hide which one is happening. */}
+      <Card title={`تحویل به تفکیک کمپین (۷ روز اخیر)`}>
+        {(snapshot.campaignDelivery ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">در این بازه کمپینی ارسال نشده است.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th className="p-2 text-right">کمپین</th>
+                  <th className="p-2 text-right">کسب‌وکار</th>
+                  <th className="p-2 text-right">پذیرفته</th>
+                  <th className="p-2 text-right">تحویل</th>
+                  <th className="p-2 text-right">ناموفق</th>
+                  <th className="p-2 text-right">در صف</th>
+                  <th className="p-2 text-right">تأخیر صف (میانه / صدک ۹۵)</th>
+                  <th className="p-2 text-right">تأخیر ارائه‌دهنده (میانه / صدک ۹۵)</th>
+                  <th className="p-2 text-right">وضعیت</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(snapshot.campaignDelivery ?? []).map((row) => (
+                  <tr key={row.campaignId} className="border-t border-border/60">
+                    <td className="p-2">
+                      {row.campaignName ?? "—"}
+                      <span className="ms-1 text-xs text-muted-foreground">
+                        {row.channel === "email" ? "ایمیل" : "پیامک"}
+                      </span>
+                    </td>
+                    <td className="p-2 text-xs text-muted-foreground">
+                      {row.businessName ?? row.businessId ?? "—"}
+                    </td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.sent)}</td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.delivered)}</td>
+                    <td className={`p-2 tabular-nums ${row.failed > 0 ? "text-destructive" : ""}`}>
+                      {formatPersianNumber(row.failed)}
+                    </td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.pending)}</td>
+                    <td className="p-2 text-xs text-muted-foreground tabular-nums">
+                      {latencyLabel(row.queueLatency)}
+                    </td>
+                    <td className="p-2 text-xs text-muted-foreground tabular-nums">
+                      {latencyLabel(row.sendLatency)}
+                    </td>
+                    <td
+                      className={`p-2 ${row.health === "attention" ? "text-destructive" : "text-muted-foreground"}`}
+                    >
+                      {DELIVERY_LABELS[row.health]}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          «تأخیر صف» مدت انتظار پیام در صف ارسال است و «تأخیر ارائه‌دهنده» مدت پاسخ ارائه‌دهنده.
+          ردیف‌ها بر اساس بیشترین خطا مرتب شده‌اند.
         </p>
       </Card>
 

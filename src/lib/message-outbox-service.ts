@@ -229,17 +229,23 @@ export async function runBusinessMessageDrain(
       // the moment the console configures one — never silently drop it.
       continue;
     }
+    // Issue #902 §6 — the provider's own share of the latency. Measured here
+    // because this is the only place that knows when the call left and when it
+    // came back; without it the report cannot tell "the drain is backed up"
+    // from "the provider is slow", which have opposite fixes.
+    const sendStartedAt = Date.now();
     const result = await provider.send({
       to: row.address,
       subject: row.subject || undefined,
       body: row.body,
     });
+    const sendLatencyMs = Math.max(0, Date.now() - sendStartedAt);
 
     if (result.ok) {
       await query(
         `UPDATE message_outbox
             SET status = 'sent', sent_at = now(), provider_message_id = $3,
-                provider_cost_rial = $4,
+                provider_cost_rial = $4, send_latency_ms = $5,
                 last_attempt_at = now(), error = NULL, updated_at = now()
           WHERE id = $1 AND business_id = $2`,
         [
@@ -247,6 +253,7 @@ export async function runBusinessMessageDrain(
           businessId,
           result.providerMessageId,
           typeof result.providerCostRial === "number" ? result.providerCostRial : null,
+          sendLatencyMs,
         ],
       );
       sent += 1;
@@ -301,11 +308,12 @@ export async function runBusinessMessageDrain(
         `UPDATE message_outbox
             SET attempts = attempts + 1,
                 last_attempt_at = now(),
+                send_latency_ms = $4,
                 error = $3,
                 updated_at = now()
           WHERE id = $1 AND business_id = $2
           RETURNING id`,
-        [row.id, businessId, providerErrorLabel(result.code)],
+        [row.id, businessId, providerErrorLabel(result.code), sendLatencyMs],
       );
       if (rowCount === 0) continue;
       const attemptsRow = await query<{ attempts: number; max_attempts: number }>(

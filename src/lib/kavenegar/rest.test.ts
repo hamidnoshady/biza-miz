@@ -160,6 +160,37 @@ describe("KavenegarManagementClient", () => {
     expect((error as KavenegarTransportError).timeout).toBe(true);
   });
 
+  it("reads the master balance from account/info with the master key in the path", async () => {
+    const { transport, calls } = scripted([
+      ok({ remaincredit: 8_000_000, expiredate: 1_767_225_600, type: "Master" }),
+    ]);
+    const client = new KavenegarManagementClient("MASTERKEEPSECRET", { transport, ...options });
+
+    const info = await client.fetchAccountInfo();
+
+    expect(info).toMatchObject({ remainCreditRial: 8_000_000, expireAtUnix: 1_767_225_600 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("GET");
+    // The master's own key, and never the `/client/` or `/verify/` family: this
+    // endpoint describes the account the key belongs to, and a child key here
+    // would answer with a child's credit.
+    expect(calls[0].url).toBe(
+      "https://api.kavenegar.com/v1/MASTERKEEPSECRET/account/info.json",
+    );
+  });
+
+  it("answers an unreadable account reply with an unknown balance, not zero", async () => {
+    const { transport } = scripted([ok({})]);
+    const client = new KavenegarManagementClient("MASTER", { transport, ...options });
+    expect((await client.fetchAccountInfo()).remainCreditRial).toBeNull();
+  });
+
+  it("surfaces a refused account read as an error the caller can swallow into 'unknown'", async () => {
+    const { transport } = scripted([providerStatus(403)]);
+    const client = new KavenegarManagementClient("MASTER", { transport, ...options });
+    await expect(client.fetchAccountInfo()).rejects.toBeInstanceOf(KavenegarManagementError);
+  });
+
   it("lists templates with the provider's pagination metadata", async () => {
     const { transport } = scripted([
       ok(
