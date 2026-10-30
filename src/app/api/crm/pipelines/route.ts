@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import {
   createPipeline,
   defaultPipeline,
+  ensureAgencySalesPipeline,
   listPipelines,
   pipelineStageUsage,
 } from "@/lib/crm-pipeline-service";
@@ -36,8 +37,17 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const requested = request.nextUrl.searchParams.get("pipelineId");
   const pipelines = await listPipelines(session.businessId, { includeArchived: true });
   if (pipelines.length === 0) await defaultPipeline(session.businessId);
+  // Issue #1128 §A — an advertising agency also gets its own sales track, created
+  // on read for the same reason the default is: a read that creates what it needs
+  // cannot be forgotten by a provisioning path, and there are already three of
+  // those. Returns null for every other trade, which writes nothing at all.
+  const agency = await ensureAgencySalesPipeline(session.businessId);
 
-  const all = pipelines.length === 0
+  // `agency` is returned whether this call created it or it already existed, so
+  // compare against what was listed rather than re-reading on every request.
+  const stale =
+    pipelines.length === 0 || (agency !== null && !pipelines.some((entry) => entry.id === agency.id));
+  const all = stale
     ? await listPipelines(session.businessId, { includeArchived: true })
     : pipelines;
   const usage = await Promise.all(
