@@ -14,7 +14,6 @@ import { getBusinessIndustry } from "./industry-guard";
 import { getInventorySystem } from "./inventory-service";
 import {
   applyTourEvent,
-  tourById,
   tourFactsNeeded,
   tourForViewer,
   type TourViewer,
@@ -23,6 +22,7 @@ import {
   type TourEventError,
   type TourProgressEvent,
 } from "./tours";
+import { publishedTourById } from "./tour-catalogue-service";
 
 type ProgressRow = {
   tour_id: string;
@@ -82,7 +82,7 @@ export async function eligibleTourById(
   businessId: string,
   permissions: ReadonlySet<string>,
 ): Promise<TourDefinition | null> {
-  const tour = tourById(id);
+  const tour = await publishedTourById(id);
   if (!tour) return null;
   const viewer = await tourViewerFor(businessId, permissions, [tour]);
   return tourForViewer(tour, viewer);
