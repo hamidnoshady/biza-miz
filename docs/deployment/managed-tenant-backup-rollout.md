@@ -294,18 +294,26 @@ the end, still explicitly.
    key is refused. A self-hosted install that already had its own bucket keeps
    uploading to it (`mode: "legacy"`); Local profiles return
    `unavailable/local_profile` before any configuration is read.
-3. **Artifact transport** (`tenant-backup-transport.ts`, four routes).
+3. **Artifact transport** (`tenant-backup-transport.ts`).
    - Download is two-step: `POST /api/backup/artifacts/[ref]/download` mints a
      short-lived ticket bound to one business, one reference and one destination
      (`backup.export`, Owner-only); `GET` redeems it and either redirects to a
      time-limited provider URL (cloud) or streams the ciphertext (local).
-   - Upload is chunked (`POST /api/backup/uploads`, `PUT …/[token]?offset=`,
-     `POST …/[token]/complete`, `DELETE …/[token]`). `offset` must equal what the
-     server holds, so a retried piece is rejected rather than duplicated.
-   - A completed upload lands in **quarantine** as a `verifying` artifact row. It
-     becomes restorable only via `POST /api/backup/artifacts/[ref]/verify`, which
-     re-reads the stored bytes, checks the digest and signature and parses the
-     archive for this business.
+   - The **tenant** upload surface is deliberately gone (`2026-10-30`): business
+     users do not upload backups *as inventory*, and §2 says so explicitly. What
+     was `POST /api/backup/uploads`, the chunked `PUT/DELETE …/[token]` and
+     `POST …/complete`, plus the tenant `POST /api/backup/artifacts/[ref]/verify`,
+     were removed with their chunk validators rather than hidden — the chunked
+     upload a business *does* have is the restore-file transport
+     (`/api/backup/restore/upload`, site installs), which is a recovery step, not
+     a management one. The `tenant_backup_upload_sessions` table stays as history
+     (migrations are forward-only) and is no longer written.
+   - Importing a file the platform never wrote, and restoring a Cloud backup from
+     such a file, is **not delivered**: an imported archive has no signed
+     manifest, so the server cannot certify what it contains without the tenant's
+     legacy passphrase, and registering one as `ready` on the strength of an
+     operator-supplied manifest is the lie §4 forbids. It needs a designed
+     passphrase-scoped import, not a button.
 4. **Central tenant-only restore engine** (`tenant-restore-apply.ts`,
    `POST /api/backup/restores/apply`). Phased and journalled
    (`verify_started → verify_succeeded → apply_started → apply_succeeded`, or
@@ -643,3 +651,32 @@ upload remain physical, site-only, exactly-one-business), the tenant upload
 endpoints that §2 forbids, post-restore accounting/permission checks, per-plan
 schedules and alert thresholds, a route for the margin report, and the real
 acceptance matrix — unchanged by this increment.
+
+## Increment: the tenant upload surface is removed, not hidden (§2, §10 P0)
+
+§2 lists "backup uploads as managed inventory" among the controls a business user
+must not have. Four tenant endpoints implemented exactly that, and nothing in the
+app called any of them:
+
+| Removed | Why |
+| --- | --- |
+| `POST /api/backup/uploads` | started a chunked upload into the business's own artifact inventory |
+| `PUT`/`DELETE /api/backup/uploads/[token]` | appended/discarded pieces of that upload |
+| `POST /api/backup/uploads/[token]/complete` | registered the finished file as a `verifying` artifact row |
+| `POST /api/backup/artifacts/[ref]/verify` | let the *tenant* promote its own upload to restorable |
+
+With them went the chunk validators only they used (`checkChunk`,
+`checkCompletion`, the `UPLOAD_*` ceilings) — the restore-file transport a
+business legitimately has is `/api/backup/restore/upload` plus
+`POST /api/backup/restore`, which is a recovery step on a site install and has its
+own (tested) chunk validation. Two divergent chunk validators would have drifted.
+
+The `tenant_backup_upload_sessions` table (0265) stays — migrations are
+forward-only — but nothing writes it any more.
+
+**Import stays undelivered, deliberately.** A file the platform did not write has
+no signed manifest, so it cannot be certified as restorable without the tenant's
+legacy passphrase; registering one on an operator-supplied manifest would present
+unverified bytes to the tenant as a verified backup, which §4 forbids. That is a
+designed feature (passphrase-scoped import), not a route to bolt on, and Cloud's
+"restore from a backup file" (DoD 4, §1 matrix) stays open until it exists.

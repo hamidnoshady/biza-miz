@@ -30,13 +30,10 @@ vi.mock("./s3-lite", () => ({
 
 import {
   DOWNLOAD_TICKET_TTL_SECONDS,
-  planArtifactDownload,
-  checkChunk,
-  checkCompletion,
   isTransportableState,
   openDownloadTicket,
+  planArtifactDownload,
   sealDownloadTicket,
-  UPLOAD_MAX_BYTES,
 } from "./tenant-backup-transport";
 
 const masterKey = randomBytes(32);
@@ -114,67 +111,6 @@ describe("download tickets", () => {
 
   it.each(["", "one-part", "a.b.c", "!!!.???"])("refuses the malformed token %j", (token) => {
     expect(openDownloadTicket(token, masterKey, now).ok).toBe(false);
-  });
-});
-
-describe("checkChunk", () => {
-  const base = { expectedBytes: 10, receivedBytes: 4, offset: 4, chunkLength: 3 };
-
-  it("accepts the next piece in order", () => {
-    expect(checkChunk(base)).toEqual({ ok: true, nextOffset: 7 });
-  });
-
-  it("rejects a retried piece instead of duplicating it", () => {
-    expect(checkChunk({ ...base, offset: 0 })).toEqual({ ok: false, error: "invalid_offset" });
-  });
-
-  it("rejects a piece that would overshoot the declared size", () => {
-    expect(checkChunk({ ...base, receivedBytes: 9, offset: 9, chunkLength: 5 })).toEqual({
-      ok: false,
-      error: "invalid_offset",
-    });
-  });
-
-  it("rejects an oversized piece and an oversized upload", () => {
-    expect(checkChunk({ ...base, chunkLength: 9 * 1024 * 1024 })).toEqual({ ok: false, error: "chunk_too_large" });
-    expect(checkChunk({ ...base, expectedBytes: UPLOAD_MAX_BYTES + 1 })).toEqual({
-      ok: false,
-      error: "upload_too_large",
-    });
-  });
-
-  it("rejects a negative or non-integer offset", () => {
-    expect(checkChunk({ ...base, offset: -1, receivedBytes: -1 })).toEqual({ ok: false, error: "invalid_offset" });
-    expect(checkChunk({ ...base, offset: 1.5, receivedBytes: 1.5 })).toEqual({ ok: false, error: "invalid_offset" });
-  });
-
-  it("refuses to append to a complete upload", () => {
-    expect(checkChunk({ ...base, expectedBytes: 4, receivedBytes: 4, offset: 4 })).toEqual({
-      ok: false,
-      error: "upload_complete",
-    });
-  });
-});
-
-describe("checkCompletion", () => {
-  const digest = "a".repeat(64);
-
-  it("accepts an exact size and digest", () => {
-    expect(
-      checkCompletion({ expectedBytes: 5, receivedBytes: 5, expectedSha256: digest, actualSha256: digest.toUpperCase() }),
-    ).toEqual({ ok: true });
-  });
-
-  it("refuses a short upload, an empty one and a digest mismatch", () => {
-    expect(
-      checkCompletion({ expectedBytes: 5, receivedBytes: 4, expectedSha256: digest, actualSha256: digest }),
-    ).toEqual({ ok: false, error: "upload_incomplete" });
-    expect(
-      checkCompletion({ expectedBytes: 0, receivedBytes: 0, expectedSha256: digest, actualSha256: digest }),
-    ).toEqual({ ok: false, error: "size_mismatch" });
-    expect(
-      checkCompletion({ expectedBytes: 5, receivedBytes: 5, expectedSha256: digest, actualSha256: "b".repeat(64) }),
-    ).toEqual({ ok: false, error: "checksum_mismatch" });
   });
 });
 
