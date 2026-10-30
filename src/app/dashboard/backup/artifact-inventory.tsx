@@ -10,13 +10,22 @@
  * browser never receives an endpoint, bucket, prefix, object key or internal
  * error, only opaque references, sizes and human labels.
  *
- * The restore action here is an explicit **preview** (dry run). The apply engine
- * exists (`tenant-restore-apply.ts`) and is reached through
- * `POST /api/backup/restores/apply`, which recomputes this same preview and
- * requires the typed confirmation phrase plus a fresh re-authentication; this
- * card deliberately does not offer that button, because a restore replaces the
- * business's live rows and the epic puts it behind the Owner's explicit,
- * re-authenticated confirmation rather than a click on an inventory row.
+ * Restore is two steps, in this order, and the second one is deliberately hard
+ * to reach by accident:
+ *
+ *  1. **Preview** (dry run) — `POST /api/backup/restores/preview` reports what
+ *     would be replaced, what would be kept, what the backup does not contain,
+ *     the data gap and every blocker.
+ *  2. **Apply** — `POST /api/backup/restores/apply`, which recomputes the same
+ *     preview server-side (the browser's copy is never trusted), re-derives the
+ *     actor's facts from the session, and requires the typed confirmation phrase
+ *     plus a fresh re-authentication.
+ *
+ * The button appears only for a preview with no blockers and a restorable
+ * artifact. A missing re-authentication is not a dead end either: the preview
+ * names it as a blocker, and the «تأیید هویت» button runs the shared step-up
+ * ceremony and then re-reads the preview, so the Owner can finish the restore in
+ * one sitting without signing out.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatJalali } from "@/lib/jalali";
@@ -25,8 +34,9 @@ import { Button } from "@/components/ui/button";
 import { EmptyState, KpiCard, KpiRow, SectionCard, StatusBadge } from "../page-chrome";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import { FilterChip, FilterChipRow, SearchField } from "@/app/dashboard/filters";
-import { ErrorBox, InfoBox, api } from "../ui";
+import { ErrorBox, InfoBox, api, inputClass } from "../ui";
 import { LoadingSkeleton } from "../page-chrome";
+import { StepUpPrompt } from "@/components/auth/step-up-prompt";
 
 type ArtifactState = "ready" | "uploading" | "verifying" | "failed" | "expired" | "unavailable_offline";
 type ArtifactOrigin = "scheduled" | "manual" | "uploaded";
@@ -99,6 +109,8 @@ interface RestorePreview {
   completeness: "complete" | "partial";
   blockers: { code: string; label: string }[];
   canApply: boolean;
+  /** The exact text the Owner must type. Server-derived, never a generic "YES". */
+  confirmationPhrase: string;
 }
 
 const STATE_FILTERS: { key: ArtifactState | "all"; label: string }[] = [
@@ -138,6 +150,11 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
   const [data, setData] = useState<InventoryResponse | null>(null);
   const [error, setError] = useState(false);
   const [preview, setPreview] = useState<{ ref: string; body: RestorePreview } | null>(null);
+  const [confirmText, setConfirmText] = useState("");
+  const [applyBusy, setApplyBusy] = useState(false);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [applied, setApplied] = useState<{ tables: number; inserted: number; deleted: number; verified: boolean } | null>(null);
+  const [stepUpOpen, setStepUpOpen] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewBusy, setPreviewBusy] = useState<string | null>(null);
 
@@ -167,6 +184,9 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
   async function openPreview(ref: string) {
     setPreviewBusy(ref);
     setPreviewError(null);
+    setApplyError(null);
+    setApplied(null);
+    setConfirmText("");
     const res = await api<{ preview: RestorePreview }>("/api/backup/restores/preview", {
       method: "POST",
       body: JSON.stringify({ ref }),
@@ -177,6 +197,65 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
       return;
     }
     setPreview({ ref, body: res.data.preview });
+  }
+
+  /**
+   * The apply step. The server re-derives everything: the phrase must match what
+   * *it* computes, the session must be fresh, and the reference must still be
+   * this business's own restorable artifact. A stale session is answered with
+   * `reauthentication_required`, which is where the step-up prompt takes over —
+   * no need to sign out and back in.
+   */
+  async function applyRestore() {
+    if (!preview) return;
+    setApplyBusy(true);
+    setApplyError(null);
+    const res = await api<{
+      ok?: boolean;
+      tables?: number;
+      inserted?: number;
+      deleted?: number;
+      verified?: boolean;
+      error?: string;
+    }>("/api/backup/restores/apply", {
+      method: "POST",
+      body: JSON.stringify({ ref: preview.ref, confirmation: confirmText }),
+    });
+    setApplyBusy(false);
+    if (!res.ok) {
+      switch (res.data.error) {
+        case "reauthentication_required":
+          setStepUpOpen(true);
+          break;
+        case "mfa_required":
+          setApplyError("برای بازگردانی، ورود دومرحله‌ای (2FA) باید فعال باشد.");
+          break;
+        case "confirmation_required":
+          setApplyError("عبارت تأیید با آنچه نمایش داده شد مطابقت ندارد.");
+          break;
+        case "restore_busy":
+          setApplyError("یک بازگردانی دیگر برای این کسب‌وکار در حال اجراست؛ کمی بعد دوباره تلاش کنید.");
+          break;
+        case "backup_restore_not_permitted":
+          setApplyError("بازگردانی برای این کسب‌وکار در این نصب مجاز نیست.");
+          break;
+        case "artifact_not_found":
+          setApplyError("این نسخه دیگر در دسترس نیست یا قابل بازگردانی نیست.");
+          break;
+        default:
+          setApplyError("بازگردانی انجام نشد؛ هیچ تغییری در داده‌ها اعمال نشد.");
+      }
+      return;
+    }
+    setApplied({
+      tables: res.data.tables ?? 0,
+      inserted: res.data.inserted ?? 0,
+      deleted: res.data.deleted ?? 0,
+      verified: res.data.verified === true,
+    });
+    setPreview(null);
+    setConfirmText("");
+    await load();
   }
 
   const summary = data?.summary;
@@ -362,8 +441,80 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
                   بخش‌های پشتیبان‌گیری‌نشده: {preview.body.missing.map((entry) => entry.component).join(" · ")}
                 </p>
               ) : null}
+
+              {preview.body.blockers.some((blocker) => blocker.code === "reauthentication_required") ? (
+                <div className="space-y-2">
+                  <p className="text-sm text-muted-foreground">
+                    پیش از بازگردانی باید هویت خود را دوباره تأیید کنید. پس از تأیید، همین پیش‌نمایش دوباره خوانده می‌شود.
+                  </p>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setStepUpOpen(true)}>
+                    تأیید هویت
+                  </Button>
+                </div>
+              ) : null}
+
+              {preview.body.canApply && preview.body.blockers.length === 0 ? (
+                <div className="space-y-2 rounded-xl border border-destructive/40 bg-destructive/5 p-3">
+                  <p className="text-sm font-semibold text-destructive">
+                    این کار داده‌های فعلی این کسب‌وکار را با نسخهٔ انتخاب‌شده جایگزین می‌کند.
+                  </p>
+                  <p className="text-sm">
+                    برای تأیید، نام کسب‌وکار خود را دقیقاً بنویسید:{" "}
+                    <span className="font-semibold">{preview.body.confirmationPhrase}</span>
+                  </p>
+                  <input
+                    className={inputClass}
+                    value={confirmText}
+                    onChange={(event) => setConfirmText(event.target.value)}
+                    aria-label="عبارت تأیید بازگردانی"
+                    autoComplete="off"
+                  />
+                  {applyError ? <ErrorBox>{applyError}</ErrorBox> : null}
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={
+                        applyBusy ||
+                        confirmText.trim() !== preview.body.confirmationPhrase.trim() ||
+                        !preview.body.confirmationPhrase.trim()
+                      }
+                      onClick={() => void applyRestore()}
+                    >
+                      {applyBusy ? "در حال بازگردانی…" : "بازگردانی قطعی"}
+                    </Button>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setPreview(null)}>
+                      انصراف
+                    </Button>
+                  </div>
+                </div>
+              ) : applyError ? (
+                <ErrorBox>{applyError}</ErrorBox>
+              ) : null}
             </div>
           ) : null}
+
+          {applied ? (
+            <InfoBox>
+              بازگردانی انجام و تأیید شد: {toPersianDigits(String(applied.tables))} مجموعهٔ داده،{" "}
+              {toPersianDigits(String(applied.inserted))} ردیف نوشته‌شده و{" "}
+              {toPersianDigits(String(applied.deleted))} ردیف جایگزین‌شده
+              {applied.verified ? "؛ شمارش ردیف‌ها با نسخهٔ پشتیبان مطابقت دارد." : "."}
+            </InfoBox>
+          ) : null}
+
+          <StepUpPrompt
+            open={stepUpOpen}
+            title="تأیید مجدد هویت برای بازگردانی"
+            description="بازگردانی داده‌های کسب‌وکار یک عمل حساس است و نیازمند تأیید دوبارهٔ هویت شماست."
+            onCancel={() => setStepUpOpen(false)}
+            onVerified={() => {
+              setStepUpOpen(false);
+              const ref = preview?.ref;
+              if (ref) void openPreview(ref);
+            }}
+          />
         </div>
       ) : null}
     </SectionCard>

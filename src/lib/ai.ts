@@ -2956,8 +2956,9 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     type: "backup.restore.apply",
     endpoint: "/api/backup/restore",
     method: "POST",
-    label: "خطرناک — جایگزینی کامل پایگاه‌دادۀ تنانت با یک نسخهٔ از پیش صحت‌سنجی‌شده؛ هر بار تأیید انسان",
-    payloadHint: '{ artifactId: string /* از لیست restore */, passphrase?: string, verifyOnly?: boolean }',
+    label:
+      "خطرناک — بازگردانی دادهٔ همین کسب‌وکار از یک نسخهٔ صحت‌سنجی‌شده. در نصب تک‌کسب‌وکار جایگزینی فیزیکی انجام می‌شود؛ در استقرار مرکزی فقط پیش‌نمایش بازگردانی (بدون تغییر داده) برگردانده می‌شود و اجرای واقعی با تأیید و ورود دوبارهٔ مالک در صفحهٔ پشتیبان‌گیری انجام می‌شود",
+    payloadHint: '{ artifactId: string /* از لیست restore یا فهرست نسخه‌ها */, passphrase?: string, verifyOnly?: boolean }',
     executor: "backupRestoreApply",
   },
   "table.session.open": {

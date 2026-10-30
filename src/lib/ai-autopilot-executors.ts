@@ -24,6 +24,10 @@ import { redeemPoints, issueStoreCredit, useStoreCredit as payOutStoreCredit, st
 import { openSession, releaseSessionWithoutOrders, mergeTableIntoSession, setSessionGuests } from "./table-session-service";
 import { broadcast } from "./realtime";
 import { restoreAvailable, restoreFromArtifact } from "./backup-service";
+import { deploymentRole } from "./deployment-role";
+import { tenantPhysicalRestoreAllowed } from "./backup-policy";
+import { readDeploymentProfile } from "./deployment-mode";
+import { previewOwnedRestore } from "./tenant-backup-artifacts-service";
 import { DeviceError, renameDevice, revokeDevice, listDevices, findActiveDeviceId } from "./device-service";
 import { updateAttributeDefinition, deleteAttributeDefinition } from "./product-attributes-service";
 import { parseAttributeDefinitionInput } from "./product-attributes";
@@ -6738,8 +6742,45 @@ const deviceRevoke: AutopilotExecutor = async (ctx) => {
 // status (`get_backup_status`) and apply a verified restore on a single-tenant
 // install, which is what remains below.
 const backupRestoreApply: AutopilotExecutor = async (ctx) => {
-  const artifactId = str(ctx.payload.artifactId) ?? str(ctx.payload.id);
+  const artifactId = str(ctx.payload.artifactId) ?? str(ctx.payload.id) ?? str(ctx.payload.ref);
   if (!artifactId) return fail("missing_artifact");
+
+  // Issue #903 §4: a **central** deployment restores one tenant logically, and
+  // that engine requires the Owner's typed confirmation plus a fresh
+  // re-authentication. An executor has no session to prove freshness with, and
+  // fabricating one would defeat the very gate the epic asks for. So the model
+  // gets the real preview — computed by the same engine the Owner's screen uses
+  // — and the apply is left to the human, in the app, behind that gate. The
+  // previous code answered `restore_not_available` here, which was a lie: the
+  // capability exists, it just is not the model's to exercise.
+  if (!tenantPhysicalRestoreAllowed(deploymentRole())) {
+    const profile = (await readDeploymentProfile(ctx.businessId)).profile;
+    const previewed = await previewOwnedRestore(ctx.businessId, artifactId, {
+      role: deploymentRole(),
+      profile,
+      actor: {
+        canRestore: true,
+        // No session facts to claim: the preview reports these two blockers for
+        // an automated caller, which is the truth about what it can prove.
+        mfaSatisfied: false,
+        reauthenticatedAt: null,
+      },
+      actorUserId: ctx.authorizedByUserId,
+    });
+    if ("error" in previewed) return fail("artifact_not_found");
+    return {
+      ok: false,
+      errorCode: "owner_reauthentication_required",
+      result: {
+        preview: previewed.preview,
+        applyInApp: "/settings/backup",
+        note: "On a central deployment a tenant restore is applied only by the Owner, with a typed confirmation and a fresh re-authentication.",
+      },
+    };
+  }
+
+  // A site install holds exactly one business, so the physical replacement is
+  // the tenant's own restore; `restoreAvailable()` still refuses anything else.
   if (!(await restoreAvailable())) return fail("restore_not_available");
   const apply = !(ctx.payload.verifyOnly === true);
   const outcome = await restoreFromArtifact(ctx.businessId, {
