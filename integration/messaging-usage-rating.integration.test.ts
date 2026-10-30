@@ -123,9 +123,11 @@ async function balanceRial(businessId: string): Promise<number> {
 
 /** Queued sends, one per address, with the outbox row ids `appendUsageEvent` reuses. */
 async function queueSends(businessId: string, addresses: string[]): Promise<string[]> {
+  // `sending`: the drain only claims rows of a campaign that is not paused —
+  // pausing is a real brake on the money, not a label (see `drainRows`).
   const { rows: campaignRows } = await db.query<{ id: string }>(
     `INSERT INTO message_campaigns (business_id, channel, name, status)
-     VALUES ($1, 'sms', 'Campaign', 'completed') RETURNING id`,
+     VALUES ($1, 'sms', 'Campaign', 'sending') RETURNING id`,
     [businessId],
   );
   const campaignId = campaignRows[0]!.id;
