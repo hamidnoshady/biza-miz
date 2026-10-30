@@ -545,8 +545,8 @@ missing was the rest of the provider's documented surface and the tenant screen 
 | Growth screen «پیام‌های خودکار» | The tenant finally sees its approved messages with a first-party status label, can add one, revise the text of a `needs_action` row, and remove it from the catalog |
 | Console «کاتالوگ الگوهای تأییدشده» | Rejections first, then reviews in flight: submit (add or update, chosen by the service), retire, and the stored provider-neutral error code |
 
-Still open in §5/§6 and left for the follow-ups below: the dedicated audit view, and wiring an
-approved template to a concrete send (`sendManagedLookup`) once reserve/settle is in place.
+Still open in §5 and left for the follow-ups below: wiring an approved template to a concrete send
+(`sendManagedLookup`) once reserve/settle is in place. The audit view is §6f.
 Targeting by business type/plan shipped in §5c, the delivery dashboard in §6c.
 
 ## 6c. Delivery and health reporting (§6)
@@ -562,8 +562,8 @@ A child can be `active`, funded and failing every send, and nothing on the conso
 - The console gains «وضعیت تحویل پیام (۲۴ ساعت اخیر)» with the counts, the verdict and the last
   attempt per business.
 
-Still open in §6: the dedicated audit view (platform audit entries exist and are written by every
-managed-account action, but the console links to the shared audit page rather than filtering it).
+The dedicated audit view landed as §6f: not a second page, but the shared log with the `sms` family
+and a per-account deep link — the rows were always there, they just read as raw strings.
 
 ## 6d. Retail pricing, price versions and supplier cost (§4)
 
@@ -644,6 +644,33 @@ Surfaces: the console's «تحویل به تفکیک کمپین (۷ روز اخ�
 second line under each campaign on the tenant's Growth messaging screen («تأخیر صف» / «تأخیر ارسال»,
 in «—» when nothing was measured).
 
+## 6f. The audit view is the shared log, filtered (§6)
+
+§6 asked for an audit view of the managed-SMS control plane. The rows were already being written —
+every provisioning job, suspension, transfer, funding pass, reconciliation, policy change, template
+submit and test send goes through `platformAudit` — but the console linked to the unfiltered log, and
+the log had no idea what an `sms.*` action was. An operator investigating a suspension saw
+`sms.managed_account.suspend` as literal text with a generic icon, mixed into every other privileged
+action in the platform.
+
+Copying the log into a messaging-only page would have been the wrong fix: a second place to read
+events, drifting from the first. Instead the shared page learned the vocabulary.
+
+- Every `sms.*` action now has a Persian label, a status tone and an icon — a suspension in
+  `warning`, a test send in `info` because it spends real money at the provider and reaches a real
+  handset, a key rotation in `warning` even though nothing failed, since it invalidates the credential
+  the drain is holding.
+- `AUDIT_ACTION_FAMILIES` gains «پیامک مدیریت‌شده» (`sms`). The API already matched the family as a
+  prefix (`action LIKE '<value>%'`), so one entry filters the whole plane.
+- The messaging console links into it twice: «همهٔ رویدادهای پیامک مدیریت‌شده ←» for the fleet, and
+  per account «رویدادهای این حساب ←» (`?actionFamily=sms&businessId=…`), which lands on the account's
+  own history with the detail drawer intact.
+
+The guard is a sweep, not a list: `action-meta.test.ts` reads the actions back out of the two routes
+that write them **and** follows the `jobKindFor` switch that produces
+`sms.managed_account.${action}`, so a tenth job kind cannot ship unlabeled. It also asserts the two
+deep links keep their `actionFamily=sms` parameter — the exact thing that was missing.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -663,6 +690,7 @@ in «—» when nothing was measured).
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `audit/action-meta` (§6f) | 4/4: every `sms.*` action the two SMS routes write has a label that is not the key echoed back; the `jobKindFor` switch is followed so a new job kind cannot ship unlabeled; the `sms` family exists and prefixes every one of them; and both console deep links still carry `actionFamily=sms` |
 | `npx vitest run` — `campaign-delivery-report` (§6e) | 8/8 (nearest-rank percentiles where one 90 s retry still shows at p95, `null` for silence rather than `0`, unmeasured rows excluded from the statistics, unsorted input not mutated; and the source guards: no provider name, no `o.error`/`provider_message_id` in the shared row shape, the tenant query scoped by business *and* RLS, the cross-tenant read behind the documented bypass) |
 | `npm run test:db` — `kavenegar-managed-accounts` (§6e) | one added case: a campaign with two accepted sends (2 s/4 s queue, 100 ms/300 ms provider), one queued and one refused reports `{p50: 2 000, p95: 4 000}` and `{p50: 100, p95: 300}` with health `attention`; the tenant copy is its own campaign with no business or provider field, another business sees none of it, and `[null, null]` is "no measurement" |
 | `npx vitest run` — `app-availability-callers` (§3b) | 11/11 (the sweep over ~1,100 source files finds no hand-written state decision; every allowlisted presentation file still exists; the resolver carries neither `"enabled"` nor a cast; both writers validate; the SQL CHECK matches the TypeScript states exactly; and `enabled`/`off`/`""`/`null`/`3` are all refused before any query runs) |

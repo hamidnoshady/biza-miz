@@ -1,15 +1,22 @@
 import {
   Archive,
   Ban,
+  BellRing,
   CircleCheck,
+  Download,
   Globe,
   KeyRound,
   Layers,
   Pencil,
+  RefreshCw,
   RotateCcw,
+  Send,
+  ShieldCheck,
   SlidersHorizontal,
   Store,
   Trash2,
+  Upload,
+  WalletCards,
 } from "lucide-react";
 import type { StatusTone } from "@/components/platform/status-badge";
 
@@ -60,6 +67,50 @@ export const ACTION_META: Record<string, ActionMeta> = {
   "support_session.expired": { label: "انقضای نشست پشتیبانی", tone: "muted", icon: KeyRound },
   "support_session.revoked": { label: "لغو نشست پشتیبانی از کنسول", tone: "warning", icon: KeyRound },
   "support_session.tenant_revoked": { label: "لغو نشست پشتیبانی توسط کسب‌وکار", tone: "warning", icon: KeyRound },
+  // Issue #902 §6 — the managed-SMS control plane. Every one of these actions
+  // moves money, a provider credential, or a message a business will send to
+  // its own customers, so each gets a first-party label rather than falling
+  // through to the raw `sms.managed_account.…` string. The family filter in
+  // the toolbar is the prefix `sms`, which is why every entry must keep it.
+  "sms.config.update": { label: "تغییر تنظیمات پیامک", tone: "warning", icon: SlidersHorizontal },
+  "sms.managed_account.provision": { label: "ساخت حساب پیامک", tone: "success", icon: Store },
+  "sms.managed_account.adopt": { label: "پذیرش حساب موجود", tone: "info", icon: Store },
+  "sms.managed_account.sync": { label: "همگام‌سازی حساب", tone: "info", icon: RefreshCw },
+  "sms.managed_account.suspend": { label: "تعلیق حساب پیامک", tone: "warning", icon: Ban },
+  "sms.managed_account.reactivate": { label: "فعال‌سازی حساب پیامک", tone: "success", icon: CircleCheck },
+  // A key rotation invalidates the credential the drain is holding: worth a
+  // warning tone even though nothing failed.
+  "sms.managed_account.rotate_key": { label: "چرخش کلید حساب", tone: "warning", icon: KeyRound },
+  "sms.managed_account.fund": { label: "تأمین اعتبار ارائه‌دهنده", tone: "info", icon: WalletCards },
+  "sms.managed_account.transfer": { label: "انتقال اعتبار به ارائه‌دهنده", tone: "info", icon: WalletCards },
+  "sms.managed_account.reconcile": { label: "تطبیق موجودی حساب", tone: "info", icon: RefreshCw },
+  "sms.managed_account.probe": { label: "بررسی سلامت حساب", tone: "info", icon: ShieldCheck },
+  "sms.managed_account.policy": { label: "تغییر خط‌مشی حساب", tone: "info", icon: SlidersHorizontal },
+  "sms.managed_account.template_sync": { label: "همگام‌سازی الگوها", tone: "info", icon: RefreshCw },
+  "sms.managed_account.template_submit": { label: "ثبت الگو نزد ارائه‌دهنده", tone: "info", icon: Upload },
+  "sms.managed_account.template_archive": { label: "بازنشانی الگو", tone: "warning", icon: Archive },
+  "sms.managed_account.template_from_library": {
+    label: "کپی الگو از کتابخانه",
+    tone: "info",
+    icon: Download,
+  },
+  // A test send costs the provider real money and reaches a real handset.
+  "sms.managed_account.template_send_test": { label: "ارسال آزمایشی الگو", tone: "info", icon: Send },
+  "sms.managed_service.master_template_saved": {
+    label: "ذخیره الگوی سرور",
+    tone: "info",
+    icon: Pencil,
+  },
+  "sms.managed_service.master_template_toggled": {
+    label: "تغییر وضعیت الگوی سرور",
+    tone: "warning",
+    icon: Layers,
+  },
+  "sms.managed_service.alert_acknowledged": {
+    label: "تأیید هشدار پیامک",
+    tone: "muted",
+    icon: BellRing,
+  },
 };
 
 export function auditMetaFor(action: string): ActionMeta {
@@ -76,4 +127,7 @@ export const AUDIT_ACTION_FAMILIES: { value: string; label: string }[] = [
   { value: "backup", label: "پشتیبان‌گیری" },
   { value: "cms", label: "سایت‌ساز" },
   { value: "ai", label: "هوش مصنوعی" },
+  // Issue #902 §6 — the managed-SMS actions, filterable on their own. The value
+  // is the action prefix the API matches with `action LIKE '<value>%'`.
+  { value: "sms", label: "پیامک مدیریت‌شده" },
 ];
