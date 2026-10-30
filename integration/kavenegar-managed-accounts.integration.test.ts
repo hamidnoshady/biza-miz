@@ -1732,6 +1732,137 @@ describe("the canonical resolver reads the app-availability vocabulary", () => {
   });
 });
 
+describe("an approved campaign is a funding trigger of its own (plan §9 item 1)", () => {
+  it("funds the queued segments, not just the policy buffer, and says which one asked", async () => {
+    await activate(alpha.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 10,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 0,
+    });
+
+    const { rows: campaignRows } = await db.query<{ id: string }>(
+      `INSERT INTO message_campaigns (business_id, channel, name, status)
+       VALUES ($1, 'sms', 'Big campaign', 'sending') RETURNING id`,
+      [alpha.businessId],
+    );
+    const campaignId = campaignRows[0]!.id;
+
+    // Three queued recipients, one of them three segments long, plus one already
+    // delivered: pending demand is 1 + 1 + 3 = 5 segments, and the settled row
+    // owes nothing.
+    const enqueue = async (body: string, status = "queued") => {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
+         VALUES ($1, $2, 'sms', '+989120000000', $3) RETURNING id`,
+        [alpha.businessId, campaignId, body],
+      );
+      await db.query(
+        `INSERT INTO message_outbox (business_id, recipient_id, campaign_id, status)
+         VALUES ($1, $2, $3, $4)`,
+        [alpha.businessId, rows[0]!.id, campaignId, status],
+      );
+    };
+    await enqueue("سلام");
+    await enqueue("سلام");
+    await enqueue("x".repeat(200)); // 1 + ceil(130/67) = 3 segments
+    await enqueue("x".repeat(200), "delivered");
+
+    // The child's real wholesale rate, from the planner's own snapshot.
+    const plan = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 50_000_000,
+    });
+    const perSegment = Math.max(
+      plan!.snapshot.tariff.farsiRialPerSegment ?? 0,
+      plan!.snapshot.tariff.englishRialPerSegment ?? 0,
+    );
+    expect(perSegment).toBeGreaterThan(0);
+
+    const demand = await pricing.readPendingCampaignDemand(alpha.businessId, perSegment);
+    expect(demand).toMatchObject({ messages: 3, segments: 5, campaigns: 1 });
+    expect(demand.estimatedWholesaleRial).toBe(5 * perSegment);
+
+    // Only this business's queue: another tenant's campaign is not our demand.
+    expect((await pricing.readPendingCampaignDemand(beta.businessId, perSegment)).messages).toBe(0);
+
+    // The buffer asks for 10 messages; the queue asks for five — the buffer wins
+    // here, so this is a `top_up` and not a `campaign_demand` transfer.
+    expect(plan?.decision).toMatchObject({ action: "transfer", reason: "top_up" });
+
+    // Raise the queue above the buffer: eight more recipients make 13 segments
+    // against a 10-message standing order, and the reason flips.
+    for (let index = 0; index < 8; index += 1) await enqueue("سلام");
+    const queued = await pricing.planBusinessFunding(alpha.businessId, {
+      masterBalanceRial: 50_000_000,
+    });
+    expect(queued?.decision).toMatchObject({
+      action: "transfer",
+      reason: "campaign_demand",
+      targetBalanceRial: 13 * perSegment,
+    });
+
+    // And a pass implements exactly that plan for this child.
+    const script = scripted([
+      ok({ remaincredit: 50_000_000, expiredate: 1_767_225_600, type: "Master" }),
+      ok(childEntry({ remaincredit: 13 * perSegment })),
+    ]);
+    await pricing.runManagedFundingTick({ client: clientFor(script) });
+
+    const { rows: transfers } = await db.query<{ amount_rial: string; reason: string }>(
+      `SELECT amount_rial, reason FROM kavenegar_credit_transfers
+        WHERE business_id = $1 AND state = 'applied' AND idempotency_key LIKE 'auto:%'
+        ORDER BY created_at DESC LIMIT 1`,
+      [alpha.businessId],
+    );
+    // 13 segments of credit, floored to the provider's 1,000 Rial granularity.
+    expect(Number(transfers[0]?.amount_rial)).toBe(
+      pricing.roundToProviderMinimum(13 * perSegment),
+    );
+    expect(transfers[0]?.reason).toBe("automatic managed-service buffer");
+  });
+
+  it("keeps the buffer in charge when the queue is small, so a quiet fleet is not re-planned", async () => {
+    await activate(beta.businessId);
+    await policy.saveManagedChildPolicy({
+      fundingBufferMessages: 100,
+      fundingChildCapRial: null,
+      fundingDailyCapRial: null,
+      fundingMasterFloorRial: 0,
+    });
+
+    // One queued short message: well under the 100-message buffer.
+    const { rows: campaignRows } = await db.query<{ id: string }>(
+      `INSERT INTO message_campaigns (business_id, channel, name, status)
+       VALUES ($1, 'sms', 'Small campaign', 'sending') RETURNING id`,
+      [beta.businessId],
+    );
+    const { rows: recipientRows } = await db.query<{ id: string }>(
+      `INSERT INTO message_recipients (business_id, campaign_id, channel, address, body)
+       VALUES ($1, $2, 'sms', '+989120000000', 'سلام') RETURNING id`,
+      [beta.businessId, campaignRows[0]!.id],
+    );
+    await db.query(
+      `INSERT INTO message_outbox (business_id, recipient_id, campaign_id, status)
+       VALUES ($1, $2, $3, 'queued')`,
+      [beta.businessId, recipientRows[0]!.id, campaignRows[0]!.id],
+    );
+
+    const plan = await pricing.planBusinessFunding(beta.businessId, {
+      masterBalanceRial: 50_000_000,
+    });
+    const perSegment = Math.max(
+      plan!.snapshot.tariff.farsiRialPerSegment ?? 0,
+      plan!.snapshot.tariff.englishRialPerSegment ?? 0,
+    );
+    expect(plan?.decision).toMatchObject({
+      action: "transfer",
+      reason: "top_up",
+      targetBalanceRial: 100 * perSegment,
+    });
+  });
+});
+
 describe("the master balance the last pass saw (plan §9 item 4)", () => {
   it("records the figure, its age and the failed read, instead of spending it and dropping it", async () => {
     const masterBalance = await import("../src/lib/kavenegar/master-balance");
