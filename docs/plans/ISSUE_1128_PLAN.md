@@ -103,6 +103,10 @@ way round. See «What this change does not build».
 | **Wave 4** — the client screen | `/review/[token]`, public in exactly the way `/invite` is, plus its middleware entries. Renders each item's preview inline from its token-scoped URL, takes a per-item decision with a note, then a whole-round decision, and maps the refusal codes onto instructions split by whether the outcome is terminal or fixable. Its wire types are redeclared locally: the service imports the Postgres driver, and importing it into a client component would drag `pg` into the browser bundle |
 | **Wave 4** — tests | `src/lib/media-review.test.ts` (42, pure), `src/app/api/media/review-guard.test.ts` (7, exhaustive status map), `integration/media-review.integration.test.ts` (18, real database), and 72 assertions against 0265 run directly over Postgres. Two MCP coverage rows were added and both generated matrices regenerated, because `media.assets`'s broad `routes: ["media"]` prefix silently absorbed all ten new route files — the only symptom was a stale route count |
 
+| **Wave 5** — §A sales pipeline | `src/lib/crm-agency-pipeline.ts`: the agency's seven sales stages — intake, qualification, the brief, the proposal, scope and contract, won, lost — each with a probability, an outcome and its own exit criterion in `requirement_note`. No table, no entity, no engine: a list the platform's own `crm_pipeline_stages` already holds and `savePipelineStages` already validates. A type-only import and no `pg`, asserted by a source scan |
+| **Wave 5** — §A wiring | `ensureAgencySalesPipeline` in `crm-pipeline-service.ts`, called from the two read routes where a member looks at pipelines: `GET /api/crm/pipelines` under `crm.configure` and `GET /api/crm/deals` under `crm.view`. Returns null and writes nothing for every other trade; inserts under `ON CONFLICT DO NOTHING` against `(business_id, name)`; writes `is_default` false so exactly one pipeline stays the default |
+| **Wave 5** — §A tests | `crm-agency-pipeline.test.ts` (13, pure: both invariants `savePipelineStages` enforces, contiguous ordering, unique names within 120, notes within 300, probabilities rising to won, no legacy key, only the agency receives it, imports nothing but a type) and `integration/crm-agency-pipeline.integration.test.ts` (8, real database: beside-not-instead, idempotence, two simultaneous first visits, the default's identity and seeded six intact with zero deactivated stages anywhere, nothing written for a `jewelry` tenant, no legacy key, the invariants as rows, and a renamed stage surviving the next visit) |
+
 ## Decisions
 
 ### 1 — the family is `service`, and Workspace eligibility is a separate axis
@@ -525,6 +529,38 @@ integration suite.
 
 Nothing here posts a journal entry or moves money. §E is a review and handover surface, so it stays out
 of the accounting path entirely — the media recharge in §D's P&L is a different concern.
+### 33 — §A adds no CRM engine, because the CRM is already there
+
+§A reads like a request to build something: "agency client companies with multiple contacts/brands, inbound lead intake, opportunity pipeline, client briefs, qualification, proposals/quotes, scope of work and contract renewals". Recon found twenty-one `crm_*` tables already in place — `crm_pipelines`, `crm_pipeline_stages`, `crm_deals`, `crm_deal_stage_history`, `crm_leads`, `crm_activities`, `crm_party_relationships`, `crm_consent_events`, `crm_custom_fields`, `crm_scoring_state`, `crm_merges`, `crm_audit_events` — and roughly fifty service modules covering dedup, merge, ownership, scoring, consent, automation and saved views.
+
+So the second clause of §A is the operative one: leads and opportunities "must reuse canonical CRM records and existing dedup, activity history, consent, ownership and tenant permissions". Most of that is not work, it is a constraint that rules work out. What §A actually owes is the agency's *shape* on top of machinery that already exists, which is why the pipeline slice adds no table, no entity and no engine — only a list of stage names the platform's own `crm_pipeline_stages` already holds.
+
+### 34 — the agency gets a second pipeline, not a different default
+
+The obvious implementation is to fork `SEED_STAGES` by industry, and the file argues against it in terms: its six are the six the pre-0157 `CHECK` allowed, "so a freshly provisioned business and an upgraded one have structurally identical pipelines. Anything else would mean two code paths to test and a subtle difference nobody notices until a report disagrees between two tenants."
+
+That argument holds, and it is about reports rather than about tidiness. A win rate or a forecast over the default pipeline has to mean the same thing for a café and an agency or the number is not comparable, and the divergence would be invisible until somebody reconciled two tenants side by side. So the agency's track sits *beside* the universal default — which `createPipeline`'s own docblock already anticipates, naming "a tender track, an after-sales track" as the reason a second board exists. The default is untouched, no existing tenant's reports move, and a member who wants the agency track as their default promotes it through `updatePipeline`, which clears the previous one so exactly one remains.
+
+This is also why the preset's stages carry no `legacy_key`. `SaveStageInput` has no such field and `legacyStageKey` exists to recognise the pre-0157 strings; reusing `lead`/`proposal`/`won` would have made reports keyed on the legacy vocabulary count agency stages as though they were the seeded ones, which is the same silent disagreement from the other direction.
+
+### 35 — direct inserts, because composing the two existing functions leaves wreckage
+
+`createPipeline` copies the source pipeline's stages, and `savePipelineStages` *deactivates* rather than deletes the stages missing from the list it is given — rightly, because a deleted stage would leave its deals on no board at all, invisible to every forecast and discoverable only by querying SQL. Composing the two therefore leaves six deactivated copies of the default's stages beside the seven agency ones: rows that mean nothing, listed by a configurator that shows inactive stages, created by a function whose whole job was to make a tidy starting point.
+
+Nothing catches that. It type-checks, it passes every unit test, and the seven right stages are present and active — the six wrong ones are merely also there. Only a real database shows it, so one of the eight integration tests counts inactive stages across the entire tenant and requires zero. The preset inserts directly instead, and still cannot be rejected by the rules `savePipelineStages` enforces, because the pure module's own tests assert both invariants: at least one `open` stage, so a deal can be created, and at least one `won` stage, so the win rate is not structurally zero.
+
+### 36 — the read path creates it, but only the reads that look at pipelines
+
+`defaultPipeline` self-heals for a reason worth copying: migration 0157 seeded every business that existed when it ran, and businesses created afterwards get a pipeline only if every provisioning path remembers to — there are three of them (`business-provisioning`, `pairing-apply`, `platform-service`) and nothing stops a fourth. A read that creates what it needs cannot be forgotten by a new provisioning path.
+
+The tempting version is to put the agency step inside `defaultPipeline` and inherit all six of its call sites for free. Refused, because two of those sites are deal creation and lead conversion — write paths where a second pipeline's creation has no business running — and because `defaultPipeline`'s contract is to return *the default*, which the agency's track is not. It is called from the two routes where a member actually looks at pipelines instead: the configurator under `crm.configure` and the board under `crm.view`. The second matters: a sales-only member who never opens CRM settings still gets the track the first time they open the board, and a preset that only appeared after a visit to settings would look broken to exactly the people it is for.
+
+### 37 — §A's multi-brand client needs no schema at all
+
+"Agency client companies with multiple contacts/brands" and "stakeholder/approver contact is recorded without exposing another client's information" read like new tables. `crm_party_relationships` already carries `kind` over `contact_of`, `decision_maker`, `billing_contact`, `purchasing_contact`, `owner_of`, `household`, `referred_by`, `parent_organization` and `branch_of`, plus `role_title` and `is_primary` — which is a client company, its brands, its contacts and its approver, expressed in vocabulary that already exists and already has tenant scoping, an audit trail and merge behaviour.
+
+Recording that here is the point: the next reader of §A will otherwise spend the effort discovering it again, or worse, build the table.
+
 
 ## Sites audited and deliberately left alone
 
@@ -737,6 +773,31 @@ Two faults only a real database could find, and both are recorded as decisions: 
 superuser, which bypasses RLS even under FORCE (decision 31); and the purpose gate refused a `review`
 link every byte fetch, which made the default link unable to show the artwork it exists to show
 (decision 28).
+
+* `crm-agency-pipeline.test.ts` (13) — §A's preset: both invariants
+  `savePipelineStages` enforces, so the preset can never be refused by the
+  function that writes it; exactly one `won` and one `lost`; contiguous ordering;
+  unique names within the column's 120 and notes within its 300; probabilities in
+  range and rising to `won`, because a forecast multiplies by them and a preset
+  that fell as a deal advanced would reward stalling; no `legacy_key` anywhere;
+  only `advertising_agency` receives it; and a source scan proving it imports
+  nothing but a type.
+* `integration/crm-agency-pipeline.integration.test.ts` (8) — the preset against a
+  real database, which is the only place the interaction with the tenant's
+  existing pipeline is visible: it lands beside the default rather than replacing
+  it, creating it twice writes it once, two simultaneous first visits produce one
+  pipeline, the default keeps its identity and its seeded six still active with
+  zero deactivated stages anywhere in the tenant, a `jewelry` tenant gets nothing
+  written at all, no agency stage carries a `legacy_key` while every seeded one
+  still does, the two invariants hold as rows, and a stage the agency renamed
+  survives the next visit.
+
+The count of zero deactivated stages is the assertion that justifies the file.
+Composing `createPipeline` with `savePipelineStages` — the obvious implementation
+— type-checks, passes every unit test, and leaves six deactivated copies of the
+default's stages beside the seven agency ones, because the first copies the
+source stages and the second deactivates rather than deletes what it is not
+given. Only a real database shows the wreckage (decision 35).
 
 ## Rollout checklist
 
