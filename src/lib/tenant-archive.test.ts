@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  RESTORE_IMMUTABLE_TABLES,
   TENANT_ARCHIVE_MAGIC,
   applyTenantArchive,
   archiveRowCounts,
@@ -238,3 +239,50 @@ describe("applyTenantArchive", () => {
 function statements(client: ReturnType<typeof fakeClient>): string[] {
   return client.statements.map((statement) => statement.text);
 }
+
+describe("applyTenantArchive — the money tables a restore must never rewind", () => {
+  function withMoney(): TenantArchive {
+    return {
+      ...built(),
+      tables: [
+        ...built().tables,
+        { name: "wallet_ledger", columns: ["id", "amount_rial"], rows: [{ id: "w1", amount_rial: 5000 }] },
+        { name: "business_wallets", columns: ["business_id", "balance_rial"], rows: [{ business_id: "b1", balance_rial: 0 }] },
+      ],
+    };
+  }
+
+  it("leaves the wallet and the ledger exactly as they are", async () => {
+    const client = fakeClient();
+    const result = await applyTenantArchive(client as never, withMoney(), {
+      tablesInOrder: ["accounts", "orders", "order_items", "wallet_ledger", "business_wallets"],
+      skipTables: RESTORE_IMMUTABLE_TABLES,
+    });
+
+    // Not one statement reaches a money table: no DELETE, no INSERT.
+    const touched = statements(client).filter((text) => /wallet/.test(text));
+    expect(touched).toEqual([]);
+    expect(result).toEqual({ deleted: 6, inserted: 3, tables: 2 });
+  });
+
+  it("still refuses a table it cannot place in dependency order", async () => {
+    const client = fakeClient();
+    await expect(
+      applyTenantArchive(client as never, withMoney(), {
+        // A skipped table needs no position in the order; an ordinary one does.
+        tablesInOrder: ["accounts"],
+        skipTables: RESTORE_IMMUTABLE_TABLES,
+      }),
+    ).rejects.toThrow("archive_table_order_incomplete");
+  });
+
+  it("without the skip set the archive would have rewound the balance", () => {
+    // The behaviour this set exists to prevent, stated once so the reason is
+    // visible in the test rather than only in the comment above it.
+    const archive = withMoney();
+    expect(archive.tables.some((table) => table.name === "business_wallets")).toBe(true);
+    expect(RESTORE_IMMUTABLE_TABLES.has("business_wallets")).toBe(true);
+    expect(RESTORE_IMMUTABLE_TABLES.has("wallet_ledger")).toBe(true);
+    expect(RESTORE_IMMUTABLE_TABLES.has("billing_usage_events")).toBe(true);
+  });
+});

@@ -41,7 +41,14 @@ import path from "node:path";
 import { query, withTenantTransaction } from "./db";
 import { LOCK_KEYS, lockIsHeld, withDistributedLock } from "./db-locks";
 import { newRestoreJournalId, restoreJournalDir, tryAppendRestoreJournal } from "./restore-journal";
-import { applyTenantArchive, archiveRowCounts, parseTenantArchive, tenantTableSet, type TenantArchive } from "./tenant-archive";
+import {
+  RESTORE_IMMUTABLE_TABLES,
+  applyTenantArchive,
+  archiveRowCounts,
+  parseTenantArchive,
+  tenantTableSet,
+  type TenantArchive,
+} from "./tenant-archive";
 import { tenantTablesInDependencyOrder } from "./tenant-tables";
 import { buildTenantArchive, serializeTenantArchive } from "./tenant-archive";
 import { exportTenantData } from "./tenant-export";
@@ -301,7 +308,14 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
         //    recoverable operation.
         const checkpoint = await writeCheckpoint(request.businessId, journalId);
         checkpointFile = checkpoint.path;
-        const expected = archiveRowCounts(loaded.archive);
+        // The money tables are skipped by the engine (§5: the canonical wallet
+        // must be unchanged), so they are not part of what this restore promises
+        // — expecting their counts would fail every restore that touches them.
+        const expected = Object.fromEntries(
+          Object.entries(archiveRowCounts(loaded.archive)).filter(
+            ([table]) => !RESTORE_IMMUTABLE_TABLES.has(table),
+          ),
+        );
 
         // 7. The line that must exist before the first write. If it cannot be
         //    made durable, nothing is written.
@@ -315,7 +329,11 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
           // this business, so a swapped row between load and write cannot
           // redirect it.
           if (loaded.archive.businessId !== request.businessId) throw new Error("archive_business_mismatch");
-          const written = await applyTenantArchive(client, loaded.archive, { tablesInOrder: order });
+          const written = await applyTenantArchive(client, loaded.archive, {
+            tablesInOrder: order,
+            // §5: a restore replaces the tenant's business data, never its money.
+            skipTables: RESTORE_IMMUTABLE_TABLES,
+          });
           // Post-verification *inside* the same transaction: the row counts the
           // archive promised must be the counts the business now holds. A
           // mismatch throws and rolls the whole replacement back, so a
@@ -326,7 +344,14 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
         });
 
         await tryAppendRestoreJournal(
-          journalEntry("apply_succeeded", { tables: applied.tables, inserted: applied.inserted, deleted: applied.deleted }),
+          journalEntry("apply_succeeded", {
+            tables: applied.tables,
+            inserted: applied.inserted,
+            deleted: applied.deleted,
+            // The receipt says what it deliberately did not touch, so an auditor
+            // reading the journal cannot conclude the wallet was restored.
+            untouched: [...RESTORE_IMMUTABLE_TABLES].sort(),
+          }),
           journalDir,
         );
 

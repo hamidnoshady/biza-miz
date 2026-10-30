@@ -239,12 +239,38 @@ export interface ApplyArchiveResult {
  * in reverse dependency order and filled in dependency order, so foreign keys
  * hold at every step.
  */
+/**
+ * Tables a tenant restore must **never** delete and refill (issue #903 §5).
+ *
+ * The archive is captured table by table from everything that carries a
+ * `business_id`, and the money tables carry one. Without this set a restore
+ * rewinds them: `business_wallets.balance_rial` goes back to the balance at the
+ * moment of the backup — refunding every charge since — and
+ * `wallet_ledger` loses the entries that explain the difference.
+ *
+ * `billing_usage_events` is the subtler one: it is what makes charging
+ * idempotent (its `event_id` is the dedupe identity). Deleting a day's events
+ * and re-inserting an older day's would let the settlement job re-charge a
+ * window it had already charged, because the evidence that it had is gone.
+ *
+ * §5 states it directly: a restore must prove "the canonical wallet is
+ * unchanged". These are skipped rather than checked afterwards, so the property
+ * holds by construction: no statement is ever issued against them.
+ */
+export const RESTORE_IMMUTABLE_TABLES: ReadonlySet<string> = new Set([
+  "business_wallets",
+  "wallet_ledger",
+  "billing_usage_events",
+]);
+
 export async function applyTenantArchive(
   client: PoolClient,
   archive: TenantArchive,
-  options: { tablesInOrder: readonly string[] },
+  options: { tablesInOrder: readonly string[]; skipTables?: ReadonlySet<string> },
 ): Promise<ApplyArchiveResult> {
-  const present = new Set(archive.tables.map((table) => table.name));
+  const skipped = options.skipTables ?? new Set<string>();
+  const restorable = archive.tables.filter((table) => !skipped.has(table.name));
+  const present = new Set(restorable.map((table) => table.name));
   const ordered = options.tablesInOrder.filter((table) => present.has(table));
   // An archive table missing from the caller's dependency order would be
   // applied in an arbitrary position — refuse instead.

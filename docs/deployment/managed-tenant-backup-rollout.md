@@ -680,3 +680,36 @@ legacy passphrase; registering one on an operator-supplied manifest would presen
 unverified bytes to the tenant as a verified backup, which §4 forbids. That is a
 designed feature (passphrase-scoped import), not a route to bolt on, and Cloud's
 "restore from a backup file" (DoD 4, §1 matrix) stays open until it exists.
+
+## Increment: a restore must never rewind the wallet (§5, §8) — found while auditing the apply path
+
+The archive is captured table by table from everything carrying a `business_id`,
+and the money tables carry one. So the shipped apply engine would, for a business
+restoring a two-week-old backup:
+
+- **delete and refill `business_wallets`** — `balance_rial` back to the balance of
+  that day, silently refunding every charge since;
+- **delete and refill `wallet_ledger`** — the entries that explain the difference
+  gone with it;
+- **delete `billing_usage_events`** — the table whose `event_id` *is* the
+  idempotency identity, so the next settlement could re-charge a window it had
+  already charged because the evidence it had was deleted.
+
+§5 says a restore "must prove … the canonical wallet is unchanged". That is now
+true by construction rather than by inspection: `RESTORE_IMMUTABLE_TABLES`
+(`business_wallets`, `wallet_ledger`, `billing_usage_events`) is passed to
+`applyTenantArchive` as `skipTables`, so **no statement is issued** against them.
+The row-count verification skips them too (otherwise every restore would fail its
+own post-check), and the `apply_succeeded` journal entry records
+`untouched: [...]`, so an auditor reading the receipt cannot conclude the wallet
+was restored.
+
+Note this was reachable in production *only* because the apply button was added in
+`53f78cd` — the engine had no caller before that, which is exactly the kind of
+latent hazard that a Prettier-only diff review cannot see.
+
+**Still open in §5:** the checks either side of the money rule — accounting
+consistency after the swap, permission/membership reconciliation, and sync
+fencing verification — are not implemented. The epic also wants a *proof* (a test
+that another business, the platform realm and the canonical wallet are unchanged)
+which needs `npm run test:db` and therefore PostgreSQL.
