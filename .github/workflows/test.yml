@@ -74,7 +74,8 @@ permissions:
 
 defaults:
   run:
-    # Windows PowerShell 5.1 — always present on Windows, unlike `pwsh`.
+    # Windows-specific jobs still use Windows PowerShell 5.1; portable checks
+    # override the shell to Bash on Ubuntu.
     shell: powershell
 
 env:
@@ -96,7 +97,10 @@ env:
 jobs:
   lint:
     name: ESLint (noninteractive)
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -108,7 +112,10 @@ jobs:
 
   typecheck:
     name: type check
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     # A clean full-program `tsc --noEmit` exceeds the shared 3072 MB workflow
     # cap after the knowledge/notifications/warehouse merges grew the tree:
     # it dies with `FATAL ERROR: Ineffective mark-compacts near heap limit`,
@@ -146,14 +153,14 @@ jobs:
       # exit-code gate. `--pretty false` keeps diagnostics one-per-line.
       - name: Type check
         id: typecheck
-        shell: cmd
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: |
+          set +e
           node node_modules/typescript/lib/tsc.js --noEmit --extendedDiagnostics --pretty false > tsc-output.log 2>&1
-          set TSC_EXIT=%ERRORLEVEL%
-          type tsc-output.log
-          exit /b %TSC_EXIT%
+          status=$?
+          cat tsc-output.log
+          exit "$status"
       # tsc has no problem matcher here and the job-log endpoint is
       # unreachable from some debugging environments, so a red type check was
       # previously opaque ("Process completed with exit code 1" was all that
@@ -163,15 +170,18 @@ jobs:
       - name: Surface tsc diagnostics on failure
         if: failure() && steps.typecheck.outcome == 'failure'
         run: |
-          if (Test-Path tsc-output.log) {
-            Get-Content tsc-output.log -TotalCount 80 | ForEach-Object {
-              Write-Host ("::error::" + ($_ -replace '%', '%25'))
-            }
-          }
+          if [[ -f tsc-output.log ]]; then
+            head -n 80 tsc-output.log | while IFS= read -r line; do
+              printf '::error::%s\n' "${line//%/%25}"
+            done
+          fi
 
   unit-tests:
     name: unit tests
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -185,7 +195,10 @@ jobs:
 
   build:
     name: production build
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -682,7 +695,10 @@ jobs:
   # (issue #755 §22).
   required:
     name: all checks passed
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     needs: [lint, typecheck, unit-tests, build, integration-tests, api-guard-tests, data-transfer-tests, design-checks, visual-regression, media-e2e-tests]
     if: always()
     steps:
@@ -692,9 +708,10 @@ jobs:
           # `skipped` in the log instead of only changing a boolean.
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          Write-Host "job results: $env:RESULTS"
-          $bad = @($env:RESULTS -split '\s+' | Where-Object { $_ -in @('failure', 'cancelled', 'skipped') })
-          if ($bad.Count -gt 0) {
-            Write-Host "::error::One or more required checks failed, were cancelled, or did not run: $($bad -join ', ')"
-            exit 1
-          }
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            if [[ "$result" != "success" ]]; then
+              echo "::error::Required check did not succeed: $result"
+              exit 1
+            fi
+          done
