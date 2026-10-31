@@ -11,11 +11,11 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1163**. Rows: tenant **104**, platform **21**.
+Route files scanned: **1166**. Rows: tenant **105**, platform **21**.
 
 ## Summary of remaining gaps
 
-### Tenant (10)
+### Tenant (11)
 - **accounting.currencies** (Accounting · Currencies and exchange rates) — MCP gap
 - **accounting.multicurrency** (Accounting · Multi-currency entries, settlements and revaluations) — MCP gap
 - **accounting.opening-balances** (Accounting · Opening balances & fiscal carry-forward) — MCP gap
@@ -24,6 +24,7 @@ Route files scanned: **1163**. Rows: tenant **104**, platform **21**.
 - **accounting.tax_invoices** (Accounting · Taxpayer invoices (سامانه مودیان)) — MCP gap
 - **automotive.vehicles** (Automotive · Vehicles, leads, reservations and transfers) — MCP gap
 - **accounting.ar** (Accounting · Receivables (receipts, aging, customers)) — partial
+- **crm.client_briefs** (CRM · Client briefs (record what the client asked for, send it, record their confirmation)) — MCP gap
 - **workspace.agency** (Workspace · Agency commercial registers (billing schedule & milestones, change requests)) — MCP gap
 - **media.client_review** (Media · Client review rounds (assemble a batch, send it, collect the client's decisions)) — MCP gap
 
@@ -34,7 +35,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 63 · partial: 1 · MCP gap: 9 · backend gap: 0 · n/a (infra): 13 · duplicate surface: 1 · route-only (by design): 17
+Counts — covered: 63 · partial: 1 · MCP gap: 10 · backend gap: 0 · n/a (infra): 13 · duplicate surface: 1 · route-only (by design): 17
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -81,6 +82,7 @@ Counts — covered: 63 · partial: 1 · MCP gap: 9 · backend gap: 0 · n/a (inf
 | CRM | Deals & leads (handoff, convert)<br>_the services are upserts (optional id), matching the routes' create-vs-update split; convert is transactional and duplicate-guarded, exactly the screen button_ | list_crm_deals, list_crm_leads | crm.deal.save, crm.lead.save | crm.deal.move_stage | crm.deal.delete | — | crm.manage, crm.view | connection mode; step-up (always approve) | list_crm_deals, list_crm_leads, crm.deal.save, crm.lead.save, crm.deal.move_stage, crm.deal.delete | integration/crm.integration.test.ts | covered |
 | CRM | Cases & activities<br>_writes gate on partiesManage like their routes (the CRM screens share the parties lane); setCaseStatus drives the SLA clock identical to the screen button_ | list_crm_activities, list_crm_cases | crm.activity.create, crm.case.save | crm.activity.update, crm.case.set_status | crm.case.delete | — | crm.delete, parties.manage, parties.view | connection mode; step-up (always approve) | list_crm_activities, list_crm_cases, crm.activity.create, crm.case.save, crm.activity.update, crm.case.set_status, crm.case.delete | integration/crm.integration.test.ts | covered |
 | CRM | Pipelines & stages<br>_stage set edits (savePipelineStages) stay route-only: structural rework belongs to the settings screen, not a chat turn_ | list_crm_pipelines | crm.pipeline.create | crm.pipeline.update | — | — | crm.configure | connection mode | list_crm_pipelines, crm.pipeline.create, crm.pipeline.update | integration/crm.integration.test.ts | covered |
+| CRM | Client briefs (record what the client asked for, send it, record their confirmation)<br>_issue #1128 §A: the requirement as the client stated it, written before anybody prices or builds it. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and one of them has to stay a gap. `confirm` records the *client's* decision with a name attached, so a verb that could confirm would let an assistant attest that a human at the client agreed to something, which is the one act §F's rule that an assistant drafts and a human approves exists to prevent; the same applies to `supersede`, which retires a confirmed brief. Drafting and reading a brief are different in kind and are what a future tool should expose, subject to three things it must keep: a confirmed brief is frozen (a proposal priced it and a project may be delivering against it, so a correction is a new brief that supersedes it, not an edit), an approver has to be a contact of *that brief's own client* or the write is refused — which is §A's stakeholder rule stated as a constraint rather than a convention — and nothing here prices or posts anything, because budgetRial is what the client says they intend to spend and never a receivable_ | (route only) | (route only) | (route only) | (route only) | — | crm.delete, crm.manage, crm.view | — | — | integration/agency-client-briefs.integration.test.ts | MCP gap |
 | CRM | Segments, saved views, queues, RFM | get_repurchase_candidates, list_customer_segments, preview_customer_segment | crm.segment.create | crm.segment.update | crm.segment.archive | — | crm.configure, crm.manage, crm.view | connection mode | get_repurchase_candidates, list_customer_segments, preview_customer_segment, crm.segment.create, crm.segment.update, crm.segment.archive | integration/crm.integration.test.ts | covered |
 | CRM | CRM automations, custom fields, audit<br>_AR close-out: automation create/rule DSL stays screen-owned by design (batch D decision); custom fields fully covered — save is the route's single create-or-edit POST, archive its soft delete_ | list_crm_automations, list_custom_fields | crm.customField.save | crm.automation.toggle, crm.customField.save | crm.customField.archive | — | crm.configure | connection mode; step-up (always approve) | list_crm_automations, list_custom_fields, crm.customField.save, crm.automation.toggle, crm.customField.save, crm.customField.archive | integration/crm.integration.test.ts | covered |
 | CRM | CRM overview, members, consent state, data quality<br>_consent changes stay route-only by design (a human act, see crm-app-boundaries.test.ts); quality/merge POST stays route-only (mass mutation identity merge)_ | get_crm_data_quality, get_crm_overview, get_crm_queue, list_crm_members | — | crm.customer.tag | — | — | crm.merge, crm.view | connection mode | get_crm_data_quality, get_crm_overview, get_crm_queue, list_crm_members, crm.customer.tag | integration/crm.integration.test.ts | covered |
