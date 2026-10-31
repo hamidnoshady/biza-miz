@@ -882,6 +882,8 @@ half) and now have the join they were missing.
 
 ## 5n. Usage that was rated becomes a bill (§9 item 3, part two)
 
+_Merged as `c69c226` (PR #1203); the migration is `0275` here because main took `0271`–`0274` while it was in review._
+
 §5m made a rating say which price produced its amount. That answers the question for one row. It does
 not answer the question a business asks when a bill arrives — *what is this for, and on what terms?* —
 and until this slice there was no answer at all: `billing_invoice_lines` had **no `kind = 'usage'`
