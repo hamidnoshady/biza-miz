@@ -17,8 +17,13 @@
  *      `/api/platform/sms/accounts` and rendered in the console card.
  */
 import { query, withoutTenantScope } from "./db";
+import { deliveryHealth, type DeliveryHealth } from "./delivery-health";
 
-export type DeliveryHealth = "healthy" | "degraded" | "attention" | "idle";
+// The rule lives in `delivery-health.ts` (pure) because the Superadmin card is a
+// client component and the per-campaign report needs the same verdict; this
+// re-export keeps the existing importers working.
+export { deliveryHealth };
+export type { DeliveryHealth };
 
 export interface DeliveryReportRow {
   businessId: string;
@@ -31,27 +36,6 @@ export interface DeliveryReportRow {
   /** Still queued or in flight — not yet an outcome. */
   pending: number;
   lastAttemptAt: string | null;
-}
-
-/**
- * A first-party verdict for one business's recent sends.
- *
- * The thresholds are deliberately coarse — this is an operator's triage aid,
- * not an SLA — and `idle` is distinct from `healthy`: no attempts means no
- * evidence, and a report that calls silence "healthy" trains the operator to
- * ignore it.
- */
-export function deliveryHealth(row: {
-  sent: number;
-  delivered: number;
-  failed: number;
-  pending: number;
-}): DeliveryHealth {
-  const decided = row.sent + row.delivered + row.failed;
-  if (decided === 0) return row.pending > 0 ? "degraded" : "idle";
-  if (row.failed > 0 && row.failed / decided >= 0.1) return "attention";
-  if (row.failed > 0 || row.pending > 0) return "degraded";
-  return "healthy";
 }
 
 /** The window the console shows, and the most it will list. */

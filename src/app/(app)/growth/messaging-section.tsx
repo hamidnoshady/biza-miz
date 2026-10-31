@@ -18,6 +18,7 @@ import {
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass, SecondaryButton } from "@/app/dashboard/ui";
+import { TREND_HEALTH_LABELS, trendBarPercent, type DeliveryTrendSummary } from "@/lib/delivery-trend-facts";
 
 type Channel = "sms" | "email";
 
@@ -157,6 +158,13 @@ interface Data {
    * here (`campaign-delivery-report.ts`).
    */
   campaignDelivery?: CampaignDelivery[];
+  /**
+   * Issue #902 §9 item 2 — a quarter of this business's own sends, bucketed
+   * weekly. The per-campaign rows above answer "did this one arrive"; this
+   * answers "was last month worse", which is a series and not a row. A bucket
+   * with no attempts is a gap, never a zero.
+   */
+  deliveryTrend?: DeliveryTrendSummary & { days: number; granularity: string };
   campaigns: Campaign[];
   segments: Segment[];
   projects: Project[];
@@ -1081,6 +1089,62 @@ export function MessagingSection({
             </div>
           </form>
         ) : null}
+      </SectionCard>
+
+      {/* Issue #902 §9 item 2 — the long view, in the business's own words.
+          Deliberately three numbers and a shape: this screen is for someone who
+          sent a campaign, not for an operator triaging a carrier, so there is no
+          provider vocabulary here at all — and a week with no sends is a gap,
+          because "nothing sent" and "everything failed" must never look alike. */}
+      <SectionCard
+        title={`روند ارسال (${formatPersianNumber(data.deliveryTrend?.days ?? 90)} روز اخیر)`}
+        description="هر ستون یک بازه است؛ بازهٔ بدون ارسال خالی می‌ماند، نه صفر."
+      >
+        {!data.deliveryTrend || data.deliveryTrend.activeBuckets === 0 ? (
+          <p className="text-sm text-muted-foreground">در این بازه ارسالی ثبت نشده است.</p>
+        ) : (
+          <>
+            <p className="text-sm leading-6">
+              {formatPersianNumber(data.deliveryTrend.sent)} پذیرفته ·{" "}
+              {formatPersianNumber(data.deliveryTrend.delivered)} تحویل ·{" "}
+              <span className={data.deliveryTrend.failed > 0 ? "text-destructive" : undefined}>
+                {formatPersianNumber(data.deliveryTrend.failed)} ناموفق
+              </span>
+              {data.deliveryTrend.failureRate === null
+                ? ""
+                : ` · نرخ خطا ${formatPersianNumber(Math.round(data.deliveryTrend.failureRate * 100))}٪`}
+            </p>
+            <div className="mt-3 flex items-end gap-[2px]" role="img" aria-label="روند ارسال">
+              {data.deliveryTrend.points.map((point) => {
+                const busiest = Math.max(...data.deliveryTrend!.points.map((p) => p.decided + p.pending), 0);
+                const height = point.hasData ? trendBarPercent(point.decided + point.pending, busiest) : null;
+                return (
+                  <div
+                    key={point.key}
+                    className="flex min-w-0 flex-1 flex-col items-center gap-1"
+                    title={`${point.label} — ${TREND_HEALTH_LABELS[point.health]}`}
+                  >
+                    {height === null ? (
+                      <div className="h-12 w-full rounded-sm border border-dashed border-border/70" />
+                    ) : (
+                      <div
+                        className={`w-full rounded-sm ${
+                          point.health === "attention"
+                            ? "bg-destructive"
+                            : point.health === "degraded"
+                              ? "bg-amber-500 dark:bg-amber-400"
+                              : "bg-emerald-500 dark:bg-emerald-400"
+                        }`}
+                        style={{ height: `${Math.max(4, Math.round((height / 100) * 48))}px` }}
+                      />
+                    )}
+                    <span className="truncate text-[9px] text-muted-foreground">{point.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
       </SectionCard>
 
       <SectionCard title="کمپین‌های پیام" description="با شروع ارسال، فهرست مشتریانِ مجاز همان لحظه ثابت و در صف خروجی ثبت می‌شود.">

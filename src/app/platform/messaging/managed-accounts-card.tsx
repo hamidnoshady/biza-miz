@@ -17,6 +17,12 @@ import { Loader2Icon, RefreshCwIcon, SaveIcon, ShieldCheckIcon, WalletCardsIcon 
 import { formatPersianNumber } from "@/lib/digits";
 import { tomanLabel } from "@/lib/platform-money";
 import { MASTER_BALANCE_STALE_HOURS } from "@/lib/kavenegar/master-balance-facts";
+import { deliveryHealth, type DeliveryHealth } from "@/lib/delivery-health";
+import {
+  TREND_HEALTH_LABELS,
+  trendBarPercent,
+  type DeliveryTrendSummary,
+} from "@/lib/delivery-trend-facts";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass } from "../ui";
 
 interface ManagedPolicy {
@@ -230,6 +236,8 @@ interface Snapshot {
   masterTemplates: MasterTemplate[];
   delivery: DeliveryRow[];
   campaignDelivery: CampaignDeliveryRow[];
+  /** Issue #902 §9 item 2 — a quarter of delivery, bucketed weekly. */
+  deliveryTrend: DeliveryTrendSummary & { granularity: string; days: number; businesses?: number };
   alerts: ServiceAlert[];
   alertSummary: { critical: number; warning: number; info: number; unacknowledged: number; total: number };
   recentJobs: ManagedJob[];
@@ -421,13 +429,14 @@ function latencyLabel(stats: LatencyStats | null): string {
   return `${seconds(stats.p50)} / ${seconds(stats.p95)}`;
 }
 
-/** Mirrors `deliveryHealth` on the server; kept here for a per-row label. */
+/**
+ * The rule is the server's, imported rather than copied: `delivery-health.ts` is
+ * pure, so the card can call the same function the reports call. It used to keep
+ * its own copy of the thresholds with a comment saying it mirrored them, which is
+ * how a rule becomes two rules.
+ */
 function healthOf(row: DeliveryRow): keyof typeof DELIVERY_LABELS {
-  const decided = row.sent + row.delivered + row.failed;
-  if (decided === 0) return row.pending > 0 ? "degraded" : "idle";
-  if (row.failed > 0 && row.failed / decided >= 0.1) return "attention";
-  if (row.failed > 0 || row.pending > 0) return "degraded";
-  return "healthy";
+  return deliveryHealth(row);
 }
 
 const JOB_LABELS: Record<string, string> = {
@@ -1238,6 +1247,82 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
           «تأخیر صف» مدت انتظار پیام در صف ارسال است و «تأخیر ارائه‌دهنده» مدت پاسخ ارائه‌دهنده.
           ردیف‌ها بر اساس بیشترین خطا مرتب شده‌اند.
         </p>
+      </Card>
+
+      {/* Issue #902 §9 item 2 — the long view. The two cards above answer "is
+          anything failing now"; a series answers "did it get worse, and when".
+          A bucket with no attempts is drawn as a gap and labelled «بدون داده»,
+          never as a zero bar: silence and failure look identical on a chart that
+          plots zeros, and only one of them is an emergency. */}
+      <Card title={`روند تحویل (${formatPersianNumber(snapshot.deliveryTrend?.days ?? 90)} روز اخیر)`}>
+        {(snapshot.deliveryTrend?.activeBuckets ?? 0) === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            در این بازه هیچ ارسالی ثبت نشده است؛ نبودِ داده با شکست یکی نیست.
+          </p>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+              <span>
+                پذیرفته: <b className="tabular-nums">{formatPersianNumber(snapshot.deliveryTrend.sent)}</b>
+              </span>
+              <span>
+                تحویل: <b className="tabular-nums">{formatPersianNumber(snapshot.deliveryTrend.delivered)}</b>
+              </span>
+              <span className={snapshot.deliveryTrend.failed > 0 ? "text-destructive" : ""}>
+                ناموفق: <b className="tabular-nums">{formatPersianNumber(snapshot.deliveryTrend.failed)}</b>
+              </span>
+              <span className="text-xs text-muted-foreground">
+                نرخ خطا:{" "}
+                {snapshot.deliveryTrend.failureRate === null
+                  ? "—"
+                  : `${formatPersianNumber(Math.round(snapshot.deliveryTrend.failureRate * 100))}٪`}
+              </span>
+              <span
+                className={`text-xs ${
+                  snapshot.deliveryTrend.worstHealth === "attention" ? "text-destructive" : "text-muted-foreground"
+                }`}
+              >
+                بدترین وضعیت: {TREND_HEALTH_LABELS[snapshot.deliveryTrend.worstHealth]}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                تأخیر صف (میانه / صدک ۹۵): {latencyLabel(snapshot.deliveryTrend.queueLatency)}
+              </span>
+            </div>
+            <div className="mt-4 flex items-end gap-[2px]" role="img" aria-label="روند تحویل">
+              {(snapshot.deliveryTrend.points ?? []).map((point) => {
+                const max = Math.max(...snapshot.deliveryTrend.points.map((p) => p.decided + p.pending), 0);
+                const height = point.hasData ? trendBarPercent(point.decided + point.pending, max) : null;
+                const tone =
+                  point.health === "attention"
+                    ? "bg-destructive"
+                    : point.health === "degraded"
+                      ? "bg-amber-500"
+                      : "bg-emerald-500";
+                return (
+                  <div
+                    key={point.key}
+                    className="flex min-w-0 flex-1 flex-col items-center gap-1"
+                    title={`${point.label} — ${TREND_HEALTH_LABELS[point.health]}`}
+                  >
+                    {height === null ? (
+                      <div className="h-16 w-full rounded-sm border border-dashed border-border/70" />
+                    ) : (
+                      <div
+                        className={`w-full rounded-sm ${tone}`}
+                        style={{ height: `${Math.max(4, Math.round((height / 100) * 64))}px` }}
+                      />
+                    )}
+                    <span className="truncate text-[9px] text-muted-foreground">{point.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              هر ستون یک بازه است؛ کادر خالی یعنی در آن بازه هیچ ارسالی ثبت نشده — نه اینکه همه
+              شکست خورده باشند. نرخ خطا فقط روی ارسال‌هایی حساب می‌شود که نتیجه‌شان روشن شده است.
+            </p>
+          </>
+        )}
       </Card>
 
       {/* Issue #902 §5 — the library the catalog is built from. An entry is
