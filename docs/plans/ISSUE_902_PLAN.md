@@ -1000,6 +1000,8 @@ different decisions, and each is `billing.manage` and audited with the numbers i
 That closes §9 item 3 in full: retail citation (§5m), retail invoice lines (§5n), wholesale
 reconciliation (§5p).
 
+_Merged as `fdfc711` (PR #1211)._
+
 ## 7. Verification run
 
 | Gate | Result |
