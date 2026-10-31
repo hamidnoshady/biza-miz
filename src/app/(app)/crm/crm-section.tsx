@@ -34,6 +34,7 @@ import { DirectorySection } from "./directory-section";
 import { LeadsSection } from "./leads-section";
 import { SegmentsSection } from "./segments-section";
 import { DealsSection } from "./deals-section";
+import { BriefsSection } from "./briefs-section";
 import { ActivitiesSection } from "./activities-section";
 import { CasesSection } from "./cases-section";
 import { DuplicatesSection } from "./duplicates-section";
@@ -74,6 +75,16 @@ export function CrmSection({
   if (section === "leads") return <LeadsSection canManage={canWriteCrmSection(held, "leads")} />;
   if (section === "segments") return <SegmentsSection />;
   if (section === "deals") return <DealsSection canManage={canWriteCrmSection(held, "deals")} />;
+  if (section === "briefs")
+    return (
+      <BriefsSection
+        // Both flags from the table the API guards with, so the edit and action
+        // controls are never drawn for a member whose own request would be
+        // refused — and the delete control is `crm.delete`, not `crm.manage`.
+        canManage={canWriteCrmSection(held, "briefs")}
+        canDelete={canDeleteCrmSection(held, "briefs")}
+      />
+    );
   if (section === "activities")
     // The saved-view bar's key, like the service desk's: a named view is a
     // decision about how the business reads its work, and `api/crm/saved-views`

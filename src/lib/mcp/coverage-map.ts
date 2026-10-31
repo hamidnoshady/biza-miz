@@ -516,6 +516,17 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/crm.integration.test.ts",
   },
   {
+    id: "crm.client_briefs",
+    module: "CRM",
+    entity: "Client briefs (record what the client asked for, send it, record their confirmation)",
+    routes: ["crm/briefs"],
+    // No overlap with crm.pipelines or crm.deals-leads: a brief hangs off a deal
+    // and a client but is its own entity with its own chain, and neither row's
+    // prefix reaches these files.
+    note: "issue #1128 §A: the requirement as the client stated it, written before anybody prices or builds it. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and one of them has to stay a gap. `confirm` records the *client's* decision with a name attached, so a verb that could confirm would let an assistant attest that a human at the client agreed to something, which is the one act §F's rule that an assistant drafts and a human approves exists to prevent; the same applies to `supersede`, which retires a confirmed brief. Drafting and reading a brief are different in kind and are what a future tool should expose, subject to three things it must keep: a confirmed brief is frozen (a proposal priced it and a project may be delivering against it, so a correction is a new brief that supersedes it, not an edit), an approver has to be a contact of *that brief's own client* or the write is refused — which is §A's stakeholder rule stated as a constraint rather than a convention — and nothing here prices or posts anything, because budgetRial is what the client says they intend to spend and never a receivable",
+    test: "integration/agency-client-briefs.integration.test.ts",
+  },
+  {
     id: "crm.segments-views",
     module: "CRM",
     entity: "Segments, saved views, queues, RFM",
@@ -1395,6 +1406,16 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     status: "route-only (by design)",
     note: "the operator's price policy for managed messaging (markup, surcharge, volume slabs, per-business exceptions) is published only through billing.manage with a platform audit before/after, and it reveals the platform's margin over the supplier — the console's own commercial surface, never a chat-channel verb",
     test: "integration/kavenegar-retail-pricing.integration.test.ts",
+  },
+  {
+    id: "platform.billing-usage-invoices",
+    module: "Platform — Billing",
+    entity: "Usage invoices emitted from the rating ledger",
+    routes: ["platform/billing/usage-invoices"],
+    status: "route-only (by design)",
+    note:
+      "issue #902 §9 item 3: turning a month's ratings into an invoice line (and citing the price version that produced each line) is a money action with a platform audit, and the read half is a preview of what a month would bill. Both stay on the console: a chat-channel verb that issues invoices would post a receivable on someone else's word.",
+    test: "integration/billing-usage-invoice.integration.test.ts",
   },
   {
     id: "platform.services",

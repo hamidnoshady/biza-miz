@@ -36,6 +36,7 @@
  */
 
 import {
+  ClipboardListIcon,
   DatabaseZapIcon,
   HeadsetIcon,
   HistoryIcon,
@@ -79,6 +80,15 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
     label: "فرصت‌ها",
     description: "معامله‌ها در قیف فروش: چقدر، برای کی، قدم بعدی چیست",
     icon: TargetIcon,
+  },
+  {
+    // Issue #1128 §A. Sits beside the deals rather than inside one: a brief is
+    // written against an opportunity and then carried by the project it becomes,
+    // so it outlives both.
+    key: "briefs",
+    label: "بریف کارفرما",
+    description: "آنچه مشتری خواسته، پیش از قیمت و پیش از ساخت",
+    icon: ClipboardListIcon,
   },
   {
     key: "leads",
@@ -140,7 +150,7 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
 export const CRM_NAV_GROUPS: ReadonlyArray<AppSectionNavGroup<CrmSectionKey>> = [
   { label: "امروز", keys: ["overview"] },
   { label: "مشتریان", keys: ["directory"] },
-  { label: "فرصت‌ها", keys: ["deals", "leads"] },
+  { label: "فرصت‌ها", keys: ["deals", "briefs", "leads"] },
   { label: "ارتباط و پیگیری", keys: ["activities", "cases"] },
   { label: "شناخت مشتری", keys: ["segments", "consent"] },
   { label: "کیفیت داده", keys: ["quality"] },

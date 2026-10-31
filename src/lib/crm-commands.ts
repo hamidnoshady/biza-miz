@@ -70,6 +70,21 @@ const SECTION_ALIASES: Record<CrmSectionKey, readonly string[]> = {
   persons: ["پرونده مشتری", "پرونده ۳۶۰", "فایل مشتری"],
   leads: ["سرنخ", "سرنخ‌ها", "سرنخ تازه", "پرس‌وجو", "استعلام"],
   deals: ["فرصت", "فرصت‌ها", "معامله", "معامله‌ها", "قیف", "فروش", "پیشنهاد", "مذاکره"],
+  // §A's briefs. The aliases are what a person types when they are not reading
+  // the menu: the document they are looking for, not the section's name — which
+  // the caller already compares from `crm-nav.ts`.
+  briefs: [
+    "بریف",
+    "بریف کارفرما",
+    "خواسته کارفرما",
+    "نیازمندی",
+    "اقلام تحویلی",
+    "معیار پذیرش",
+    "دامنه کار",
+    "اسکوپ",
+    "کمپین",
+    "تأییدیه کارفرما",
+  ],
   activities: ["کار", "کارها", "پیگیری", "پیگیری‌ها", "تماس", "جلسه", "یادآوری", "وظیفه", "وظایف"],
   cases: ["تیکت", "تیکت‌ها", "شکایت", "پشتیبانی", "خدمات", "میز خدمت", "درخواست"],
   segments: ["بخش", "بخش‌بندی", "سگمنت", "گروه مشتریان", "تحلیل", "وفاداری", "چرخه عمر"],
