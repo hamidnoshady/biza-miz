@@ -656,6 +656,33 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     previewLabel: "دورهای بررسی",
   },
 
+  // -- Agency client briefs (issue #1128 §A) --------------------------------
+  // Migration 0271's two party columns, both `move`, and classified together
+  // because 0271's own trigger requires the approver to be *related to the
+  // brief's client*. A merge that moved `party_id` to the winner while leaving
+  // the approver on the loser would produce rows that trigger then refuses to
+  // write. It does not happen, because `crm_party_relationships` moves its edges
+  // in both directions above — the approver's edge follows the client, and the
+  // pair stays consistent.
+  {
+    table: "agency_client_briefs",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The client whose requirement this brief records, and the column is NOT NULL so it cannot be left behind. A proposal prices the brief, a project may be delivering against it and a change request departs from it, so the surviving customer's file has to carry it; stranded on an archived duplicate, the record of what was agreed disappears from exactly the place it would be needed.",
+    preview: true,
+    previewLabel: "بریف‌های کارفرما",
+  },
+  {
+    table: "agency_client_briefs",
+    column: "approver_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The client-side contact recorded as approving the brief. Moved with the brief so §A's separation rule still holds after a merge — the approver has to remain a contact of whichever client record survives — and so the pointer resolves instead of naming an archived duplicate. Not itemised in the preview: it is a dimension of the same rows `party_id` already counts, and counting them twice would overstate what the merge touches.",
+  },
+
   // -- AEC (issue #799 Wave 2) ----------------------------------------------
   // Migration 0194's three party columns. All four are `move`: they name a live
   // counterparty on a project that is still running, and the migration's own
