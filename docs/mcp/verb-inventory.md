@@ -5,8 +5,8 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **289 write verbs**
-(**78** high-risk, forced through the approval queue even on `apply`-mode connections).
+visible only to connections consented for every branch) and **287 write verbs**
+(**77** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
 
@@ -391,8 +391,6 @@ visible only to connections consented for every branch) and **289 write verbs**
 | `write_loyalty_store_credit_issue` | `loyalty.store_credit.issue` | crm | high | always approval queue (step-up) | `store_credit.issue` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_loyalty_store_credit_use` | `loyalty.store_credit.use` | crm | high | always approval queue (step-up) | `store_credit.payout` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_loyalty_program_upsert` | `loyalty.program.upsert` | crm | low | connection write_mode | `loyalty.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
-| `write_backup_config_set` | `backup.config.set` | workspace | low | connection write_mode | `backup.configure` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
-| `write_backup_run_now` | `backup.run_now` | workspace | high | always approval queue (step-up) | `backup.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_backup_restore_apply` | `backup.restore.apply` | workspace | high | always approval queue (step-up) | `backup.restore` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_device_rename` | `device.rename` | workspace | low | connection write_mode | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_device_revoke` | `device.revoke` | workspace | high | always approval queue (step-up) | `settings.manage` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

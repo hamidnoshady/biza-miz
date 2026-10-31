@@ -401,6 +401,12 @@ describe("every tenant table is protected", () => {
       // shape as platform_ai_config: one account, configured once by a
       // super-admin, holding no tenant data.
       "platform_sms_config",
+      // Issue #903 — the managed tenant-backup fleet policy singleton: interval,
+      // retention ceiling, keep count and quotas, owned by Superadmin and never
+      // a tenant's to read. Its per-business overrides and the recovery
+      // approvals are `platform_only` too, but their ownership column is
+      // `subject_business_id`, so they are not part of this `platform_` census.
+      "platform_tenant_backup_service",
     ]);
   });
 

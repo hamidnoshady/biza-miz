@@ -21,7 +21,7 @@
  * withTenantScope; this only handles the *price* of an entitled function.
  */
 import { NextResponse } from "next/server";
-import { billFeatureUse } from "./billing-service";
+import { billFeatureUse, previewFeatureUse } from "./billing-service";
 
 export type BillingGateResult =
   | {
@@ -40,10 +40,101 @@ export type BillingGateResult =
       error: "insufficient_credits" | "feature_not_entitled";
     };
 
+export type BillingPreflightResult =
+  | {
+      ok: true;
+      /** True when settling after the work would debit the wallet. */
+      willCharge: boolean;
+      priceRial: number;
+      balanceRial: number;
+    }
+  | {
+      ok: false;
+      charged: false;
+      response: NextResponse;
+      balanceRial?: number;
+      priceRial?: number;
+      error: "insufficient_credits" | "feature_not_entitled";
+    };
+
+/**
+ * Check entitlement and affordability **without debiting anything**.
+ *
+ * Issue #903: a route whose work can fail must not buy a charge before it
+ * starts. It makes that two-phase shape (refuse early with the 402/403 that
+ * `chargeForFeature` also returns, then settle only after the work succeeded)
+ * expressible; the tenant `POST /api/backup/run` route that first used it was
+ * removed by the same epic's owner decision — see §3 of
+ * `docs/deployment/managed-tenant-backup-rollout.md` — so managed backups are
+ * now charged from verified storage byte-days instead of a per-use debit.
+ */
+export async function preflightFeatureUse(
+  businessId: string,
+  featureKey: string,
+): Promise<BillingPreflightResult> {
+  try {
+    const preview = await previewFeatureUse({ businessId, featureKey });
+    if (!preview.entitled) {
+      return {
+        ok: false,
+        charged: false,
+        error: "feature_not_entitled",
+        priceRial: preview.priceRial,
+        balanceRial: preview.balanceRial,
+        response: NextResponse.json(
+          {
+            error: "feature_not_entitled",
+            message: "این قابلیت برای پلن شما فعال نیست. از بخش «اعتبار و پرداخت‌ها» می‌توانید پلن یا افزونهٔ آن را تهیه کنید.",
+            topUpUrl: "/settings/billing",
+          },
+          { status: 403 },
+        ),
+      };
+    }
+    const willCharge = preview.priceRial > 0;
+    if (preview.priceRial > 0 && preview.balanceRial < preview.priceRial) {
+      return {
+        ok: false,
+        charged: false,
+        error: "insufficient_credits",
+        balanceRial: preview.balanceRial,
+        priceRial: preview.priceRial,
+        response: NextResponse.json(
+          {
+            error: "insufficient_credits",
+            message: "اعتبار حساب شما برای این عملیات کافی نیست. از بخش «اعتبار و پرداخت‌ها» حساب خود را شارژ کنید.",
+            balanceRial: preview.balanceRial,
+            requiredRial: preview.priceRial,
+            topUpUrl: "/settings/billing",
+          },
+          { status: 402 },
+        ),
+      };
+    }
+    return {
+      ok: true,
+      willCharge,
+      priceRial: preview.priceRial,
+      balanceRial: preview.balanceRial,
+    };
+  } catch (err) {
+    // An entitlement read that fails is not permission to run the work free.
+    throw err;
+  }
+}
+
 export async function chargeForFeature(
   businessId: string,
   featureKey: string,
-  opts: { note?: string; userId?: string | null } = {},
+  opts: {
+    note?: string;
+    userId?: string | null;
+    /**
+     * Ledger metadata, so a later reconciliation can match the charge to the
+     * work it paid for (issue #903 §7: the backup refund job needs the run id).
+     */
+    metadata?: Record<string, unknown>;
+  } = {},
 ): Promise<BillingGateResult> {
   try {
     const result = await billFeatureUse({
@@ -51,6 +142,7 @@ export async function chargeForFeature(
       featureKey,
       note: opts.note,
       userId: opts.userId ?? null,
+      metadata: opts.metadata,
     });
     return {
       ok: true as const,

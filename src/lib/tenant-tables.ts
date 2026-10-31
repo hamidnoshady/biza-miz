@@ -256,6 +256,31 @@ export const EXEMPT_TABLES = new Set([
   "kavenegar_retail_price_slabs",
   "kavenegar_retail_price_versions",
   "kavenegar_service_alerts",
+  // Issue #903 — the managed tenant-backup service's platform half. Same shape
+  // as the managed-SMS fleet above: `platform_only` under FORCE RLS, so no
+  // tenant connection reads them, but an export's `SELECT *` as the owner would.
+  //
+  //   * `platform_tenant_backup_service` — the fleet policy singleton every
+  //     business's cadence and retention ceiling are derived from.
+  //   * `backup_key_versions` — the platform's key custody: each business's
+  //     artifact secret **wrapped** under the platform KEK. Ciphertext, but
+  //     nobody else's export has any business carrying the material that wraps
+  //     it, and §0's rule (a credential is not tenant data) covers it too.
+  //   * `tenant_backup_business_policy` — the Superadmin override of that
+  //     policy. A business is subject to it and must never read or infer it,
+  //     which is why its ownership column is `subject_business_id`, not
+  //     `business_id` (the convention `backup_key_versions` and
+  //     `kavenegar_service_alerts` already use).
+  //   * `tenant_backup_restore_approvals` — the named, expiring, single-use
+  //     consent for one destructive restore, same `subject_business_id` shape.
+  //
+  // The tenant halves (tenant_backup_artifacts, _drills, _restore_jobs,
+  // _site_heartbeat, _storage_samples, _upload_sessions, _upload_queue) are
+  // RLS-protected and stay in the export.
+  "platform_tenant_backup_service",
+  "backup_key_versions",
+  "tenant_backup_business_policy",
+  "tenant_backup_restore_approvals",
 ]);
 
 export interface ForeignKeyEdge {

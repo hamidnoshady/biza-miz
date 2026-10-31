@@ -79,7 +79,7 @@ if (!gate.ok) return gate.response;   // 402 no credits / 403 not entitled
   the billing catalogue test. A key that predates that registry and is still
   undeclared keeps the historical flag-governed path.
 
-`/api/backup/run` is wired as the reference integration.
+Issue #903 removed the tenant `POST /api/backup/run` route (creating a backup is not a tenant action), so managed backup billing now settles from verified `backup.storage_byte_day` usage in the scheduled jobs rather than from a per-use debit.
 
 ## Data model (migration 0130)
 

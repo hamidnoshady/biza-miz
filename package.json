@@ -40,6 +40,7 @@
     "db:platform-admin": "tsx scripts/seed-platform-admin.ts",
     "mfa:reset-platform": "tsx scripts/reset-platform-mfa.ts",
     "db:restore": "tsx scripts/restore.ts",
+    "backup:drill": "tsx scripts/backup-drill.ts",
     "db:restore-tenant": "tsx scripts/restore-tenant.ts",
     "db:reconcile-opening": "tsx scripts/reconcile-opening-inventory.ts",
     "media:reconcile-orphans": "tsx scripts/media-reconcile-orphans.ts",

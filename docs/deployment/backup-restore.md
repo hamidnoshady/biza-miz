@@ -73,6 +73,15 @@ Local, USB, and cloud artifacts are ALL unrecoverable without the encryption pas
    critical documents — so a restore is possible even if the primary Owner
    is unreachable.
 
+**Managed custody (issue #903).** `docs/deployment/managed-tenant-backup-rollout.md`
+describes the managed-custody layer: a generated per-business secret, wrapped
+under the platform key-encryption key, with rotation. It applies to artifacts
+registered through the managed path; artifacts produced by the run pipeline
+described above still require the Owner's passphrase until that pipeline is
+wired to custody (the rollout doc lists this as an open gate). Until then, keep
+the passphrase exactly as this section says — a managed record does not make a
+passphrase-protected file openable.
+
 The S3 credentials should likewise be stored outside the POS machine — after
 a total machine loss, the dashboard settings (which live in the database) are
 gone with it; restore then needs the passphrase + S3 credentials from that
