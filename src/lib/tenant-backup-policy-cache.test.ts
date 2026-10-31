@@ -163,9 +163,9 @@ describe("resolveTenantBackupPolicy with a device cache", () => {
             updated_at: new Date().toISOString(),
           }],
           rowCount: 1,
-        };
+        } as never;
       }
-      return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 0 } as never;
     });
 
     const policy = await resolveTenantBackupPolicy("business-a");

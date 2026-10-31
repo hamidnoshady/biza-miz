@@ -26,6 +26,7 @@ function row(overrides: Partial<TenantArtifactRow> = {}): TenantArtifactRow {
     lastRestoreAt: null,
     completeness: "complete",
     encryption: "managed_envelope_v1",
+    keyVersion: 1,
     storageRef: "local:pos-backup-20261027.dump.enc",
     failureCode: null,
     ...overrides,
