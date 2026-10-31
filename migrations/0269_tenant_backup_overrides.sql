@@ -32,7 +32,12 @@
 -- 1. Per-business policy overrides
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tenant_backup_business_policy (
-    business_id              uuid PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
+    -- Named `subject_business_id`, not `business_id`: this row is the platform's
+    -- (same reason `backup_key_versions` and `kavenegar_service_alerts` do it).
+    -- The generic tenancy check treats every `business_id` table as tenant data
+    -- that needs a single permissive `tenant_isolation` policy — and this row
+    -- must never be reachable from a tenant connection at all.
+    subject_business_id      uuid PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
 
     -- NULL means "inherit the fleet default". A NULL column is not a zero: the
     -- resolver must be able to tell "the operator chose 12 hours" from "nobody
@@ -74,7 +79,9 @@ COMMENT ON COLUMN tenant_backup_business_policy.interval_hours IS
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tenant_backup_restore_approvals (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id   uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    -- Same reasoning as tenant_backup_business_policy above: the business is the
+    -- subject of the consent, never a scope a tenant can reach.
+    subject_business_id uuid NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
     -- The opaque artifact reference the approval is for. Kept as text: the same
     -- reference the tenant route resolves, so an approval cannot be re-pointed.
     artifact_ref  text NOT NULL,
@@ -95,7 +102,7 @@ CREATE TABLE IF NOT EXISTS tenant_backup_restore_approvals (
 );
 
 CREATE INDEX IF NOT EXISTS tenant_backup_restore_approvals_lookup
-    ON tenant_backup_restore_approvals (business_id, artifact_ref, expires_at DESC);
+    ON tenant_backup_restore_approvals (subject_business_id, artifact_ref, expires_at DESC);
 
 ALTER TABLE tenant_backup_restore_approvals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_backup_restore_approvals FORCE ROW LEVEL SECURITY;

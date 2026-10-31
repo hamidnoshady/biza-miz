@@ -206,7 +206,7 @@ export async function getBackupConfigMasked(businessId: string) {
   const config = await getBackupConfig(businessId);
   const warnings: string[] = [];
   if (!backupPassphrase(config)) {
-    warnings.push("No encryption passphrase is set. Backups will be stored in plaintext and cloud upload will fail.");
+    warnings.push("No encryption passphrase is set. Backups will fail until a passphrase is set or the platform holds a managed key.");
   }
   const mode = tenantBackupMode();
   return {
@@ -721,27 +721,14 @@ export async function runCloudUpload(
   if (await isLocalOnly(businessId)) return { status: "disabled" };
   const config = await getBackupConfig(businessId);
 
-  // Issue #903: the destination is resolved server-side from the Superadmin's
-  // managed service (or, for an existing self-hosted install, its own historic
-  // bucket). A Local profile has already returned above, so this is the only
-  // place a managed tenant artifact can reach the network.
-  const profile = (await readDeploymentProfile(businessId)).profile;
-  const storage = await resolveTenantStorage({
-    businessId,
-    profile,
-    role: deploymentRole(),
-    legacyCloud: config.cloud.enabled ? config.cloud : undefined,
-  });
-  if (storage.mode === "unavailable") {
-    // Nothing to upload to. That is `disabled`, not `failed`: a Local profile has
-    // no cloud destination by definition, and an incomplete managed destination
-    // is reported on the service page (`last_check_ok`/`lastErrorCode`) rather
-    // than as a failed tenant backup every tick.
-    return { status: "disabled" };
-  }
-
   const role = deploymentRole();
   const scopeTag = parseArtifactName(artifact)?.scope ?? logicalSnapshotScopeTag(businessId);
+  // Admission runs before the destination is resolved: a physical dump or
+  // another scope's snapshot is refused for being forbidden, and that answer
+  // must not change with whether this install happens to have a bucket
+  // configured. (It also means the refusal is still exercised, and still
+  // recorded as a failed run, on a deployment whose managed storage is not set
+  // up yet.)
   const admission = admitTenantArtifact(role, businessId, artifact, scopeTag);
   if (!admission.ok) {
     // Recorded, not thrown: an attempt is exactly what an operator needs to see.
@@ -756,6 +743,25 @@ export async function runCloudUpload(
     ).catch(() => "");
     if (runId) await finishRun(runId, { status: "failed", error: admission.error });
     return { status: "failed", error: admission.error };
+  }
+
+  // Issue #903: the destination is resolved server-side from the Superadmin's
+  // managed service (or, for an existing self-hosted install, its own historic
+  // bucket). A Local profile has already returned above, so this is the only
+  // place a managed tenant artifact can reach the network.
+  const profile = (await readDeploymentProfile(businessId)).profile;
+  const storage = await resolveTenantStorage({
+    businessId,
+    profile,
+    role,
+    legacyCloud: config.cloud.enabled ? config.cloud : undefined,
+  });
+  if (storage.mode === "unavailable") {
+    // Nothing to upload to. That is `disabled`, not `failed`: a Local profile has
+    // no cloud destination by definition, and an incomplete managed destination
+    // is reported on the service page (`last_check_ok`/`lastErrorCode`) rather
+    // than as a failed tenant backup every tick.
+    return { status: "disabled" };
   }
 
   const prefix = storage.mode === "managed" ? tenantObjectPrefix(storage.prefix, businessId) : storage.prefix;

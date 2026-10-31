@@ -42,6 +42,7 @@ import { query, withTenantTransaction } from "./db";
 import { LOCK_KEYS, lockIsHeld, withDistributedLock } from "./db-locks";
 import { newRestoreJournalId, restoreJournalDir, tryAppendRestoreJournal } from "./restore-journal";
 import {
+  ARCHIVE_EXCLUDED_TABLES,
   RESTORE_IMMUTABLE_TABLES,
   applyTenantArchive,
   archiveRowCounts,
@@ -168,7 +169,15 @@ async function writeCheckpoint(businessId: string, journalId: string): Promise<{
   const dir = await ensureStagingDir(businessId, `checkpoint-${journalId.slice(0, 8)}`);
   const file = path.join(dir, "checkpoint.archive.json");
   const [tables, schemaVersion] = await Promise.all([exportTenantData(businessId), installedSchemaVersion()]);
-  const archive = buildTenantArchive({ businessId, capturedAt: new Date(), schemaVersion, tables });
+  // Never the identity row: the checkpoint is replayed through the same engine,
+  // which refuses to write `businesses`. One set decides what an archive may
+  // carry, so the writer and the validator cannot disagree.
+  const archive = buildTenantArchive({
+    businessId,
+    capturedAt: new Date(),
+    schemaVersion,
+    tables: tables.filter((table) => !ARCHIVE_EXCLUDED_TABLES.has(table.name)),
+  });
   await fs.writeFile(file, serializeTenantArchive(archive), { mode: 0o600 });
   return { path: file, archive };
 }

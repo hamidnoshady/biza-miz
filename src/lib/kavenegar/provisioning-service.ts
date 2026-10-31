@@ -35,6 +35,8 @@ import {
 } from "./client";
 import { KavenegarManagementClient, KavenegarManagementError, KavenegarTransportError } from "./rest";
 import { getManagedChildPolicy, type ManagedChildPolicy } from "./policy";
+import { readMasterBalanceMirror, type MasterBalanceMirror } from "./master-balance";
+import { listFleetCampaignDemand } from "./pricing-service";
 import { raiseServiceAlert, resolveServiceAlert } from "./alert-service";
 import {
   buildChildProvisioningRequest,
@@ -1128,6 +1130,18 @@ export async function listManagedAccountsForConsole(): Promise<ManagedAccountCon
 export interface ManagedServiceConsoleSnapshot {
   policy: ManagedChildPolicy;
   accounts: ManagedAccountConsoleRow[];
+  /**
+   * The master's credit as the last funding pass observed it, with the age and
+   * the failed-read flag — `masterBalanceView` turns it into a verdict for the
+   * screen. Provider-facing and platform-only, like every other field here.
+   */
+  masterBalance: MasterBalanceMirror;
+  /**
+   * Queued SMS work per business, in segments — the input the funding planner
+   * sizes transfers against since §9 item 1. Counts only; the money it implies
+   * is the planner's arithmetic, not the console's.
+   */
+  pendingDemand: { businessId: string; messages: number; segments: number; campaigns: number }[];
   recentJobs: {
     id: string;
     businessId: string;
@@ -1147,9 +1161,15 @@ export interface ManagedServiceConsoleSnapshot {
 }
 
 export async function getManagedServiceConsoleSnapshot(): Promise<ManagedServiceConsoleSnapshot> {
-  const [policy, accounts, jobs, transfers] = await Promise.all([
+  const [policy, masterBalance, accounts, demand, jobs, transfers] = await Promise.all([
     getManagedChildPolicy(),
+    // Issue #902 §9 item 4: what the last funding pass saw the provider report,
+    // so an operator reads the console instead of asking the provider by hand.
+    readMasterBalanceMirror(),
     listManagedAccountsForConsole(),
+    // Issue #902 §9 item 1: the queue each child is holding, so an operator can
+    // see the demand the planner is sizing transfers against.
+    listFleetCampaignDemand(),
     withoutTenantScope("platform", async () => {
       const { rows } = await query<{
         id: string;
@@ -1188,6 +1208,8 @@ export async function getManagedServiceConsoleSnapshot(): Promise<ManagedService
   return {
     policy,
     accounts,
+    masterBalance,
+    pendingDemand: demand,
     recentJobs: jobs.map((row) => ({
       id: row.id,
       businessId: row.business_id,

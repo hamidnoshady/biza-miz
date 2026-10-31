@@ -259,6 +259,7 @@ export function FoodServiceInventoryManager({
       ) : null}
       <ErrorBox>{error}</ErrorBox>
 
+      <div data-tour-id="inventory.workspace">
       <SectionNav
         idPrefix="inventory"
         label="بخش‌های انبار"
@@ -340,6 +341,7 @@ export function FoodServiceInventoryManager({
           <BarcodesSection items={data.items} busy={busy} />
         ) : null}
       </SectionNav>
+      </div>
     </div>
   );
 }

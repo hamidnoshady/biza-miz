@@ -450,7 +450,7 @@ export async function readBusinessPolicyOverride(
       const { rows } = await query<BusinessPolicyOverrideRow>(
         `SELECT interval_hours, retention_days, keep_count, protected_recovery_copies,
                 max_artifact_bytes, require_restore_approval, note, updated_at
-           FROM tenant_backup_business_policy WHERE business_id = $1`,
+           FROM tenant_backup_business_policy WHERE subject_business_id = $1`,
         [businessId],
       );
       return rows[0] ?? null;

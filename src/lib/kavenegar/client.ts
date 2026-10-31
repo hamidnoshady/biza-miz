@@ -11,6 +11,8 @@
  *        &Status=2&Mininumallowedcredit=<rial>&Planid=<id>&Lines=<a,b>
  *   GET  …/client/fetchbylocalid.json?Localid=<our id>
  *   GET  …/verify/templatelist.json?apiKey=<child key>&page=1
+ *   GET  https://api.kavenegar.com/v1/{MASTER_KEY}/account/info.json
+ *        — the *master's own* credit and expiry (see `KavenegarAccountInfo`)
  *
  * The reply envelope (verified against the provider's own documented examples,
  * which are recorded as fixtures in `client.test.ts`) puts the result in
@@ -59,6 +61,37 @@ export interface KavenegarChildAccount {
   assignedLines: string[];
   expireAtUnix: number | null;
   lastLoginAtUnix: number | null;
+}
+
+/**
+ * The master account's own credit — issue #902 §3 / plan §9 item 4.
+ *
+ * The customer-management API reports a *child's* `remaincredit` and says
+ * nothing about the parent, which is why the funding plan accepted an
+ * operator-supplied master balance for so long. The account endpoint answers
+ * the question directly: it describes whichever account the key belongs to, so
+ * the master key's own answer is the master's credit.
+ *
+ * `remainCreditRial` is `null` when the reply carried no usable number, and is
+ * never coerced to `0`: "the provider said zero" and "the provider said nothing
+ * I could parse" are opposite facts to a funding decision, and the second one
+ * must not quietly look like an empty wallet.
+ */
+export interface KavenegarAccountInfo {
+  remainCreditRial: number | null;
+  /** Unix seconds the account expires, or `null` when absent. */
+  expireAtUnix: number | null;
+  /** The provider's own account type label, when it sends one. */
+  type: string | null;
+}
+
+/** Map the `account/info` payload. Unrecognised fields are dropped, not copied. */
+export function mapAccountInfo(raw: Record<string, unknown>): KavenegarAccountInfo {
+  return {
+    remainCreditRial: numberValue(pick(raw, "remaincredit")),
+    expireAtUnix: numberValue(pick(raw, "expiredate")),
+    type: stringValue(pick(raw, "type")) || null,
+  };
 }
 
 export interface KavenegarTemplate {
@@ -446,6 +479,21 @@ export function buildFetchChildByLocalIdRequest(input: {
   };
 }
 
+/**
+ * `account/info.json` — the credit of the account the key belongs to.
+ *
+ * A GET, so it is safe to retry (`rest.ts` retries idempotent GETs); the key
+ * travels in the path like every other endpoint, which is why the caller logs
+ * only the redacted URL.
+ */
+export function buildAccountInfoRequest(input: { masterApiKey: string }): KavenegarRequest {
+  return {
+    url: `${KAVENEGAR_API_BASE}/${encodeURIComponent(input.masterApiKey)}/account/info.json`,
+    method: "GET",
+    params: {},
+  };
+}
+
 export function buildListChildrenRequest(input: { masterApiKey: string }): KavenegarRequest {
   return { url: clientUrl(input.masterApiKey, "list"), method: "GET", params: {} };
 }
@@ -627,6 +675,88 @@ export function buildDeleteTemplateRequest(input: {
   if (input.childApiKey) params.apiKey = input.childApiKey;
   if (input.childLocalId) params.localId = input.childLocalId;
   return { url: verifyUrl(input.masterApiKey, "deletetemplate"), method: "POST", params };
+}
+
+/**
+ * Issue #902 §5 — one `verify/lookup` send.
+ *
+ * Unlike the customer-management calls, a lookup send is authenticated by the
+ * **child's own key in the URL** (`/{key}/verify/lookup.json`): the message goes
+ * out of the business's account, is billed to that business's provider credit,
+ * and the master key never appears. That is why this builder takes no
+ * `masterApiKey` — there is nothing here for the master to do.
+ *
+ * `template` is the derived provider name (`bm<8 hex>`), never the tenant's
+ * title: `template-service.lookupTemplateName` is the single place that maps one
+ * to the other, so a rename can never silently change which approved message
+ * sends.
+ */
+export interface LookupSendInput {
+  /** The child account's own API key. */
+  apiKey: string;
+  /** The provider template name, already derived and approved. */
+  template: string;
+  receptor: string;
+  /** Positional token values: `tokens[0]` → `%token`, `[1]` → `%token2`. */
+  tokens: string[];
+  /** The child's assigned line, when the policy fixes one. */
+  sender?: string | null;
+}
+
+/**
+ * Iranian mobile numbers, as people and CRMs actually store them.
+ *
+ * A bad receptor is a billed provider failure (411), so the normalisation is
+ * here rather than left to whatever a caller happened to type: `+98`, `0098`,
+ * `98`, Persian digits and stray separators all have to become one canonical
+ * `09xxxxxxxxx`.
+ */
+export function normalizeReceptor(value: string): string | null {
+  const digits = String(value)
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[^0-9]/g, "")
+    // `0098…` is the same subscriber as `+98…`: strip the international prefix
+    // before deciding what the number is.
+    .replace(/^0098/, "98");
+  if (/^09\d{9}$/.test(digits)) return digits;
+  if (/^989\d{9}$/.test(digits)) return `0${digits.slice(2)}`;
+  return null;
+}
+
+export function buildLookupSendRequest(input: LookupSendInput): KavenegarRequest {
+  const params: Record<string, string> = {
+    receptor: input.receptor,
+    template: input.template,
+  };
+  // The provider's slot names, spelled the way its own substitution pass reads
+  // them: `token`, `token2`, `token3`.
+  input.tokens.forEach((value, index) => {
+    params[index === 0 ? "token" : `token${index + 1}`] = value;
+  });
+  if (input.sender) params.sender = input.sender;
+  return { url: verifyUrl(input.apiKey, "lookup"), method: "POST", params };
+}
+
+export interface LookupSendResult {
+  /** The provider's message id, for support and delivery tracking. */
+  messageId: string | null;
+  /**
+   * What the provider says the message cost, in rial. Null when it did not say
+   * — the margin report prefers an honest null to a zero.
+   */
+  costRial: number | null;
+  status: number | null;
+}
+
+export function mapLookupEntry(raw: Record<string, unknown>): LookupSendResult {
+  const messageId = raw.messageid ?? raw.messageId ?? raw.id;
+  const cost = Number(raw.cost);
+  const status = Number(raw.status);
+  return {
+    messageId: messageId === undefined || messageId === null ? null : String(messageId),
+    costRial: Number.isFinite(cost) && cost > 0 ? Math.round(cost) : null,
+    status: Number.isFinite(status) ? status : null,
+  };
 }
 
 /**

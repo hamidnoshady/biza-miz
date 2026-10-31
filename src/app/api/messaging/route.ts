@@ -15,6 +15,7 @@ import {
 } from "@/lib/message-campaigns-service";
 import { getMessageBusinessBilling } from "@/lib/messaging-billing";
 import { getTenantMessagingConfig } from "@/lib/messaging-service-readiness";
+import { tenantCampaignDelivery } from "@/lib/campaign-delivery-report";
 import {
   createLookupTemplate,
   disableLookupTemplate,
@@ -23,6 +24,16 @@ import {
   reviseLookupTemplate,
   toTenantLookupTemplates,
 } from "@/lib/kavenegar/template-service";
+import {
+  instantiateMasterTemplate,
+  MasterTemplateError,
+  tenantTemplateLibrary,
+} from "@/lib/kavenegar/master-template-service";
+import {
+  LookupTriggerError,
+  listTriggerSettings,
+  saveTriggerSetting,
+} from "@/lib/kavenegar/lookup-triggers";
 
 const channel = (value: unknown): "sms" | "email" | null =>
   value === "sms" || value === "email" ? value : null;
@@ -39,8 +50,25 @@ export const GET = withTenantScope(async () => {
 
   // `billing` is the central wallet's usable balance, for the cost warning
   // only; buying credit is the platform billing page's job (issue #764).
-  const [config, billing, templates, campaigns, segments, projects, promotions, lookupTemplates] =
-    await Promise.all([
+  const [
+    config,
+    billing,
+    templates,
+    campaigns,
+    segments,
+    projects,
+    promotions,
+    lookupTemplates,
+    templateLibrary,
+    // Issue #902 §5 — the business's own "when X happens, send this" decisions.
+    // Off until the business turns one on; the login code is deliberately not
+    // among them (auth runs on the platform transport, never a tenant wallet).
+    triggers,
+    // Issue #902 §9 item 2 — did this business's campaigns arrive? Scoped to its
+    // own campaigns by the caller and by RLS, and carrying no provider name,
+    // provider error string or wholesale cost (campaign-delivery-report.ts).
+    campaignDelivery,
+  ] = await Promise.all([
       getTenantMessagingConfig(session.businessId),
       getMessageBusinessBilling(session.businessId),
       listMessageTemplates(session.businessId),
@@ -52,6 +80,12 @@ export const GET = withTenantScope(async () => {
       // The provider's template names, ids and rejection text never leave the
       // server (src/lib/kavenegar/template-service.ts).
       listLookupTemplates(session.businessId).then(toTenantLookupTemplates),
+      // Issue #902 §5 — the platform's own message library, filtered to this
+      // business's trade and plan server-side. First-party titles and a rendered
+      // sample only: no provider template name, id or approval vocabulary.
+      tenantTemplateLibrary(session.businessId),
+      listTriggerSettings(session.businessId),
+      tenantCampaignDelivery(session.businessId, { sinceHours: 24 * 7, limit: 10 }),
     ]);
   return NextResponse.json({
     config,
@@ -62,6 +96,9 @@ export const GET = withTenantScope(async () => {
     projects,
     promotions,
     lookupTemplates,
+    templateLibrary,
+    triggers,
+    campaignDelivery,
   });
 });
 
@@ -108,6 +145,34 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       );
     }
 
+    if (body.action === "lookup_template_from_library") {
+      // Adding one of the platform's approved messages to this business's own
+      // catalog. The entry is named by id, but eligibility (enabled, trade,
+      // plan) is re-resolved server-side — the id is not an authorisation.
+      if (typeof body.libraryId !== "string" || !body.libraryId) {
+        return NextResponse.json({ error: "invalid_lookup_template" }, { status: 400 });
+      }
+      try {
+        const result = await instantiateMasterTemplate({
+          businessId: session.businessId,
+          masterTemplateId: body.libraryId,
+        });
+        return NextResponse.json(
+          {
+            template: toTenantLookupTemplates([result.template])[0],
+            created: result.created,
+          },
+          { status: result.created ? 201 : 200 },
+        );
+      } catch (error) {
+        if (error instanceof MasterTemplateError) {
+          const status = error.code === "master_template_not_found" ? 404 : 400;
+          return NextResponse.json({ error: error.code }, { status });
+        }
+        throw error;
+      }
+    }
+
     if (body.action === "lookup_template_revise") {
       // Editing a message. The server decides the shape (issue #902 §5): a
       // draft or rejected row is rewritten in place, while an approved one
@@ -143,6 +208,31 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       if (!owned) return NextResponse.json({ error: "template_not_found" }, { status: 404 });
       const template = await disableLookupTemplate(owned.id);
       return NextResponse.json({ template: toTenantLookupTemplates([template])[0] });
+    }
+
+    if (body.action === "lookup_trigger") {
+      // Turning one automation on, attached to one of this business's approved
+      // messages. Every check the dispatcher makes (ownership, approval, and a
+      // mapping the event can actually fill) happens here too, so the operator
+      // reads the refusal in the form rather than in a send log.
+      if (typeof body.trigger !== "string" || typeof body.templateId !== "string") {
+        return NextResponse.json({ error: "invalid_trigger" }, { status: 400 });
+      }
+      try {
+        const trigger = await saveTriggerSetting({
+          businessId: session.businessId,
+          trigger: body.trigger,
+          templateId: body.templateId,
+          enabled: body.enabled === undefined ? true : body.enabled === true,
+        });
+        return NextResponse.json({ trigger });
+      } catch (error) {
+        if (error instanceof LookupTriggerError) {
+          const status = error.code === "template_not_found" ? 404 : 400;
+          return NextResponse.json({ error: error.code }, { status });
+        }
+        throw error;
+      }
     }
 
     if (body.action === "campaign") {
@@ -214,6 +304,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       "missing_token",
       "unsupported_token",
       "unknown_purpose",
+      "variables_mismatch",
       "template_archived",
     ];
     if (known.some((code) => message.startsWith(code)) || message.startsWith("message_variable_missing") || message.startsWith("unknown_template_variable")) {

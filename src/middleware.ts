@@ -264,6 +264,20 @@ const PUBLIC_PATHS = [
   // accept-invite, and public for the same reason.
   "/activate",
   "/api/auth/owner-activation",
+  // Issue #1128 §E — the external client review door, and the same shape as
+  // /invite above: the person arriving has no session and must never be given
+  // one, because they are the client and not staff. §B asks for "revocable
+  // scoped external review links" and for resource scheduling "without a new
+  // staff identity system", so the token in the URL is the whole credential and
+  // there is deliberately no approve-style media permission behind it.
+  //
+  // The API entry is prefix-matched by `isPublicPath`, which is what keeps this
+  // safe to spell this way: `/api/media/review` publishes the three token routes
+  // under `/api/media/review/[token]/…` and does NOT publish the agency's own
+  // `/api/media/review-rounds/…`, because that path does not start with
+  // `/api/media/review/`. Those stay session-guarded with media.view/media.manage.
+  "/review",
+  "/api/media/review",
   "/reset-password",
   "/api/auth/password-reset",
   // Issue #885 L10 — the initiation half. Already covered by the entry above

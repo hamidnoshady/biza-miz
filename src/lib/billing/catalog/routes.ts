@@ -70,6 +70,14 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   // are My Workspace's project-metadata endpoints, so they classify exactly as
   // `workspace` does rather than as a capability of their own.
   aec: keys("operations.shared"),
+  // Issue #1128 §D — an agency project's billing registers: the schedule and
+  // its milestones, and the change requests that revise the engagement's value.
+  // They are My Workspace project endpoints with money in them, not a capability
+  // a tenant is billed for separately — the money they move is already accounted
+  // for by `orders`/`sales` (the invoice a milestone issues) and by `ledger`
+  // (the entry that invoice posts). Classifying them as their own declaration
+  // would bill twice for one document.
+  agency: keys("operations.shared"),
   knowledge: keys("operations.shared"),
   support: keys("operations.shared"),
   "support-access": keys("operations.shared"),

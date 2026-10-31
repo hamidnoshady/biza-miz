@@ -35,6 +35,7 @@ import {
   searchKbArticles,
   getKbArticleBySlug,
   listKbCatalogue,
+  kbRelatedGuidesForArticle,
 } from "./knowledge-service";
 
 type QueryResult = { rows: Record<string, unknown>[]; rowCount: number };
@@ -282,6 +283,40 @@ describe("member reads apply the inactive-category visibility policy (P1)", () =
   });
 });
 
+describe("related published guides in a page-help modal", () => {
+  it("returns only same-category published siblings in deterministic order", async () => {
+    db.query.mockImplementation(
+      handler((sql, params) => {
+        expect(params).toEqual(["accounting-products-guide"]);
+        expect(sql).toContain("WITH RECURSIVE visible_categories");
+        expect(sql).toContain("chosen.category_id IN (SELECT id FROM visible_categories)");
+        expect(sql).toContain("a.category_id = chosen.category_id");
+        expect(sql).toContain("a.id <> chosen.id");
+        expect(sql).toContain("a.status = 'published'");
+        expect(sql).toContain("chosen.status = 'published'");
+        expect(sql).toContain("a.category_id IS NULL OR a.category_id IN");
+        expect(sql).toContain("ORDER BY a.sort_order, a.title, a.id");
+        expect(sql).toContain("LIMIT 24");
+        return {
+          rows: [
+            { slug: "accounting-products-new-guide", title: "افزودن محصول", summary: "راهنما", section_keys: ["page:/accounting/products/new"] },
+            { slug: "accounting-products-prices-guide", title: "قیمت‌ها", summary: "", section_keys: ["page:/accounting/products/prices"] },
+          ],
+          rowCount: 2,
+        };
+      }),
+    );
+    const related = await kbRelatedGuidesForArticle("accounting-products-guide");
+    expect(related.map((x) => x.slug)).toEqual(["accounting-products-new-guide", "accounting-products-prices-guide"]);
+    expect(related[0].sectionKeys).toEqual(["page:/accounting/products/new"]);
+    expect(related[0].summary).toBe("راهنما");
+  });
+
+  it("returns no siblings for an article without a visible category", async () => {
+    db.query.mockResolvedValue({ rows: [], rowCount: 0 });
+    await expect(kbRelatedGuidesForArticle("uncategorized")).resolves.toEqual([]);
+  });
+});
 describe("admin pagination (P2)", () => {
   it("returns a bounded page and total instead of a silent LIMIT 200", async () => {
     const calls: string[] = [];

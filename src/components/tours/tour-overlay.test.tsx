@@ -169,6 +169,18 @@ describe("TourOverlay", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
+  it("targets the visible copy when an anchor is drawn twice (phone bar and desktop panel)", () => {
+    // The first copy in the document is hidden (no box), as a `md:hidden` bar is on desktop.
+    const hidden = mountAnchor("products.toolbar", { width: 0, height: 0 });
+    const visible = mountAnchor("products.toolbar");
+    const { container } = setup({ startIndex: 1 });
+    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
+    expect((HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mock.contexts).toContain(visible);
+    expect((HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mock.contexts).not.toContain(hidden);
+    expect(container.querySelector("[style*='box-shadow']")).not.toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("waits for an anchor that mounts late", async () => {
     setup({ startIndex: 1 });
     await act(async () => {

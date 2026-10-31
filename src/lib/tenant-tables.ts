@@ -226,6 +226,61 @@ export const EXEMPT_TABLES = new Set([
   "platform_mcp_oauth_clients",
   "platform_mcp_oauth_codes",
   "platform_mcp_oauth_tokens",
+  // Issue #902 — the managed-SMS service's platform tables. Every one of them is
+  // `platform_only` under FORCE RLS (no tenant policy at all), so a tenant
+  // connection reads nothing from them; but a per-tenant export runs its
+  // `SELECT *` as the owner, and an owner is exactly what FORCE RLS stops only
+  // for non-superusers. On a superuser connection these rows therefore *were*
+  // exported, and migration 0264's seeded library made a restore collide on its
+  // own keys — the drift this list exists to prevent (see the header: 0130 did
+  // the same thing with the billing catalogue).
+  //
+  //   * `kavenegar_account_credentials` — the encrypted child API key. Never in
+  //     an export, by §0's own rule: a credential is not tenant data, and
+  //     ciphertext is meaningless on any install without this business's key.
+  //   * `kavenegar_retail_price_versions` / `_slabs` / `_overrides` (§4) — the
+  //     platform's commercial policy: the markup a business is charged. Its
+  //     exception rows target a business through `scope_business_id`, which is a
+  //     targeting key, not a tenant column.
+  //   * `kavenegar_service_alerts` (§3) — the operator's attention ledger. It
+  //     names a business at most as the *subject* of an internal condition.
+  //   * `kavenegar_master_templates` (§5) — the platform's approved message
+  //     library, with its trade/plan rules and its own seeded rows.
+  //
+  // The tenant halves of the same feature (kavenegar_business_accounts,
+  // _provisioning_jobs, _credit_transfers, _lookup_templates,
+  // _reconciliation_runs) are RLS-protected and stay in the export.
+  "kavenegar_account_credentials",
+  "kavenegar_master_templates",
+  "kavenegar_retail_price_overrides",
+  "kavenegar_retail_price_slabs",
+  "kavenegar_retail_price_versions",
+  "kavenegar_service_alerts",
+  // Issue #903 — the managed tenant-backup service's platform half. Same shape
+  // as the managed-SMS fleet above: `platform_only` under FORCE RLS, so no
+  // tenant connection reads them, but an export's `SELECT *` as the owner would.
+  //
+  //   * `platform_tenant_backup_service` — the fleet policy singleton every
+  //     business's cadence and retention ceiling are derived from.
+  //   * `backup_key_versions` — the platform's key custody: each business's
+  //     artifact secret **wrapped** under the platform KEK. Ciphertext, but
+  //     nobody else's export has any business carrying the material that wraps
+  //     it, and §0's rule (a credential is not tenant data) covers it too.
+  //   * `tenant_backup_business_policy` — the Superadmin override of that
+  //     policy. A business is subject to it and must never read or infer it,
+  //     which is why its ownership column is `subject_business_id`, not
+  //     `business_id` (the convention `backup_key_versions` and
+  //     `kavenegar_service_alerts` already use).
+  //   * `tenant_backup_restore_approvals` — the named, expiring, single-use
+  //     consent for one destructive restore, same `subject_business_id` shape.
+  //
+  // The tenant halves (tenant_backup_artifacts, _drills, _restore_jobs,
+  // _site_heartbeat, _storage_samples, _upload_sessions, _upload_queue) are
+  // RLS-protected and stay in the export.
+  "platform_tenant_backup_service",
+  "backup_key_versions",
+  "tenant_backup_business_policy",
+  "tenant_backup_restore_approvals",
 ]);
 
 export interface ForeignKeyEdge {

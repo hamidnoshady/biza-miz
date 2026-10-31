@@ -70,7 +70,11 @@ CREATE TABLE tenant_backup_artifacts (
                        )),
     -- Custody generation protecting this artifact. NULL only for legacy
     -- passphrase artifacts, which are labelled as such rather than reclassified.
-    key_version        integer CHECK (key_version > 0),
+    -- Named explicitly: an anonymous column check would auto-name itself
+    -- `tenant_backup_artifacts_key_version_check`, which is the name the
+    -- table-level custody constraint below already claims.
+    key_version        integer CONSTRAINT tenant_backup_artifacts_key_version_positive
+                       CHECK (key_version > 0),
     completeness       text NOT NULL DEFAULT 'partial' CHECK (completeness IN ('complete', 'partial')),
     -- Server-only: the object key in managed storage, or the local file name.
     -- Never serialized; see `tenant-backup-artifact-ref.ts` for what the tenant

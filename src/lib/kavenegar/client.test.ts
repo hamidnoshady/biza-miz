@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  buildAccountInfoRequest,
   buildAddChildAccountRequest,
   buildChargeChildCreditRequest,
   buildFetchChildByLocalIdRequest,
@@ -19,6 +20,7 @@ import {
   classifyKavenegarStatus,
   isLocalIdCollision,
   isUsernameCollision,
+  mapAccountInfo,
   mapChildAccount,
   normalizeChildStatus,
   parseKavenegarEnvelope,
@@ -194,6 +196,52 @@ describe("classifyKavenegarStatus", () => {
 
   it("treats a code it has never seen as transient, bounded by the queue's attempts", () => {
     expect(classifyKavenegarStatus(999)).toMatchObject({ retryable: true, code: "unknown" });
+  });
+});
+
+describe("the master account's own balance (issue #902 §3, plan §9 item 4)", () => {
+  // Recorded from kavenegar.com/rest.html — `account/info` answers with the
+  // same envelope and puts the payload in the top-level `entries`.
+  const INFO_ENTRY = {
+    remaincredit: 12_450_000,
+    expiredate: 1_767_225_600,
+    type: "Master",
+    apikey: "MASTERKEY",
+  };
+
+  it("reads the credit and expiry of whichever account the key belongs to", () => {
+    const info = mapAccountInfo(INFO_ENTRY);
+    expect(info).toEqual({
+      remainCreditRial: 12_450_000,
+      expireAtUnix: 1_767_225_600,
+      type: "Master",
+    });
+  });
+
+  it("keeps an unparseable or missing credit unknown rather than calling it zero", () => {
+    // "The provider said zero" and "the provider said nothing I could read" are
+    // opposite facts to a funding floor; collapsing the second into the first
+    // would let a funded master look empty (or an empty one look funded).
+    expect(mapAccountInfo({}).remainCreditRial).toBeNull();
+    expect(mapAccountInfo({ remaincredit: "n/a" }).remainCreditRial).toBeNull();
+    expect(mapAccountInfo({ remaincredit: "" }).remainCreditRial).toBeNull();
+    // A real zero is still a zero.
+    expect(mapAccountInfo({ remaincredit: 0 }).remainCreditRial).toBe(0);
+    expect(mapAccountInfo({ remaincredit: "0" }).remainCreditRial).toBe(0);
+  });
+
+  it("drops the key the payload happens to echo back", () => {
+    const info = mapAccountInfo(INFO_ENTRY) as unknown as Record<string, unknown>;
+    expect(JSON.stringify(info)).not.toContain(INFO_ENTRY.apikey);
+  });
+
+  it("addresses account/info under the master key, never a child's", () => {
+    const request = buildAccountInfoRequest({ masterApiKey: "MASTER" });
+    expect(request.url).toBe("https://api.kavenegar.com/v1/MASTER/account/info.json");
+    expect(request.method).toBe("GET");
+    expect(request.params).toEqual({});
+    // The key is in the path, so the logged form must not carry it.
+    expect(redactKavenegarUrl(request.url)).not.toContain("MASTER");
   });
 });
 

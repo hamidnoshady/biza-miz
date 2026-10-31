@@ -179,8 +179,9 @@ is a pure decision over explicit inputs (`planFunding`):
 4. target = `buffer_messages × the dearer wholesale segment` (English is ~2.3× Persian, so
    planning on Persian would under-fund English traffic);
 5. deficit clamped by the per-child ceiling and the rolling 24-hour cap;
-6. the master floor is subtracted from what the master may spend — and if a floor is set
-   while the master balance is unknown, the plan refuses rather than fund through it;
+6. the master floor is subtracted from what the master may spend — the balance itself is read
+   from `account/info` once per pass, and if that read fails (or a floor is set with no figure
+   at all) the plan refuses rather than fund through it;
 7. the remainder is rounded **down** to 1,000 Rial; below that the provider refuses (±1,000
    minimum), so nothing is attempted.
 
@@ -196,6 +197,13 @@ target:
 | `low_watermark` | Only after the child drops below a trigger (messages), then refill to the target — hysteresis, so a child one message under target is not topped up every 15 minutes |
 | `scheduled` | Only inside a UTC hour window (wraps midnight; `start = end` means all day). An unset window funds normally rather than never: an accidental strategy must not silently stop the fleet |
 | `manual` | Never automatically; distinct from a zero buffer, which reads like a misconfiguration |
+
+**The transactional reserve** (migration `0267`) decides *whose* money a transfer spends. The floor
+alone stops funding everyone once the master reaches it — including the login code a customer is
+waiting for — so `managed_funding_transactional_reserve_rial` holds back a slice above the floor that
+a `marketing`-classified fleet may not touch, while a `transactional` one may. A marketing transfer
+blocked by it reports `transactional_reserve` and raises `transactional_reserve_held`: the money is
+there, it is held, and an operator told "credit low" would top up an account that is not short.
 
 A watermark of 0 (or ≥ the buffer) clamps to the buffer, so a typo cannot fund above what the
 operator chose. `funding_global_daily_cap_rial` is the **cross-business demand guard**: a ceiling
@@ -338,6 +346,31 @@ and nothing provisions until it is on.
 - `/platform/billing?tab=usage` — «قیمت‌گذاری خرده‌فروشی پیام مدیریت‌شده»: the summary, the
   slab editor, the exception editor with a business search, and the version history.
 - `template-service.ts` — the Lookup template catalog and approval sync.
+- `master-template-service.ts` — the platform's message library (§5): keys, bodies, the ordered
+  variables each accepts, and the trade/plan targeting that decides which businesses are offered
+  it. Instantiation is what gives a business its `draft` copy, carrying `master_template_id` and
+  the version it came from; disabling an entry withdraws the offer and nothing else.
+- `template-variables.ts` — the pure rendering boundary (§5): six domain variables, one renderer
+  each, positional `%token` slots, and errors instead of silent truncation. The same call produces
+  the sample a tenant sees, so what is previewed is what will be sent.
+- `template-library-view.ts` — the library as a tenant may read it (§5f): the sample rendered by
+  the sending renderer, the declared variables named in Persian, and the automations an entry can
+  serve computed by the same check the send path refuses with. A variable outside the closed
+  vocabulary is dropped rather than shown as `%token4`.
+- `lookup-send-service.ts` — sending one approved message (§5): the child's own key, retail reserved
+  and settled once by the §4 engine, the provider's reported cost recorded tenant-invisibly, a
+  definitive refusal refunded in full, and an **ambiguous** transport failure kept as `unknown`
+  rather than refunded. `buildLookupSendRequest` takes no master key by design.
+- `lookup-trigger-facts.ts` — the closed event vocabulary (§5): `order_ready` and
+  `payment_received`, the facts each event really has, and the check that a template's declared
+  variables can be filled from them. `login_code` is deliberately absent — every trigger here is a
+  send on a business's child account charged to that business's wallet, while a login OTP must
+  survive an empty wallet, a suspended child or Growth being off.
+- `lookup-triggers.ts` — the product half (§5): the business's per-trigger choice
+  (`kavenegar_lookup_triggers`, seeded empty), a consent-and-reachability check before any provider
+  call, and a claim row in `kavenegar_lookup_trigger_sends` whose UNIQUE fact key makes a replayed
+  or racing event one message. Entry point: `notifyOrderReady`, called un-awaited from both the
+  kitchen bump and the offline replay; nothing in the module throws.
 - `reconciliation-service.ts` — stored wholesale balance/margin evidence.
 - `/api/platform/sms/accounts` — Superadmin reads (accounts, margin, reconciliation, template
   catalog) and actions (policy, probe, transfer, fund, reconcile, template submit/archive/sync,
@@ -353,7 +386,18 @@ and nothing provisions until it is on.
   recorded usage, business/channel exceptions, reserve → settle → refund-once, supplier cost
   posted once and invisible to a tenant, RLS forced on the three new tables.
 - `integration/kavenegar-managed-accounts.integration.test.ts` — 46 database cases with a
-  fake transport (no network): one-child-per-activation, lost-response recovery, funding
+  fake transport (no network)
+- `integration/kavenegar-master-templates.integration.test.ts` — 16 database cases for the
+  library: trade/plan targeting, idempotent instantiation, versioned rollout, lineage, RLS
+- `integration/kavenegar-lookup-triggers.integration.test.ts` — 17 database cases for the trigger
+  layer: refusals at configuration time (not approved, no mapping, a fact the event lacks, and
+  `login_code` as a trigger), nothing sent until the business turns an event on, one send on the
+  child's key per fact (replay and two racing bumps included), an empty wallet blocked before the
+  provider is called, consent honoured for a transactional message, and one receipt per replayed
+  settlement.
+- `integration/kavenegar-lookup-send.integration.test.ts` — 8 database cases for the send: the
+  refusals that must precede a charge, one charge per message, a tenant-invisible wholesale cost,
+  a full refund on a definitive refusal, and the kept reservation on an ambiguous outcome: one-child-per-activation, lost-response recovery, funding
   idempotency and caps, template approval, reconciliation bucketing, RLS under an
   unprivileged role, and the app-availability regression.
 
@@ -362,8 +406,8 @@ and nothing provisions until it is on.
 | Item | Why it is not in this slice |
 | --- | --- |
 | Delivery/health dashboard | Delivery is visible through the outbox and Billing's usage screens; a dedicated latency/failure panel is a follow-up. |
-| Tying approved templates to concrete triggers | The catalog and approval lifecycle exist; wiring «کد ورود»/«سفارش آماده است» to product events is product work. |
+| Payment receipts from every writer | `notifyPaymentReceived` fires from the counter checkout and the offline replay, after `COMMIT`. The Woo/CMS importers and the amendment bridge settle inside their own transactions and have no post-commit point yet. |
 | Invoice lines from price versions, supplier-invoice reconciliation | The versions, the margin report and `billing_vendor_cost_events` exist; emitting `billing_usage_ratings`/invoice lines from the same versions is Billing's change, and confirming accepted-but-undelivered billing needs real invoices. |
-| Authoritative master balance | The customer API exposes a child's balance only. The floor accepts an operator-supplied balance and refuses to fund blindly without one. |
+| Authoritative master balance | Read from `account/info` once per funding pass (`client.fetchAccountInfo`): it describes the account the key belongs to, so the master key's answer is the master's credit. A missing figure is `null` — never `0` — and the plan still refuses to fund through a floor it cannot see. |
 | Bulk adoption of pre-existing children | Single adoption by `localid` exists (`adopt` job); bulk mapping needs operator-supplied data. |
 | Cross-integration managed-service migration (#894, #896, payments, media, AI) | The contract is shared here; each migration is tracked on its own issue, per the epic. |

@@ -133,6 +133,13 @@ describe("tenant-facing template status", () => {
         submitted_title: "کد ورود",
         submitted_body: "کد ورود شما %token است",
         supersedes_id: null,
+        // Issue #902 §5 lineage: a template a tenant wrote by hand has no
+        // library origin and no declared variables.
+        master_template_id: null,
+        master_version: null,
+        // A message a tenant wrote by hand has no declared mapping; the managed
+        // send path refuses it rather than guessing one (issue #902 §5).
+        variables: [],
         archived_at: null,
         submitted_at: new Date(),
         decided_at: new Date(),
@@ -147,6 +154,49 @@ describe("tenant-facing template status", () => {
     expect(JSON.stringify(template)).not.toMatch(/998877/);
     // The provider's vocabulary must not appear anywhere in the payload.
     expect(JSON.stringify(template)).not.toMatch(/approved|pending|rejected/i);
+    // No declared mapping means no automation can be attached, so the screen
+    // offers none (issue #902 §5).
+    expect(template!.triggers).toEqual([]);
+  });
+
+  it("offers an approved message only for the events its variables can fill", () => {
+    const base = {
+      id: "t1",
+      business_id: businessId,
+      name: "bmv0123456789",
+      title: "آمادهٔ تحویل سفارش",
+      body: "%token عزیز، سفارش شما در %token2 آماده است",
+      purpose: "transactional" as const,
+      provider_template_id: "998877",
+      last_sync_error: null,
+      revision: 0,
+      submitted_title: null,
+      submitted_body: null,
+      supersedes_id: null,
+      master_template_id: null,
+      master_version: null,
+      archived_at: null,
+      submitted_at: null,
+      decided_at: new Date(),
+      last_synced_at: null,
+      created_at: new Date(),
+      updated_at: new Date("2026-01-01T00:00:00.000Z"),
+    };
+    const [approved] = toTenantLookupTemplates([
+      { ...base, state: "approved", variables: ["customer_name", "store_name"] },
+    ]);
+    // An order-ready event has a customer name and a store name — and no amount.
+    expect(approved!.triggers).toEqual(["order_ready"]);
+
+    const [inReview] = toTenantLookupTemplates([
+      { ...base, state: "submitted", variables: ["customer_name", "store_name"] },
+    ]);
+    expect(inReview!.triggers).toEqual([]);
+
+    const [payment] = toTenantLookupTemplates([
+      { ...base, state: "approved", variables: ["amount", "store_name"] },
+    ]);
+    expect(payment!.triggers).toEqual(["payment_received"]);
   });
 });
 

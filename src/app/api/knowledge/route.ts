@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { knowledgePage, knowledgeSection } from "@/lib/knowledge-base";
-import { kbGuideForSection } from "@/lib/knowledge-service";
+import { kbGuideForSection, kbRelatedGuidesForArticle } from "@/lib/knowledge-service";
 
 /**
  * The member-facing side of the knowledge base (migration 0117). A page's
@@ -46,9 +46,15 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const guide =
     (page ? await kbGuideForSection(page.key) : null) ??
     (known ? await kbGuideForSection(known.key) : null);
+  // Related guides are optional: a catalogue read failure must not break the
+  // primary article, the tour, or the legacy external-learning link.
+  const relatedGuides = guide
+    ? await kbRelatedGuidesForArticle(guide.slug).catch(() => [])
+    : [];
 
   return NextResponse.json({
     entry: entry ? { section: entry.section, label: known?.label ?? page?.label ?? "", url: entry.url } : null,
     guide,
+    relatedGuides,
   });
 });

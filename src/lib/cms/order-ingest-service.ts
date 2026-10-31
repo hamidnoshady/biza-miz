@@ -6,6 +6,7 @@
 import { NextResponse } from "next/server";
 import type { PoolClient } from "pg";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
+import { notifyPaymentReceived } from "../kavenegar/lookup-triggers";
 import { WELL_KNOWN_CODES } from "../coa-template";
 import { RETAIL_ACCOUNT_CODES } from "../retail-account-codes";
 import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
@@ -431,6 +432,20 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
     }
 
     await client.query("COMMIT");
+
+    // Issue #902 §9 item 0 — a paid order from the business's own website is a
+    // payment, and only the counter and the offline replay used to notify the
+    // customer. After COMMIT and deliberately not awaited: the inbox update and
+    // the caller's response must not wait on a provider round trip, and a
+    // message that fails must never mark a committed import as failed.
+    // Scoped explicitly: a CMS delivery carries no request session, and the
+    // lookup tables are tenant-RLS — an unscoped read would find no order and
+    // the receipt would silently never be attempted.
+    if (total > 0n) {
+      void withTenant(businessId, () =>
+        notifyPaymentReceived({ businessId, locationId, orderId, amountRial: Number(total) }),
+      );
+    }
     return orderId;
   } catch (err) {
     await client.query("ROLLBACK");

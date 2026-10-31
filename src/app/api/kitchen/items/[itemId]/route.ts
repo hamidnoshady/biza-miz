@@ -7,6 +7,7 @@ import { isKitchenOrderReady, type OrderItemStatus } from "@/lib/order-item-stat
 import { transitionKitchenItem } from "@/lib/kitchen-item-transition";
 import { broadcast } from "@/lib/realtime";
 import { recordCoworkerEvent } from "@/lib/ai-coworker-events";
+import { notifyOrderReady } from "@/lib/kavenegar/lookup-triggers";
 
 /**
  * Kitchen "bump" (sent→preparing→ready) and waiter/cashier "served"
@@ -84,6 +85,16 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
         // turn a successful bump into an apparent failure that invites a retry.
         console.error("kitchen order-ready event dispatch failed:", error);
       }
+      // Issue #902 §5 — the customer's own message, if this business turned
+      // that trigger on. Deliberately not awaited: a kitchen bump must not wait
+      // on a provider round trip (the same rule the outbox drain states for a
+      // till close), and `notifyOrderReady` swallows and logs its own failures.
+      // The send log's UNIQUE key is what makes this safe to fire twice.
+      void notifyOrderReady({
+        businessId: session.businessId,
+        locationId: location.id,
+        orderId,
+      });
     }
   }
   return NextResponse.json({ ok: true });

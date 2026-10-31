@@ -29,6 +29,7 @@ import { logicalSnapshotScopeTag } from "./backup-policy";
 import { decryptFileToFile, encryptFileToFile, sha256File } from "./backup-streams";
 import { exportTenantData, type TenantExportTable } from "./tenant-export";
 import {
+  ARCHIVE_EXCLUDED_TABLES,
   buildTenantArchive,
   parseTenantArchive,
   serializeTenantArchive,
@@ -253,7 +254,10 @@ export async function writeTenantArchive(
     businessId,
     capturedAt,
     schemaVersion,
-    tables: tables as TenantExportTable[],
+    // The tenant's identity row is not part of its data: an archive that named
+    // `businesses` could never be applied, because the restore engine refuses to
+    // delete or replace it. See ARCHIVE_EXCLUDED_TABLES.
+    tables: (tables as TenantExportTable[]).filter((table) => !ARCHIVE_EXCLUDED_TABLES.has(table.name)),
   });
   const serialized = serializeTenantArchive(archive);
   await fs.writeFile(outPath, serialized, { mode: 0o600 });

@@ -784,6 +784,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     note: "batch BH: four grouped verbs dispatch the 54 uniform lanes entity-by-entity with the exact route capability gates (workspaceManage, workspaceApprove for review-side status actions like the routes, settingsManage for the org profile); record deletes and participant removal are always_approve/high (data-record deletes); review actions likewise (money-state decisions); the field photo upload carries media bytes and stays route-only by design, like the other media lanes",
     test: "integration/aec-rfi.integration.test.ts + aec-boq + aec-commercial + aec-document-control + aec-procurement + aec-site",
   },
+  {
+    id: "workspace.agency",
+    module: "Workspace",
+    entity: "Agency commercial registers (billing schedule & milestones, change requests)",
+    routes: ["agency"],
+    note: "issue #1128 §D: one project's billing schedule, the milestones in it and the change requests that revise its value. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — exposing these as tools has to satisfy §F's rule that an assistant drafts and a human approves, and agreeing more money with a client is exactly the kind of act that rule exists for. Two things a future tool must keep: approving a milestone does NOT bill it (issuing the invoice is a separate act gated on the invoice screen's own permissions, paymentsTake + ordersCreate, as well as workspaceApprove), and an approved change request moves only the engagement's revised value, never the figure the client signed",
+    test: "src/lib/agency-commercial.test.ts",
+  },
 
   // ============================ Business configuration ============================
   {
@@ -974,6 +982,27 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       lifecycle: ["media.collection.delete", "media.asset.trash", "media.asset.restore"],
     },
     test: "integration/media-library.integration.test.ts",
+  },
+  {
+    id: "media.client_review",
+    module: "Media",
+    entity: "Client review rounds (assemble a batch, send it, collect the client's decisions)",
+    routes: ["media/review-rounds"],
+    // Overlaps media.assets by design: that row's "media" prefix already matched
+    // these files, and leaving them silently absorbed there would have a reader
+    // believe list_media_assets covers them. It does not — a review round is a
+    // different entity with a different state machine.
+    note: "issue #1128 §E: the agency's side of client review. A round, and not an asset, is the unit of approval — agencies send a batch, collect decisions, revise and resend, and the sequence of rounds over one asset is its version history (approved is terminal because the next round supersedes it). No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion; exposing these has to satisfy §F's rule that an assistant drafts and a human approves, and sending work to a client for sign-off is precisely that kind of act. Three things a future tool must keep: a round in «sent» is frozen so a client never finds the batch changed underneath them, approving a round requires every item decided AND every item approved, and minting a link returns a plaintext token exactly once — it is unrecoverable afterwards, which makes it a poor fit for a request/response verb",
+    test: "src/lib/media-review.test.ts",
+  },
+  {
+    id: "media.client_review_links",
+    module: "Media",
+    entity: "Scoped client review links — the external token door and its byte stream",
+    routes: ["media/review"],
+    status: "route-only (by design)",
+    note: "issue #1128 §E: the client's door, addressed by token alone. Route-only by design and not by omission — there is no session here and there must never be one. §B asks for revocable scoped external review links without a new staff identity system, so the client is authorised by holding a short-lived token, never by a tenant role, and there is deliberately no approve-style media permission (the party who approves is not a member and must not become one). An MCP connection cannot hold that token: minting one for an agent would hand a credential that opens a tenant's files to a party outside it, when the entire point of the link is that a human at the client decides. The byte route is also not a JSON envelope, for the same reason media.assets keeps upload screen-side. Bytes stream through the app rather than a presigned URL so revocation takes effect on the next request and every fetch is counted against the link",
+    test: "src/app/api/media/review-guard.test.ts",
   },
   {
     id: "knowledge.articles",

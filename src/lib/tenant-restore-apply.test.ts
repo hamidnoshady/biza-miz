@@ -33,7 +33,12 @@ vi.mock("./tenant-backup-artifacts-service", () => ({
   installedSchemaVersion: mocks.installedSchemaVersion,
 }));
 vi.mock("./tenant-export", () => ({ exportTenantData: mocks.exportTenantData }));
-vi.mock("./tenant-tables", () => ({ tenantTablesInDependencyOrder: vi.fn(async () => ["accounts", "orders"]) }));
+vi.mock("./tenant-tables", () => ({
+  tenantTablesInDependencyOrder: vi.fn(async () => ["accounts", "orders"]),
+  // The archive allowlist is the tenant export set; `businesses` is exported but
+  // is the identity row an archive never carries.
+  listTenantTables: vi.fn(async () => ["businesses", "accounts", "orders"]),
+}));
 vi.mock("./tenant-archive", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./tenant-archive")>();
   return { ...actual, applyTenantArchive: mocks.applyTenantArchive };
@@ -207,7 +212,7 @@ describe("applyTenantRestore", () => {
   it("refuses when a preview is blocked, even with the right phrase", async () => {
     const blocked = preview({
       canApply: false,
-      blockers: [{ code: "restore_busy", message: "…" }],
+      blockers: [{ code: "restore_busy", label: "…" }],
     }) as RestorePreview;
     const outcome = await applyTenantRestore({ ...request, preview: blocked });
     expect(outcome.ok).toBe(false);

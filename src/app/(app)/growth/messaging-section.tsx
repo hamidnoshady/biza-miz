@@ -6,7 +6,9 @@ import { MessageCircleIcon, PlusIcon, SendIcon, WalletCardsIcon } from "lucide-r
 import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { formatPersianNumber } from "@/lib/digits";
+import { triggerCodeLabel } from "@/lib/kavenegar/lookup-trigger-facts";
 import { templateVariableTokens } from "@/lib/message-template";
+import { libraryEntryView, splitLibrary, type LibraryEntryView } from "@/lib/kavenegar/template-library-view";
 import {
   cardClass,
   EmptyState,
@@ -72,6 +74,56 @@ interface LookupTemplate {
   status: "in_review" | "ready" | "needs_action" | "disabled";
   statusLabel: string;
   updatedAt: string;
+  /** The business events this message's own variables can serve (issue #902 §5). */
+  triggers?: LookupTriggerKey[];
+}
+
+/** The closed vocabulary the server accepts for automations. */
+type LookupTriggerKey = "order_ready" | "payment_received";
+
+/**
+ * Issue #902 §5 — one "when X happens, send this" decision, as the server
+ * describes it. `problem` is why the attached message cannot be used, in
+ * first-party words; `login_code` is deliberately not a trigger, because a
+ * login OTP runs on the platform transport and never on this business's wallet.
+ */
+/**
+ * Issue #902 §5 — one of Bizamiz's own approved messages, as offered to this
+ * business. The server filters by trade and plan and renders the sample with the
+ * same renderer a real send uses; `variables` is the ordered domain vocabulary,
+ * never the provider's notation.
+ */
+interface LibraryEntry {
+  id: string;
+  title: string;
+  purpose: "verification" | "transactional";
+  sample: string;
+  variables?: string[];
+  alreadyAdded: boolean;
+}
+
+/** Issue #902 §9 item 0 — what the automation actually did, in first-party words. */
+interface TriggerDelivery {
+  sent: number;
+  skipped: number;
+  blocked: number;
+  failed: number;
+  unknown: number;
+  lastAttemptAt: string | null;
+  lastCode: string | null;
+}
+
+interface TriggerSetting {
+  trigger: LookupTriggerKey;
+  label: string;
+  description: string;
+  enabled: boolean;
+  templateId: string | null;
+  templateTitle: string | null;
+  problem: string | null;
+  /** The exact text this event would send, rendered by the server's dispatcher. */
+  preview: string | null;
+  delivery: TriggerDelivery;
 }
 
 interface Data {
@@ -95,10 +147,56 @@ interface Data {
   billing: { balanceRial: number };
   templates: Template[];
   lookupTemplates?: LookupTemplate[];
+  triggers?: TriggerSetting[];
+  templateLibrary?: LibraryEntry[];
+  /**
+   * Issue #902 §9 item 2 — this business's own delivery, per campaign, with the
+   * two latencies. Counts are already on `campaigns`; what this adds is the
+   * wait, split into "the queue" and "the carrier", because only one of those is
+   * something this page can explain. No provider name, code or price travels
+   * here (`campaign-delivery-report.ts`).
+   */
+  campaignDelivery?: CampaignDelivery[];
   campaigns: Campaign[];
   segments: Segment[];
   projects: Project[];
   promotions: Promotion[];
+}
+
+interface Latency {
+  count: number;
+  p50: number;
+  p95: number;
+  max: number;
+}
+
+/** One campaign's delivery from the server (`campaign-delivery-report.ts`). */
+interface CampaignDelivery {
+  campaignId: string;
+  campaignName: string | null;
+  channel: "sms" | "email";
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  queueLatency: Latency | null;
+  sendLatency: Latency | null;
+  lastAttemptAt: string | null;
+  health: "healthy" | "degraded" | "attention" | "idle";
+}
+
+/**
+ * Seconds, with «—» for "not measured".
+ *
+ * `null` must never render as `۰`: a business reading "zero delay" for a value
+ * nobody measured would stop asking the one question this line exists to
+ * answer. Rounded to one decimal so a queue wait and a carrier wait are
+ * comparable at a glance.
+ */
+function latencyText(stats: Latency | null): string {
+  if (!stats) return "—";
+  const seconds = (ms: number) => (ms / 1000).toFixed(1);
+  return `${seconds(stats.p50)} / ${seconds(stats.p95)}`;
 }
 
 /** `excludedByConsent` is the API field; `missingContact` is a separate, actionable data-quality gap. */
@@ -164,14 +262,27 @@ function displayMessagingError(code: string | undefined, fallback: string): stri
 export const CENTRAL_BILLING_HREF = "/settings/billing";
 
 /**
- * Outbound SMS/email campaigns: templates, audience (a CRM segment, filtered
- * for consent server-side), a real sample, cost estimate and send status.
+ * What this automation did in the last week, in one sentence.
  *
- * Growth does not run a second billing centre. The balance shown is the
- * platform wallet's, the estimate is checked against it, and buying credit is
- * a link to `/settings/billing` (issue #764). Composing and sending need
- * `campaigns.manage`; `campaigns.view` sees the campaigns and their results.
+ * The zeros are deliberately spoken aloud: "no message has been sent yet" and
+ * "every message was refused because the customer did not consent" are both
+ * quiet on a screen that only shows a switch, and only one of them is fine.
  */
+function deliveryLine(delivery: TriggerDelivery): string {
+  const total =
+    delivery.sent + delivery.skipped + delivery.blocked + delivery.failed + delivery.unknown;
+  if (total === 0) {
+    return "در ۷ روز اخیر رویدادی برای این اطلاع‌رسانی ثبت نشده است.";
+  }
+  const parts = [`${formatPersianNumber(delivery.sent)} ارسال‌شده`];
+  if (delivery.skipped > 0) parts.push(`${formatPersianNumber(delivery.skipped)} رد‌شده`);
+  if (delivery.blocked > 0) parts.push(`${formatPersianNumber(delivery.blocked)} متوقف‌شده`);
+  if (delivery.failed > 0) parts.push(`${formatPersianNumber(delivery.failed)} ناموفق`);
+  if (delivery.unknown > 0) parts.push(`${formatPersianNumber(delivery.unknown)} نامشخص`);
+  const reason = triggerCodeLabel(delivery.lastCode);
+  return `۷ روز اخیر: ${parts.join(" • ")}${reason ? ` — آخرین دلیل: ${reason}` : ""}`;
+}
+
 export function MessagingSection({
   canManage,
   initialPromotionId,
@@ -208,6 +319,9 @@ export function MessagingSection({
   const [lookupBody, setLookupBody] = useState("");
   const [lookupPurpose, setLookupPurpose] = useState<LookupTemplate["purpose"]>("verification");
   const [editingLookupId, setEditingLookupId] = useState("");
+  // Issue #902 §5 — the trigger form: which approved message each automation is
+  // attached to, before it is saved.
+  const [triggerPick, setTriggerPick] = useState<Record<string, string>>({});
   const audienceRequest = useRef(0);
   const messagePreviewRequest = useRef(0);
 
@@ -371,6 +485,42 @@ export function MessagingSection({
     if (saved) setNotice("این پیام از فهرست پیام‌های خودکار خارج شد.");
   }
 
+  /**
+   * Turn one automation on or off. The chosen message is what the server
+   * validates against the event's own variables, so a mismatch comes back as a
+   * refusal in this form rather than as a message sent with a blank.
+   */
+  /**
+   * Add one of Bizamiz's library messages to this business's catalog.
+   *
+   * The server re-resolves eligibility by id (a disabled entry or another
+   * trade's entry is refused), creates a draft, and the platform asks the
+   * provider for approval — which is why the notice below says «برای بررسی»
+   * rather than «آماده».
+   */
+  async function addFromLibrary(libraryId: string, title: string) {
+    const saved = await send({ action: "lookup_template_from_library", libraryId }, `library:${libraryId}`);
+    if (saved) {
+      setNotice(`«${title}» به فهرست پیام‌های خودکار اضافه شد و برای بررسی ثبت می‌شود.`);
+    }
+  }
+
+  async function saveTrigger(trigger: LookupTriggerKey, enabled: boolean) {
+    const chosen = triggerPick[trigger] ?? data?.triggers?.find((item) => item.trigger === trigger)?.templateId ?? "";
+    if (!chosen) {
+      setError("برای این رویداد یک پیام آمادهٔ استفاده انتخاب کنید.");
+      return;
+    }
+    const saved = await send({ action: "lookup_trigger", trigger, templateId: chosen, enabled }, `trigger:${trigger}`);
+    if (saved) {
+      setNotice(
+        enabled
+          ? "این رویداد فعال شد؛ از این پس برای هر اتفاق، یک پیامک برای مشتری همان سفارش می‌رود."
+          : "این رویداد خاموش شد؛ دیگر پیامکی برای آن فرستاده نمی‌شود.",
+      );
+    }
+  }
+
   async function addCampaign(event: FormEvent) {
     event.preventDefault();
     if (audience?.truncated) return;
@@ -419,6 +569,12 @@ export function MessagingSection({
     ? sendableAudience * messagePreview.costRial
     : sendableAudience * costPerRecipient;
   const insufficientCredit = audience !== null && estimatedAudienceCost > data.billing.balanceRial;
+
+  // Issue #902 §9 item 2 — one lookup, so the campaign list below reads the
+  // delivery of a campaign without a second pass over the array per row.
+  const deliveryByCampaign = new Map(
+    (data.campaignDelivery ?? []).map((row) => [row.campaignId, row]),
+  );
 
   return (
     <div className="space-y-4 sm:space-y-5">
@@ -693,6 +849,185 @@ export function MessagingSection({
           <EmptyState>هنوز پیام خودکاری ثبت نشده است. کد ورود یا پیام تراکنشی را از فرم پایین اضافه کنید.</EmptyState>
         )}
 
+        {/* Issue #902 §5 — Bizamiz's own message library. The server offers only
+            entries matching this business's trade and plan, renders the sample
+            with the renderer a real send uses, and re-checks eligibility when
+            an entry is added by id. */}
+        <div className="mt-4 grid gap-3 border-t border-border/80 pt-4">
+          <div>
+            <p className="text-sm font-medium">پیام‌های آمادهٔ بیزامیز</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              این متن‌ها از پیش نوشته و بررسی شده‌اند. با افزودن یکی، نسخهٔ خودتان ساخته می‌شود و پس از تأیید در
+              اطلاع‌رسانی خودکار همین صفحه قابل استفاده است.
+            </p>
+          </div>
+          {(() => {
+            const library = splitLibrary((data.templateLibrary ?? []).map((entry) => libraryEntryView(entry)));
+            if (!library.available.length && !library.added.length) {
+              return <EmptyState>در حال حاضر پیام آماده‌ای برای این کسب‌وکار وجود ندارد.</EmptyState>;
+            }
+            const renderEntry = (entry: LibraryEntryView) => (
+              <li key={entry.id} className="grid gap-2 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="leading-6 font-medium">
+                      {entry.title}{" "}
+                      {entry.alreadyAdded ? <StatusBadge tone="neutral">در فهرست شما</StatusBadge> : null}
+                    </p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{entry.purposeLabel}</p>
+                  </div>
+                  {canManage && !entry.alreadyAdded ? (
+                    <Button
+                      variant="outline"
+                      className="min-h-11"
+                      disabled={busy === `library:${entry.id}`}
+                      onClick={() => void addFromLibrary(entry.id, entry.title)}
+                    >
+                      {busy === `library:${entry.id}` ? "در حال افزودن…" : <><PlusIcon aria-hidden="true" /> افزودن</>}
+                    </Button>
+                  ) : null}
+                </div>
+                <p className="rounded-lg bg-muted/40 px-3 py-2 text-sm leading-6">{entry.sample}</p>
+                <div className="flex flex-wrap items-center gap-2 text-xs leading-5 text-muted-foreground">
+                  <span>متغیرها:</span>
+                  {entry.variables.length ? (
+                    entry.variables.map((variable) => (
+                      <span key={variable.name} className="rounded-md border border-border/70 px-2 py-0.5">
+                        {variable.label}
+                      </span>
+                    ))
+                  ) : (
+                    <span>متن ثابت</span>
+                  )}
+                  {entry.triggers.length ? (
+                    <>
+                      <span>· کاربرد خودکار:</span>
+                      <span>{entry.triggers.map((trigger) => trigger.label).join("، ")}</span>
+                    </>
+                  ) : null}
+                </div>
+              </li>
+            );
+            return (
+              <>
+                {library.available.length ? (
+                  <ul className="divide-y divide-border/60">{library.available.map(renderEntry)}</ul>
+                ) : null}
+                {library.added.length ? (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-sm font-medium">
+                      افزوده‌شده‌ها ({formatPersianNumber(library.added.length)})
+                    </summary>
+                    <ul className="divide-y divide-border/60">{library.added.map(renderEntry)}</ul>
+                  </details>
+                ) : null}
+              </>
+            );
+          })()}
+        </div>
+
+        {/* Issue #902 §5 — the product half: when a real event happens, one of
+            these messages goes to the customer of that order. Off until the
+            business turns one on. */}
+        {(data.triggers ?? []).length ? (
+          <div className="mt-4 grid gap-3 border-t border-border/80 pt-4">
+            <div>
+              <p className="text-sm font-medium">اطلاع‌رسانی خودکار برای رویدادها</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                هر پیامک از حساب پیامکی همین کسب‌وکار ارسال و از کیف پول مرکزی کسر می‌شود. فقط مشتری همان سفارشِ پیام را
+                می‌گیرد، و اگر مشتری اجازهٔ پیامک نداده باشد پیامی فرستاده نمی‌شود.
+              </p>
+            </div>
+            {(data.triggers ?? []).map((setting) => {
+              const options = (data.lookupTemplates ?? []).filter(
+                (item) => item.status === "ready" && (item.triggers ?? []).includes(setting.trigger),
+              );
+              const chosen = triggerPick[setting.trigger] ?? setting.templateId ?? options[0]?.id ?? "";
+              return (
+                <div key={setting.trigger} className="grid gap-2 rounded-xl border border-border/70 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">
+                        {setting.label}{" "}
+                        <StatusBadge tone={setting.enabled && !setting.problem ? "positive" : "neutral"}>
+                          {setting.problem
+                            ? "نیازمند رسیدگی"
+                            : setting.enabled
+                              ? "فعال"
+                              : "خاموش"}
+                        </StatusBadge>
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">{setting.description}</p>
+                      {setting.problem ? (
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                          پیام انتخاب‌شده با این رویداد سازگار نیست؛ پیامی انتخاب کنید که متغیرهایش با این رویداد پر می‌شود.
+                        </p>
+                      ) : setting.templateTitle ? (
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">پیام: {setting.templateTitle}</p>
+                      ) : null}
+                      {/* §9 item 0: the exact text, rendered on the server by the
+                          dispatcher's own functions over fake facts — so what the
+                          business approves is what its customer receives. */}
+                      {setting.preview ? (
+                        <p className="mt-2 rounded-lg border border-border/70 bg-muted/40 px-2 py-1.5 text-xs leading-5 text-foreground">
+                          <span className="text-muted-foreground">پیش‌نمایش با دادهٔ نمونه: </span>
+                          {setting.preview}
+                        </p>
+                      ) : null}
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">{deliveryLine(setting.delivery)}</p>
+                    </div>
+                  </div>
+                  {canManage ? (
+                    options.length ? (
+                      <div className="flex flex-wrap items-end gap-2">
+                        <label className="min-w-0 flex-1">
+                          <span className="mb-1 block text-xs font-medium text-foreground">پیام این رویداد</span>
+                          <select
+                            className={inputClass}
+                            value={chosen}
+                            onChange={(event) =>
+                              setTriggerPick((current) => ({ ...current, [setting.trigger]: event.target.value }))
+                            }
+                          >
+                            {options.map((item) => (
+                              <option key={item.id} value={item.id}>
+                                {item.title}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {setting.enabled ? (
+                          <Button
+                            variant="outline"
+                            className="min-h-11"
+                            disabled={busy === `trigger:${setting.trigger}`}
+                            onClick={() => void saveTrigger(setting.trigger, false)}
+                          >
+                            {busy === `trigger:${setting.trigger}` ? "در حال ذخیره…" : "خاموش کردن"}
+                          </Button>
+                        ) : (
+                          <Button
+                            className="min-h-11"
+                            disabled={!chosen || busy === `trigger:${setting.trigger}`}
+                            onClick={() => void saveTrigger(setting.trigger, true)}
+                          >
+                            {busy === `trigger:${setting.trigger}` ? "در حال ذخیره…" : "فعال کردن"}
+                          </Button>
+                        )}
+                      </div>
+                    ) : (
+                      <InfoBox>
+                        برای این رویداد هنوز پیام آمادهٔ استفاده‌ای ندارید. یکی از پیام‌های تراکنشی را از فهرست بالا اضافه
+                        کنید؛ پس از تأیید، همین‌جا قابل انتخاب می‌شود.
+                      </InfoBox>
+                    )
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+
         {canManage ? (
           <form className="mt-4 grid gap-3 border-t border-border/80 pt-4" onSubmit={saveLookup}>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -752,6 +1087,7 @@ export function MessagingSection({
         {data.campaigns.length ? (
           <ul className="divide-y divide-border/80">
             {data.campaigns.map((campaign) => {
+              const delivery = deliveryByCampaign.get(campaign.id) ?? null;
               const template = data.templates.find((item) => item.id === campaign.templateId);
               const needsDiscountCode = usesVariable(template, "کد_تخفیف");
               const discountCode = discountCodes[campaign.id] ?? "";
@@ -765,6 +1101,16 @@ export function MessagingSection({
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
                       {channelLabel[campaign.channel]} · {formatPersianNumber(campaign.sentCount)} ارسال‌شده از {formatPersianNumber(campaign.totalRecipients)} · تحویل {formatPersianNumber(campaign.deliveredCount)} · ناموفق {formatPersianNumber(campaign.failedCount)} · {campaign.promotionId ? "بازده با پروموشن اختصاصی در گزارش حسابداری" : "بازده: قابل محاسبه نیست (پروموشن اختصاصی ندارد)"}
                     </p>
+                    {delivery ? (
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        {delivery.pending > 0
+                          ? `${formatPersianNumber(delivery.pending)} در صف · `
+                          : ""}
+                        {`تأخیر صف (میانه/صدک ۹۵): ${latencyText(delivery.queueLatency)} ثانیه`}
+                        {" · "}
+                        {`تأخیر ارسال: ${latencyText(delivery.sendLatency)} ثانیه`}
+                      </p>
+                    ) : null}
                   </div>
 
                   {!canManage ? null : campaign.status === "draft" ? (

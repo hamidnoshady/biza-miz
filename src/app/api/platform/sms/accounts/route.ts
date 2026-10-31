@@ -12,21 +12,38 @@ import {
   transferManagedCredit,
   type ProvisioningJobKind,
 } from "@/lib/kavenegar/provisioning-service";
-import { isFundingStrategy, isValidSenderLines, saveManagedChildPolicy } from "@/lib/kavenegar/policy";
+import {
+  isFundingPurpose,
+  isFundingStrategy,
+  isValidSenderLines,
+  saveManagedChildPolicy,
+} from "@/lib/kavenegar/policy";
 import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricing-service";
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
+import { masterBalanceView } from "@/lib/kavenegar/master-balance-facts";
 import { getDeliveryReport } from "@/lib/messaging-delivery-report";
+import { getCampaignDeliveryReport } from "@/lib/campaign-delivery-report";
 import {
   acknowledgeServiceAlert,
   getServiceAlertSummary,
   listServiceAlerts,
 } from "@/lib/kavenegar/alert-service";
+import { sendManagedLookup } from "@/lib/kavenegar/lookup-send-service";
 import {
   archiveLookupTemplate,
   listAllLookupTemplates,
   submitLookupTemplate,
   syncLookupTemplates,
 } from "@/lib/kavenegar/template-service";
+import {
+  instantiateMasterTemplate,
+  listMasterTemplates,
+  MasterTemplateError,
+  saveMasterTemplate,
+  setMasterTemplateEnabled,
+  type MasterTemplateRow,
+} from "@/lib/kavenegar/master-template-service";
+import { renderTemplateSample } from "@/lib/kavenegar/template-variables";
 
 /**
  * Issue #902 — the Superadmin control plane for managed SMS accounts.
@@ -53,7 +70,17 @@ export const GET = withPlatformScope(async () => {
 
   const until = new Date();
   const since = new Date(until.getTime() - 30 * 24 * 60 * 60_000);
-  const [snapshot, margin, reconciliation, templates, delivery, alerts, alertSummary] = await Promise.all([
+  const [
+    snapshot,
+    margin,
+    reconciliation,
+    templates,
+    delivery,
+    campaignDelivery,
+    alerts,
+    alertSummary,
+    masterTemplates,
+  ] = await Promise.all([
     getManagedServiceConsoleSnapshot(),
     getManagedMarginReport({ since, until }),
     listReconciliationRuns({ limit: 25 }),
@@ -61,10 +88,16 @@ export const GET = withPlatformScope(async () => {
     // Issue #902 §6 — acceptance ≠ delivery. A funded, active child can still be
     // failing every send, and only this view shows it.
     getDeliveryReport({ sinceHours: 24 }),
+    // Issue #902 §9 item 2 — the same question one level down, with the two
+    // latencies that decide *which* end is slow. A campaign is the unit the
+    // business asks about; the fleet row above cannot answer it.
+    getCampaignDeliveryReport({ sinceHours: 24 * 7, limit: 25 }),
     // Issue #902 §3 — what needs a human right now: low master credit, cap
     // pressure, unknown transfers, drift, a child the provider disagrees about.
     listServiceAlerts({ limit: 50 }),
     getServiceAlertSummary(),
+    // Issue #902 §5 — the library every business's approved messages come from.
+    listMasterTemplates({ limit: 100 }),
   ]);
   return NextResponse.json({
     ...snapshot,
@@ -74,7 +107,16 @@ export const GET = withPlatformScope(async () => {
     // Rejections first, then reviews in flight, so the operator's next action is
     // at the top. Provider ids are fine here; tenants never receive this list.
     templates,
+    // §5 library entries with their targeting and a rendered sample, so the
+    // console can show what a business would actually receive.
+    masterTemplates: masterTemplates.map(toConsoleMasterTemplate),
+    // §9 item 4: the master's credit as the last funding pass observed it, aged
+    // and flagged. Reading providers live from a screen is how an operator ends
+    // up quoting a number nobody recorded.
+    masterBalance: masterBalanceView(snapshot.masterBalance),
     delivery,
+    // §6 one level down: per campaign, over a week, with queue and send latency.
+    campaignDelivery,
     // Wholesale vs. retail over the last 30 days. Retail is Billing's number,
     // provider cost is theirs; this screen only compares them.
     margin,
@@ -84,7 +126,25 @@ export const GET = withPlatformScope(async () => {
   });
 });
 
+/** A library entry as the console shows it: a rendered sample alongside the rules. */
+function toConsoleMasterTemplate(row: MasterTemplateRow & { business_copies: number }) {
+  return {
+    ...row,
+    sample: renderTemplateSample({ body: row.body, variables: row.variables }),
+  };
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A body field that should be a list of short strings, or nothing at all. */
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 50);
+}
 
 export const POST = withPlatformScope(async (request: NextRequest) => {
   const { session, error } = await requirePlatformCapability("messaging.manage");
@@ -144,6 +204,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       "fundingDailyCapRial",
       "fundingMasterFloorRial",
       "fundingGlobalDailyCapRial",
+      "fundingTransactionalReserveRial",
     ] as const) {
       if (body[key] !== undefined && body[key] !== null && !isNonNegativeInteger(body[key])) {
         return NextResponse.json({ error: "invalid_funding_cap" }, { status: 400 });
@@ -153,6 +214,12 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     // unknown value must be refused rather than silently treated as `jit`.
     if (body.fundingStrategy !== undefined && !isFundingStrategy(body.fundingStrategy)) {
       return NextResponse.json({ error: "invalid_funding_strategy" }, { status: 400 });
+    }
+    // Issue #902 #3 — how the fleet's spend is classified for the reserve. An
+    // unknown value would silently mean "marketing", which is the side that
+    // cannot spend the reserve, so it is refused rather than guessed.
+    if (body.fundingPurpose !== undefined && !isFundingPurpose(body.fundingPurpose)) {
+      return NextResponse.json({ error: "invalid_funding_purpose" }, { status: 400 });
     }
     if (
       body.fundingLowWatermarkMessages !== undefined &&
@@ -198,6 +265,11 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       fundingWindowEndHour:
         body.fundingWindowEndHour === undefined ? undefined : Number(body.fundingWindowEndHour),
       fundingGlobalDailyCapRial: optionalNumberOrNull(body.fundingGlobalDailyCapRial),
+      fundingTransactionalReserveRial:
+        body.fundingTransactionalReserveRial === undefined
+          ? undefined
+          : Number(body.fundingTransactionalReserveRial),
+      fundingPurpose: isFundingPurpose(body.fundingPurpose) ? body.fundingPurpose : undefined,
     });
     await platformAudit({
       adminId: session.padmin,
@@ -340,6 +412,108 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     return NextResponse.json({ run });
   }
 
+  if (action === "master_template_save") {
+    // Issue #902 §5 — the operator edits the library, not a business's copy:
+    // enabling, disabling and retargeting happen here, and a changed message
+    // bumps the version so every copy created later records what it came from.
+    try {
+      const variables = Array.isArray(body.variables)
+        ? body.variables.filter((name): name is string => typeof name === "string")
+        : [];
+      const template = await saveMasterTemplate({
+        key: typeof body.key === "string" ? body.key : "",
+        title: typeof body.title === "string" ? body.title : "",
+        body: typeof body.body === "string" ? body.body : "",
+        purpose: body.purpose === "verification" ? "verification" : "transactional",
+        variables,
+        industries: stringList(body.industries),
+        plans: stringList(body.plans),
+        enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
+        notes: typeof body.notes === "string" ? body.notes.slice(0, 500) : null,
+        actorId: session.padmin,
+      });
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: null,
+        action: "sms.managed_service.master_template_saved",
+        entity: "kavenegar_master_templates",
+        entityId: template.id,
+        payload: {
+          key: template.key,
+          version: template.version,
+          enabled: template.enabled,
+          variables: template.variables,
+          industries: template.industries,
+          plans: template.plans,
+        },
+      });
+      return NextResponse.json({ template: toConsoleMasterTemplate({ ...template, business_copies: 0 }) });
+    } catch (error) {
+      if (error instanceof MasterTemplateError) {
+        return NextResponse.json({ error: error.code }, { status: 400 });
+      }
+      throw error;
+    }
+  }
+
+  if (action === "master_template_toggle") {
+    const templateId = typeof body.masterTemplateId === "string" ? body.masterTemplateId : "";
+    if (!UUID.test(templateId)) {
+      return NextResponse.json({ error: "invalid_master_template" }, { status: 400 });
+    }
+    try {
+      const template = await setMasterTemplateEnabled({
+        id: templateId,
+        enabled: body.enabled === true,
+        actorId: session.padmin,
+      });
+      await platformAudit({
+        adminId: session.padmin,
+        businessId: null,
+        action: "sms.managed_service.master_template_toggled",
+        entity: "kavenegar_master_templates",
+        entityId: template.id,
+        payload: { key: template.key, enabled: template.enabled },
+      });
+      return NextResponse.json({ template: toConsoleMasterTemplate({ ...template, business_copies: 0 }) });
+    } catch (error) {
+      if (error instanceof MasterTemplateError) {
+        return NextResponse.json({ error: error.code }, { status: 404 });
+      }
+      throw error;
+    }
+  }
+
+  if (action === "template_from_master") {
+    // Giving one business a copy of a library entry. The copy is a draft: the
+    // platform still has to submit it, so an unapproved message can never send.
+    const masterId = typeof body.masterTemplateId === "string" ? body.masterTemplateId : "";
+    if (!UUID.test(businessId) || !UUID.test(masterId)) {
+      return NextResponse.json({ error: "invalid_request" }, { status: 400 });
+    }
+    try {
+      const result = await instantiateMasterTemplate({
+        businessId,
+        masterTemplateId: masterId,
+      });
+      await platformAudit({
+        adminId: session.padmin,
+        businessId,
+        action: "sms.managed_account.template_from_library",
+        entity: "kavenegar_lookup_templates",
+        entityId: result.template.id,
+        payload: { key: result.master.key, masterVersion: result.master.version, created: result.created },
+      });
+      return NextResponse.json({ template: result.template, created: result.created });
+    } catch (error) {
+      if (error instanceof MasterTemplateError) {
+        const status = error.code === "master_template_not_found" ? 404 : 400;
+        return NextResponse.json({ error: error.code }, { status });
+      }
+      throw error;
+    }
+  }
+
   if (action === "template_submit") {
     const templateId = typeof body.templateId === "string" ? body.templateId : "";
     if (!UUID.test(templateId)) {
@@ -385,6 +559,46 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       },
     });
     return NextResponse.json({ template });
+  }
+
+  if (action === "template_send_test") {
+    // Issue #902 §5 — the operator's proof that a message works: reserve retail,
+    // send on the business's own child key, settle once. It is also how a
+    // template is verified before automation is wired to it, so the answer says
+    // exactly what happened (sent, refused, or an unknown outcome) instead of a
+    // bare success.
+    if (!UUID.test(businessId)) {
+      return NextResponse.json({ error: "invalid_business" }, { status: 400 });
+    }
+    const templateId = typeof body.templateId === "string" ? body.templateId : "";
+    if (!UUID.test(templateId)) {
+      return NextResponse.json({ error: "invalid_template" }, { status: 400 });
+    }
+    const variables =
+      body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
+        ? (body.variables as Record<string, string>)
+        : {};
+    const outcome = await sendManagedLookup({
+      businessId,
+      templateId,
+      receptor: typeof body.receptor === "string" ? body.receptor : "",
+      variables,
+    });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId,
+      action: "sms.managed_account.template_send_test",
+      entity: "kavenegar_lookup_templates",
+      entityId: templateId,
+      payload: {
+        status: outcome.status,
+        code: outcome.status === "blocked" || outcome.status === "failed" ? outcome.code : null,
+        messageId: outcome.status === "sent" ? outcome.messageId : null,
+        chargedRial: outcome.status === "sent" ? outcome.chargedRial : null,
+      },
+    });
+    // A refusal is the operator's answer, not a server error.
+    return NextResponse.json({ outcome }, { status: outcome.status === "blocked" ? 400 : 200 });
   }
 
   if (action === "template_sync") {

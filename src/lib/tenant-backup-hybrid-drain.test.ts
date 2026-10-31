@@ -67,7 +67,7 @@ describe("drainUploadQueue concurrency", () => {
   it("runs the configured number at once, in queue order", async () => {
     routeQuery([queueRow("a.dump.enc"), queueRow("b.dump.enc"), queueRow("c.dump.enc")]);
     const seen: string[] = [];
-    const upload = vi.fn(async (name: string) => {
+    const upload = vi.fn(async (name: string): Promise<{ ok: true }> => {
       seen.push(name);
       return { ok: true };
     });

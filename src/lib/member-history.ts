@@ -211,6 +211,13 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'layaway_payments', columns: ["created_by"] },
   { table: 'layaway_plans', columns: ["created_by"] },
   { table: 'ledger_party_attribution_moves', columns: ["actor_id"] },
+  // Issue #1128 §E. The rest of the media library is excused as tooling in the
+  // schema-contract sweep, and this column deliberately is not: a review link is a
+  // short-lived credential handed to someone *outside* the business, it carries no
+  // name snapshot, and it is ON DELETE SET NULL — so a hard delete would erase who
+  // opened the tenant's files to an external party. That is business history, and
+  // the gate should notice before the member goes.
+  { table: 'media_review_links', columns: ["created_by"] },
   { table: 'opening_balance_sets', columns: ["approved_by", "created_by", "posted_by", "reversed_by", "submitted_by"] },
   { table: 'order_amendments', columns: ["created_by"] },
   { table: 'orders', columns: ["amended_by"], scope: { kind: 'location' } },

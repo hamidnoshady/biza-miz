@@ -86,7 +86,7 @@ export async function validRestoreApproval(
     `SELECT id, artifact_ref, approved_by, approved_at, expires_at, consumed_at,
             consumed_journal_id, note
        FROM tenant_backup_restore_approvals
-      WHERE business_id = $1 AND artifact_ref = $2
+      WHERE subject_business_id = $1 AND artifact_ref = $2
         AND consumed_at IS NULL AND expires_at > $3
       ORDER BY expires_at DESC
       LIMIT 1`,
@@ -150,7 +150,7 @@ export async function grantRestoreApproval(input: GrantApprovalInput): Promise<R
 
   const { rows } = await query<ApprovalRow>(
     `INSERT INTO tenant_backup_restore_approvals
-       (business_id, artifact_ref, approved_by, approved_at, expires_at, note)
+       (subject_business_id, artifact_ref, approved_by, approved_at, expires_at, note)
      VALUES ($1,$2,$3,$4,$5,$6)
      RETURNING id, artifact_ref, approved_by, approved_at, expires_at, consumed_at,
                consumed_journal_id, note`,
@@ -165,7 +165,7 @@ export async function listRestoreApprovals(businessId: string, limit = 20): Prom
     `SELECT id, artifact_ref, approved_by, approved_at, expires_at, consumed_at,
             consumed_journal_id, note
        FROM tenant_backup_restore_approvals
-      WHERE business_id = $1
+      WHERE subject_business_id = $1
       ORDER BY approved_at DESC
       LIMIT $2`,
     [businessId, Math.min(Math.max(1, limit), 100)],
@@ -181,7 +181,7 @@ export async function listRestoreApprovals(businessId: string, limit = 20): Prom
 export async function revokeRestoreApproval(businessId: string, id: string): Promise<boolean> {
   const { rowCount } = await query(
     `DELETE FROM tenant_backup_restore_approvals
-      WHERE business_id = $1 AND id = $2 AND consumed_at IS NULL`,
+      WHERE subject_business_id = $1 AND id = $2 AND consumed_at IS NULL`,
     [businessId, id],
   );
   return (rowCount ?? 0) > 0;
@@ -210,10 +210,10 @@ export async function writeBusinessPolicyOverride(
   await withoutTenantScope("tenant-backup-business-policy", async () => {
     await query(
       `INSERT INTO tenant_backup_business_policy
-         (business_id, interval_hours, retention_days, keep_count, protected_recovery_copies,
+         (subject_business_id, interval_hours, retention_days, keep_count, protected_recovery_copies,
           max_artifact_bytes, require_restore_approval, note, updated_by, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,false),COALESCE($8,''),$9,now())
-       ON CONFLICT (business_id) DO UPDATE SET
+       ON CONFLICT (subject_business_id) DO UPDATE SET
          interval_hours = COALESCE($2, tenant_backup_business_policy.interval_hours),
          retention_days = COALESCE($3, tenant_backup_business_policy.retention_days),
          keep_count = COALESCE($4, tenant_backup_business_policy.keep_count),
@@ -243,7 +243,7 @@ export async function writeBusinessPolicyOverride(
 /** Delete a business's override entirely, returning it to the fleet policy. */
 export async function clearBusinessPolicyOverride(businessId: string): Promise<void> {
   await withoutTenantScope("tenant-backup-business-policy", async () => {
-    await query(`DELETE FROM tenant_backup_business_policy WHERE business_id = $1`, [businessId]);
+    await query(`DELETE FROM tenant_backup_business_policy WHERE subject_business_id = $1`, [businessId]);
   });
 }
 

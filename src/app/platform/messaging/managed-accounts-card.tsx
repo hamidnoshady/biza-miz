@@ -12,9 +12,11 @@
  * nowhere else — tenant screens receive `getTenantMessagingConfig()` instead.
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { Loader2Icon, RefreshCwIcon, SaveIcon, ShieldCheckIcon, WalletCardsIcon } from "lucide-react";
 import { formatPersianNumber } from "@/lib/digits";
 import { tomanLabel } from "@/lib/platform-money";
+import { MASTER_BALANCE_STALE_HOURS } from "@/lib/kavenegar/master-balance-facts";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass } from "../ui";
 
 interface ManagedPolicy {
@@ -33,6 +35,9 @@ interface ManagedPolicy {
   fundingWindowStartHour: number;
   fundingWindowEndHour: number;
   fundingGlobalDailyCapRial: number | null;
+  /** Issue #902 #3 — credit above the floor that only transactional spend may use. */
+  fundingTransactionalReserveRial: number;
+  fundingPurpose: "marketing" | "transactional";
   updatedAt: string | null;
 }
 
@@ -117,7 +122,34 @@ interface CatalogTemplate {
   provider_template_id: string | number | null;
   last_sync_error: string | null;
   revision: number;
+  /** Ordered variable names; empty means the managed send path refuses it (§5). */
+  variables: string[];
   archived_at: string | null;
+  updated_at: string;
+}
+
+/**
+ * Issue #902 §5 — one entry of the platform's own message library.
+ *
+ * This is the layer above the catalog: the operator decides which first-party
+ * message exists, which trades/plans may have it, and whether it is offered at
+ * all. `sample` arrives rendered by the server with representative values, so
+ * the console never has to guess what `%token` will become.
+ */
+interface MasterTemplate {
+  id: string;
+  key: string;
+  title: string;
+  body: string;
+  purpose: "verification" | "transactional";
+  variables: string[];
+  industries: string[];
+  plans: string[];
+  enabled: boolean;
+  version: number;
+  notes: string | null;
+  business_copies: number;
+  sample: string;
   updated_at: string;
 }
 
@@ -130,6 +162,30 @@ interface DeliveryRow {
   failed: number;
   pending: number;
   lastAttemptAt: string | null;
+}
+
+/** Issue #902 §9 item 2 — the same question per campaign, with both latencies. */
+interface LatencyStats {
+  count: number;
+  p50: number;
+  p95: number;
+  max: number;
+}
+
+interface CampaignDeliveryRow {
+  campaignId: string;
+  businessId?: string;
+  businessName?: string | null;
+  campaignName: string | null;
+  channel: "sms" | "email";
+  sent: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  queueLatency: LatencyStats | null;
+  sendLatency: LatencyStats | null;
+  lastAttemptAt: string | null;
+  health: keyof typeof DELIVERY_LABELS;
 }
 
 /** Issue #902 §3 — what needs a human, in the service's own words. */
@@ -147,12 +203,33 @@ interface ServiceAlert {
   detail: Record<string, unknown>;
 }
 
+/** Issue #902 §9 item 4 — the master credit the last funding pass observed. */
+interface MasterBalance {
+  rial: number | null;
+  observedAt: string | null;
+  checkedAt: string | null;
+  state: "unknown" | "current" | "unreadable" | "stale";
+  ageMinutes: number | null;
+}
+
+/** Issue #902 §9 item 1 — the queued work the funding planner sizes against. */
+interface PendingDemand {
+  businessId: string;
+  messages: number;
+  segments: number;
+  campaigns: number;
+}
+
 interface Snapshot {
   error?: string;
   policy: ManagedPolicy;
+  masterBalance: MasterBalance;
+  pendingDemand: PendingDemand[];
   accounts: ManagedAccount[];
   templates: CatalogTemplate[];
+  masterTemplates: MasterTemplate[];
   delivery: DeliveryRow[];
+  campaignDelivery: CampaignDeliveryRow[];
   alerts: ServiceAlert[];
   alertSummary: { critical: number; warning: number; info: number; unacknowledged: number; total: number };
   recentJobs: ManagedJob[];
@@ -173,7 +250,12 @@ const ALERT_COPY: Record<string, { title: string; action: string }> = {
   },
   master_balance_unknown: {
     title: "موجودی حساب اصلی نامشخص است؛ شارژ خودکار متوقف شد",
-    action: "موجودی حساب اصلی را از پنل تأمین‌کننده بخوانید و در پنل ثبت کنید.",
+    action: "کلید حساب اصلی و اتصال به تأمین‌کننده را بررسی کنید؛ شارژ خودکار موجودی را خودش می‌خواند.",
+  },
+  transactional_reserve_held: {
+    title: "شارژ خودکار بازاریابی به ذخیرهٔ تراکنشی رسیده است",
+    action:
+      "اعتبار حساب مادر را شارژ کنید؛ این سهم برای پیام ورود و پیام سفارش نگه داشته شده است.",
   },
   fleet_cap_reached: {
     title: "سقف روزانهٔ شارژ همهٔ کسب‌وکارها پر شده است",
@@ -233,6 +315,47 @@ const STATE_LABELS: Record<ManagedAccount["state"], string> = {
   suspended: "معلق",
 };
 
+const PURPOSE_LABELS: Record<"verification" | "transactional", string> = {
+  verification: "ورود و تأیید",
+  transactional: "اطلاع‌رسانی تراکنشی",
+};
+
+/** Why a test send was refused, in the console's own words. */
+const SEND_BLOCK_LABELS: Record<string, string> = {
+  template_not_found: "پیام یافت نشد",
+  template_not_approved: "پیام هنوز تأیید نشده است",
+  template_archived: "پیام از فهرست خارج شده است",
+  template_variables_undeclared: "متغیرهای پیام تعریف نشده‌اند",
+  invalid_receptor: "شمارهٔ گیرنده معتبر نیست",
+  sms_not_ready: "حساب پیامکی این کسب‌وکار آماده نیست",
+  insufficient_credit: "اعتبار کیف پول کسب‌وکار کافی نیست",
+  pricing_unavailable: "تعرفهٔ ارسال در دسترس نیست",
+  variable_missing: "مقدار یکی از متغیرها وارد نشده است",
+  variable_invalid: "مقدار یکی از متغیرها معتبر نیست",
+  variables_mismatch: "تعداد متغیرها با متن پیام هم‌خوان نیست",
+  variable_not_allowed: "متغیر ناشناخته",
+};
+
+/** What each variable means, for the operator's input label. */
+const VARIABLE_LABELS: Record<string, string> = {
+  code: "کد",
+  customer_name: "نام مشتری",
+  store_name: "نام فروشگاه",
+  order_number: "شمارهٔ سفارش",
+  amount: "مبلغ (ریال)",
+  date: "تاریخ",
+};
+
+/** Believable values, so a test send needs no typing at all. */
+const SAMPLE_VALUES: Record<string, string> = {
+  code: "482913",
+  customer_name: "سارا محمدی",
+  store_name: "فروشگاه نمونه",
+  order_number: "1042",
+  amount: "250000",
+  date: "2026-10-28",
+};
+
 const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
   draft: "پیش‌نویس",
   submitted: "در حال بررسی",
@@ -240,6 +363,37 @@ const TEMPLATE_STATE_LABELS: Record<CatalogTemplate["state"], string> = {
   rejected: "رد‌شده",
   disabled: "غیرفعال",
 };
+
+/** Issue #902 #3 — how the fleet's spend is classified for the reserve. */
+const FUNDING_PURPOSE_LABELS: Record<ManagedPolicy["fundingPurpose"], string> = {
+  marketing: "بازاریابی — ذخیرهٔ تراکنشی را مصرف نمی‌کند",
+  transactional: "تراکنشی — می‌تواند از ذخیرهٔ تراکنشی استفاده کند",
+};
+
+/**
+ * One line about the master's credit, saying how old it is and whether the last
+ * read worked — because a figure with no age is a number an operator will
+ * quote as if it were current.
+ */
+function masterBalanceLine(balance: MasterBalance): string {
+  if (balance.state === "unknown" || balance.rial === null) {
+    return "موجودی حساب اصلی: هنوز خوانده نشده است؛ پاس بعدی شارژ خودکار آن را می‌خواند.";
+  }
+  const age =
+    balance.ageMinutes === null
+      ? ""
+      : balance.ageMinutes < 60
+        ? ` (${formatPersianNumber(balance.ageMinutes)} دقیقه پیش)`
+        : ` (${formatPersianNumber(Math.floor(balance.ageMinutes / 60))} ساعت پیش)`;
+  const value = `موجودی حساب اصلی: ${tomanLabel(balance.rial)}${age}`;
+  if (balance.state === "unreadable") {
+    return `${value} — آخرین خواندن ناموفق بود؛ این عدد مربوط به آخرین خواندن موفق است.`;
+  }
+  if (balance.state === "stale") {
+    return `${value} — قدیمی‌تر از ${formatPersianNumber(Math.floor(MASTER_BALANCE_STALE_HOURS))} ساعت؛ وضعیت فعلی حساب اصلی نامعلوم است.`;
+  }
+  return value;
+}
 
 const STRATEGY_LABELS: Record<ManagedPolicy["fundingStrategy"], string> = {
   jit: "به‌موقع (JIT) — هر بار زیر هدف",
@@ -254,6 +408,18 @@ const DELIVERY_LABELS: Record<"healthy" | "degraded" | "attention" | "idle", str
   attention: "نرخ خطای بالا",
   idle: "بدون ارسال",
 };
+
+/**
+ * Milliseconds as seconds, or «—» when nothing was measured.
+ *
+ * A `null` percentile is "no measurement", never `0 ms`: an operator reading
+ * "0" concludes the end is fast, which is the one thing the report cannot say.
+ */
+function latencyLabel(stats: LatencyStats | null): string {
+  if (!stats) return "—";
+  const seconds = (ms: number) => (ms / 1000).toFixed(ms < 1_000 ? 2 : 1);
+  return `${seconds(stats.p50)} / ${seconds(stats.p95)}`;
+}
 
 /** Mirrors `deliveryHealth` on the server; kept here for a per-row label. */
 function healthOf(row: DeliveryRow): keyof typeof DELIVERY_LABELS {
@@ -286,6 +452,9 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
   const [notice, setNotice] = useState("");
   const [transfer, setTransfer] = useState({ businessId: "", amountRial: "", reason: "" });
   const [probe, setProbe] = useState<{ eligible: boolean; code: string | null } | null>(null);
+  // Issue #902 §5 — the operator's test send: one number, re-used per message.
+  const [testReceptor, setTestReceptor] = useState("");
+  const [testValues, setTestValues] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     const result = await api<Snapshot>("/api/platform/sms/accounts");
@@ -307,6 +476,14 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       attention: accounts.filter((account) => account.state === "attention_required").length,
       suspended: accounts.filter((account) => account.state === "suspended").length,
     };
+  }, [snapshot]);
+
+  // §9 item 1: queued work by business, so the account row can say why a child
+  // was funded above its standing buffer.
+  const demandByBusiness = useMemo(() => {
+    const map = new Map<string, PendingDemand>();
+    for (const row of snapshot?.pendingDemand ?? []) map.set(row.businessId, row);
+    return map;
   }, [snapshot]);
 
   async function post(body: Record<string, unknown>, key: string) {
@@ -353,6 +530,8 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
         fundingWindowStartHour: policy.fundingWindowStartHour,
         fundingWindowEndHour: policy.fundingWindowEndHour,
         fundingGlobalDailyCapRial: policy.fundingGlobalDailyCapRial,
+        fundingTransactionalReserveRial: policy.fundingTransactionalReserveRial,
+        fundingPurpose: policy.fundingPurpose,
       },
       "policy",
     );
@@ -374,6 +553,60 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
   async function submitTemplate(template: CatalogTemplate) {
     const done = await post({ action: "template_submit", templateId: template.id }, `template:${template.id}`);
     if (done) setNotice(`«${template.title}» برای بررسی ارسال شد.`);
+  }
+
+  async function toggleMasterTemplate(template: MasterTemplate) {
+    // Enabling/disabling is not a new version: no business's approved copy
+    // changes, so nothing needs re-approval.
+    const done = await post(
+      { action: "master_template_toggle", masterTemplateId: template.id, enabled: !template.enabled },
+      `master:${template.id}`,
+    );
+    if (done) {
+      setNotice(
+        template.enabled
+          ? `«${template.title}» از کتابخانه کنار گذاشته شد؛ نسخه‌های موجود کسب‌وکارها دست‌نخورده می‌مانند.`
+          : `«${template.title}» برای کسب‌وکارهای هدف فعال شد.`,
+      );
+    }
+  }
+
+  /**
+   * Issue #902 §5 — prove a message works before automation depends on it.
+   *
+   * The receptor and the values are the operator's; the send itself is the real
+   * path (retail reserved, child key, settle once), so a success here means a
+   * trigger will work too.
+   */
+  async function sendTest(template: CatalogTemplate) {
+    if (!testReceptor.trim()) {
+      setError("شمارهٔ آزمایشی را وارد کنید.");
+      return;
+    }
+    const values: Record<string, string> = {};
+    for (const name of template.variables) {
+      const raw = (testValues[`${template.id}:${name}`] ?? "").trim();
+      values[name] = raw || SAMPLE_VALUES[name] || "";
+    }
+    const result = await post(
+      {
+        action: "template_send_test",
+        businessId: template.business_id,
+        templateId: template.id,
+        receptor: testReceptor.trim(),
+        variables: values,
+      },
+      `send:${template.id}`,
+    );
+    if (!result) return;
+    const outcome = (result as { outcome?: { status?: string; code?: string } }).outcome;
+    setNotice(
+      outcome?.status === "sent"
+        ? `پیام آزمایشی «${template.title}» ارسال شد.`
+        : outcome?.status === "unknown"
+          ? `نتیجهٔ ارسال «${template.title}» نامشخص است؛ مبلغ رزروشده بازگردانده نشد.`
+          : `ارسال «${template.title}» انجام نشد: ${SEND_BLOCK_LABELS[outcome?.code ?? ""] ?? outcome?.code ?? "نامشخص"}`,
+    );
   }
 
   async function archiveTemplate(template: CatalogTemplate) {
@@ -443,6 +676,17 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       </Card>
 
       <Card title="سیاست ساخت و تأمین اعتبار">
+        {/* §9 item 4: the balance behind every funding decision on this card,
+            with its age — read, not asked for. */}
+        <p
+          className="mb-4 rounded-lg border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          data-testid="master-balance-mirror"
+        >
+          {masterBalanceLine(snapshot.masterBalance)}
+          {snapshot.masterBalance.checkedAt ? (
+            <span dir="ltr"> · {dateTime(snapshot.masterBalance.checkedAt)}</span>
+          ) : null}
+        </p>
         <form onSubmit={savePolicy} className="grid gap-3 sm:grid-cols-2">
           <Field label="ساخت خودکار حساب فرزند" hint="تا روشن نشدن این گزینه هیچ حسابی ساخته نمی‌شود.">
             <select
@@ -532,6 +776,48 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                 })
               }
             />
+          </Field>
+          <Field
+            label="ذخیرهٔ تراکنشی حساب مادر (ریال)"
+            hint="بالای کف، سهمی که شارژ بازاریابی نمی‌تواند مصرف کند؛ برای بازگرداندن پیام ورود و پیام سفارش وقتی همهٔ حساب‌ها پر شده‌اند. ۰ = بدون ذخیره."
+          >
+            <input
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              value={policy.fundingTransactionalReserveRial}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingTransactionalReserveRial: Number(event.target.value) || 0,
+                })
+              }
+            />
+          </Field>
+          <Field
+            label="دستهٔ مصرف این ناوگان"
+            hint="بازاریابی از ذخیرهٔ تراکنشی استفاده نمی‌کند؛ تراکنشی می‌تواند. پیش‌فرض بازاریابی است تا فعال‌کردن ذخیره هرگز پول بیشتری آزاد نکند."
+          >
+            <select
+              className={inputClass}
+              value={policy.fundingPurpose}
+              disabled={!canManage}
+              onChange={(event) =>
+                setPolicy({
+                  ...policy,
+                  fundingPurpose: event.target.value as ManagedPolicy["fundingPurpose"],
+                })
+              }
+            >
+              {(Object.keys(FUNDING_PURPOSE_LABELS) as ManagedPolicy["fundingPurpose"][]).map(
+                (key) => (
+                  <option key={key} value={key}>
+                    {FUNDING_PURPOSE_LABELS[key]}
+                  </option>
+                ),
+              )}
+            </select>
           </Field>
           <Field label="کف اعتبار حساب مادر (ریال)" hint="با مقدار مثبت، تأمین خودکار بدون موجودی مشخص انجام نمی‌شود.">
             <input
@@ -689,6 +975,18 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       </Card>
 
       <Card title={`حساب‌ها (${formatPersianNumber(snapshot.accounts.length)})`}>
+        {/* Issue #902 §6 — the dedicated audit view is the shared log, filtered
+            rather than copied: the family filter narrows it to `sms.*`, so the
+            operator reads this card's own actions instead of the whole console's. */}
+        <p className="mb-2 text-xs text-muted-foreground">
+          <Link
+            href="/platform/audit?actionFamily=sms"
+            className="text-sky-700 hover:underline dark:text-sky-300"
+          >
+            همهٔ رویدادهای پیامک مدیریت‌شده ←
+          </Link>{" "}
+          — ساخت حساب، تعلیق، تأمین اعتبار و تغییر الگوها، با دادهٔ کامل هر رویداد.
+        </p>
         <div className="space-y-2">
           {snapshot.accounts.length === 0 ? (
             <p className="text-sm text-muted-foreground">هنوز حسابی ساخته نشده است.</p>
@@ -705,6 +1003,28 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
+                  <Link
+                    href={`/platform/audit?actionFamily=sms&businessId=${account.businessId}`}
+                    className="text-sky-700 hover:underline dark:text-sky-300"
+                  >
+                    رویدادهای این حساب ←
+                  </Link>
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {(() => {
+                    // §9 item 1: a child holding an approved queue is being
+                    // funded for that queue, not just for the standing buffer.
+                    // Without this line the transfer looks arbitrary.
+                    const demand = demandByBusiness.get(account.businessId);
+                    if (!demand || demand.messages === 0) return null;
+                    return (
+                      <>
+                        صف فعال: {formatPersianNumber(demand.messages)} پیام (
+                        {formatPersianNumber(demand.segments)} قطعه) در{" "}
+                        {formatPersianNumber(demand.campaigns)} کمپین •{" "}
+                      </>
+                    );
+                  })()}
                   تعرفه: {account.pricingName ?? "—"} • فارسی {tomanLabel(account.smsFarsiCostRial ?? 0)} • انگلیسی{" "}
                   {tomanLabel(account.smsEnglishCostRial ?? 0)} • موجودی داخلی{" "}
                   {account.providerBalanceRial === null ? "نامشخص" : tomanLabel(account.providerBalanceRial)} •{" "}
@@ -855,10 +1175,139 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
         </p>
       </Card>
 
+      {/* Issue #902 §9 item 2 — the fleet row above answers "are messages
+          arriving"; this answers "is one campaign stuck, and at which end".
+          Queue and send latency are shown apart on purpose: a backed-up drain
+          and a slow carrier have opposite fixes, and one averaged number would
+          hide which one is happening. */}
+      <Card title={`تحویل به تفکیک کمپین (۷ روز اخیر)`}>
+        {(snapshot.campaignDelivery ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">در این بازه کمپینی ارسال نشده است.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th className="p-2 text-right">کمپین</th>
+                  <th className="p-2 text-right">کسب‌وکار</th>
+                  <th className="p-2 text-right">پذیرفته</th>
+                  <th className="p-2 text-right">تحویل</th>
+                  <th className="p-2 text-right">ناموفق</th>
+                  <th className="p-2 text-right">در صف</th>
+                  <th className="p-2 text-right">تأخیر صف (میانه / صدک ۹۵)</th>
+                  <th className="p-2 text-right">تأخیر ارائه‌دهنده (میانه / صدک ۹۵)</th>
+                  <th className="p-2 text-right">وضعیت</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(snapshot.campaignDelivery ?? []).map((row) => (
+                  <tr key={row.campaignId} className="border-t border-border/60">
+                    <td className="p-2">
+                      {row.campaignName ?? "—"}
+                      <span className="ms-1 text-xs text-muted-foreground">
+                        {row.channel === "email" ? "ایمیل" : "پیامک"}
+                      </span>
+                    </td>
+                    <td className="p-2 text-xs text-muted-foreground">
+                      {row.businessName ?? row.businessId ?? "—"}
+                    </td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.sent)}</td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.delivered)}</td>
+                    <td className={`p-2 tabular-nums ${row.failed > 0 ? "text-destructive" : ""}`}>
+                      {formatPersianNumber(row.failed)}
+                    </td>
+                    <td className="p-2 tabular-nums">{formatPersianNumber(row.pending)}</td>
+                    <td className="p-2 text-xs text-muted-foreground tabular-nums">
+                      {latencyLabel(row.queueLatency)}
+                    </td>
+                    <td className="p-2 text-xs text-muted-foreground tabular-nums">
+                      {latencyLabel(row.sendLatency)}
+                    </td>
+                    <td
+                      className={`p-2 ${row.health === "attention" ? "text-destructive" : "text-muted-foreground"}`}
+                    >
+                      {DELIVERY_LABELS[row.health]}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="mt-3 text-xs text-muted-foreground">
+          «تأخیر صف» مدت انتظار پیام در صف ارسال است و «تأخیر ارائه‌دهنده» مدت پاسخ ارائه‌دهنده.
+          ردیف‌ها بر اساس بیشترین خطا مرتب شده‌اند.
+        </p>
+      </Card>
+
+      {/* Issue #902 §5 — the library the catalog is built from. An entry is
+          offered only to the trades and plans it names, so a message a business
+          does not need never appears on its screen; disabling one withdraws it
+          from new businesses without touching a copy already approved. */}
+      <Card title={`کتابخانهٔ الگوها (${formatPersianNumber((snapshot.masterTemplates ?? []).length)})`}>
+        {(snapshot.masterTemplates ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">کتابخانه خالی است.</p>
+        ) : (
+          <div className="space-y-2 text-sm">
+            {(snapshot.masterTemplates ?? []).map((template) => (
+              <div key={template.id} className="rounded-lg border border-border px-3 py-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0 break-words">
+                    <b>{template.title}</b>
+                    <span className="ms-2 text-xs text-muted-foreground">
+                      {PURPOSE_LABELS[template.purpose]} • نسخهٔ {formatPersianNumber(template.version)}
+                      {template.enabled ? "" : " • کنارگذاشته‌شده"}
+                      {template.business_copies > 0
+                        ? ` • ${formatPersianNumber(template.business_copies)} نسخه نزد کسب‌وکارها`
+                        : ""}
+                    </span>
+                  </span>
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-muted-foreground" dir="ltr">
+                      {template.key}
+                    </span>
+                    {canManage ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="min-h-9"
+                        disabled={busy === `master:${template.id}`}
+                        onClick={() => void toggleMasterTemplate(template)}
+                      >
+                        {busy === `master:${template.id}` ? "…" : template.enabled ? "کنار گذاشتن" : "فعال‌سازی"}
+                      </Button>
+                    ) : null}
+                  </span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{template.sample}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  مخاطب: {template.industries.length ? template.industries.join("، ") : "همهٔ کسب‌وکارها"}
+                  {" • "}
+                  طرح: {template.plans.length ? template.plans.join("، ") : "همهٔ طرح‌ها"}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
       {/* Issue #902 §5 — the catalog the tenants created. Approvals are the
           provider's; submission and retirement are ours. Rejected rows sort
           first in the API so the operator's next action is at the top. */}
       <Card title={`کاتالوگ الگوهای تأییدشده (${formatPersianNumber((snapshot.templates ?? []).length)})`}>
+        <label className="mb-3 block text-sm">
+          <span className="mb-1 block text-muted-foreground">
+            شمارهٔ آزمایشی (پیام آزمایشی با اعتبار همین کسب‌وکار ارسال می‌شود)
+          </span>
+          <input
+            className="min-h-10 w-full rounded-md border border-border bg-background px-3 py-2"
+            dir="ltr"
+            inputMode="tel"
+            placeholder="09121234567"
+            value={testReceptor}
+            onChange={(event) => setTestReceptor(event.target.value)}
+          />
+        </label>
         {(snapshot.templates ?? []).length === 0 ? (
           <p className="text-sm text-muted-foreground">هنوز الگویی ساخته نشده است.</p>
         ) : (
@@ -890,6 +1339,17 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                           {busy === `template:${template.id}` ? "…" : submitted ? "ارسال ویرایش برای بررسی" : "ارسال برای بررسی"}
                         </Button>
                       ) : null}
+                      {canManage && template.state === "approved" ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="min-h-9"
+                          disabled={busy === `send:${template.id}`}
+                          onClick={() => void sendTest(template)}
+                        >
+                          {busy === `send:${template.id}` ? "…" : "ارسال آزمایشی"}
+                        </Button>
+                      ) : null}
                       {canManage && !template.archived_at ? (
                         <Button
                           type="button"
@@ -904,6 +1364,21 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                     </span>
                   </div>
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{template.body}</p>
+                  {canManage && template.state === "approved" && template.variables.length > 0 ? (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {template.variables.map((name, index) => (
+                        <input
+                          key={name}
+                          className="min-h-9 w-36 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                          placeholder={`${VARIABLE_LABELS[name] ?? name} (%token${index === 0 ? "" : index + 1})`}
+                          value={testValues[`${template.id}:${name}`] ?? ""}
+                          onChange={(event) =>
+                            setTestValues((current) => ({ ...current, [`${template.id}:${name}`]: event.target.value }))
+                          }
+                        />
+                      ))}
+                    </div>
+                  ) : null}
                   {template.last_sync_error ? (
                     <p className="mt-1 text-xs text-destructive" dir="ltr">{template.last_sync_error}</p>
                   ) : null}

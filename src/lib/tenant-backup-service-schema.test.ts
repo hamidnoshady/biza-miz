@@ -147,14 +147,19 @@ describe("migration 0270 — drill history", () => {
   it("lets a business read its own drill evidence but never write it", () => {
     expect(DRILLS).toMatch(/ALTER TABLE tenant_backup_drills ENABLE ROW LEVEL SECURITY/);
     expect(DRILLS).toMatch(/ALTER TABLE tenant_backup_drills FORCE ROW LEVEL SECURITY/);
-    // Read: own business. Write: platform only, because evidence a tenant can
-    // manufacture is not evidence.
+    // Read: own business, through the one permissive policy the tenancy gate
+    // approves. Write: platform only, because evidence a tenant can manufacture
+    // is not evidence — and subtracted with RESTRICTIVE policies so the
+    // permissive read policy can never widen into a write.
     expect(DRILLS).toMatch(
-      /CREATE POLICY tenant_read_drills ON tenant_backup_drills FOR SELECT\s+USING \(app_rls_bypass\(\) OR business_id = app_current_business\(\)\)/,
+      /CREATE POLICY tenant_isolation ON tenant_backup_drills FOR ALL\s+USING \(app_rls_bypass\(\) OR business_id = app_current_business\(\)\)\s+WITH CHECK \(app_rls_bypass\(\) OR business_id = app_current_business\(\)\)/,
     );
-    expect(DRILLS).toMatch(/CREATE POLICY platform_write_drills ON tenant_backup_drills FOR ALL\s+USING \(app_rls_bypass\(\)\)/);
-    expect(DRILLS).not.toMatch(/FOR INSERT/);
-    expect(DRILLS).not.toMatch(/FOR UPDATE/);
+    expect(DRILLS).toMatch(/CREATE POLICY platform_write_insert ON tenant_backup_drills AS RESTRICTIVE FOR INSERT\s+WITH CHECK \(app_rls_bypass\(\)\)/);
+    expect(DRILLS).toMatch(/CREATE POLICY platform_write_update ON tenant_backup_drills AS RESTRICTIVE FOR UPDATE/);
+    expect(DRILLS).toMatch(/CREATE POLICY platform_write_delete ON tenant_backup_drills AS RESTRICTIVE FOR DELETE/);
+    // No second permissive policy: the gate allows exactly one per table.
+    const permissive = DRILLS.match(/CREATE POLICY \w+ ON tenant_backup_drills FOR (SELECT|ALL)/g) ?? [];
+    expect(permissive).toEqual(["CREATE POLICY tenant_isolation ON tenant_backup_drills FOR ALL"]);
   });
 
   it("records what a drill could not prove, separately from whether it passed", () => {

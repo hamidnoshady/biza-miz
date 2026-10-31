@@ -401,7 +401,78 @@ describe("every tenant table is protected", () => {
       // shape as platform_ai_config: one account, configured once by a
       // super-admin, holding no tenant data.
       "platform_sms_config",
+      // Issue #903 — the managed tenant-backup fleet policy singleton: interval,
+      // retention ceiling, keep count and quotas, owned by Superadmin and never
+      // a tenant's to read. Its per-business overrides and the recovery
+      // approvals are `platform_only` too, but their ownership column is
+      // `subject_business_id`, so they are not part of this `platform_` census.
+      "platform_tenant_backup_service",
     ]);
+  });
+
+  /**
+   * Issue #902 — a table no tenant can ever read must not be in a tenant export.
+   *
+   * `platform_only` (FORCE RLS, `app_rls_bypass()` and nothing else) is the
+   * project's way of saying "this row is the platform's". RLS enforces it for
+   * every non-owner connection, but a per-tenant export reads with `SELECT *`
+   * **as the owner** — and FORCE RLS does not bind a superuser. So the rows of
+   * those tables silently landed in the artifact: the 0264 seeded library then
+   * made a restore collide on its own keys, and the retail markup, the alert
+   * ledger and an encrypted child key rode along with it.
+   *
+   * `EXEMPT_TABLES` is the list that keeps them out, so the two must agree. The
+   * exceptions below carry no `business_id`/`location_id` and hold nothing about
+   * a tenant: deployment-wide identity and cloud-relay bookkeeping that predates
+   * this check.
+   */
+  it("keeps every platform-only table out of the tenant export", async () => {
+    const { rows } = await ownerClient.query<{ relname: string }>(
+      `SELECT c.relname
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+         JOIN pg_policy p ON p.polrelid = c.oid
+        WHERE c.relkind = 'r' AND c.relforcerowsecurity
+        GROUP BY c.relname
+       HAVING count(*) = count(*) FILTER (WHERE p.polname = 'platform_only')
+          AND count(*) FILTER (WHERE p.polname = 'platform_only') > 0
+        ORDER BY c.relname`,
+    );
+    // Nine today: the six managed-SMS tables below plus the cloud-relay
+    // bookkeeping. The assertion is a floor, not a census — the point is that
+    // the catalog was actually read, and the family check underneath names the
+    // rows this test exists for.
+    expect(rows.length).toBeGreaterThanOrEqual(6);
+
+    const NOT_TENANT_DATA = new Set([
+      "cloud_exception_inbox",
+      "cloud_exception_installations",
+      "cloud_exception_responses",
+      "telegram_identity_links",
+      "telegram_init_data_replays",
+      "telegram_webhook_updates",
+    ]);
+    const exported = rows
+      .map((row) => row.relname)
+      .filter((name) => !EXEMPT_TABLES.has(name) && !NOT_TENANT_DATA.has(name));
+    expect(
+      exported,
+      `platform-only tables that would be dumped into a tenant export: ${exported.join(", ")}`,
+    ).toEqual([]);
+
+    // The managed-SMS fleet is the family this check was written for, and it is
+    // platform-only in every direction: the credential, the commercial policy,
+    // the alert ledger and the message library.
+    for (const table of [
+      "kavenegar_account_credentials",
+      "kavenegar_master_templates",
+      "kavenegar_retail_price_overrides",
+      "kavenegar_retail_price_slabs",
+      "kavenegar_retail_price_versions",
+      "kavenegar_service_alerts",
+    ]) {
+      expect(EXEMPT_TABLES.has(table), `${table} must stay out of tenant exports`).toBe(true);
+    }
   });
 
   it("makes reporting views follow the caller rather than their owner", async () => {

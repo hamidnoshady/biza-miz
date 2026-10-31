@@ -23,6 +23,14 @@ import { query, withoutTenantScope, withoutTenantScopeTransaction } from "../db"
 import type { KavenegarManagementClient } from "./rest";
 import type { FundingStrategy } from "./policy";
 import { getManagedChildPolicy } from "./policy";
+import { recordMasterBalanceObservation } from "./master-balance";
+import {
+  EMPTY_CAMPAIGN_DEMAND,
+  PENDING_OUTBOX_STATES,
+  priceCampaignDemand,
+  smsSegmentsSql,
+  type CampaignDemand,
+} from "./campaign-demand";
 import { applyReservedCreditTransfer, type CreditTransferRow } from "./provisioning-service";
 import {
   alertForFundingBlock,
@@ -141,6 +149,19 @@ export interface FundingPolicy {
   globalDailyCapRial: number | null;
   /** Wholesale credit the master account must retain. */
   masterFloorRial: number;
+  /**
+   * Issue #902 #3 — credit above the floor that only *transactional* funding
+   * may spend (migration 0267). 0 means no reserve, which is the default: the
+   * guard only ever protects capacity once an operator asks for it.
+   */
+  transactionalReserveRial: number;
+  /**
+   * How this fleet's provider spend is classified. `marketing` — the default —
+   * may not spend the reserve; `transactional` may. The platform cannot infer
+   * this: the same child account sends a campaign and an order-ready message,
+   * so only an operator knows which side of the line a fleet is on.
+   */
+  fundingPurpose: FundingPurpose;
 }
 
 export const NO_FUNDING: FundingPolicy = {
@@ -155,7 +176,24 @@ export const NO_FUNDING: FundingPolicy = {
   dailyCapRial: null,
   globalDailyCapRial: null,
   masterFloorRial: 0,
+  transactionalReserveRial: 0,
+  fundingPurpose: "marketing",
 };
+
+/**
+ * How a fleet's provider spend is classified for the reserve (issue #902 #3).
+ *
+ * `marketing` is deliberately the default and the restrictive side: it cannot
+ * touch the reserved slice, so switching the reserve on can only ever hold
+ * capacity back, never let more money out.
+ */
+export type FundingPurpose = "marketing" | "transactional";
+
+export const FUNDING_PURPOSES: readonly FundingPurpose[] = ["marketing", "transactional"] as const;
+
+export function isFundingPurpose(value: unknown): value is FundingPurpose {
+  return typeof value === "string" && (FUNDING_PURPOSES as readonly string[]).includes(value);
+}
 
 /**
  * Is the `scheduled` strategy inside its window right now?
@@ -215,11 +253,23 @@ export type FundingBlockedReason =
   | "unresolved_transfer"
   | "below_provider_minimum"
   | "outside_funding_window"
-  | "global_daily_cap_reached";
+  | "global_daily_cap_reached"
+  | "transactional_reserve";
 
 export type FundingDecision =
   | { action: "none"; amountRial: 0; reason: FundingBlockedReason; targetBalanceRial: number | null }
-  | { action: "transfer"; amountRial: number; reason: "top_up"; targetBalanceRial: number };
+  | {
+      action: "transfer";
+      amountRial: number;
+      /**
+       * `top_up` — the standing buffer asked for credit. `campaign_demand` — an
+       * approved campaign's queued segments raised the target above the buffer,
+       * which is a different instruction for whoever reads the ledger: one says
+       * "running low", the other says "500 messages are waiting".
+       */
+      reason: "top_up" | "campaign_demand";
+      targetBalanceRial: number;
+    };
 
 /** The provider rejects transfers below 1,000 Rial (`client/chargecredit`). */
 export const MIN_PROVIDER_TRANSFER_RIAL = 1_000;
@@ -240,7 +290,8 @@ export function roundToProviderMinimum(amountRial: number): number {
  *      (double-funding is the failure mode the journal exists to prevent);
  *   3. unknown tariff ⇒ cannot compute a target, so guess nothing;
  *   4. ceiling and daily cap clamp the amount;
- *   5. the master floor is subtracted from what the master may spend;
+ *   5. the master floor is subtracted from what the master may spend, and the
+ *      transactional reserve on top of it for marketing-classified spend;
  *   6. anything below the provider's 1,000 Rial minimum is not attempted.
  *
  * Negative values (a child whose balance the provider reported above target)
@@ -264,6 +315,13 @@ export function planFunding(input: {
   masterBalanceRial: number | null;
   transferredTodayRial: number;
   unresolvedTransferRial: number;
+  /**
+   * Wholesale credit already owed to approved, queued work (issue #902 §9 item
+   * 1). The target becomes `max(buffer, demand)`: a business that approved 500
+   * recipients needs 500 messages of credit, not the policy's standing 100, or
+   * the queue dies mid-campaign with the provider's credit error.
+   */
+  pendingDemandRial?: number;
 }): FundingDecision {
   const { policy } = input;
   if (policy.strategy === "manual" || policy.bufferMessages <= 0) {
@@ -294,8 +352,18 @@ export function planFunding(input: {
     };
   }
 
-  const targetBalanceRial = policy.bufferMessages * perSegment;
-  const triggerBalanceRial = refillTriggerMessages(policy) * perSegment;
+  // The standing order, then the approved queue on top of it. Both the target
+  // and the trigger move: a child that cannot pay for the work it is holding is
+  // short no matter what the policy's buffer says, and `low_watermark`'s
+  // hysteresis must not delay a campaign that is already draining.
+  const demandRial = Math.max(0, Math.trunc(input.pendingDemandRial ?? 0));
+  const bufferTargetRial = policy.bufferMessages * perSegment;
+  const targetBalanceRial = Math.max(bufferTargetRial, demandRial);
+  const triggerBalanceRial = Math.max(refillTriggerMessages(policy) * perSegment, demandRial);
+  // A pass is only "demand-driven" when the queue, not the buffer, is what asked
+  // for the money — reporting every campaign-era top-up as `campaign_demand`
+  // would make the reason meaningless.
+  const drivenByDemand = demandRial > bufferTargetRial;
   const balance = Math.max(0, Math.trunc(input.childBalanceRial));
   // `low_watermark` refills to the target but only once the child is below the
   // trigger; every other strategy triggers at the target itself.
@@ -334,6 +402,16 @@ export function planFunding(input: {
     available = Math.min(available, fleetRoom);
   }
 
+  // Issue #902 #3 — the reserved slice. A marketing-classified fleet may not
+  // spend the last `transactionalReserveRial` above the floor; a transactional
+  // one may. This is the only thing that keeps a login code funded when every
+  // child is capped and the master has drifted down to the floor, because the
+  // floor alone stops funding *everyone* — the waiting customer included.
+  const reserveRial =
+    policy.fundingPurpose === "transactional"
+      ? 0
+      : Math.max(0, Math.trunc(policy.transactionalReserveRial ?? 0));
+
   if (input.masterBalanceRial === null) {
     if (policy.masterFloorRial > 0) {
       return { action: "none", amountRial: 0, reason: "master_balance_unknown", targetBalanceRial };
@@ -346,14 +424,26 @@ export function planFunding(input: {
     if (spendableMaster <= 0) {
       return { action: "none", amountRial: 0, reason: "master_floor", targetBalanceRial };
     }
-    available = Math.min(available, spendableMaster);
+    // The reserve is reported as its own reason rather than as `master_floor`:
+    // an operator looking at a fleet that stopped funding needs to know which
+    // guard stopped it, and "the money is there but held for transactional
+    // traffic" is a different instruction from "there is no money".
+    if (spendableMaster <= reserveRial) {
+      return { action: "none", amountRial: 0, reason: "transactional_reserve", targetBalanceRial };
+    }
+    available = Math.min(available, spendableMaster - reserveRial);
   }
 
   const amountRial = roundToProviderMinimum(available);
   if (amountRial < MIN_PROVIDER_TRANSFER_RIAL) {
     return { action: "none", amountRial: 0, reason: "below_provider_minimum", targetBalanceRial };
   }
-  return { action: "transfer", amountRial, reason: "top_up", targetBalanceRial };
+  return {
+    action: "transfer",
+    amountRial,
+    reason: drivenByDemand ? "campaign_demand" : "top_up",
+    targetBalanceRial,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +481,8 @@ type SnapshotRow = {
   managed_funding_window_start_hour: number;
   managed_funding_window_end_hour: number;
   managed_funding_global_daily_cap_rial: string | number | null;
+  managed_funding_transactional_reserve_rial: string | number;
+  managed_funding_purpose: FundingPurpose;
 };
 
 /** One business's retail rate, wholesale tariff and funding policy. */
@@ -411,7 +503,9 @@ export async function getBusinessPriceSnapshot(
               s.managed_funding_low_watermark_messages,
               s.managed_funding_window_start_hour,
               s.managed_funding_window_end_hour,
-              s.managed_funding_global_daily_cap_rial
+              s.managed_funding_global_daily_cap_rial,
+              s.managed_funding_transactional_reserve_rial,
+              s.managed_funding_purpose
          FROM kavenegar_business_accounts a
          LEFT JOIN platform_message_config c ON c.id
          LEFT JOIN platform_sms_config s ON s.id = 1
@@ -446,6 +540,10 @@ export async function getBusinessPriceSnapshot(
       dailyCapRial: nullableNumber(row.managed_funding_daily_cap_rial),
       globalDailyCapRial: nullableNumber(row.managed_funding_global_daily_cap_rial),
       masterFloorRial: numberOr(row.managed_funding_master_floor_rial, 0),
+      transactionalReserveRial: numberOr(row.managed_funding_transactional_reserve_rial, 0),
+      fundingPurpose: isFundingPurpose(row.managed_funding_purpose)
+        ? row.managed_funding_purpose
+        : "marketing",
     },
   };
 }
@@ -501,6 +599,100 @@ export async function getFleetFundingWindow(): Promise<{ transferredTodayAllChil
   return { transferredTodayAllChildrenRial: numberOr(rows[0]?.transferred_today ?? 0, 0) };
 }
 
+/**
+ * The wholesale credit this business's approved queue already owes.
+ *
+ * Read with the **ambient** query so it joins the caller's transaction: the
+ * reservation path already runs inside the child's funding lock, and a demand
+ * read from outside it could size a transfer against a queue that has since
+ * drained. Segments are counted by SQL built from the billing constants
+ * (`smsSegmentsSql`), so a three-segment notice is three units of credit here
+ * exactly as it is on the invoice.
+ *
+ * A tariff the provider has not given us yet is `perSegment = 0`, which prices
+ * the queue at zero — and that is correct, not a bug: with no tariff
+ * `planFunding` already refuses with `tariff_unknown` before a target matters.
+ */
+export async function readPendingCampaignDemand(
+  businessId: string,
+  perSegmentRial: number,
+): Promise<CampaignDemand> {
+  const { rows } = await query<{
+    messages: string | number | null;
+    segments: string | number | null;
+    campaigns: string | number | null;
+  }>(
+    `SELECT count(*) AS messages,
+            COALESCE(sum(${smsSegmentsSql("r.body")}), 0) AS segments,
+            count(DISTINCT o.campaign_id) AS campaigns
+       FROM message_outbox o
+       JOIN message_recipients r ON r.id = o.recipient_id
+      WHERE o.business_id = $1
+        AND r.channel = 'sms'
+        AND o.status = ANY($2::text[])`,
+    [businessId, [...PENDING_OUTBOX_STATES]],
+  );
+  const row = rows[0];
+  if (!row) return EMPTY_CAMPAIGN_DEMAND;
+  return priceCampaignDemand({
+    messages: numberOr(row.messages ?? 0, 0),
+    segments: numberOr(row.segments ?? 0, 0),
+    campaigns: numberOr(row.campaigns ?? 0, 0),
+    perSegmentRial,
+  });
+}
+
+/**
+ * Every business's queued demand, in one query, for the console.
+ *
+ * The funding rule is per-child; the operator's question is fleet-wide ("who is
+ * holding a queue we have not funded yet?"), and N per-child queries on a page
+ * load is not an answer. Counts only — no money — so the screen can say how much
+ * work is waiting without a second, subtly different pricing rule appearing in
+ * a React file.
+ */
+export async function listFleetCampaignDemand(): Promise<
+  { businessId: string; messages: number; segments: number; campaigns: number }[]
+> {
+  const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
+    query<{
+      business_id: string;
+      messages: string | number | null;
+      segments: string | number | null;
+      campaigns: string | number | null;
+    }>(
+      `SELECT o.business_id,
+              count(*) AS messages,
+              COALESCE(sum(${smsSegmentsSql("r.body")}), 0) AS segments,
+              count(DISTINCT o.campaign_id) AS campaigns
+         FROM message_outbox o
+         JOIN message_recipients r ON r.id = o.recipient_id
+        WHERE r.channel = 'sms'
+          AND o.status = ANY($1::text[])
+        GROUP BY o.business_id`,
+      [[...PENDING_OUTBOX_STATES]],
+    ),
+  );
+  return rows.map((row) => ({
+    businessId: row.business_id,
+    messages: numberOr(row.messages ?? 0, 0),
+    segments: numberOr(row.segments ?? 0, 0),
+    campaigns: numberOr(row.campaigns ?? 0, 0),
+  }));
+}
+
+/**
+ * The dearest script's wholesale rate — the same conservative choice the buffer
+ * makes: under-funding strands a queue, over-funding does not, because the child
+ * keeps the credit either way.
+ */
+function conservativePerSegment(tariff: ProviderTariff): number {
+  return Math.max(
+    wholesalePerSegment(tariff, "persian") ?? 0,
+    wholesalePerSegment(tariff, "english") ?? 0,
+  );
+}
+
 export interface FundingPlan {
   businessId: string;
   snapshot: BusinessPriceSnapshot;
@@ -522,7 +714,15 @@ export async function planBusinessFunding(
 ): Promise<FundingPlan | null> {
   const snapshot = await getBusinessPriceSnapshot(businessId);
   if (!snapshot) return null;
-  const [window, fleet] = await Promise.all([getFundingWindow(businessId), getFleetFundingWindow()]);
+  const [window, fleet, demand] = await Promise.all([
+    getFundingWindow(businessId),
+    getFleetFundingWindow(),
+    // The console must answer "what would a pass do" with the same inputs the
+    // pass uses — including the approved queue (issue #902 §9 item 1). A
+    // preview that ignored demand would promise a healthy child a transfer it
+    // is about to receive, or the reverse.
+    readPendingCampaignDemand(businessId, conservativePerSegment(snapshot.tariff)),
+  ]);
   return {
     businessId,
     snapshot,
@@ -537,6 +737,7 @@ export async function planBusinessFunding(
       transferredTodayAllChildrenRial: fleet.transferredTodayAllChildrenRial,
       masterBalanceRial: input.masterBalanceRial,
       unresolvedTransferRial: window.unresolvedTransferRial,
+      pendingDemandRial: demand.estimatedWholesaleRial,
     }),
   };
 }
@@ -732,9 +933,13 @@ export async function reserveAutomaticTransfer(input: {
     }
     if (snapshot.policy.globalDailyCapRial !== null) await lockFleetFunding();
 
-    const [window, fleet] = await Promise.all([
+    const [window, fleet, demand] = await Promise.all([
       getFundingWindow(input.businessId),
       getFleetFundingWindow(),
+      // Issue #902 §9 item 1: what the approved queue already owes. Read inside
+      // the same transaction as the decision, so the planner sizes the transfer
+      // for the work that exists now, not for the work a previous pass saw.
+      readPendingCampaignDemand(input.businessId, conservativePerSegment(snapshot.tariff)),
     ]);
     const plan: FundingPlan = {
       businessId: input.businessId,
@@ -750,6 +955,7 @@ export async function reserveAutomaticTransfer(input: {
         transferredTodayAllChildrenRial: fleet.transferredTodayAllChildrenRial,
         masterBalanceRial: input.masterBalanceRial,
         unresolvedTransferRial: window.unresolvedTransferRial,
+        pendingDemandRial: demand.estimatedWholesaleRial,
       }),
     };
     if (plan.decision.action !== "transfer") {
@@ -868,6 +1074,30 @@ const BUSINESS_FUNDING_ALERTS = [
 ] as const;
 
 /**
+ * The master's credit as the provider reports it, or `null` when it will not say.
+ *
+ * Deliberately collapsed to `null` rather than thrown: a provider hiccup must
+ * not turn a funding pass into an incident, and `null` already has an honest
+ * meaning downstream — with a floor configured the plan refuses to move money,
+ * and the pass raises `master_balance_unknown` for the operator. The log line
+ * is the trail, and it never contains the key (the transport redacts the URL).
+ */
+export async function readMasterBalanceRial(
+  client: KavenegarManagementClient,
+): Promise<number | null> {
+  try {
+    const info = await client.fetchAccountInfo();
+    return info.remainCreditRial;
+  } catch (error) {
+    console.error(
+      "kavenegar master balance unavailable; funding will refuse while a floor is configured:",
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
+/**
  * One bounded funding pass over the active children that need it most.
  *
  * Children whose balance the provider reported longest ago (or never) come
@@ -876,6 +1106,12 @@ const BUSINESS_FUNDING_ALERTS = [
  */
 export async function runManagedFundingTick(input: {
   client: KavenegarManagementClient;
+  /**
+   * Overrides the provider read. `undefined` — the scheduled pass — asks the
+   * provider; an explicit number is an operator's figure; an explicit `null`
+   * means "unknown on purpose", which the plan refuses to fund through while a
+   * floor is configured.
+   */
   masterBalanceRial?: number | null;
   limit?: number;
 }): Promise<FundingTickResult> {
@@ -886,6 +1122,33 @@ export async function runManagedFundingTick(input: {
   if (!policy.enabled || policy.fundingStrategy === "manual" || policy.fundingBufferMessages <= 0) {
     return { planned: 0, funded: 0, failed: 0, deferred: 0, alerts: 0 };
   }
+  // The master's own credit, read once for the whole pass (plan §9 item 4).
+  //
+  // Before this, the scheduled pass had no figure to pass, so it refused every
+  // child with `master_balance_unknown` whenever a floor was configured — which
+  // is exactly what a careful operator configures. Automation was therefore
+  // dead in the configuration that needs it, and the fleet only got funded when
+  // a human typed a number into the console.
+  const masterBalanceRial =
+    input.masterBalanceRial !== undefined
+      ? input.masterBalanceRial
+      : await readMasterBalanceRial(input.client);
+
+  // Issue #902 §9 item 4, second half: keep the figure rather than spending it
+  // and dropping it. Only a pass that actually asked the provider writes the
+  // mirror — an operator's typed number is an instruction, not an observation.
+  // A mirror write failing must not fail the funding pass it is describing, so
+  // it is logged and swallowed: the money decision is the job, the evidence is
+  // the bonus.
+  if (input.masterBalanceRial === undefined) {
+    await recordMasterBalanceObservation({ rial: masterBalanceRial }).catch((error: unknown) => {
+      console.error(
+        "kavenegar master balance mirror not written:",
+        error instanceof Error ? error.message : error,
+      );
+    });
+  }
+
   const limit = Math.min(Math.max(1, input.limit ?? 25), 100);
   const businessIds = await withoutTenantScope("platform", async () => {
     const { rows } = await query<{ business_id: string }>(
@@ -905,7 +1168,7 @@ export async function runManagedFundingTick(input: {
       const execution = await fundManagedChild({
         businessId,
         client: input.client,
-        masterBalanceRial: input.masterBalanceRial ?? null,
+        masterBalanceRial,
       });
       if (!execution) {
         result.deferred += 1;
@@ -935,15 +1198,16 @@ export async function runManagedFundingTick(input: {
   }
 
   // Fleet-level evidence. One applied transfer proves the master had spendable
-  // credit and that the fleet cap had room *at that moment*; a supplied master
-  // balance proves the figure is no longer unknown. Each clears exactly its own
-  // condition — a healthy pass that funded nothing proves nothing about either,
-  // because it may simply not have needed money.
+  // credit and that the fleet cap had room *at that moment*; any real master
+  // balance — read from the provider or supplied by an operator — proves the
+  // figure is no longer unknown. Each clears exactly its own condition: a
+  // healthy pass that funded nothing proves nothing about either, because it
+  // may simply not have needed money.
   if (result.funded > 0) {
     await resolveServiceAlert({ kind: "master_credit_low" });
     await resolveServiceAlert({ kind: "fleet_cap_reached" });
   }
-  if (input.masterBalanceRial !== null && input.masterBalanceRial !== undefined) {
+  if (masterBalanceRial !== null) {
     await resolveServiceAlert({ kind: "master_balance_unknown" });
   }
   return result;

@@ -65,17 +65,38 @@ CREATE INDEX IF NOT EXISTS tenant_backup_drills_recent
 ALTER TABLE tenant_backup_drills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_backup_drills FORCE ROW LEVEL SECURITY;
 
+-- A tenant reads its own drill history (that is the "does my backup actually
+-- restore?" evidence the console shows it); writes are the platform's alone.
+--
+-- Two policies would be the obvious spelling — `tenant_read_drills` FOR SELECT
+-- plus a platform-only FOR ALL — but the tenancy gate in
+-- integration/tenant-isolation.integration.test.ts treats every `business_id`
+-- table as tenant data with exactly one permissive, gate-approved
+-- `tenant_isolation` policy, precisely so a table cannot quietly carry a second
+-- permissive policy that widens access. So the read scope is the standard
+-- policy and the *writes* are subtracted with RESTRICTIVE policies, which AND
+-- with it (the same shape migration 0262 uses to hide internal supplier cost):
+-- a tenant connection satisfies the permissive policy only for its own rows,
+-- and satisfies no write policy at all without the bypass flag.
 DROP POLICY IF EXISTS tenant_read_drills ON tenant_backup_drills;
-CREATE POLICY tenant_read_drills ON tenant_backup_drills FOR SELECT
-    USING (app_rls_bypass() OR business_id = app_current_business());
+DROP POLICY IF EXISTS tenant_isolation ON tenant_backup_drills;
+CREATE POLICY tenant_isolation ON tenant_backup_drills FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
+    WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
 
 -- Writes are platform-only: a drill result is evidence, and evidence a tenant
--- can write is not evidence. There is deliberately no tenant INSERT/UPDATE
--- policy, so FORCE RLS refuses one rather than trusting a CHECK in the app.
-DROP POLICY IF EXISTS platform_write_drills ON tenant_backup_drills;
-CREATE POLICY platform_write_drills ON tenant_backup_drills FOR ALL
+-- can write is not evidence. RESTRICTIVE, so the permissive policy above cannot
+-- hand a tenant INSERT/UPDATE/DELETE, and no app-layer CHECK is trusted.
+DROP POLICY IF EXISTS platform_write_insert ON tenant_backup_drills;
+CREATE POLICY platform_write_insert ON tenant_backup_drills AS RESTRICTIVE FOR INSERT
+    WITH CHECK (app_rls_bypass());
+DROP POLICY IF EXISTS platform_write_update ON tenant_backup_drills;
+CREATE POLICY platform_write_update ON tenant_backup_drills AS RESTRICTIVE FOR UPDATE
     USING (app_rls_bypass())
     WITH CHECK (app_rls_bypass());
+DROP POLICY IF EXISTS platform_write_delete ON tenant_backup_drills;
+CREATE POLICY platform_write_delete ON tenant_backup_drills AS RESTRICTIVE FOR DELETE
+    USING (app_rls_bypass());
 
 COMMENT ON TABLE tenant_backup_drills IS
     'One row per automated or manual recovery drill. Tenant-readable for its own business; written only by the platform. Issue #903 §12.';

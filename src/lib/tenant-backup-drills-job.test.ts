@@ -39,10 +39,11 @@ import {
   recordDrillRun,
   runScheduledBackupDrills,
 } from "./tenant-backup-drills-job";
+import type { DrillReport } from "./tenant-backup-drill";
 
 const now = new Date("2026-10-30T12:00:00.000Z");
 
-function report(patch: Record<string, unknown> = {}) {
+function report(patch: Partial<DrillReport> = {}): DrillReport {
   return {
     businessId: "business-a",
     ref: "ref-1",

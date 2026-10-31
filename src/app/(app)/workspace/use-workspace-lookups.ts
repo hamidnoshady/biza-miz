@@ -31,6 +31,18 @@ export interface WorkspaceLookups {
    * to `aecProjectTabs`.
    */
   aecCapabilities?: AecCapabilityKey[];
+  /**
+   * Present only for an advertising agency (issue #1128 §D): the project page
+   * mounts the billing panel — schedule, milestones, change requests — when
+   * this is here.
+   *
+   * Absent rather than `false` for every other trade, for the reason the two
+   * AEC entries above give: the flag is what stops a café's project page from
+   * calling `/api/agency/**` and rendering an `industry_mismatch` banner for a
+   * request it should never have made. A screen that has to ask whether it
+   * exists is a screen that has already fetched.
+   */
+  agencyCommercial?: true;
 }
 
 export const EMPTY_LOOKUPS: WorkspaceLookups = {

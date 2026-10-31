@@ -28,6 +28,7 @@
  */
 import type { PoolClient } from "pg";
 import { query } from "./db";
+import { listTenantTables } from "./tenant-tables";
 import type { TenantExportTable } from "./tenant-export";
 
 export const TENANT_ARCHIVE_MAGIC = "POSTARC1";
@@ -307,12 +308,29 @@ export async function applyTenantArchive(
   return { deleted, inserted, tables: ordered.length };
 }
 
-/** Tables a validated archive touched, for the restore journal. */
+/**
+ * The rows a tenant archive may carry, and therefore the allowlist a parsed
+ * archive is checked against.
+ *
+ * This is the tenant export's own table set (issue #903 §5) minus the one table
+ * a restore must never write: `businesses` is the tenant's identity row, not its
+ * data, and `checkRestorableTables` refuses an archive that names it. Deriving
+ * the allowlist from the export rather than from "tables with a `business_id`
+ * column" is what keeps the writer and the validator in step — most tenant
+ * tables are scoped through `location_id` or a parent foreign key (menu_items,
+ * orders, journal_lines, …), so the narrower query this replaced refused every
+ * archive a real business produced.
+ */
 export async function tenantTableSet(): Promise<Set<string>> {
-  const { rows } = await query<{ table_name: string }>(
-    `SELECT table_name FROM information_schema.columns
-      WHERE table_schema = 'public' AND column_name = 'business_id'
-        AND table_name <> 'businesses'`,
-  );
-  return new Set(rows.map((row) => row.table_name));
+  const tables = await listTenantTables();
+  return new Set(tables.filter((name) => !ARCHIVE_EXCLUDED_TABLES.has(name)));
 }
+
+/**
+ * Exported tables an archive is never written with. `businesses` is the tenant's
+ * identity row: the restore engine refuses to delete or replace it (see
+ * `RESTORE_PROTECTED_TABLES` in `tenant-restore-apply.ts`), so an archive that
+ * carried it could never be applied — and a checkpoint that carried it could
+ * never be replayed for a rollback.
+ */
+export const ARCHIVE_EXCLUDED_TABLES: ReadonlySet<string> = new Set(["businesses"]);

@@ -640,7 +640,9 @@ app.prepare().then(async () => {
 
   // Issue #902: keep the children funded, and prove the provider's balance
   // against our own journal. Both passes are bounded and use the same
-  // privileged adapter; neither runs in a request.
+  // privileged adapter; neither runs in a request. The funding pass reads the
+  // master's own credit from the provider (plan §9 item 4), so a configured
+  // floor is a real guard rather than a switch that silently stops funding.
   const [{ runManagedFundingTick }, { runManagedReconciliationSweep }] = await Promise.all([
     import("./src/lib/kavenegar/pricing-service"),
     import("./src/lib/kavenegar/reconciliation-service"),
