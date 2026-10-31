@@ -35,6 +35,7 @@ import { LeadsSection } from "./leads-section";
 import { SegmentsSection } from "./segments-section";
 import { DealsSection } from "./deals-section";
 import { BriefsSection } from "./briefs-section";
+import { ProposalsSection } from "./proposals-section";
 import { ActivitiesSection } from "./activities-section";
 import { CasesSection } from "./cases-section";
 import { DuplicatesSection } from "./duplicates-section";
@@ -83,6 +84,16 @@ export function CrmSection({
         // refused — and the delete control is `crm.delete`, not `crm.manage`.
         canManage={canWriteCrmSection(held, "briefs")}
         canDelete={canDeleteCrmSection(held, "briefs")}
+      />
+    );
+  if (section === "proposals")
+    return (
+      <ProposalsSection
+        // Both flags from the table the API guards with, so the edit and action
+        // controls are never drawn for a member whose own request would be
+        // refused — and the delete control is `crm.delete`, not `crm.manage`.
+        canManage={canWriteCrmSection(held, "proposals")}
+        canDelete={canDeleteCrmSection(held, "proposals")}
       />
     );
   if (section === "activities")

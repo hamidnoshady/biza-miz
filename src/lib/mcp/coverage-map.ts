@@ -527,6 +527,17 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/agency-client-briefs.integration.test.ts",
   },
   {
+    id: "crm.client_proposals",
+    module: "CRM",
+    entity: "Proposals and quotes (price a brief, send the offer, record the client's decision)",
+    routes: ["crm/proposals"],
+    // No overlap with crm.client_briefs or crm.deals-leads: a proposal prices a
+    // brief and hangs off a deal but is its own entity with its own chain and its
+    // own lines, and neither row's prefix reaches these files.
+    note: "issue #1128 §A + §D: the priced offer, which §A calls a proposal or quote, §D calls an estimate and #1127 will print as a service quote — §B's stage list puts all three in one place, so it is one row. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and two of them have to stay gaps. `accept` and `decline` record the *client's* decision with a name attached, so a verb that could accept would let an assistant attest that a human at the client agreed to a figure, which is the one act §F's rule that an assistant drafts and a human approves exists to prevent; `expire` closes an offer the client never answered, which is the same attestation wearing a different hat. Drafting and reading an offer are different in kind and are what a future tool should expose — §F names proposals among the things an assistant may draft — subject to four things it must keep: a sent offer is frozen including its lines, because the lines *are* the price and the correction is a new number in the series; a discount larger than the subtotal it discounts is refused, which no CHECK can express because it compares the header against the sum of its lines; an offer whose validity has run out cannot be accepted, which no CHECK can express either because it needs the current date; and a line's `costRial` and `passThrough` are internal, so any tool that reads a proposal has to decide which of the two shapes it is serving — the member's, with a margin, or the client's, in which those properties do not exist",
+    test: "integration/agency-proposals.integration.test.ts",
+  },
+  {
     id: "crm.segments-views",
     module: "CRM",
     entity: "Segments, saved views, queues, RFM",

@@ -683,6 +683,30 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
       "The client-side contact recorded as approving the brief. Moved with the brief so §A's separation rule still holds after a merge — the approver has to remain a contact of whichever client record survives — and so the pointer resolves instead of naming an archived duplicate. Not itemised in the preview: it is a dimension of the same rows `party_id` already counts, and counting them twice would overstate what the merge touches.",
   },
 
+  // Migration 0276's two party columns, both `move`, for the reason 0274's are:
+  // the proposal's own trigger requires the client contact to be *related to the
+  // proposal's client*, so a merge that moved one and not the other would leave
+  // rows the trigger then refuses to write. Both follow together, and the
+  // relationship edges they depend on move above.
+  {
+    table: "agency_proposals",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The client this offer was priced for, and the column is NOT NULL so it cannot be left behind. An accepted proposal is the record of what was agreed and at what figure, and a contract and later invoices are keyed off it, so the surviving customer's file has to carry it; stranded on an archived duplicate, the price the client accepted disappears from exactly the place a dispute about that price would look.",
+    preview: true,
+    previewLabel: "پیشنهادهای قیمت کارفرما",
+  },
+  {
+    table: "agency_proposals",
+    column: "client_contact_party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The client-side stakeholder §A asks to be recorded — the person who may accept this offer. Moved with the proposal so the separation rule still holds after a merge, since the contact has to remain a contact of whichever client record survives, and so the pointer resolves instead of naming an archived duplicate. Not itemised in the preview: it is a dimension of the same rows `party_id` already counts, and counting them twice would overstate what the merge touches.",
+  },
+
   // -- AEC (issue #799 Wave 2) ----------------------------------------------
   // Migration 0194's three party columns. All four are `move`: they name a live
   // counterparty on a project that is still running, and the migration's own

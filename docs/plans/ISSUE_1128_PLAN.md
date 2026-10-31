@@ -113,6 +113,12 @@ way round. See «What this change does not build».
 | **Wave 6** — §A brief HTTP | Three routes under `/api/crm/briefs/**`, in the CRM door rather than the agency one (decision 39): list and draft, one brief and its edits, and the chain. `crm.view` to read, `crm.manage` to write and to move a brief along its chain, `crm.delete` to delete one. One error map in `src/app/api/crm/brief-guard.ts`, exhaustive over the fifteen codes. A new CRM section key `briefs` with its access row, its command-palette aliases, and its place in the «فرصت‌ها» group |
 | **Wave 6** — §A brief screen | `/crm/briefs` and `briefs-section.tsx`. Acts are read off each row's own `actions`, so the screen never offers a button the route refuses (decision 30). The approver picker is populated from the chosen client's own relationships in both directions — exactly what 0274's trigger accepts — so another client's decision-maker is not among the options. A confirmed brief's sheet keeps only the note and the project pointer writable. Dates render through `formatJalali` and money through `formatPersianNumber`; the browser's own formatter is what `crm-rtl.test.ts` refuses |
 | **Wave 6** — §A brief tests | `agency-brief.test.ts` (26, pure), `integration/agency-client-briefs.integration.test.ts` (17, real database) and 48 assertions against 0274 run directly over Postgres. The integration suite covers what only a database can show: one number sequence per agency held under a race, a second tenant unable to load, list, patch, transition or delete the first tenant's brief, §A's approver rule in both directions with nothing written on refusal, the freeze and the §A→§B handoff coexisting, and a client's deletion taking a confirmed brief with it |
+| **Wave 7** — §A+§D proposal schema | `migrations/0276_agency_proposals.sql`: `agency_proposals` and `agency_proposal_lines`. One document for §A's "proposal/quote" and §D's "estimate", because §B's stage list puts them in one place (decision 43). The header stores `discount_rial` and `tax_rial` and no total (decision 44); each line carries `quantity numeric(14,3)`, a computed `amount_rial`, one of the trade's four revenue codes validated against the tenant's own chart, and the internal `cost_rial` + `pass_through` pair (decision 45). Four triggers: reference ownership including §A's stakeholder rule and the sharper one — a brief priced for a different client; the freeze from `sent` with its lines and the cascade-tolerant delete; the line guard that freezes with the price, refuses impossible inputs in words and then computes the amount; and the revenue account's chart check. `UNIQUE (business_id, id)` on both so a later register can composite-FK a line. `brief_id` is a simple FK because Postgres refuses `ON DELETE SET NULL` on a composite whose other column is NOT NULL. RLS shape 1 on both, `ENABLE` + `FORCE`. Nothing posts |
+| **Wave 7** — §A proposal pure module | `src/lib/agency-proposal.ts`: the chain (`draft → sent → accepted|declined|expired|withdrawn`, with `withdrawn → draft` and every decision terminal), the actions derived from it, lapsing computed from the date rather than read from a status, line normalisation that renumbers in the caller's order and refuses rather than drops, the derived totals and the internal margin, and `agencyProposalClientView` — the projection in which `costRial` and `passThrough` do not exist as properties |
+| **Wave 7** — §A proposal service | `src/lib/agency-proposal-service.ts`: fifteen refusal codes; list, read, create, patch, action, delete, plus `loadAgencyProposalClientView`. Header and lines are written in one transaction, because an offer is one statement about a price. Every statement carries its own `business_id` predicate, inside each of the six joins and the lateral aggregate too (decision 31). The list reads five figures from ONE lateral join rather than five correlated subqueries over the same rows, so its margin is real and its `costedLineCount` says whether it is complete. Two rules the database cannot enforce live here and are documented at the point of enforcement (decision 47) |
+| **Wave 7** — §A proposal HTTP | Three routes under `/api/crm/proposals/**`, in the CRM door for the reason decision 39 gives, with one exhaustive error map in `src/app/api/crm/proposal-guard.ts` over fifteen codes plus the deliberate SQLSTATEs. A new CRM section key `proposals` with its access row, its command-palette aliases (including «پیش‌فاکتور» and «برآورد», the two other words for the same document), and its place in the «فرصت‌ها» group between the brief and the leads |
+| **Wave 7** — §A proposal screen | `/crm/proposals` and `proposals-section.tsx`. حاشیهٔ سود is the central column, marked «ناقص» when only some lines were costed. A frozen row's «ویرایش» becomes «نمایش» and «پیشنهاد تازه از روی این» is the correction the freeze forces, pre-filled and with the contract and project pointers cleared. The brief picker holds only the chosen client's own briefs and the stakeholder picker only that client's contacts, in both directions — the shape of §A's rule, with 0276 as the rule. Live totals from the same pure module the service calls, so the figure being typed and the figure stored are one arithmetic |
+| **Wave 7** — §A proposal tests | `agency-proposal.test.ts` (34, pure), `integration/agency-proposals.integration.test.ts` (27, real database) and 89 assertions against 0276 run directly over Postgres. The harness found three things nothing else could see: triggers firing alphabetically, a negative price reported as a bad `amount_rial`, and a code outside the revenue vocabulary reported as missing from the chart (decision 48). The integration suite found a fourth — the schema and the service disagreeing about whether an empty draft may be withdrawn, each self-consistent (decision 46) |
 
 
 ## Decisions
@@ -612,6 +618,63 @@ The mirror case matters as much. A client being deleted takes its briefs with it
 What does follow from that is a constraint on automation. `confirm` attests that a human at the client agreed to something, and `supersede` retires a brief they confirmed — so neither may ever become an MCP verb, because §F's rule that an assistant drafts and a human approves exists to prevent precisely that attestation being machine-made. Drafting and reading a brief are different in kind and are what a future tool should expose. The coverage row records this, so the gap reads as a decision rather than as an omission waiting to be filled.
 
 
+### 43 — §A's proposal and §D's estimate are one document
+
+§A asks for "proposals/quotes" in the CRM and §D asks for "service/project estimates" in the billing set. They are the same thing, and §B's stage list is what settles it rather than anybody's opinion: "brief → discovery → **proposal/quote** → contract → kickoff". One name, one position, one lifecycle. Two tables would be the same offer in two places, free to disagree about the price — and a price two systems disagree about is the one disagreement a client always notices.
+
+So it is built once, as `agency_proposals` and `agency_proposal_lines` (0276), and it sits where §B puts it: a brief (0274) records what the client asked for, a proposal records what the agency offers in answer and at what price, and `workspace_contracts` (0167) records what was signed. That is why a proposal carries three pointers written at three different moments — `brief_id` at the start, `deal_id` and `project_id` as the work takes shape, and `contract_id` only after acceptance. `workspace_contracts` was read before this was decided, and its `contract_type` vocabulary is mostly inbound (contractor, supplier, vendor, subcontractor); it is the signed agreement, and a proposal is the offer that precedes it.
+
+`brief_id` is a *simple* foreign key, not the composite one 0274 made possible, because Postgres refuses `ON DELETE SET NULL` on a composite key whose other column is `NOT NULL` and `business_id` here is. Tenant ownership of the brief is therefore the trigger's job, alongside the sharper question the foreign key cannot ask: whether the brief was written for *this* client. Pricing client A's brief for client B would put one client's stated requirement inside another client's offer, which is §A's leak arriving from the other direction.
+
+### 44 — the header stores no total, and a line's amount is computed rather than trusted
+
+`discount_rial` and `tax_rial` are on the header because they are policy inputs somebody chose. The subtotal is the sum of the lines and the total is derived from both, on every read, in one pure function. A stored total is a second answer to "how much", and the only way to keep two answers agreeing is a trigger whose whole job is bookkeeping — so there is one answer, which cannot disagree with itself. The integration suite asserts that a list row's figures equal the opened row's, because a summary that disagreed with its own detail view would be the more dangerous kind of wrong: it would look like agreement.
+
+Each line's own `amount_rial` *is* stored, and is computed by a trigger from quantity × unit price rather than accepted from the caller. A line whose amount disagrees with its own quantity and price is a bug nobody can see, because both readings look correct on a printed quote. Storing it at all is still right: a list, a print template and an eventual invoice all need it, and none of them should re-derive it slightly differently.
+
+The TypeScript side computes the same figure, in `agencyProposalLineAmountRial`, so the number under the member's cursor and the number in the row are one arithmetic. That is the one place a rounding rule could silently differ — Postgres rounds `numeric` half away from zero, `Math.round` rounds half up, which for the non-negative figures allowed here are the same rule — and the integration suite pins both sides on a `.5` case. A one-rial gap is invisible in review and maddening in an audit.
+
+Quantity is `numeric(14,3)` rather than an integer because agency work is sold in halves and thirds: ۱٫۵ روز مدیریت هنری, half a retainer month. An integer column would have forced every such line to be rounded up and quietly overcharged for it. The form's own digit-stripper has to keep the decimal separator for the same reason — stripping it turns «۱٫۵» into ۱۵, a tenfold overcharge that looks exactly like what was typed.
+
+### 45 — cost and pass-through are internal, and the client boundary is a type
+
+A line carries `cost_rial` and `pass_through`, and neither may ever reach a client. `cost_rial` earns its place immediately rather than waiting for a profitability report: the margin on an offer has to be visible *before* it is sent, and an agency that cannot see its own margin on a media buy is guessing at whether the work is worth taking. That is why the screen's central column is حاشیهٔ سود and not merely one field among many.
+
+The rule is enforced structurally rather than by comment. `agencyProposalClientView()` returns a type in which `costRial`, `passThrough` and `revenueCode` do not exist, and the test asserts the exact key set — so a screen built on the projection cannot render what it cannot name, and adding a cost field to the client shape fails a test. A comment saying "do not show the cost" survives one refactor; an absent property does not need to. `loadAgencyProposalClientView` is the service door that reads it from real rows, and #1127's proposal and service-quote print templates plus §A's P2 review portal are its consumers; no endpoint ships for it yet, because an endpoint with no consumer is dead surface.
+
+`pass_through` is where §D's gross-versus-net question gets *answered*, though not where it gets posted. A media recharge is either the agency's own money moving through its accounts or the client's money moving past them, and that is a decision made line by line at offer time — the only moment anybody actually knows the answer — not something discovered at invoice time or inferred from how large a line is. A pass-through line must state its cost, because a recharge of an unknown amount is a promise to book the client's money without knowing how much of it there is. Nothing here reaches account 1270 and nothing posts; §D's invoice layer reads the flag when it is built.
+
+A list row reports `costedLineCount` against `lineCount` so the screen can mark a margin «ناقص» when only some lines were costed. A margin over a half-costed offer is a guess with the missing inputs hidden, and printing it as a figure would look like an answer.
+
+### 46 — frozen at `sent`, not at acceptance
+
+A brief freezes at `confirmed`, because only then has the client agreed to something and only then does an edit make three downstream documents cite something they never read. A proposal freezes a step earlier, when it is sent, because it states a *price*: a client who reads «۵۰۰٬۰۰۰٬۰۰۰ ریال» and returns to find «۶۵۰٬۰۰۰٬۰۰۰ ریال» has been given a reason to distrust every later figure. That is 0260's rule for a submitted milestone — what an approver is reading cannot change underneath them — applied to the document an approver reads first.
+
+The lines freeze with it, because the lines *are* the price. Replacing them on a sent offer is the same change by another route, and so is deleting the last one.
+
+What stays writable is the status chain and its stamps, plus `contract_id` — the one commercial write that happens *after* the decision, for exactly the reason 0260 leaves `invoice_order_id` writable and 0274 leaves `project_id` writable. Freezing the outcome would make it unrecordable.
+
+`accepted`, `declined` and `expired` are terminal, and that follows from the freeze rather than being a separate choice: the price closed when the offer was sent, so there is nothing left to revise in place. The client who declines at ۶۵۰٬۰۰۰٬۰۰۰ and is then offered ۵۵۰٬۰۰۰٬۰۰۰ gets a *new* proposal in the same series, and the declined one stays on the record as the offer that was actually refused — the only evidence of what the client said no to. Reopening it would destroy that. `withdrawn` does reopen, as a withdrawn brief does: an offer taken back before anyone decided was never a fact about the client. The screen makes the correction a button («پیشنهاد تازه از روی این») rather than leaving the member to discover it, and clears the contract and project pointers on the way, because a new offer is a new negotiation and silently inheriting this one's contract would attach a fresh price to a signed agreement.
+
+Withdrawing an *empty* draft is allowed, and the exemption is the point of the rule rather than an escape from it: what is being prevented is an empty offer reaching the client, and withdrawing one shows it to nobody. The first version of 0276 refused it, which stranded a half-written draft — unable to be sent, unable to be withdrawn, deletable only while it was still a draft, a corner with one exit in it. Only the integration suite caught it, because the service and the schema each agreed with themselves and not with each other.
+
+### 47 — two rules no CHECK can express
+
+A discount larger than the subtotal it discounts would make the total negative: the agency paying the client to accept the work. No CHECK can refuse it, because it compares the header against the sum of another table's rows. Equal is allowed — zero-rial work is a real offer, a pro-bono campaign or a first month free to win a retainer — and the refusal is checked against the lines that will exist *after* the write, so patching only the discount or only the lines cannot sneak one past.
+
+Accepting an offer whose validity has run out is refused for the same structural reason: `valid_until < now()` is not an immutable expression, so no CHECK can express it either. Without the refusal a client could accept a six-month-old quote at the old price, which is the exact mistake a validity date exists to prevent. `decline` and `expire` are *not* refused — recording that a client turned down an offer that had already lapsed, or formally closing one, are both accurate statements about the past.
+
+Lapsing is computed from the date rather than read from the status, and the two are deliberately distinct facts. `expired` is a decision somebody recorded; lapsing is true the moment the date passes whether or not anyone has looked. A list that showed only the stored status would keep offering a quote that lapsed three weeks ago, because nothing had got round to marking it — so the screen has a «اعتبارشان تمام شده» filter that reads the date, and a sent offer can be `sent` and lapsed at once, which is exactly the case worth surfacing.
+
+### 48 — same-timing triggers fire alphabetically, so the freeze and the arithmetic are one function
+
+Postgres fires same-timing row triggers in alphabetical order by trigger name. The first version of 0276 had two functions on the lines — one computing the amount, one enforcing the freeze — and whichever sorted first answered. Both were individually correct, and together they meant that adding a badly-formed line to an already-sent offer could report the line's arithmetic instead of the fact that the offer is closed. Ordering by name is not a contract to build on, so the two became one function with the freeze first, and the comment says why, because the next person to split them will not otherwise know what breaks.
+
+The same ordering fact produced two more fixes. Both line triggers run *before* Postgres enforces a CHECK, so a negative unit price was being reported as a violation of `amount_rial >= 0` — a true statement about a number nobody asked for, and a misleading answer to the person who typed it. And a revenue code outside the vocabulary was reported as missing from the tenant's chart of accounts, which sends the reader looking for an account that must not exist. Each trigger now refuses its own impossible input in words before deriving anything from it, and the CHECKs stay: they are the structural invariant and still hold if a trigger is ever dropped. This is the same reason 0274's trigger raises on a missing client rather than leaving it to `NOT NULL`.
+
+None of the three was visible to a type-checker, to the unit suite or to a green whole-schema sweep. An 89-assertion raw-SQL harness found all of them, which is what it is for.
+
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -852,6 +915,52 @@ link every byte fetch, which made the default link unable to show the artwork it
   refusal from the wrong constraint is still a refusal and still a bug. This is
   what found the frozen `project_id` and the `BEFORE` trigger answering a NULL
   client before the column's own NOT NULL could.
+* `agency-proposal.test.ts` (34) — §A's proposal vocabulary: the chain with every
+  decision terminal and only `withdrawn` reopening, `agencyProposalActionsFrom`
+  offering only acts the route would accept, the freeze covering everything past
+  `draft` and saying so separately about the lines, lapsing computed inclusively
+  from the date and never applied to a decided offer, `accept` blocked once an
+  offer has lapsed while `decline` and `expire` are not, the revenue accounts read
+  from the trade's own list rather than restated, the amount rounding half up
+  exactly as Postgres rounds `numeric`, zero kept as a real rial figure rather
+  than collapsed into absent, a fractional quantity surviving a browser's
+  floating-point artefact, a date refused unless it is a plain `YYYY-MM-DD` inside
+  a Gregorian year range, lines renumbered in the caller's order and refused
+  rather than dropped, a pass-through line required to state what passes through,
+  totals taxing what is left after discount and capping a discount at the
+  subtotal, margin subtracting the discount but never the tax, and the client
+  projection asserting its exact key set so a cost cannot be added to it.
+* `integration/agency-proposals.integration.test.ts` (27) — the same feature
+  against a real database: one `PR-` sequence per agency held under two
+  concurrent creates and a second agency starting its own, a stored amount equal
+  to the pure module's on the half-rial case, totals derived with no total column
+  present in the schema at all, a margin visible to the agency and provably absent
+  from the client projection read from real rows, a draft refused to the client
+  door, a discount past the subtotal refused on create and on a one-sided patch in
+  either direction, a pass-through line without a cost refused, a revenue code
+  outside the vocabulary refused, a second tenant answered `proposal_not_found`
+  for load, client-view, list, patch, transition and delete with nothing changed
+  by the attempts, §A's stakeholder rule in both directions and against a stranger
+  who is somebody else's contact, one client's brief refused as another client's
+  price, the chain walked end to end with a decision attributed to the stakeholder
+  already on the offer, an unattributed decision refused, an empty offer refused
+  at `send` but allowed at `withdraw`, the freeze refusing eight kinds of edit
+  while the contract pointer still moves, `accept` refused once lapsed and allowed
+  on the last valid day, a list whose margin equals the opened row's, every list
+  dimension including `lapsedOnly` and a search across the offer's words and its
+  client's name, absent-versus-null on a PATCH, draft-only deletion cascading its
+  lines, a client's deletion taking a sent offer with it, and a brief's deletion
+  leaving the offer that priced it standing.
+* 89 assertions run directly against `0276_agency_proposals.sql` over Postgres —
+  the named CHECKs, the absence of auto-named ones, both unique keys, the
+  composite line foreign key, four triggers, RLS enabled *and forced* on both
+  tables, and the two non-vacuity checks that matter most: that no total column
+  exists on the header and that cost and pass-through exist only on the lines.
+  Each negative case asserts *why* it was refused. This is what found the
+  alphabetically-ordered triggers, the negative price reported as a bad
+  `amount_rial`, and the out-of-vocabulary revenue code reported as missing from
+  the chart — none of which a type-checker, a unit suite or a green whole-schema
+  sweep can see.
 
 * `crm-agency-pipeline.test.ts` (13) — §A's preset: both invariants
   `savePipelineStages` enforces, so the preset can never be refused by the
@@ -948,18 +1057,25 @@ Deliberately, and each is named in the issue:
   apart from its posted half. Client receivables arrive through the invoice itself — an agency
   invoice defaults to on account (نسیه), so the posting engine raises the receivable and §D's
   collected/owed split is read from the invoices a project produced. What is still missing:
-  * **Estimates and quotations.** A schedule is laid out against an engagement that exists; there is
-    no pre-contract document to price work the client has not yet agreed to, and no path from a
-    quotation to a signed engagement.
+  * ~~**Estimates and quotations.**~~ Built, as `agency_proposals` (0276) — the pre-contract document
+    that prices work the client has not yet agreed to, carrying a nullable `contract_id` written
+    after acceptance so the path from a quotation to a signed engagement exists. Decision 43: §A's
+    "proposals/quotes" and §D's "estimates" are one document, because §B's stage list puts them in
+    one place. What is still missing on §D's side is the *posting*: an accepted proposal is an
+    agreement that money will become due, and turning it into an invoice is the service-invoice
+    layer's act, not this table's.
   * **True customer advances.** A `deposit` is a milestone that gets invoiced, not a liability drawn
     down against later invoices (decision 15). 2430 remains a retail layaway deposit and is
     unreached by any agency document.
   * **The vendor chain** — quote → approved purchase/expense → payable → settlement (decision 21).
     The accounts are seeded and the project dimension it needs now exists; the documents are
     procurement's.
-  * **Gross vs. net pass-through.** The media recharge is booked gross as revenue and 1270 is
-    unreached. Which way a given agency books it is a business policy needing its own document and
-    posting rule, never a flag on an invoice and never inferred from how large a line is.
+  * **Gross vs. net pass-through.** The media recharge is still booked gross as revenue and 1270 is
+    still unreached, so the *posting* remains to be built. What now exists is the decision it needs:
+    `agency_proposal_lines.pass_through` records, line by line and at offer time, whether a figure is
+    the agency's own revenue or the client's money moving past it — the only moment anybody actually
+    knows the answer, and not something to infer at invoice time from how large a line is. Which way
+    a given agency books it is still a business policy needing its own posting rule.
   * **Overdue balances per project.** `ar-service.ts` ages a *customer's* balance, and migration
     0260 added the partial index on `(business_id, due_date) WHERE status = 'approved'` that a
     per-project overdue list would read, but nothing surfaces it yet. Tax and discount are likewise

@@ -70,6 +70,12 @@ export const CRM_SECTION_KEYS = [
   // a brief outlives the opportunity it was written against — it is carried by
   // the project it becomes, and a lost deal does not unask what was asked.
   "briefs",
+  // What the agency offered that client, at what price, valid until when (issue
+  // #1128 §A + §D). §A calls it a proposal or quote and §D calls it an estimate;
+  // §B's stage list puts it in one place, so it is one section. Sits beside the
+  // brief it prices rather than inside the deal it hangs off, because an offer
+  // outlives both — it is carried by the contract it becomes.
+  "proposals",
   "activities",
   "cases",
   // The data-quality *workspace*: which records can be trusted. It hosts the
@@ -263,6 +269,19 @@ export const CRM_SECTION_ACCESS: Record<CrmSectionKey, CrmSectionAccess> = {
   // record of what they asked for — so `crm.delete`, and the service refuses
   // anything past draft anyway.
   briefs: {
+    read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
+    write: [crmManage],
+    delete: [crmDelete],
+  },
+  // Management work, and more clearly so than a brief's: a proposal states a
+  // *price*, which is a commitment about money even though it posts nothing. The
+  // internal margin rides on the same `crm.view` as the offer it belongs to,
+  // because a member who may read what was offered may read what it cost —
+  // splitting them would show one figure without the other and invite a guess.
+  // `accept` and `decline` are `crm.manage` rather than a stronger key for the
+  // reason a brief's `confirm` is: they record the **client's** decision and the
+  // member is the scribe, not the decider.
+  proposals: {
     read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
     write: [crmManage],
     delete: [crmDelete],
