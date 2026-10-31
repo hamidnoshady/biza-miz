@@ -33,7 +33,10 @@ export type RegisterNumberedTable =
   | "aec_commitments"
   // Issue #1128 §D — the agency's billing schedule and its change requests.
   | "agency_billing_milestones"
-  | "agency_change_requests";
+  | "agency_change_requests"
+  // Issue #1128 §A — what the client asked for, which is numbered per agency
+  // rather than per project; see `nextBusinessRegisterNumber`.
+  | "agency_client_briefs";
 
 export type RegisterNumberedColumn =
   | "variation_number"
@@ -42,7 +45,8 @@ export type RegisterNumberedColumn =
   | "rfq_number"
   | "commitment_number"
   | "milestone_number"
-  | "change_request_number";
+  | "change_request_number"
+  | "brief_number";
 
 const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   aec_variations: "variation_number",
@@ -52,6 +56,7 @@ const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   aec_commitments: "commitment_number",
   agency_billing_milestones: "milestone_number",
   agency_change_requests: "change_request_number",
+  agency_client_briefs: "brief_number",
 };
 
 /**
@@ -61,8 +66,8 @@ const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
  * old pod and a new pod lock *different* keys for the same register and can hand
  * out the same number. The name is historical; the guarantee is not.
  */
-function lockKey(table: RegisterNumberedTable, projectId: string): string {
-  return `aec-number:${table}:${projectId}`;
+function lockKey(table: RegisterNumberedTable, scope: string): string {
+  return `aec-number:${table}:${scope}`;
 }
 
 /**
@@ -120,6 +125,41 @@ export async function nextRegisterNumber(
        FROM ${table}
       WHERE project_id = $1 AND ${column} LIKE $2`,
     [projectId, `${prefix}-%`],
+  );
+  return formatRegisterNumber(prefix, (rows[0]?.max ?? 0) + 1);
+}
+
+/**
+ * The next number within one business, for a register that is not scoped to a
+ * project.
+ *
+ * `nextRegisterNumber` numbers inside a project because that is what the five AEC
+ * registers and §D's two mean by "the next one". A client brief means something
+ * different: it is usually written while the work is still an opportunity and has
+ * no project at all, so a project-scoped sequence would leave the common case
+ * unnumbered. One sequence per agency also keeps a number unambiguous outside its
+ * client's file, which matters because a brief gets quoted in proposals, projects
+ * and change requests read by people who are not looking at one client's page.
+ *
+ * Same contract as its project-scoped sibling, and for the same reason: call it
+ * inside the caller's transaction, because the lock it takes is released at
+ * commit and an insert outside that transaction is not serialised by it.
+ */
+export async function nextBusinessRegisterNumber(
+  table: RegisterNumberedTable,
+  businessId: string,
+  prefix: string,
+): Promise<string> {
+  const { query } = await import("./db");
+  const column = NUMBER_COLUMN[table];
+  await query(`SELECT pg_advisory_xact_lock(hashtextextended($1, ${REGISTER_NUMBERING_LOCK_SEED}))`, [
+    lockKey(table, businessId),
+  ]);
+  const { rows } = await query<{ max: number | null }>(
+    `SELECT MAX(NULLIF(regexp_replace(${column}, '^.*-', ''), '')::integer) AS max
+       FROM ${table}
+      WHERE business_id = $1 AND ${column} LIKE $2`,
+    [businessId, `${prefix}-%`],
   );
   return formatRegisterNumber(prefix, (rows[0]?.max ?? 0) + 1);
 }
