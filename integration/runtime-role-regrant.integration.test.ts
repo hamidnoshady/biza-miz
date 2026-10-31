@@ -61,6 +61,9 @@ const currentPassword = decodeURIComponent(new URL(databaseUrl).password);
 afterAll(async () => {
   if (!canCreateRoles) return;
   await sql(`DROP OWNED BY ${probeRole}`).catch(() => {});
+  // createAppRole grants the replay capability below, and a parameter grant
+  // depends on the role: revoke it, or DROP ROLE refuses to run.
+  await sql(`REVOKE SET ON PARAMETER session_replication_role FROM ${probeRole}`).catch(() => {});
   await sql(`DROP ROLE IF EXISTS ${probeRole}`).catch(() => {});
 });
 

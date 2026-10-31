@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { jalaliToIsoDate, isoDateToJalali } from "../src/lib/jalali";
 import { roleBasePermissions } from "../src/lib/permissions";
 import { SYNC_EVENT_REGISTRY, siteSkipsPulledEvent, syncEventDefinition } from "../src/lib/sync-event-registry";
@@ -362,7 +362,7 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query(`DROP ROLE IF EXISTS "${applicationRole}"`);
+    await dropAppRole(maintenance, applicationRole);
   } finally {
     await maintenance.end();
   }

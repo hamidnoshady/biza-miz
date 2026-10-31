@@ -630,6 +630,10 @@ const COMPONENT_TABLES: Partial<Record<BackupComponentKey, string[]>> = {
 export async function currentComponentCounts(
   businessId: string,
 ): Promise<Partial<Record<BackupComponentKey, number>>> {
+  // The scope is already applied by the caller (`withTenant`): the counts below
+  // read under this business's RLS. The id is accepted so the call site reads as
+  // "for this business", not because the SQL needs it.
+  void businessId;
   const counts: Partial<Record<BackupComponentKey, number>> = {};
   for (const [component, tables] of Object.entries(COMPONENT_TABLES) as [BackupComponentKey, string[]][]) {
     let total = 0;
@@ -638,10 +642,15 @@ export async function currentComponentCounts(
       const { rows } = await query<{ present: string | null; total: string }>(
         // A table that does not exist on this build is skipped, not counted as
         // zero rows: "unknown" and "empty" mean different things to a restore.
-        `SELECT to_regclass($2)::text AS present,
-                CASE WHEN to_regclass($2) IS NULL THEN '0'
+        //
+        // The count is unscoped on purpose: the caller is inside the tenant's
+        // RLS scope, so the policy — not this SQL — decides which rows exist.
+        // (Postgres refuses a statement whose placeholder is never used, which
+        // is why there is no unused `$1` here: `to_regclass($1)`.)
+        `SELECT to_regclass($1)::text AS present,
+                CASE WHEN to_regclass($1) IS NULL THEN '0'
                      ELSE (SELECT count(*)::text FROM ${table}) END AS total`,
-        [businessId, `public.${table}`],
+        [`public.${table}`],
       );
       if (rows[0]?.present) {
         measured = true;
@@ -686,13 +695,18 @@ export async function previewOwnedRestore(
       artifact.manifestSignature &&
       verifyBackupManifestSignature(artifact.manifest, artifact.manifestSignature, masterKey),
   );
-  const [schemaVersion, currentCounts] = await Promise.all([
+  const [schemaVersion, currentCounts, business] = await Promise.all([
     installedSchemaVersion(),
     currentComponentCounts(businessId),
+    query<{ name: string }>("SELECT name FROM businesses WHERE id = $1", [businessId]),
   ]);
 
   const preview = previewTenantRestore({
     businessId,
+    // The typed confirmation is the business's own name (see
+    // `restoreConfirmationPhrase`); the caller has the row, so read it here
+    // rather than trusting anything the browser sent.
+    businessName: business.rows[0]?.name ?? "",
     artifact: {
       ref,
       format: artifact.format,

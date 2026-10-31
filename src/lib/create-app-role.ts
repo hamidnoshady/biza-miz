@@ -49,6 +49,29 @@ export function decodeUrlCredential(value: string): string {
   }
 }
 
+/** Anything that can run a statement — the pool, a `pg` client, or a test double. */
+export interface SqlRunner {
+  query(queryText: string): Promise<unknown>;
+}
+
+/**
+ * Drop a runtime role this module may have provisioned.
+ *
+ * `createAppRole` grants the role SET on `session_replication_role` (see there),
+ * and PostgreSQL records that grant in `pg_parameter_acl`, which *depends on the
+ * role*: a plain `DROP ROLE` then fails with "role ... cannot be dropped because
+ * some objects depend on it". Revoking first is the only way to remove a role
+ * whose capability was granted. Tolerates a role that never existed, or a
+ * cluster that never had the grant.
+ */
+export async function dropAppRole(client: SqlRunner, roleName: string): Promise<void> {
+  const role = assertSafeIdentifier(roleName);
+  await client
+    .query(`REVOKE SET ON PARAMETER session_replication_role FROM ${role}`)
+    .catch(() => {});
+  await client.query(`DROP ROLE IF EXISTS ${role}`);
+}
+
 /** Idempotently provisions the restricted NOSUPERUSER/NOBYPASSRLS runtime role. */
 export async function createAppRole(options: AppRoleOptions): Promise<AppRoleResult> {
   const role = assertSafeIdentifier(options.roleName ?? DEFAULT_APP_ROLE);
@@ -100,6 +123,26 @@ export async function createAppRole(options: AppRoleOptions): Promise<AppRoleRes
     await client.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${role}`);
     await client.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${role}`);
     await client.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO ${role}`);
+    // A central tenant restore replays an archive into the business's tables.
+    // The triggers on those tables police *live* mutations and reject a faithful
+    // replay — the order-item guard refuses even the DELETE of an item belonging
+    // to a completed order — so `applyTenantArchive` replays with
+    // `session_replication_role = replica`, scope-local to its transaction. That
+    // is a parameter only a superuser may set unless it is granted, and this role
+    // is never a superuser by design, so the grant is what makes an ordinary
+    // business restorable at all. It does not weaken RLS, checks, foreign keys or
+    // any constraint — only ordinary triggers, and only for the session that sets
+    // it. Servers older than 15 have no such grant: warn, so an operator learns
+    // why restores refuse rather than discovering it mid-incident.
+    try {
+      await client.query(`GRANT SET ON PARAMETER session_replication_role TO ${role}`);
+    } catch {
+      console.warn(
+        `create-app-role: could not grant SET on session_replication_role to ${role} ` +
+          "(PostgreSQL 15+ is required); tenant restores of this database will refuse with " +
+          "restore_requires_trigger_bypass.",
+      );
+    }
     await client.query(
       `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${role}`,
     );
