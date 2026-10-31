@@ -47,6 +47,7 @@ import { isProductPublishStatus, type ProductPublishStatus } from "@/lib/product
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { PercentInput, PriceInput } from "../number-fields";
 import { RetailPriceAdvisor } from "./retail-price-advisor";
+import { ProductPublicationPanel } from "./product-publication-panel";
 import {
   cardClass,
   EmptyState,
@@ -363,6 +364,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [createdProductId, setCreatedProductId] = useState<string | null>(null);
   const [issues, setIssues] = useState<ProductValidationIssue[]>([]);
   /**
    * The advisor calculation the user applied to the sale price. It is sent with
@@ -719,6 +721,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     setNotice("");
     setIssues([]);
     const result = await api<{
+      item?: { id: string };
       error?: string;
       message?: string;
       issues?: ProductValidationIssue[];
@@ -759,6 +762,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       persistDrafts(drafts.filter((draft) => draft.id !== activeDraftId));
     }
     resetForm("محصول با موفقیت ذخیره شد. می‌توانید محصول بعدی را ثبت کنید.");
+    setCreatedProductId(result.data.item?.id ?? null);
   }
 
   if (definitions === null) {
@@ -796,6 +800,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   return (
     <div className="grid min-w-0 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-5">
       <form id="product-add-form" noValidate onSubmit={save} className="min-w-0 space-y-4">
+        {createdProductId ? <SectionCard title="انتشار اختیاری محصول ثبت‌شده"><ProductPublicationPanel localId={createdProductId} /></SectionCard> : null}
         <div aria-live="assertive">
           <ErrorBox>{error}</ErrorBox>
         </div>

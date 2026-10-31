@@ -148,6 +148,7 @@ export const MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS: readonly MemberAttribution
 ];
 
 export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = [
+  { table: 'integration_woo_attribute_mappings', columns: ["reviewed_by"] },
   { table: 'accounting_dimension_mappings', columns: ["created_by"] },
   { table: 'accounting_dimension_values', columns: ["created_by"] },
   { table: 'aec_document_revisions', columns: ["created_by", "issued_by"] },

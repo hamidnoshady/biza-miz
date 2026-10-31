@@ -23,7 +23,9 @@
  * exactly this.
  */
 import { NextResponse } from "next/server";
-import { query, withoutTenantScope, withTenant } from "../db";
+import { query, withoutTenantScope, withTenant, withTenantTransaction } from "../db";
+import { acknowledgeProductPublication } from "./product-publication-service";
+import { acknowledgeTaxonomyEnsure } from "./product-attribute-mappings-service";
 import { isFeatureEnabled } from "../features";
 import { writeIntegrationAudit } from "./audit";
 import {
@@ -424,6 +426,8 @@ export async function pluginHandshake(
           "stock",
           "price",
           "product_update",
+          "product_publish",
+          "taxonomy_ensure",
           "order_status",
           "refund_create",
           "catalogue_export",
@@ -756,6 +760,7 @@ export interface PluginJobAck {
   error?: string;
   /** The lease generation this job was pulled under — see PluginJob.leaseToken. */
   leaseToken?: string;
+  result?: Record<string, unknown>;
 }
 
 /** Exponential, capped — same shape as `retry.ts`'s backoff, expressed in the SQL below. */
@@ -798,17 +803,19 @@ export async function pluginAckJobs(
       const leaseToken = result.leaseToken && UUID_RE.test(result.leaseToken) ? result.leaseToken : null;
 
       if (result.status === "done") {
+        await withTenantTransaction(connection.business_id, async () => {
         const { rows } = await query<{ entity_type: string; remote_id: string; payload: Record<string, unknown> }>(
           `UPDATE integration_outbox_events
               SET status = 'sent', sent_at = now(), last_error = NULL,
+                  payload = CASE WHEN entity_type='product_publish' THEN jsonb_set(payload,'{__ackRemoteId}',to_jsonb($4::text)) ELSE payload END,
                   leased_until = NULL, lease_token = NULL, updated_at = now()
             WHERE id = $1 AND connection_id = $2 AND ${ackFenceSql("$3")}
           RETURNING entity_type, remote_id, payload`,
-          [result.id, connection.id, leaseToken],
+          [result.id, connection.id, leaseToken, typeof result.result?.remoteId === "number" || typeof result.result?.remoteId === "string" ? String(result.result.remoteId) : ""],
         );
         if (rows.length === 0) {
           stale += await auditStaleAck(connection, result);
-          continue;
+          return;
         }
         done += 1;
         // Issue #942 (F03): record what this delivery proved on the product
@@ -822,6 +829,9 @@ export async function pluginAckJobs(
         // acked payload (not current local state) means a value changed
         // mid-flight is not falsely recorded as delivered.
         await acknowledgePushedEvent(connection, rows[0]);
+        if (rows[0].entity_type === "product_publish") await acknowledgeProductPublication(connection, rows[0]);
+        if (rows[0].entity_type === "taxonomy_ensure") await acknowledgeTaxonomyEnsure(connection.business_id, connection.id, rows[0].payload, result.result);
+        });
         continue;
       }
 

@@ -1102,6 +1102,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "src/app/api/products/woo-links/route.test.ts",
   },
   {
+    id: "misc.product-woo-publications",
+    module: "Products (retail)",
+    entity: "Reviewed product publication and linkage to selected Woo stores",
+    routes: ["products/publications"],
+    status: "route-only (by design)",
+    note: "explicit human-reviewed cross-store publication; inventory and integration management permissions required; creates mappings only after store acknowledgement",
+    test: "src/lib/integrations/product-publication-service.test.ts",
+  },
+  {
     id: "misc.price-lists",
     module: "Products (retail)",
     entity: "Price lists & entries (bulk quick-update)",
