@@ -1419,6 +1419,16 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     test: "integration/kavenegar-retail-pricing.integration.test.ts",
   },
   {
+    id: "platform.billing-supplier-invoices",
+    module: "Platform — Billing",
+    entity: "Supplier statements reconciled against the wholesale cost ledger",
+    routes: ["platform/billing/supplier-invoices"],
+    status: "route-only (by design)",
+    note:
+      "issue #902 §9 item 3: recording a supplier statement, comparing it with billing_vendor_cost_events and accepting a difference with a reason are audited billing.manage actions on wholesale data — the supplier name and the margin never reach a chat channel, same rule as the retail price catalogue row.",
+    test: "integration/billing-supplier-invoices.integration.test.ts",
+  },
+  {
     id: "platform.billing-usage-invoices",
     module: "Platform — Billing",
     entity: "Usage invoices emitted from the rating ledger",
