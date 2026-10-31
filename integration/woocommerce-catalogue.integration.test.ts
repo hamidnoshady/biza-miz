@@ -218,6 +218,40 @@ afterAll(async () => {
 });
 
 describe("the catalogue: every product type lands in the right row", () => {
+  it("does not overwrite local stock or its snapshot clock with a stale Woo observation", async () => {
+    const connection = (await connections.getConnection(biz.id, biz.connectionId))!;
+    await sync.upsertProductFromWoo(connection, biz.locationId, variableParent(950));
+    const product = variation(951, 950, "stock ownership", "red", "15000", 10);
+    await sync.upsertProductFromWoo(connection, biz.locationId, product);
+    const { rows: [{ local_id: itemId }] } = await db.query<{ local_id: string }>(
+      "SELECT local_id FROM integration_mappings WHERE connection_id = $1 AND entity_type = 'product' AND remote_id = '951'",
+      [biz.connectionId],
+    );
+    await db.query("UPDATE item_stock SET quantity = 7, remote_snapshot_at = '2026-01-01T00:00:00Z' WHERE item_id = $1", [itemId]);
+    await sync.upsertProductFromWoo(connection, biz.locationId, { ...product, regular_price: "16000", price: "16000" });
+    const { rows: [after] } = await db.query<{ quantity: string; unit_price: string; snapshot: Date }>(
+      "SELECT quantity::text, unit_price::text, remote_snapshot_at AS snapshot FROM item_stock WHERE item_id = $1", [itemId],
+    );
+    expect(after.quantity).toBe("7.000000000");
+    expect(after.unit_price).toBe("150000"); // Local sale price owns the outbound axis too.
+    expect(new Date(after.snapshot).toISOString()).toBe("2026-01-01T00:00:00.000Z");
+
+    await db.query(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, local_id, payload)
+       VALUES ($1, $2, 'stock', '951', $3, '{"stock_quantity":7}')`,
+      [biz.id, biz.connectionId, itemId],
+    );
+    await sync.upsertProductFromWoo({ ...connection, push_stock: false }, biz.locationId, product);
+    const { rows: [pending] } = await db.query<{ quantity: string; snapshot: Date }>(
+      "SELECT quantity::text, remote_snapshot_at AS snapshot FROM item_stock WHERE item_id = $1", [itemId],
+    );
+    expect(pending.quantity).toBe("7.000000000");
+    expect(new Date(pending.snapshot).toISOString()).toBe("2026-01-01T00:00:00.000Z");
+    await db.query(`DELETE FROM integration_outbox_events WHERE connection_id=$1 AND remote_id='951'`, [biz.connectionId]);
+    await db.query(`DELETE FROM items WHERE id IN (SELECT local_id FROM integration_mappings WHERE connection_id=$1 AND entity_type='product' AND remote_id IN ('950','951'))`, [biz.connectionId]);
+    await db.query(`DELETE FROM integration_mappings WHERE connection_id=$1 AND entity_type='product' AND remote_id IN ('950','951')`, [biz.connectionId]);
+  });
+
   it("writes a variable parent as a container and each variation as a sellable child", async () => {
     const connection = (await connections.getConnection(biz.id, biz.connectionId))!;
 
@@ -282,7 +316,7 @@ describe("the catalogue: every product type lands in the right row", () => {
   });
 
   it("records every store-driven price change in the immutable history (issue #924 F07)", async () => {
-    const connection = (await connections.getConnection(biz.id, biz.connectionId))!;
+    const connection = { ...(await connections.getConnection(biz.id, biz.connectionId))!, source_of_truth: "store" as const };
     const remoteId = "31";
     // First delivery: the opening price has no "old" value.
     await sync.upsertProductFromWoo(connection, biz.locationId, variation(31, 10, "تی‌شرت", "زرد", "20000", 2));
@@ -307,6 +341,11 @@ describe("the catalogue: every product type lands in the right row", () => {
       { old_price: null, new_price: "200000", source: "sync", reason: "woocommerce_product_created" },
       { old_price: "200000", new_price: "210000", source: "sync", reason: "woocommerce_product_sync" },
     ]);
+    await sync.upsertProductFromWoo(connection, biz.locationId, variation(31, 10, "تی‌شرت", "زرد", "0", 2));
+    const { rows: [free] } = await db.query<{ unit_price: string }>(`SELECT s.unit_price::text FROM item_stock s JOIN integration_mappings m ON m.local_id=s.item_id WHERE m.connection_id=$1 AND m.remote_id=$2`, [biz.connectionId,remoteId]);
+    expect(free.unit_price).toBeNull(); // Canonical retail shelf prices must be positive; never keep the stale price.
+    const { rows: [zeroChange] } = await db.query<{ reason: string; metadata: unknown }>(`SELECT reason, metadata FROM product_price_history WHERE item_id=(SELECT local_id FROM integration_mappings WHERE connection_id=$1 AND remote_id=$2) ORDER BY created_at DESC LIMIT 1`, [biz.connectionId,remoteId]);
+    expect(zeroChange).toMatchObject({ reason: "woocommerce_zero_price_requires_local_price", metadata: { remotePriceRial: "0" } });
   });
 
   it("has an answer for every product type, including one it has never heard of", async () => {

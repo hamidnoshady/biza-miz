@@ -34,17 +34,17 @@ $ago      = static function ( $seconds ) use ( $now ) {
 	return gmdate( 'Y-m-d H:i:s', $now - $seconds );
 };
 $base     = array( 'enabled' => true, 'base_url' => 'https://pos.example', 'token' => 'wplink_x', 'last_run_at' => '', 'armed_at' => '' );
-same( 900, POS_Connector_Health::stale_after_seconds(), 'stale after three fast intervals' );
+same( 120, POS_Connector_Health::stale_after_seconds(), 'stale after two one-minute pulls' );
 
-$fresh = POS_Connector_Health::cron_status( array_merge( $base, array( 'last_run_at' => $ago( 400 ) ) ), $now );
-check( $fresh['configured'] && ! $fresh['stale'], 'a run six minutes ago is not stale' );
+$fresh = POS_Connector_Health::cron_status( array_merge( $base, array( 'last_run_at' => $ago( 40 ) ) ), $now );
+check( $fresh['configured'] && ! $fresh['stale'], 'a run forty seconds ago is not stale' );
 
-$edge = POS_Connector_Health::cron_status( array_merge( $base, array( 'last_run_at' => $ago( 900 ) ) ), $now );
+$edge = POS_Connector_Health::cron_status( array_merge( $base, array( 'last_run_at' => $ago( 120 ) ) ), $now );
 check( ! $edge['stale'], 'exactly at the threshold is not yet stale' );
 
-$stale = POS_Connector_Health::cron_status( array_merge( $base, array( 'last_run_at' => $ago( 901 ) ) ), $now );
+$stale = POS_Connector_Health::cron_status( array_merge( $base, array( 'last_run_at' => $ago( 121 ) ) ), $now );
 check( $stale['stale'], 'one second past the threshold is stale' );
-same( 901, $stale['age'], 'age is measured from the last run' );
+same( 121, $stale['age'], 'age is measured from the last run' );
 
 // The case that hid two days of dead cron: a Test-button success is a
 // different field and must not make a dead cron look alive.

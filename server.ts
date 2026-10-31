@@ -367,9 +367,12 @@ app.prepare().then(async () => {
   // enumerates active connections under the documented platform bypass, then
   // wraps each business's diff/push work in withTenant — the same shape as
   // every other background tick here.
-  const wooSyncTick = () =>
-    runWooCommerceSyncTick().catch((err) => console.error("woocommerce sync tick failed:", err));
-  scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 90_000);
+  const wooSyncRunner = createSyncRunner(
+    runWooCommerceSyncTick,
+    (err) => console.error("woocommerce sync tick failed:", err),
+  );
+  const wooSyncTick = () => wooSyncRunner.run();
+  scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 10_000);
 
   // Issue #1077: delete finished WP/Woo queue rows past their retention (90 days
   // done, 180 days dead/failed). The exact hour never matters; pending,

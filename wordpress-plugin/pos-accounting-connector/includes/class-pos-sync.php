@@ -131,6 +131,7 @@ class POS_Connector_Sync {
 		}
 
 		if ( ! empty( $settings['sync_orders'] ) ) {
+			add_action( 'woocommerce_create_refund', array( __CLASS__, 'record_refund_restock_intent' ), 20, 2 );
 			// `woocommerce_new_order` fires for admin-created orders too, and
 			// `checkout_order_processed` for the storefront path; both funnel
 			// here, and the app's delivery-id dedup makes the overlap free.
@@ -793,6 +794,10 @@ class POS_Connector_Sync {
 		return $out;
 	}
 
+	public static function record_refund_restock_intent( $refund, $args ) {
+		$refund->update_meta_data( '_bizamiz_restock_items', ! empty( $args['restock_items'] ) ? 'yes' : 'no' );
+	}
+
 	public static function refund_payload( $refund, $parent_order_id ) {
 		$items = array();
 		foreach ( $refund->get_items() as $item ) {
@@ -814,6 +819,7 @@ class POS_Connector_Sync {
 			'id'           => $refund->get_id(),
 			'order_id'     => (int) $parent_order_id,
 			'parent_id'    => (int) $parent_order_id,
+			'restock_items' => 'yes' === $refund->get_meta( '_bizamiz_restock_items', true ) ? true : ( 'no' === $refund->get_meta( '_bizamiz_restock_items', true ) ? false : null ),
 			'amount'       => (string) abs( (float) $refund->get_amount() ),
 			'reason'       => $refund->get_reason(),
 			'date_created' => $refund->get_date_created() ? $refund->get_date_created()->date( DATE_ATOM ) : null,
@@ -1140,6 +1146,7 @@ class POS_Connector_Sync {
 
 		$payload = array(
 			'id'               => $product->get_id(),
+			'meta_data'        => array( array( 'key' => '_bizamiz_publication_id', 'value' => $product->get_meta( '_bizamiz_publication_id', true ) ) ),
 			'type'             => $type,
 			'name'             => $product->get_name(),
 			'sku'              => $product->get_sku(),
@@ -1334,7 +1341,9 @@ class POS_Connector_Sync {
 
 		$started = microtime( true );
 		$pushed  = self::push_queue_until( $client, $started );
-		$applied = self::pull_jobs( $client );
+		$queue_counts = POS_Connector_Queue::counts();
+		// Deliver durable inbound events before accepting absolute stock writes.
+		$applied = ( (int) $queue_counts['pending'] + (int) $queue_counts['failed'] ) > 0 ? 0 : self::pull_jobs( $client );
 		// Whatever budget is left ships the events a just-applied export job
 		// queued, so «همگام‌سازی محصولات» starts producing rows in the same
 		// run the plugin accepted the job.
@@ -1460,6 +1469,7 @@ class POS_Connector_Sync {
 				'stock',
 				'price',
 				'product_update',
+				'product_publish',
 				'order_status',
 				'refund_create',
 				'catalogue_export',
@@ -1471,6 +1481,7 @@ class POS_Connector_Sync {
 				'media_update',
 				// Issue #939: re-send only the taxonomy tree.
 				'taxonomy_export',
+				'taxonomy_ensure',
 			),
 		);
 	}
@@ -1500,6 +1511,7 @@ class POS_Connector_Sync {
 				'lastRunAt'           => $cron['at'],
 				'cronStale'           => $cron['stale'],
 				'cronGapSeconds'      => $cron['age'],
+				'fastIntervalSeconds' => POS_Connector_Health::FAST_INTERVAL_SECONDS,
 				'systemCron'          => pos_connector_uses_system_cron(),
 				'productExportsInProgress' => count( self::pending_product_exports() ),
 				'lastLocalError'      => $settings['last_error'],
@@ -1688,6 +1700,9 @@ class POS_Connector_Sync {
 					continue;
 				}
 				$ack['status'] = 'done';
+				if ( is_array( $outcome ) ) {
+					$ack['result'] = $outcome;
+				}
 				$results[]     = $ack;
 				++$applied;
 			} catch ( Throwable $e ) {
@@ -1721,6 +1736,113 @@ class POS_Connector_Sync {
 	 * switch for the field is off, and the caller acks it `skipped` so the
 	 * app never records an unwritten value as delivered (issue #942, F10).
 	 */
+	private static function ensure_reviewed_attribute( array $payload ) {
+		$slug = isset( $payload['slug'] ) ? (string) $payload['slug'] : '';
+		if ( ! preg_match( '/^[a-z0-9][a-z0-9_-]{0,27}$/D', $slug ) || empty( $payload['name'] ) || ! isset( $payload['terms'] ) || ! is_array( $payload['terms'] ) || count( $payload['terms'] ) > 100 ) {
+			throw new Exception( 'invalid_attribute_mapping' );
+		}
+		// Lookup by canonical slug on every retry: a lost ACK must not create duplicates.
+		$attribute_id = (int) wc_attribute_taxonomy_id_by_name( $slug );
+		if ( ! $attribute_id ) {
+			$attribute_id = wc_create_attribute( array( 'name' => (string) $payload['name'], 'slug' => $slug, 'type' => 'select' ) );
+			if ( is_wp_error( $attribute_id ) ) {
+				throw new Exception( $attribute_id->get_error_message() );
+			}
+		}
+		$taxonomy = wc_attribute_taxonomy_name( $slug );
+		if ( ! taxonomy_exists( $taxonomy ) ) {
+			register_taxonomy( $taxonomy, array( 'product' ), array( 'hierarchical' => false, 'public' => false, 'show_ui' => false ) );
+		}
+		$terms = array();
+		foreach ( $payload['terms'] as $wanted ) {
+			if ( ! is_array( $wanted ) || empty( $wanted['local'] ) || empty( $wanted['name'] ) || empty( $wanted['slug'] ) ) {
+				throw new Exception( 'invalid_attribute_mapping' );
+			}
+			$term = get_term_by( 'slug', (string) $wanted['slug'], $taxonomy );
+			if ( ! $term ) {
+				$created = wp_insert_term( (string) $wanted['name'], $taxonomy, array( 'slug' => (string) $wanted['slug'] ) );
+				if ( is_wp_error( $created ) ) {
+					throw new Exception( $created->get_error_message() );
+				}
+				$term = get_term( (int) $created['term_id'], $taxonomy );
+			}
+			if ( ! $term || is_wp_error( $term ) ) {
+				throw new Exception( 'attribute_term_missing' );
+			}
+			$terms[ (string) $wanted['local'] ] = array( 'id' => (int) $term->term_id, 'name' => $term->name, 'slug' => $term->slug );
+		}
+		return array( 'attributeId' => (int) $attribute_id, 'taxonomy' => $taxonomy, 'terms' => (object) $terms );
+	}
+
+	private static function publish_product( array $payload ) {
+		global $wpdb;
+		$operation = isset( $payload['__operationId'] ) ? (string) $payload['__operationId'] : '';
+		if ( '' === $operation ) {
+			throw new Exception( 'publication_review:operation_id_missing' );
+		}
+		$lock = 'bizamiz_product_' . substr( hash( 'sha256', $operation ), 0, 40 );
+		if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) {
+			throw new Exception( 'publication_locked' );
+		}
+		try {
+			$target = isset( $payload['__targetRemoteId'] ) ? (int) $payload['__targetRemoteId'] : 0;
+			$parent = isset( $payload['__parentRemoteId'] ) ? (int) $payload['__parentRemoteId'] : 0;
+			$sku = isset( $payload['sku'] ) ? (string) $payload['sku'] : '';
+			if ( $target <= 0 ) {
+				$existing = wc_get_product_id_by_sku( $sku );
+				if ( $existing ) {
+					$product = wc_get_product( $existing );
+					if ( ! $product || $product->get_meta( '_bizamiz_publication_id', true ) !== $operation || (int) $product->get_parent_id() !== $parent || $product->get_type() !== ( $payload['__wooType'] ?? '' ) ) {
+						throw new Exception( 'publication_review:sku_already_exists' );
+					}
+					return array( 'remoteId' => (int) $existing );
+				}
+			} else {
+				$product = self::product_for_job( $target, $parent );
+				$wanted_type = isset( $payload['__wooType'] ) ? (string) $payload['__wooType'] : '';
+				if ( $product->get_type() !== $wanted_type || (int) $product->get_parent_id() !== $parent ) {
+					throw new Exception( 'publication_review:remote_type_mismatch' );
+				}
+				if ( ! empty( $payload['__linkOnly'] ) ) {
+					if ( $product->get_sku() !== $sku ) {
+						throw new Exception( 'publication_review:link_sku_mismatch' );
+					}
+					return array( 'remoteId' => $target );
+				}
+			}
+			$request = new WP_REST_Request( $target > 0 ? 'PUT' : 'POST' );
+			foreach ( array( 'name', 'sku', 'status', 'description', 'short_description', 'attributes', 'type', 'regular_price' ) as $key ) {
+				if ( array_key_exists( $key, $payload ) ) {
+					$request->set_param( $key, $payload[ $key ] );
+				}
+			}
+			if ( $parent > 0 ) {
+				$parent_product = wc_get_product( $parent );
+				if ( ! $parent_product || ! $parent_product->is_type( 'variable' ) ) {
+					throw new Exception( 'publication_review:invalid_parent' );
+				}
+				$request->set_param( 'product_id', $parent );
+			}
+			if ( $target > 0 ) {
+				$request->set_param( 'id', $target );
+			} else {
+				$request->set_param( 'meta_data', array( array( 'key' => '_bizamiz_publication_id', 'value' => $operation ) ) );
+			}
+			$controller = $parent > 0 ? new WC_REST_Product_Variations_Controller() : new WC_REST_Products_Controller();
+			$response = $target > 0 ? $controller->update_item( $request ) : $controller->create_item( $request );
+			if ( is_wp_error( $response ) ) {
+				throw new Exception( 'publication_' . $response->get_error_code() );
+			}
+			$data = $response->get_data();
+			if ( empty( $data['id'] ) ) {
+				throw new Exception( 'publication_invalid_remote_ack' );
+			}
+			return array( 'remoteId' => (int) $data['id'] );
+		} finally {
+			$wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+		}
+	}
+
 	private static function apply_job( array $job ) {
 		$settings = pos_connector_settings();
 		$type     = isset( $job['type'] ) ? $job['type'] : '';
@@ -1733,6 +1855,8 @@ class POS_Connector_Sync {
 		$parent   = isset( $job['parentRemoteId'] ) ? (int) $job['parentRemoteId'] : 0;
 
 		switch ( $type ) {
+			case 'taxonomy_ensure':
+				return self::ensure_reviewed_attribute( $payload );
 			case 'stock':
 				if ( empty( $settings['apply_stock'] ) ) {
 					// The owner switched this off on the accounting side.
@@ -1769,6 +1893,9 @@ class POS_Connector_Sync {
 				}
 				$product->save();
 				return;
+
+			case 'product_publish':
+				return self::publish_product( $payload );
 
 			case 'product_update':
 				// A whole-field update from the accounting dashboard. The field
