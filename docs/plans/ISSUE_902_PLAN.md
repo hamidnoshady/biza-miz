@@ -902,6 +902,13 @@ The line is the join, and the design follows from what a reader must be able to 
 | A pre-0270 rating is **billed without a citation** | It has no recorded basis. Refusing to bill it would let an accounting change decide whether a business owes money |
 | An **open** invoice accepts a rating that arrived late; a paid one does not | A crash between the claim and the lines must not strand an empty invoice, and a genuinely late rating should reach the bill it belongs to. But rewriting a settled document is how a customer is charged twice for one thing and then disputes everything after it — so a closed invoice returns `invoice_closed` and the rating waits for an amendment |
 
+**What a repeat run says.** Issuing again for a month that is already billed is not an error and not a
+silent no-op. It returns the invoice that exists, with that invoice's own total and line count, and a
+reason: `already_invoiced` (nothing new), `invoice_closed` (new usage, but the document is settled) or
+`nothing_to_bill` (no usage, no invoice). The first version returned `totalRial: 0` for the repeat case,
+which reads as "the invoice vanished" — the kind of answer that makes an operator issue a second one by
+hand. The database suite caught it; the case is now asserted.
+
 **It is an operator action, not a timer, and that is a deliberate line.** Post-paid metered usage is a
 commercial decision. Today essentially every rateable event is wallet-backed — `ai`, `media`,
 `messaging`, activation all mark theirs — so a monthly pass would be inert now and would start billing
