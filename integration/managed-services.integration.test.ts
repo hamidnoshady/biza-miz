@@ -121,10 +121,9 @@ beforeEach(async () => {
   // The deployment's own state, put back to "nothing is configured": every
   // service-down assertion below starts from here so the transitions it measures
   // are real.
-  await db.query(
-    `UPDATE platform_ai_gateway
-        SET enabled = false, base_url = '', chat_model = '', master_key_ciphertext = NULL`,
-  );
+  // No row at all is the fresh-deployment state; deleting is how a test that
+  // inserted one hands the next test the deployment it expects.
+  await db.query(`DELETE FROM platform_ai_gateway`);
   await db.query(
     `UPDATE platform_payment_config
         SET gateway = 'manual', merchant_id = '', callback_url = ''`,
@@ -145,7 +144,11 @@ describe("one view per managed service", () => {
     expect(list.map((view) => view.service).sort()).toEqual([...registered].sort());
     expect(new Set(list.map((view) => view.service)).size).toBe(list.length);
     for (const view of list) {
-      expect(Number.isNaN(Date.parse(view.checkedAt ?? ""))).toBe(false);
+      // `checkedAt` is null where nothing has ever been established — an SMS
+      // account that was never provisioned — and a timestamp otherwise.
+      if (view.checkedAt !== null) {
+        expect(Number.isNaN(Date.parse(view.checkedAt)), view.service).toBe(false);
+      }
     }
   });
 
@@ -163,8 +166,10 @@ describe("one view per managed service", () => {
     );
     await db.query(
       `INSERT INTO kavenegar_business_accounts (business_id, localid, username, provision_state)
-       VALUES ($1, $1::text, 'alpha-user', 'active')`,
-      [alpha.businessId],
+       VALUES ($1, $2, 'alpha-user', 'active')`,
+      // Two parameters on purpose: one value cannot be both the uuid column and
+      // the text the provider's `localid` column requires.
+      [alpha.businessId, alpha.businessId],
     );
 
     const list = await views(alpha.businessId);
@@ -223,9 +228,17 @@ describe("configuring the platform moves each service forward", () => {
   });
 
   it("switching AI on without a usable credential is not 'ready'", async () => {
+    // The row is absent on a fresh deployment (0124 seeds it only when a key is
+    // supplied), so this is an insert: an UPDATE would touch nothing and the
+    // default — disabled — would be what the assertion below measured.
     await db.query(
-      `UPDATE platform_ai_gateway
-          SET enabled = true, base_url = 'https://ai-gateway.example.test', chat_model = 'model-a'`,
+      `INSERT INTO platform_ai_gateway (id, enabled, base_url, chat_model, master_key_ciphertext)
+       VALUES (true, true, 'https://ai-gateway.example.test', 'model-a', NULL)
+       ON CONFLICT (id) DO UPDATE
+          SET enabled = true,
+              base_url = EXCLUDED.base_url,
+              chat_model = EXCLUDED.chat_model,
+              master_key_ciphertext = NULL`,
     );
     const ai = byKey(await views(alpha.businessId), "ai.assistant");
     // The runtime has no credential it can use, so the honest state is still
@@ -239,8 +252,10 @@ describe("SMS readiness follows the business's own account", () => {
   it("is ready only for the business whose child account is active", async () => {
     await db.query(
       `INSERT INTO kavenegar_business_accounts (business_id, localid, username, provision_state)
-       VALUES ($1, $1::text, 'alpha-user', 'active')`,
-      [alpha.businessId],
+       VALUES ($1, $2, 'alpha-user', 'active')`,
+      // Two parameters on purpose: one value cannot be both the uuid column and
+      // the text the provider's `localid` column requires.
+      [alpha.businessId, alpha.businessId],
     );
 
     const [alphaList, betaList] = await Promise.all([
@@ -255,8 +270,8 @@ describe("SMS readiness follows the business's own account", () => {
   it("reports a suspended account as a plan-level stop", async () => {
     await db.query(
       `INSERT INTO kavenegar_business_accounts (business_id, localid, username, provision_state)
-       VALUES ($1, $1::text, 'alpha-user', 'suspended')`,
-      [alpha.businessId],
+       VALUES ($1, $2, 'alpha-user', 'suspended')`,
+      [alpha.businessId, alpha.businessId],
     );
     const sms = byKey(await views(alpha.businessId), "messaging.sms");
     expect(sms.status).toBe("action_required");
