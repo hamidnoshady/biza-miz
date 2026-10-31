@@ -57,6 +57,14 @@ export type PlatformCapability =
   /** @deprecated Use the specific backup.* capability; equals read+run+verify. */
   | "backup.manage"
   | "tenant_backup.read"
+  // Issue #903 §10 — the tenant-backup surface is split by trust, exactly like
+  // the platform backup capabilities above. Reading metadata is support work;
+  // proving an artifact, fetching its bytes, restoring it and changing the
+  // managed storage/price policy are four different trusts.
+  | "tenant_backup.verify"
+  | "tenant_backup.download"
+  | "tenant_backup.restore"
+  | "tenant_backup.policy"
   | "backup.read"
   | "backup.run"
   | "backup.verify"
@@ -241,6 +249,11 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
     "backup.manage",
     "backup.run",
     "backup.verify",
+    // Issue #903 §10: an engineer may re-prove a tenant artifact (checksum,
+    // signature, archive parse) — that repairs trust. Taking a copy of a
+    // tenant's data, restoring over it, or changing where the fleet stores
+    // backups are not engineer work.
+    "tenant_backup.verify",
     "cms.manage",
     // Messaging and media are operational, granted at the same level as the
     // capabilities they used to ride (billing.manage / backup.manage).
@@ -284,6 +297,13 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
     "media.manage",
     "security.manage",
     "backup.restore",
+    // Issue #903 §10 — the tenant-backup counterparts, owner-only: downloading a
+    // tenant's artifact, applying a tenant restore, and setting the managed
+    // storage + pricing policy the whole fleet is billed under.
+    "tenant_backup.verify",
+    "tenant_backup.download",
+    "tenant_backup.restore",
+    "tenant_backup.policy",
     "impersonate.full",
     "business.provision",
     "business.archive",

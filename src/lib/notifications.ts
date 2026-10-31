@@ -81,6 +81,11 @@ export const NOTIFICATION_EVENT_KEYS = [
   "payment.refunded",
   "inventory.low_stock",
   "backup.failed",
+  // Issue #903 §12 — the drill exists so a backup that cannot be opened is
+  // discovered in a scheduled test rather than on the day it is needed. It is a
+  // separate key from `backup.failed` because it is a separate fact: the backup
+  // ran, and still could not be restored.
+  "backup.drill_failed",
   // Issue #988 — the Hybrid security plane gating all operational traffic. The
   // gate is deliberate (a suspension must land before the orders queued behind
   // it); a block nobody could see for nine days is not.
@@ -263,6 +268,19 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     // The one thing whose whole value is arriving at the wrong hour: a backup
     // that has silently failed for a week is discovered at exactly the moment
     // it is too late to matter.
+    defaultSeverity: "critical",
+    defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "backup.drill_failed": {
+    key: "backup.drill_failed",
+    group: "system",
+    label: "ناموفق‌بودن آزمایش بازیابی پشتیبان",
+    description:
+      "وقتی آزمایش زمان‌بندی‌شدهٔ بازیابی نشان می‌دهد آخرین نسخهٔ پشتیبان این کسب‌وکار باز نمی‌شود یا بازیابی آن مجاز نیست. بحرانی است، پس ساعت سکوت را نادیده می‌گیرد.",
+    // Critical for the same reason as `backup.failed`: a failed drill is the last
+    // cheap warning before a recovery that does not work.
     defaultSeverity: "critical",
     defaultRoles: ["owner"],
     perLocation: false,

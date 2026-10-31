@@ -18,7 +18,7 @@
  * RLS is the actual filter, so the pool has to run as the unprivileged app role
  * — exactly as `tenant-export.integration.test.ts` explains.
  */
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +26,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { createAppRole } from "../scripts/create-app-role";
+import { decryptFileToFile } from "../src/lib/backup-streams";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -41,6 +42,7 @@ let seed: Client;
 let svc: typeof import("../src/lib/backup-service");
 let dbLib: typeof import("../src/lib/db");
 let policy: typeof import("../src/lib/backup-policy");
+let custodyKeys: typeof import("../src/lib/tenant-backup-artifacts-service");
 let artifactNaming: typeof import("../src/lib/backup");
 
 const bizA = { id: "", locationId: "" };
@@ -120,11 +122,16 @@ beforeAll(async () => {
   process.env.DEPLOYMENT_ROLE = "central";
   process.env.BACKUP_DIR = path.join(workDir, "backups");
   delete process.env.BACKUP_SECONDARY_DIR;
+  // Issue #903: a managed artifact's manifest is signed with the platform KEK
+  // and its key is minted under it, so the suite runs the way a managed install
+  // does instead of leaving the service unconfigured.
+  process.env.POS_MASTER_KEY = randomBytes(32).toString("base64");
 
   dbLib = await import("../src/lib/db");
   svc = await import("../src/lib/backup-service");
   policy = await import("../src/lib/backup-policy");
   artifactNaming = await import("../src/lib/backup");
+  custodyKeys = await import("../src/lib/tenant-backup-artifacts-service");
 }, 240_000);
 
 afterAll(async () => {
@@ -133,6 +140,7 @@ afterAll(async () => {
   process.env.DATABASE_URL = rootDatabaseUrl;
   delete process.env.DEPLOYMENT_ROLE;
   delete process.env.BACKUP_DIR;
+  delete process.env.POS_MASTER_KEY;
   await fs.rm(workDir, { recursive: true, force: true });
 
   const maintenance = new Client({ connectionString: urlFor("postgres") });
@@ -149,16 +157,26 @@ function asTenant<T>(businessId: string, fn: () => Promise<T>): Promise<T> {
   return dbLib.withTenant(businessId, fn);
 }
 
-/** A backup config that writes plaintext, so the artifact's contents can be read back. */
-function plaintextConfig(overrides: Record<string, unknown> = {}) {
+/**
+ * The passphrase a self-hosted install protects its artifacts with.
+ *
+ * Issue #903 refuses to write an artifact when neither the platform's managed
+ * custody nor the Owner's passphrase exists — "no plaintext artifacts" — so a
+ * configured install always has one of the two. This suite holds a platform key
+ * (managed custody wins) and carries the passphrase as the documented fallback.
+ */
+const PASSPHRASE = "isolation-test-passphrase";
+
+/** A local backup config for an install with a key and a passphrase. */
+function localConfig(overrides: Record<string, unknown> = {}) {
   return {
     enabled: true,
     intervalHours: 24,
     anchorTime: "03:30",
     localRetention: 5,
     directory: "",
-    passphrase: "",
-    encryptLocal: false,
+    passphrase: PASSPHRASE,
+    encryptLocal: true,
     ...overrides,
     cloud: {
       enabled: false,
@@ -177,23 +195,38 @@ function plaintextConfig(overrides: Record<string, unknown> = {}) {
 
 describe("central tenant backups are logical and tenant-only", () => {
   it("writes a scoped .sql snapshot containing A's rows and none of B's", async () => {
-    await asTenant(bizA.id, () => svc.setBackupConfig(bizA.id, plaintextConfig()));
+    await asTenant(bizA.id, () => svc.setBackupConfig(bizA.id, localConfig()));
     const result = await asTenant(bizA.id, () => svc.runLocalBackup(bizA.id, "manual"));
     expect(result.status === "ok" ? "ok" : JSON.stringify(result)).toBe("ok");
     if (result.status !== "ok") return;
 
     // The artifact grammar itself records what it is and whose it is.
     expect(result.mode).toBe("logical");
-    expect(result.artifact.endsWith(".sql")).toBe(true);
+    expect(result.artifact.endsWith(".sql.enc")).toBe(true);
     const parsed = artifactNaming.parseArtifactName(result.artifact);
     expect(parsed?.format).toBe("sql");
+    expect(parsed?.encrypted).toBe(true);
     expect(parsed?.scope).toBe(artifactNaming.artifactScopeTag(bizA.id));
     expect(parsed?.runId).toBeTruthy();
 
     // …and central puts it under the business's own directory, not the flat one.
     const dir = svc.tenantBackupDir(bizA.id);
     expect(dir).toContain(path.join("tenants", artifactNaming.artifactScopeTag(bizA.id)));
-    const sql = await fs.readFile(path.join(dir, result.artifact), "utf8");
+
+    // The bytes on disk are ciphertext — the payload is not readable as it sits
+    // there, which is what "no plaintext artifacts" means — so the scope check
+    // reads the artifact the only way a recovery would: decrypt it first.
+    const onDisk = await fs.readFile(path.join(dir, result.artifact));
+    expect(onDisk.includes(Buffer.from("Alpha Item"))).toBe(false);
+
+    const plainPath = path.join(workDir, "decrypted-archive.json");
+    // The platform's custody generation is the secret this artifact was written
+    // with: nothing has rotated in between, and the run just minted or reused
+    // the active one.
+    const custody = await custodyKeys.currentArtifactCustodyKey(bizA.id);
+    if (!custody.ok) throw new Error(custody.error);
+    await decryptFileToFile(path.join(dir, result.artifact), plainPath, custody.secret);
+    const sql = await fs.readFile(plainPath, "utf8");
 
     expect(sql).toContain(bizA.id);
     expect(sql).toContain("Alpha Item");
@@ -239,7 +272,7 @@ describe("a tenant's destinations can never receive another tenant's data", () =
     await asTenant(bizA.id, () =>
       svc.setBackupConfig(
         bizA.id,
-        plaintextConfig({
+        localConfig({
           cloud: {
             enabled: true,
             endpoint: "http://127.0.0.1:9/never-contacted",

@@ -378,9 +378,9 @@ export type ActionType =
   // Batch AF — table sessions (floor-plan table CRUD stays designer-side).
   | "table.session.open"
   | "table.session.update"
-  // Batch AH — backup config/run/restore (restore replaces the tenant DB).
-  | "backup.config.set"
-  | "backup.run_now"
+  // Batch AH — tenant restore only. Issue #903 §3 removed `backup.config.set`
+  // and `backup.run_now`: creating, scheduling and running a backup belongs to
+  // the managed service, not to a tenant (or a tenant's model).
   | "backup.restore.apply"
   // Batch AI — devices: rename + revoke (pairing stays browser-bound).
   | "device.rename"
@@ -652,8 +652,6 @@ export type AutopilotExecutorKey =
   | "messagingCampaignPause"
   | "messagingCampaignResume"
   | "giftCardRedeem"
-  | "backupConfigSet"
-  | "backupRunNow"
   | "backupRestoreApply"
   | "jewelryItemSell"
   | "jewelryBuybackCreate"
@@ -2954,28 +2952,13 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     payloadHint: '{ id: string }',
     executor: "deviceRevoke",
   },
-  "backup.config.set": {
-    type: "backup.config.set",
-    endpoint: "/api/backup/config",
-    method: "PUT",
-    label: "تنظیم زمان‌بندی/مقصد بکاپ — فقط Owner؛ رمز نسخه اگر خالی بماند تغییر نمی‌کند",
-    payloadHint: '{ enabled: boolean, intervalHours?: number, retentionDays?: number, localDir?: string, cloud?: object, passphrase?: string }',
-    executor: "backupConfigSet",
-  },
-  "backup.run_now": {
-    type: "backup.run_now",
-    endpoint: "/api/backup/run",
-    method: "POST",
-    label: "اجرای فوری بکاپ — وقتی پلن قیمت‌گذاری کرده باشد از کیف پول کسر می‌کند؛ هر بار تأیید انسان",
-    payloadHint: "{}",
-    executor: "backupRunNow",
-  },
   "backup.restore.apply": {
     type: "backup.restore.apply",
     endpoint: "/api/backup/restore",
     method: "POST",
-    label: "خطرناک — جایگزینی کامل پایگاه‌دادۀ تنانت با یک نسخهٔ از پیش صحت‌سنجی‌شده؛ هر بار تأیید انسان",
-    payloadHint: '{ artifactId: string /* از لیست restore */, passphrase?: string, verifyOnly?: boolean }',
+    label:
+      "خطرناک — بازگردانی دادهٔ همین کسب‌وکار از یک نسخهٔ صحت‌سنجی‌شده. در نصب تک‌کسب‌وکار جایگزینی فیزیکی انجام می‌شود؛ در استقرار مرکزی فقط پیش‌نمایش بازگردانی (بدون تغییر داده) برگردانده می‌شود و اجرای واقعی با تأیید و ورود دوبارهٔ مالک در صفحهٔ پشتیبان‌گیری انجام می‌شود",
+    payloadHint: '{ artifactId: string /* از لیست restore یا فهرست نسخه‌ها */, passphrase?: string, verifyOnly?: boolean }',
     executor: "backupRestoreApply",
   },
   "table.session.open": {
