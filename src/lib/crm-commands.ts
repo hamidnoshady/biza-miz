@@ -85,6 +85,25 @@ const SECTION_ALIASES: Record<CrmSectionKey, readonly string[]> = {
     "کمپین",
     "تأییدیه کارفرما",
   ],
+  // §A's proposals, which §D calls estimates and #1127 will print as a service
+  // quote. The vocabulary covers all three words a person might type for it, plus
+  // the two figures they are actually looking for: «پیش‌فاکتور» is what an
+  // Iranian office calls a quote, «برآورد» is §D's word for the same document,
+  // and «حاشیه سود» is the reason an agency opens the screen at all.
+  proposals: [
+    "پیشنهاد قیمت",
+    "پیشنهادهای قیمت",
+    "پیش‌فاکتور",
+    "پیش فاکتور",
+    "پیشنهاده",
+    "برآورد",
+    "برآورد هزینه",
+    "قیمت‌گذاری",
+    "حاشیه سود",
+    "تخفیف",
+    "اعتبار پیشنهاد",
+    "منقضی‌شده",
+  ],
   activities: ["کار", "کارها", "پیگیری", "پیگیری‌ها", "تماس", "جلسه", "یادآوری", "وظیفه", "وظایف"],
   cases: ["تیکت", "تیکت‌ها", "شکایت", "پشتیبانی", "خدمات", "میز خدمت", "درخواست"],
   segments: ["بخش", "بخش‌بندی", "سگمنت", "گروه مشتریان", "تحلیل", "وفاداری", "چرخه عمر"],

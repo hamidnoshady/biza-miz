@@ -156,6 +156,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/crm/persons", "پروندهٔ شخص"],
     ["/crm/deals", "فرصت‌ها"],
     ["/crm/briefs", "بریف کارفرما"],
+    ["/crm/proposals", "پیشنهاد قیمت و برآورد"],
     ["/crm/leads", "سرنخ‌ها"],
     ["/crm/activities", "کارها و پیگیری‌ها"],
     ["/crm/cases", "تیکت‌های خدمات"],

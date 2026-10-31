@@ -226,8 +226,11 @@ type ProposalRow = {
   created_by_name: string;
   created_at: Date | string;
   updated_at: Date | string;
-  /** Only the list selects these two; a single read carries its own lines. */
+  /** Only the list selects these five; a single read carries its own lines. */
   subtotal_rial?: string | number | null;
+  cost_rial?: string | number | null;
+  pass_through_rial?: string | number | null;
+  costed_line_count?: string | number | null;
   line_count?: string | number | null;
 };
 
@@ -244,15 +247,9 @@ type LineRow = {
   note: string;
 };
 
-/**
- * The columns every read selects, with the six names a proposal is read by.
- *
- * Each join is `LEFT` and filtered on `business_id` as well as on id: joining a
- * party by id alone would resolve another tenant's client into this proposal's
- * name, which is the leak the predicate exists to prevent.
- */
-const PROPOSAL_SELECT = `
-  SELECT p.id, p.proposal_number, p.party_id, c.name AS party_name,
+/** The columns every read selects. */
+const PROPOSAL_COLUMNS = `
+         p.id, p.proposal_number, p.party_id, c.name AS party_name,
          p.brief_id, b.brief_number, b.title AS brief_title,
          p.deal_id, d.title AS deal_title,
          p.project_id, pr.name AS project_name,
@@ -261,7 +258,16 @@ const PROPOSAL_SELECT = `
          p.discount_rial, p.tax_rial, p.valid_until,
          p.client_contact_party_id, p.client_contact_name,
          p.sent_at, p.decided_at, p.decided_by_name, p.created_by_name,
-         p.created_at, p.updated_at
+         p.created_at, p.updated_at`;
+
+/**
+ * The six names a proposal is read by.
+ *
+ * Each join is `LEFT` and filtered on `business_id` as well as on id: joining a
+ * party by id alone would resolve another tenant's client into this proposal's
+ * name, which is the leak the predicate exists to prevent.
+ */
+const PROPOSAL_JOINS = `
     FROM agency_proposals p
     LEFT JOIN parties c
            ON c.id = p.party_id AND c.business_id = p.business_id
@@ -276,24 +282,40 @@ const PROPOSAL_SELECT = `
     LEFT JOIN parties cc
            ON cc.id = p.client_contact_party_id AND cc.business_id = p.business_id`;
 
+const PROPOSAL_SELECT = `SELECT ${PROPOSAL_COLUMNS} ${PROPOSAL_JOINS}`;
+
 /**
- * The same read, plus a subtotal and a line count from correlated aggregates, so
- * a list of fifty offers costs fifty small sums instead of loading every line of
- * every one.
+ * The same read, plus the five figures a list shows, from ONE lateral aggregate.
  *
- * Both subqueries carry their own `business_id` predicate. They are subqueries,
- * and the rule about predicates applies inside one exactly as it applies outside:
- * summing another tenant's lines into this offer's subtotal would be a leak with
- * a currency symbol on it.
+ * A lateral join rather than five correlated subqueries because they all describe
+ * the same set of rows: five subqueries would scan each offer's lines five times
+ * to produce five numbers about one thing.
+ *
+ * The aggregate carries its own `business_id` predicate. It is a subquery, and the
+ * rule about predicates applies inside one exactly as it applies outside: summing
+ * another tenant's lines into this offer's subtotal would be a leak with a
+ * currency symbol on it.
+ *
+ * The cost is summed here too, so a list can show a margin that is *true* rather
+ * than a zero that merely looks like one. `costed_line_count` is what lets the
+ * screen say whether that margin is complete: an offer with three lines and one
+ * cost is a guess with two missing inputs, and printing it as a figure would be
+ * the more dangerous kind of wrong, because it would look like an answer.
  */
-const PROPOSAL_LIST_SELECT = PROPOSAL_SELECT.replace(
-  "  SELECT p.id,",
-  `  SELECT (SELECT COALESCE(SUM(l.amount_rial), 0) FROM agency_proposal_lines l
-              WHERE l.proposal_id = p.id AND l.business_id = p.business_id) AS subtotal_rial,
-          (SELECT count(*) FROM agency_proposal_lines l
-              WHERE l.proposal_id = p.id AND l.business_id = p.business_id) AS line_count,
-         p.id,`,
-);
+const PROPOSAL_LIST_AGGREGATE = `
+    CROSS JOIN LATERAL (
+           SELECT COALESCE(SUM(l.amount_rial), 0) AS subtotal_rial,
+                  COALESCE(SUM(l.cost_rial), 0) AS cost_rial,
+                  COALESCE(SUM(l.amount_rial) FILTER (WHERE l.pass_through), 0) AS pass_through_rial,
+                  count(*) FILTER (WHERE l.cost_rial IS NOT NULL)::int AS costed_line_count,
+                  count(*)::int AS line_count
+             FROM agency_proposal_lines l
+            WHERE l.proposal_id = p.id AND l.business_id = p.business_id
+         ) agg`;
+
+const PROPOSAL_LIST_SELECT = `SELECT agg.subtotal_rial, agg.cost_rial, agg.pass_through_rial,
+         agg.costed_line_count, agg.line_count,
+         ${PROPOSAL_COLUMNS} ${PROPOSAL_JOINS} ${PROPOSAL_LIST_AGGREGATE}`;
 
 // ---------------------------------------------------------------------------
 // Reading what Postgres hands back
@@ -633,12 +655,15 @@ export async function listAgencyProposals(
     params,
   );
 
-  // A list does not carry its lines: it shows the subtotal the aggregate already
-  // computed, and a row opened from it is read in full. Keeping the same
-  // `AgencyProposal` shape means the screen has one type to render, at the cost of
-  // a margin figure the list cannot honestly state — so `lines` is empty, every
-  // cost is zero and `costedLineCount` is 0, which together say "not costed here"
-  // rather than "costs nothing". A screen that wants a margin has to open the row.
+  // A list does not carry its lines — a row opened from it is read in full — but
+  // it does carry the figures the aggregate produced, so its totals and its margin
+  // are real rather than placeholders. Keeping the same `AgencyProposal` shape
+  // means the screen has one type to render.
+  //
+  // The margin is computed from the summed cost, which is the same arithmetic the
+  // per-line path performs: subtotal − discount − cost. It agrees with an opened
+  // row by construction, and `costedLineCount` against `lineCount` is what tells
+  // the reader how much of that cost was actually stated.
   return rows.map((row) => {
     const base = toAgencyProposal(row, [], now);
     const totals = agencyProposalTotals(
@@ -646,13 +671,14 @@ export async function listAgencyProposals(
       base.discountRial,
       base.taxRial,
     );
+    const costRial = readMoney(row.cost_rial);
     const margin: AgencyProposalMargin = {
       ...totals,
-      costRial: 0,
-      marginRial: 0,
-      passThroughRial: 0,
+      costRial,
+      marginRial: totals.subtotalRial - totals.discountRial - costRial,
+      passThroughRial: readMoney(row.pass_through_rial),
       lineCount: Number(row.line_count ?? 0),
-      costedLineCount: 0,
+      costedLineCount: Number(row.costed_line_count ?? 0),
     };
     return { ...base, totals, margin };
   });

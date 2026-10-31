@@ -87,7 +87,8 @@ describe("interpretCrmCommand", () => {
     const reachable = new Set<string>();
     for (const section of CRM_SECTION_KEYS) {
       const queries = [
-        "امروز", "مشتریان", "سرنخ‌ها", "فرصت‌ها", "بریف", "پیگیری‌ها", "تیکت‌ها",
+        "امروز", "مشتریان", "سرنخ‌ها", "فرصت‌ها", "بریف", "پیشنهاد قیمت", "پیگیری‌ها",
+        "تیکت‌ها",
         "بخش‌بندی", "رضایت", "کیفیت داده", "تکراری‌ها", "تطبیق", "سابقه", "تنظیمات",
         // Reached from the settings screen rather than the rail, but a person
         // who types «اتوماسیون» must still land on it.

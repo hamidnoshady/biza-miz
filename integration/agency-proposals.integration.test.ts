@@ -683,19 +683,47 @@ describe("agency proposals against a real database (issue #1128 §A + §D)", () 
     expect(found[0].lapsed).toBe(true);
   });
 
-  it("lists with a subtotal but no margin, because a list does not read its lines", async () => {
+  it("lists a real margin, and agrees with the row opened from it", async () => {
     const { businessId, client } = await agencyWithClient();
-    await draftOffer(businessId, client, { discountRial: 100_000 });
+    await service.createAgencyProposal(businessId, ACTOR, {
+      partyId: client,
+      title: "با حاشیه",
+      discountRial: 100_000,
+      lines: [
+        { description: "دستمز", quantity: 1, unitPriceRial: 1_000_000, costRial: 250_000 },
+        {
+          description: "خرید رسانه",
+          quantity: 1,
+          unitPriceRial: 500_000,
+          revenueCode: "4660",
+          costRial: 500_000,
+          passThrough: true,
+        },
+        // Uncosted, so the list has to say the margin is partial rather than print
+        // a figure that looks complete and is not.
+        { description: "بی‌هزینه", quantity: 1, unitPriceRial: 100_000 },
+      ],
+    });
+
     const listed = await service.listAgencyProposals(businessId, { partyId: client });
     expect(listed).toHaveLength(1);
-    expect(listed[0].totals.subtotalRial).toBe(1_500_000);
-    expect(listed[0].totals.totalRial).toBe(1_400_000);
     expect(listed[0].lines).toEqual([]);
-    expect(listed[0].margin.costedLineCount).toBe(0);
-    expect(listed[0].margin.lineCount).toBe(2);
-    // Opening the row is what produces the lines and a real margin.
+    expect(listed[0].totals.subtotalRial).toBe(1_600_000);
+    expect(listed[0].totals.totalRial).toBe(1_500_000);
+    // 1_600_000 subtotal − 100_000 discount − 750_000 cost.
+    expect(listed[0].margin.costRial).toBe(750_000);
+    expect(listed[0].margin.marginRial).toBe(750_000);
+    expect(listed[0].margin.passThroughRial).toBe(500_000);
+    expect(listed[0].margin.lineCount).toBe(3);
+    expect(listed[0].margin.costedLineCount).toBe(2);
+
+    // The same figures the opened row reports: a list that disagreed with its own
+    // detail view would be the more dangerous kind of wrong, because it would look
+    // like agreement.
     const opened = await service.loadAgencyProposal(businessId, listed[0].id);
-    expect(opened.lines).toHaveLength(2);
+    expect(opened.lines).toHaveLength(3);
+    expect(opened.totals).toEqual(listed[0].totals);
+    expect(opened.margin).toEqual(listed[0].margin);
   });
 
   it("honours its filters and its limit", async () => {
