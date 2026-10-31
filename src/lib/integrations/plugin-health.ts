@@ -8,10 +8,10 @@
  * call), and the plugin's own report (`cronStale`, from the run that ended the
  * silence) is shown beside it as the explanation, never used as the trigger.
  */
-import { PLUGIN_HEALTH_STALE_MS } from "./connections-service";
+import { pluginSilenceThresholdMs } from "./sync-timing";
 
 /** Silence longer than this is worth telling the owner about, not just painting amber. */
-export const PLUGIN_ALERT_AFTER_MS = 30 * 60 * 1000;
+export const PLUGIN_ALERT_AFTER_MS = 10 * 60 * 1000;
 
 export interface PluginHealthSummary {
   /** Last time the plugin authenticated at all. */
@@ -53,8 +53,8 @@ export function summarizePluginHealth(
     lastPluginSeenAt: connection.last_plugin_seen_at,
     lastSyncAt: connection.last_sync_at,
     silentMinutes: silentMs === null ? null : Math.floor(silentMs / 60_000),
-    stale: silentMs !== null && silentMs > PLUGIN_HEALTH_STALE_MS,
-    alert: silentMs !== null && silentMs > PLUGIN_ALERT_AFTER_MS,
+    stale: silentMs !== null && silentMs > pluginSilenceThresholdMs(health),
+    alert: silentMs !== null && silentMs > pluginSilenceThresholdMs(health),
     cronStale: typeof health.cronStale === "boolean" ? health.cronStale : null,
     cronGapSeconds: numberOrNull(health.cronGapSeconds),
     queueSize: queue.size,
@@ -68,10 +68,10 @@ export function summarizePluginHealth(
  * nobody finished setting up, or one deliberately stopped, is not an outage.
  */
 export function shouldAlertPluginStale(
-  connection: { link_mode: string; status: string; last_plugin_seen_at: string | null },
+  connection: { link_mode: string; status: string; last_plugin_seen_at: string | null; plugin_health?: Record<string, unknown> | null },
   now: Date,
 ): boolean {
   if (connection.link_mode !== "plugin" || connection.status !== "active" || !connection.last_plugin_seen_at) return false;
   const seenMs = Date.parse(connection.last_plugin_seen_at);
-  return Number.isFinite(seenMs) && now.getTime() - seenMs > PLUGIN_ALERT_AFTER_MS;
+  return Number.isFinite(seenMs) && now.getTime() - seenMs > pluginSilenceThresholdMs(connection.plugin_health);
 }

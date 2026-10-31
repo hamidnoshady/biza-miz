@@ -44,6 +44,7 @@ import { PRODUCT_PUBLISH_STATUS_LABELS } from "@/lib/product-content";
 import { ProductContentFields, type ProductContentValue } from "./product-content-fields";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import type { ProductWooLink } from "@/lib/integrations/product-links-service";
+import { ProductPublicationPanel } from "./product-publication-panel";
 
 const PAGE_SIZES = [10, 20, 50] as const;
 
@@ -621,6 +622,7 @@ function ProductRow({
               })}
             </ul>
           )}
+          {!item.parentItemId ? <ProductPublicationPanel localId={item.id} /> : null}
         </Td>
         <Td>
           <div className="flex flex-wrap gap-1.5">

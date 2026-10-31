@@ -57,6 +57,7 @@ import { replaceTerms, stageTaxonomySnapshotChunk } from "./woo-taxonomy-service
 import { parseTaxonomySnapshotEvent } from "./woo-taxonomy-snapshot";
 import type { WooCustomer, WooOrder, WooOrderLineItem, WooProduct, WooRefund } from "./woocommerce-client";
 import type { Industry } from "../industries";
+import { refundRestockIntent } from "./woo-refund-policy";
 
 const zero = "0" as RialText;
 
@@ -219,6 +220,26 @@ async function dispatchIngestEvent(
       // revenue journal entry.
       if (connection.sync_orders && shouldImportWooOrder(order.status)) {
         await ingestOrder(connection, order);
+      } else if (connection.sync_orders && order.status === "cancelled") {
+        // A cancelled unpaid checkout has no local sale to reverse. For an
+        // imported retail sale, restore only its remaining sold quantities;
+        // payment refunds remain separate refund.created events.
+        const industry = await getBusinessIndustry(connection.business_id);
+        if (isRetailCatalogueIndustry(industry)) {
+          await ingestRefund(connection, {
+            id: order.id,
+            parent_id: order.id,
+            date_created: order.date_modified ?? order.date_created,
+            amount: "0",
+            reason: "WooCommerce cancellation",
+            line_items: (order.line_items ?? []).map((line) => ({
+              product_id: line.product_id,
+              variation_id: line.variation_id,
+              quantity: -Math.abs(line.quantity),
+              total: "0",
+            })),
+          }, inboxId, { stockOnly: true });
+        }
       }
     } else if (event.topic.endsWith("refund.created")) {
       await ingestRefund(connection, event.payload as unknown as WooRefund, inboxId);
@@ -953,12 +974,23 @@ async function ingestRetailOrder(
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`woo-order:${connection.id}:${remoteId}`]);
-    const { rows: mapped } = await client.query(
-      `SELECT 1 FROM integration_mappings
-        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'order' AND remote_id = $3`,
+    const { rows: mapped } = await client.query<{ entity_type: string; cancellation_payload: WooOrder | null }>(
+      `SELECT m.entity_type, w.payload AS cancellation_payload FROM integration_mappings m
+        LEFT JOIN integration_webhook_events w ON m.entity_type='refund' AND w.id=m.local_id
+          AND w.business_id=m.business_id AND w.connection_id=m.connection_id
+        WHERE m.business_id = $1 AND m.connection_id = $2
+          AND ((m.entity_type = 'order' AND m.remote_id = $3)
+            OR (m.entity_type = 'refund' AND m.remote_id = 'cancel:' || $3))`,
       [businessId, connection.id, remoteId],
     );
     if (mapped.length > 0) {
+      const cancellation = mapped.find(row => row.entity_type === "refund");
+      const updated = wooOrderInstant(order.date_modified_gmt, order.date_modified);
+      const cancelledAt = cancellation?.cancellation_payload
+        ? wooOrderInstant(cancellation.cancellation_payload.date_modified_gmt, cancellation.cancellation_payload.date_modified) : null;
+      if (cancellation && updated && (!cancelledAt || Date.parse(updated) > Date.parse(cancelledAt))) {
+        throw new Error("cancelled_order_reopened_requires_reconciliation");
+      }
       await client.query("ROLLBACK");
       return;
     }
@@ -1296,9 +1328,14 @@ async function buildRefundReturnLines(
   return lines;
 }
 
-async function ingestRefund(connection: ConnectionRow, refund: WooRefund, inboxId: string): Promise<void> {
+async function ingestRefund(
+  connection: ConnectionRow,
+  refund: WooRefund,
+  inboxId: string,
+  options: { stockOnly?: boolean } = {},
+): Promise<void> {
   const businessId = connection.business_id;
-  const remoteId = String(refund.id);
+  const remoteId = options.stockOnly ? `cancel:${refund.parent_id}` : String(refund.id);
 
   const amount = wooAmountToRial(refund.amount ?? "0", connection.currency_unit);
   const tax = refund.total_tax ? wooAmountToRial(refund.total_tax, connection.currency_unit) : 0n;
@@ -1311,6 +1348,9 @@ async function ingestRefund(connection: ConnectionRow, refund: WooRefund, inboxI
     await client.query("BEGIN");
     // Same race-proofing as ingestOrder: two refund deliveries of one refund
     // must not double-post.
+    // Distinct partial refunds of the same order must also serialize their
+    // returned-quantity reads, including against an order import in progress.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`woo-order:${connection.id}:${refund.parent_id}`]);
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`woo-refund:${connection.id}:${remoteId}`]);
     const { rows: mapped } = await client.query(
       `SELECT 1 FROM integration_mappings
@@ -1327,7 +1367,7 @@ async function ingestRefund(connection: ConnectionRow, refund: WooRefund, inboxI
     // the door a storefront-less business acquires a sale row through.
     if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
     if (isRetailCatalogueIndustry(industry)) {
-      await ingestRetailRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId, industry });
+      await ingestRetailRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId, industry, stockOnly: options.stockOnly });
     } else {
       await ingestFnBRefund(client, connection, refund, { businessId, locationId, amount, tax, net, remoteId, inboxId });
     }
@@ -1364,6 +1404,7 @@ interface RefundMeta {
   net: bigint;
   remoteId: string;
   inboxId: string;
+  stockOnly?: boolean;
 }
 
 /**
@@ -1399,6 +1440,16 @@ async function ingestRetailRefund(
     [meta.businessId, connection.id, String(refund.parent_id)],
   );
   const orderId = orderRows[0]?.id ?? null;
+
+  if (!orderId && !meta.stockOnly && (refund.line_items ?? []).some((line) => Number(line.quantity) !== 0)) {
+    // Keep the inbox delivery retryable until the parent sale is imported.
+    // Mapping this refund now would permanently discard its stock reversal.
+    throw new Error("refund_order_not_imported");
+  }
+  const restock = meta.stockOnly ? true : refundRestockIntent(refund);
+  if (restock === null && (refund.line_items ?? []).some(line => Number(line.quantity) !== 0)) {
+    throw new Error("refund_restock_unknown");
+  }
 
   // Resolve product mappings for the refund's line items so we can match
   // them to item_id rows in order_items. A refunded VARIATION identifies
@@ -1441,6 +1492,7 @@ async function ingestRetailRefund(
 
   let recoveredCogsRial = "0";
 
+  let returnId: string | undefined;
   if (orderId) {
     for (const line of refund.line_items ?? []) {
       const variationId = Number(line.variation_id ?? 0) || 0;
@@ -1473,24 +1525,32 @@ async function ingestRetailRefund(
         // We still insert into customer_return_lines even though we don't go
         // through the full createCustomerReturn path — it's the single source
         // of truth for "how much of this order item was returned".
-        const { rows: returnRows } = await client.query<{ id: string }>(
-          `INSERT INTO customer_returns
+        if (!returnId) {
+          const { rows: returnRows } = await client.query<{ id: string }>(
+            `INSERT INTO customer_returns
              (business_id, location_id, order_id, refund_method, refund_amount_rial, reason, created_by, idempotency_key)
            VALUES ($1, $2, $3, 'online', $4, $5, $6, $7)
            ON CONFLICT (business_id, idempotency_key) DO NOTHING
            RETURNING id`,
-          [meta.businessId, meta.locationId, orderId, "0",
-            `WooCommerce refund #${meta.remoteId}`, null,
-            `woo-refund:${connection.id}:${meta.remoteId}`],
-        );
-        const returnId = returnRows[0]?.id;
-        if (returnId) {
-          await client.query(
-            `INSERT INTO customer_return_lines (customer_return_id, order_item_id, quantity, disposition)
-             VALUES ($1, $2, $3, 'restockable')
-             ON CONFLICT DO NOTHING`,
-            [returnId, item.id, String(take)],
+            [meta.businessId, meta.locationId, orderId, "0",
+              `WooCommerce refund #${meta.remoteId}`, null,
+              `woo-refund:${connection.id}:${meta.remoteId}`],
           );
+          returnId = returnRows[0]?.id;
+          if (!returnId) throw new Error("refund_return_already_exists");
+        }
+        await client.query(
+            `INSERT INTO customer_return_lines (customer_return_id, order_item_id, quantity, disposition)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (customer_return_id, order_item_id) DO UPDATE
+               SET quantity = customer_return_lines.quantity + EXCLUDED.quantity`,
+            [returnId, item.id, String(take), restock ? "restockable" : "discarded"],
+          );
+
+        if (!restock) {
+          await client.query(`UPDATE online_sale_lines SET returned_quantity = LEAST(quantity, returned_quantity + $2::numeric) WHERE order_item_id = $1`, [item.id, String(take)]);
+          remaining -= take;
+          continue;
         }
 
         // Restock the returned quantity. A batch-tracked line has its exact
@@ -1516,10 +1576,14 @@ async function ingestRetailRefund(
           quantity: string; short_quantity: string; relieved_quantity: string;
           restored_quantity: string; cogs_rial: string; restored_cogs_rial: string;
         }>(
-          `SELECT quantity::text, short_quantity::text, relieved_quantity::text,
-                  restored_quantity::text, cogs_rial::text, restored_cogs_rial::text
-             FROM online_sale_lines WHERE order_item_id = $1 FOR UPDATE`,
-          [item.id],
+          `SELECT f.quantity::text, f.short_quantity::text,
+                  CASE WHEN f.stock_outcome = 'already_reflected'
+                    AND $2::timestamptz > s.remote_snapshot_at
+                    THEN (f.quantity - f.short_quantity)::text ELSE f.relieved_quantity::text END AS relieved_quantity,
+                  f.restored_quantity::text, f.cogs_rial::text, f.restored_cogs_rial::text
+             FROM online_sale_lines f JOIN item_stock s ON s.item_id = f.item_id
+            WHERE f.order_item_id = $1 FOR UPDATE OF f`,
+          [item.id, parseRemoteInstant(refund.date_created_gmt, { assumeUtc: true }) ?? parseRemoteInstant(refund.date_created, { assumeUtc: false })],
         );
         const fact = factRows[0] ?? null;
 
@@ -1594,6 +1658,10 @@ async function ingestRetailRefund(
       ],
     });
   }
+
+  // Cancellation only reverses physical stock and its cost. It is not
+  // evidence that a gateway returned money to the customer.
+  if (meta.stockOnly) return;
 
   // Post the money side.
   const accounts = await accountIdsByCode(client, meta.businessId, [

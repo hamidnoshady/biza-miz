@@ -43,6 +43,7 @@ import {
   upsertMapping,
 } from "./mapping-service";
 import { wooAmountToRial } from "./woo-money";
+import { effectivePushSwitches } from "./outbox-policy";
 import { writeIntegrationAudit } from "./audit";
 import {
   externalCustomerResolution,
@@ -317,13 +318,19 @@ async function upsertRetailProduct(
     );
     // A container is not sellable — it carries no stock/price of its own.
     if (!shape.container) {
-      await upsertItemStock(existing, remoteManagesStock(shape, product) ? stockQuantity : null, price, {
+      const switches = effectivePushSwitches(connection);
+      // Once linked to a locally owned stock catalogue, store snapshots are
+      // observations, not inventory adjustments. Woo already deducts its own
+      // orders; the order importer applies that sale to our inventory once.
+      await upsertItemStock(existing, !switches.pushStock && remoteManagesStock(shape, product) ? stockQuantity : null,
+        switches.pushPrices ? null : price, {
         businessId,
         locationId,
       });
     }
     if (attributes.length) {
-      await replaceVariantAttributes(existing, attributes);
+      const { rows: localDefinitions } = await query(`SELECT 1 FROM item_variant_attributes WHERE item_id = $1 AND attribute_definition_id IS NOT NULL LIMIT 1`, [existing]);
+      if (localDefinitions.length === 0) await replaceVariantAttributes(existing, attributes);
     }
     await recordProductShape(connection, product);
     return "updated";
@@ -335,6 +342,29 @@ async function upsertRetailProduct(
   // Every create below runs under the identity lock (audit F13): a second
   // delivery of the same new product waits, finds the first one's mapping and
   // applies its payload as an update instead of inserting a twin item.
+  const publicationId = product.meta_data?.find(m => m.key === "_bizamiz_publication_id")?.value;
+  const { rows: publications } = await query<{ local_id: string; payload: Record<string, unknown> }>(
+    `SELECT local_id, payload FROM integration_outbox_events WHERE business_id=$1 AND connection_id=$2
+      AND entity_type='product_publish' AND ((operation_id=$3 AND $3 <> '')
+        OR (payload->>'sku'=$4 AND status IN ('pending','processing','deferred','failed')))
+      ORDER BY (operation_id=$3) DESC LIMIT 1`,
+    [businessId, connection.id, typeof publicationId === "string" ? publicationId : "", product.sku ?? ""],
+  );
+  const publication = publications[0];
+  if (publication) {
+    // The signed product echo is itself remote evidence. Without its stable
+    // operation marker, wait for the delivery ACK instead of cloning a SKU.
+    if (publicationId !== publication.payload.__operationId) throw new Error("publication_awaiting_ack");
+    if (publication.payload.sku !== product.sku || publication.payload.__wooType !== inferWooProductType(product) ||
+      String(publication.payload.__parentRemoteId ?? "") !== String(product.parent_id || "")) throw new Error("publication_echo_mismatch");
+    const linked = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async client => {
+      const { rows } = await client.query(`SELECT i.id FROM items i JOIN locations l ON l.id=i.location_id
+        WHERE i.id=$1 AND i.location_id=$2 AND l.business_id=$3 AND i.is_active`, [publication.local_id, locationId, businessId]);
+      if (!rows.length) throw new Error("publication_product_not_found");
+      return publication.local_id;
+    });
+    return applyUpdate(linked.localId);
+  }
   if (shape.container) {
     const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
       const { rows } = await client.query<{ id: string }>(
@@ -532,10 +562,12 @@ function remoteManagesStock(shape: ReturnType<typeof wooProductShape>, product: 
 async function upsertItemStock(
   itemId: string,
   quantity: number | null,
-  price: bigint,
+  price: bigint | null,
   audit: { businessId: string; locationId: string },
 ): Promise<void> {
-  const unitPrice = price > 0n ? Number(price) : null;
+  // Retail requires a positive shelf price; zero from Woo clears that field
+  // and stays visible in remote metadata/history, rather than retaining a stale price.
+  const unitPrice = price !== null && price > 0n ? Number(price) : null;
   // `previous` sees the row as it was before this statement, so the returned
   // old/new pair is exact and the history row can be written from the same
   // statement's result (issue #924 F07 — sync is a first-class price source).
@@ -546,7 +578,7 @@ async function upsertItemStock(
          ), upserted AS (
            INSERT INTO item_stock (item_id, quantity, unit_price)
            VALUES ($1, 0, $2)
-           ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = now()
+           ON CONFLICT (item_id) DO UPDATE SET unit_price = CASE WHEN $3::boolean THEN EXCLUDED.unit_price ELSE item_stock.unit_price END, updated_at = now()
            RETURNING unit_price
          )
          SELECT previous.unit_price::text AS old_price, upserted.unit_price::text AS new_price
@@ -557,17 +589,27 @@ async function upsertItemStock(
            INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
            VALUES ($1, $2, $3, now())
            ON CONFLICT (item_id) DO UPDATE
-             SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price,
-                 remote_snapshot_at = now(), updated_at = now()
+             SET quantity = CASE WHEN EXISTS (
+                   SELECT 1 FROM integration_outbox_events o
+                    WHERE o.local_id = $1 AND o.entity_type = 'stock'
+                      AND o.status NOT IN ('sent', 'skipped')
+                 ) THEN item_stock.quantity ELSE EXCLUDED.quantity END,
+                 unit_price = CASE WHEN $4::boolean THEN EXCLUDED.unit_price ELSE item_stock.unit_price END,
+                 remote_snapshot_at = CASE WHEN EXISTS (
+                   SELECT 1 FROM integration_outbox_events o
+                    WHERE o.local_id = $1 AND o.entity_type = 'stock'
+                      AND o.status NOT IN ('sent', 'skipped')
+                 ) THEN item_stock.remote_snapshot_at ELSE now() END,
+                 updated_at = now()
            RETURNING unit_price
          )
          SELECT previous.unit_price::text AS old_price, upserted.unit_price::text AS new_price
            FROM upserted LEFT JOIN previous ON true`;
 
-  const params = quantity == null ? [itemId, unitPrice] : [itemId, quantity, unitPrice];
+  const params = quantity == null ? [itemId, unitPrice, price !== null] : [itemId, quantity, unitPrice, price !== null];
   const { rows } = await query<{ old_price: string | null; new_price: string | null }>(statement, params);
   const row = rows[0];
-  if (!row || unitPrice == null) return;
+  if (!row || price === null) return;
   const oldPrice = row.old_price == null ? null : Number(row.old_price);
   if (oldPrice === unitPrice) return;
 
@@ -580,7 +622,8 @@ async function upsertItemStock(
       oldPrice,
       newPrice: unitPrice,
       source: "sync",
-      reason: "woocommerce_product_sync",
+      reason: price === 0n ? "woocommerce_zero_price_requires_local_price" : "woocommerce_product_sync",
+      ...(price === 0n ? { metadata: { remotePriceRial: "0" } } : {}),
     },
   ]);
 }
@@ -1032,14 +1075,14 @@ export async function syncOrders(
   businessId: string,
   connectionId: string,
   options: { sinceDays?: number; maxPages?: number } = {},
-): Promise<{ imported: number; duplicates: number; failed: number; total: number }> {
+): Promise<{ imported: number; duplicates: number; failed: number; total: number; partial?: true }> {
   const connection = await getConnection(businessId, connectionId);
   if (!connection) throw new Error("not_found");
   if (!connection.sync_orders) {
     return { imported: 0, duplicates: 0, failed: 0, total: 0 };
   }
   const client = wooClientFor(connection);
-  const { ingestRemoteOrder } = await import("./webhook-ingest-service");
+  const { ingestRemoteOrder, ingestRemoteRefund } = await import("./webhook-ingest-service");
 
   const days = options.sinceDays ?? connection.order_lookback_days ?? 7;
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -1049,6 +1092,7 @@ export async function syncOrders(
   let failed = 0;
   let total = 0;
   let page = 1;
+  let partial = false;
 
   for (;;) {
     // Paged with the store's X-WP-TotalPages header, not guessed from a full
@@ -1078,10 +1122,16 @@ export async function syncOrders(
       if (outcome.status === "processed") imported += 1;
       else if (outcome.status === "duplicate") duplicates += 1;
       else failed += 1;
+        if (order.refunds?.length) {
+          for (const refund of await client.listOrderRefunds(order.id)) {
+            const refundOutcome = await ingestRemoteRefund(connection, { ...refund, parent_id: order.id }, `pull-refund:${connection.id}:${refund.id}`);
+            if (refundOutcome.status === "failed") failed += 1;
+          }
+        }
     }
     if (!totalPages || page >= totalPages) break;
     page += 1;
-    if (options.maxPages && page > options.maxPages) break;
+    if (options.maxPages && page > options.maxPages) { partial = true; break; }
   }
 
   await query(
@@ -1097,7 +1147,7 @@ export async function syncOrders(
     action: "orders.synced",
     payload: { imported, duplicates, failed, total, sinceDays: days },
   });
-  return { imported, duplicates, failed, total };
+  return { imported, duplicates, failed, total, ...(partial ? { partial: true as const } : {}) };
 }
 
 export interface CustomerSyncRunOutcome {

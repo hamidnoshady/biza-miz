@@ -10,7 +10,7 @@
  * the mapping's last-pushed value and upserts due outbox events, then (2)
  * drains due events to the store with retry/backoff/dead-lettering.
  */
-import { query, withoutTenantScope, withTenant } from "../db";
+import { query, withoutTenantScope, withTenant, withTenantTransaction } from "../db";
 import { isAppServiceOperational } from "../service-activation/app-gate-service";
 import { getBusinessIndustry } from "../industry-guard";
 import { hasSellableCatalogue } from "../industries";
@@ -28,9 +28,12 @@ import { shouldAlertPluginStale } from "./plugin-health";
 import { recordNotification } from "../notification-events";
 import { notificationDedupeKey } from "../notifications";
 import { formatJalali } from "../jalali";
+import { resolveMappedWooPrice } from "./woo-price-source-service";
 
-export const WOO_SYNC_TICK_INTERVAL_MS = 60 * 1000;
+export const WOO_SYNC_TICK_INTERVAL_MS = 30 * 1000;
 export const DRAIN_BATCH = 25;
+export const WOO_DRAIN_MAX_BATCHES = 4;
+export const WOO_DRAIN_TIME_BUDGET_MS = 15_000;
 /**
  * How long a REST claim stays fenced to its claimer (issue #942, F02/F04).
  * Generous against a slow store, short enough that a crashed worker's rows
@@ -141,7 +144,9 @@ async function desiredState(
   if (!rows[0]) return { stock: null, priceRial: null };
   return {
     stock: stockPayload(Number(rows[0].quantity)),
-    priceRial: switches.pushPrices && rows[0].unit_price ? BigInt(rows[0].unit_price) : null,
+    priceRial: !switches.pushPrices ? null : connection.price_source === "list"
+      ? await resolveMappedWooPrice(connection.business_id, connection, localId)
+      : rows[0].unit_price !== null ? BigInt(rows[0].unit_price) : null,
   };
 }
 
@@ -159,8 +164,9 @@ async function desiredState(
  */
 async function openManualProductAxes(connectionId: string): Promise<Map<string, { price: boolean; stock: boolean }>> {
   const { rows } = await query<{ remote_id: string; payload: Record<string, unknown> | null }>(
-    `SELECT remote_id, payload FROM integration_outbox_events
-      WHERE connection_id = $1 AND entity_type = 'product_update'
+    `SELECT CASE WHEN entity_type = 'product_publish' THEN payload->>'__targetRemoteId' ELSE remote_id END AS remote_id,
+            payload FROM integration_outbox_events
+      WHERE connection_id = $1 AND entity_type IN ('product_update', 'product_publish')
         AND status IN ('pending', 'processing', 'deferred', 'failed')`,
     [connectionId],
   );
@@ -322,7 +328,7 @@ async function upsertOutbox(
               -- as stale, or because its switch was off, is owed a fresh attempt
               -- once the desire is back — the same payload must not stay dead.
               OR (integration_outbox_events.status = 'skipped'
-                  AND integration_outbox_events.last_error IN ('stale_job', 'push_switch_off')))`,
+                  AND integration_outbox_events.last_error IN ('stale_job', 'push_switch_off', 'price_source_changed')))`,
       [businessId, connectionId, entityType, remoteId, localId, payloadJson],
     );
     return;
@@ -341,6 +347,8 @@ export type OutboxEntityType =
   | "stock"
   | "price"
   | "product_update"
+  | "product_publish"
+  | "taxonomy_ensure"
   | "order_status"
   | "refund_create"
   | "catalogue_export"
@@ -372,6 +380,16 @@ async function applyOutboundEvent(
   }
 
   switch (event.entity_type) {
+    case "product_publish": {
+      const { applyProductPublication } = await import("./product-publication-service");
+      await applyProductPublication(connection, client, event);
+      return;
+    }
+    case "taxonomy_ensure": {
+      const { applyTaxonomyEnsure } = await import("./product-attribute-mappings-service");
+      patch.__taxonomyResult = await applyTaxonomyEnsure(connection, patch);
+      return;
+    }
     case "stock":
     case "price":
     case "product_update": {
@@ -603,6 +621,7 @@ export async function drainOutbox(connection: ConnectionRow): Promise<DrainOutbo
       // Fenced on the lease generation: if our lease expired while the
       // store was answering and another worker re-claimed the row, this
       // matches nothing and the newer holder's outcome stands.
+      const delivered = await withTenantTransaction(businessId, async () => {
       const { rowCount } = await query(
         `UPDATE integration_outbox_events
             SET status = 'sent', sent_at = now(), last_error = NULL,
@@ -610,23 +629,32 @@ export async function drainOutbox(connection: ConnectionRow): Promise<DrainOutbo
           WHERE id = $1 AND status = 'processing' AND lease_token = $2`,
         [event.id, event.lease_token],
       );
-      if ((rowCount ?? 0) === 0) {
+      if ((rowCount ?? 0) === 0) return false;
+      if (event.entity_type === "product_publish") {
+        const { acknowledgeProductPublication } = await import("./product-publication-service");
+        await acknowledgeProductPublication(connection, event);
+      } else if (event.entity_type === "taxonomy_ensure") {
+        const { acknowledgeTaxonomyEnsure } = await import("./product-attribute-mappings-service");
+        await acknowledgeTaxonomyEnsure(businessId, connection.id, event.payload,
+          (event.payload as Record<string, unknown>).__taxonomyResult);
+      } else {
+        await acknowledgePushedEvent(connection, event);
+      }
+      return true;
+      });
+      if (!delivered) {
         result.leaseLost += 1;
         continue;
       }
       result.sent += 1;
-      // Preserve the other half so a stock push doesn't erase the last-pushed price (and vice versa).
-      if (event.entity_type === "stock" || event.entity_type === "price" || event.entity_type === "product_update") {
-        await acknowledgePushedEvent(connection, event);
-      }
     } catch (err) {
-      if (err instanceof NeedsReviewError) {
+      if (err instanceof NeedsReviewError || (err as Error).message?.startsWith("publication_review:")) {
         const { rowCount } = await query(
           `UPDATE integration_outbox_events
               SET status = 'needs_review', last_error = $3,
                   leased_until = NULL, lease_token = NULL, updated_at = now()
             WHERE id = $1 AND status = 'processing' AND lease_token = $2`,
-          [event.id, event.lease_token, err.message],
+          [event.id, event.lease_token, (err as Error).message],
         );
         if ((rowCount ?? 0) === 0) {
           result.leaseLost += 1;
@@ -639,7 +667,7 @@ export async function drainOutbox(connection: ConnectionRow): Promise<DrainOutbo
           action: "outbox.needs_review",
           entityType: event.entity_type,
           remoteId: event.remote_id,
-          error: err.message,
+          error: (err as Error).message,
         });
         continue;
       }
@@ -787,10 +815,6 @@ async function runWooCommerceSyncForConnection(business_id: string, id: string):
       payload: { connectionId: connection.id, lastPluginSeenAt: connection.last_plugin_seen_at },
     });
   }
-  const switches = effectivePushSwitches(connection);
-  if (switches.pushStock || switches.pushPrices) {
-    await refreshOutboxForConnection(connection);
-  }
   // Phase 38 — a scheduled order pull, in REST mode only. The plugin
   // pushes its own orders, so pulling there would be a second path to the
   // same rows; but a REST connection whose webhook was never configured
@@ -800,7 +824,8 @@ async function runWooCommerceSyncForConnection(business_id: string, id: string):
   if (connection.link_mode === "rest_api" && connection.auto_pull_orders && connection.sync_orders) {
     try {
       const { syncOrders } = await import("./sync-service");
-      await syncOrders(connection.business_id, connection.id, { maxPages: 10 });
+      const pulled = await syncOrders(connection.business_id, connection.id, { maxPages: 10 });
+      if (pulled?.failed || pulled?.partial) throw new Error("orders_pull_incomplete");
     } catch (err) {
       await writeIntegrationAudit({
         businessId: connection.business_id,
@@ -808,7 +833,14 @@ async function runWooCommerceSyncForConnection(business_id: string, id: string):
         action: "orders.pull_failed",
         error: (err as Error).message,
       });
+      // Sending an absolute stock figure before reconciling Woo's own sales
+      // can put sold units back on the shelf. Retain all work for a retry.
+      throw err;
     }
+  }
+  const switches = effectivePushSwitches(connection);
+  if (switches.pushStock || switches.pushPrices) {
+    await refreshOutboxForConnection(connection);
   }
   // Filling the queue is the same in both link modes — it only reads local
   // stock and prices. Draining is not: in plugin mode the WordPress plugin
@@ -816,6 +848,10 @@ async function runWooCommerceSyncForConnection(business_id: string, id: string):
   // here to call the store with), so this side must leave them alone or it
   // would immediately dead-letter every job the plugin was about to take.
   if (connection.link_mode === "rest_api") {
-    await drainOutbox(connection);
+    const started = Date.now();
+    for (let batch = 0; batch < WOO_DRAIN_MAX_BATCHES; batch += 1) {
+      const result = await drainOutbox(connection);
+      if (!result.hasMore || Date.now() - started >= WOO_DRAIN_TIME_BUDGET_MS) break;
+    }
   }
 }

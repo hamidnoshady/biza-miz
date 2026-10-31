@@ -25,11 +25,11 @@ defined( 'ABSPATH' ) || exit;
 
 class POS_Connector_Health {
 
-	/** The fast lane's nominal cadence (pos_connector_five_minutes). */
-	const FAST_INTERVAL_SECONDS = 300;
+	/** The fast lane's nominal cadence (pos_connector_one_minute). */
+	const FAST_INTERVAL_SECONDS = 60;
 
 	/** The cron counts as stopped after this many fast intervals without a run. */
-	const STALE_AFTER_INTERVALS = 3;
+	const STALE_AFTER_INTERVALS = 2;
 
 	/** How long a crashed run can hold the lock before the next one takes over. */
 	const RUN_LOCK_TTL_SECONDS = 300;
