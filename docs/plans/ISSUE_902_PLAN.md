@@ -929,6 +929,8 @@ the rated amount with its citation (§5m) and the invoiced amount with its citat
 
 ## 5o. The long view: delivery over months (§9 item 2, part two)
 
+_Merged as `58f94f6` (PR #1208)._
+
 §6e answered the question an operator asks while a campaign is running — *is it arriving, and at
 which end is it slow* — over seven days. It cannot answer the one they ask after a bad month: **was
 last month worse, and did it get worse gradually or fall off a cliff?** A row cannot be a series.
