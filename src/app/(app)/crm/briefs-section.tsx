@@ -47,8 +47,11 @@ import {
 } from "@/lib/agency-brief";
 import { api, ErrorBox, Field, InfoBox, PrimaryButton, SecondaryButton, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { EmptyState, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
+import { DataTable, DataTableBody, DataTableHead } from "@/app/dashboard/data-table";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
+import { useMoney } from "@/components/money/money-context";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
+import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { CustomerSearchField } from "./customer-search";
 
@@ -149,7 +152,7 @@ function emptyDraft(): BriefDraft {
   };
 }
 
-function draftFrom(brief: BriefWire): BriefDraft {
+function draftFrom(brief: BriefWire, money: ReturnType<typeof useMoney>): BriefDraft {
   return {
     partyId: brief.partyId,
     partyName: brief.partyName,
@@ -158,7 +161,7 @@ function draftFrom(brief: BriefWire): BriefDraft {
     audience: brief.audience,
     channels: [...brief.channels],
     deliverables: brief.deliverables.map((item) => ({ ...item })),
-    budgetRial: brief.budgetRial === null ? "" : String(brief.budgetRial),
+    budgetRial: brief.budgetRial === null ? "" : String(money.toInput(brief.budgetRial)),
     startDate: brief.startDate ?? "",
     deliveryDate: brief.deliveryDate ?? "",
     acceptanceCriteria: brief.acceptanceCriteria,
@@ -177,7 +180,11 @@ function draftFrom(brief: BriefWire): BriefDraft {
  * string as a decision — sending both for every field would clear whatever the
  * form does not show.
  */
-function bodyFrom(draft: BriefDraft, frozen: boolean): Record<string, unknown> {
+function bodyFrom(
+  draft: BriefDraft,
+  frozen: boolean,
+  money: ReturnType<typeof useMoney>,
+): Record<string, unknown> {
   const body: Record<string, unknown> = { note: draft.note.trim() };
   if (frozen) {
     // A confirmed brief accepts only our own note and the pointers to the work it
@@ -196,27 +203,33 @@ function bodyFrom(draft: BriefDraft, frozen: boolean): Record<string, unknown> {
   body.approverName = draft.approverName.trim();
   body.startDate = draft.startDate || null;
   body.deliveryDate = draft.deliveryDate || null;
-  body.budgetRial = draft.budgetRial.trim() === "" ? null : Number(draft.budgetRial.trim());
+  // Empty is *absent*, not zero: the service refuses a zero budget, and a client
+  // who would not say is a different fact from one who said nothing.
+  const budgetDigits = digitsOf(draft.budgetRial);
+  body.budgetRial = budgetDigits === "" ? null : money.fromInput(Number(budgetDigits));
   if (draft.projectId) body.projectId = draft.projectId;
   return body;
 }
 
 /**
- * Both formatters are the app's own, never the browser's.
+ * The app's own date formatter, never the browser's.
  *
- * Reaching for the browser's own formatter would group digits correctly and
- * render a Gregorian date in a Persian product — silently, and only for some
- * locales — which is exactly what `crm-rtl.test.ts` exists to refuse. A brief's
- * dates arrive as ISO from Postgres and are displayed on the Shamsi calendar like
- * every other date in the app.
+ * Reaching for a built-in locale formatter would render a Gregorian date in a
+ * Persian product — silently, and only for some locales — which is exactly what
+ * `crm-rtl.test.ts` exists to refuse. A brief's dates arrive as ISO from Postgres
+ * and are displayed on the Shamsi calendar like every other date in the app.
+ *
+ * Money is not formatted here at all: `useMoney()` owns the business's unit, so a
+ * tenant that works in toman is never shown a rial figure, and the column keeps
+ * storing rial exactly as §D's registers do.
  */
-function formatRial(value: number | null): string {
-  if (value === null) return "—";
-  return `${formatPersianNumber(value)} ریال`;
-}
-
 function formatDate(value: string | null): string {
   return value ? formatJalali(value) : "—";
+}
+
+/** Digits only, in Latin, so a money or quantity field survives Persian input. */
+function digitsOf(value: string): string {
+  return toLatinDigits(value).replace(/[^\d]/g, "");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -230,6 +243,7 @@ export function BriefsSection({
   canManage: boolean;
   canDelete: boolean;
 }) {
+  const money = useMoney();
   const [briefs, setBriefs] = useState<BriefWire[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("open");
@@ -318,7 +332,7 @@ export function BriefsSection({
 
   function openEdit(brief: BriefWire) {
     setSaveError(null);
-    setDraft(draftFrom(brief));
+    setDraft(draftFrom(brief, money));
     setEditing({ brief });
   }
 
@@ -327,7 +341,7 @@ export function BriefsSection({
     setSaving(true);
     setSaveError(null);
     const frozen = editing.brief?.frozen ?? false;
-    const body = bodyFrom(draft, frozen);
+    const body = bodyFrom(draft, frozen, money);
     const { ok, data } = await api<{ brief?: BriefWire; error?: string }>(
       editing.brief ? `/api/crm/briefs/${editing.brief.id}` : "/api/crm/briefs",
       {
@@ -453,21 +467,18 @@ export function BriefsSection({
         ) : null}
 
         {!loadError && briefs !== null && briefs.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-muted-foreground">
-                  <th className="py-2 text-start font-medium">شماره</th>
-                  <th className="py-2 text-start font-medium">عنوان</th>
-                  <th className="py-2 text-start font-medium">کارفرما</th>
-                  <th className="py-2 text-start font-medium">وضعیت</th>
-                  <th className="py-2 text-start font-medium">بودجه</th>
-                  <th className="py-2 text-start font-medium">تحویل</th>
-                  <th className="py-2 text-start font-medium">تأییدکننده</th>
-                  <th className="py-2 text-end font-medium">عملیات</th>
-                </tr>
-              </thead>
-              <tbody>
+          <DataTable caption="بریف‌های کارفرما">
+            <DataTableHead>
+              <th className="py-2 text-start font-medium">شماره</th>
+              <th className="py-2 text-start font-medium">عنوان</th>
+              <th className="py-2 text-start font-medium">کارفرما</th>
+              <th className="py-2 text-start font-medium">وضعیت</th>
+              <th className="py-2 text-start font-medium">بودجه</th>
+              <th className="py-2 text-start font-medium">تحویل</th>
+              <th className="py-2 text-start font-medium">تأییدکننده</th>
+              <th className="py-2 text-end font-medium">عملیات</th>
+            </DataTableHead>
+            <DataTableBody>
                 {briefs.map((brief) => (
                   <tr key={brief.id} className="border-b last:border-0">
                     <td className="py-2 whitespace-nowrap">{toPersianDigits(brief.briefNumber)}</td>
@@ -483,7 +494,9 @@ export function BriefsSection({
                         {AGENCY_BRIEF_STATUS_LABELS[brief.status]}
                       </StatusBadge>
                     </td>
-                    <td className="py-2 whitespace-nowrap">{formatRial(brief.budgetRial)}</td>
+                    <td className="py-2 whitespace-nowrap">
+                      {brief.budgetRial === null ? "—" : money.format(brief.budgetRial)}
+                    </td>
                     <td className="py-2 whitespace-nowrap">{formatDate(brief.deliveryDate)}</td>
                     <td className="py-2 whitespace-nowrap">
                       {brief.approverName || brief.confirmedByName || "—"}
@@ -519,9 +532,8 @@ export function BriefsSection({
                     </td>
                   </tr>
                 ))}
-              </tbody>
-            </table>
-          </div>
+            </DataTableBody>
+          </DataTable>
         ) : null}
 
         <InfoBox>
@@ -704,27 +716,24 @@ export function BriefsSection({
                       <option value="contract">قرارداد</option>
                       <option value="report">گزارش</option>
                     </select>
-                    <input
+                    <PersianNumberInput
                       className={`${inputClass} w-24`}
-                      type="number"
-                      min={1}
-                      max={999}
+                      inputMode="numeric"
+                      allowNegative={false}
                       disabled={frozen}
-                      value={item.quantity ?? ""}
+                      value={item.quantity === null ? "" : String(item.quantity)}
                       aria-label={`تعداد قلم ${toPersianDigits(index + 1)}`}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        const digits = digitsOf(event.target.value);
                         setDraft((current) => ({
                           ...current,
                           deliverables: current.deliverables.map((entry, at) =>
                             at === index
-                              ? {
-                                  ...entry,
-                                  quantity: event.target.value === "" ? null : Number(event.target.value),
-                                }
+                              ? { ...entry, quantity: digits === "" ? null : Number(digits) }
                               : entry,
                           ),
-                        }))
-                      }
+                        }));
+                      }}
                     />
                     {!frozen ? (
                       <SecondaryButton
@@ -762,15 +771,22 @@ export function BriefsSection({
             </Field>
 
             <div className="grid gap-4 sm:grid-cols-3">
-              <Field label="بودجهٔ کارفرما (ریال)" hint="آنچه کارفرما گفته قصد دارد بپردازد.">
+              <Field
+                label={`بودجهٔ کارفرما (${money.unitLabel})`}
+                hint="آنچه کارفرما گفته قصد دارد بپردازد؛ نه مطالبهٔ قطعی و نه سند حسابداری."
+              >
                 {frozen ? (
-                  <div className={inputClass}>{formatRial(draft.budgetRial ? Number(draft.budgetRial) : null)}</div>
+                  <div className={inputClass}>
+                    {editing?.brief?.budgetRial == null ? "—" : money.format(editing.brief.budgetRial)}
+                  </div>
                 ) : (
-                  <input
+                  <PersianNumberInput
                     className={inputClass}
-                    type="number"
-                    min={1}
+                    inputMode="numeric"
+                    allowNegative={false}
                     value={draft.budgetRial}
+                    placeholder="۰"
+                    aria-label={`بودجهٔ کارفرما به ${money.unitLabel}`}
                     onChange={(event) => setDraft((c) => ({ ...c, budgetRial: event.target.value }))}
                   />
                 )}
