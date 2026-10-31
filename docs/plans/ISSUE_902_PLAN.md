@@ -927,6 +927,37 @@ What is **still** Billing's own work: reconciling a supplier's invoice against
 `billing_vendor_cost_events`. That is the last half of §9 item 3, and it now has both halves it needs —
 the rated amount with its citation (§5m) and the invoiced amount with its citation (§5n).
 
+## 5o. The long view: delivery over months (§9 item 2, part two)
+
+§6e answered the question an operator asks while a campaign is running — *is it arriving, and at
+which end is it slow* — over seven days. It cannot answer the one they ask after a bad month: **was
+last month worse, and did it get worse gradually or fall off a cliff?** A row cannot be a series.
+
+The data was already there. `message_outbox` keeps every row (nothing prunes it, unlike the
+integration queues), and `0134`/`0268` already carry the enqueue and provider clocks. So this slice is
+a query and a shape — no new columns, no new table, no new tick.
+
+What it had to get right, in the order the mistakes would appear:
+
+| Rule | The failure it prevents |
+| --- | --- |
+| A bucket with **no attempts is a gap**, not a zero | Silence and total failure draw identically on a chart that plots zeros. An operator then chases a collapse that never happened — and a real one looks the same as the false one |
+| `failureRate` is **`null`** when nothing was decided, never `۰٪` | A week of no sends has no failure rate. Printing zero is a claim, and a flattering one |
+| Buckets are cut on the **Tehran calendar**, in SQL, by the same key the facts module builds | Grouping `created_at` in UTC moves every Iranian evening (21:00 UTC = 00:30 Tehran) into the next day, so the trend would disagree with every other figure in the product |
+| Granularity follows the span: **days ≤ 31, weeks ≤ 120, months beyond** | 365 daily bars is not a chart, and a single constant granularity is wrong at one end of the range whichever one is chosen |
+| Latencies are **pooled over the window**, not averaged per bucket | An average of medians is not a median, and it weights a two-message week like a two-thousand-message one. The test asserts the pooled p50 on a 1 000:1 split |
+| The tenant series is **business-scoped and RLS-scoped**, and selects no provider field | A trend is still a tenant surface. Counts and latencies only: no provider id, no error string, no wholesale cost |
+
+Two side effects worth naming. `deliveryHealth()` and `latencyStats()` moved out of the two reporting
+modules into `delivery-health.ts` and `latency-stats.ts`, both pure, because a third caller (the trend)
+and a client component (the console card) both need them — the card had been keeping a hand-copy of the
+thresholds with a comment saying it mirrored the server, which is how a rule becomes two rules; it now
+imports the one function. And the screens say the quiet part out loud: the console card draws an empty
+dashed box for a bucket with no sends and a note that «کادر خالی یعنی … هیچ ارسالی ثبت نشده — نه اینکه
+همه شکست خورده باشند», and the tenant card carries the same note in the business's own words.
+
+That closes §9 item 2: §6e gave the per-campaign view, this gives the window that contains it.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -947,6 +978,8 @@ the rated amount with its citation (§5m) and the invoiced amount with its citat
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npx vitest run` — `imported-payment-receipts` (§5l) | 6/6: both plugin importers (F&B and retail) and the CMS importer call the receipt trigger, in every case after `COMMIT`, never awaited, and wrapped in `withTenant` — plus the amount being the same `total` the payment row was written with; and the amendment bridge carrying no call at all, with its reason still in the file |
+| `npx vitest run` — `delivery-trend` (§5o) | 18/18: granularity from the span (day/week/month) and a contiguous series ending today; Tehran day keys (21:00 UTC is tomorrow) and Monday-start weeks (a Sunday belongs to the week before); a bucket with no rows is `hasData: false` with a `null` rate and `idle`, and an in-flight-only bucket is data with no rate; the rate is over decided attempts only; a bucket outside the window is dropped; the window's latency is pooled rather than averaged from medians (the 1 000:1 case); worst verdict and newest-first health; bars scaled to the busiest bucket with a visible minimum and `null` for an empty window; plus the guards — SQL groups on `Asia/Tehran` at every granularity, the tenant query is `withTenant` + `business_id`, no provider field is selected, the window clamps to a year, and both screens render server-computed points with the shared health rule and no hand-copied thresholds |
+| `npm run test:db` — `delivery-trend` (§5o) | CI only (no Postgres here): a 21:00 UTC send lands on the next Tehran day while a 19:00 UTC one stays on today (the UTC-grouping bug, asserted against Postgres); empty buckets stay gaps with no rate; a quarter rolls into weeks and a Sunday falls in the previous week; the window pools queue and provider latencies from the outbox's own columns; a failure counts as a decided attempt; each business sees only its own series while the fleet view counts rows across both and businesses once each |
 | `npx vitest run` — `usage-invoice` (§5n) | 16/16: ratings of one meter and version fold into one line whose amount is the sum of its parts; a mid-month price change splits into two lines, each citing one version; a retail line and a meter line for the same meter never cross catalogues; an allowance-covered rating bills nothing but is still counted; a pre-0270 rating is billed without a citation; 10 Rial over 3 units stays 10; a negative rating is dropped rather than credited; descriptions carry the catalogue's Persian name, the basis label and the version in Persian digits and no supplier word; plus the schema guards (0275's pairing CHECKs, `kind = 'usage'`, the one-billing-ever index, forced RLS), the writer's linkage and the route's two capabilities |
 | `npm run test:db` — `billing-usage-invoice` (§5n) | CI only (no Postgres here): a month of ratings becomes one invoice with one line per meter-and-version, each rating linked with what it contributed and the lines summing to the invoice; wallet-backed usage is left out; a month with nothing unbilled creates no invoice; issuing twice finds the same invoice and writes no second line; the database refuses a second link for the same rating; a late rating extends an open invoice and is refused by a paid one; another business's usage is not invoiced |
 | `npx vitest run` — `rating-basis` (§5m) | 11/11: retail wins and nulls the meter column; explicit amount cites nothing; meter stays the fallback; a zero version is a real default while a negative or non-finite one is rejected rather than clamped; plus source guards on both INSERT branches, the migration's pairing CHECK, and the drain passing the version it priced with |
@@ -998,10 +1031,11 @@ the rated amount with its citation (§5m) and the invoiced amount with its citat
    in the segments the provider bills and priced at the child's wholesale rate. The target becomes
    `max(buffer, demand)` and the transfer reports `campaign_demand` rather than `top_up`.
 2. ~~**Delivery/health dashboards** (#902 P1): per-campaign delivery and provider latency~~
-   — **closed** (§6e): the console and the tenant screen now show delivery per campaign with the
-   queue wait and the provider wait separately, over a week. A longer *historical* view (trend over
-   months rather than a window) is still open; the outbox rows it would read are retained, so it is
-   a query and a chart, not new data.
+   — **closed** (§6e, §5o): the console and the tenant screen show delivery per campaign with the
+   queue wait and the provider wait separated, and now also a **long-range trend** — a quarter of
+   sends bucketed weekly (days under a month, months over a quarter), where a bucket with no
+   attempts is a gap rather than a zero and the failure rate is `null` instead of `۰٪`. The outbox
+   rows it reads are retained, so it stayed a query and a chart.
 3. **Retail ↔ wholesale settlement in invoicing** (billing) — **two of three parts closed**:
    the rating cites the version that produced its amount (§5m), and those ratings now become **invoice
    lines** — one per meter-and-version, each linked to the ratings it was built from with one-billing-ever
