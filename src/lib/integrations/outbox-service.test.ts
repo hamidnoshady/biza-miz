@@ -9,7 +9,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { query } from "../db";
-import { refreshOutboxForConnection, drainOutbox, acknowledgePushedEvent } from "./outbox-service";
+import { refreshOutboxForConnection, drainOutbox, acknowledgePushedEvent, runWooCommerceSyncTick } from "./outbox-service";
 import type { ConnectionRow } from "./connections-service";
 
 const mocks = vi.hoisted(() => ({
@@ -20,6 +20,8 @@ const mocks = vi.hoisted(() => ({
   wooClientFor: vi.fn(),
   parentRemoteIdFor: vi.fn(),
   writeIntegrationAudit: vi.fn(),
+  getConnection: vi.fn(),
+  syncOrders: vi.fn(),
 }));
 
 vi.mock("../db", () => ({
@@ -27,13 +29,15 @@ vi.mock("../db", () => ({
   getPool: vi.fn(),
   closeDatabasePool: vi.fn(),
   withTenant: vi.fn(async (_businessId: string, fn: () => Promise<unknown>) => fn()),
+  withTenantTransaction: vi.fn(async (_businessId: string, fn: () => Promise<unknown>) => fn()),
   withoutTenantScope: vi.fn(async (_reason: string, fn: () => Promise<unknown>) => fn()),
   rlsEffective: vi.fn(),
   assertRlsEffective: vi.fn(),
 }));
 vi.mock("../industry-guard", () => ({ getBusinessIndustry: mocks.getBusinessIndustry }));
 vi.mock("../industries", () => ({ hasSellableCatalogue: mocks.hasSellableCatalogue }));
-vi.mock("./connections-service", () => ({ getConnection: vi.fn(), wooClientFor: mocks.wooClientFor }));
+vi.mock("./connections-service", () => ({ getConnection: mocks.getConnection, wooClientFor: mocks.wooClientFor }));
+vi.mock("../service-activation/app-gate-service", () => ({ isAppServiceOperational: vi.fn(async () => true) }));
 vi.mock("./mapping-service", () => ({
   listMappings: mocks.listMappings,
   mergeMappingMeta: mocks.mergeMappingMeta,
@@ -42,6 +46,7 @@ vi.mock("./mapping-service", () => ({
 // `parentRemoteIdFromMeta` is pure, so the mock carries its exact rule rather
 // than importing the whole module chain.
 vi.mock("./sync-service", () => ({
+  syncOrders: mocks.syncOrders,
   parentRemoteIdFor: mocks.parentRemoteIdFor,
   parentRemoteIdFromMeta: (meta: unknown) => {
     const parent = (meta as { remoteParentId?: unknown } | null | undefined)?.remoteParentId;
@@ -92,6 +97,36 @@ beforeEach(() => {
   mocks.getBusinessIndustry.mockResolvedValue("accessories");
   mocks.hasSellableCatalogue.mockReturnValue(true);
   mocks.parentRemoteIdFor.mockResolvedValue(null);
+});
+
+describe("Woo worker order reconciliation before outbound stock (#951)", () => {
+  function stubTick(pull: () => Promise<void>) {
+    const steps: string[] = [];
+    mocks.getConnection.mockResolvedValue(connection({ auto_pull_orders: true, sync_orders: true }));
+    mocks.syncOrders.mockImplementation(async () => { steps.push("orders"); await pull(); });
+    mocks.listMappings.mockImplementation(async () => { steps.push("refresh"); return []; });
+    vi.mocked(query).mockImplementation((async (sql: string) => {
+      if (sql.includes("SELECT id, business_id FROM integration_connections")) {
+        return { rows: [{ id: "conn-1", business_id: "biz-1" }] };
+      }
+      if (sql.includes("UPDATE integration_outbox_events o")) steps.push("drain");
+      return { rows: [] };
+    }) as never);
+    return steps;
+  }
+
+  it("ingests Woo sales before deriving the absolute stock push", async () => {
+    const steps = stubTick(async () => {});
+    await runWooCommerceSyncTick();
+    expect(steps).toEqual(["orders", "refresh", "drain"]);
+  });
+
+  it("retains queued absolute stock instead of sending it after a failed order pull", async () => {
+    const steps = stubTick(async () => { throw new Error("store_unreachable"); });
+    await runWooCommerceSyncTick();
+    expect(steps).toEqual(["orders"]);
+    expect(mocks.writeIntegrationAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "orders.pull_failed" }));
+  });
 });
 
 describe("refreshOutboxForConnection — variation routing", () => {

@@ -609,3 +609,46 @@ describe("who owns the number, against the real database (issue #1149)", () => {
     expect((await eventsFor("203")).find((e) => e.entity_type === "price")?.status).toBe("pending");
   });
 });
+
+describe("Accounting publication through the shared plugin outbox (#951)", () => {
+  it("creates no mapping until a fenced ACK, and replaying that ACK cannot remap it", async () => {
+    const publication = await import("../src/lib/integrations/product-publication-service");
+    const { rows: [item] } = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id,name,sku,kind) VALUES ($1,'local publish','PUB-951','simple') RETURNING id`, [biz.locationId]);
+    await db.query(`INSERT INTO item_stock (item_id,quantity,unit_price) VALUES ($1,2,5000)`, [item.id]);
+    const preview = await publication.previewProductPublication(biz.id, biz.locationId, biz.connectionId, item.id);
+    await publication.queueProductPublication(biz.id, preview);
+    await publication.queueProductPublication(biz.id, preview);
+    expect((await db.query(`SELECT 1 FROM integration_mappings WHERE connection_id=$1 AND local_id=$2`, [biz.connectionId,item.id])).rowCount).toBe(0);
+    const pluginConn = { ...connRow, link_mode: "plugin" as const, plugin_capabilities: { protocolVersion: 3, jobTypes: ["product_publish"] } };
+    const { jobs } = await (await plugin.pluginPullJobs(pluginConn)).json();
+    expect(jobs).toHaveLength(1);
+    // The product hook can arrive before the explicit job ACK, or after its
+    // HTTP response was lost. It is remote evidence, not a second local item.
+    const beforeCount = (await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM items WHERE location_id=$1`, [biz.locationId])).rows[0].n;
+    await sync.upsertProductFromWoo(connRow, biz.locationId, {
+      id: 9951, name: "local publish", sku: "PUB-951", type: "simple", regular_price: "500",
+      price: "500", manage_stock: false, stock_quantity: null,
+      meta_data: [{ key: "_bizamiz_publication_id", value: jobs[0].payload.__operationId }],
+    } as import("../src/lib/integrations/woocommerce-client").WooProduct);
+    expect((await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM items WHERE location_id=$1`, [biz.locationId])).rows[0].n).toBe(beforeCount);
+    await plugin.pluginAckJobs(pluginConn, [{ id: jobs[0].id, status: "done", leaseToken: jobs[0].leaseToken, result: { remoteId: 9951 } }]);
+    await plugin.pluginAckJobs(pluginConn, [{ id: jobs[0].id, status: "done", leaseToken: jobs[0].leaseToken, result: { remoteId: 9952 } }]);
+    const { rows: mapped } = await db.query<{ remote_id: string }>(`SELECT remote_id FROM integration_mappings WHERE connection_id=$1 AND local_id=$2`, [biz.connectionId,item.id]);
+    expect(mapped).toEqual([{ remote_id: "9951" }]);
+  });
+
+  it("invalidates a waiting base price when a named source is selected, with no missing-entry fallback", async () => {
+    const { rows: [list] } = await db.query<{ id: string }>(`INSERT INTO price_lists (location_id,name,currency) VALUES ($1,'Woo named source','IRR') RETURNING id`, [biz.locationId]);
+    await db.query(`UPDATE integration_outbox_events SET status='pending', payload='{"regular_price":"999"}', leased_until=NULL, lease_token=NULL WHERE connection_id=$1 AND remote_id='101' AND entity_type='price'`, [biz.connectionId]);
+    const updated = await connections.updateConnection(biz.id, biz.connectionId, { priceSource: "list", priceListId: list.id });
+    expect(updated.ok).toBe(true);
+    expect((await eventsFor("101")).find(e => e.entity_type === "price")).toMatchObject({ status: "skipped", last_error: "price_source_changed" });
+    connRow = (await connections.getConnection(biz.id,biz.connectionId))!;
+    await refresh();
+    expect((await eventsFor("101")).find(e => e.entity_type === "price")?.status).toBe("skipped");
+    await db.query(`INSERT INTO price_list_entries (price_list_id,item_id,price) SELECT $1,local_id,7000 FROM integration_mappings WHERE connection_id=$2 AND entity_type='product' AND remote_id='101'`, [list.id,biz.connectionId]);
+    await refresh();
+    expect((await eventsFor("101")).find(e => e.entity_type === "price")).toMatchObject({ status: "pending", payload: { regular_price: "700" } });
+  });
+});

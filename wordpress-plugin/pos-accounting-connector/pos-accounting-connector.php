@@ -3,7 +3,7 @@
  * Plugin Name:       Bizamiz Connector
  * Plugin URI:        https://github.com/hamidnoshady/biza-miz
  * Description:       اتصال امن دوطرفه فروشگاه ووکامرس به بیزامیز: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.
- * Version:           1.6.20
+ * Version:           1.6.21
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -77,7 +77,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'POS_CONNECTOR_VERSION', '1.6.20' );
+define( 'POS_CONNECTOR_VERSION', '1.6.21' );
 define( 'POS_CONNECTOR_DB_VERSION_OPTION', 'pos_connector_db_version' );
 define( 'POS_CONNECTOR_FILE', __FILE__ );
 define( 'POS_CONNECTOR_PATH', plugin_dir_path( __FILE__ ) );
@@ -402,6 +402,10 @@ add_action( 'plugins_loaded', 'pos_connector_bootstrap' );
  * backstop rather than a primary path.
  */
 function pos_connector_cron_schedules( $schedules ) {
+	$schedules['pos_connector_one_minute'] = array(
+		'interval' => MINUTE_IN_SECONDS,
+		'display'  => __( 'هر دقیقه (بیزامیز)', 'pos-accounting-connector' ),
+	);
 	$schedules['pos_connector_five_minutes'] = array(
 		'interval' => 5 * MINUTE_IN_SECONDS,
 		'display'  => __( 'هر پنج دقیقه (بیزامیز)', 'pos-accounting-connector' ),
@@ -483,8 +487,9 @@ function pos_connector_schedule_event( $hook, $schedule ) {
 function pos_connector_ensure_schedules() {
 	$settings = pos_connector_settings();
 
-	if ( ! wp_next_scheduled( POS_CONNECTOR_CRON_HOOK ) ) {
-		wp_schedule_event( time() + MINUTE_IN_SECONDS, 'pos_connector_five_minutes', POS_CONNECTOR_CRON_HOOK );
+	if ( wp_get_schedule( POS_CONNECTOR_CRON_HOOK ) !== 'pos_connector_one_minute' ) {
+		wp_clear_scheduled_hook( POS_CONNECTOR_CRON_HOOK );
+		wp_schedule_event( time() + MINUTE_IN_SECONDS, 'pos_connector_one_minute', POS_CONNECTOR_CRON_HOOK );
 	}
 	foreach ( array(
 		POS_CONNECTOR_CRON_RESYNC_ORDERS   => $settings['resync_orders_schedule'],

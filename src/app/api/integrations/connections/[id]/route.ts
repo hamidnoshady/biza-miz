@@ -34,6 +34,8 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   }
 
   const result = await updateConnection(session.businessId, id, {
+    priceSource: typeof body.priceSource === "string" ? body.priceSource as "base" | "list" : undefined,
+    priceListId: typeof body.priceListId === "string" ? body.priceListId : body.priceListId === null ? null : undefined,
     name: typeof body.name === "string" ? body.name : undefined,
     locationId: typeof body.locationId === "string" ? body.locationId : body.locationId === null ? null : undefined,
     status: body.status === "active" || body.status === "paused" ? body.status : undefined,

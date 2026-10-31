@@ -17,6 +17,7 @@ import { createWooCommerceClient, type WooCredentials } from "./woocommerce-clie
 import type { WooCurrencyUnit } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
 import { effectivePushSwitches, isSourceOfTruth, type SourceOfTruth } from "./outbox-policy";
+import { pluginSilenceThresholdMs } from "./sync-timing";
 
 /**
  * How a store is connected.
@@ -59,6 +60,8 @@ export interface ConnectionRow extends Record<string, unknown> {
   sync_customers: boolean;
   push_stock: boolean;
   push_prices: boolean;
+  price_source?: "base" | "list";
+  price_list_id?: string | null;
   /** Issue #1149 — which side owns stock and prices; `store` switches the scheduled push off. */
   source_of_truth: SourceOfTruth;
   /** Issue #1149 — the owner agreed a stock push may turn on WooCommerce stock tracking. */
@@ -99,6 +102,8 @@ export interface Connection {
   syncCustomers: boolean;
   pushStock: boolean;
   pushPrices: boolean;
+  priceSource?: "base" | "list";
+  priceListId?: string | null;
   sourceOfTruth: SourceOfTruth;
   manageStockOptIn: boolean;
   syncCategories: boolean;
@@ -138,7 +143,7 @@ export function webhookPathFor(connectionId: string): string {
 }
 
 /** Plugin-mode freshness threshold. The plugin's fast lane runs every five minutes; three missed runs is stale. */
-export const PLUGIN_HEALTH_STALE_MS = 15 * 60 * 1000;
+export const PLUGIN_HEALTH_STALE_MS = 10 * 60 * 1000;
 
 export type TransportHealthState = "never_connected" | "healthy" | "stale" | "paused" | "error" | "site_mismatch";
 
@@ -151,14 +156,15 @@ export interface TransportHealth {
 }
 
 export function deriveTransportHealth(
-  connection: Pick<ConnectionRow, "link_mode" | "status" | "last_plugin_seen_at" | "last_error" | "plugin_site_mismatch_at">,
+  connection: Pick<ConnectionRow, "link_mode" | "status" | "last_plugin_seen_at" | "last_error" | "plugin_site_mismatch_at"> & { plugin_health?: Record<string, unknown> },
   now = new Date(),
 ): TransportHealth {
+  const staleAfterMs = pluginSilenceThresholdMs(connection.plugin_health);
   if (connection.status === "paused") {
     return {
       state: "paused",
       lastSeenAt: connection.last_plugin_seen_at,
-      staleAfterMs: PLUGIN_HEALTH_STALE_MS,
+      staleAfterMs,
       checkedAt: now.toISOString(),
       message: "همگام‌سازی از سمت پنل متوقف شده است",
     };
@@ -167,7 +173,7 @@ export function deriveTransportHealth(
     return {
       state: "error",
       lastSeenAt: connection.last_plugin_seen_at,
-      staleAfterMs: PLUGIN_HEALTH_STALE_MS,
+      staleAfterMs,
       checkedAt: now.toISOString(),
       message: connection.last_error ?? "connection_error",
     };
@@ -176,7 +182,7 @@ export function deriveTransportHealth(
     return {
       state: "healthy",
       lastSeenAt: null,
-      staleAfterMs: PLUGIN_HEALTH_STALE_MS,
+      staleAfterMs,
       checkedAt: now.toISOString(),
     };
   }
@@ -184,7 +190,7 @@ export function deriveTransportHealth(
     return {
       state: "site_mismatch",
       lastSeenAt: connection.last_plugin_seen_at,
-      staleAfterMs: PLUGIN_HEALTH_STALE_MS,
+      staleAfterMs,
       checkedAt: now.toISOString(),
       message: "site_mismatch",
     };
@@ -193,17 +199,17 @@ export function deriveTransportHealth(
     return {
       state: "never_connected",
       lastSeenAt: null,
-      staleAfterMs: PLUGIN_HEALTH_STALE_MS,
+      staleAfterMs,
       checkedAt: now.toISOString(),
       message: "plugin_never_connected",
     };
   }
   const lastSeenMs = Date.parse(connection.last_plugin_seen_at);
-  if (!Number.isFinite(lastSeenMs) || now.getTime() - lastSeenMs > PLUGIN_HEALTH_STALE_MS) {
+  if (!Number.isFinite(lastSeenMs) || now.getTime() - lastSeenMs > staleAfterMs) {
     return {
       state: "stale",
       lastSeenAt: connection.last_plugin_seen_at,
-      staleAfterMs: PLUGIN_HEALTH_STALE_MS,
+      staleAfterMs,
       checkedAt: now.toISOString(),
       message: "plugin_stale",
     };
@@ -211,7 +217,7 @@ export function deriveTransportHealth(
   return {
     state: "healthy",
     lastSeenAt: connection.last_plugin_seen_at,
-    staleAfterMs: PLUGIN_HEALTH_STALE_MS,
+    staleAfterMs,
     checkedAt: now.toISOString(),
   };
 }
@@ -231,6 +237,8 @@ function mapConnection(row: ConnectionRow): Connection {
     syncCustomers: row.sync_customers,
     pushStock: row.push_stock,
     pushPrices: row.push_prices,
+    priceSource: row.price_source ?? "base",
+    priceListId: row.price_list_id ?? null,
     sourceOfTruth: row.source_of_truth ?? "two_way",
     manageStockOptIn: Boolean(row.manage_stock_opt_in),
     syncCategories: row.sync_categories,
@@ -270,7 +278,7 @@ export const CONNECTION_COLUMNS = `id, business_id, location_id, name, provider,
   plugin_health, plugin_capabilities, pending_plugin_site_url, plugin_site_mismatch_at,
   wp_username_ciphertext, wp_application_password_ciphertext,
   currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices,
-  source_of_truth, manage_stock_opt_in,
+  source_of_truth, manage_stock_opt_in, price_source, price_list_id,
   sync_categories, auto_pull_orders, order_lookback_days,
   status, last_test_at, last_successful_test_at, last_test_error, last_sync_at, last_catalogue_sync_at, last_order_sync_at,
   last_customer_sync_at, last_content_sync_at, last_error, created_at, updated_at`;
@@ -442,6 +450,8 @@ export async function rotateLinkToken(
 }
 
 export interface UpdateConnectionInput {
+  priceSource?: "base" | "list";
+  priceListId?: string | null;
   name?: string;
   locationId?: string | null;
   status?: "active" | "paused";
@@ -474,6 +484,7 @@ export async function updateConnection(
 
   const key = resolveEncryptionKey(process.env);
   const sets: string[] = [];
+  let priceSourceChanged = false;
   const params: unknown[] = [businessId, id];
   const add = (column: string, value: unknown) => {
     params.push(value);
@@ -502,6 +513,24 @@ export async function updateConnection(
   if (input.syncCustomers !== undefined) add("sync_customers", input.syncCustomers);
   if (input.pushStock !== undefined) add("push_stock", input.pushStock);
   if (input.pushPrices !== undefined) add("push_prices", input.pushPrices);
+  if (input.priceSource !== undefined || input.priceListId !== undefined) {
+    const source = input.priceSource ?? existing.price_source ?? "base";
+    const listId = source === "base" ? null : (input.priceListId ?? existing.price_list_id);
+    if (source !== "base" && source !== "list") return { ok: false, error: "invalid_price_source" };
+    if (source === "list") {
+      if (!listId || !/^[0-9a-f-]{36}$/i.test(listId)) return { ok: false, error: "invalid_price_list" };
+      const { rows: lists } = await query(
+        `SELECT p.id FROM price_lists p JOIN locations l ON l.id = p.location_id
+         WHERE p.id = $1 AND l.business_id = $2 AND p.currency IN ('IRR', 'IRT')
+           AND ($3::uuid IS NULL OR p.location_id = $3)`,
+        [listId, businessId, input.locationId ?? existing.location_id],
+      );
+      if (!lists.length) return { ok: false, error: "invalid_price_list" };
+    }
+    add("price_source", source);
+    add("price_list_id", listId);
+    priceSourceChanged = source !== (existing.price_source ?? "base") || listId !== (existing.price_list_id ?? null);
+  }
   if (input.sourceOfTruth !== undefined) {
     if (!isSourceOfTruth(input.sourceOfTruth)) return { ok: false, error: "invalid_source_of_truth" };
     add("source_of_truth", input.sourceOfTruth);
@@ -537,6 +566,7 @@ export async function updateConnection(
   const closeTypes = touchesPush
     ? [...(effective.pushStock ? [] : ["stock"]), ...(effective.pushPrices ? [] : ["price"])]
     : [];
+  if (priceSourceChanged && !closeTypes.includes("price")) closeTypes.push("price");
   let sql: string;
   if (closeTypes.length > 0) {
     params.push(closeTypes);
@@ -546,7 +576,8 @@ export async function updateConnection(
               RETURNING ${CONNECTION_COLUMNS}
            ), closed AS (
              UPDATE integration_outbox_events
-                SET status = 'skipped', last_error = 'push_switch_off',
+                SET status = 'skipped', last_error = CASE WHEN entity_type = 'price' AND ${priceSourceChanged ? "true" : "false"}
+                      THEN 'price_source_changed' ELSE 'push_switch_off' END,
                     leased_until = NULL, lease_token = NULL, updated_at = now()
               WHERE business_id = $1 AND connection_id = $2
                 AND entity_type = ANY($${params.length}::text[])
