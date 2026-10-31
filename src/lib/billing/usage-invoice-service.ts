@@ -19,7 +19,7 @@
  *   wallet-backed, so a monthly pass would be inert now and dangerous the day a
  *   new source starts rating without charging. Issuing is an explicit,
  *   capability-guarded, audited operator action until that decision is made.
- * - **It does not tax metered usage.** `0271` links lines to versions; a tax
+ * - **It does not tax metered usage.** `0274` links lines to versions; a tax
  *   policy for usage is a different question and inventing a rate here would put
  *   a number on an invoice that no one approved.
  *
@@ -223,7 +223,7 @@ async function writeLines(client: PoolClient, invoiceId: string, businessId: str
         Math.max(1, line.quantity),
         line.unitAmountRial,
         line.amountRial,
-        // A retail-priced line must not cite the meter catalogue (0271's CHECK).
+        // A retail-priced line must not cite the meter catalogue (0274's CHECK).
         line.priceBasis === "meter_price_version" ? line.priceVersionId : null,
         order++,
         line.priceBasis,

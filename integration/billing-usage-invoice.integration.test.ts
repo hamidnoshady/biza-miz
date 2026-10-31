@@ -254,7 +254,7 @@ describe("a month's rates become a readable invoice", () => {
     expect(emailLine.price_basis).toBe("retail_price_version");
     expect(emailLine.retail_price_version).toBe(12);
     // The meter catalogue is a different table; a value here would be a false
-    // citation, and 0271 refuses it.
+    // citation, and 0274 refuses it.
     expect(emailLine.price_version_id).toBeNull();
 
     const cmsLine = lines.find((line) => line.description.includes("cms.api_request"))!;

@@ -1,6 +1,7 @@
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { PriceListsSection } from "@/app/dashboard/products/price-lists-section";
+import { WooPriceSourceSettings } from "@/app/dashboard/products/woo-price-source-settings";
 import { requireProductWorkspace } from "@/app/dashboard/products/workspace-context";
 
 /** «لیست قیمت» — the price-update matrix over sale/purchase and named lists. */
@@ -14,6 +15,7 @@ export default async function PriceListsPage() {
         actions={<KnowledgeHelpButton section="pos" />}
       />
       <PriceListsSection apiBase={apiBase} canEdit={canEdit} draftScope={draftScope} />
+      {canEdit ? <WooPriceSourceSettings /> : null}
     </PageShell>
   );
 }

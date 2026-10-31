@@ -5,7 +5,7 @@ const now = new Date("2026-10-26T12:00:00Z");
 const ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
 
 describe("summarizePluginHealth (issue #1149, C5)", () => {
-  it("reports silence in minutes and flags stale after 15 and alert after 30", () => {
+  it("reports legacy plugin silence after two missed five-minute pulls", () => {
     const at = (minutes: number) =>
       summarizePluginHealth(
         { last_plugin_seen_at: ago(minutes * 60_000), last_sync_at: null, plugin_health: {} },
@@ -13,8 +13,14 @@ describe("summarizePluginHealth (issue #1149, C5)", () => {
         now,
       );
     expect(at(10)).toMatchObject({ silentMinutes: 10, stale: false, alert: false });
-    expect(at(20)).toMatchObject({ stale: true, alert: false });
+    expect(at(11)).toMatchObject({ stale: true, alert: true });
     expect(at(31)).toMatchObject({ stale: true, alert: true });
+  });
+
+  it("alerts after two missed pulls of an upgraded one-minute plugin", () => {
+    const connection = { last_plugin_seen_at: ago(121_000), last_sync_at: null, plugin_health: { fastIntervalSeconds: 60 } };
+    expect(summarizePluginHealth(connection, { size: 0, oldestAt: null }, now)).toMatchObject({ stale: true, alert: true });
+    expect(shouldAlertPluginStale({ ...connection, link_mode: "plugin", status: "active" }, now)).toBe(true);
   });
 
   it("carries the plugin's own cron report and the queue's size and age", () => {
