@@ -69,6 +69,7 @@ afterAll(async () => {
 
 describe("re-granting a separate runtime role", () => {
   it.skipIf(!canCreateRoles)("locks it down and leaves it able to connect and read", async () => {
+    await sql(`REVOKE SET ON PARAMETER session_replication_role FROM ${probeRole}`).catch(() => {});
     await sql(`DROP ROLE IF EXISTS ${probeRole}`).catch(() => {});
     const result = await createAppRole({ databaseUrl, roleName: probeRole, password: "probe-password", quiet: true });
 
