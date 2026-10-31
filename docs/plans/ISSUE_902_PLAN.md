@@ -960,6 +960,46 @@ dashed box for a bucket with no sends and a note that «کادر خالی یعن
 
 That closes §9 item 2: §6e gave the per-campaign view, this gives the window that contains it.
 
+## 5p. The supplier's invoice, checked against ours (§9 item 3, last part)
+
+§5m and §5n closed the **retail** side of item 3: a rating says which price produced it, and those
+ratings become invoice lines with one-billing-ever enforced by the database. The **wholesale** side has
+been recorded since §6a — `billing_vendor_cost_events`, one row per accepted send carrying what the
+provider charged us, tenant-invisible — but nobody could answer the only question wholesale data
+exists for: *the provider invoiced us X for March; do our books agree?* A supplier over-charge would
+have been invisible, and so would our own under-recording.
+
+`0276` adds the missing half — the statement — and the verdict of comparing it with the ledger:
+
+| Column / state | Why it exists |
+| --- | --- |
+| `claimed_rial`, `recorded_rial`, `delta_rial` | The difference is **kept with its sign**, never rounded into a match. Positive means the supplier wants more than we recorded, which is a different problem from the reverse |
+| `state ∈ open / matched / disputed / accepted` | "Not compared", "inside the tolerance", "a finding", and "a person decided to pay it anyway" are four different facts, and the console has to say which |
+| `accepted_reason`, required by a CHECK | Paying a difference your own books dispute is the decision that most needs to be legible a year later, so the database refuses `accepted` with no reason |
+| `UNIQUE (provider, statement_reference)` | The same invoice recorded twice is the same debt, not two |
+
+Three judgements worth recording, because each is where reconciliation quietly goes wrong:
+
+- **`unexplained` is checked before the tolerance.** A supplier billing a period our ledger is silent
+  about is not a small difference — it is the missing half of the books — but the arithmetic would say
+  `|0 − 0| ≤ tolerance` and pass. The state of the books decides this verdict, not the size of the
+  difference; a test passes a tolerance wide enough to swallow the whole claim and asserts the verdict
+  stays `unexplained`.
+- **Reconciling never edits the evidence.** Not to add a missing cost event, not to correct an amount.
+  The database suite snapshots `billing_vendor_cost_events` before and after a disputed reconciliation
+  and asserts it is byte-for-byte unchanged: a ledger adjusted to fit one invoice cannot test the next.
+- **An accepted statement is final.** Re-reconciling it is refused, because a later pass would erase
+  the decision while leaving the money paid — the same reasoning that keeps a **paid** usage invoice
+  from absorbing a late rating (§5n).
+
+The statement is platform data, and `0276` says so with the bypass-only policy `0262` uses for the
+retail catalogue: the suite grants an unprivileged role `SELECT` on the table and asserts it still
+reads zero rows. The route has three actions — record, reconcile, accept — because they are three
+different decisions, and each is `billing.manage` and audited with the numbers it decided on.
+
+That closes §9 item 3 in full: retail citation (§5m), retail invoice lines (§5n), wholesale
+reconciliation (§5p).
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -980,6 +1020,8 @@ That closes §9 item 2: §6e gave the per-campaign view, this gives the window t
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npx vitest run` — `imported-payment-receipts` (§5l) | 6/6: both plugin importers (F&B and retail) and the CMS importer call the receipt trigger, in every case after `COMMIT`, never awaited, and wrapped in `withTenant` — plus the amount being the same `total` the payment row was written with; and the amendment bridge carrying no call at all, with its reason still in the file |
+| `npx vitest run` — `supplier-invoice` (§5p) | 14/14: an exact match; a difference inside a written tolerance kept rather than erased; symmetric tolerance with a documented default; a dispute that names which way it points; `unexplained` when the ledger is silent for a billed period — including under a tolerance wide enough to swallow the whole claim; verdict→state mapping with `unexplained` stored as a dispute; nonsense normalised; `accepted` requires a reason and only for a disputed statement; an accepted statement cannot be re-reconciled; plus the schema guards (the reason CHECK, the verdict-needs-comparison CHECK, the supplier-reference unique), platform-only RLS, and the service reading — never writing — the cost events over a half-open window |
+| `npm run test:db` — `billing-supplier-invoices` (§5p) | CI only (no Postgres here): recording is idempotent on the supplier's reference and refuses a backwards period or a negative amount; reconciliation sums only that provider's events inside the half-open window (outside-window and other-supplier rows excluded); a discrepancy is stored and the ledger is asserted unchanged before and after, twice; a silent month is `disputed`/`unexplained` even with a 10 000 000 Rial tolerance; an explicit tolerance is honoured and recorded; accepting needs a reason, refuses a matched statement, and blocks re-reconciliation; the database refuses an accepted row with no reason; an unprivileged role granted SELECT still reads zero rows; disputes list first |
 | `npx vitest run` — `delivery-trend` (§5o) | 18/18: granularity from the span (day/week/month) and a contiguous series ending today; Tehran day keys (21:00 UTC is tomorrow) and Monday-start weeks (a Sunday belongs to the week before); a bucket with no rows is `hasData: false` with a `null` rate and `idle`, and an in-flight-only bucket is data with no rate; the rate is over decided attempts only; a bucket outside the window is dropped; the window's latency is pooled rather than averaged from medians (the 1 000:1 case); worst verdict and newest-first health; bars scaled to the busiest bucket with a visible minimum and `null` for an empty window; plus the guards — SQL groups on `Asia/Tehran` at every granularity, the tenant query is `withTenant` + `business_id`, no provider field is selected, the window clamps to a year, and both screens render server-computed points with the shared health rule and no hand-copied thresholds |
 | `npm run test:db` — `delivery-trend` (§5o) | CI only (no Postgres here): a 21:00 UTC send lands on the next Tehran day while a 19:00 UTC one stays on today (the UTC-grouping bug, asserted against Postgres); empty buckets stay gaps with no rate; a quarter rolls into weeks and a Sunday falls in the previous week; the window pools queue and provider latencies from the outbox's own columns; a failure counts as a decided attempt; each business sees only its own series while the fleet view counts rows across both and businesses once each |
 | `npx vitest run` — `usage-invoice` (§5n) | 16/16: ratings of one meter and version fold into one line whose amount is the sum of its parts; a mid-month price change splits into two lines, each citing one version; a retail line and a meter line for the same meter never cross catalogues; an allowance-covered rating bills nothing but is still counted; a pre-0270 rating is billed without a citation; 10 Rial over 3 units stays 10; a negative rating is dropped rather than credited; descriptions carry the catalogue's Persian name, the basis label and the version in Persian digits and no supplier word; plus the schema guards (0275's pairing CHECKs, `kind = 'usage'`, the one-billing-ever index, forced RLS), the writer's linkage and the route's two capabilities |
@@ -1038,12 +1080,12 @@ That closes §9 item 2: §6e gave the per-campaign view, this gives the window t
    sends bucketed weekly (days under a month, months over a quarter), where a bucket with no
    attempts is a gap rather than a zero and the failure rate is `null` instead of `۰٪`. The outbox
    rows it reads are retained, so it stayed a query and a chart.
-3. **Retail ↔ wholesale settlement in invoicing** (billing) — **two of three parts closed**:
-   the rating cites the version that produced its amount (§5m), and those ratings now become **invoice
-   lines** — one per meter-and-version, each linked to the ratings it was built from with one-billing-ever
-   enforced by the database (§5n). Still Billing's: reconciling a **supplier invoice** against
-   `billing_vendor_cost_events` (the wholesale side, which exists and is tenant-invisible, but has no
-   statement to reconcile against yet).
+3. ~~**Retail ↔ wholesale settlement in invoicing**~~ — **closed**, in three slices: a rating cites
+   the version that produced its amount (§5m); those ratings become **invoice lines**, one per
+   meter-and-version with one-billing-ever enforced by the database (§5n); and a **supplier statement**
+   is now recorded and reconciled against `billing_vendor_cost_events` — a discrepancy stored with its
+   sign, an accepted one requiring a reason, and the wholesale ledger never edited to fit an invoice
+   (§5p).
 4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g and §5i): the account
    endpoint reports the master's own credit, the funding pass reads it once per pass, and the figure
    is now mirrored with its age and its failed-read flag, so a configured floor neither stops
