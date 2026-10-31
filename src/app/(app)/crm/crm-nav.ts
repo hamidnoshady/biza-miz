@@ -38,6 +38,7 @@
 import {
   ClipboardListIcon,
   DatabaseZapIcon,
+  FileTextIcon,
   HeadsetIcon,
   HistoryIcon,
   LayoutDashboardIcon,
@@ -89,6 +90,16 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
     label: "بریف کارفرما",
     description: "آنچه مشتری خواسته، پیش از قیمت و پیش از ساخت",
     icon: ClipboardListIcon,
+  },
+  {
+    // Issue #1128 §A + §D. Between the brief and the contract on §B's own stage
+    // list, so it sits beside the brief it prices rather than inside the deal: a
+    // rejected offer outlives the opportunity, and a second one in the series is
+    // the correction the first one's freeze makes necessary.
+    key: "proposals",
+    label: "پیشنهاد قیمت",
+    description: "چه چیزی، به چه قیمتی، تا چه اعتباری — و چقدر سود دارد",
+    icon: FileTextIcon,
   },
   {
     key: "leads",
@@ -150,7 +161,7 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
 export const CRM_NAV_GROUPS: ReadonlyArray<AppSectionNavGroup<CrmSectionKey>> = [
   { label: "امروز", keys: ["overview"] },
   { label: "مشتریان", keys: ["directory"] },
-  { label: "فرصت‌ها", keys: ["deals", "briefs", "leads"] },
+  { label: "فرصت‌ها", keys: ["deals", "briefs", "proposals", "leads"] },
   { label: "ارتباط و پیگیری", keys: ["activities", "cases"] },
   { label: "شناخت مشتری", keys: ["segments", "consent"] },
   { label: "کیفیت داده", keys: ["quality"] },

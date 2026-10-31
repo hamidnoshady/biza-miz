@@ -36,7 +36,11 @@ export type RegisterNumberedTable =
   | "agency_change_requests"
   // Issue #1128 §A — what the client asked for, which is numbered per agency
   // rather than per project; see `nextBusinessRegisterNumber`.
-  | "agency_client_briefs";
+  | "agency_client_briefs"
+  // Issue #1128 §A + §D — the priced offer. Numbered per agency for the reason a
+  // brief is: a proposal belongs to the client relationship, not to a project, and
+  // at the moment it is written there is usually no project yet.
+  | "agency_proposals";
 
 export type RegisterNumberedColumn =
   | "variation_number"
@@ -46,7 +50,8 @@ export type RegisterNumberedColumn =
   | "commitment_number"
   | "milestone_number"
   | "change_request_number"
-  | "brief_number";
+  | "brief_number"
+  | "proposal_number";
 
 const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   aec_variations: "variation_number",
@@ -57,6 +62,7 @@ const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   agency_billing_milestones: "milestone_number",
   agency_change_requests: "change_request_number",
   agency_client_briefs: "brief_number",
+  agency_proposals: "proposal_number",
 };
 
 /**
