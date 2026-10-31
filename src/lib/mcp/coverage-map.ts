@@ -606,6 +606,16 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/crm.integration.test.ts",
   },
   {
+    id: "settings.managed-services",
+    module: "Settings",
+    entity: "Managed-service readiness (messaging, AI, payments, media)",
+    routes: ["managed-services"],
+    status: "route-only (by design)",
+    note:
+      "issue #902 §9 item 5: the payload is the tenant contract's view (a first-party label, four states, a Persian sentence, a first-party link) and nothing else — no supplier, account id, key hint or wholesale price. There is nothing here an assistant could act on, and the whole reason the shape exists is that a chat channel is another surface a supplier name must not reach. A verb that reported 'the AI service is unavailable' without saying why would be worse than the console card that shows the action.",
+    test: "integration/managed-services.integration.test.ts",
+  },
+  {
     id: "growth.messaging",
     module: "Growth",
     entity: "Messaging rules & templates",

@@ -42,6 +42,7 @@ import {
   wizardProgress,
   wizardStepsFor,
 } from "@/lib/service-activation/wizard";
+import type { TenantManagedServiceView } from "@/lib/managed-services/contract";
 import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { ErrorBox, InfoBox, api, errorMessageOrRaw, inputClass } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
@@ -130,6 +131,21 @@ function identityLabel(service: TenantService): string {
   return service.definition?.label ?? service.identity.key;
 }
 
+/**
+ * Badge tone for a managed service's readiness.
+ *
+ * `unavailable` is `neutral` rather than `danger`: it means the platform has not
+ * finished setting the service up, which is ours to fix and not an alarm for the
+ * business. `action_required` is the one state a tenant can do something about,
+ * so it is the one that draws the eye.
+ */
+const MANAGED_TONE: Record<TenantManagedServiceView["status"], "positive" | "neutral" | "active"> = {
+  ready: "positive",
+  preparing: "neutral",
+  action_required: "active",
+  unavailable: "neutral",
+};
+
 export function ServicesSettings({ canManage }: { canManage: boolean }) {
   const [services, setServices] = useState<TenantService[] | null>(null);
   const [error, setError] = useState("");
@@ -145,6 +161,9 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [answerError, setAnswerError] = useState<{ field: string; code: string } | null>(null);
   const [savedDraft, setSavedDraft] = useState(false);
+  /** Issue #902 §9 item 5: readiness for the provider-backed capabilities. */
+  const [managed, setManaged] = useState<TenantManagedServiceView[] | null>(null);
+  const [managedError, setManagedError] = useState("");
 
   const load = useCallback(async () => {
     const res = await api<{ services?: TenantService[]; error?: string }>("/api/services");
@@ -156,9 +175,25 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
     }
   }, []);
 
+  /**
+   * Loaded separately from the service list on purpose: a deployment whose
+   * messaging or payment configuration is unreadable must not blank out the
+   * activation controls, and vice versa. Each card states its own failure.
+   */
+  const loadManaged = useCallback(async () => {
+    const res = await api<{ services?: TenantManagedServiceView[]; error?: string }>("/api/managed-services");
+    if (res.ok) {
+      setManaged(res.data.services ?? []);
+      setManagedError("");
+    } else {
+      setManagedError(errorMessageOrRaw(res.data.error ?? "وضعیت سرویس‌ها دریافت نشد."));
+    }
+  }, []);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadManaged();
+  }, [load, loadManaged]);
 
   const openDialog = useCallback(
     async (mode: "enable" | "disable", service: TenantService) => {
@@ -414,6 +449,44 @@ export function ServicesSettings({ canManage }: { canManage: boolean }) {
           <p className="mt-3 text-xs text-muted-foreground">
             فعال و غیرفعال کردن سرویس‌ها به دسترسی «مدیریت صورت‌حساب» نیاز دارد.
           </p>
+        )}
+      </SectionCard>
+
+      <SectionCard
+        title="وضعیت سرویس‌های پلتفرم"
+        description="پیامک، ایمیل، دستیار هوشمند، پرداخت آنلاین و کتابخانهٔ رسانه — هر کدام چه چیزی کم دارند"
+      >
+        {managedError ? (
+          <ErrorBox>{managedError}</ErrorBox>
+        ) : managed === null ? (
+          <LoadingSkeleton rows={3} />
+        ) : managed.length === 0 ? (
+          <EmptyState title="سرویسی برای نمایش نیست" />
+        ) : (
+          <ul className="divide-y divide-border">
+            {managed.map((service) => (
+              <li
+                key={service.service}
+                className="flex flex-col gap-2 py-3 sm:flex-row sm:items-start sm:justify-between"
+              >
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-medium text-foreground">{service.label}</p>
+                    <StatusBadge tone={MANAGED_TONE[service.status]}>{service.statusLabel}</StatusBadge>
+                  </div>
+                  <p className="max-w-2xl text-sm text-muted-foreground">{service.detail}</p>
+                </div>
+                {service.action && (
+                  <Link
+                    href={service.action.href}
+                    className="shrink-0 text-xs text-primary underline-offset-4 hover:underline"
+                  >
+                    {service.action.label}
+                  </Link>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
       </SectionCard>
 

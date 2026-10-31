@@ -84,6 +84,33 @@ and status code belong. They require a platform capability, never a tenant permi
 (`billing_vendor_cost_events`, `tenant_visible = false`); retail is written by Billing. A tenant
 wallet entry may carry a price *version* number, never a markup.
 
+## 3a. Readiness for every integration, in one shape
+
+Issue #902 §9 item 5 took the contract beyond messaging. `src/lib/managed-services/readiness.ts`
+holds one small, pure adapter per integration — AI, payments, media, the email relay — that turns a
+handful of booleans and internal reasons into a `ManagedServiceDetailKey`; `readiness-service.ts`
+reads the deployment's actual configuration; `/api/managed-services` serves the resulting views and
+passes them through `assertTenantSafePayload` on the way out. `/settings/services` renders them.
+
+The ordering rule inside every adapter is the part worth remembering:
+
+1. **Our side first.** If the platform has not set the service up, that is the answer. Telling a
+   business to buy a plan for something we cannot deliver is the one sentence this vocabulary must
+   never produce, so `platform_setup_incomplete` is checked *before* the entitlement layer.
+2. **Then their side.** A working service the business is not entitled to is `suspended_by_plan`,
+   which carries a first-party link that fixes it.
+3. **Then limits and money.** `usage_limit_reached` (a support conversation) and `wallet_empty`
+   (a top-up) are separate states because the fix differs; folding either into `needs_support`
+   would send a business to the wrong page.
+
+Two states exist only for the newer integrations and are documented here rather than reused:
+`usage_limit_reached` and `no_access`. The second is about the *member* asking, not the business, so
+it offers no link — the fix is another member granting the role, not a page.
+
+Torob (#894) and Divar (#896) are deliberately **not** in `MANAGED_SERVICES` yet: a definition
+promises a readiness shape, and there is nothing to report on until those issues are built. The
+inventory lists them as `vendor_visible` so the audit stays complete rather than flattering.
+
 ## 4. What a new integration inherits
 
 1. Register the service in `MANAGED_SERVICES` (`contract.ts`) with a `TenantManagedServiceView` for
@@ -91,8 +118,11 @@ wallet entry may carry a price *version* number, never a markup.
 2. Translate its failures into `ManagedServiceFaultCode`; never let a supplier's message reach a
    tenant.
 3. Charge retail through the existing wallet; record wholesale as a tenant-invisible vendor cost.
-4. Run `npx vitest run src/lib/managed-services` — if a screen you added names the supplier, the
-   inventory's guard fails, which is the point.
+4. Add its readiness adapter in `readiness.ts` and a row to the payload in `readiness-service.ts`,
+   with the our-side-first ordering above.
+5. Run `npx vitest run src/lib/managed-services` — if a screen you added names the supplier, the
+   inventory's guard fails, which is the point; `readiness.test.ts` walks every state of every
+   integration through the same leak guard the API applies.
 
 ## 5. Known exceptions, stated rather than hidden
 
