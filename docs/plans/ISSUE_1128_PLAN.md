@@ -107,6 +107,14 @@ way round. See «What this change does not build».
 | **Wave 5** — §A wiring | `ensureAgencySalesPipeline` in `crm-pipeline-service.ts`, called from the two read routes where a member looks at pipelines: `GET /api/crm/pipelines` under `crm.configure` and `GET /api/crm/deals` under `crm.view`. Returns null and writes nothing for every other trade; inserts under `ON CONFLICT DO NOTHING` against `(business_id, name)`; writes `is_default` false so exactly one pipeline stays the default |
 | **Wave 5** — §A tests | `crm-agency-pipeline.test.ts` (13, pure: both invariants `savePipelineStages` enforces, contiguous ordering, unique names within 120, notes within 300, probabilities rising to won, no legacy key, only the agency receives it, imports nothing but a type) and `integration/crm-agency-pipeline.integration.test.ts` (8, real database: beside-not-instead, idempotence, two simultaneous first visits, the default's identity and seeded six intact with zero deactivated stages anywhere, nothing written for a `jewelry` tenant, no legacy key, the invariants as rows, and a renamed stage surviving the next visit) |
 
+| **Wave 6** — §A client briefs schema | `migrations/0271_agency_client_briefs.sql`: one table, `agency_client_briefs`. `party_id` is NOT NULL — a brief with no client is the agency guessing — while `deal_id` and `project_id` are nullable and `ON DELETE SET NULL`, because a brief is written against an opportunity, then carried by the project it becomes, and outlives either. The substance is columns rather than a jsonb blob (objective, audience, `channels text[]`, `deliverables jsonb`, `budget_rial`, dates, acceptance criteria) so it stays queryable and freezable. Two triggers: `agency_assert_brief_references_owned` validates the client, deal, project and approver against `business_id` and requires the approver to be *related to this brief's own client*; `agency_client_brief_guard` freezes the substance once confirmed, keeps `sent_at`/`confirmed_at` un-clearable, and allows a cascaded delete when the client itself is gone. Eight named CHECKs couple status to stamps. RLS shape 1, `ENABLE` + `FORCE`. Nothing in it posts a journal entry |
+| **Wave 6** — §A brief vocabulary | `src/lib/agency-brief.ts`: five statuses, five acts, the chain between them, `agencyBriefActionsFrom` (which the panel renders its buttons from), the freeze/open/deletable predicates, a twelve-key channel vocabulary, and normalisers that return `null` rather than dropping a channel or deliverable nobody recognises — a silently vanished line item is a promise quietly unmade. Deliverable formats reuse §E's `AGENCY_MEDIA_FORMATS`, which already carried `brief`. Pure, so the panel may import it |
+| **Wave 6** — §A brief service | `src/lib/agency-brief-service.ts`: fifteen refusal codes; list, read, create, patch, action, delete. Every statement carries its own `business_id` predicate (decision 31), and a PATCH tests `"field" in patch`, so omitting `budgetRial` does not clear the client's budget. Numbering is `nextBusinessRegisterNumber`, a business-scoped *sibling* added to `register-numbering.ts` rather than a change to `nextRegisterNumber`'s signature — seven registers call it positionally, and a brief has no project to scope by more often than it has one. Confirming attributes the confirmation to a name, falling back to the approver the brief already records |
+| **Wave 6** — §A brief HTTP | Three routes under `/api/crm/briefs/**`, in the CRM door rather than the agency one (decision 39): list and draft, one brief and its edits, and the chain. `crm.view` to read, `crm.manage` to write and to move a brief along its chain, `crm.delete` to delete one. One error map in `src/app/api/crm/brief-guard.ts`, exhaustive over the fifteen codes. A new CRM section key `briefs` with its access row, its command-palette aliases, and its place in the «فرصت‌ها» group |
+| **Wave 6** — §A brief screen | `/crm/briefs` and `briefs-section.tsx`. Acts are read off each row's own `actions`, so the screen never offers a button the route refuses (decision 30). The approver picker is populated from the chosen client's own relationships in both directions — exactly what 0271's trigger accepts — so another client's decision-maker is not among the options. A confirmed brief's sheet keeps only the note and the project pointer writable. Dates render through `formatJalali` and money through `formatPersianNumber`; the browser's own formatter is what `crm-rtl.test.ts` refuses |
+| **Wave 6** — §A brief tests | `agency-brief.test.ts` (26, pure), `integration/agency-client-briefs.integration.test.ts` (17, real database) and 48 assertions against 0271 run directly over Postgres. The integration suite covers what only a database can show: one number sequence per agency held under a race, a second tenant unable to load, list, patch, transition or delete the first tenant's brief, §A's approver rule in both directions with nothing written on refusal, the freeze and the §A→§B handoff coexisting, and a client's deletion taking a confirmed brief with it |
+
+
 ## Decisions
 
 ### 1 — the family is `service`, and Workspace eligibility is a separate axis
@@ -561,6 +569,48 @@ The tempting version is to put the agency step inside `defaultPipeline` and inhe
 
 Recording that here is the point: the next reader of §A will otherwise spend the effort discovering it again, or worse, build the table.
 
+### 38 — one brief table across both of its moments
+
+A brief is written against an opportunity while the deal is still open — §A's pipeline stage «بریف کارفرما» is exactly that moment — and it is then what the project delivers against, which is why §B lists `brief` among the project's own metadata. The temptation is two tables, one in the CRM and one in My Workspace, each scoped to the thing it belongs to. Refused: they would be the same brief in two places, free to disagree about what the client asked for, and the disagreement would be invisible until somebody priced a proposal against one and delivered against the other.
+
+So it is one table with two nullable pointers. `party_id` is NOT NULL, because a brief with no client is the agency guessing and guessing is the thing a brief exists to stop. `deal_id` and `project_id` are both optional and both `ON DELETE SET NULL` rather than `CASCADE`: a brief is the record of a requirement, and a lost deal or a cancelled project does not unask it.
+
+It is also not `crm_custom_fields`, which could hold every one of these values per tenant and still may. What a brief has and a custom-field value does not is a *life cycle* — drafted, sent to the client, confirmed by a named person, later superseded — and custom-field values have no status, no stamps and no freeze. What makes a brief worth anything is that it is the version the client confirmed, which is a fact about time rather than a value in a column.
+
+### 39 — the CRM door, not the agency door
+
+§D's registers live behind `/api/agency/*`, whose guard resolves its owner through `workspaceOwner` and so applies the workspace *projects* service gate and project membership. That is right for a billing schedule, which lives inside a project and is meaningless without one. It would be wrong for a brief, which is written during sales and usually before any project exists: gating it on the projects service would make it unusable in exactly the moment §A's pipeline stage describes, and invisible to a sales-only member who holds the CRM and not My Workspace.
+
+That is decision 36's lesson arriving from the other direction. There, the question was which *read* should create the agency pipeline, and the answer was the board rather than only the settings screen, because a preset that appeared only after a visit to settings would look broken to exactly the people it is for. Here the question is which door the feature hangs off, and the same people give the same answer: `crm.view` to read, `crm.manage` to write, `crm.delete` to delete, in `/api/crm/briefs`, as a CRM section beside the deals a brief hangs off.
+
+It is not industry-gated either, which repeats decision 32 for the same reason: the permission is the gate, and a tenant whose members hold it may use the feature. Nothing about a brief requires an advertising agency, and a preset orders and labels rather than gates.
+
+### 40 — §A's stakeholder rule is a constraint, and the picker is its shape
+
+"Stakeholder/approver contact is recorded without exposing another client's information" reads as a design instruction about the UI. It is enforceable more strongly than that, and decision 37's finding is what makes it so: `crm_party_relationships` already expresses who is a contact of whom, in vocabulary that already has tenant scoping, an audit trail and merge behaviour.
+
+So migration 0271's trigger requires an edge between the approver and *this brief's own client*, in either direction, and refuses the write without one. The consequence is concrete rather than decorative: one client's decision-maker cannot be recorded on another client's brief, so no screen that renders the approver can put one client's contact inside another client's file. Without the constraint the rule would hold only for as long as every picker remembered it.
+
+The screen then expresses the same rule as a shape rather than a warning — the approver options *are* the chosen client's contacts, so another client's decision-maker is not on offer — and picking a different client clears the approver, because the previous client's contact is not this client's. The picker is a convenience; the trigger is the rule. Both are tested, and the integration test asserts that a refusal wrote nothing at all, because a passing negative test is worth nothing if it was refused by some other constraint.
+
+### 41 — what freezes at confirmation, and what deliberately does not
+
+Once the client has confirmed, the substance stops being editable: title, objective, audience, channels, deliverables, budget, dates, acceptance criteria, the approver and the client. The reason is not tidiness — a proposal priced the brief, a project may be delivering against it, and a change request departs from it, so an edit in place would make all three cite a document that no longer says what they read. A correction is a new brief that supersedes this one, which is also what leaves a trail where an edit would leave none.
+
+Three things are deliberately *not* frozen, and each is a decision rather than an oversight:
+
+* **our own note**, which is the agency's and not part of what the client agreed — §E's review round makes the same split;
+* **`deal_id` and `project_id`**, which say where the work lives rather than what was agreed. The project normally arrives *after* confirmation, so freezing the pointer would break the §A→§B handoff, the one transition this table exists to serve. That is precisely the reasoning which leaves 0260's `invoice_order_id` writable after its milestone is approved: it is the one write that happens after the determination. An earlier version of 0271 froze `project_id`, and the 48-assertion harness caught it — the type-checker and the unit suite both passed with the handoff broken;
+* **the status chain and its own stamps**, because confirming and then superseding is the point. `sent_at` and `confirmed_at` are set once and can never be cleared: re-sending a correction is a new brief, so each stamp is a fact about the first time the client saw it.
+
+The mirror case matters as much. A client being deleted takes its briefs with it, confirmed or not: with no counterparty left there is nobody for the record to speak for, and refusing would let one confirmed brief block the deletion of the very client it belongs to. Absence of the party is what tells the guard that a delete is the cascade rather than a direct one — the test 0265's item guard applies to its round. A blanket "only a draft may be deleted" without it is the trap: it looks like a stronger rule and quietly breaks a parent's `ON DELETE CASCADE`.
+
+### 42 — one permission for the whole chain, and two acts MCP must never get
+
+§D's change requests split `workspace.manage` from `workspace.approve`, because agreeing *somebody else's figure* is a different power from drafting one, and money moves when it is agreed. A brief's `confirm` looks like the same shape and is not: it records the **client's** decision, and the agency member is only the scribe. Nothing is priced, nothing posts, and no internal determination is made. So the whole chain sits on `crm.manage`, and the split would have invented a tier with no power behind it.
+
+What does follow from that is a constraint on automation. `confirm` attests that a human at the client agreed to something, and `supersede` retires a brief they confirmed — so neither may ever become an MCP verb, because §F's rule that an assistant drafts and a human approves exists to prevent precisely that attestation being machine-made. Drafting and reading a brief are different in kind and are what a future tool should expose. The coverage row records this, so the gap reads as a decision rather than as an omission waiting to be filled.
+
 
 ## Sites audited and deliberately left alone
 
@@ -774,6 +824,35 @@ superuser, which bypasses RLS even under FORCE (decision 31); and the purpose ga
 link every byte fetch, which made the default link unable to show the artwork it exists to show
 (decision 28).
 
+* `agency-brief.test.ts` (26) — §A's brief vocabulary: the chain and every
+  transition it refuses (no confirming a brief nobody was shown, no un-confirming
+  anything), `agencyBriefActionsFrom` offering only acts the route would accept,
+  the freeze covering `confirmed` and `superseded` but not `sent`, deletion only
+  from `draft`, an objective required only from `sent` onwards, channels deduped
+  into vocabulary order and *refused* rather than dropped when a key is unknown,
+  deliverables validated against §E's format vocabulary including `brief` itself,
+  a budget read as absent rather than as zero, and text trimmed but never
+  truncated.
+* `integration/agency-client-briefs.integration.test.ts` (17) — the same feature
+  against a real database: one `BR-` sequence per agency held under two
+  concurrent creates, a separate agency starting its own `BR-001`, a second tenant
+  answered `brief_not_found` for load, list, patch, transition and delete,
+  references into another tenant refused with nothing written, §A's approver rule
+  in both directions and against a stranger, the chain walked end to end with a
+  confirmation attributed to the approver already on the brief, an unattributed
+  confirmation refused, withdrawal from either side with `sent_at` surviving, the
+  freeze refusing six kinds of edit while the project pointer and the note still
+  move, absent-versus-null on a PATCH, an impossible date window refused on create
+  and on a one-sided patch, draft-only deletion, a client's deletion cascading a
+  confirmed brief away, and every list dimension including a search across the
+  brief's own words and its client's name.
+* 48 assertions run directly against `0271_agency_client_briefs.sql` over
+  Postgres — the CHECKs by name, both triggers, the cascade, and the two `SET
+  NULL` pointers. Each negative case asserts *why* it was refused, because a
+  refusal from the wrong constraint is still a refusal and still a bug. This is
+  what found the frozen `project_id` and the `BEFORE` trigger answering a NULL
+  client before the column's own NOT NULL could.
+
 * `crm-agency-pipeline.test.ts` (13) — §A's preset: both invariants
   `savePipelineStages` enforces, so the preset can never be refused by the
   function that writes it; exactly one `won` and one `lost`; contiguous ordering;
@@ -843,9 +922,11 @@ given. Only a real database shows the wreckage (decision 35).
 
 Deliberately, and each is named in the issue:
 
-* **§A CRM** — agency pipeline stages, client briefs, multi-brand client accounts, proposals and
-  scope-of-work documents, contract renewals. Canonical `parties`/leads/deals exist and the agency
-  has the `crm` module; the agency-shaped pipeline and brief records do not.
+* **§A CRM** — proposals and scope-of-work documents, and contract renewals. The agency-shaped
+  pipeline shipped in wave 5 and the client briefs in wave 6; canonical `parties`/leads/deals already
+  existed, and decision 37 records why the multi-brand client account needs no schema at all. What
+  is left is proposals and quotes, which overlap §D's still-unbuilt estimates and quotations and
+  should be designed together with them rather than twice.
 * **§B My Workspace** — wave 2 added the seven project templates and the agency stages they carry.
   Still missing: deliverable revisions and version history, the approval/request-changes states as
   an agency-shaped review (Workspace has approvals; nothing here wires a client-facing review to
