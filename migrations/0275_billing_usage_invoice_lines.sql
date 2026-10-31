@@ -20,7 +20,7 @@
 --
 --      Legacy lines are all-NULL and still valid: NULL means "not one of the
 --      usage bases" (a plan or add-on line, whose price version is a plan price)
---      or "written before 0274" — the same unknown-not-guessed rule as 0268/0270.
+--      or "written before 0275" — the same unknown-not-guessed rule as 0268/0270.
 --
 --   2. `billing_invoice_line_usage` links a line to the ratings it was built
 --      from, one row per rating, with a UNIQUE index on `usage_event_id`. That is
@@ -44,7 +44,7 @@ ALTER TABLE billing_invoice_lines
         CHECK (retail_price_version IS NULL OR retail_price_version >= 0);
 
 COMMENT ON COLUMN billing_invoice_lines.price_basis IS
-    'Issue #902 §9 item 3: which price produced this line. NULL = a plan/add-on line (its own catalogue) or a line written before 0274.';
+    'Issue #902 §9 item 3: which price produced this line. NULL = a plan/add-on line (its own catalogue) or a line written before 0275.';
 COMMENT ON COLUMN billing_invoice_lines.retail_price_version IS
     'The kavenegar_retail_price_versions number that priced this usage line. 0 = the built-in default, which has no row.';
 

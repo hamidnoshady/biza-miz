@@ -102,7 +102,7 @@ describe("a line is one meter on one set of terms", () => {
     const retail = body.lines.find((line) => line.priceBasis === "retail_price_version")!;
     const meter = body.lines.find((line) => line.priceBasis === "meter_price_version")!;
     // The catalogues never cross: a retail line cites no meter version and the
-    // meter line cites no retail one (0274's CHECK would refuse it anyway).
+    // meter line cites no retail one (0275's CHECK would refuse it anyway).
     expect(retail.priceVersionId).toBeNull();
     expect(retail.retailPriceVersion).toBe(7);
     expect(meter.retailPriceVersion).toBeNull();
@@ -195,7 +195,7 @@ describe("the description says which price produced the line", () => {
 
 describe("the schema and the writer agree with this arithmetic", () => {
   it("adds the provenance columns with 0270's pairing rules", () => {
-    const migration = read("migrations/0274_billing_usage_invoice_lines.sql");
+    const migration = read("migrations/0275_billing_usage_invoice_lines.sql");
     expect(migration).toMatch(/ADD COLUMN price_basis text/);
     expect(migration).toMatch(
       /CHECK \(\(price_basis = 'retail_price_version'\) = \(retail_price_version IS NOT NULL\)\)/,
@@ -206,7 +206,7 @@ describe("the schema and the writer agree with this arithmetic", () => {
   });
 
   it("makes one rating billable once, ever", () => {
-    const migration = read("migrations/0274_billing_usage_invoice_lines.sql");
+    const migration = read("migrations/0275_billing_usage_invoice_lines.sql");
     expect(migration).toMatch(
       /CREATE UNIQUE INDEX billing_invoice_line_usage_once\s*\n\s*ON billing_invoice_line_usage \(usage_event_id\)/,
     );
@@ -218,7 +218,7 @@ describe("the schema and the writer agree with this arithmetic", () => {
     const service = read("src/lib/billing/usage-invoice-service.ts");
     expect(service).toMatch(/INSERT INTO billing_invoice_line_usage/);
     expect(service).toMatch(/\[\s*lineId,\s*rating\.usageEventId,\s*businessId,\s*line\.meterKey,\s*rating\.amountRial,?\s*\]/);
-    // A retail line must not carry a meter price version into the row — 0274's
+    // A retail line must not carry a meter price version into the row — 0275's
     // CHECK would reject it, but the writer should not rely on a bounce.
     expect(service).toMatch(
       /line\.priceBasis === "meter_price_version" \? line\.priceVersionId : null/,
