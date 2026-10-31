@@ -470,6 +470,10 @@ describe("every tenant table is protected", () => {
       "kavenegar_retail_price_slabs",
       "kavenegar_retail_price_versions",
       "kavenegar_service_alerts",
+      // Issue #902 §9 item 3: the wholesale side of billing — what a supplier
+      // charged us and the statement it charged against. DoD #3 keeps the cost
+      // and the margin off every tenant surface, an export included.
+      "billing_supplier_invoices",
     ]) {
       expect(EXEMPT_TABLES.has(table), `${table} must stay out of tenant exports`).toBe(true);
     }

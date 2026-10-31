@@ -281,6 +281,13 @@ export const EXEMPT_TABLES = new Set([
   "backup_key_versions",
   "tenant_backup_business_policy",
   "tenant_backup_restore_approvals",
+  // Issue #902 §9 item 3 — the supplier's statement and what we paid against it.
+  // `billing_supplier_invoices` is the wholesale half of billing: a provider's
+  // name, what it charged us, and the margin between that and the retail price a
+  // business sees. DoD #3 keeps every one of those off a tenant surface, so the
+  // table is `platform_only` under FORCE RLS — and, for the same reason as the
+  // retail catalogue above, it must not ride along in a tenant export either.
+  "billing_supplier_invoices",
 ]);
 
 export interface ForeignKeyEdge {
