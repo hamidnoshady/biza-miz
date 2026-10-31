@@ -65,6 +65,11 @@ export const CRM_SECTION_KEYS = [
   "leads",
   "segments",
   "deals",
+  // What the client asked for, written down before anybody prices it or builds
+  // it (issue #1128 §A). A section of its own rather than a card on the deal:
+  // a brief outlives the opportunity it was written against — it is carried by
+  // the project it becomes, and a lost deal does not unask what was asked.
+  "briefs",
   "activities",
   "cases",
   // The data-quality *workspace*: which records can be trusted. It hosts the
@@ -250,6 +255,17 @@ export const CRM_SECTION_ACCESS: Record<CrmSectionKey, CrmSectionAccess> = {
   deals: {
     read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
     write: [crmManage],
+  },
+  // Management work, exactly like the deals a brief hangs off: a brief carries
+  // what a client intends to spend and who on their side decides, which is
+  // forecasting and relationship data rather than floor data. Deleting one is
+  // the strongest key in the app, because a brief the client has seen is the
+  // record of what they asked for — so `crm.delete`, and the service refuses
+  // anything past draft anyway.
+  briefs: {
+    read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
+    write: [crmManage],
+    delete: [crmDelete],
   },
   // Floor work: logging a call, ticking off a callback, taking a complaint. The
   // records live in the CRM but the read and write paths are the shared parties
