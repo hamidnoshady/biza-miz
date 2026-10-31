@@ -73,8 +73,15 @@ export interface IssueUsageInvoiceResult {
   created: boolean;
   totalRial: number;
   lineCount: number;
-  /** Why nothing was added, when the returned invoice already existed. */
-  skipped?: "nothing_to_bill" | "invoice_closed";
+  /**
+   * Why this call added nothing:
+   *   - `nothing_to_bill`  — no unbilled, non-wallet-backed usage, no invoice;
+   *   - `already_invoiced` — the month is already fully billed;
+   *   - `invoice_closed`   — new usage exists but the invoice is settled, and
+   *                          rewriting a paid document is not an option.
+   * `totalRial`/`lineCount` describe the invoice that exists, not this call.
+   */
+  skipped?: "nothing_to_bill" | "already_invoiced" | "invoice_closed";
 }
 
 export class UsageInvoicePeriodError extends Error {
@@ -266,13 +273,24 @@ export async function issueUsageInvoice(input: {
       const body = groupUsageInvoiceLines(ratings);
 
       if (body.lines.length === 0) {
+        // Nothing new to bill. If the month already has an invoice, report *it*
+        // — an operator asking "issue November" again should see November's
+        // invoice, not an empty result that looks like the invoice vanished.
+        const { rows: existing } = await client.query<{ id: string; total_rial: string; lines: string }>(
+          `SELECT i.id, i.total_rial,
+                  (SELECT count(*) FROM billing_invoice_lines l WHERE l.invoice_id = i.id)::text AS lines
+             FROM billing_invoices i
+            WHERE i.business_id = $1 AND i.reference = $2`,
+          [input.businessId, usageInvoiceReference(window.periodMonth)],
+        );
         await client.query("COMMIT");
+        const invoice = existing[0];
         return {
-          invoiceId: await existingInvoiceId(input.businessId, window.periodMonth),
+          invoiceId: invoice?.id ?? null,
           created: false,
-          totalRial: 0,
-          lineCount: 0,
-          skipped: "nothing_to_bill" as const,
+          totalRial: Number(invoice?.total_rial ?? 0),
+          lineCount: Number(invoice?.lines ?? 0),
+          skipped: invoice ? ("already_invoiced" as const) : ("nothing_to_bill" as const),
         };
       }
 
@@ -352,12 +370,21 @@ export async function issueUsageInvoice(input: {
           };
         }
 
+        // A settled invoice: report what it says and leave it alone.
+        const { rows: totals } = invoiceId
+          ? await client.query<{ total: string; lines: string }>(
+              `SELECT total_rial::text AS total,
+                      (SELECT count(*) FROM billing_invoice_lines l WHERE l.invoice_id = $1)::text AS lines
+                 FROM billing_invoices WHERE id = $1`,
+              [invoiceId],
+            )
+          : { rows: [] as { total: string; lines: string }[] };
         await client.query("COMMIT");
         return {
           invoiceId,
           created: false,
-          totalRial: 0,
-          lineCount: 0,
+          totalRial: Number(totals[0]?.total ?? 0),
+          lineCount: Number(totals[0]?.lines ?? 0),
           skipped: invoiceId ? ("invoice_closed" as const) : ("nothing_to_bill" as const),
         };
       }

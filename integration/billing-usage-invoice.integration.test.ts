@@ -247,8 +247,11 @@ describe("a month's rates become a readable invoice", () => {
     expect(lines).toHaveLength(2);
     expect(lines.every((line) => line.kind === "usage")).toBe(true);
 
-    // The email line folded two sends into one line, on one version.
-    const emailLine = lines.find((line) => line.description.includes("ایمیل"))!;
+    // The email line folded two sends into one line, on one version. Found by
+    // basis rather than by its text, because the description comes from the
+    // meter catalogue's Persian name and asserting a substring of it would pin
+    // copy instead of behaviour.
+    const emailLine = lines.find((line) => line.price_basis === "retail_price_version")!;
     expect(Number(emailLine.amount_rial)).toBe(3_600);
     expect(emailLine.quantity).toBe(3);
     expect(emailLine.price_basis).toBe("retail_price_version");
@@ -257,7 +260,7 @@ describe("a month's rates become a readable invoice", () => {
     // citation, and 0274 refuses it.
     expect(emailLine.price_version_id).toBeNull();
 
-    const cmsLine = lines.find((line) => line.description.includes("cms.api_request"))!;
+    const cmsLine = lines.find((line) => line.price_basis === "explicit_amount")!;
     expect(Number(cmsLine.amount_rial)).toBe(5_000);
     expect(cmsLine.price_basis).toBe("explicit_amount");
 
@@ -325,7 +328,15 @@ describe("issuing twice bills once", () => {
     expect(first.created).toBe(true);
 
     const second = await usageInvoice.issueUsageInvoice({ businessId: alpha.businessId, periodMonth });
-    expect(second).toMatchObject({ invoiceId: first.invoiceId, created: false, totalRial: 3_000 });
+    // The second call reports the invoice that exists — same id, same money,
+    // nothing added — rather than an empty result that reads as "no invoice".
+    expect(second).toMatchObject({
+      invoiceId: first.invoiceId,
+      created: false,
+      totalRial: 3_000,
+      lineCount: 1,
+      skipped: "already_invoiced",
+    });
     expect(await linesFor(first.invoiceId!)).toHaveLength(1);
 
     const { rows } = await db.query<{ n: string }>(
