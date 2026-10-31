@@ -1043,6 +1043,13 @@ SMS is the one view this service does not re-derive: `getTenantSmsReadiness` alr
 the child account's provision state, which is richer than the plan layer, and two sources for one
 sentence is how two screens start disagreeing.
 
+_Merged as `600e8eb` (PR #1212), after one red shard that was the test's own SQL: one parameter
+cannot be both the uuid `business_id` column and the text `localid` one, and `platform_ai_gateway`
+has no row on a fresh deployment (0124 seeds it only when a key is supplied), so an `UPDATE` there
+touched nothing and the "switched on" case was really measuring the default, disabled config. Both
+are fixed, and the suite then ran green against a real PostgreSQL locally before CI saw it — see the
+environment note in §10._
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -1153,3 +1160,9 @@ sentence is how two screens start disagreeing.
   used for type verification. CI's `test.yml` runs the full type check with more memory.
 - `npm ci` and `npm run db:migrate` were run locally; the integration suite creates and drops
   its own scratch database, as the other `integration/*` suites do.
+- **Database suites can in fact run here**, which earlier slices in this file assumed they could not.
+  `npm run db:dev:start` starts the embedded PostgreSQL from `node_modules/@embedded-postgres/linux-x64`,
+  `npm run db:migrate` applies all 457 migrations, and
+  `DATABASE_URL=postgres://pos:pos@127.0.0.1:5432/pos npx vitest run --config vitest.db.config.ts integration/<file>`
+  runs one suite against it in ~12 s. From §5q on, no database test goes to CI without a local run
+  first.
