@@ -134,7 +134,7 @@ export const MANAGED_SERVICE_INVENTORY: readonly ManagedServiceInventoryEntry[] 
     tenantSurfaces: ["src/app/(app)/settings/security-center-settings.tsx"],
     maturity: "partial",
     followUpIssue: null,
-    note: "One deployment-wide credential, already first-party in tenant copy; the missing half is per-model wholesale cost in `billing_vendor_cost_events`, which needs a per-model price table the provider does not publish.",
+    note: "One deployment-wide credential, first-party in tenant copy and now readiness-shaped by §9 item 5; the missing half is per-model wholesale cost in `billing_vendor_cost_events`, which needs a per-model price table the provider does not publish.",
   },
   {
     key: "payments.gateway",
@@ -147,7 +147,7 @@ export const MANAGED_SERVICE_INVENTORY: readonly ManagedServiceInventoryEntry[] 
     tenantSurfaces: ["src/app/(app)/settings/billing/billing-manager.tsx"],
     maturity: "partial",
     followUpIssue: null,
-    note: "No tenant screen names the gateway; the wallet API reports only whether a top-up is online or a manual transfer. What is missing is the gateway fee in the wholesale ledger.",
+    note: "No tenant screen names the gateway; the wallet API reports only whether a top-up is online or a manual transfer, and §9 item 5 added the readiness view (online payment is not \"manual\"). What is missing is the gateway fee in the wholesale ledger.",
   },
   {
     key: "media.storage",
@@ -160,7 +160,7 @@ export const MANAGED_SERVICE_INVENTORY: readonly ManagedServiceInventoryEntry[] 
     tenantSurfaces: ["src/app/(app)/websites/wp/media-section.tsx"],
     maturity: "managed",
     followUpIssue: null,
-    note: "Tenant keys are per-business prefixes inside one bucket; the credential never leaves the console.",
+    note: "Tenant keys are per-business prefixes inside one bucket; the credential never leaves the console, and §9 item 5 reports readiness (switched on is not the same as a complete storage account).",
   },
   {
     key: "website.wordpress",

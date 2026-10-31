@@ -1002,6 +1002,47 @@ reconciliation (§5p).
 
 _Merged as `fdfc711` (PR #1211)._
 
+## 5q. The contract reaches the other integrations (§9 item 5)
+
+§0 wrote the managed-service contract and applied it to messaging, and left a warning in the file:
+"the same bug was waiting in every other integration". This slice goes and looks, and the warning was
+half right — the *payloads* of AI, payments and media were already first-party, but none of them had
+a **readiness shape** at all. Each screen decided its own copy from whatever internal state it
+happened to hold, which is precisely how a supplier name gets into a tenant sentence: not by
+decision, but by a screen reaching for the nearest field.
+
+What changed:
+
+- `MANAGED_SERVICES` now carries **five** definitions: SMS, email, `ai.assistant` (capability
+  `ai.use`), `payments.gateway` (`billing.top_up`) and `media.storage` (`media.manage`). Torob and
+  Divar are deliberately **not** registered yet — a definition promises a readiness shape, and
+  #894/#896 have nothing to report on until they are built.
+- `readiness.ts` (pure) holds one adapter per integration, and every adapter applies the same order:
+  **our setup, then their plan, then limits and money.** The order is the substance of the slice:
+  telling a business to buy a plan for a service whose own credential we have not configured is the
+  one sentence this vocabulary must never produce, so `platform_setup_incomplete` and
+  `suspended_by_platform` are decided before the entitlement layer is consulted.
+- Two states were added to the vocabulary because the other integrations actually have them:
+  `usage_limit_reached` (a support conversation, not a top-up) and `no_access` (the *member* asking
+  lacks the permission — no first-party page fixes that, so it offers no link).
+- `readiness-service.ts` reads the deployment's real singletons — the AI gateway row and its runtime
+  readiness, the payment gateway mode and merchant id, the media switch *and* whether the bucket
+  credential is complete — resolves the three capabilities, and returns one view per service.
+  `/api/managed-services` serves that list through `assertTenantSafePayload`, and `/settings/services`
+  renders it in a «وضعیت سرویس‌های پلتفرم» card that fails independently of the activation list above
+  it.
+
+The per-integration leak guards are the point of the test file: every integration is walked through
+**every** state the contract can express, and each view is checked three ways — the shared
+`findTenantLeaks` guard, the supplier-name pattern on its label and sentence, and a search of its own
+JSON for the internal reasons it was derived from (`missing_runtime_credential`, `spend_limit_reached`,
+`zarinpal`, …). A mapping that got the status right but forwarded the runtime's own reason would pass
+a status-only test and fail a customer.
+
+SMS is the one view this service does not re-derive: `getTenantSmsReadiness` already builds it from
+the child account's provision state, which is richer than the plan layer, and two sources for one
+sentence is how two screens start disagreeing.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -1022,6 +1063,8 @@ _Merged as `fdfc711` (PR #1211)._
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npx vitest run` — `imported-payment-receipts` (§5l) | 6/6: both plugin importers (F&B and retail) and the CMS importer call the receipt trigger, in every case after `COMMIT`, never awaited, and wrapped in `withTenant` — plus the amount being the same `total` the payment row was written with; and the amendment bridge carrying no call at all, with its reason still in the file |
+| `npx vitest run` — `managed-services` (§5q) | 38/38 across three files: the entitlement translation (plan / wallet / limit / platform / no-access, and a denial with no reason never becomes "ready"); AI's every runtime reason mapped, and the ordering fixture where both halves are broken; payments requiring a gateway *and* its merchant id; media requiring the switch *and* a complete storage account; the email relay's two answers; and, per integration, every state rendered with a first-party label and sentence, walked through the shared leak guard, searched for internal reason strings, and limited to the four first-party action links (plus the inventory-agreement check that keeps `MANAGED_SERVICES` and the audit table in step) |
+| `npm run test:db` — `managed-services` (§5q) | CI only (no Postgres here): one view per registered service, every `checkedAt` parseable; the payload passes the leak guard with the deployment *fully* configured (merchant id, bucket credential, active child account), so a configured platform does not grow a supplier field; a fresh deployment reports our setup for AI/payments/media rather than the tenant's plan; enabling each one moves it off `platform_setup_incomplete`; switching AI on without a usable credential is still not "ready"; SMS readiness follows each business's own child account, including a suspended one linking to `/settings/billing`; and every served service exists in the inventory |
 | `npx vitest run` — `supplier-invoice` (§5p) | 14/14: an exact match; a difference inside a written tolerance kept rather than erased; symmetric tolerance with a documented default; a dispute that names which way it points; `unexplained` when the ledger is silent for a billed period — including under a tolerance wide enough to swallow the whole claim; verdict→state mapping with `unexplained` stored as a dispute; nonsense normalised; `accepted` requires a reason and only for a disputed statement; an accepted statement cannot be re-reconciled; plus the schema guards (the reason CHECK, the verdict-needs-comparison CHECK, the supplier-reference unique), platform-only RLS, and the service reading — never writing — the cost events over a half-open window |
 | `npm run test:db` — `billing-supplier-invoices` (§5p) | CI only (no Postgres here): recording is idempotent on the supplier's reference and refuses a backwards period or a negative amount; reconciliation sums only that provider's events inside the half-open window (outside-window and other-supplier rows excluded); a discrepancy is stored and the ledger is asserted unchanged before and after, twice; a silent month is `disputed`/`unexplained` even with a 10 000 000 Rial tolerance; an explicit tolerance is honoured and recorded; accepting needs a reason, refuses a matched statement, and blocks re-reconciliation; the database refuses an accepted row with no reason; an unprivileged role granted SELECT still reads zero rows; disputes list first |
 | `npx vitest run` — `delivery-trend` (§5o) | 18/18: granularity from the span (day/week/month) and a contiguous series ending today; Tehran day keys (21:00 UTC is tomorrow) and Monday-start weeks (a Sunday belongs to the week before); a bucket with no rows is `hasData: false` with a `null` rate and `idle`, and an in-flight-only bucket is data with no rate; the rate is over decided attempts only; a bucket outside the window is dropped; the window's latency is pooled rather than averaged from medians (the 1 000:1 case); worst verdict and newest-first health; bars scaled to the busiest bucket with a visible minimum and `null` for an empty window; plus the guards — SQL groups on `Asia/Tehran` at every granularity, the tenant query is `withTenant` + `business_id`, no provider field is selected, the window clamps to a year, and both screens render server-computed points with the shared health rule and no hand-copied thresholds |
@@ -1092,8 +1135,12 @@ _Merged as `fdfc711` (PR #1211)._
    endpoint reports the master's own credit, the funding pass reads it once per pass, and the figure
    is now mirrored with its age and its failed-read flag, so a configured floor neither stops
    automation nor forces an operator to ask the provider what the balance is.
-5. **Managed-service rollout for other integrations**: #894 Torob, #896 Divar, payments,
-   media, AI — apply the contract and add leak-guard tests per integration.
+5. **Managed-service rollout for other integrations** — **closed for what is built** (§5q):
+   AI, payments, media and the email relay now have readiness adapters, one payload
+   (`/api/managed-services`) served through the leak guard, a tenant card that renders it, and
+   per-integration guards that walk every state. Torob (#894) and Divar (#896) remain their own
+   issues: they are not registrations waiting to be flipped but unbuilt integrations, and the
+   inventory says so.
 6. ~~**`resolveBusinessCapability` follow-up**: audit other callers for the same stale
    `"enabled"` comparison~~ — **closed** (§3b): the audit found the same class of drift in three
    more places (an unvalidated write, a hand-copied vocabulary and a cast in the resolver), all

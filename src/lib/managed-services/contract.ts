@@ -114,6 +114,31 @@ export const MANAGED_SERVICES = {
     capability: "cloud.messaging",
     readyDetail: "ارسال ایمیل از اعتبار پلتفرم انجام می‌شود.",
   },
+  // Issue #902 §9 item 5 — the rest of the integrations, registered here so they
+  // inherit the tenant vocabulary instead of each route inventing one. Torob
+  // (#894) and Divar (#896) are not built yet and are deliberately absent: a
+  // definition promises a readiness shape, and there is nothing to report on.
+  aiAssistant: {
+    key: "ai.assistant",
+    tenantLabel: "دستیار هوشمند",
+    owningApp: "accounting",
+    capability: "ai.use",
+    readyDetail: "دستیار هوشمند با اعتبار پلتفرم آمادهٔ استفاده است.",
+  },
+  paymentsGateway: {
+    key: "payments.gateway",
+    tenantLabel: "پرداخت آنلاین",
+    owningApp: "accounting",
+    capability: "billing.top_up",
+    readyDetail: "شارژ کیف پول از درگاه آنلاین انجام می‌شود.",
+  },
+  mediaStorage: {
+    key: "media.storage",
+    tenantLabel: "کتابخانهٔ رسانه",
+    owningApp: "website",
+    capability: "media.manage",
+    readyDetail: "فایل‌ها در فضای ابری پلتفرم نگهداری می‌شوند.",
+  },
 } as const satisfies Record<string, ManagedServiceDefinition>;
 
 export type ManagedServiceKey = (typeof MANAGED_SERVICES)[keyof typeof MANAGED_SERVICES]["key"];
@@ -155,7 +180,13 @@ export type ManagedServiceDetailKey =
   | "wallet_empty"
   | "platform_setup_incomplete"
   | "temporarily_unavailable"
-  | "needs_support";
+  | "needs_support"
+  // Issue #902 §9 item 5: the two states the other integrations actually have and
+  // the SMS adapter never did. Both are the tenant's to resolve, but neither is a
+  // wallet problem, and folding them into `needs_support` would have told a
+  // business to call us when the answer is one click away.
+  | "usage_limit_reached"
+  | "no_access";
 
 /** Persian tenant copy for each internal reason. */
 export const MANAGED_SERVICE_DETAILS: Record<ManagedServiceDetailKey, string> = {
@@ -167,6 +198,8 @@ export const MANAGED_SERVICE_DETAILS: Record<ManagedServiceDetailKey, string> = 
   platform_setup_incomplete: "سرویس هنوز در حال راه‌اندازی است؛ نیازی به اقدام شما نیست.",
   temporarily_unavailable: "سرویس موقتاً در دسترس نیست؛ به‌صورت خودکار دوباره بررسی می‌شود.",
   needs_support: "برای ادامهٔ استفاده از این سرویس با پشتیبانی تماس بگیرید.",
+  usage_limit_reached: "سقف مصرف این سرویس پر شده است؛ برای افزایش سقف با پشتیبانی تماس بگیرید.",
+  no_access: "دسترسی شما به این سرویس فعال نیست؛ از مدیر کسب‌وکار بخواهید آن را فعال کند.",
 };
 
 /**
@@ -212,6 +245,8 @@ export function statusForDetail(detailKey: ManagedServiceDetailKey): ManagedServ
     case "wallet_empty":
     case "suspended_by_plan":
     case "needs_support":
+    case "usage_limit_reached":
+    case "no_access":
       return "action_required";
     case "suspended_by_platform":
     case "platform_setup_incomplete":
@@ -229,7 +264,12 @@ export function actionForDetail(detailKey: ManagedServiceDetailKey): ManagedServ
       return { label: "مشاهدهٔ طرح و اشتراک", href: "/settings/billing", blocking: true };
     case "needs_support":
       return { label: "تماس با پشتیبانی", href: "/support", blocking: true };
+    case "usage_limit_reached":
+      return { label: "درخواست افزایش سقف", href: "/support", blocking: true };
     default:
+      // `no_access` has no first-party screen of its own: the fix is another
+      // member of the business granting it, which happens where roles are
+      // managed, not on a page this contract may link to.
       return null;
   }
 }
