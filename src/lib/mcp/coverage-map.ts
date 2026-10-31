@@ -1390,6 +1390,16 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     test: "integration/kavenegar-retail-pricing.integration.test.ts",
   },
   {
+    id: "platform.billing-usage-invoices",
+    module: "Platform — Billing",
+    entity: "Usage invoices emitted from the rating ledger",
+    routes: ["platform/billing/usage-invoices"],
+    status: "route-only (by design)",
+    note:
+      "issue #902 §9 item 3: turning a month's ratings into an invoice line (and citing the price version that produced each line) is a money action with a platform audit, and the read half is a preview of what a month would bill. Both stay on the console: a chat-channel verb that issues invoices would post a receivable on someone else's word.",
+    test: "integration/billing-usage-invoice.integration.test.ts",
+  },
+  {
     id: "platform.services",
     module: "Platform — Billing",
     entity: "Per-service setup/hourly tariffs and data-retention policy",
