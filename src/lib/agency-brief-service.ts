@@ -18,7 +18,7 @@
  *     let a caller who omitted `budgetRial` silently delete the client's budget.
  *
  * What the service refuses and what the database refuses overlap on purpose. The
- * service answers in Persian, early, with the field named; migration 0271 answers
+ * service answers in Persian, early, with the field named; migration 0274 answers
  * with a `23514` if something gets past it. Neither is a substitute for the
  * other, and the integration suite checks the database's half independently.
  */

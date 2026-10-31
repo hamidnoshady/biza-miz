@@ -10,7 +10,7 @@
  * `media-review-service.ts` are: a panel that imports the service drags `pg` into
  * the browser bundle.
  *
- * Every rule here has a matching constraint in `0271_agency_client_briefs.sql`.
+ * Every rule here has a matching constraint in `0274_agency_client_briefs.sql`.
  * That duplication is deliberate and it is not drift-prone in the way it looks:
  * the database decides what is *possible* and this module decides what is
  * *offered*, so a refusal reaches the member as a Persian sentence from here and

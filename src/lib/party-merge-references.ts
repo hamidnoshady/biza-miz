@@ -657,8 +657,8 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
   },
 
   // -- Agency client briefs (issue #1128 §A) --------------------------------
-  // Migration 0271's two party columns, both `move`, and classified together
-  // because 0271's own trigger requires the approver to be *related to the
+  // Migration 0274's two party columns, both `move`, and classified together
+  // because 0274's own trigger requires the approver to be *related to the
   // brief's client*. A merge that moved `party_id` to the winner while leaving
   // the approver on the loser would produce rows that trigger then refuses to
   // write. It does not happen, because `crm_party_relationships` moves its edges

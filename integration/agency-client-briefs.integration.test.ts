@@ -2,7 +2,7 @@
  * §A's client briefs against a real database (issue #1128).
  *
  * `agency-brief.test.ts` pins the vocabulary and the chain, and 48 raw-SQL
- * assertions pin migration 0271's constraints. Neither can see what this file is
+ * assertions pin migration 0274's constraints. Neither can see what this file is
  * here for, which is the service and the schema agreeing:
  *
  *   * that numbering is one sequence per agency and survives two creates racing

@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0271_agency_client_briefs.sql — issue #1128 §A: what the client actually asked
+-- 0274_agency_client_briefs.sql — issue #1128 §A: what the client actually asked
 -- for, recorded before anybody prices or builds it.
 --
 -- §A names "client briefs" in the sales pipeline, and §B lists `brief` among the

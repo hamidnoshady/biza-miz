@@ -19,7 +19,7 @@ import { briefActor, briefErrorResponse, readBriefBody } from "../../brief-guard
  * route would refuse.
  *
  * PATCH edits what is still editable. From `confirmed` on, what the client agreed
- * is frozen — here and again by migration 0271's trigger — and the way forward is
+ * is frozen — here and again by migration 0274's trigger — and the way forward is
  * `…/status`'s `supersede`, which leaves the confirmed brief intact as the record
  * of what was agreed. The pointers to the opportunity and the project are *not*
  * frozen, because the project normally arrives after confirmation and blocking it

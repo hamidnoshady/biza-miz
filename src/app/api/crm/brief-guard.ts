@@ -86,7 +86,7 @@ function messageOf(err: unknown): string | undefined {
  * platform's own handler and log instead of being laundered into a generic
  * message.
  *
- * This departs from §E in one place, deliberately. Migration 0271's trigger and
+ * This departs from §E in one place, deliberately. Migration 0274's trigger and
  * CHECKs raise `23514`, `23503` and `23505` *as domain rules* — a reference into
  * another tenant, an approver who is not this client's contact, a number that lost
  * a race — so they are refusals this feature means rather than accidents, and

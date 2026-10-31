@@ -23,7 +23,7 @@
  * §A asks that the stakeholder be recorded "without exposing another client's
  * information". Here that is a shape rather than a warning: the approver picker is
  * populated from the chosen client's own relationships, so another client's
- * decision-maker is not among the options. Migration 0271 refuses the write anyway
+ * decision-maker is not among the options. Migration 0274 refuses the write anyway
  * — the picker is a convenience, the constraint is the rule.
  *
  * ## Permissions are computed by `crm-section.tsx`, never here
@@ -188,7 +188,7 @@ function bodyFrom(
   const body: Record<string, unknown> = { note: draft.note.trim() };
   if (frozen) {
     // A confirmed brief accepts only our own note and the pointers to the work it
-    // became; everything else is refused by the service and by migration 0271.
+    // became; everything else is refused by the service and by migration 0274.
     if (draft.projectId) body.projectId = draft.projectId;
     return body;
   }
@@ -292,7 +292,7 @@ export function BriefsSection({
   }, [load, reloadKey]);
 
   // The approver picker is the chosen client's own contacts — both directions of
-  // the relationship, which is exactly what migration 0271's trigger accepts.
+  // the relationship, which is exactly what migration 0274's trigger accepts.
   const editorPartyId = editing?.brief === null ? draft.partyId : (draft.partyId ?? null);
   useEffect(() => {
     if (!editing || !editorPartyId) {
