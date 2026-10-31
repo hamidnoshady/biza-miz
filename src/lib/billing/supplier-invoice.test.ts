@@ -131,7 +131,7 @@ describe("accepting a difference is a decision with a reason", () => {
 
 describe("the schema and the service keep the evidence intact", () => {
   it("refuses an accepted statement without a reason, in the database", () => {
-    const migration = read("migrations/0276_billing_supplier_invoices.sql");
+    const migration = read("migrations/0277_billing_supplier_invoices.sql");
     expect(migration).toMatch(
       /CHECK \(state <> 'accepted' OR length\(trim\(coalesce\(accepted_reason, ''\)\)\) > 0\)/,
     );
@@ -142,7 +142,7 @@ describe("the schema and the service keep the evidence intact", () => {
   });
 
   it("is platform-only at the database, like the retail price catalogue", () => {
-    const migration = read("migrations/0276_billing_supplier_invoices.sql");
+    const migration = read("migrations/0277_billing_supplier_invoices.sql");
     expect(migration).toMatch(/ALTER TABLE billing_supplier_invoices FORCE ROW LEVEL SECURITY/);
     expect(migration).toMatch(/CREATE POLICY platform_only ON billing_supplier_invoices FOR ALL\s*\n\s*USING \(app_rls_bypass\(\)\)/);
   });

@@ -969,7 +969,7 @@ provider charged us, tenant-invisible — but nobody could answer the only quest
 exists for: *the provider invoiced us X for March; do our books agree?* A supplier over-charge would
 have been invisible, and so would our own under-recording.
 
-`0276` adds the missing half — the statement — and the verdict of comparing it with the ledger:
+`0277` adds the missing half — the statement — and the verdict of comparing it with the ledger:
 
 | Column / state | Why it exists |
 | --- | --- |
@@ -992,7 +992,7 @@ Three judgements worth recording, because each is where reconciliation quietly g
   the decision while leaving the money paid — the same reasoning that keeps a **paid** usage invoice
   from absorbing a late rating (§5n).
 
-The statement is platform data, and `0276` says so with the bypass-only policy `0262` uses for the
+The statement is platform data, and `0277` says so with the bypass-only policy `0262` uses for the
 retail catalogue: the suite grants an unprivileged role `SELECT` on the table and asserts it still
 reads zero rows. The route has three actions — record, reconcile, accept — because they are three
 different decisions, and each is `billing.manage` and audited with the numbers it decided on.
