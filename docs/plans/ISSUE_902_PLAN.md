@@ -880,6 +880,53 @@ What this does **not** do, and should not pretend to: generate invoice lines fro
 supplier's invoice against `billing_vendor_cost_events`. Those are Billing's own work (§9 item 3's other
 half) and now have the join they were missing.
 
+## 5n. Usage that was rated becomes a bill (§9 item 3, part two)
+
+§5m made a rating say which price produced its amount. That answers the question for one row. It does
+not answer the question a business asks when a bill arrives — *what is this for, and on what terms?* —
+and until this slice there was no answer at all: `billing_invoice_lines` had **no `kind = 'usage'`
+writer**. Usage was reported (the ratings, the spend breakdown, the console) and separately invoiced
+(subscriptions, add-ons, the website service), and the two ledgers never met. A business could have a
+month of rated usage and no line describing it.
+
+The line is the join, and the design follows from what a reader must be able to check:
+
+| Rule | Why |
+| --- | --- |
+| A line is one **meter + one price version** | Two rows of the same meter in one month can have been priced by two retail versions — a promotion ended, a markup changed. Folding them into one line gives "which version?" a blended, false answer, which is exactly the lie 0270 removed from the ratings |
+| `amount_rial` is the **sum of the ratings**, and the unit price is derived from it | The amount is what is billed. Deriving the amount from a rounded unit would leave a Rial unexplained on any line whose quantity does not divide evenly; a test pins 10 Rial over 3 units as 10, not 9 |
+| Every rating is **linked** to the line it was billed on, with what it contributed | A line that does not add up to its parts is a bill nobody can defend. The link also answers "has this been billed?" without arithmetic |
+| One rating is billable **once, ever** (`UNIQUE (usage_event_id)`) | The invoice's own `UNIQUE (business_id, reference)` claim stops a second invoice for the same month. It does **not** stop a late event with an occurrence date in an earlier window from being collected again by the next month's run. The index is the guarantee; the application code is not |
+| Wallet-backed usage is **never** invoiced | That money already left the wallet. The same `walletBacked = false` predicate the spend breakdown uses decides it — one definition of "billable outside the wallet", asserted by a test so the two cannot drift into two answers |
+| A zero-rated event produces **no line**, but is still counted | A line of ۰ ریال is not something anyone can pay, and it would fill every invoice with rows that were entirely inside a plan allowance. `ratingCount` versus `billedCount` is what tells an operator "no usage" from "usage, all of it free" |
+| A pre-0270 rating is **billed without a citation** | It has no recorded basis. Refusing to bill it would let an accounting change decide whether a business owes money |
+| An **open** invoice accepts a rating that arrived late; a paid one does not | A crash between the claim and the lines must not strand an empty invoice, and a genuinely late rating should reach the bill it belongs to. But rewriting a settled document is how a customer is charged twice for one thing and then disputes everything after it — so a closed invoice returns `invoice_closed` and the rating waits for an amendment |
+
+**What a repeat run says.** Issuing again for a month that is already billed is not an error and not a
+silent no-op. It returns the invoice that exists, with that invoice's own total and line count, and a
+reason: `already_invoiced` (nothing new), `invoice_closed` (new usage, but the document is settled) or
+`nothing_to_bill` (no usage, no invoice). The first version returned `totalRial: 0` for the repeat case,
+which reads as "the invoice vanished" — the kind of answer that makes an operator issue a second one by
+hand. The database suite caught it; the case is now asserted.
+
+**It is an operator action, not a timer, and that is a deliberate line.** Post-paid metered usage is a
+commercial decision. Today essentially every rateable event is wallet-backed — `ai`, `media`,
+`messaging`, activation all mark theirs — so a monthly pass would be inert now and would start billing
+people the day some new source rates without charging. `POST /api/platform/billing/usage-invoices`
+issues (capability `billing.manage`, audited with the invoice it created); `GET` previews a month
+(`billing.view`) so the decision can be made from real numbers. The month's key is `usage:<YYYY-MM>`,
+and its window comes from the same `tehranMonthWindow` the spend report uses — anchored on the 15th at
+noon UTC, so the key unambiguously names the month it bills.
+
+**The portability lesson, again.** The dry run of this slice's own SQL is where a slice like this is
+usually wrong, and this repository has no local Postgres: the database suite is the only proof, so it is
+written to test the constraint rather than the happy path — it asserts that a *second* link for the same
+rating is rejected by `billing_invoice_line_usage_once`, not that the service avoids writing one.
+
+What is **still** Billing's own work: reconciling a supplier's invoice against
+`billing_vendor_cost_events`. That is the last half of §9 item 3, and it now has both halves it needs —
+the rated amount with its citation (§5m) and the invoiced amount with its citation (§5n).
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -900,6 +947,8 @@ half) and now have the join they were missing.
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npx vitest run` — `imported-payment-receipts` (§5l) | 6/6: both plugin importers (F&B and retail) and the CMS importer call the receipt trigger, in every case after `COMMIT`, never awaited, and wrapped in `withTenant` — plus the amount being the same `total` the payment row was written with; and the amendment bridge carrying no call at all, with its reason still in the file |
+| `npx vitest run` — `usage-invoice` (§5n) | 16/16: ratings of one meter and version fold into one line whose amount is the sum of its parts; a mid-month price change splits into two lines, each citing one version; a retail line and a meter line for the same meter never cross catalogues; an allowance-covered rating bills nothing but is still counted; a pre-0270 rating is billed without a citation; 10 Rial over 3 units stays 10; a negative rating is dropped rather than credited; descriptions carry the catalogue's Persian name, the basis label and the version in Persian digits and no supplier word; plus the schema guards (0275's pairing CHECKs, `kind = 'usage'`, the one-billing-ever index, forced RLS), the writer's linkage and the route's two capabilities |
+| `npm run test:db` — `billing-usage-invoice` (§5n) | CI only (no Postgres here): a month of ratings becomes one invoice with one line per meter-and-version, each rating linked with what it contributed and the lines summing to the invoice; wallet-backed usage is left out; a month with nothing unbilled creates no invoice; issuing twice finds the same invoice and writes no second line; the database refuses a second link for the same rating; a late rating extends an open invoice and is refused by a paid one; another business's usage is not invoiced |
 | `npx vitest run` — `rating-basis` (§5m) | 11/11: retail wins and nulls the meter column; explicit amount cites nothing; meter stays the fallback; a zero version is a real default while a negative or non-finite one is rejected rather than clamped; plus source guards on both INSERT branches, the migration's pairing CHECK, and the drain passing the version it priced with |
 | `npm run test:db` — `messaging-usage-rating` (§5m) | CI only (no Postgres here): a drained send takes exactly what it rates out of the wallet and cites `retail_price_version` `7` by id and number with `price_version_id` NULL; a three-recipient batch rates as one version and sums to the single reservation; a batch where the provider refuses one of three charges and rates only the two that went out (the case the double-count broke); an `explicit_amount` rating stays uncited even with a meter version published; a metered event still cites the published meter version |
 | `npx vitest run` — `lookup-trigger-facts` (§5k) | 6 new fixtures: the preview rendered by the dispatcher's renderer (no `%token` left, the amount formatted as money and the date as Jalali rather than the raw rial integer or an ISO string); a template whose variables the event cannot fill previewing as `null` rather than blank; and the code map translating the refusals a tenant can act on while a code it does not know — `http_429`, `kavenegar_418` — becomes a generic sentence instead of leaking |
@@ -953,11 +1002,12 @@ half) and now have the join they were missing.
    queue wait and the provider wait separately, over a week. A longer *historical* view (trend over
    months rather than a window) is still open; the outbox rows it would read are retained, so it is
    a query and a chart, not new data.
-3. **Retail ↔ wholesale settlement in invoicing** (billing): the rating now cites the version that
-   produced its amount — `price_basis` distinguishes `retail_price_version` from `explicit_amount` and
-   from the meter catalogue, and `retail_price_version_id`/`retail_price_version` name it (§5m). Still
-   Billing's: emitting **invoice lines** from those ratings (`billing_invoice_lines` has no rating
-   linkage at all today), and reconciling a supplier invoice against `billing_vendor_cost_events`.
+3. **Retail ↔ wholesale settlement in invoicing** (billing) — **two of three parts closed**:
+   the rating cites the version that produced its amount (§5m), and those ratings now become **invoice
+   lines** — one per meter-and-version, each linked to the ratings it was built from with one-billing-ever
+   enforced by the database (§5n). Still Billing's: reconciling a **supplier invoice** against
+   `billing_vendor_cost_events` (the wholesale side, which exists and is tenant-invisible, but has no
+   statement to reconcile against yet).
 4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g and §5i): the account
    endpoint reports the master's own credit, the funding pass reads it once per pass, and the figure
    is now mirrored with its age and its failed-read flag, so a configured floor neither stops
