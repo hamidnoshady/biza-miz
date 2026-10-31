@@ -414,7 +414,14 @@ BEGIN
         -- An offer with nothing on it is not an offer. Checked on the way out of
         -- `draft` rather than on insert, because a proposal is built line by line
         -- and the first save legitimately has none.
-        IF OLD.status = 'draft' AND NEW.status <> 'draft' THEN
+        --
+        -- `withdrawn` is exempt, and the exemption is the point of the rule rather
+        -- than an escape from it: what is being prevented is an *empty offer
+        -- reaching the client*, and withdrawing one shows it to nobody. Refusing
+        -- here would strand a half-written draft that its author wants gone —
+        -- unable to be sent, unable to be withdrawn, deletable only because it is
+        -- still a draft, which is a corner with one exit in it.
+        IF OLD.status = 'draft' AND NEW.status NOT IN ('draft', 'withdrawn') THEN
             SELECT count(*) INTO line_count
               FROM agency_proposal_lines WHERE proposal_id = NEW.id;
             IF line_count = 0 THEN
