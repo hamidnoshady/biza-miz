@@ -15,6 +15,7 @@ import { cardClass, SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
 import { CatalogueSection } from "./catalogue-section";
 import { StoreOrdersSection } from "./woo-store-sections";
+import { orderStatusRegistry } from "./order-status";
 import { TaxonomiesSection } from "./taxonomies-section";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { ConnectionPicker, connectionOptionLabel } from "./connection-lite";
@@ -204,7 +205,14 @@ export function OrdersSectionHost() {
       callResult={callResult}
       notice={notice}
     >
-      <StoreOrdersSection connectionId={selectedId} busy={busy} call={call} />
+      <StoreOrdersSection
+        connectionId={selectedId}
+        busy={busy}
+        call={call}
+        statusRegistry={orderStatusRegistry(
+          connections?.find((connection) => connection.id === selectedId)?.pluginCapabilities,
+        )}
+      />
     </HostFrame>
   );
 }
