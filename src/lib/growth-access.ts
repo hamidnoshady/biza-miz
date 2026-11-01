@@ -146,6 +146,11 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   // `torob.view` — looking at what your catalogue would publish is reading, not
   // managing the channel.
   "/api/growth/torob/shops/[id]/feed": { POST: PERMISSIONS.torobView },
+  // The Shop Generator approval callback (issue #894). It is the merchant's own
+  // browser arriving from Torob with a one-time code, so it manages the
+  // relationship like the action that started it — and it *spends* the code, which
+  // is why `torob.view` would be the wrong key even though it is a GET.
+  "/api/growth/torob/authorize/callback": { GET: PERMISSIONS.torobManage },
   "/api/messaging": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage },
   "/api/messaging/preview": { POST: PERMISSIONS.campaignsManage },
 };

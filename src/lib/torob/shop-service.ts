@@ -60,6 +60,12 @@ export interface TorobShop {
   healthReason: string | null;
   lastCheckedAt: string | null;
   createdAt: string;
+  /** Where the merchant approves the partner connection. Only while pending. */
+  approveUrl: string | null;
+  /** When the 15-minute approval window opened. Only while pending. */
+  authorizationRequestedAt: string | null;
+  /** Why the last approval attempt failed, from a closed vocabulary. */
+  authorizationError: string | null;
 }
 
 export class TorobShopError extends Error {
@@ -81,7 +87,8 @@ export class TorobShopError extends Error {
 
 const SELECT_COLUMNS = `id, business_id, website_kind, source_connection_id, domain,
             authorization_state, auth_mode, token_hint, provider_shop_id,
-            publication_rule, enabled, health, health_reason, last_checked_at, created_at`;
+            publication_rule, enabled, health, health_reason, last_checked_at, created_at,
+            approve_url, authorization_requested_at, authorization_error`;
 
 function toShop(row: Record<string, unknown>): TorobShop {
   const iso = (value: unknown) =>
@@ -102,6 +109,9 @@ function toShop(row: Record<string, unknown>): TorobShop {
     healthReason: (row.health_reason as string | null) ?? null,
     lastCheckedAt: iso(row.last_checked_at),
     createdAt: iso(row.created_at) ?? new Date(0).toISOString(),
+    approveUrl: (row.approve_url as string | null) ?? null,
+    authorizationRequestedAt: iso(row.authorization_requested_at),
+    authorizationError: (row.authorization_error as string | null) ?? null,
   };
 }
 
@@ -351,29 +361,39 @@ export async function authorizeTorobShopWithToken(input: {
 }
 
 /**
- * Record that a partner authorization is waiting on Torob's approval.
+ * One shop, by its own id, inside the caller's tenant scope.
  *
- * The row is deliberately not "authorized" until the callback arrives: the issue
- * is explicit that an accepted request is not an approved shop, and a state that
- * lies here is what makes a merchant chase a feed that was never authorized.
+ * There is deliberately no `markPendingApproval` here any more: a state that says
+ * "Torob is reviewing this" may only be written because Torob actually answered a
+ * connection request (`authorization-service.ts`). A function that moved the state
+ * on its own would let a screen claim an approval nobody asked for.
  */
-export async function markTorobShopPendingApproval(input: {
-  businessId: string;
-  shopId: string;
-}): Promise<TorobShop> {
+export async function readTorobShop(input: { businessId: string; shopId: string }): Promise<TorobShop | null> {
   const { rows } = await query<Record<string, unknown>>(
-    `UPDATE torob_shops
-        SET authorization_state = 'pending_approval',
-            auth_mode = 'partner',
-            token_ciphertext = NULL,
-            token_hint = NULL,
-            updated_at = now()
-      WHERE id = $1 AND business_id = $2 AND authorization_state <> 'authorized'
-      RETURNING ${SELECT_COLUMNS}`,
+    `SELECT ${SELECT_COLUMNS} FROM torob_shops WHERE id = $1 AND business_id = $2`,
     [input.shopId, input.businessId],
   );
-  if (!rows[0]) throw new TorobShopError("not_authorizable");
-  return toShop(rows[0]);
+  return rows[0] ? toShop(rows[0]) : null;
+}
+
+/**
+ * The shop a partner connection belongs to, found by Torob's connection id.
+ *
+ * This is the lookup the approval callback makes, and it is scoped to the tenant
+ * as well as to the connection: a `connection_id` from another business's shop
+ * resolves to nothing, even if the browser is signed in somewhere else.
+ */
+export async function readTorobShopByConnection(input: {
+  businessId: string;
+  connectionId: string;
+}): Promise<TorobShop | null> {
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT ${SELECT_COLUMNS} FROM torob_shops
+      WHERE business_id = $1 AND provider_shop_id = $2
+      ORDER BY created_at LIMIT 1`,
+    [input.businessId, input.connectionId],
+  );
+  return rows[0] ? toShop(rows[0]) : null;
 }
 
 /**
