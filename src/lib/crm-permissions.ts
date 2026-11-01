@@ -81,7 +81,7 @@ export const CRM_SECTION_KEYS = [
   // proposal that priced it because a campaign outlives the offer and is what §C's
   // client reporting reads. **Not `growth_campaigns`** — that is #901's retail
   // cashback automation and its party is the shopper, not an agency's client.
-  "campaigns",
+  "client-campaigns",
   "activities",
   "cases",
   // The data-quality *workspace*: which records can be trusted. It hosts the
@@ -300,7 +300,7 @@ export const CRM_SECTION_ACCESS: Record<CrmSectionKey, CrmSectionAccess> = {
   // internal determination that does. A member who may enter the spend may also
   // close it; what they may not do is change a closed one, which 0278 enforces
   // below the permission system entirely.
-  campaigns: {
+  "client-campaigns": {
     read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
     write: [crmManage],
     delete: [crmDelete],

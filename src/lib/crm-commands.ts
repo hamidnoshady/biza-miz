@@ -108,7 +108,7 @@ const SECTION_ALIASES: Record<CrmSectionKey, readonly string[]> = {
   // point at. Aliases match by folded substring, longest first, so leaving it there
   // would have sent a member typing «کمپین» to the brief screen now that both
   // exist. It moves here, and the brief keeps the words that were always its own.
-  campaigns: [
+  "client-campaigns": [
     "کمپین‌های کارفرما",
     "کمپین کارفرما",
     "کمپین‌ها",

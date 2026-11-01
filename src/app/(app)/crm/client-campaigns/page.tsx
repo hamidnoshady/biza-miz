@@ -24,11 +24,11 @@ export default async function CrmCampaignsPage() {
   if (!session) redirect("/login");
   const access = await memberAccessFor(session);
   const permissions = access?.permissions ?? new Set();
-  if (!canViewCrmSection(permissions, "campaigns")) redirect(crmFallbackHref(permissions));
+  if (!canViewCrmSection(permissions, "client-campaigns")) redirect(crmFallbackHref(permissions));
 
   return (
     <CrmSection
-      section="campaigns"
+      section="client-campaigns"
       role={access?.role ?? session.role}
       permissions={[...permissions]}
     />

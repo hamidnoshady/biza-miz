@@ -111,7 +111,7 @@ describe("campaign-guard", () => {
 
   it("reads a body, and treats a malformed one as a 400 rather than an exception", async () => {
     const ok = await readCampaignBody(
-      new Request("http://test/api/crm/campaigns", {
+      new Request("http://test/api/crm/client-campaigns", {
         method: "POST",
         body: JSON.stringify({ title: "بهاره" }),
       }),
@@ -122,21 +122,21 @@ describe("campaign-guard", () => {
     // the server broke.
     expect(
       await readCampaignBody(
-        new Request("http://test/api/crm/campaigns", { method: "POST", body: "{not json" }),
+        new Request("http://test/api/crm/client-campaigns", { method: "POST", body: "{not json" }),
       ),
     ).toBeNull();
     expect(
-      await readCampaignBody(new Request("http://test/api/crm/campaigns", { method: "POST", body: "[]" })),
+      await readCampaignBody(new Request("http://test/api/crm/client-campaigns", { method: "POST", body: "[]" })),
     ).toBeNull();
     expect(
       await readCampaignBody(
-        new Request("http://test/api/crm/campaigns", { method: "POST", body: JSON.stringify(null) }),
+        new Request("http://test/api/crm/client-campaigns", { method: "POST", body: JSON.stringify(null) }),
       ),
     ).toBeNull();
     // An empty object *is* a body — the service decides that an empty patch is a
     // no-op returning the row, and that decision is not this function's to make.
     expect(
-      await readCampaignBody(new Request("http://test/api/crm/campaigns", { method: "POST", body: "{}" })),
+      await readCampaignBody(new Request("http://test/api/crm/client-campaigns", { method: "POST", body: "{}" })),
     ).toEqual({});
   });
 

@@ -548,7 +548,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "crm.client_campaigns",
     module: "CRM",
     entity: "Client campaigns (the window, the channels, the media spend and the figures that came back)",
-    routes: ["crm/campaigns"],
+    routes: ["crm/client-campaigns"],
     // Not `growth/campaign-builder`, which is #901's retail cashback automation and
     // is classified under Growth. No overlap with crm.client_briefs or
     // crm.client_proposals either: a campaign runs *after* the offer is accepted and

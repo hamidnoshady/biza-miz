@@ -299,7 +299,7 @@ function draftOf(campaign: CampaignWire, money: { toInput: (value: number) => nu
 /* The screen                                                                 */
 /* ------------------------------------------------------------------------- */
 
-export function CampaignsSection({
+export function ClientCampaignsSection({
   canManage,
   canDelete,
 }: {
@@ -335,7 +335,7 @@ export function CampaignsSection({
     if (statusFilter) search.set("status", statusFilter);
     if (currentOnly) search.set("currentOnly", "1");
     const result = await api<{ campaigns?: CampaignWire[]; error?: string }>(
-      `/api/crm/campaigns?${search.toString()}`,
+      `/api/crm/client-campaigns?${search.toString()}`,
     );
     if (result.aborted) return;
     if (!result.ok || !result.data.campaigns) {
@@ -495,7 +495,7 @@ export function CampaignsSection({
     setSaveError(null);
     const body = bodyOf();
     const result = await api<{ campaign?: CampaignWire; error?: string }>(
-      editing.campaign === null ? "/api/crm/campaigns" : `/api/crm/campaigns/${editing.campaign.id}`,
+      editing.campaign === null ? "/api/crm/client-campaigns" : `/api/crm/client-campaigns/${editing.campaign.id}`,
       {
         method: editing.campaign === null ? "POST" : "PATCH",
         body: JSON.stringify(body),
@@ -515,7 +515,7 @@ export function CampaignsSection({
   const applyAction = async (campaign: CampaignWire, action: AgencyCampaignAction) => {
     setActionError(null);
     const result = await api<{ campaign?: CampaignWire; error?: string }>(
-      `/api/crm/campaigns/${campaign.id}/status`,
+      `/api/crm/client-campaigns/${campaign.id}/status`,
       { method: "POST", body: JSON.stringify({ action }) },
     );
     if (result.aborted) return;
@@ -530,7 +530,7 @@ export function CampaignsSection({
     if (!confirmDelete) return;
     setDeleteError(null);
     const result = await api<{ result?: string; error?: string }>(
-      `/api/crm/campaigns/${confirmDelete.id}`,
+      `/api/crm/client-campaigns/${confirmDelete.id}`,
       { method: "DELETE" },
     );
     if (result.aborted) return;
