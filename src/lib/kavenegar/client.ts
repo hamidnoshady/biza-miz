@@ -307,6 +307,13 @@ const STATUS_TABLE: Record<number, Omit<KavenegarClassification, "ok">> = {
   419: { retryable: false, code: "invalid_request", fault: "provider_rejected", operatorMessage: "provider: array lengths differ" },
   420: { retryable: false, code: "invalid_message", fault: "content_blocked", operatorMessage: "provider: links are restricted on this account" },
   424: { retryable: false, code: "template_unavailable", fault: "provider_rejected", operatorMessage: "provider: template missing or not approved" },
+  // Issue #902 DoD #11 — HTTP 429 is the canonical "slow down", and it was the
+  // one throttling answer that fell through to `unknown`. It stayed retryable by
+  // luck (the fallback treats unknown statuses as transient), but the console and
+  // the alert ledger could not tell a supplier backing us off from a code nobody
+  // has ever seen. 451 below is the same condition in this supplier's own table;
+  // both now read `rate_limited`.
+  429: { retryable: true, code: "rate_limited", fault: "rate_limited", operatorMessage: "provider: too many requests (HTTP 429)" },
   449: { retryable: false, code: "not_found", fault: "provider_rejected", operatorMessage: "provider: no record matched" },
   451: { retryable: true, code: "rate_limited", fault: "rate_limited", operatorMessage: "provider: rate limited" },
   502: { retryable: false, code: "duplicate_username", fault: "provider_rejected", operatorMessage: "provider: username already taken" },

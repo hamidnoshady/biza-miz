@@ -184,6 +184,9 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'tax_invoice_profiles.updated_by': 'tax profile config',
   'source_identities.linked_by': 'import reconciliation tooling; the owning run and its decisions are audited',
   'tenant_roles.created_by': 'role configuration',
+  // Issue #894 — who connected the channel, not an act the member did on a
+  // reservation or a record. The audit trail carries the real attribution.
+  'torob_shops.created_by': 'channel connection setup',
   'tenant_roles.updated_by': 'role configuration',
   'tour_member_progress.user_id': 'personal learning progress (guided tours)',
   'trusted_devices.user_id': 'sign-in security',
