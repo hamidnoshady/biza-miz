@@ -1143,6 +1143,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "src/lib/integrations/product-publication-service.test.ts",
   },
   {
+    id: "misc.product-duplicates",
+    module: "Products (retail)",
+    entity: "Duplicate-SKU review and safe creation-race orphan archive (issue #1207)",
+    routes: ["products/duplicates"],
+    status: "route-only (by design)",
+    note: "the same report and guarded archive the operator scripts run, behind inventory.view + integrations.view to read and inventory.adjust + integrations.manage to decide; only two decisions exist (record «keep separate» in the audit log, or archive an unreferenced race orphan), both behind a review token and an explicit confirmation, and neither merges rows, moves a mapping or aggregates stock — so no MCP/AI verb may offer a merge",
+    test: "src/app/api/products/duplicates/route.test.ts",
+  },
+  {
     id: "misc.price-lists",
     module: "Products (retail)",
     entity: "Price lists & entries (bulk quick-update)",
