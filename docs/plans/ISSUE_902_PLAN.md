@@ -1108,6 +1108,10 @@ leaves with the **business's child key** and the login code with the **platform 
 the two URLs that were actually built — neither containing the other's credential. That is DoD #9
 and DoD #2 in one line of evidence.
 
+_Merged as `81de8d2` (PR #1213), all checks green. CI confirmed the database drill on a second
+platform (Windows + embedded PostgreSQL) after the same suite had already run here — the first time
+in this epic that a database test was green locally and in CI on the first attempt._
+
 ## 7. Verification run
 
 | Gate | Result |
