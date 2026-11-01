@@ -539,6 +539,73 @@ describe("staleness and alerting", () => {
       computeBackupAlert({ ...base, cloudEnabled: false, cloudLastSuccessAt: null }, now),
     ).toEqual({ level: "ok", reason: "ok" });
   });
+
+  /**
+   * Issue #903 §3 — the thresholds a plan may set. Two invariants, asserted from
+   * both sides: a threshold can make the alert more patient but never hide a
+   * stale backup, and a streak threshold can only raise the bar for "failed".
+   */
+  it("waits for the configured number of consecutive failures before alerting", () => {
+    const failing = { ...base, localLastError: "pg_dump exited 1", thresholds: { failureStreak: 3 } };
+    expect(computeBackupAlert({ ...failing, localFailureStreak: 1 }, now)).toEqual({ level: "ok", reason: "ok" });
+    expect(computeBackupAlert({ ...failing, localFailureStreak: 2 }, now)).toEqual({ level: "ok", reason: "ok" });
+    expect(computeBackupAlert({ ...failing, localFailureStreak: 3 }, now)).toEqual({
+      level: "error",
+      reason: "local_failed",
+    });
+    // The same rule for the cloud half, and it still stays quiet when cloud is off.
+    const cloudFailing = { ...base, cloudLastError: "unreachable", thresholds: { failureStreak: 2 } };
+    expect(computeBackupAlert({ ...cloudFailing, cloudFailureStreak: 1 }, now)).toEqual({ level: "ok", reason: "ok" });
+    expect(computeBackupAlert({ ...cloudFailing, cloudFailureStreak: 2 }, now)).toEqual({
+      level: "error",
+      reason: "cloud_failed",
+    });
+    expect(
+      computeBackupAlert({ ...cloudFailing, cloudEnabled: false, cloudFailureStreak: 2 }, now),
+    ).toEqual({ level: "ok", reason: "ok" });
+  });
+
+  it("never treats a streak threshold below one as 'never alert'", () => {
+    expect(
+      computeBackupAlert({ ...base, localLastError: "boom", thresholds: { failureStreak: 0 } }, now),
+    ).toEqual({ level: "error", reason: "local_failed" });
+  });
+
+  it("widens the stale window when a threshold asks, and refuses to shrink it below the cadence", () => {
+    // 26h ago: inside the nightly 30h window, outside a 12h one — so the
+    // threshold has to be able to *widen* what counts as stale.
+    const almost = { ...base, localLastSuccessAt: "2026-07-20T10:00:00Z", cloudLastSuccessAt: "2026-07-20T10:00:00Z" };
+    expect(computeBackupAlert(almost, now)).toEqual({ level: "ok", reason: "ok" });
+    expect(computeBackupAlert({ ...almost, thresholds: { staleAfterHours: 30 } }, now)).toEqual({
+      level: "ok",
+      reason: "ok",
+    });
+    expect(computeBackupAlert({ ...almost, thresholds: { staleAfterHours: 36 } }, now)).toEqual({
+      level: "ok",
+      reason: "ok",
+    });
+    // A window shorter than the cadence would flag a healthy nightly backup, so
+    // it is ignored rather than obeyed.
+    expect(computeBackupAlert({ ...almost, thresholds: { staleAfterHours: 2 } }, now)).toEqual({
+      level: "ok",
+      reason: "ok",
+    });
+    // …and a genuinely old success still alerts under any of them: 314h ago is
+    // outside even the 200h window, so widening cannot hide it.
+    const old = { ...base, localLastSuccessAt: "2026-07-08T10:00:00Z" };
+    expect(computeBackupAlert({ ...old, thresholds: { staleAfterHours: 200 } }, now)).toEqual({
+      level: "error",
+      reason: "local_stale",
+    });
+  });
+
+  it("keeps behaving exactly as before when no thresholds are supplied", () => {
+    expect(computeBackupAlert(base, now)).toEqual({ level: "ok", reason: "ok" });
+    expect(computeBackupAlert({ ...base, thresholds: {} }, now)).toEqual({ level: "ok", reason: "ok" });
+    expect(
+      computeBackupAlert({ ...base, localLastError: "boom", thresholds: {} }, now),
+    ).toEqual({ level: "error", reason: "local_failed" });
+  });
 });
 
 describe("cloud artifact encryption", () => {

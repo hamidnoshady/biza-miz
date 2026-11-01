@@ -281,6 +281,12 @@ export const EXEMPT_TABLES = new Set([
   "backup_key_versions",
   "tenant_backup_business_policy",
   "tenant_backup_restore_approvals",
+  // Migration 0280 — the per-plan half of that policy: schedule, retention,
+  // capacity, alert thresholds and DR objectives keyed by `billing_plans.key`.
+  // A global catalogue row like `billing_plans` itself (no business_id at all),
+  // `platform_only` under FORCE RLS. A business is *subject* to its plan's
+  // policy; the plan row is never tenant data and never rides in an export.
+  "tenant_backup_plan_policy",
   // Issue #902 §9 item 3 — the supplier's statement and what we paid against it.
   // `billing_supplier_invoices` is the wholesale half of billing: a provider's
   // name, what it charged us, and the margin between that and the retail price a

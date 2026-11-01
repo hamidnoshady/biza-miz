@@ -22,6 +22,11 @@ interface ServiceView {
   uploadChunkBytes: number;
   maxParallelUploads: number;
   protectedRecoveryCopies: number;
+  /** Issue #903 §3 — fleet alert and disaster-recovery thresholds. */
+  alertStaleHours: number | null;
+  alertFailureStreak: number;
+  drillIntervalHours: number;
+  drRpoHours: number | null;
   lastCheckedAt: string | null;
   lastCheckOk: boolean | null;
   lastErrorCode: string | null;
@@ -103,6 +108,10 @@ export function TenantBackupServicePanel() {
       "uploadChunkBytes",
       "maxParallelUploads",
       "protectedRecoveryCopies",
+      "alertStaleHours",
+      "alertFailureStreak",
+      "drillIntervalHours",
+      "drRpoHours",
     ] as const) {
       const entered = draft[key];
       if (entered !== undefined && entered !== "") {
@@ -111,6 +120,12 @@ export function TenantBackupServicePanel() {
             ? entered
             : Number(entered);
       }
+    }
+    // The two nullable thresholds can be cleared back to "auto" / "not
+    // promised", which is different from "leave unchanged" — so they are sent
+    // as an explicit null when the operator emptied the box after editing it.
+    for (const key of ["alertStaleHours", "drRpoHours"] as const) {
+      if (draft[key] !== undefined && draft[key] === "") body[key] = null;
     }
     if (draft.accessKeyId) body.accessKeyId = draft.accessKeyId;
     if (draft.secretAccessKey) body.secretAccessKey = draft.secretAccessKey;
@@ -302,6 +317,26 @@ export function TenantBackupServicePanel() {
           </Field>
           <Field label="اندازه هر قطعه بارگذاری (بایت)">
             <input className={inputClass} inputMode="numeric" value={value("uploadChunkBytes")} onChange={(e) => setDraft({ ...draft, uploadChunkBytes: e.target.value })} disabled={!canWrite} />
+          </Field>
+        </div>
+
+        {/* Issue #903 §3 — the thresholds every plan inherits. Blank stale/RPO
+            means "not set": the stale window then follows the cadence and no
+            recovery point is promised, which the console reports as unset
+            rather than met. */}
+        <h3 className="mt-4 text-sm font-semibold">هشدار و بازیابی</h3>
+        <div className="mt-2 grid gap-3 sm:grid-cols-2">
+          <Field label="آستانهٔ کهنگی (ساعت، خالی = از فاصله محاسبه شود)">
+            <input className={inputClass} inputMode="numeric" value={value("alertStaleHours")} placeholder="خودکار" onChange={(e) => setDraft({ ...draft, alertStaleHours: e.target.value })} disabled={!canWrite} />
+          </Field>
+          <Field label="تعداد خطای پیاپی برای هشدار">
+            <input className={inputClass} inputMode="numeric" value={value("alertFailureStreak")} onChange={(e) => setDraft({ ...draft, alertFailureStreak: e.target.value })} disabled={!canWrite} />
+          </Field>
+          <Field label="فاصلهٔ آزمایش بازیابی (ساعت)">
+            <input className={inputClass} inputMode="numeric" value={value("drillIntervalHours")} onChange={(e) => setDraft({ ...draft, drillIntervalHours: e.target.value })} disabled={!canWrite} />
+          </Field>
+          <Field label="هدف نقطهٔ بازیابی (ساعت، خالی = وعده‌ای نیست)">
+            <input className={inputClass} inputMode="numeric" value={value("drRpoHours")} placeholder="تعیین‌نشده" onChange={(e) => setDraft({ ...draft, drRpoHours: e.target.value })} disabled={!canWrite} />
           </Field>
         </div>
       </Card>

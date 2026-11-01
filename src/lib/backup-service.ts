@@ -1166,7 +1166,26 @@ export interface BackupHealth {
   cloudLastSuccessAt: string | null;
   cloudLastError: string | null;
   alert: BackupAlert;
+  /**
+   * Issue #903 §3 — the thresholds the alert was computed with: the plan's stale
+   * window and failure streak, plus the drill cadence and recovery-point
+   * objective this business is held to.
+   */
+  thresholds: {
+    staleAfterHours: number;
+    failureStreak: number;
+    drillIntervalHours: number;
+    drRpoHours: number | null;
+  };
 }
+
+/**
+ * The newest finished run of one kind, plus how many *consecutive* failures it
+ * heads — the evidence a plan's `alert_failure_streak` threshold is judged
+ * against (issue #903 §3). Bounded at `FAILURE_STREAK_WINDOW` rows: a threshold
+ * is never larger than that, so reading more would cost a query for nothing.
+ */
+const FAILURE_STREAK_WINDOW = 10;
 
 async function latestRuns(businessId: string, kind: RunKind) {
   const [{ rows: successRows }, { rows: lastRows }] = await Promise.all([
@@ -1179,13 +1198,19 @@ async function latestRuns(businessId: string, kind: RunKind) {
     query<{ status: string; error: string | null }>(
       `SELECT status, error FROM backup_runs
         WHERE business_id = $1 AND kind = $2 AND status <> 'running'
-        ORDER BY started_at DESC LIMIT 1`,
-      [businessId, kind],
+        ORDER BY started_at DESC LIMIT $3`,
+      [businessId, kind, FAILURE_STREAK_WINDOW],
     ),
   ]);
+  let failureStreak = 0;
+  for (const row of lastRows) {
+    if (row.status !== "failed") break;
+    failureStreak += 1;
+  }
   return {
     lastSuccessAt: successRows[0]?.finished_at?.toISOString() ?? null,
     lastError: lastRows[0]?.status === "failed" ? lastRows[0].error : null,
+    failureStreak,
   };
 }
 
@@ -1213,8 +1238,22 @@ export async function getBackupHealth(businessId: string): Promise<BackupHealth>
     localLastError: local.lastError,
     cloudLastSuccessAt: localOnly ? null : cloud.lastSuccessAt,
     cloudLastError: localOnly ? null : cloud.lastError,
+    // Issue #903 §3 — the thresholds this business's plan puts in force, and the
+    // evidence they are judged against. Both are reported so the screen can say
+    // *why* it is quiet, not only that it is.
+    thresholds: {
+      staleAfterHours: policy.alertStaleHours,
+      failureStreak: policy.alertFailureStreak,
+    },
+    localFailureStreak: local.failureStreak,
+    cloudFailureStreak: localOnly ? 0 : cloud.failureStreak,
   };
-  return { ...input, scope: tenantBackupMode(), alert: computeBackupAlert(input) };
+  return {
+    ...input,
+    scope: tenantBackupMode(),
+    alert: computeBackupAlert(input),
+    thresholds: { ...input.thresholds, drillIntervalHours: policy.drillIntervalHours, drRpoHours: policy.drRpoHours },
+  };
 }
 
 export async function listBackupRuns(businessId: string): Promise<BackupRunRow[]> {
