@@ -30,6 +30,7 @@
 import { query } from "../db";
 import { decryptSecret, encryptSecret, resolveEncryptionKey } from "../integrations/secrets";
 import {
+  DEFAULT_PRODUCT_PATH,
   normaliseHost,
   resolveTorobWebsites,
   enrollable,
@@ -279,8 +280,9 @@ export async function connectTorobShop(input: {
   const { rows } = await query<Record<string, unknown>>(
     `INSERT INTO torob_shops
        (business_id, website_kind, source_connection_id, domain, authorization_state,
-        auth_mode, token_ciphertext, token_hint, publication_rule, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        auth_mode, token_ciphertext, token_hint, publication_rule, created_by,
+        public_product_path)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      ON CONFLICT (business_id, website_kind, source_connection_id) DO NOTHING
      RETURNING ${SELECT_COLUMNS}`,
     [
@@ -297,6 +299,9 @@ export async function connectTorobShop(input: {
       hint,
       input.publicationRule ?? "all",
       input.createdBy ?? null,
+      // The manager's own storefront route, copied at connect time so a feed has
+      // a page URL without the builder guessing one (migration 0280).
+      DEFAULT_PRODUCT_PATH[input.kind],
     ],
   );
 

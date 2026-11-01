@@ -142,6 +142,10 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
     GET: PERMISSIONS.torobView,
     POST: [PERMISSIONS.torobManage, PERMISSIONS.torobConfigure],
   },
+  // Building the shop's feed writes a run row, so it is a POST and it reads as
+  // `torob.view` — looking at what your catalogue would publish is reading, not
+  // managing the channel.
+  "/api/growth/torob/shops/[id]/feed": { POST: PERMISSIONS.torobView },
   "/api/messaging": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage },
   "/api/messaging/preview": { POST: PERMISSIONS.campaignsManage },
 };
