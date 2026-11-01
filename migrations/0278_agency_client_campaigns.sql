@@ -351,9 +351,21 @@ BEGIN
            OR NEW.leads_generated IS DISTINCT FROM OLD.leads_generated
            OR NEW.conversions IS DISTINCT FROM OLD.conversions
            OR NEW.revenue_rial IS DISTINCT FROM OLD.revenue_rial
-           OR NEW.metrics_source IS DISTINCT FROM OLD.metrics_source
-           OR NEW.party_id IS DISTINCT FROM OLD.party_id THEN
+           OR NEW.metrics_source IS DISTINCT FROM OLD.metrics_source THEN
             RAISE EXCEPTION 'a % campaign is closed; its figures were already reported', OLD.status
+                USING ERRCODE = '23514';
+        END IF;
+
+        -- The client is split out of the freeze above, born that way rather than
+        -- patched into it by 0279 the way 0274 and 0276 were. A closed campaign's
+        -- figures are what the client was reported and stay immutable always; whose
+        -- file it lives on is a different statement, and `mergeCustomers` has to be
+        -- able to make it. Without the split, one completed campaign on a duplicate
+        -- client record would refuse the merge outright — the bug 0279 exists to
+        -- fix, and a new table has no business shipping with it.
+        IF NEW.party_id IS DISTINCT FROM OLD.party_id
+           AND current_setting('app.ledger_party_move', true) IS DISTINCT FROM 'on' THEN
+            RAISE EXCEPTION 'client attribution moves only through an audited party merge'
                 USING ERRCODE = '23514';
         END IF;
 
