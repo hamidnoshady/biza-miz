@@ -119,6 +119,11 @@ class POS_Connector_Sync {
 		add_action( POS_CONNECTOR_CRON_PRODUCT_EXPORT, array( __CLASS__, 'continue_product_export' ), 10, 1 );
 		// A button press, run by cron instead of inside the admin request.
 		add_action( POS_CONNECTOR_CRON_MANUAL_JOB, array( __CLASS__, 'run_manual_job' ), 10, 1 );
+		// The cron probe (#1206): its callback running at all is the evidence
+		// that a scheduler invocation executed a due event. Bound before the
+		// `enabled` check below, like every other cron hook, so a store that
+		// disabled sync locally can still be told whether its cron works.
+		add_action( POS_CONNECTOR_CRON_PROBE, array( __CLASS__, 'run_cron_probe' ), 10, 1 );
 
 		$settings = pos_connector_settings();
 		if ( ! empty( $settings['enabled'] ) && ! empty( $settings['sync_customers'] ) ) {
@@ -1234,11 +1239,17 @@ class POS_Connector_Sync {
 	 * day-long drip.
 	 */
 	private static function record_server_paused() {
+		$now = current_time( 'mysql', true );
+		// A paused connection moved nothing, so it must not move the verified
+		// timestamp either (#1206 P0-2): `wp pos-connector doctor` and the app
+		// would otherwise read a paused store as a freshly synced one.
 		pos_connector_update_settings(
 			array(
-				'last_sync_ok_at' => current_time( 'mysql', true ),
-				'last_error'      => __( 'همگام‌سازی از سمت پنل متوقف شده است', 'pos-accounting-connector' ),
-				'last_run_stats'  => array( 'paused' => true, 'at' => current_time( 'mysql', true ) ),
+				'last_run_completed_at' => $now,
+				'last_cycle_verdict'    => POS_Connector_Health::PHASE_PAUSED,
+				'last_cycle_phases'     => array( POS_Connector_Health::phase( 'run', POS_Connector_Health::PHASE_PAUSED, 0 ) ),
+				'last_error'            => __( 'همگام‌سازی از سمت پنل متوقف شده است', 'pos-accounting-connector' ),
+				'last_run_stats'        => array( 'paused' => true, 'at' => $now ),
 			)
 		);
 		POS_Connector_Log::info( 'paused', 'همگام‌سازی از سمت پنل متوقف شده است' );
@@ -1287,6 +1298,9 @@ class POS_Connector_Sync {
 	 * Serialised with a short lock: `wp pos-connector sync` and `wp cron event
 	 * run --due-now` are both documented ways to drive the plugin, and two runs
 	 * at once would lease and apply the same jobs twice.
+	 *
+	 * Returns the run's phase results and its `verdict` (#1206 P0); `pushed`
+	 * and `applied` stay for the callers that only print them.
 	 */
 	public static function run( $gate = null ) {
 		$settings = pos_connector_settings();
@@ -1303,30 +1317,46 @@ class POS_Connector_Sync {
 		$token = POS_Connector_Lock::acquire( 'run', POS_Connector_Health::RUN_LOCK_TTL_SECONDS, time(), $store );
 		if ( false === $token ) {
 			POS_Connector_Log::info( 'run', 'run_locked' );
-			return array( 'locked' => true, 'pushed' => 0, 'applied' => 0 );
+			return array( 'locked' => true, 'pushed' => 0, 'applied' => 0, 'verdict' => 'skipped', 'phases' => array() );
 		}
 		try {
 			return self::run_locked( $settings, is_array( $gate ) ? $gate : null );
 		} finally {
 			POS_Connector_Lock::release( 'run', $token, $store );
-			self::$previous_run = null;
 		}
 	}
 
-	/** What `telemetry()` should say about the run in progress: when the previous one started, and whether the cron had stopped. */
-	private static $previous_run = null;
-
+	/**
+	 * One fast-lane cycle.
+	 *
+	 * Three facts, kept apart on purpose (#1206):
+	 *
+	 *   - **the scheduler started** — `last_run_at`, written before anything
+	 *     can fail, because a run that dies mid-flight still proves the cron
+	 *     fires;
+	 *   - **the cycle completed** — `last_run_completed_at` plus the structured
+	 *     phases, success or not;
+	 *   - **the cycle was verified** — `last_sync_ok_at`, written only when no
+	 *     phase failed or half-applied. It used to be written unconditionally,
+	 *     so a dead link and an idle queue were both «همگام‌سازی موفق».
+	 */
 	private static function run_locked( array $settings, $gate ) {
+		$now   = time();
+		$prior = POS_Connector_Health::cron_state( $settings, $now );
 		// Recorded before anything can fail: «کرون اجرا می‌شود» and «همگام‌سازی
 		// موفق بود» are different facts, and the first is the one the stale
-		// check watches.
-		$status = POS_Connector_Health::cron_status( $settings, time() );
-		self::$previous_run = array(
-			'at'    => $settings['last_run_at'],
-			'stale' => $status['stale'],
-			'age'   => $status['age'],
+		// check watches. The gap this run ends becomes a *historical* incident
+		// with a resolution time — never the reported current state (#1206 P0-3).
+		pos_connector_update_settings(
+			array_merge(
+				array( 'last_run_at' => current_time( 'mysql', true ) ),
+				POS_Connector_Health::note_attempt( $settings, $prior, $now )
+			)
 		);
-		pos_connector_update_settings( array( 'last_run_at' => current_time( 'mysql', true ) ) );
+		// `$settings` is re-read so the incident this run may have just opened
+		// is visible to `note_cycle()` below: a run that ends a silence and
+		// completes cleanly is also the run that resolves it.
+		$settings = pos_connector_settings();
 		// A pending catalogue/customer export whose continuation was lost
 		// (cron option rebuilt, event fired while paused) is put back.
 		self::schedule_pending_product_exports();
@@ -1334,60 +1364,133 @@ class POS_Connector_Sync {
 		if ( null === $gate || true !== $gate['state'] ) {
 			$gate = self::gate();
 			if ( true !== $gate['state'] ) {
-				return 'paused' === $gate['state'] ? array( 'paused' => true, 'pushed' => 0, 'applied' => 0 ) : null;
+				return 'paused' === $gate['state'] ? array( 'paused' => true, 'pushed' => 0, 'applied' => 0, 'verdict' => POS_Connector_Health::PHASE_PAUSED, 'phases' => array() ) : null;
 			}
 		}
 		$client = $gate['client'];
 
-		$started = microtime( true );
-		$pushed  = self::push_queue_until( $client, $started );
+		$started  = microtime( true );
+		$first    = self::push_queue_until( $client, $started );
+		$phases   = array( $first );
 		$queue_counts = POS_Connector_Queue::counts();
-		// Deliver durable inbound events before accepting absolute stock writes.
-		$applied = ( (int) $queue_counts['pending'] + (int) $queue_counts['failed'] ) > 0 ? 0 : self::pull_jobs( $client );
+		if ( ( (int) $queue_counts['pending'] + (int) $queue_counts['failed'] ) > 0 ) {
+			// Deliver durable inbound events before accepting absolute stock
+			// writes. Recorded as `skipped`, so the cycle cannot claim to have
+			// verified the pull (#1206 P0).
+			$phases[] = POS_Connector_Health::phase( 'pull', POS_Connector_Health::PHASE_SKIPPED, 0, array( 'applied' => 0, 'jobs' => 0 ), 'local_queue_not_drained' );
+			$applied  = 0;
+		} else {
+			$pull     = self::pull_jobs( $client );
+			$phases[] = $pull;
+			$applied  = (int) $pull['counts']['applied'];
+		}
 		// Whatever budget is left ships the events a just-applied export job
 		// queued, so «همگام‌سازی محصولات» starts producing rows in the same
 		// run the plugin accepted the job.
-		$pushed += self::push_queue_until( $client, $started );
+		$second   = self::push_queue_until( $client, $started );
+		$phases[] = $second;
+		$pushed   = (int) $first['counts']['sent'] + (int) $second['counts']['sent'];
 
-		$stats = array(
-			'at'      => current_time( 'mysql', true ),
+		$verdict   = POS_Connector_Health::cycle_verdict( $phases );
+		$completed = current_time( 'mysql', true );
+		$stats     = array(
+			'at'      => $completed,
 			'pushed'  => $pushed,
 			'applied' => $applied,
+			'verdict' => $verdict['status'],
+			'phases'  => $phases,
 		);
 
-		pos_connector_update_settings(
-			array(
-				'last_sync_ok_at' => current_time( 'mysql', true ),
-				'last_error'      => '',
-				'last_run_stats'  => $stats,
-			)
+		$changes = array(
+			'last_run_completed_at' => $completed,
+			'last_run_stats'        => $stats,
+			'last_cycle_verdict'    => $verdict['status'],
+			'last_cycle_phases'     => $phases,
+			// A failed cycle must not leave the previous cycle's empty error
+			// standing as if nothing had gone wrong.
+			'last_error'            => $verdict['verified'] ? '' : self::cycle_error_message( $verdict ),
 		);
+		if ( $verdict['verified'] ) {
+			$changes['last_sync_ok_at'] = $completed;
+		}
+		if ( $verdict['dataMoved'] > 0 ) {
+			$changes['last_data_applied_at'] = $completed;
+		}
+		if ( $verdict['verified'] ) {
+			$changes = array_merge( $changes, POS_Connector_Health::note_cycle( $settings, $verdict, $completed ) );
+		} elseif ( ! empty( $settings['last_cycle_verdict'] ) && $verdict['status'] !== $settings['last_cycle_verdict'] ) {
+			POS_Connector_Log::error( 'run', 'cycle_' . $verdict['status'] );
+		}
+		pos_connector_update_settings( $changes );
+		// Retention is about housekeeping, not about the verdict: a connector
+		// that has been failing for a week must not also grow its tables.
 		POS_Connector_Queue::prune();
 		POS_Connector_Log::prune();
 
 		return $stats;
 	}
 
+	/** A short, secret-free line for the «نیاز به توجه» box; the phases hold the detail. */
+	private static function cycle_error_message( array $verdict ) {
+		$errors = implode( ', ', $verdict['errors'] );
+		return '' === $errors
+			? __( 'دورهٔ همگام‌سازی کامل نشد؛ گزارش رویدادها را ببینید.', 'pos-accounting-connector' )
+			: sprintf(
+				/* translators: %s: one or more sanitized phase errors */
+				__( 'دورهٔ همگام‌سازی کامل نشد (%1$s). وضعیت را در «عیب‌یابی» ببینید.', 'pos-accounting-connector' ),
+				$errors
+			);
+	}
+
 	/**
-	 * Push batches until the queue is empty, a batch stops making progress, or
-	 * the run's time budget runs out.
+	 * Push batches until the queue is empty, no batch makes progress, or the
+	 * run's time budget runs out; report the rounds as one structured phase.
 	 *
-	 * `push_queue` returns 0 both when there is nothing left and when the app
-	 * could not be reached — in both cases looping would only hammer the same
-	 * failure, so 0 is where this stops. A batch that delivered *some* rows
-	 * (the app rejects events one by one, not wholesale) keeps the loop going:
-	 * those are the backlog minutes of a first sync.
+	 * A batch that delivered *some* rows (the app rejects events one by one,
+	 * not wholesale) keeps the loop going: those are the backlog minutes of a
+	 * first sync. A batch that moved nothing stops it — an empty queue and an
+	 * unreachable app are answered by the phase's own status now, instead of
+	 * both being `0`.
+	 *
+	 * @return array{phase:string,status:string,durationMs:int,counts:array<string,int>,error:string}
 	 */
 	private static function push_queue_until( POS_Connector_Client $client, $started_at ) {
-		$total = 0;
+		$rank   = array(
+			POS_Connector_Health::PHASE_EMPTY   => 0,
+			POS_Connector_Health::PHASE_OK      => 1,
+			POS_Connector_Health::PHASE_SKIPPED => 1,
+			POS_Connector_Health::PHASE_PARTIAL => 2,
+			POS_Connector_Health::PHASE_FAILED  => 3,
+		);
+		$status = POS_Connector_Health::PHASE_EMPTY;
+		$total  = 0;
+		$failed = 0;
+		$rounds = 0;
+		$error  = '';
 		do {
-			$sent = self::push_queue( $client );
-			$total += $sent;
+			$phase   = self::push_queue( $client );
+			++$rounds;
+			$total  += (int) $phase['counts']['sent'];
+			$failed += (int) $phase['counts']['failed'];
+			if ( ( $rank[ $phase['status'] ] ?? 0 ) > $rank[ $status ] ) {
+				$status = $phase['status'];
+			}
+			if ( '' === $error && '' !== $phase['error'] ) {
+				$error = $phase['error'];
+			}
+			$sent = (int) $phase['counts']['sent'];
 		} while (
 			$sent > 0
+			&& POS_Connector_Health::PHASE_FAILED !== $phase['status']
 			&& ( microtime( true ) - $started_at ) < self::PUSH_TIME_BUDGET_SECONDS
 		);
-		return $total;
+		return POS_Connector_Health::phase(
+			'push',
+			$status,
+			( microtime( true ) - $started_at ) * 1000,
+			array( 'sent' => $total, 'failed' => $failed, 'rounds' => $rounds ),
+			$error
+		);
 	}
 
 	/**
@@ -1524,6 +1627,9 @@ class POS_Connector_Sync {
 				// Issue #939: re-send only the taxonomy tree.
 				'taxonomy_export',
 				'taxonomy_ensure',
+				// #1206 P0: the app only offers «تست کرون» to a plugin that can run
+				// this, because an older plugin throws plugin_version_unsupported.
+				'cron_probe',
 			),
 		);
 	}
@@ -1531,29 +1637,59 @@ class POS_Connector_Sync {
 		private static function telemetry() {
 			$settings = pos_connector_settings();
 			$counts   = POS_Connector_Queue::counts();
-			if ( is_array( self::$previous_run ) ) {
-				$cron = self::$previous_run;
-			} else {
-				$status = POS_Connector_Health::cron_status( $settings, time() );
-				$cron   = array( 'at' => $settings['last_run_at'], 'stale' => $status['stale'], 'age' => $status['age'] );
-			}
+			// #1206 P0-3: graded NOW, from the `last_run_at` this run has just
+			// refreshed — not from the previous run's staleness. Advertising a
+			// silence that this very run ended made a recovered store show
+			// «زمان‌بند مدتی اجرا نشده بود» until some later report. The gap is
+			// still reported, as history: `previousOutageAt` + `recoveredAt`.
+			$cron     = POS_Connector_Health::cron_state( $settings, time() );
+			$next_fast = wp_next_scheduled( POS_CONNECTOR_CRON_HOOK );
 			return array(
 				'pluginVersion'       => POS_CONNECTOR_VERSION,
 				'siteUrl'             => home_url(),
 				'wordpressVersion'    => get_bloginfo( 'version' ),
 				'woocommerceVersion'  => defined( 'WC_VERSION' ) ? WC_VERSION : null,
 				'phpVersion'          => PHP_VERSION,
-				// `lastSuccessfulRun` keeps its 1.x name; it is now the last FULL
-				// sync (handshake, push, pull), never a button press — the old
-				// value moved on «آزمایش اتصال» and hid two days of dead cron.
+				// `lastSuccessfulRun` keeps its 1.x name; it is now the last
+				// VERIFIED cycle — every phase succeeded or was verified empty,
+				// never a button press and never a failed push (#1206 P0-2).
 				'lastSuccessfulRun'   => $settings['last_sync_ok_at'],
-				// When the fast lane last started (before this run, when this is
-				// one), and whether it had stopped: a run that follows a long
-				// silence reports the silence it ended.
-				'lastRunAt'           => $cron['at'],
-				'cronStale'           => $cron['stale'],
-				'cronGapSeconds'      => $cron['age'],
-				'fastIntervalSeconds' => POS_Connector_Health::FAST_INTERVAL_SECONDS,
+				'lastVerifiedCycleAt' => $settings['last_sync_ok_at'],
+				// When the fast lane last started, and when it last finished —
+				// the second is what tells a slow cycle from a dead scheduler.
+				'lastRunAt'                => $settings['last_run_at'],
+				'fastHandlerLastStartedAt' => $settings['last_run_at'],
+				'fastHandlerLastCompletedAt' => $settings['last_run_completed_at'],
+				// Last cycle that actually moved data, distinct from a verified
+				// empty round trip.
+				'lastActualDataAppliedAt'  => $settings['last_data_applied_at'],
+				'lastPingOkAt'             => $settings['last_ping_ok_at'],
+				// Current scheduler state and why; `stale`/`cronGapSeconds` stay
+				// for older apps, now measured from the same fresh reference.
+				'currentCronState'         => $cron['state'],
+				'cronStateReason'          => $cron['reason'],
+				'cronStale'                => $cron['stale'],
+				'cronGapSeconds'           => $cron['age'],
+				'cronMissedIntervals'      => $cron['missedIntervals'],
+				'fastIntervalSeconds'      => POS_Connector_Health::FAST_INTERVAL_SECONDS,
+				// The plugin's own thresholds, so the app grades with the numbers
+				// this build actually uses instead of assuming old ones.
+				'cronDelayedAfterSeconds'  => POS_Connector_Health::delayed_after_seconds(),
+				'cronCriticalAfterSeconds' => POS_Connector_Health::CRITICAL_AFTER_SECONDS,
+				// The previous interruption and its resolution: history, never
+				// the live warning.
+				'previousOutageAt'         => $settings['incident_at'],
+				'previousOutageSeconds'    => (int) $settings['incident_gap_seconds'],
+				'previousOutageState'      => $settings['incident_previous_state'],
+				'previousOutageOpen'       => ! empty( $settings['incident_open'] ),
+				'recoveredAt'              => $settings['incident_recovered_at'],
+				// The last cron probe (#1206 P0): the app grades queued → executed
+				// → reported itself, and stamps when the report actually arrived.
+				'cronProbe'                => self::cron_probe_telemetry( $settings ),
+				// What the last cycle's phases actually reported (#1206 P0-2).
+				'lastCycleVerdict'         => $settings['last_cycle_verdict'],
+				'lastCyclePhases'          => array_values( (array) $settings['last_cycle_phases'] ),
+				'nextDueAt'                => $next_fast ? gmdate( 'c', (int) $next_fast ) : null,
 				'systemCron'          => pos_connector_uses_system_cron(),
 				'productExportsInProgress' => count( self::pending_product_exports() ),
 				'lastLocalError'      => $settings['last_error'],
@@ -1578,6 +1714,28 @@ class POS_Connector_Sync {
 					'catalogue' => $settings['resync_products_schedule'],
 					'lookback'  => (int) $settings['resync_orders_days'],
 				),
+			);
+		}
+
+		/**
+		 * The probe as telemetry: ids and timestamps only, never a payload.
+		 *
+		 * @param array $settings pos_connector_settings().
+		 * @return array|null Null when no probe has ever been run, so the app can
+		 *                    tell "never tested" from "tested and queued".
+		 */
+		private static function cron_probe_telemetry( array $settings ) {
+			$probe = isset( $settings['cron_probe'] ) && is_array( $settings['cron_probe'] ) ? $settings['cron_probe'] : array();
+			if ( empty( $probe['id'] ) ) {
+				return null;
+			}
+			return array(
+				'id'          => (string) $probe['id'],
+				'origin'      => isset( $probe['origin'] ) ? (string) $probe['origin'] : 'admin',
+				'queuedAt'    => isset( $probe['queued_at'] ) ? (string) $probe['queued_at'] : '',
+				'executedAt'  => isset( $probe['executed_at'] ) ? (string) $probe['executed_at'] : '',
+				'reportedAt'  => isset( $probe['reported_at'] ) ? (string) $probe['reported_at'] : '',
+				'error'       => isset( $probe['error'] ) ? substr( (string) $probe['error'], 0, 120 ) : '',
 			);
 		}
 
@@ -1616,12 +1774,21 @@ class POS_Connector_Sync {
 
 	/**
 	 * Send queued events in batches, marking each row by what the app said
-	 * about it. Returns how many were delivered.
+	 * about it.
+	 *
+	 * Returns a structured phase result (#1206 P0), not a bare count: `0`
+	 * used to mean both «صف خالی بود» and «سامانه پاسخ نداد», which is how a
+	 * failed push could be recorded as a successful sync cycle.
+	 *
+	 * @return array{phase:string,status:string,durationMs:int,counts:array<string,int>,error:string}
 	 */
 	public static function push_queue( POS_Connector_Client $client ) {
-		$rows = POS_Connector_Queue::due( self::PUSH_BATCH_ROWS );
+		$started = microtime( true );
+		$rows    = POS_Connector_Queue::due( self::PUSH_BATCH_ROWS );
 		if ( empty( $rows ) ) {
-			return 0;
+			// Explicitly verified empty: the queue was read and had nothing
+			// due. That is a healthy phase, but a distinct one from «sent».
+			return POS_Connector_Health::phase( 'push', POS_Connector_Health::PHASE_EMPTY, ( microtime( true ) - $started ) * 1000, array( 'sent' => 0, 'failed' => 0, 'batched' => 0 ) );
 		}
 
 		$events = array();
@@ -1658,11 +1825,18 @@ class POS_Connector_Sync {
 				POS_Connector_Queue::mark_failed( $id, $response['error'] );
 			}
 			POS_Connector_Log::error( 'push', $response['error'] );
-			return 0;
+			return POS_Connector_Health::phase(
+				'push',
+				POS_Connector_Health::PHASE_FAILED,
+				( microtime( true ) - $started ) * 1000,
+				array( 'sent' => 0, 'failed' => count( $by_id ), 'batched' => count( $by_id ) ),
+				$response['error']
+			);
 		}
 
 		$sent   = array();
 		$failed = 0;
+		$error  = '';
 		foreach ( (array) ( isset( $response['data']['results'] ) ? $response['data']['results'] : array() ) as $result ) {
 			$delivery_id = isset( $result['deliveryId'] ) ? $result['deliveryId'] : '';
 			if ( ! isset( $by_id[ $delivery_id ] ) ) {
@@ -1674,33 +1848,66 @@ class POS_Connector_Sync {
 				$sent[] = $by_id[ $delivery_id ];
 			} else {
 				++$failed;
+				if ( '' === $error ) {
+					$error = isset( $result['error'] ) ? (string) $result['error'] : 'rejected';
+				}
 				POS_Connector_Queue::mark_failed( $by_id[ $delivery_id ], isset( $result['error'] ) ? $result['error'] : 'rejected' );
 			}
 		}
 
 		POS_Connector_Queue::mark_sent( $sent );
 		POS_Connector_Log::info( 'push', sprintf( 'ارسال‌شده: %d، ناموفق: %d', count( $sent ), $failed ) );
-		return count( $sent );
+		// A batch the app rejected row by row is delivered but not applied in
+		// full: `partial`, never `ok` (#1206 P0).
+		$status = $failed > 0 ? ( count( $sent ) > 0 ? POS_Connector_Health::PHASE_PARTIAL : POS_Connector_Health::PHASE_FAILED ) : POS_Connector_Health::PHASE_OK;
+		return POS_Connector_Health::phase(
+			'push',
+			$status,
+			( microtime( true ) - $started ) * 1000,
+			array( 'sent' => count( $sent ), 'failed' => $failed, 'batched' => count( $by_id ) ),
+			$error
+		);
 	}
 
 	/**
 	 * Lease jobs from the app, apply each to WooCommerce, and report back.
-	 * Returns how many were applied.
+	 *
+	 * Returns a structured phase (#1206 P0). Two things a count cannot say:
+	 * applying without a successful ACK leaves the app holding the job as
+	 * pending — so a re-apply happens — and a `skipped` ack is a deliberate
+	 * decision, not a success. Both are visible here.
+	 *
+	 * @return array{phase:string,status:string,durationMs:int,counts:array<string,int>,error:string}
 	 */
 	public static function pull_jobs( POS_Connector_Client $client ) {
+		$started  = microtime( true );
 		$response = $client->post( '/api/integrations/wordpress/jobs' );
 		if ( ! $response['ok'] ) {
 			POS_Connector_Log::error( 'pull', $response['error'] );
-			return 0;
+			return POS_Connector_Health::phase(
+				'pull',
+				POS_Connector_Health::PHASE_FAILED,
+				( microtime( true ) - $started ) * 1000,
+				array( 'applied' => 0, 'failed' => 0, 'jobs' => 0 ),
+				$response['error']
+			);
 		}
 
 		$jobs = isset( $response['data']['jobs'] ) ? (array) $response['data']['jobs'] : array();
 		if ( empty( $jobs ) ) {
-			return 0;
+			return POS_Connector_Health::phase(
+				'pull',
+				POS_Connector_Health::PHASE_EMPTY,
+				( microtime( true ) - $started ) * 1000,
+				array( 'applied' => 0, 'failed' => 0, 'jobs' => 0 )
+			);
 		}
 
 		$results = array();
 		$applied = 0;
+		$skipped = 0;
+		$failed  = 0;
+		$error   = '';
 		foreach ( $jobs as $job ) {
 			$job    = (array) $job;
 			$job_id = isset( $job['id'] ) ? (string) $job['id'] : '';
@@ -1739,6 +1946,7 @@ class POS_Connector_Sync {
 					$ack['status'] = 'skipped';
 					$ack['error']  = substr( $outcome, strlen( 'skipped:' ) );
 					$results[]     = $ack;
+					++$skipped;
 					continue;
 				}
 				$ack['status'] = 'done';
@@ -1751,10 +1959,17 @@ class POS_Connector_Sync {
 				$ack['status'] = 'failed';
 				$ack['error']  = POS_Connector_Log::scrub_urls( $e->getMessage() );
 				$results[]     = $ack;
+				if ( '' === $error ) {
+					$error = $ack['error'];
+				}
+				++$failed;
 				POS_Connector_Log::error( 'job:' . $type, $e->getMessage() );
 			}
 		}
 
+		// Applying is not delivering (#1206 P0): until the app has this ACK
+		// it still holds every job above as pending and will lease it again.
+		$ack_error = '';
 		if ( ! empty( $results ) ) {
 			$ack = $client->post( '/api/integrations/wordpress/jobs/ack', array( 'results' => $results ) );
 			if ( ! $ack['ok'] ) {
@@ -1762,10 +1977,24 @@ class POS_Connector_Sync {
 				// app still holds the jobs as pending, so they will be leased
 				// again — the one state where a re-apply is not a no-op.
 				POS_Connector_Log::error( 'ack', $ack['error'] );
+				$ack_error = 'ack_' . $ack['error'];
 			}
 		}
 		POS_Connector_Log::info( 'pull', sprintf( 'کار دریافتی: %d', count( $jobs ) ) );
-		return $applied;
+
+		$counts = array( 'applied' => $applied, 'skipped' => $skipped, 'failed' => $failed, 'jobs' => count( $jobs ) );
+		$status = POS_Connector_Health::PHASE_OK;
+		if ( '' !== $ack_error ) {
+			// Applied but unacknowledged is `partial`, never `failed`: the store
+			// already holds the values, and a retry is the app's decision.
+			$status = POS_Connector_Health::PHASE_PARTIAL;
+			$error  = $ack_error;
+		} elseif ( $failed > 0 ) {
+			$status = $applied > 0 || $skipped > 0 ? POS_Connector_Health::PHASE_PARTIAL : POS_Connector_Health::PHASE_FAILED;
+		} elseif ( $skipped > 0 && 0 === $applied ) {
+			$status = POS_Connector_Health::PHASE_SKIPPED;
+		}
+		return POS_Connector_Health::phase( 'pull', $status, ( microtime( true ) - $started ) * 1000, $counts, $error );
 	}
 
 	/**
@@ -1897,6 +2126,18 @@ class POS_Connector_Sync {
 		$parent   = isset( $job['parentRemoteId'] ) ? (int) $job['parentRemoteId'] : 0;
 
 		switch ( $type ) {
+			case 'cron_probe':
+				// #1206 P0: the app asked for proof that its scheduler runs. This
+				// job being applied already means the pull ran inside a cron
+				// invocation; the probe adds a *second*, separately scheduled
+				// one, so the app is not trusting a single lucky pass.
+				$requested = isset( $payload['probeId'] ) ? (string) $payload['probeId'] : '';
+				if ( ! preg_match( '/^[a-f0-9]{32}$/D', $requested ) ) {
+					throw new Exception( 'invalid_probe_id' );
+				}
+				$probe = self::schedule_cron_probe( 'app' );
+				return array( 'probeId' => $probe['id'], 'requestedProbeId' => $requested, 'dueAt' => $probe['due_at'] );
+
 			case 'taxonomy_ensure':
 				return self::ensure_reviewed_attribute( $payload );
 			case 'stock':
@@ -2698,6 +2939,87 @@ class POS_Connector_Sync {
 				self::run_resync_content();
 				return;
 		}
+	}
+
+	/**
+	 * Queue a cron probe (#1206 P0).
+	 *
+	 * Nothing here claims anything: a true return means WordPress recorded a
+	 * single event due in a few seconds. `run_cron_probe()` is what turns that
+	 * into evidence, and only a separate scheduler invocation can call it.
+	 *
+	 * @param string $origin `admin` (the button) or `app` (a job from the panel).
+	 * @return array The stored probe record.
+	 */
+	public static function schedule_cron_probe( $origin = 'admin' ) {
+		$now   = time();
+		$id    = bin2hex( random_bytes( 16 ) );
+		$probe = array(
+			'id'          => $id,
+			'origin'      => 'app' === $origin ? 'app' : 'admin',
+			'queued_at'   => gmdate( 'Y-m-d H:i:s', $now ),
+			'due_at'      => gmdate( 'Y-m-d H:i:s', $now + 2 ),
+			'executed_at' => '',
+			'reported_at' => '',
+			'error'       => '',
+		);
+		pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+
+		// Five seconds out, not zero: an event due "now" can be executed by the
+		// same traffic tick that queued it, which would prove nothing about a
+		// scheduler. A due-now crontab picks it up on its next pass.
+		if ( false === wp_schedule_single_event( $now + 5, POS_CONNECTOR_CRON_PROBE, array( $id ) ) ) {
+			$probe['error'] = 'schedule_failed';
+			pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+			POS_Connector_Log::error( 'probe', 'schedule_failed' );
+		}
+		return $probe;
+	}
+
+	/**
+	 * The probe's cron callback — the whole point of it.
+	 *
+	 * If this function is running, a real scheduler invocation executed a due
+	 * event, which is the fact a connection test cannot establish. It then
+	 * sends one signed handshake so the app learns the same thing, and records
+	 * whether that report left. It never syncs data and never moves a success
+	 * timestamp: a probe must be safe to press on a broken connection.
+	 *
+	 * @param string $id The correlation id the event was queued with.
+	 */
+	public static function run_cron_probe( $id ) {
+		$settings = pos_connector_settings();
+		$probe    = isset( $settings['cron_probe'] ) && is_array( $settings['cron_probe'] ) ? $settings['cron_probe'] : array();
+		$id       = is_string( $id ) ? $id : '';
+		// A stale or duplicated event (a schedule cleared and re-created, an id
+		// that is not the current probe) is ignored rather than allowed to
+		// overwrite a newer probe's evidence.
+		if ( '' === $id || empty( $probe['id'] ) || ! hash_equals( (string) $probe['id'], $id ) ) {
+			POS_Connector_Log::info( 'probe', 'stale_probe_ignored' );
+			return;
+		}
+
+		$probe['executed_at'] = gmdate( 'Y-m-d H:i:s' );
+		$probe['error']       = '';
+		pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+		POS_Connector_Log::info( 'probe', 'executed_by_scheduler' );
+
+		$client = POS_Connector_Client::from_settings();
+		if ( ! $client ) {
+			$probe['error'] = 'not_configured';
+			pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+			return;
+		}
+		// One handshake carries the probe; its telemetry is what the app grades.
+		$response = self::handshake( $client );
+		if ( ! empty( $response['ok'] ) ) {
+			$probe['reported_at'] = gmdate( 'Y-m-d H:i:s' );
+			POS_Connector_Log::info( 'probe', 'telemetry_reported' );
+		} else {
+			$probe['error'] = 'report_failed:' . ( isset( $response['error'] ) ? (string) $response['error'] : 'unknown' );
+			POS_Connector_Log::error( 'probe', $probe['error'] );
+		}
+		pos_connector_update_settings( array( 'cron_probe' => $probe ) );
 	}
 
 	/**
