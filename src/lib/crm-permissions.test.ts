@@ -135,6 +135,13 @@ const ROUTES: RouteAccess[] = [
     action: "write",
     note: "Declared as a `routes` refinement: the identity graph is management work",
   },
+  {
+    route: "customers/[id]/organization/route.ts",
+    method: "GET",
+    section: "persons",
+    action: "read",
+    note: "Issue #1128 §A. Read-only on `crm.view`, the same key the relationship graph beside it uses, because it is a *reading* of that graph's own `parent_organization`/`branch_of` edges rather than new data — nothing here is visible that `/relationships` does not already return. Writes stay on that route, which already gates on `crm.manage` and already audits; a second write path would be a second place to get both wrong",
+  },
   { route: "customers/[id]/timeline/route.ts", method: "GET", section: "persons", action: "read" },
   {
     route: "quality/route.ts",
