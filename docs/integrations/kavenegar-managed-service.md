@@ -286,6 +286,36 @@ and nothing provisions until it is on.
 
 ---
 
+## 7a. Failure drills (DoD #11) — what to expect, and how to re-run it
+
+The drill is code, not a checklist: two suites break the platform on purpose and assert what a
+customer sees. Run them after any change to the transport, the drain or the error tables.
+
+```bash
+# pure: supplier answer -> classification -> tenant sentence
+npx vitest run src/lib/kavenegar/failure-drills.test.ts src/lib/sms-kavenegar.test.ts
+
+# real database, no network: a broken business can still log in
+npm run db:dev:start && npm run db:migrate
+DATABASE_URL=postgres://pos:pos@127.0.0.1:5432/pos \
+  npx vitest run --config vitest.db.config.ts integration/kavenegar-failure-drills.integration.test.ts
+```
+
+Expected outcome per drill — the left column is the supplier, the right is the customer:
+
+| Drill | Marketing | Login |
+| --- | --- | --- |
+| Child suspended | nothing dispatched, rows stay queued, no charge | **still delivered** on the platform key |
+| Wallet empty | nothing dispatched (refused before the first send) | **still delivered** |
+| Campaign paused | queue not claimed | **still delivered** |
+| Provider outage / rate limit | row requeued with backoff, no charge | **still delivered** |
+| Carrier stalls | row requeued | fails with «به‌موقع پاسخ نداد؛ کد ارسال نشد» |
+| Platform credential rejected | account `attention_required` | fails with the Persian operator-fault sentence |
+| No credential at all, production | nothing | refuses; **never logs the code** |
+
+The last row is the one to re-check by hand after any change to `sms.ts`: printing a live code is the
+failure that is invisible in tests that only assert "a code was sent".
+
 ## 8. Failure modes and what happens
 
 | Failure | Behaviour |
