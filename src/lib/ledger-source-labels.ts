@@ -126,6 +126,14 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   loyalty_store_credit_use: "مصرف اعتبار فروشگاهی",
   message_campaign: "هزینهٔ کمپین پیامکی",
 
+  // Issue #1128 §D — an advertising agency's pass-through cost. It needs its own
+  // label rather than sharing one with an ordinary expense, because the two are not
+  // the same thing to the reader of a journal: an expense is the business's own cost,
+  // and this is money spent on a client's behalf that the client is going to be asked
+  // for. The wording follows account 1270's own name («هزینه‌های قابل بازدریافت از
+  // مشتری») so the entry and the account it debits read as one idea.
+  agency_reimbursable_cost: "هزینهٔ بازدریافتی از کارفرما",
+
   // The ledger's own documents
   manual: "سند دستی",
   manual_adjustment: "تعدیل دستی",
