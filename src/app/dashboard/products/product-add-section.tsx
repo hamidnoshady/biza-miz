@@ -800,7 +800,20 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   return (
     <div className="grid min-w-0 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-5">
       <form id="product-add-form" noValidate onSubmit={save} className="min-w-0 space-y-4">
-        {createdProductId ? <SectionCard title="انتشار اختیاری محصول ثبت‌شده"><ProductPublicationPanel localId={createdProductId} /></SectionCard> : null}
+        {createdProductId ? (
+          <SectionCard title="انتشار اختیاری محصول ثبت‌شده">
+            {/* A product this form just created has no store mapping yet and no
+                duplicate history: the row controls are «انتشار در فروشگاه» /
+                «پیوند به محصول موجود», with nothing to refresh on this screen. */}
+            <ProductPublicationPanel
+              localId={createdProductId}
+              links={[]}
+              duplicate={false}
+              open
+              onQueued={() => {}}
+            />
+          </SectionCard>
+        ) : null}
         <div aria-live="assertive">
           <ErrorBox>{error}</ErrorBox>
         </div>
