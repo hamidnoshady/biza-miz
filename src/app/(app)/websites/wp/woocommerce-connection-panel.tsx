@@ -25,6 +25,7 @@ import { useFeatureLocked } from "@/components/feature-lock";
 import { api, ErrorBox, errorMessageOrRaw, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
 import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
+import { WORDPRESS_PLUGIN_ZIP_URL } from "@/lib/integrations/wp-plugin-release";
 import { formatDateTime } from "./format";
 import { SyncSettingsSection } from "./woo-store-sections";
 
@@ -793,7 +794,7 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
           <li>
             فایل{" "}
             <a
-              href="https://updates.eshobe.app/wordpress/pos-accounting-connector/pos-accounting-connector.zip"
+              href={WORDPRESS_PLUGIN_ZIP_URL}
               className="font-medium text-primary hover:underline"
               dir="ltr"
             >

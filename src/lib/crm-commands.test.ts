@@ -88,6 +88,11 @@ describe("interpretCrmCommand", () => {
     for (const section of CRM_SECTION_KEYS) {
       const queries = [
         "امروز", "مشتریان", "سرنخ‌ها", "فرصت‌ها", "بریف", "پیشنهاد قیمت", "پیگیری‌ها",
+        // «کمپین» moved off the brief's alias list when 0278 gave a campaign a
+        // record of its own — before that, the brief was the nearest thing to point
+        // at. Aliases match longest-first, so the word now lands on the section that
+        // actually holds campaigns.
+        "کمپین",
         "تیکت‌ها",
         "بخش‌بندی", "رضایت", "کیفیت داده", "تکراری‌ها", "تطبیق", "سابقه", "تنظیمات",
         // Reached from the settings screen rather than the rail, but a person

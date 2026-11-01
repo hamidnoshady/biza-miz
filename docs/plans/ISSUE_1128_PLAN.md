@@ -123,6 +123,13 @@ way round. See «What this change does not build».
 | **Wave 8** — §A organisation service and route | `organizationStructureFor` in `crm-relationship-service.ts`: two queries — one for the hierarchy edges with `business_id` on each `parties` join, one grouped read over the four registers that name a client, restricted to this group's own parties. Returns `null` for a party that is not this tenant's. `GET /api/crm/customers/[id]/organization` on `crm.view`, read-only: writes stay on `/relationships`, which already gates and audits them |
 | **Wave 8** — §A organisation card | `customer-organization-card.tsx` on the 360° file, above «ارتباط‌ها». An indented, root-first list with each brand's work as a sentence rather than a grid of zeros, a link to the group's own file when this one is a brand, contradictions in words naming the parties to fix, and `paddingInlineStart` because the file is RTL. Renders nothing at all when the party is not part of a group |
 | **Wave 8** — §A organisation tests | `crm-org-structure.test.ts` (19, pure) and `integration/agency-org-structure.integration.test.ts` (12, real database). The suite pins the direction collapse against edges recorded both ways, each brand's work counted against that brand and nobody else's, a second tenant unable to resolve a party or pull one in through a join, a cycle naming only its own members, the depth bound, a contact not becoming a brand — and the *absence* of a campaign count, so adding one is a decision somebody makes |
+| **Wave 9** — §C campaign schema | `migrations/0278_agency_client_campaigns.sql`: one table, `agency_client_campaigns`. Downstream of the brief, the proposal, the contract and the project, so it carries five nullable reference FKs (`SET NULL`) and a trigger that validates each one belongs to this business *and* that a brief's or proposal's client equals the campaign's — §A's separation rule as a constraint. `party_id` NOT NULL, a `CA-` series with `UNIQUE (business_id, campaign_number)`, the window, `channels text[]`, `budget_rial` nullable and `spend_rial` NOT NULL DEFAULT 0 with **no CHECK between them** (decision 53), five attribution counts, `metrics_source` with exactly two values and `metrics_note` for the method (decision 54), RLS shape 1 with `ENABLE` + `FORCE`, `created_by` a bare uuid. The guard trigger allows DELETE only while planned and freezes a completed or cancelled campaign — with the cascade exemption and the audited-merge exemption, both narrower than they look (decision 56). Nothing in it posts |
+| **Wave 9** — §C campaign vocabulary | `src/lib/agency-campaign.ts`: five statuses, five acts and the chain between them (`planned → running ⇄ paused`, either to `completed` or `cancelled`, both terminal), the freeze/editable/deletable predicates and `isAgencyCampaignInFlight` — running *and* paused, because a paused campaign's budget is still committed. `agencyCampaignMetrics` with every ratio null on a zero denominator, `agencyCampaignBudget` with `over` as a first-class state, `isAgencyCampaignCurrent` inclusive at both ends, and `NullableFieldResult` (decision 55). Dates reuse `src/lib/iso-date.ts`'s calendar-aware validator rather than adding a fifth implementation of one. Channel vocabulary *is* `agency-brief`'s, asserted identical rather than copied. Pure, so the panel may import it |
+| **Wave 9** — §C campaign service | `src/lib/agency-campaign-service.ts`: eighteen refusal codes closed into `AGENCY_CAMPAIGN_ERROR_CODES` so the route's status map can be exhaustive over them; list, read, create, patch, action, delete. `countCampaignsByParty` answers a whole group's brands in one grouped read with `count(*) FILTER` for the in-flight subset — the piece wave 8's card was missing. The patch merges over the stored row, so `clicks` arriving alone is checked against stored impressions, and takes **no row lock**: the read exists to merge and to answer in words, but the authority on a closed record is 0278's trigger inside the write. Every statement carries its own `business_id`, inside every join |
+| **Wave 9** — §C campaign HTTP | Three routes under `/api/crm/client-campaigns/**`, in the CRM door for the reason decision 39 gives, with one exhaustive error map in `src/app/api/crm/campaign-guard.ts` over eighteen codes plus 0278's deliberate SQLSTATEs. The lifecycle step is on its own `/status` route and rides `crm.manage`: completing a campaign closes a claim about attribution rather than approving money moving, and §D's `approve` is the determination that does. A new CRM section key `campaigns` with its access row, its aliases (and «کمپین» moved off the brief's list, where it had been pointing at the nearest thing), and its place in the «فرصت‌ها» group |
+| **Wave 9** — §C campaign screen | `/crm/client-campaigns` and `campaigns-section.tsx`. Mostly arithmetic and dates rather than workflow, and §C's "no fake campaign performance" shows up as three refusals to pretend: no invented figure (every ratio «—» on a zero denominator), no platform to import from (two sources and no third), attribution stated beside the figure it explains. A closed campaign's controls are disabled rather than left to be refused, while its note fields stay open. The brief and proposal pickers hold only the chosen client's own records; the deal, project and contract pointers are shown but not settable, because project and contract live behind `workspace.view` and a CRM-only member must not get a directory of work they cannot see |
+| **Wave 9** — the audited merge door | `migrations/0279_agency_party_attribution_moves.sql`: a **bug fix in shipped code**, found by giving 0278's campaign a merge disposition. 0274 and 0276 each froze `party_id` inside their substance comparison, so `mergeCustomers` failed with a raw `23514` on the CRM's duplicates screen whenever either client held a confirmed brief or a sent proposal. 0279 redefines both guards — never editing an applied migration in place — with the attribution split out and honouring 0217's transaction-local flag, and adds `crm_party_attribution_moves` so every move is audited before the door opens. Five registry entries now declare it (decision 56) |
+| **Wave 9** — §C campaign tests | `agency-campaign.test.ts` (26, pure), `integration/agency-client-campaigns.integration.test.ts` (16, real database), `integration/agency-party-merge.integration.test.ts` (6, real database), `campaign-guard.test.ts` (6) and 66 assertions against 0278 run directly over Postgres. The integration suite covers what only a database can show: one number sequence under a race, an overspend recorded *and* reported as `over`, the four ratios and their nulls including `revenueRial: 0` giving no ROAS, list figures identical to detail figures, a one-field patch clearing nothing, the full lifecycle with its window requirements stated in words first, a closed campaign refused from both the service and a **raw** `UPDATE` that skips it, a foreign client refused by the trigger as `23514`, and two of one brand's campaigns concurrent in the same window. The merge suite pins both halves of decision 56 — the move lands with substance and lines byte-for-byte intact and an audit row written, and what was frozen stays frozen for every path that is not the audited merge |
 
 
 ## Decisions
@@ -707,6 +714,64 @@ Counting campaigns as zero was refused, and the integration suite pins the refus
 
 The card is not industry-gated. A corporate group with brands is not an agency idea — a wholesaler has the same shape — so, like §E under decision 32, this is gated by permission and not by trade. §A is the reason it was built, not a limit on who may use it.
 
+**Corrected in wave 9, and the correction is about the diagnosis rather than the decision.** Everything above about refusing to render a zero stands, and the integration suite still pins it. What was wrong is the word *blocked*: this document said §C needed "a missing dimension" on `growth_campaigns`, as though the fix were an `ALTER TABLE`. Reading #901's builder showed that adding a client there would have been a mistake rather than a small extension — that table's trigger vocabulary is exactly `pos_sale_settled` and its reward is `cashback`, so its party is the shopper earning money back, not an agency's client (decision 52). The missing thing was a missing *record*, and wave 9 added one. §A's concurrent campaigns are counted per brand from it, with the in-flight subset broken out, and the test that pinned the absence now pins the presence.
+
+
+### 52 — §C's campaign is a new table, and the name collision is the argument for it
+
+There are four unrelated records in this product that the word «campaign» already names. `growth_campaigns` is #901's **retail cashback automation**: `CAMPAIGN_TRIGGER_TYPES` is exactly `["pos_sale_settled"]`, `CAMPAIGN_REWARD_TYPES` is exactly `["cashback"]`, and its base is `net_paid` — the party it rewards is the shopper, and creating one issues no reward, no liability and no journal entry. `message_campaigns` is an SMS broadcast with its own credit ledger. `media_review_rounds.campaign_id` points at the first of those, not at anything an agency runs for a client. And `ai_projects` has no client column at all, so §B's project cannot be the campaign either.
+
+So 0278 adds `agency_client_campaigns` rather than extending any of them. The alternative — a client column on `growth_campaigns` — would have made one column mean two things in two trades, and the symptom would have been a report: a "campaigns by client" figure silently counting retail cashback automations, or an agency's media plan silently eligible to pay a shopper cashback. **A "missing column" diagnosis is only as good as the read of what the table is for**, and this wave's premise had to be overturned to find that out.
+
+What the new table is: downstream of the brief (what the client asked for), the proposal (the priced offer), the contract (what was signed) and the project (the work), so it may point at any of the four — and it records the window, the channels, the media money out, and the figures that came back. `UNIQUE (business_id, campaign_number)` over a `CA-` series from the shared register numbering, RLS shape 1 with `ENABLE` + `FORCE`, and nothing in it posts.
+
+### 53 — an overspend is recordable, and `over` is a state rather than an error
+
+0278 has **no CHECK of `spend_rial` against `budget_rial`**. A campaign that cost more than it was budgeted for is a thing that happens, and a schema that refuses to store it does not prevent it — it pushes the true figure into a note, where no report can read it and no client conversation can be had about it. The refusal would not have made the overspend less real; it would have made it invisible.
+
+So `agencyCampaignBudget` derives four states — `unbudgeted`, `under`, `at`, `over` — and the screen renders «فراتر از بودجه» with the amount past. `unbudgeted` is its own state rather than a zero budget, because "no budget was agreed" and "the budget was zero" are different claims about a client conversation.
+
+The same reasoning sets `cancelled` apart from `completed` in the window rules: a campaign cancelled while still planned never ran, so demanding an end date from it would make a member invent a window to satisfy the schema. `completed` does demand one, because a campaign that ran has a date it stopped.
+
+### 54 — every derived ratio is `null` when its denominator is zero
+
+§C asks for spend, reach, CPL, CPA and ROAS with *defensible* attribution, and the word that does the work is "defensible". `agencyCampaignMetrics` returns `null` rather than 0 for every ratio whose denominator is zero, because a CPL of 0 on a campaign that recorded no leads reads as the cheapest leads the agency ever bought. §C's own phrase for that is "fake campaign performance".
+
+ROAS needs *both* sides: `revenue_rial` is nullable, and null means "we do not know yet" where 0 means "we know it was nothing". A campaign with no revenue claim has no ROAS rather than a ROAS of zero, and the two render differently — «—» against ۰.
+
+Two more refusals to pretend sit beside it. `metrics_source` has exactly two values, `manual` and `imported`, and that *is* the documentation: there is no ad-platform integration in this product, so a third value would claim a connection that does not exist. And attribution is a member's claim, with `metrics_note` holding the method, because a number with no stated method is not defensible — the field sits beside the figure it explains rather than on a separate screen.
+
+### 55 — a nullable field needs four states, and this cost three test failures to find
+
+0276's documented lesson is that a normaliser returning `null` for an *absent* field turns "omitted" into "refused": a PATCH carrying only a title would have cleared the budget. Avoiding that is not enough, and the first version of this wave's normalisers shows why. They returned `{ present, value }`, which cannot tell **"clear the budget"** from **"that is not a number"** — both look like `{ present: true, value: null }`. So `{ budgetRial: "" }` from a form whose money input the member had emptied was refused as `invalid_metric`, and the member could not remove a budget they had set by mistake.
+
+`NullableFieldResult<T>` is therefore four states — `absent | clear | value | invalid` — with `nullableFieldStored()` collapsing them for the write. Whitespace-only counts as `clear`, not `invalid`: a form that emptied a money input hands back spaces.
+
+The second failure in the same run is the same shape of mistake on a different axis. `updateAgencyCampaign` and `applyAgencyCampaignAction` computed `current` from `todayIsoDate()`, so a campaign whose window was in May reported itself not on air in November — true in production, useless in a test and in a report backfilling a date. Both now take `options.todayIso`. **A derived "today" must be injectable**, and the reason is not only testing: a report that reconstructs last quarter's calendar needs the same parameter.
+
+### 56 — a freeze must exempt the changes the database makes on a parent's behalf, and a frozen record must still follow its client
+
+Two exemptions, both found by a harness rather than by review, and both narrower than they first look.
+
+**The cascade exemption.** 0278's freeze refuses any change to a closed campaign, and `ON DELETE SET NULL` on `brief_id` *is* an UPDATE of the child. So a completed campaign blocked the deletion of its own brief — and of its proposal, project and contract. The fix is not "NULL is fine", which would let a member un-file a campaign from its brief; it is to allow the clear **only when the parent row is gone**, checked per column, and the harness asserts both halves.
+
+**The merge exemption, and it was a bug in shipped code.** 0274 freezes a confirmed brief and 0276 freezes a sent proposal, and both put `party_id` inside the frozen-substance comparison. That is right for an edit and wrong for a merge, and the two are not the same operation: an edit says "the client agreed to something different than we recorded", which a confirmed brief must refuse; a merge says "these two client records were always one", which changes no agreement and only re-points whose file the document lives on. The result was that `mergeCustomers` — which re-points every reference the registry classifies as `move`, and a brief's client is NOT NULL so it cannot be left behind — failed with a raw `23514` on the CRM's own duplicates screen as soon as either client held a confirmed brief or a sent proposal.
+
+0279 follows 0217 rather than inventing a door. `journal_immutable_columns_guard` already drew this line: substance immutable always, attribution movable only while the transaction has declared `app.ledger_party_move = on` — a flag the merge loop sets for a reference that declares a `preMoveSql`, after that statement has written its audit row. So the move lands in the new `crm_party_attribution_moves` first, the door opens for exactly that registered move, and every other session still hits the guard. The flag's name is historical and kept for the reason `register-numbering.ts` keeps its `aec-number:` namespace; the audit table is *not* shared with the ledger's, because a brief is not a journal line.
+
+0278 was born with the split rather than patched into it, because a new table has no business shipping a bug this wave just spent a migration fixing. Neither 0274 nor 0276 was edited in place: an applied migration's checksum is in `schema_migrations`, and amending forward is the only change that reaches an install that already ran it.
+
+**The lesson is about the sweep.** `party-merge-coverage` passed throughout, because it checks that every `parties(id)` reference has a *declared disposition* — not that the declared move survives the table's own triggers. A green whole-schema sweep can be vacuous in exactly the dimension a new feature stresses, and the only thing that found this was executing a merge against a frozen document.
+
+### 57 — the CRM section is `client-campaigns`, because Growth owns the word `campaigns`
+
+`app-ownership.test.ts` asserts that the CRM's nav contains no key called `campaigns`, and that Growth's does. That is the app-ownership split doing its job: the test exists to stop one app growing a second copy of another's territory, and wave 9 walked straight into it by naming a new CRM section `campaigns`.
+
+The boundary is right and the fix is not to negotiate with it. Growth's campaign is #901's retail cashback automation (decision 52) and this record is an agency's media plan for a client — genuinely different things that happen to share an English word. Two names is the honest resolution; one name with a comment explaining the difference is the dishonest one, because the comment is the only thing standing between a member reading «کمپین‌ها» in two apps and having to know which is which.
+
+So the key, the route, the API path and the screen file are all `client-campaigns`, and the Persian label stays «کمپین‌های کارفرما» — which already carried the distinction, and is what a member reads. The command palette keeps «کمپین» pointing here rather than at the brief, where it had been sitting as the nearest available thing; Growth's own campaigns are reached by their own aliases and by the Growth door.
+
+The lesson is the one decision 51's correction already implies, from the other direction: a new section key is not one change. It reaches the permissions table, the nav and its group, the command aliases, the knowledge base's help title, the section switch, the permission test's route table, the coverage map — and the app-ownership boundary, which is the only one of those that can say *no* rather than merely needing an update. It is also the only one a compiler cannot see, and a full-suite run is what caught it.
 
 ## Sites audited and deliberately left alone
 
@@ -1002,8 +1067,9 @@ link every byte fetch, which made the default link unable to show the artwork it
   directions, a brand's file rooted on its group with its sibling visible, three
   levels depth-ordered, each brand's deals/briefs/proposals/accepted/contracts
   counted against that brand and nobody else's with the group itself carrying
-  nothing (rolling up would double-count every figure on the card), **no campaign
-  count at all** — pinned as an absence so adding one is a decision, a contact-only
+  nothing (rolling up would double-count every figure on the card), a campaign count
+  — **pinned as an absence in wave 8 and inverted in wave 9**, so the change was a
+  decision somebody made rather than a column that appeared, a contact-only
   party reporting `isEmpty`, a second tenant answered `null` for a valid foreign id
   and unable to pull a foreign party into the tree through a join or a foreign deal
   into the counts, a nonexistent and a malformed id both refused, the newest of two
@@ -1020,6 +1086,56 @@ link every byte fetch, which made the default link unable to show the artwork it
   `amount_rial`, and the out-of-vocabulary revenue code reported as missing from
   the chart — none of which a type-checker, a unit suite or a green whole-schema
   sweep can see.
+
+* `agency-campaign.test.ts` (26) — §C's campaign vocabulary: the chain with both
+  terminal states and no path back to `planned`, the acts derived from it, the
+  window each act implies, `isAgencyCampaignInFlight` counting a paused campaign's
+  budget as still committed, `isAgencyCampaignCurrent` inclusive at both ends and
+  only for a campaign in flight, the four metrics with **every ratio null on a zero
+  denominator** and ROAS needing both sides because "we do not know" and "it was
+  zero" are different claims, the four budget states with `over` first-class, a
+  reversed window named rather than inferred, and the normalisers — including the
+  four-state nullable result (decision 55), channels de-duplicated in first-mention
+  order with the cap checked *before* the dedupe and an unrecognised channel refused
+  rather than silently dropped. Dates reuse `src/lib/iso-date.ts` rather than adding
+  a fifth validator, and a Jalali year is refused by bounds because `isValidIsoDate`
+  is calendar-shaped rather than calendar-correct.
+* `integration/agency-client-campaigns.integration.test.ts` (16) — the same feature
+  against a real database, which is the only place a service and a schema can be
+  caught disagreeing while each is self-consistent: one `CA-` sequence held under a
+  race, the defaults, refusals arriving in words, an overspend recorded *and*
+  reported as `over`, the four ratios and their nulls with `revenueRial: 0` giving no
+  ROAS, **list-row figures identical to the detail row's** (a list must not print a
+  figure it did not read), the five filters, a one-field patch clearing nothing while
+  an explicit clear still works, a figure pair validated against the record rather
+  than against the request, the full lifecycle with each window requirement stated in
+  words before the CHECK could say it, a closed campaign refused from the service and
+  from a **raw `UPDATE` that skips the service entirely**, deletion only while
+  planned, a second tenant answered null and refused, a foreign client refused by the
+  trigger as `23514`, §A's cross-brand brief arriving the same way, and two of one
+  brand's campaigns concurrent in one window — neither current once it has passed.
+* `integration/agency-party-merge.integration.test.ts` (6) — decision 56's merge
+  door, and the shape of the fix rather than only that a merge passes: relaxing a
+  freeze is easy and dangerous, so each test asserts both halves. A confirmed brief,
+  a sent proposal and a completed campaign each follow their client onto the
+  surviving record with the substance untouched and the proposal's lines byte-for-byte
+  intact, a brand's approver and stakeholder come along so §A's separation rule
+  survives, every move is audited into `crm_party_attribution_moves`, and an edit
+  that is *not* a merge is still refused — as is the substance, flag or no flag.
+* `campaign-guard.test.ts` (6) — §C's error map, whose value is the type rather than
+  the assertions: `EXPECTED_STATUS` is `Record<AgencyCampaignErrorCode, number>`, so
+  adding a refusal to the service without deciding its status fails `tsc` before it
+  can reach a route. The statuses are pinned too, because the screen renders «این
+  کمپین بسته شده است» off the 409s and renumbering one to a 400 would make it
+  re-show an editable form for a record that cannot be edited.
+* 66 assertions run directly against `0278_agency_client_campaigns.sql` over
+  Postgres — the named CHECKs and the deliberate absence of one between spend and
+  budget, both unique keys, the five reference foreign keys and their `SET NULL`, the
+  two triggers, RLS enabled *and forced*, and the non-vacuity checks: that
+  `metrics_source` has exactly two values and that there is no third. This is what
+  found the cascade exemption — a freeze that refuses "any change to a closed row"
+  also refuses the `ON DELETE SET NULL` a parent's deletion performs on it, so a
+  completed campaign was blocking the deletion of its own brief.
 
 * `crm-agency-pipeline.test.ts` (13) — §A's preset: both invariants
   `savePipelineStages` enforces, so the preset can never be refused by the
@@ -1092,8 +1208,9 @@ Deliberately, and each is named in the issue:
 
 * **§A CRM** — contract renewals, and scope of work as a document rather than as prose. The
   agency-shaped pipeline shipped in wave 5, the client briefs in wave 6, the proposals and quotes in
-  wave 7 (with §D's estimates, which are the same document — decision 43), and the multi-brand client
-  presentation in wave 8 (decisions 49–51). Canonical `parties`/leads/deals already existed, and
+  wave 7 (with §D's estimates, which are the same document — decision 43), the multi-brand client
+  presentation in wave 8 (decisions 49–51), and wave 9's client campaign record, which is §A's
+  "concurrent campaigns" and §C's first half at once (decisions 52–56). Canonical `parties`/leads/deals already existed, and
   decision 37 records why the multi-brand account needed no schema. A proposal carries
   `scope_of_work` and `terms` as text, which is what a client reads and disputes; a separately
   versioned scope document with its own approvals is #1127's print-template territory and is not
@@ -1111,9 +1228,16 @@ Deliberately, and each is named in the issue:
 * **§C Growth** — campaign calendar and channel mix for *client* campaigns, the agency's-own vs
   client-managed split in reporting, spend/reach/CPL/CPA/ROAS with defensible attribution, manual
   import of platform data. No external ad-platform integration is claimed or implied anywhere in
-  this change. **The split is blocked on a schema change, not on an endpoint:** wave 8 established
-  that `growth_campaigns` has no client column at all (decision 51), so no report can attribute a
-  campaign to a client or a brand until one exists.
+  this change. Wave 9 built the **record** half and stopped there: `agency_client_campaigns` now
+  names a client, holds the window and the channels, holds the media spend and the five attribution
+  counts, and derives CTR/CPL/CPA/ROAS with every ratio null on a zero denominator (decisions 52–54).
+  What is *not* built is the reporting half — a calendar view across campaigns, the agency's-own
+  versus client-managed split (which needs a "whose campaign is this" dimension that no record here
+  carries, and which the issue's own non-goal rules out inventing), cross-campaign CPL/CPA/ROAS
+  roll-ups, and manual import of platform data as a file rather than as typed figures. Wave 8's
+  claim that §C was "blocked on `growth_campaigns` having no client column" is corrected in decision
+  51: that table is #901's retail cashback automation and could not be given one honestly, so the
+  missing thing was a record and wave 9 added one.
 * **§D Accounting** — wave 2 gave the trade its ordinary sale document (a service invoice, on account
   or settled, one line per described service, each crediting one of the agency's four revenue
   accounts, posted by the existing `service.sale_revenue` rule), and wave 3 gave it the documents

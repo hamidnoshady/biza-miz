@@ -13,6 +13,7 @@
  *
  *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid>                  # plan only
  *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --sku zza05023   # one SKU
+ *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --location <uuid> # one branch
  *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --apply          # do it
  *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --json           # machine-readable plan
  */
@@ -49,12 +50,19 @@ function describe(plan: OrphanPlan): void {
 async function main(): Promise<number> {
   const businessId = argValue("--business");
   if (!businessId || !UUID_RE.test(businessId)) {
-    console.error("usage: npx tsx scripts/resolve-duplicate-items.ts --business <uuid> [--sku <sku>] [--apply] [--json]");
+    console.error(
+      "usage: npx tsx scripts/resolve-duplicate-items.ts --business <uuid> [--sku <sku>] [--location <uuid>] [--apply] [--json]",
+    );
     return 2;
   }
   const sku = argValue("--sku");
   if (sku === "") {
     console.error("--sku needs a value.");
+    return 2;
+  }
+  const locationId = argValue("--location");
+  if (locationId === "" || (locationId && !UUID_RE.test(locationId))) {
+    console.error("--location needs a branch (location) uuid.");
     return 2;
   }
   const apply = process.argv.includes("--apply");
@@ -64,7 +72,7 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const plans = await planDuplicateOrphanArchives(businessId, { sku });
+  const plans = await planDuplicateOrphanArchives(businessId, { sku, locationId });
 
   if (asJson) {
     console.log(JSON.stringify(plans, null, 2));

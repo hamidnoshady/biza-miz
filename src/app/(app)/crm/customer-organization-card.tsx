@@ -20,12 +20,16 @@
  * price one client's brief for another) have a visible counterpart rather than
  * arriving as a refusal nobody expected.
  *
- * Campaigns are *not* counted, and that is a fact about the schema rather than an
- * omission here: `growth_campaigns` has no client column at all. §A's "concurrent
- * campaigns" therefore cannot be presented per brand until §C gives a campaign a
- * client. Rendering «۰ کمپین» on every row would have been worse than rendering
- * nothing — it reads as "this brand has no campaigns", which is not what the data
- * says.
+ * Campaigns *are* counted now, and the history of that word is the interesting
+ * part. This card shipped in wave 8 refusing to render a campaign count at all,
+ * because the only table it could have counted — `growth_campaigns` — has no client
+ * column and, reading #901's builder, could not be given one honestly: it is a
+ * retail cashback automation whose party is the shopper earning money back.
+ * Rendering «۰ کمپین» on every row would have stated that no brand has campaigns,
+ * which absent data does not say. Migration 0278 added the register that *can*
+ * answer, and §A's "concurrent campaigns" is now here — with the in-flight subset
+ * broken out, because "two of this brand's campaigns are live now" and "this brand
+ * has had two campaigns" are different answers to the same question.
  *
  * ## Conflicts are shown, never resolved
  *
@@ -81,6 +85,8 @@ interface OrgMemberWire {
     proposals: number;
     acceptedProposals: number;
     contracts: number;
+    campaigns: number;
+    campaignsInFlight: number;
   };
 }
 
@@ -117,7 +123,8 @@ interface OrganizationWire {
  */
 function workSummary(member: OrgMemberWire): string | null {
   const parts: string[] = [];
-  const { deals, briefs, proposals, acceptedProposals, contracts } = member.work;
+  const { deals, briefs, proposals, acceptedProposals, contracts, campaigns, campaignsInFlight } =
+    member.work;
   if (deals > 0) parts.push(`${toPersianDigits(deals)} فرصت`);
   if (briefs > 0) parts.push(`${toPersianDigits(briefs)} بریف`);
   if (proposals > 0) {
@@ -128,6 +135,15 @@ function workSummary(member: OrgMemberWire): string | null {
     );
   }
   if (contracts > 0) parts.push(`${toPersianDigits(contracts)} قرارداد`);
+  if (campaigns > 0) {
+    // The in-flight figure first, because it is the one a member acts on: a brand
+    // with two campaigns live right now is a brand somebody is servicing this week.
+    parts.push(
+      campaignsInFlight > 0
+        ? `${toPersianDigits(campaignsInFlight)} کمپین در جریان (از ${toPersianDigits(campaigns)})`
+        : `${toPersianDigits(campaigns)} کمپین`,
+    );
+  }
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 

@@ -545,6 +545,19 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/agency-proposals.integration.test.ts",
   },
   {
+    id: "crm.client_campaigns",
+    module: "CRM",
+    entity: "Client campaigns (the window, the channels, the media spend and the figures that came back)",
+    routes: ["crm/client-campaigns"],
+    // Not `growth/campaign-builder`, which is #901's retail cashback automation and
+    // is classified under Growth. No overlap with crm.client_briefs or
+    // crm.client_proposals either: a campaign runs *after* the offer is accepted and
+    // is its own entity with its own chain, and neither row's prefix reaches these
+    // files.
+    note: "issue #1128 §A + §C: the campaign as it ran for one client, downstream of the brief, the proposal, the contract and the project, so it may point at any of the four. Distinct from `growth_campaigns`, which has no client and cannot be given one honestly — its trigger vocabulary is exactly `pos_sale_settled` and its reward is `cashback`, so its party is the shopper earning money back. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and here, unlike the brief's `confirm` and the proposal's `accept`, no column *has* to stay a gap: `complete` and `cancel` record a member's own claim that a campaign finished, not a client's attestation, so §F's draft-and-approve rule does not bite. What a future tool must keep instead is four things about the figures. `metrics_source` has exactly two values, `manual` and `imported`, and that is the documentation: there is no ad-platform integration, so §C's «no fake campaign performance» is satisfied by having no third value to claim one. Attribution figures are a member's claim and `metrics_note` is where the method is recorded, because §C asks for *defensible* attribution and a number with no stated method is not defensible. Every ratio this row derives — CPL, CPA, ROAS, click-through — is `null` when its denominator is zero rather than zero, since a CPL of 0 on a lead-less campaign reads as the cheapest leads ever bought. And nothing here posts: media spend is §D's business and becomes real money there, so this record only reports what was spent",
+    test: "integration/agency-client-campaigns.integration.test.ts",
+  },
+  {
     id: "crm.segments-views",
     module: "CRM",
     entity: "Segments, saved views, queues, RFM",
@@ -1148,6 +1161,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     status: "route-only (by design)",
     note: "explicit human-reviewed cross-store publication; inventory and integration management permissions required; creates mappings only after store acknowledgement",
     test: "src/lib/integrations/product-publication-service.test.ts",
+  },
+  {
+    id: "misc.product-duplicates",
+    module: "Products (retail)",
+    entity: "Duplicate-SKU review and safe creation-race orphan archive (issue #1207)",
+    routes: ["products/duplicates"],
+    status: "route-only (by design)",
+    note: "the same report and guarded archive the operator scripts run, behind inventory.view + integrations.view to read and inventory.adjust + integrations.manage to decide; only two decisions exist (record «keep separate» in the audit log, or archive an unreferenced race orphan), both behind a review token and an explicit confirmation, and neither merges rows, moves a mapping or aggregates stock — so no MCP/AI verb may offer a merge",
+    test: "src/app/api/products/duplicates/route.test.ts",
   },
   {
     id: "misc.price-lists",

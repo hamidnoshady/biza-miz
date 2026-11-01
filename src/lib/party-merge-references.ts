@@ -673,6 +673,15 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
       "The client whose requirement this brief records, and the column is NOT NULL so it cannot be left behind. A proposal prices the brief, a project may be delivering against it and a change request departs from it, so the surviving customer's file has to carry it; stranded on an archived duplicate, the record of what was agreed disappears from exactly the place it would be needed.",
     preview: true,
     previewLabel: "بریف‌های کارفرما",
+    // The door through 0279's attribution guard: the move is audited into
+    // `crm_party_attribution_moves` FIRST (same transaction), then the guard accepts
+    // the re-point under the transaction-local flag. Every other path still hits it.
+    // Without this the merge itself was refused — see 0279's header.
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+                   (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, 'agency_client_briefs', b.id, b.party_id, $3, $4
+                   FROM agency_client_briefs b
+                  WHERE b.business_id = $1 AND b.party_id = $2`,
   },
   {
     table: "agency_client_briefs",
@@ -681,6 +690,15 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     disposition: "move",
     reason:
       "The client-side contact recorded as approving the brief. Moved with the brief so §A's separation rule still holds after a merge — the approver has to remain a contact of whichever client record survives — and so the pointer resolves instead of naming an archived duplicate. Not itemised in the preview: it is a dimension of the same rows `party_id` already counts, and counting them twice would overstate what the merge touches.",
+    // The door through 0279's attribution guard: the move is audited into
+    // `crm_party_attribution_moves` FIRST (same transaction), then the guard accepts
+    // the re-point under the transaction-local flag. Every other path still hits it.
+    // Without this the merge itself was refused — see 0279's header.
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+                   (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, 'agency_client_briefs', b.id, b.approver_party_id, $3, $4
+                   FROM agency_client_briefs b
+                  WHERE b.business_id = $1 AND b.approver_party_id = $2`,
   },
 
   // Migration 0276's two party columns, both `move`, for the reason 0274's are:
@@ -697,6 +715,15 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
       "The client this offer was priced for, and the column is NOT NULL so it cannot be left behind. An accepted proposal is the record of what was agreed and at what figure, and a contract and later invoices are keyed off it, so the surviving customer's file has to carry it; stranded on an archived duplicate, the price the client accepted disappears from exactly the place a dispute about that price would look.",
     preview: true,
     previewLabel: "پیشنهادهای قیمت کارفرما",
+    // The door through 0279's attribution guard: the move is audited into
+    // `crm_party_attribution_moves` FIRST (same transaction), then the guard accepts
+    // the re-point under the transaction-local flag. Every other path still hits it.
+    // Without this the merge itself was refused — see 0279's header.
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+                   (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, 'agency_proposals', pr.id, pr.party_id, $3, $4
+                   FROM agency_proposals pr
+                  WHERE pr.business_id = $1 AND pr.party_id = $2`,
   },
   {
     table: "agency_proposals",
@@ -705,6 +732,40 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     disposition: "move",
     reason:
       "The client-side stakeholder §A asks to be recorded — the person who may accept this offer. Moved with the proposal so the separation rule still holds after a merge, since the contact has to remain a contact of whichever client record survives, and so the pointer resolves instead of naming an archived duplicate. Not itemised in the preview: it is a dimension of the same rows `party_id` already counts, and counting them twice would overstate what the merge touches.",
+    // The door through 0279's attribution guard: the move is audited into
+    // `crm_party_attribution_moves` FIRST (same transaction), then the guard accepts
+    // the re-point under the transaction-local flag. Every other path still hits it.
+    // Without this the merge itself was refused — see 0279's header.
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+                   (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, 'agency_proposals', pr.id, pr.client_contact_party_id, $3, $4
+                   FROM agency_proposals pr
+                  WHERE pr.business_id = $1 AND pr.client_contact_party_id = $2`,
+  },
+
+  // Migration 0278's client column. `move`, and behind the same door: a completed
+  // campaign's figures are what the client was reported, so the record cannot be
+  // deleted or edited — but it must still follow its client onto the surviving file,
+  // because §C's per-client reporting reads it from there and a campaign stranded on
+  // an archived duplicate is spend nobody can attribute.
+  {
+    table: "agency_client_campaigns",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The client — or the brand of a client — this campaign ran for, and the column is NOT NULL so it cannot be left behind. The campaign's spend and results are the evidence behind §C's client reporting and the count on the client's organisation card, so the surviving customer's file has to carry it; stranded on an archived duplicate, the record of what a campaign cost and returned disappears from exactly the place a client's report is assembled.",
+    preview: true,
+    previewLabel: "کمپین‌های کارفرما",
+    // The door through 0279's attribution guard: the move is audited into
+    // `crm_party_attribution_moves` FIRST (same transaction), then the guard accepts
+    // the re-point under the transaction-local flag. Every other path still hits it.
+    // Without this the merge itself was refused — see 0279's header.
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+                   (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, 'agency_client_campaigns', c.id, c.party_id, $3, $4
+                   FROM agency_client_campaigns c
+                  WHERE c.business_id = $1 AND c.party_id = $2`,
   },
 
   // -- AEC (issue #799 Wave 2) ----------------------------------------------

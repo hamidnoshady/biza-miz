@@ -293,16 +293,26 @@ export async function unlinkParties(
 /**
  * What one brand of the group is carrying, from the registers that name a client.
  *
- * These four and no others, and the exclusion is a finding rather than an
- * oversight: `crm_deals.customer_id`, `agency_client_briefs.party_id`,
- * `agency_proposals.party_id` and `workspace_contracts.party_id` all name a
- * client, so all four can be counted per brand. **`growth_campaigns` cannot** —
- * it has no client column at all, only `business_id`, `name`, `status` and
- * `created_by`. So §A's "concurrent campaigns" is not countable per brand today,
- * and §C's client-versus-own campaign split needs a schema change before it needs
- * an endpoint. Recording a zero here would have been worse than recording
- * nothing: a card that says «۰ کمپین» for every brand is a statement that no
- * brand has campaigns, which is not what the data says.
+ * Every register counted here names a client, which is the whole qualification:
+ * `crm_deals.customer_id`, `agency_client_briefs.party_id`,
+ * `agency_proposals.party_id`, `workspace_contracts.party_id` and — since 0278 —
+ * `agency_client_campaigns.party_id`.
+ *
+ * **`growth_campaigns` is still not counted, and still must not be.** It has no
+ * client column, and reading #901's builder showed why adding one would have been
+ * a mistake rather than a small extension: that table is a retail cashback
+ * automation whose trigger vocabulary is exactly `pos_sale_settled` and whose
+ * reward is `cashback`, so its party would be the shopper earning money back. One
+ * column meaning two things in two trades is how a report starts lying. 0278's
+ * header records the argument.
+ *
+ * Wave 8 refused to render a campaign count at all, because the only table it
+ * could have counted said nothing — and a card reading «۰ کمپین» for every brand
+ * states that no brand has campaigns, which is not what absent data says. That
+ * refusal was the right call and it is now lifted by the register that could
+ * answer, not by relaxing the standard: §A's "concurrent campaigns" is counted
+ * here, with the in-flight subset broken out because "two of this brand's
+ * campaigns are live now" and "this brand has had two" are different answers.
  */
 export interface OrgWorkCounts {
   deals: number;
@@ -311,6 +321,9 @@ export interface OrgWorkCounts {
   /** Offers the client accepted — the ones that became work. */
   acceptedProposals: number;
   contracts: number;
+  campaigns: number;
+  /** Campaigns running or paused: §A's "concurrent campaigns" for this brand. */
+  campaignsInFlight: number;
 }
 
 /** One node of the resolved structure, with what it is carrying. */
@@ -365,6 +378,8 @@ const EMPTY_WORK: OrgWorkCounts = {
   proposals: 0,
   acceptedProposals: 0,
   contracts: 0,
+  campaigns: 0,
+  campaignsInFlight: 0,
 };
 
 /**
@@ -463,6 +478,12 @@ export async function organizationStructureFor(
            FROM workspace_contracts
           WHERE business_id = $1 AND party_id = ANY($2::uuid[])
           GROUP BY party_id
+         UNION ALL
+         SELECT party_id, 'campaigns', count(*)::int,
+                count(*) FILTER (WHERE status IN ('running', 'paused'))::int
+           FROM agency_client_campaigns
+          WHERE business_id = $1 AND party_id = ANY($2::uuid[])
+          GROUP BY party_id
        ) w`,
       [businessId, memberIds],
     );
@@ -476,6 +497,9 @@ export async function organizationStructureFor(
       else if (row.register === "proposals") {
         counts.proposals = total;
         counts.acceptedProposals = Number(row.accepted) || 0;
+      } else if (row.register === "campaigns") {
+        counts.campaigns = total;
+        counts.campaignsInFlight = Number(row.accepted) || 0;
       }
     }
   }

@@ -157,6 +157,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/crm/deals", "فرصت‌ها"],
     ["/crm/briefs", "بریف کارفرما"],
     ["/crm/proposals", "پیشنهاد قیمت و برآورد"],
+    ["/crm/client-campaigns", "کمپین کارفرما و بازده رسانه"],
     ["/crm/leads", "سرنخ‌ها"],
     ["/crm/activities", "کارها و پیگیری‌ها"],
     ["/crm/cases", "تیکت‌های خدمات"],
@@ -174,6 +175,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/growth/gift-cards", "کارت هدیه"],
     ["/growth/loyalty", "وفاداری و اعتبار"],
     ["/growth/commission", "پورسانت فروشندگان"],
+    ["/growth/torob", "کانال ترب"],
     ["/growth/settings", "تنظیمات رشد"],
   ]),
   ...pageGroup("وب‌سایت و بیزامیز CMS", [

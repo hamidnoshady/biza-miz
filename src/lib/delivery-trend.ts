@@ -66,6 +66,20 @@ function bucketExpression(granularity: TrendGranularity): string {
   return `to_char(o.created_at AT TIME ZONE 'Asia/Tehran', 'YYYY-MM-DD')`;
 }
 
+/**
+ * The instant a window is measured back from.
+ *
+ * The buckets are built from the caller's `now` (so a test can pin one), and the
+ * query MUST filter from that same instant. It used to filter from `now()`, the
+ * database's wall clock: with a pinned `now` the two disagreed and the read
+ * returned rows outside the buckets it had just drawn — an injected "yesterday"
+ * returned nothing at all, and the window summary pooled whatever the wall clock
+ * happened to include. Passed as a parameter, never written as `now()`.
+ */
+function windowStart(days: number, now: Date): Date {
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+}
+
 const AGGREGATES = `
        count(*) FILTER (WHERE o.status = 'sent')      AS sent,
        count(*) FILTER (WHERE o.status = 'delivered') AS delivered,
@@ -104,19 +118,10 @@ export async function getDeliveryTrend(input: {
   now?: Date;
 } = {}): Promise<DeliveryTrend> {
   const days = clampDays(input.days);
-  const buckets = buildTrendBuckets({
-    days,
-    granularity: input.granularity,
-    now: input.now ?? new Date(),
-  });
+  const now = input.now ?? new Date();
+  const buckets = buildTrendBuckets({ days, granularity: input.granularity, now });
   const granularity = buckets[0]?.granularity ?? "day";
-  // The window's lower bound is anchored to the same instant the bucket grid
-  // was built from, not to the database clock. `now()` here disagreed with
-  // `buildTrendBuckets(now)`: a caller passing a fixed `now` (a test, a
-  // backfill report, a "as of" view) got buckets for its window and rows for
-  // a different one, so the oldest row fell out and the pooled latencies
-  // disagreed with the points above them.
-  const anchorIso = (input.now ?? new Date()).toISOString();
+  const since = windowStart(days, now);
 
   return withoutTenantScope("platform", async () => {
     const { rows: bucketsWithBusinesses } = await query<TrendBucketRow & Record<string, unknown>>(
@@ -124,10 +129,10 @@ export async function getDeliveryTrend(input: {
               count(DISTINCT o.business_id) AS businesses,
               ${AGGREGATES}
          FROM message_outbox o
-        WHERE o.created_at >= $2::timestamptz - ($1::int * interval '1 day')
+        WHERE o.created_at >= $1::timestamptz
         GROUP BY bucket
         ORDER BY bucket`,
-      [days, anchorIso],
+      [since],
     );
     const rows = bucketsWithBusinesses as (TrendBucketRow & { businesses?: string | number })[];
     // The distinct count is per bucket; the window's is the largest, which is
@@ -150,15 +155,10 @@ export async function tenantDeliveryTrend(
   input: { days?: number; granularity?: TrendGranularity; now?: Date } = {},
 ): Promise<DeliveryTrend> {
   const days = clampDays(input.days);
-  const buckets = buildTrendBuckets({
-    days,
-    granularity: input.granularity,
-    now: input.now ?? new Date(),
-  });
+  const now = input.now ?? new Date();
+  const buckets = buildTrendBuckets({ days, granularity: input.granularity, now });
   const granularity = buckets[0]?.granularity ?? "day";
-  // Same anchor as the platform view, for the same reason: the row set must be
-  // the window the buckets describe.
-  const anchorIso = (input.now ?? new Date()).toISOString();
+  const since = windowStart(days, now);
 
   return withTenant(businessId, async () => {
     const { rows: bucketRows } = await query<TrendBucketRow & Record<string, unknown>>(
@@ -166,10 +166,10 @@ export async function tenantDeliveryTrend(
               ${AGGREGATES}
          FROM message_outbox o
         WHERE o.business_id = $1
-          AND o.created_at >= $3::timestamptz - ($2::int * interval '1 day')
+          AND o.created_at >= $2::timestamptz
         GROUP BY bucket
         ORDER BY bucket`,
-      [businessId, days, anchorIso],
+      [businessId, since],
     );
     return shape(days, granularity, buckets, bucketRows as TrendBucketRow[]);
   });
