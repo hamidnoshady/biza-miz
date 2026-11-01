@@ -308,12 +308,35 @@ the end, still explicitly.
      (`/api/backup/restore/upload`, site installs), which is a recovery step, not
      a management one. The `tenant_backup_upload_sessions` table stays as history
      (migrations are forward-only) and is no longer written.
-   - Importing a file the platform never wrote, and restoring a Cloud backup from
-     such a file, is **not delivered**: an imported archive has no signed
-     manifest, so the server cannot certify what it contains without the tenant's
-     legacy passphrase, and registering one as `ready` on the strength of an
-     operator-supplied manifest is the lie §4 forbids. It needs a designed
-     passphrase-scoped import, not a button.
+   - Restoring a business from a file it downloaded earlier is delivered as a
+     **two-file recovery pair**, because that is what the custody model actually
+     allows: the encrypted payload (the existing download) plus
+     `GET /api/backup/artifacts/[ref]/manifest`, which serves the artifact's
+     **signed** manifest (`<ref>.manifest.json`, Owner-only `backup.export`, no
+     provider detail). `POST /api/backup/restores/import` takes the chunked
+     upload (`/api/backup/restores/import/upload`) together with that manifest
+     file and registers the payload as this business's `uploaded`/`verifying`
+     artifact, then verifies it into `ready` through the same checksum +
+     signature + archive-parse gate every other artifact passes. The import only
+     accepts what it can *prove*: the manifest's signature must verify under the
+     platform key, the manifest's business must be the importing business, the
+     payload's sha256 must be the one the manifest signed, the schema must not be
+     newer than the installation, and a physical dump or a text SQL payload is
+     refused by name. The ordinary preview/apply path then restores it, so the
+     import adds no second way to write a business's rows.
+     Honest limits, stated rather than promised away: the manifest is what makes
+     the file self-describing, so a payload kept without it cannot be imported; a
+     `managed_envelope_v1` payload is only openable by the platform that holds
+     that business's key generation (a file from another installation fails as
+     `backup_key_missing` rather than restoring partially); a
+     `legacy_passphrase_v1` payload asks for its one-time passphrase at import;
+     and a Local install does not offer import at all — its restores are the
+     single-business physical path of #807.
+     The screen says the same thing: each artifact row offers its payload and its
+     manifest side by side, and a «بازگردانی از فایل پشتیبان» panel below the
+     inventory takes the two files back. A successful import appears as an
+     ordinary row, so the same preview card — with its phrase, re-authentication
+     and MFA step-up — governs the restore; the panel itself restores nothing.
 4. **Central tenant-only restore engine** (`tenant-restore-apply.ts`,
    `POST /api/backup/restores/apply`). Phased and journalled
    (`verify_started → verify_succeeded → apply_started → apply_succeeded`, or

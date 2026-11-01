@@ -400,7 +400,17 @@ export type VerificationResult =
  */
 export async function verifyStoredArtifact(
   businessId: string,
-  options: { ref: string; stagedPath: string; schemaVersion: number },
+  options: {
+    ref: string;
+    stagedPath: string;
+    schemaVersion: number;
+    /**
+     * The one-time legacy passphrase an Owner typed for a file they brought from
+     * outside this installation (issue #903 §6). Omitted everywhere else, so the
+     * environment's passphrase stays the fallback for this install's own runs.
+     */
+    legacyPassphrase?: string;
+  },
 ): Promise<VerificationResult> {
   const row = await resolveOwnedArtifact(businessId, options.ref);
   if (!row) return { ok: false, error: "artifact_not_found" };
@@ -423,7 +433,11 @@ export async function verifyStoredArtifact(
   if (row.manifest.payloadFormat === "tenant_archive_v1") {
     const decryptedPath = `${options.stagedPath}.verify.json`;
     try {
-      const secret = await decryptionSecretFor(businessId, row, legacyPassphraseFromEnv());
+      const secret = await decryptionSecretFor(
+        businessId,
+        row,
+        options.legacyPassphrase ?? legacyPassphraseFromEnv(),
+      );
       if (!secret.ok) return { ok: false, error: secret.error };
       await decryptFileToFile(options.stagedPath, decryptedPath, secret.secret);
       const raw = await fs.readFile(decryptedPath, "utf8");
