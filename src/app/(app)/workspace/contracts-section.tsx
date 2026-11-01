@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { FileSignatureIcon, PlusIcon } from "lucide-react";
 import {
   EmptyState,
@@ -38,6 +39,7 @@ import {
   SecondaryButton,
 } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
+import { workspaceContractHref } from "@/lib/app-routes";
 import { toPersianDigits } from "@/lib/digits";
 import {
   CONTRACT_DEFAULT_REMINDER_DAYS,
@@ -148,6 +150,28 @@ export function ContractsSection({
     pending: list.summary?.pending ?? 0,
   };
 
+  /**
+   * Duplicate a contract and its document (issue #908).
+   *
+   * The copy is a DRAFT with its own document: the source keeps its frozen
+   * versions and any signatures it collected. Duplication is how a business
+   * reuses terms it already negotiated, so it lives on the row rather than in a
+   * buried menu — but it needs `contracts_manage`, because creating a contract
+   * is the same commitment as recording one.
+   */
+  async function duplicate(contract: ContractRow) {
+    const { ok, data } = await api<{ contract?: { id: string }; error?: string }>(
+      "/api/workspace/contracts",
+      { method: "POST", body: JSON.stringify({ duplicateOf: contract.id }) },
+    );
+    if (!ok) {
+      setError(workspaceError(data?.error));
+      return;
+    }
+    setError("");
+    load();
+  }
+
   async function requestApproval(contract: ContractRow) {
     const { ok, data } = await api("/api/workspace/approvals", {
       method: "POST",
@@ -235,7 +259,29 @@ export function ContractsSection({
               {contracts.map((contract) => (
                 <DataTableRow key={contract.id} onClick={() => setEditing(contract)}>
                   <Td data-label="عنوان">
-                    <span className="font-medium">{contract.title}</span>
+                    {/* The record's own page — the document builder and the signing
+                        round (issue #908). The row's click still opens the quick
+                        metadata dialog, so the link stops propagation. */}
+                    <Link
+                      href={workspaceContractHref(contract.id)}
+                      className="font-medium text-primary hover:underline"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {contract.title}
+                    </Link>
+                    {canManageContracts ? (
+                      <button
+                        type="button"
+                        title="ساخت کپی از این قرارداد و سندش"
+                        className="ms-2 align-middle text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void duplicate(contract);
+                        }}
+                      >
+                        کپی
+                      </button>
+                    ) : null}
                   </Td>
                   <Td data-label="نوع">{CONTRACT_TYPE_LABELS[contract.contractType]}</Td>
                   <Td data-label="طرف قرارداد">{contract.partyName ?? <span className="text-muted-foreground">—</span>}</Td>

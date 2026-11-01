@@ -55,6 +55,12 @@ export const OTP_PURPOSES = [
   "step_up_sms",
   /** Tenant-triggered, account-holder-completed password recovery. */
   "password_recovery",
+  /**
+   * Issue #908 — proving the mobile number of a contract signer who may not have
+   * an account at all. Keyed on the signer id in the `contract_signer` realm, so
+   * a code minted here can never be spent as a login, and vice versa.
+   */
+  "contract_signing",
 ] as const;
 
 export type OtpPurpose = (typeof OTP_PURPOSES)[number];

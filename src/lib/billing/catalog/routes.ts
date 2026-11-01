@@ -117,6 +117,12 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   // Issue #984 — the Windows support companion's API: platform-operated
   // support infrastructure, never billed to the customer.
   "support-companion": keys("platform.support"),
+  // Issue #908 — the public contract-signing session. It is the `workspace`
+  // module's own capability reached without a session (the recipient is an
+  // external signatory holding a token), so it bills exactly as `workspace`
+  // does; sending an invitation SMS is charged by the messaging wallet, never
+  // twice here.
+  sign: keys("operations.shared"),
 };
 
 function keys(...capabilityKeys: string[]): RouteClass {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { createContract, listContracts, contractListPage, type ContractListFilter } from "@/lib/workspace";
+import { duplicateContract, ensureContractDocument } from "@/lib/contracts/service";
 import type { WorkspaceContractStatus, WorkspaceContractType } from "@/lib/workspace-shared";
 import { PERMISSIONS, handleWorkspaceError, readBody, pageParams, workspaceOwner } from "../guard";
 
@@ -41,12 +42,36 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   }
 });
 
+/**
+ * Create a contract — blank, from a template, or as a copy of another one
+ * (issue #908).
+ *
+ *  - `{ ...terms }`                     a blank document titled with the contract;
+ *  - `{ ...terms, templateRef }`        the document starts from a template;
+ *  - `{ duplicateOf: "<contractId>" }`  a copy of that contract and its text.
+ *
+ * The document is created eagerly only when a starting point was named, so the
+ * "open a contract I created in the quick dialog" path still creates it on
+ * first read (and the unique index keeps that idempotent).
+ */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceContractsManage, request);
   if (error) return error;
   const body = await readBody(request);
   try {
-    return NextResponse.json({ contract: await createContract(owner, body) }, { status: 201 });
+    if (body.duplicateOf) {
+      const contract = await duplicateContract(owner, String(body.duplicateOf), body.title as string | undefined);
+      return NextResponse.json({ contract }, { status: 201 });
+    }
+    const contract = await createContract(owner, body);
+    const templateRef = body.templateRef ? String(body.templateRef) : "";
+    if (templateRef) {
+      await ensureContractDocument(owner, contract, {
+        templateId: templateRef.startsWith("builtin:") ? null : templateRef,
+        templateKey: templateRef.startsWith("builtin:") ? templateRef.slice(8) : null,
+      });
+    }
+    return NextResponse.json({ contract }, { status: 201 });
   } catch (err) {
     return handleWorkspaceError(err);
   }

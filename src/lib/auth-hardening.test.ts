@@ -22,11 +22,16 @@ import { PIN_MAX_LENGTH, PIN_MIN_LENGTH, PIN_POLICY_HINT, isValidPin } from "./p
 import { toLatinDigits } from "./digits";
 
 describe("OTP purposes", () => {
-  it("separates login, phone-change, enrolment, step-up and recovery", () => {
+  it("separates login, phone-change, enrolment, step-up, recovery and contract signing", () => {
     /**
      * Issue #854 P0.8 / invariant 4: a code is only spendable for the purpose
      * it was issued for. The vocabulary has to be explicit for that to be
      * checkable, so it is pinned here — adding a purpose is a deliberate act.
+     *
+     * `contract_signing` (#908) is the seventh: the signer is a third party with
+     * no account, and their code must never be redeemable in a sign-in, a step-up
+     * or a password recovery — nor may those codes sign a contract. Same table,
+     * same hashing, separate purpose.
      */
     expect([...OTP_PURPOSES]).toEqual([
       "login",
@@ -36,6 +41,7 @@ describe("OTP purposes", () => {
       "mfa_enrol_sms",
       "step_up_sms",
       "password_recovery",
+      "contract_signing",
     ]);
     expect(isOtpPurpose("login")).toBe(true);
     expect(isOtpPurpose("mfaLogin")).toBe(false);

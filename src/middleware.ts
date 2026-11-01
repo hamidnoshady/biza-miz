@@ -221,6 +221,15 @@ const PUBLIC_PATHS = [
   // Public website forms authenticate with a site-scoped bearer credential;
   // no tenant session exists in the visitor's browser.
   "/api/website/leads",
+  // Issue #908 — the public contract-signing page. The caller is an external
+  // signatory who has no Bizamiz account by definition (that is the point of
+  // the flow), so no session can exist. The credential is the per-recipient
+  // token in the URL: 256 bits of randomness, HMAC-hashed at rest, bound to one
+  // signer and one frozen document version, expiring, and revocable. The
+  // handlers behind it never take a business, contract or signer id from the
+  // request — the token names them — and the endpoints refuse a body that tries.
+  "/sign",
+  "/api/sign",
   // First-run flow: /welcome bootstraps an empty install; the state endpoint
   // answers "needsBootstrap" (and nothing more) without a session.
   "/welcome",
@@ -488,6 +497,11 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   // given in PUBLIC_PATHS; a cross-site POST to it must still be refused, even
   // though all it could ever do is end a session the browser already left.
   "/api/auth/logout/retry",
+  // Issue #908 — the signing page's own mutations (consent, OTP request, submit
+  // signature, decline) are browser-driven and session-less, so they belong
+  // behind the same Origin rule: our page's fetch carries a matching Origin, and
+  // a cross-site page cannot make a victim's browser finish a signing step.
+  "/api/sign",
 ];
 
 /** Is this one of the browser-driven, pre-session sign-in mutations? */

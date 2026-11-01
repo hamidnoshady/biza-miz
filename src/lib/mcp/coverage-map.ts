@@ -754,6 +754,24 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/workspace.integration.test.ts",
   },
   {
+    id: "workspace.contract-documents",
+    module: "Workspace",
+    entity: "Contract documents, reusable templates & multi-party e-signing",
+    routes: [
+      "workspace/contract-templates",
+      "workspace/contracts/[id]/document",
+      "workspace/contracts/[id]/signing",
+      "sign",
+    ],
+    note:
+      "Issue #908: authoring a legal document, freezing a version and collecting " +
+      "external signatures are human acts with legal consequence — route-only by " +
+      "design (no MCP verb), and the public /api/sign surface is a per-recipient " +
+      "capability credential that must never be reachable by an assistant session",
+    status: "route-only (by design)",
+    test: "src/lib/contracts/signing.test.ts",
+  },
+  {
     id: "workspace.approvals",
     module: "Workspace",
     entity: "Approvals",
