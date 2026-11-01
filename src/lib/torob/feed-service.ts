@@ -31,13 +31,13 @@ import { query } from "../db";
 import {
   buildTorobFeed,
   summariseFeed,
-  torobFeedEnvelope,
   torobFeedPage,
+  torobPageResponse,
   type BuiltFeed,
   type CatalogueProduct,
   type FeedSummary,
-  type TorobFeedEnvelope,
 } from "./feed";
+import type { TorobV3Response } from "./contract";
 import { TorobShopError, type TorobShop } from "./shop-service";
 import { DEFAULT_PRODUCT_PATH, type TorobWebsiteKind } from "./eligibility";
 
@@ -61,8 +61,8 @@ export interface FeedBuildResult {
   status: "built" | "blocked";
   blockedReason: TorobFeedBlockedReason | null;
   summary: FeedSummary | null;
-  /** The first page, so a caller can show something without a second build. */
-  firstPage: TorobFeedEnvelope | null;
+  /** The first page in Torob's own envelope, so a caller sees what Torob sees. */
+  firstPage: TorobV3Response | null;
   /** The skipped pages, capped — the screen shows the first few and the counts. */
   skipped: BuiltFeed["skipped"];
   builtAt: string;
@@ -185,10 +185,12 @@ async function catalogueProducts(businessId: string, shop: ShopRow, currency: st
     price: string | number;
     image_url: string | null;
     is_active: boolean;
+    created_at: Date;
+    updated_at: Date;
     category_name: string | null;
   }>(
     `SELECT m.id, m.name, m.description, m.sku, m.price, m.image_url, m.is_active,
-            c.name AS category_name
+            m.created_at, m.updated_at, c.name AS category_name
        FROM menu_items m
        JOIN locations l ON l.id = m.location_id
        LEFT JOIN menu_categories c ON c.id = m.category_id
@@ -204,13 +206,91 @@ async function catalogueProducts(businessId: string, shop: ShopRow, currency: st
     url: productPageUrl(shop.domain, shop.publicProductPath, { id: row.id, sku: row.sku }),
     categoryName: row.category_name,
     imageUrls: row.image_url ? [row.image_url] : [],
+    // `date_added` is required by Torob's contract, and `updated_at` is what
+    // `date_updated_desc` sorts on.
+    dateAdded: row.created_at.toISOString(),
+    dateUpdated: row.updated_at.toISOString(),
     // The canonical column, integer Rial. `pg` returns bigint as a string, which
     // is exactly what the converter wants — never a float.
     priceRial: row.price,
-    available: row.is_active,
+    // `is_active` is publication, not stock: a withdrawn product is omitted from
+    // the feed entirely, which Torob treats as "removed". Stock is a later wave's
+    // input; today every published product is offered (`available: true`).
+    sellable: row.is_active,
+    available: true,
     currency,
     sku: row.sku,
   }));
+}
+
+/**
+ * Why this shop cannot publish right now, or `null` when it can.
+ *
+ * The four states are the issue's own list, in its own order: authorized,
+ * enabled, and pointed at a website that is still there and still active.
+ */
+async function publishBlock(
+  businessId: string,
+  shop: ShopRow,
+): Promise<TorobFeedBlockedReason | null> {
+  if (shop.authorizationState !== "authorized") return "not_authorized";
+  if (!shop.enabled) return "channel_disabled";
+  const website = await websiteState(businessId, shop);
+  if (website === "missing") return "website_missing";
+  if (website === "inactive") return "website_inactive";
+  return null;
+}
+
+/** The shop's whole publishable catalogue, built from its current rows. */
+async function buildForShop(businessId: string, shop: ShopRow): Promise<BuiltFeed> {
+  const currency = await siteCurrency(businessId, shop);
+  const products = await catalogueProducts(businessId, shop, currency);
+  return buildTorobFeed({ products, includeOutOfStock: shop.includeOutOfStock });
+}
+
+/** A shop a crawler may be served from: its own host, and nothing else. */
+export interface ServeableShop {
+  businessId: string;
+  shopId: string;
+  /** The host Torob's `aud` must name. Read from the row, never from a header. */
+  domain: string;
+}
+
+/**
+ * Whether this shop may be served at all — the check that runs **before** any
+ * token, and before any catalogue is read.
+ *
+ * Split from building the feed on purpose: an unauthenticated caller must not be
+ * able to make the platform assemble a 4 000-product catalogue just by posting a
+ * uuid. And `blocked` is answered as one flat "not found" by the endpoint, so a
+ * caller cannot learn which of the four states the shop is in.
+ */
+export async function resolveServeableShop(input: {
+  businessId: string;
+  shopId: string;
+}): Promise<{ status: "available"; shop: ServeableShop } | { status: "blocked"; reason: TorobFeedBlockedReason }> {
+  const shop = await findShop(input.businessId, input.shopId);
+  if (!shop) return { status: "blocked", reason: "shop_not_found" };
+  const blocked = await publishBlock(input.businessId, shop);
+  if (blocked) return { status: "blocked", reason: blocked };
+  return {
+    status: "available",
+    shop: { businessId: input.businessId, shopId: shop.id, domain: shop.domain },
+  };
+}
+
+/**
+ * The catalogue a crawler reads.
+ *
+ * Deliberately does **not** write a `torob_feed_runs` row: a run records that the
+ * merchant's channel was built, while this is Torob asking for page 7 at 3am. The
+ * two are different events, and conflating them would bury the merchant's own
+ * refresh in crawler traffic — and put a `created_by` on rows nobody triggered.
+ */
+export async function buildServedFeed(shop: ServeableShop): Promise<BuiltFeed | null> {
+  const row = await findShop(shop.businessId, shop.shopId);
+  if (!row) return null;
+  return buildForShop(shop.businessId, row);
 }
 
 /**
@@ -246,16 +326,10 @@ export async function buildShopFeed(input: {
     };
   };
 
-  if (shop.authorizationState !== "authorized") return blocked("not_authorized");
-  if (!shop.enabled) return blocked("channel_disabled");
+  const block = await publishBlock(input.businessId, shop);
+  if (block) return blocked(block);
 
-  const website = await websiteState(input.businessId, shop);
-  if (website === "missing") return blocked("website_missing");
-  if (website === "inactive") return blocked("website_inactive");
-
-  const currency = await siteCurrency(input.businessId, shop);
-  const products = await catalogueProducts(input.businessId, shop, currency);
-  const built = buildTorobFeed({ products, includeOutOfStock: shop.includeOutOfStock });
+  const built = await buildForShop(input.businessId, shop);
   const summary = summariseFeed(built);
 
   const run = await recordRun(input.businessId, shop.id, {
@@ -269,7 +343,7 @@ export async function buildShopFeed(input: {
     status: "built",
     blockedReason: null,
     summary,
-    firstPage: torobFeedEnvelope(torobFeedPage(built, 1)),
+    firstPage: torobPageResponse(torobFeedPage(built, { mode: "page", page: 1, sort: "date_added_desc" })),
     // The screen lists reasons, not every row: a 4 000-product shop with one bad
     // import would otherwise send 4 000 rows to a browser to render nine lines.
     skipped: built.skipped.slice(0, 50),

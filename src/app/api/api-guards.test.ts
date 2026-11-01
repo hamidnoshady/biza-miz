@@ -419,6 +419,24 @@ const COMPANION_DEVICE_ROUTES: Record<string, string> = {
     "upload completion with server-side integrity verification; session ticket pinning",
 };
 
+/**
+ * Issue #894 — Torob's **Product API v3** endpoint.
+ *
+ * It lives under `/api/v1` because that prefix *is* the platform's machine-facing
+ * surface, but its caller is a marketplace crawler holding no API key of ours:
+ * Torob signs each request with its own Ed25519 key and the platform verifies that
+ * signature against the shop's stored domain (`src/lib/torob/auth.ts`). So the
+ * `/api/v1` rule below — "must authenticate a scoped API key" — cannot apply, and
+ * this map is the documented exception. What it asserts instead is that the route
+ * delegates to the one handler that performs that verification, so a future edit
+ * cannot drop the check by inlining a query.
+ */
+const TOROB_TOKEN_ROUTES: Record<string, string> = {
+  "v1/torob/products/[shopId]":
+    "Product API v3 — Torob's EdDSA JWT in X-Torob-Token, audience checked against the " +
+    "shop's own domain; the shop id is opaque and resolves the tenant under one documented bypass",
+};
+
 /** Routes that guard via getSession() with route-specific logic instead of requireRole. */
 const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/me": "returns the caller's own session (or null) — nothing else",
@@ -679,6 +697,14 @@ describe("every API route is guarded", () => {
 
   for (const [key, src] of sources) {
     it(`${key} is guarded or explicitly public`, () => {
+      if (TOROB_TOKEN_ROUTES[key]) {
+        // A signed marketplace token replaces the API key; the route must hand off
+        // to the handler that verifies it.
+        expect(src, `src/app/api/${key}/route.ts must authenticate Torob's token`).toMatch(
+          /handleTorobProductRequest\(/,
+        );
+        return;
+      }
       if (key === "v1" || key.startsWith("v1/")) {
         expect(isApiKeyGuarded(src), `src/app/api/${key}/route.ts must authenticate a scoped API key`).toBe(true);
         return;
@@ -845,7 +871,11 @@ describe("every API route is guarded", () => {
   });
 
   it("the public list doesn't cover routes that no longer exist", () => {
-    for (const key of [...Object.keys(PUBLIC_ROUTES), ...Object.keys(SELF_GUARDING_ROUTES)]) {
+    for (const key of [
+      ...Object.keys(PUBLIC_ROUTES),
+      ...Object.keys(SELF_GUARDING_ROUTES),
+      ...Object.keys(TOROB_TOKEN_ROUTES),
+    ]) {
       expect(sources.has(key), `${key} is allowlisted but has no route file`).toBe(true);
     }
   });

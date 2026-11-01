@@ -33,7 +33,8 @@ import { toPersianDigits } from "@/lib/digits";
 import { cmsSectionHref, wpSectionHref } from "@/app/(app)/websites/website-routes";
 import type { TorobWebsiteKind, TorobWebsiteRow, TorobWebsiteState } from "@/lib/torob/eligibility";
 import type { TorobShopView } from "@/app/api/growth/torob/shops/route";
-import type { TorobFeedEnvelope, TorobFeedSkipReason } from "@/lib/torob/feed";
+import type { TorobV3Response } from "@/lib/torob/contract";
+import type { TorobFeedSkipReason } from "@/lib/torob/feed";
 import { TOROB_FEED_SKIP_COPY } from "@/lib/torob/feed";
 
 /**
@@ -144,7 +145,7 @@ interface FeedPreview {
     skippedTotal: number;
     skippedByReason: { reason: TorobFeedSkipReason; count: number; copy: string }[];
   } | null;
-  page: TorobFeedEnvelope | null;
+  page: TorobV3Response | null;
   skipped: { productId: string; variantId: string | null; name: string; url: string | null; reason: TorobFeedSkipReason }[];
   capabilities: { feed: boolean; sent: boolean; listing: boolean };
 }
@@ -280,6 +281,9 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                   </Link>
                 ) : null}
                 {shop ? <ShopLine shop={shop} /> : null}
+                {shop && shop.authorizationState === "authorized" ? (
+                  <ProductApiLine domain={row.domain} shopId={shop.id} enabled={shop.enabled} />
+                ) : null}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -475,6 +479,26 @@ function FeedPreviewPanel({ feed }: { feed: FeedPreview }) {
  * stored itself — no figure here is Torob's claim about the shop, because Wave 1
  * has not asked Torob anything yet.
  */
+/**
+ * The address this shop's catalogue is served from, for Torob's own configuration.
+ *
+ * The shop registers this in its Torob panel; Torob then mints a token whose `aud`
+ * is this domain, which is why the endpoint verifies the audience against the shop
+ * rather than against whatever host the request arrived on. The path is shown
+ * relative to the shop's own domain because that is the address the token names.
+ */
+function ProductApiLine({ domain, shopId, enabled }: { domain: string; shopId: string; enabled: boolean }) {
+  return (
+    <p className="mt-1 text-xs text-muted-foreground">
+      نشانی دریافت محصول برای ترب:{" "}
+      <span dir="ltr" className="break-all text-foreground">
+        {`https://${domain}/api/v1/torob/products/${shopId}`}
+      </span>
+      {enabled ? null : <span> (با انتشار خاموش، این نشانی پاسخ نمی‌دهد.)</span>}
+    </p>
+  );
+}
+
 function ShopLine({ shop }: { shop: Shop }) {
   const parts = [
     shop.authMode === "manual_token"
