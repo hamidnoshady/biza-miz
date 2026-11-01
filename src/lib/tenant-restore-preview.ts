@@ -97,6 +97,12 @@ export interface RestoreActorFacts {
 
 export interface RestorePreviewInput {
   businessId: string;
+  /**
+   * The business's own name, as the Owner sees it. This is the text the Owner
+   * must retype to confirm, so it has to be the name — not an id, which nobody
+   * knows by heart and which a copy-paste would satisfy anyway.
+   */
+  businessName: string;
   artifact: RestoreArtifactFacts;
   manifest: BackupManifest | null;
   /** Result of `verifyBackupManifestSignature`, computed by the caller. */
@@ -283,7 +289,11 @@ export function previewTenantRestore(input: RestorePreviewInput): RestorePreview
     requiresCheckpoint: true,
     pausesTenantWrites: true,
     lockKey: `tenant-restore:${input.businessId}`,
-    confirmationPhrase: restoreConfirmationPhrase(input.businessId),
+    // A nameless business would otherwise get an empty phrase, which the guard
+    // compares against an empty input — a gate anyone passes by pressing Enter.
+    // Fall back to the id so the phrase is at least something only the platform
+    // shows the Owner.
+    confirmationPhrase: restoreConfirmationPhrase(input.businessName.trim() || input.businessId),
     blockers,
     canApply: blockers.length === 0,
   };

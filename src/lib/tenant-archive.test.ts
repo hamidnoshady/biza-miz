@@ -181,17 +181,20 @@ function fakeClient() {
 }
 
 describe("applyTenantArchive", () => {
-  it("deletes in reverse dependency order, then inserts in dependency order", async () => {
+  it("disarms triggers, deletes in reverse dependency order, then inserts in dependency order", async () => {
     const client = fakeClient();
     const result = await applyTenantArchive(client as never, built(), {
       tablesInOrder: ["accounts", "orders", "order_items"],
     });
     expect(statements(client)).toEqual([
+      // A replay is not a live mutation: business-rule triggers stay off for the
+      // transaction (they refuse even the DELETE of a closed order's items).
+      "SET LOCAL session_replication_role = replica",
       'DELETE FROM "orders"',
       'DELETE FROM "accounts"',
-      'INSERT INTO "accounts" ("id", "name") VALUES ($1, $2)',
-      'INSERT INTO "orders" ("id", "total") VALUES ($1, $2)',
-      'INSERT INTO "orders" ("id", "total") VALUES ($1, $2)',
+      'INSERT INTO "accounts" ("id", "name") OVERRIDING SYSTEM VALUE VALUES ($1, $2)',
+      'INSERT INTO "orders" ("id", "total") OVERRIDING SYSTEM VALUE VALUES ($1, $2)',
+      'INSERT INTO "orders" ("id", "total") OVERRIDING SYSTEM VALUE VALUES ($1, $2)',
     ]);
     expect(result).toEqual({ deleted: 6, inserted: 3, tables: 2 });
   });
@@ -210,8 +213,32 @@ describe("applyTenantArchive", () => {
     };
     await applyTenantArchive(client as never, hostile, { tablesInOrder: ["accounts", "orders"] });
     const insert = client.statements.find((statement) => statement.text.startsWith("INSERT"));
-    expect(insert?.text).toBe('INSERT INTO "accounts" ("id", "name") VALUES ($1, $2)');
+    expect(insert?.text).toBe(
+      'INSERT INTO "accounts" ("id", "name") OVERRIDING SYSTEM VALUE VALUES ($1, $2)',
+    );
     expect(insert?.values).toEqual(["a1", "'); DROP TABLE accounts; --"]);
+  });
+
+  it("refuses to replay when the role may not disarm triggers", async () => {
+    // Without the SET, the replay would run through business-rule triggers that
+    // reject perfectly ordinary archived rows (a closed order's items, say). A
+    // role that cannot set the parameter must be told, not half-restored.
+    const client = {
+      query: vi.fn(async (text: string) => {
+        if (text.startsWith("SET LOCAL")) {
+          throw Object.assign(new Error('permission denied to set parameter "session_replication_role"'), {
+            code: "42501",
+          });
+        }
+        return { rowCount: 0, rows: [] };
+      }),
+    };
+    await expect(
+      applyTenantArchive(client as never, built(), { tablesInOrder: ["accounts", "orders", "order_items"] }),
+    ).rejects.toThrow("restore_requires_trigger_bypass");
+    // Nothing was deleted: the refusal happens before the first destructive
+    // statement.
+    expect(client.query).toHaveBeenCalledTimes(1);
   });
 
   it("refuses a table it cannot place in dependency order", async () => {

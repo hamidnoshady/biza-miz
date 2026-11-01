@@ -225,6 +225,28 @@ function quoteIdentifier(value: string): string {
   return `"${assertIdentifier(value)}"`;
 }
 
+/**
+ * Turn off ordinary triggers for the rest of the current transaction.
+ *
+ * Answers "no" only when the *role* may not set the parameter — the one case a
+ * restore has to report as a configuration problem. Every other failure (a dead
+ * connection, an aborted transaction) is a real error and propagates.
+ */
+async function setReplicaRole(
+  client: Pick<PoolClient, "query">,
+): Promise<{ ok: true } | { ok: false }> {
+  try {
+    await client.query("SET LOCAL session_replication_role = replica");
+    return { ok: true };
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    // 42501: permission denied (no `GRANT SET ON PARAMETER`).
+    // 42704: unrecognized configuration parameter (a server older than 15).
+    if (code === "42501" || code === "42704") return { ok: false };
+    throw error;
+  }
+}
+
 export interface ApplyArchiveResult {
   deleted: number;
   inserted: number;
@@ -264,6 +286,43 @@ export const RESTORE_IMMUTABLE_TABLES: ReadonlySet<string> = new Set([
   "billing_usage_events",
 ]);
 
+/**
+ * The backup service's own records about a business, which a restore of that
+ * business must not delete either (issue #903 §5, found while proving the money
+ * rule against a real database).
+ *
+ * These tables carry a `business_id`, so they are tenant data by the archive's
+ * definition — but they describe *artifacts that exist*, not the business's
+ * rows. Deleting and refilling them from a two-week-old archive would make the
+ * platform forget every backup it took since: the inventory rows vanish while
+ * their bytes stay in the bucket, so the tenant can no longer see, download or
+ * restore the newer backups — including the one that would undo the restore
+ * itself — the integrity sweep has nothing to verify, and retention's byte
+ * accounting no longer matches what is actually stored and billed.
+ *
+ * `tenant_backup_site_heartbeat` is here for the generation as well: the
+ * restored row would carry the *backup's* sync generation, which is exactly the
+ * rewind the hybrid upload fence exists to prevent. The fence is advanced past
+ * the pre-restore generation after the swap instead (see
+ * `tenant-restore-checks.ts`), which is safe precisely because the row itself is
+ * no longer replaced.
+ */
+export const RESTORE_SERVICE_TABLES: ReadonlySet<string> = new Set([
+  "tenant_backup_artifacts",
+  "tenant_backup_storage_samples",
+  "tenant_backup_upload_queue",
+  "tenant_backup_upload_sessions",
+  "tenant_backup_restore_jobs",
+  "tenant_backup_drills",
+  "tenant_backup_site_heartbeat",
+]);
+
+/** Everything a restore leaves exactly as it found it. */
+export const RESTORE_SKIPPED_TABLES: ReadonlySet<string> = new Set([
+  ...RESTORE_IMMUTABLE_TABLES,
+  ...RESTORE_SERVICE_TABLES,
+]);
+
 export async function applyTenantArchive(
   client: PoolClient,
   archive: TenantArchive,
@@ -276,6 +335,25 @@ export async function applyTenantArchive(
   // An archive table missing from the caller's dependency order would be
   // applied in an arbitrary position — refuse instead.
   if (ordered.length !== present.size) throw new Error("archive_table_order_incomplete");
+
+  // Business-rule triggers police *live* mutations, not a faithful replay of
+  // rows a real, already-consistent database produced — every derived value and
+  // every closed period in this archive was already computed once, by the same
+  // triggers, before the capture. Left armed they make ordinary archives
+  // unrestorable: `guard_order_item_financial_mutation`, for one, refuses even
+  // the DELETE of an item that belongs to a completed order ("order_not_open"),
+  // so any business with a single closed order could never be restored. This is
+  // the same mechanism the tenant SQL export uses (`tenantDataToSql`), and the
+  // one logical replication itself uses for a data load; SET LOCAL scopes it to
+  // this transaction, reverting on COMMIT or ROLLBACK. Row-level security, check
+  // constraints and foreign keys are unaffected.
+  //
+  // The runtime role must be allowed to set the parameter (PostgreSQL 15+:
+  // `GRANT SET ON PARAMETER session_replication_role`); `createAppRole` grants
+  // it. A role that cannot is refused loudly instead of silently replaying
+  // through triggers that may reject the archive.
+  const bypass = await setReplicaRole(client);
+  if (!bypass.ok) throw new Error("restore_requires_trigger_bypass");
 
   let deleted = 0;
   for (const table of [...ordered].reverse()) {
@@ -298,8 +376,14 @@ export async function applyTenantArchive(
         if (cell !== null && typeof cell === "object" && !Array.isArray(cell)) return JSON.stringify(cell);
         return cell as unknown;
       });
+      // OVERRIDING SYSTEM VALUE: the tenant export carries `bigint GENERATED
+      // ALWAYS AS IDENTITY` ids (stock_movements, journal_lines, audit_log, …),
+      // and Postgres refuses an explicit value for those without this clause —
+      // a restore would then fail on the first identity table it met. It is a
+      // no-op on every other table, so it is always emitted rather than
+      // special-cased per column.
       await client.query(
-        `INSERT INTO ${quoteIdentifier(table)} (${columnList}) VALUES (${placeholders})`,
+        `INSERT INTO ${quoteIdentifier(table)} (${columnList}) OVERRIDING SYSTEM VALUE VALUES (${placeholders})`,
         values,
       );
       inserted += 1;

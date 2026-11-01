@@ -12,7 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { runMigrations } from "../scripts/migrate";
 import type { TaxPayloadV1 } from "../src/lib/tax-invoice-core";
 import { SandboxTaxProvider, type SandboxScript, type TaxProviderAdapter, type TaxSubmitRequest } from "../src/lib/tax-invoice-provider";
@@ -87,7 +87,7 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query(`DROP ROLE IF EXISTS ${APP_ROLE}`);
+    await dropAppRole(maintenance, APP_ROLE);
   } finally {
     await maintenance.end();
   }

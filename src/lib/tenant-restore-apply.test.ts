@@ -11,11 +11,15 @@ const mocks = vi.hoisted(() => ({
   installedSchemaVersion: vi.fn(),
   applyTenantArchive: vi.fn(),
   loadArchive: vi.fn(),
+  rlsEffective: vi.fn(),
 }));
 
 vi.mock("./db", () => ({
   query: mocks.query,
   withTenantTransaction: mocks.withTenantTransaction,
+  // §5: the engine refuses to run the replacement at all on a role that
+  // ignores row-level security, so the check is part of the happy path.
+  rlsEffective: mocks.rlsEffective,
 }));
 vi.mock("./db-locks", () => ({
   LOCK_KEYS: { tenantRestore: (businessId: string) => `restore:tenant:${businessId}` },
@@ -128,6 +132,25 @@ function preview(patch: Partial<RestorePreview> = {}): RestorePreview {
   };
 }
 
+/**
+ * The pinned client a happy-path restore runs on.
+ *
+ * The post-swap checks (§5) ask five different questions of the same
+ * connection, so an "always the same row" stub cannot tell a balanced journal
+ * from an unbalanced one. This answers each question the way a healthy business
+ * would: RLS in force, one active Owner, no unbalanced entry, no wallet row, and
+ * the row counts the archive promised.
+ */
+function tenantQuery(text: string): { rows: Record<string, unknown>[] } {
+  if (text.includes("rolsuper")) return { rows: [{ privileged: false }] };
+  if (text.includes("balance_rial")) return { rows: [{}] };
+  if (text.includes("site_generation")) return { rows: [{}] };
+  if (text.includes("FROM users")) return { rows: [{ total: "1" }] };
+  if (text.includes("journal_lines")) return { rows: [{ total: "0" }] };
+  if (text.includes("count(*)")) return { rows: [{ total: "1" }] };
+  return { rows: [] };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.lockIsHeld.mockResolvedValue(false);
@@ -139,8 +162,9 @@ beforeEach(() => {
   mocks.installedSchemaVersion.mockResolvedValue(268);
   mocks.applyTenantArchive.mockResolvedValue({ deleted: 1, inserted: 1, tables: 1 });
   mocks.resolveOwnedArtifact.mockResolvedValue(readyArtifact());
+  mocks.rlsEffective.mockResolvedValue(true);
   mocks.withTenantTransaction.mockImplementation(async (_businessId: string, fn: (client: unknown) => Promise<unknown>) =>
-    fn({ query: vi.fn(async () => ({ rows: [{ total: "1" }] })) }),
+    fn({ query: vi.fn(tenantQuery) }),
   );
   // `tenantTableSet()` asks information_schema which tables are tenant tables;
   // everything else this module reads in a happy path is bookkeeping.
@@ -280,6 +304,63 @@ describe("applyTenantRestore", () => {
     );
     const outcome = await applyTenantRestore(request);
     expect(outcome.ok).toBe(false);
+  });
+
+  it("refuses the replacement outright when the connection ignores row-level security", async () => {
+    // §5: `DELETE FROM accounts` is scoped by the policy, and a superuser or a
+    // BYPASSRLS role has no policy to obey — the same statement would empty
+    // every business. Refuse before the first delete rather than after.
+    mocks.rlsEffective.mockResolvedValue(false);
+    const outcome = await applyTenantRestore(request);
+    expect(outcome).toMatchObject({ ok: false, error: "restore_requires_rls" });
+    expect(mocks.applyTenantArchive).not.toHaveBeenCalled();
+    const phases = mocks.tryAppendRestoreJournal.mock.calls.map(
+      (call) => (call[0] as { phase: string }).phase,
+    );
+    expect(phases).toContain("verify_failed");
+    expect(phases).not.toContain("apply_started");
+  });
+
+  it("rolls the replacement back when the business would be left without an Owner", async () => {
+    // The users table is tenant data and is replaced too, so a backup taken
+    // before the Owner existed would hand the business a locked door.
+    mocks.withTenantTransaction.mockImplementation(async (_businessId: string, fn: (client: unknown) => Promise<unknown>) =>
+      fn({
+        query: vi.fn((text: string) =>
+          text.includes("FROM users") ? { rows: [{ total: "0" }] } : tenantQuery(text),
+        ),
+      }),
+    );
+    const outcome = await applyTenantRestore(request);
+    expect(outcome).toMatchObject({ ok: false, error: "restore_post_check_failed" });
+    const applied = mocks.tryAppendRestoreJournal.mock.calls.at(-1)?.[0] as {
+      phase: string;
+      detail: { failed: string[]; rolledBack: boolean };
+    };
+    expect(applied.phase).toBe("apply_failed_before_swap");
+    expect(applied.detail.failed).toEqual(["owner_preserved"]);
+    expect(applied.detail.rolledBack).toBe(true);
+  });
+
+  it("rolls the replacement back when the canonical wallet moved", async () => {
+    // §5's money rule, asserted rather than assumed: the engine skips the money
+    // tables, and this is the check that notices if that ever stops being true.
+    let walletReads = 0;
+    mocks.withTenantTransaction.mockImplementation(async (_businessId: string, fn: (client: unknown) => Promise<unknown>) =>
+      fn({
+        query: vi.fn((text: string) => {
+          if (!text.includes("balance_rial")) return tenantQuery(text);
+          walletReads += 1;
+          return { rows: [{ balance_rial: walletReads === 1 ? "500000" : "0" }] };
+        }),
+      }),
+    );
+    const outcome = await applyTenantRestore(request);
+    expect(outcome).toMatchObject({ ok: false, error: "restore_post_check_failed" });
+    const applied = mocks.tryAppendRestoreJournal.mock.calls.at(-1)?.[0] as {
+      detail: { failed: string[] };
+    };
+    expect(applied.detail.failed).toEqual(["wallet_unchanged"]);
   });
 
   it("refuses a physical dump on a central deployment", async () => {

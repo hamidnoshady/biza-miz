@@ -322,7 +322,15 @@ the end, still explicitly.
    by `LOCK_KEYS.tenantRestore`, checkpointed as a typed archive of the current
    rows, and applied in **one tenant-pinned transaction** that deletes in reverse
    dependency order and inserts parameterised rows, then re-counts inside the same
-   transaction (a mismatch rolls back). Protected tables (`businesses`,
+   transaction (a mismatch rolls back). The replay runs with
+   `session_replication_role = replica` (SET LOCAL, this transaction only): the
+   business's own triggers police live mutations and refuse a faithful replay —
+   the order-item guard rejects even the DELETE of an item belonging to a
+   completed order — so a role that cannot set that parameter makes every
+   business with a closed order unrestorable. `npm run db:app-role` grants it
+   (`GRANT SET ON PARAMETER session_replication_role`), and a restore on a role
+   without it refuses up front as `restore_requires_trigger_bypass` rather than
+   half-restoring. Protected tables (`businesses`,
    `platform_admins`, …) are refused by name; a physical dump on central is
    refused; `logical_sql_v1` is refused as a payload format. Rows of another
    business cannot be reached: the archive carries a business id that must match,

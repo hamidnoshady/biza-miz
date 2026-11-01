@@ -38,12 +38,14 @@
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { query, withTenantTransaction } from "./db";
+import { query, rlsEffective, withTenantTransaction } from "./db";
 import { LOCK_KEYS, lockIsHeld, withDistributedLock } from "./db-locks";
 import { newRestoreJournalId, restoreJournalDir, tryAppendRestoreJournal } from "./restore-journal";
 import {
   ARCHIVE_EXCLUDED_TABLES,
   RESTORE_IMMUTABLE_TABLES,
+  RESTORE_SERVICE_TABLES,
+  RESTORE_SKIPPED_TABLES,
   applyTenantArchive,
   archiveRowCounts,
   parseTenantArchive,
@@ -59,6 +61,12 @@ import { cleanupStagingDir, ensureStagingDir } from "./tenant-backup-storage";
 import { fetchCloudArtifact, planArtifactDownload } from "./tenant-backup-transport";
 import { decryptFileToFile } from "./backup-streams";
 import { guardTenantRestoreApply, type RestorePreview } from "./tenant-restore-preview";
+import {
+  captureRestoreBaseline,
+  verifyPostRestore,
+  type RestoreCheck,
+  type RestoreBaseline,
+} from "./tenant-restore-checks";
 import type { DeploymentProfile } from "./deployment-mode";
 import type { DeploymentRole } from "./deployment-role";
 
@@ -115,10 +123,40 @@ export const APPLY_REFUSALS = [
   "archive_unreadable",
   "archive_business_mismatch",
   "archive_schema_newer_than_installation",
+  // §5 — the replacement is `DELETE FROM <tenant table>` filtered only by RLS.
+  // On a role that ignores policies (superuser / BYPASSRLS) that statement would
+  // empty **every** business, so a tenant-only restore is refused outright.
+  "restore_requires_rls",
+  // The replay could not disarm business-rule triggers, so an archived closed
+  // order (or any other state those triggers police on a live mutation) would be
+  // refused mid-restore. Better to refuse up front than to restore some
+  // businesses and not others depending on what their history contains.
+  "restore_requires_trigger_bypass",
+  // §5 — one of the post-swap consistency checks failed and the replacement was
+  // rolled back: the business still holds exactly what it held before.
+  "restore_post_check_failed",
   "restore_failed",
 ] as const;
 
 export type ApplyRefusal = (typeof APPLY_REFUSALS)[number];
+
+/**
+ * Thrown inside the restoring transaction when a post-swap check refuses the
+ * result. It exists as a class — not an error code string — because the handler
+ * has to tell "the rows landed and were then rolled back because the business
+ * would have been broken" apart from "the write itself failed", and the journal
+ * needs to name which check it was.
+ */
+export class RestorePostCheckError extends Error {
+  readonly failed: string[];
+  readonly checks: RestoreCheck[];
+  constructor(failed: string[], checks: RestoreCheck[]) {
+    super(`restore_post_check_failed:${failed.join(",")}`);
+    this.name = "RestorePostCheckError";
+    this.failed = failed;
+    this.checks = checks;
+  }
+}
 
 /** Fail closed: an unknown internal error never reaches a tenant as text. */
 export function mapApplyError(error: string): ApplyRefusal {
@@ -308,6 +346,16 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
         await tryAppendRestoreJournal(journalEntry("verify_failed", { code: check.error }), journalDir);
         return { ok: false, error: mapApplyError(check.error), journalId };
       }
+
+      // §5 — the replacement deletes from every tenant table and relies on RLS
+      // to mean "this business's rows". A superuser or a BYPASSRLS role ignores
+      // policies entirely, which would turn that into "every business's rows".
+      // The check is about the role, so it has to happen before the first
+      // DELETE, not after it.
+      if (!(await rlsEffective())) {
+        await tryAppendRestoreJournal(journalEntry("verify_failed", { code: "restore_requires_rls" }), journalDir);
+        return { ok: false, error: "restore_requires_rls", journalId };
+      }
       await tryAppendRestoreJournal(journalEntry("verify_succeeded"), journalDir);
 
       let checkpointFile: string | null = null;
@@ -322,7 +370,7 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
         // — expecting their counts would fail every restore that touches them.
         const expected = Object.fromEntries(
           Object.entries(archiveRowCounts(loaded.archive)).filter(
-            ([table]) => !RESTORE_IMMUTABLE_TABLES.has(table),
+            ([table]) => !RESTORE_SKIPPED_TABLES.has(table),
           ),
         );
 
@@ -338,10 +386,15 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
           // this business, so a swapped row between load and write cannot
           // redirect it.
           if (loaded.archive.businessId !== request.businessId) throw new Error("archive_business_mismatch");
+          // §5 — what the business looked like a moment before the replacement:
+          // the canonical wallet the restore must not move, the Owners it must
+          // not lose, and the sync generation the fence has to stay ahead of.
+          const baseline: RestoreBaseline = await captureRestoreBaseline(client, request.businessId);
           const written = await applyTenantArchive(client, loaded.archive, {
             tablesInOrder: order,
-            // §5: a restore replaces the tenant's business data, never its money.
-            skipTables: RESTORE_IMMUTABLE_TABLES,
+            // §5: a restore replaces the tenant's business data — never its
+            // money, and never the service's record of which artifacts exist.
+            skipTables: RESTORE_SKIPPED_TABLES,
           });
           // Post-verification *inside* the same transaction: the row counts the
           // archive promised must be the counts the business now holds. A
@@ -349,7 +402,15 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
           // half-applied restore can never be committed.
           const counts = await verifyRestoredCounts(client, expected, order);
           if (!counts) throw new Error("restore_verification_failed");
-          return written;
+          // The checks around the data, not inside it: RLS is still doing the
+          // filtering, the business still has an Owner, accounting still
+          // balances, the wallet did not move, and the hybrid fence now sits
+          // past every artifact that existed before this restore.
+          const verdict = await verifyPostRestore(client, request.businessId, baseline);
+          if (!verdict.ok) {
+            throw new RestorePostCheckError(verdict.failed, verdict.checks);
+          }
+          return { ...written, checks: verdict.checks };
         });
 
         await tryAppendRestoreJournal(
@@ -360,6 +421,12 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
             // The receipt says what it deliberately did not touch, so an auditor
             // reading the journal cannot conclude the wallet was restored.
             untouched: [...RESTORE_IMMUTABLE_TABLES].sort(),
+            // …and the service records it kept, so "restored" cannot be read as
+            // "the backup inventory was rewound to the backup's own moment".
+            keptServiceRecords: [...RESTORE_SERVICE_TABLES].sort(),
+            // …and what was checked around it, so "restored" means more than
+            // "the rows landed".
+            checks: applied.checks,
           }),
           journalDir,
         );
@@ -389,6 +456,20 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
           verified: true,
         };
       } catch (error) {
+        if (error instanceof RestorePostCheckError) {
+          // The replacement was written and then rolled back: the journal says
+          // which check refused it, and that the business is unchanged.
+          await tryAppendRestoreJournal(
+            journalEntry("apply_failed_before_swap", {
+              code: "restore_post_check_failed",
+              failed: error.failed,
+              checks: error.checks,
+              rolledBack: true,
+            }),
+            journalDir,
+          );
+          return { ok: false, error: "restore_post_check_failed", journalId, checkpointFile };
+        }
         const code = error instanceof Error ? error.message : "restore_failed";
         await tryAppendRestoreJournal(journalEntry("apply_failed_before_swap", { code: code.slice(0, 120) }), journalDir);
         // The transaction rolled back; the checkpoint stays on disk for an

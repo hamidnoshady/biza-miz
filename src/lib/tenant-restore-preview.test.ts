@@ -35,6 +35,7 @@ function manifest(overrides: Partial<Parameters<typeof buildBackupManifest>[0]> 
 function input(overrides: Partial<RestorePreviewInput> = {}): RestorePreviewInput {
   return {
     businessId: BUSINESS,
+    businessName: "Cafe Alpha",
     artifact: {
       ref: "ref-1",
       format: "logical_snapshot",
@@ -89,7 +90,9 @@ describe("previewTenantRestore", () => {
     // ~32.5 hours between the backup and "now".
     expect(preview.rpoHours).toBe(32.5);
     expect(preview.estimatedDowntimeMinutes).toBeGreaterThan(0);
-    expect(preview.confirmationPhrase).toBe(restoreConfirmationPhrase(BUSINESS));
+    // The phrase the Owner must retype is the business's name, never its id.
+    expect(preview.confirmationPhrase).toBe("Cafe Alpha");
+    expect(preview.confirmationPhrase).toBe(restoreConfirmationPhrase("Cafe Alpha"));
   });
 
   it("never previews a physical whole-database restore on central", () => {
@@ -190,7 +193,7 @@ describe("guardTenantRestoreApply", () => {
     expect(
       guardTenantRestoreApply({
         preview,
-        typedConfirmation: BUSINESS,
+        typedConfirmation: "Cafe Alpha",
         minutesSinceReauthentication: 3,
       }),
     ).toEqual({ ok: true });
@@ -202,13 +205,13 @@ describe("guardTenantRestoreApply", () => {
     ).toEqual({ ok: false, error: "confirmation_required" });
 
     expect(
-      guardTenantRestoreApply({ preview, typedConfirmation: BUSINESS, minutesSinceReauthentication: 45 }),
+      guardTenantRestoreApply({ preview, typedConfirmation: "Cafe Alpha", minutesSinceReauthentication: 45 }),
     ).toEqual({ ok: false, error: "reauthentication_required" });
 
     expect(
       guardTenantRestoreApply({
         preview,
-        typedConfirmation: BUSINESS,
+        typedConfirmation: "Cafe Alpha",
         minutesSinceReauthentication: 1,
         appliesAsPlatformAdmin: true,
       }),
@@ -217,7 +220,7 @@ describe("guardTenantRestoreApply", () => {
     expect(
       guardTenantRestoreApply({
         preview,
-        typedConfirmation: BUSINESS,
+        typedConfirmation: "Cafe Alpha",
         minutesSinceReauthentication: 1,
         appliesAsPlatformAdmin: true,
         approvalRef: "approval-1",
