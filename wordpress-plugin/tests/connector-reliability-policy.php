@@ -270,4 +270,55 @@ foreach ( array_keys( $prefixes ) as $prefix ) {
 }
 same( array(), $uncovered, 'uninstall.php deletes each export progress prefix exactly once' );
 
+// --- option keys outside the settings array -------------------------------------
+//
+// Written by literal name or through a constant, read by name in uninstall.php
+// (which never loads the plugin). A key added later and not deleted here is a
+// row left in every shop's options table forever.
+$option_keys = array();
+foreach ( $sources as $file ) {
+	$source = file_get_contents( $file );
+	preg_match_all( "/(?:update|add|get|delete)_option\(\s*'(pos_connector_[a-z0-9_]+)'/", $source, $named, PREG_SET_ORDER );
+	foreach ( $named as $one ) {
+		$option_keys[ $one[1] ] = true;
+	}
+}
+// The settings array and the schema version are written through constants.
+preg_match_all( "/define\(\s*'(POS_CONNECTOR_(?:OPTION|DB_VERSION_OPTION))',\s*'(pos_connector_[a-z0-9_]+)'/", implode( "\n", array_map( 'file_get_contents', $sources ) ), $constants_named, PREG_SET_ORDER );
+foreach ( $constants_named as $one ) {
+	$option_keys[ $one[2] ] = true;
+}
+
+check( count( $option_keys ) >= 5, 'the scan finds the plugin option keys (found ' . count( $option_keys ) . ')' );
+$orphan_keys = array();
+foreach ( array_keys( $option_keys ) as $key ) {
+	if ( 1 !== substr_count( $uninstall, "'" . $key . "'" ) ) {
+		$orphan_keys[] = $key;
+	}
+}
+same( array(), $orphan_keys, 'uninstall.php deletes every option key the plugin writes, exactly once' );
+
+// --- PERF-01/PERF-02: nothing per-request that can be per-update ---------------
+//
+// `maybe_upgrade_db()` is hooked on `plugins_loaded`, i.e. every request, and it
+// used to run `dbDelta()` twice and a `SHOW TABLES` to answer a question whose
+// answer changes only on update. The guard is a schema-version read.
+$main_source = file_get_contents( $plugin_dir . 'pos-accounting-connector.php' );
+check( false !== strpos( $main_source, 'function pos_connector_db_version()' ), 'the schema version is one value, in one place' );
+check( 1 === preg_match( '/function pos_connector_maybe_upgrade_db\(\)\s*\{\s*\$installed = \(string\) get_option\( POS_CONNECTOR_DB_VERSION_OPTION/s', $main_source ), 'dbDelta is gated by a schema-version read before anything else' );
+check( false !== strpos( $main_source, 'update_option( POS_CONNECTOR_DB_VERSION_OPTION, pos_connector_db_version(), true )' ), 'and the version is stored autoloaded, so the gate costs no query' );
+check( false !== strpos( $main_source, 'POS_CONNECTOR_INSTALL_RETRY_SECONDS' ), 'a failed install is retried, but not on every request' );
+
+$queue_source = file_get_contents( $plugin_dir . 'includes/class-pos-queue.php' );
+check( 1 === preg_match( '/private static \$table_present = null;/', $queue_source ), 'the queue asks whether its table exists once per request' );
+check( 1 === substr_count( $queue_source, "SHOW TABLES LIKE" ), 'and keeps only one SHOW TABLES call in the class' );
+check( false !== strpos( $queue_source, 'KEY topic_remote_status (topic, remote_id, status)' ), 'the de-duplication read has an index of its own columns, in its own order' );
+check( false === strpos( $queue_source, 'UNIQUE KEY topic_remote_status' ), 'and it is not unique: a product legitimately has a sent row and a pending one' );
+check( false !== strpos( $queue_source, "WHERE topic = %s AND remote_id = %s AND status = 'pending'" ), 'the read the index serves is still the same read' );
+
+// `ensure_schedules()` on `init` is the other per-request question.
+check( false !== strpos( $main_source, 'function pos_connector_schedules_due_for_check()' ), 'the schedule check is throttled' );
+check( 1 === preg_match( '/function pos_connector_ensure_schedules\( \$force = false \)\s*\{\s*if \( ! \$force && ! pos_connector_schedules_due_for_check\(\) \)/s', $main_source ), 'and ensure_schedules consults the throttle first' );
+check( false !== strpos( $main_source, 'pos_connector_ensure_schedules( true );' ), 'activation forces it, so a fresh install is armed immediately' );
+
 echo $assertions . " reliability-policy assertions passed\n";

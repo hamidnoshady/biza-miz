@@ -228,17 +228,50 @@ function pos_connector_cron_status() {
 }
 
 /**
+ * The schema version this build installs: the queue's and the log's, together.
+ *
+ * A pair rather than one number because the two tables upgrade independently,
+ * and a guard that only knew about the queue would skip a log change.
+ */
+function pos_connector_db_version() {
+	return POS_Connector_Queue::DB_VERSION . '.' . POS_Connector_Log::DB_VERSION;
+}
+
+/** How long a failed install is left alone before it is retried, in seconds. */
+const POS_CONNECTOR_INSTALL_RETRY_SECONDS = 300;
+
+/**
  * Ensure plugin tables exist after activation, updates, or a failed first install.
  *
- * Some hosts never created `{prefix}pos_connector_queue` because dbDelta choked
- * on SQL comments in the CREATE string; this self-heals without manual SQL.
+ * This runs on `plugins_loaded`, i.e. on every request, so the first thing it
+ * does is one read of one autoloaded option. It used to call `dbDelta()` twice
+ * and `SHOW TABLES` on every single request — including a customer's checkout —
+ * to answer a question whose answer changes only when the plugin is updated.
+ * `pos_connector_db_version()` is written here and by nothing else, so a
+ * plugin update is the only thing that can make the two differ.
+ *
+ * A host whose install failed is retried, but at most every five minutes:
+ * some hosts never created `{prefix}pos_connector_queue` because dbDelta choked
+ * on SQL comments in the CREATE string, and self-healing is worth a few
+ * queries — once, not once per page view.
  */
 function pos_connector_maybe_upgrade_db() {
+	$installed = (string) get_option( POS_CONNECTOR_DB_VERSION_OPTION, '' );
+	if ( '' !== $installed && pos_connector_db_version() === $installed ) {
+		return;
+	}
+
+	$failed = get_option( 'pos_connector_queue_install_failed', array() );
+	if ( is_array( $failed ) && isset( $failed['checked_at'] ) && ( time() - (int) $failed['checked_at'] ) < POS_CONNECTOR_INSTALL_RETRY_SECONDS ) {
+		return;
+	}
+
 	POS_Connector_Log::install_table();
 
 	$queue_ok = POS_Connector_Queue::maybe_install();
 	if ( $queue_ok ) {
-		update_option( POS_CONNECTOR_DB_VERSION_OPTION, POS_Connector_Queue::DB_VERSION, false );
+		// Autoloaded on purpose: the guard above must not cost a query.
+		update_option( POS_CONNECTOR_DB_VERSION_OPTION, pos_connector_db_version(), true );
 		delete_option( 'pos_connector_queue_install_failed' );
 		return;
 	}
@@ -484,19 +517,46 @@ function pos_connector_schedule_event( $hook, $schedule ) {
 }
 
 /**
+ * How often `init` may re-check the schedules, in seconds.
+ *
+ * `ensure_schedules()` runs on `init`, so its cost is paid on every request the
+ * site serves — a customer's included — for a question whose answer changes only
+ * after an update, an activation, or a cron option somebody rebuilt. Its checks
+ * are cron-array reads; being right within a few minutes is enough, so they are
+ * made at most this often.
+ */
+const POS_CONNECTOR_SCHEDULE_CHECK_SECONDS = 300;
+
+/**
+ * Whether the schedules are due another look.
+ *
+ * The timestamp is an autoloaded option, so consulting it costs no query.
+ */
+function pos_connector_schedules_due_for_check() {
+	$last = (int) get_option( 'pos_connector_schedules_checked_at', 0 );
+	return $last <= 0 || ( time() - $last ) >= POS_CONNECTOR_SCHEDULE_CHECK_SECONDS;
+}
+
+/**
  * Arm every scheduled event that should exist and does not.
  *
  * Activation used to be the only place events were scheduled, and WordPress
  * does not fire the activation hook when a plugin is *updated* — so an event
  * added in a later release was never scheduled on an installed store, and one
- * that was ever cleared (a cadence change that failed half-way, a cron
- * option rebuilt by a cache plugin) was never put back. This runs on `init`
- * and costs a handful of `wp_next_scheduled()` reads; it only writes when
- * something is actually missing or scheduled on the wrong cadence.
+ * that was ever cleared (a cadence change that failed half-way, a cron option
+ * rebuilt by a cache plugin) was never put back. This runs on `init`, at most
+ * every `POS_CONNECTOR_SCHEDULE_CHECK_SECONDS`, and only writes when something
+ * is actually missing or scheduled on the wrong cadence.
  *
  * A cadence set to «خاموش» stays off: that is a setting, not a gap.
+ *
+ * @param bool $force Re-check now, ignoring the throttle (activation, settings save).
  */
-function pos_connector_ensure_schedules() {
+function pos_connector_ensure_schedules( $force = false ) {
+	if ( ! $force && ! pos_connector_schedules_due_for_check() ) {
+		return;
+	}
+	update_option( 'pos_connector_schedules_checked_at', time(), true );
 	$settings = pos_connector_settings();
 
 	if ( wp_get_schedule( POS_CONNECTOR_CRON_HOOK ) !== 'pos_connector_one_minute' ) {
@@ -533,7 +593,8 @@ add_action( 'init', 'pos_connector_ensure_schedules', 20 );
 
 function pos_connector_activate() {
 	pos_connector_maybe_upgrade_db();
-	pos_connector_ensure_schedules();
+	// Activation is exactly the case the throttle exists to make an exception for.
+	pos_connector_ensure_schedules( true );
 }
 register_activation_hook( __FILE__, 'pos_connector_activate' );
 
