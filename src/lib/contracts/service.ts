@@ -28,6 +28,7 @@ import {
   type WorkspaceOwner,
 } from "../workspace";
 import { resolveBusinessMoneyUnit } from "../ai-money-unit";
+import { resolveBusinessBranding } from "../business-branding";
 import { formatMoney } from "../money";
 import { formatJalali } from "../jalali";
 import {
@@ -48,7 +49,7 @@ import {
   type ContractBindingContext,
   type ResolvedContractField,
 } from "./bindings";
-import { contractContentHash } from "./crypto";
+import { frozenContentHash } from "./crypto";
 import {
   BUILTIN_CONTRACT_TEMPLATES,
   blankContent,
@@ -89,21 +90,31 @@ interface BusinessFacts {
   address: string;
 }
 
+/**
+ * The business's own identity, for the `{{business_name}}` / address / phone
+ * bindings.
+ *
+ * Reuses `resolveBusinessBranding` — the one resolver every printed document in
+ * the product already goes through (#945) — so a contract cannot print a
+ * different legal name than an invoice does. The branch-level address and phone
+ * are only filled when the branding has none, because a framework contract is
+ * issued by the business, not by one shop.
+ */
 async function businessFacts(businessId: string): Promise<BusinessFacts> {
-  const { rows } = await query<{ name: string; phone: string | null; address: string | null }>(
-    `SELECT b.name,
-            COALESCE(l.phone, b.phone) AS phone,
-            COALESCE(l.address, '') AS address
-       FROM businesses b
-       LEFT JOIN LATERAL (
-         SELECT phone, address FROM locations
-          WHERE business_id = b.id ORDER BY is_primary DESC NULLS LAST, created_at LIMIT 1
-       ) l ON true
-      WHERE b.id = $1`,
-    [businessId],
-  );
-  const row = rows[0];
-  return { name: row?.name ?? "", phone: row?.phone ?? "", address: row?.address ?? "" };
+  const branding = await resolveBusinessBranding(businessId, null, { includeLogo: false });
+  let address = branding.address ?? "";
+  let phone = branding.phone ?? "";
+  if (!address || !phone) {
+    const { rows } = await query<{ address: string | null; phone: string | null }>(
+      `SELECT address, phone FROM locations
+        WHERE business_id = $1 AND is_active
+        ORDER BY created_at LIMIT 1`,
+      [businessId],
+    );
+    address = address || rows[0]?.address || "";
+    phone = phone || rows[0]?.phone || "";
+  }
+  return { name: branding.legalName || branding.businessName, phone, address };
 }
 
 /**
@@ -756,13 +767,10 @@ export async function freezeContractDocument(
     throw new WorkspaceError("contract_document_has_issues");
   }
 
-  const content = { ...document.content, values };
-  const contentHash = contractContentHash({
-    title: content.title,
-    blocks: content.blocks,
-    values,
-    version: document.revision,
-  });
+  // Normalise once, hash exactly what gets stored, and store exactly that —
+  // `frozenContentHash` is shared with the verification in `signing.ts`.
+  const content = normalizeContractContent({ ...document.content, values });
+  const contentHash = frozenContentHash(content);
 
   return withTenantTransaction(owner.businessId, async () => {
     // Lock the document row, not the version rows: the "next number" is a
@@ -776,8 +784,8 @@ export async function freezeContractDocument(
     const version = Number(existing[0]?.version ?? 0) + 1;
     const { rows } = await query<Record<string, unknown>>(
       `INSERT INTO contract_document_versions
-         (business_id, contract_id, document_id, version, content, content_hash, frozen_by)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+         (business_id, contract_id, document_id, version, title, content, content_hash, frozen_by)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
        RETURNING id, version, title, content, content_hash, frozen_at, frozen_by`,
       [owner.businessId, contract.id, document.id, version, content.title, JSON.stringify(content), contentHash, owner.actorUserId],
     );

@@ -46,7 +46,7 @@ import { getSmsProvider } from "../sms-config";
 import { formatJalali } from "../jalali";
 import { recordActivity, WorkspaceError, type WorkspaceContract, type WorkspaceOwner } from "../workspace";
 import { CONTRACT_LIMITS, normalizeContractContent, signatureSlots, type ContractDocumentContent } from "./blocks";
-import { contractContentHash, hashInvitationToken, looksLikeInvitationToken, newInvitationToken } from "./crypto";
+import { frozenContentHash, hashInvitationToken, looksLikeInvitationToken, newInvitationToken } from "./crypto";
 import { SIGNING_EVENT_LABELS } from "./labels";
 import type {
   ContractEnvelope,
@@ -1329,12 +1329,7 @@ export async function submitSignature(
     // froze. It cannot drift (versions are immutable), but the check is the
     // one that turns a data-repair mistake into a refusal rather than a
     // signature on the wrong text.
-    const recomputed = contractContentHash({
-      title: frozen.content.title,
-      blocks: frozen.content.blocks,
-      values: frozen.content.values ?? {},
-      version: frozen.content.version,
-    });
+    const recomputed = frozenContentHash(frozen.content);
     if (recomputed !== row.version_hash) throw new WorkspaceError("contract_version_mismatch");
 
     const result = await withTenant(row.business_id, async () => {

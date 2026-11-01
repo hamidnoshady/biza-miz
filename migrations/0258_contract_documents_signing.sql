@@ -319,6 +319,29 @@ CREATE POLICY tenant_read ON contract_signing_events FOR SELECT
 CREATE POLICY tenant_insert ON contract_signing_events FOR INSERT
     WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
 
+-- ---------------------------------------------------------------------------
+-- The signer OTP is an `mfa_challenges` row with purpose `contract_signing`
+-- (#902's platform-managed OTP — no second provider system). The purpose
+-- vocabulary is a CHECK constraint, so it has to grow here or every real OTP
+-- issuance fails with a constraint violation: exactly what happened the first
+-- time this suite ran against a real database. `src/lib/auth-hardening.test.ts`
+-- pins the TypeScript list; this keeps the database in step with it.
+-- ---------------------------------------------------------------------------
+ALTER TABLE mfa_challenges DROP CONSTRAINT mfa_challenges_purpose_check;
+ALTER TABLE mfa_challenges
+    ADD CONSTRAINT mfa_challenges_purpose_check CHECK (purpose IN (
+        'login',
+        'verify_login_phone',
+        'change_login_phone',
+        'mfa_login',
+        'mfa_enrol_sms',
+        'step_up_sms',
+        'password_recovery',
+        -- A contract signer is a third party with no account; the challenge is
+        -- keyed to the signer, never to a user session.
+        'contract_signing'
+    ));
+
 COMMENT ON TABLE contract_document_versions IS
     'Immutable frozen contract snapshots; content_hash is SHA-256 over the canonical {title, blocks, values, version} JSON (issue #908).';
 COMMENT ON TABLE contract_invitations IS

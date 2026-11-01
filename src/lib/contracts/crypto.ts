@@ -43,6 +43,34 @@ export function contractContentHash(frozen: unknown): string {
   return sha256Hex(canonicalJson(frozen));
 }
 
+/**
+ * The hash of one frozen version.
+ *
+ * Both the write side (freezing a draft) and the read side (verifying the text a
+ * signer is about to sign) must use *this* function and nothing else. They used
+ * to assemble the payload separately, and they disagreed about `version` — the
+ * freeze hashed the draft's `revision`, verification the content schema version
+ * — so every real signature was refused with `contract_version_mismatch`. A
+ * genuine bug that only a database test could find, because both sides were
+ * "correct" against their own hand-built fixtures.
+ *
+ * The payload is the normalised content the database actually stores, so the
+ * hash cannot depend on which code path produced the object.
+ */
+export function frozenContentHash(content: {
+  title: string;
+  blocks: unknown[];
+  values?: Record<string, string>;
+  version: number;
+}): string {
+  return contractContentHash({
+    title: content.title,
+    blocks: content.blocks,
+    values: content.values ?? {},
+    version: content.version,
+  });
+}
+
 /** 32 random bytes, url-safe. The only form of the token that is ever printable. */
 export function newInvitationToken(): string {
   return randomBytes(32).toString("base64url");

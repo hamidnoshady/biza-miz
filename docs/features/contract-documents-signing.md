@@ -38,6 +38,12 @@ Invariants enforced in the database, not only in code:
 * one signature per signer (`UNIQUE (signer_id)`);
 * two people cannot share a signature line or a phone number in the same round.
 
+The signer OTP is #902's platform-managed `mfa_challenges` row, so this migration
+also extends `mfa_challenges_purpose_check` with `contract_signing` — without that
+line no challenge can be inserted and every real OTP fails. The realm is
+`contract_signer`; the challenge is keyed to the **signer** row, never to a user
+session, and the code is never stored in plaintext.
+
 `src/lib/contracts/schema-contract.test.ts` pins the migration to every column
 the service writes, plus the five invariants above. It exists because the first
 draft of this branch drifted there (`ip_address`, `cancel_reason`, a missing
@@ -120,12 +126,39 @@ canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
    `bindings.ts` (contract, project, party, business). AEC commercial terms and
    the CRM party file are covered through the project/party projections; there is
    no per-field AEC binding yet.
-4. **No Database/CI proof in this environment.** `npm run test:db` needs a
-   PostgreSQL instance that this sandbox does not have; the SQL is verified only
-   by the static contract test above. CI must run it.
+4. **`npm run test:db` proves this migration locally, but CI still has to run it.**
+   `integration/contract-signing.integration.test.ts` (20 tests) runs the whole
+   flow against a real PostgreSQL: it creates a throwaway database, applies all
+   420 migrations, seeds nothing but the party/project rows the contract binds to,
+   and then exercises freezing, tenant isolation under an unprivileged role,
+   append-only evidence, parallel and sequential rounds, consent → OTP →
+   signature, link rotation and post-signature draft edits. Results are in §6a;
+   the green run here does not replace the CI job.
 5. **`npm run build` was not executed** here (the sandbox has 3 GB and the
    previous full `tsc` run exhausted it); a scoped `tsc --noEmit` over every file
    this branch touches passes, and the full `vitest` suite passes.
+
+## 6a. What the database suite found
+
+Three defects were invisible to the unit tests — which mock `query()` — and only
+appeared once the SQL ran against a real server:
+
+1. **`locations` has no `is_primary` column.** `businessFacts()` selected
+   `COALESCE(l.phone, b.phone)` from locations with `ORDER BY is_primary`, so
+   *every* freeze, send and print path threw `column "is_primary" does not exist`.
+   Fixed by reusing `resolveBusinessBranding()` — the resolver every printed
+   document already goes through (#945) — so a contract now prints the same legal
+   name as an invoice, with the first active location only as the address/phone
+   fallback.
+2. **Frozen versions were written without their title.** The `INSERT` listed
+   seven columns but bound eight parameters, so no version could ever be stored.
+3. **Signing was impossible even with a correct hash.** Two independent bugs met:
+   the `mfa_challenges.purpose` CHECK in `0211` did not include
+   `contract_signing` (so no OTP challenge could be inserted), and the freeze path
+   hashed the draft's `revision` while verification hashed the content schema
+   version — every signature was refused with `contract_version_mismatch`. Both
+   are fixed; the hash payload now has exactly one definition
+   (`frozenContentHash()` in `crypto.ts`), used by both sides.
 
 ## 7. Verification commands
 
@@ -144,6 +177,12 @@ npx vitest run src/app/api/api-guards.test.ts src/app/design-lint.test.ts \
 # the whole suite (≈12 minutes)
 npx vitest run
 
-# the migration, on a database
+# the migration and the signing flow, on a real database
+PGDATA=/tmp/pgdata node scripts/dev-postgres.mjs --detach
+export DATABASE_URL=postgres://pos:pos@localhost:5432/pos
+./node_modules/.bin/tsx scripts/migrate.ts
+./node_modules/.bin/vitest run --config vitest.db.config.ts \
+  integration/contract-signing.integration.test.ts
+# the whole database suite
 npm run test:db
 ```
