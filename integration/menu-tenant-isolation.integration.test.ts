@@ -26,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { createAppRole } from "../src/lib/create-app-role";
+import { createAppRole, dropAppRole } from "../src/lib/create-app-role";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -178,7 +178,7 @@ afterAll(async () => {
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
     await maintenance.query(`DROP OWNED BY "${probeRole}"`).catch(() => {});
-    await maintenance.query(`DROP ROLE IF EXISTS "${probeRole}"`).catch(() => {});
+    await dropAppRole(maintenance, probeRole).catch(() => {});
   } finally {
     await maintenance.end();
   }

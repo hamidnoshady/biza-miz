@@ -5,7 +5,7 @@ import { beforeAll, afterAll, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { runMigrations } from "../scripts/migrate";
 import { branchScope, BUSINESS_WIDE_SCOPE } from "../src/lib/report-scope";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { INDUSTRIES } from "../src/lib/industries";
 import { pageReportDetails } from "../src/lib/report-detail-page";
 import { standardReportsFor, reportShape, REPORT_VIEWS, previousPeriodRange } from "../src/lib/reports";
@@ -130,7 +130,7 @@ afterAll(async () => {
   await db?.closeDatabasePool(); await owner?.end(); process.env.DATABASE_URL = root;
   const maintenance = new Client({ connectionString: url("postgres") }); await maintenance.connect();
   await maintenance.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
-  await maintenance.query(`DROP ROLE IF EXISTS "${role}"`); await maintenance.end();
+  await dropAppRole(maintenance, role); await maintenance.end();
 });
 async function read(id: string, section: string, qs = "", key?: string) {
   const response = await (key ? standard : route)(new NextRequest(`http://test/api/platform/businesses/${id}/reports/${section}${qs}`), { params: Promise.resolve({ id, section, key }) });
