@@ -174,6 +174,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/growth/gift-cards", "کارت هدیه"],
     ["/growth/loyalty", "وفاداری و اعتبار"],
     ["/growth/commission", "پورسانت فروشندگان"],
+    ["/growth/torob", "کانال ترب"],
     ["/growth/settings", "تنظیمات رشد"],
   ]),
   ...pageGroup("وب‌سایت و بیزامیز CMS", [

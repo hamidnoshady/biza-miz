@@ -1222,7 +1222,12 @@ and DoD #2 in one line of evidence.
 8. **Managed Torob (#894) and Divar (#896)** — the two integrations §5q left unregistered because
    there is nothing to report on yet. They are separate issues by the epic's own rule ("do not
    silently expand this Kavenegar issue into undocumented rebuilds"), and they inherit §5q's contract
-   and §5r's drill table rather than inventing a second one.
+   and §5r's drill table rather than inventing a second one. **In progress:** Torob's Wave 1 (the
+   eligibility foundation, the shop lifecycle and the credential) is in
+   [`docs/integrations/torob-channel.md`](../integrations/torob-channel.md), which also lists the
+   waves that remain and the two facts — feed, indexing — the screen deliberately does not claim yet.
+   Torob is *not* registered in the managed-services inventory: in this wave the platform holds a
+   merchant's token at their request, not a supply relationship of its own.
 
 ## 10. Environment notes
 
