@@ -43,6 +43,7 @@ import {
   upsertMapping,
 } from "./mapping-service";
 import { wooAmountToRial } from "./woo-money";
+import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "../product-content";
 import { effectivePushSwitches } from "./outbox-policy";
 import { writeIntegrationAudit } from "./audit";
 import {
@@ -451,6 +452,20 @@ async function upsertRetailProduct(
 /** How many gallery images (beyond the primary) the mirror keeps per product. */
 const REMOTE_GALLERY_LIMIT = 8;
 
+/**
+ * One storefront text field, bounded and never `undefined`.
+ *
+ * A blank store field is stored as `null` rather than `""` so "the store says
+ * nothing here" has exactly one shape in the metadata, the same rule the
+ * product form applies (`normalizeProductDescription`).
+ */
+function boundedRemoteText(value: unknown, max: number): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  if (!text) return null;
+  return text.length > max ? text.slice(0, max) : text;
+}
+
 async function recordProductShape(connection: ConnectionRow, product: WooProduct): Promise<void> {
   // The primary image is the lowest-position one WooCommerce returns; the
   // mirror is display-only (issue #943) — the app never uploads through it
@@ -482,6 +497,18 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
       .slice(1, 1 + REMOTE_GALLERY_LIMIT)
       .filter((image) => typeof image.src === "string" && image.src)
       .map((image) => ({ src: image.src as string, alt: typeof image.alt === "string" ? image.alt : "" })),
+    // The store's own storefront text (issue #1215, P1-2). Media stays a
+    // read-only mirror (#941 owns attachment transport), but the descriptions
+    // are text the owner may edit from the manager — and to edit what the
+    // store says, the manager first has to be able to *read* what the store
+    // says. Bounded at the same limits the editor and the write path enforce,
+    // so the mirror never holds text this app could not send back.
+    remoteShortDescription: boundedRemoteText(product.short_description, PRODUCT_SHORT_DESCRIPTION_MAX),
+    remoteDescription: boundedRemoteText(product.description, PRODUCT_LONG_DESCRIPTION_MAX),
+    // The store's own watermark for its content: when WordPress last wrote
+    // this product, which is not when our sync last read it.
+    remoteModifiedAt:
+      typeof product.date_modified === "string" && product.date_modified ? product.date_modified : null,
     // Seeing the product in any inbound payload — a sync page, a webhook —
     // clears a stale "the store no longer lists this" flag (issue #943).
     remoteMissing: false,

@@ -15,12 +15,20 @@ bottom are the proof.
    page under «websites → WP» never edits local values.
 2. **The store is the truth about the store.** What WooCommerce shows —
    publish status, `manage_stock`, its own regular/sale price, its primary
-   image — is mirrored inward at every sync (`recordProductShape`) and
-   displayed as *last-seen* values. The mirror is never sent back: inbound
-   reads cannot become outbound writes.
-3. **Store-side overrides are explicit, human, and queued.** The row editor
-   on the Products page is the only place a store-side value is written from
-   this app. It goes through `sanitizeProductPatch`'s closed allowlist
+   image, its short and long description — is mirrored inward at every sync
+   (`recordProductShape`) and displayed as *last-seen* values. The mirror is
+   never sent back on its own: inbound reads cannot become outbound writes.
+   Imagery in particular is read-only in both directions until #941's
+   attachment transport lands.
+3. **Store-side overrides are explicit, human, and queued.** The Products
+   page is the only place a store-side value is written from this app: its row
+   editor, and — for the storefront text alone — the per-product «محتوا و
+   تصاویر» sheet (issue #1215), which reads the store's own short/long
+   description out of the same mirror and writes either field back **only**
+   when the owner presses «اعمال», through the ordinary product outbox. A
+   description travels verbatim (Gutenberg HTML intact) and is refused, not
+   truncated, past the limits in `src/lib/product-content.ts`; the AI draft
+   that may fill the field never writes anything. It goes through `sanitizeProductPatch`'s closed allowlist
    (`name`, `regular_price`, `sale_price`, `stock_quantity`,
    `manage_stock`, `status`, `description`, `short_description`) — never
    `type`, `parent_id`, `sku`, `attributes`, `categories` or `images`, which
