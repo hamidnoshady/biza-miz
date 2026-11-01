@@ -3,17 +3,38 @@
 /**
  * Phase 42 — «لیست محصولات»: the trade's variant board as the reference's
  * product table — a KPI summary over the catalogue, then one card with a
- * search/status/page-size/CSV toolbar, the shared table and a numbered pager,
- * plus the per-row stock/price panel — composed from the platform's card, KPI,
- * badge, input and money primitives instead of the reference's blue chrome.
+ * search/status/Woo/page-size/CSV toolbar, the shared table and a numbered
+ * pager, plus the per-row panels.
+ *
+ * Issue #1207 §B compacted it. The old table was eleven columns and every
+ * eligible row carried a five-line WooCommerce block, so a phone showed a table
+ * it could not read and a desktop row stacked more chrome than product. It is
+ * now four columns — the product, one primary stock/price state, small source
+ * and connection chips, and one primary action — with the verbose facts (barcode,
+ * unit, cost, Woo ids, receive/acknowledge times, store management, the
+ * publish-content editor) in one expandable details area per row. `DataTable`
+ * already turns that table into stacked cards below `sm`, so the same markup is
+ * the mobile view.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useDeferredValue, type ReactNode } from "react";
-import { BanIcon, ChevronLeftIcon, ChevronRightIcon, CircleCheckIcon, CircleXIcon, DownloadIcon, PackageIcon, PackageSearchIcon } from "lucide-react";
+import {
+  BanIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CircleCheckIcon,
+  CircleXIcon,
+  DownloadIcon,
+  PackageIcon,
+  PackageSearchIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
 import { formatQuantity, toPersianDigits } from "@/lib/digits";
+import { formatJalali } from "@/lib/jalali";
 import {
   buildProductsCsv,
   isVariantParent,
@@ -44,7 +65,20 @@ import { PRODUCT_PUBLISH_STATUS_LABELS } from "@/lib/product-content";
 import { ProductContentFields, type ProductContentValue } from "./product-content-fields";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 import type { ProductWooLink } from "@/lib/integrations/product-links-service";
-import { ProductPublicationPanel } from "./product-publication-panel";
+import { ProductStoreActionButton, ProductPublicationPanel } from "./product-publication-panel";
+import { ProductDuplicatePanel } from "./product-duplicate-panel";
+import { normaliseSku } from "@/lib/duplicate-items";
+import {
+  PRODUCT_WOO_FILTERS,
+  STORE_LINK_STATE_LABEL,
+  STORE_LINK_STATE_TONE,
+  matchesWooFilter,
+  productLinkState,
+  productRowAction,
+  storeLinkState,
+  type ProductLinkState,
+  type ProductWooFilter,
+} from "@/lib/product-row-actions";
 
 const PAGE_SIZES = [10, 20, 50] as const;
 
@@ -56,18 +90,18 @@ const STATUS_FILTERS: readonly { value: ProductStatusFilter; label: string }[] =
   { value: "non_sellable", label: "غیر قابل فروش" },
 ];
 
-const PRODUCT_COLUMNS = 11;
+const PRODUCT_COLUMNS = 4;
 
-type ProductPanelKind = "stock" | "content";
+/** The one expanded area a row may show at a time. */
+type ProductPanelKind = "store" | "details" | "stock" | "content" | "duplicate";
 
 type ProductWooLinkLoadState = "loading" | "ready" | "unavailable" | "error";
 
+/** «۱۴۰۵/۰۸/۰۹ ۱۴:۳۰» — Shamsi everywhere, never a raw ISO string. */
 function displayLinkTime(value: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? "—"
-    : new Intl.DateTimeFormat("fa-IR", { dateStyle: "short", timeStyle: "short" }).format(date);
+  return Number.isNaN(date.getTime()) ? "—" : formatJalali(date, { withTime: true, timeZone: "Asia/Tehran" });
 }
 
 export function ProductsListSection({ apiBase }: { apiBase: string }) {
@@ -78,6 +112,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const [statusFilter, setStatusFilter] = useState<ProductStatusFilter>("all");
+  const [wooFilter, setWooFilter] = useState<ProductWooFilter>("all");
   const [pageSize, setPageSize] = useState<number>(20);
   const [page, setPage] = useState(0);
   const [panelFor, setPanelFor] = useState<{ id: string; kind: ProductPanelKind } | null>(null);
@@ -85,21 +120,38 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   const [notice, setNotice] = useState("");
   const [wooLinks, setWooLinks] = useState<ProductWooLink[]>([]);
   const [wooLinksState, setWooLinksState] = useState<ProductWooLinkLoadState>("loading");
+  // Which SKUs the duplicate report flags as needing a decision. Only the SKUs:
+  // the evidence is read per row, when somebody opens its review.
+  const [duplicateSkus, setDuplicateSkus] = useState<ReadonlySet<string>>(new Set());
+  const [duplicateState, setDuplicateState] = useState<ProductWooLinkLoadState>("loading");
   const money = useMoney();
 
   const loadWooLinks = useCallback(async () => {
     setWooLinksState("loading");
-    const result = await api<{ links: ProductWooLink[]; error?: string }>("/api/products/woo-links");
-    if (!result.ok) {
+    setDuplicateState("loading");
+    // One round trip for both: the link badges and the duplicate flags are the
+    // same "what does the store know about this row" question.
+    const [linksResult, duplicateResult] = await Promise.all([
+      api<{ links: ProductWooLink[]; error?: string }>("/api/products/woo-links"),
+      api<{ skus?: string[]; error?: string }>("/api/products/duplicates?summary=1"),
+    ]);
+    if (!linksResult.ok) {
       setWooLinks([]);
-      setWooLinksState(result.data.error === "forbidden" ? "unavailable" : "error");
-      return;
+      setWooLinksState(linksResult.data.error === "forbidden" ? "unavailable" : "error");
+    } else {
+      // A 2xx that says nothing (or omits `links`) is "no links", never a
+      // crash: this read is decoration over the catalogue, and a missing body
+      // must not take the whole products screen down with it.
+      setWooLinks(Array.isArray(linksResult.data.links) ? linksResult.data.links : []);
+      setWooLinksState("ready");
     }
-    // A 2xx that says nothing (or omits `links`) is "no links", never a
-    // crash: this read is decoration over the catalogue, and a missing body
-    // must not take the whole products screen down with it.
-    setWooLinks(Array.isArray(result.data.links) ? result.data.links : []);
-    setWooLinksState("ready");
+    if (!duplicateResult.ok) {
+      setDuplicateSkus(new Set());
+      setDuplicateState(duplicateResult.data.error === "forbidden" ? "unavailable" : "error");
+    } else {
+      setDuplicateSkus(new Set(Array.isArray(duplicateResult.data.skus) ? duplicateResult.data.skus : []));
+      setDuplicateState("ready");
+    }
   }, []);
 
   const load = useCallback(() => {
@@ -127,6 +179,21 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
     return grouped;
   }, [wooLinks]);
 
+  /** Per-row state both the filter and the badges read, computed once. */
+  const linkStateByLocalId = useMemo(() => {
+    const states = new Map<string, ProductLinkState>();
+    for (const [localId, links] of wooLinksByLocalId) states.set(localId, productLinkState(links));
+    return states;
+  }, [wooLinksByLocalId]);
+
+  const isDuplicate = useCallback(
+    (item: VariantSummary) => {
+      const sku = normaliseSku(item.sku);
+      return Boolean(sku && duplicateSkus.has(sku));
+    },
+    [duplicateSkus],
+  );
+
   // Performance optimization: Pre-compute the search needles to avoid O(N)
   // recalculations per keystroke. This index depends only on the base dataset;
   // needles are digit-folded so a Persian-keyboard query («۱۰۱۳») matches the
@@ -138,8 +205,9 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
 
   // Performance optimization: We depend on deferredSearch so typing remains
   // snappy while filtering happens in the background. Field-level needles
-  // avoid false-positive cross-boundary matches. Search and the status filter
-  // combine with AND: «Gliss» + «موجود» is only the Gliss rows in stock.
+  // avoid false-positive cross-boundary matches. Search, the status filter and
+  // the store/duplicate filter combine with AND: «Gliss» + «موجود» + «متصل» is
+  // only the linked, in-stock Gliss rows.
   const needle = normalizeListSearch(deferredSearch);
   const filtered = useMemo(() => {
     if (!items || !searchIndex) return null;
@@ -147,17 +215,18 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
       .filter(
         ({ item, needles }) =>
           (!needle || variantMatchesNeedle(needles, needle)) &&
-          variantMatchesStatusFilter(item, statusFilter),
+          variantMatchesStatusFilter(item, statusFilter) &&
+          matchesWooFilter(linkStateByLocalId.get(item.id) ?? "unlinked", isDuplicate(item), wooFilter),
       )
       .map(({ item }) => item);
-  }, [items, searchIndex, needle, statusFilter]);
+  }, [items, searchIndex, needle, statusFilter, wooFilter, linkStateByLocalId, isDuplicate]);
 
   // Any narrowing of the list returns the pager to the first page — staying
   // on page 7 of a result that now has one page shows an empty table.
-  useEffect(() => setPage(0), [deferredSearch, statusFilter, pageSize]);
+  useEffect(() => setPage(0), [deferredSearch, statusFilter, wooFilter, pageSize]);
 
   const searching = needle.length > 0;
-  const filtering = searching || statusFilter !== "all";
+  const filtering = searching || statusFilter !== "all" || wooFilter !== "all";
   const pageCount = filtered ? Math.max(1, Math.ceil(filtered.length / pageSize)) : 1;
   const safePage = Math.min(page, pageCount - 1);
   const rows = filtered?.slice(safePage * pageSize, safePage * pageSize + pageSize) ?? [];
@@ -183,7 +252,14 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   function clearFilters() {
     setSearch("");
     setStatusFilter("all");
+    setWooFilter("all");
     setPage(0);
+  }
+
+  /** The link/outbox badges and the duplicate flags, after something changed. */
+  function refreshStoreState() {
+    void loadWooLinks();
+    load();
   }
 
   const description =
@@ -232,8 +308,8 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
 
       <SectionCard title="لیست محصولات" description={description} flush>
         {/*
-          The toolbar: search takes the wide area, the two dropdowns and the
-          export stay grouped after it. On a phone each control takes its own
+          The toolbar: search takes the wide area, the dropdowns and the two
+          exports stay grouped after it. On a phone each control takes its own
           full-width row (search first) instead of squeezing into one clipped
           strip.
         */}
@@ -264,6 +340,24 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
             </select>
           </label>
           <label className="flex w-full shrink-0 items-center gap-2 text-xs text-muted-foreground sm:w-auto">
+            فروشگاه
+            <select
+              className={`${inputClass} w-auto`}
+              value={wooFilter}
+              // The flags arrive with the link read; filtering on a state that
+              // has not loaded yet would show an empty list for no reason.
+              disabled={wooLinksState === "loading" || duplicateState === "loading"}
+              onChange={(event) => setWooFilter(event.target.value as ProductWooFilter)}
+              aria-label="فیلتر پیوند فروشگاه و تکراری"
+            >
+              {PRODUCT_WOO_FILTERS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex w-full shrink-0 items-center gap-2 text-xs text-muted-foreground sm:w-auto">
             ردیف در صفحه
             <select
               className={`${inputClass} w-auto`}
@@ -278,6 +372,17 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
               ))}
             </select>
           </label>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="min-h-9 shrink-0"
+            onClick={refreshStoreState}
+            disabled={wooLinksState === "loading"}
+          >
+            <RefreshCwIcon aria-hidden="true" className="size-4" />
+            تازه‌سازی وضعیت ارسال
+          </Button>
           <Button
             type="button"
             size="sm"
@@ -350,18 +455,11 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
           </div>
         ) : (
           <div data-tour-id="products.table">
-          <DataTable caption="فهرست کالاها، موجودی و قیمت‌ها" tableClassName="min-w-[52rem]">
+          <DataTable caption="فهرست کالاها، موجودی و قیمت‌ها">
             <DataTableHead>
-              <Th>#</Th>
-              <Th>نام محصول</Th>
-              <Th>وضعیت</Th>
-              <Th>کد کالا</Th>
-              <Th>بارکد</Th>
-              <Th>واحد اصلی</Th>
-              <Th numeric>موجودی</Th>
-              <Th numeric>قیمت فروش</Th>
-              <Th numeric>قیمت خرید</Th>
-              <Th>پیوند فروشگاه ووکامرس</Th>
+              <Th>محصول</Th>
+              <Th>وضعیت و موجودی</Th>
+              <Th>منبع و پیوند فروشگاه</Th>
               <Th aria-label="عملیات" />
             </DataTableHead>
             <DataTableBody>
@@ -373,6 +471,8 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
                   apiBase={apiBase}
                   wooLinks={wooLinksByLocalId.get(item.id) ?? []}
                   wooLinksState={wooLinksState}
+                  duplicate={isDuplicate(item)}
+                  duplicateState={duplicateState}
                   onRetryWooLinks={() => void loadWooLinks()}
                   busy={busy}
                   setBusy={setBusy}
@@ -381,6 +481,7 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
                     setNotice("");
                     setPanelFor((current) => (current?.id === item.id && current.kind === kind ? null : { id: item.id, kind }));
                   }}
+                  onStoreStateChanged={refreshStoreState}
                   onSaved={() => {
                     setNotice("ذخیره شد.");
                     load();
@@ -463,11 +564,14 @@ function ProductRow({
   apiBase,
   wooLinks,
   wooLinksState,
+  duplicate,
+  duplicateState,
   onRetryWooLinks,
   busy,
   setBusy,
   panel,
   onTogglePanel,
+  onStoreStateChanged,
   onSaved,
 }: {
   item: VariantSummary;
@@ -475,11 +579,16 @@ function ProductRow({
   apiBase: string;
   wooLinks: ProductWooLink[];
   wooLinksState: ProductWooLinkLoadState;
+  /** The row's SKU is flagged as a probable duplicate. */
+  duplicate: boolean;
+  duplicateState: ProductWooLinkLoadState;
   onRetryWooLinks: () => void;
   busy: boolean;
   setBusy: (busy: boolean) => void;
   panel: ProductPanelKind | null;
   onTogglePanel: (kind: ProductPanelKind) => void;
+  /** A store decision landed: re-read links, outbox state and duplicate flags. */
+  onStoreStateChanged: () => void;
   onSaved: () => void;
 }) {
   const money = useMoney();
@@ -487,35 +596,31 @@ function ProductRow({
   const status = productStatus(item);
   const inStock = status === "in_stock";
   const sourceLabel = itemSourceLabel(item.source);
+  const action = productRowAction({ links: wooLinks, duplicate });
   return (
     <>
       {/* The amber "selected" wash ties the expanded panel to its row. */}
       <DataTableRow className={isFamily ? "bg-muted/60" : undefined} selected={panel !== null}>
-        <Td muted className="text-xs">{toPersianDigits(index)}</Td>
         <Td>
           {/*
-            Two scan lines: the name, then the family it belongs to plus its
-            attributes as quiet amber chips. The status used to live here as a
-            fourth chip; it has its own column now.
+            One cell, three scan lines at most: which row this is (number, name,
+            publish status), its code, and — for a variant — the family and
+            attributes that distinguish it. The status has its own column.
           */}
           <div className="min-w-0">
-            <span className="block font-medium text-foreground">{item.name}</span>
-            {item.publishStatus === "draft" || item.publishStatus === "private" ? (
-              <span className="mt-1 inline-block">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="text-[11px] text-muted-foreground tabular-nums">{toPersianDigits(index)}</span>
+              <span className="min-w-0 font-medium text-foreground">{item.name}</span>
+              {isFamily ? <StatusBadge tone="neutral">خانواده</StatusBadge> : null}
+              {item.publishStatus === "draft" || item.publishStatus === "private" ? (
                 <StatusBadge tone="neutral">{PRODUCT_PUBLISH_STATUS_LABELS[item.publishStatus]}</StatusBadge>
-              </span>
-            ) : null}
-            {(!isFamily && (item.parentName || item.attributes.length > 0)) || sourceLabel ? (
+              ) : null}
+            </div>
+            <p dir="ltr" className="mt-0.5 text-xs text-muted-foreground">
+              {item.sku ?? "بدون کد کالا"}
+            </p>
+            {(!isFamily && item.parentName) || item.attributes.length > 0 ? (
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-                {/*
-                  Audit F13 — provenance: which integration owns this row.
-                  Two rows with one name and SKU are told apart here.
-                */}
-                {sourceLabel ? (
-                  <span className="text-[11px] text-muted-foreground" title="منبع این ردیف">
-                    {sourceLabel}
-                  </span>
-                ) : null}
                 {!isFamily && item.parentName ? (
                   <span className="text-xs text-muted-foreground">{item.parentName}</span>
                 ) : null}
@@ -532,129 +637,187 @@ function ProductRow({
           </div>
         </Td>
         <Td>
-          <StatusBadge
-            tone={
-              status === "in_stock"
-                ? "positive"
-                : status === "non_sellable"
-                  ? "danger"
-                  : "neutral"
-            }
-          >
-            {status === "family" ? "خانواده" : status === "in_stock" ? "موجود" : status === "out_of_stock" ? "ناموجود" : "غیر قابل فروش"}
-          </StatusBadge>
-        </Td>
-        <Td muted nowrap className="text-xs">{item.sku ?? "—"}</Td>
-        <Td dir="ltr" muted nowrap className="text-xs">{item.barcode ?? "—"}</Td>
-        <Td muted className="text-xs">{item.unit ?? "عدد"}</Td>
-        <Td numeric className="text-xs">
-          {isFamily ? (
-            <span className="text-muted-foreground">—</span>
-          ) : (
-            <span
-              className={cn(
-                inStock ? "text-emerald-700 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400",
-              )}
+          {/*
+            §B: one primary stock/price state per row, not three competing
+            columns. A family has no stock of its own, so it says so instead of
+            inventing a zero.
+          */}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <StatusBadge
+              tone={
+                status === "in_stock"
+                  ? "positive"
+                  : status === "non_sellable"
+                    ? "danger"
+                    : "neutral"
+              }
             >
-              {formatQuantity(item.quantity)}
-            </span>
-          )}
-        </Td>
-        <Td numeric className="text-xs">
-          {isFamily ? "—" : item.unitPrice != null ? money.format(item.unitPrice) : "تعیین نشده"}
-        </Td>
-        <Td numeric className="text-xs">
-          {isFamily ? "—" : item.unitCost != null ? money.format(item.unitCost) : "تعیین نشده"}
-        </Td>
-        <Td className="min-w-52 text-xs">
-          {wooLinksState === "loading" ? (
-            <span className="text-muted-foreground">در حال بررسی پیوندها…</span>
-          ) : wooLinksState === "unavailable" ? (
-            <span className="text-muted-foreground">برای دیدن پیوند فروشگاه، دسترسی اتصال‌ها لازم است.</span>
-          ) : wooLinksState === "error" ? (
-            <div className="space-y-1">
-              <span className="block text-muted-foreground">وضعیت پیوندها دریافت نشد.</span>
-              <Button type="button" variant="outline" size="sm" className="min-h-8 px-2 text-xs" onClick={onRetryWooLinks}>
-                تلاش دوباره
-              </Button>
-            </div>
-          ) : wooLinks.length === 0 ? (
-            <StatusBadge tone="neutral">بدون پیوند ووکامرس</StatusBadge>
-          ) : (
-            <ul className="space-y-2">
-              {wooLinks.map((link) => {
-                const failed = link.connectionStatus === "error" || link.lastOutboundStatus === "failed" || link.lastOutboundStatus === "dead";
-                const pending = link.lastOutboundStatus === "pending" || link.lastOutboundStatus === "processing";
-                const label = failed
-                  ? "نیازمند بررسی"
-                  : link.connectionStatus === "paused"
-                    ? "اتصال متوقف"
-                    : pending
-                      ? "در صف ارسال"
-                      : link.lastOutboundStatus === "sent"
-                        ? "ارسال تأیید شد"
-                        : "متصل";
-                return (
-                  <li key={`${link.connectionId}:${link.remoteId}`} className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <StatusBadge tone={failed ? "danger" : pending ? "active" : link.connectionStatus === "paused" ? "neutral" : "positive"}>
-                        {label}
-                      </StatusBadge>
-                      <span className="font-medium text-foreground">WooCommerce · {link.storeName}</span>
-                    </div>
-                    <p className="text-muted-foreground" dir="ltr">Woo ID: {link.remoteId}</p>
-                    <Link
-                      className="inline-block text-[11px] text-primary underline-offset-4 hover:underline"
-                      href={`/websites/wp/products?store=${encodeURIComponent(link.connectionId)}`}
-                    >
-                      مدیریت این فروشگاه
-                    </Link>
-                    <p className="text-[11px] text-muted-foreground">
-                      آخرین دریافت کاتالوگ: {displayLinkTime(link.lastCatalogueSyncAt)}
-                    </p>
-                    {link.lastOutboundStatus ? (
-                      <p className="text-[11px] text-muted-foreground">
-                        آخرین تأیید ارسال: {displayLinkTime(link.lastOutboundSentAt)}
-                      </p>
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          {!item.parentItemId ? <ProductPublicationPanel localId={item.id} /> : null}
+              {status === "family" ? "خانواده" : status === "in_stock" ? "موجود" : status === "out_of_stock" ? "ناموجود" : "غیر قابل فروش"}
+            </StatusBadge>
+            {isFamily ? (
+              <span className="text-xs text-muted-foreground">بدون موجودی مستقل</span>
+            ) : (
+              <>
+                <span
+                  className={cn(
+                    "text-xs tabular-nums",
+                    inStock ? "text-emerald-700 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400",
+                  )}
+                >
+                  {formatQuantity(item.quantity)}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {item.unitPrice != null ? money.format(item.unitPrice) : "قیمت تعیین نشده"}
+                </span>
+              </>
+            )}
+          </div>
         </Td>
         <Td>
-          <div className="flex flex-wrap gap-1.5">
-            {!isFamily ? (
+          {/*
+            Small chips: who owns the row, which store(s) know it and how their
+            last delivery ended, and whether it is a duplicate candidate. The
+            ids, timestamps and history moved into the row's details area.
+          */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            {sourceLabel ? (
+              <span
+                className="rounded-full border border-border/80 bg-muted/60 px-2 py-0.5 text-[11px] text-muted-foreground"
+                title="منبع این ردیف"
+              >
+                {sourceLabel}
+              </span>
+            ) : null}
+            {duplicate && duplicateState === "ready" ? (
+              <StatusBadge tone="danger">احتمال تکراری</StatusBadge>
+            ) : null}
+            {wooLinksState === "loading" ? (
+              <span className="text-xs text-muted-foreground">در حال بررسی پیوندها…</span>
+            ) : wooLinksState === "unavailable" ? (
+              <span className="text-xs text-muted-foreground">برای دیدن پیوند فروشگاه، دسترسی اتصال‌ها لازم است.</span>
+            ) : wooLinksState === "error" ? (
+              <div className="space-y-1">
+                <span className="block text-muted-foreground">وضعیت پیوندها دریافت نشد.</span>
+                <Button type="button" variant="outline" size="sm" className="min-h-8 px-2 text-xs" onClick={onRetryWooLinks}>
+                  تلاش دوباره
+                </Button>
+              </div>
+            ) : wooLinks.length === 0 ? (
+              <StatusBadge tone="neutral">بدون پیوند ووکامرس</StatusBadge>
+            ) : (
+              wooLinks.map((link) => {
+                const state = storeLinkState(link);
+                return (
+                  <span
+                    key={`${link.connectionId}:${link.remoteId}`}
+                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-border/80 bg-card px-2 py-0.5 text-[11px]"
+                    title={`${link.storeName} · Woo ID ${link.remoteId}`}
+                  >
+                    <span className="max-w-24 truncate text-foreground">{link.storeName}</span>
+                    <StatusBadge tone={STORE_LINK_STATE_TONE[state]}>{STORE_LINK_STATE_LABEL[state]}</StatusBadge>
+                  </span>
+                );
+              })
+            )}
+          </div>
+        </Td>
+        <Td>
+          {/*
+            §B: one primary action, plus the details disclosure (and, on a
+            linked duplicate, the review that must not be lost behind it).
+          */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <ProductStoreActionButton
+              links={wooLinks}
+              duplicate={duplicate}
+              open={panel === "store"}
+              controls={`store-panel-${item.id}`}
+              onToggle={() => onTogglePanel("store")}
+              onReviewDuplicate={() => onTogglePanel("duplicate")}
+            />
+            {action.kind === "manual_update" && duplicate && duplicateState === "ready" ? (
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 className="min-h-8 whitespace-nowrap px-2 text-xs"
-                onClick={() => onTogglePanel("stock")}
-                disabled={busy}
-                aria-expanded={panel === "stock"}
-                aria-controls={`stock-panel-${item.id}`}
+                aria-expanded={panel === "duplicate"}
+                aria-controls={`duplicate-panel-${item.id}`}
+                onClick={() => onTogglePanel("duplicate")}
               >
-                ورود کالا / قیمت
+                بررسی تکراری
               </Button>
             ) : null}
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
               size="sm"
               className="min-h-8 whitespace-nowrap px-2 text-xs"
-              onClick={() => onTogglePanel("content")}
-              disabled={busy}
-              aria-expanded={panel === "content"}
-              aria-controls={`content-panel-${item.id}`}
+              aria-expanded={panel === "details"}
+              aria-controls={`details-panel-${item.id}`}
+              onClick={() => onTogglePanel("details")}
             >
-              توضیحات و انتشار
+              جزئیات
+              <ChevronDownIcon
+                aria-hidden="true"
+                className={cn("size-3.5 transition-transform", panel === "details" && "rotate-180")}
+              />
             </Button>
           </div>
         </Td>
       </DataTableRow>
+      {panel === "store" ? (
+        <DataTableRow>
+          <Td colSpan={PRODUCT_COLUMNS}>
+            <PanelShell id={`store-panel-${item.id}`}>
+              <PanelFrame itemName={item.name}>
+                <ProductPublicationPanel
+                  localId={item.id}
+                  links={wooLinks}
+                  duplicate={duplicate}
+                  open
+                  onQueued={() => {
+                    onStoreStateChanged();
+                  }}
+                />
+              </PanelFrame>
+            </PanelShell>
+          </Td>
+        </DataTableRow>
+      ) : null}
+      {panel === "duplicate" ? (
+        <DataTableRow>
+          <Td colSpan={PRODUCT_COLUMNS}>
+            <PanelShell id={`duplicate-panel-${item.id}`}>
+              <PanelFrame itemName={item.name}>
+                <ProductDuplicatePanel
+                  sku={item.sku ?? ""}
+                  onDecision={() => {
+                    onStoreStateChanged();
+                  }}
+                />
+              </PanelFrame>
+            </PanelShell>
+          </Td>
+        </DataTableRow>
+      ) : null}
+      {panel === "details" ? (
+        <DataTableRow>
+          <Td colSpan={PRODUCT_COLUMNS}>
+            <PanelShell id={`details-panel-${item.id}`}>
+              <ProductDetailsPanel
+                item={item}
+                wooLinks={wooLinks}
+                wooLinksState={wooLinksState}
+                onRetryWooLinks={onRetryWooLinks}
+                duplicate={duplicate}
+                busy={busy}
+                onOpenPanel={onTogglePanel}
+              />
+            </PanelShell>
+          </Td>
+        </DataTableRow>
+      ) : null}
       {panel === "stock" ? (
         <DataTableRow>
           <Td colSpan={PRODUCT_COLUMNS}>
@@ -679,11 +842,11 @@ function ProductRow({
 
 /**
  * The expanded row lives inside the wide table, which scrolls sideways on
- * small screens — an uncapped panel is as wide as the table (min-width 52rem)
- * and a phone user has to scroll sideways to reach its fields. Cap it at the
- * scroll container's *visible* width, measured directly: viewport math cannot
- * know the sidebar and page padding at every breakpoint, and RTL horizontal
- * sticky positioning is unreliable across browsers.
+ * small screens — an uncapped panel is as wide as the table and a phone user
+ * has to scroll sideways to reach its fields. Cap it at the scroll container's
+ * *visible* width, measured directly: viewport math cannot know the sidebar and
+ * page padding at every breakpoint, and RTL horizontal sticky positioning is
+ * unreliable across browsers.
  */
 function PanelShell({ id, children }: { id?: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -713,6 +876,167 @@ function PanelShell({ id, children }: { id?: string; children: ReactNode }) {
       style={available != null ? { maxWidth: available - 12 } : undefined}
     >
       {children}
+    </div>
+  );
+}
+
+/**
+ * The amber panel skin every expanded row shares. `title` is optional: the
+ * store and duplicate reviews carry their own heading, and a second one
+ * stacked under it would say the same thing twice.
+ */
+function PanelFrame({ title, itemName, children }: { title?: string; itemName: string; children: ReactNode }) {
+  return (
+    <div className="rounded-xl border border-amber-200/70 bg-amber-50/60 p-3 sm:p-4 dark:border-amber-500/25 dark:bg-amber-500/10">
+      <div className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        {title ? <p className="text-sm font-semibold text-amber-950 dark:text-amber-200">{title}</p> : null}
+        <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{itemName}</p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * §B's expandable per-product details: the columns the compact table gave up
+ * (barcode, unit, cost), each store's remote id and its two *separate* times —
+ * the last catalogue receive and the last acknowledged send — plus the handles
+ * that used to crowd the row.
+ */
+function ProductDetailsPanel({
+  item,
+  wooLinks,
+  wooLinksState,
+  onRetryWooLinks,
+  duplicate,
+  busy,
+  onOpenPanel,
+}: {
+  item: VariantSummary;
+  wooLinks: ProductWooLink[];
+  wooLinksState: ProductWooLinkLoadState;
+  onRetryWooLinks: () => void;
+  duplicate: boolean;
+  busy: boolean;
+  onOpenPanel: (kind: ProductPanelKind) => void;
+}) {
+  const money = useMoney();
+  const isFamily = isVariantParent(item);
+  return (
+    <PanelFrame title="جزئیات محصول" itemName={item.name}>
+      <div className="grid min-w-0 gap-x-4 gap-y-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
+        <Detail label="کد کالا" value={item.sku ?? "—"} mono />
+        <Detail label="بارکد" value={item.barcode ?? "—"} mono />
+        <Detail label="واحد اصلی" value={item.unit ?? "عدد"} />
+        <Detail label="قیمت فروش" value={isFamily ? "—" : item.unitPrice != null ? money.format(item.unitPrice) : "تعیین نشده"} />
+        <Detail label="قیمت خرید" value={isFamily ? "—" : item.unitCost != null ? money.format(item.unitCost) : "تعیین نشده"} />
+        <Detail label="وضعیت انتشار" value={PRODUCT_PUBLISH_STATUS_LABELS[item.publishStatus]} />
+      </div>
+
+      <div className="mt-4 space-y-3">
+        <p className="text-xs font-medium text-foreground">فروشگاه ووکامرس</p>
+        {wooLinksState === "loading" ? (
+          <p className="text-xs text-muted-foreground">در حال بررسی پیوندها…</p>
+        ) : wooLinksState === "unavailable" ? (
+          <p className="text-xs text-muted-foreground">برای دیدن پیوند فروشگاه، دسترسی اتصال‌ها لازم است.</p>
+        ) : wooLinksState === "error" ? (
+          <div className="space-y-1">
+            <p className="text-xs text-muted-foreground">وضعیت پیوندها دریافت نشد.</p>
+            <Button type="button" variant="outline" size="sm" className="min-h-8 px-2 text-xs" onClick={onRetryWooLinks}>
+              تلاش دوباره
+            </Button>
+          </div>
+        ) : wooLinks.length === 0 ? (
+          <div className="space-y-1">
+            <StatusBadge tone="neutral">بدون پیوند ووکامرس</StatusBadge>
+            <p className="text-xs text-muted-foreground">
+              این ردیف محلی است؛ برای ارسال به فروشگاه از «انتشار در فروشگاه» استفاده کنید.
+            </p>
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {wooLinks.map((link) => {
+              const state = storeLinkState(link);
+              return (
+                <li key={`${link.connectionId}:${link.remoteId}`} className="space-y-1 text-xs">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <StatusBadge tone={STORE_LINK_STATE_TONE[state]}>{STORE_LINK_STATE_LABEL[state]}</StatusBadge>
+                    <span className="font-medium text-foreground">WooCommerce · {link.storeName}</span>
+                    <span className="text-muted-foreground" dir="ltr">
+                      Woo ID: {link.remoteId}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+                    <span>آخرین دریافت کاتالوگ: {displayLinkTime(link.lastCatalogueSyncAt)}</span>
+                    {link.lastOutboundStatus ? (
+                      <span>آخرین تأیید ارسال: {displayLinkTime(link.lastOutboundSentAt)}</span>
+                    ) : null}
+                  </div>
+                  {link.lastOutboundError ? (
+                    <p className="text-rose-600 dark:text-rose-400">آخرین خطای ارسال: {link.lastOutboundError}</p>
+                  ) : null}
+                  <Link
+                    className="inline-block text-[11px] text-primary underline-offset-4 hover:underline"
+                    href={`/websites/wp/products?store=${encodeURIComponent(link.connectionId)}`}
+                  >
+                    مدیریت این فروشگاه
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-1.5">
+        {!isFamily ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-h-8 whitespace-nowrap px-2 text-xs"
+            onClick={() => onOpenPanel("stock")}
+            disabled={busy}
+            aria-controls={`stock-panel-${item.id}`}
+          >
+            ورود کالا / قیمت
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="min-h-8 whitespace-nowrap px-2 text-xs"
+          onClick={() => onOpenPanel("content")}
+          disabled={busy}
+          aria-controls={`content-panel-${item.id}`}
+        >
+          توضیحات و انتشار
+        </Button>
+        {duplicate ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-h-8 whitespace-nowrap px-2 text-xs"
+            onClick={() => onOpenPanel("duplicate")}
+            disabled={busy}
+            aria-controls={`duplicate-panel-${item.id}`}
+          >
+            بررسی محصول تکراری
+          </Button>
+        ) : null}
+      </div>
+    </PanelFrame>
+  );
+}
+
+/** One labelled fact in the details grid. */
+function Detail({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[11px] text-muted-foreground">{label}</p>
+      <p className={cn("break-all text-xs text-foreground", mono && "tabular-nums")}>{value}</p>
     </div>
   );
 }

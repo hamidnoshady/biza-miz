@@ -66,6 +66,20 @@ function bucketExpression(granularity: TrendGranularity): string {
   return `to_char(o.created_at AT TIME ZONE 'Asia/Tehran', 'YYYY-MM-DD')`;
 }
 
+/**
+ * The instant a window is measured back from.
+ *
+ * The buckets are built from the caller's `now` (so a test can pin one), and the
+ * query MUST filter from that same instant. It used to filter from `now()`, the
+ * database's wall clock: with a pinned `now` the two disagreed and the read
+ * returned rows outside the buckets it had just drawn — an injected "yesterday"
+ * returned nothing at all, and the window summary pooled whatever the wall clock
+ * happened to include. Passed as a parameter, never written as `now()`.
+ */
+function windowStart(days: number, now: Date): Date {
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+}
+
 const AGGREGATES = `
        count(*) FILTER (WHERE o.status = 'sent')      AS sent,
        count(*) FILTER (WHERE o.status = 'delivered') AS delivered,
@@ -104,22 +118,10 @@ export async function getDeliveryTrend(input: {
   now?: Date;
 } = {}): Promise<DeliveryTrend> {
   const days = clampDays(input.days);
-  // One clock, used for both halves. `buildTrendBuckets` draws the window from
-  // `now`, so the query has to *read* from the same instant — anchoring the SQL on
-  // the database's own `now()` left two clocks in one function, and they disagreed
-  // in both directions: a test injecting a date got rows filtered by the wall clock,
-  // and in production an app server and a database a second apart could produce a
-  // series whose oldest bucket is empty or whose oldest row is silently dropped.
-  // The parameter is derived here rather than in the SQL so the subtraction is the
-  // same arithmetic the buckets used.
   const now = input.now ?? new Date();
-  const windowStart = new Date(now.getTime() - days * 86_400_000);
-  const buckets = buildTrendBuckets({
-    days,
-    granularity: input.granularity,
-    now,
-  });
+  const buckets = buildTrendBuckets({ days, granularity: input.granularity, now });
   const granularity = buckets[0]?.granularity ?? "day";
+  const since = windowStart(days, now);
 
   return withoutTenantScope("platform", async () => {
     const { rows: bucketsWithBusinesses } = await query<TrendBucketRow & Record<string, unknown>>(
@@ -130,7 +132,7 @@ export async function getDeliveryTrend(input: {
         WHERE o.created_at >= $1::timestamptz
         GROUP BY bucket
         ORDER BY bucket`,
-      [windowStart],
+      [since],
     );
     const rows = bucketsWithBusinesses as (TrendBucketRow & { businesses?: string | number })[];
     // The distinct count is per bucket; the window's is the largest, which is
@@ -153,22 +155,10 @@ export async function tenantDeliveryTrend(
   input: { days?: number; granularity?: TrendGranularity; now?: Date } = {},
 ): Promise<DeliveryTrend> {
   const days = clampDays(input.days);
-  // One clock, used for both halves. `buildTrendBuckets` draws the window from
-  // `now`, so the query has to *read* from the same instant — anchoring the SQL on
-  // the database's own `now()` left two clocks in one function, and they disagreed
-  // in both directions: a test injecting a date got rows filtered by the wall clock,
-  // and in production an app server and a database a second apart could produce a
-  // series whose oldest bucket is empty or whose oldest row is silently dropped.
-  // The parameter is derived here rather than in the SQL so the subtraction is the
-  // same arithmetic the buckets used.
   const now = input.now ?? new Date();
-  const windowStart = new Date(now.getTime() - days * 86_400_000);
-  const buckets = buildTrendBuckets({
-    days,
-    granularity: input.granularity,
-    now,
-  });
+  const buckets = buildTrendBuckets({ days, granularity: input.granularity, now });
   const granularity = buckets[0]?.granularity ?? "day";
+  const since = windowStart(days, now);
 
   return withTenant(businessId, async () => {
     const { rows: bucketRows } = await query<TrendBucketRow & Record<string, unknown>>(
@@ -179,7 +169,7 @@ export async function tenantDeliveryTrend(
           AND o.created_at >= $2::timestamptz
         GROUP BY bucket
         ORDER BY bucket`,
-      [businessId, windowStart],
+      [businessId, since],
     );
     return shape(days, granularity, buckets, bucketRows as TrendBucketRow[]);
   });
