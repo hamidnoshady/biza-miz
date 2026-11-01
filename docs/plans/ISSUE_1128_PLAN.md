@@ -119,6 +119,10 @@ way round. See «What this change does not build».
 | **Wave 7** — §A proposal HTTP | Three routes under `/api/crm/proposals/**`, in the CRM door for the reason decision 39 gives, with one exhaustive error map in `src/app/api/crm/proposal-guard.ts` over fifteen codes plus the deliberate SQLSTATEs. A new CRM section key `proposals` with its access row, its command-palette aliases (including «پیش‌فاکتور» and «برآورد», the two other words for the same document), and its place in the «فرصت‌ها» group between the brief and the leads |
 | **Wave 7** — §A proposal screen | `/crm/proposals` and `proposals-section.tsx`. حاشیهٔ سود is the central column, marked «ناقص» when only some lines were costed. A frozen row's «ویرایش» becomes «نمایش» and «پیشنهاد تازه از روی این» is the correction the freeze forces, pre-filled and with the contract and project pointers cleared. The brief picker holds only the chosen client's own briefs and the stakeholder picker only that client's contacts, in both directions — the shape of §A's rule, with 0276 as the rule. Live totals from the same pure module the service calls, so the figure being typed and the figure stored are one arithmetic |
 | **Wave 7** — §A proposal tests | `agency-proposal.test.ts` (34, pure), `integration/agency-proposals.integration.test.ts` (27, real database) and 89 assertions against 0276 run directly over Postgres. The harness found three things nothing else could see: triggers firing alphabetically, a negative price reported as a bad `amount_rial`, and a code outside the revenue vocabulary reported as missing from the chart (decision 48). The integration suite found a fourth — the schema and the service disagreeing about whether an empty draft may be withdrawn, each self-consistent (decision 46) |
+| **Wave 8** — §A multi-brand client | `src/lib/crm-org-structure.ts`: the pure reading of `crm_party_relationships`' two hierarchy kinds. Collapses `parent_organization` (parent → child) and `branch_of` (child → parent) to one `child → parent` statement, because they are the same fact stored twice and a resolver reading one direction looks correct in every test written against it. Total over any edge list: cycles terminate on a visited set, a brand with two claimed parents takes the newest and reports the other, and every walk is bounded by `ORG_DEPTH_LIMIT` with the truncation reported rather than silent. Contradictions come back in `conflicts` naming only their own members, never resolved quietly. No schema (decision 37), no industry gate (decisions 49–51) |
+| **Wave 8** — §A organisation service and route | `organizationStructureFor` in `crm-relationship-service.ts`: two queries — one for the hierarchy edges with `business_id` on each `parties` join, one grouped read over the four registers that name a client, restricted to this group's own parties. Returns `null` for a party that is not this tenant's. `GET /api/crm/customers/[id]/organization` on `crm.view`, read-only: writes stay on `/relationships`, which already gates and audits them |
+| **Wave 8** — §A organisation card | `customer-organization-card.tsx` on the 360° file, above «ارتباط‌ها». An indented, root-first list with each brand's work as a sentence rather than a grid of zeros, a link to the group's own file when this one is a brand, contradictions in words naming the parties to fix, and `paddingInlineStart` because the file is RTL. Renders nothing at all when the party is not part of a group |
+| **Wave 8** — §A organisation tests | `crm-org-structure.test.ts` (19, pure) and `integration/agency-org-structure.integration.test.ts` (12, real database). The suite pins the direction collapse against edges recorded both ways, each brand's work counted against that brand and nobody else's, a second tenant unable to resolve a party or pull one in through a join, a cycle naming only its own members, the depth bound, a contact not becoming a brand — and the *absence* of a campaign count, so adding one is a decision somebody makes |
 
 
 ## Decisions
@@ -675,6 +679,35 @@ The same ordering fact produced two more fixes. Both line triggers run *before* 
 None of the three was visible to a type-checker, to the unit suite or to a green whole-schema sweep. An 89-assertion raw-SQL harness found all of them, which is what it is for.
 
 
+### 49 — the two hierarchy kinds are one relation, and that is why this is code
+
+Decision 37 recorded that §A's multi-brand client needs no schema. What it did not say — because nothing had tried to read the edges yet — is that reading them is not a query.
+
+`crm-relationship-service.ts` states the convention: `from → to` reads "from is *kind* of to". So `parent_organization` points **parent → child** and `branch_of` points **child → parent**. They are exact inverses describing the same fact, which means one hierarchy can be recorded in either direction, and a group's two brands can legitimately be recorded in *different* directions by two members on two days. A resolver that treated them as two relations would see a group with no brands, a brand with two parents, or nothing at all — depending on which way round somebody happened to type it.
+
+So `crm-org-structure.ts` collapses both to one `child → parent` statement before anything else reasons about the structure. That collapse is the whole reason the module exists as code, and it is pure so it can be tested without a database: a resolver that only ever sees one direction looks correct in every unit test written against one direction, and fails in production on the first tenant that recorded it the other way.
+
+### 50 — nothing here may assume the edges form a tree
+
+Two members recording the same hierarchy from their own ends produce a cycle. A re-parenting recorded by adding an edge rather than removing the old one produces a brand with two claimed parents. Both are reachable in two clicks on the existing relationships card, so both are ordinary data rather than corruption.
+
+The resolver is therefore total: any edge list produces a structure. Every walk is bounded by a visited set *and* by `ORG_DEPTH_LIMIT`, and each contradiction comes back in `conflicts` rather than being resolved silently. A card that quietly picked a winner would be the reason nobody ever fixed the record — and the CRM already has a data-quality screen whose whole job is surfacing records that need a decision.
+
+Where a winner is unavoidable (a tree cannot give one node two parents) the newest statement takes it, because that is how a correction is actually recorded, and the superseded claim is reported beside it. A cycle names **only its own members**, not the whole path climbed to reach it: a brand three levels below a two-party loop is not part of the contradiction, and listing it would send a member to delete an edge that is correct.
+
+The card renders *nothing at all* for a party that is not part of a group, which is the common case. An empty card on every customer file teaches people to skip this one, so «بدون برند» is not a state this screen has. That is different from an error and different from an empty group, and the payload says which.
+
+### 51 — campaigns are not counted, and that is a schema finding
+
+The card counts four registers per brand: `crm_deals.customer_id`, `agency_client_briefs.party_id`, `agency_proposals.party_id` (with the accepted ones separately) and `workspace_contracts.party_id`. All four name a client, so all four can be attributed to a brand.
+
+**`growth_campaigns` names nobody.** It has `business_id`, `name`, `status`, `created_by` and its own version rows — no client column, in 0262 or in any later migration. So §A's "concurrent campaigns" cannot be presented per brand, and §C's agency's-own versus client-managed split is not blocked on a missing list endpoint as this document previously said: it is blocked on a missing *dimension*. That is a schema change, and it is §C's first job rather than its last.
+
+Counting campaigns as zero was refused, and the integration suite pins the refusal: a card reading «۰ کمپین» on every brand states that no brand has campaigns, which is not what the data says. A missing figure and a zero are different claims, and only one of them is true here.
+
+The card is not industry-gated. A corporate group with brands is not an agency idea — a wholesaler has the same shape — so, like §E under decision 32, this is gated by permission and not by trade. §A is the reason it was built, not a limit on who may use it.
+
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -951,6 +984,32 @@ link every byte fetch, which made the default link unable to show the artwork it
   client's name, absent-versus-null on a PATCH, draft-only deletion cascading its
   lines, a client's deletion taking a sent offer with it, and a brief's deletion
   leaving the offer that priced it standing.
+* `crm-org-structure.test.ts` (19) — §A's organisation resolver: both hierarchy
+  kinds collapsing to one `child → parent` statement, a refusal of every kind that
+  is not a hierarchy so a contact cannot become a brand, a group read from its own
+  file and from one of its brands (where the sibling appears, because seeing the
+  other brand is what stops one brand's work being priced for the other), three
+  levels root-first and depth-ordered, a hierarchy recorded in both directions
+  resolving as one tree, `isEmpty` for a party nothing hierarchical touches, an
+  unrelated group ignored, a missing name left blank rather than invented, the
+  newest of two claimed parents winning with the superseded one reported, an
+  undated claim outranked by a dated one in either arrival order, two- and
+  three-party cycles terminating and naming only their own members, and both the
+  upward and downward walks stopping at the depth bound and reporting that they
+  did.
+* `integration/agency-org-structure.integration.test.ts` (12) — the same reading
+  against a real database: one group resolved from edges recorded in both
+  directions, a brand's file rooted on its group with its sibling visible, three
+  levels depth-ordered, each brand's deals/briefs/proposals/accepted/contracts
+  counted against that brand and nobody else's with the group itself carrying
+  nothing (rolling up would double-count every figure on the card), **no campaign
+  count at all** — pinned as an absence so adding one is a decision, a contact-only
+  party reporting `isEmpty`, a second tenant answered `null` for a valid foreign id
+  and unable to pull a foreign party into the tree through a join or a foreign deal
+  into the counts, a nonexistent and a malformed id both refused, the newest of two
+  claimed parents winning with both groups drawn, a cycle terminating with a party
+  below the loop correctly excluded from it, the depth bound, and a `contact_of`
+  edge not making a person a brand.
 * 89 assertions run directly against `0276_agency_proposals.sql` over Postgres —
   the named CHECKs, the absence of auto-named ones, both unique keys, the
   composite line foreign key, four triggers, RLS enabled *and forced* on both
@@ -1031,11 +1090,15 @@ given. Only a real database shows the wreckage (decision 35).
 
 Deliberately, and each is named in the issue:
 
-* **§A CRM** — proposals and scope-of-work documents, and contract renewals. The agency-shaped
-  pipeline shipped in wave 5 and the client briefs in wave 6; canonical `parties`/leads/deals already
-  existed, and decision 37 records why the multi-brand client account needs no schema at all. What
-  is left is proposals and quotes, which overlap §D's still-unbuilt estimates and quotations and
-  should be designed together with them rather than twice.
+* **§A CRM** — contract renewals, and scope of work as a document rather than as prose. The
+  agency-shaped pipeline shipped in wave 5, the client briefs in wave 6, the proposals and quotes in
+  wave 7 (with §D's estimates, which are the same document — decision 43), and the multi-brand client
+  presentation in wave 8 (decisions 49–51). Canonical `parties`/leads/deals already existed, and
+  decision 37 records why the multi-brand account needed no schema. A proposal carries
+  `scope_of_work` and `terms` as text, which is what a client reads and disputes; a separately
+  versioned scope document with its own approvals is #1127's print-template territory and is not
+  built. Contract renewals are `workspace_contracts`' `reminder_days`, start and end dates with
+  nothing acting on them.
 * **§B My Workspace** — wave 2 added the seven project templates and the agency stages they carry.
   Still missing: deliverable revisions and version history, the approval/request-changes states as
   an agency-shaped review (Workspace has approvals; nothing here wires a client-facing review to
@@ -1048,7 +1111,9 @@ Deliberately, and each is named in the issue:
 * **§C Growth** — campaign calendar and channel mix for *client* campaigns, the agency's-own vs
   client-managed split in reporting, spend/reach/CPL/CPA/ROAS with defensible attribution, manual
   import of platform data. No external ad-platform integration is claimed or implied anywhere in
-  this change.
+  this change. **The split is blocked on a schema change, not on an endpoint:** wave 8 established
+  that `growth_campaigns` has no client column at all (decision 51), so no report can attribute a
+  campaign to a client or a brand until one exists.
 * **§D Accounting** — wave 2 gave the trade its ordinary sale document (a service invoice, on account
   or settled, one line per described service, each crediting one of the agency's four revenue
   accounts, posted by the existing `service.sale_revenue` rule), and wave 3 gave it the documents

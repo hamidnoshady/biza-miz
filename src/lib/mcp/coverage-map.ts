@@ -460,8 +460,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
   {
     id: "crm.customers",
     module: "CRM",
-    entity: "Customers (profile, notes, tags, relationships, merge, duplicates, consent)",
+    entity: "Customers (profile, notes, tags, relationships, organisation structure, merge, duplicates, consent)",
     routes: ["crm/customers", "parties", "crm/external-profiles"],
+    // `customers/[id]/organization` (issue #1128 §A) lands here rather than in a
+    // row of its own, and belongs here: it is a *reading* of the relationship
+    // edges this row already owns — `parent_organization` and `branch_of` —
+    // collapsed into one direction and walked into a group/brand tree with the
+    // work each brand carries. No new entity, no new write path, no new
+    // permission.
+    note: "The organisation structure has no MCP verb, and unlike the deliberately excluded acts elsewhere in this map that is a real gap rather than a decision: an assistant asked «which brands does this group have?» or «has anybody priced مهر کیمیا yet?» can currently only answer from the flat relationship list, which does not distinguish a brand from a contact. A read verb over the resolved tree would be safe — it exposes nothing `/relationships` does not already return. What must never become a verb is a *write*: re-parenting a client rewrites an identity graph, and the two rules that keep it honest (a cycle is reported rather than resolved, and the newest of two claimed parents wins while the superseded claim is surfaced) are the kind of judgement §F reserves for a human at the screen",
     ops: {
       // Batch D (#883): notes reads + lifecycle (delete/pin), consent as a
       // logged legal event — both live behind the same services the CRM file

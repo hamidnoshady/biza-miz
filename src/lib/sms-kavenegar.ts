@@ -101,8 +101,35 @@ export class KavenegarError extends Error {
   }
 }
 
+/**
+ * Issue #902 §9 item 7 (DoD #11) — how long a login code may take to leave.
+ *
+ * Every other supplier call in this codebase goes through `rest.ts`, which
+ * aborts on a timeout and records whether a failed request was *ambiguous* (the
+ * supplier may have acted) or definitive. This transport — the one that sends
+ * the codes people log in with — called bare `fetch` with no signal at all, so a
+ * supplier that accepted the connection and then stalled held the login request
+ * open for as long as the platform's own HTTP server allowed. The person waiting
+ * saw a spinner; every other failure in this file at least produces a sentence.
+ *
+ * Ten seconds is deliberately generous: it is longer than a normal send (the
+ * whole point is not to fail a slow success) and far shorter than a person's
+ * patience. On expiry the caller consumes the challenge and reports
+ * `sms_dispatch_failed`, so nothing sits live for five minutes that was never
+ * delivered.
+ */
+export const OTP_SEND_TIMEOUT_MS = 10_000;
+
+/** A dispatch that ran out of time, distinct from one that never connected. */
+export const OTP_TIMEOUT_MESSAGE = "سرویس پیامک به‌موقع پاسخ نداد؛ کد ارسال نشد. دوباره تلاش کنید.";
+
 export class KavenegarProvider implements SmsProvider {
-  constructor(private apiKey: string, private template: string) {}
+  constructor(
+    private apiKey: string,
+    private template: string,
+    /** Injectable so a test can prove the abort without waiting ten seconds. */
+    private timeoutMs: number = OTP_SEND_TIMEOUT_MS,
+  ) {}
 
   async sendOtp(phoneE164: string, otp: string): Promise<void> {
     // Normalise to Iranian local format if it has +98
@@ -119,8 +146,19 @@ export class KavenegarProvider implements SmsProvider {
 
     let res;
     try {
-      res = await fetch(url);
+      // Issue #902 DoD #11 — a stalled supplier must fail the dispatch, not the
+      // login. `AbortSignal.timeout` rejects with a `TimeoutError`, which the
+      // catch below turns into its own sentence so an operator can tell "we
+      // could not reach them" from "they took the request and went quiet".
+      res = await fetch(url, { signal: AbortSignal.timeout(this.timeoutMs) });
     } catch (err) {
+      const name = (err as Error)?.name;
+      if (name === "TimeoutError" || name === "AbortError") {
+        // Deliberately no URL, no receptor and no code: this is a log line, and
+        // the code inside it would still be live for its remaining minutes.
+        console.error(`Kavenegar verify/lookup timed out after ${this.timeoutMs}ms`);
+        throw new KavenegarError(undefined, OTP_TIMEOUT_MESSAGE);
+      }
       // `err` may be a fetch TypeError whose `cause` carries the URL; only the
       // message is interpolated, never the error object or the URL itself.
       throw new KavenegarError(undefined, `ارتباط با سرویس پیامک برقرار نشد: ${(err as Error)?.message ?? "unknown"}`);

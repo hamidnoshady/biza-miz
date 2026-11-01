@@ -1043,6 +1043,71 @@ SMS is the one view this service does not re-derive: `getTenantSmsReadiness` alr
 the child account's provision state, which is richer than the plan layer, and two sources for one
 sentence is how two screens start disagreeing.
 
+## 5r. The failure drills, and the login that survives them (§9 item 7, DoD #11)
+
+The last open acceptance line in the issue is DoD #11:
+
+> *Tests cover errors (invalid key, insufficient master/child balance, expired account, rejected
+> template, HTTP timeout/429, duplicate responses, concurrent workers, offline replay and provider
+> outage) without external network calls; actionable first-party tenant errors and internal supplier
+> observability.*
+
+All nine had tests. What they did not have was **one pass that proves the combination**, and the
+combination is what DoD #9 promises: *"Auth OTP still works if Growth is disabled, tenant marketing
+credit is exhausted, campaign sends are paused, or an individual child's account is suspended."* A
+per-module test passes even when the seam between two modules leaks, because the seam is exactly the
+part neither module owns.
+
+Following the issue's own §7 checklist ("failure drills") we did what a drill does — broke the
+platform on purpose and checked what a customer sees:
+
+| Drill | What the platform does | What the customer sees |
+| --- | --- | --- |
+| Invalid key (403), expired master (505) | no retry, account `attention_required` | «نیازمند اقدام», never a supplier code |
+| Insufficient balance (418) | no retry, no send | «کیف پول را شارژ کنید» with the billing link |
+| Rejected template (424) | no retry | «فرستادن انجام نشد» — nothing to do, we fix it |
+| Rate limited (429, 451) | requeued with backoff, nothing charged | nothing; it goes out later |
+| Busy / unavailable (409) | requeued, nothing charged | nothing |
+| Invalid recipient (411) | failed, refunded | «شمارهٔ گیرنده نامعتبر است» |
+| Duplicate create (502/503) | adopted or retried internally | nothing — recovery, not failure |
+| Provider timeout | ambiguous, no blind retry | «سرویس ارسال به‌موقع پاسخ نداد» |
+| Provider outage | rows stay queued | nothing; the queue is the buffer |
+
+**Two real defects the drills found**, both on the *login* transport — the one path that had never
+been put through a failure drill because it is not part of the messaging feature:
+
+1. **It had no timeout.** `KavenegarProvider.sendOtp` called bare `fetch(url)`. Every other supplier
+   call in the codebase goes through `rest.ts` and aborts; this one, which sends the codes people
+   log in with, would wait as long as the socket lived. A carrier that accepted the connection and
+   went quiet held the login request open and then let the code stay live for its full five minutes,
+   because nothing had *failed*, so nothing consumed it. Now `AbortSignal.timeout(10s)`, with its own
+   Persian sentence — distinct from "we could not reach them" — so an operator can tell a stall from
+   an outage.
+2. **HTTP 429 was unclassified.** It fell through to `unknown`: retryable by luck (the fallback
+   treats unknown statuses as transient), but invisible to the console and the alert ledger, which
+   could not tell "the supplier is backing us off" from "a code nobody has ever seen". 429 now reads
+   `rate_limited`, like the supplier's own 451.
+
+The drill suite is two files:
+
+- `src/lib/kavenegar/failure-drills.test.ts` (pure) walks **supplier answer → classification →
+  contract fault → tenant sentence** for every row above, and asserts the two properties that keep
+  the boundary: the tenant sentence is Persian, contains neither a provider code nor a supplier name;
+  the operator line is English and does name the source. It also pins the retry *decision* per row —
+  the money consequence, since a retryable failure must leave the row queued and charge nothing
+  while a permanent one fails it and refunds.
+- `integration/kavenegar-failure-drills.integration.test.ts` (real database, no network) runs the
+  actual drain and the actual OTP dispatch with a business in each broken state — suspended child,
+  empty wallet, paused campaign, provider outage, no child at all — and asserts in every one that
+  **nothing was charged, the queue is intact, and a login code still goes out on the platform key**.
+  Then the reverse: a carrier that times out or rejects the platform credential must fail honestly
+  (a Persian error the screen shows) rather than log the code and pretend success.
+
+The assertion the whole slice exists for is the last one: in a single run, the marketing message
+leaves with the **business's child key** and the login code with the **platform key**, asserted on
+the two URLs that were actually built — neither containing the other's credential. That is DoD #9
+and DoD #2 in one line of evidence.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -1063,6 +1128,9 @@ sentence is how two screens start disagreeing.
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
 | `npx vitest run` — `imported-payment-receipts` (§5l) | 6/6: both plugin importers (F&B and retail) and the CMS importer call the receipt trigger, in every case after `COMMIT`, never awaited, and wrapped in `withTenant` — plus the amount being the same `total` the payment row was written with; and the amendment bridge carrying no call at all, with its reason still in the file |
+| `npx vitest run` — `failure-drills` (§5r) | 9/9: every failure class DoD #11 names classified as the drain decides it (five permanent, three transient, one fallback); each fault renders a Persian sentence with no provider code and no supplier name while its operator line stays English and diagnosable; the retry decision per row asserted as a table, because it is the money consequence; both duplicate answers distinguished; an unknown status stays transient so a new supplier code cannot permanently fail a send |
+| `npx vitest run` — `sms-kavenegar` (§5r) | 10/10, four new: every dispatch carries an abort signal; a stalled carrier yields its own Persian sentence containing neither the code, the number nor the key; a connection failure stays distinguishable from a stall; a timely answer still sends |
+| `npm run test:db` — `kavenegar-failure-drills` (§5r) | run against a real PostgreSQL here, 9/9: suspended child dispatches nothing (no attempt counted, no attempt timestamped), charges nothing, leaves the queue intact — with the platform adapter switched on, so the managed-sender rule is what stops it — and login still leaves on the platform key; empty wallet never reaches the provider; a paused campaign's queue is not claimed; a provider outage requeues with a future backoff and charges nothing; a business with no child is unaffected; the carrier timing out and the carrier rejecting the platform key both fail honestly with a Persian error carrying no code; with no credential at all in production the fallback refuses rather than logging a live code; and marketing rides the child key while login rides the platform key in the same run |
 | `npx vitest run` — `managed-services` (§5q) | 38/38 across three files: the entitlement translation (plan / wallet / limit / platform / no-access, and a denial with no reason never becomes "ready"); AI's every runtime reason mapped, and the ordering fixture where both halves are broken; payments requiring a gateway *and* its merchant id; media requiring the switch *and* a complete storage account; the email relay's two answers; and, per integration, every state rendered with a first-party label and sentence, walked through the shared leak guard, searched for internal reason strings, and limited to the four first-party action links (plus the inventory-agreement check that keeps `MANAGED_SERVICES` and the audit table in step) |
 | `npm run test:db` — `managed-services` (§5q) | CI only (no Postgres here): one view per registered service, every `checkedAt` parseable; the payload passes the leak guard with the deployment *fully* configured (merchant id, bucket credential, active child account), so a configured platform does not grow a supplier field; a fresh deployment reports our setup for AI/payments/media rather than the tenant's plan; enabling each one moves it off `platform_setup_incomplete`; switching AI on without a usable credential is still not "ready"; SMS readiness follows each business's own child account, including a suspended one linking to `/settings/billing`; and every served service exists in the inventory |
 | `npx vitest run` — `supplier-invoice` (§5p) | 14/14: an exact match; a difference inside a written tolerance kept rather than erased; symmetric tolerance with a documented default; a dispute that names which way it points; `unexplained` when the ledger is silent for a billed period — including under a tolerance wide enough to swallow the whole claim; verdict→state mapping with `unexplained` stored as a dispute; nonsense normalised; `accepted` requires a reason and only for a disputed statement; an accepted statement cannot be re-reconciled; plus the schema guards (the reason CHECK, the verdict-needs-comparison CHECK, the supplier-reference unique), platform-only RLS, and the service reading — never writing — the cost events over a half-open window |
@@ -1145,6 +1213,16 @@ sentence is how two screens start disagreeing.
    `"enabled"` comparison~~ — **closed** (§3b): the audit found the same class of drift in three
    more places (an unvalidated write, a hand-copied vocabulary and a cast in the resolver), all
    fixed, and the rule is now a test rather than a note.
+7. ~~**Failure drills** (DoD #11)~~ — **closed** (§5r): every failure class the DoD names now has a
+   drill that traces it from the supplier's answer to the tenant's sentence, and the cross-cutting
+   one — a business whose marketing is broken can still log in — is asserted against a real database
+   with the queue and the wallet both unchanged. The drills found two real defects on the login
+   transport, neither of which any per-module test could see: it had no request timeout, and HTTP 429
+   was unclassified. Both fixed.
+8. **Managed Torob (#894) and Divar (#896)** — the two integrations §5q left unregistered because
+   there is nothing to report on yet. They are separate issues by the epic's own rule ("do not
+   silently expand this Kavenegar issue into undocumented rebuilds"), and they inherit §5q's contract
+   and §5r's drill table rather than inventing a second one.
 
 ## 10. Environment notes
 
@@ -1153,3 +1231,9 @@ sentence is how two screens start disagreeing.
   used for type verification. CI's `test.yml` runs the full type check with more memory.
 - `npm ci` and `npm run db:migrate` were run locally; the integration suite creates and drops
   its own scratch database, as the other `integration/*` suites do.
+- **Database suites run here too**, which earlier slices assumed they could not. `npm run db:dev:start`
+  starts the embedded PostgreSQL from `node_modules/@embedded-postgres/linux-x64`, `npm run db:migrate`
+  applies all 457 migrations, and
+  `DATABASE_URL=postgres://pos:pos@127.0.0.1:5432/pos npx vitest run --config vitest.db.config.ts integration/<file>`
+  runs one suite against it in seconds. Since §5r no database test goes to CI without a local run
+  first — which is how §5r's own two SQL/semantics mistakes were found before a CI round-trip.
