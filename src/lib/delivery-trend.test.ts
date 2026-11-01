@@ -240,7 +240,11 @@ describe("the queries and the screens agree with these facts", () => {
     // Both views, and no bare now() left in either WHERE clause.
     expect(service.match(/o\.created_at >= \$\d::timestamptz/g)).toHaveLength(2);
     expect(service).not.toMatch(/created_at >= now\(\)/);
-    expect(service.match(/const anchorIso = \(input\.now \?\? new Date\(\)\)\.toISOString\(\);/g)).toHaveLength(2);
+    // Both derive that instant from the caller's `now`…
+    expect(service.match(/const since = windowStart\(days, now\);/g)).toHaveLength(2);
+    // …and pass it to the driver, rather than re-reading a clock inside the query.
+    expect(service.match(/\[since\]/g)).toHaveLength(1);
+    expect(service.match(/\[businessId, since\]/g)).toHaveLength(1);
   });
 
   it("clamps the window to a year, so a caller cannot ask for all time", () => {
