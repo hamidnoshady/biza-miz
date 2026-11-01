@@ -187,6 +187,7 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   // Issue #894 — who connected the channel, not an act the member did on a
   // reservation or a record. The audit trail carries the real attribution.
   'torob_shops.created_by': 'channel connection setup',
+  'torob_feed_runs.created_by': 'channel feed build (an operational act, not a record write)',
   'tenant_roles.updated_by': 'role configuration',
   'tour_member_progress.user_id': 'personal learning progress (guided tours)',
   'trusted_devices.user_id': 'sign-in security',

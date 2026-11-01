@@ -368,11 +368,18 @@ mapping with no acknowledged send has no send time.
 
 `DataTable` already turns its table into stacked cards below `sm`, so the same
 markup is the phone view; the panel wrapper still measures the scroll container
-so an expanded panel never opens off-screen. A new Woo/duplicate filter —
-`متصل`, `محلی / بدون پیوند`, `احتمال تکراری`, `در صف`, `ناموفق` — reads the same
-per-row state as the badges, and «تازه‌سازی وضعیت ارسال» re-reads link/outbox
-state, as does every successful decision, so a badge cannot stay stale until a
-page reload.
+so an expanded panel never opens off-screen. Three filters read the same per-row
+state as the badges (`src/lib/product-row-actions.ts`):
+
+| Filter | Values | What it means |
+|---|---|---|
+| وضعیت | موجود / ناموجود / غیر قابل فروش | the row's own stock state (unchanged) |
+| فروشگاه (Woo) | متصل / محلی / احتمال تکراری / در صف / ناموفق | link and outbox health, worst store wins |
+| منبع | ووکامرس / هلو / محلی | the integration that **owns** the row (`items`'s mapping), not whether a store knows it |
+| فروشگاه مشخص | one per connected store | drawn only when more than one store exists; a one-option dropdown is noise |
+
+«تازه‌سازی وضعیت ارسال» re-reads link/outbox/duplicate state, as does every
+successful decision, so a badge cannot stay stale until a page reload.
 
 ### §C — the duplicate review on the screen
 
@@ -394,6 +401,13 @@ echoed) records one of exactly two decisions:
   blocked candidate lists its blockers and the referencing tables and offers no
   archive button at all.
 
+Both shapes are scoped to the **active branch** (`resolveActiveLocation`), which is
+the last of §C's "by authorized business + branch + SKU": items are per branch, so
+a business-wide read flags a row for a twin the reader cannot see on this screen,
+and reports the legitimate `per_branch_copies` shape as a candidate. The operator
+scripts take the same scope as `--location <uuid>`; without it they keep their
+business-wide read.
+
 The review panel shows each row's id, branch, kind and parent, on-hand quantity,
 creation time (Shamsi), provenance and the store's last product payload, then why
 the candidate is ambiguous and which distinctions would justify keeping it apart.
@@ -403,10 +417,11 @@ A shared SKU alone is never a merge key.
 
 ```bash
 # 1. Read-only. One SKU or the whole catalogue; writes nothing (READ ONLY, rolled back).
-npx tsx scripts/report-duplicate-items.ts --business <uuid> --sku zza05023
+#    --location <uuid> narrows it to the branch the reader is looking at.
+npx tsx scripts/report-duplicate-items.ts --business <uuid> --sku zza05023 --location <branch uuid>
 
 # 2. Plan. Still write-free: which orphans may be archived, which are blocked and why.
-npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --sku zza05023
+npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --sku zza05023 --location <branch uuid>
 
 # 3. Snapshot before any write (the plan plus the active-item count).
 npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --json > dups-plan.json
@@ -440,12 +455,12 @@ needs a person's reconciliation plan, not an archive.
 | `src/lib/duplicate-items.test.ts` | the verdict rules and helpers |
 | `src/lib/duplicate-items-resolution.test.ts` | which orphans may be archived and why the rest are blocked (fails closed on unchecked references) |
 | `integration/woocommerce-duplicate-orphan-archive.integration.test.ts` | the plan writes nothing; an unreferenced orphan is archived and audited, a referenced or changed-since-plan one is left active, another business is untouched |
-| `src/lib/product-row-actions.test.ts` | 1207 §A/B — the three row actions and their labels, per-store state, the worst-store row state, the five filter options |
+| `src/lib/product-row-actions.test.ts` | 1207 §A/B — the three row actions and their labels, per-store state, the worst-store row state, the Woo/duplicate filter, the source filter and the per-store filter |
 | `src/app/dashboard/products/product-publication-panel.test.tsx` | 1207 §A — manual update vs publication vs review, per-store state, review token invalidation, queued-not-synced, a failed send |
 | `src/app/dashboard/products/products-list-section.test.tsx` | 1207 §A/B/C — the row's action per state, details behind «جزئیات», the duplicate chip, the review panel's keep-separate and blocked cases |
 | `src/app/api/products/duplicates/route.test.ts` | 1207 §C — summary vs one-SKU reads, both decisions, missing confirmation/token, a stale token (409), blockers (409) |
 | `src/lib/duplicate-items-copy.test.ts` | 1207 §C — every verdict and blocker word, ambiguity notes, keep-separate reasons |
-| `integration/woocommerce-duplicate-review.integration.test.ts` | 1207 §C against Postgres — the group read with its plan writes nothing, the flagged-SKU summary is tenant-scoped, «نگهداری جداگانه» is audited and touches no row, a changed token and a referenced orphan both refuse the archive |
+| `integration/woocommerce-duplicate-review.integration.test.ts` | 1207 §C against Postgres — the group read with its plan writes nothing, the flagged-SKU summary is tenant-scoped, «نگهداری جداگانه» is audited and touches no row, a changed token and a referenced orphan both refuse the archive, and the read is branch-scoped |
 | `src/lib/integrations/woo-catalogue.test.ts` | 39 — the type matrix, order-line resolution, update paths, taxonomy tree sort |
 | `src/lib/integrations/woocommerce-client.test.ts` | 23 — both namespaces, pagination, update paths |
 | `src/lib/integrations/woo-ops-service.test.ts` | 16 — the closed field lists, price/quantity/refund validation, `api_refund` forced false |

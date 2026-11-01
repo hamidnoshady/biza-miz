@@ -41,7 +41,7 @@ import {
   hashPluginToken,
   verifyPluginEnvelope,
 } from "./plugin-link";
-import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken } from "./plugin-capabilities";
+import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken, registeredOrderStatuses } from "./plugin-capabilities";
 import { assertPluginJobSupported } from "./plugin-job-guard";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
@@ -212,6 +212,12 @@ export interface PluginHandshakeInput {
   capabilities?: {
     eventTypes?: string[];
     jobTypes?: string[];
+    /**
+     * The store's registered order statuses (`wc_get_order_statuses()`), which
+     * is the only truthful source of their display names — see
+     * `registeredOrderStatuses` (#1215 / P1‑3).
+     */
+    orderStatuses?: unknown;
   };
   telemetry?: Record<string, unknown>;
 }
@@ -273,10 +279,18 @@ function sanitizeLocalQueueRecent(value: unknown): Array<{
 }
 
 function pluginCapabilities(input: PluginHandshakeInput): Record<string, unknown> {
+  // The order-status registry is stored *through its own reader*, so the shape
+  // the manager displays is exactly the shape the handshake accepted: a plugin
+  // that sends junk, or none at all, leaves an empty list and the screen falls
+  // back to canonical labels plus a clearly marked raw slug (#1215 / P1‑3).
+  const orderStatuses = registeredOrderStatuses({
+    orderStatuses: input.capabilities?.orderStatuses,
+  });
   return {
     protocolVersion: Number.isFinite(input.protocolVersion) ? Math.max(1, Math.floor(input.protocolVersion ?? 1)) : 1,
     eventTypes: sanitizeStringArray(input.capabilities?.eventTypes),
     jobTypes: sanitizeStringArray(input.capabilities?.jobTypes),
+    ...(orderStatuses.length > 0 ? { orderStatuses } : {}),
   };
 }
 

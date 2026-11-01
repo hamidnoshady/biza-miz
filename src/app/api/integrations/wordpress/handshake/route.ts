@@ -15,7 +15,7 @@ export const POST = pluginRoute(async (connection, body) =>
     protocolVersion: typeof body.protocolVersion === "number" ? body.protocolVersion : undefined,
     capabilities:
       body.capabilities && typeof body.capabilities === "object"
-        ? (body.capabilities as { eventTypes?: string[]; jobTypes?: string[] })
+        ? (body.capabilities as { eventTypes?: string[]; jobTypes?: string[]; orderStatuses?: unknown })
         : undefined,
     telemetry: body.telemetry && typeof body.telemetry === "object" ? (body.telemetry as Record<string, unknown>) : undefined,
   }),

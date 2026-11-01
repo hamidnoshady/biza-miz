@@ -33,6 +33,8 @@ import { toPersianDigits } from "@/lib/digits";
 import { cmsSectionHref, wpSectionHref } from "@/app/(app)/websites/website-routes";
 import type { TorobWebsiteKind, TorobWebsiteRow, TorobWebsiteState } from "@/lib/torob/eligibility";
 import type { TorobShopView } from "@/app/api/growth/torob/shops/route";
+import type { TorobFeedEnvelope, TorobFeedSkipReason } from "@/lib/torob/feed";
+import { TOROB_FEED_SKIP_COPY } from "@/lib/torob/feed";
 
 /**
  * One row as the screen sees it: the eligibility view's shape, with the *API's*
@@ -125,6 +127,28 @@ function StateBadge({ state }: { state: TorobWebsiteState }) {
 
 type Shop = TorobShopView;
 
+/**
+ * What `POST …/feed` answers. `status: "built"` is all this wave can say: the
+ * platform assembled the feed. Sending it, Torob accepting it and Torob indexing
+ * it are three later facts, and the panel below never implies otherwise.
+ */
+interface FeedPreview {
+  status: "built" | "blocked";
+  builtAt: string;
+  blocked: { reason: string; message: string } | null;
+  summary: {
+    total: number;
+    pageCount: number;
+    inStock: number;
+    outOfStock: number;
+    skippedTotal: number;
+    skippedByReason: { reason: TorobFeedSkipReason; count: number; copy: string }[];
+  } | null;
+  page: TorobFeedEnvelope | null;
+  skipped: { productId: string; variantId: string | null; name: string; url: string | null; reason: TorobFeedSkipReason }[];
+  capabilities: { feed: boolean; sent: boolean; listing: boolean };
+}
+
 export function TorobSection({ canManage, canConfigure }: { canManage: boolean; canConfigure: boolean }) {
   const [data, setData] = useState<ShopsResponse | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -133,6 +157,9 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
   const [tokenFor, setTokenFor] = useState<string | null>(null);
   const [token, setToken] = useState("");
   const [actionError, setActionError] = useState("");
+  /** The shop whose feed was last built in this visit, and what came back. */
+  const [feedFor, setFeedFor] = useState<string | null>(null);
+  const [feed, setFeed] = useState<FeedPreview | null>(null);
 
   const load = useCallback(async () => {
     const { ok, data: body, status } = await api<Partial<ShopsResponse> & { error?: string }>(
@@ -165,6 +192,23 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
     setTokenFor(null);
     setToken("");
     await load();
+  }
+
+  async function buildFeed(key: string, shopId: string) {
+    setBusy(`${key}:feed`);
+    setActionError("");
+    setFeed(null);
+    const { ok, data: answer } = await api<FeedPreview & { error?: string }>(
+      `/api/growth/torob/shops/${shopId}/feed`,
+      { method: "POST" },
+    );
+    setBusy(null);
+    if (!ok) {
+      setActionError(errorMessageOrRaw(answer.error) ?? "ساخت فید ناموفق بود.");
+      return;
+    }
+    setFeedFor(key);
+    setFeed(answer);
   }
 
   if (loadError) return <ErrorBox>{loadError}</ErrorBox>;
@@ -284,6 +328,16 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                   </Button>
                 ) : null}
 
+                {shop && shop.authorizationState === "authorized" ? (
+                  <Button
+                    variant="outline"
+                    disabled={busy !== null}
+                    onClick={() => void buildFeed(key, shop.id)}
+                  >
+                    {working(key, "feed") ? "در حال ساخت…" : "پیش‌نمایش فید"}
+                  </Button>
+                ) : null}
+
                 {canManage && shop && shop.authorizationState === "authorized" ? (
                   <Button
                     variant="outline"
@@ -295,6 +349,8 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                 ) : null}
               </div>
             </div>
+
+            {feedFor === key && feed ? <FeedPreviewPanel feed={feed} /> : null}
 
             {canConfigure && tokenFor === key && shop ? (
               <form
@@ -339,6 +395,77 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
           گزارش فید و ایندکس محصولات در ترب در نسخهٔ بعدی این بخش اضافه می‌شود.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * What a build produced, in the merchant's terms.
+ *
+ * Three numbers and one honest sentence: published pages, skipped pages and why.
+ * It says «آمادهٔ ارسال» rather than «منتشر شد» because building is all this wave
+ * does — the count is what *would* be sent, and claiming more is the exact
+ * conflation the issue forbids.
+ */
+function FeedPreviewPanel({ feed }: { feed: FeedPreview }) {
+  if (feed.status === "blocked") {
+    return (
+      <div className="mt-3 border-t border-border pt-3 text-sm">
+        <p className="font-medium text-foreground">فید ساخته نشد</p>
+        <p className="mt-1 text-muted-foreground">{feed.blocked?.message ?? "دلیل نامشخص"}</p>
+      </div>
+    );
+  }
+
+  const summary = feed.summary;
+  if (!summary) return null;
+
+  return (
+    <div className="mt-3 space-y-2 border-t border-border pt-3 text-sm">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="font-medium text-foreground">آمادهٔ ارسال: {toPersianDigits(summary.total)} صفحه</span>
+        <span className="text-muted-foreground">
+          موجود {toPersianDigits(summary.inStock)} · ناموجود {toPersianDigits(summary.outOfStock)}
+        </span>
+        <span className="text-muted-foreground">
+          {toPersianDigits(summary.pageCount)} صفحهٔ فید (هر صفحه ۱۰۰ محصول)
+        </span>
+        <span className="text-xs text-muted-foreground">
+          ساخته‌شده {toPersianDigits(formatJalali(new Date(feed.builtAt)))}
+        </span>
+      </div>
+
+      <p className="text-xs text-muted-foreground">
+        این فهرست چیزی است که برای ترب آماده می‌شود؛ ارسال آن مرحلهٔ بعد است و دیده‌شدن در ترب را
+        فقط خود ترب تأیید می‌کند.
+      </p>
+
+      {summary.skippedTotal > 0 ? (
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-foreground">
+            {toPersianDigits(summary.skippedTotal)} محصول منتشر نمی‌شود:
+          </p>
+          <ul className="space-y-0.5 text-xs text-muted-foreground">
+            {summary.skippedByReason.map((entry) => (
+              <li key={entry.reason}>
+                {entry.copy} ({toPersianDigits(entry.count)})
+              </li>
+            ))}
+          </ul>
+          {feed.skipped.length > 0 ? (
+            <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+              {feed.skipped.slice(0, 5).map((entry) => (
+                <li key={`${entry.productId}:${entry.variantId ?? ""}`}>
+                  {entry.name} — {TOROB_FEED_SKIP_COPY[entry.reason]}
+                </li>
+              ))}
+              {feed.skipped.length > 5 ? (
+                <li>و {toPersianDigits(feed.skipped.length - 5)} مورد دیگر…</li>
+              ) : null}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
