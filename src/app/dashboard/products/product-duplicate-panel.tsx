@@ -140,6 +140,10 @@ export function ProductDuplicatePanel({
         </p>
       </div>
       <p className="text-xs text-muted-foreground">{SHARED_SKU_IS_NOT_A_MERGE_KEY}</p>
+      {/* §C scopes the review to business + branch + SKU, like the list itself. */}
+      <p className="text-xs text-muted-foreground">
+        این بررسی به شعبهٔ فعال محدود است؛ ردیف‌های هم‌کد در شعبه‌های دیگر جدا شمرده می‌شوند.
+      </p>
 
       {groups === null ? (
         <LoadingSkeleton rows={3} label="در حال خواندن ردیف‌های هم‌کد" />

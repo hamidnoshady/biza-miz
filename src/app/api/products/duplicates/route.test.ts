@@ -30,6 +30,12 @@ vi.mock("@/lib/industry-guard", () => ({
   requireProductWorkspaceForApi: vi.fn(async () => null),
 }));
 
+// §C scopes the read and the decisions to the active branch.
+const LOCATION = "1f0e6f3a-1b1c-4d5e-8f90-1a2b3c4d5e6f";
+vi.mock("@/lib/setup-state", () => ({
+  resolveActiveLocation: vi.fn(async () => ({ id: LOCATION })),
+}));
+
 vi.mock("@/lib/duplicate-items-review-service", () => mocks);
 
 import { GET, POST } from "./route";
@@ -59,11 +65,16 @@ describe("GET", () => {
     const response = await GET(new NextRequest("https://app.test/api/products/duplicates?summary=1"));
     expect(await response.json()).toEqual({ skus: ["zza05023"] });
     expect(mocks.loadDuplicateReviewGroups).not.toHaveBeenCalled();
+    // The list's flags are the active branch's, not the whole business.
+    expect(mocks.listDuplicateCandidateSkus).toHaveBeenCalledWith("tenant-a", { locationId: LOCATION });
   });
 
   it("reads one SKU's review when asked", async () => {
     await GET(new NextRequest("https://app.test/api/products/duplicates?sku=ZZA05023"));
-    expect(mocks.loadDuplicateReviewGroups).toHaveBeenCalledWith("tenant-a", { sku: "ZZA05023" });
+    expect(mocks.loadDuplicateReviewGroups).toHaveBeenCalledWith("tenant-a", {
+      sku: "ZZA05023",
+      locationId: LOCATION,
+    });
   });
 });
 
@@ -80,6 +91,7 @@ describe("POST", () => {
       sku: "zza05023",
       reviewToken: "token-1",
       actorUserId: "user-1",
+      locationId: LOCATION,
     });
   });
 
@@ -97,6 +109,7 @@ describe("POST", () => {
       orphanItemId: UUID,
       reviewToken: "token-1",
       actorUserId: "user-1",
+      locationId: LOCATION,
     });
   });
 

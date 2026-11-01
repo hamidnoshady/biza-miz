@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  ALL_STORES,
+  PRODUCT_SOURCE_FILTERS,
   PRODUCT_WOO_FILTERS,
   STORE_LINK_STATE_LABEL,
   duplicateReviewGatesPublication,
+  matchesSourceFilter,
+  matchesStoreFilter,
   matchesWooFilter,
   productLinkState,
   productRowAction,
   storeLinkState,
+  storesInLinks,
 } from "./product-row-actions";
 
 const linked = { connectionStatus: "active" as const, lastOutboundStatus: null };
@@ -115,5 +120,44 @@ describe("the row's primary action", () => {
     // A linked flagged row keeps the plain manual-update hint: the review sits
     // beside it in the row, so nothing here may read as "publish again".
     expect(productRowAction({ links: [linked], duplicate: true }).hint).not.toContain("کد کالای یکسان");
+  });
+});
+
+describe("the source filter", () => {
+  it("offers every source the catalogue can have", () => {
+    expect(PRODUCT_SOURCE_FILTERS.map((option) => option.value)).toEqual(["all", "woocommerce", "holoo", "local"]);
+  });
+
+  it("matches the row's owning integration, and `local` means no integration at all", () => {
+    expect(matchesSourceFilter({ provider: "woocommerce" }, "all")).toBe(true);
+    expect(matchesSourceFilter({ provider: "woocommerce" }, "woocommerce")).toBe(true);
+    expect(matchesSourceFilter({ provider: "woocommerce" }, "holoo")).toBe(false);
+    expect(matchesSourceFilter({ provider: "holoo" }, "holoo")).toBe(true);
+    // A row nothing owns is not a store row — and is not matched by `all`-or-store either.
+    expect(matchesSourceFilter(null, "local")).toBe(true);
+    expect(matchesSourceFilter(null, "woocommerce")).toBe(false);
+    expect(matchesSourceFilter(undefined, "holoo")).toBe(false);
+  });
+});
+
+describe("the per-store filter", () => {
+  const storeA = { connectionId: "store-a", storeName: "فروشگاه الف" };
+  const storeB = { connectionId: "store-b", storeName: "فروشگاه ب" };
+
+  it("lists each store once, in the server's order", () => {
+    expect(storesInLinks([storeA, storeB, { connectionId: "store-a", storeName: "فروشگاه الف" }])).toEqual([
+      { id: "store-a", name: "فروشگاه الف" },
+      { id: "store-b", name: "فروشگاه ب" },
+    ]);
+    expect(storesInLinks([])).toEqual([]);
+  });
+
+  it("matches only rows mapped to the chosen store, and everything on `all`", () => {
+    expect(matchesStoreFilter([storeA], ALL_STORES)).toBe(true);
+    // `all` is not the same claim as the Woo filter's «محلی / بدون پیوند».
+    expect(matchesStoreFilter([], ALL_STORES)).toBe(true);
+    expect(matchesStoreFilter([storeA], "store-a")).toBe(true);
+    expect(matchesStoreFilter([storeA], "store-b")).toBe(false);
+    expect(matchesStoreFilter([], "store-a")).toBe(false);
   });
 });

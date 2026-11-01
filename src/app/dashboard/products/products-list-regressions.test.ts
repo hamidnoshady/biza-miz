@@ -90,7 +90,7 @@ describe("search and status filtering", () => {
 
   it("returns the pager to the first page when the list narrows", () => {
     expect(SECTION).toContain(
-      "useEffect(() => setPage(0), [deferredSearch, statusFilter, wooFilter, pageSize]);",
+      "useEffect(() => setPage(0), [deferredSearch, statusFilter, wooFilter, sourceFilter, storeFilter, pageSize]);",
     );
   });
 
@@ -216,7 +216,23 @@ describe("issue #1207 — the compact row keeps its three store states apart", (
     expect(SECTION).toContain('aria-label="فیلتر پیوند فروشگاه و تکراری"');
   });
 
+  it("offers the source filter and the per-store filter when more than one store exists", () => {
+    expect(SECTION).toContain("PRODUCT_SOURCE_FILTERS");
+    expect(SECTION).toContain("matchesSourceFilter(item.source, sourceFilter)");
+    expect(SECTION).toContain('aria-label="فیلتر منبع محصول"');
+    expect(SECTION).toContain("matchesStoreFilter(wooLinksByLocalId.get(item.id) ?? [], storeFilter)");
+    expect(SECTION).toContain("storesInLinks(wooLinks)");
+    expect(SECTION).toContain("stores.length > 1");
+    expect(SECTION).toContain('aria-label="فیلتر فروشگاه مشخص"');
+    // Every filter participates in "is the list narrowed?" and in the reset.
+    expect(SECTION).toContain('sourceFilter !== "all"');
+    expect(SECTION).toContain("storeFilter !== ALL_STORES");
+    expect(SECTION).toContain("setSourceFilter(\"all\")");
+    expect(SECTION).toContain("setStoreFilter(ALL_STORES)");
+  });
+
   it("asks only for the flagged duplicate SKUs, and reviews one row on demand", () => {
+    // §C scopes the flags to the active branch — the server resolves it.
     expect(SECTION).toContain("/api/products/duplicates?summary=1");
     expect(SECTION).toContain("normaliseSku(item.sku)");
     expect(SECTION).toContain("ProductDuplicatePanel");

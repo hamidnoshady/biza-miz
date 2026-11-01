@@ -69,14 +69,20 @@ import { ProductStoreActionButton, ProductPublicationPanel } from "./product-pub
 import { ProductDuplicatePanel } from "./product-duplicate-panel";
 import { normaliseSku } from "@/lib/duplicate-items";
 import {
+  ALL_STORES,
+  PRODUCT_SOURCE_FILTERS,
   PRODUCT_WOO_FILTERS,
   STORE_LINK_STATE_LABEL,
   STORE_LINK_STATE_TONE,
+  matchesSourceFilter,
+  matchesStoreFilter,
   matchesWooFilter,
   productLinkState,
   productRowAction,
   storeLinkState,
+  storesInLinks,
   type ProductLinkState,
+  type ProductSourceFilter,
   type ProductWooFilter,
 } from "@/lib/product-row-actions";
 
@@ -113,6 +119,8 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
   const deferredSearch = useDeferredValue(search);
   const [statusFilter, setStatusFilter] = useState<ProductStatusFilter>("all");
   const [wooFilter, setWooFilter] = useState<ProductWooFilter>("all");
+  const [sourceFilter, setSourceFilter] = useState<ProductSourceFilter>("all");
+  const [storeFilter, setStoreFilter] = useState<string>(ALL_STORES);
   const [pageSize, setPageSize] = useState<number>(20);
   const [page, setPage] = useState(0);
   const [panelFor, setPanelFor] = useState<{ id: string; kind: ProductPanelKind } | null>(null);
@@ -203,6 +211,11 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
     return items.map((item) => ({ item, needles: variantSearchNeedles(item) }));
   }, [items]);
 
+  // §B "per-store filters when appropriate": the distinct stores the link read
+  // found. One store (or none) makes the control meaningless, so the toolbar
+  // only draws it beyond one.
+  const stores = useMemo(() => storesInLinks(wooLinks), [wooLinks]);
+
   // Performance optimization: We depend on deferredSearch so typing remains
   // snappy while filtering happens in the background. Field-level needles
   // avoid false-positive cross-boundary matches. Search, the status filter and
@@ -216,17 +229,35 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
         ({ item, needles }) =>
           (!needle || variantMatchesNeedle(needles, needle)) &&
           variantMatchesStatusFilter(item, statusFilter) &&
-          matchesWooFilter(linkStateByLocalId.get(item.id) ?? "unlinked", isDuplicate(item), wooFilter),
+          matchesWooFilter(linkStateByLocalId.get(item.id) ?? "unlinked", isDuplicate(item), wooFilter) &&
+          matchesSourceFilter(item.source, sourceFilter) &&
+          matchesStoreFilter(wooLinksByLocalId.get(item.id) ?? [], storeFilter),
       )
       .map(({ item }) => item);
-  }, [items, searchIndex, needle, statusFilter, wooFilter, linkStateByLocalId, isDuplicate]);
+  }, [
+    items,
+    searchIndex,
+    needle,
+    statusFilter,
+    wooFilter,
+    sourceFilter,
+    storeFilter,
+    wooLinksByLocalId,
+    linkStateByLocalId,
+    isDuplicate,
+  ]);
 
   // Any narrowing of the list returns the pager to the first page — staying
   // on page 7 of a result that now has one page shows an empty table.
-  useEffect(() => setPage(0), [deferredSearch, statusFilter, wooFilter, pageSize]);
+  useEffect(() => setPage(0), [deferredSearch, statusFilter, wooFilter, sourceFilter, storeFilter, pageSize]);
 
   const searching = needle.length > 0;
-  const filtering = searching || statusFilter !== "all" || wooFilter !== "all";
+  const filtering =
+    searching ||
+    statusFilter !== "all" ||
+    wooFilter !== "all" ||
+    sourceFilter !== "all" ||
+    storeFilter !== ALL_STORES;
   const pageCount = filtered ? Math.max(1, Math.ceil(filtered.length / pageSize)) : 1;
   const safePage = Math.min(page, pageCount - 1);
   const rows = filtered?.slice(safePage * pageSize, safePage * pageSize + pageSize) ?? [];
@@ -253,6 +284,8 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
     setSearch("");
     setStatusFilter("all");
     setWooFilter("all");
+    setSourceFilter("all");
+    setStoreFilter(ALL_STORES);
     setPage(0);
   }
 
@@ -357,6 +390,41 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
               ))}
             </select>
           </label>
+          <label className="flex w-full shrink-0 items-center gap-2 text-xs text-muted-foreground sm:w-auto">
+            منبع
+            <select
+              className={`${inputClass} w-auto`}
+              value={sourceFilter}
+              onChange={(event) => setSourceFilter(event.target.value as ProductSourceFilter)}
+              aria-label="فیلتر منبع محصول"
+            >
+              {PRODUCT_SOURCE_FILTERS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* §B "per-store filters when appropriate": one store needs no choice. */}
+          {stores.length > 1 ? (
+            <label className="flex w-full shrink-0 items-center gap-2 text-xs text-muted-foreground sm:w-auto">
+              فروشگاه مشخص
+              <select
+                className={`${inputClass} w-auto`}
+                value={storeFilter}
+                disabled={wooLinksState === "loading"}
+                onChange={(event) => setStoreFilter(event.target.value)}
+                aria-label="فیلتر فروشگاه مشخص"
+              >
+                <option value={ALL_STORES}>همهٔ فروشگاه‌ها</option>
+                {stores.map((store) => (
+                  <option key={store.id} value={store.id}>
+                    {store.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <label className="flex w-full shrink-0 items-center gap-2 text-xs text-muted-foreground sm:w-auto">
             ردیف در صفحه
             <select
