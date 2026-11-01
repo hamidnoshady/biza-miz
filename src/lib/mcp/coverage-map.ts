@@ -957,7 +957,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       listDetail: ["get_backup_status"],
       lifecycle: ["backup.restore.apply"],
     },
-    note: "Issue #903 §3 removed the create/update verbs: backup creation, scheduling and retention are Superadmin-only, so the tenant lane is status + verified restore. Restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lane stays route-only",
+    note: "Issue #903 §3 removed the create/update verbs: backup creation, scheduling and retention are Superadmin-only, so the tenant lane is status + verified restore. Restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lanes — the site restore file, and on managed profiles the uploaded copy plus its signed-manifest import (issue #903 §2 item 4) — stay route-only because both carry a file upload no chat-side verb can complete",
     test: "integration/backup.integration.test.ts",
   },
   {
