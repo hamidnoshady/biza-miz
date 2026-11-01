@@ -20,6 +20,7 @@ import {
   MegaphoneIcon,
   MessageCircleIcon,
   SettingsIcon,
+  ShoppingBagIcon,
   TrendingUpIcon,
   UsersIcon,
   type LucideIcon,
@@ -77,6 +78,14 @@ export const GROWTH_NAV_ITEMS: readonly GrowthNavItem[] = [
     label: "پورسانت فروشندگان",
     description: "قواعد و رتبه‌بندی",
     icon: HandCoinsIcon,
+  },
+  {
+    // Issue #894: the Torob channel, seated in Growth's own rail rather than in a
+    // separate app — a merchant manages one channel here, not a second product.
+    key: "torob",
+    label: "کانال ترب",
+    description: "انتشار محصولات وب‌سایت‌های تحت مدیریت در ترب",
+    icon: ShoppingBagIcon,
   },
   {
     key: "settings",
