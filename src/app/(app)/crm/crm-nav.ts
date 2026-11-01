@@ -43,6 +43,7 @@ import {
   HistoryIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
+  MegaphoneIcon,
   SettingsIcon,
   ShieldCheckIcon,
   SproutIcon,
@@ -100,6 +101,26 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
     label: "پیشنهاد قیمت",
     description: "چه چیزی، به چه قیمتی، تا چه اعتباری — و چقدر سود دارد",
     icon: FileTextIcon,
+  },
+  {
+    // Issue #1128 §A + §C. After the proposal on §B's stage list: the offer is
+    // accepted, the work runs, and this is the record of what it cost and returned
+    // for that client. Grouped with the deal, the brief and the offer because all
+    // four name a client and §A asks to see them per brand.
+    //
+    // The key is `client-campaigns` and not `campaigns`, and `app-ownership.test.ts`
+    // is what says so: Growth owns that destination name, and the test exists to stop
+    // one app growing a second copy of another's territory. That boundary is right and
+    // this record is genuinely a different thing — Growth's campaign is #901's retail
+    // cashback automation whose party is the shopper, this one is an agency's media
+    // plan for a client (decision 52) — so the honest resolution is two names, not a
+    // shared one with a comment. The route, the section key and the screen all say
+    // `client-campaigns` for the same reason: a CRM door called "campaigns" invites
+    // exactly the confusion the ownership rule prevents.
+    key: "client-campaigns",
+    label: "کمپین‌های کارفرما",
+    description: "چه زمانی، در کدام کانال‌ها، چقدر هزینه و چه بازدهی",
+    icon: MegaphoneIcon,
   },
   {
     key: "leads",
@@ -161,7 +182,7 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
 export const CRM_NAV_GROUPS: ReadonlyArray<AppSectionNavGroup<CrmSectionKey>> = [
   { label: "امروز", keys: ["overview"] },
   { label: "مشتریان", keys: ["directory"] },
-  { label: "فرصت‌ها", keys: ["deals", "briefs", "proposals", "leads"] },
+  { label: "فرصت‌ها", keys: ["deals", "briefs", "proposals", "client-campaigns", "leads"] },
   { label: "ارتباط و پیگیری", keys: ["activities", "cases"] },
   { label: "شناخت مشتری", keys: ["segments", "consent"] },
   { label: "کیفیت داده", keys: ["quality"] },
