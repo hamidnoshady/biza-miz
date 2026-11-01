@@ -40,7 +40,11 @@ export type RegisterNumberedTable =
   // Issue #1128 §A + §D — the priced offer. Numbered per agency for the reason a
   // brief is: a proposal belongs to the client relationship, not to a project, and
   // at the moment it is written there is usually no project yet.
-  | "agency_proposals";
+  | "agency_proposals"
+  // Issue #1128 §A + §C — the campaign as it ran. Numbered per agency for the same
+  // reason a brief and a proposal are: a campaign belongs to the client
+  // relationship, and a brand of a group has its own series of them.
+  | "agency_client_campaigns";
 
 export type RegisterNumberedColumn =
   | "variation_number"
@@ -51,7 +55,8 @@ export type RegisterNumberedColumn =
   | "milestone_number"
   | "change_request_number"
   | "brief_number"
-  | "proposal_number";
+  | "proposal_number"
+  | "campaign_number";
 
 const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   aec_variations: "variation_number",
@@ -63,6 +68,7 @@ const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   agency_change_requests: "change_request_number",
   agency_client_briefs: "brief_number",
   agency_proposals: "proposal_number",
+  agency_client_campaigns: "campaign_number",
 };
 
 /**
