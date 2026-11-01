@@ -22,8 +22,8 @@ describe("diffLines — what an Apply will change", () => {
   });
 
   it("handles growing and shrinking text", () => {
-    expect(diffLines("", "الف\nبا").map((line) => line.kind)).toEqual(["added", "added"]);
-    expect(diffLines("الف\nبا", "").map((line) => line.kind)).toEqual(["removed", "removed"]);
+    expect((diffLines("", "الف\nبا") ?? []).map((line) => line.kind)).toEqual(["added", "added"]);
+    expect((diffLines("الف\nبا", "") ?? []).map((line) => line.kind)).toEqual(["removed", "removed"]);
   });
 
   it("treats a trailing newline as formatting, not as an empty line change", () => {
