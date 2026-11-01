@@ -49,6 +49,15 @@ import {
   type PartyRelationship,
   type RelationshipKind,
 } from "./crm-shared";
+import {
+  ORG_RELATIONSHIP_KINDS,
+  isOrgBrand,
+  normalizeOrgEdge,
+  orgGroupName,
+  resolveOrgStructure,
+  type OrgConflict,
+  type OrgParentEdge,
+} from "./crm-org-structure";
 
 export {
   RELATIONSHIP_KINDS,
@@ -264,4 +273,235 @@ export async function unlinkParties(
 
     return true;
   });
+}
+
+/* ===========================================================================
+ * The organisation structure behind one client — issue #1128 §A
+ *
+ * «Agency client companies with multiple contacts/brands». The edges are already
+ * in this table; what was missing is a reading of them, because the customer file
+ * showed every relationship as one spoke of a flat ring and a brand was
+ * indistinguishable from a contact.
+ *
+ * The reading itself — collapsing `parent_organization` and `branch_of` into one
+ * direction, and terminating on cycles and on a brand with two claimed parents —
+ * lives in `crm-org-structure.ts`, which is pure and tested without a database.
+ * What is here is only the fetch and the work counts, because those are the parts
+ * that need a tenant.
+ * ======================================================================== */
+
+/**
+ * What one brand of the group is carrying, from the registers that name a client.
+ *
+ * These four and no others, and the exclusion is a finding rather than an
+ * oversight: `crm_deals.customer_id`, `agency_client_briefs.party_id`,
+ * `agency_proposals.party_id` and `workspace_contracts.party_id` all name a
+ * client, so all four can be counted per brand. **`growth_campaigns` cannot** —
+ * it has no client column at all, only `business_id`, `name`, `status` and
+ * `created_by`. So §A's "concurrent campaigns" is not countable per brand today,
+ * and §C's client-versus-own campaign split needs a schema change before it needs
+ * an endpoint. Recording a zero here would have been worse than recording
+ * nothing: a card that says «۰ کمپین» for every brand is a statement that no
+ * brand has campaigns, which is not what the data says.
+ */
+export interface OrgWorkCounts {
+  deals: number;
+  briefs: number;
+  proposals: number;
+  /** Offers the client accepted — the ones that became work. */
+  acceptedProposals: number;
+  contracts: number;
+}
+
+/** One node of the resolved structure, with what it is carrying. */
+export interface OrgMember {
+  partyId: string;
+  name: string;
+  depth: number;
+  parentId: string | null;
+  isFocus: boolean;
+  childIds: string[];
+  contestedParent: boolean;
+  work: OrgWorkCounts;
+}
+
+export interface OrganizationStructure {
+  focusId: string;
+  focusName: string;
+  /** The topmost party — the client account the group rolls up to. */
+  groupId: string;
+  groupName: string;
+  /** True when this file is a brand of something else rather than its own group. */
+  isBrand: boolean;
+  /** Root-first and depth-ordered: exactly the order an indented list wants. */
+  members: OrgMember[];
+  ancestorIds: string[];
+  descendantIds: string[];
+  conflicts: OrgConflict[];
+  depthLimited: boolean;
+  /** No hierarchy edge touches this party, so there is no card to draw. */
+  isEmpty: boolean;
+}
+
+type OrgEdgeRow = Record<string, unknown> & {
+  from_party_id: string;
+  to_party_id: string;
+  from_name: string;
+  to_name: string;
+  kind: RelationshipKind;
+  created_at: Date | string;
+};
+
+type OrgWorkRow = Record<string, unknown> & {
+  party: string;
+  register: string;
+  total: string | number;
+  accepted: string | number;
+};
+
+const EMPTY_WORK: OrgWorkCounts = {
+  deals: 0,
+  briefs: 0,
+  proposals: 0,
+  acceptedProposals: 0,
+  contracts: 0,
+};
+
+/**
+ * One client's organisation structure, with the work each party in it carries.
+ *
+ * Returns `null` when the party is not this tenant's — the same answer the file
+ * route gives, and the reason the check is here rather than in the route: an id
+ * from another tenant must not resolve to a name on this business's screen.
+ *
+ * Two queries, not one per node. The edges arrive in a single read filtered to the
+ * two hierarchy kinds — a small subset of this table by nature, since a business
+ * has tens of companies and thousands of contacts — and the counts arrive in a
+ * single grouped read over the four registers that name a client, restricted to
+ * the parties actually in this group. Both carry their own `business_id` on every
+ * table they touch, *including inside each join*: the join is where a predicate
+ * is easiest to forget and where forgetting it resolves another tenant's party
+ * into this screen's tree.
+ */
+export async function organizationStructureFor(
+  businessId: string,
+  partyId: string,
+): Promise<OrganizationStructure | null> {
+  if (!isUuid(partyId)) return null;
+
+  const { rows: focusRows } = await query<{ id: string; name: string }>(
+    `SELECT id, name FROM parties WHERE id = $1 AND business_id = $2`,
+    [partyId, businessId],
+  );
+  const focus = focusRows[0];
+  if (!focus) return null;
+
+  const { rows: edgeRows } = await query<OrgEdgeRow>(
+    `SELECT r.from_party_id, r.to_party_id, r.kind, r.created_at,
+            pf.name AS from_name, pt.name AS to_name
+       FROM crm_party_relationships r
+       JOIN parties pf
+         ON pf.id = r.from_party_id AND pf.business_id = r.business_id
+       JOIN parties pt
+         ON pt.id = r.to_party_id AND pt.business_id = r.business_id
+      WHERE r.business_id = $1
+        AND r.kind = ANY($2::text[])
+      ORDER BY r.created_at`,
+    [businessId, [...ORG_RELATIONSHIP_KINDS]],
+  );
+
+  const edges = edgeRows
+    .map((row) =>
+      normalizeOrgEdge({
+        fromPartyId: row.from_party_id,
+        toPartyId: row.to_party_id,
+        kind: row.kind,
+        createdAt:
+          row.created_at instanceof Date
+            ? row.created_at.toISOString()
+            : String(row.created_at ?? ""),
+      }),
+    )
+    .filter((edge): edge is OrgParentEdge => edge !== null);
+
+  const names: Record<string, string> = { [focus.id]: focus.name };
+  for (const row of edgeRows) {
+    names[row.from_party_id] = row.from_name;
+    names[row.to_party_id] = row.to_name;
+  }
+
+  const structure = resolveOrgStructure({ focusId: focus.id, edges, names });
+
+  const memberIds = structure.nodes.map((node) => node.partyId);
+  const work = new Map<string, OrgWorkCounts>();
+  for (const id of memberIds) work.set(id, { ...EMPTY_WORK });
+
+  if (memberIds.length > 0) {
+    // One grouped read over the four registers that name a client. Each branch
+    // carries its own `business_id`, and the party list is this group's own, so
+    // the scan is bounded by the structure rather than by the tenant's history.
+    const { rows: workRows } = await query<OrgWorkRow>(
+      `SELECT party, register, total, accepted FROM (
+         SELECT customer_id AS party, 'deals' AS register,
+                count(*)::int AS total, 0 AS accepted
+           FROM crm_deals
+          WHERE business_id = $1 AND customer_id = ANY($2::uuid[])
+          GROUP BY customer_id
+         UNION ALL
+         SELECT party_id, 'briefs', count(*)::int, 0
+           FROM agency_client_briefs
+          WHERE business_id = $1 AND party_id = ANY($2::uuid[])
+          GROUP BY party_id
+         UNION ALL
+         SELECT party_id, 'proposals', count(*)::int,
+                count(*) FILTER (WHERE status = 'accepted')::int
+           FROM agency_proposals
+          WHERE business_id = $1 AND party_id = ANY($2::uuid[])
+          GROUP BY party_id
+         UNION ALL
+         SELECT party_id, 'contracts', count(*)::int, 0
+           FROM workspace_contracts
+          WHERE business_id = $1 AND party_id = ANY($2::uuid[])
+          GROUP BY party_id
+       ) w`,
+      [businessId, memberIds],
+    );
+    for (const row of workRows) {
+      const counts = work.get(row.party);
+      if (!counts) continue;
+      const total = Number(row.total) || 0;
+      if (row.register === "deals") counts.deals = total;
+      else if (row.register === "briefs") counts.briefs = total;
+      else if (row.register === "contracts") counts.contracts = total;
+      else if (row.register === "proposals") {
+        counts.proposals = total;
+        counts.acceptedProposals = Number(row.accepted) || 0;
+      }
+    }
+  }
+
+  const members: OrgMember[] = structure.nodes.map((node) => ({
+    partyId: node.partyId,
+    name: node.name,
+    depth: node.depth,
+    parentId: node.parentId,
+    isFocus: node.isFocus,
+    childIds: node.childIds,
+    contestedParent: node.contestedParent,
+    work: work.get(node.partyId) ?? { ...EMPTY_WORK },
+  }));
+
+  return {
+    focusId: focus.id,
+    focusName: focus.name,
+    groupId: structure.rootId,
+    groupName: orgGroupName(structure),
+    isBrand: isOrgBrand(structure),
+    members,
+    ancestorIds: structure.ancestorIds,
+    descendantIds: structure.descendantIds,
+    conflicts: structure.conflicts,
+    depthLimited: structure.depthLimited,
+    isEmpty: structure.isEmpty,
+  };
 }
