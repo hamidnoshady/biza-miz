@@ -18,6 +18,29 @@ define( 'ABSPATH', '/tmp/' );
 define( 'MINUTE_IN_SECONDS', 60 );
 define( 'HOUR_IN_SECONDS', 3600 );
 define( 'DAY_IN_SECONDS', 86400 );
+define( 'POS_CONNECTOR_OPTION', 'pos_connector_settings' );
+define( 'POS_CONNECTOR_CRON_PROBE', 'pos_connector_cron_probe' );
+/** Stand-in for the real class, which loads the whole sync stack; the handler only queues. */
+class POS_Connector_Sync {
+	public static function schedule_cron_probe( $origin = 'admin' ) {
+		$now   = time();
+		$probe = array(
+			'id'          => bin2hex( random_bytes( 16 ) ),
+			'origin'      => 'app' === $origin ? 'app' : 'admin',
+			'queued_at'   => gmdate( 'Y-m-d H:i:s', $now ),
+			'due_at'      => gmdate( 'Y-m-d H:i:s', $now + 2 ),
+			'executed_at' => '',
+			'reported_at' => '',
+			'error'       => '',
+		);
+		pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+		if ( false === wp_schedule_single_event( $now + 5, POS_CONNECTOR_CRON_PROBE, array( $probe['id'] ) ) ) {
+			$probe['error'] = 'schedule_failed';
+			pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+		}
+		return $probe;
+	}
+}
 define( 'POS_CONNECTOR_VERSION', '1.6.19' );
 define( 'POS_CONNECTOR_FILE', '/tmp/pos-accounting-connector/pos-accounting-connector.php' );
 define( 'POS_CONNECTOR_UPDATE_REPO', 'hamidnoshady/biza-miz' );
@@ -214,8 +237,27 @@ $actions = array(
 	'pos_connector_resync_customers' => array( array( 'POS_Connector_Settings', 'handle_resync_customers' ), array(), 'customers_queued' ),
 	'pos_connector_resync_content'   => array( array( 'POS_Connector_Settings', 'handle_resync_content' ), array(), 'content_queued' ),
 	'pos_connector_schedule'         => array( array( 'POS_Connector_Settings', 'handle_schedule' ), array( 'resync_products_schedule' => 'daily', 'resync_orders_schedule' => 'hourly', 'resync_orders_days' => '3' ), 'schedule_saved' ),
+	// #1206 P0: the probe queues an event and claims nothing beyond that.
+	'pos_connector_cron_probe'       => array( array( 'POS_Connector_Settings', 'handle_cron_probe' ), array(), 'probe_queued' ),
 	'pos_connector_check_update'     => array( array( 'POS_Connector_Updater', 'handle_check_update' ), array(), null ),
 );
+
+// --- #1206 P0: the cron probe proves the scheduler, and claims nothing early --------
+$GLOBALS['t']['scheduled'] = array();
+$GLOBALS['t']['options'][ POS_CONNECTOR_OPTION ] = array_merge(
+	pos_connector_settings(),
+	array( 'enabled' => true, 'base_url' => 'https://pos.example', 'token' => 'wplink_x', 'cron_probe' => array() )
+);
+POS_Connector_Sync::schedule_cron_probe( 'admin' );
+$queued_probe = pos_connector_settings()['cron_probe'];
+check( ! empty( $queued_probe['id'] ), 'the probe is recorded with a correlation id' );
+check( '' === $queued_probe['executed_at'], 'queuing is not execution' );
+$probe_state = POS_Connector_Health::probe_state( $queued_probe, time() );
+check( 'queued' === $probe_state['state'], 'a queued probe is «queued», never «ok» (got ' . $probe_state['state'] . ')' );
+$probe_events = array_values( array_filter( $GLOBALS['t']['scheduled'], static function ( $event ) { return POS_CONNECTOR_CRON_PROBE === $event['hook']; } ) );
+check( 1 === count( $probe_events ), 'one event, on the probe hook' );
+check( array( $queued_probe['id'] ) === $probe_events[0]['args'], 'carrying the correlation id' );
+check( $probe_events[0]['time'] > time() + 2, 'due a few seconds out, so the tick that queued it cannot execute it' );
 
 // The registration list in init() and this table must name the same actions.
 $settings_source = file_get_contents( $includes . 'class-pos-settings.php' );

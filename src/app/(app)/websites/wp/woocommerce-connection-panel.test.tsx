@@ -42,3 +42,63 @@ it("warns about rotation outage and keeps a one-time token visible if clipboard 
   expect(await screen.findByText("کپی انجام نشد؛ مقدار را دستی کپی کنید.")).toBeTruthy();
   expect(screen.getByText("show-once-token")).toBeTruthy();
 });
+
+// Issue #1206: the scheduler's *current* state and the interruption it ended
+// are two different rows on the screen. A recovered store must not keep
+// showing a live warning, and a dead scheduler must not hide behind a fresh
+// connection test.
+const pluginHealth = (overrides: Record<string, unknown> = {}) => ({
+  status: "active",
+  lastPluginSeenAt: new Date(Date.now() - 5_000).toISOString(),
+  linkMode: "plugin",
+  pluginHealthSummary: {
+    silentMinutes: 0,
+    stale: false,
+    alert: false,
+    cron: { state: "healthy", reason: "recent_start", lastAttemptAt: new Date(Date.now() - 5_000).toISOString(), missedIntervals: 0 },
+    cronStale: false,
+    cronGapSeconds: 5,
+    lastVerifiedCycleAt: new Date(Date.now() - 5_000).toISOString(),
+    lastDataAppliedAt: new Date(Date.now() - 300_000).toISOString(),
+    lastCycleVerdict: "empty",
+    nextDueAt: new Date(Date.now() + 55_000).toISOString(),
+    previousOutageAt: "2026-10-31T09:00:00.000Z",
+    recoveredAt: "2026-10-31T10:00:00.000Z",
+    incidentOpen: false,
+    queueSize: 0,
+    oldestQueuedAgeSeconds: null,
+    ...overrides,
+  },
+});
+
+it("shows a recovered gap as history instead of a live cron warning", async () => {
+  vi.mocked(api).mockResolvedValue({ ok: true, data: { connections: [{ ...woo, ...pluginHealth() }] } } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText("کرون در حال اجرا")).toBeTruthy();
+  expect(screen.getByText(/وقفهٔ پیشین/)).toBeTruthy();
+  expect(screen.getByText(/رفع‌شده در/)).toBeTruthy();
+  expect(screen.queryByText(/مدتی اجرا نشده بود/)).toBeNull();
+});
+
+it("reports a stopped scheduler with its reason, and does not call a connection test a cron test", async () => {
+  vi.mocked(api).mockResolvedValue({
+    ok: true,
+    data: {
+      connections: [
+        {
+          ...woo,
+          ...pluginHealth({
+            stale: true,
+            alert: true,
+            cron: { state: "failed", reason: "no_start_since", lastAttemptAt: new Date(Date.now() - 30 * 60_000).toISOString(), missedIntervals: 30 },
+            incidentOpen: true,
+          }),
+        },
+      ],
+    },
+  } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText("کرون اجرا نمی‌شود")).toBeTruthy();
+  expect(screen.getByText(/کرون سیستم یا مسیر WP-CLI/)).toBeTruthy();
+  expect(screen.getByText(/هنوز رفع نشده/)).toBeTruthy();
+});

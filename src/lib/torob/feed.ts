@@ -1,59 +1,64 @@
 /**
- * Issue #894 Wave 2 — the product feed: catalogue in, Torob items out.
+ * Issue #894 Wave 2 — the product feed: catalogue in, **Torob v3 products** out.
  *
- * Torob lists **pages**, not products. Every item this module emits is one page
- * a shopper can open, identified by a `page_unique` that must not change when
+ * Torob lists pages, not products. Every item this module emits is one page a
+ * shopper can open, identified by a `page_unique` that must not change when
  * something unrelated in the catalogue does — an unstable identity makes Torob
  * treat a renamed product as a new listing and a re-priced one as a duplicate,
- * which is the single most common way a marketplace feed "works" while the shop
- * shows nothing.
+ * which is the most common way a marketplace feed "works" while the shop shows
+ * nothing.
  *
- * So the rules here are about identity and stability first, and about fields
- * second:
+ * The rules, each of which is a test in `feed.test.ts`:
  *
  *   1. **One item per sellable page.** A simple product is one item. A product
- *      with variants is one item per variant, because a variant is what a shopper
- *      can actually buy — sending the parent with the cheapest variant's price is
- *      the lie that makes a listing look available at a price nobody sells at.
- *   2. **Deterministic order.** Items are sorted by URL then identity, so page 1
- *      of a feed is page 1 on the next refresh. Torob pages through the feed; an
- *      order that reshuffles between requests silently drops products off the end
- *      of the crawl.
- *   3. **Skips are data, not exceptions.** A product that cannot be published is
- *      returned with one reason from a closed vocabulary, so the screen can say
- *      «۴ محصول منتشر نمی‌شود: قیمتشان به تومان صحیح تبدیل نمی‌شود» instead of
- *      quietly sending fewer products than the catalogue has.
- *   4. **Nothing here claims a listing.** A built item is what Torob *would*
- *      receive. Whether Torob accepted it, and whether it is indexed, is what the
- *      run record and — later — the Shop API say. The issue is explicit that
- *      those must never be conflated.
+ *      with variants is one item per variant, sharing a `product_group_id` (the
+ *      document's own rule) and differing in `page_unique` — never the parent
+ *      priced at its cheapest variant, which lists a number nobody sells at.
+ *   2. **A product that is not for sale is not sent.** `sellable: false` omits it
+ *      entirely; the document says a removed product is excluded from the list and
+ *      answers a direct lookup with an empty array. It is *not* sent as
+ *      `availability: false`, which would keep a withdrawn listing alive.
+ *   3. **Unavailable is `false` + `0`.** `availability: true` with
+ *      `current_price: 0` means **free** to Torob, so a sold-out product is sent
+ *      as unavailable at zero — never with its last known price, which would
+ *      quote a shopper a number the shop will not honour.
+ *   4. **Order is the request's, not the catalogue's.** `buildTorobFeed` produces
+ *      a canonical order (by identity) so the same catalogue always yields the
+ *      same list; `sortTorobProducts` then applies the sort Torob asked for, and
+ *      paging cuts that sorted list. A crawler that pages through
+ *      `date_updated_desc` twice must see the same page boundaries both times.
+ *   5. **Skips are data.** A page that cannot be published comes back with a
+ *      reason from a closed vocabulary, so the screen can say «۴ محصول منتشر
+ *      نمی‌شود: …» instead of quietly sending fewer products than the catalogue.
  *
- * Pure: no database, no HTTP, no clock. `feed.test.ts` covers every branch, and
- * the price rules live one file over in `currency.ts`.
+ * Field names, limits and the envelope are Torob's and live in `contract.ts`
+ * beside the document they come from.
  */
-
+import { TorobPriceError, sellingPriceInToman, type RialAmount, type TorobPriceProblem } from "./currency";
 import {
-  TorobPriceError,
-  sellingPriceInToman,
-  type RialAmount,
-  type TorobPriceProblem,
-} from "./currency";
-
-/** Torob's documented page size for a product feed. Not tunable. */
-export const TOROB_PAGE_SIZE = 100;
+  TOROB_PAGE_SIZE,
+  clampField,
+  cursorResponse,
+  pageResponse,
+  priceForTorob,
+  type TorobProductV3,
+  type TorobSort,
+  type TorobV3Response,
+} from "./contract";
 
 /**
  * Why a catalogue page is not in the feed.
  *
- * Closed vocabulary, for the same reason the price problems are: these strings
- * reach a merchant (translated below) and an operator's log. A free-form string
- * would be a reason nobody can group, count or translate.
+ * Closed vocabulary: these reach a merchant (translated below) and an operator's
+ * log. A free-form string would be a reason nobody can group, count or translate.
  */
 export type TorobFeedSkipReason =
+  | "not_sellable"
   | "missing_name"
   | "missing_url"
   | "unusable_url"
   | "missing_image"
+  | "missing_date"
   | "unsupported_currency"
   | "price_not_whole_toman"
   | "negative_price"
@@ -62,13 +67,13 @@ export type TorobFeedSkipReason =
 
 /** One sellable variant of a product, as the website's catalogue knows it. */
 export interface CatalogueVariant {
-  /** Stable within the product. Together with the product id it is the identity. */
+  /** Stable within the product. With the product id it is the identity. */
   id: string;
-  /** «رنگ: قرمز» — the axis values this variant differs by. */
+  /** «رنگ: قرمز» — the axis values this variant differs by. Becomes `spec`. */
   attributes: Readonly<Record<string, string>>;
   /** Integer Rial, in the site's currency. */
   priceRial: RialAmount;
-  /** Integer Rial; only sent when it is above the current price. */
+  /** Integer Rial; sent only when it is above the current price. */
   oldPriceRial?: RialAmount | null;
   available: boolean;
   sku?: string | null;
@@ -81,44 +86,34 @@ export interface CatalogueProduct {
   /** `menu_items.id` or `items.id` — a stable local identity. */
   id: string;
   name: string;
+  subtitle?: string | null;
   description?: string | null;
   /** The public page on the managed website. Required: Torob indexes pages. */
   url: string;
   categoryName?: string | null;
-  brand?: string | null;
-  /** Absolute URLs. The first one is the listing image. */
+  /** Absolute URLs, main image first. The document rejects thumbnails. */
   imageUrls: readonly string[];
   /** Integer Rial, in the site's currency. */
   priceRial: RialAmount;
   oldPriceRial?: RialAmount | null;
+  /** In stock. Sent as `availability`; see rule 3. */
   available: boolean;
+  /**
+   * Published and offered at all. `false` omits the product from the feed — the
+   * difference between "sold out" and "withdrawn", which Torob treats very
+   * differently.
+   */
+  sellable?: boolean;
   /** The site's currency: `IRR`, `IRT`, or something this feed refuses. */
   currency: string;
   sku?: string | null;
+  /** Specifications — Torob requires a `spec` dictionary, `{}` when there are none. */
+  spec?: Readonly<Record<string, string>>;
+  guarantee?: string | null;
+  /** Timezone-aware ISO 8601. Required by the contract. */
+  dateAdded: string;
+  dateUpdated?: string | null;
   variants?: readonly CatalogueVariant[];
-}
-
-/**
- * One page of the shop, as Torob receives it.
- *
- * The field names are Torob's (`page_unique`, `page_url`), because this object
- * goes over the wire unchanged; translating on the way out would put a rename
- * between the contract and its test.
- */
-export interface TorobFeedItem {
-  page_unique: string;
-  page_url: string;
-  name: string;
-  /** Whole Toman. */
-  price: number;
-  old_price?: number;
-  availability: "in_stock" | "out_of_stock";
-  category_name?: string;
-  brand?: string;
-  image_urls?: string[];
-  description?: string;
-  attributes?: Record<string, string>;
-  sku?: string;
 }
 
 export interface SkippedProduct {
@@ -131,16 +126,19 @@ export interface SkippedProduct {
 }
 
 export interface BuiltFeed {
-  items: TorobFeedItem[];
+  /** Canonical order (by `page_unique`), independent of any request's sort. */
+  items: TorobProductV3[];
   skipped: SkippedProduct[];
 }
 
 /** What a merchant reads for each skip reason. */
 export const TOROB_FEED_SKIP_COPY: Readonly<Record<TorobFeedSkipReason, string>> = {
+  not_sellable: "این محصول منتشر نشده یا از فروش خارج شده است.",
   missing_name: "نام محصول ثبت نشده است.",
   missing_url: "نشانی صفحهٔ محصول روی وب‌سایت ثبت نشده است.",
   unusable_url: "نشانی صفحهٔ محصول قابل استفاده نیست.",
   missing_image: "برای محصول تصویری ثبت نشده است؛ در ترب بدون تصویر دیده نمی‌شود.",
+  missing_date: "تاریخ ثبت محصول خوانده نمی‌شود؛ ترب برای هر محصول تاریخ افزودن می‌خواهد.",
   unsupported_currency: "قیمت این محصول به ارزی جز ریال یا تومان ثبت شده است.",
   price_not_whole_toman: "قیمت این محصول به تومان صحیح تبدیل نمی‌شود.",
   negative_price: "قیمت این محصول منفی است.",
@@ -179,7 +177,13 @@ function isUsableUrl(value: string | null | undefined): value is string {
   }
 }
 
-/** The price problem, mapped to the skip reason the merchant sees. */
+/** A timezone-aware ISO timestamp, or null when the source value is unusable. */
+export function isoTimestamp(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 function priceSkipReason(problem: TorobPriceProblem): TorobFeedSkipReason {
   switch (problem) {
     case "unsupported_currency":
@@ -190,8 +194,7 @@ function priceSkipReason(problem: TorobPriceProblem): TorobFeedSkipReason {
       return "price_out_of_range";
     case "rial_not_whole_toman":
     case "not_an_integer":
-      // Both are "this price has no exact Toman form": a Rial amount that is not
-      // a whole Toman, and an amount that is not an integer at all.
+      // Both are "this price has no exact Toman form".
       return "price_not_whole_toman";
   }
 }
@@ -210,8 +213,8 @@ function price(
 
 /**
  * An old price is a *strikethrough*, so it is only meaningful above the selling
- * price. A feed that sends an old price below the current one shows a shopper a
- * discount that is a price rise — so it is dropped rather than sent.
+ * price. A feed that sends one below the current price shows a shopper a discount
+ * that is a price rise — so it is dropped rather than sent.
  */
 function oldPrice(
   amount: RialAmount | null | undefined,
@@ -224,32 +227,38 @@ function oldPrice(
   return converted.toman > sellingPrice ? converted.toman : undefined;
 }
 
+/** Drop empty values so the response carries only fields Torob can use. */
+function cleanSpec(spec: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(spec ?? {})) {
+    const name = key.trim();
+    const text = String(value ?? "").trim();
+    if (name && text) result[name] = text;
+  }
+  return result;
+}
+
 /**
- * Build the whole feed for one shop.
+ * Build a shop's feed.
  *
- * The result is the shop's full catalogue in feed order — not a page. Paging is
- * `torobFeedPage`'s job, because the page a caller asks for must be cut from the
- * same ordered list every time; cutting while building would make page 2 depend
- * on which products happened to be skipped on page 1.
+ * The result is the shop's whole publishable catalogue in canonical order — not a
+ * page. Paging and sorting belong to `torobFeedPage`, because the page a caller
+ * asks for must be cut from one ordered list every time; cutting while building
+ * would make page 2 depend on which products happened to be skipped on page 1.
  */
 export function buildTorobFeed(input: {
   products: readonly CatalogueProduct[];
-  /** Out-of-stock products are sent with an availability flag by default. */
+  /** Out-of-stock products are sent with `availability: false` by default. */
   includeOutOfStock?: boolean;
 }): BuiltFeed {
   const includeOutOfStock = input.includeOutOfStock ?? true;
-  const items: TorobFeedItem[] = [];
+  const items: TorobProductV3[] = [];
   const skipped: SkippedProduct[] = [];
-  // Two identities are checked, because they can each collide independently: two
-  // rows with one local id, and two rows pointing at one page.
+  // Two identities are checked, because they can each collide independently.
   const seenUniques = new Set<string>();
   const seenUrls = new Set<string>();
 
-  const skip = (
-    product: CatalogueProduct,
-    variant: CatalogueVariant | null,
-    reason: TorobFeedSkipReason,
-  ) => {
+  const skip = (product: CatalogueProduct, variant: CatalogueVariant | null, reason: TorobFeedSkipReason) => {
     skipped.push({
       productId: product.id,
       variantId: variant?.id ?? null,
@@ -260,13 +269,26 @@ export function buildTorobFeed(input: {
   };
 
   for (const product of input.products) {
-    const name = product.name?.trim();
-    if (!name) {
+    const title = clampField(product.name, 500);
+    if (!title) {
       skip(product, null, "missing_name");
       continue;
     }
     if (!product.url || !product.url.trim()) {
       skip(product, null, "missing_url");
+      continue;
+    }
+    // A withdrawn product is absent from the feed entirely — not "out of stock".
+    if (product.sellable === false) {
+      skip(product, null, "not_sellable");
+      continue;
+    }
+
+    const dateAdded = isoTimestamp(product.dateAdded);
+    if (!dateAdded) {
+      // The contract requires `date_added`; a product without one cannot be sent
+      // rather than being sent with a fabricated timestamp.
+      skip(product, null, "missing_date");
       continue;
     }
 
@@ -300,7 +322,7 @@ export function buildTorobFeed(input: {
       }
       if (seenUniques.has(page.unique) || seenUrls.has(page.url!)) {
         // Two catalogue rows pointing at one page — `menu_items` can hold a
-        // duplicate after an import. Sending both makes Torob pick one at random.
+        // duplicate after an import. Sending both lets Torob pick one at random.
         skip(product, variant, "duplicate_page");
         continue;
       }
@@ -311,22 +333,35 @@ export function buildTorobFeed(input: {
         continue;
       }
 
-      const item: TorobFeedItem = {
+      const priced = priceForTorob({ available, toman: converted.toman });
+      const item: TorobProductV3 = {
         page_unique: page.unique,
         page_url: page.url!,
-        name,
-        price: converted.toman,
-        availability: available ? "in_stock" : "out_of_stock",
-        image_urls: [...product.imageUrls],
+        title,
+        ...priced,
+        image_links: product.imageUrls
+          .map((url) => clampField(url, 1000))
+          .filter((url): url is string => Boolean(url)),
+        // Required by the contract, empty when there is nothing to say.
+        spec: cleanSpec(variant ? { ...product.spec, ...variant.attributes } : product.spec),
+        date_added: dateAdded,
       };
+
+      const subtitle = clampField(product.subtitle ?? undefined, 500);
+      if (subtitle) item.subtitle = subtitle;
+      // Variants of one product share a group id, which is how Torob knows they
+      // are the same thing in different colours rather than unrelated listings.
+      if (variant) item.product_group_id = clampField(product.id, 200);
       const old = oldPrice(variant ? variant.oldPriceRial : product.oldPriceRial, product.currency, converted.toman);
       if (old !== undefined) item.old_price = old;
-      if (product.categoryName?.trim()) item.category_name = product.categoryName.trim();
-      if (product.brand?.trim()) item.brand = product.brand.trim();
-      if (product.description?.trim()) item.description = product.description.trim();
-      if (variant && Object.keys(variant.attributes).length > 0) item.attributes = { ...variant.attributes };
-      const sku = variant?.sku ?? product.sku;
-      if (sku?.trim()) item.sku = sku.trim();
+      const category = clampField(product.categoryName ?? undefined, 200);
+      if (category) item.category_name = category;
+      const shortDesc = clampField(product.description ?? undefined, 500);
+      if (shortDesc) item.short_desc = shortDesc;
+      const guarantee = clampField(product.guarantee ?? undefined, 200);
+      if (guarantee) item.guarantee = guarantee;
+      const updated = isoTimestamp(product.dateUpdated);
+      if (updated) item.date_updated = updated;
 
       seenUniques.add(page.unique);
       seenUrls.add(item.page_url);
@@ -334,8 +369,8 @@ export function buildTorobFeed(input: {
     }
   }
 
-  // One order, every refresh. See rule 2 in the header.
-  items.sort((a, b) => (a.page_url === b.page_url ? cmp(a.page_unique, b.page_unique) : cmp(a.page_url, b.page_url)));
+  // Canonical order: identity ascending. Every request sorts this list itself.
+  items.sort((a, b) => cmp(a.page_unique, b.page_unique));
   skipped.sort((a, b) => cmp(`${a.productId}~${a.variantId ?? ""}`, `${b.productId}~${b.variantId ?? ""}`));
 
   return { items, skipped };
@@ -345,76 +380,96 @@ function cmp(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** A page of a built feed, plus the envelope Torob reads. */
+/**
+ * Apply the sort Torob asked for.
+ *
+ * A missing `date_updated` sorts last in `date_updated_desc` rather than being
+ * treated as "now": a product the shop never updated did not just change, and
+ * bumping it to the top would make every crawler re-fetch it on every pass.
+ */
+export function sortTorobProducts(items: readonly TorobProductV3[], sort: TorobSort): TorobProductV3[] {
+  const byUnique = (a: TorobProductV3, b: TorobProductV3) => cmp(a.page_unique, b.page_unique);
+  const copy = [...items];
+  switch (sort) {
+    case "date_added_desc":
+      return copy.sort((a, b) => cmp(b.date_added, a.date_added) || byUnique(a, b));
+    case "date_updated_desc":
+      return copy.sort((a, b) => {
+        if (!a.date_updated && !b.date_updated) return byUnique(a, b);
+        if (!a.date_updated) return 1;
+        if (!b.date_updated) return -1;
+        return cmp(b.date_updated, a.date_updated) || byUnique(a, b);
+      });
+    case "product_id_desc":
+      return copy.sort((a, b) => cmp(b.page_unique, a.page_unique));
+  }
+}
+
 export interface TorobFeedPage {
-  /** 1-based. */
-  page: number;
-  pageCount: number;
+  products: TorobProductV3[];
+  /** Total products the shop publishes (before paging). */
   total: number;
-  hasMore: boolean;
-  items: TorobFeedItem[];
-  /** A cursor that survives a catalogue change: the last identity sent. */
+  currentPage: number | null;
   nextCursor: string | null;
 }
 
 /**
- * Cut one page out of a built feed.
+ * Cut one page, or one cursor window, out of the shop's feed.
  *
- * `pageSize` is capped at Torob's 100 rather than accepted as a caller's choice:
- * a page of 500 is a page Torob's crawler will not read, and a silent cap is
- * better than a feed that looks configured and is not.
+ * Page-based and cursor-based paging both use 100 items — the contract's fixed
+ * size — and both are cuts of the same sorted list, so the two modes agree about
+ * what page 1 contains for the same `sort`.
  */
-export function torobFeedPage(feed: BuiltFeed, page: number, pageSize = TOROB_PAGE_SIZE): TorobFeedPage {
-  const size = Math.max(1, Math.min(TOROB_PAGE_SIZE, Math.floor(pageSize)));
-  const total = feed.items.length;
-  const pageCount = Math.max(1, Math.ceil(total / size));
-  const current = Math.max(1, Math.min(pageCount, Math.floor(page) || 1));
-  const start = (current - 1) * size;
-  const items = feed.items.slice(start, start + size);
-  const hasMore = current < pageCount;
-  return {
-    page: current,
-    pageCount,
-    total,
-    hasMore,
-    items,
-    nextCursor: hasMore ? items[items.length - 1]!.page_unique : null,
-  };
+export function torobFeedPage(
+  feed: BuiltFeed,
+  query: { mode: "page"; page: number; sort: TorobSort } | { mode: "cursor"; cursor: string | null; sort: TorobSort },
+): TorobFeedPage {
+  const sorted = sortTorobProducts(feed.items, query.sort);
+  const total = sorted.length;
+
+  if (query.mode === "page") {
+    const maxPage = Math.max(1, Math.ceil(total / TOROB_PAGE_SIZE));
+    // Clamp rather than return an empty page for a stale page number: a 200 with
+    // no products reads to a crawler as "the shop deleted everything".
+    const page = Math.max(1, Math.min(maxPage, query.page));
+    const start = (page - 1) * TOROB_PAGE_SIZE;
+    return {
+      products: sorted.slice(start, start + TOROB_PAGE_SIZE),
+      total,
+      currentPage: page,
+      nextCursor: null,
+    };
+  }
+
+  // Cursor mode: the cursor is the last `page_unique` this shop sent, and it is
+  // opaque to Torob — it only has to be stable, which a local uuid is.
+  const after = query.cursor;
+  const start = after ? sorted.findIndex((product) => cmp(product.page_unique, after) < 0) : 0;
+  // A cursor past the end means the caller already has everything. Restarting from
+  // the first page would put a crawler in an endless loop, which looks like a shop
+  // that keeps growing.
+  if (start === -1) return { products: [], total, currentPage: null, nextCursor: null };
+  const from = start;
+  const products = sorted.slice(from, from + TOROB_PAGE_SIZE);
+  const last = products[products.length - 1]?.page_unique ?? null;
+  const nextCursor = products.length === TOROB_PAGE_SIZE && from + TOROB_PAGE_SIZE < total ? last : null;
+  return { products, total, currentPage: null, nextCursor };
 }
 
-/**
- * The response envelope, in the shape a Torob crawler reads.
- *
- * `page_urls` and `page_uniques` are always present: they are how Torob diffs a
- * refresh without fetching every product again, and a feed that only sends full
- * products forces a full re-crawl each time.
- */
-export interface TorobFeedEnvelope {
-  page: number;
-  page_count: number;
-  total: number;
-  page_urls: string[];
-  page_uniques: string[];
-  products: TorobFeedItem[];
+/** Wrap a page in the documented response envelope. */
+export function torobPageResponse(page: TorobFeedPage): TorobV3Response {
+  return page.currentPage === null
+    ? cursorResponse({ products: page.products, total: page.total, nextCursor: page.nextCursor })
+    : pageResponse({ products: page.products, page: page.currentPage, total: page.total });
 }
 
-export function torobFeedEnvelope(page: TorobFeedPage): TorobFeedEnvelope {
-  return {
-    page: page.page,
-    page_count: page.pageCount,
-    total: page.total,
-    page_urls: page.items.map((item) => item.page_url),
-    page_uniques: page.items.map((item) => item.page_unique),
-    products: page.items,
-  };
-}
-
-/** What a shop's feed contains, without building every item twice. */
+/** What a shop's feed contains, for the screen and the run record. */
 export interface FeedSummary {
   total: number;
   pageCount: number;
   inStock: number;
   outOfStock: number;
+  groups: number;
   skippedTotal: number;
   skippedByReason: { reason: TorobFeedSkipReason; count: number; copy: string }[];
 }
@@ -426,15 +481,29 @@ export interface FeedSummary {
 export function summariseFeed(feed: BuiltFeed): FeedSummary {
   const byReason = new Map<TorobFeedSkipReason, number>();
   for (const entry of feed.skipped) byReason.set(entry.reason, (byReason.get(entry.reason) ?? 0) + 1);
-  const inStock = feed.items.filter((item) => item.availability === "in_stock").length;
+  const inStock = feed.items.filter((item) => item.availability).length;
   return {
     total: feed.items.length,
     pageCount: Math.max(1, Math.ceil(feed.items.length / TOROB_PAGE_SIZE)),
     inStock,
     outOfStock: feed.items.length - inStock,
+    groups: new Set(feed.items.map((item) => item.product_group_id ?? item.page_unique)).size,
     skippedTotal: feed.skipped.length,
     skippedByReason: [...byReason.entries()]
       .sort((a, b) => b[1] - a[1] || cmp(a[0], b[0]))
       .map(([reason, count]) => ({ reason, count, copy: TOROB_FEED_SKIP_COPY[reason] })),
   };
+}
+
+/** Products matching a `page_urls` / `page_uniques` lookup, in feed order. */
+export function lookupTorobProducts(
+  feed: BuiltFeed,
+  query: { mode: "page_urls"; pageUrls: string[] } | { mode: "page_uniques"; pageUniques: string[] },
+): TorobProductV3[] {
+  if (query.mode === "page_uniques") {
+    const wanted = new Set(query.pageUniques);
+    return feed.items.filter((item) => wanted.has(item.page_unique));
+  }
+  const wanted = new Set(query.pageUrls.map((url) => url.trim()));
+  return feed.items.filter((item) => wanted.has(item.page_url));
 }

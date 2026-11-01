@@ -3,7 +3,7 @@
  * Plugin Name:       Bizamiz Connector
  * Plugin URI:        https://github.com/hamidnoshady/biza-miz
  * Description:       اتصال امن دوطرفه فروشگاه ووکامرس به بیزامیز: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.
- * Version:           1.6.22
+ * Version:           1.6.24
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -77,7 +77,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'POS_CONNECTOR_VERSION', '1.6.22' );
+define( 'POS_CONNECTOR_VERSION', '1.6.24' );
 define( 'POS_CONNECTOR_DB_VERSION_OPTION', 'pos_connector_db_version' );
 define( 'POS_CONNECTOR_FILE', __FILE__ );
 define( 'POS_CONNECTOR_PATH', plugin_dir_path( __FILE__ ) );
@@ -159,6 +159,15 @@ define( 'POS_CONNECTOR_CRON_RESYNC_CONTENT', 'pos_connector_resync_content' );
 define( 'POS_CONNECTOR_CRON_MANUAL_JOB', 'pos_connector_manual_job' );
 /** Continuation of a chunked catalogue export (args: the export's run id). */
 define( 'POS_CONNECTOR_CRON_PRODUCT_EXPORT', 'pos_connector_product_export_continue' );
+/**
+ * The cron probe (args: the probe's correlation id, issue #1206).
+ *
+ * Queued with `wp_schedule_single_event()` a couple of seconds out. When this
+ * hook runs, a real scheduler invocation executed a due event — which is the
+ * one fact a «آزمایش اتصال» ping can never establish, and the reason the two
+ * buttons are worded differently.
+ */
+define( 'POS_CONNECTOR_CRON_PROBE', 'pos_connector_cron_probe' );
 
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-log.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-health.php';
@@ -538,6 +547,7 @@ function pos_connector_deactivate() {
 	// be told; wp_unschedule_hook() clears every event on the hook.
 	wp_unschedule_hook( POS_CONNECTOR_CRON_MANUAL_JOB );
 	wp_unschedule_hook( POS_CONNECTOR_CRON_PRODUCT_EXPORT );
+	wp_unschedule_hook( POS_CONNECTOR_CRON_PROBE );
 }
 register_deactivation_hook( __FILE__, 'pos_connector_deactivate' );
 
@@ -557,10 +567,32 @@ function pos_connector_settings() {
 		// that works says nothing about whether the cron does; that button has
 		// its own field. `armed_at` is when the connection first became usable.
 		'last_run_at'              => '',
+		// When the last cycle *finished*, whether or not it worked. `last_run_at`
+		// says the cron fires; this says the cycle came back — the difference
+		// between a dead scheduler and a slow or failing one (#1206).
+		'last_run_completed_at'    => '',
+		// Last VERIFIED cycle: no phase failed or half-applied. A failed push
+		// or an unreachable app must never move it.
 		'last_sync_ok_at'          => '',
+		// Last cycle that actually moved data, distinct from a verified empty
+		// round trip ("صف خالی بود" is healthy, not proof of transfer).
+		'last_data_applied_at'     => '',
 		'last_ping_ok_at'          => '',
 		'armed_at'                 => '',
 		'last_error'               => '',
+		// Structured phase results of the last cycle (POS_Connector_Health::phase()).
+		'last_cycle_verdict'       => '',
+		'last_cycle_phases'        => array(),
+		// The last cron probe: queued → executed → reported, with an expiry
+		// (POS_Connector_Health::probe_state()).
+		'cron_probe'               => array(),
+		// The last interruption, kept as history with its resolution time, so a
+		// recovered store stops showing a live warning (#1206 P0-3).
+		'incident_open'            => false,
+		'incident_at'              => '',
+		'incident_gap_seconds'     => 0,
+		'incident_previous_state'  => '',
+		'incident_recovered_at'    => '',
 		// 1.1.0 — the scheduled sweeps. Orders default on (a missed hook is a
 		// missing sale); products default to hourly (a full export is not
 		// free, and an hourly backstop is enough for a catalogue that also

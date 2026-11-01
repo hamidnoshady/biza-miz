@@ -142,14 +142,59 @@ per shop, so the guess lives in one column instead of inside the builder.
 The screen's «پیش‌نمایش فید» button shows what would be sent and why anything is missing; it says
 «آمادهٔ ارسال», never «منتشر شد».
 
+## 6b. The endpoint the crawler reads (Wave 3)
+
+```
+POST https://<shop-domain>/api/v1/torob/products/<shopId>
+X-Torob-Token: <jwt>
+X-Torob-Token-Version: 1
+```
+
+The shop registers that address in its Torob panel; Torob then mints a token whose `aud` is the
+shop's own hostname, which is what makes the audience check mean something on a platform that hosts
+many shops. Everything about the request is Torob's contract and lives in `src/lib/torob/contract.ts`
+beside the document it came from — `api_version: "torob_api_v3"`, 100 products per page,
+`date_added_desc`/`date_updated_desc`/`product_id_desc`, cursor paging only over `product_id_desc`, and
+exactly one request mode per body (`page_urls`, `page_uniques`, `page` + `sort`, or `cursor` + `sort`).
+A body with no mode is a `400`, never a defaulted page 1: a crawler that receives page 1 for a
+malformed request believes it has synced the shop.
+
+The order of operations is the security model, and it is the same order in the code:
+
+1. **Rate limit per shop** — five requests per second, keyed on the path's shop id, so one crawl
+   cannot spend another shop's budget and a flood is refused before a database round trip.
+2. **Resolve the shop before any tenant scope exists.** The path id is opaque; the lookup runs under
+   the documented `torob-product-api-auth` bypass (see `src/lib/db.ts`) and returns `business_id`,
+   which is how the tenant becomes known. Every later statement runs inside `withTenant`.
+3. **Refuse anything not publishable as a plain `404 not_found`** — unknown, unauthorized, switched
+   off, or whose website is gone. A shop that may not be served must not be discoverable, so all five
+   answers are identical.
+4. **Verify the token before reading the catalogue.** EdDSA only, `exp`/`nbf` enforced, and `aud`
+   compared against `torob_shops.domain` — never against the request's `Host`. The failure reason is
+   part of the `401` body (`unauthorized: audience_mismatch`, `unauthorized: expired`, …) because a
+   partner integration with no reason is the hardest thing to debug.
+5. **Only then build and answer.** The catalogue is assembled exactly as «پیش‌نمایش فید» assembles it,
+   so page 7 of a crawl and the merchant's preview can never disagree.
+
+A request that is refused, and a product that is withdrawn, are different things: the first is a
+`400`/`401`/`404` with `{ error }`, the second is simply absent from `products`. The contract's price
+trap is enforced in one place — `availability: false` with `current_price: 0` for something sold out,
+because `true` with `0` means **free** to Torob, and a withdrawn product is omitted rather than left
+on display at its last known price.
+
+Nothing about this endpoint claims a listing. It proves the catalogue can be *served*; whether Torob
+accepted it, indexed it, or rejected the domain is Torob's own fact and arrives later.
+
 ## 7. What remains (Waves 3–6)
 
-1. **Wave 3 — serving the feed.** The public, per-shop feed endpoint the crawler reads, with the
-   Product API v3 auth the issue names: an EdDSA JWT in `X-Torob-Token`, checked for audience (the
-   shop's own host), expiry and issuer, plus the `page`/`sort`/cursor contract already implemented in
-   `feed.ts`. It waits for the endpoint rather than shipping a signer nothing verifies. Alongside it,
-   the WordPress connector and CMS runtime releases that publish the route, and the Shop Generator
-   partner path that turns `pending_approval` into `authorized` with a `provider_shop_id`.
+1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
+   `/api/v1/torob/products/<shopId>` with `auth.ts` verifying Torob's EdDSA token and
+   `product-api.ts` owning the order of operations. What remains in this wave is the *other* two
+   deployables the issue names — the WordPress connector release and the CMS runtime release that
+   serve the same contract from the shop's own origin (needed for shops whose domain the platform
+   does not terminate, since the token's `aud` is that domain), and the Shop Generator partner path
+   that turns `pending_approval` into `authorized` with a `provider_shop_id` and its 15-minute
+   callback.
 2. **Variant catalogue.** The builder already accepts variants and emits one item each; the database
    source reads `menu_items` only, so retail `items`/`item_variant_attributes` products need their
    price source mapped before they can appear.
@@ -173,7 +218,15 @@ this website enroll", and every later surface reads it.
 - `src/lib/torob/currency.ts` — Rial → integer Toman, exact or refused.
 - `src/lib/torob/feed.ts` — the feed builder: identity, order, skips, paging, envelope.
 - `src/lib/torob/feed-service.ts` — the catalogue read and the run record.
+- `src/lib/torob/contract.ts` — the Product API v3 request/response contract, and its strict parser.
+- `src/lib/torob/auth.ts` — EdDSA verification of `X-Torob-Token`, audience against the shop's domain.
+- `src/lib/torob/product-api.ts` — the public endpoint's order of operations and its response codes.
+- `src/app/api/v1/torob/products/[shopId]/route.ts` — the public route itself.
 - `src/app/api/growth/torob/shops/[id]/feed/route.ts` — «پیش‌نمایش فید».
 - `src/app/(app)/growth/torob/page.tsx` + `torob-section.tsx` — the screen.
 - `src/lib/torob/eligibility.test.ts` — the state matrix; `integration/torob-shops.integration.test.ts`
   — the lifecycle and the tenant boundary against real Postgres.
+- `src/lib/torob/contract.test.ts`, `feed.test.ts`, `auth.test.ts`, `product-api.test.ts` — the
+  contract, the builder, the token and the endpoint's order of operations; `integration/torob-api.integration.test.ts`
+  — all four request modes, 100 per page, the withdrawn product and the cross-shop audience refusal
+  against real Postgres.
