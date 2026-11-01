@@ -448,21 +448,41 @@ export function normalizeAgencyCampaignNumber(
 }
 
 /**
- * A nullable money column: `undefined` means "leave it alone", an empty string
- * means "clear it", and a figure means the figure.
+ * What a caller meant by a nullable field, in four states rather than two.
  *
- * The distinction is the one 0276 learned the hard way — a normaliser that
- * returned `null` for an absent field turned "omitted" into "refused", and a
- * PATCH that sent only a title would have cleared the budget.
+ * 0276's lesson was that returning `null` for an *absent* field turns "omitted"
+ * into "refused", and a PATCH carrying only a title would have cleared the budget.
+ * This is the same trap one level down: `null` for an *explicit empty* is also what
+ * an unusable value looks like, so a two-state result cannot tell "clear the
+ * budget" from "the budget you typed is not a number" — and refusing the first is
+ * exactly as wrong as silently accepting the second. Four states, and the caller
+ * never has to guess which null it was handed.
  */
+export type NullableFieldResult<T> =
+  | { state: "absent" }
+  | { state: "clear" }
+  | { state: "value"; value: T }
+  | { state: "invalid" };
+
+/** The value to store, or `null` for both "absent" and "clear". */
+export function nullableFieldStored<T>(result: NullableFieldResult<T>): T | null {
+  return result.state === "value" ? result.value : null;
+}
+
+/** A nullable money column. */
 export function normalizeAgencyCampaignNullableRial(
   input: unknown,
   max: number,
-): { present: boolean; value: number | null } {
-  if (input === undefined) return { present: false, value: null };
-  if (input === null || input === "") return { present: true, value: null };
+): NullableFieldResult<number> {
+  if (input === undefined) return { state: "absent" };
+  if (input === null) return { state: "clear" };
+  // Whitespace-only is an empty field, not an unusable one: a form that cleared a
+  // money input hands back "   ", and answering "invalid" to that would stop a
+  // member removing a budget they set by mistake.
+  if (typeof input === "string" && input.trim() === "") return { state: "clear" };
+  if (input === "") return { state: "clear" };
   const value = normalizeAgencyCampaignNumber(input, max);
-  return { present: true, value };
+  return value === null ? { state: "invalid" } : { state: "value", value };
 }
 
 /** A date: valid on the calendar, and inside the years somebody could mean. */
@@ -475,13 +495,13 @@ export function normalizeAgencyCampaignDate(input: unknown): string | null {
   return trimmed;
 }
 
-/** A nullable date, with `undefined` meaning "leave it alone". */
-export function normalizeAgencyCampaignNullableDate(
-  input: unknown,
-): { present: boolean; value: string | null } {
-  if (input === undefined) return { present: false, value: null };
-  if (input === null || input === "") return { present: true, value: null };
-  return { present: true, value: normalizeAgencyCampaignDate(input) };
+/** A nullable date, in the same four states. */
+export function normalizeAgencyCampaignNullableDate(input: unknown): NullableFieldResult<string> {
+  if (input === undefined) return { state: "absent" };
+  if (input === null) return { state: "clear" };
+  if (typeof input === "string" && input.trim() === "") return { state: "clear" };
+  const value = normalizeAgencyCampaignDate(input);
+  return value === null ? { state: "invalid" } : { state: "value", value };
 }
 
 /**

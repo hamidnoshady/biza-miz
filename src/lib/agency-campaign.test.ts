@@ -31,6 +31,7 @@ import {
   normalizeAgencyCampaignNumber,
   normalizeAgencyCampaignOptionalText,
   normalizeAgencyCampaignText,
+  nullableFieldStored,
 } from "./agency-campaign";
 
 const TODAY = "2026-05-15";
@@ -281,20 +282,31 @@ describe("normalising what a browser sends", () => {
     expect(normalizeAgencyCampaignNumber(1e13, 1e12)).toBeNull();
   });
 
-  it("distinguishes an omitted figure from a cleared one", () => {
-    // The distinction 0276 learned the hard way: a normaliser returning null for an
-    // absent field turns "omitted" into "refused", and a PATCH carrying only a
-    // title would have cleared the budget.
-    expect(normalizeAgencyCampaignNullableRial(undefined, 1e12)).toEqual({
-      present: false,
-      value: null,
-    });
-    expect(normalizeAgencyCampaignNullableRial(null, 1e12)).toEqual({ present: true, value: null });
-    expect(normalizeAgencyCampaignNullableRial("", 1e12)).toEqual({ present: true, value: null });
-    expect(normalizeAgencyCampaignNullableRial("500", 1e12)).toEqual({ present: true, value: 500 });
-    expect(normalizeAgencyCampaignNullableRial("-5", 1e12)).toEqual({ present: true, value: null });
+  it("tells an omitted field from a cleared one from an unusable one", () => {
+    // Three different intentions, and a two-state result cannot hold them: 0276's
+    // lesson was that null-for-absent turns "omitted" into "refused", and the same
+    // trap one level down is that null-for-empty is indistinguishable from
+    // null-for-unusable — so "clear the budget" and "that is not a number" would get
+    // one answer between them.
+    expect(normalizeAgencyCampaignNullableRial(undefined, 1e12)).toEqual({ state: "absent" });
+    expect(normalizeAgencyCampaignNullableRial(null, 1e12)).toEqual({ state: "clear" });
+    expect(normalizeAgencyCampaignNullableRial("", 1e12)).toEqual({ state: "clear" });
+    expect(normalizeAgencyCampaignNullableRial("   ", 1e12)).toEqual({ state: "clear" });
+    expect(normalizeAgencyCampaignNullableRial("500", 1e12)).toEqual({ state: "value", value: 500 });
+    expect(normalizeAgencyCampaignNullableRial(0, 1e12)).toEqual({ state: "value", value: 0 });
+    expect(normalizeAgencyCampaignNullableRial("-5", 1e12)).toEqual({ state: "invalid" });
+    expect(normalizeAgencyCampaignNullableRial("banana", 1e12)).toEqual({ state: "invalid" });
     expect(normalizeAgencyCampaignNumber(undefined, 1e12, { absentIsZero: true })).toBe(0);
     expect(normalizeAgencyCampaignNumber("", 1e12, { absentIsZero: true })).toBe(0);
+  });
+
+  it("stores null for both absent and clear, and only for those", () => {
+    expect(nullableFieldStored(normalizeAgencyCampaignNullableRial(undefined, 1e12))).toBeNull();
+    expect(nullableFieldStored(normalizeAgencyCampaignNullableRial("", 1e12))).toBeNull();
+    expect(nullableFieldStored(normalizeAgencyCampaignNullableRial("500", 1e12))).toBe(500);
+    // An invalid field has nothing safe to store, which is why the caller checks the
+    // state before it ever asks for the value.
+    expect(nullableFieldStored(normalizeAgencyCampaignNullableRial("-5", 1e12))).toBeNull();
   });
 
   it("accepts a real date and refuses a Jalali year typed into a Gregorian field", () => {
@@ -316,14 +328,17 @@ describe("normalising what a browser sends", () => {
     expect(normalizeAgencyCampaignDate(20260515)).toBeNull();
   });
 
-  it("distinguishes an omitted date from a cleared one", () => {
-    expect(normalizeAgencyCampaignNullableDate(undefined)).toEqual({ present: false, value: null });
-    expect(normalizeAgencyCampaignNullableDate("")).toEqual({ present: true, value: null });
+  it("distinguishes an omitted date from a cleared one from an impossible one", () => {
+    expect(normalizeAgencyCampaignNullableDate(undefined)).toEqual({ state: "absent" });
+    expect(normalizeAgencyCampaignNullableDate("")).toEqual({ state: "clear" });
     expect(normalizeAgencyCampaignNullableDate("2026-05-15")).toEqual({
-      present: true,
+      state: "value",
       value: "2026-05-15",
     });
-    expect(normalizeAgencyCampaignNullableDate("1406-03-01")).toEqual({ present: true, value: null });
+    // A Jalali year is not "no date", it is a date nobody meant: refusing it is what
+    // stops a window seven centuries off being stored as though it were fine.
+    expect(normalizeAgencyCampaignNullableDate("1406-03-01")).toEqual({ state: "invalid" });
+    expect(normalizeAgencyCampaignNullableDate("2026-02-31")).toEqual({ state: "invalid" });
   });
 
   it("de-duplicates channels in the member's order and refuses what it cannot use", () => {
