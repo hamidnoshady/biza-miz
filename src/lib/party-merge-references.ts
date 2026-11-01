@@ -768,6 +768,30 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
                   WHERE c.business_id = $1 AND c.party_id = $2`,
   },
 
+  // Migration 0280's client column, `move` and behind 0279's door for the reason
+  // 0278's is: a *posted* cost is frozen, so the guard would refuse the re-point and
+  // one posted cost on a duplicate client record would block the merge. 0279's audit
+  // table has no fixed vocabulary CHECK, so widening it to a fourth agency register is
+  // a line here and not a migration.
+  {
+    table: "agency_reimbursable_costs",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The client this money was spent for, and the column is NOT NULL so it cannot be left behind. It is a claim on that client — 1270's balance is what they owe back — so the surviving customer's file has to carry it; stranded on an archived duplicate, an agency would be owed money by a client record nobody looks at and §D's per-client outstanding figure would understate what is recoverable. Moving the client does not move the money: the posted entry keeps its accounts and amounts, and only whose claim it is changes.",
+    preview: true,
+    previewLabel: "هزینه‌های بازدریافتی کارفرما",
+    // The door through 0280's attribution guard: the move is audited into
+    // `crm_party_attribution_moves` FIRST (same transaction), then the guard accepts
+    // the re-point under the transaction-local flag. Every other path still hits it.
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+                   (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, 'agency_reimbursable_costs', c.id, c.party_id, $3, $4
+                   FROM agency_reimbursable_costs c
+                  WHERE c.business_id = $1 AND c.party_id = $2`,
+  },
+
   // -- AEC (issue #799 Wave 2) ----------------------------------------------
   // Migration 0194's three party columns. All four are `move`: they name a live
   // counterparty on a project that is still running, and the migration's own
