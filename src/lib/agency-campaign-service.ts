@@ -68,8 +68,46 @@ import {
 
 export { AGENCY_CAMPAIGN_ACTIONS, isAgencyCampaignAction };
 
+/**
+ * Every refusal this service can make, as a closed list.
+ *
+ * So the route guard's status map can be exhaustive over it, and adding a refusal
+ * here without deciding what a member should see is a compile error rather than a
+ * silent 400.
+ *
+ * The split the map applies is the one every register in this product uses: a
+ * record that does not exist is a 404, a field the member typed wrong is a 400,
+ * and anything a record refuses *because of where it is in its life cycle* is a
+ * 409 — the request was reasonable and the state is what says no. That is why
+ * `start_date_required` and `end_date_required` are 409s beside `window_reversed`
+ * and `clicks_exceed_impressions` as 400s: the first two are an unfinished record,
+ * the second two are arithmetic the member got wrong.
+ */
+export const AGENCY_CAMPAIGN_ERROR_CODES = [
+  "campaign_not_found",
+  "client_required",
+  "title_required",
+  "text_too_long",
+  "invalid_channel",
+  "too_many_channels",
+  "invalid_date",
+  "window_reversed",
+  "invalid_metric",
+  "clicks_exceed_impressions",
+  "invalid_metrics_source",
+  "invalid_reference",
+  "invalid_action",
+  "invalid_transition",
+  "campaign_closed",
+  "start_date_required",
+  "end_date_required",
+  "campaign_not_deletable",
+] as const;
+
+export type AgencyCampaignErrorCode = (typeof AGENCY_CAMPAIGN_ERROR_CODES)[number];
+
 export class AgencyCampaignError extends Error {
-  constructor(readonly code: string) {
+  constructor(readonly code: AgencyCampaignErrorCode) {
     super(code);
   }
 }

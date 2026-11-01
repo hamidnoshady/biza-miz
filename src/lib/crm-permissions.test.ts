@@ -88,6 +88,20 @@ const ROUTES: RouteAccess[] = [
     action: "write",
     note: "Moving a brief along its chain is the same power as drafting one: `confirm` records the *client's* decision and the member is only the scribe, so unlike §D's change requests there is no separate approve tier and no money moves",
   },
+  { route: "campaigns/route.ts", method: "GET", section: "campaigns", action: "read" },
+  { route: "campaigns/route.ts", method: "POST", section: "campaigns", action: "write" },
+  { route: "campaigns/[id]/route.ts", method: "GET", section: "campaigns", action: "read" },
+  { route: "campaigns/[id]/route.ts", method: "PATCH", section: "campaigns", action: "write" },
+  { route: "campaigns/[id]/route.ts", method: "DELETE", section: "campaigns", action: "delete" },
+  {
+    route: "campaigns/[id]/status/route.ts",
+    method: "POST",
+    section: "campaigns",
+    // The lifecycle step rides `crm.manage` and not a stronger key: completing a
+    // campaign closes a claim about attribution rather than approving money
+    // moving, and nothing here posts an entry.
+    action: "write",
+  },
   { route: "proposals/route.ts", method: "GET", section: "proposals", action: "read" },
   { route: "proposals/route.ts", method: "POST", section: "proposals", action: "write" },
   { route: "proposals/[id]/route.ts", method: "GET", section: "proposals", action: "read" },

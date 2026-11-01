@@ -76,6 +76,12 @@ export const CRM_SECTION_KEYS = [
   // brief it prices rather than inside the deal it hangs off, because an offer
   // outlives both — it is carried by the contract it becomes.
   "proposals",
+  // The campaign as it ran for one client (issue #1128 §A + §C): the window, the
+  // channels, what media money went out, what figures came back. Sits beside the
+  // proposal that priced it because a campaign outlives the offer and is what §C's
+  // client reporting reads. **Not `growth_campaigns`** — that is #901's retail
+  // cashback automation and its party is the shopper, not an agency's client.
+  "campaigns",
   "activities",
   "cases",
   // The data-quality *workspace*: which records can be trusted. It hosts the
@@ -282,6 +288,19 @@ export const CRM_SECTION_ACCESS: Record<CrmSectionKey, CrmSectionAccess> = {
   // reason a brief's `confirm` is: they record the **client's** decision and the
   // member is the scribe, not the decider.
   proposals: {
+    read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
+    write: [crmManage],
+    delete: [crmDelete],
+  },
+  // The same tier as the brief and the proposal, with one difference worth stating:
+  // a campaign's figures are a **claim** about attribution, and the strongest key
+  // here is still `crm.manage`. That is deliberate rather than an oversight. The
+  // record posts nothing — no ledger entry, no receivable — so completing a campaign
+  // closes a claim rather than approving money moving, and §D's `approve` is the
+  // internal determination that does. A member who may enter the spend may also
+  // close it; what they may not do is change a closed one, which 0278 enforces
+  // below the permission system entirely.
+  campaigns: {
     read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
     write: [crmManage],
     delete: [crmDelete],

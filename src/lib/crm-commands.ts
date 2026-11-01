@@ -82,7 +82,6 @@ const SECTION_ALIASES: Record<CrmSectionKey, readonly string[]> = {
     "معیار پذیرش",
     "دامنه کار",
     "اسکوپ",
-    "کمپین",
     "تأییدیه کارفرما",
   ],
   // §A's proposals, which §D calls estimates and #1127 will print as a service
@@ -103,6 +102,25 @@ const SECTION_ALIASES: Record<CrmSectionKey, readonly string[]> = {
     "تخفیف",
     "اعتبار پیشنهاد",
     "منقضی‌شده",
+  ],
+  // §A's and §C's client campaign. «کمپین» used to sit on the brief's list, from
+  // before 0278 gave a campaign a record of its own — it was the nearest thing to
+  // point at. Aliases match by folded substring, longest first, so leaving it there
+  // would have sent a member typing «کمپین» to the brief screen now that both
+  // exist. It moves here, and the brief keeps the words that were always its own.
+  campaigns: [
+    "کمپین‌های کارفرما",
+    "کمپین کارفرما",
+    "کمپین‌ها",
+    "کمپینها",
+    "کمپین",
+    "تقویم کمپین",
+    "کانال‌های رسانه",
+    "هزینه رسانه",
+    "بازده تبلیغات",
+    "نرخ کلیک",
+    "رواس",
+    "کمپین در جریان",
   ],
   activities: ["کار", "کارها", "پیگیری", "پیگیری‌ها", "تماس", "جلسه", "یادآوری", "وظیفه", "وظایف"],
   cases: ["تیکت", "تیکت‌ها", "شکایت", "پشتیبانی", "خدمات", "میز خدمت", "درخواست"],

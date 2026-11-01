@@ -43,6 +43,7 @@ import {
   HistoryIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
+  MegaphoneIcon,
   SettingsIcon,
   ShieldCheckIcon,
   SproutIcon,
@@ -100,6 +101,16 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
     label: "پیشنهاد قیمت",
     description: "چه چیزی، به چه قیمتی، تا چه اعتباری — و چقدر سود دارد",
     icon: FileTextIcon,
+  },
+  {
+    // Issue #1128 §A + §C. After the proposal on §B's stage list: the offer is
+    // accepted, the work runs, and this is the record of what it cost and returned
+    // for that client. Grouped with the deal, the brief and the offer because all
+    // four name a client and §A asks to see them per brand.
+    key: "campaigns",
+    label: "کمپین‌های کارفرما",
+    description: "چه زمانی، در کدام کانال‌ها، چقدر هزینه و چه بازدهی",
+    icon: MegaphoneIcon,
   },
   {
     key: "leads",
@@ -161,7 +172,7 @@ export const CRM_NAV_ITEMS: readonly CrmNavItem[] = [
 export const CRM_NAV_GROUPS: ReadonlyArray<AppSectionNavGroup<CrmSectionKey>> = [
   { label: "امروز", keys: ["overview"] },
   { label: "مشتریان", keys: ["directory"] },
-  { label: "فرصت‌ها", keys: ["deals", "briefs", "proposals", "leads"] },
+  { label: "فرصت‌ها", keys: ["deals", "briefs", "proposals", "campaigns", "leads"] },
   { label: "ارتباط و پیگیری", keys: ["activities", "cases"] },
   { label: "شناخت مشتری", keys: ["segments", "consent"] },
   { label: "کیفیت داده", keys: ["quality"] },
