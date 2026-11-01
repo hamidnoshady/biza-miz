@@ -230,6 +230,19 @@ describe("the queries and the screens agree with these facts", () => {
     expect(service).not.toMatch(/provider_message_id|o\.error|provider_cost_rial/);
   });
 
+  // The row set and the bucket grid must describe the same window. Bounding the
+  // query on the database clock while `buildTrendBuckets` was given a `now`
+  // meant a caller with a fixed anchor (a test, an "as of" view, a backfill
+  // report) got buckets for one window and rows for another — the oldest row
+  // fell out and the pooled latencies disagreed with the points above them.
+  it("anchors the window to the caller's `now`, not the database clock", () => {
+    const service = read("src/lib/delivery-trend.ts");
+    // Both views, and no bare now() left in either WHERE clause.
+    expect(service.match(/o\.created_at >= \$\d::timestamptz/g)).toHaveLength(2);
+    expect(service).not.toMatch(/created_at >= now\(\)/);
+    expect(service.match(/const anchorIso = \(input\.now \?\? new Date\(\)\)\.toISOString\(\);/g)).toHaveLength(2);
+  });
+
   it("clamps the window to a year, so a caller cannot ask for all time", () => {
     const service = read("src/lib/delivery-trend.ts");
     expect(service).toMatch(/TREND_MAX_DAYS/);
