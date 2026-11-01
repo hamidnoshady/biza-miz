@@ -12,6 +12,9 @@
  *
  *   wp pos-connector status                      what is configured, what is queued, when each event runs
  *                                                (exits non-zero while the cron is stopped, for monitoring)
+ *   wp pos-connector doctor [--json] [--ping]    read-only diagnosis of the whole pipeline: scheduler
+ *                                                state and why, schedule/next due, lock age, backlog age,
+ *                                                the last cycle's phase results (exits non-zero on failure)
  *   wp pos-connector sync                        the fast lane: handshake, push, pull
  *   wp pos-connector export products             queue the whole catalogue
  *   wp pos-connector export orders [--days=7]    queue recently-modified orders
@@ -148,6 +151,219 @@ class POS_Connector_CLI {
 	}
 
 	/**
+	 * Diagnose the scheduler and the sync pipeline, without changing anything.
+	 *
+	 * Issue #1206: «کرون زمان‌بندی شده است», «آزمایش اتصال موفق بود» and «صف
+	 * خالی است» are each compatible with a connector that has applied nothing
+	 * for days. This command prints the evidence for all of them at once —
+	 * the scheduler's current state and why, whether each schedule exists and
+	 * when it is due, how long the run lock has been held, the age of the
+	 * oldest unsent row, and the phase results of the last cycle — and exits
+	 * non-zero only when the pipeline is currently failing.
+	 *
+	 * It never writes settings, never moves a success timestamp and never
+	 * changes store data. `--ping` also asks the app whether it can be
+	 * reached; a plain run makes no outbound request, so it is safe to call
+	 * from a monitoring loop at any interval.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--json]
+	 * : Machine-readable output for monitoring and support tickets.
+	 *
+	 * [--ping]
+	 * : Also ping the panel. A successful ping is a CONNECTION test only; it
+	 * proves the address and the token, never that the scheduler runs.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp pos-connector doctor
+	 *     wp pos-connector doctor --json
+	 *
+	 * @subcommand doctor
+	 */
+	public function doctor( $args, $assoc_args ) {
+		$settings = pos_connector_settings();
+		$now      = time();
+		$state    = POS_Connector_Health::cron_state( $settings, $now );
+		$counts   = POS_Connector_Queue::counts();
+		$lock     = POS_Connector_Lock::peek( 'run', new POS_Connector_Option_Lock_Store(), $now );
+		$oldest   = POS_Connector_Queue::oldest_pending_at();
+		$oldest_ts = POS_Connector_Health::parse_utc( $oldest );
+
+		$report = array(
+			'pluginVersion' => POS_CONNECTOR_VERSION,
+			'checkedAt'     => gmdate( 'c' ),
+			'configured'    => $state['configured'],
+			'enabled'       => ! empty( $settings['enabled'] ),
+			'baseUrl'       => $settings['base_url'],
+			'tokenSet'      => '' !== $settings['token'],
+			'cronMode'      => pos_connector_uses_system_cron() ? 'system' : 'wp_cron',
+			'cron'          => array(
+				'state'              => $state['state'],
+				'reason'             => $state['reason'],
+				'lastStartedAt'      => $settings['last_run_at'],
+				'lastCompletedAt'    => $settings['last_run_completed_at'],
+				'lastVerifiedCycleAt' => $settings['last_sync_ok_at'],
+				'lastDataAppliedAt'  => $settings['last_data_applied_at'],
+				'lastPingOkAt'       => $settings['last_ping_ok_at'],
+				'gapSeconds'         => $state['age'],
+				'missedIntervals'    => $state['missedIntervals'],
+				'delayedAfterSeconds'  => POS_Connector_Health::delayed_after_seconds(),
+				'criticalAfterSeconds' => POS_Connector_Health::CRITICAL_AFTER_SECONDS,
+			),
+			'schedules'     => array(),
+			'lock'          => $lock,
+			'queue'         => array(
+				'pending'  => (int) $counts['pending'],
+				'deferred' => (int) POS_Connector_Queue::deferred_count(),
+				'failed'   => (int) $counts['failed'],
+				'sent'     => (int) $counts['sent'],
+				'oldestPendingAt'      => $oldest,
+				'oldestPendingSeconds' => $oldest_ts > 0 ? max( 0, $now - $oldest_ts ) : null,
+			),
+			'lastCycle'     => array(
+				'verdict' => $settings['last_cycle_verdict'],
+				'phases'  => array_values( (array) $settings['last_cycle_phases'] ),
+				'error'   => $settings['last_error'],
+			),
+			'incident'      => array(
+				'open'        => ! empty( $settings['incident_open'] ),
+				'at'          => $settings['incident_at'],
+				'gapSeconds'  => (int) $settings['incident_gap_seconds'],
+				'recoveredAt' => $settings['incident_recovered_at'],
+			),
+		);
+		foreach ( array(
+			POS_CONNECTOR_CRON_HOOK,
+			POS_CONNECTOR_CRON_RESYNC_ORDERS,
+			POS_CONNECTOR_CRON_RESYNC_PRODUCTS,
+			POS_CONNECTOR_CRON_RESYNC_CUSTOMERS,
+			POS_CONNECTOR_CRON_RESYNC_CONTENT,
+		) as $hook ) {
+			$next = wp_next_scheduled( $hook );
+			$report['schedules'][ $hook ] = array(
+				'next'     => $next ? gmdate( 'c', (int) $next ) : null,
+				'schedule' => wp_get_schedule( $hook ) ? wp_get_schedule( $hook ) : null,
+			);
+		}
+
+		if ( isset( $assoc_args['ping'] ) ) {
+			$client = POS_Connector_Client::from_settings();
+			$report['ping'] = $client
+				? POS_Connector_Health::interpret_ping(
+					$client->post( '/api/integrations/wordpress/ping', array( 'siteUrl' => home_url(), 'pluginVersion' => POS_CONNECTOR_VERSION ) ),
+					$now
+				)
+				: array( 'notice' => 'not_configured', 'detail' => '', 'skew' => null );
+			// Said out loud, because this is the exact confusion #1206 is about.
+			$report['ping']['note'] = 'connection_test_only: proves the address and token, not the scheduler';
+		}
+
+		// A current failure is the exit code; a warning is not. `delayed` is
+		// still running, just late, and a monitoring loop that pages on it
+		// would page on every shared-host hiccup.
+		$failing = 'failed' === $state['state'];
+
+		if ( isset( $assoc_args['json'] ) ) {
+			WP_CLI::line( wp_json_encode( $report ) );
+			if ( $failing ) {
+				WP_CLI::halt( 1 );
+			}
+			return;
+		}
+
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'وضعیت زمان‌بند', 'pos-accounting-connector' ) . '%n' ) );
+		WP_CLI::log( '  ' . sprintf( 'حالت: %s (%s)', $state['state'], $state['reason'] ) );
+		WP_CLI::log( '  ' . sprintf( 'آخرین شروع: %s • آخرین پایان: %s', $report['cron']['lastStartedAt'] ? $report['cron']['lastStartedAt'] : '—', $report['cron']['lastCompletedAt'] ? $report['cron']['lastCompletedAt'] : '—' ) );
+		WP_CLI::log( '  ' . sprintf( 'آخرین دورهٔ تأییدشده: %s • آخرین دادهٔ اعمال‌شده: %s', $report['cron']['lastVerifiedCycleAt'] ? $report['cron']['lastVerifiedCycleAt'] : '—', $report['cron']['lastDataAppliedAt'] ? $report['cron']['lastDataAppliedAt'] : '—' ) );
+		WP_CLI::log( '  ' . sprintf( 'فاصله از آخرین شروع: %d ثانیه (هشدار پس از %d، خطا پس از %d)', $report['cron']['gapSeconds'], $report['cron']['delayedAfterSeconds'], $report['cron']['criticalAfterSeconds'] ) );
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'زمان‌بندی', 'pos-accounting-connector' ) . '%n' ) );
+		foreach ( $report['schedules'] as $hook => $entry ) {
+			WP_CLI::log( '  ' . sprintf( '%s: %s (%s)', $hook, $entry['next'] ? $entry['next'] : __( 'زمان‌بندی نشده', 'pos-accounting-connector' ), $entry['schedule'] ? $entry['schedule'] : '—' ) );
+		}
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'قفل اجرا', 'pos-accounting-connector' ) . '%n' ) );
+		WP_CLI::log(
+			'  ' . ( $lock['held']
+				? sprintf( 'گرفته‌شده؛ %d ثانیه تا انقضا%s', (int) $lock['seconds_left'], $lock['expired'] ? ' — منقضی: اجرای قبلی نیمه‌کاره ماند' : '' )
+				: __( 'آزاد', 'pos-accounting-connector' ) )
+		);
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'صف محلی (وردپرس ← بیزامیز)', 'pos-accounting-connector' ) . '%n' ) );
+		WP_CLI::log( '  ' . sprintf( 'در انتظار: %d • بک‌آف: %d • ناموفق: %d • ارسال‌شده: %d', $report['queue']['pending'], $report['queue']['deferred'], $report['queue']['failed'], $report['queue']['sent'] ) );
+		if ( null !== $report['queue']['oldestPendingSeconds'] ) {
+			WP_CLI::log( '  ' . sprintf( 'قدیمی‌ترین ردیف منتظر: %d ثانیه (%s)', $report['queue']['oldestPendingSeconds'], $oldest ) );
+		}
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'آخرین دوره', 'pos-accounting-connector' ) . '%n' ) );
+		WP_CLI::log( '  ' . sprintf( 'نتیجه: %s', '' !== $report['lastCycle']['verdict'] ? $report['lastCycle']['verdict'] : '—' ) );
+		foreach ( $report['lastCycle']['phases'] as $phase ) {
+			if ( ! is_array( $phase ) ) {
+				continue;
+			}
+			WP_CLI::log(
+				'  ' . sprintf(
+					'- %s: %s%s%s',
+					isset( $phase['phase'] ) ? $phase['phase'] : '?',
+					isset( $phase['status'] ) ? $phase['status'] : '?',
+					! empty( $phase['counts'] ) ? ' ' . wp_json_encode( $phase['counts'] ) : '',
+					! empty( $phase['error'] ) ? ' — ' . $phase['error'] : ''
+				)
+			);
+		}
+		if ( '' !== $report['lastCycle']['error'] ) {
+			WP_CLI::log( '  ' . sprintf( 'خطا: %s', $report['lastCycle']['error'] ) );
+		}
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'آخرین وقفه', 'pos-accounting-connector' ) . '%n' ) );
+		WP_CLI::log(
+			'  ' . ( '' === $report['incident']['at']
+				? __( 'ثبت نشده', 'pos-accounting-connector' )
+				: sprintf(
+					'شروع %s • %d ثانیه • %s',
+					$report['incident']['at'],
+					$report['incident']['gapSeconds'],
+					$report['incident']['open']
+						? __( 'هنوز باز', 'pos-accounting-connector' )
+						: sprintf( 'رفع شد در %s', '' !== $report['incident']['recoveredAt'] ? $report['incident']['recoveredAt'] : '—' )
+				) )
+		);
+
+		if ( isset( $report['ping'] ) && is_array( $report['ping'] ) ) {
+			WP_CLI::log( '' );
+			WP_CLI::log( WP_CLI::colorize( '%B' . __( 'آزمایش اتصال (فقط اتصال، نه کرون)', 'pos-accounting-connector' ) . '%n' ) );
+			WP_CLI::log( '  ' . $report['ping']['notice'] . ( '' !== $report['ping']['detail'] ? ' ' . $report['ping']['detail'] : '' ) );
+		}
+
+		if ( $failing ) {
+			WP_CLI::error(
+				sprintf(
+					/* translators: 1: state reason, 2: seconds since the last start */
+					__( 'همگام‌سازی در حال اجرا نیست: %1$s (آخرین شروع %2$d ثانیه پیش).', 'pos-accounting-connector' ),
+					$state['reason'],
+					$state['age']
+				)
+			);
+		}
+		if ( 'delayed' === $state['state'] ) {
+			WP_CLI::warning( sprintf( 'زمان‌بند دیرکرده است: آخرین شروع %d ثانیه پیش (هشدار از %d ثانیه).', $state['age'], POS_Connector_Health::delayed_after_seconds() ) );
+		}
+		if ( 'test_only' === $state['state'] ) {
+			WP_CLI::warning( __( 'فقط آزمایش اتصال دیده شده است؛ کرون هرگز اجرا نشده.', 'pos-accounting-connector' ) );
+		}
+		if ( '' === $settings['last_cycle_verdict'] ) {
+			WP_CLI::log( __( 'هنوز هیچ دوره‌ای ثبت نشده است؛ عدد «هیچ» به معنی «موفق» نیست.', 'pos-accounting-connector' ) );
+		}
+	}
+
+	/**
 	 * Run the fast lane: handshake, push queued events, lease and apply jobs.
 	 *
 	 * ## EXAMPLES
@@ -165,6 +381,19 @@ class POS_Connector_CLI {
 		if ( ! empty( $stats['locked'] ) ) {
 			WP_CLI::warning( 'اجرای دیگری در جریان است؛ این اجرا انجام نشد.' );
 			return;
+		}
+		$verdict = isset( $stats['verdict'] ) ? (string) $stats['verdict'] : '';
+		// #1206 P0: a cycle whose phases failed is not a success, and the exit
+		// code is what a monitoring crontab reads.
+		if ( '' !== $verdict && ! in_array( $verdict, array( POS_Connector_Health::PHASE_OK, POS_Connector_Health::PHASE_EMPTY, POS_Connector_Health::PHASE_SKIPPED ), true ) ) {
+			WP_CLI::error(
+				sprintf(
+					'دورهٔ همگام‌سازی کامل نشد (%s) — ارسال: %d • اعمال: %d. جزئیات: wp pos-connector doctor',
+					$verdict,
+					(int) $stats['pushed'],
+					(int) $stats['applied']
+				)
+			);
 		}
 		WP_CLI::success(
 			sprintf( 'ارسال: %d • اعمال: %d', (int) $stats['pushed'], (int) $stats['applied'] )

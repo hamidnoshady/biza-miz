@@ -304,6 +304,25 @@ class POS_Connector_Queue {
 		);
 	}
 
+	/**
+	 * The oldest still-unsent row, for the backlog age in `doctor` and telemetry.
+	 *
+	 * Age is the whole point: a queue of five rows from ten minutes ago is an
+	 * outage, a queue of five hundred from ten seconds ago is a catalogue
+	 * export in progress. Read-only.
+	 *
+	 * @return string|null UTC `Y-m-d H:i:s`, or null when nothing is waiting.
+	 */
+	public static function oldest_pending_at() {
+		if ( ! self::table_exists() ) {
+			return null;
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$value = $wpdb->get_var( "SELECT MIN(created_at) FROM {$table} WHERE status IN ('pending', 'failed')" );
+		return null === $value ? null : (string) $value;
+	}
+
 	/** Counts by status, for the admin screen's summary line. */
 	public static function counts() {
 		if ( ! self::table_exists() ) {

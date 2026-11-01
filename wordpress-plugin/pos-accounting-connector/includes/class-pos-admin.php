@@ -262,6 +262,9 @@ class POS_Connector_Admin {
 				__( 'روش اجرا', 'pos-accounting-connector' ) => defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ? __( 'کرون واقعی/سیستمی', 'pos-accounting-connector' ) : __( 'WP-Cron فقط هنگام بازدید', 'pos-accounting-connector' ),
 				__( 'وضعیت کرون', 'pos-accounting-connector' ) => self::cron_state_label(),
 				__( 'آخرین اجرای کرون', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_at'] ),
+				__( 'آخرین پایان دوره', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_completed_at'] ),
+				__( 'آخرین دوره', 'pos-accounting-connector' ) => self::cycle_label( $settings ),
+				__( 'آخرین وقفه', 'pos-accounting-connector' ) => self::incident_label( $settings ),
 				__( 'اجرای سریع بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_HOOK ),
 				__( 'بازخوانی سفارش بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_RESYNC_ORDERS ),
 				__( 'بازخوانی کاتالوگ بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_RESYNC_PRODUCTS ),
@@ -301,17 +304,76 @@ class POS_Connector_Admin {
 		echo '</div></section>';
 	}
 
-	/** «کرون اجرا می‌شود» / «کرون اجرا نمی‌شود» — from when the fast lane last started, never from a button press. */
+	/**
+	 * «کرون اجرا می‌شود» / «کند» / «اجرا نمی‌شود» — from when the fast lane
+	 * last started, never from a button press (#1149, refined by #1206).
+	 *
+	 * The three answers exist because one boolean could not tell a shared host
+	 * that started 100s late from a scheduler that has not fired for hours.
+	 */
 	private static function cron_state_label() {
-		$status = pos_connector_cron_status();
-		if ( ! $status['configured'] ) {
-			return __( 'اتصال فعال نیست', 'pos-accounting-connector' );
+		$state = POS_Connector_Health::cron_state( pos_connector_settings(), time() );
+		switch ( $state['state'] ) {
+			case 'paused':
+				return __( 'متوقف از سمت پنل', 'pos-accounting-connector' );
+			case 'test_only':
+				return __( 'کرون هرگز اجرا نشده — فقط آزمایش اتصال انجام شده', 'pos-accounting-connector' );
+			case 'failed':
+				/* translators: %s: how long ago the sync last started */
+				return sprintf( __( 'اجرا نمی‌شود — آخرین اجرا %s پیش', 'pos-accounting-connector' ), human_time_diff( $state['reference_ts'], time() ) );
+			case 'delayed':
+				/* translators: %s: how long ago the sync last started */
+				return sprintf( __( 'دیرکرده — آخرین اجرا %s پیش', 'pos-accounting-connector' ), human_time_diff( $state['reference_ts'], time() ) );
+			case 'healthy':
+				return __( 'در حال اجرا', 'pos-accounting-connector' );
+			default:
+				return __( 'اتصال فعال نیست', 'pos-accounting-connector' );
 		}
-		if ( $status['stale'] ) {
-			/* translators: %s: how long ago the sync last started */
-			return sprintf( __( 'اجرا نمی‌شود — آخرین اجرا %s پیش', 'pos-accounting-connector' ), human_time_diff( $status['reference_ts'], time() ) );
+	}
+
+	/**
+	 * The last cycle as the screen may state it: what it verified, what it
+	 * moved, and — as history — the interruption it ended (#1206 P0-2/P0-3).
+	 *
+	 * A cycle that failed says so instead of leaving the previous success on
+	 * screen, which is what made a broken connector look healthy.
+	 */
+	private static function cycle_label( $settings ) {
+		$verdict = isset( $settings['last_cycle_verdict'] ) ? (string) $settings['last_cycle_verdict'] : '';
+		if ( '' === $verdict ) {
+			return __( 'هنوز دوره‌ای ثبت نشده است', 'pos-accounting-connector' );
 		}
-		return __( 'در حال اجرا', 'pos-accounting-connector' );
+		if ( in_array( $verdict, array( POS_Connector_Health::PHASE_OK, POS_Connector_Health::PHASE_EMPTY, POS_Connector_Health::PHASE_SKIPPED ), true ) ) {
+			return POS_Connector_Health::PHASE_EMPTY === $verdict
+				/* translators: %s: cycle finish time */
+				? sprintf( __( 'تأییدشده و خالی (بدون تغییر) — %s', 'pos-accounting-connector' ), self::format_time( $settings['last_run_completed_at'] ) )
+				/* translators: %s: cycle finish time */
+				: sprintf( __( 'موفق — %s', 'pos-accounting-connector' ), self::format_time( $settings['last_run_completed_at'] ) );
+		}
+		return sprintf(
+			/* translators: 1: verdict, 2: hours/minutes since the last verified cycle */
+			__( '%1$s — آخرین دورهٔ تأییدشده %2$s پیش', 'pos-accounting-connector' ),
+			$verdict,
+			$settings['last_sync_ok_at'] ? human_time_diff( POS_Connector_Health::parse_utc( $settings['last_sync_ok_at'] ), time() ) : __( 'هرگز', 'pos-accounting-connector' )
+		);
+	}
+
+	/** The last interruption, as history with a resolution time — never a live warning. */
+	private static function incident_label( $settings ) {
+		if ( empty( $settings['incident_at'] ) ) {
+			return __( 'ثبت نشده', 'pos-accounting-connector' );
+		}
+		$when = self::format_time( $settings['incident_at'] );
+		if ( ! empty( $settings['incident_open'] ) ) {
+			/* translators: %s: when the interruption started */
+			return sprintf( __( 'باز — از %s', 'pos-accounting-connector' ), $when );
+		}
+		return sprintf(
+			/* translators: 1: when the interruption started, 2: when it was verified fixed */
+			__( '%1$s — رفع‌شده در %2$s', 'pos-accounting-connector' ),
+			$when,
+			self::format_time( $settings['incident_recovered_at'] )
+		);
 	}
 
 	/**
@@ -411,12 +473,32 @@ class POS_Connector_Admin {
 		<section class="pos-panel">
 			<h2><?php esc_html_e( 'عیب‌یابی', 'pos-accounting-connector' ); ?></h2>
 			<?php if ( ! pos_connector_woocommerce_active() ) : ?><div class="notice notice-error inline"><p><?php esc_html_e( 'ووکامرس فعال نیست؛ همگام‌سازی فروشگاهی متوقف است اما اتصال و به‌روزرسانی افزونه قابل بررسی است.', 'pos-accounting-connector' ); ?></p></div><?php endif; ?>
-			<details open><summary><?php esc_html_e( 'کرون واقعی', 'pos-accounting-connector' ); ?></summary>
-				<p><?php esc_html_e( 'یک خط کافی است:', 'pos-accounting-connector' ); ?></p>
+			<details open><summary><?php esc_html_e( 'کرون واقعی — وضعیت فعلی و اثبات آن', 'pos-accounting-connector' ); ?></summary>
+				<?php
+				$cron_state = POS_Connector_Health::cron_state( $settings, time() );
+				self::card(
+					__( 'آنچه واقعاً اندازه‌گیری شده', 'pos-accounting-connector' ),
+					array(
+						__( 'حالت', 'pos-accounting-connector' ) => self::cron_state_label(),
+						__( 'دلیل', 'pos-accounting-connector' ) => $cron_state['reason'],
+						__( 'آخرین شروع اجرا', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_at'] ),
+						__( 'آخرین پایان دوره', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_completed_at'] ),
+						__( 'آخرین دورهٔ تأییدشده', 'pos-accounting-connector' ) => self::format_time( $settings['last_sync_ok_at'] ),
+						__( 'آخرین آزمایش اتصال (اثبات کرون نیست)', 'pos-accounting-connector' ) => self::format_time( $settings['last_ping_ok_at'] ),
+						__( 'اجرای سریع بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_HOOK ),
+					)
+				);
+				?>
+				<?php if ( pos_connector_uses_system_cron() ) : ?>
+					<p><?php esc_html_e( 'DISABLE_WP_CRON در wp-config.php روشن است: یعنی زمان‌بندِ وابسته به بازدید وردپرس خاموش است. این به‌تنهایی خرابی نیست — اجرای کارها به کرون سیستم شما بستگی دارد، و تنها اثباتش «آخرین شروع اجرا» در بالا است، نه «آزمایش اتصال».', 'pos-accounting-connector' ); ?></p>
+				<?php else : ?>
+					<p><?php esc_html_e( 'DISABLE_WP_CRON تعریف نشده است: کرون داخلی وردپرس فقط هنگام بازدید از سایت اجرا می‌شود و در فروشگاه کم‌تردد عقب می‌افتد. برای بازهٔ دقیق، همین یک خط را در crontab بگذارید.', 'pos-accounting-connector' ); ?></p>
+				<?php endif; ?>
+				<p><?php esc_html_e( 'یک خط کافی است (خط دوم نسازید؛ دو زمان‌بند موازی همان کارها را دو بار می‌گیرند):', 'pos-accounting-connector' ); ?></p>
 				<p><code dir="ltr"><?php echo esc_html( implode( "\n", pos_connector_system_cron_examples() ) ); ?></code></p>
-				<p><?php esc_html_e( 'روی کانتینر یا هاستی که open_basedir اجرای wp را می‌بندد (برای کاربر root گزینهٔ --allow-root را هم اضافه کنید):', 'pos-accounting-connector' ); ?></p>
+				<p><?php esc_html_e( 'اگر و فقط اگر لاگ کرون خطای open_basedir را نشان داد، همین یک خط را با این نسخه اجرا کنید (برای کاربر root گزینهٔ --allow-root را اضافه کنید). محدودیت امنیتی سرور را به‌صورت کلی خاموش نکنید:', 'pos-accounting-connector' ); ?></p>
 				<p><code dir="ltr"><?php echo esc_html( pos_connector_system_cron_open_basedir_example() ); ?></code></p>
-				<p><?php esc_html_e( 'برای مانیتورینگ، دستور wp pos-connector status اگر کرون متوقف باشد با کد خروج غیرصفر تمام می‌شود.', 'pos-accounting-connector' ); ?></p>
+				<p><?php esc_html_e( 'برای عیب‌یابی کامل و بدون تغییر داده:', 'pos-accounting-connector' ); ?> <code dir="ltr">wp pos-connector doctor</code> — <?php esc_html_e( 'و برای مانیتورینگ:', 'pos-accounting-connector' ); ?> <code dir="ltr">wp pos-connector doctor --json</code> <?php esc_html_e( '(هنگام خرابی فعلی با کد خروج غیرصفر).', 'pos-accounting-connector' ); ?></p>
 			</details>
 			<h3><?php esc_html_e( 'گزارش رویدادها', 'pos-accounting-connector' ); ?></h3>
 			<table class="widefat striped"><thead><tr><th><?php esc_html_e( 'زمان UTC', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'رویداد', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'پیام', 'pos-accounting-connector' ); ?></th></tr></thead><tbody>

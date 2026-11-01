@@ -557,10 +557,29 @@ function pos_connector_settings() {
 		// that works says nothing about whether the cron does; that button has
 		// its own field. `armed_at` is when the connection first became usable.
 		'last_run_at'              => '',
+		// When the last cycle *finished*, whether or not it worked. `last_run_at`
+		// says the cron fires; this says the cycle came back — the difference
+		// between a dead scheduler and a slow or failing one (#1206).
+		'last_run_completed_at'    => '',
+		// Last VERIFIED cycle: no phase failed or half-applied. A failed push
+		// or an unreachable app must never move it.
 		'last_sync_ok_at'          => '',
+		// Last cycle that actually moved data, distinct from a verified empty
+		// round trip ("صف خالی بود" is healthy, not proof of transfer).
+		'last_data_applied_at'     => '',
 		'last_ping_ok_at'          => '',
 		'armed_at'                 => '',
 		'last_error'               => '',
+		// Structured phase results of the last cycle (POS_Connector_Health::phase()).
+		'last_cycle_verdict'       => '',
+		'last_cycle_phases'        => array(),
+		// The last interruption, kept as history with its resolution time, so a
+		// recovered store stops showing a live warning (#1206 P0-3).
+		'incident_open'            => false,
+		'incident_at'              => '',
+		'incident_gap_seconds'     => 0,
+		'incident_previous_state'  => '',
+		'incident_recovered_at'    => '',
 		// 1.1.0 — the scheduled sweeps. Orders default on (a missed hook is a
 		// missing sale); products default to hourly (a full export is not
 		// free, and an hourly backstop is enough for a catalogue that also

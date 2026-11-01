@@ -7,14 +7,17 @@
  * Three things live here, and each one is the answer to a way this plugin
  * once failed without anybody being told:
  *
- *   - **Is the cron actually running?** WP-Cron only fires on traffic, and a
- *     system crontab that cannot execute its command (an `open_basedir` that
- *     blocks /usr/bin/wp, a missing PATH) still "succeeds" from the
- *     scheduler's point of view. The only honest evidence is that
- *     `POS_Connector_Sync::run()` stopped starting, so staleness is measured
- *     from the last time it started — not from the last time somebody pressed
- *     «آزمایش اتصال», which proves the address and token and nothing about the
- *     schedule.
+ *   - **Is the cron actually running, and did the cycle work?** WP-Cron only
+ *     fires on traffic, and a system crontab that cannot execute its command
+ *     (an `open_basedir` that blocks /usr/bin/wp, a missing PATH) still
+ *     "succeeds" from the scheduler's point of view. The only honest evidence
+ *     that the scheduler runs is that `POS_Connector_Sync::run()` started, and
+ *     the only honest evidence that the *sync* worked is a cycle in which
+ *     every phase reported success (#1206). Those are two different facts and
+ *     this file keeps them apart: `cron_state()` grades the scheduler from the
+ *     last start, `cycle_verdict()` grades the work from structured phase
+ *     results. Neither is ever inferred from «آزمایش اتصال», which proves the
+ *     address and token and nothing about the schedule.
  *   - **When does a queue row give up?** After exactly MAX_ATTEMPTS attempts.
  *   - **Which two runs may not overlap?** `wp pos-connector sync` and
  *     `wp cron event run --due-now` are both documented, and both end up in
@@ -31,11 +34,40 @@ class POS_Connector_Health {
 	/** The cron counts as stopped after this many fast intervals without a run. */
 	const STALE_AFTER_INTERVALS = 2;
 
+	/**
+	 * «کند» — a scheduler we still believe in, but which dropped some ticks.
+	 *
+	 * Three intervals, not two: a shared host serving a queued crontab that
+	 * starts 100–170s apart is ordinary, and #1149's two-interval threshold
+	 * called that an outage. Three missed starts is a pattern, not a hiccup.
+	 */
+	const DELAYED_AFTER_INTERVALS = 3;
+
+	/**
+	 * «اجرا نمی‌شود» — no start for ten minutes is a failure at any cadence.
+	 *
+	 * This is the alerting floor (#1206 P1): the grace above only *warns*.
+	 */
+	const CRITICAL_AFTER_SECONDS = 600;
+
 	/** How long a crashed run can hold the lock before the next one takes over. */
 	const RUN_LOCK_TTL_SECONDS = 300;
 
+	/** Structured phase outcomes (#1206 P0) — never collapse two of these into `0`. */
+	const PHASE_OK      = 'ok';
+	const PHASE_EMPTY   = 'empty';
+	const PHASE_PARTIAL = 'partial';
+	const PHASE_FAILED  = 'failed';
+	const PHASE_SKIPPED = 'skipped';
+	const PHASE_PAUSED  = 'paused';
+
 	public static function stale_after_seconds() {
 		return self::FAST_INTERVAL_SECONDS * self::STALE_AFTER_INTERVALS;
+	}
+
+	/** Past this age the scheduler is «کند» but not yet failed. */
+	public static function delayed_after_seconds() {
+		return self::FAST_INTERVAL_SECONDS * self::DELAYED_AFTER_INTERVALS;
 	}
 
 	/** A UTC `Y-m-d H:i:s` string (what current_time('mysql', true) writes) as a timestamp; 0 when empty or unreadable. */
@@ -48,7 +80,81 @@ class POS_Connector_Health {
 	}
 
 	/**
-	 * Is the fast lane overdue?
+	 * The scheduler's *current* state, as one word plus the reason for it.
+	 *
+	 * `stale` (2 intervals) is kept exactly as #1149 defined it, because the
+	 * admin screen, `wp pos-connector status` and the monitoring crontab all
+	 * regress against it. On top of it sit the two verdicts #1206 asked for:
+	 * «کند» after DELAYED_AFTER_INTERVALS missed starts, «اجرا نمی‌شود» after
+	 * CRITICAL_AFTER_SECONDS. `test_only` is the honest answer for a store
+	 * whose only evidence is a button press: a ping proves the token, not the
+	 * schedule.
+	 *
+	 * @param array $settings pos_connector_settings().
+	 * @param int   $now      Unix timestamp.
+	 * @return array{configured:bool,state:string,reason:string,stale:bool,delayed:bool,failed:bool,missedIntervals:int,reference_ts:int,age:int,last_run_ts:int,last_verified_ts:int,last_ping_ts:int}
+	 */
+	public static function cron_state( array $settings, $now ) {
+		$now        = (int) $now;
+		$configured = ! empty( $settings['enabled'] ) && ! empty( $settings['base_url'] ) && ! empty( $settings['token'] );
+		$last_run   = self::parse_utc( isset( $settings['last_run_at'] ) ? $settings['last_run_at'] : '' );
+		$armed      = self::parse_utc( isset( $settings['armed_at'] ) ? $settings['armed_at'] : '' );
+		$verified   = self::parse_utc( isset( $settings['last_sync_ok_at'] ) ? $settings['last_sync_ok_at'] : '' );
+		$ping       = self::parse_utc( isset( $settings['last_ping_ok_at'] ) ? $settings['last_ping_ok_at'] : '' );
+		$reference  = $last_run > 0 ? $last_run : $armed;
+		$age        = $reference > 0 ? max( 0, $now - $reference ) : 0;
+		$missed     = $reference > 0 ? (int) floor( $age / self::FAST_INTERVAL_SECONDS ) : 0;
+		// A run that the app paused writes `last_run_stats['paused']`; any
+		// later real cycle overwrites it. So this is the *last* cycle's say.
+		$paused     = ! empty( $settings['last_run_stats']['paused'] );
+
+		$state  = 'unknown';
+		$reason = 'not_configured';
+		if ( $configured ) {
+			if ( $paused ) {
+				$state  = 'paused';
+				$reason = 'paused_by_app';
+			} elseif ( $reference > 0 ) {
+				if ( $age > self::CRITICAL_AFTER_SECONDS ) {
+					$state  = 'failed';
+					$reason = $last_run > 0 ? 'no_start_since' : 'never_ran';
+				} elseif ( $age > self::delayed_after_seconds() ) {
+					$state  = 'delayed';
+					$reason = 'missed_starts';
+				} else {
+					$state  = 'healthy';
+					$reason = $last_run > 0 ? 'recent_start' : 'awaiting_first_run';
+				}
+			} elseif ( $ping > 0 && ( $now - $ping ) <= self::delayed_after_seconds() ) {
+				// Configured, never armed and never run, but somebody pressed
+				// «آزمایش اتصال» a moment ago: the link works, the cron is
+				// unproven. Calling that healthy is the bug this exists for.
+				$state  = 'test_only';
+				$reason = 'ping_without_cron';
+			} else {
+				$state  = 'failed';
+				$reason = 'never_ran';
+			}
+		}
+
+		return array(
+			'configured'        => $configured,
+			'state'             => $state,
+			'reason'            => $reason,
+			'stale'             => $configured && $reference > 0 && $age > self::stale_after_seconds(),
+			'delayed'           => 'delayed' === $state,
+			'failed'            => 'failed' === $state,
+			'missedIntervals'   => $missed,
+			'reference_ts'      => $reference,
+			'age'               => $age,
+			'last_run_ts'       => $last_run,
+			'last_verified_ts'  => $verified,
+			'last_ping_ts'      => $ping,
+		);
+	}
+
+	/**
+	 * Is the fast lane overdue? (#1149's contract, unchanged.)
 	 *
 	 * Measured from the last time `run()` started; a store that was enabled but
 	 * has never run is measured from the moment it was armed, so a cron that
@@ -59,17 +165,158 @@ class POS_Connector_Health {
 	 * @return array{configured:bool,stale:bool,reference_ts:int,age:int,last_run_ts:int}
 	 */
 	public static function cron_status( array $settings, $now ) {
-		$configured = ! empty( $settings['enabled'] ) && ! empty( $settings['base_url'] ) && ! empty( $settings['token'] );
-		$last_run   = self::parse_utc( isset( $settings['last_run_at'] ) ? $settings['last_run_at'] : '' );
-		$armed      = self::parse_utc( isset( $settings['armed_at'] ) ? $settings['armed_at'] : '' );
-		$reference  = $last_run > 0 ? $last_run : $armed;
-		$age        = $reference > 0 ? max( 0, (int) $now - $reference ) : 0;
+		$state = self::cron_state( $settings, $now );
 		return array(
-			'configured'   => $configured,
-			'stale'        => $configured && $reference > 0 && $age > self::stale_after_seconds(),
-			'reference_ts' => $reference,
-			'age'          => $age,
-			'last_run_ts'  => $last_run,
+			'configured'   => $state['configured'],
+			'stale'        => $state['stale'],
+			'reference_ts' => $state['reference_ts'],
+			'age'          => $state['age'],
+			'last_run_ts'  => $state['last_run_ts'],
+		);
+	}
+
+	/**
+	 * One phase's outcome, structured (#1206 P0).
+	 *
+	 * `push_queue()` used to return `0` for "nothing to send" *and* for "the
+	 * app did not answer", so `run_locked()` could not tell an idle queue from
+	 * a dead link and wrote a success timestamp for both. This is the shape
+	 * that makes them different.
+	 *
+	 * @param string $name        push|pull|ack …
+	 * @param string $status      One of the PHASE_* constants.
+	 * @param int    $duration_ms Wall time spent in the phase.
+	 * @param array  $counts      Named counters (sent, applied, failed, jobs, rounds…).
+	 * @param string $error       Sanitized reason; empty on success.
+	 * @return array{phase:string,status:string,durationMs:int,counts:array<string,int>,error:string}
+	 */
+	public static function phase( $name, $status, $duration_ms, array $counts = array(), $error = '' ) {
+		$allowed = array( self::PHASE_OK, self::PHASE_EMPTY, self::PHASE_PARTIAL, self::PHASE_FAILED, self::PHASE_SKIPPED, self::PHASE_PAUSED );
+		$clean   = array();
+		foreach ( $counts as $key => $value ) {
+			$clean[ substr( (string) $key, 0, 20 ) ] = (int) $value;
+		}
+		return array(
+			'phase'      => substr( (string) $name, 0, 20 ),
+			'status'     => in_array( $status, $allowed, true ) ? $status : self::PHASE_FAILED,
+			'durationMs' => max( 0, (int) $duration_ms ),
+			'counts'     => $clean,
+			'error'      => substr( (string) $error, 0, 200 ),
+		);
+	}
+
+	/**
+	 * What all of one run's phases add up to.
+	 *
+	 * `verified` is the only thing allowed to move `last_sync_ok_at`: no phase
+	 * failed or half-applied. A phase that was deliberately skipped (the app
+	 * paused, or absolute stock writes held back behind a local backlog) does
+	 * not fail the cycle — it is an explicit decision, recorded in the phase
+	 * list so the screen can say so.
+	 *
+	 * @param array $phases List of `phase()` results.
+	 * @return array{status:string,verified:bool,dataMoved:int,errors:string[]}
+	 */
+	public static function cycle_verdict( array $phases ) {
+		$rank     = array(
+			self::PHASE_EMPTY   => 0,
+			self::PHASE_OK      => 1,
+			self::PHASE_SKIPPED => 1,
+			self::PHASE_PARTIAL => 2,
+			self::PHASE_FAILED  => 3,
+			self::PHASE_PAUSED  => 1,
+		);
+		$worst    = null;
+		$statuses = array();
+		$data     = 0;
+		$errors   = array();
+		foreach ( $phases as $phase ) {
+			if ( ! is_array( $phase ) || empty( $phase['status'] ) ) {
+				continue;
+			}
+			$status     = (string) $phase['status'];
+			$statuses[] = $status;
+			if ( ! empty( $phase['error'] ) ) {
+				$errors[] = (string) $phase['error'];
+			}
+			if ( isset( $rank[ $status ] ) && ( null === $worst || $rank[ $status ] > $rank[ $worst ] ) ) {
+				$worst = $status;
+			}
+			// Only `sent` and `applied` are movement: a batch count, a job count
+			// or an attempt count is not data reaching the other side.
+			if ( is_array( $phase['counts'] ) ) {
+				foreach ( array( 'sent', 'applied' ) as $key ) {
+					if ( isset( $phase['counts'][ $key ] ) ) {
+						$data += max( 0, (int) $phase['counts'][ $key ] );
+					}
+				}
+			}
+		}
+
+		if ( null === $worst ) {
+			$status = self::PHASE_FAILED;
+			$errors = array( 'no_phases' );
+		} elseif ( 1 === count( array_unique( $statuses ) ) && self::PHASE_PAUSED === $statuses[0] ) {
+			$status = self::PHASE_PAUSED;
+		} else {
+			$status = $worst;
+		}
+
+		return array(
+			'status'    => $status,
+			'verified'  => in_array( $status, array( self::PHASE_OK, self::PHASE_EMPTY, self::PHASE_SKIPPED ), true ),
+			'dataMoved' => $data,
+			'errors'    => array_slice( array_values( array_unique( $errors ) ), 0, 5 ),
+		);
+	}
+
+	/**
+	 * Start-of-run bookkeeping for the *historical* record (#1206 P0-3).
+	 *
+	 * The run that ends a silence is the one that knows about it, and it must
+	 * not advertise that silence as the current state — the old code did, so a
+	 * recovered store showed «زمان‌بند مدتی اجرا نشده بود» until some later
+	 * report. Instead the gap becomes an incident with a start time, closed by
+	 * `note_cycle()` once a cycle is actually verified.
+	 *
+	 * @param array $settings Settings as they were before this run started.
+	 * @param array $state    `cron_state()` of those settings.
+	 * @param int   $now      Unix timestamp.
+	 * @return array Settings changes, possibly empty.
+	 */
+	public static function note_attempt( array $settings, array $state, $now ) {
+		if ( ! in_array( $state['state'], array( 'failed', 'delayed' ), true ) ) {
+			return array();
+		}
+		if ( ! empty( $settings['incident_open'] ) ) {
+			// Already recorded; a second start inside the same outage must not
+			// restamp it, or the incident would look ongoing forever.
+			return array();
+		}
+		return array(
+			'incident_open'            => true,
+			'incident_at'              => gmdate( 'Y-m-d H:i:s', (int) $now ),
+			'incident_gap_seconds'     => (int) $state['age'],
+			'incident_previous_state'  => (string) $state['state'],
+			'incident_recovered_at'    => '',
+		);
+	}
+
+	/**
+	 * End-of-run bookkeeping: close an open incident only on a verified cycle.
+	 *
+	 * @param array  $settings Settings as they are now.
+	 * @param array  $verdict  `cycle_verdict()` of this run.
+	 * @param string $now_iso  This run's completion stamp (UTC `Y-m-d H:i:s`).
+	 * @return array Settings changes, possibly empty.
+	 */
+	public static function note_cycle( array $settings, array $verdict, $now_iso ) {
+		if ( empty( $settings['incident_open'] ) || empty( $verdict['verified'] ) ) {
+			return array();
+		}
+		return array(
+			'incident_open'         => false,
+			'incident_recovered_at' => (string) $now_iso,
 		);
 	}
 
@@ -228,6 +475,33 @@ class POS_Connector_Lock {
 			return $store->delete_if( $name, $current );
 		}
 		return false;
+	}
+
+	/**
+	 * Look at a lock without taking it — `wp pos-connector doctor` (#1206 P0).
+	 *
+	 * A lock held far past its lease is the signature of a run that died
+	 * mid-flight (fatal, timeout, container restart), and that is exactly the
+	 * case where «صف خالی است» and «کرون اجرا نمی‌شود» look identical from
+	 * outside. Reading it must not acquire, renew or release anything.
+	 *
+	 * @param string $name  Lock key.
+	 * @param object $store The same store contract as `acquire()`.
+	 * @param int    $now   Unix time.
+	 * @return array{held:bool,expires_ts:int|null,seconds_left:int|null,expired:bool}
+	 */
+	public static function peek( $name, $store, $now ) {
+		$current = $store->get( $name );
+		if ( null === $current || '' === $current ) {
+			return array( 'held' => false, 'expires_ts' => null, 'seconds_left' => null, 'expired' => false );
+		}
+		$expires = (int) strtok( $current, ':' );
+		return array(
+			'held'         => true,
+			'expires_ts'   => $expires,
+			'seconds_left' => $expires - (int) $now,
+			'expired'      => $expires < (int) $now,
+		);
 	}
 }
 
