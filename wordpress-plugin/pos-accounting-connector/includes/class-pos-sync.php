@@ -119,6 +119,11 @@ class POS_Connector_Sync {
 		add_action( POS_CONNECTOR_CRON_PRODUCT_EXPORT, array( __CLASS__, 'continue_product_export' ), 10, 1 );
 		// A button press, run by cron instead of inside the admin request.
 		add_action( POS_CONNECTOR_CRON_MANUAL_JOB, array( __CLASS__, 'run_manual_job' ), 10, 1 );
+		// The cron probe (#1206): its callback running at all is the evidence
+		// that a scheduler invocation executed a due event. Bound before the
+		// `enabled` check below, like every other cron hook, so a store that
+		// disabled sync locally can still be told whether its cron works.
+		add_action( POS_CONNECTOR_CRON_PROBE, array( __CLASS__, 'run_cron_probe' ), 10, 1 );
 
 		$settings = pos_connector_settings();
 		if ( ! empty( $settings['enabled'] ) && ! empty( $settings['sync_customers'] ) ) {
@@ -1580,6 +1585,9 @@ class POS_Connector_Sync {
 				// Issue #939: re-send only the taxonomy tree.
 				'taxonomy_export',
 				'taxonomy_ensure',
+				// #1206 P0: the app only offers «تست کرون» to a plugin that can run
+				// this, because an older plugin throws plugin_version_unsupported.
+				'cron_probe',
 			),
 		);
 	}
@@ -1633,6 +1641,9 @@ class POS_Connector_Sync {
 				'previousOutageState'      => $settings['incident_previous_state'],
 				'previousOutageOpen'       => ! empty( $settings['incident_open'] ),
 				'recoveredAt'              => $settings['incident_recovered_at'],
+				// The last cron probe (#1206 P0): the app grades queued → executed
+				// → reported itself, and stamps when the report actually arrived.
+				'cronProbe'                => self::cron_probe_telemetry( $settings ),
 				// What the last cycle's phases actually reported (#1206 P0-2).
 				'lastCycleVerdict'         => $settings['last_cycle_verdict'],
 				'lastCyclePhases'          => array_values( (array) $settings['last_cycle_phases'] ),
@@ -1661,6 +1672,28 @@ class POS_Connector_Sync {
 					'catalogue' => $settings['resync_products_schedule'],
 					'lookback'  => (int) $settings['resync_orders_days'],
 				),
+			);
+		}
+
+		/**
+		 * The probe as telemetry: ids and timestamps only, never a payload.
+		 *
+		 * @param array $settings pos_connector_settings().
+		 * @return array|null Null when no probe has ever been run, so the app can
+		 *                    tell "never tested" from "tested and queued".
+		 */
+		private static function cron_probe_telemetry( array $settings ) {
+			$probe = isset( $settings['cron_probe'] ) && is_array( $settings['cron_probe'] ) ? $settings['cron_probe'] : array();
+			if ( empty( $probe['id'] ) ) {
+				return null;
+			}
+			return array(
+				'id'          => (string) $probe['id'],
+				'origin'      => isset( $probe['origin'] ) ? (string) $probe['origin'] : 'admin',
+				'queuedAt'    => isset( $probe['queued_at'] ) ? (string) $probe['queued_at'] : '',
+				'executedAt'  => isset( $probe['executed_at'] ) ? (string) $probe['executed_at'] : '',
+				'reportedAt'  => isset( $probe['reported_at'] ) ? (string) $probe['reported_at'] : '',
+				'error'       => isset( $probe['error'] ) ? substr( (string) $probe['error'], 0, 120 ) : '',
 			);
 		}
 
@@ -2051,6 +2084,18 @@ class POS_Connector_Sync {
 		$parent   = isset( $job['parentRemoteId'] ) ? (int) $job['parentRemoteId'] : 0;
 
 		switch ( $type ) {
+			case 'cron_probe':
+				// #1206 P0: the app asked for proof that its scheduler runs. This
+				// job being applied already means the pull ran inside a cron
+				// invocation; the probe adds a *second*, separately scheduled
+				// one, so the app is not trusting a single lucky pass.
+				$requested = isset( $payload['probeId'] ) ? (string) $payload['probeId'] : '';
+				if ( ! preg_match( '/^[a-f0-9]{32}$/D', $requested ) ) {
+					throw new Exception( 'invalid_probe_id' );
+				}
+				$probe = self::schedule_cron_probe( 'app' );
+				return array( 'probeId' => $probe['id'], 'requestedProbeId' => $requested, 'dueAt' => $probe['due_at'] );
+
 			case 'taxonomy_ensure':
 				return self::ensure_reviewed_attribute( $payload );
 			case 'stock':
@@ -2852,6 +2897,87 @@ class POS_Connector_Sync {
 				self::run_resync_content();
 				return;
 		}
+	}
+
+	/**
+	 * Queue a cron probe (#1206 P0).
+	 *
+	 * Nothing here claims anything: a true return means WordPress recorded a
+	 * single event due in a few seconds. `run_cron_probe()` is what turns that
+	 * into evidence, and only a separate scheduler invocation can call it.
+	 *
+	 * @param string $origin `admin` (the button) or `app` (a job from the panel).
+	 * @return array The stored probe record.
+	 */
+	public static function schedule_cron_probe( $origin = 'admin' ) {
+		$now   = time();
+		$id    = bin2hex( random_bytes( 16 ) );
+		$probe = array(
+			'id'          => $id,
+			'origin'      => 'app' === $origin ? 'app' : 'admin',
+			'queued_at'   => gmdate( 'Y-m-d H:i:s', $now ),
+			'due_at'      => gmdate( 'Y-m-d H:i:s', $now + 2 ),
+			'executed_at' => '',
+			'reported_at' => '',
+			'error'       => '',
+		);
+		pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+
+		// Five seconds out, not zero: an event due "now" can be executed by the
+		// same traffic tick that queued it, which would prove nothing about a
+		// scheduler. A due-now crontab picks it up on its next pass.
+		if ( false === wp_schedule_single_event( $now + 5, POS_CONNECTOR_CRON_PROBE, array( $id ) ) ) {
+			$probe['error'] = 'schedule_failed';
+			pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+			POS_Connector_Log::error( 'probe', 'schedule_failed' );
+		}
+		return $probe;
+	}
+
+	/**
+	 * The probe's cron callback — the whole point of it.
+	 *
+	 * If this function is running, a real scheduler invocation executed a due
+	 * event, which is the fact a connection test cannot establish. It then
+	 * sends one signed handshake so the app learns the same thing, and records
+	 * whether that report left. It never syncs data and never moves a success
+	 * timestamp: a probe must be safe to press on a broken connection.
+	 *
+	 * @param string $id The correlation id the event was queued with.
+	 */
+	public static function run_cron_probe( $id ) {
+		$settings = pos_connector_settings();
+		$probe    = isset( $settings['cron_probe'] ) && is_array( $settings['cron_probe'] ) ? $settings['cron_probe'] : array();
+		$id       = is_string( $id ) ? $id : '';
+		// A stale or duplicated event (a schedule cleared and re-created, an id
+		// that is not the current probe) is ignored rather than allowed to
+		// overwrite a newer probe's evidence.
+		if ( '' === $id || empty( $probe['id'] ) || ! hash_equals( (string) $probe['id'], $id ) ) {
+			POS_Connector_Log::info( 'probe', 'stale_probe_ignored' );
+			return;
+		}
+
+		$probe['executed_at'] = gmdate( 'Y-m-d H:i:s' );
+		$probe['error']       = '';
+		pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+		POS_Connector_Log::info( 'probe', 'executed_by_scheduler' );
+
+		$client = POS_Connector_Client::from_settings();
+		if ( ! $client ) {
+			$probe['error'] = 'not_configured';
+			pos_connector_update_settings( array( 'cron_probe' => $probe ) );
+			return;
+		}
+		// One handshake carries the probe; its telemetry is what the app grades.
+		$response = self::handshake( $client );
+		if ( ! empty( $response['ok'] ) ) {
+			$probe['reported_at'] = gmdate( 'Y-m-d H:i:s' );
+			POS_Connector_Log::info( 'probe', 'telemetry_reported' );
+		} else {
+			$probe['error'] = 'report_failed:' . ( isset( $response['error'] ) ? (string) $response['error'] : 'unknown' );
+			POS_Connector_Log::error( 'probe', $probe['error'] );
+		}
+		pos_connector_update_settings( array( 'cron_probe' => $probe ) );
 	}
 
 	/**

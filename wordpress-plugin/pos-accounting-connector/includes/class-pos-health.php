@@ -321,6 +321,61 @@ class POS_Connector_Health {
 	}
 
 	/**
+	 * How long a queued probe may sit before «کرون این را اجرا نکرد» is the
+	 * answer (#1206 P0). Ten minutes is generous on any host and still short
+	 * enough that the person who pressed the button sees the verdict.
+	 */
+	const PROBE_EXPIRY_SECONDS = 600;
+
+	/**
+	 * What the cron probe has actually proven so far.
+	 *
+	 * The button's whole point is that queuing proves nothing: `wp_schedule_
+	 * single_event()` returning true only means WordPress recorded an event.
+	 * Evidence appears in order —
+	 *
+	 *   queued   → WordPress accepted the event, nothing has run;
+	 *   executed → a *separate* scheduler invocation entered the callback;
+	 *   reported → that invocation's signed telemetry reached the app;
+	 *   expired  → the event was queued and never ran: the scheduler is not
+	 *              executing due events, which is the finding, not a failure
+	 *              of the probe;
+	 *   failed   → the event ran but the report did not leave (network,
+	 *              token, clock).
+	 *
+	 * @param array $probe The stored `cron_probe` record.
+	 * @param int   $now   Unix timestamp.
+	 * @return array{state:string,reason:string,age:int,expiresIn:int}
+	 */
+	public static function probe_state( $probe, $now ) {
+		$empty = array( 'state' => 'none', 'reason' => 'no_probe', 'age' => 0, 'expiresIn' => 0 );
+		if ( ! is_array( $probe ) || empty( $probe['id'] ) ) {
+			return $empty;
+		}
+		$now      = (int) $now;
+		$queued   = self::parse_utc( isset( $probe['queued_at'] ) ? $probe['queued_at'] : '' );
+		$executed = self::parse_utc( isset( $probe['executed_at'] ) ? $probe['executed_at'] : '' );
+		$reported = self::parse_utc( isset( $probe['reported_at'] ) ? $probe['reported_at'] : '' );
+		$age      = $queued > 0 ? max( 0, $now - $queued ) : 0;
+		$left     = max( 0, self::PROBE_EXPIRY_SECONDS - $age );
+		$found    = array( 'age' => $age, 'expiresIn' => $left );
+
+		if ( $reported > 0 ) {
+			return array( 'state' => 'reported', 'reason' => 'telemetry_sent' ) + $found;
+		}
+		if ( ! empty( $probe['error'] ) ) {
+			return array( 'state' => 'failed', 'reason' => (string) $probe['error'] ) + $found;
+		}
+		if ( $executed > 0 ) {
+			return array( 'state' => 'executed', 'reason' => 'scheduler_ran_it' ) + $found;
+		}
+		if ( $queued > 0 && $age > self::PROBE_EXPIRY_SECONDS ) {
+			return array( 'state' => 'expired', 'reason' => 'queued_but_never_executed' ) + $found;
+		}
+		return array( 'state' => 'queued', 'reason' => 'awaiting_scheduler' ) + $found;
+	}
+
+	/**
 	 * What a failed delivery attempt does to a queue row.
 	 *
 	 * @param int $attempts_before Attempts already recorded.

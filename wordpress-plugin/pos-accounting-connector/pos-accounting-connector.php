@@ -159,6 +159,15 @@ define( 'POS_CONNECTOR_CRON_RESYNC_CONTENT', 'pos_connector_resync_content' );
 define( 'POS_CONNECTOR_CRON_MANUAL_JOB', 'pos_connector_manual_job' );
 /** Continuation of a chunked catalogue export (args: the export's run id). */
 define( 'POS_CONNECTOR_CRON_PRODUCT_EXPORT', 'pos_connector_product_export_continue' );
+/**
+ * The cron probe (args: the probe's correlation id, issue #1206).
+ *
+ * Queued with `wp_schedule_single_event()` a couple of seconds out. When this
+ * hook runs, a real scheduler invocation executed a due event — which is the
+ * one fact a «آزمایش اتصال» ping can never establish, and the reason the two
+ * buttons are worded differently.
+ */
+define( 'POS_CONNECTOR_CRON_PROBE', 'pos_connector_cron_probe' );
 
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-log.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-health.php';
@@ -538,6 +547,7 @@ function pos_connector_deactivate() {
 	// be told; wp_unschedule_hook() clears every event on the hook.
 	wp_unschedule_hook( POS_CONNECTOR_CRON_MANUAL_JOB );
 	wp_unschedule_hook( POS_CONNECTOR_CRON_PRODUCT_EXPORT );
+	wp_unschedule_hook( POS_CONNECTOR_CRON_PROBE );
 }
 register_deactivation_hook( __FILE__, 'pos_connector_deactivate' );
 
@@ -573,6 +583,9 @@ function pos_connector_settings() {
 		// Structured phase results of the last cycle (POS_Connector_Health::phase()).
 		'last_cycle_verdict'       => '',
 		'last_cycle_phases'        => array(),
+		// The last cron probe: queued → executed → reported, with an expiry
+		// (POS_Connector_Health::probe_state()).
+		'cron_probe'               => array(),
 		// The last interruption, kept as history with its resolution time, so a
 		// recovered store stops showing a live warning (#1206 P0-3).
 		'incident_open'            => false,

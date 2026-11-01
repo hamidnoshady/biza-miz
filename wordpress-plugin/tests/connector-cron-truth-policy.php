@@ -243,4 +243,34 @@ $expired = POS_Connector_Lock::peek( 'run', $store, $now + 400 );
 check( $expired['expired'], 'a run that died past its lease is visible as expired' );
 check( false !== POS_Connector_Lock::acquire( 'run', 300, $now + 400, $store ), 'and the next run may take it over' );
 
+// --- P0-5: the probe, staged ---------------------------------------------------
+
+same( 'none', POS_Connector_Health::probe_state( array(), $now )['state'], 'no probe is «none», not «ok»' );
+same( 'none', POS_Connector_Health::probe_state( null, $now )['state'], 'and a null probe too' );
+
+$queued_probe = array( 'id' => str_repeat( 'a', 32 ), 'queued_at' => $ago( 5 ), 'executed_at' => '', 'reported_at' => '', 'error' => '' );
+$queued_state = POS_Connector_Health::probe_state( $queued_probe, $now );
+same( 'queued', $queued_state['state'], 'a queued event is «queued» — a scheduled event proves nothing' );
+same( 'awaiting_scheduler', $queued_state['reason'], 'and says it is waiting for the scheduler' );
+same( 595, $queued_state['expiresIn'], 'with a visible expiry' );
+
+$executed = POS_Connector_Health::probe_state( array_merge( $queued_probe, array( 'executed_at' => $ago( 3 ) ) ), $now );
+same( 'executed', $executed['state'], 'a separate invocation running the event is the evidence' );
+same( 'scheduler_ran_it', $executed['reason'], 'and says so' );
+
+$reported = POS_Connector_Health::probe_state( array_merge( $queued_probe, array( 'executed_at' => $ago( 3 ), 'reported_at' => $ago( 2 ) ) ), $now );
+same( 'reported', $reported['state'], 'signed telemetry arriving is the last stage' );
+
+// The finding this control exists for: queued, never executed.
+$expired = POS_Connector_Health::probe_state( array_merge( $queued_probe, array( 'queued_at' => $ago( 601 ) ) ), $now );
+same( 'expired', $expired['state'], 'queued and never executed is «expired» — the scheduler is not running' );
+same( 'queued_but_never_executed', $expired['reason'], 'with the reason stated plainly' );
+same( 0, $expired['expiresIn'], 'and no grace left' );
+
+// Executed but the report did not leave: a different diagnosis from expired.
+$failed = POS_Connector_Health::probe_state( array_merge( $queued_probe, array( 'executed_at' => $ago( 4 ), 'error' => 'report_failed:http_500' ) ), $now );
+same( 'failed', $failed['state'], 'executed but unreported is «failed», never «reported»' );
+same( 'report_failed:http_500', $failed['reason'], 'carrying the sanitized reason' );
+same( 600, POS_Connector_Health::PROBE_EXPIRY_SECONDS, 'ten minutes of grace' );
+
 printf( "%d cron-truth-policy assertions passed\n", $assertions );

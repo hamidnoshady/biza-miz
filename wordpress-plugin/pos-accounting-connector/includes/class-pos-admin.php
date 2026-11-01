@@ -122,6 +122,9 @@ class POS_Connector_Admin {
 			'update_available'    => array( 'warning', __( 'نسخهٔ جدید افزونه آمادهٔ نصب است.', 'pos-accounting-connector' ) ),
 			'up_to_date'          => array( 'success', __( 'افزونه به‌روز است.', 'pos-accounting-connector' ) ),
 			'update_check_failed' => array( 'error', __( 'بررسی به‌روزرسانی ناموفق بود:', 'pos-accounting-connector' ) ),
+			// #1206 P0: queuing is not evidence, and the wording says so.
+			'probe_queued'        => array( 'info', __( 'آزمایش کرون زمان‌بندی شد. این هنوز اثباتی نیست: اگر کرون اجرا شود، «اجراشده» و سپس «گزارش‌شده» در بخش عیب‌یابی نمایش داده می‌شود. زمان‌بندی بدون اجرا پس از ۱۰ دقیقه «منقضی» می‌شود.', 'pos-accounting-connector' ) ),
+			'probe_queue_failed'  => array( 'error', __( 'وردپرس نتوانست رویداد آزمایش کرون را زمان‌بندی کند؛ خودِ زمان‌بندی مشکل دارد.', 'pos-accounting-connector' ) ),
 		);
 		return isset( $map[ $key ] ) ? $map[ $key ] : null;
 	}
@@ -411,6 +414,46 @@ class POS_Connector_Admin {
 		echo '</ul></section>';
 	}
 
+	/**
+	 * The probe's stage-by-stage outcome (#1206 P0).
+	 *
+	 * Deliberately a list of stages rather than a badge: «صف شد» and «اجرا شد»
+	 * are the difference between a scheduled event and a working scheduler, and
+	 * that difference is the whole reason this control exists.
+	 */
+	private static function render_cron_probe( $settings ) {
+		$probe = isset( $settings['cron_probe'] ) && is_array( $settings['cron_probe'] ) ? $settings['cron_probe'] : array();
+		$state = POS_Connector_Health::probe_state( $probe, time() );
+		if ( 'none' === $state['state'] ) {
+			echo '<p>' . esc_html__( 'هنوز آزمایشی انجام نشده است.', 'pos-accounting-connector' ) . '</p>';
+			return;
+		}
+		$stages = array(
+			array( __( '۱) زمان‌بندی رویداد', 'pos-accounting-connector' ), (string) ( isset( $probe['queued_at'] ) ? $probe['queued_at'] : '' ), ! empty( $probe['queued_at'] ) ),
+			array( __( '۲) اجرا توسط زمان‌بند', 'pos-accounting-connector' ), (string) ( isset( $probe['executed_at'] ) ? $probe['executed_at'] : '' ), ! empty( $probe['executed_at'] ) ),
+			array( __( '۳) رسیدن گزارش امضاشده', 'pos-accounting-connector' ), (string) ( isset( $probe['reported_at'] ) ? $probe['reported_at'] : '' ), ! empty( $probe['reported_at'] ) ),
+		);
+		echo '<table class="widefat striped pos-probe"><tbody>';
+		foreach ( $stages as $stage ) {
+			echo '<tr><td>' . esc_html( $stage[0] ) . '</td><td>'
+				. self::status_badge( $stage[2] ? __( 'انجام شد', 'pos-accounting-connector' ) : __( 'انجام نشده', 'pos-accounting-connector' ), $stage[2] ? 'good' : 'warn' ) // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+				. '</td><td dir="ltr">' . esc_html( $stage[1] ? $stage[1] . ' UTC' : '—' ) . '</td></tr>';
+		}
+		echo '</tbody></table>';
+		echo '<p>' . esc_html(
+			sprintf(
+				/* translators: 1: state, 2: reason, 3: seconds until the probe expires */
+				__( 'وضعیت: %1$s (%2$s) — %3$d ثانیه تا انقضا.', 'pos-accounting-connector' ),
+				$state['state'],
+				$state['reason'],
+				$state['expiresIn']
+			)
+		) . '</p>';
+		if ( 'expired' === $state['state'] ) {
+			echo '<div class="notice notice-error inline"><p>' . esc_html__( 'رویداد زمان‌بندی شد اما هیچ اجرایی آن را برنداشت: زمان‌بند وردپرس (WP-Cron یا کرون سیستم) در حال اجرای رویدادهای سررسید نیست. کرون سرور را بررسی کنید — «آزمایش اتصال» موفق بودن این را ثابت نمی‌کند.', 'pos-accounting-connector' ) . '</p></div>';
+		}
+	}
+
 	private static function next_cron_label( $hook ) {
 		$at = wp_next_scheduled( $hook );
 		return $at ? gmdate( 'Y-m-d H:i:s', $at ) . ' UTC' : __( 'زمان‌بندی نشده', 'pos-accounting-connector' );
@@ -499,6 +542,11 @@ class POS_Connector_Admin {
 				<p><?php esc_html_e( 'اگر و فقط اگر لاگ کرون خطای open_basedir را نشان داد، همین یک خط را با این نسخه اجرا کنید (برای کاربر root گزینهٔ --allow-root را اضافه کنید). محدودیت امنیتی سرور را به‌صورت کلی خاموش نکنید:', 'pos-accounting-connector' ); ?></p>
 				<p><code dir="ltr"><?php echo esc_html( pos_connector_system_cron_open_basedir_example() ); ?></code></p>
 				<p><?php esc_html_e( 'برای عیب‌یابی کامل و بدون تغییر داده:', 'pos-accounting-connector' ); ?> <code dir="ltr">wp pos-connector doctor</code> — <?php esc_html_e( 'و برای مانیتورینگ:', 'pos-accounting-connector' ); ?> <code dir="ltr">wp pos-connector doctor --json</code> <?php esc_html_e( '(هنگام خرابی فعلی با کد خروج غیرصفر).', 'pos-accounting-connector' ); ?></p>
+			</details>
+			<details open><summary><?php esc_html_e( 'تست کرون و مسیر همگام‌سازی', 'pos-accounting-connector' ); ?></summary>
+				<p><?php esc_html_e( 'این آزمایش سه چیز را از هم جدا می‌کند: زمان‌بندی رویداد (که اثباتی نیست)، اجرای واقعی آن توسط زمان‌بند (که اثبات است) و رسیدن گزارش امضاشده به بیزامیز. «آزمایش اتصال» فقط آدرس و توکن را ثابت می‌کند، نه کرون را.', 'pos-accounting-connector' ); ?></p>
+				<?php self::render_cron_probe( $settings ); ?>
+				<div class="pos-actions"><?php self::action_button( 'pos_connector_cron_probe', __( 'تست کرون و مسیر همگام‌سازی', 'pos-accounting-connector' ), 'secondary' ); ?></div>
 			</details>
 			<h3><?php esc_html_e( 'گزارش رویدادها', 'pos-accounting-connector' ); ?></h3>
 			<table class="widefat striped"><thead><tr><th><?php esc_html_e( 'زمان UTC', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'رویداد', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'پیام', 'pos-accounting-connector' ); ?></th></tr></thead><tbody>
