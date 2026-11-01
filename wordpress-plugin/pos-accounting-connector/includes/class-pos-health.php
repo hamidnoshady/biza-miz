@@ -477,16 +477,32 @@ class POS_Connector_Health {
 		return array_values( array_unique( $kinds ) );
 	}
 
+	/**
+	 * The crontab cadence the recommended line asks for.
+	 *
+	 * Derived from `FAST_INTERVAL_SECONDS` rather than written by hand. The line
+	 * used to say every five minutes while the fast lane is scheduled every
+	 * sixty seconds, so the recommended setup could never deliver the cadence the
+	 * status thresholds are written against: three missed fast intervals (three
+	 * minutes) already reads as «delayed», and a five-minute driver misses three
+	 * of them per tick. Crontab's finest grain is a minute, so the best it can do
+	 * is every minute and the remaining jitter is the tick itself, not the setup.
+	 */
+	public static function system_cron_schedule() {
+		$minutes = max( 1, (int) ceil( self::FAST_INTERVAL_SECONDS / 60 ) );
+		return 1 === $minutes ? '* * * * *' : '*/' . $minutes . ' * * * *';
+	}
+
 	/** A recommended crontab line — one line, and the invocation that survives a container's `open_basedir`. */
 	public static function system_cron_line( $wp_path ) {
 		$path = rtrim( str_replace( '\\', '/', (string) $wp_path ), '/' );
-		return '*/5 * * * * wp --path=' . $path . ' cron event run --due-now > /dev/null 2>&1';
+		return self::system_cron_schedule() . ' wp --path=' . $path . ' cron event run --due-now > /dev/null 2>&1';
 	}
 
 	/** The same line for hosts where PHP's open_basedir blocks the `wp` binary (run as root: add --allow-root). */
 	public static function system_cron_line_open_basedir( $wp_path ) {
 		$path = rtrim( str_replace( '\\', '/', (string) $wp_path ), '/' );
-		return '*/5 * * * * php -d open_basedir= /usr/bin/wp --path=' . $path . ' cron event run --due-now > /dev/null 2>&1';
+		return self::system_cron_schedule() . ' php -d open_basedir= /usr/bin/wp --path=' . $path . ' cron event run --due-now > /dev/null 2>&1';
 	}
 }
 
