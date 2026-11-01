@@ -97,6 +97,16 @@ An undecryptable ciphertext (a deployment whose key changed) resolves to `null` 
 sending an unauthenticated request to Torob under our name is worse than reporting that the
 credential cannot be read.
 
+The deployment's own Torob settings, all optional — each absence degrades to a stated behaviour rather
+than to a silent failure:
+
+| Variable | What it is | Without it |
+| --- | --- | --- |
+| `TOROB_PARTNER_TOKEN` | the partner token Torob issued for this platform's Shop Generator application (also restricted to registered IP addresses on their side) | the automatic approval flow answers `not_configured` and the screen offers the merchant's own token instead |
+| `TOROB_RETURN_URL_BASE` | the public origin Torob sends the merchant's browser back to; defaults to the tenant origin of the request | the request's own origin is used, which behind a proxy may not be the https address Torob requires |
+| `TOROB_API_PUBLIC_KEY` | Torob's Ed25519 verification key for the Product API; defaults to the key published in their token guide | the published key is used |
+| `TOROB_SHOP_GENERATOR_BASE_URL` | overrides Torob's Shop Generator base URL | `https://api.torob.com/shop-generator/v1/` |
+
 ## 6. Permissions
 
 Torob's keys live in Growth's band, because the channel lives in Growth:
@@ -185,16 +195,48 @@ on display at its last known price.
 Nothing about this endpoint claims a listing. It proves the catalogue can be *served*; whether Torob
 accepted it, indexed it, or rejected the domain is Torob's own fact and arrives later.
 
+## 6c. The partner approval flow (Wave 3)
+
+```
+merchant → POST /api/growth/torob/shops {action:"authorize"}
+         → Torob POST /shop-generator/v1/connections/   (shop_domain, return_url)
+         → 302 to approve_url  (merchant logs into Torob and approves)
+         → Torob redirects the browser to /api/growth/torob/authorize/callback?connection_id=…&code=…
+         → Torob POST /shop-generator/v1/connections/{id}/confirm/ (code)
+         → Torob answers `active` → the shop is `authorized`
+```
+
+Four things about that sequence are decisions, not plumbing:
+
+1. **An accepted request is not an approved shop.** `pending_approval` means Torob has opened a
+   connection and the merchant has not decided; the row becomes `authorized` only when Torob's
+   `confirm` answers `active`. Torob's five connection statuses map onto the platform's four states in
+   `authorization-service.ts` and nowhere else.
+2. **The callback resolves the shop by the connection id it stored**, never by a shop id in the browser's
+   URL. Torob's document names the attack this prevents: "*a user of the platform could add another
+   shop's domain and get the real owner to approve it*". A connection id belonging to another business
+   resolves to nothing, even for a signed-in merchant.
+3. **The 15-minute window is stored, not inferred.** `authorization_requested_at` is written when the
+   request is made, the schema refuses a `pending_approval` row without it, and a code that arrives late
+   is refused before it is sent — the row then says `expired` rather than looking like a network fault.
+   Asking again reuses Torob's `connection_id`, replaces the `return_url` and restarts the clock.
+4. **A denial is a decision.** The merchant who says no in Torob's panel sends the row to `revoked` with
+   `authorization_error = 'denied'` and the channel off. Nothing is deleted: their Torob shop still
+   exists, and the screen offers a fresh request.
+
+The approval page is opened with `location.assign` rather than in a new tab, because Torob's code is tied
+to the browser session that started the request. The `code` is never written to an audit row, never
+echoed back in the redirect, and never stored.
+
 ## 7. What remains (Waves 3–6)
 
 1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
-   `/api/v1/torob/products/<shopId>` with `auth.ts` verifying Torob's EdDSA token and
-   `product-api.ts` owning the order of operations. What remains in this wave is the *other* two
-   deployables the issue names — the WordPress connector release and the CMS runtime release that
-   serve the same contract from the shop's own origin (needed for shops whose domain the platform
-   does not terminate, since the token's `aud` is that domain), and the Shop Generator partner path
-   that turns `pending_approval` into `authorized` with a `provider_shop_id` and its 15-minute
-   callback.
+   `/api/v1/torob/products/<shopId>` with `auth.ts` verifying Torob's EdDSA token, `product-api.ts`
+   owning the order of operations, and `§6c` closing the partner path from `pending_approval` to
+   `authorized`. What remains in this wave is the *other* two deployables the issue names — the
+   WordPress connector release and the CMS runtime release that serve the same contract from the
+   shop's own origin, which is needed wherever the platform does not terminate that shop's domain
+   (the token's `aud` is the domain, by design).
 2. **Variant catalogue.** The builder already accepts variants and emits one item each; the database
    source reads `menu_items` only, so retail `items`/`item_variant_attributes` products need their
    price source mapped before they can appear.
@@ -221,12 +263,17 @@ this website enroll", and every later surface reads it.
 - `src/lib/torob/contract.ts` — the Product API v3 request/response contract, and its strict parser.
 - `src/lib/torob/auth.ts` — EdDSA verification of `X-Torob-Token`, audience against the shop's domain.
 - `src/lib/torob/product-api.ts` — the public endpoint's order of operations and its response codes.
+- `src/lib/torob/shop-generator.ts` — Torob's Shop Generator API: request, confirm, read, disconnect.
+- `src/lib/torob/authorization-service.ts` — the four-state machine, the 15-minute window, the row.
+- `src/app/api/growth/torob/authorize/callback/route.ts` — where Torob returns the merchant's browser.
 - `src/app/api/v1/torob/products/[shopId]/route.ts` — the public route itself.
 - `src/app/api/growth/torob/shops/[id]/feed/route.ts` — «پیش‌نمایش فید».
 - `src/app/(app)/growth/torob/page.tsx` + `torob-section.tsx` — the screen.
 - `src/lib/torob/eligibility.test.ts` — the state matrix; `integration/torob-shops.integration.test.ts`
   — the lifecycle and the tenant boundary against real Postgres.
-- `src/lib/torob/contract.test.ts`, `feed.test.ts`, `auth.test.ts`, `product-api.test.ts` — the
+- `src/lib/torob/contract.test.ts`, `feed.test.ts`, `auth.test.ts`, `product-api.test.ts`,
+  `shop-generator.test.ts`, `authorization-service.test.ts` — the
   contract, the builder, the token and the endpoint's order of operations; `integration/torob-api.integration.test.ts`
   — all four request modes, 100 per page, the withdrawn product and the cross-shop audience refusal
-  against real Postgres.
+  against real Postgres; `integration/torob-authorization.integration.test.ts` — the approval flow,
+  the window, the denial and the schema's own invariants.
