@@ -290,12 +290,28 @@ BEGIN
     IF NEW.amount_rial     IS DISTINCT FROM OLD.amount_rial
        OR NEW.presentation IS DISTINCT FROM OLD.presentation
        OR NEW.settled_by   IS DISTINCT FROM OLD.settled_by
-       OR NEW.party_id     IS DISTINCT FROM OLD.party_id
        OR NEW.project_id   IS DISTINCT FROM OLD.project_id
        OR NEW.spent_on     IS DISTINCT FROM OLD.spent_on
        OR NEW.description  IS DISTINCT FROM OLD.description
        OR NEW.vendor_name  IS DISTINCT FROM OLD.vendor_name THEN
         RAISE EXCEPTION 'a posted reimbursable cost is frozen; reverse the entry and record a new one'
+            USING ERRCODE = '23514';
+    END IF;
+
+    -- The client is split out of the freeze above, born that way rather than patched
+    -- into it by 0279 the way 0274 and 0276 were. A posted cost's amount,
+    -- presentation and settlement decided which two accounts the entry landed in and
+    -- stay immutable always; *whose* claim it is, is a different statement, and
+    -- `mergeCustomers` has to be able to make it. Without the split, one posted cost
+    -- on a duplicate client record would refuse the merge outright — the bug 0279
+    -- exists to fix, and a new table has no business shipping with it.
+    --
+    -- Note that moving the client does not move the money: the entry keeps its own
+    -- accounts and its own amounts, and 1270's balance follows the surviving client's
+    -- file because the register row does. That is exactly what a merge means here.
+    IF NEW.party_id IS DISTINCT FROM OLD.party_id
+       AND current_setting('app.ledger_party_move', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION 'client attribution moves only through an audited party merge'
             USING ERRCODE = '23514';
     END IF;
 
