@@ -278,6 +278,8 @@ describe("the multi-brand client against a real database (issue #1128 §A)", () 
       proposals: 1,
       acceptedProposals: 1,
       contracts: 0,
+      campaigns: 0,
+      campaignsInFlight: 0,
     });
     expect(workOf(kimia)).toEqual({
       deals: 0,
@@ -285,6 +287,8 @@ describe("the multi-brand client against a real database (issue #1128 §A)", () 
       proposals: 1,
       acceptedProposals: 0,
       contracts: 1,
+      campaigns: 0,
+      campaignsInFlight: 0,
     });
     // The group itself carries nothing: the work belongs to the brands, and
     // rolling it up would double-count every figure on the card.
@@ -294,30 +298,40 @@ describe("the multi-brand client against a real database (issue #1128 §A)", () 
       proposals: 0,
       acceptedProposals: 0,
       contracts: 0,
+      campaigns: 0,
+      campaignsInFlight: 0,
     });
   });
 
-  it("counts no campaigns, because a campaign has no client to be counted against", async () => {
-    const { businessId, group, food } = await agencyWithGroup();
-    const campaign = randomUUID();
-    await db.query(`INSERT INTO growth_campaigns (id, business_id, name) VALUES ($1,$2,$3)`, [
-      campaign,
+  it("counts campaigns per brand now that a register can answer, and not the one that cannot", async () => {
+    const { businessId, group, food, kimia } = await agencyWithGroup();
+    // #901's builder campaign: a retail cashback automation with no client. It must
+    // not be counted, and giving it one would have made a column mean two things in
+    // two trades — see 0278's header.
+    await db.query(`INSERT INTO growth_campaigns (business_id, name) VALUES ($1,$2)`, [
       businessId,
-      "کمپین بهاره",
+      "کمپین کش‌بک فروشگاه",
     ]);
+    // 0278's client campaign: two for one brand, one live and one only planned, and
+    // one for the other brand.
+    await db.query(
+      `INSERT INTO agency_client_campaigns
+         (business_id, campaign_number, party_id, title, status, start_date, end_date)
+       VALUES ($1,'CA-1',$2,'بهاره فود','running','2026-03-01','2026-06-30'),
+              ($1,'CA-2',$2,'آینده فود','planned',NULL,NULL),
+              ($1,'CA-3',$3,'بهاره کیمیا','running','2026-03-01','2026-06-30')`,
+      [businessId, food, kimia],
+    );
 
     const structure = await service.organizationStructureFor(businessId, group);
-    const work = structure!.members.find((m) => m.partyId === food)!.work;
-    // Not a zero in a `campaigns` field: a card reading «۰ کمپین» for every brand
-    // states that no brand has campaigns, which is not what the data says. §A's
-    // "concurrent campaigns" waits on §C giving `growth_campaigns` a client.
-    expect(Object.keys(work).sort()).toEqual([
-      "acceptedProposals",
-      "briefs",
-      "contracts",
-      "deals",
-      "proposals",
-    ]);
+    const workOf = (id: string) => structure!.members.find((m) => m.partyId === id)!.work;
+    // Wave 8 refused to render a campaign count because nothing could answer it.
+    // The refusal is lifted by a register that can, not by relaxing the standard.
+    expect(workOf(food).campaigns).toBe(2);
+    expect(workOf(food).campaignsInFlight).toBe(1);
+    expect(workOf(kimia).campaigns).toBe(1);
+    expect(workOf(kimia).campaignsInFlight).toBe(1);
+    expect(workOf(group).campaigns).toBe(0);
   });
 
   it("says there is no structure for a party that is only a contact", async () => {
