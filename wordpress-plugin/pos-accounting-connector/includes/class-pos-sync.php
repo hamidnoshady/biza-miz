@@ -1439,6 +1439,43 @@ class POS_Connector_Sync {
 	}
 
 	/**
+	 * `wc_get_order_statuses()` as `[{ slug, label }]`, with WooCommerce's `wc-`
+	 * prefix stripped.
+	 *
+	 * This is the only truthful source of a status's display name: the
+	 * dashboard cannot guess one from a slug, and a custom status registered by
+	 * another plugin has no name anywhere else. Guarded by `function_exists`
+	 * because the plugin also loads on a site where WooCommerce is missing or
+	 * being updated — there the registry is simply empty and the dashboard falls
+	 * back to its canonical labels plus a clearly marked raw slug.
+	 */
+	private static function order_status_registry() {
+		if ( ! function_exists( 'wc_get_order_statuses' ) ) {
+			return array();
+		}
+		$statuses = wc_get_order_statuses();
+		if ( ! is_array( $statuses ) ) {
+			return array();
+		}
+		$out = array();
+		foreach ( $statuses as $key => $label ) {
+			$slug = strtolower( trim( (string) preg_replace( '/^wc-/', '', (string) $key ) ) );
+			$label = trim( wp_strip_all_tags( (string) $label ) );
+			if ( '' === $slug || '' === $label || ! preg_match( '/^[a-z0-9][a-z0-9_-]{0,39}$/', $slug ) ) {
+				continue;
+			}
+			$out[] = array(
+				'slug'  => $slug,
+				'label' => mb_substr( $label, 0, 80 ),
+			);
+			if ( count( $out ) >= 60 ) {
+				break;
+			}
+		}
+		return $out;
+	}
+
+	/**
 	 * Introduce this site and take back the connection's current settings.
 	 *
 	 * The sync toggles live in the accounting dashboard, so this is how a
@@ -1449,6 +1486,11 @@ class POS_Connector_Sync {
 	private static function capabilities() {
 		return array(
 			'mediaTrash' => defined( 'MEDIA_TRASH' ) && MEDIA_TRASH && defined( 'EMPTY_TRASH_DAYS' ) && EMPTY_TRASH_DAYS > 0,
+			// Issue #1215: the store's own order-status registry, so the
+			// dashboard can show the name the owner gave a status («ارسال شد»)
+			// instead of a slug, and can offer every status this store accepts —
+			// including one it has not used on an order yet.
+			'orderStatuses' => self::order_status_registry(),
 			'eventTypes' => array(
 				'order.created',
 				'order.updated',

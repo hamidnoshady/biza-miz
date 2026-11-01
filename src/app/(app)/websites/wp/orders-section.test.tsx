@@ -54,6 +54,7 @@ function order(overrides: Record<string, unknown> = {}) {
     dateCreated: "2026-10-20T10:00:00Z",
     customer: "سارا احمدی",
     paymentMethod: "zarinpal",
+    paymentMethodTitle: "زرین‌پال",
     ingestStatus: "processed",
     ingestError: null,
     lineCount: 3,
@@ -94,6 +95,31 @@ describe("StoreOrdersSection", () => {
     expect(work.textContent).toContain("۲۰");
     // the card badge is the custom status, not «وضعیت نامشخص»
     expect(screen.queryByText("وضعیت نامشخص")).toBeNull();
+  });
+
+  it("shows the gateway's own payment name instead of its code (#1215 P1-3)", async () => {
+    respond([order({ paymentMethod: "cod", paymentMethodTitle: "پرداخت در محل" })]);
+    render(<StoreOrdersSection connectionId="c1" busy={false} call={call as never} />);
+    await screen.findByText("#1001");
+    expect(screen.getByText(/پرداخت در محل/)).toBeTruthy();
+    expect(screen.queryByText(/cod/)).toBeNull();
+  });
+
+  it("uses the store's registered status name and offers a registered status it has not used yet", async () => {
+    respond();
+    const registry = new Map([
+      ["shipped", "ارسال شد"],
+      ["awaiting-pickup", "در انتظار تحویل"],
+    ]);
+    render(<StoreOrdersSection connectionId="c1" busy={false} call={call as never} statusRegistry={registry} />);
+    await screen.findByText("#1001");
+    // The card badge and the status chip are the store's own words, not the slug.
+    expect(screen.getAllByText("ارسال شد").length).toBeGreaterThan(0);
+    expect(screen.queryByText("shipped")).toBeNull();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "تغییر وضعیت" })[0]);
+    // A status the store registered but has never used is now choosable.
+    expect(screen.getByRole("group", { name: "تغییر وضعیت سفارش 1001" }).textContent).toContain("در انتظار تحویل");
   });
 
   it("debounces search into one request and keeps the field typeable", async () => {

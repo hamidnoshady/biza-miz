@@ -21,7 +21,8 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { formatPersianNumber, formatPersianNumericText, normalizeNumericText } from "@/lib/digits";
 import { formatDateTime } from "./format";
 import { ListPager } from "./list-pager";
-import { orderStatusChoices, orderStatusLabel, orderStatusTone, type OrderBadgeTone } from "./order-status";
+import { orderStatusChoices, orderStatusLabel, type OrderBadgeTone } from "./order-status";
+import { OrderStatusBadge } from "./order-status-badge";
 import { WooOrderDetailModal } from "./woo-order-detail-modal";
 
 const INGEST_STATUS_LABELS: Record<string, string> = {
@@ -37,6 +38,13 @@ const SEARCH_DEBOUNCE_MS = 350;
 
 export interface OrdersSectionProps {
   connectionId: string;
+  /**
+   * The store's registered status names (`wc_get_order_statuses()` as the
+   * plugin reported them), so a custom status reads the way its owner named it
+   * and the picker offers every status this store accepts — including one it
+   * has not used yet (#1215 / P1‑3). Empty for a plugin that predates it.
+   */
+  statusRegistry?: ReadonlyMap<string, string> | null;
   /** True while any request for this connection is in flight. */
   busy: boolean;
   /** The panel's request helper, so a failure shows in the panel's own banner. */
@@ -68,6 +76,8 @@ interface StoreOrder {
   dateCreated: string | null;
   customer: string;
   paymentMethod: string;
+  /** The gateway's own name; falls back to the bare code when the store sent none. */
+  paymentMethodTitle: string;
   ingestStatus: string;
   ingestError: string | null;
   lineCount: number;
@@ -142,10 +152,14 @@ function formatStoreMoney(amount: string | null | undefined, currency: string | 
   return label ? `${text} ${label}` : text;
 }
 
-function operationSummary(operation: StoreOrderOperation, currency: string): string {
+function operationSummary(
+  operation: StoreOrderOperation,
+  currency: string,
+  statusRegistry: ReadonlyMap<string, string> | null,
+): string {
   if (operation.type === "order_status") {
     const status = operation.targetStatus ?? "";
-    return `تغییر وضعیت به ${status ? orderStatusLabel(status) : "—"}`;
+    return `تغییر وضعیت به ${status ? orderStatusLabel(status, statusRegistry) : "—"}`;
   }
   return `برگشت وجه ${formatStoreMoney(operation.amount, currency)}`;
 }
@@ -182,7 +196,7 @@ function syncResultText(result: { queued?: boolean; imported?: number; duplicate
   ].join("، ");
 }
 
-export function StoreOrdersSection({ connectionId, busy, call }: OrdersSectionProps) {
+export function StoreOrdersSection({ connectionId, busy, call, statusRegistry = null }: OrdersSectionProps) {
   const [detailFor, setDetailFor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -272,7 +286,10 @@ export function StoreOrdersSection({ connectionId, busy, call }: OrdersSectionPr
     return () => clearTimeout(timer);
   }, [searchDraft, query]);
 
-  const statusChoices = orderStatusChoices(facets.statuses.map((entry) => entry.value));
+  const statusChoices = orderStatusChoices(
+    facets.statuses.map((entry) => entry.value),
+    statusRegistry,
+  );
   const hasOrderFilter = Boolean(query.trim() || statusFilter || view);
 
   function clearFilters() {
@@ -312,7 +329,7 @@ export function StoreOrdersSection({ connectionId, busy, call }: OrdersSectionPr
     );
     if (!result) return false;
     setStatusFor(null);
-    setNotice(`درخواست تغییر وضعیت سفارش #${order.number} به «${orderStatusLabel(status)}» در صف قرار گرفت.`);
+    setNotice(`درخواست تغییر وضعیت سفارش #${order.number} به «${orderStatusLabel(status, statusRegistry)}» در صف قرار گرفت.`);
     await load();
     return true;
   }
@@ -378,6 +395,7 @@ export function StoreOrdersSection({ connectionId, busy, call }: OrdersSectionPr
             remoteId={detailFor}
             onClose={() => setDetailFor(null)}
             statusChoices={statusChoices}
+            statusRegistry={statusRegistry}
             canChangeStatus={!busy}
             onChangeStatus={async (status) => {
               const target = detailOrder ?? { remoteId: detailFor, number: detailFor, status: "" };
@@ -431,7 +449,7 @@ export function StoreOrdersSection({ connectionId, busy, call }: OrdersSectionPr
                     setStatusFilter(statusFilter === entry.value ? "" : entry.value);
                   }}
                 >
-                  {orderStatusLabel(entry.value)} <span className="tabular-nums opacity-70">{formatPersianNumber(entry.count)}</span>
+                  {orderStatusLabel(entry.value, statusRegistry)} <span className="tabular-nums opacity-70">{formatPersianNumber(entry.count)}</span>
                 </FilterChip>
               ))}
             </FilterChipRow>
@@ -479,14 +497,16 @@ export function StoreOrdersSection({ connectionId, busy, call }: OrdersSectionPr
                       <span className="text-base font-bold text-foreground" dir="ltr">
                         #{order.number}
                       </span>
-                      <StatusBadge tone={orderStatusTone(order.status)}>{orderStatusLabel(order.status)}</StatusBadge>
+                      <OrderStatusBadge status={order.status} registry={statusRegistry} />
                       {orderHasQueuedWork(order) ? <StatusBadge tone="active">عملیات در صف</StatusBadge> : null}
                       {orderNeedsAttention(order) ? <StatusBadge tone="danger">نیازمند بررسی</StatusBadge> : null}
                     </div>
                     <p className="truncate text-sm font-medium text-foreground">{order.customer || "مشتری بدون نام"}</p>
                     <p className="text-xs text-muted-foreground">
                       {formatDateTime(order.dateCreated)}
-                      {order.paymentMethod ? ` • ${order.paymentMethod}` : ""}
+                      {order.paymentMethodTitle || order.paymentMethod
+                        ? ` • ${order.paymentMethodTitle || order.paymentMethod}`
+                        : ""}
                       {` • ${formatPersianNumber(order.lineCount)} قلم`}
                     </p>
                   </div>
@@ -547,7 +567,7 @@ export function StoreOrdersSection({ connectionId, busy, call }: OrdersSectionPr
                       {order.operations.map((operation, index) => (
                         <span key={`${operation.type}-${index}`} className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-lg bg-card/70 px-2 py-1">
                           <StatusBadge tone={operationTone(operation.status)}>{operationStatusLabel(operation.status)}</StatusBadge>
-                          <span>{operationSummary(operation, order.currency)}</span>
+                          <span>{operationSummary(operation, order.currency, statusRegistry)}</span>
                           {operation.error ? <span className="break-all text-destructive" dir="ltr">{operation.error}</span> : null}
                         </span>
                       ))}
@@ -572,7 +592,7 @@ export function StoreOrdersSection({ connectionId, busy, call }: OrdersSectionPr
                           aria-current={status === order.status ? "true" : undefined}
                           onClick={() => void changeStatus(order, status)}
                         >
-                          {orderStatusLabel(status)}
+                          {orderStatusLabel(status, statusRegistry)}
                         </Button>
                       ))}
                     </div>
