@@ -603,6 +603,21 @@ export type BackupAlert =
   | { level: "warning"; reason: "disabled" }
   | { level: "error"; reason: "local_failed" | "local_stale" | "cloud_failed" | "cloud_stale" };
 
+/**
+ * Issue #903 §3 — the alert thresholds a plan (or the fleet row) may set.
+ *
+ * Both are *safety* numbers, so neither can weaken the shipped behaviour: the
+ * stale window is never shortened below the cadence's own window (that would
+ * alert about healthy backups every cycle), and the failure streak is only ever
+ * a reason to wait for *more* evidence than the default one failure.
+ */
+export interface BackupAlertThresholds {
+  /** Absolute hours without a success before it is stale; null = derive from the cadence. */
+  staleAfterHours?: number | null;
+  /** Consecutive failures needed before a failed run alerts. Default 1. */
+  failureStreak?: number;
+}
+
 export interface BackupAlertInput {
   enabled: boolean;
   cloudEnabled: boolean;
@@ -612,6 +627,37 @@ export interface BackupAlertInput {
   localLastError: string | null;
   cloudLastSuccessAt: string | null;
   cloudLastError: string | null;
+  /** Per-plan thresholds (issue #903 §3). Absent = the pre-#903 behaviour. */
+  thresholds?: BackupAlertThresholds;
+  /**
+   * Trailing consecutive failures. Absent is treated as 1, which keeps the old
+   * rule "a failed latest run alerts immediately".
+   */
+  localFailureStreak?: number;
+  cloudFailureStreak?: number;
+}
+
+/** The window the alert uses: the cadence's own, widened (never narrowed) by a plan. */
+function alertWindowMs(intervalHours: number, thresholds?: BackupAlertThresholds): number {
+  const cadence = backupStaleAfterMs(Math.max(1, intervalHours));
+  const configured = thresholds?.staleAfterHours ?? null;
+  if (configured === null) return cadence;
+  const configuredMs = Math.max(0, configured) * 60 * 60 * 1000;
+  return Math.max(cadence, configuredMs);
+}
+
+function staleBeyond(lastSuccessAt: string | null, windowMs: number, now: Date): boolean {
+  if (!lastSuccessAt) return true;
+  const t = new Date(lastSuccessAt).getTime();
+  if (Number.isNaN(t)) return true;
+  return now.getTime() - t > windowMs;
+}
+
+function failedEnough(streak: number | undefined, required: number | undefined): boolean {
+  // One failure is enough unless a threshold says otherwise; a threshold can
+  // only raise the bar, never lower it below one.
+  const need = Math.max(1, Math.trunc(required ?? 1));
+  return (streak ?? 1) >= need;
 }
 
 /**
@@ -619,16 +665,27 @@ export interface BackupAlertInput {
  * immediately (don't wait out the window — the failure already happened);
  * otherwise silence past the expected window alerts as stale. Cloud only
  * counts while cloud backup is enabled.
+ *
+ * Issue #903 §3 adds the two thresholds a plan may set: a stale window, and how
+ * many consecutive failures count as a failure rather than a retry. Both are
+ * clamped so a configured value can only make the alert *more* patient, never
+ * hide a stale backup.
  */
 export function computeBackupAlert(input: BackupAlertInput, now: Date = new Date()): BackupAlert {
   if (!input.enabled) return { level: "warning", reason: "disabled" };
-  if (input.localLastError !== null) return { level: "error", reason: "local_failed" };
-  if (isBackupStale(input.localLastSuccessAt, input.intervalHours, now)) {
+  const windowMs = alertWindowMs(input.intervalHours, input.thresholds);
+  const required = input.thresholds?.failureStreak;
+  if (input.localLastError !== null && failedEnough(input.localFailureStreak, required)) {
+    return { level: "error", reason: "local_failed" };
+  }
+  if (staleBeyond(input.localLastSuccessAt, windowMs, now)) {
     return { level: "error", reason: "local_stale" };
   }
   if (input.cloudEnabled) {
-    if (input.cloudLastError !== null) return { level: "error", reason: "cloud_failed" };
-    if (isBackupStale(input.cloudLastSuccessAt, input.intervalHours, now)) {
+    if (input.cloudLastError !== null && failedEnough(input.cloudFailureStreak, required)) {
+      return { level: "error", reason: "cloud_failed" };
+    }
+    if (staleBeyond(input.cloudLastSuccessAt, windowMs, now)) {
       return { level: "error", reason: "cloud_stale" };
     }
   }

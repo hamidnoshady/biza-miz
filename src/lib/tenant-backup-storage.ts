@@ -30,7 +30,19 @@ import path from "node:path";
 import { query, withoutTenantScope } from "./db";
 import { getMasterKey } from "./master-key";
 import { logicalSnapshotScopeTag } from "./backup-policy";
+import { backupStaleAfterMs } from "./backup";
 import { readCachedPolicy, writeCachedPolicy } from "./tenant-backup-policy-cache";
+import {
+  MAX_FAILURE_STREAK,
+  MAX_RPO_HOURS,
+  MAX_STALE_HOURS,
+  MAX_DRILL_INTERVAL_HOURS,
+  MIN_DRILL_INTERVAL_HOURS,
+  layerPlanPolicy,
+  layerPlanThresholds,
+  readBackupPlanPolicy,
+  type BackupPlanPolicyValues,
+} from "./tenant-backup-plan-policy";
 import { sha256Hex, signS3Request, type S3Config } from "./s3-lite";
 import type { DeploymentProfile } from "./deployment-mode";
 import type { DeploymentRole } from "./deployment-role";
@@ -58,6 +70,11 @@ export interface TenantBackupServiceConfig {
   uploadChunkBytes: number;
   maxParallelUploads: number;
   protectedRecoveryCopies: number;
+  /** Issue #903 §3 — the fleet's alert and disaster-recovery thresholds. */
+  alertStaleHours: number | null;
+  alertFailureStreak: number;
+  drillIntervalHours: number;
+  drRpoHours: number | null;
   lastCheckedAt: string | null;
   lastCheckOk: boolean | null;
   lastErrorCode: string | null;
@@ -81,6 +98,10 @@ interface ServiceRow extends Record<string, unknown> {
   upload_chunk_bytes: number;
   max_parallel_uploads: number;
   protected_recovery_copies: number;
+  alert_stale_hours: number | null;
+  alert_failure_streak: number;
+  drill_interval_hours: number;
+  dr_rpo_hours: number | null;
   last_checked_at: Date | null;
   last_check_ok: boolean | null;
   last_error_code: string | null;
@@ -135,6 +156,7 @@ async function readRow(): Promise<ServiceRow> {
               default_interval_hours, default_retention_days, max_retention_days,
               cloud_keep_count, max_artifact_bytes, upload_chunk_bytes,
               max_parallel_uploads, protected_recovery_copies,
+              alert_stale_hours, alert_failure_streak, drill_interval_hours, dr_rpo_hours,
               last_checked_at, last_check_ok, last_error_code, updated_at
          FROM platform_tenant_backup_service WHERE id = true`,
     );
@@ -148,6 +170,7 @@ async function readRow(): Promise<ServiceRow> {
       default_retention_days: 30, max_retention_days: 365, cloud_keep_count: 30,
       max_artifact_bytes: "5368709120", upload_chunk_bytes: 8388608,
       max_parallel_uploads: 2, protected_recovery_copies: 1,
+      alert_stale_hours: null, alert_failure_streak: 1, drill_interval_hours: 24, dr_rpo_hours: null,
       last_checked_at: null, last_check_ok: null, last_error_code: null, updated_at: new Date(0),
     };
   });
@@ -188,6 +211,10 @@ export async function readTenantBackupService(): Promise<TenantBackupServiceConf
     uploadChunkBytes: row.upload_chunk_bytes,
     maxParallelUploads: row.max_parallel_uploads,
     protectedRecoveryCopies: row.protected_recovery_copies,
+    alertStaleHours: row.alert_stale_hours,
+    alertFailureStreak: row.alert_failure_streak,
+    drillIntervalHours: row.drill_interval_hours,
+    drRpoHours: row.dr_rpo_hours,
     lastCheckedAt: row.last_checked_at ? row.last_checked_at.toISOString() : null,
     lastCheckOk: row.last_check_ok,
     lastErrorCode: row.last_error_code,
@@ -220,6 +247,10 @@ export function serviceConfigView(config: TenantBackupServiceConfig) {
     uploadChunkBytes: config.uploadChunkBytes,
     maxParallelUploads: config.maxParallelUploads,
     protectedRecoveryCopies: config.protectedRecoveryCopies,
+    alertStaleHours: config.alertStaleHours,
+    alertFailureStreak: config.alertFailureStreak,
+    drillIntervalHours: config.drillIntervalHours,
+    drRpoHours: config.drRpoHours,
     lastCheckedAt: config.lastCheckedAt,
     lastCheckOk: config.lastCheckOk,
     lastErrorCode: config.lastErrorCode,
@@ -395,6 +426,20 @@ export interface TenantBackupPolicy {
    * (issue #903 §3, "background job concurrency").
    */
   maxParallelUploads: number;
+  /**
+   * Issue #903 §3 — the plan this business is on and the alert/DR thresholds in
+   * force. The thresholds are already layered (fleet → plan) and clamped, so a
+   * caller never has to remember which direction "tighter" points.
+   */
+  planKey: string | null;
+  /** Hours without a success before the Owner alert says stale. */
+  alertStaleHours: number;
+  /** Consecutive failures before a failed run alerts. */
+  alertFailureStreak: number;
+  /** How often the scheduled recovery drill re-proves restorability. */
+  drillIntervalHours: number;
+  /** Recovery-point objective in hours, or null when this fleet promises none. */
+  drRpoHours: number | null;
 }
 
 /** What a device without a reachable fleet row protects itself with. */
@@ -409,10 +454,22 @@ export const SAFE_TENANT_BACKUP_POLICY: TenantBackupPolicy = {
   override: false,
   requireRestoreApproval: false,
   maxParallelUploads: 2,
+  planKey: null,
+  // The pre-#903 alert: a nightly cadence plus its grace period, alert on the
+  // first failure, drill daily, promise no recovery point.
+  alertStaleHours: 30,
+  alertFailureStreak: 1,
+  drillIntervalHours: 24,
+  drRpoHours: null,
 };
 
 /** The allowed cadences, mirrored from the migration's CHECK constraint. */
 const SCHEDULE_HOURS = [1, 2, 3, 4, 6, 8, 12, 24] as const;
+
+/** The stale window a cadence implies, in hours — `backup.ts` owns the grace rule. */
+function backupStaleHoursFor(intervalHours: number): number {
+  return backupStaleAfterMs(intervalHours) / 3_600_000;
+}
 
 function scheduleHours(value: number): number {
   if ((SCHEDULE_HOURS as readonly number[]).includes(value)) return value;
@@ -460,16 +517,36 @@ export async function readBusinessPolicyOverride(
   }
 }
 
+/** The plan a business is on, for the policy layering. `null` when unknown. */
+async function readBusinessPlan(businessId: string): Promise<string | null> {
+  try {
+    return await withoutTenantScope("tenant-backup-business-policy", async () => {
+      const { rows } = await query<{ plan: string | null }>(`SELECT plan::text AS plan FROM businesses WHERE id = $1`, [
+        businessId,
+      ]);
+      return rows[0]?.plan ?? null;
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Resolve the policy in force for a business: fleet defaults, then that
- * business's override, clamped to the fleet's own ceilings.
+ * Resolve the policy in force for a business: **fleet defaults, then that
+ * business's plan, then that business's own override**, each clamped to the
+ * envelope above it.
  *
- * Clamping is the point. An override is an operator decision *inside* the
- * platform's envelope — retention cannot outlive `maxRetentionDays`, the keep
- * count cannot exceed the fleet's, and the cadence must be one the scheduler can
- * express. A value that would breach the envelope is clamped rather than
- * rejected, because refusing the whole override would leave the business on the
- * old policy without saying why.
+ * Clamping is the point, and it is why this is one function rather than three
+ * readers. A *plan* is a sales tier and may only tighten (see
+ * `tenant-backup-plan-policy.ts` for the per-field direction); an *override* is
+ * an operator decision inside the platform's envelope — retention cannot outlive
+ * `maxRetentionDays`, the keep count cannot exceed the fleet's, and the cadence
+ * must be one the scheduler can express. A value that would breach the envelope
+ * is clamped rather than rejected, because refusing the whole layer would leave
+ * the business on the old policy without saying why.
+ *
+ * Called with no business id it answers the *fleet* row alone, which is what the
+ * console shows as the envelope every plan and override lives in.
  */
 export async function resolveTenantBackupPolicy(businessId?: string): Promise<TenantBackupPolicy> {
   let base: TenantBackupPolicy;
@@ -486,6 +563,15 @@ export async function resolveTenantBackupPolicy(businessId?: string): Promise<Te
       override: false,
       requireRestoreApproval: false,
       maxParallelUploads: Math.min(Math.max(1, config.maxParallelUploads), 16),
+      planKey: null,
+      alertStaleHours:
+        config.alertStaleHours ?? backupStaleHoursFor(scheduleHours(config.defaultIntervalHours)),
+      alertFailureStreak: Math.max(1, Math.min(config.alertFailureStreak, MAX_FAILURE_STREAK)),
+      drillIntervalHours: Math.max(
+        MIN_DRILL_INTERVAL_HOURS,
+        Math.min(config.drillIntervalHours, MAX_DRILL_INTERVAL_HOURS),
+      ),
+      drRpoHours: config.drRpoHours,
     };
   } catch {
     // The fleet row is unreachable. On a device that has seen one before, that
@@ -495,6 +581,55 @@ export async function resolveTenantBackupPolicy(businessId?: string): Promise<Te
     return cached ? { ...cached } : { ...SAFE_TENANT_BACKUP_POLICY };
   }
   if (!businessId) return base;
+
+  // ---- the plan layer -------------------------------------------------------
+  // A plan is layered before the per-business override, so an override still
+  // wins over the tier the business happens to be sold on.
+  const planKey = await readBusinessPlan(businessId);
+  const plan: BackupPlanPolicyValues | null = planKey ? await readBackupPlanPolicy(planKey) : null;
+  const layered = layerPlanPolicy(
+    {
+      intervalHours: base.intervalHours,
+      retentionDays: base.retentionDays,
+      maxRetentionDays: base.maxRetentionDays,
+      keepCount: base.keepCount,
+      protectedCopies: base.protectedCopies,
+      maxArtifactBytes: 0,
+      alertStaleHours: base.alertStaleHours,
+      alertFailureStreak: base.alertFailureStreak,
+      drillIntervalHours: base.drillIntervalHours,
+      drRpoHours: base.drRpoHours,
+    },
+    plan,
+  );
+  const thresholds = layerPlanThresholds(
+    {
+      intervalHours: base.intervalHours,
+      retentionDays: base.retentionDays,
+      maxRetentionDays: base.maxRetentionDays,
+      keepCount: base.keepCount,
+      protectedCopies: base.protectedCopies,
+      maxArtifactBytes: 0,
+      alertStaleHours: base.alertStaleHours,
+      alertFailureStreak: base.alertFailureStreak,
+      drillIntervalHours: base.drillIntervalHours,
+      drRpoHours: base.drRpoHours,
+    },
+    plan,
+    layered.intervalHours,
+  );
+  base = {
+    ...base,
+    intervalHours: layered.intervalHours,
+    retentionDays: layered.retentionDays,
+    keepCount: layered.keepCount,
+    protectedCopies: layered.protectedCopies,
+    planKey,
+    alertStaleHours: thresholds.staleAfterHours,
+    alertFailureStreak: thresholds.failureStreak,
+    drillIntervalHours: thresholds.drillIntervalHours,
+    drRpoHours: thresholds.rpoHours,
+  };
 
   const override = await readBusinessPolicyOverride(businessId);
   if (!override) {
@@ -509,10 +644,16 @@ export async function resolveTenantBackupPolicy(businessId?: string): Promise<Te
   const keepCount =
     override.keep_count !== null ? Math.min(Math.max(1, override.keep_count), base.keepCount) : base.keepCount;
 
+  // An override that changes the cadence changes the floor of the stale window
+  // with it: a business backed up hourly must not be called stale on a nightly
+  // window, and one pinned to a daily cadence must not be judged hourly.
+  const overrideInterval =
+    override.interval_hours !== null ? scheduleHours(override.interval_hours) : base.intervalHours;
+  const staleAfterOverride = Math.max(base.alertStaleHours, backupStaleHoursFor(overrideInterval));
+
   const effective: TenantBackupPolicy = {
     ...base,
-    intervalHours:
-      override.interval_hours !== null ? scheduleHours(override.interval_hours) : base.intervalHours,
+    intervalHours: overrideInterval,
     retentionDays,
     keepCount,
     protectedCopies:
@@ -520,6 +661,7 @@ export async function resolveTenantBackupPolicy(businessId?: string): Promise<Te
         ? Math.max(0, override.protected_recovery_copies)
         : base.protectedCopies,
     requireRestoreApproval: override.require_restore_approval === true,
+    alertStaleHours: staleAfterOverride,
     override: true,
   };
   // Reconcile: the platform answered, so the cache becomes the effective policy
@@ -590,6 +732,11 @@ export interface ServiceUpdateInput {
   uploadChunkBytes?: unknown;
   maxParallelUploads?: unknown;
   protectedRecoveryCopies?: unknown;
+  /** Issue #903 §3 — the fleet's alert and DR thresholds. */
+  alertStaleHours?: unknown;
+  alertFailureStreak?: unknown;
+  drillIntervalHours?: unknown;
+  drRpoHours?: unknown;
   updatedBy?: string | null;
 }
 
@@ -668,6 +815,40 @@ export async function updateTenantBackupService(input: ServiceUpdateInput): Prom
       ? current.protectedRecoveryCopies
       : boundedInt(input.protectedRecoveryCopies, 0, 10);
 
+  // Thresholds are safety numbers, so each is validated here rather than by the
+  // CHECK constraint alone: an out-of-range window must be a 400 with a name, not
+  // a 500 that leaves the operator unsure whether the fleet changed.
+  let alertStaleHours = current.alertStaleHours;
+  if (input.alertStaleHours !== undefined) {
+    if (input.alertStaleHours === null || input.alertStaleHours === "") {
+      alertStaleHours = null;
+    } else {
+      const parsed = boundedInt(input.alertStaleHours, 1, MAX_STALE_HOURS);
+      if (parsed === null) return { ok: false, error: "invalid_alert_stale_hours" };
+      alertStaleHours = parsed;
+    }
+  }
+  const alertFailureStreak =
+    input.alertFailureStreak === undefined
+      ? current.alertFailureStreak
+      : boundedInt(input.alertFailureStreak, 1, MAX_FAILURE_STREAK);
+  const drillIntervalHours =
+    input.drillIntervalHours === undefined
+      ? current.drillIntervalHours
+      : boundedInt(input.drillIntervalHours, MIN_DRILL_INTERVAL_HOURS, MAX_DRILL_INTERVAL_HOURS);
+  let drRpoHours = current.drRpoHours;
+  if (input.drRpoHours !== undefined) {
+    // Explicitly cleared: "this fleet promises no recovery point" is a decision
+    // an operator must be able to make, not a value they can only overwrite.
+    if (input.drRpoHours === null || input.drRpoHours === "") {
+      drRpoHours = null;
+    } else {
+      const parsed = boundedInt(input.drRpoHours, 1, MAX_RPO_HOURS);
+      if (parsed === null) return { ok: false, error: "invalid_dr_rpo_hours" };
+      drRpoHours = parsed;
+    }
+  }
+
   if (
     defaultRetentionDays === null ||
     maxRetentionDays === null ||
@@ -675,7 +856,9 @@ export async function updateTenantBackupService(input: ServiceUpdateInput): Prom
     maxArtifactBytes === null ||
     uploadChunkBytes === null ||
     maxParallelUploads === null ||
-    protectedRecoveryCopies === null
+    protectedRecoveryCopies === null ||
+    alertFailureStreak === null ||
+    drillIntervalHours === null
   ) {
     return { ok: false, error: "invalid_service_limit" };
   }
@@ -705,8 +888,10 @@ export async function updateTenantBackupService(input: ServiceUpdateInput): Prom
           access_key_sealed, secret_key_sealed, access_key_hint,
           default_interval_hours, default_retention_days, max_retention_days,
           cloud_keep_count, max_artifact_bytes, upload_chunk_bytes,
-          max_parallel_uploads, protected_recovery_copies, updated_by, updated_at)
-       VALUES (true,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
+          max_parallel_uploads, protected_recovery_copies,
+          alert_stale_hours, alert_failure_streak, drill_interval_hours, dr_rpo_hours,
+          updated_by, updated_at)
+       VALUES (true,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now())
        ON CONFLICT (id) DO UPDATE SET
          managed_cloud = EXCLUDED.managed_cloud,
          hybrid_enabled = EXCLUDED.hybrid_enabled,
@@ -725,6 +910,10 @@ export async function updateTenantBackupService(input: ServiceUpdateInput): Prom
          upload_chunk_bytes = EXCLUDED.upload_chunk_bytes,
          max_parallel_uploads = EXCLUDED.max_parallel_uploads,
          protected_recovery_copies = EXCLUDED.protected_recovery_copies,
+         alert_stale_hours = EXCLUDED.alert_stale_hours,
+         alert_failure_streak = EXCLUDED.alert_failure_streak,
+         drill_interval_hours = EXCLUDED.drill_interval_hours,
+         dr_rpo_hours = EXCLUDED.dr_rpo_hours,
          updated_by = EXCLUDED.updated_by,
          updated_at = now()`,
       [
@@ -745,6 +934,10 @@ export async function updateTenantBackupService(input: ServiceUpdateInput): Prom
         uploadChunkBytes,
         maxParallelUploads,
         protectedRecoveryCopies,
+        alertStaleHours,
+        alertFailureStreak,
+        drillIntervalHours,
+        drRpoHours,
         input.updatedBy ?? null,
       ],
     );

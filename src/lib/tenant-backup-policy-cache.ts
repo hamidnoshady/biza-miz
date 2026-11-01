@@ -53,6 +53,17 @@ interface CachedEntry {
   keepCount: number;
   protectedCopies: number;
   maxParallelUploads: number;
+  /**
+   * Issue #903 §3 thresholds. Optional, not a version bump: an entry written
+   * before they existed stays valid (a device that was offline across the
+   * upgrade must not lose the cadence it was honouring) and the reader derives
+   * the pre-#903 answer for the missing ones.
+   */
+  alertStaleHours?: number;
+  alertFailureStreak?: number;
+  drillIntervalHours?: number;
+  drRpoHours?: number | null;
+  planKey?: string | null;
 }
 
 interface CacheFile {
@@ -112,6 +123,11 @@ export async function readCachedPolicy(
   const retentionDays = validRange(entry.retentionDays, 1, 3650);
   if (intervalHours === null || retentionDays === null) return null;
 
+  // A cached entry from before the thresholds existed keeps its cadence and gets
+  // the pre-#903 alert back: the window the cadence implies, alert on the first
+  // failure, drill daily, promise no recovery point.
+  const derivedStaleHours = intervalHours + Math.max(1, intervalHours / 4);
+
   return {
     intervalHours,
     retentionDays,
@@ -126,6 +142,11 @@ export async function readCachedPolicy(
     source: "cached" satisfies TenantBackupPolicySource,
     override: false,
     requireRestoreApproval: false,
+    planKey: typeof entry.planKey === "string" && entry.planKey ? entry.planKey : null,
+    alertStaleHours: validRange(entry.alertStaleHours, 1, 8760) ?? derivedStaleHours,
+    alertFailureStreak: validRange(entry.alertFailureStreak, 1, 10) ?? 1,
+    drillIntervalHours: validRange(entry.drillIntervalHours, 1, 168) ?? 24,
+    drRpoHours: entry.drRpoHours === null ? null : validRange(entry.drRpoHours, 1, 720),
     cachedAt: entry.cachedAt,
   };
 }
@@ -148,6 +169,11 @@ export async function writeCachedPolicy(
     keepCount: policy.keepCount,
     protectedCopies: policy.protectedCopies,
     maxParallelUploads: policy.maxParallelUploads,
+    alertStaleHours: policy.alertStaleHours,
+    alertFailureStreak: policy.alertFailureStreak,
+    drillIntervalHours: policy.drillIntervalHours,
+    drRpoHours: policy.drRpoHours,
+    planKey: policy.planKey,
   };
 
   const keys = Object.keys(cache.entries);

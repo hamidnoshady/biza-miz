@@ -28,6 +28,43 @@ import {
 
 const BUSINESS = "11111111-1111-4111-8111-111111111111";
 
+/**
+ * Route the resolver's three reads by statement rather than by call order.
+ *
+ * Issue #903 §3 added the plan layer, so `resolveTenantBackupPolicy` now asks the
+ * fleet row, then the business's plan, then its override. Order-based mocks would
+ * silently feed the override row to the plan query — which is exactly the kind of
+ * fixture that makes a bug invisible — so each statement is matched explicitly.
+ */
+function routeQueries(input: {
+  fleet?: RowPatch;
+  plan?: string | null;
+  planPolicy?: Record<string, unknown> | null;
+  override?: Record<string, unknown> | null;
+  failFleet?: boolean;
+}) {
+  mocks.query.mockImplementation(async (sql: string) => {
+    if (sql.includes("FROM platform_tenant_backup_service")) {
+      if (input.failFleet) throw new Error("relation does not exist");
+      return { rows: [serviceRow(input.fleet ?? {})], rowCount: 1 };
+    }
+    if (sql.includes("SELECT plan::text")) {
+      return { rows: input.plan ? [{ plan: input.plan }] : [], rowCount: input.plan ? 1 : 0 };
+    }
+    if (sql.includes("FROM tenant_backup_plan_policy")) {
+      return {
+        rows: input.planPolicy ? [{ plan_key: input.plan ?? "pro", ...input.planPolicy }] : [],
+        rowCount: input.planPolicy ? 1 : 0,
+      };
+    }
+    if (sql.includes("FROM tenant_backup_business_policy")) {
+      return { rows: input.override ? [input.override] : [], rowCount: input.override ? 1 : 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+}
+
+
 interface RowPatch {
   managed_cloud?: boolean;
   hybrid_enabled?: boolean;
@@ -46,6 +83,10 @@ interface RowPatch {
   upload_chunk_bytes?: number;
   max_parallel_uploads?: number;
   protected_recovery_copies?: number;
+  alert_stale_hours?: number | null;
+  alert_failure_streak?: number;
+  drill_interval_hours?: number;
+  dr_rpo_hours?: number | null;
   last_checked_at?: Date | null;
   last_check_ok?: boolean | null;
   last_error_code?: string | null;
@@ -70,6 +111,10 @@ function serviceRow(patch: RowPatch = {}) {
     upload_chunk_bytes: 8388608,
     max_parallel_uploads: 2,
     protected_recovery_copies: 1,
+    alert_stale_hours: null,
+    alert_failure_streak: 1,
+    drill_interval_hours: 24,
+    dr_rpo_hours: null,
     last_checked_at: null,
     last_check_ok: null,
     last_error_code: null,
@@ -300,12 +345,23 @@ describe("resolveTenantBackupPolicy", () => {
   });
 });
 
+function overrideRow(patch: Record<string, unknown> = {}) {
+  return {
+    interval_hours: null,
+    retention_days: null,
+    keep_count: null,
+    protected_recovery_copies: null,
+    max_artifact_bytes: null,
+    require_restore_approval: false,
+    note: "",
+    updated_at: new Date(0),
+    ...patch,
+  };
+}
+
 describe("per-business policy override", () => {
   it("returns the fleet policy when the business has no override row", async () => {
-    // First call: the fleet singleton. Second: this business's override (absent).
-    mocks.query
-      .mockResolvedValueOnce({ rows: [serviceRow({ default_interval_hours: 12, default_retention_days: 45 })] })
-      .mockResolvedValueOnce({ rows: [] });
+    routeQueries({ fleet: { default_interval_hours: 12, default_retention_days: 45 } });
     await expect(resolveTenantBackupPolicy(BUSINESS)).resolves.toMatchObject({
       intervalHours: 12,
       retentionDays: 45,
@@ -314,22 +370,17 @@ describe("per-business policy override", () => {
   });
 
   it("applies the business's own numbers inside the fleet envelope", async () => {
-    mocks.query
-      .mockResolvedValueOnce({
-        rows: [serviceRow({ default_interval_hours: 24, default_retention_days: 30, max_retention_days: 365, cloud_keep_count: 30 })],
-      })
-      .mockResolvedValueOnce({
-        rows: [{
-          interval_hours: 6,
-          retention_days: 120,
-          keep_count: 12,
-          protected_recovery_copies: 2,
-          max_artifact_bytes: null,
-          require_restore_approval: true,
-          note: "legal retention",
-          updated_at: new Date(0),
-        }],
-      });
+    routeQueries({
+      fleet: { default_interval_hours: 24, default_retention_days: 30, max_retention_days: 365, cloud_keep_count: 30 },
+      override: overrideRow({
+        interval_hours: 6,
+        retention_days: 120,
+        keep_count: 12,
+        protected_recovery_copies: 2,
+        require_restore_approval: true,
+        note: "legal retention",
+      }),
+    });
     await expect(resolveTenantBackupPolicy(BUSINESS)).resolves.toMatchObject({
       intervalHours: 6,
       retentionDays: 120,
@@ -341,22 +392,10 @@ describe("per-business policy override", () => {
   });
 
   it("clamps an override that would escape the fleet ceiling", async () => {
-    mocks.query
-      .mockResolvedValueOnce({
-        rows: [serviceRow({ default_retention_days: 30, max_retention_days: 90, cloud_keep_count: 10 })],
-      })
-      .mockResolvedValueOnce({
-        rows: [{
-          interval_hours: null,
-          retention_days: 3650,
-          keep_count: 400,
-          protected_recovery_copies: null,
-          max_artifact_bytes: null,
-          require_restore_approval: false,
-          note: "",
-          updated_at: new Date(0),
-        }],
-      });
+    routeQueries({
+      fleet: { default_retention_days: 30, max_retention_days: 90, cloud_keep_count: 10 },
+      override: overrideRow({ retention_days: 3650, keep_count: 400 }),
+    });
     const policy = await resolveTenantBackupPolicy(BUSINESS);
     expect(policy.retentionDays).toBe(90);
     expect(policy.keepCount).toBe(10);
@@ -368,5 +407,62 @@ describe("per-business policy override", () => {
   it("answers null (inherit) when the override table is unavailable", async () => {
     mocks.query.mockRejectedValueOnce(new Error("relation does not exist"));
     await expect(readBusinessPolicyOverride(BUSINESS)).resolves.toBeNull();
+  });
+});
+
+describe("the plan layer (issue #903 §3)", () => {
+  it("takes the cadence from the business's plan, tighter than the fleet's", async () => {
+    routeQueries({
+      fleet: { default_interval_hours: 24, default_retention_days: 30 },
+      plan: "pro",
+      planPolicy: { interval_hours: 6, alert_stale_hours: 8 },
+    });
+    const policy = await resolveTenantBackupPolicy(BUSINESS);
+    expect(policy).toMatchObject({ planKey: "pro", intervalHours: 6, retentionDays: 30, override: false });
+    // The stale window follows the tighter cadence: the floor is 6h + grace, and
+    // the plan asked for 8h.
+    expect(policy.alertStaleHours).toBe(8);
+  });
+
+  it("does not let a plan slow the fleet down or outlive its retention ceiling", async () => {
+    routeQueries({
+      fleet: { default_interval_hours: 6, max_retention_days: 90 },
+      plan: "base",
+      planPolicy: { interval_hours: 24, retention_days: 3650 },
+    });
+    const policy = await resolveTenantBackupPolicy(BUSINESS);
+    expect(policy.intervalHours).toBe(6);
+    expect(policy.retentionDays).toBe(90);
+  });
+
+  it("lets a per-business override win over the plan, still inside the envelope", async () => {
+    routeQueries({
+      fleet: { default_interval_hours: 24 },
+      plan: "pro",
+      planPolicy: { interval_hours: 6, retention_days: 60 },
+      override: overrideRow({ interval_hours: 2, retention_days: 30 }),
+    });
+    const policy = await resolveTenantBackupPolicy(BUSINESS);
+    expect(policy).toMatchObject({ intervalHours: 2, retentionDays: 30, override: true, planKey: "pro" });
+  });
+
+  it("inherits everything when the business has no plan, and says so", async () => {
+    routeQueries({ fleet: { default_interval_hours: 12 } });
+    const policy = await resolveTenantBackupPolicy(BUSINESS);
+    expect(policy).toMatchObject({ planKey: null, intervalHours: 12, alertFailureStreak: 1 });
+    // With no threshold set anywhere, the window is the one the cadence implies:
+    // 12h + its 3h grace.
+    expect(policy.alertStaleHours).toBe(15);
+  });
+
+  it("reports the fleet's thresholds, and the defaults it falls back to", async () => {
+    routeQueries({
+      fleet: { alert_failure_streak: 3, drill_interval_hours: 48, dr_rpo_hours: 24 },
+    });
+    await expect(resolveTenantBackupPolicy()).resolves.toMatchObject({
+      alertFailureStreak: 3,
+      drillIntervalHours: 48,
+      drRpoHours: 24,
+    });
   });
 });

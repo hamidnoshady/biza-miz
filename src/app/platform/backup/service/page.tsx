@@ -21,7 +21,17 @@
  * from a global page.
  */
 import { TenantBackupServicePanel } from "./service-panel";
+import { PlanPolicyPanel } from "./plan-policy-panel";
 
 export default function PlatformTenantBackupServicePage() {
-  return <TenantBackupServicePanel />;
+  return (
+    <>
+      <TenantBackupServicePanel />
+      {/* Issue #903 §3 — the per-plan half of the policy, below the fleet row it
+          inherits from: the envelope first, then the tiers inside it. */}
+      <div className="mx-auto max-w-4xl px-6 pb-8">
+        <PlanPolicyPanel />
+      </div>
+    </>
+  );
 }

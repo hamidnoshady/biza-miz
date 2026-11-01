@@ -8,11 +8,13 @@
  *
  * Three properties matter, and each is a decision:
  *
- *  1. **A drill per business per day, not per tick.** The scheduler calls this
+ *  1. **A drill per business per cadence, not per tick.** The scheduler calls this
  *     every hour; the idempotency check reads `tenant_backup_drills` for the last
- *     run and skips a business that already has one inside `DRILL_INTERVAL_MS`.
- *     That is cheaper and more honest than a distributed lock alone: a lock says
- *     "someone else is running it now", this says "it already ran today".
+ *     run and skips a business that already has one inside its plan's
+ *     `drill_interval_hours` (a day unless a plan asks for more frequent proof —
+ *     and the resolver never lets a plan ask for less). That is cheaper and more
+ *     honest than a distributed lock alone: a lock says "someone else is running
+ *     it now", this says "it already ran inside the window".
  *
  *  2. **The envelope step is expected to be skipped.** The platform never holds
  *     the tenant's recovery passphrase (that is the point of §4's custody split),
@@ -35,8 +37,14 @@ import { notificationDedupeKey } from "./notifications";
 import { deploymentRole } from "./deployment-role";
 import { readDeploymentProfile } from "./deployment-mode";
 import { DRILL_STEPS, runDrill, type DrillReport, type DrillStep } from "./tenant-backup-drill";
+import { drillDue, readEffectiveBackupThresholds } from "./tenant-backup-plan-policy";
 
-/** Once a day per business. A drill is evidence, not a monitoring loop. */
+/**
+ * The default cadence: once a day per business. A drill is evidence, not a
+ * monitoring loop. Issue #903 §3 lets a plan ask for it more often
+ * (`drill_interval_hours`) — never less, because the resolver clamps — and this
+ * value is what a business with no plan row keeps getting.
+ */
 export const DRILL_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -181,7 +189,12 @@ export async function runScheduledBackupDrills(now: Date = new Date()): Promise<
 
   for (const candidate of candidates) {
     const previous = await lastDrill(candidate.businessId).catch(() => null);
-    if (previous && now.getTime() - previous.finished_at.getTime() < DRILL_INTERVAL_MS) {
+    // The plan's cadence, resolved per business and clamped so it can only be
+    // more frequent than the fleet's. An unreadable policy answers the default,
+    // which is why a missing migration cannot stop the drill job.
+    const thresholds = await readEffectiveBackupThresholds(candidate.businessId).catch(() => null);
+    const drillIntervalHours = thresholds?.drillIntervalHours ?? DRILL_INTERVAL_MS / 3_600_000;
+    if (!drillDue(now, previous?.finished_at ?? null, drillIntervalHours)) {
       outcome.skipped += 1;
       continue;
     }

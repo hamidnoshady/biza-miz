@@ -134,6 +134,55 @@ describe("runScheduledBackupDrills", () => {
     expect(outcome.skipped).toBe(0);
   });
 
+  /**
+   * Issue #903 §3 — the plan's `drill_interval_hours`. A tier may buy *more*
+   * frequent proof; the schedule is per business, and a plan cannot make the
+   * proof rarer than the fleet allows (the resolver clamps before it gets here).
+   */
+  it("honours a plan's shorter drill cadence", async () => {
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("SELECT DISTINCT business_id")) {
+        return { rows: [{ business_id: "business-a" }], rowCount: 1 };
+      }
+      if (sql.includes("FROM tenant_backup_drills")) {
+        // Two hours ago: inside the default day, outside a two-hour tier.
+        return {
+          rows: [{ finished_at: new Date(now.getTime() - 2 * 3_600_000), ok: true }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("FROM platform_tenant_backup_service")) {
+        return {
+          rows: [{ plan_key: "pro", fleet_drill: 24, plan_drill: 2, fleet_streak: 1, fleet_stale: null, fleet_rpo: null }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    const outcome = await runScheduledBackupDrills(now);
+    expect(outcome.drilled).toBe(1);
+    expect(outcome.skipped).toBe(0);
+  });
+
+  it("keeps the daily cadence when the policy row cannot be read", async () => {
+    mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("SELECT DISTINCT business_id")) {
+        return { rows: [{ business_id: "business-a" }], rowCount: 1 };
+      }
+      if (sql.includes("FROM tenant_backup_drills")) {
+        return { rows: [{ finished_at: new Date(now.getTime() - 3_600_000), ok: true }], rowCount: 1 };
+      }
+      if (sql.includes("FROM platform_tenant_backup_service")) {
+        throw new Error("relation does not exist");
+      }
+      return { rows: [], rowCount: 1 };
+    });
+
+    const outcome = await runScheduledBackupDrills(now);
+    expect(outcome).toMatchObject({ drilled: 0, skipped: 1 });
+  });
+
   it("notifies the Owner when a backup that exists does not open", async () => {
     mocks.drill.mockResolvedValue(
       report({ ok: false, missing: ["payload_decrypted", "archive_parsed"] }),

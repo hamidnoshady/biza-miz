@@ -31,6 +31,7 @@ const BILLING = ddl(read("0267_tenant_backup_billing_jobs.sql"));
 const CUSTODY = ddl(read("0268_tenant_backup_custody_ops.sql"));
 const OVERRIDES = ddl(read("0269_tenant_backup_overrides.sql"));
 const DRILLS = ddl(read("0270_tenant_backup_drills.sql"));
+const PLANS = ddl(read("0280_tenant_backup_plan_policy.sql"));
 
 describe("migration 0265 — managed service and upload sessions", () => {
   it("adds a platform-only singleton service row", () => {
@@ -176,5 +177,53 @@ describe("migration 0270 — drill history", () => {
 
   it("indexes the question the console and the scheduler both ask", () => {
     expect(DRILLS).toMatch(/CREATE INDEX IF NOT EXISTS tenant_backup_drills_recent\s+ON tenant_backup_drills \(business_id, finished_at DESC\)/);
+  });
+});
+
+describe("migration 0280 — per-plan policy and the alert/DR thresholds", () => {
+  it("adds the four fleet thresholds additively, with the pre-#903 alert as the default", () => {
+    expect(PLANS).toMatch(/ADD COLUMN IF NOT EXISTS alert_stale_hours integer/);
+    // 1 = alert on the first failure, which is exactly what the dashboard did
+    // before this migration; anything else would silently change every fleet.
+    expect(PLANS).toMatch(/alert_failure_streak integer NOT NULL DEFAULT 1/);
+    expect(PLANS).toMatch(/drill_interval_hours integer NOT NULL DEFAULT 24/);
+    expect(PLANS).toMatch(/dr_rpo_hours integer/);
+    expect(PLANS).toMatch(/CHECK \(alert_failure_streak BETWEEN 1 AND 10\)/);
+    expect(PLANS).toMatch(/CHECK \(drill_interval_hours BETWEEN 1 AND 168\)/);
+  });
+
+  it("keeps a plan's unset field NULL, so 'inherit' is distinguishable from zero", () => {
+    expect(PLANS).toMatch(/CREATE TABLE IF NOT EXISTS tenant_backup_plan_policy/);
+    expect(PLANS).toMatch(/plan_key\s+text PRIMARY KEY REFERENCES billing_plans\(key\) ON DELETE CASCADE/);
+    for (const column of [
+      "interval_hours",
+      "retention_days",
+      "cloud_keep_count",
+      "protected_recovery_copies",
+      "max_artifact_bytes",
+      "alert_stale_hours",
+      "alert_failure_streak",
+      "drill_interval_hours",
+      "dr_rpo_hours",
+    ]) {
+      expect(PLANS).toMatch(new RegExp(`${column}\\s+\\w+\\s+(?:bigint\\s+)?CHECK \\(${column} IS NULL`));
+    }
+  });
+
+  it("is platform-only, so a business is subject to its plan and never a reader of it", () => {
+    expect(PLANS).toMatch(/ALTER TABLE tenant_backup_plan_policy ENABLE ROW LEVEL SECURITY/);
+    expect(PLANS).toMatch(/ALTER TABLE tenant_backup_plan_policy FORCE ROW LEVEL SECURITY/);
+    expect(PLANS).toMatch(/CREATE POLICY platform_only ON tenant_backup_plan_policy FOR ALL\s+USING \(app_rls_bypass\(\)\)\s+WITH CHECK \(app_rls_bypass\(\)\)/);
+    // No tenant clause at all: there is nothing to widen into.
+    expect(PLANS).not.toContain("app_current_business()");
+  });
+
+  it("is additive: no drops, no rewrites, no deletes", () => {
+    for (const sql of [PLANS]) {
+      expect(sql).not.toMatch(/DROP TABLE/i);
+      expect(sql).not.toMatch(/DROP COLUMN/i);
+      expect(sql).not.toMatch(/TRUNCATE/i);
+      expect(sql).not.toMatch(/DELETE FROM/i);
+    }
   });
 });
