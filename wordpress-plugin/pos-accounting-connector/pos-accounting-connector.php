@@ -198,9 +198,12 @@ function pos_connector_uses_system_cron() {
 /**
  * The crontab line to recommend, as a list so callers can print it line by line.
  *
- * ONE line: `cron event run --due-now` runs every due event, the five-minute
+ * ONE line: `cron event run --due-now` runs every due event, the one-minute
  * fast lane included, so the second line the docs used to suggest
  * (`pos-connector sync`) only made two processes race for the same jobs.
+ * The cadence in the line is derived from the fast lane's own interval
+ * (`POS_Connector_Health::system_cron_schedule()`), so the recommendation can
+ * never point at a slower tick than the lane it is meant to drive.
  * Where PHP's `open_basedir` blocks the `wp` binary — containers do this to the
  * CLI as well as to the web — `pos_connector_system_cron_open_basedir_example()`
  * is the invocation that works.

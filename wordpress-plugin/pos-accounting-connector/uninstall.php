@@ -34,5 +34,13 @@ wp_clear_scheduled_hook( 'pos_connector_resync_content' );
 // carry arguments, which wp_clear_scheduled_hook() above would not match.
 wp_unschedule_hook( 'pos_connector_manual_job' );
 wp_unschedule_hook( 'pos_connector_product_export_continue' );
+// Found by the guard in connector-reliability-policy.php: the customer export's
+// continuation was scheduled but never unscheduled, so deleting the plugin left
+// an event firing against an unregistered callback for the life of the site.
+wp_unschedule_hook( 'pos_connector_customer_export_continue' );
+// The scheduler probe's single event carries its correlation id for the same
+// reason — and a probe left behind would report on a site that no longer has the
+// plugin to report to.
+wp_unschedule_hook( 'pos_connector_cron_probe' );
 // Export progress and run locks live in options under these prefixes.
-$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s", $wpdb->esc_like( 'pos_connector_product_export_' ) . '%', $wpdb->esc_like( 'pos_connector_lock_' ) . '%' ) );
+$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s", $wpdb->esc_like( 'pos_connector_product_export_' ) . '%', $wpdb->esc_like( 'pos_connector_customer_export_' ) . '%', $wpdb->esc_like( 'pos_connector_lock_' ) . '%' ) );
