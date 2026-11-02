@@ -542,6 +542,16 @@ export async function withTenantTransaction<T>(
  *     way in. Every statement is written by the platform and read by the
  *     console; nothing here is ever returned by a tenant route.
  *
+ *   - **tenant-backup-plan-policy** (issue #903 §3) — the plan-shaped and
+ *     fleet-level halves of the backup policy: `tenant_backup_plan_policy`
+ *     keyed by `billing_plans.key`, plus the alert/DR threshold columns on
+ *     `platform_tenant_backup_service`. Both are platform-only under FORCE RLS
+ *     and carry no business id (a plan is a catalogue row), so the console and
+ *     the scheduler are the only readers. A business is *subject* to its plan's
+ *     policy and must never read or infer it — the same rule as the
+ *     per-business override — which is why this bypass never joins a tenant
+ *     table's data into a caller that could return it.
+ *
  *   - **kavenegar-credentials** (issue #902) — reading or writing ONE child
  *     API key by the account id the caller already established. The credential
  *     table is platform-only under FORCE RLS so that no tenant policy can
