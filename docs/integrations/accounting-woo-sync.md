@@ -130,6 +130,29 @@ wp pos-connector doctor --json   # for monitoring and support tickets
 wp pos-connector doctor --ping   # also a CONNECTION test — not a cron test
 ```
 
+### «تست کرون و مسیر همگام‌سازی»
+
+A connection test authenticates; it cannot make a scheduler run, because the
+plugin answers it from a web request like any other. The probe is the only
+control whose answer requires a **real cron invocation**, and it exists on both
+sides under one correlation id (32 lowercase hex):
+
+| Step | Who | What it proves |
+| --- | --- | --- |
+| `requested` | the app queues a `cron_probe` outbox row with an id it mints | the operator asked — nothing more |
+| `queued` | the plugin leased the row inside a cron run and scheduled a second event five seconds out | a scheduler ran *something*, but not yet the probe |
+| `executed` | that separate invocation ran it and recorded `executed_at` | the scheduler executes due events — the fact a ping cannot establish |
+| `reported` | one signed handshake carrying `cronProbe` reached Biza Miz | the pipeline works end to end, in both directions |
+| `expired` | ten minutes passed with `queued` and no `executed_at` | **the finding**: events are recorded and never run |
+| `failed` | it ran and the report did not leave (sanitized `report_failed:*`) | the scheduler works; the connection or the app is the problem |
+
+`expired` and `failed` are deliberately different answers, and `queued` is never
+painted as success. The same probe can be started from the WordPress screen
+(«تست کرون و مسیر همگام‌سازی»), where it needs no permission from the app to
+run; the panel's «تست کرون» button is offered only to a plugin that advertises
+the `cron_probe` job type, because a job an older plugin cannot lease would sit
+in the queue looking broken instead of looking old.
+
 `doctor` prints the scheduler state and why, whether each schedule exists and
 when it is due, how long the run lock has been held (an expired lease means a
 run died mid-flight), the age of the oldest unsent row, and the last cycle's

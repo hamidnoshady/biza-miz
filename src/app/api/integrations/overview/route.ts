@@ -4,6 +4,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { summarizePluginHealth } from "@/lib/integrations/plugin-health";
+import { cronProbeOffered } from "@/lib/integrations/plugin-cron-probe";
 
 /**
  * Wave 6 — the panel's monitoring summary: each connection plus the number of
@@ -37,6 +38,19 @@ export const GET = withTenantScope(async () => {
     [session.businessId],
   );
   const waitingByConnection = new Map(waiting.map((row) => [row.connection_id, row]));
+
+  // The newest probe this app asked for, per connection (#1206 P0). Without it
+  // a probe the plugin never picked up is indistinguishable from one it is
+  // running: the app's own record is what makes "requested, nothing back yet"
+  // sayable.
+  const { rows: probes } = await query<{ connection_id: string; remote_id: string; created_at: Date }>(
+    `SELECT DISTINCT ON (connection_id) connection_id, remote_id, created_at
+       FROM integration_outbox_events
+      WHERE business_id = $1 AND entity_type = 'cron_probe'
+      ORDER BY connection_id, created_at DESC`,
+    [session.businessId],
+  );
+  const probeByConnection = new Map(probes.map((row) => [row.connection_id, row]));
   const now = new Date();
 
   const summarize = (rows: { connection_id: string; status: string; count: string }[]) => {
@@ -65,6 +79,15 @@ export const GET = withTenantScope(async () => {
                 oldestAt: waitingByConnection.get(c.id)?.oldest ? new Date(waitingByConnection.get(c.id)!.oldest!).toISOString() : null,
               },
               now,
+              {
+                supported: cronProbeOffered({ link_mode: c.linkMode, capabilities: c.pluginCapabilities }),
+                request: probeByConnection.get(c.id)
+                  ? {
+                      probeId: probeByConnection.get(c.id)!.remote_id,
+                      requestedAt: new Date(probeByConnection.get(c.id)!.created_at).toISOString(),
+                    }
+                  : null,
+              },
             )
           : null,
     })),
