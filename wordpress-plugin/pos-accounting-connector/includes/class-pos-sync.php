@@ -1313,17 +1313,44 @@ class POS_Connector_Sync {
 			return;
 		}
 
+		// One line per invocation, whatever the outcome (#1206 P0): a run that
+		// dies before it can record a verdict is exactly the case the owner is
+		// trying to diagnose, and it must leave a trace too.
+		$invocation = POS_Connector_Invocation_Log::start( array( 'trigger' => is_array( $gate ) ? 'cron' : 'sync' ) );
+
 		$store = new POS_Connector_Option_Lock_Store();
 		$token = POS_Connector_Lock::acquire( 'run', POS_Connector_Health::RUN_LOCK_TTL_SECONDS, time(), $store );
 		if ( false === $token ) {
 			POS_Connector_Log::info( 'run', 'run_locked' );
-			return array( 'locked' => true, 'pushed' => 0, 'applied' => 0, 'verdict' => 'skipped', 'phases' => array() );
+			$locked = array( 'locked' => true, 'pushed' => 0, 'applied' => 0, 'verdict' => POS_Connector_Health::PHASE_SKIPPED, 'phases' => array() );
+			POS_Connector_Invocation_Log::finish( $invocation, $locked );
+			return $locked;
 		}
 		try {
-			return self::run_locked( $settings, is_array( $gate ) ? $gate : null );
+			$stats = self::run_locked( $settings, is_array( $gate ) ? $gate : null );
+		} catch ( \Throwable $error ) {
+			POS_Connector_Invocation_Log::finish(
+				$invocation,
+				array( 'verdict' => POS_Connector_Health::PHASE_FAILED, 'errors' => array( 'exception:' . $error->getMessage() ) )
+			);
+			throw $error;
 		} finally {
 			POS_Connector_Lock::release( 'run', $token, $store );
 		}
+
+		if ( null === $stats ) {
+			// The gate refused (token revoked, host unreachable): no phase ran,
+			// so no verdict was recorded — which is a failure of the pipeline and
+			// must not be logged as an idle tick.
+			POS_Connector_Invocation_Log::finish(
+				$invocation,
+				array( 'verdict' => POS_Connector_Health::PHASE_FAILED, 'errors' => array( 'gate_not_ok' ) )
+			);
+			return null;
+		}
+
+		POS_Connector_Invocation_Log::finish( $invocation, $stats );
+		return $stats;
 	}
 
 	/**

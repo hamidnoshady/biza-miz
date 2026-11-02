@@ -227,6 +227,15 @@ class POS_Connector_CLI {
 				'phases'  => array_values( (array) $settings['last_cycle_phases'] ),
 				'error'   => $settings['last_error'],
 			),
+			// #1206 P0: the last 20 invocations, newest first, with the exit code
+			// a monitoring crontab would have seen. `lastCycle` is one line of
+			// evidence; a store that fails four ticks in a row before it recovers
+			// leaves only this.
+			'invocations'   => array(
+				'recent'      => POS_Connector_Invocation_Log::recent(),
+				'failures24h' => POS_Connector_Invocation_Log::failures_since( DAY_IN_SECONDS ),
+				'limit'       => POS_Connector_Invocation_Log::RECENT_LIMIT,
+			),
 			'incident'      => array(
 				'open'        => ! empty( $settings['incident_open'] ),
 				'at'          => $settings['incident_at'],
@@ -319,6 +328,51 @@ class POS_Connector_CLI {
 		}
 		if ( '' !== $report['lastCycle']['error'] ) {
 			WP_CLI::log( '  ' . sprintf( 'خطا: %s', $report['lastCycle']['error'] ) );
+		}
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'اجراهای اخیر زمان‌بند', 'pos-accounting-connector' ) . '%n' ) );
+		if ( empty( $report['invocations']['recent'] ) ) {
+			WP_CLI::log( '  ' . __( 'هیچ اجرایی ثبت نشده است — این یعنی زمان‌بند هنوز این افزونه را صدا نزده، نه اینکه همه‌چیز خوب بوده.', 'pos-accounting-connector' ) );
+		} else {
+			foreach ( $report['invocations']['recent'] as $invocation ) {
+				$started   = isset( $invocation['startedAt'] ) ? get_date_from_gmt( $invocation['startedAt'], 'H:i:s' ) : '—';
+				$exit      = isset( $invocation['exitCode'] ) ? (int) $invocation['exitCode'] : null;
+				$runtime   = isset( $invocation['runtimeMs'] ) && null !== $invocation['runtimeMs']
+					? sprintf( '%.1f' . __( 'ثانیه', 'pos-accounting-connector' ), ( (int) $invocation['runtimeMs'] ) / 1000 )
+					: '—';
+				WP_CLI::log(
+					'  ' . sprintf(
+						'%s • %s • %s • %s %s • %s',
+						$started,
+						isset( $invocation['driver'] ) ? $invocation['driver'] : '?',
+						isset( $invocation['outcome'] ) ? $invocation['outcome'] : '?',
+						__( 'کد', 'pos-accounting-connector' ),
+						null === $exit ? '?' : (string) $exit,
+						$runtime
+					)
+				);
+				$detail = array();
+				if ( isset( $invocation['verdict'] ) && '' !== $invocation['verdict'] ) {
+					$detail[] = (string) $invocation['verdict'];
+				}
+				if ( ! empty( $invocation['phases'] ) && is_array( $invocation['phases'] ) ) {
+					$phases = array();
+					foreach ( $invocation['phases'] as $phase => $status ) {
+						$phases[] = $phase . '=' . $status;
+					}
+					$detail[] = implode( ' ', $phases );
+				}
+				if ( ! empty( $invocation['errors'] ) && is_array( $invocation['errors'] ) ) {
+					$detail[] = implode( ', ', array_map( 'strval', $invocation['errors'] ) );
+				}
+				if ( $detail ) {
+					WP_CLI::log( '      ' . implode( ' — ', $detail ) );
+				}
+			}
+			if ( (int) $report['invocations']['failures24h'] > 0 ) {
+				WP_CLI::log( '  ' . sprintf( __( '%d اجرای ناموفق در ۲۴ ساعت گذشته.', 'pos-accounting-connector' ), (int) $report['invocations']['failures24h'] ) );
+			}
 		}
 
 		WP_CLI::log( '' );

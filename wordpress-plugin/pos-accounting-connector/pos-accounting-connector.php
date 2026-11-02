@@ -171,6 +171,7 @@ define( 'POS_CONNECTOR_CRON_PROBE', 'pos_connector_cron_probe' );
 
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-log.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-health.php';
+require_once POS_CONNECTOR_PATH . 'includes/class-pos-invocation-log.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-client.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-queue.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-sync.php';
