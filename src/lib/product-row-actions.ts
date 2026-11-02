@@ -109,6 +109,58 @@ export function matchesWooFilter(linkState: ProductLinkState, duplicate: boolean
 }
 
 /**
+ * §B's remaining two filters — «Source and per-store filters when appropriate».
+ *
+ * Source is the integration that owns the row (`items` carries one mapping's
+ * provider, see `item-source.ts`); a row nothing owns is `local`. A store filter
+ * is only meaningful when more than one store is connected, which is why the
+ * screen renders it conditionally rather than as a one-option dropdown.
+ */
+export type ProductSourceFilter = "all" | "woocommerce" | "holoo" | "local";
+
+export const PRODUCT_SOURCE_FILTERS: readonly { value: ProductSourceFilter; label: string }[] = [
+  { value: "all", label: "همهٔ منابع" },
+  { value: "woocommerce", label: "ووکامرس" },
+  { value: "holoo", label: "هلو" },
+  { value: "local", label: "محلی (بدون منبع)" },
+];
+
+/** True when the row's owning integration matches the source filter. */
+export function matchesSourceFilter(
+  source: { provider: string } | null | undefined,
+  filter: ProductSourceFilter,
+): boolean {
+  if (filter === "all") return true;
+  if (filter === "local") return !source;
+  return source?.provider === filter;
+}
+
+/** The value the per-store filter uses for "no store chosen". */
+export const ALL_STORES = "all";
+
+/**
+ * True when the row is mapped to the chosen store. `ALL_STORES` matches every
+ * row — including rows no store knows, which is the store filter's `all` and not
+ * its "unlinked" state (the Woo filter already draws that line).
+ */
+export function matchesStoreFilter(
+  links: readonly Pick<ProductWooLink, "connectionId">[],
+  storeId: string,
+): boolean {
+  if (!storeId || storeId === ALL_STORES) return true;
+  return links.some((link) => link.connectionId === storeId);
+}
+
+/** The distinct stores in a link list, in the order the server returned them. */
+export function storesInLinks(
+  links: readonly Pick<ProductWooLink, "connectionId" | "storeName">[],
+): { id: string; name: string }[] {
+  const seen = new Map<string, string>();
+  for (const link of links) if (!seen.has(link.connectionId)) seen.set(link.connectionId, link.storeName);
+  return [...seen.entries()].map(([id, name]) => ({ id, name }));
+}
+
+/**
  * What the row's primary control is.
  * `manual_update` and `publish` are the two store actions; `review_duplicate`
  * is the pre-emptive one a probable duplicate gets instead of a publication.

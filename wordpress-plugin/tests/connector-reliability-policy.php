@@ -193,9 +193,132 @@ same( array( 'products', 'sync' ), POS_Connector_Health::queued_manual_jobs( $cr
 same( array(), POS_Connector_Health::queued_manual_jobs( false, 'pos_connector_manual_job' ), 'no cron array, no jobs' );
 
 // --- one crontab line ---------------------------------------------------------------
-same( '*/5 * * * * wp --path=/var/www/site cron event run --due-now > /dev/null 2>&1', POS_Connector_Health::system_cron_line( '/var/www/site/' ), 'the recommended line is the due-now runner' );
+same( '* * * * * wp --path=/var/www/site cron event run --due-now > /dev/null 2>&1', POS_Connector_Health::system_cron_line( '/var/www/site/' ), 'the recommended line is the due-now runner' );
+// The line used to ask for every five minutes while the fast lane runs every
+// sixty seconds, so the recommended setup could never satisfy the «delayed»
+// threshold (three missed fast intervals). The cadence is derived, not typed.
+same( '* * * * *', POS_Connector_Health::system_cron_schedule(), 'the recommended cadence is one tick a minute, the fast lane interval itself' );
+$schedule_minutes = '* * * * *' === POS_Connector_Health::system_cron_schedule()
+	? 1
+	: (int) trim( str_replace( array( '*/', ' ' ), '', POS_Connector_Health::system_cron_schedule() ) );
+check( $schedule_minutes * 60 <= POS_Connector_Health::FAST_INTERVAL_SECONDS, 'the recommended cron never ticks less often than the fast lane is scheduled' );
+check( false !== strpos( POS_Connector_Health::system_cron_line_open_basedir( '/var/www/site' ), '* * * * * php -d open_basedir= /usr/bin/wp' ), 'the open_basedir form keeps the same cadence' );
 check( false !== strpos( POS_Connector_Health::system_cron_line_open_basedir( '/var/www/site' ), 'php -d open_basedir= /usr/bin/wp' ), 'the open_basedir form is available' );
 $main = file_get_contents( dirname( __DIR__ ) . '/pos-accounting-connector/pos-accounting-connector.php' );
 check( false === strpos( $main, 'pos-connector sync > /dev/null' ), 'the second, overlapping crontab line is gone from the plugin' );
+
+// --- every hook we schedule is a hook we unschedule on uninstall ---------------
+//
+// Deactivating keeps the queue and the log on purpose; deleting the plugin is an
+// explicit "I am done", and a single event left behind fires against a callback
+// nothing registers any more, for the life of the site. The list of hooks is
+// read from the plugin's own definitions, so a hook added later cannot be
+// forgotten here.
+
+$plugin_dir = dirname( __DIR__ ) . '/pos-accounting-connector/';
+$sources    = array_merge( glob( $plugin_dir . 'includes/*.php' ), array( $plugin_dir . 'pos-accounting-connector.php' ) );
+$hooks      = array();
+foreach ( $sources as $file ) {
+	$source = file_get_contents( $file );
+	// Every hook the plugin defines a constant for is a hook it schedules.
+	preg_match_all( "/define\( '(POS_CONNECTOR_CRON_[A-Z_]+)', '([a-z_]+)'/", $source, $defined, PREG_SET_ORDER );
+	foreach ( $defined as $one ) {
+		$hooks[ $one[1] ] = $one[2];
+	}
+	// And a hook scheduled by a local variable is not a constant.
+	preg_match_all( '/\$hook\s*=\s*\'(pos_connector_[a-z_]+)\'/', $source, $assigned, PREG_SET_ORDER );
+	foreach ( $assigned as $one ) {
+		$hooks[ $one[1] ] = $one[1];
+	}
+}
+
+check( count( $hooks ) >= 8, 'the scan finds the plugin cron hooks (found ' . count( $hooks ) . ')' );
+$uninstall  = file_get_contents( $plugin_dir . 'uninstall.php' );
+$forgotten  = array();
+foreach ( $hooks as $constant => $hook ) {
+	if ( ! preg_match( "/wp_(?:clear_scheduled|unschedule)_hook\(\s*'" . preg_quote( $hook, '/' ) . "'/", $uninstall ) ) {
+		$forgotten[] = $hook;
+	}
+}
+same( array(), $forgotten, 'uninstall.php unschedules every hook the plugin schedules' );
+
+// One clean-up line per hook: a duplicated call is dead code, and this file has
+// been edited by hand more than once.
+$repeated = array();
+foreach ( $hooks as $constant => $hook ) {
+	if ( preg_match_all( "/wp_(?:clear_scheduled|unschedule)_hook\(\s*'" . preg_quote( $hook, '/' ) . "'/", $uninstall ) > 1 ) {
+		$repeated[] = $hook;
+	}
+}
+same( array(), $repeated, 'and no hook is unscheduled twice' );
+
+// The chunked exports keep progress in options; the clean-up matches each
+// prefix exactly once.
+$prefixes = array();
+foreach ( $sources as $file ) {
+	preg_match_all( '/\$prefix\s*=\s*\'(pos_connector_[a-z_]+)\'/', file_get_contents( $file ), $found, PREG_SET_ORDER );
+	foreach ( $found as $one ) {
+		$prefixes[ $one[1] ] = true;
+	}
+}
+check( count( $prefixes ) >= 2, 'the scan finds the export progress prefixes' );
+$uncovered = array();
+foreach ( array_keys( $prefixes ) as $prefix ) {
+	if ( 1 !== substr_count( $uninstall, "'" . $prefix . "'" ) ) {
+		$uncovered[] = $prefix;
+	}
+}
+same( array(), $uncovered, 'uninstall.php deletes each export progress prefix exactly once' );
+
+// --- option keys outside the settings array -------------------------------------
+//
+// Written by literal name or through a constant, read by name in uninstall.php
+// (which never loads the plugin). A key added later and not deleted here is a
+// row left in every shop's options table forever.
+$option_keys = array();
+foreach ( $sources as $file ) {
+	$source = file_get_contents( $file );
+	preg_match_all( "/(?:update|add|get|delete)_option\(\s*'(pos_connector_[a-z0-9_]+)'/", $source, $named, PREG_SET_ORDER );
+	foreach ( $named as $one ) {
+		$option_keys[ $one[1] ] = true;
+	}
+}
+// The settings array and the schema version are written through constants.
+preg_match_all( "/define\(\s*'(POS_CONNECTOR_(?:OPTION|DB_VERSION_OPTION))',\s*'(pos_connector_[a-z0-9_]+)'/", implode( "\n", array_map( 'file_get_contents', $sources ) ), $constants_named, PREG_SET_ORDER );
+foreach ( $constants_named as $one ) {
+	$option_keys[ $one[2] ] = true;
+}
+
+check( count( $option_keys ) >= 5, 'the scan finds the plugin option keys (found ' . count( $option_keys ) . ')' );
+$orphan_keys = array();
+foreach ( array_keys( $option_keys ) as $key ) {
+	if ( 1 !== substr_count( $uninstall, "'" . $key . "'" ) ) {
+		$orphan_keys[] = $key;
+	}
+}
+same( array(), $orphan_keys, 'uninstall.php deletes every option key the plugin writes, exactly once' );
+
+// --- PERF-01/PERF-02: nothing per-request that can be per-update ---------------
+//
+// `maybe_upgrade_db()` is hooked on `plugins_loaded`, i.e. every request, and it
+// used to run `dbDelta()` twice and a `SHOW TABLES` to answer a question whose
+// answer changes only on update. The guard is a schema-version read.
+$main_source = file_get_contents( $plugin_dir . 'pos-accounting-connector.php' );
+check( false !== strpos( $main_source, 'function pos_connector_db_version()' ), 'the schema version is one value, in one place' );
+check( 1 === preg_match( '/function pos_connector_maybe_upgrade_db\(\)\s*\{\s*\$installed = \(string\) get_option\( POS_CONNECTOR_DB_VERSION_OPTION/s', $main_source ), 'dbDelta is gated by a schema-version read before anything else' );
+check( false !== strpos( $main_source, 'update_option( POS_CONNECTOR_DB_VERSION_OPTION, pos_connector_db_version(), true )' ), 'and the version is stored autoloaded, so the gate costs no query' );
+check( false !== strpos( $main_source, 'POS_CONNECTOR_INSTALL_RETRY_SECONDS' ), 'a failed install is retried, but not on every request' );
+
+$queue_source = file_get_contents( $plugin_dir . 'includes/class-pos-queue.php' );
+check( 1 === preg_match( '/private static \$table_present = null;/', $queue_source ), 'the queue asks whether its table exists once per request' );
+check( 1 === substr_count( $queue_source, "SHOW TABLES LIKE" ), 'and keeps only one SHOW TABLES call in the class' );
+check( false !== strpos( $queue_source, 'KEY topic_remote_status (topic, remote_id, status)' ), 'the de-duplication read has an index of its own columns, in its own order' );
+check( false === strpos( $queue_source, 'UNIQUE KEY topic_remote_status' ), 'and it is not unique: a product legitimately has a sent row and a pending one' );
+check( false !== strpos( $queue_source, "WHERE topic = %s AND remote_id = %s AND status = 'pending'" ), 'the read the index serves is still the same read' );
+
+// `ensure_schedules()` on `init` is the other per-request question.
+check( false !== strpos( $main_source, 'function pos_connector_schedules_due_for_check()' ), 'the schedule check is throttled' );
+check( 1 === preg_match( '/function pos_connector_ensure_schedules\( \$force = false \)\s*\{\s*if \( ! \$force && ! pos_connector_schedules_due_for_check\(\) \)/s', $main_source ), 'and ensure_schedules consults the throttle first' );
+check( false !== strpos( $main_source, 'pos_connector_ensure_schedules( true );' ), 'activation forces it, so a fresh install is armed immediately' );
 
 echo $assertions . " reliability-policy assertions passed\n";

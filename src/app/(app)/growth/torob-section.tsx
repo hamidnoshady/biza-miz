@@ -33,6 +33,10 @@ import { toPersianDigits } from "@/lib/digits";
 import { cmsSectionHref, wpSectionHref } from "@/app/(app)/websites/website-routes";
 import type { TorobWebsiteKind, TorobWebsiteRow, TorobWebsiteState } from "@/lib/torob/eligibility";
 import type { TorobShopView } from "@/app/api/growth/torob/shops/route";
+import type { TorobV3Response } from "@/lib/torob/contract";
+import type { TorobFeedSkipReason } from "@/lib/torob/feed";
+import { TOROB_FEED_SKIP_COPY } from "@/lib/torob/feed";
+import { TOROB_PARTNER_FAILURE_COPY, type TorobPartnerFailure } from "@/lib/torob/shop-generator";
 
 /**
  * One row as the screen sees it: the eligibility view's shape, with the *API's*
@@ -125,6 +129,28 @@ function StateBadge({ state }: { state: TorobWebsiteState }) {
 
 type Shop = TorobShopView;
 
+/**
+ * What `POST …/feed` answers. `status: "built"` is all this wave can say: the
+ * platform assembled the feed. Sending it, Torob accepting it and Torob indexing
+ * it are three later facts, and the panel below never implies otherwise.
+ */
+interface FeedPreview {
+  status: "built" | "blocked";
+  builtAt: string;
+  blocked: { reason: string; message: string } | null;
+  summary: {
+    total: number;
+    pageCount: number;
+    inStock: number;
+    outOfStock: number;
+    skippedTotal: number;
+    skippedByReason: { reason: TorobFeedSkipReason; count: number; copy: string }[];
+  } | null;
+  page: TorobV3Response | null;
+  skipped: { productId: string; variantId: string | null; name: string; url: string | null; reason: TorobFeedSkipReason }[];
+  capabilities: { feed: boolean; sent: boolean; listing: boolean };
+}
+
 export function TorobSection({ canManage, canConfigure }: { canManage: boolean; canConfigure: boolean }) {
   const [data, setData] = useState<ShopsResponse | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -133,6 +159,15 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
   const [tokenFor, setTokenFor] = useState<string | null>(null);
   const [token, setToken] = useState("");
   const [actionError, setActionError] = useState("");
+  /** The shop whose feed was last built in this visit, and what came back. */
+  const [feedFor, setFeedFor] = useState<string | null>(null);
+  const [feed, setFeed] = useState<FeedPreview | null>(null);
+  /**
+   * What Torob's approval callback said. The browser arrives back on this screen
+   * with `?torob=<outcome>`; the parameter is read once and dropped from the URL so
+   * a refresh does not replay a message about an approval that is already spent.
+   */
+  const [outcome, setOutcome] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const { ok, data: body, status } = await api<Partial<ShopsResponse> & { error?: string }>(
@@ -144,6 +179,16 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
     }
     setData(body as ShopsResponse);
     setLoadError("");
+  }, []);
+
+  useEffect(() => {
+    const value = new URLSearchParams(window.location.search).get("torob");
+    if (value) {
+      setOutcome(value);
+      const url = new URL(window.location.href);
+      url.searchParams.delete("torob");
+      window.history.replaceState(null, "", url.toString());
+    }
   }, []);
 
   useEffect(() => {
@@ -167,6 +212,52 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
     await load();
   }
 
+  /**
+   * Ask Torob for a connection, then hand the merchant to Torob's approval page.
+   *
+   * The page is opened with `location.assign` rather than in a tab: the approval is
+   * tied to the browser session that started it (Torob's document is explicit), so
+   * a different tab could not carry the code back.
+   */
+  async function authorize(key: string, shopId: string) {
+    setBusy(`${key}:authorize`);
+    setActionError("");
+    const { ok, data: answer } = await api<{ approveUrl?: string | null; error?: string }>(
+      "/api/growth/torob/shops",
+      { method: "POST", body: JSON.stringify({ action: "authorize", shopId }) },
+    );
+    if (!ok) {
+      setBusy(null);
+      setActionError(partnerFailureCopy(answer.error) ?? "درخواست اتصال به ترب فرستاده نشد.");
+      return;
+    }
+    if (answer.approveUrl) {
+      window.location.assign(answer.approveUrl);
+      return;
+    }
+    // No approval page means Torob already had this shop connected; the reload
+    // shows the row as authorized, which is the truth we just learned.
+    setBusy(null);
+    await load();
+  }
+
+  async function buildFeed(key: string, shopId: string) {
+    setBusy(`${key}:feed`);
+    setActionError("");
+    setFeed(null);
+    const { ok, data: answer } = await api<FeedPreview & { error?: string }>(
+      `/api/growth/torob/shops/${shopId}/feed`,
+      { method: "POST" },
+    );
+    setBusy(null);
+    if (!ok) {
+      setActionError(errorMessageOrRaw(answer.error) ?? "ساخت فید ناموفق بود.");
+      return;
+    }
+    setFeedFor(key);
+    setFeed(answer);
+  }
+
   if (loadError) return <ErrorBox>{loadError}</ErrorBox>;
   if (!data) return <SectionCardSkeleton />;
 
@@ -185,6 +276,8 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
           می‌شود.
         </InfoBox>
       </SectionCard>
+
+      {outcome ? <AuthorizationOutcome outcome={outcome} /> : null}
 
       {websites.length === 0 ? (
         <SectionCard title="وب‌سایتی برای اتصال نیست">
@@ -236,6 +329,9 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                   </Link>
                 ) : null}
                 {shop ? <ShopLine shop={shop} /> : null}
+                {shop && shop.authorizationState === "authorized" ? (
+                  <ProductApiLine domain={row.domain} shopId={shop.id} enabled={shop.enabled} />
+                ) : null}
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -255,6 +351,19 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                       : row.state === "disconnected"
                         ? "اتصال دوباره"
                         : "اتصال به ترب"}
+                  </Button>
+                ) : null}
+
+                {canManage && shop && shop.authMode === "partner" && shop.authorizationState === "pending_approval" && shop.approveUrl ? (
+                  <Button disabled={busy !== null} onClick={() => window.location.assign(shop.approveUrl!)}>
+                    ادامهٔ تأیید در ترب
+                    <ExternalLinkIcon className="h-4 w-4" aria-hidden />
+                  </Button>
+                ) : null}
+
+                {canManage && shop && shop.authMode === "partner" && (shop.authorizationState === "not_authorized" || shop.authorizationState === "revoked") ? (
+                  <Button disabled={busy !== null} onClick={() => void authorize(key, shop.id)}>
+                    {working(key, "authorize") ? "در حال ارسال درخواست…" : "درخواست اتصال به ترب"}
                   </Button>
                 ) : null}
 
@@ -284,6 +393,16 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                   </Button>
                 ) : null}
 
+                {shop && shop.authorizationState === "authorized" ? (
+                  <Button
+                    variant="outline"
+                    disabled={busy !== null}
+                    onClick={() => void buildFeed(key, shop.id)}
+                  >
+                    {working(key, "feed") ? "در حال ساخت…" : "پیش‌نمایش فید"}
+                  </Button>
+                ) : null}
+
                 {canManage && shop && shop.authorizationState === "authorized" ? (
                   <Button
                     variant="outline"
@@ -295,6 +414,8 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                 ) : null}
               </div>
             </div>
+
+            {feedFor === key && feed ? <FeedPreviewPanel feed={feed} /> : null}
 
             {canConfigure && tokenFor === key && shop ? (
               <form
@@ -344,10 +465,101 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
 }
 
 /**
+ * What a build produced, in the merchant's terms.
+ *
+ * Three numbers and one honest sentence: published pages, skipped pages and why.
+ * It says «آمادهٔ ارسال» rather than «منتشر شد» because building is all this wave
+ * does — the count is what *would* be sent, and claiming more is the exact
+ * conflation the issue forbids.
+ */
+function FeedPreviewPanel({ feed }: { feed: FeedPreview }) {
+  if (feed.status === "blocked") {
+    return (
+      <div className="mt-3 border-t border-border pt-3 text-sm">
+        <p className="font-medium text-foreground">فید ساخته نشد</p>
+        <p className="mt-1 text-muted-foreground">{feed.blocked?.message ?? "دلیل نامشخص"}</p>
+      </div>
+    );
+  }
+
+  const summary = feed.summary;
+  if (!summary) return null;
+
+  return (
+    <div className="mt-3 space-y-2 border-t border-border pt-3 text-sm">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="font-medium text-foreground">آمادهٔ ارسال: {toPersianDigits(summary.total)} صفحه</span>
+        <span className="text-muted-foreground">
+          موجود {toPersianDigits(summary.inStock)} · ناموجود {toPersianDigits(summary.outOfStock)}
+        </span>
+        <span className="text-muted-foreground">
+          {toPersianDigits(summary.pageCount)} صفحهٔ فید (هر صفحه ۱۰۰ محصول)
+        </span>
+        <span className="text-xs text-muted-foreground">
+          ساخته‌شده {toPersianDigits(formatJalali(new Date(feed.builtAt)))}
+        </span>
+      </div>
+
+      <p className="text-xs text-muted-foreground">
+        این فهرست چیزی است که برای ترب آماده می‌شود؛ ارسال آن مرحلهٔ بعد است و دیده‌شدن در ترب را
+        فقط خود ترب تأیید می‌کند.
+      </p>
+
+      {summary.skippedTotal > 0 ? (
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-foreground">
+            {toPersianDigits(summary.skippedTotal)} محصول منتشر نمی‌شود:
+          </p>
+          <ul className="space-y-0.5 text-xs text-muted-foreground">
+            {summary.skippedByReason.map((entry) => (
+              <li key={entry.reason}>
+                {entry.copy} ({toPersianDigits(entry.count)})
+              </li>
+            ))}
+          </ul>
+          {feed.skipped.length > 0 ? (
+            <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+              {feed.skipped.slice(0, 5).map((entry) => (
+                <li key={`${entry.productId}:${entry.variantId ?? ""}`}>
+                  {entry.name} — {TOROB_FEED_SKIP_COPY[entry.reason]}
+                </li>
+              ))}
+              {feed.skipped.length > 5 ? (
+                <li>و {toPersianDigits(feed.skipped.length - 5)} مورد دیگر…</li>
+              ) : null}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * The facts a shop row carries. Every one of them is something the platform
  * stored itself — no figure here is Torob's claim about the shop, because Wave 1
  * has not asked Torob anything yet.
  */
+/**
+ * The address this shop's catalogue is served from, for Torob's own configuration.
+ *
+ * The shop registers this in its Torob panel; Torob then mints a token whose `aud`
+ * is this domain, which is why the endpoint verifies the audience against the shop
+ * rather than against whatever host the request arrived on. The path is shown
+ * relative to the shop's own domain because that is the address the token names.
+ */
+function ProductApiLine({ domain, shopId, enabled }: { domain: string; shopId: string; enabled: boolean }) {
+  return (
+    <p className="mt-1 text-xs text-muted-foreground">
+      نشانی دریافت محصول برای ترب:{" "}
+      <span dir="ltr" className="break-all text-foreground">
+        {`https://${domain}/api/v1/torob/products/${shopId}`}
+      </span>
+      {enabled ? null : <span> (با انتشار خاموش، این نشانی پاسخ نمی‌دهد.)</span>}
+    </p>
+  );
+}
+
 function ShopLine({ shop }: { shop: Shop }) {
   const parts = [
     shop.authMode === "manual_token"
@@ -359,5 +571,47 @@ function ShopLine({ shop }: { shop: Shop }) {
   if (shop.lastCheckedAt) {
     parts.push(`آخرین بررسی: ${toPersianDigits(formatJalali(new Date(shop.lastCheckedAt)))}`);
   }
-  return <p className="mt-2 text-xs text-muted-foreground">{parts.join(" · ")}</p>;
+  const error = authorizationFailureCopy(shop.authorizationError);
+  return (
+    <>
+      <p className="mt-2 text-xs text-muted-foreground">{parts.join(" · ")}</p>
+      {error ? <p className="mt-1 text-xs text-destructive">{error}</p> : null}
+    </>
+  );
+}
+
+/**
+ * Torob's own reasons for a failed approval, in the merchant's words.
+ *
+ * `denied` and `expired` come from the merchant's side of the flow rather than
+ * from an API error, so they are spelled here beside the partner vocabulary — and
+ * an unknown value falls back to a sentence instead of a code.
+ */
+const AUTHORIZATION_OUTCOME_COPY: Readonly<Record<string, string>> = {
+  connected: "اتصال این فروشگاه به ترب تأیید شد. برای انتشار، کلید انتشار را روشن کنید.",
+  denied: "شما درخواست اتصال را در ترب رد کردید؛ هر زمان خواستید می‌توانید دوباره بفرستید.",
+  expired: "مهلت ۱۵ دقیقه‌ای تأیید در ترب تمام شد؛ درخواست تازه بفرستید.",
+  ...TOROB_PARTNER_FAILURE_COPY,
+};
+
+function partnerFailureCopy(value: string | undefined): string | null {
+  if (!value) return null;
+  return AUTHORIZATION_OUTCOME_COPY[value] ?? null;
+}
+
+function authorizationFailureCopy(value: string | null): string | null {
+  return value ? (AUTHORIZATION_OUTCOME_COPY[value] ?? null) : null;
+}
+
+/**
+ * The one line the callback leaves behind.
+ *
+ * A confirmation is informational; a refusal or an expiry is a failure the merchant
+ * has to act on, so it wears the error tone — and neither ever says the shop is
+ * publishing, only that the *connection* changed.
+ */
+function AuthorizationOutcome({ outcome }: { outcome: string }) {
+  const copy = partnerFailureCopy(outcome);
+  if (!copy) return null;
+  return outcome === "connected" ? <InfoBox>{copy}</InfoBox> : <ErrorBox>{copy}</ErrorBox>;
 }

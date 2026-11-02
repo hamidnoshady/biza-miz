@@ -205,6 +205,20 @@ export function enrollable(row: TorobWebsiteRow): boolean {
   return row.state === "eligible" || row.state === "disconnected";
 }
 
+/**
+ * Each manager's own storefront product route, as the template a feed composes a
+ * page URL from (`{id}` → local id, `{sku}` → SKU).
+ *
+ * It lives beside the website kinds because it *is* a fact about the manager, not
+ * about Torob: the plugin's storefront uses `/product/{slug}` and the CMS's uses
+ * `/products/{id}`. A shop stores its own copy, so a business that moves its
+ * route edits one row — and Wave 4's screen edits exactly that.
+ */
+export const DEFAULT_PRODUCT_PATH: Readonly<Record<TorobWebsiteKind, string>> = {
+  woocommerce: "/product/{id}",
+  eshobe_cms: "/products/{id}",
+};
+
 /** Stable identity for a website across the two registries. */
 export function websiteKey(kind: TorobWebsiteKind, connectionId: string): string {
   return `${kind}:${connectionId}`;

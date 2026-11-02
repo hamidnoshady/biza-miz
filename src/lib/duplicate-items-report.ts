@@ -49,6 +49,15 @@ export interface DuplicateSkuGroup {
 export interface DuplicateReportOptions {
   /** Only this SKU (compared trimmed and case-insensitively). */
   sku?: string | null;
+  /**
+   * Only rows in this branch (issue #1207 §C: "by authorized business + branch
+   * + SKU"). Items are per branch, so a business-wide read can flag a row for a
+   * twin the reader is not looking at, and can report the legitimate
+   * `per_branch_copies` shape as if it were a candidate. Scoping to the active
+   * branch is what the products screen does; `null` keeps the whole business
+   * (the operator scripts' default).
+   */
+  locationId?: string | null;
 }
 
 interface ItemRow {
@@ -91,6 +100,7 @@ export async function findDuplicateItemGroups(
   options: DuplicateReportOptions = {},
 ): Promise<DuplicateSkuGroup[]> {
   const skuFilter = normaliseSku(options.sku ?? null);
+  const locationFilter = options.locationId ?? null;
   return withTenant(businessId, async () => {
     const client = await getPool().connect();
     try {
@@ -103,6 +113,7 @@ export async function findDuplicateItemGroups(
             WHERE l.business_id = $1
               AND NULLIF(btrim(i.sku), '') IS NOT NULL
               AND ($2::text IS NULL OR lower(btrim(i.sku)) = $2)
+              AND ($3::uuid IS NULL OR i.location_id = $3)
             GROUP BY lower(btrim(i.sku))
            HAVING count(*) > 1
          )
@@ -113,8 +124,9 @@ export async function findDuplicateItemGroups(
            JOIN dup d ON d.key = lower(btrim(i.sku))
            LEFT JOIN item_stock s ON s.item_id = i.id
           WHERE l.business_id = $1
+            AND ($3::uuid IS NULL OR i.location_id = $3)
           ORDER BY lower(btrim(i.sku)), i.created_at, i.id`,
-        [businessId, skuFilter],
+        [businessId, skuFilter, locationFilter],
       );
       if (items.length === 0) return [];
 

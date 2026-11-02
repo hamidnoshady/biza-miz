@@ -123,9 +123,12 @@ async function keepSeparateDecisions(businessId: string, skus: readonly string[]
  */
 export async function loadDuplicateReviewGroups(
   businessId: string,
-  options: { sku?: string | null } = {},
+  options: { sku?: string | null; locationId?: string | null } = {},
 ): Promise<DuplicateReviewGroup[]> {
-  const groups = await findDuplicateItemGroups(businessId, { sku: options.sku ?? null });
+  const groups = await findDuplicateItemGroups(businessId, {
+    sku: options.sku ?? null,
+    locationId: options.locationId ?? null,
+  });
   if (groups.length === 0) return [];
   const plans = await planOrphanArchivesForGroups(businessId, groups);
   const decisions = await keepSeparateDecisions(businessId, groups.map((group) => group.sku));
@@ -153,9 +156,10 @@ export async function loadDuplicateReviewGroups(
 export async function loadDuplicateReviewForItem(
   businessId: string,
   sku: string | null,
+  options: { locationId?: string | null } = {},
 ): Promise<DuplicateReviewGroup | null> {
   if (!sku) return null;
-  const groups = await loadDuplicateReviewGroups(businessId, { sku });
+  const groups = await loadDuplicateReviewGroups(businessId, { sku, locationId: options.locationId ?? null });
   return groups[0] ?? null;
 }
 
@@ -164,8 +168,11 @@ export async function loadDuplicateReviewForItem(
  * plans, for a catalogue screen that runs on every visit. The full evidence is
  * read per SKU, only when a reader opens the review.
  */
-export async function listDuplicateCandidateSkus(businessId: string): Promise<string[]> {
-  const groups = await findDuplicateItemGroups(businessId);
+export async function listDuplicateCandidateSkus(
+  businessId: string,
+  options: { locationId?: string | null } = {},
+): Promise<string[]> {
+  const groups = await findDuplicateItemGroups(businessId, { locationId: options.locationId ?? null });
   return groups.filter((group) => verdictNeedsAction(group.verdict)).map((group) => group.sku);
 }
 
@@ -179,8 +186,9 @@ export async function assertReviewToken(
   businessId: string,
   sku: string,
   reviewToken: string,
+  options: { locationId?: string | null } = {},
 ): Promise<DuplicateReviewGroup> {
-  const group = await loadDuplicateReviewForItem(businessId, sku);
+  const group = await loadDuplicateReviewForItem(businessId, sku, options);
   if (!group) throw new Error("duplicate_review_not_found");
   if (group.reviewToken !== reviewToken) throw new Error("duplicate_review_changed");
   return group;
@@ -189,9 +197,11 @@ export async function assertReviewToken(
 /** Record that two (or more) rows share a SKU on purpose and stay separate. */
 export async function recordDuplicateKeepSeparate(
   businessId: string,
-  input: { sku: string; reviewToken: string; actorUserId: string | null },
+  input: { sku: string; reviewToken: string; actorUserId: string | null; locationId?: string | null },
 ): Promise<DuplicateReviewGroup> {
-  const group = await assertReviewToken(businessId, input.sku, input.reviewToken);
+  const group = await assertReviewToken(businessId, input.sku, input.reviewToken, {
+    locationId: input.locationId ?? null,
+  });
   await withTenantTransaction(businessId, async (client) => {
     await client.query(
       `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
@@ -210,7 +220,7 @@ export async function recordDuplicateKeepSeparate(
       ],
     );
   });
-  return assertReviewToken(businessId, input.sku, group.reviewToken);
+  return assertReviewToken(businessId, input.sku, group.reviewToken, { locationId: input.locationId ?? null });
 }
 
 /**
@@ -220,9 +230,17 @@ export async function recordDuplicateKeepSeparate(
  */
 export async function archiveDuplicateOrphanFromReview(
   businessId: string,
-  input: { sku: string; orphanItemId: string; reviewToken: string; actorUserId: string | null },
+  input: {
+    sku: string;
+    orphanItemId: string;
+    reviewToken: string;
+    actorUserId: string | null;
+    locationId?: string | null;
+  },
 ): Promise<{ archived: OrphanPlan | null; blockers: OrphanBlocker[] }> {
-  const group = await assertReviewToken(businessId, input.sku, input.reviewToken);
+  const group = await assertReviewToken(businessId, input.sku, input.reviewToken, {
+    locationId: input.locationId ?? null,
+  });
   const plan = group.plan;
   if (!plan || plan.orphanItemId !== input.orphanItemId) throw new Error("duplicate_review_plan_changed");
   if (plan.status !== "archive") return { archived: null, blockers: plan.blockers };

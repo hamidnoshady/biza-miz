@@ -463,6 +463,12 @@ export interface StoreOrderRow {
   dateCreated: string | null;
   customer: string;
   paymentMethod: string;
+  /**
+   * The gateway's own display name (`payment_method_title`, e.g. «پرداخت در
+   * محل»). The card shows this before the code, because `cod` is not what the
+   * customer chose — issue #1215 / P1‑3.
+   */
+  paymentMethodTitle: string;
   /** Whether the last delivery of this order applied cleanly. */
   ingestStatus: string;
   ingestError: string | null;
@@ -721,6 +727,7 @@ export async function storeOrdersPageFor(
       dateCreated: typeof payload.date_created === "string" ? payload.date_created : null,
       customer: name || company,
       paymentMethod: String(payload.payment_method ?? ""),
+      paymentMethodTitle: String(payload.payment_method_title ?? "").trim(),
       ingestStatus: row.ingest_status ?? "none",
       ingestError: row.ingest_error,
       lineCount: Array.isArray(payload.line_items) ? payload.line_items.length : 0,

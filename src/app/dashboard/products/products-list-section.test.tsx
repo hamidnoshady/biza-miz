@@ -253,6 +253,89 @@ describe("issue #1207 §A — the row's store action is named after its state", 
   });
 });
 
+describe("issue #1207 §B — source and per-store filters", () => {
+  it("filters by the integration that owns the row", async () => {
+    vi.stubGlobal(
+      "fetch",
+      fetchDouble({
+        items: () => ({
+          items: [
+            item({ id: "item-1", name: "پیراهن آبی", source: { provider: "woocommerce", remoteId: "5023" } }),
+            item({ id: "item-2", name: "شلوار خاکی", sku: "SKU-2", source: { provider: "holoo", remoteId: "G1" } }),
+            item({ id: "item-3", name: "کلاه محلی", sku: "SKU-3", source: null }),
+          ],
+        }),
+      }),
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("پیراهن آبی");
+    expect(screen.getByText("شلوار خاکی")).toBeTruthy();
+
+    await user.selectOptions(screen.getByLabelText("فیلتر منبع محصول"), "holoo");
+    expect(screen.getByText("شلوار خاکی")).toBeTruthy();
+    expect(screen.queryByText("پیراهن آبی")).toBeNull();
+    expect(screen.queryByText("کلاه محلی")).toBeNull();
+
+    // `local` is "no integration owns it", not "no store mapping".
+    await user.selectOptions(screen.getByLabelText("فیلتر منبع محصول"), "local");
+    expect(screen.getByText("کلاه محلی")).toBeTruthy();
+    expect(screen.queryByText("شلوار خاکی")).toBeNull();
+  });
+
+  it("offers the per-store filter only when more than one store is connected", async () => {
+    // One store: the control would be a dropdown with a single real choice.
+    vi.stubGlobal("fetch", fetchDouble({ links: [wooLink()] }));
+    const { unmount } = renderSection();
+    await screen.findByText("پیراهن آبی");
+    expect(screen.queryByLabelText("فیلتر فروشگاه مشخص")).toBeNull();
+    unmount();
+    cleanup();
+
+    vi.stubGlobal(
+      "fetch",
+      fetchDouble({ links: [wooLink(), wooLink({ connectionId: "store-b", storeName: "فروشگاه ب", remoteId: "9001" })] }),
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("پیراهن آبی");
+    const select = await screen.findByLabelText("فیلتر فروشگاه مشخص");
+    await user.selectOptions(select, "store-b");
+    // This row is mapped to both, so it survives a filter for either store.
+    expect(screen.getByText("پیراهن آبی")).toBeTruthy();
+    await user.selectOptions(select, "store-a");
+    expect(screen.getByText("پیراهن آبی")).toBeTruthy();
+  });
+
+  it("drops a row the chosen store does not know, and clearing restores it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      fetchDouble({
+        // Two stores, each owning one row: the filter has to separate them.
+        links: [
+          wooLink({ connectionId: "store-a", storeName: "فروشگاه الف", localId: "item-1" }),
+          wooLink({ connectionId: "store-c", storeName: "فروشگاه ج", localId: "item-2", remoteId: "7001" }),
+        ],
+        items: () => ({
+          items: [
+            item({ id: "item-1", name: "پیراهن آبی" }),
+            item({ id: "item-2", name: "شلوار خاکی", sku: "SKU-2" }),
+          ],
+        }),
+      }),
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("پیراهن آبی");
+    await user.selectOptions(await screen.findByLabelText("فیلتر فروشگاه مشخص"), "store-c");
+    expect(screen.getByText("شلوار خاکی")).toBeTruthy();
+    expect(screen.queryByText("پیراهن آبی")).toBeNull();
+
+    await user.selectOptions(screen.getByLabelText("فیلتر فروشگاه مشخص"), "all");
+    expect(await screen.findByText("پیراهن آبی")).toBeTruthy();
+  });
+});
+
 describe("issue #1207 §C — a duplicate candidate is reviewed, not published", () => {
   const group = {
     sku: "sku-1",

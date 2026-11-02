@@ -73,8 +73,11 @@ Do not infer acceptance of those cycles from duplicate-delivery tests.
   budget is checked between batches, not a hard timeout for an HTTP request.
 * Plugin 1.6.21 fast lane: **60 seconds**. Existing fast-lane schedules are upgraded.
   Older installed plugins keep their five-minute cadence until actually upgraded.
-* Silence alert: after two missed expected pulls: **two minutes** for an upgraded
-  plugin reporting the minute cadence, **ten minutes** for legacy plugins.
+* Cron health: **three missed cycles** is amber (`delayed`) — two minutes'
+  worth for an upgraded plugin, fifteen for a legacy five-minute one — and
+  **ten minutes** without a start, or a whole grace window, is an alert
+  (`failed`). The live state is graded from actual cron starts, never from a
+  connection test.
 * The hourly catalogue sweep is a reconciliation backstop, not the stock/price path.
 
 These are configured intervals, not measured production latency. A healthy,
@@ -85,6 +88,80 @@ take another plugin pull. These ranges exclude backlog, retries, outages and
 Hybrid's site-to-central hop. Traffic-driven WP-Cron has no guaranteed upper bound;
 system cron must actually invoke due events at least once per minute to realize
 the new plugin cadence.
+
+## Truthful cron and sync health (issue #1206)
+
+Four facts that used to be one number are now four fields. Nothing but the
+plugin's own scheduler writes them, and a connection test writes none of them.
+
+| Field | What it proves | What it does **not** prove |
+| --- | --- | --- |
+| `fastHandlerLastStartedAt` (`lastRunAt`) | the plugin's fast handler actually started — i.e. the cron fires | that the cycle finished |
+| `fastHandlerLastCompletedAt` | the cycle returned, success or not | that it worked |
+| `lastVerifiedCycleAt` (`lastSuccessfulRun`, `last_sync_ok_at`) | every phase succeeded or was verified empty | that any data moved |
+| `lastActualDataAppliedAt` | at least one event or job actually moved | that the rest did |
+
+Alongside them: `currentCronState` (`healthy` / `delayed` / `failed` / `paused` /
+`test_only` / `unknown`) with `cronStateReason`, and the previous interruption as
+history — `previousOutageAt`, `previousOutageSeconds`, `previousOutageOpen`,
+`recoveredAt`.
+
+Structured phase results (`push`, `pull`, and the second `push`) are recorded in
+`lastCyclePhases` and summarised in `lastCycleVerdict`:
+
+* `ok` — the phase delivered or applied everything it was given;
+* `empty` — the phase was read and had nothing due; healthy, but no proof of transfer;
+* `partial` — applied but not acknowledged (`pull`), or a batch the app rejected row by row;
+* `failed` — the phase did not reach the app at all;
+* `skipped` — deliberately not run (local backlog not drained, or the app paused);
+* `paused` — the app paused the connection.
+
+`last_sync_ok_at` moves only on `ok` / `empty` / `skipped`. A failed push, an
+unreachable app, a lost ACK or a failed job never advances it — the previous
+value stays, which is what makes it a usable freshness signal. The plugin does
+not report the *previous* run's staleness as the current state; a recovered gap
+is shown as a resolved incident.
+
+Diagnose without changing anything:
+
+```
+wp pos-connector doctor          # human-readable; exits non-zero when failing
+wp pos-connector doctor --json   # for monitoring and support tickets
+wp pos-connector doctor --ping   # also a CONNECTION test — not a cron test
+```
+
+`doctor` prints the scheduler state and why, whether each schedule exists and
+when it is due, how long the run lock has been held (an expired lease means a
+run died mid-flight), the age of the oldest unsent row, and the last cycle's
+phase results. It writes no settings, moves no success timestamp and changes no
+store data.
+
+### The one cron command
+
+```
+* * * * * wp --path=/path/to/wordpress cron event run --due-now > /dev/null 2>&1
+```
+
+One line, every minute: it runs every due event — the 60-second fast lane, the
+order/catalogue sweeps and any queued button press — so there is no second line
+to race it. The cadence is the fast lane's own interval, derived in
+`POS_Connector_Health::system_cron_schedule()` rather than typed into the docs, and
+`*/5` was wrong for exactly that reason: a five-minute driver misses three
+fast-lane intervals per tick, which is the threshold this page calls `delayed`.
+Crontab cannot tick finer than a minute, so the remaining jitter is the tick.
+
+Only if the cron log shows an `open_basedir` error, run the same line through a
+PHP that is allowed to reach the binary (add `--allow-root` only for a root
+crontab):
+
+```
+* * * * * php -d open_basedir= /usr/bin/wp --path=/path/to/wordpress cron event run --due-now > /dev/null 2>&1
+```
+
+That relaxes the restriction for that one process. Do not turn `open_basedir`
+off globally for the site. And `DISABLE_WP_CRON=true` in `wp-config.php` is not
+itself a fault: it is the prerequisite for the line above — the proof is the
+fast handler's last start, never a passing connection test.
 
 Validate a real store separately: record local commit time, outbox creation/lease,
 remote application, fenced ACK and mapping update; test both modes, variations,

@@ -17,7 +17,12 @@
  *
  *   npx tsx scripts/report-duplicate-items.ts --business <uuid>
  *   npx tsx scripts/report-duplicate-items.ts --business <uuid> --sku zza05023
+ *   npx tsx scripts/report-duplicate-items.ts --business <uuid> --location <uuid>
  *   npx tsx scripts/report-duplicate-items.ts --business <uuid> --json > dups.json
+ *
+ * `--location` narrows the read to one branch — the same "business + branch +
+ * SKU" scope the products screen uses, and the one to use when the question is
+ * about a row you are looking at.
  */
 import "dotenv/config";
 import { getPool } from "../src/lib/db";
@@ -42,7 +47,9 @@ function argValue(flag: string): string | null {
 async function main(): Promise<number> {
   const businessId = argValue("--business");
   if (!businessId || !UUID_RE.test(businessId)) {
-    console.error("usage: npx tsx scripts/report-duplicate-items.ts --business <uuid> [--sku <sku>] [--json]");
+    console.error(
+      "usage: npx tsx scripts/report-duplicate-items.ts --business <uuid> [--sku <sku>] [--location <uuid>] [--json]",
+    );
     return 2;
   }
   const sku = argValue("--sku");
@@ -50,9 +57,14 @@ async function main(): Promise<number> {
     console.error("--sku needs a value.");
     return 2;
   }
+  const locationId = argValue("--location");
+  if (locationId === "" || (locationId && !UUID_RE.test(locationId))) {
+    console.error("--location needs a branch (location) uuid.");
+    return 2;
+  }
   const asJson = process.argv.includes("--json");
 
-  const groups = await findDuplicateItemGroups(businessId, { sku });
+  const groups = await findDuplicateItemGroups(businessId, { sku, locationId });
 
   if (asJson) {
     console.log(

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   LEGACY_PLUGIN_JOB_TYPES,
+  normalizeOrderStatusSlug,
   pluginAdvertisedJobTypes,
   pluginSupportsJobType,
   pluginSupportsLeaseToken,
+  registeredOrderStatuses,
 } from "./plugin-capabilities";
 
 describe("plugin capability negotiation", () => {
@@ -41,5 +43,63 @@ describe("plugin capability negotiation", () => {
     expect(pluginSupportsLeaseToken({})).toBe(false);
     expect(pluginSupportsLeaseToken(null)).toBe(false);
     expect(pluginSupportsLeaseToken({ protocolVersion: "3" })).toBe(false);
+  });
+});
+
+// Issue #1215 / P1-3: the store's registered order statuses are the only
+// truthful source of a status's display name, and the handshake stores what
+// this reader accepts — so the rules below are also the storage rules.
+describe("registered order statuses", () => {
+  it("reads the [{slug,label}] registry and strips WooCommerce's wc- prefix", () => {
+    expect(
+      registeredOrderStatuses({
+        orderStatuses: [
+          { slug: "wc-shipped", label: "ارسال شد" },
+          { slug: "awaiting-pickup", label: "در انتظار تحویل" },
+        ],
+      }),
+    ).toEqual([
+      { slug: "shipped", label: "ارسال شد" },
+      { slug: "awaiting-pickup", label: "در انتظار تحویل" },
+    ]);
+  });
+
+  it("tolerates the associative slug→label shape", () => {
+    expect(registeredOrderStatuses({ orderStatuses: { "wc-processing": "در حال آماده‌سازی" } })).toEqual([
+      { slug: "processing", label: "در حال آماده‌سازی" },
+    ]);
+  });
+
+  it("drops junk instead of trusting it", () => {
+    expect(
+      registeredOrderStatuses({
+        orderStatuses: [
+          { slug: "shipped", label: "ارسال شد" },
+          { slug: "shipped", label: "تکراری" },
+          { slug: "bad slug!", label: "نامعتبر" },
+          { slug: "", label: "بی‌شناسه" },
+          { slug: 7, label: "عدد" },
+          { slug: "no-label" },
+          null,
+          "shipped",
+          { slug: "x".repeat(60), label: "بیش از حد" },
+        ],
+      }),
+    ).toEqual([{ slug: "shipped", label: "ارسال شد" }]);
+  });
+
+  it("keeps labels bounded and returns nothing for a plugin that reported none", () => {
+    const long = registeredOrderStatuses({ orderStatuses: [{ slug: "shipped", label: "x".repeat(200) }] });
+    expect(long[0].label).toHaveLength(80);
+    for (const caps of [null, undefined, {}, { orderStatuses: [] }, { orderStatuses: "shipped" }, { orderStatuses: {} }]) {
+      expect(registeredOrderStatuses(caps as never)).toEqual([]);
+    }
+  });
+
+  it("normalizes a slug the same way everywhere wc- appears", () => {
+    expect(normalizeOrderStatusSlug("wc-on-hold")).toBe("on-hold");
+    expect(normalizeOrderStatusSlug(" Processing ")).toBe("processing");
+    expect(normalizeOrderStatusSlug("bad slug")).toBe("");
+    expect(normalizeOrderStatusSlug(null)).toBe("");
   });
 });

@@ -283,6 +283,38 @@ describe("the duplicate review", () => {
     expect(await isActive(orphan)).toBe(true);
   });
 
+  it("scopes the read and the flags to one branch", async () => {
+    // §C asks for the report "by authorized business + branch + SKU": a row in
+    // another branch is a copy per branch (legitimate), not a candidate for the
+    // reader looking at this one.
+    const kept = await mapProduct(5700, "zza05700");
+    const orphan = await insertOrphan("zza05700");
+    await insertOrphan("zza05700", biz.otherLocationId);
+
+    const branchGroups = await review.loadDuplicateReviewGroups(biz.id, {
+      sku: "zza05700",
+      locationId: biz.locationId,
+    });
+    expect(branchGroups).toHaveLength(1);
+    expect(branchGroups[0].members.map((member) => member.locationId)).toEqual([
+      biz.locationId,
+      biz.locationId,
+    ]);
+    expect(branchGroups[0].verdict).toBe("race_orphan");
+    expect(branchGroups[0].plan?.orphanItemId).toBe(orphan);
+    expect(branchGroups[0].plan?.twinItemId).toBe(kept);
+
+    // The same SKU in another branch is a separate group of one row's copy —
+    // never a race orphan, so nothing there is offered for archiving.
+    const otherBranch = await review.loadDuplicateReviewGroups(biz.id, {
+      sku: "zza05700",
+      locationId: biz.otherLocationId,
+    });
+    expect(otherBranch).toEqual([]);
+    // The list's flags are the branch's too.
+    expect(await review.listDuplicateCandidateSkus(biz.id, { locationId: biz.locationId })).toContain("zza05700");
+  });
+
   it("leaves legitimate shared SKUs alone", async () => {
     // Two hand-made rows days apart: no integration owns either, so the screen
     // reports the question but never a plan.
