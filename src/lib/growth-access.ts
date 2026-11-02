@@ -162,6 +162,13 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
     GET: PERMISSIONS.torobView,
     POST: PERMISSIONS.torobView,
   },
+  // The webhook queue (issue #894 Wave 5b): reading what is waiting is
+  // `torob.view`; sending it — or retrying what stopped — spends the shop's own
+  // rate budget and tells Torob something, so it is `torob.configure`.
+  "/api/growth/torob/shops/[id]/webhook": {
+    GET: PERMISSIONS.torobView,
+    POST: PERMISSIONS.torobConfigure,
+  },
   // The Shop Generator approval callback (issue #894). It is the merchant's own
   // browser arriving from Torob with a one-time code, so it manages the
   // relationship like the action that started it — and it *spends* the code, which

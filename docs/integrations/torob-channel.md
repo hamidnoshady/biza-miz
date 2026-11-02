@@ -312,6 +312,54 @@ partner mode, and a shop with neither is answered `not_configured` — before th
 `not_authorized`/`channel_disabled` cases. That is the same reading of "disconnect stops managed
 operations" the rest of the feature uses: a channel that is off is not polled.
 
+## 6f. Telling Torob what changed (Wave 5b)
+
+The Product API is Torob pulling from us on Torob's schedule. The **Product Webhook**
+(`POST https://api.torob.com/update/webhook/v1/`) is us saying "these pages changed, pull them
+sooner", and it is the last P0 piece of the epic: without it a shop waits for a crawl.
+
+Three invariants come from the document and are enforced in `webhook.ts`, once:
+
+| invariant | where |
+| --- | --- |
+| at most **100 items** per request, **20 requests/minute/shop** | `planWebhookBatches`, `TOROB_WEBHOOK_BATCHES_PER_RUN = 4` per run |
+| **one domain per request** (400 otherwise) | an item whose URL is not on the shop's own domain is dropped and counted, never sent |
+| the payload is `{page_url, page_unique}` — **nothing else** | `webhookBody`; no price, no title, no stock, because Torob re-fetches the page itself |
+
+The queue is one row per **page** (`torob_webhook_outbox`, migration 0284), so a shop that changes a
+price three times in a minute re-arms one row instead of growing a queue of three events. Rows are
+filled from the **built feed** — the same `readShopCatalogue` the crawler is served from — so the
+platform never announces a page it would not serve: a product the merchant excluded (§6d) or withdrew
+loses its row rather than being sent to Torob. `reason` distinguishes «تازه» from «به‌روزشده» by asking
+the outbox whether Torob was ever told about the page.
+
+A drain claims up to 100 due rows with `FOR UPDATE SKIP LOCKED`, pushing `next_attempt_at` forward by a
+five-minute lease; a crash between claim and send therefore costs one interval rather than a lost
+notice. That is **at-least-once**, deliberately: the webhook's only effect is "please re-fetch", and
+fetching a page twice is free. A send that fails is settled per row:
+
+| failure | what happens | why |
+| --- | --- | --- |
+| `400 invalid_request`, `400`/`403 domain_mismatch` | dead-letter at once | retrying the same body repeats the same refusal |
+| `401 unauthorized`, `403 shop_not_active` | dead-letter, and the shop's `health` becomes `attention` | a human has to fix the credential or the shop's state |
+| `429 rate_limited` | stays `pending`, due after the documented spacing (3 s) | this is exactly what waiting fixes |
+| timeout, `5xx` | backoff, dead-letter at the attempt cap (8) | the ordinary outage path |
+
+Every request is recorded in `torob_webhook_batches` — items, `accepted` or `failed`, and the reason —
+so "rate limited", "refused" and "stopped" are visible on the screen instead of only in a log line. A
+`200 {"message": "success"}` is stored as **accepted** and never as indexed: the document says so twice,
+and the per-shop screen's three stages now read `sent` from this table (`capabilities.sent` is no longer
+a constant `false`) while `listing` still comes only from Torob's own answer (§6e).
+
+Disconnecting stops sending. An unauthorized shop, a switched-off channel, or a shop whose token Torob
+refuses is not drained — the same reading of "disconnect stops managed background operations" the read
+side (§6e) already applies. The tick (`runTorobWebhookTick`, central, every minute) enumerates only
+`enabled AND authorized` shops.
+
+Surface: `GET/POST /api/growth/torob/shops/[id]/webhook` — `GET` the queue (ours only, never Torob),
+`POST {action: "drain"}` to send now and `{action: "retry"}` to revive stopped pages. Reading is
+`torob.view`; both writes are `torob.configure`, because sending spends the shop's own rate budget.
+
 ## 7. What remains (Waves 3–6)
 
 1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
@@ -330,11 +378,10 @@ operations" the rest of the feature uses: a channel that is off is not polled.
    catalogue (item 2) and the multi-shop overview columns for Torob's own counts (item 6).
 4. **Wave 5 — opt-in attribution**: Torob order/action attribution off by default, a 403 when it is
    disabled, and a tenant-visible switch that says exactly what is shared.
-5. **Wave 5b — the sync queue and monitoring.** `§6e` reads Torob; nothing yet *writes* to Torob in the
-   background. The webhook outbox (bounded batches, dedupe, retries, dead letters, reconciliation after
-   an outage), the Shop API's activate/deactivate, and the per-shop retry/repair actions from the site
-   screen are the next slice — they are also what turns `capabilities.sent` from a constant `false` into
-   a real fact.
+5. **Wave 5b — the sync queue.** *Done*: `§6f` is the webhook outbox, bounded and coalesced, with
+   dead letters, retries, reconciliation-by-fill and a per-shop queue screen. What is left of this wave
+   is the Shop API's **activate/deactivate** (turning a product off on Torob from Biza Miz) and the
+   per-shop «تعمیر» action that re-runs both the fill and the status read in one step.
 6. **Wave 6 — the drill table and the docs** for the failure classes the issue names (expired token,
    rejected domain, feed refused, shop deleted on Torob's side), plus the runbook for a shop whose
    feed has been `blocked` for longer than an hour, and for a shop whose last Shop API read failed three
@@ -375,14 +422,24 @@ this website enroll", and every later surface reads it.
 - `src/app/api/growth/torob/shops/[id]/status/route.ts` — the cached read and the explicit refresh.
 - `migrations/0283_torob_observations.sql` — the observation columns, `torob_product_states` and
   `torob_status_runs`, RLS included.
+- `src/lib/torob/webhook.ts` — the webhook's rules: batching, the one-domain check, the two-field
+  payload, and what each failure deserves. Pure.
+- `src/lib/torob/webhook-client.ts` — the one `POST`, and the mapping from Torob's statuses to the
+  queue's closed vocabulary.
+- `src/lib/torob/webhook-service.ts` — fill (from the built feed), drain (claim, send, settle), the
+  queue read, retry, and the minute tick `server.ts` schedules.
+- `src/app/api/growth/torob/shops/[id]/webhook/route.ts` — the queue and its two actions.
+- `migrations/0284_torob_webhook_outbox.sql` — the coalesced outbox and the batch log, RLS included.
 - `src/app/(app)/growth/torob/page.tsx` + `torob-section.tsx` — the screen.
 - `src/lib/torob/eligibility.test.ts` — the state matrix; `integration/torob-shops.integration.test.ts`
   — the lifecycle and the tenant boundary against real Postgres.
 - `src/lib/torob/contract.test.ts`, `feed.test.ts`, `auth.test.ts`, `product-api.test.ts`,
   `shop-generator.test.ts`, `authorization-service.test.ts`, `publication.test.ts`,
-  `observed-state.test.ts`, `shop-api-client.test.ts` — the
+  `observed-state.test.ts`, `shop-api-client.test.ts`, `webhook.test.ts`, `webhook-client.test.ts` — the
   contract, the builder, the token and the endpoint's order of operations; `integration/torob-api.integration.test.ts`
   — all four request modes, 100 per page, the withdrawn product and the cross-shop audience refusal
   against real Postgres; `integration/torob-authorization.integration.test.ts` — the approval flow,
   the window, the denial and the schema's own invariants; `integration/torob-status.integration.test.ts`
-  — the snapshot, the truncated scan, the kept failure and the shops that are never read.
+  — the snapshot, the truncated scan, the kept failure and the shops that are never read;
+  `integration/torob-webhook.integration.test.ts` — the coalesced queue, the excluded page, the accepted
+  batch, the dead letter and the channel that must not send.

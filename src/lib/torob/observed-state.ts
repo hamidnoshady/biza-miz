@@ -281,6 +281,8 @@ export interface TorobShopStatusView {
     byStatus: TorobStatusCount[];
   };
   latestRun: TorobStatusRun | null;
+  /** The webhook queue, so the panel states the middle stage from data (§6f). */
+  webhook: { sent: boolean; pending: number; dead: number };
   capabilities: { feed: boolean; sent: boolean; listing: boolean };
 }
 
