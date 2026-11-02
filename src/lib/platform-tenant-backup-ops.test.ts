@@ -142,6 +142,60 @@ describe("diagnoseBusinessBackup", () => {
     expect(diagnosis.artifacts.ready).toBe(1);
     expect(diagnosis.actions).toEqual([]);
     expect(diagnosis.custody).toEqual({ keyVersion: 3, kekAvailable: true });
+    // No recovery-point objective is promised by this fleet, so the diagnosis
+    // says "unset" rather than claiming a target was met.
+    expect(diagnosis.dr).toEqual({ rpoHours: null, newestVerifiedAt: null, ageHours: null, breached: false });
+  });
+
+  /**
+   * Issue #903 §3 — the DR threshold. It is judged on what is *verified*: an
+   * artifact that exists but has never been re-read is not a recovery point, so
+   * it cannot satisfy the objective either.
+   */
+  it("reports a breached recovery-point objective against the newest verified backup", async () => {
+    mocks.policy.mockResolvedValue(policy({ drRpoHours: 24 }));
+    mocks.rows.mockResolvedValue([
+      artifactRow({
+        id: "row-1",
+        capturedAt: new Date(Date.now() - 48 * 3_600_000).toISOString(),
+        verifiedAt: new Date(Date.now() - 48 * 3_600_000).toISOString(),
+      }),
+      // A newer copy that was never re-read: it must not be counted as the
+      // recovery point, or the objective would look met on an unproven backup.
+      artifactRow({
+        id: "row-2",
+        artifactId: "artifact-2",
+        capturedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        verifiedAt: null,
+      }),
+    ]);
+
+    const diagnosis = await diagnoseBusinessBackup(BUSINESS);
+    expect(diagnosis.dr.rpoHours).toBe(24);
+    expect(diagnosis.dr.breached).toBe(true);
+    expect(diagnosis.dr.ageHours).toBeGreaterThan(23);
+    expect(diagnosis.actions).toContain("dr_rpo_breached");
+  });
+
+  it("does not breach an objective that a fresh verified backup satisfies", async () => {
+    mocks.policy.mockResolvedValue(policy({ drRpoHours: 24 }));
+    mocks.rows.mockResolvedValue([
+      artifactRow({
+        capturedAt: new Date(Date.now() - 3_600_000).toISOString(),
+        verifiedAt: new Date(Date.now() - 3_600_000).toISOString(),
+      }),
+    ]);
+    const diagnosis = await diagnoseBusinessBackup(BUSINESS);
+    expect(diagnosis.dr.breached).toBe(false);
+    expect(diagnosis.actions).not.toContain("dr_rpo_breached");
+  });
+
+  it("treats a missing verified backup as a breach when an objective exists", async () => {
+    mocks.policy.mockResolvedValue(policy({ drRpoHours: 24 }));
+    mocks.rows.mockResolvedValue([artifactRow({ state: "failed" })]);
+    const diagnosis = await diagnoseBusinessBackup(BUSINESS);
+    expect(diagnosis.dr.ageHours).toBeNull();
+    expect(diagnosis.dr.breached).toBe(true);
   });
 
   it("names every real gap an operator has to act on", async () => {
