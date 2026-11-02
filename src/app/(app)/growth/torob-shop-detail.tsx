@@ -143,6 +143,47 @@ export function TorobShopDetail({ shopId, canConfigure }: { shopId: string; canC
     void loadStatus();
   }, [load, loadStatus]);
 
+  /**
+   * «تعمیر» — announce, tell Torob, read it back, in that order. Available only to
+   * a caller who may configure the channel, because the middle step spends the
+   * shop's own rate budget.
+   */
+  async function repair() {
+    setBusy(true);
+    setActionError("");
+    const { ok, data: answer } = await api<{ error?: string }>(`/api/growth/torob/shops/${shopId}/repair`, {
+      method: "POST",
+    });
+    setBusy(false);
+    if (!ok) {
+      setActionError(errorMessageOrRaw(answer.error) ?? "تعمیر ناموفق بود.");
+      return;
+    }
+    await Promise.all([load(), loadStatus()]);
+  }
+
+  /** Torob-side on/off for one page, then the panel is re-read so it says what Torob says. */
+  async function toggleOnTorob(pageUnique: string, active: boolean) {
+    setBusy(true);
+    setActionError("");
+    const { ok, data: answer } = await api<{ error?: string; message?: string; note?: string; missing?: string[] }>(
+      `/api/growth/torob/shops/${shopId}/pages`,
+      { method: "POST", body: JSON.stringify({ pageUniques: [pageUnique], active }) },
+    );
+    setBusy(false);
+    if (!ok) {
+      setActionError(errorMessageOrRaw(answer.error) ?? "این کار انجام نشد.");
+      return;
+    }
+    if (answer.message) setActionError(answer.message);
+    else if (answer.missing && answer.missing.length > 0) {
+      // Torob answered, but did not recognise the page: nothing changed there, and
+      // saying «انجام شد» would be a claim only our request supports.
+      setActionError("ترب این صفحه را نشناخت، پس چیزی روی ترب عوض نشد. «تعمیر» صفحه را دوباره معرفی می‌کند.");
+    }
+    await loadStatus();
+  }
+
   /** The merchant's explicit refresh: the only path that talks to Torob. */
   async function refreshStatus() {
     setBusy(true);
@@ -229,7 +270,13 @@ export function TorobShopDetail({ shopId, canConfigure }: { shopId: string; canC
 
       {statusError ? <ErrorBox>{statusError}</ErrorBox> : null}
       {status ? (
-        <TorobStatusPanel view={status} busy={busy} onRefresh={() => void refreshStatus()} />
+        <TorobStatusPanel
+          view={status}
+          busy={busy}
+          onRefresh={() => void refreshStatus()}
+          onRepair={canConfigure ? () => void repair() : undefined}
+          onTogglePage={canConfigure ? (pageUnique, active) => void toggleOnTorob(pageUnique, active) : undefined}
+        />
       ) : null}
 
       <WebhookQueuePanel shopId={shopId} canConfigure={canConfigure} />
@@ -495,10 +542,14 @@ function TorobStatusPanel({
   view,
   busy,
   onRefresh,
+  onRepair,
+  onTogglePage,
 }: {
   view: StatusResponse;
   busy: boolean;
   onRefresh: () => void;
+  onRepair?: () => void;
+  onTogglePage?: (pageUnique: string, active: boolean) => void;
 }) {
   const { observation, states, latestRun, problems, failure } = view;
 
@@ -537,9 +588,16 @@ function TorobStatusPanel({
       title="وضعیت در ترب"
       description="آنچه ترب دربارهٔ این فروشگاه می‌گوید — نه آنچه ما برایش فرستاده‌ایم."
       actions={
-        <Button variant="outline" disabled={busy} onClick={onRefresh}>
-          خواندن دوباره از ترب
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" disabled={busy} onClick={onRefresh}>
+            خواندن دوباره از ترب
+          </Button>
+          {onRepair ? (
+            <Button variant="outline" disabled={busy} onClick={onRepair}>
+              تعمیر
+            </Button>
+          ) : null}
+        </div>
       }
     >
       <div className="space-y-3 text-sm">
@@ -591,13 +649,26 @@ function TorobStatusPanel({
         ) : null}
 
         {errorRows.length > 0 ? (
-          <div className="space-y-0.5 text-xs text-muted-foreground">
+          <div className="space-y-1 text-xs text-muted-foreground">
             <p className="font-medium text-foreground">آخرین خطای خواندن ترب</p>
-            {errorRows.map((row) => (
-              <p key={row.pageUnique}>
-                {row.errorTitle} — {TOROB_PRODUCT_STATUS_COPY[row.mainStatus]}
-              </p>
-            ))}
+            {errorRows.map((row) => {
+              // A page Torob switched off is the merchant's to switch back on; any
+              // other problem is one they can take the page off display for while
+              // they fix it. Both are Torob-side switches, neither deletes anything.
+              const activate = row.mainStatus === "page_not_active";
+              return (
+                <div key={row.pageUnique} className="flex flex-wrap items-center gap-2">
+                  <span>
+                    {row.errorTitle} — {TOROB_PRODUCT_STATUS_COPY[row.mainStatus]}
+                  </span>
+                  {onTogglePage ? (
+                    <Button variant="outline" disabled={busy} onClick={() => onTogglePage(row.pageUnique, activate)}>
+                      {activate ? "روشن کردن در ترب" : "خاموش کردن در ترب"}
+                    </Button>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         ) : null}
 
