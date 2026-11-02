@@ -22,6 +22,7 @@
  */
 
 import type { FeedSummary, TorobFeedSkipReason } from "./feed";
+import type { TorobProductStatus } from "./observed-state";
 
 /** The shop's rule. Mirrors `torob_shops.publication_rule`'s CHECK. */
 export type PublicationRule = "all" | "selected";
@@ -145,6 +146,17 @@ export interface ShopProductRow {
   skipReason: TorobFeedSkipReason | null;
   /** Said in the merchant's language, so the screen never renders a code. */
   reasonCopy: string | null;
+  /**
+   * Torob's own first status for this page, when the shop has been read back from
+   * Torob — `null` means Torob reports no problem, or has not answered yet.
+   *
+   * A separate field from `state` on purpose: `state` is what *we* publish, this
+   * is what *Torob* shows. The screen puts them side by side precisely so the two
+   * are never read as one claim.
+   */
+  torobStatus: TorobProductStatus | null;
+  /** How many pages Torob reports for this product (variants split into several). */
+  torobPages: number;
 }
 
 /** Everything `/growth/torob/[shopId]` renders, in one shape. */
