@@ -302,6 +302,15 @@ class InstalledApplication {
     return origin;
   }
 
+  /** Resolve true once the process exits, false after `budgetMs`. */
+  async waitForExit(budgetMs) {
+    const settled = await Promise.race([
+      this.exited.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), budgetMs)),
+    ]);
+    return settled === true;
+  }
+
   /**
    * Ask the window to close and wait for the process to run its own quit
    * path (backend stop, postmaster shutdown). A forced kill would make the
@@ -310,9 +319,24 @@ class InstalledApplication {
    */
   async stop(stage) {
     if (!this.child || this.child.exitCode !== null) return this.exited;
+    // Ask the window to close, which is the product's own quit path
+    // (`window-all-closed` -> `app.quit()` -> `before-quit` -> cleanup).
+    //
+    // Two attempts, because neither is universally reliable on a CI runner:
+    // `CloseMainWindow()` posts WM_CLOSE to the process's main window, and
+    // `taskkill` without `/F` asks a window to close too. A force kill is
+    // never a fallback here — if neither gets a clean exit, that *is* the
+    // finding this step exists for.
     if (process.platform === "win32") {
-      // taskkill without /F posts WM_CLOSE to the app's windows.
-      spawnSync("taskkill", ["/pid", String(this.child.pid)], { windowsHide: true, encoding: "utf8" });
+      spawnSync(
+        "powershell",
+        ["-NoProfile", "-NonInteractive", "-Command", `$null = (Get-Process -Id ${this.child.pid}).CloseMainWindow()`],
+        { windowsHide: true, encoding: "utf8", timeout: 30_000 },
+      );
+      const exitedEarly = await this.waitForExit(Math.min(30_000, QUIT_TIMEOUT_MS));
+      if (!exitedEarly) {
+        spawnSync("taskkill", ["/pid", String(this.child.pid)], { windowsHide: true, encoding: "utf8" });
+      }
     } else {
       this.child.kill("SIGTERM");
     }
