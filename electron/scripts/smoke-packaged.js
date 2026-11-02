@@ -45,8 +45,21 @@ const rules = require(path.join(repoRoot, "scripts", "desktop", "release-scan-ru
 
 const READY_TIMEOUT_MS = 5 * 60 * 1000; // above backend-manager's own readiness wait
 const HTTP_TIMEOUT_MS = 20_000;
-const QUIT_TIMEOUT_MS = 120_000;
+const QUIT_TIMEOUT_MS = 90_000;
 const POLL_INTERVAL_MS = 2_000;
+/**
+ * A whole-run ceiling. Every individual wait is bounded, but a Windows CI
+ * runner can still wedge outside them (a hung `taskkill`, a modal dialog that
+ * ignores WM_CLOSE). Without this, one such wedge burns the job's entire
+ * timeout and reports nothing; with it, the run fails in a quarter of an hour
+ * and says which stage it was in and what the app logged.
+ */
+const WATCHDOG_MS = Number(process.env.DESKTOP_ACCEPTANCE_WATCHDOG_MS || 15 * 60 * 1000);
+/** Every external command gets a budget; a child that never exits is a failure. */
+const COMMAND_TIMEOUT_MS = 60_000;
+
+/** The stage the harness is in, so a watchdog or a throw can say where. */
+let currentStage = "starting";
 
 /** Paths middleware must deny on a site runtime (issue #1003 / #1194). */
 const PLATFORM_DENIAL_PATHS = Object.freeze([
@@ -284,6 +297,7 @@ class InstalledApplication {
       child.once("exit", (code, signal) => resolve({ code, signal }));
       child.once("error", (error) => resolve({ code: null, signal: null, error }));
     });
+    currentStage = "waiting for the installed application to answer /api/health";
     const origin = await waitFor("the installed application's HTTP server", async () => {
       // A crash or an early exit must fail the run at once instead of waiting
       // out the whole readiness budget with no diagnostic.
@@ -298,6 +312,7 @@ class InstalledApplication {
     });
     this.origin = origin;
     this.config = readDesktopConfig(this.userDataDir);
+    currentStage = "the application is running";
     log(`ready at ${origin} (instance ${this.config?.instanceId ?? "unknown"})`);
     return origin;
   }
@@ -331,11 +346,16 @@ class InstalledApplication {
       spawnSync(
         "powershell",
         ["-NoProfile", "-NonInteractive", "-Command", `$null = (Get-Process -Id ${this.child.pid}).CloseMainWindow()`],
-        { windowsHide: true, encoding: "utf8", timeout: 30_000 },
+        { windowsHide: true, encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL" },
       );
       const exitedEarly = await this.waitForExit(Math.min(30_000, QUIT_TIMEOUT_MS));
       if (!exitedEarly) {
-        spawnSync("taskkill", ["/pid", String(this.child.pid)], { windowsHide: true, encoding: "utf8" });
+        spawnSync("taskkill", ["/pid", String(this.child.pid)], {
+          windowsHide: true,
+          encoding: "utf8",
+          timeout: COMMAND_TIMEOUT_MS,
+          killSignal: "SIGKILL",
+        });
       }
     } else {
       this.child.kill("SIGTERM");
@@ -346,7 +366,11 @@ class InstalledApplication {
     ]);
     if (outcome.code === "timeout") {
       if (process.platform === "win32") {
-        spawnSync("taskkill", ["/pid", String(this.child.pid), "/t", "/f"], { windowsHide: true });
+        spawnSync("taskkill", ["/pid", String(this.child.pid), "/t", "/f"], {
+          windowsHide: true,
+          timeout: COMMAND_TIMEOUT_MS,
+          killSignal: "SIGKILL",
+        });
       } else {
         this.child.kill("SIGKILL");
       }
@@ -372,6 +396,7 @@ class InstalledApplication {
  * ------------------------------------------------------------------ */
 
 async function assertLegacyBypassIsInert({ executable, userDataDir, freshProfile }) {
+  currentStage = "legacy-bypass launch (the removed test switches must be inert)";
   const markerPath = path.join(userDataDir, "acceptance", "smoke-marker.json");
   fs.rmSync(markerPath, { force: true });
   const app = new InstalledApplication({
@@ -410,6 +435,7 @@ async function assertLegacyBypassIsInert({ executable, userDataDir, freshProfile
 }
 
 async function bootstrapOwner(origin, userDataDir) {
+  currentStage = "first-run bootstrap through /api/setup/bootstrap";
   const password = `Acceptance-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-Aa1!`;
   const email = `desktop-acceptance-${Date.now().toString(36)}@example.invalid`;
   const response = await httpJson(`${origin}/api/setup/bootstrap`, {
@@ -716,8 +742,27 @@ async function runLaunchPhases({ executable, userDataDir, previouslyInitialized,
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * Start the whole-run ceiling. It is deliberately *not* `unref`ed: if every
+ * other handle is gone the process is exiting anyway, and while a wedge is
+ * live this timer is what ends it.
+ */
+function startWatchdog() {
+  const timer = setTimeout(() => {
+    console.error(`acceptance did not finish within ${Math.round(WATCHDOG_MS / 1000)}s`);
+    console.error(`last stage: ${currentStage}`);
+    const profile = process.env.DESKTOP_ACCEPTANCE_USER_DATA;
+    if (profile) console.error(diagnosticTail(path.resolve(profile)));
+    process.exit(1);
+  }, WATCHDOG_MS);
+  timer.unref?.();
+  return timer;
+}
+
 if (require.main === module) {
+  startWatchdog();
   runAcceptance().catch((error) => {
+    console.error(`last stage: ${currentStage}`);
     console.error(error);
     const profile = process.env.DESKTOP_ACCEPTANCE_USER_DATA;
     if (profile) console.error(diagnosticTail(path.resolve(profile)));

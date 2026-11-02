@@ -348,6 +348,8 @@ jobs:
         # also exercises Full Offline enrollment against the release bytes. The
         # token is a secret; without it the phase reports "skipped" and the
         # Hybrid install/restart checks still run.
+        # Issue #1194 — a wedged runner must fail this step, not the job.
+        timeout-minutes: 25
         env:
           DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
           DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_TOKEN }}
