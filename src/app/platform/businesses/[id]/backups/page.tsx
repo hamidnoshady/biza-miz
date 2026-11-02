@@ -66,11 +66,20 @@ interface Diagnosis {
     override?: boolean;
     /** Whether a destructive restore needs a Superadmin approval here. */
     requireRestoreApproval?: boolean;
+    /** The plan whose policy this business inherits, when one is set. */
+    planKey?: string | null;
   };
   storage: { includedBytes: number };
   queue: { pending: number };
   device: { connectivity: "online" | "offline" | "unknown"; lastSeenAt: string | null };
   artifacts: Record<string, number> & { total: number };
+  /** Issue #903 §3 — the recovery-point objective and how the business stands against it. */
+  dr?: {
+    rpoHours: number | null;
+    newestVerifiedAt: string | null;
+    ageHours: number | null;
+    breached: boolean;
+  };
   actions: string[];
 }
 
@@ -90,6 +99,8 @@ const ACTION_LABELS: Record<string, string> = {
     "نسخهٔ ابری هنوز دوباره خوانده و تأیید نشده است؛ تا آن زمان قابل بازگردانی نیست. بررسی خودکار در ساعت بعد اجرا می‌شود.",
   drill_failed:
     "آزمایش بازیابی زمان‌بندی‌شده ناموفق بود: نسخهٔ ثبت‌شده باز نشد یا بازیابی آن مجاز نیست. پیش از نیاز واقعی بررسی کنید.",
+  dr_rpo_breached:
+    "تازه‌ترین نسخهٔ تأییدشده از هدف نقطهٔ بازیابی این طرح قدیمی‌تر است؛ یک نسخهٔ تازه و تأییدشده لازم است.",
 };
 
 export default function BusinessBackupsPage() {
@@ -304,11 +315,25 @@ function OperationsCard({ id, onChanged }: { id: string; onChanged: () => void }
               <dd>
                 {diagnosis.policy.override
                   ? "بازنویسی این کسب‌وکار"
-                  : diagnosis.policy.source === "managed"
-                    ? "سیاست سراسری سکو"
-                    : "پیش‌فرض ایمن دستگاه"}
+                  : diagnosis.policy.planKey
+                    ? `طرح ${diagnosis.policy.planKey}`
+                    : diagnosis.policy.source === "managed"
+                      ? "سیاست سراسری سکو"
+                      : "پیش‌فرض ایمن دستگاه"}
               </dd>
             </div>
+            {diagnosis.dr ? (
+              <div className="flex justify-between gap-2 sm:justify-start">
+                <dt className="text-muted-foreground">هدف نقطهٔ بازیابی:</dt>
+                <dd>
+                  {diagnosis.dr.rpoHours === null
+                    ? "تعیین‌نشده"
+                    : diagnosis.dr.breached
+                      ? `نقض شده — تازه‌ترین نسخهٔ تأییدشده ${toPersianDigits(String(Math.round(diagnosis.dr.ageHours ?? 0)))} ساعت پیش است (هدف ${toPersianDigits(String(diagnosis.dr.rpoHours))} ساعت)`
+                      : `رعایت شده (${toPersianDigits(String(diagnosis.dr.rpoHours))} ساعت)`}
+                </dd>
+              </div>
+            ) : null}
             <div className="flex justify-between gap-2 sm:justify-start">
               <dt className="text-muted-foreground">تأیید بازگردانی:</dt>
               <dd>{diagnosis.policy.requireRestoreApproval ? "لازم است" : "لازم نیست"}</dd>

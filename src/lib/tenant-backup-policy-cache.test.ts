@@ -54,6 +54,11 @@ const managed = {
   managedCloud: true,
   override: false,
   requireRestoreApproval: false,
+  planKey: "pro",
+  alertStaleHours: 9,
+  alertFailureStreak: 2,
+  drillIntervalHours: 12,
+  drRpoHours: 24,
 };
 
 describe("policy cache", () => {
@@ -67,6 +72,43 @@ describe("policy cache", () => {
       maxParallelUploads: 4,
       source: "cached",
       cachedAt: "2026-10-28T00:00:00.000Z",
+      // Issue #903 §3: the thresholds travel with the cadence, so a device that
+      // goes offline after the platform answered keeps the tier's alerting and
+      // recovery objective too, not just its schedule.
+      planKey: "pro",
+      alertStaleHours: 9,
+      alertFailureStreak: 2,
+      drillIntervalHours: 12,
+      drRpoHours: 24,
+    });
+  });
+
+  it("keeps a pre-0280 entry valid and derives the pre-#903 thresholds for it", async () => {
+    // Such an entry can only exist on a device that was offline across the
+    // upgrade; dropping it would silently downgrade that device to the
+    // hard-coded defaults.
+    await fs.writeFile(
+      cacheFile,
+      JSON.stringify({
+        version: 2,
+        entries: {
+          "*": { cachedAt: "2026-10-28T00:00:00.000Z", intervalHours: 6, retentionDays: 90, keepCount: 12, protectedCopies: 3, maxParallelUploads: 4 },
+        },
+      }),
+      "utf8",
+    );
+
+    const cached = await readCachedPolicy(undefined, new Date("2026-10-29T00:00:00Z"));
+    expect(cached).toMatchObject({
+      intervalHours: 6,
+      retentionDays: 90,
+      planKey: null,
+      // 6h cadence plus its grace period, alert on the first failure, daily drill,
+      // and no promise the fleet never made.
+      alertStaleHours: 7.5,
+      alertFailureStreak: 1,
+      drillIntervalHours: 24,
+      drRpoHours: null,
     });
   });
 

@@ -68,7 +68,13 @@ export type OperatorActionCode =
   /** Issue #903 §12: the scheduled drill could not prove the last backup opens. */
   | "drill_failed"
   /** Issue #903 §1: a cloud copy the platform wrote has not been re-read yet. */
-  | "cloud_unverified";
+  | "cloud_unverified"
+  /**
+   * Issue #903 §3: the newest verified backup is already older than the
+   * recovery-point objective this business's plan promises. A drill proves a
+   * backup opens; this says the *right* one is not there any more.
+   */
+  | "dr_rpo_breached";
 
 export interface BusinessBackupDiagnosis {
   businessId: string;
@@ -103,6 +109,20 @@ export interface BusinessBackupDiagnosis {
     missingSteps: string[];
     finishedAt: string;
   } | null;
+  /**
+   * Issue #903 §3 — the disaster-recovery objective this business is held to,
+   * and how it stands against it. `rpoHours: null` means the fleet promises
+   * none, which is reported as unset rather than met: a target nobody set is not
+   * a target that was hit.
+   */
+  dr: {
+    rpoHours: number | null;
+    /** Capture time of the newest restorable-verified backup, or null. */
+    newestVerifiedAt: string | null;
+    /** Hours since that backup, or null when there is none. */
+    ageHours: number | null;
+    breached: boolean;
+  };
   /** Codes, not prose: the console translates, the route stays stable. */
   actions: OperatorActionCode[];
 }
@@ -175,6 +195,21 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
   if (drill && !drill.ok) actions.push("drill_failed");
   if (unverified > 0) actions.push("cloud_unverified");
 
+  // Issue #903 §3 — the recovery-point objective, judged on what is *verified*:
+  // an artifact that exists but has never been re-read is not a recovery point.
+  const now = new Date();
+  const verifiedRows = rows
+    .filter((row) => row.state === "ready" && Boolean(row.verifiedAt))
+    .sort((a, b) => Date.parse(b.capturedAt) - Date.parse(a.capturedAt));
+  const newestVerifiedAt = verifiedRows[0]?.capturedAt ?? null;
+  const ageHours = newestVerifiedAt ? (now.getTime() - Date.parse(newestVerifiedAt)) / 3_600_000 : null;
+  // `?? null`, not the bare field: a policy resolved from an older cache or a
+  // fixture without the threshold has `undefined`, and "no objective" must not
+  // read as "a zero-hour objective that is already breached".
+  const rpoHours = policy.drRpoHours ?? null;
+  const breached = rpoHours !== null && (ageHours === null || ageHours > rpoHours);
+  if (breached) actions.push("dr_rpo_breached");
+
   return {
     businessId,
     profile,
@@ -197,6 +232,12 @@ export async function diagnoseBusinessBackup(businessId: string): Promise<Busine
       lastErrorCode: heartbeat?.lastErrorCode ?? null,
     },
     artifacts,
+    dr: {
+      rpoHours,
+      newestVerifiedAt: newestVerifiedAt ?? null,
+      ageHours: ageHours === null ? null : Math.round(ageHours * 10) / 10,
+      breached,
+    },
     drill: drill
       ? {
           ok: drill.ok,
