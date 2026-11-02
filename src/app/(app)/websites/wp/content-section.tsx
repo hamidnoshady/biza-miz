@@ -48,6 +48,7 @@ import { formatJalali } from "@/lib/jalali";
 import { cn } from "@/lib/utils";
 import { ConnectionPicker, type ConnectionLite } from "./connection-lite";
 import { wpEditorIsDirty, wpEditorPatch, type WpEditorValues } from "./content-editor-state";
+import { EditorialAssistant } from "./editorial-assistant";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
@@ -737,6 +738,26 @@ function PostEditor({
                     placeholder={contentEditable ? "متن نوشته یا برگه…" : "متن خام در دسترس نیست"}
                   />
                 </Field>
+                {/* The assistant sits under the text it works on: it drafts from
+                    what is in the editor right now, and its output is only a
+                    suggestion until a button here places it in a field. */}
+                <EditorialAssistant
+                  connectionId={connectionId}
+                  type={type}
+                  title={values.editorTitle}
+                  content={values.content}
+                  excerpt={values.excerpt}
+                  disabled={busy}
+                  canEditContent={contentEditable}
+                  onInsert={(target, text, mode) => {
+                    if (target === "title") setValue("editorTitle", text);
+                    else if (target === "excerpt") setValue("excerpt", text);
+                    else if (mode === "append") {
+                      const separator = values.content.trim() ? "\n\n" : "";
+                      setValue("content", `${values.content.trimEnd()}${separator}${text}`);
+                    } else setValue("content", text);
+                  }}
+                />
                 <ErrorBox>{error}</ErrorBox>
                 {row && !expectedRemoteUpdatedAt ? (
                   <div className="mb-3"><InfoBox>نسخهٔ این مورد مشخص نیست. برای جلوگیری از بازنویسی تغییرات هم‌زمان، ابتدا همگام‌سازی را اجرا کنید.</InfoBox></div>
