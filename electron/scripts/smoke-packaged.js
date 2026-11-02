@@ -51,7 +51,13 @@ const rules = require(path.join(repoRoot, "scripts", "desktop", "release-scan-ru
  */
 const READY_TIMEOUT_MS = 10 * 60 * 1000;
 const HTTP_TIMEOUT_MS = 20_000;
-const QUIT_TIMEOUT_MS = 90_000;
+/**
+ * Embedded PostgreSQL's `pg_ctl stop` is the long pole here, and a loaded
+ * runner can take a minute or more to release the data directory. The app's
+ * own quit path is `before-quit` -> cleanup() -> app.exit(0), so this budget
+ * is for the product's shutdown, not for the window message.
+ */
+const QUIT_TIMEOUT_MS = 180_000;
 const POLL_INTERVAL_MS = 2_000;
 /**
  * A whole-run ceiling. Every individual wait is bounded, but a Windows CI
@@ -473,12 +479,19 @@ class InstalledApplication {
     // never a fallback here — if neither gets a clean exit, that *is* the
     // finding this step exists for.
     if (process.platform === "win32") {
-      spawnSync(
+      const close = spawnSync(
         "powershell",
-        ["-NoProfile", "-NonInteractive", "-Command", `$null = (Get-Process -Id ${this.child.pid}).CloseMainWindow()`],
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `$p = Get-Process -Id ${this.child.pid} -ErrorAction SilentlyContinue; ` +
+            `if (-not $p) { Write-Output "gone" } else { Write-Output ("window={0} title={1} closed={2}" -f $p.MainWindowHandle, ($p.MainWindowTitle -replace '\s+', ' '), $p.CloseMainWindow()) }`,
+        ],
         { windowsHide: true, encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL" },
       );
-      const exitedEarly = await this.waitForExit(Math.min(30_000, QUIT_TIMEOUT_MS));
+      log(`asked ${stage} to close its window: ${String(close.stdout || close.stderr || "").trim()}`);
+      const exitedEarly = await this.waitForExit(Math.min(60_000, QUIT_TIMEOUT_MS));
       if (!exitedEarly) {
         spawnSync("taskkill", ["/pid", String(this.child.pid)], {
           windowsHide: true,
@@ -508,6 +521,7 @@ class InstalledApplication {
     }
     if (outcome.error) fail(`${stage} could not be monitored: ${outcome.error.message}`);
     if (outcome.code !== 0) fail(`${stage} exited ${outcome.code ?? outcome.signal} instead of quitting cleanly`);
+    log(`${stage} quit cleanly (exit 0)`);
     this.assertNoPostmasterPid(stage);
     return outcome;
   }
@@ -922,8 +936,11 @@ if (require.main === module) {
     // GitHub's public job page exposes annotations even when raw Actions logs
     // require authentication. Keep the root cause visible to package reviewers.
     if (process.env.GITHUB_ACTIONS === "true") {
-      const annotation = String(error?.stack || error)
-        .slice(0, 4_000)
+      const summary = process.env.DESKTOP_ACCEPTANCE_USER_DATA
+        ? `\n${diagnosticSummary(path.resolve(process.env.DESKTOP_ACCEPTANCE_USER_DATA))}`
+        : "";
+      const annotation = `${String(error?.stack || error).slice(0, 3_000)}${summary}`
+        .slice(0, 5_000)
         .replaceAll("%", "%25")
         .replaceAll("\r", "%0D")
         .replaceAll("\n", "%0A");
