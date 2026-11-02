@@ -135,6 +135,10 @@ way round. See «What this change does not build».
 | **Wave 10** — §D reimbursable cost service | `src/lib/agency-reimbursable-cost-service.ts`: twelve codes closed into `AGENCY_REIMBURSABLE_COST_ERROR_CODES`; list, read, create, patch, delete, plus `sumCostsByParty` separating the client's money from the agency's own cost in one grouped read. The row and its entry are written in **one transaction** against the transaction's own client, so a cost and its ledger document commit together or neither does — a row whose entry failed would be a claim on a client the books know nothing about. The presentation is carried into the entry and never re-derived. Outstanding balances are read, never stored |
 | **Wave 10** — §D reimbursable cost HTTP | Two routes under `/api/agency/reimbursable-costs/**` on `ledger.view` and `finance.expenses_manage` (decision 61), with `src/app/api/agency/reimbursable-cost-guard.ts` exhaustive over the twelve codes and **composing** with the shared `handleAgencyError` rather than replacing it, so `MissingLedgerAccountError` still answers 409 in the product's own words instead of a 500. Its own coverage-map row rather than being absorbed by `workspace.agency`'s broad `["agency"]` prefix, whose only symptom is a stale route count |
 | **Wave 10** — §D reimbursable cost tests | `agency-reimbursable-cost.test.ts` (22, pure — the four presentation × settlement combinations pinned by account code, because a mis-stated presentation moves money between cost of sale and a claim on a client and looks fine everywhere else), `integration/agency-reimbursable-costs.integration.test.ts` (12, real database), `reimbursable-cost-guard.test.ts` (6, including the hand-off to the shared handler), the merge suite extended to a **posted** cost whose entry is asserted line-for-line unchanged, and 104 assertions against 0280 over Postgres. The harness proves both halves of the merge door, which needed savepoints because a refused statement aborts the whole transaction, and needed its vacuous assertions replaced — setting a column to the value it already holds is not a change and `IS DISTINCT FROM` correctly says so |
+| **Wave 11** — §D recharge schema | `migrations/0284_agency_cost_recharge.sql`: three columns on wave 10's register — `recharged_order_id` (a real FK to `orders`, `ON DELETE SET NULL`), and the actor's bare uuid plus name in 0280's own shape. **No `status`, no `recharged_at`, no `recharged_rial`**, and the harness asserts their absence, because whether a cost has been recharged is *derived* from the invoice's live status (decision 65). One partial index over the unrecharged rows per client, which is the queue a member works from. `CREATE OR REPLACE agency_reimbursable_cost_guard()` checks the link **before** the substance freeze and exempts it — a cost is always already posted when it is recharged, so 0280's freeze would otherwise refuse the recharge itself — and restates 0280's freeze and 0279's merge door verbatim, because replacing a function replaces its whole body |
+| **Wave 11** — the pass-through invoice line | `service-invoice.ts` grows the vocabulary: `PASS_THROUGH_RECHARGE_ACCOUNT` is 1270, `PASS_THROUGH_RECHARGE_INDUSTRIES` is the agency alone, and `resolvePassThroughCreditCode` refuses any other trade here rather than letting it fail mid-transaction with a missing-account error. `retail-invoice/types.ts` grows `ServiceLineSnapshot.passThrough?: true` — a discriminator on the existing field, not a new line kind (decision 63) — and `retail-invoice-service.ts` accepts `passThrough` on a service line, refusing it alongside an explicit `revenueCode` or a non-zero discount. `service-posting-rules.ts` branches **only the memo**, because the rule already credits whatever code the line carries |
+| **Wave 11** — §D recharge service and HTTP | `rechargeAgencyCosts` in `agency-reimbursable-cost-service.ts`: one invoice, one pass-through line per cost, written with the marks on the cost rows in a single transaction so a recharge cannot half-happen (decision 67). Seven new codes, and the guard's exhaustive status map refused to compile until each was placed — the net wave 10 built, paying off. `POST /api/agency/reimbursable-costs/recharge` asks for **both** `ordersCreate` and `financeExpensesManage`, one permission at a time, because a composite permission does not exist and inventing one would be a second way to ask for authority (decision 66). `isCostRecharged` is pure, and `sumCostsByParty` grows `unrechargedRial` computed the same way |
+| **Wave 11** — §D recharge tests | `integration/agency-recharge.integration.test.ts` (11, real database), whose headline is that recording a client's media buy and then billing it back leaves **1270 at exactly zero** — what "clearing account" means, and what neither half could prove alone — plus that the entry recognises no revenue and no VAT, that a cost cannot be billed twice, that an unposted cost is refused because there is nothing to clear, that two clients are two recharges, that the project tag appears only when every cost agrees, that voiding the invoice makes the cost billable again *with nobody updating a flag*, and that one tenant cannot recharge another's costs. The suite caught a real bug in the trigger: refusing re-pointing outright also refused the legitimate re-bill after a void, so the rule became about the invoice's state rather than about which column changed. `reimbursable-cost-guard.test.ts` grew to 10, and 48 assertions run against 0284 over Postgres, including re-pointing a cost *directly* from a voided invoice to a live one without clearing the link first — which is the service's own path, and which a trigger that cleared-then-re-pointed would have passed while still refusing it |
 | **Wave 9** — §C campaign tests | `agency-campaign.test.ts` (26, pure), `integration/agency-client-campaigns.integration.test.ts` (16, real database), `integration/agency-party-merge.integration.test.ts` (6, real database), `campaign-guard.test.ts` (6) and 66 assertions against 0278 run directly over Postgres. The integration suite covers what only a database can show: one number sequence under a race, an overspend recorded *and* reported as `over`, the four ratios and their nulls including `revenueRial: 0` giving no ROAS, list figures identical to detail figures, a one-field patch clearing nothing, the full lifecycle with its window requirements stated in words first, a closed campaign refused from both the service and a **raw** `UPDATE` that skips it, a foreign client refused by the trigger as `23514`, and two of one brand's campaigns concurrent in the same window. The merge suite pins both halves of decision 56 — the move lands with substance and lines byte-for-byte intact and an audit row written, and what was frozen stays frozen for every path that is not the audited merge |
 
 
@@ -817,6 +821,88 @@ There is no UI in this wave, and that is a decision rather than an omission. The
 
 What ships is complete and usable through the API and, more importantly, **true in the books**: 1270 is reachable, a cost posts through the domain-event engine with its project tag, and §D's gross-versus-net distinction is a stored, audited fact rather than a note in a spreadsheet. The screen that reads it is the next slice, and it will land on a register that already works.
 
+### 63 — a pass-through line is a discriminator on the service line, not a new line kind
+
+`retail-invoice-service.ts` has seven line kinds and `service` is the service trades'
+only one, so §D's pass-through could have been an eighth. It is not, and the reason is
+a recon result rather than a preference: nothing in `src/` reads
+`ServiceLineSnapshot.revenueCode` for reporting — only reprints read it — so a new kind
+would have reached every exhaustive map over line kinds for no behavioural gain.
+
+`passThrough?: true` is optional, which is what makes it cheap: absent on every
+existing snapshot, so no row needed migrating and no old invoice changed meaning.
+
+The discriminator is still load-bearing and not decorative, precisely *because* the
+field is named `revenueCode`. A report that summed it without this check would count a
+client's own media money as agency sales, which is the exact error §D exists to prevent
+— and the first thing a future reporting slice will read is that field name.
+
+### 64 — VAT on a recharge defaults to zero, and the software takes no position
+
+`PASS_THROUGH_DEFAULT_VAT_PERCENT = 0`. Whether recovering a disbursement is a taxable
+supply depends on the jurisdiction **and** on the contract between the agency and the
+client, and neither is visible from a line on an invoice. Software that picked a
+position would be asserting a tax treatment it cannot know, and the failure is
+asymmetric: a wrong zero is a missing liability the business can still correct, while a
+wrong non-zero creates a liability owed to nobody.
+
+So it is a *default* and a member can charge VAT on the line. Naming it a rule — "a
+recharge is never taxable" — would have been a claim about tax law sitting in a
+constant.
+
+### 65 — whether a cost has been recharged is derived from the invoice, never stored
+
+0284 stores `recharged_order_id` and asserts that no `status`, `recharged_at` or
+`recharged_rial` column exists. `retail-invoice-void-service.ts` does not delete an
+invoice: it flips `orders.status` to `voided`, keeps the original entry and writes a
+reversing one. So by the time anybody looks, **the ledger has already put the money
+back into 1270** — a stored flag would be a second answer to a question the order
+answers, and the two would disagree the first time somebody voided an invoice.
+
+`isCostRecharged` is pure so the rule is testable without a database, and it treats a
+missing order status as *not* recharged: the safe direction is making a cost billable
+again rather than silently writing off a claim on a client.
+
+The same derivation runs in SQL inside `sumCostsByParty`, so `unrechargedRial` — what a
+client still owes — moves back up when an invoice is voided without anything being
+written to the register. Two implementations of one rule is the cost of this decision,
+and it is paid deliberately: the alternative is a flag that lies.
+
+### 66 — the recharge needs two permissions, asked for one at a time
+
+It creates a sales invoice, so `ordersCreate` is the act; it draws down the cost
+register, so `financeExpensesManage` is where the money came from. Either alone is
+wrong: a member who can invoice but not see costs would bill a client from a register
+they cannot read, and a member who can record costs but not invoice would be able to
+raise a document.
+
+There is no composite permission in `PERMISSIONS`, and the house helper is a
+single-permission door, so the route calls `requirePermission` twice. Inventing a
+composite here would have meant a second way to ask for authority — and authority with
+two spellings is authority that gets checked in only one of them.
+
+The invoice permission is asked first, because it is the act this route performs, and
+naming the missing authority that matters most beats naming whichever check ran first.
+
+### 67 — a recharge is whole-or-nothing, one client at a time, one project only on agreement
+
+One invoice line per cost row, never a part-recharge. A remaining-balance figure would
+have to agree with both the register and 1270's ledger balance, and two sources for one
+number is how they drift; whole-or-nothing means the cost is either in an invoice or it
+is in the queue, and the partial index over `recharged_order_id IS NULL` *is* the queue.
+
+`orders.customer_id` references `parties`, so the cost's client is the invoice's
+customer and no mapping was needed or wanted — costs from two clients are therefore two
+recharges, not one invoice with a problem.
+
+The project tag is applied only when every selected cost agrees, and left null when they
+do not. Guessing one of several would put the whole recharge in a single project's P&L
+and quietly take it out of the others', which is the same error §C's "defensible
+attribution" rule exists to prevent, on the cost side.
+
+The invoice and the marks on the rows commit together. The failure mode of a
+half-written recharge is not a confusing screen but billing the same media buy twice.
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -1143,6 +1229,22 @@ link every byte fetch, which made the default link unable to show the artwork it
   year because `isValidIsoDate` is calendar-aware about days but shape-based about
   years, and free text that reports over-long rather than truncating a description
   about to appear on a client's invoice.
+* `integration/agency-recharge.integration.test.ts` (11) — §D's recharge half, and the
+  assertion that makes the pair worth having: that recording a client's media buy and
+  then billing it back leaves **1270 at exactly zero**. Also that the entry recognises
+  no revenue and no VAT (a VAT line would be a liability owed to nobody), that the
+  snapshot carries `passThrough` so a report reading `revenueCode` can tell a
+  pass-through from a sale, that a cost cannot be billed twice, that an unposted cost is
+  refused because there is nothing in 1270 to clear, that two clients are refused with
+  nothing written for either, that a duplicate id collapses into one recharge, that the
+  project tag appears only when every cost agrees, that **voiding the invoice makes the
+  cost billable again with nobody updating a flag**, and that one tenant cannot recharge
+  another's. Entries are found through `domain_events`, because
+  `journal_entries.source_id` is a fresh identity per line and not the order.
+* `reimbursable-cost-guard.test.ts` grew to 10 with `readRechargeBody`: a location is
+  trimmed, a blank one reads as absent rather than reaching the service as an id nobody
+  has, tenders pass through untouched so the invoice keeps deciding payment, and
+  anything that is not an object answers `null` rather than throwing.
 * `integration/agency-reimbursable-costs.integration.test.ts` (12) — the same feature
   against a real database, and the proof that the door to 1270 opened rather than
   that a row was inserted: the entry landing Dr 1270 / Cr 2140 with the project tag
@@ -1314,14 +1416,17 @@ Deliberately, and each is named in the issue:
   and revocable, never a share URL that bypasses tenant and project authorization. #1110's
   eligibility matrix must still name this trade when it lands.
 * **§D reimbursable client costs** — wave 10 opened account 1270 and made the
-  gross-versus-net choice a stored, posted fact, and stopped there deliberately
-  (decisions 58–62). Still owed: the **screen**, because the Accounting app's section
-  key reaches ten files and four contract tests of its own; the **recharge** that
-  credits 1270 when a cost is billed back, which is what turns the account from an
-  accumulator into a clearing one; a **business-level** presentation policy, where
-  today the treatment is chosen per document; and the vendor quote → purchase →
-  payable → settlement chain, for which `settled_by = 'payable'` crediting 2140 is the
-  seam — the day that chain exists it settles these rows rather than duplicating them.
+  gross-versus-net choice a stored, posted fact (decisions 58–62), and wave 11 closed
+  the loop with the **recharge** that credits it when a cost is billed back, which is
+  what turns the account from an accumulator into a clearing one (decisions 63–67).
+  Still owed: the **screen**, because the Accounting app's section key reaches ten
+  files and four contract tests of its own — and it now has two acts to show rather
+  than one, so it is the natural home for both; a **business-level** presentation
+  policy, where today the treatment is chosen per document; the **campaign and project
+  P&L** read, which wave 11 made one step closer by tagging the recharge's entries with
+  the project its costs agreed on; and the vendor quote → purchase → payable →
+  settlement chain, for which `settled_by = 'payable'` crediting 2140 is the seam — the
+  day that chain exists it settles these rows rather than duplicating them.
 * **§C Growth** — campaign calendar and channel mix for *client* campaigns, the agency's-own vs
   client-managed split in reporting, spend/reach/CPL/CPA/ROAS with defensible attribution, manual
   import of platform data. No external ad-platform integration is claimed or implied anywhere in

@@ -60,6 +60,22 @@ export const REIMBURSABLE_COST_ERROR_STATUS: Record<AgencyReimbursableCostErrorC
   invalid_settlement: 400,
   text_too_long: 400,
   cost_posted: 409,
+
+  // Recharging. The split follows the same rule as the rest of the map: a record
+  // that is not there is a 404, a malformed field is a 400, and a refusal that comes
+  // from where the record *is* in its life cycle is a 409.
+  recharge_empty: 400,
+  invalid_cost_id: 400,
+  cost_not_found_for_recharge: 404,
+  // Both of these are states rather than mistakes: the cost has already been billed
+  // (and the words say which invoice to void), or its own entry has not landed yet so
+  // there is nothing in 1270 to clear.
+  cost_already_recharged: 409,
+  cost_not_posted: 409,
+  costs_from_different_clients: 400,
+  // Not the member's field — the tenant has no active branch to bill from, so the
+  // request was reasonable and the setup is what says no.
+  location_required: 409,
 };
 
 /** The SQLSTATE on an error, read off the shape rather than by importing `pg`. */
@@ -121,6 +137,36 @@ export function costActor(session: { sub: string; fullName?: string | null }): {
   name: string;
 } {
   return { userId: session.sub, name: session.fullName ?? "" };
+}
+
+/**
+ * The recharge body, in the same shape as `readCostBody`: it takes the request, parses
+ * it, and answers `null` for anything that is not an object, so the route reports one
+ * malformed-body error rather than three.
+ *
+ * The fields are handed to the service largely as they arrived. The service already
+ * refuses an empty set of costs, a non-string member and an id belonging to another
+ * tenant, and a stricter read here would mean two places deciding what a usable
+ * request looks like — and the two would drift.
+ */
+export async function readRechargeBody(request: Request): Promise<{
+  costIds: unknown;
+  tenders: unknown;
+  locationId: string | null;
+  note: unknown;
+} | null> {
+  const source = await readCostBody(request);
+  if (!source) return null;
+  const locationId =
+    typeof source.locationId === "string" && source.locationId.trim().length > 0
+      ? source.locationId.trim()
+      : null;
+  return {
+    costIds: source.costIds,
+    tenders: source.tenders,
+    locationId,
+    note: source.note,
+  };
 }
 
 export { AGENCY_REIMBURSABLE_COST_ERROR_CODES, AgencyReimbursableCostError };

@@ -30,6 +30,7 @@ import {
   costActor,
   costErrorResponse,
   readCostBody,
+  readRechargeBody,
   type AgencyReimbursableCostErrorCode,
 } from "./reimbursable-cost-guard";
 
@@ -56,6 +57,22 @@ const EXPECTED_STATUS: Record<AgencyReimbursableCostErrorCode, number> = {
   // The ledger already carries the figure, so the record refuses because of where it
   // is in its life cycle: the request was reasonable and the state says no.
   cost_posted: 409,
+
+  // Recharging. The split follows the same rule as the rest of the map: a record
+  // that is not there is a 404, a malformed field is a 400, and a refusal that comes
+  // from where the record *is* in its life cycle is a 409.
+  recharge_empty: 400,
+  invalid_cost_id: 400,
+  cost_not_found_for_recharge: 404,
+  // Both of these are states rather than mistakes: the cost has already been billed
+  // (and the words say which invoice to void), or its own entry has not landed yet so
+  // there is nothing in 1270 to clear.
+  cost_already_recharged: 409,
+  cost_not_posted: 409,
+  costs_from_different_clients: 400,
+  // Not the member's field — the tenant has no active branch to bill from, so the
+  // request was reasonable and the setup is what says no.
+  location_required: 409,
 };
 
 describe("reimbursable-cost-guard", () => {
@@ -155,5 +172,41 @@ describe("reimbursable-cost-guard", () => {
     });
     expect(costActor({ sub: "user-1", fullName: null })).toEqual({ userId: "user-1", name: "" });
     expect(costActor({ sub: "user-1" })).toEqual({ userId: "user-1", name: "" });
+  });
+});
+
+describe("readRechargeBody — the recharge's request shape", () => {
+  const req = (body: string) =>
+    new Request("http://test/api/agency/reimbursable-costs/recharge", { method: "POST", body });
+
+  it("takes the cost ids as they arrived and lets the service decide", () => {
+    // The service refuses an empty set, a non-string member and a foreign tenant's id.
+    // Validating a second time here would be a second opinion that could drift.
+    return expect(readRechargeBody(req(`{"costIds":["a","b"],"note":"x"}`))).resolves.toEqual({
+      costIds: ["a", "b"],
+      tenders: undefined,
+      locationId: null,
+      note: "x",
+    });
+  });
+
+  it("trims a location and treats a blank one as absent", async () => {
+    expect((await readRechargeBody(req(`{"locationId":"  loc-1 "}`)))?.locationId).toBe("loc-1");
+    // Absent and blank are the same answer, because both mean "pick the member's
+    // active branch" — and a blank string that reached the service would be a location
+    // id nobody has.
+    expect((await readRechargeBody(req(`{"locationId":"   "}`)))?.locationId).toBeNull();
+    expect((await readRechargeBody(req(`{"locationId":7}`)))?.locationId).toBeNull();
+  });
+
+  it("answers null rather than throwing for anything that is not an object", async () => {
+    expect(await readRechargeBody(req(`not json`))).toBeNull();
+    expect(await readRechargeBody(req(`[1,2]`))).toBeNull();
+    expect(await readRechargeBody(req(`null`))).toBeNull();
+  });
+
+  it("passes tenders through untouched, so the invoice keeps deciding payment", async () => {
+    const tenders = [{ method: "cash", amount: "1000" }];
+    expect((await readRechargeBody(req(JSON.stringify({ tenders }))))?.tenders).toEqual(tenders);
   });
 });
