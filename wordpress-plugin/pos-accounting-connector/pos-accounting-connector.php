@@ -3,7 +3,7 @@
  * Plugin Name:       Bizamiz Connector
  * Plugin URI:        https://github.com/hamidnoshady/biza-miz
  * Description:       اتصال امن دوطرفه فروشگاه ووکامرس به بیزامیز: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.
- * Version:           1.6.23
+ * Version:           1.6.25
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -77,7 +77,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'POS_CONNECTOR_VERSION', '1.6.23' );
+define( 'POS_CONNECTOR_VERSION', '1.6.25' );
 define( 'POS_CONNECTOR_DB_VERSION_OPTION', 'pos_connector_db_version' );
 define( 'POS_CONNECTOR_FILE', __FILE__ );
 define( 'POS_CONNECTOR_PATH', plugin_dir_path( __FILE__ ) );
@@ -159,6 +159,15 @@ define( 'POS_CONNECTOR_CRON_RESYNC_CONTENT', 'pos_connector_resync_content' );
 define( 'POS_CONNECTOR_CRON_MANUAL_JOB', 'pos_connector_manual_job' );
 /** Continuation of a chunked catalogue export (args: the export's run id). */
 define( 'POS_CONNECTOR_CRON_PRODUCT_EXPORT', 'pos_connector_product_export_continue' );
+/**
+ * The cron probe (args: the probe's correlation id, issue #1206).
+ *
+ * Queued with `wp_schedule_single_event()` a couple of seconds out. When this
+ * hook runs, a real scheduler invocation executed a due event — which is the
+ * one fact a «آزمایش اتصال» ping can never establish, and the reason the two
+ * buttons are worded differently.
+ */
+define( 'POS_CONNECTOR_CRON_PROBE', 'pos_connector_cron_probe' );
 
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-log.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-health.php';
@@ -189,9 +198,12 @@ function pos_connector_uses_system_cron() {
 /**
  * The crontab line to recommend, as a list so callers can print it line by line.
  *
- * ONE line: `cron event run --due-now` runs every due event, the five-minute
+ * ONE line: `cron event run --due-now` runs every due event, the one-minute
  * fast lane included, so the second line the docs used to suggest
  * (`pos-connector sync`) only made two processes race for the same jobs.
+ * The cadence in the line is derived from the fast lane's own interval
+ * (`POS_Connector_Health::system_cron_schedule()`), so the recommendation can
+ * never point at a slower tick than the lane it is meant to drive.
  * Where PHP's `open_basedir` blocks the `wp` binary — containers do this to the
  * CLI as well as to the web — `pos_connector_system_cron_open_basedir_example()`
  * is the invocation that works.
@@ -216,17 +228,50 @@ function pos_connector_cron_status() {
 }
 
 /**
+ * The schema version this build installs: the queue's and the log's, together.
+ *
+ * A pair rather than one number because the two tables upgrade independently,
+ * and a guard that only knew about the queue would skip a log change.
+ */
+function pos_connector_db_version() {
+	return POS_Connector_Queue::DB_VERSION . '.' . POS_Connector_Log::DB_VERSION;
+}
+
+/** How long a failed install is left alone before it is retried, in seconds. */
+const POS_CONNECTOR_INSTALL_RETRY_SECONDS = 300;
+
+/**
  * Ensure plugin tables exist after activation, updates, or a failed first install.
  *
- * Some hosts never created `{prefix}pos_connector_queue` because dbDelta choked
- * on SQL comments in the CREATE string; this self-heals without manual SQL.
+ * This runs on `plugins_loaded`, i.e. on every request, so the first thing it
+ * does is one read of one autoloaded option. It used to call `dbDelta()` twice
+ * and `SHOW TABLES` on every single request — including a customer's checkout —
+ * to answer a question whose answer changes only when the plugin is updated.
+ * `pos_connector_db_version()` is written here and by nothing else, so a
+ * plugin update is the only thing that can make the two differ.
+ *
+ * A host whose install failed is retried, but at most every five minutes:
+ * some hosts never created `{prefix}pos_connector_queue` because dbDelta choked
+ * on SQL comments in the CREATE string, and self-healing is worth a few
+ * queries — once, not once per page view.
  */
 function pos_connector_maybe_upgrade_db() {
+	$installed = (string) get_option( POS_CONNECTOR_DB_VERSION_OPTION, '' );
+	if ( '' !== $installed && pos_connector_db_version() === $installed ) {
+		return;
+	}
+
+	$failed = get_option( 'pos_connector_queue_install_failed', array() );
+	if ( is_array( $failed ) && isset( $failed['checked_at'] ) && ( time() - (int) $failed['checked_at'] ) < POS_CONNECTOR_INSTALL_RETRY_SECONDS ) {
+		return;
+	}
+
 	POS_Connector_Log::install_table();
 
 	$queue_ok = POS_Connector_Queue::maybe_install();
 	if ( $queue_ok ) {
-		update_option( POS_CONNECTOR_DB_VERSION_OPTION, POS_Connector_Queue::DB_VERSION, false );
+		// Autoloaded on purpose: the guard above must not cost a query.
+		update_option( POS_CONNECTOR_DB_VERSION_OPTION, pos_connector_db_version(), true );
 		delete_option( 'pos_connector_queue_install_failed' );
 		return;
 	}
@@ -472,19 +517,46 @@ function pos_connector_schedule_event( $hook, $schedule ) {
 }
 
 /**
+ * How often `init` may re-check the schedules, in seconds.
+ *
+ * `ensure_schedules()` runs on `init`, so its cost is paid on every request the
+ * site serves — a customer's included — for a question whose answer changes only
+ * after an update, an activation, or a cron option somebody rebuilt. Its checks
+ * are cron-array reads; being right within a few minutes is enough, so they are
+ * made at most this often.
+ */
+const POS_CONNECTOR_SCHEDULE_CHECK_SECONDS = 300;
+
+/**
+ * Whether the schedules are due another look.
+ *
+ * The timestamp is an autoloaded option, so consulting it costs no query.
+ */
+function pos_connector_schedules_due_for_check() {
+	$last = (int) get_option( 'pos_connector_schedules_checked_at', 0 );
+	return $last <= 0 || ( time() - $last ) >= POS_CONNECTOR_SCHEDULE_CHECK_SECONDS;
+}
+
+/**
  * Arm every scheduled event that should exist and does not.
  *
  * Activation used to be the only place events were scheduled, and WordPress
  * does not fire the activation hook when a plugin is *updated* — so an event
  * added in a later release was never scheduled on an installed store, and one
- * that was ever cleared (a cadence change that failed half-way, a cron
- * option rebuilt by a cache plugin) was never put back. This runs on `init`
- * and costs a handful of `wp_next_scheduled()` reads; it only writes when
- * something is actually missing or scheduled on the wrong cadence.
+ * that was ever cleared (a cadence change that failed half-way, a cron option
+ * rebuilt by a cache plugin) was never put back. This runs on `init`, at most
+ * every `POS_CONNECTOR_SCHEDULE_CHECK_SECONDS`, and only writes when something
+ * is actually missing or scheduled on the wrong cadence.
  *
  * A cadence set to «خاموش» stays off: that is a setting, not a gap.
+ *
+ * @param bool $force Re-check now, ignoring the throttle (activation, settings save).
  */
-function pos_connector_ensure_schedules() {
+function pos_connector_ensure_schedules( $force = false ) {
+	if ( ! $force && ! pos_connector_schedules_due_for_check() ) {
+		return;
+	}
+	update_option( 'pos_connector_schedules_checked_at', time(), true );
 	$settings = pos_connector_settings();
 
 	if ( wp_get_schedule( POS_CONNECTOR_CRON_HOOK ) !== 'pos_connector_one_minute' ) {
@@ -521,7 +593,8 @@ add_action( 'init', 'pos_connector_ensure_schedules', 20 );
 
 function pos_connector_activate() {
 	pos_connector_maybe_upgrade_db();
-	pos_connector_ensure_schedules();
+	// Activation is exactly the case the throttle exists to make an exception for.
+	pos_connector_ensure_schedules( true );
 }
 register_activation_hook( __FILE__, 'pos_connector_activate' );
 
@@ -538,6 +611,7 @@ function pos_connector_deactivate() {
 	// be told; wp_unschedule_hook() clears every event on the hook.
 	wp_unschedule_hook( POS_CONNECTOR_CRON_MANUAL_JOB );
 	wp_unschedule_hook( POS_CONNECTOR_CRON_PRODUCT_EXPORT );
+	wp_unschedule_hook( POS_CONNECTOR_CRON_PROBE );
 }
 register_deactivation_hook( __FILE__, 'pos_connector_deactivate' );
 
@@ -557,10 +631,32 @@ function pos_connector_settings() {
 		// that works says nothing about whether the cron does; that button has
 		// its own field. `armed_at` is when the connection first became usable.
 		'last_run_at'              => '',
+		// When the last cycle *finished*, whether or not it worked. `last_run_at`
+		// says the cron fires; this says the cycle came back — the difference
+		// between a dead scheduler and a slow or failing one (#1206).
+		'last_run_completed_at'    => '',
+		// Last VERIFIED cycle: no phase failed or half-applied. A failed push
+		// or an unreachable app must never move it.
 		'last_sync_ok_at'          => '',
+		// Last cycle that actually moved data, distinct from a verified empty
+		// round trip ("صف خالی بود" is healthy, not proof of transfer).
+		'last_data_applied_at'     => '',
 		'last_ping_ok_at'          => '',
 		'armed_at'                 => '',
 		'last_error'               => '',
+		// Structured phase results of the last cycle (POS_Connector_Health::phase()).
+		'last_cycle_verdict'       => '',
+		'last_cycle_phases'        => array(),
+		// The last cron probe: queued → executed → reported, with an expiry
+		// (POS_Connector_Health::probe_state()).
+		'cron_probe'               => array(),
+		// The last interruption, kept as history with its resolution time, so a
+		// recovered store stops showing a live warning (#1206 P0-3).
+		'incident_open'            => false,
+		'incident_at'              => '',
+		'incident_gap_seconds'     => 0,
+		'incident_previous_state'  => '',
+		'incident_recovered_at'    => '',
 		// 1.1.0 — the scheduled sweeps. Orders default on (a missed hook is a
 		// missing sale); products default to hourly (a full export is not
 		// free, and an hourly backstop is enough for a catalogue that also

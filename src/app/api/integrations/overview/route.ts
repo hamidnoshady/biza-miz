@@ -59,7 +59,7 @@ export const GET = withTenantScope(async () => {
       pluginHealthSummary:
         c.linkMode === "plugin"
           ? summarizePluginHealth(
-              { last_plugin_seen_at: c.lastPluginSeenAt, last_sync_at: c.lastSyncAt, plugin_health: c.pluginHealth },
+              { status: c.status, last_plugin_seen_at: c.lastPluginSeenAt, last_sync_at: c.lastSyncAt, plugin_health: c.pluginHealth },
               {
                 size: Number(waitingByConnection.get(c.id)?.size ?? 0),
                 oldestAt: waitingByConnection.get(c.id)?.oldest ? new Date(waitingByConnection.get(c.id)!.oldest!).toISOString() : null,

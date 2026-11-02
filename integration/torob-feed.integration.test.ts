@@ -9,9 +9,13 @@
  *    with a reason — never an empty feed that reads as "no products";
  *  - the price comes from `menu_items.price` (integer Rial) and the currency from
  *    the *website's* registry, so a Rial site and a Toman site produce different
- *    Toman figures from the same numbers;
+ *    Toman figures from the same numbers, in Torob's v3 fields (`current_price`,
+ *    `title`, `availability`);
  *  - the page URL is composed from the manager's real storefront route, and a
  *    product without one is skipped with a reason instead of vanishing;
+ *  - a product the merchant withdrew (`is_active = false`) is **absent** — the v3
+ *    contract's rule for a removed product — while a product that is merely out of
+ *    stock stays listed;
  *  - every build writes a run row, and the row never claims Torob has anything.
  *  - one business can never build another's feed.
  */
@@ -196,10 +200,16 @@ describe("building a feed", () => {
       feed.buildShopFeed({ businessId: alpha.businessId, shopId: alpha.shopId }),
     );
     expect(result.status).toBe("built");
-    expect(result.summary?.total).toBe(2); // the inactive one is out of stock, not gone
-    expect(result.summary).toMatchObject({ total: 2, inStock: 1, outOfStock: 1 });
-    const item = result.firstPage?.products.find((entry) => entry.name === "دستبند نقره");
-    expect(item).toMatchObject({ price: 250_000, availability: "in_stock", category_name: "دستبند" });
+    // The withdrawn one is not a product Torob should list at all: v3's rule for a
+    // removed page is to omit it, not to send it as unavailable.
+    expect(result.summary?.total).toBe(1);
+    expect(result.summary).toMatchObject({ total: 1, inStock: 1, outOfStock: 0 });
+    expect(result.summary?.skippedByReason.map((entry) => entry.reason).sort()).toEqual([
+      "missing_image",
+      "not_sellable",
+    ]);
+    const item = result.firstPage?.products.find((entry) => entry.title === "دستبند نقره");
+    expect(item).toMatchObject({ current_price: 250_000, availability: true, category_name: "دستبند" });
     // The manager's own route, not a guess: `/product/{id}` for WooCommerce.
     expect(item?.page_url).toBe(`https://shop.alpha.example/product/${item?.page_unique}`);
   });
@@ -212,7 +222,7 @@ describe("building a feed", () => {
       feed.buildShopFeed({ businessId: alpha.businessId, shopId: alpha.rialShopId }),
     );
     const priceOf = (result: typeof toman) =>
-      result.firstPage?.products.find((entry) => entry.name === "دستبند نقره")?.price;
+      result.firstPage?.products.find((entry) => entry.title === "دستبند نقره")?.current_price;
     expect(priceOf(toman)).toBe(250_000);
     // 250 000 Rial = 25 000 Toman.
     expect(priceOf(rial)).toBe(25_000);
@@ -230,12 +240,20 @@ describe("building a feed", () => {
     const result = await withTenant(alpha.businessId, () =>
       feed.buildShopFeed({ businessId: alpha.businessId, shopId: alpha.shopId }),
     );
-    expect(result.summary?.skippedTotal).toBe(1);
-    expect(result.summary?.skippedByReason[0]).toMatchObject({ reason: "missing_image", count: 1 });
-    expect(result.skipped[0].name).toBe("بدون تصویر");
+    expect(result.summary?.skippedTotal).toBe(2);
+    expect(result.summary?.skippedByReason).toContainEqual({
+      reason: "missing_image",
+      count: 1,
+      copy: expect.any(String),
+    });
+    expect(result.skipped.map((entry) => entry.name).sort()).toEqual(["بدون تصویر", "غیرفعال"].sort());
   });
 
-  it("honours the shop's choice to leave sold-out products out", async () => {
+  it("leaves the sold-out choice inert until stock is a feed input", async () => {
+    // `menu_items` carries no stock count yet, so every published product is sent
+    // as available (see feed-service's `available: true`). The flag is honoured, it
+    // simply has nothing to remove — recorded here so the gap is a decision and not
+    // a surprise when stock arrives.
     await db.query(`UPDATE torob_shops SET include_out_of_stock = false WHERE id = $1`, [alpha.shopId]);
     try {
       const result = await withTenant(alpha.businessId, () =>
@@ -303,7 +321,7 @@ describe("a shop that cannot publish", () => {
     const result = await withTenant(beta.businessId, () =>
       feed.buildShopFeed({ businessId: beta.businessId, shopId: betaShop }),
     );
-    expect(result.firstPage!.products.map((item) => item.name)).toEqual(["کالای بتا"]);
+    expect(result.firstPage!.products.map((item) => item.title)).toEqual(["کالای بتا"]);
   });
 });
 
@@ -327,9 +345,12 @@ describe("the run record", () => {
          FROM torob_feed_runs WHERE shop_id = $1 ORDER BY built_at DESC LIMIT 1`,
       [alpha.shopId],
     );
-    expect(Number(rows[0].items_total)).toBe(2);
+    expect(Number(rows[0].items_total)).toBe(1);
     expect(rows[0].status).toBe("built");
-    expect(rows[0].skipped_detail).toEqual([{ reason: "missing_image", count: 1 }]);
+    expect(rows[0].skipped_detail).toEqual([
+      { reason: "missing_image", count: 1 },
+      { reason: "not_sellable", count: 1 },
+    ]);
     const after = await db.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM torob_feed_runs WHERE shop_id = $1",
       [alpha.shopId],
@@ -356,6 +377,6 @@ describe("the run record", () => {
   it("summarises the latest run per shop", async () => {
     const latest = await withTenant(alpha.businessId, () => feed.latestFeedRuns(alpha.businessId));
     expect(latest.get(alpha.shopId)?.status).toBe("built");
-    expect(latest.get(alpha.shopId)?.itemsTotal).toBe(2);
+    expect(latest.get(alpha.shopId)?.itemsTotal).toBe(1);
   });
 });

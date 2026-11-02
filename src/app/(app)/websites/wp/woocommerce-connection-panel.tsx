@@ -47,13 +47,29 @@ interface Connection {
   orderLookbackDays: number;
   sourceOfTruth?: "store" | "pos" | "two_way";
   manageStockOptIn?: boolean;
-  /** Issue #1149 — plugin-mode health, from GET /api/integrations/overview. */
+  /** Issues #1149/#1206 — plugin-mode health, from GET /api/integrations/overview. */
   pluginHealthSummary?: {
     silentMinutes: number | null;
     stale: boolean;
     alert: boolean;
+    /** The scheduler graded from actual cron starts (#1206), not from any contact. */
+    cron: {
+      state: "healthy" | "delayed" | "failed" | "paused" | "test_only" | "unknown";
+      reason: string;
+      lastAttemptAt: string | null;
+      missedIntervals: number | null;
+    };
     cronStale: boolean | null;
     cronGapSeconds: number | null;
+    /** Last cycle in which every phase succeeded or was verified empty. */
+    lastVerifiedCycleAt: string | null;
+    lastDataAppliedAt: string | null;
+    lastCycleVerdict: string | null;
+    nextDueAt: string | null;
+    /** The interruption a recovered store ended: history, not a live warning. */
+    previousOutageAt: string | null;
+    recoveredAt: string | null;
+    incidentOpen: boolean;
     queueSize: number;
     oldestQueuedAgeSeconds: number | null;
   } | null;
@@ -138,6 +154,34 @@ const OUTBOX_STATUS_LABELS: Record<string, string> = {
  * not running — the queue is real, it is just not being drained.
  */
 const PLUGIN_STALE_MS = 15 * 60 * 1000;
+
+/**
+ * How the app names the plugin's scheduler (#1206). Worded as what is known,
+ * never as a promise: `test_only` and `unknown` exist so the screen can say
+ * «نمی‌دانیم» instead of borrowing the colour of «سالم».
+ */
+const CRON_STATE_LABELS: Record<string, string> = {
+  healthy: "کرون در حال اجرا",
+  delayed: "کرون دیرکرده",
+  failed: "کرون اجرا نمی‌شود",
+  paused: "همگام‌سازی متوقف",
+  test_only: "فقط آزمایش اتصال",
+  unknown: "وضعیت کرون نامشخص",
+};
+
+/** Why the state is what it is — the actionable half of the sentence. */
+const CRON_REASON_LABELS: Record<string, string> = {
+  recent_start: "آخرین دوره به‌تازگی شروع شده است.",
+  missed_starts: "چند اجرای پیاپی کرون انجام نشده است؛ کرون سیستم را بررسی کنید.",
+  no_start_since: "کرون از مدتی پیش اجرا نشده؛ کرون سیستم یا مسیر WP-CLI را بررسی کنید.",
+  never_ran: "از زمان فعال‌سازی، کرون هرگز اجرا نشده است.",
+  awaiting_first_run: "اتصال تازه فعال شده و در انتظار نخستین اجرای کرون است.",
+  ping_without_cron: "آزمایش اتصال موفق بوده، اما این فقط اتصال را ثابت می‌کند نه کرون را.",
+  no_cycle_evidence: "هنوز هیچ نشانه‌ای از یک اجرای واقعی کرون به این سامانه نرسیده است.",
+  paused_by_owner: "همگام‌سازی از همین پنل متوقف شده است.",
+  paused_by_app: "همگام‌سازی از پنل بیزامیز متوقف شده است.",
+};
+
 
 /** A secret shown exactly once. Deliberately loud: there is no second chance to read it. */
 function ShowOnceSecret({ title, value, note, onDone }: { title: string; value: string; note: string; onDone: () => void }) {
@@ -471,9 +515,44 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                         .
                       </div>
                     ) : null}
-                    {c.pluginHealthSummary?.cronStale ? (
-                      <div className="text-amber-700 dark:text-amber-300">
-                        افزونه گزارش داده که زمان‌بند وردپرس مدتی اجرا نشده بود؛ کرون سیستمی را بررسی کنید.
+                    {c.pluginHealthSummary?.cron ? (
+                      <div
+                        className={
+                          c.pluginHealthSummary.cron.state === "failed"
+                            ? "text-red-700 dark:text-red-300"
+                            : c.pluginHealthSummary.cron.state === "delayed"
+                              ? "text-amber-700 dark:text-amber-300"
+                              : ""
+                        }
+                      >
+                        <span className="font-semibold">
+                          {CRON_STATE_LABELS[c.pluginHealthSummary.cron.state] ?? CRON_STATE_LABELS.unknown}
+                        </span>
+                        {c.pluginHealthSummary.cron.reason
+                          ? ` — ${CRON_REASON_LABELS[c.pluginHealthSummary.cron.reason] ?? c.pluginHealthSummary.cron.reason}`
+                          : null}
+                      </div>
+                    ) : null}
+                    {c.pluginHealthSummary ? (
+                      <div>
+                        آخرین اجرای واقعی کرون: {formatDateTime(c.pluginHealthSummary.cron.lastAttemptAt)}
+                        {" • "}
+                        آخرین دورهٔ تأییدشده: {formatDateTime(c.pluginHealthSummary.lastVerifiedCycleAt)}
+                        {" • "}
+                        آخرین دادهٔ اعمال‌شده: {formatDateTime(c.pluginHealthSummary.lastDataAppliedAt)}
+                        {c.pluginHealthSummary.nextDueAt
+                          ? ` • اجرای بعدی: ${formatDateTime(c.pluginHealthSummary.nextDueAt)}`
+                          : ""}
+                      </div>
+                    ) : null}
+                    {/* A recovered gap is history: shown, never painted as the
+                        current concern (#1206 P0-3). */}
+                    {c.pluginHealthSummary?.previousOutageAt ? (
+                      <div>
+                        وقفهٔ پیشین: {formatDateTime(c.pluginHealthSummary.previousOutageAt)}
+                        {c.pluginHealthSummary.incidentOpen
+                          ? " — هنوز رفع نشده"
+                          : ` — رفع‌شده در ${formatDateTime(c.pluginHealthSummary.recoveredAt)}`}
                       </div>
                     ) : null}
                     {!c.lastPluginSeenAt ? (
@@ -632,8 +711,8 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
 
                 {c.linkMode === "plugin" ? (
                   <p className="mt-1 text-[11px] text-muted-foreground">
-                    صف این فروشگاه توسط خودِ افزونهٔ وردپرس (هر ۵ دقیقه) تخلیه می‌شود؛ اگر «در صف» ثابت ماند، افزونه در
-                    حال اجرا نیست.
+                    صف این فروشگاه توسط خودِ افزونهٔ وردپرس و در بازه‌ای که خودش گزارش می‌کند (افزونه‌های ۱٫۶ به بالا هر
+                    دقیقه) تخلیه می‌شود؛ اگر «در صف» ثابت ماند، وضعیت کرون در بالای همین کارت را ببینید.
                   </p>
                 ) : null}
 
@@ -728,7 +807,14 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
             خودش نمایش داده می‌شود) آدرس <span dir="ltr" className="font-mono">{origin}</span> و توکنی که
             اینجا ساخته‌اید را وارد کنید.
           </li>
-          <li>«آزمایش اتصال از وردپرس» را بزنید؛ پس از موفقیت، همگام‌سازی خودکار هر پنج دقیقه اجرا می‌شود.</li>
+          <li>
+            «آزمایش اتصال از وردپرس» را بزنید. این آزمایش فقط اتصال را ثابت می‌کند؛ برای اثبات اجرای زمان‌بند، پس از
+            آن در پیشخوان وردپرس بخش «عیب‌یابی» وضعیت کرون را ببینید (یا در سرور{" "}
+            <code dir="ltr" className="font-mono">
+              wp pos-connector doctor
+            </code>{" "}
+            را اجرا کنید).
+          </li>
         </ol>
         <InfoBox>
           افزونه هیچ‌گاه به پایگاه‌دادهٔ این سامانه وصل نمی‌شود؛ همهٔ ارتباط‌ها امضاشده (HMAC-SHA256) و دارای
@@ -736,7 +822,7 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
         </InfoBox>
         <InfoBox>
           کرون داخلی وردپرس فقط هنگام بازدید از سایت اجرا می‌شود؛ در فروشگاه کم‌تردد، همگام‌سازی تا مراجعهٔ بعدی به تعویق
-          می‌افتد. برای اجرای دقیق هر ۵ دقیقه، یک کرون واقعی در هاست تنظیم کنید:{" "}
+          می‌افتد. برای اجرای دقیق، یک کرون واقعی در هاست تنظیم کنید (یک خط، بدون تکرار):{" "}
           <code dir="ltr" className="font-mono">wp cron event run --due-now</code> (یا بازدید دوره‌ای از
           wp-cron.php).
         </InfoBox>

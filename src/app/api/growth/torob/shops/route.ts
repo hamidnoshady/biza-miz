@@ -12,6 +12,8 @@ import {
   type TorobAuthMode,
   type TorobShop,
 } from "@/lib/torob/shop-service";
+import { beginPartnerAuthorization } from "@/lib/torob/authorization-service";
+import { TorobPartnerError } from "@/lib/torob/shop-generator";
 import type { TorobWebsiteKind } from "@/lib/torob/eligibility";
 
 /**
@@ -28,6 +30,9 @@ import type { TorobWebsiteKind } from "@/lib/torob/eligibility";
  * The actions are separated by permission on purpose:
  *
  *   connect / disconnect  → `torob.manage`     (a relationship decision)
+ *   authorize             → `torob.manage`     (one step of that relationship: ask
+ *                                               Torob for a connection and hand the
+ *                                               merchant its approval page)
  *   token                 → `torob.configure`  (a credential; its own key, its own
  *                                               audit entry, never echoed back)
  *   revoke                → `torob.manage`
@@ -50,9 +55,9 @@ export const GET = withTenantScope(async () => {
   });
 });
 
-type Action = "connect" | "token" | "revoke" | "enable" | "disable";
+type Action = "connect" | "authorize" | "token" | "revoke" | "enable" | "disable";
 
-const ACTIONS: readonly Action[] = ["connect", "token", "revoke", "enable", "disable"];
+const ACTIONS: readonly Action[] = ["connect", "authorize", "token", "revoke", "enable", "disable"];
 
 function isKind(value: unknown): value is TorobWebsiteKind {
   return value === "woocommerce" || value === "eshobe_cms";
@@ -84,6 +89,10 @@ export interface TorobShopView {
   authMode: TorobShop["authMode"];
   tokenHint: string | null;
   providerShopId: string | null;
+  /** Where the merchant approves the partner request; only while pending. */
+  approveUrl: string | null;
+  /** Why the last approval attempt failed, already translated by the screen. */
+  authorizationError: string | null;
   publicationRule: TorobShop["publicationRule"];
   enabled: boolean;
   health: TorobShop["health"];
@@ -104,6 +113,8 @@ function shaped(shop: TorobShop): TorobShopView {
     authMode: shop.authMode,
     tokenHint: shop.tokenHint,
     providerShopId: shop.providerShopId,
+    approveUrl: shop.approveUrl,
+    authorizationError: shop.authorizationError,
     publicationRule: shop.publicationRule,
     enabled: shop.enabled,
     health: shop.health,
@@ -112,7 +123,26 @@ function shaped(shop: TorobShop): TorobShopView {
   };
 }
 
+/**
+ * Where Torob sends the merchant's browser back to.
+ *
+ * The tenant's own origin, because that is where the merchant is signed in — and
+ * Torob requires https outside loopback, so a deployment behind a proxy must say
+ * what its public origin is rather than let this guess from a header.
+ */
+function returnUrlFor(request: NextRequest): string {
+  const configured = process.env.TOROB_RETURN_URL_BASE?.trim().replace(/\/$/, "");
+  const base = configured || request.nextUrl.origin;
+  return `${base}/api/growth/torob/authorize/callback`;
+}
+
 function failure(error: unknown) {
+  if (error instanceof TorobPartnerError) {
+    // 502 rather than 500: Torob answered, and the answer is what the screen has
+    // to explain. `not_configured` is ours, and 409 says so without pretending.
+    const status = error.code === "not_configured" ? 409 : error.code === "invalid_request" ? 400 : 502;
+    return NextResponse.json({ error: error.code }, { status });
+  }
   if (error instanceof TorobShopError) {
     const status =
       error.code === "website_not_found" || error.code === "shop_not_found"
@@ -197,6 +227,24 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     }
 
     if (typeof body.shopId !== "string") return NextResponse.json({ error: "bad_request" }, { status: 400 });
+
+    if (action === "authorize") {
+      const before = await shopState(businessId, body.shopId);
+      const { shop, connection } = await beginPartnerAuthorization({
+        businessId,
+        shopId: body.shopId,
+        returnUrl: returnUrlFor(request),
+      });
+      await audit(businessId, session.sub, "torob.shop.authorization_requested", shop.id, {
+        from: before,
+        to: shop.authorizationState,
+        // The connection id is Torob's own handle for this shop; the approval URL
+        // is a one-time page, so neither it nor the code ever reaches the audit log.
+        connectionId: connection.connectionId,
+        torobStatus: connection.status,
+      });
+      return NextResponse.json({ shop: shaped(shop), approveUrl: shop.approveUrl });
+    }
 
     if (action === "revoke") {
       const before = await shopState(businessId, body.shopId);

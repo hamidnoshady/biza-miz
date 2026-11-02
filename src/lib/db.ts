@@ -550,6 +550,18 @@ export async function withTenantTransaction<T>(
  *     it. It never selects across businesses: the account id is a parameter
  *     derived from a row already scoped to the caller's business.
  *
+ *   - **torob-product-api-auth** (issue #894) — resolving the opaque shop id in
+ *     Torob's Product API v3 path (`/api/v1/torob/products/<shopId>`) to the
+ *     business that owns that `torob_shops` row. The caller is Torob's fetcher
+ *     with no session of any kind, and the id in the URL is the *only* thing that
+ *     names the tenant, so this is the same identify-the-tenant-first shape as
+ *     woocommerce-webhook-auth and api-key-auth, keyed on a path segment instead
+ *     of a token. ONE read of `torob_shops.business_id`; every later statement —
+ *     the shop's publishability, its domain (the JWT audience), the catalogue and
+ *     the feed — runs inside `withTenant` for that business. The response to an
+ *     unknown id and to a shop that may not be served is identical, so this
+ *     lookup cannot be used to enumerate shops.
+ *
  * Every call is a hole in the isolation boundary, so keep them few, keep them
  * short, and never let one wrap a request body that also handles tenant data.
  */

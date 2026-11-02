@@ -42,6 +42,26 @@ class POS_Connector_Settings {
 		add_action( 'admin_post_pos_connector_resync_customers', array( __CLASS__, 'handle_resync_customers' ) );
 		add_action( 'admin_post_pos_connector_resync_content', array( __CLASS__, 'handle_resync_content' ) );
 		add_action( 'admin_post_pos_connector_schedule', array( __CLASS__, 'handle_schedule' ) );
+		// #1206 P0: prove the scheduler runs, without touching store data.
+		add_action( 'admin_post_pos_connector_cron_probe', array( __CLASS__, 'handle_cron_probe' ) );
+	}
+
+	/**
+	 * Queue a cron probe and return immediately.
+	 *
+	 * Deliberately makes no claim and syncs nothing: the answer arrives when a
+	 * separate scheduler invocation runs the event, which the Diagnostics screen
+	 * then shows stage by stage. No `precondition()` here — a store whose sync is
+	 * paused or whose WooCommerce is off still has a cron to check, and the probe
+	 * changes no store data.
+	 */
+	public static function handle_cron_probe() {
+		self::guard( 'pos_connector_cron_probe' );
+		if ( empty( pos_connector_settings()['enabled'] ) ) {
+			self::redirect_back( 'disabled' );
+		}
+		$probe = POS_Connector_Sync::schedule_cron_probe( 'admin' );
+		self::redirect_back( empty( $probe['error'] ) ? 'probe_queued' : 'probe_queue_failed' );
 	}
 
 
