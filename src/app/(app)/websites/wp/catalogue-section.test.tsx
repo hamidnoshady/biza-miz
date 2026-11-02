@@ -426,6 +426,21 @@ describe("CatalogueSection — rial vs toman display (issue #943, item 6)", () =
   });
 });
 
+describe("CatalogueSection — the storefront content sheet (issue #1215, P1-2)", () => {
+  it("opens the sheet for the row's own product, and only on a click", async () => {
+    const user = userEvent.setup();
+    await renderSection();
+    // The card itself stays the read-only mirror: nothing was fetched for a
+    // product nobody opened.
+    expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("/store/products/55"))).toBe(false);
+
+    await user.click(within(rowOf("قهوه ترک")).getByRole("button", { name: "محتوا و تصاویر" }));
+
+    expect(await screen.findByText(/محتوا و تصاویر «قهوه ترک»/)).toBeTruthy();
+    expect(vi.mocked(api).mock.calls.some(([url]) => String(url).endsWith("/store/products/55"))).toBe(true);
+  });
+});
+
 describe("syncProductsResultText — the sync outcome wording (issue #943, item 5)", () => {
   it("reports skipped and missing-remotely counts, and never invents a deletion", () => {
     const text = syncProductsResultText({
