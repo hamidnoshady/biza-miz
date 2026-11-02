@@ -136,6 +136,33 @@ run died mid-flight), the age of the oldest unsent row, and the last cycle's
 phase results. It writes no settings, moves no success timestamp and changes no
 store data.
 
+### The one cron command
+
+```
+* * * * * wp --path=/path/to/wordpress cron event run --due-now > /dev/null 2>&1
+```
+
+One line, every minute: it runs every due event — the 60-second fast lane, the
+order/catalogue sweeps and any queued button press — so there is no second line
+to race it. The cadence is the fast lane's own interval, derived in
+`POS_Connector_Health::system_cron_schedule()` rather than typed into the docs, and
+`*/5` was wrong for exactly that reason: a five-minute driver misses three
+fast-lane intervals per tick, which is the threshold this page calls `delayed`.
+Crontab cannot tick finer than a minute, so the remaining jitter is the tick.
+
+Only if the cron log shows an `open_basedir` error, run the same line through a
+PHP that is allowed to reach the binary (add `--allow-root` only for a root
+crontab):
+
+```
+* * * * * php -d open_basedir= /usr/bin/wp --path=/path/to/wordpress cron event run --due-now > /dev/null 2>&1
+```
+
+That relaxes the restriction for that one process. Do not turn `open_basedir`
+off globally for the site. And `DISABLE_WP_CRON=true` in `wp-config.php` is not
+itself a fault: it is the prerequisite for the line above — the proof is the
+fast handler's last start, never a passing connection test.
+
 Validate a real store separately: record local commit time, outbox creation/lease,
 remote application, fenced ACK and mapping update; test both modes, variations,
 duplicate delivery, disabled tracking, refunds with/without restock, broken cron,

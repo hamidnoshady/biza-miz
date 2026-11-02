@@ -68,7 +68,16 @@ export interface FeedBuildResult {
   builtAt: string;
 }
 
-interface ShopRow extends TorobShop {
+/**
+ * The shop row this file reads, plus the two publication columns.
+ *
+ * The approval-flow columns (`approve_url`, the window's start, the last failure)
+ * are deliberately *not* selected here: a feed is built from a shop's publication
+ * state, and carrying a one-time approval URL into a code path that only answers
+ * "what would we send" would invite it into a log.
+ */
+interface ShopRow
+  extends Omit<TorobShop, "approveUrl" | "authorizationRequestedAt" | "authorizationError"> {
   publicProductPath: string;
   includeOutOfStock: boolean;
 }
