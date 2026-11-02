@@ -15,6 +15,8 @@ import { describe, expect, it } from "vitest";
 const here = (relative: string) => readFileSync(new URL(relative, import.meta.url), "utf8");
 
 const SECTION = here("./products-list-section.tsx");
+
+const EDIT_PANEL = readFileSync("src/app/dashboard/products/product-edit-panel.tsx", "utf8");
 const PAGE = here("../../(app)/accounting/products/page.tsx");
 
 describe("the products list keeps the shared-chrome contract", () => {
@@ -214,6 +216,27 @@ describe("issue #1207 — the compact row keeps its three store states apart", (
     expect(SECTION).toContain("PRODUCT_WOO_FILTERS");
     expect(SECTION).toContain("matchesWooFilter(linkStateByLocalId.get(item.id) ?? \"unlinked\", isDuplicate(item), wooFilter)");
     expect(SECTION).toContain('aria-label="فیلتر پیوند فروشگاه و تکراری"');
+  });
+
+  it("offers «ویرایش» in the row's details area, through the same meta write path", () => {
+    expect(SECTION).toContain('type ProductPanelKind = "store" | "details" | "edit" | "stock" | "content" | "duplicate"');
+    expect(SECTION).toContain('onOpenPanel("edit")');
+    expect(SECTION).toContain("aria-controls={`edit-panel-${item.id}`}");
+    expect(SECTION).toContain('panel === "edit"');
+    expect(SECTION).toContain("<ProductEditPanel item={item}");
+    // The panel owns the identity fields only; stock/price and descriptions keep
+    // their own panels, and no edit path touches a store.
+    expect(EDIT_PANEL).toContain("/api/products/items/${item.id}/meta");
+    expect(EDIT_PANEL).toContain("PATCH");
+    expect(EDIT_PANEL).not.toContain("/api/products/publications");
+  });
+
+  it("separates «محصول اصلی» from «تنوع»", () => {
+    expect(SECTION).toContain("محصول اصلی");
+    expect(SECTION).toContain("تنوع");
+    expect(SECTION).toContain("از «{item.parentName}»");
+    // The family's own stock state is "none of its own", not a fabricated zero.
+    expect(SECTION).toContain('status === "family" ? "بدون موجودی مستقل"');
   });
 
   it("offers the source filter and the per-store filter when more than one store exists", () => {
