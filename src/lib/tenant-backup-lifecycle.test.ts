@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   query: vi.fn(),
   scope: vi.fn(),
+  tenantScope: vi.fn(async (_businessId: string, fn: () => Promise<unknown>) => fn()),
   config: vi.fn(),
   tenantDir: vi.fn(),
   profile: vi.fn(),
@@ -25,7 +26,11 @@ const mocks = vi.hoisted(() => ({
   storage: vi.fn(),
 }));
 
-vi.mock("./db", () => ({ query: mocks.query, withoutTenantScope: mocks.scope }));
+vi.mock("./db", () => ({
+  query: mocks.query,
+  withoutTenantScope: mocks.scope,
+  withTenant: mocks.tenantScope,
+}));
 vi.mock("./backup-service", () => ({
   getBackupConfig: mocks.config,
   tenantBackupDir: mocks.tenantDir,
@@ -410,6 +415,12 @@ describe("runBackupLifecycleTick", () => {
     const outcome = await runBackupLifecycleTick(now);
     expect(outcome.reclaimed + outcome.expired + outcome.verified).toBe(0);
     expect(mocks.query).toHaveBeenCalledWith(expect.stringContaining("SELECT DISTINCT business_id"));
+    // Each business's passes read tenant-scoped rows, so they must run inside
+    // that business's RLS scope — the fleet query alone is a bypass.
+    expect(mocks.tenantScope.mock.calls.map(([businessId]) => businessId)).toEqual([
+      "business-a",
+      "business-b",
+    ]);
   });
 
   it("does not let one broken business stop the others", async () => {
