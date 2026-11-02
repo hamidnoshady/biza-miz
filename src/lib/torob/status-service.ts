@@ -43,6 +43,7 @@ import { webhookCapability } from "./webhook-service";
 import { readTorobShop, readTorobShopToken, TorobShopError } from "./shop-service";
 import type {
   TorobObservation,
+  TorobObservationBrief,
   TorobObservationError,
   TorobProductState,
   TorobProductStatus,
@@ -223,6 +224,56 @@ export async function readShopObservation(input: {
     webhook,
     capabilities: { feed: true, sent: webhook.sent, listing: observation !== null },
   };
+}
+
+/**
+ * Every shop's observation in one read, for the multi-shop section.
+ *
+ * One query rather than one per shop: the section renders while a merchant is
+ * looking at it, and a dozen round trips to draw a dozen lines is how a page
+ * becomes slow for a reason nobody can see. It reads only our own tables — the
+ * overview never calls Torob either.
+ */
+export async function readObservationOverview(businessId: string): Promise<TorobObservationBrief[]> {
+  const { rows } = await query<{
+    id: string;
+    observed_status: TorobShopStatus | null;
+    observed_at: Date | null;
+    observed_error: TorobObservationError | null;
+    total: string | null;
+    pages: string;
+    with_problem: string;
+  }>(
+    `SELECT s.id,
+            s.observed_status,
+            s.observed_at,
+            s.observed_error,
+            s.observed_summary->>'total' AS total,
+            COALESCE(p.pages, 0)::text AS pages,
+            COALESCE(p.with_problem, 0)::text AS with_problem
+       FROM torob_shops s
+       LEFT JOIN (
+         SELECT shop_id,
+                count(*) AS pages,
+                count(*) FILTER (WHERE main_status IS NOT NULL) AS with_problem
+           FROM torob_product_states
+          WHERE business_id = $1
+          GROUP BY shop_id
+       ) p ON p.shop_id = s.id
+      WHERE s.business_id = $1
+      ORDER BY s.created_at`,
+    [businessId],
+  );
+
+  return rows.map((row) => ({
+    shopId: row.id,
+    shopStatus: row.observed_status,
+    pages: Number(row.pages),
+    withProblem: Number(row.with_problem),
+    total: row.total === null ? 0 : Number(row.total),
+    observedAt: iso(row.observed_at),
+    error: row.observed_error,
+  }));
 }
 
 /**

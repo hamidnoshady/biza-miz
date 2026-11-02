@@ -13,6 +13,7 @@ import {
   type TorobShop,
 } from "@/lib/torob/shop-service";
 import { beginPartnerAuthorization } from "@/lib/torob/authorization-service";
+import { readObservationOverview } from "@/lib/torob/status-service";
 import { TorobPartnerError } from "@/lib/torob/shop-generator";
 import type { TorobWebsiteKind } from "@/lib/torob/eligibility";
 
@@ -45,13 +46,20 @@ export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.torobView);
   if (error) return error;
 
-  const websites = await torobWebsiteOverview(session.businessId);
+  const [websites, observations] = await Promise.all([
+    torobWebsiteOverview(session.businessId),
+    readObservationOverview(session.businessId),
+  ]);
   return NextResponse.json({
     websites,
-    // Stated in the payload rather than left to the screen: Wave 1 can report
-    // authorization, and cannot report what Torob has indexed. A client that
-    // renders a "published" figure from this response would be inventing it.
-    capabilities: { authorization: true, feed: false, listing: false, attribution: false },
+    // Torob's own answer, one line per shop, read from our tables. Empty until a
+    // shop has been read back from Torob (§6e); a shop that has never been read is
+    // simply absent here, which a screen must not render as "nothing on Torob".
+    observations,
+    // Stated in the payload rather than left to the screen: the platform can report
+    // authorization and Torob's own listing state, and the webhook queue (§6f) is
+    // per shop — the section does not aggregate it, so it says nothing about it.
+    capabilities: { authorization: true, feed: true, listing: true, attribution: false },
   });
 });
 

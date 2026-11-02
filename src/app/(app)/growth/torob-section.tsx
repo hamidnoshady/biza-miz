@@ -37,6 +37,11 @@ import type { TorobV3Response } from "@/lib/torob/contract";
 import type { TorobFeedSkipReason } from "@/lib/torob/feed";
 import { TOROB_FEED_SKIP_COPY } from "@/lib/torob/feed";
 import { TOROB_PARTNER_FAILURE_COPY, type TorobPartnerFailure } from "@/lib/torob/shop-generator";
+import {
+  TOROB_OBSERVATION_ERROR_COPY,
+  TOROB_SHOP_STATUS_COPY,
+  type TorobObservationBrief,
+} from "@/lib/torob/observed-state";
 
 /**
  * One row as the screen sees it: the eligibility view's shape, with the *API's*
@@ -47,6 +52,11 @@ type TorobRow = Omit<TorobWebsiteRow, "shop"> & { shop: TorobShopView | null };
 
 interface ShopsResponse {
   websites: TorobRow[];
+  /**
+   * Torob's own answer per shop, from our tables — absent for a shop nobody has
+   * read back from Torob yet, which a screen must not render as "nothing on Torob".
+   */
+  observations?: TorobObservationBrief[];
   capabilities: { authorization: boolean; feed: boolean; listing: boolean; attribution: boolean };
 }
 
@@ -262,6 +272,7 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
   if (!data) return <SectionCardSkeleton />;
 
   const websites = data.websites;
+  const observations = new Map((data.observations ?? []).map((brief) => [brief.shopId, brief]));
   const working = (key: string, field: string) => busy === `${key}:${field}`;
 
   return (
@@ -271,9 +282,9 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
         description="هر وب‌سایتی که در بیزامیز مدیریت می‌کنید، یک فروشگاه مستقل و جدا در ترب دارد."
       >
         <InfoBox>
-          این نسخه اتصال و اجازهٔ انتشار را مدیریت می‌کند. وضعیت ارسال فید و ایندکس‌شدن محصولات در ترب
-          هنوز نمایش داده نمی‌شود: «متصل» یعنی ترب اجازهٔ انتشار داده است، نه اینکه محصولی در ترب دیده
-          می‌شود.
+          «متصل» یعنی ترب اجازهٔ انتشار داده است — نه اینکه محصولی در ترب دیده می‌شود. آن را فقط خود ترب
+          می‌گوید: هر فروشگاهی که از ترب خوانده شده باشد، وضعیتش را همان‌جا نشان می‌دهیم. ارسال تغییرات
+          به ترب (وبهوک) در صفحهٔ هر فروشگاه است و این صفحه جمع آن را ادعا نمی‌کند.
         </InfoBox>
       </SectionCard>
 
@@ -299,6 +310,7 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
         const key = `${row.kind}:${row.connectionId}`;
         const copy = STATE_COPY[row.state];
         const shop = row.shop;
+        const brief = shop ? (observations.get(shop.id) ?? null) : null;
         const canConnect = canManage && (row.state === "eligible" || row.state === "disconnected");
         const fixable = row.state === "needs_attention" || row.state === "inactive";
 
@@ -329,6 +341,7 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                   </Link>
                 ) : null}
                 {shop ? <ShopLine shop={shop} /> : null}
+                {brief ? <TorobStatusLine brief={brief} /> : null}
                 {shop && shop.authorizationState === "authorized" ? (
                   <ProductApiLine domain={row.domain} shopId={shop.id} enabled={shop.enabled} />
                 ) : null}
@@ -588,6 +601,46 @@ function ShopLine({ shop }: { shop: Shop }) {
       <p className="mt-2 text-xs text-muted-foreground">{parts.join(" · ")}</p>
       {error ? <p className="mt-1 text-xs text-destructive">{error}</p> : null}
     </>
+  );
+}
+
+/**
+ * What Torob says about one shop, in a line — or the honest absence of it.
+ *
+ * Deliberately separate from `ShopLine` above, which is our side of the channel
+ * (credential, rule, switch): one line is what we arranged, the other is what Torob
+ * reported. A shop that has never been read says so, because "no products on
+ * Torob" and "nobody has asked Torob" look identical in an empty panel and are
+ * entirely different problems.
+ */
+function TorobStatusLine({ brief }: { brief: TorobObservationBrief }) {
+  if (!brief.shopStatus) {
+    return (
+      <p className="mt-1 text-xs text-muted-foreground">
+        از ترب خوانده نشده است؛ در صفحهٔ همین فروشگاه «خواندن از ترب» را بزنید.
+      </p>
+    );
+  }
+
+  const copy = TOROB_SHOP_STATUS_COPY[brief.shopStatus];
+  const parts = [
+    `${toPersianDigits(brief.pages)} محصول در ترب`,
+    brief.withProblem > 0 ? `${toPersianDigits(brief.withProblem)} با ایراد` : "بدون ایراد",
+  ];
+  if (brief.observedAt) parts.push(`آخرین خواندن: ${toPersianDigits(formatJalali(new Date(brief.observedAt)))}`);
+
+  return (
+    <div className="mt-1 space-y-0.5">
+      <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <StatusBadge tone={copy.tone}>{copy.label}</StatusBadge>
+        <span>{parts.join(" · ")}</span>
+      </p>
+      {brief.error ? (
+        <p className="text-xs text-destructive">
+          آخرین تلاش ناموفق بود: {TOROB_OBSERVATION_ERROR_COPY[brief.error]}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

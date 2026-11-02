@@ -312,6 +312,13 @@ partner mode, and a shop with neither is answered `not_configured` — before th
 `not_authorized`/`channel_disabled` cases. That is the same reading of "disconnect stops managed
 operations" the rest of the feature uses: a channel that is off is not polled.
 
+The multi-shop section (`GET /api/growth/torob/shops`) also carries one observation line per shop —
+Torob's status, how many products it reports, how many carry a problem, when it was last read, and why the
+last attempt failed. It is read in **one** query over both Torob tables and it too never calls Torob. A
+shop that has never been read is simply absent from that list: the screen renders «از ترب خوانده نشده»
+rather than an empty panel, because "no products on Torob" and "nobody has asked Torob" look identical
+and are entirely different problems.
+
 ## 6f. Telling Torob what changed (Wave 5b)
 
 The Product API is Torob pulling from us on Torob's schedule. The **Product Webhook**

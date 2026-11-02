@@ -238,6 +238,27 @@ export function productIdFromPageUnique(pageUnique: string): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
+/**
+ * One shop's observation as the multi-shop overview needs it.
+ *
+ * Small on purpose: the section answers "which of my sites is in what state", so
+ * it carries Torob's status and three numbers — the rest lives on the per-shop
+ * page. `error` is the last failed attempt, kept beside the last good answer for
+ * the same reason the panel keeps both.
+ */
+export interface TorobObservationBrief {
+  shopId: string;
+  shopStatus: TorobShopStatus | null;
+  /** Pages Torob currently reports for this shop. */
+  pages: number;
+  /** Pages carrying at least one status — what somebody has to look at. */
+  withProblem: number;
+  /** Torob's own total from `product_summary`; not live, and `0` before its first calculation. */
+  total: number;
+  observedAt: string | null;
+  error: TorobObservationError | null;
+}
+
 /** How many pages Torob currently has in one status. */
 export interface TorobStatusCount {
   status: TorobProductStatus;

@@ -394,6 +394,27 @@ describe("a successful read", () => {
   });
 });
 
+describe("the multi-shop overview", () => {
+  it("reports Torob's status and counts for a shop, in one read", async () => {
+    const briefs = await withTenant(alpha.businessId, () => status.readObservationOverview(alpha.businessId));
+    const brief = briefs.find((row) => row.shopId === alpha.shopId);
+    // Torob's own status and total come from the stored observation; the page
+    // counts come from the state table, so the two cannot disagree about nothing
+    // having been read.
+    expect(brief).toMatchObject({ shopStatus: "active", total: 3 });
+    expect(brief?.observedAt).not.toBeNull();
+    expect(brief?.pages).toBeGreaterThan(0);
+    expect(brief?.withProblem).toBeLessThanOrEqual(brief?.pages ?? 0);
+  });
+
+  it("says nothing at all about another business's shops", async () => {
+    const briefs = await withTenant(beta.businessId, () => status.readObservationOverview(beta.businessId));
+    expect(briefs.map((row) => row.shopId)).toEqual([beta.shopId]);
+    // Never read: absent from the counts, with no status claimed.
+    expect(briefs[0]).toMatchObject({ shopStatus: null, pages: 0, withProblem: 0, error: null });
+  });
+});
+
 describe("a read that fails", () => {
   it("records the failure and keeps the last good answer and its date", async () => {
     const before = await shopRow();
