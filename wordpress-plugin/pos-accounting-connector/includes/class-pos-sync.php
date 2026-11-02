@@ -117,6 +117,10 @@ class POS_Connector_Sync {
 		// The same for the catalogue (1.6.19): one resync used to be a single
 		// ~200 s request on a 1,300-product store.
 		add_action( POS_CONNECTOR_CRON_PRODUCT_EXPORT, array( __CLASS__, 'continue_product_export' ), 10, 1 );
+		// And for the content/order walks (#1206): a slice that ran out of
+		// budget leaves a cursor, and this event finishes the walk minutes
+		// later instead of waiting for tomorrow's resync to find it expired.
+		add_action( POS_CONNECTOR_CRON_CONTENT_EXPORT, array( __CLASS__, 'continue_content_export' ) );
 		// A button press, run by cron instead of inside the admin request.
 		add_action( POS_CONNECTOR_CRON_MANUAL_JOB, array( __CLASS__, 'run_manual_job' ), 10, 1 );
 		// The cron probe (#1206): its callback running at all is the evidence
@@ -1313,17 +1317,44 @@ class POS_Connector_Sync {
 			return;
 		}
 
+		// One line per invocation, whatever the outcome (#1206 P0): a run that
+		// dies before it can record a verdict is exactly the case the owner is
+		// trying to diagnose, and it must leave a trace too.
+		$invocation = POS_Connector_Invocation_Log::start( array( 'trigger' => is_array( $gate ) ? 'cron' : 'sync' ) );
+
 		$store = new POS_Connector_Option_Lock_Store();
 		$token = POS_Connector_Lock::acquire( 'run', POS_Connector_Health::RUN_LOCK_TTL_SECONDS, time(), $store );
 		if ( false === $token ) {
 			POS_Connector_Log::info( 'run', 'run_locked' );
-			return array( 'locked' => true, 'pushed' => 0, 'applied' => 0, 'verdict' => 'skipped', 'phases' => array() );
+			$locked = array( 'locked' => true, 'pushed' => 0, 'applied' => 0, 'verdict' => POS_Connector_Health::PHASE_SKIPPED, 'phases' => array() );
+			POS_Connector_Invocation_Log::finish( $invocation, $locked );
+			return $locked;
 		}
 		try {
-			return self::run_locked( $settings, is_array( $gate ) ? $gate : null );
+			$stats = self::run_locked( $settings, is_array( $gate ) ? $gate : null );
+		} catch ( \Throwable $error ) {
+			POS_Connector_Invocation_Log::finish(
+				$invocation,
+				array( 'verdict' => POS_Connector_Health::PHASE_FAILED, 'errors' => array( 'exception:' . $error->getMessage() ) )
+			);
+			throw $error;
 		} finally {
 			POS_Connector_Lock::release( 'run', $token, $store );
 		}
+
+		if ( null === $stats ) {
+			// The gate refused (token revoked, host unreachable): no phase ran,
+			// so no verdict was recorded — which is a failure of the pipeline and
+			// must not be logged as an idle tick.
+			POS_Connector_Invocation_Log::finish(
+				$invocation,
+				array( 'verdict' => POS_Connector_Health::PHASE_FAILED, 'errors' => array( 'gate_not_ok' ) )
+			);
+			return null;
+		}
+
+		POS_Connector_Invocation_Log::finish( $invocation, $stats );
+		return $stats;
 	}
 
 	/**
@@ -1360,6 +1391,7 @@ class POS_Connector_Sync {
 		// A pending catalogue/customer export whose continuation was lost
 		// (cron option rebuilt, event fired while paused) is put back.
 		self::schedule_pending_product_exports();
+		self::schedule_pending_content_export();
 
 		if ( null === $gate || true !== $gate['state'] ) {
 			$gate = self::gate();
@@ -2685,6 +2717,47 @@ class POS_Connector_Sync {
 		}
 	}
 
+	/**
+	 * Finish a content walk that ran out of budget (#1206).
+	 *
+	 * One event, no arguments: the cursor itself names the snapshot. Re-added on
+	 * every tick while a cursor exists, which is what makes a lost event (cron
+	 * option rebuilt, a run that died) recoverable instead of a stranded walk.
+	 */
+	private static function schedule_content_export_continuation( $delay = 5 ) {
+		if ( null === POS_Connector_Export_Cursor::get( 'content' ) ) {
+			return;
+		}
+		if ( ! wp_next_scheduled( POS_CONNECTOR_CRON_CONTENT_EXPORT ) ) {
+			if ( false === wp_schedule_single_event( time() + max( 1, (int) $delay ), POS_CONNECTOR_CRON_CONTENT_EXPORT ) ) {
+				POS_Connector_Log::error( 'export', 'content_export_continuation_schedule_failed' );
+			}
+		}
+	}
+
+	/** The fast lane puts back a content continuation that was never scheduled. */
+	private static function schedule_pending_content_export() {
+		self::schedule_content_export_continuation();
+	}
+
+	/** Continue a chunked content export from its saved place. */
+	public static function continue_content_export() {
+		if ( null === POS_Connector_Export_Cursor::get( 'content' ) ) {
+			return;
+		}
+		$settings = pos_connector_settings();
+		if ( empty( $settings['enabled'] ) ) {
+			return;
+		}
+		$gate = self::gate();
+		if ( true !== $gate['state'] ) {
+			// Paused or unreachable: the cursor stays, and the fast lane puts
+			// this event back on its next tick.
+			return;
+		}
+		self::export_content();
+	}
+
 	/** Continue a chunked catalogue export from its saved place. */
 	public static function continue_product_export( $sync_id ) {
 		$sync_id = (string) $sync_id;
@@ -3058,6 +3131,15 @@ class POS_Connector_Sync {
 		$boundary_seen = array();
 		$cursor_failed = false;
 		$ceiling_hit   = false;
+		// #1206: a store with more than one run's worth of modified orders used
+		// to re-walk the head of the window every time and never reach the tail,
+		// so orders past the ceiling were never exported at all. The walk now
+		// resumes where the last one stopped, inside the same window and age.
+		$resumed = POS_Connector_Export_Cursor::resume( 'orders', array( 'days' => $days, 'after' => $after ) );
+		if ( null !== $resumed && isset( $resumed['ts'] ) ) {
+			$boundary_ts   = (int) $resumed['ts'];
+			$boundary_seen = array_fill_keys( POS_Connector_Export_Cursor::seen_ids( isset( $resumed['seen'] ) ? (array) $resumed['seen'] : array() ), true );
+		}
 		while ( true ) {
 			$orders = wc_get_orders(
 				array(
@@ -3117,10 +3199,14 @@ class POS_Connector_Sync {
 		}
 
 		if ( $cursor_failed ) {
+			// The walk cannot be resumed soundly; the offset fallback below
+			// re-reads from the start of the window on its own budget.
+			POS_Connector_Export_Cursor::clear( 'orders' );
 			POS_Connector_Log::info(
 				'export',
 				'پیمایش کلیدی سفارش‌ها قابل اتکا نبود؛ پیمایش صفحه‌ای از ابتدا انجام شد.'
 			);
+			$cursor_failed = true; // Kept set: the fallback's own walk is not resumable.
 			$enqueued = 0;
 			$page     = 1;
 			do {
@@ -3144,11 +3230,31 @@ class POS_Connector_Sync {
 			$ceiling_hit = $page > 100;
 		}
 
-		if ( $ceiling_hit ) {
+		if ( $ceiling_hit && $cursor_failed ) {
+			// The offset fallback re-walks from the head by design (the cursor
+			// was unsound). Saying so is better than pretending to resume.
 			POS_Connector_Log::info(
 				'export',
 				'سقف پیمایش سفارش‌ها در این اجرا پر شد؛ باقی‌مانده در اجرای بعدی ارسال می‌شود.'
 			);
+		} elseif ( $ceiling_hit ) {
+			POS_Connector_Export_Cursor::set(
+				'orders',
+				array(
+					'days'  => $days,
+					'after' => $after,
+					'ts'    => $boundary_ts,
+					'seen'  => POS_Connector_Export_Cursor::seen_ids( array_keys( $boundary_seen ) ),
+				)
+			);
+			POS_Connector_Log::info(
+				'export',
+				'سقف پیمایش سفارش‌ها در این اجرا پر شد؛ اجرای بعدی از همین نقطه ادامه می‌دهد.'
+			);
+		} else {
+			// Drained: the window is covered, so nothing is owed. (Clearing is
+			// also what keeps a completed sweep from resuming into itself.)
+			POS_Connector_Export_Cursor::clear( 'orders' );
 		}
 
 		$sync_id = wp_generate_uuid4();
@@ -3362,20 +3468,42 @@ class POS_Connector_Sync {
 	 * path.
 	 */
 	public static function export_content() {
+		$types   = array( 'post', 'page' );
 		$count   = 0;
-		$sync_id = wp_generate_uuid4();
-		// Issue #941: attachments travel as one verified media snapshot, not as content pages.
-		self::export_media_snapshot();
-		foreach ( array( 'post', 'page' ) as $type ) {
-			$cursor  = 0;
+		$state   = POS_Connector_Export_Cursor::resume( 'content', array( 'kind' => 'content' ) );
+		$resumed = null !== $state;
+		if ( $resumed ) {
+			// The same snapshot continues, so the completion marker still lands
+			// behind every row of the run that started it (#1206).
+			$sync_id = (string) $state['sync_id'];
+		} else {
+			$sync_id = wp_generate_uuid4();
+			// Issue #941: attachments travel as one verified media snapshot, not
+			// as content pages — and only once per snapshot, not on every slice.
+			self::export_media_snapshot();
+		}
+
+		$type_index = 0;
+		$cursor     = 0;
+		if ( $resumed ) {
+			$found = array_search( (string) $state['type'], $types, true );
+			if ( false !== $found ) {
+				$type_index = (int) $found;
+				$cursor     = (int) $state['cursor'];
+			}
+		}
+
+		$started = microtime( true );
+		for ( $index = $type_index; $index < count( $types ); $index++ ) {
+			$type    = $types[ $index ];
 			$batches = 0;
-			do {
+			while ( true ) {
 				self::$export_id_cursor = $cursor;
 				add_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 				$posts = get_posts(
 					array(
 						'post_type'      => $type,
-						'post_status'    => 'attachment' === $type ? 'inherit' : array( 'publish', 'draft', 'pending', 'private', 'future', 'trash' ),
+						'post_status'    => array( 'publish', 'draft', 'pending', 'private', 'future', 'trash' ),
 						'posts_per_page' => 100,
 						'orderby'        => 'ID',
 						'order'          => 'ASC',
@@ -3397,8 +3525,34 @@ class POS_Connector_Sync {
 					);
 					++$count;
 				}
-			} while ( count( $posts ) === 100 && ++$batches < 500 );
+				++$batches;
+				if ( count( $posts ) < 100 ) {
+					break; // This type is drained.
+				}
+				if ( $batches >= 500 || ( microtime( true ) - $started ) >= self::EXPORT_TIME_BUDGET_SECONDS ) {
+					// The run is out of budget, not out of content. Remember the
+					// exact row so the next run continues instead of re-reading
+					// the same head and never reaching the tail (#1206).
+					POS_Connector_Export_Cursor::set(
+						'content',
+						array(
+							'kind'    => 'content',
+							'sync_id' => $sync_id,
+							'type'    => $type,
+							'cursor'  => $cursor,
+						)
+					);
+					POS_Connector_Log::info(
+						'export',
+						sprintf( 'سقف این اجرا پر شد؛ %d محتوا در صف قرار گرفت و اجرای بعدی از همان نقطه ادامه می‌دهد.', $count )
+					);
+					self::schedule_content_export_continuation();
+					return $count;
+				}
+			}
 		}
+
+		POS_Connector_Export_Cursor::clear( 'content' );
 		// This marker is queued after every exported row. The outbound queue is
 		// FIFO, so the app only advances its content watermark after the whole
 		// snapshot in front of this marker has been accepted.

@@ -203,3 +203,44 @@ describe("TaxonomiesSection — density and breadcrumbs (issue #1215, P2-4)", ()
     expect(await screen.findByText("پوشاک › تی‌شرت › یقه‌دار")).toBeTruthy();
   });
 });
+
+describe("TaxonomiesSection — «همگام‌سازی از وب‌سایت» in REST mode (#1206 PERF-05)", () => {
+  function queued(via: "app" | "plugin", alreadyRunning = false) {
+    vi.mocked(api).mockImplementation(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        return { ok: true, status: 200, data: { ok: true, queued: true, via, alreadyRunning, jobType: "taxonomy_sync" } } as never;
+      }
+      return {
+        ok: true,
+        status: 200,
+        data: { groups, totals: { groups: 30, terms: 60, mappedProducts: 10, assignments: 90 }, syncedAt: null, lastTaxonomySyncAt: null },
+      } as never;
+    });
+  }
+
+  it("says this app reads the tree, not that the plugin will send it", async () => {
+    queued("app");
+    render(<TaxonomiesSection connectionId="woo" />);
+    await screen.findByText("ویژگی 1");
+    fireEvent.click(screen.getAllByRole("button", { name: /همگام‌سازی از وب‌سایت/ })[0]);
+    await screen.findByText(/خواندن درخت در صف قرار گرفت/);
+    // The plugin sentence would be a lie about a REST store.
+    expect(screen.queryByText(/افزونه/)).toBeNull();
+  });
+
+  it("distinguishes an already-running read from a newly queued one", async () => {
+    queued("app", true);
+    render(<TaxonomiesSection connectionId="woo" />);
+    await screen.findByText("ویژگی 1");
+    fireEvent.click(screen.getAllByRole("button", { name: /همگام‌سازی از وب‌سایت/ })[0]);
+    await screen.findByText(/خواندن درخت در جریان است/);
+  });
+
+  it("keeps the plugin sentence for a plugin connection", async () => {
+    queued("plugin");
+    render(<TaxonomiesSection connectionId="woo" />);
+    await screen.findByText("ویژگی 1");
+    fireEvent.click(screen.getAllByRole("button", { name: /همگام‌سازی از وب‌سایت/ })[0]);
+    await screen.findByText(/فروشگاه در اجرای بعدی افزونه/);
+  });
+});

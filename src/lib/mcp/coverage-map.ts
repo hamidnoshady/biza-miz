@@ -795,7 +795,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "workspace.contracts",
     module: "Workspace",
     entity: "Contracts & lifecycle",
-    routes: ["workspace/contracts"],
+    // Exact `!` on the register itself: the document/signing subroutes belong to
+    // `workspace.contract-documents` below, and the DOCX/PDF import route there
+    // must not be read as a bulk operation on the contract register (it writes
+    // nothing — the editor saves through the ordinary document PUT).
+    routes: [
+      "workspace/contracts!",
+      "workspace/contracts/[id]!",
+      "workspace/contracts/[id]/lifecycle!",
+    ],
     ops: {
       listDetail: ["list_expiring_contracts", "get_workspace_contract"],
       create: ["contract.create"],

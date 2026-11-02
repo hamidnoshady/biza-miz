@@ -96,12 +96,16 @@ a `stale` flag on the field.
 * `src/lib/contracts/crypto.ts` — canonical-JSON SHA-256 and the HMAC-hashed
   invitation token. The plaintext token exists only in the message that carried
   it.
+* `src/lib/contracts/import.ts` — DOCX/PDF → blocks (§4a). Pure: bytes and a file
+  name in, blocks plus warnings out. No database, no storage, no clock, so it is
+  tested against in-memory fixtures.
 
 | route | verbs | authority |
 |---|---|---|
 | `/api/workspace/contracts/[id]/document` | GET, PUT | `workspace.view` / `workspace.contracts_manage` + `resolveWorkspaceSubject(edit)` |
 | `/api/workspace/contracts/[id]/document/versions` | GET, POST | same |
 | `/api/workspace/contracts/[id]/document/template` | POST | same |
+| `/api/workspace/contracts/[id]/document/import` | POST (multipart, one file) | same — and it does **not** write |
 | `/api/workspace/contracts/[id]/signing` | GET, PUT, POST | same |
 | `/api/workspace/contract-templates` | GET, POST, DELETE | view / contracts_manage |
 | `/api/workspace/contracts` | POST (+`templateRef`, `duplicateOf`) | contracts_manage |
@@ -111,6 +115,53 @@ The public route is the product's only session-less surface apart from the auth
 doors. It is listed in `PUBLIC_PATHS`, behind the same Origin check as the
 login mutations, and justified in `api-guards.test.ts` `PUBLIC_ROUTES`. Every id
 it acts on is resolved **from the token**, never accepted from the request.
+
+## 4a. Importing an existing Word or PDF document
+
+`src/lib/contracts/import.ts` + `POST …/document/import`. The epic asks for
+"import DOCX/PDF"; the honest version of that is *read the document, produce
+editable blocks, and say exactly what could not be carried over* — not a button
+that uploads a file and implies a perfect copy.
+
+**DOCX.** The archive is opened with the same bounded inflation the AI
+attachment reader uses (`openBoundedZip` / `inflateBoundedEntry`, exported from
+`ai-office-extract.ts` for this second caller so there is one inflate guard
+rather than two that can drift), then `word/document.xml` is walked as a tree:
+headings (a `Heading*`/`Title` style or an outline level), paragraphs, bulleted
+and numbered lists — read through `word/numbering.xml`, so a bulleted list does
+not come back numbered — tables (first row = header, which is what the block
+model requires) and page breaks. Bold/italic runs, colour, images, headers,
+footnotes, comments and tracked changes are dropped **and reported**.
+
+**PDF.** A text-layer reader, not OCR. FlateDecode streams are unwrapped and
+glyph codes are mapped through each font's `ToUnicode` CMap — without that, a
+modern Persian PDF (Identity-H: two bytes per glyph) yields nothing readable.
+A scanned page has no text and no CMap, so the import refuses with
+`pdf_no_text_layer` rather than returning an empty document: an import that
+silently produces nothing is worse than an error, because the sender would
+freeze and send a blank contract.
+
+**Three decisions worth stating:**
+
+1. **The route does not write.** It returns blocks plus warnings; the editor
+   puts them on the canvas as an ordinary edit (undoable, dirty, autosaved)
+   through the existing `PUT …/document` with the revision it already holds. One
+   write path means import cannot bypass the 409 `document_conflict` guarantee.
+2. **The file is not stored.** No media asset, no temp file, no second document
+   store: the bytes are parsed and dropped. Filing the original would make
+   import depend on object storage being configured, which would fail on a fresh
+   install for a reason unrelated to import. What is signed is the contract's own
+   frozen version, and that is the record.
+3. **No variables are invented.** Word cannot say which words were meant to be
+   `{{counterparty_name}}`, and a guessed field is a blank a signer would meet at
+   signing time. The imported document has `fields: []` and the sender binds them
+   in the inspector.
+
+Limits enforced before a parser sees the bytes: 5 MB per file, ≤ 500 archive
+entries, ≤ 20 MB per inflated part (and the whole archive bounded the same way),
+and the declared MIME type is never trusted — the format comes from the magic
+bytes, so a PDF announced as a `.docx` is read as a PDF and the mismatch comes
+back as a warning (the sender may simply have attached the wrong file).
 
 ## 5. Screens
 
@@ -127,9 +178,12 @@ canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
 
 ## 6. Honest gaps (what this branch does NOT claim)
 
-1. **DOCX/PDF import** is not implemented. There is no parser in this change and
-   no button pretending there is. Contracts start blank, from a built-in
-   template, from a saved template, or as a duplicate.
+1. **DOCX/PDF import is partial by design** (§4a). Word styling, images,
+   headers/footnotes and tracked changes are dropped; a PDF contributes text
+   only (no columns, no tables, no styling), and a scanned PDF is refused rather
+   than imported blank. Signature placements are never auto-detected — the
+   sender adds them, because a guessed signing line is a document that cannot be
+   sent. The upload is not archived.
 2. **Notifications on completion** are not wired to the notifications subsystem;
    the timeline and the sender's screen show the state, but no message is pushed.
 3. **Settings/AEC autofill sources** are limited to the catalogue in

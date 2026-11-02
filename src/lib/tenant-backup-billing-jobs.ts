@@ -306,6 +306,12 @@ export async function runBackupLegacyRefundJob(now: Date = new Date()): Promise<
 
 export interface MarginLine {
   businessId: string;
+  /**
+   * The business's name, when the report was read from the database. The pure
+   * arithmetic never invents one — a console row an operator cannot identify is
+   * a worse failure than a missing label.
+   */
+  businessName: string | null;
   byteDays: number;
   revenueRial: number;
   costRial: number;
@@ -314,6 +320,12 @@ export interface MarginLine {
   marginPercent: number | null;
   /** True when the meter event exists but no catalog price was found. */
   notPriced: boolean;
+  /**
+   * Byte-days in this line whose events carried no rating, and are therefore not
+   * covered by `revenueRial`. Zero for a fully priced line; a partly-priced line
+   * is neither `notPriced` (it does have revenue) nor complete.
+   */
+  unpricedByteDays: number;
 }
 
 export interface MarginReport {
@@ -336,7 +348,13 @@ export function computeBackupMargin(input: {
   from: Date;
   to: Date;
   providerCostRialPerGbMonth: number;
-  lines: { businessId: string; byteDays: number; revenueRial: number | null }[];
+  lines: {
+    businessId: string;
+    businessName?: string | null;
+    byteDays: number;
+    revenueRial: number | null;
+    unpricedByteDays?: number;
+  }[];
 }): MarginReport {
   // One GB-month is `daysInMonth` GB-days, so a byte-day costs
   // price ÷ (bytesPerGb × daysInMonth). Costing against the month the window
@@ -351,12 +369,14 @@ export function computeBackupMargin(input: {
     const marginRial = revenueRial - costRial;
     return {
       businessId: line.businessId,
+      businessName: line.businessName ?? null,
       byteDays: line.byteDays,
       revenueRial,
       costRial,
       marginRial,
       marginPercent: revenueRial > 0 ? Math.round((marginRial / revenueRial) * 1000) / 10 : null,
       notPriced: line.revenueRial === null,
+      unpricedByteDays: Math.max(0, Math.trunc(line.unpricedByteDays ?? 0)),
     };
   });
   const totals = lines.reduce(
@@ -387,6 +407,68 @@ function daysPerMonth(from: Date): number {
   return new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + 1, 0)).getUTCDate();
 }
 
+/** The window the console asks for when it names none. */
+export const MARGIN_DEFAULT_WINDOW_DAYS = 30;
+/**
+ * A year is already more history than a byte-day report is useful over, and the
+ * cap is also what keeps one query from scanning the meter's whole life.
+ */
+export const MARGIN_MAX_WINDOW_DAYS = 366;
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+export type MarginWindowResult =
+  | { ok: true; from: Date; to: Date }
+  | { ok: false; error: "invalid_window" | "window_too_long" };
+
+/**
+ * The window a margin request asked for, resolved against the clock.
+ *
+ * The report is a `[from, to)` interval over usage events, and two details are
+ * easy to get wrong in a query string, so they are decided here instead:
+ *
+ *  - a **date-only** `to` means "through the end of that day" (the returned bound
+ *    is the following midnight), because an operator asking for "1 to 31 October"
+ *    means the 31st is included;
+ *  - a **missing** bound defaults to the last 30 days ending now, which is the
+ *    window the console opens on.
+ *
+ * An unusable or inverted range is refused rather than silently widened: a
+ * report over a window nobody asked for is a number somebody will act on.
+ */
+export function resolveMarginWindow(
+  input: { from?: string | null; to?: string | null },
+  now: Date = new Date(),
+): MarginWindowResult {
+  const parseBound = (raw: string | null | undefined, endOfDay: boolean): Date | null => {
+    const trimmed = typeof raw === "string" ? raw.trim() : "";
+    if (!trimmed) return null;
+    if (DATE_ONLY.test(trimmed)) {
+      const start = Date.parse(`${trimmed}T00:00:00.000Z`);
+      if (!Number.isFinite(start)) return null;
+      return new Date(endOfDay ? start + DAY_MS : start);
+    }
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? new Date(parsed) : null;
+  };
+
+  const explicitTo = input.to === undefined || input.to === null || input.to === "" ? null : input.to;
+  const to = explicitTo === null ? new Date(now.getTime()) : parseBound(explicitTo, true);
+  if (!to) return { ok: false, error: "invalid_window" };
+
+  const explicitFrom = input.from === undefined || input.from === null || input.from === "" ? null : input.from;
+  const from =
+    explicitFrom === null
+      ? new Date(to.getTime() - MARGIN_DEFAULT_WINDOW_DAYS * DAY_MS)
+      : parseBound(explicitFrom, false);
+  if (!from) return { ok: false, error: "invalid_window" };
+
+  if (from.getTime() >= to.getTime()) return { ok: false, error: "invalid_window" };
+  if (to.getTime() - from.getTime() > MARGIN_MAX_WINDOW_DAYS * DAY_MS) {
+    return { ok: false, error: "window_too_long" };
+  }
+  return { ok: true, from, to };
+}
+
 /** The stored-margin report for a window, from the usage the ledger recorded. */
 export async function backupMarginReport(input: {
   from: Date;
@@ -395,15 +477,42 @@ export async function backupMarginReport(input: {
 }): Promise<MarginReport> {
   const providerCost = input.providerCostRialPerGbMonth ?? DEFAULT_PROVIDER_COST_RIAL_PER_GB_MONTH;
   const rows = await withoutTenantScope("backup-billing", async () => {
-    const result = await query<{ business_id: string; byte_days: string; revenue: string | null }>(
-      `SELECT u.business_id,
-              COALESCE(SUM(u.quantity), 0)::text AS byte_days,
-              SUM(u.amount_rial)::text AS revenue
-         FROM usage_events u
-        WHERE u.meter_key = $3
-          AND u.occurred_at >= $1 AND u.occurred_at < $2
-        GROUP BY u.business_id
-        ORDER BY u.business_id`,
+    const result = await query<{
+      business_id: string;
+      business_name: string | null;
+      byte_days: string;
+      revenue: string | null;
+      unpriced_byte_days: string;
+    }>(
+      // The name is joined here rather than resolved by the caller: a margin line
+      // an operator cannot identify is a row they will scroll past, and the
+      // console must not guess which business a uuid is.
+      //
+      // The shape is the billing runtime's own: quantity lives on the append-only
+      // `billing_usage_events`, and the money is the *rating* — `rated_amount_rial`
+      // on `billing_usage_ratings`, one row per event. A single LEFT JOIN is safe
+      // because `usage_event_id` is that table's primary key, so a quantity can
+      // never be multiplied by a second rating. `COUNT(r.usage_event_id)` tells an
+      // unpriced event (no rating row at all) from a zero-priced one: only the
+      // former is `not_priced`. Unrated byte-days are also counted separately, so a
+      // partly-rated line shows the exact quantity its revenue does not cover
+      // instead of quietly reading as fully billed.
+      `SELECT e.business_id,
+              b.name AS business_name,
+              COALESCE(SUM(e.quantity), 0)::text AS byte_days,
+              CASE
+                WHEN COUNT(r.usage_event_id) = 0 THEN NULL
+                ELSE COALESCE(SUM(r.rated_amount_rial), 0)::text
+              END AS revenue,
+              COALESCE(SUM(CASE WHEN r.usage_event_id IS NULL THEN e.quantity ELSE 0 END), 0)::text
+                AS unpriced_byte_days
+         FROM billing_usage_events e
+         LEFT JOIN billing_usage_ratings r ON r.usage_event_id = e.id
+         LEFT JOIN businesses b ON b.id = e.business_id
+        WHERE e.meter_key = $3
+          AND e.occurred_at >= $1 AND e.occurred_at < $2
+        GROUP BY e.business_id, b.name
+        ORDER BY e.business_id`,
       [input.from, input.to, BACKUP_STORAGE_METER_KEY],
     );
     return result.rows;
@@ -414,8 +523,10 @@ export async function backupMarginReport(input: {
     providerCostRialPerGbMonth: providerCost,
     lines: rows.map((row) => ({
       businessId: row.business_id,
+      businessName: row.business_name,
       byteDays: Number(row.byte_days),
       revenueRial: row.revenue === null ? null : Number(row.revenue),
+      unpricedByteDays: Number(row.unpriced_byte_days),
     })),
   });
 }

@@ -6,10 +6,10 @@ import { wooClientFor } from "@/lib/integrations/connections-service";
 import {
   listTaxonomyStates,
   listTerms,
-  syncTaxonomyTree,
   taxonomyGroupStats,
   type TermRow,
 } from "@/lib/integrations/woo-taxonomy-service";
+import { enqueueTaxonomySync } from "@/lib/integrations/outbox-service";
 import { isPluginJobUnsupportedError, PLUGIN_JOB_UNSUPPORTED } from "@/lib/integrations/plugin-job-guard";
 import { enqueuePluginExport } from "@/lib/integrations/plugin-service";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
@@ -161,10 +161,11 @@ export const GET = withTenantScope(async (request: Request, context: { params: P
  *
  * Issue #939 TAX-12: the screen's only button used to be a GET of this very
  * route — a "refresh" that re-read the local mirror and could never show
- * anything new. This is the missing remote action, honest per connection
- * mode: REST pulls the tree now and returns the per-taxonomy outcomes;
- * plugin mode cannot be dialled, so it queues the job and says `queued`
- * (the queue screen at /websites/wp/queue shows it land).
+ * anything new. This is the missing remote action. Both modes queue it and
+ * both say `queued`: in plugin mode the store sends the tree, in REST mode
+ * this app reads it, and in neither case does the person who pressed the
+ * button wait for a page-per-taxonomy walk of their catalogue (#1206
+ * PERF-05). `via` says which side does the work.
  */
 export const POST = withTenantScope(async (_request: Request, context: { params: Promise<{ id: string }> }) => {
   // Sync is an operation, not a read: `woocommerce.sync` (the WP Manager's
@@ -206,19 +207,27 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
     return NextResponse.json({ ok: true, queued: true, jobType });
   }
 
-  let client;
+  // REST mode cannot be dialled either — it is read *by* this app, but a whole
+  // tree is one HTTP page per taxonomy, sequentially, and a store with a few
+  // thousand terms makes that minutes (#1206 PERF-05). The POST used to do that
+  // inside the request the owner was waiting on. Now it queues the same kind of
+  // job the plugin path does, and this app's tick executes it with the queue's
+  // lease and backoff; the GET above shows the results as they land.
+  // Fails here when the credentials are missing or unreadable — no network —
+  // so a store that could never be read says so now rather than after a tick.
   try {
-    client = wooClientFor(connection);
+    wooClientFor(connection);
   } catch (err) {
     return NextResponse.json({ ok: false, error: (err as Error).message }, { status: 409 });
   }
-  try {
-    const outcome = await syncTaxonomyTree(session.businessId, id, client);
-    // 200 even when partial: the run happened, and the per-taxonomy results
-    // ARE the answer. A total failure (nothing landed) is a 502 so the UI
-    // can style it as an error rather than a summary.
-    return NextResponse.json({ ok: true, queued: false, ...outcome }, { status: outcome.status === "failed" ? 502 : 200 });
-  } catch (err) {
-    return NextResponse.json({ ok: false, error: (err as Error).message }, { status: 502 });
-  }
+  const { jobId, alreadyRunning } = await enqueueTaxonomySync(session.businessId, id);
+  return NextResponse.json({
+    ok: true,
+    queued: true,
+    // Which side runs it: the app (REST) or the store's plugin.
+    via: "app",
+    jobId,
+    alreadyRunning,
+    jobType: "taxonomy_sync",
+  });
 });
