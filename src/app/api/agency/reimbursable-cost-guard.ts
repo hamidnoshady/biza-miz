@@ -60,6 +60,22 @@ export const REIMBURSABLE_COST_ERROR_STATUS: Record<AgencyReimbursableCostErrorC
   invalid_settlement: 400,
   text_too_long: 400,
   cost_posted: 409,
+
+  // Recharging. The split follows the same rule as the rest of the map: a record
+  // that is not there is a 404, a malformed field is a 400, and a refusal that comes
+  // from where the record *is* in its life cycle is a 409.
+  recharge_empty: 400,
+  invalid_cost_id: 400,
+  cost_not_found_for_recharge: 404,
+  // Both of these are states rather than mistakes: the cost has already been billed
+  // (and the words say which invoice to void), or its own entry has not landed yet so
+  // there is nothing in 1270 to clear.
+  cost_already_recharged: 409,
+  cost_not_posted: 409,
+  costs_from_different_clients: 400,
+  // Not the member's field — the tenant has no active branch to bill from, so the
+  // request was reasonable and the setup is what says no.
+  location_required: 409,
 };
 
 /** The SQLSTATE on an error, read off the shape rather than by importing `pg`. */

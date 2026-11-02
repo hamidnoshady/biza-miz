@@ -454,8 +454,14 @@ describe("a reimbursable client cost (issue #1128 §D, migration 0280)", () => {
     });
 
     const totals = await service.sumCostsByParty(a.businessId, [a.clientId, second]);
-    expect(totals.get(a.clientId)).toEqual({ total: 7_000_000, passThrough: 5_000_000, unposted: 0 });
-    expect(totals.get(second)).toEqual({ total: 900_000, passThrough: 900_000, unposted: 0 });
+    expect(totals.get(a.clientId)).toEqual({
+      total: 7_000_000,
+      passThrough: 5_000_000,
+      unposted: 0,
+      // Nothing billed back yet, so all of it is still owed by the client.
+      unrechargedRial: 7_000_000,
+    });
+    expect(totals.get(second)).toEqual({ total: 900_000, passThrough: 900_000, unposted: 0, unrechargedRial: 900_000 });
     // A party with nothing recorded is absent rather than zero-filled, so a caller
     // cannot mistake "no costs" for "not asked about".
     const empty = await service.sumCostsByParty(a.businessId, [randomUUID()]);

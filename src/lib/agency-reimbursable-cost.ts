@@ -251,3 +251,33 @@ export function normalizeAgencyCostAmount(value: unknown): number | null {
   if (parsed <= 0n || parsed > AGENCY_COST_AMOUNT_MAX) return null;
   return Number(parsed);
 }
+
+/* ------------------------------------------------------------------------- */
+/* Recharged — derived, never stored (migration 0284)                         */
+/* ------------------------------------------------------------------------- */
+
+/** The order status that means an invoice no longer asks anybody for anything. */
+export const VOIDED_ORDER_STATUS = "voided";
+
+/**
+ * Whether a cost has actually been recharged.
+ *
+ * Derived from the invoice's live status rather than stored, and 0284 asserts that
+ * no `recharged`, `recharged_at` or `recharge_status` column exists. The reason is
+ * that `retail-invoice-void-service.ts` does not delete an invoice — it flips
+ * `orders.status` to `voided` and writes a reversing entry, leaving the original in
+ * place — so the ledger has *already* put the money back into 1270 by the time
+ * anybody looks. A stored flag would be a second answer to a question the order
+ * answers, and the two would disagree the first time somebody voided an invoice.
+ *
+ * A missing order status counts as not recharged, which is the safe direction: it
+ * makes a cost billable again rather than silently writing off a claim on a client.
+ */
+export function isCostRecharged(input: {
+  rechargedOrderId: string | null;
+  orderStatus: string | null | undefined;
+}): boolean {
+  if (!input.rechargedOrderId) return false;
+  if (typeof input.orderStatus !== "string" || input.orderStatus.length === 0) return false;
+  return input.orderStatus !== VOIDED_ORDER_STATUS;
+}

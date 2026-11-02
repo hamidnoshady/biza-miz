@@ -32,10 +32,12 @@
 -- The one thing that must not happen is charging a client twice for the same media
 -- buy: 1270 would clear past zero and the agency's revenue would be overstated by
 -- an amount nobody spent. So the trigger below refuses to re-point
--- `recharged_order_id` at a different live invoice, and refuses to clear it while
--- the invoice that made it is still live — undoing a recharge is done by voiding the
--- invoice, not by unlinking it. Clearing is allowed once the order is voided or gone,
--- which is tidying up after an act that already reversed the money.
+-- `recharged_order_id` at a different invoice, and refuses to clear it, *while the
+-- invoice it already points at is still live*. Undoing a recharge is done by voiding
+-- that invoice, which reverses the entry and puts the money back into 1270; only then
+-- is the cost free to be billed again, and then both re-pointing and clearing are
+-- legitimate, because both are tidying up after an act that already reversed the
+-- money. The rule is about the invoice's state and not about which column changed.
 --
 -- ## Whole or nothing
 --
@@ -83,6 +85,7 @@ CREATE OR REPLACE FUNCTION agency_reimbursable_cost_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
     v_order_status text;
+    v_live         boolean;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         IF OLD.entry_id IS NOT NULL THEN
@@ -100,34 +103,38 @@ BEGIN
     -- the columns the *system* writes back are not the columns a member edits.
     -- ---------------------------------------------------------------------
     IF NEW.recharged_order_id IS DISTINCT FROM OLD.recharged_order_id THEN
-        -- Re-pointing at a different live invoice is refused outright: it is how a
-        -- client gets billed twice for one media buy, and 1270 would clear past zero.
-        IF OLD.recharged_order_id IS NOT NULL AND NEW.recharged_order_id IS NOT NULL
-           AND NEW.recharged_order_id <> OLD.recharged_order_id THEN
+        -- Is the invoice this cost *already* points at still asking the client for
+        -- money? `orders` carries no business_id, so tenancy is reached through its
+        -- location; the status itself is read without a tenant filter on purpose,
+        -- because this is a question about a row the FK already proved exists, and
+        -- scoping it would let a cross-tenant order read as "missing" and therefore as
+        -- already voided.
+        v_live := false;
+        IF OLD.recharged_order_id IS NOT NULL THEN
+            SELECT (o.status IS DISTINCT FROM 'voided') INTO v_live
+              FROM orders o
+             WHERE o.id = OLD.recharged_order_id;
+            -- A missing order is not live either: the FK's own ON DELETE SET NULL
+            -- means the invoice is gone, and with it the reason to protect the link.
+            v_live := coalesce(v_live, false);
+        END IF;
+
+        -- Both re-pointing and clearing are refused while that invoice is live, and
+        -- for one reason: the money is out of 1270 and the client has been asked, so
+        -- either act would let the same media buy be billed a second time. Undoing a
+        -- recharge is done by voiding the invoice, which reverses the entry; only then
+        -- is the cost free to be billed again, and then *both* acts are legitimate.
+        IF v_live THEN
+            IF NEW.recharged_order_id IS NULL THEN
+                RAISE EXCEPTION 'a recharge is undone by voiding the invoice that made it, not by clearing the link'
+                    USING ERRCODE = '23514';
+            END IF;
             RAISE EXCEPTION 'this cost is already recharged by another invoice; void that invoice first'
                 USING ERRCODE = '23514';
         END IF;
 
-        -- Clearing the link is only tidying up once the invoice is voided or gone.
-        -- While it is live, the money is still out of 1270 and the client has still
-        -- been asked, so unlinking would let the same cost be recharged again.
-        IF OLD.recharged_order_id IS NOT NULL AND NEW.recharged_order_id IS NULL THEN
-            -- `orders` carries no business_id, so tenancy is reached through its
-            -- location. The status is read without a tenant filter on purpose: this
-            -- is a question about a row the FK already proved exists, and scoping it
-            -- would only let a cross-tenant order read as "missing" and therefore as
-            -- clearable.
-            SELECT o.status INTO v_order_status
-              FROM orders o
-             WHERE o.id = OLD.recharged_order_id;
-            IF v_order_status IS NOT NULL AND v_order_status IS DISTINCT FROM 'voided' THEN
-                RAISE EXCEPTION 'a recharge is undone by voiding the invoice that made it, not by clearing the link'
-                    USING ERRCODE = '23514';
-            END IF;
-        END IF;
-
-        -- Setting the link for the first time must point at this tenant's invoice.
-        IF NEW.recharged_order_id IS NOT NULL AND OLD.recharged_order_id IS NULL THEN
+        -- Whatever the link becomes, the invoice it points at must be this tenant's.
+        IF NEW.recharged_order_id IS NOT NULL THEN
             SELECT o.status INTO v_order_status
               FROM orders o
               JOIN locations l ON l.id = o.location_id AND l.business_id = NEW.business_id
