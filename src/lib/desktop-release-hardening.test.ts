@@ -53,6 +53,9 @@ const harness = require("../../electron/scripts/smoke-packaged.js") as {
   appOrigin: (config: { appPort?: number } | null) => string | null;
   readDesktopConfig: (userDataDir: string) => Record<string, unknown> | null;
   legacyBypassEnvironment: (markerPath: string) => Record<string, string>;
+  readinessFromLog: (
+    userDataDir: string,
+  ) => { appPort: number; instanceId: string | null; log: string } | null;
   scanShippedPayload: (options: { resourcesDir: string }) => Array<{ id: string; path: string }>;
   prepareProfile: (userDataDir: string) => void;
   PLATFORM_DENIAL_PATHS: Array<{ method: string; path: string }>;
@@ -354,6 +357,40 @@ describe("packaged acceptance harness", () => {
     expect(harness.appOrigin({ appPort: 3077 })).toBe("http://127.0.0.1:3077");
     expect(harness.appOrigin({})).toBeNull();
     expect(harness.appOrigin(null)).toBeNull();
+  });
+
+  it("reads the port and identity the application announced in its own log", () => {
+    const profile = temporaryDir();
+    expect(harness.readinessFromLog(profile)).toBeNull();
+    write(
+      path.join(profile, "Logs", "desktop.log"),
+      [
+        "INFO bin/migrate.cjs: Applied 469 migration(s).",
+        'INFO server: > Ready on http://127.0.0.1:3077 (WebSocket sync on /ws)',
+        'INFO Desktop backend is ready {"appUrl":"http://127.0.0.1:3077","instanceId":"inst-1"}',
+      ].join("\n"),
+    );
+    const announced = harness.readinessFromLog(profile);
+    expect(announced).toMatchObject({ appPort: 3077, instanceId: "inst-1" });
+    expect(announced?.log).toContain("desktop.log");
+    // A later launch reuses the port and keeps the identity: the newest line wins.
+    write(
+      path.join(profile, "Logs", "desktop.log"),
+      [
+        "> Ready on http://127.0.0.1:3077 (WebSocket sync on /ws)",
+        'Desktop backend is ready {"appUrl":"http://127.0.0.1:3077","instanceId":"inst-2"}',
+      ].join("\n"),
+    );
+    expect(harness.readinessFromLog(profile)).toMatchObject({ appPort: 3077, instanceId: "inst-2" });
+  });
+
+  it("treats a pre-migration flat config as an initialised install", () => {
+    const profile = temporaryDir();
+    write(path.join(profile, "config.json"), JSON.stringify({ appPort: 3088 }));
+    expect(harness.readDesktopConfig(profile)).toMatchObject({ appPort: 3088 });
+    // The canonical path still wins when both exist.
+    write(path.join(profile, "Configuration", "config.json"), JSON.stringify({ appPort: 3099 }));
+    expect(harness.readDesktopConfig(profile)).toMatchObject({ appPort: 3099 });
   });
 
   it("exercises the legacy bypass switches without granting anything", () => {

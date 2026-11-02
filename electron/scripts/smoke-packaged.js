@@ -101,15 +101,57 @@ function fail(message) {
  * Pure helpers (unit tested in src/lib/desktop-acceptance-harness.test.ts)
  * ------------------------------------------------------------------ */
 
-/** Read `Configuration/config.json`; `null` until the backend has written it. */
+/**
+ * Read the desktop config; `null` until the backend has written it.
+ *
+ * Both layouts are checked because an install that has not been through the
+ * Section 8 folder migration still keeps a flat `config.json`, and the
+ * acceptance run must recognise such an install as initialised rather than
+ * mistake it for a fresh one.
+ */
 function readDesktopConfig(userDataDir) {
-  const configPath = path.join(userDataDir, "Configuration", "config.json");
-  if (!fs.existsSync(configPath)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(configPath, "utf8"));
-  } catch {
-    return null;
+  for (const candidate of [
+    path.join(userDataDir, "Configuration", "config.json"),
+    path.join(userDataDir, "config.json"),
+  ]) {
+    if (!fs.existsSync(candidate)) continue;
+    try {
+      return JSON.parse(fs.readFileSync(candidate, "utf8"));
+    } catch {
+      return null;
+    }
   }
+  return null;
+}
+
+/**
+ * What the application says about itself, from its own log.
+ *
+ * Asking the desktop where it listens is more reliable than predicting it: the
+ * config file's location depends on which data root the app chose (and on
+ * whether the folder migration has run), while `Logs/desktop.log` is written
+ * by the app under whichever root it actually used, and prints both facts the
+ * acceptance run needs — the port it bound and its instance identity. The
+ * desktop says:
+ *
+ *   > Ready on http://127.0.0.1:3000 (WebSocket sync on /ws)
+ *   Desktop backend is ready {"appUrl":"http://127.0.0.1:3000","instanceId":"…"}
+ */
+function readinessFromLog(userDataDir) {
+  for (const log of desktopLogs(userDataDir)) {
+    if (!fs.existsSync(log)) continue;
+    const text = fs.readFileSync(log, "utf8");
+    const ports = [...text.matchAll(/Ready on http:\/\/127\.0\.0\.1:(\d+)/g)];
+    if (!ports.length) continue;
+    const appPort = Number(ports[ports.length - 1][1]);
+    const instances = [...text.matchAll(/"instanceId"\s*:\s*"([^"]+)"/g)];
+    return {
+      appPort,
+      instanceId: instances.length ? instances[instances.length - 1][1] : null,
+      log,
+    };
+  }
+  return null;
 }
 
 /** The local application origin for a desktop config. */
@@ -296,7 +338,18 @@ function diagnosticSummary(userDataDir) {
   const log = logs.find((candidate) => fs.existsSync(candidate));
   const facts = [];
   const config = readDesktopConfig(userDataDir);
-  facts.push(config?.appPort ? `appPort ${config.appPort}` : "no Configuration/config.json yet");
+  const announced = readinessFromLog(userDataDir);
+  facts.push(
+    config?.appPort
+      ? `config appPort ${config.appPort}`
+      : "no config.json at the profile root",
+  );
+  facts.push(announced ? `log says ready on ${announced.appPort}` : "the log never said the server was ready");
+  try {
+    facts.push(`profile entries: ${fs.readdirSync(userDataDir).slice(0, 12).join(", ") || "(empty)"}`);
+  } catch {
+    facts.push("profile directory is unreadable");
+  }
   facts.push(
     fs.existsSync(path.join(userDataDir, "Data", "pgdata", "postmaster.pid")) ||
       fs.existsSync(path.join(userDataDir, "pgdata", "postmaster.pid"))
@@ -367,8 +420,13 @@ class InstalledApplication {
             `the application exited before it was ready (code ${child.exitCode})${diagnosticTail(this.userDataDir)}`,
           );
         }
-        const config = readDesktopConfig(this.userDataDir);
-        const candidate = appOrigin(config);
+        // The app's own log names the port it bound (see `readinessFromLog`);
+        // the config file is the fallback for a build whose log line changed.
+        const announced = readinessFromLog(this.userDataDir);
+        const candidate =
+          (announced ? `http://127.0.0.1:${announced.appPort}` : null) ??
+          appOrigin(readDesktopConfig(this.userDataDir));
+        this.announced = announced;
         if (!candidate) return null;
         const health = await httpJson(`${candidate}/api/health`).catch(() => null);
         return health?.status === 200 ? candidate : null;
@@ -379,7 +437,11 @@ class InstalledApplication {
       throw new Error(`${error.message}\n${diagnosticSummary(this.userDataDir)}`);
     }
     this.origin = origin;
-    this.config = readDesktopConfig(this.userDataDir);
+    this.config = {
+      ...(readDesktopConfig(this.userDataDir) ?? {}),
+      ...(this.announced?.appPort ? { appPort: this.announced.appPort } : {}),
+      ...(this.announced?.instanceId ? { instanceId: this.announced.instanceId } : {}),
+    };
     currentStage = "the application is running";
     log(`ready at ${origin} (instance ${this.config?.instanceId ?? "unknown"})`);
     return origin;
@@ -877,6 +939,7 @@ module.exports = {
   assertPlatformRealmDenied,
   legacyBypassEnvironment,
   readDesktopConfig,
+  readinessFromLog,
   readOwnerCredentials,
   runAcceptance,
   scanShippedPayload,
