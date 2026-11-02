@@ -652,3 +652,64 @@ describe("Accounting publication through the shared plugin outbox (#951)", () =>
     expect((await eventsFor("101")).find(e => e.entity_type === "price")).toMatchObject({ status: "pending", payload: { regular_price: "700" } });
   });
 });
+
+/**
+ * #1206 PERF-05 — «همگام‌سازی از وب‌سایت» in REST mode is a queued app-side job.
+ *
+ * The read is a page per taxonomy, so it cannot live inside the request; the
+ * row it queues has to survive exactly the things every other outbox row does:
+ * a second press, a run in flight, and the *other* link mode's worker, which
+ * must never lease a job only this app can execute.
+ */
+describe("taxonomy sync as an app-side job (#1206 PERF-05)", () => {
+  it("queues one row, and pressing again refreshes it rather than stacking", async () => {
+    const first = await outbox.enqueueTaxonomySync(biz.id, biz.connectionId);
+    expect(first.alreadyRunning).toBe(false);
+    expect(first.jobId).toBeTruthy();
+    const second = await outbox.enqueueTaxonomySync(biz.id, biz.connectionId);
+    expect(second.jobId).toBe(first.jobId);
+
+    const { rows } = await db.query<{ entity_type: string; remote_id: string; status: string }>(
+      `SELECT entity_type, remote_id, status FROM integration_outbox_events
+        WHERE connection_id = $1 AND entity_type = 'taxonomy_sync'`,
+      [biz.connectionId],
+    );
+    expect(rows).toEqual([{ entity_type: "taxonomy_sync", remote_id: "all", status: "pending" }]);
+  });
+
+  it("leaves a run in flight alone, and says so", async () => {
+    await db.query(
+      `UPDATE integration_outbox_events SET status = 'processing', lease_token = gen_random_uuid(),
+              leased_until = now() + interval '3 minutes'
+        WHERE connection_id = $1 AND entity_type = 'taxonomy_sync'`,
+      [biz.connectionId],
+    );
+    const queued = await outbox.enqueueTaxonomySync(biz.id, biz.connectionId);
+    expect(queued.alreadyRunning).toBe(true);
+    const { rows } = await db.query<{ status: string }>(
+      `SELECT status FROM integration_outbox_events WHERE connection_id = $1 AND entity_type = 'taxonomy_sync'`,
+      [biz.connectionId],
+    );
+    expect(rows[0].status).toBe("processing");
+  });
+
+  it("is never leased by a plugin — no capability names it", async () => {
+    await db.query(
+      `UPDATE integration_outbox_events SET status = 'pending', lease_token = NULL, leased_until = NULL
+        WHERE connection_id = $1 AND entity_type = 'taxonomy_sync'`,
+      [biz.connectionId],
+    );
+    const pluginConn = {
+      ...connRow,
+      link_mode: "plugin" as const,
+      plugin_capabilities: { protocolVersion: 3, jobTypes: ["stock", "price", "taxonomy_export"] },
+    };
+    const pulled = await (await plugin.pluginPullJobs(pluginConn)).json();
+    expect(pulled.jobs.some((job: { type: string }) => job.type === "taxonomy_sync")).toBe(false);
+    const { rows } = await db.query<{ status: string }>(
+      `SELECT status FROM integration_outbox_events WHERE connection_id = $1 AND entity_type = 'taxonomy_sync'`,
+      [biz.connectionId],
+    );
+    expect(rows[0].status).toBe("pending");
+  });
+});

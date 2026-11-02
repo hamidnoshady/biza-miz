@@ -43,7 +43,16 @@ export const SYNC_DOMAIN_SOURCES: Record<SyncDomain, { outbound: string[]; inbou
   },
   customers: { outbound: ["customer_export"], inbound: ["customer."] },
   content: {
-    outbound: ["content_export", "post_upsert", "media_create", "taxonomy_export", "taxonomy_ensure"],
+    outbound: [
+      "content_export",
+      "post_upsert",
+      "media_create",
+      "taxonomy_export",
+      "taxonomy_ensure",
+      // The app-side read of the same tree (#1206 PERF-05). Same domain: it is
+      // the taxonomy snapshot, whoever fetches it.
+      "taxonomy_sync",
+    ],
     inbound: ["post.", "media.", "term.", "product_category.", "product_tag."],
   },
 };
