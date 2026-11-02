@@ -159,6 +159,27 @@ run died mid-flight), the age of the oldest unsent row, and the last cycle's
 phase results. It writes no settings, moves no success timestamp and changes no
 store data.
 
+### Per-domain freshness
+
+One cron state answers «does the scheduler run», not «is stock moving». A store
+can have a healthy scheduler, a working connection and a catalogue that stopped
+updating three days ago because one push keeps failing. The panel therefore
+grades six domains on their own evidence — products and variations, stock,
+prices, Woo orders and refunds, customers, content and taxonomies — from this
+app's own outbox (`entity_type`) and inbox (`event_topic`), never from one
+combined number:
+
+* **delayed** — work for that domain is waiting and the oldest of it is older
+  than the cadence's warning window (three cycles). This is the only state that
+  paints a colour, and the only one that means "something should have moved";
+* **ok** — the last exchange is shown, and any backlog is draining normally;
+* **never** — nothing has been sent or received for that domain yet.
+
+**Quiet is not stale.** A shop with no orders today has no order traffic, and
+that is not a fault: absence of traffic is never graded as failure. All six
+domains are always listed, because a screen that omits a silent domain makes
+silence look like health.
+
 ### The one cron command
 
 ```

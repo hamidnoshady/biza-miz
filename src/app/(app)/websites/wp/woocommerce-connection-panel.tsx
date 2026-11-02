@@ -47,6 +47,19 @@ interface Connection {
   orderLookbackDays: number;
   sourceOfTruth?: "store" | "pos" | "two_way";
   manageStockOptIn?: boolean;
+  /**
+   * Issue #1206 P1 — per-domain freshness, from the same overview call. Always
+   * all six domains: a screen that omits a silent one makes silence look like
+   * health.
+   */
+  domainFreshness?: {
+    domain: "products" | "stock" | "prices" | "orders" | "customers" | "content";
+    state: "ok" | "delayed" | "never";
+    reason: string;
+    lastExchangeAt: string | null;
+    backlog: number;
+    oldestBacklogSeconds: number | null;
+  }[];
   /** Issues #1149/#1206 — plugin-mode health, from GET /api/integrations/overview. */
   pluginHealthSummary?: {
     silentMinutes: number | null;
@@ -209,6 +222,24 @@ const CRON_PROBE_LABELS: Record<string, string> = {
   expired: "زمان‌بندی بدون اجرا",
   failed: "اجرا شد، گزارش نرسید",
   unsupported: "افزونهٔ قدیمی، بدون تست کرون",
+};
+
+const DOMAIN_LABELS: Record<string, string> = {
+  products: "محصولات و تنوع‌ها",
+  stock: "موجودی",
+  prices: "قیمت‌ها",
+  orders: "سفارش‌ها و مرجوعی‌ها",
+  customers: "مشتریان",
+  content: "محتوا و دسته‌بندی‌ها",
+};
+
+/** Why a domain is graded what it is — never "no traffic is a fault". */
+const DOMAIN_REASON_LABELS: Record<string, string> = {
+  no_backlog: "بدون کار در انتظار",
+  backlog_draining: "در حال ارسال",
+  backlog_not_draining: "کار در انتظار مانده و ارسال نمی‌شود",
+  backlog_not_sent_yet: "در انتظار نخستین ارسال",
+  no_traffic_yet: "هنوز تبادلی نداشته",
 };
 
 const CRON_PROBE_REASON_LABELS: Record<string, string> = {
@@ -595,6 +626,34 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                         {c.pluginHealthSummary.cronProbe.stage === "queued" && c.pluginHealthSummary.cronProbe.expiresInSeconds !== null
                           ? ` • ${Math.max(0, Math.round(c.pluginHealthSummary.cronProbe.expiresInSeconds / 60)).toLocaleString("fa-IR")} دقیقه تا پایان مهلت`
                           : ""}
+                      </div>
+                    ) : null}
+                    {c.domainFreshness?.length ? (
+                      <div className="space-y-0.5">
+                        {c.domainFreshness.map((entry) => (
+                          <div
+                            key={entry.domain}
+                            className={
+                              entry.state === "delayed"
+                                ? "text-amber-700 dark:text-amber-300"
+                                : entry.state === "never"
+                                  ? "text-muted-foreground"
+                                  : ""
+                            }
+                          >
+                            {DOMAIN_LABELS[entry.domain] ?? entry.domain}:{" "}
+                            {entry.state === "delayed" ? "دیرکرد — " : ""}
+                            {DOMAIN_REASON_LABELS[entry.reason] ?? entry.reason}
+                            {entry.lastExchangeAt ? ` • آخرین تبادل: ${formatDateTime(entry.lastExchangeAt)}` : ""}
+                            {entry.backlog > 0
+                              ? ` • ${entry.backlog.toLocaleString("fa-IR")} در صف${
+                                  entry.oldestBacklogSeconds !== null
+                                    ? ` (قدیمی‌ترین ${Math.max(1, Math.round(entry.oldestBacklogSeconds / 60)).toLocaleString("fa-IR")} دقیقه)`
+                                    : ""
+                                }`
+                              : ""}
+                          </div>
+                        ))}
                       </div>
                     ) : null}
                     {c.pluginHealthSummary ? (
