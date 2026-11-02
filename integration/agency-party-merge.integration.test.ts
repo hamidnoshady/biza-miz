@@ -60,6 +60,7 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   provisioning = await import("../src/lib/business-provisioning");
   crm = await import("../src/lib/crm-service");
+  costService = await import("../src/lib/agency-reimbursable-cost-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -83,6 +84,10 @@ afterAll(async () => {
 
 let seq = 0;
 let businessId: string;
+/** The provisioned owner: `domain_events.created_by` is a FK, so a posted document
+ *  needs a real member and not a placeholder id. */
+let ownerUserId: string;
+let costService: typeof import("../src/lib/agency-reimbursable-cost-service");
 
 beforeAll(async () => {
   seq += 1;
@@ -96,6 +101,7 @@ beforeAll(async () => {
     seedChartOfAccounts: true,
   });
   businessId = result.businessId;
+  ownerUserId = result.userId;
 }, 180_000);
 
 async function seedParty(name: string): Promise<string> {
@@ -273,6 +279,64 @@ describe("a party merge through a frozen agency document (issue #1128, migration
     ).rows[0];
     expect(row.party_id).toBe(winner);
     expect(row.approver_party_id).toBe(contact);
+  });
+
+  it("moves a POSTED reimbursable cost, whose entry is already in the ledger", async () => {
+    // The case 0280 was born handling rather than patched into by 0279: a posted cost
+    // is frozen, so without the split one row on a duplicate client record would block
+    // the merge. What makes this one sharper than the others is that the money has
+    // already posted — so the merge must move *whose claim it is* and leave the entry
+    // itself alone.
+    const winner = await seedParty("برندهٔ هزینه");
+    const loser = await seedParty("بازندهٔ هزینه");
+    const cost = await costService.createAgencyReimbursableCost(
+      businessId,
+      { userId: ownerUserId, name: "مالک" },
+      {
+        partyId: loser,
+        description: "خرید فضای تبلیغاتی آبان",
+        amountRial: 5_000_000,
+        spentOn: "2026-11-01",
+        presentation: "net",
+        settledBy: "payable",
+      },
+    );
+    expect(cost.posted).toBe(true);
+    const entryLinesBefore = await db.query(
+      `SELECT a.code, l.debit::text AS debit FROM journal_lines l
+         JOIN accounts a ON a.id = l.account_id WHERE l.entry_id = $1 ORDER BY a.code`,
+      [cost.entryId],
+    );
+
+    await merge(winner, loser);
+
+    const row = (
+      await db.query(
+        `SELECT party_id, amount_rial, presentation, settled_by, entry_id
+           FROM agency_reimbursable_costs WHERE id = $1`,
+        [cost.id],
+      )
+    ).rows[0];
+    // The claim follows the client…
+    expect(row.party_id).toBe(winner);
+    // …and the accounting facts the entry was built from do not move at all.
+    expect(Number(row.amount_rial)).toBe(5_000_000);
+    expect(row.presentation).toBe("net");
+    expect(row.settled_by).toBe("payable");
+    expect(row.entry_id).toBe(cost.entryId);
+
+    const entryLinesAfter = await db.query(
+      `SELECT a.code, l.debit::text AS debit FROM journal_lines l
+         JOIN accounts a ON a.id = l.account_id WHERE l.entry_id = $1 ORDER BY a.code`,
+      [cost.entryId],
+    );
+    // Same entry, same lines, same account: a merge changes who is owed, not what was
+    // booked. 1270's balance moves with the client because the register row does.
+    expect(entryLinesAfter.rows).toEqual(entryLinesBefore.rows);
+    expect(entryLinesAfter.rows.map((r) => r.code)).toContain("1270");
+
+    const moves = await attributionMoves("agency_reimbursable_costs");
+    expect(moves.some((m) => m.row_id === cost.id && m.new_party_id === winner)).toBe(true);
   });
 
   it("still refuses an edit that is not a merge", async () => {
