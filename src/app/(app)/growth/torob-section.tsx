@@ -403,6 +403,17 @@ export function TorobSection({ canManage, canConfigure }: { canManage: boolean; 
                   </Button>
                 ) : null}
 
+                {shop ? (
+                  // Wave 4: the per-shop page, where the merchant decides what
+                  // actually goes to Torob and sees why anything does not.
+                  <Link
+                    className="inline-flex items-center rounded-md px-3 py-2 text-sm font-medium text-primary hover:underline"
+                    href={`/growth/torob/${shop.id}`}
+                  >
+                    مدیریت انتشار
+                  </Link>
+                ) : null}
+
                 {canManage && shop && shop.authorizationState === "authorized" ? (
                   <Button
                     variant="outline"

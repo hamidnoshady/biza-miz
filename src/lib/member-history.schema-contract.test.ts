@@ -188,6 +188,10 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   // reservation or a record. The audit trail carries the real attribution.
   'torob_shops.created_by': 'channel connection setup',
   'torob_feed_runs.created_by': 'channel feed build (an operational act, not a record write)',
+  // Wave 4's per-product decision: which products a channel publishes is channel
+  // configuration, and the audit row says who changed it. The table keeps the
+  // decision, not a work record.
+  'torob_shop_products.created_by': 'channel publication config',
   'tenant_roles.updated_by': 'role configuration',
   'tour_member_progress.user_id': 'personal learning progress (guided tours)',
   'trusted_devices.user_id': 'sign-in security',

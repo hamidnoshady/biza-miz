@@ -228,6 +228,46 @@ The approval page is opened with `location.assign` rather than in a new tab, bec
 to the browser session that started the request. The `code` is never written to an audit row, never
 echoed back in the redirect, and never stored.
 
+## 6d. What a shop publishes (Wave 4)
+
+`/growth/torob/[shopId]` is the per-shop page, and the question it answers is the merchant's own:
+*which of my products go to Torob, and why does one not?* One rule plus one decision per product:
+
+| rule | what it publishes | a product nobody touched |
+| --- | --- | --- |
+| «همهٔ محصولات» (`all`) | the catalogue, **minus** the products marked `exclude` | published |
+| «فقط محصولات انتخابی» (`selected`) | **only** the products marked `include` | not published |
+
+They are one question asked from opposite ends, which is why both live in one table
+(`torob_shop_products`, migration 0282) with a single `decision` column rather than an inclusion list
+and an exclusion list that could disagree. The rule decides which decision is doing the work; the
+decisions are kept when the rule changes, so a merchant who flips back and forth loses nothing, and
+clearing a decision returns a product to the rule instead of leaving it switched off out of sight.
+
+The table is deliberately thin — an id, a decision, who and when. Names and prices stay in
+`menu_items`; copying them would make a second catalogue that drifts, and Torob would end up showing a
+price the storefront no longer charges. `product_id` is a soft reference (retail `items` are coming),
+so `setProductDecision` verifies every id against the tenant's own catalogue and reports how many it
+refused rather than silently dropping them.
+
+Four states a product can be in, and the boundary between them is the point of the page:
+
+| state | meaning |
+| --- | --- |
+| «در فید ترب» | the platform would send it, complete and priced |
+| «کنار گذاشته‌اید» | the merchant switched it off (`exclude`) |
+| «انتخاب نشده» | rule is `selected` and it has not been chosen |
+| «منتشر نمی‌شود» | wanted, and a catalogue rule stops it — the feed builder's own reason, in Persian, with the link that fixes it |
+
+The first three are the merchant's answer; only the last is a problem, and it is never conflated with
+them. The page's summary is `summariseFeed` — the same function «پیش‌نمایش فید» uses — so the two can
+not disagree about how many products a shop would send. Every decision and rule change is audited with
+the product ids and the counts; the audit never contains anything the catalogue owns.
+
+Reading the page is `torob.view`; changing the rule, the sold-out preference or a decision is
+`torob.configure`, the same key as the merchant's token, because both are channel settings rather than
+relationships.
+
 ## 7. What remains (Waves 3–6)
 
 1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
@@ -240,8 +280,9 @@ echoed back in the redirect, and never stored.
 2. **Variant catalogue.** The builder already accepts variants and emits one item each; the database
    source reads `menu_items` only, so retail `items`/`item_variant_attributes` products need their
    price source mapped before they can appear.
-3. **Wave 4 — the per-shop screen** (`/growth/torob/[shopId]`): the feed's pages, the skipped
-   products with links to fix them, and the publication rule — now that there is enough to put on it.
+3. **Wave 4 — the per-shop screen.** *Done*: `§6d` above is `/growth/torob/[shopId]`, with the
+   publication rule, the per-product decisions and the blocked products' reasons. What is left of this
+   wave is only what the variant catalogue (item 2) unlocks: a retail shop choosing between variants.
 4. **Wave 5 — opt-in attribution**: Torob order/action attribution off by default, a 403 when it is
    disabled, and a tenant-visible switch that says exactly what is shared.
 5. **Wave 6 — the drill table and the docs** for the failure classes the issue names (expired token,
@@ -268,11 +309,17 @@ this website enroll", and every later surface reads it.
 - `src/app/api/growth/torob/authorize/callback/route.ts` — where Torob returns the merchant's browser.
 - `src/app/api/v1/torob/products/[shopId]/route.ts` — the public route itself.
 - `src/app/api/growth/torob/shops/[id]/feed/route.ts` — «پیش‌نمایش فید».
+- `src/lib/torob/publication.ts` — the two rules, the decision cycle, the page's shared shapes and copy.
+- `src/lib/torob/shop-publication.ts` — the per-shop read (why each product is or is not in the feed)
+  and the writes, with the catalogue-ownership check.
+- `src/app/api/growth/torob/shops/[id]/publication/route.ts` — that page's read and write.
+- `src/app/(app)/growth/torob/[shopId]/page.tsx` + `torob-shop-detail.tsx` — the screen.
+- `migrations/0282_torob_shop_products.sql` — one decision per product per shop, RLS included.
 - `src/app/(app)/growth/torob/page.tsx` + `torob-section.tsx` — the screen.
 - `src/lib/torob/eligibility.test.ts` — the state matrix; `integration/torob-shops.integration.test.ts`
   — the lifecycle and the tenant boundary against real Postgres.
 - `src/lib/torob/contract.test.ts`, `feed.test.ts`, `auth.test.ts`, `product-api.test.ts`,
-  `shop-generator.test.ts`, `authorization-service.test.ts` — the
+  `shop-generator.test.ts`, `authorization-service.test.ts`, `publication.test.ts` — the
   contract, the builder, the token and the endpoint's order of operations; `integration/torob-api.integration.test.ts`
   — all four request modes, 100 per page, the withdrawn product and the cross-shop audience refusal
   against real Postgres; `integration/torob-authorization.integration.test.ts` — the approval flow,

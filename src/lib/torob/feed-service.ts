@@ -38,6 +38,7 @@ import {
   type FeedSummary,
 } from "./feed";
 import type { TorobV3Response } from "./contract";
+import { isPublishedByRule, type TorobDecision } from "./publication";
 import { TorobShopError, type TorobShop } from "./shop-service";
 import { DEFAULT_PRODUCT_PATH, type TorobWebsiteKind } from "./eligibility";
 
@@ -76,7 +77,7 @@ export interface FeedBuildResult {
  * state, and carrying a one-time approval URL into a code path that only answers
  * "what would we send" would invite it into a log.
  */
-interface ShopRow
+export interface ShopRow
   extends Omit<TorobShop, "approveUrl" | "authorizationRequestedAt" | "authorizationError"> {
   publicProductPath: string;
   includeOutOfStock: boolean;
@@ -176,16 +177,32 @@ export function productPageUrl(domain: string, template: string, product: { id: 
 }
 
 /**
- * The shop's catalogue, as feed input.
+ * One row of the tenant's selling catalogue, before any publication rule.
  *
+ * Exported because the per-shop screen lists the same rows the feed is built
+ * from: a screen with its own query is a screen that can disagree with the feed
+ * about which products exist.
+ */
+export interface CatalogueRow {
+  id: string;
+  name: string;
+  description: string | null;
+  sku: string | null;
+  /** The canonical price column, integer Rial — `pg` hands a bigint back as a string. */
+  priceRial: string | number;
+  imageUrl: string | null;
+  /** Published by the storefront at all; `false` is a withdrawn product. */
+  active: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  categoryName: string | null;
+}
+
+/**
  * `menu_items` is the canonical selling catalogue (issue #844 made its price the
  * one writers go through), joined to its category for Torob's `category_name`.
- * `publication_rule = 'selected'` is honoured as "active items only": Wave 4 adds
- * the per-product selection UI, and until then a shop that chose «selected» with
- * nothing selected publishes nothing — which is what the choice means, rather
- * than the whole catalogue by accident.
  */
-async function catalogueProducts(businessId: string, shop: ShopRow, currency: string): Promise<CatalogueProduct[]> {
+async function readCatalogueRows(businessId: string): Promise<CatalogueRow[]> {
   const { rows } = await query<{
     id: string;
     name: string;
@@ -212,25 +229,107 @@ async function catalogueProducts(businessId: string, shop: ShopRow, currency: st
     id: row.id,
     name: row.name,
     description: row.description,
-    url: productPageUrl(shop.domain, shop.publicProductPath, { id: row.id, sku: row.sku }),
+    sku: row.sku,
+    priceRial: row.price,
+    imageUrl: row.image_url,
+    active: row.is_active,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
     categoryName: row.category_name,
-    imageUrls: row.image_url ? [row.image_url] : [],
+  }));
+}
+
+/**
+ * The merchant's per-product decisions for one shop.
+ *
+ * Read for every build, not cached: a merchant toggling a product expects the
+ * next crawler request to agree with the screen they just looked at.
+ */
+async function readDecisions(businessId: string, shopId: string): Promise<Map<string, TorobDecision>> {
+  const { rows } = await query<{ product_id: string; decision: TorobDecision }>(
+    `SELECT product_id, decision FROM torob_shop_products
+      WHERE business_id = $1 AND shop_id = $2`,
+    [businessId, shopId],
+  );
+  return new Map(rows.map((row) => [row.product_id, row.decision]));
+}
+
+/** A catalogue row as Torob's input, with the site's currency and storefront route. */
+export function toCatalogueProduct(row: CatalogueRow, shop: ShopRow, currency: string): CatalogueProduct {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    url: productPageUrl(shop.domain, shop.publicProductPath, { id: row.id, sku: row.sku }),
+    categoryName: row.categoryName,
+    imageUrls: row.imageUrl ? [row.imageUrl] : [],
     // `date_added` is required by Torob's contract, and `updated_at` is what
     // `date_updated_desc` sorts on.
-    dateAdded: row.created_at.toISOString(),
-    dateUpdated: row.updated_at.toISOString(),
+    dateAdded: row.createdAt.toISOString(),
+    dateUpdated: row.updatedAt.toISOString(),
     // The canonical column, integer Rial. `pg` returns bigint as a string, which
     // is exactly what the converter wants — never a float.
-    priceRial: row.price,
+    priceRial: row.priceRial,
     // `is_active` is publication, not stock: a withdrawn product is omitted from
     // the feed entirely, which Torob treats as "removed". Stock is a later wave's
     // input; today every published product is offered (`available: true`).
-    sellable: row.is_active,
+    sellable: row.active,
     available: true,
     currency,
     sku: row.sku,
-  }));
+  };
 }
+
+/** Everything one shop's feed is made of, read once. */
+export interface ShopCatalogue {
+  shop: ShopRow;
+  /** Every catalogue row the business owns, before the rule. */
+  rows: CatalogueRow[];
+  /** `product_id → decision`; a product the merchant never touched is absent. */
+  decisions: Map<string, TorobDecision>;
+  /** The storefront's currency, as the website's registry declares it. */
+  currency: string;
+  /** The rows the shop's rule keeps, already shaped for the feed builder. */
+  products: CatalogueProduct[];
+  built: BuiltFeed;
+  summary: FeedSummary;
+}
+
+/**
+ * Read a shop's catalogue and build its feed — the single path every caller uses.
+ *
+ * The merchant's rule and per-product decisions are applied **here**, so the
+ * crawler endpoint, the «پیش‌نمایش فید» button and the per-shop screen cannot
+ * disagree about what the shop publishes. A product the rule excludes is not in
+ * `products` at all, and therefore never appears as a "skipped" product: leaving
+ * something out on purpose is a decision, not a failure the screen should nag
+ * about.
+ *
+ * Returns `null` for a shop that is not this business's — the caller decides
+ * whether that is a 404 or a redirect.
+ */
+export async function readShopCatalogue(input: {
+  businessId: string;
+  shopId: string;
+}): Promise<ShopCatalogue | null> {
+  const shop = await findShop(input.businessId, input.shopId);
+  if (!shop) return null;
+
+  const [currency, rows, decisions] = await Promise.all([
+    siteCurrency(input.businessId, shop),
+    readCatalogueRows(input.businessId),
+    readDecisions(input.businessId, shop.id),
+  ]);
+
+  const products = rows
+    .filter((row) => isPublishedByRule({ rule: shop.publicationRule, decision: decisions.get(row.id) }))
+    .map((row) => toCatalogueProduct(row, shop, currency));
+
+  const built = buildTorobFeed({ products, includeOutOfStock: shop.includeOutOfStock });
+  return { shop, rows, decisions, currency, products, built, summary: summariseFeed(built) };
+}
+
+/** A shop a crawler may be served from: its own host, and nothing else. */
 
 /**
  * Why this shop cannot publish right now, or `null` when it can.
@@ -248,13 +347,6 @@ async function publishBlock(
   if (website === "missing") return "website_missing";
   if (website === "inactive") return "website_inactive";
   return null;
-}
-
-/** The shop's whole publishable catalogue, built from its current rows. */
-async function buildForShop(businessId: string, shop: ShopRow): Promise<BuiltFeed> {
-  const currency = await siteCurrency(businessId, shop);
-  const products = await catalogueProducts(businessId, shop, currency);
-  return buildTorobFeed({ products, includeOutOfStock: shop.includeOutOfStock });
 }
 
 /** A shop a crawler may be served from: its own host, and nothing else. */
@@ -297,9 +389,8 @@ export async function resolveServeableShop(input: {
  * refresh in crawler traffic — and put a `created_by` on rows nobody triggered.
  */
 export async function buildServedFeed(shop: ServeableShop): Promise<BuiltFeed | null> {
-  const row = await findShop(shop.businessId, shop.shopId);
-  if (!row) return null;
-  return buildForShop(shop.businessId, row);
+  const catalogue = await readShopCatalogue({ businessId: shop.businessId, shopId: shop.shopId });
+  return catalogue?.built ?? null;
 }
 
 /**
@@ -338,8 +429,9 @@ export async function buildShopFeed(input: {
   const block = await publishBlock(input.businessId, shop);
   if (block) return blocked(block);
 
-  const built = await buildForShop(input.businessId, shop);
-  const summary = summariseFeed(built);
+  const catalogue = await readShopCatalogue({ businessId: input.businessId, shopId: shop.id });
+  if (!catalogue) throw new TorobShopError("shop_not_found");
+  const { built, summary } = catalogue;
 
   const run = await recordRun(input.businessId, shop.id, {
     status: "built",
