@@ -586,7 +586,8 @@ authoritative while reachable, so there is no merge rule to get wrong.
 **3. Drills run on a schedule.** `npm run backup:drill` existed and nothing ran
 it. `tenant-backup-drills-job.ts` runs from `server.ts` on an hourly tick, drills
 every business with a `ready` logical artifact at most once a day
-(`DRILL_INTERVAL_MS`, idempotent through the new `tenant_backup_drills` table
+(`DRILL_INTERVAL_MS`; since 0280 the cadence is the plan's
+`drill_interval_hours`, idempotent through the new `tenant_backup_drills` table
 rather than through a lock alone), writes what it proved, and notifies the Owner
 through the new `backup.drill_failed` catalogue event when a backup that exists
 does not open. Two honest details:
@@ -605,6 +606,82 @@ does not open. Two honest details:
 did not write), media binaries, the WordPress/WooCommerce database, and a CI job
 for the drill: the scheduler now covers production, but nothing runs a drill on a
 pull request, which needs a seeded PostgreSQL and S3 stand-in in CI.
+
+## Increment: per-plan policy, alert thresholds and DR objectives (issue #903 §3)
+
+The epic asks for "default and **per-plan** automatic schedules, retention,
+capacity, alerts and disaster-recovery thresholds". Until this increment the
+scheduler knew exactly two layers: one fleet row and a per-business override.
+That is enough for exceptions, not for a product sold in tiers — shaping
+«حرفه‌ای» to six-hourly protection meant editing businesses one at a time.
+
+**The model (migration 0280).** `tenant_backup_plan_policy` is keyed by
+`billing_plans.key` and every column is nullable, so a plan states only what it
+decides; the four threshold columns also landed on
+`platform_tenant_backup_service` so a fleet has a default before any plan exists:
+
+| column | what it decides |
+| --- | --- |
+| `interval_hours` | scheduled cadence for every business on the plan |
+| `retention_days`, `cloud_keep_count`, `max_artifact_bytes` | retention and capacity |
+| `protected_recovery_copies` | the floor retention may never prune below |
+| `alert_stale_hours` | hours without a success before the Owner alert says stale |
+| `alert_failure_streak` | consecutive failures that turn a retry into an alert |
+| `drill_interval_hours` | how often the recovery drill re-proves restorability |
+| `dr_rpo_hours` | the recovery-point objective the plan promises |
+
+Resolution is **fleet → plan → per-business override**, and every layer is
+clamped to the one above it. The clamping rule is the interesting part and it is
+deliberately per-field, because "tighter" is not the same direction everywhere: a
+plan may back up *more often*, keep *fewer* bytes, retain *less*, alert *sooner*,
+require *fewer* consecutive failures, drill *more often* and promise a *shorter*
+recovery point — and it may keep **more** protected copies. A sales tier is not a
+way to buy weaker protection, so a row that asks for the looser direction is
+clamped to the fleet's number rather than obeyed, and
+`tenant-backup-plan-policy.test.ts` asserts each clamp from both sides.
+
+**What now reads it.**
+
+- **Scheduling.** `resolveTenantBackupPolicy` applies the plan layer before the
+  override, so the run-now, upload and retention paths that already asked for a
+  policy get the tier's cadence with no second lookup. The stale window a cadence
+  implies is recomputed after the layering: an hourly tier is not held to a
+  nightly window (which would never alert), and a daily one is not judged hourly
+  (which would alert constantly).
+- **Alerts.** `computeBackupAlert` takes the two thresholds and the evidence they
+  are judged against — trailing consecutive failures, now read from
+  `backup_runs` in the same query as the last run. Both are clamped inside the
+  function as well as in the resolver: a configured window is never *shorter*
+  than the cadence (that would flag healthy backups) and a streak below one means
+  "one failure is enough", never "never alert". With no thresholds supplied the
+  behaviour is byte-for-byte the pre-#903 rule, which is what keeps every existing
+  fleet unchanged.
+- **Drills.** `runScheduledBackupDrills` resolves each candidate's plan cadence
+  through a single join (`readEffectiveBackupThresholds`), so a tier can prove
+  restorability every two hours; an unreadable policy answers the daily default
+  rather than stopping the job.
+- **DR objectives.** `diagnoseBusinessBackup` now reports
+  `dr: { rpoHours, newestVerifiedAt, ageHours, breached }` and adds
+  `dr_rpo_breached` to `actions` when the newest **verified** backup is older
+  than the objective. Verified is the point: an artifact that exists but has
+  never been re-read is not a recovery point, so it cannot satisfy the target. A
+  fleet that promises nothing reports `rpoHours: null` — unset, not met.
+- **Console.** `/platform/backup/service` gained the four fleet thresholds and a
+  «سیاست هر طرح» card that lists every plan in the catalogue (including the ones
+  that never decided anything) and edits one at a time, showing the fleet's
+  number beside each field so "tighter" is a visible comparison. Empty means
+  inherit. `PUT`/`DELETE /api/platform/backup/service/plans` are
+  `tenant_backup.policy`-gated and audited with before/after; an unknown plan is a
+  404 rather than a row no business can inherit, and an unknown field is a 400
+  rather than a silently dropped setting.
+
+**Honest limits.** The offline policy cache keeps its pre-0280 format: an entry
+written before the thresholds existed stays valid and the reader derives the
+pre-#903 answer (cadence window, alert on first failure, daily drill, no RPO), so
+a device that upgrades while offline does not lose the cadence it was honouring.
+A plan policy is not exposed to a tenant at all — the table and the thresholds are
+`platform_only` under FORCE RLS, and the tenant sees only the consequences: a
+cadence, an alert that fires or does not, a drill that ran.
 
 ## Increment: artifact lifecycle — Cloud keeps nothing local, and retention is enforced
 
