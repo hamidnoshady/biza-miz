@@ -24,10 +24,8 @@ import { wooProductShape, wooUpdatePath } from "./woo-catalogue";
 import { parentRemoteIdFor, parentRemoteIdFromMeta } from "./sync-service";
 import type { ConnectionRow } from "./connections-service";
 import { effectivePushSwitches, stockPushPayload } from "./outbox-policy";
-import { shouldAlertPluginStale } from "./plugin-health";
+import { pluginCronAlerts } from "./plugin-cron-alerts";
 import { recordNotification } from "../notification-events";
-import { notificationDedupeKey } from "../notifications";
-import { formatJalali } from "../jalali";
 import { resolveMappedWooPrice } from "./woo-price-source-service";
 
 export const WOO_SYNC_TICK_INTERVAL_MS = 30 * 1000;
@@ -805,21 +803,21 @@ async function runWooCommerceSyncForConnection(business_id: string, id: string):
   // WooCommerce connections. Holoo's push path is a separate tick
   // (Wave 8). The guard is belt-and-braces with the SQL filter above.
   if (!isWooCommerce(connection)) return;
-  // Issue #1149 (C5): a plugin that has gone quiet for half an hour says so
-  // to the owner, once per silence (the dedupe key is the last time it spoke).
-  if (shouldAlertPluginStale(connection, new Date())) {
+  // Issue #1206 P1: warn when the scheduler is late, escalate when it has
+  // stopped, and close the loop when it comes back. The dedupe key is the cron
+  // signal, not the last contact — a manual «آزمایش اتصال» refreshes the latter
+  // and used to re-raise the same alarm on the next tick.
+  for (const alert of pluginCronAlerts(connection, new Date())) {
     await recordNotification({
       businessId: connection.business_id,
       locationId: null,
-      eventKey: "integrations.plugin_stale",
-      severity: "important",
-      title: "افزونهٔ وردپرس با سامانه تماس نمی‌گیرد",
-      body:
-        `«${connection.name}» از ${formatJalali(connection.last_plugin_seen_at!, { withTime: true })} با سامانه تماس نگرفته است؛ ` +
-        "معمولاً یعنی کرون سایت متوقف شده. سفارش‌ها و تغییرات در صف می‌مانند و از دست نمی‌روند.",
-      url: "/websites/wp/connections",
-      dedupeKey: notificationDedupeKey("integrations.plugin_stale", connection.id, connection.last_plugin_seen_at!),
-      payload: { connectionId: connection.id, lastPluginSeenAt: connection.last_plugin_seen_at },
+      eventKey: alert.eventKey,
+      severity: alert.severity,
+      title: alert.title,
+      body: alert.body,
+      url: alert.url,
+      dedupeKey: alert.dedupeKey,
+      payload: alert.payload,
     });
   }
   // Phase 38 — a scheduled order pull, in REST mode only. The plugin

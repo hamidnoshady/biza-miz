@@ -197,25 +197,3 @@ export function summarizePluginHealth(
     ),
   };
 }
-
-/**
- * Should the app raise an alert for this connection right now? Only a plugin
- * that has been heard from before and is not paused by its owner — a connection
- * nobody finished setting up, or one deliberately stopped, is not an outage.
- *
- * Graded from actual cycle signals, so repeatedly pressing «آزمایش اتصال»
- * during a cron outage cannot clear the alert (#1206 acceptance).
- */
-export function shouldAlertPluginStale(
-  connection: {
-    link_mode: string;
-    status: string;
-    last_plugin_seen_at: string | null;
-    plugin_health?: Record<string, unknown> | null;
-  },
-  now: Date,
-): boolean {
-  if (connection.link_mode !== "plugin" || connection.status !== "active") return false;
-  if (!connection.last_plugin_seen_at) return false;
-  return assessPluginCron({ status: connection.status, last_plugin_seen_at: connection.last_plugin_seen_at, plugin_health: connection.plugin_health ?? null }, now).state === "failed";
-}
