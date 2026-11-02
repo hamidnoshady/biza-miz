@@ -336,6 +336,70 @@ describe("issue #1207 §B — source and per-store filters", () => {
   });
 });
 
+describe("issue #1207 §B — «ویرایش» and the family/variant hierarchy", () => {
+  it("opens the edit panel from the row's details area and PATCHes the meta path", async () => {
+    const posted: { url?: string; body: Record<string, unknown> }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.body) posted.push({ url, body: JSON.parse(String(init.body)) });
+        if (url === "/api/products/items") {
+          return { ok: true, status: 200, json: async () => ({ items: [item({ barcode: null })] }) };
+        }
+        if (url === "/api/products/woo-links") return { ok: true, status: 200, json: async () => ({ links: [] }) };
+        if (url.startsWith("/api/products/duplicates?summary=1")) {
+          return { ok: true, status: 200, json: async () => ({ skus: [] }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }),
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("پیراهن آبی");
+
+    await user.click(screen.getByRole("button", { name: /جزئیات/ }));
+    await user.click(screen.getByRole("button", { name: "ویرایش" }));
+    const barcode = await screen.findByLabelText("بارکد");
+    await user.clear(barcode);
+    await user.type(barcode, "6260009999999");
+    await user.click(screen.getByRole("button", { name: "ذخیرهٔ ویرایش" }));
+
+    const patch = posted.find((entry) => entry.url === "/api/products/items/item-1/meta");
+    expect(patch?.body).toEqual({ barcode: "6260009999999" });
+    expect(await screen.findByText("ذخیره شد.")).toBeTruthy();
+  });
+
+  it("draws a family as «محصول اصلی» and its child as «تنوع» of it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      fetchDouble({
+        items: () => ({
+          items: [
+            item({ id: "family-1", name: "پیراهن مردانه", sku: "F-1", kind: "variant_parent", quantity: 0 }),
+            item({
+              id: "child-1",
+              name: "پیراهن مردانه — آبی",
+              sku: "F-1-B",
+              parentName: "پیراهن مردانه",
+              kind: "variant_child",
+            }),
+          ],
+        }),
+        links: [],
+      }),
+    );
+    renderSection();
+    await screen.findByText("پیراهن مردانه");
+    // The family row says what it is, and that its stock lives elsewhere.
+    expect(screen.getByText("محصول اصلی")).toBeTruthy();
+    expect(screen.getByText("بدون موجودی مستقل")).toBeTruthy();
+    expect(screen.getByText("موجودی در تنوع‌ها")).toBeTruthy();
+    // The child is named as a variant, of which family.
+    expect(screen.getByText("تنوع")).toBeTruthy();
+    expect(screen.getByText("از «پیراهن مردانه»")).toBeTruthy();
+  });
+});
+
 describe("issue #1207 §C — a duplicate candidate is reviewed, not published", () => {
   const group = {
     sku: "sku-1",

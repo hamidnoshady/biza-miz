@@ -149,8 +149,67 @@ describe("review, confirmation and the queued state", () => {
     );
     await user.click(await screen.findByRole("checkbox", { name: /Store A/ }));
     await user.click(screen.getByRole("button", { name: "بازبینی به‌روزرسانی دستی" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("publication_preview_changed");
+    const alert = await screen.findByRole("alert");
+    // §D: the reader gets the sentence, not the code — and is told to re-review.
+    expect(alert.textContent).toContain("بازبینی تازه");
+    expect(alert.textContent).not.toContain("publication_preview_changed");
+    // The code is still there for support, machine-readable and on hover.
+    expect(alert.getAttribute("data-error-code")).toBe("publication_preview_changed");
+    expect(alert.getAttribute("title")).toContain("publication_preview_changed");
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("tells the reader a store is offline instead of echoing the connection code", async () => {
+    fetchMock.mockImplementation(async (_url, init) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      return new Response(
+        JSON.stringify(body ? { error: "publication_connection_unavailable" } : { stores: [{ id: "store-a", name: "Store A" }] }),
+        { status: body ? 409 : 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    const user = userEvent.setup();
+    render(<ProductPublicationPanel localId="local-product" links={[LINKED]} duplicate={false} open onQueued={() => {}} />);
+    await user.click(await screen.findByRole("checkbox", { name: /Store A/ }));
+    await user.click(screen.getByRole("button", { name: "بازبینی به‌روزرسانی دستی" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("در دسترس نیست");
+    expect(alert.textContent).toContain("دوباره تلاش");
+    expect(alert.textContent).not.toContain("publication_connection_unavailable");
+  });
+
+  it("asks for a plugin update rather than offering a retry that cannot work", async () => {
+    fetchMock.mockImplementation(async (_url, init) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      return new Response(
+        JSON.stringify(body ? { error: "publication_plugin_update_required" } : { stores: [{ id: "store-a", name: "Store A" }] }),
+        { status: body ? 409 : 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    const user = userEvent.setup();
+    render(<ProductPublicationPanel localId="local-product" links={[LINKED]} duplicate={false} open onQueued={() => {}} />);
+    await user.click(await screen.findByRole("checkbox", { name: /Store A/ }));
+    await user.click(screen.getByRole("button", { name: "بازبینی به‌روزرسانی دستی" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("افزونه");
+    // No "retry is safe" promise where nothing on this screen can fix it.
+    expect(alert.textContent).not.toContain("تکرار همین دکمه");
+  });
+
+  it("says the connection failed — not that a code is unknown — when nothing came back", async () => {
+    fetchMock.mockImplementation(async (_url, init) => {
+      if (!init?.body) {
+        return new Response(JSON.stringify({ stores: [{ id: "store-a", name: "Store A" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new TypeError("Failed to fetch");
+    });
+    const user = userEvent.setup();
+    render(<ProductPublicationPanel localId="local-product" links={[LINKED]} duplicate={false} open onQueued={() => {}} />);
+    await user.click(await screen.findByRole("checkbox", { name: /Store A/ }));
+    await user.click(screen.getByRole("button", { name: "بازبینی به‌روزرسانی دستی" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("ارتباط با سرور");
   });
 });
 
