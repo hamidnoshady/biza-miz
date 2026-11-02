@@ -445,6 +445,18 @@ jobs:
             Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
           }
 
+      - name: Upload packaged acceptance diagnostics
+        # Issue #1194 - the step's own log is an annotation-capped summary; the
+        # full desktop log is what explains a launch that never came up.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-acceptance-diagnostics
+          path: |
+            C:\business-suite-smoke-${{ github.run_id }}\smoke-output.txt
+            C:\business-suite-smoke-${{ github.run_id }}\profile\Logs\desktop.log
+          if-no-files-found: ignore
+
       - name: Final size report and budgets
         id: sizes
         run: |

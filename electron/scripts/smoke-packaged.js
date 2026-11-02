@@ -282,6 +282,41 @@ function assertCleanShutdownLog(userDataDir, stage, offsets) {
   });
 }
 
+/**
+ * A failure report small enough to survive a CI annotation's size cap.
+ *
+ * The whole log tail is the wrong shape for that: a public annotation keeps a
+ * few kilobytes, and a fresh install's log is almost entirely one line per
+ * migration, so a raw tail shows the middle of the migration list and hides
+ * the reason the launch never came up. This keeps the two things that actually
+ * explain a failed start — the error-shaped lines, and the last few lines.
+ */
+function diagnosticSummary(userDataDir) {
+  const logs = desktopLogs(userDataDir);
+  const log = logs.find((candidate) => fs.existsSync(candidate));
+  const facts = [];
+  const config = readDesktopConfig(userDataDir);
+  facts.push(config?.appPort ? `appPort ${config.appPort}` : "no Configuration/config.json yet");
+  facts.push(
+    fs.existsSync(path.join(userDataDir, "Data", "pgdata", "postmaster.pid")) ||
+      fs.existsSync(path.join(userDataDir, "pgdata", "postmaster.pid"))
+      ? "postmaster.pid present (PostgreSQL is running)"
+      : "postmaster.pid absent",
+  );
+  if (!log) return `diagnostics: ${facts.join("; ")} (no desktop log was written)`;
+
+  const lines = fs.readFileSync(log, "utf8").split(/\r?\n/).filter(Boolean);
+  const errors = lines
+    .filter((line) => /\b(error|failed|failure|cannot|refused|denied|timed out|EADDRINUSE|ENOENT)\b/i.test(line))
+    .slice(-8);
+  return [
+    `diagnostics: ${facts.join("; ")}`,
+    `log: ${log} (${lines.length} lines)`,
+    errors.length ? `last error lines:\n${errors.join("\n")}` : "last error lines: none",
+    `final lines:\n${lines.slice(-8).join("\n")}`,
+  ].join("\n");
+}
+
 function diagnosticTail(userDataDir) {
   const logs = desktopLogs(userDataDir);
   for (const log of logs) {
@@ -341,7 +376,7 @@ class InstalledApplication {
     } catch (error) {
       // The app's own log says why it never answered (a failed migration, a
       // refused backend, a dialog). Without it the only symptom is a timeout.
-      throw new Error(`${error.message}${diagnosticTail(this.userDataDir)}`);
+      throw new Error(`${error.message}\n${diagnosticSummary(this.userDataDir)}`);
     }
     this.origin = origin;
     this.config = readDesktopConfig(this.userDataDir);
@@ -806,7 +841,7 @@ function startWatchdog() {
     console.error(`acceptance did not finish within ${Math.round(WATCHDOG_MS / 1000)}s`);
     console.error(`last stage: ${currentStage}`);
     const profile = process.env.DESKTOP_ACCEPTANCE_USER_DATA;
-    if (profile) console.error(diagnosticTail(path.resolve(profile)));
+    if (profile) console.error(diagnosticSummary(path.resolve(profile)));
     killLeftoverApplications();
     process.exit(1);
   }, WATCHDOG_MS);
@@ -821,12 +856,12 @@ if (require.main === module) {
     console.error(`last stage: ${currentStage}`);
     console.error(error);
     const profile = process.env.DESKTOP_ACCEPTANCE_USER_DATA;
-    if (profile) console.error(diagnosticTail(path.resolve(profile)));
+    if (profile) console.error(diagnosticSummary(path.resolve(profile)));
     // GitHub's public job page exposes annotations even when raw Actions logs
     // require authentication. Keep the root cause visible to package reviewers.
     if (process.env.GITHUB_ACTIONS === "true") {
       const annotation = String(error?.stack || error)
-        .slice(0, 8_000)
+        .slice(0, 4_000)
         .replaceAll("%", "%25")
         .replaceAll("\r", "%0D")
         .replaceAll("\n", "%0A");
