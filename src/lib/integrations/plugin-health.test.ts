@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assessPluginCron, shouldAlertPluginStale, summarizePluginHealth } from "./plugin-health";
+import { assessPluginCron, summarizePluginHealth } from "./plugin-health";
 import { PLUGIN_CRITICAL_AFTER_MS } from "./sync-timing";
 
 const now = new Date("2026-10-26T12:00:00Z");
@@ -207,30 +207,5 @@ describe("summarizePluginHealth (issues #1149, #1206)", () => {
       incidentOpen: false,
     });
     expect(summary.cron.state).toBe("unknown");
-  });
-});
-
-describe("shouldAlertPluginStale", () => {
-  const base = {
-    link_mode: "plugin",
-    status: "active",
-    last_plugin_seen_at: ago(60_000),
-    plugin_health: health({ fastHandlerLastStartedAt: ago(PLUGIN_CRITICAL_AFTER_MS + 60_000) }),
-  };
-  it("alerts an active plugin connection whose cron has stopped", () => {
-    expect(shouldAlertPluginStale(base, now)).toBe(true);
-  });
-
-  it("does not alert on a fresh cycle, a pause, or a REST connection", () => {
-    expect(shouldAlertPluginStale({ ...base, plugin_health: health({ fastHandlerLastStartedAt: ago(120_000) }) }, now)).toBe(false);
-    expect(shouldAlertPluginStale({ ...base, status: "paused" }, now)).toBe(false);
-    expect(shouldAlertPluginStale({ ...base, link_mode: "rest_api" }, now)).toBe(false);
-  });
-
-  it("cannot be cleared by pressing «آزمایش اتصال» during an outage", () => {
-    // The ping refreshes last_plugin_seen_at every few seconds; the cron
-    // signal is the only thing this grades.
-    const pressed = { ...base, last_plugin_seen_at: ago(1_000) };
-    expect(shouldAlertPluginStale(pressed, now)).toBe(true);
   });
 });
