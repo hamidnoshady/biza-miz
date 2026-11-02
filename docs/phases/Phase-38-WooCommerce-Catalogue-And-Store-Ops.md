@@ -395,6 +395,15 @@ state as the badges (`src/lib/product-row-actions.ts`):
 «تازه‌سازی وضعیت ارسال» re-reads link/outbox/duplicate state, as does every
 successful decision, so a badge cannot stay stale until a page reload.
 
+The claim in that copy is proven, not just written:
+`integration/woocommerce-automatic-sync.integration.test.ts` drives
+`runWooCommerceSyncTick()` — the cron entry point, with no screen and no user —
+and shows a local stock/price change reaching the store as two `PUT`s with the
+mapping's acknowledged payload moving behind them, the next tick sending nothing,
+plugin mode handing the same rows to the plugin instead of a dead REST call, and
+a disabled Website app or a paused connection parking the work rather than
+dropping it.
+
 Failures are written for the reader too (`src/lib/product-publication-copy.ts`):
 an unreachable or paused store, an out-of-date WordPress plugin, a missing sale
 price, an incomplete attribute mapping, a changed review and a permission gap
@@ -512,6 +521,8 @@ tenant owner's written review (#1207 §D).
 | `src/lib/duplicate-items-resolution.test.ts` | which orphans may be archived and why the rest are blocked (fails closed on unchecked references) |
 | `integration/woocommerce-duplicate-orphan-archive.integration.test.ts` | the plan writes nothing; an unreferenced orphan is archived and audited, a referenced or changed-since-plan one is left active, another business is untouched |
 | `src/lib/product-publication-copy.test.ts` | 1207 §D — every refusal in the reader's words, the offline-versus-unknown split, and no raw code on screen |
+| `integration/woocommerce-automatic-sync.integration.test.ts` | 1207 §A/§D — the scheduler's own tick delivers a stock and a price change nobody clicked (no preview, no token, no button), settles on the next tick instead of re-sending, hands the work to the plugin in plugin mode, and parks it across a disabled Website app or a paused connection without losing it |
+| `src/app/dashboard/products/products-list-responsive.test.ts` | 1207 §B/§D — the toolbar wraps, a store chip truncates while keeping its full text, an expanded panel stays capped and stuck to the start edge (no physical `left-`/`right-`), LTR is reserved for codes, and touch targets stay 32–36px |
 | `src/app/dashboard/products/product-edit-panel.test.tsx` | 1207 §B — «ویرایش» opens on the row's values, sends only changed fields, clears a code to `NULL`, refuses an empty name, and says a SKU edit is not a store update |
 | `src/lib/product-row-actions.test.ts` | 1207 §A/B — the three row actions and their labels, per-store state, the worst-store row state, the Woo/duplicate filter, the source filter and the per-store filter |
 | `src/app/dashboard/products/product-publication-panel.test.tsx` | 1207 §A/D — manual update vs publication vs review, per-store state, review token invalidation, queued-not-synced, and the friendly offline / plugin-outdated / network-down failures |
