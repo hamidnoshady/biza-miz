@@ -139,5 +139,35 @@ export function costActor(session: { sub: string; fullName?: string | null }): {
   return { userId: session.sub, name: session.fullName ?? "" };
 }
 
+/**
+ * The recharge body, in the same shape as `readCostBody`: it takes the request, parses
+ * it, and answers `null` for anything that is not an object, so the route reports one
+ * malformed-body error rather than three.
+ *
+ * The fields are handed to the service largely as they arrived. The service already
+ * refuses an empty set of costs, a non-string member and an id belonging to another
+ * tenant, and a stricter read here would mean two places deciding what a usable
+ * request looks like — and the two would drift.
+ */
+export async function readRechargeBody(request: Request): Promise<{
+  costIds: unknown;
+  tenders: unknown;
+  locationId: string | null;
+  note: unknown;
+} | null> {
+  const source = await readCostBody(request);
+  if (!source) return null;
+  const locationId =
+    typeof source.locationId === "string" && source.locationId.trim().length > 0
+      ? source.locationId.trim()
+      : null;
+  return {
+    costIds: source.costIds,
+    tenders: source.tenders,
+    locationId,
+    note: source.note,
+  };
+}
+
 export { AGENCY_REIMBURSABLE_COST_ERROR_CODES, AgencyReimbursableCostError };
 export type { AgencyReimbursableCostErrorCode };

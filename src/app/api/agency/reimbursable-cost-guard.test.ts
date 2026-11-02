@@ -30,6 +30,7 @@ import {
   costActor,
   costErrorResponse,
   readCostBody,
+  readRechargeBody,
   type AgencyReimbursableCostErrorCode,
 } from "./reimbursable-cost-guard";
 
@@ -171,5 +172,41 @@ describe("reimbursable-cost-guard", () => {
     });
     expect(costActor({ sub: "user-1", fullName: null })).toEqual({ userId: "user-1", name: "" });
     expect(costActor({ sub: "user-1" })).toEqual({ userId: "user-1", name: "" });
+  });
+});
+
+describe("readRechargeBody — the recharge's request shape", () => {
+  const req = (body: string) =>
+    new Request("http://test/api/agency/reimbursable-costs/recharge", { method: "POST", body });
+
+  it("takes the cost ids as they arrived and lets the service decide", () => {
+    // The service refuses an empty set, a non-string member and a foreign tenant's id.
+    // Validating a second time here would be a second opinion that could drift.
+    return expect(readRechargeBody(req(`{"costIds":["a","b"],"note":"x"}`))).resolves.toEqual({
+      costIds: ["a", "b"],
+      tenders: undefined,
+      locationId: null,
+      note: "x",
+    });
+  });
+
+  it("trims a location and treats a blank one as absent", async () => {
+    expect((await readRechargeBody(req(`{"locationId":"  loc-1 "}`)))?.locationId).toBe("loc-1");
+    // Absent and blank are the same answer, because both mean "pick the member's
+    // active branch" — and a blank string that reached the service would be a location
+    // id nobody has.
+    expect((await readRechargeBody(req(`{"locationId":"   "}`)))?.locationId).toBeNull();
+    expect((await readRechargeBody(req(`{"locationId":7}`)))?.locationId).toBeNull();
+  });
+
+  it("answers null rather than throwing for anything that is not an object", async () => {
+    expect(await readRechargeBody(req(`not json`))).toBeNull();
+    expect(await readRechargeBody(req(`[1,2]`))).toBeNull();
+    expect(await readRechargeBody(req(`null`))).toBeNull();
+  });
+
+  it("passes tenders through untouched, so the invoice keeps deciding payment", async () => {
+    const tenders = [{ method: "cash", amount: "1000" }];
+    expect((await readRechargeBody(req(JSON.stringify({ tenders }))))?.tenders).toEqual(tenders);
   });
 });
