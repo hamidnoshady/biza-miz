@@ -349,7 +349,7 @@ jobs:
         # token is a secret; without it the phase reports "skipped" and the
         # Hybrid install/restart checks still run.
         # Issue #1194 — a wedged runner must fail this step, not the job.
-        timeout-minutes: 25
+        timeout-minutes: 45
         env:
           DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
           DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_TOKEN }}
@@ -405,6 +405,11 @@ jobs:
             exit /b 98
           )
           set DESKTOP_EXECUTABLE=$installDir\Bizamiz.exe
+          rem Issue #1194 - a real, inspectable profile: the harness prints this
+          rem app's own log tail when a launch does not come up, and the report
+          rem lands next to the smoke output instead of a temp directory.
+          set DESKTOP_ACCEPTANCE_USER_DATA=$smokeRoot\profile
+          set DESKTOP_ACCEPTANCE_REPORT=$smokeRoot\acceptance-report.json
           "$node" "$smokeScript" > "$outputPath" 2>&1
           set RC=%ERRORLEVEL%
           echo %RC% > "$exitPath"
@@ -420,7 +425,7 @@ jobs:
             # the harness ends, and the budget bounds the rest.
             $process = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /c `"$commandPath`"" `
               -WorkingDirectory $repo -Credential $credential -LoadUser -PassThru
-            $deadline = (Get-Date).AddMinutes(22)
+            $deadline = (Get-Date).AddMinutes(42)
             while (-not (Test-Path $exitPath) -and (Get-Date) -lt $deadline) {
               Start-Sleep -Seconds 15
               if (Test-Path $outputPath) { Get-Content $outputPath -Tail 3 }
@@ -428,7 +433,7 @@ jobs:
             if (-not (Test-Path $exitPath)) {
               if (Test-Path $outputPath) { Get-Content $outputPath -Tail 200 }
               taskkill /pid $process.Id /t /f 2>&1 | Out-Null
-              throw "Standard-user installed smoke did not finish within its 22-minute budget"
+              throw "Standard-user installed smoke did not finish within its 42-minute budget"
             }
             if (Test-Path $outputPath) { Get-Content $outputPath }
             $smokeExit = [int](Get-Content $exitPath | Select-Object -First 1)

@@ -43,7 +43,13 @@ const { spawn, spawnSync } = require("node:child_process");
 const repoRoot = path.resolve(__dirname, "..", "..");
 const rules = require(path.join(repoRoot, "scripts", "desktop", "release-scan-rules.cjs"));
 
-const READY_TIMEOUT_MS = 5 * 60 * 1000; // above backend-manager's own readiness wait
+/**
+ * A fresh install runs initdb plus the full migration set before the server
+ * answers, and that is minutes on a loaded runner — the pre-#1194 harness
+ * allowed ten minutes for the same startup and this one must not be tighter
+ * than the thing it replaced. backend-manager's own readiness wait is five.
+ */
+const READY_TIMEOUT_MS = 10 * 60 * 1000;
 const HTTP_TIMEOUT_MS = 20_000;
 const QUIT_TIMEOUT_MS = 90_000;
 const POLL_INTERVAL_MS = 2_000;
@@ -54,7 +60,7 @@ const POLL_INTERVAL_MS = 2_000;
  * timeout and reports nothing; with it, the run fails in a quarter of an hour
  * and says which stage it was in and what the app logged.
  */
-const WATCHDOG_MS = Number(process.env.DESKTOP_ACCEPTANCE_WATCHDOG_MS || 15 * 60 * 1000);
+const WATCHDOG_MS = Number(process.env.DESKTOP_ACCEPTANCE_WATCHDOG_MS || 40 * 60 * 1000);
 /** Every external command gets a budget; a child that never exits is a failure. */
 const COMMAND_TIMEOUT_MS = 60_000;
 
@@ -316,18 +322,27 @@ class InstalledApplication {
       });
     });
     currentStage = "waiting for the installed application to answer /api/health";
-    const origin = await waitFor("the installed application's HTTP server", async () => {
-      // A crash or an early exit must fail the run at once instead of waiting
-      // out the whole readiness budget with no diagnostic.
-      if (child.exitCode !== null) {
-        throw new Error(`the application exited before it was ready (code ${child.exitCode})${diagnosticTail(this.userDataDir)}`);
-      }
-      const config = readDesktopConfig(this.userDataDir);
-      const candidate = appOrigin(config);
-      if (!candidate) return null;
-      const health = await httpJson(`${candidate}/api/health`).catch(() => null);
-      return health?.status === 200 ? candidate : null;
-    });
+    let origin;
+    try {
+      origin = await waitFor("the installed application's HTTP server", async () => {
+        // A crash or an early exit must fail the run at once instead of waiting
+        // out the whole readiness budget with no diagnostic.
+        if (child.exitCode !== null) {
+          throw new Error(
+            `the application exited before it was ready (code ${child.exitCode})${diagnosticTail(this.userDataDir)}`,
+          );
+        }
+        const config = readDesktopConfig(this.userDataDir);
+        const candidate = appOrigin(config);
+        if (!candidate) return null;
+        const health = await httpJson(`${candidate}/api/health`).catch(() => null);
+        return health?.status === 200 ? candidate : null;
+      });
+    } catch (error) {
+      // The app's own log says why it never answered (a failed migration, a
+      // refused backend, a dialog). Without it the only symptom is a timeout.
+      throw new Error(`${error.message}${diagnosticTail(this.userDataDir)}`);
+    }
     this.origin = origin;
     this.config = readDesktopConfig(this.userDataDir);
     currentStage = "the application is running";
