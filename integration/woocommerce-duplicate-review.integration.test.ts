@@ -76,6 +76,29 @@ async function insertOrphan(sku: string, locationId = biz.locationId): Promise<s
   return rows[0].id;
 }
 
+/**
+ * A twin whose only mapping is a Holoo one: the same SKU reached the catalogue
+ * from a different provider. The race-orphan *shape* is identical to the
+ * WooCommerce case, which is exactly why the archive has to refuse it.
+ */
+async function mapHolooTwin(sku: string, remoteId: string): Promise<string> {
+  const connectionId = (
+    await db.query<{ id: string }>(
+      `INSERT INTO integration_connections (business_id, location_id, name, provider, base_url, currency_unit)
+       VALUES ($1, $2, 'Holoo', 'holoo', NULL, 'rial') RETURNING id::text AS id`,
+      [biz.id, biz.locationId],
+    )
+  ).rows[0].id;
+  const itemId = await insertOrphan(sku);
+  await db.query(
+    `INSERT INTO integration_mappings
+       (business_id, connection_id, local_id, entity_type, remote_id)
+     VALUES ($1, $2, $3, 'product', $4)`,
+    [biz.id, connectionId, itemId, remoteId],
+  );
+  return itemId;
+}
+
 async function isActive(itemId: string): Promise<boolean> {
   const { rows } = await db.query<{ is_active: boolean }>(`SELECT is_active FROM items WHERE id = $1`, [itemId]);
   return rows[0].is_active;
@@ -313,6 +336,36 @@ describe("the duplicate review", () => {
     expect(otherBranch).toEqual([]);
     // The list's flags are the branch's too.
     expect(await review.listDuplicateCandidateSkus(biz.id, { locationId: biz.locationId })).toContain("zza05700");
+  });
+
+  it("never archives a twin whose mapping came from another provider (Holoo)", async () => {
+    // #1207 §D: "Holoo cross-provider". The local twin of this pair is a
+    // WooCommerce product; the *mapped* side is a Holoo record. Archiving the
+    // unmapped row would be a silent merge of two providers' data, so the plan
+    // must block it and the archive must refuse it.
+    const holoo = await mapHolooTwin("zza05800", "H-5800");
+    const orphan = await insertOrphan("zza05800");
+
+    const [group] = await review.loadDuplicateReviewGroups(biz.id, { sku: "zza05800" });
+    expect(group.members.map((member) => member.itemId).sort()).toEqual([holoo, orphan].sort());
+    expect(group.verdict).toBe("race_orphan");
+    // Nothing here is an archival candidate: the twin is not a WooCommerce
+    // product mapping, so the screen offers no plan at all.
+    expect(group.plan?.status === "archive").toBe(false);
+
+    const result = await review.archiveDuplicateOrphanFromReview(biz.id, {
+      sku: "zza05800",
+      orphanItemId: orphan,
+      reviewToken: group.reviewToken,
+      actorUserId: null,
+    });
+    expect(result.archived).toBeNull();
+    // The refusal names the reason, so the screen can say why instead of
+    // offering a button that does nothing.
+    expect(result.blockers).toContain("twin_not_woo_product");
+    expect(await isActive(orphan)).toBe(true);
+    expect(await isActive(holoo)).toBe(true);
+    expect(await auditRows("item.duplicate_orphan_archived", orphan)).toHaveLength(0);
   });
 
   it("leaves legitimate shared SKUs alone", async () => {

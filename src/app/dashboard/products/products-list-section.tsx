@@ -67,6 +67,7 @@ import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@
 import type { ProductWooLink } from "@/lib/integrations/product-links-service";
 import { ProductStoreActionButton, ProductPublicationPanel } from "./product-publication-panel";
 import { ProductDuplicatePanel } from "./product-duplicate-panel";
+import { ProductEditPanel } from "./product-edit-panel";
 import { normaliseSku } from "@/lib/duplicate-items";
 import {
   ALL_STORES,
@@ -99,7 +100,7 @@ const STATUS_FILTERS: readonly { value: ProductStatusFilter; label: string }[] =
 const PRODUCT_COLUMNS = 4;
 
 /** The one expanded area a row may show at a time. */
-type ProductPanelKind = "store" | "details" | "stock" | "content" | "duplicate";
+type ProductPanelKind = "store" | "details" | "edit" | "stock" | "content" | "duplicate";
 
 type ProductWooLinkLoadState = "loading" | "ready" | "unavailable" | "error";
 
@@ -679,7 +680,16 @@ function ProductRow({
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="text-[11px] text-muted-foreground tabular-nums">{toPersianDigits(index)}</span>
               <span className="min-w-0 font-medium text-foreground">{item.name}</span>
-              {isFamily ? <StatusBadge tone="neutral">خانواده</StatusBadge> : null}
+              {/*
+                §B: a family and its variants are different things and the row
+                says which one it is. «محصول اصلی» is the row that owns the
+                family; «تنوع» is a child, drawn with the parent's name below.
+              */}
+              {isFamily ? (
+                <StatusBadge tone="neutral">محصول اصلی</StatusBadge>
+              ) : item.parentName ? (
+                <StatusBadge tone="neutral">تنوع</StatusBadge>
+              ) : null}
               {item.publishStatus === "draft" || item.publishStatus === "private" ? (
                 <StatusBadge tone="neutral">{PRODUCT_PUBLISH_STATUS_LABELS[item.publishStatus]}</StatusBadge>
               ) : null}
@@ -690,7 +700,7 @@ function ProductRow({
             {(!isFamily && item.parentName) || item.attributes.length > 0 ? (
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                 {!isFamily && item.parentName ? (
-                  <span className="text-xs text-muted-foreground">{item.parentName}</span>
+                  <span className="text-xs text-muted-foreground">از «{item.parentName}»</span>
                 ) : null}
                 {item.attributes.map((attribute) => (
                   <span
@@ -720,10 +730,10 @@ function ProductRow({
                     : "neutral"
               }
             >
-              {status === "family" ? "خانواده" : status === "in_stock" ? "موجود" : status === "out_of_stock" ? "ناموجود" : "غیر قابل فروش"}
+              {status === "family" ? "بدون موجودی مستقل" : status === "in_stock" ? "موجود" : status === "out_of_stock" ? "ناموجود" : "غیر قابل فروش"}
             </StatusBadge>
             {isFamily ? (
-              <span className="text-xs text-muted-foreground">بدون موجودی مستقل</span>
+              <span className="text-xs text-muted-foreground">موجودی در تنوع‌ها</span>
             ) : (
               <>
                 <span
@@ -865,6 +875,15 @@ function ProductRow({
                   }}
                 />
               </PanelFrame>
+            </PanelShell>
+          </Td>
+        </DataTableRow>
+      ) : null}
+      {panel === "edit" ? (
+        <DataTableRow>
+          <Td colSpan={PRODUCT_COLUMNS}>
+            <PanelShell id={`edit-panel-${item.id}`}>
+              <ProductEditPanel item={item} busy={busy} setBusy={setBusy} onSaved={onSaved} />
             </PanelShell>
           </Td>
         </DataTableRow>
@@ -1057,6 +1076,18 @@ function ProductDetailsPanel({
       </div>
 
       <div className="mt-4 flex flex-wrap gap-1.5">
+        {/* §B's missing contextual action: the product's own identity fields. */}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="min-h-8 whitespace-nowrap px-2 text-xs"
+          onClick={() => onOpenPanel("edit")}
+          disabled={busy}
+          aria-controls={`edit-panel-${item.id}`}
+        >
+          ویرایش
+        </Button>
         {!isFamily ? (
           <Button
             type="button"

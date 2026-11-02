@@ -34,6 +34,7 @@ import { LoadingSkeleton, StatusBadge } from "../page-chrome";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import type { ProductWooLink } from "@/lib/integrations/product-links-service";
+import { publicationFailureCopy, storeListFailureCopy } from "@/lib/product-publication-copy";
 import {
   STORE_LINK_STATE_LABEL,
   STORE_LINK_STATE_TONE,
@@ -116,6 +117,8 @@ export function ProductPublicationPanel({
   const [stores, setStores] = useState<{ id: string; name: string }[]>([]);
   const [storesLoading, setStoresLoading] = useState(true);
   const [storesError, setStoresError] = useState("");
+  const [failure, setFailure] = useState<ReturnType<typeof publicationFailureCopy> | null>(null);
+  const [failureCode, setFailureCode] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [remoteId, setRemoteId] = useState("");
   const [previews, setPreviews] = useState<Preview[]>([]);
@@ -142,7 +145,9 @@ export function ProductPublicationPanel({
       if (cancelled) return;
       setStoresLoading(false);
       if (!result.ok) {
-        setStoresError("اجازهٔ مدیریت اتصال یا دریافت فروشگاه‌ها در دسترس نیست.");
+        // §D: no raw code on screen — the copy says what to do, and the code
+        // stays reachable for support through the hover text.
+        setStoresError(storeListFailureCopy(result.data.error));
         return;
       }
       setStores(Array.isArray(result.data.stores) ? result.data.stores : []);
@@ -155,6 +160,8 @@ export function ProductPublicationPanel({
   async function submit(confirm: boolean) {
     setBusy(true);
     setError("");
+    setFailure(null);
+    setFailureCode("");
     setNotice("");
     const result = await api<{ previews?: Preview[]; error?: string }>("/api/products/publications", {
       method: "POST",
@@ -171,9 +178,8 @@ export function ProductPublicationPanel({
     setBusy(false);
     if (!result.ok) {
       setPreviews([]);
-      setError(
-        `ارسال انجام نشد؛ قیمت فروش، نگاشت ویژگی‌ها، وضعیت اتصال و تازه بودن بازبینی را بررسی کنید. (${result.data.error ?? "خطای ارتباط"})`,
-      );
+      setFailureCode(result.data.error ?? "");
+      setFailure(publicationFailureCopy(result.data.error));
       return;
     }
     if (confirm) {
@@ -304,9 +310,15 @@ export function ProductPublicationPanel({
                 ? "بازبینی به‌روزرسانی دستی"
                 : "بازبینی انتشار / پیوند"}
         </Button>
-        {error ? (
-          <p role="alert" className="text-xs text-rose-600 dark:text-rose-400">
-            {error}
+        {failure || error ? (
+          <p
+            role="alert"
+            data-error-code={failureCode || undefined}
+            title={failureCode ? `کد خطا: ${failureCode}` : undefined}
+            className="text-xs text-rose-600 dark:text-rose-400"
+          >
+            {failure?.message ?? error}
+            {failure && failure.retryable ? " تکرار همین دکمه پس از رفع مورد بالا بی‌خطر است." : ""}
           </p>
         ) : null}
       </div>
