@@ -21,6 +21,7 @@
  * Thresholds come from `sync-timing.ts` and the plugin's own reported cadence.
  */
 import { pluginCronFailAfterMs, pluginCronWarnAfterMs, pluginPullIntervalMs } from "./sync-timing";
+import { assessCronProbe, type CronProbeAssessment } from "./plugin-cron-probe";
 
 /** The states the app shows. `test_only` and `unknown` are honest, not failures. */
 export type PluginCronState = "healthy" | "delayed" | "failed" | "paused" | "test_only" | "unknown";
@@ -67,6 +68,11 @@ export interface PluginHealthSummary {
   incidentOpen: boolean;
   /** Jobs this app has queued for the store that nothing has taken yet. */
   queueSize: number;
+  /**
+   * The scheduler probe's stage (#1206 P0): whether a real cron invocation ran
+   * the test event, which no connection test can establish.
+   */
+  cronProbe: CronProbeAssessment;
   oldestQueuedAgeSeconds: number | null;
 }
 
@@ -149,6 +155,12 @@ export function summarizePluginHealth(
   },
   queue: { size: number; oldestAt: string | null },
   now: Date,
+  probe: {
+    /** Whether the plugin advertised the probe job type at all. */
+    supported?: boolean;
+    /** The app's own request: what it queued, and when. */
+    request?: { probeId: string; requestedAt: string | null } | null;
+  } = {},
 ): PluginHealthSummary {
   const seenMs = connection.last_plugin_seen_at ? Date.parse(connection.last_plugin_seen_at) : NaN;
   const silentMs = Number.isFinite(seenMs) ? Math.max(0, now.getTime() - seenMs) : null;
@@ -175,6 +187,14 @@ export function summarizePluginHealth(
     incidentOpen: health.previousOutageOpen === true,
     queueSize: queue.size,
     oldestQueuedAgeSeconds: Number.isFinite(oldestMs) ? Math.max(0, Math.floor((now.getTime() - oldestMs) / 1000)) : null,
+    cronProbe: assessCronProbe(
+      {
+        report: health.cronProbe ?? null,
+        supported: probe.supported,
+        request: probe.request ?? null,
+      },
+      now,
+    ),
   };
 }
 

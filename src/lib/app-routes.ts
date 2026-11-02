@@ -131,6 +131,20 @@ export function workspaceProjectHref(projectId: string): string {
 }
 
 /**
+ * One contract's document and signing round (issue #908), inside the
+ * workspace's contracts section.
+ *
+ * `tab` is the panel the page should open on: the document builder by default,
+ * or `"signing"` for the signer list and the evidence timeline. It is part of
+ * the URL rather than component state so a shared link and a reload land on the
+ * same panel.
+ */
+export function workspaceContractHref(contractId: string, tab?: "document" | "signing"): string {
+  const base = `${WORKSPACE_MODULE_HOME}/contracts/${contractId}`;
+  return tab === "signing" ? `${base}?tab=signing` : base;
+}
+
+/**
  * The business work areas that belong to the primary Accounting workspace.
  *
  * These are public paths, not aliases. Every sidebar entry, link and redirect

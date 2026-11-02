@@ -129,6 +129,12 @@ way round. See «What this change does not build».
 | **Wave 9** — §C campaign HTTP | Three routes under `/api/crm/client-campaigns/**`, in the CRM door for the reason decision 39 gives, with one exhaustive error map in `src/app/api/crm/campaign-guard.ts` over eighteen codes plus 0278's deliberate SQLSTATEs. The lifecycle step is on its own `/status` route and rides `crm.manage`: completing a campaign closes a claim about attribution rather than approving money moving, and §D's `approve` is the determination that does. A new CRM section key `campaigns` with its access row, its aliases (and «کمپین» moved off the brief's list, where it had been pointing at the nearest thing), and its place in the «فرصت‌ها» group |
 | **Wave 9** — §C campaign screen | `/crm/client-campaigns` and `campaigns-section.tsx`. Mostly arithmetic and dates rather than workflow, and §C's "no fake campaign performance" shows up as three refusals to pretend: no invented figure (every ratio «—» on a zero denominator), no platform to import from (two sources and no third), attribution stated beside the figure it explains. A closed campaign's controls are disabled rather than left to be refused, while its note fields stay open. The brief and proposal pickers hold only the chosen client's own records; the deal, project and contract pointers are shown but not settable, because project and contract live behind `workspace.view` and a CRM-only member must not get a directory of work they cannot see |
 | **Wave 9** — the audited merge door | `migrations/0279_agency_party_attribution_moves.sql`: a **bug fix in shipped code**, found by giving 0278's campaign a merge disposition. 0274 and 0276 each froze `party_id` inside their substance comparison, so `mergeCustomers` failed with a raw `23514` on the CRM's duplicates screen whenever either client held a confirmed brief or a sent proposal. 0279 redefines both guards — never editing an applied migration in place — with the attribution split out and honouring 0217's transaction-local flag, and adds `crm_party_attribution_moves` so every move is audited before the door opens. Five registry entries now declare it (decision 56) |
+| **Wave 10** — §D reimbursable cost schema | `migrations/0280_agency_reimbursable_costs.sql`: one table, and the first door to account 1270 (decision 58). `party_id` NOT NULL and `CASCADE` — a reimbursable cost with no client is an ordinary expense and the expense screen already books those; `project_id` nullable and `SET NULL`, because archiving a project does not un-spend money the client still owes. `presentation` (`net`/`gross`) and `settled_by` (`cash`/`bank`/`payable`) are stored choices, not derived ones (decision 59). `amount_rial` bigint with no CHECK against anything else. `entry_id` is a real FK to `journal_entries` with `ON DELETE SET NULL` where 0134's equivalent is a bare uuid, because a dangling id here would report "posted, therefore frozen" about an entry that is gone. `RC-` series, `UNIQUE (business_id, cost_number)` and `(business_id, id)`, three indexes including a partial one over the unposted queue, RLS shape 1 `ENABLE` + `FORCE`. Two triggers: reference ownership over **both** `party_id` and `project_id` (a NOT NULL FK proves existence, not tenancy), and a freeze keyed on `entry_id IS NOT NULL` with the client attribution split out behind 0279's flag so the table is born able to survive a merge (decision 56). Nothing posts except through the engine |
+| **Wave 10** — §D gross-versus-net, pure | `src/lib/agency-reimbursable-cost.ts`: the two vocabularies with a label *and* a hint for each presentation, because a member who cannot tell the two apart will pick one and the books will carry it; `reimbursableCostAccounts` as the one exported function that turns the choice into two account codes; `isPassThroughToClient` so §D's reporting can ask the question without a second copy of the codes; `isReimbursableCostPosted` reading the entry id rather than a status; and normalisers that refuse a fraction rather than rounding it, refuse a zero rather than storing a claim that can never clear, and bound the date to a Gregorian year because a Jalali `1406-03-01` passes both a shape regex and `isValidIsoDate` |
+| **Wave 10** — the rule that reaches 1270 | `src/lib/agency-reimbursable-cost-posting.ts`: `agency.reimbursable_cost` posts Debit 1270 on net or 5197 on gross, Credit 1100/1120/2140 by settlement, tagged with `project_id` so §D's project P&L reads it from the books, and dated the day the money was **spent** rather than the day it was recorded — a member files a platform invoice days after the platform charged the card. No VAT line and no revenue line, because this is money spent and not a sale. The memo names the treatment, since the two presentations are otherwise indistinguishable in a list of entries |
+| **Wave 10** — §D reimbursable cost service | `src/lib/agency-reimbursable-cost-service.ts`: twelve codes closed into `AGENCY_REIMBURSABLE_COST_ERROR_CODES`; list, read, create, patch, delete, plus `sumCostsByParty` separating the client's money from the agency's own cost in one grouped read. The row and its entry are written in **one transaction** against the transaction's own client, so a cost and its ledger document commit together or neither does — a row whose entry failed would be a claim on a client the books know nothing about. The presentation is carried into the entry and never re-derived. Outstanding balances are read, never stored |
+| **Wave 10** — §D reimbursable cost HTTP | Two routes under `/api/agency/reimbursable-costs/**` on `ledger.view` and `finance.expenses_manage` (decision 61), with `src/app/api/agency/reimbursable-cost-guard.ts` exhaustive over the twelve codes and **composing** with the shared `handleAgencyError` rather than replacing it, so `MissingLedgerAccountError` still answers 409 in the product's own words instead of a 500. Its own coverage-map row rather than being absorbed by `workspace.agency`'s broad `["agency"]` prefix, whose only symptom is a stale route count |
+| **Wave 10** — §D reimbursable cost tests | `agency-reimbursable-cost.test.ts` (22, pure — the four presentation × settlement combinations pinned by account code, because a mis-stated presentation moves money between cost of sale and a claim on a client and looks fine everywhere else), `integration/agency-reimbursable-costs.integration.test.ts` (12, real database), `reimbursable-cost-guard.test.ts` (6, including the hand-off to the shared handler), the merge suite extended to a **posted** cost whose entry is asserted line-for-line unchanged, and 104 assertions against 0280 over Postgres. The harness proves both halves of the merge door, which needed savepoints because a refused statement aborts the whole transaction, and needed its vacuous assertions replaced — setting a column to the value it already holds is not a change and `IS DISTINCT FROM` correctly says so |
 | **Wave 9** — §C campaign tests | `agency-campaign.test.ts` (26, pure), `integration/agency-client-campaigns.integration.test.ts` (16, real database), `integration/agency-party-merge.integration.test.ts` (6, real database), `campaign-guard.test.ts` (6) and 66 assertions against 0278 run directly over Postgres. The integration suite covers what only a database can show: one number sequence under a race, an overspend recorded *and* reported as `over`, the four ratios and their nulls including `revenueRial: 0` giving no ROAS, list figures identical to detail figures, a one-field patch clearing nothing, the full lifecycle with its window requirements stated in words first, a closed campaign refused from both the service and a **raw** `UPDATE` that skips it, a foreign client refused by the trigger as `23514`, and two of one brand's campaigns concurrent in the same window. The merge suite pins both halves of decision 56 — the move lands with substance and lines byte-for-byte intact and an audit row written, and what was frozen stays frozen for every path that is not the audited merge |
 
 
@@ -773,6 +779,44 @@ So the key, the route, the API path and the screen file are all `client-campaign
 
 The lesson is the one decision 51's correction already implies, from the other direction: a new section key is not one change. It reaches the permissions table, the nav and its group, the command aliases, the knowledge base's help title, the section switch, the permission test's route table, the coverage map — and the app-ownership boundary, which is the only one of those that can say *no* rather than merely needing an update. It is also the only one a compiler cannot see, and a full-suite run is what caught it.
 
+### 58 — 1270 had no door, and the cost side has to exist before the recharge side
+
+Wave 1 seeded `1270 هزینه‌های قابل بازدریافت از مشتری (رسانه و تولید)` as an asset, and `account-classification.ts` deliberately left it unclassified — it is an *unbilled* pass-through and not an invoice the client owes yet, so classifying it would put it in the A/R totals and in `ASSET_SALE_PROCEEDS_ROLES` where it does not belong. Eight waves later nothing posted to it, and that was not an oversight in the chart. It was that the account had no door:
+
+* the expense path cannot reach it. `expense-accounts.ts` returns `accounts.filter((account) => account.type === "expense")` and 1270 is an asset — and its own docblock says why the rule is that strict, because a rent payment could once be credited against inventory or recoverable VAT. Widening it to let an expense debit an asset would undo a real fix;
+* §D forbids the obvious workaround: the vendor chain must run "through existing Accounting posting/domain-event engine, **never direct ad hoc journal entries**";
+* and the recharge side — an invoice line crediting 1270 — cannot come first, because crediting an asset nothing ever debited would drive it to a credit balance and report a *negative* claim on the client.
+
+So wave 10 builds the cost side, and alone it leaves the books **correct but incomplete** rather than wrong: a debit balance in 1270 is exactly the true statement "we have spent this on clients and not yet asked them for it". The recharge is the next wave and will clear this account row by row.
+
+### 59 — gross versus net is a field a member sets, never something inferred
+
+§D says presentation "must follow chosen business accounting policy and **must not be inferred solely from spend**". Two agencies that both buy a client ۵٬۰۰۰٬۰۰۰ ریال of media make different accounting statements about it, and nothing in the spend says which: one is reselling media and recognises the whole recharge as its own revenue with the buy as cost of sales, the other is handling the client's money and never owns either side. Guessing from the size of the line, or from whether a vendor invoice exists, is precisely the inference §D rules out.
+
+So `presentation` is stored on the document and carried into the entry, and `reimbursableCostAccounts` is the one function that turns the choice into two account codes — exported rather than inlined in the posting rule, so the rule, the screen that will explain the choice, and the tests that pin it all read the same map. `net` is the default because it keeps the agency's own revenue honest: an unchosen line landing in 5197 overstates cost of sales *and*, at recharge, revenue, and a pair of errors in opposite directions is harder to see than one.
+
+§D asks for a *business-level* policy and this wave ships a *per-document* choice. The field is where the business default will land; until it does, a member states the treatment on each cost, which is stronger than inference and auditable, and the gap is recorded rather than papered over.
+
+### 60 — a posted row freezes because the books carry the figure, not because a human saw it
+
+0274, 0276 and 0278 freeze a document because somebody *relied* on it — a client confirmed a brief, accepted a price, was reported a campaign's figures. 0280 freezes for a different reason: the amount, the presentation and the settlement decided which two accounts an entry landed in, so editing one afterwards leaves the register stating something the ledger contradicts. The correction is a reversal and a new record, which is the ledger's own shape.
+
+The predicate is `entry_id IS NOT NULL` rather than a status column, which makes "recorded but not yet posted" a real state: a locked fiscal period routes an auto-posted entry to the human-approval queue rather than refusing the spend, so a member's cost is recorded and waits. `note` stays writable throughout, because what was learned afterwards desyncs nothing.
+
+**The service and the schema disagreed about exactly this, and only an integration test saw it.** The first draft refused the whole patch on a posted row, while 0280 leaves the note open. Each side was self-consistent. The check now runs after the patch is built, against `POSTED_ROW_EDITABLE_COLUMNS`, so the refusal is about what *this request* touches.
+
+### 61 — the permissions are an expense's, not a workspace document's
+
+Reading is `ledger.view` and writing is `finance.expenses_manage` — the pair `POST /api/ledger/expenses` uses — because a reimbursable cost *is* an expense in every respect but the account it lands in. The sibling agency registers ride `workspace.view`/`workspace.manage` deliberately, and routing this one through `agencyOwner` would have added the workspace's service-activation gate. The member who records what a client's media buy cost is the office's accountant as often as the project lead; gating them behind workspace activation would hand a 403 to the one person whose job it is.
+
+The industry gate stays separate and lives in the service: another trade is refused rather than defaulted, because a café has no reimbursable client cost and must not be served a register that silently means something else. A permission answers *may this member*, the industry check answers *does this trade have one*, and conflating them is how a feature leaks into a business it means something else in.
+
+### 62 — wave 10 stops at the ledger, and the screen is the next slice
+
+There is no UI in this wave, and that is a decision rather than an omission. The Accounting app's section key reaches at least ten files with exhaustive maps (`accounting-nav`, `accounting-headings`, `accounting-icons`, `accounting-manager-policy`, `accounting-manager`, `accounting-page-body`, `accounting-routes`, `accounting-workspace`, the `[section]` page) plus four contract tests of its own — the same eleven-place problem decision 57 records for a CRM section key, in a different app. Rushing it against the accounting half of a wave that had already found one shipped bug would have been the worse trade.
+
+What ships is complete and usable through the API and, more importantly, **true in the books**: 1270 is reachable, a cost posts through the domain-event engine with its project tag, and §D's gross-versus-net distinction is a stored, audited fact rather than a note in a spreadsheet. The screen that reads it is the next slice, and it will land on a register that already works.
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -1087,6 +1131,50 @@ link every byte fetch, which made the default link unable to show the artwork it
   the chart — none of which a type-checker, a unit suite or a green whole-schema
   sweep can see.
 
+* `agency-reimbursable-cost.test.ts` (22) — §D's gross-versus-net choice as
+  arithmetic a test can hold still. The four presentation × settlement combinations
+  are pinned **by account code**, because a mis-stated presentation is invisible
+  everywhere it can be seen: the row saves, the entry balances, the invoice prints,
+  and the only symptom is a margin report quietly wrong in both directions at once.
+  Also the vocabularies' labels and hints, `isPassThroughToClient` as the one
+  predicate §D's reporting filters on, `isReimbursableCostPosted` reading the entry
+  id rather than a status, an amount that refuses zero and refuses a fraction rather
+  than rounding it and stays inside the bigint column, a date that refuses a Jalali
+  year because `isValidIsoDate` is calendar-aware about days but shape-based about
+  years, and free text that reports over-long rather than truncating a description
+  about to appear on a client's invoice.
+* `integration/agency-reimbursable-costs.integration.test.ts` (12) — the same feature
+  against a real database, and the proof that the door to 1270 opened rather than
+  that a row was inserted: the entry landing Dr 1270 / Cr 2140 with the project tag
+  and dated the day the money was spent; gross landing in 5197 **with 1270's balance
+  asserted at zero**; each of the three settlements crediting its own account;
+  refusals arriving in words with nothing written for any of them; a trade that is not
+  an agency refused rather than defaulted; a posted row frozen from the service *and*
+  from a raw `UPDATE` that skips it while its note stays open; an unposted row
+  editable and deletable; a one-field patch clearing nothing; the list's five filters
+  including an unknown presentation filtering nothing rather than matching nothing;
+  the per-client split of the client's money from the agency's own cost; and a second
+  tenant answered null, refused, and unable to file a cost against a foreign client.
+  Its first run failed eight of twelve for one reason worth keeping:
+  `domain_events.created_by` is a foreign key to `users`, so a posted document is
+  attributed to a member and not to a placeholder id.
+* `reimbursable-cost-guard.test.ts` (6) — §D's error map, typed exhaustively over the
+  service's codes, pinning `not_agency` as a 403 and `cost_posted` as a 409, and
+  pinning the **hand-off**: the guard must return null for `MissingLedgerAccountError`
+  so the shared agency handler answers it with a 409 in the product's own words, where
+  a cost-only map would answer a chart missing 1270 with a 500.
+* 104 assertions run directly against `0280_agency_reimbursable_costs.sql` over
+  Postgres — the named CHECKs, both unique keys, the three indexes including the
+  partial one over the unposted queue, four foreign keys and their delete actions
+  (with `entry_id` FK'd where 0134's equivalent is a bare uuid), RLS enabled *and*
+  forced, two triggers and the reference check covering `party_id` as well as
+  `project_id`, and the behaviour: refusals in words, the editable-before-posting
+  path, the freeze after it with the note exempt, and **both halves of the audited
+  merge door**. The merge section needed savepoints, because a statement that raises
+  aborts the whole transaction and the first refusal would otherwise answer every
+  later assertion with `25P02`; and two of its first-draft assertions were vacuous,
+  setting a column to the value it already held, which `IS DISTINCT FROM` correctly
+  reports as no change at all. A no-op UPDATE is not a test.
 * `agency-campaign.test.ts` (26) — §C's campaign vocabulary: the chain with both
   terminal states and no path back to `planned`, the acts derived from it, the
   window each act implies, `isAgencyCampaignInFlight` counting a paused campaign's
@@ -1225,6 +1313,15 @@ Deliberately, and each is named in the issue:
   freelancers, and any client/external reviewer access — which, if it is ever built, must be scoped
   and revocable, never a share URL that bypasses tenant and project authorization. #1110's
   eligibility matrix must still name this trade when it lands.
+* **§D reimbursable client costs** — wave 10 opened account 1270 and made the
+  gross-versus-net choice a stored, posted fact, and stopped there deliberately
+  (decisions 58–62). Still owed: the **screen**, because the Accounting app's section
+  key reaches ten files and four contract tests of its own; the **recharge** that
+  credits 1270 when a cost is billed back, which is what turns the account from an
+  accumulator into a clearing one; a **business-level** presentation policy, where
+  today the treatment is chosen per document; and the vendor quote → purchase →
+  payable → settlement chain, for which `settled_by = 'payable'` crediting 2140 is the
+  seam — the day that chain exists it settles these rows rather than duplicating them.
 * **§C Growth** — campaign calendar and channel mix for *client* campaigns, the agency's-own vs
   client-managed split in reporting, spend/reach/CPL/CPA/ROAS with defensible attribution, manual
   import of platform data. No external ad-platform integration is claimed or implied anywhere in

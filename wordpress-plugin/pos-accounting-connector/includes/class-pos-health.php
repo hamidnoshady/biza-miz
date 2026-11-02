@@ -347,6 +347,15 @@ class POS_Connector_Health {
 	 * @param int   $now   Unix timestamp.
 	 * @return array{state:string,reason:string,age:int,expiresIn:int}
 	 */
+	/**
+	 * Whether a string can be a probe's correlation id: 32 lowercase hex, which
+	 * is what `schedule_cron_probe()` mints and what the app sends when it asks
+	 * for one. Anything else is not a probe id and must not become one.
+	 */
+	public static function probe_id_is_valid( $id ) {
+		return is_string( $id ) && 1 === preg_match( '/^[a-f0-9]{32}$/D', $id );
+	}
+
 	public static function probe_state( $probe, $now ) {
 		$empty = array( 'state' => 'none', 'reason' => 'no_probe', 'age' => 0, 'expiresIn' => 0 );
 		if ( ! is_array( $probe ) || empty( $probe['id'] ) ) {

@@ -86,6 +86,63 @@ describe("summarizePluginHealth (issues #1149, #1206)", () => {
     expect(summary).toMatchObject({ cronStale: true, cronGapSeconds: 4000, queueSize: 12, oldestQueuedAgeSeconds: 5400 });
   });
 
+  it("carries the probe's stage, which no connection test can produce (#1206 P0)", () => {
+    // Nothing reported and nothing asked: never tested.
+    const never = summarizePluginHealth(
+      { last_plugin_seen_at: ago(60_000), last_sync_at: null, plugin_health: health({}) },
+      { size: 0, oldestAt: null },
+      now,
+      { supported: true },
+    );
+    expect(never.cronProbe.stage).toBe("never");
+
+    // Asked, and the plugin has not even stored it yet.
+    const requested = summarizePluginHealth(
+      { last_plugin_seen_at: ago(60_000), last_sync_at: null, plugin_health: health({}) },
+      { size: 0, oldestAt: null },
+      now,
+      { supported: true, request: { probeId: "a".repeat(32), requestedAt: ago(30_000) } },
+    );
+    expect(requested.cronProbe).toMatchObject({ stage: "requested", probeId: "a".repeat(32), origin: "app" });
+
+    // The plugin stored it and is waiting: still not success.
+    const queued = summarizePluginHealth(
+      {
+        last_plugin_seen_at: ago(60_000),
+        last_sync_at: null,
+        plugin_health: health({ cronProbe: { id: "a".repeat(32), origin: "app", queuedAt: ago(20_000) } }),
+      },
+      { size: 0, oldestAt: null },
+      now,
+      { supported: true },
+    );
+    expect(queued.cronProbe.stage).toBe("queued");
+
+    // A report that left is the end of the line.
+    const reported = summarizePluginHealth(
+      {
+        last_plugin_seen_at: ago(60_000),
+        last_sync_at: null,
+        plugin_health: health({
+          cronProbe: { id: "a".repeat(32), origin: "app", queuedAt: ago(30_000), executedAt: ago(25_000), reportedAt: ago(24_000) },
+        }),
+      },
+      { size: 0, oldestAt: null },
+      now,
+      { supported: true },
+    );
+    expect(reported.cronProbe).toMatchObject({ stage: "reported", reason: "telemetry_received" });
+
+    // An older plugin gets an honest "cannot", not a silent "never".
+    const unsupported = summarizePluginHealth(
+      { last_plugin_seen_at: ago(60_000), last_sync_at: null, plugin_health: health({}) },
+      { size: 0, oldestAt: null },
+      now,
+      { supported: false },
+    );
+    expect(unsupported.cronProbe.stage).toBe("unsupported");
+  });
+
   it("separates the verified cycle, the applied cycle and the recovered outage", () => {
     const summary = summarizePluginHealth(
       {

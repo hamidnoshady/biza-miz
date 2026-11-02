@@ -806,6 +806,24 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/workspace.integration.test.ts",
   },
   {
+    id: "workspace.contract-documents",
+    module: "Workspace",
+    entity: "Contract documents, reusable templates & multi-party e-signing",
+    routes: [
+      "workspace/contract-templates",
+      "workspace/contracts/[id]/document",
+      "workspace/contracts/[id]/signing",
+      "sign",
+    ],
+    note:
+      "Issue #908: authoring a legal document, freezing a version and collecting " +
+      "external signatures are human acts with legal consequence — route-only by " +
+      "design (no MCP verb), and the public /api/sign surface is a per-recipient " +
+      "capability credential that must never be reachable by an assistant session",
+    status: "route-only (by design)",
+    test: "src/lib/contracts/signing.test.ts",
+  },
+  {
     id: "workspace.approvals",
     module: "Workspace",
     entity: "Approvals",
@@ -835,6 +853,20 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     },
     note: "batch BH: four grouped verbs dispatch the 54 uniform lanes entity-by-entity with the exact route capability gates (workspaceManage, workspaceApprove for review-side status actions like the routes, settingsManage for the org profile); record deletes and participant removal are always_approve/high (data-record deletes); review actions likewise (money-state decisions); the field photo upload carries media bytes and stays route-only by design, like the other media lanes",
     test: "integration/aec-rfi.integration.test.ts + aec-boq + aec-commercial + aec-document-control + aec-procurement + aec-site",
+  },
+  {
+    // Its own row rather than being absorbed by `workspace.agency` below, whose
+    // `["agency"]` prefix would otherwise claim these silently — the symptom being
+    // nothing but a stale route count, which is how a new entity goes undocumented.
+    // It is a different entity with a different story: those are workspace documents
+    // a project member writes on `workspace.manage`; these are accounting records that
+    // post to the ledger on `finance.expenses_manage`.
+    id: "agency.reimbursable_costs",
+    module: "Accounting",
+    entity: "Reimbursable client costs (media, print and production spent on a client's behalf)",
+    routes: ["agency/reimbursable-costs"],
+    note: "issue #1128 §D: pass-through and reimbursable client costs versus agency-owned expenses, and the first thing in the product that can post to account 1270 — seeded in wave 1 and unreachable for eight waves, because the expense path refuses asset accounts and §D forbids an ad hoc journal entry. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion, and one of them has to stay a gap: `presentation` is §D's gross-versus-net choice, which the issue says must follow chosen business accounting policy and «must not be inferred solely from spend» — so a tool that guessed it from the size of a line or the presence of a vendor name would be performing exactly the forbidden inference, and moving money between cost of sale and a claim on a client is not a draft a human rubber-stamps. Three more things a future tool must keep: a posted row is frozen except its note, because the amount, the presentation and the settlement decided which two accounts the entry landed in and the register may not contradict the ledger — the correction is a reversal and a new record; the entry is dated the day the money was *spent*, not the day it was recorded, because a member files a platform invoice days after the platform charged the card; and the recharge side does not exist yet, so 1270 can only accumulate — crediting it before anything debited it would drive an asset to a credit balance and report a negative claim on a client",
+    test: "integration/agency-reimbursable-costs.integration.test.ts",
   },
   {
     id: "workspace.agency",

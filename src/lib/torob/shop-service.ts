@@ -78,7 +78,10 @@ export class TorobShopError extends Error {
       | "shop_not_found"
       | "not_authorizable"
       | "token_required"
-      | "token_invalid",
+      | "token_invalid"
+      // Wave 4: a selection request carrying more products than the endpoint
+      // accepts in one call.
+      | "selection_batch_too_large",
   ) {
     super(code);
     this.name = "TorobShopError";

@@ -44,7 +44,8 @@ export type RegisterNumberedTable =
   // Issue #1128 §A + §C — the campaign as it ran. Numbered per agency for the same
   // reason a brief and a proposal are: a campaign belongs to the client
   // relationship, and a brand of a group has its own series of them.
-  | "agency_client_campaigns";
+  | "agency_client_campaigns"
+  | "agency_reimbursable_costs";
 
 export type RegisterNumberedColumn =
   | "variation_number"
@@ -56,7 +57,9 @@ export type RegisterNumberedColumn =
   | "change_request_number"
   | "brief_number"
   | "proposal_number"
-  | "campaign_number";
+  | "campaign_number"
+  // Issue #1128 §D — money spent on a client's behalf, awaiting its recharge.
+  | "cost_number";
 
 const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   aec_variations: "variation_number",
@@ -69,6 +72,7 @@ const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   agency_client_briefs: "brief_number",
   agency_proposals: "proposal_number",
   agency_client_campaigns: "campaign_number",
+  agency_reimbursable_costs: "cost_number",
 };
 
 /**

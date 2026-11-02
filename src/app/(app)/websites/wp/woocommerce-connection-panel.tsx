@@ -47,6 +47,19 @@ interface Connection {
   orderLookbackDays: number;
   sourceOfTruth?: "store" | "pos" | "two_way";
   manageStockOptIn?: boolean;
+  /**
+   * Issue #1206 P1 — per-domain freshness, from the same overview call. Always
+   * all six domains: a screen that omits a silent one makes silence look like
+   * health.
+   */
+  domainFreshness?: {
+    domain: "products" | "stock" | "prices" | "orders" | "customers" | "content";
+    state: "ok" | "delayed" | "never";
+    reason: string;
+    lastExchangeAt: string | null;
+    backlog: number;
+    oldestBacklogSeconds: number | null;
+  }[];
   /** Issues #1149/#1206 — plugin-mode health, from GET /api/integrations/overview. */
   pluginHealthSummary?: {
     silentMinutes: number | null;
@@ -72,6 +85,20 @@ interface Connection {
     incidentOpen: boolean;
     queueSize: number;
     oldestQueuedAgeSeconds: number | null;
+    /**
+     * The scheduler probe's stage (#1206 P0). `expired` means an event was
+     * queued and no scheduler ever ran it — the finding a connection test
+     * cannot produce.
+     */
+    cronProbe: {
+      stage: "never" | "requested" | "queued" | "executed" | "reported" | "expired" | "failed" | "unsupported";
+      reason: string;
+      probeId: string | null;
+      queuedAt: string | null;
+      executedAt: string | null;
+      reportedAt: string | null;
+      expiresInSeconds: number | null;
+    };
   } | null;
   status: "active" | "paused" | "error";
   lastSyncAt: string | null;
@@ -180,6 +207,49 @@ const CRON_REASON_LABELS: Record<string, string> = {
   no_cycle_evidence: "هنوز هیچ نشانه‌ای از یک اجرای واقعی کرون به این سامانه نرسیده است.",
   paused_by_owner: "همگام‌سازی از همین پنل متوقف شده است.",
   paused_by_app: "همگام‌سازی از پنل بیزامیز متوقف شده است.",
+};
+
+/**
+ * The probe's stages, worded as what they prove (#1206 P0). «queued» never
+ * borrows «ok»: an event WordPress recorded is not an event a scheduler ran.
+ */
+const CRON_PROBE_LABELS: Record<string, string> = {
+  never: "تست کرون انجام نشده",
+  requested: "درخواست تست کرون در صف",
+  queued: "منتظر اجرای زمان‌بند",
+  executed: "زمان‌بند اجرا کرد",
+  reported: "گزارش امضاشده رسید",
+  expired: "زمان‌بندی بدون اجرا",
+  failed: "اجرا شد، گزارش نرسید",
+  unsupported: "افزونهٔ قدیمی، بدون تست کرون",
+};
+
+const DOMAIN_LABELS: Record<string, string> = {
+  products: "محصولات و تنوع‌ها",
+  stock: "موجودی",
+  prices: "قیمت‌ها",
+  orders: "سفارش‌ها و مرجوعی‌ها",
+  customers: "مشتریان",
+  content: "محتوا و دسته‌بندی‌ها",
+};
+
+/** Why a domain is graded what it is — never "no traffic is a fault". */
+const DOMAIN_REASON_LABELS: Record<string, string> = {
+  no_backlog: "بدون کار در انتظار",
+  backlog_draining: "در حال ارسال",
+  backlog_not_draining: "کار در انتظار مانده و ارسال نمی‌شود",
+  backlog_not_sent_yet: "در انتظار نخستین ارسال",
+  no_traffic_yet: "هنوز تبادلی نداشته",
+};
+
+const CRON_PROBE_REASON_LABELS: Record<string, string> = {
+  no_probe: "هنوز هیچ تست کرونی روی این فروشگاه انجام نشده است.",
+  requested_by_app: "درخواست ثبت شد؛ افزونه در اجرای بعدی کرون آن را برمی‌دارد.",
+  awaiting_scheduler: "رویداد ثبت شده و منتظر یک اجرای واقعی زمان‌بند است؛ ثبت رویداد به‌تنهایی اجرا را ثابت نمی‌کند.",
+  scheduler_ran_it: "یک اجرای واقعی زمان‌بند این رویداد را اجرا کرد؛ گزارش در راه است.",
+  telemetry_received: "گزارش امضاشده به بیزامیز رسید: زمان‌بند و مسیر همگام‌سازی هر دو کار می‌کنند.",
+  queued_but_never_executed: "رویداد ثبت شد ولی هیچ اجرایی آن را برنداشت؛ کرون سیستم اجرا نمی‌شود.",
+  plugin_cannot_run_probe: "نسخهٔ افزونهٔ نصب‌شده تست کرون را پشتیبانی نمی‌کند؛ افزونه را به‌روز کنید.",
 };
 
 
@@ -533,6 +603,59 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                           : null}
                       </div>
                     ) : null}
+                    {c.pluginHealthSummary?.cronProbe ? (
+                      <div
+                        className={
+                          c.pluginHealthSummary.cronProbe.stage === "expired" || c.pluginHealthSummary.cronProbe.stage === "failed"
+                            ? "text-amber-700 dark:text-amber-300"
+                            : ""
+                        }
+                      >
+                        <span className="font-semibold">
+                          {CRON_PROBE_LABELS[c.pluginHealthSummary.cronProbe.stage] ?? CRON_PROBE_LABELS.never}
+                        </span>
+                        {c.pluginHealthSummary.cronProbe.reason
+                          ? ` — ${CRON_PROBE_REASON_LABELS[c.pluginHealthSummary.cronProbe.reason] ?? c.pluginHealthSummary.cronProbe.reason}`
+                          : null}
+                        {c.pluginHealthSummary.cronProbe.executedAt
+                          ? ` • اجرای زمان‌بند: ${formatDateTime(c.pluginHealthSummary.cronProbe.executedAt)}`
+                          : ""}
+                        {c.pluginHealthSummary.cronProbe.reportedAt
+                          ? ` • گزارش: ${formatDateTime(c.pluginHealthSummary.cronProbe.reportedAt)}`
+                          : ""}
+                        {c.pluginHealthSummary.cronProbe.stage === "queued" && c.pluginHealthSummary.cronProbe.expiresInSeconds !== null
+                          ? ` • ${Math.max(0, Math.round(c.pluginHealthSummary.cronProbe.expiresInSeconds / 60)).toLocaleString("fa-IR")} دقیقه تا پایان مهلت`
+                          : ""}
+                      </div>
+                    ) : null}
+                    {c.domainFreshness?.length ? (
+                      <div className="space-y-0.5">
+                        {c.domainFreshness.map((entry) => (
+                          <div
+                            key={entry.domain}
+                            className={
+                              entry.state === "delayed"
+                                ? "text-amber-700 dark:text-amber-300"
+                                : entry.state === "never"
+                                  ? "text-muted-foreground"
+                                  : ""
+                            }
+                          >
+                            {DOMAIN_LABELS[entry.domain] ?? entry.domain}:{" "}
+                            {entry.state === "delayed" ? "دیرکرد — " : ""}
+                            {DOMAIN_REASON_LABELS[entry.reason] ?? entry.reason}
+                            {entry.lastExchangeAt ? ` • آخرین تبادل: ${formatDateTime(entry.lastExchangeAt)}` : ""}
+                            {entry.backlog > 0
+                              ? ` • ${entry.backlog.toLocaleString("fa-IR")} در صف${
+                                  entry.oldestBacklogSeconds !== null
+                                    ? ` (قدیمی‌ترین ${Math.max(1, Math.round(entry.oldestBacklogSeconds / 60)).toLocaleString("fa-IR")} دقیقه)`
+                                    : ""
+                                }`
+                              : ""}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                     {c.pluginHealthSummary ? (
                       <div>
                         آخرین اجرای واقعی کرون: {formatDateTime(c.pluginHealthSummary.cron.lastAttemptAt)}
@@ -590,6 +713,22 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                   >
                     تست اتصال
                   </Button>
+                  {/* #1206 P0: the only control whose answer needs a real
+                      scheduler invocation. Hidden from a plugin that cannot
+                      run it, rather than offering a button that would queue
+                      a job nothing leases. */}
+                  {c.pluginHealthSummary?.cronProbe &&
+                  c.pluginHealthSummary.cronProbe.stage !== "unsupported" ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      onClick={() => call(`/api/integrations/connections/${c.id}/cron-probe`)}
+                      disabled={busy !== null}
+                    >
+                      تست کرون
+                    </Button>
+                  ) : null}
                   <Button
                     type="button"
                     variant="outline"
