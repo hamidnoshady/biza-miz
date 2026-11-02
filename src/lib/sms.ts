@@ -1,5 +1,20 @@
 export interface SmsProvider {
   sendOtp(phoneE164: string, otp: string): Promise<void>;
+  /**
+   * Plain-text delivery, when the deployment has a sender line for it.
+   *
+   * Optional on purpose: the OTP door works with a lookup template alone, while
+   * a contract-signing invitation carries a LINK, which a template cannot. A
+   * provider without a sender line simply does not implement this, and the
+   * caller reports «پیامک تنظیم نشده» instead of pretending it was sent
+   * (issue #908: no fake confirmations).
+   *
+   * The no-op fallback implements it and **refuses outside development** for the
+   * same reason `sendOtp` does (#902 DoD #9): a signing link is a bearer
+   * credential, and printing it into a production log is the same leak as
+   * printing the code.
+   */
+  sendText?(phoneE164: string, message: string): Promise<void>;
 }
 
 /**
@@ -76,6 +91,14 @@ export class NoopProvider implements SmsProvider {
         "refusing to log a one-time code in plaintext. Configure the SMS connection in the " +
         "platform console (or the KAVENEGAR_API_KEY environment variable) to deliver codes.",
     );
+    throw new SmsNotConfiguredError();
+  }
+
+  async sendText(phoneE164: string, message: string): Promise<void> {
+    if (isDevelopmentLike(this.environment)) {
+      console.log(`${SMS_NOOP_LOG_PREFIX} To: ${phoneE164} TEXT: ${message}`);
+      return;
+    }
     throw new SmsNotConfiguredError();
   }
 }
