@@ -5,12 +5,19 @@
  * **read-only**.
  *
  * A product is managed in exactly two places — Accounting's products workspace
- * (name, price, stock, status, descriptions) and the store itself. This screen
- * is the mirror between them, so it deliberately has no price, stock or
- * product editor and no per-product push switches: it is where an owner finds
- * a product (search, category, tag, type, publish status, stock), sees what the
- * store shows for it (image, gallery, terms, price, stock) and whether the two
- * sides agree, and where the sync itself is started and its failures retried.
+ * (name, price, stock, status) and the store itself. This screen is the mirror
+ * between them, so it deliberately has no price or stock editor and no
+ * per-product push switches: it is where an owner finds a product (search,
+ * category, tag, type, publish status, stock), sees what the store shows for it
+ * (image, gallery, terms, price, stock) and whether the two sides agree, and
+ * where the sync itself is started and its failures retried.
+ *
+ * The one store-side half this screen edits is the storefront text: the card's
+ * «محتوا و تصاویر» opens `product-content-sheet.tsx`, which reads the store's
+ * own short/long description from the last sync and writes a change only when
+ * the owner presses «اعمال» — through the ordinary product outbox, never
+ * automatically (issue #1215, P1-2). Imagery stays read-only there: replacing
+ * a storefront image is blocked on #941's attachment transport.
  *
  * Filters live in the URL (durable across reloads, shareable, and they survive
  * the store picker's own `store` param); the section derives them instead of
@@ -34,6 +41,7 @@ import { describeWooError } from "./woo-errors";
 import { formatDateTime } from "./format";
 import { ListPager } from "./list-pager";
 import type { WpManagerConnection } from "./wp-store-context";
+import { ProductContentSheet } from "./product-content-sheet";
 
 /** Persian labels for the WooCommerce types a row can be. */
 export const WOO_TYPE_LABELS: Record<string, string> = {
@@ -169,6 +177,13 @@ interface SyncProductsResponse extends Record<string, unknown> {
 
 interface SectionProps {
   connectionId: string;
+  /**
+   * The member may change store content (`woocommerce.manage`, or the store's
+   * own ability set). The panel hands this down so the content sheet's editing
+   * and its AI button can be disabled for a view-only member — the routes
+   * re-check the same ability, so this is a courtesy, not the fence.
+   */
+  canEdit?: boolean;
   /** True while any request for this connection is in flight. */
   busy: boolean;
   /** The panel's request helper, so a failure shows in the panel's own banner. */
@@ -259,6 +274,7 @@ export function CatalogueSection({
   connectionId,
   busy,
   call,
+  canEdit = false,
   connection,
 }: SectionProps & { connection?: WpManagerConnection | null }) {
   const router = useRouter();
@@ -290,6 +306,8 @@ export function CatalogueSection({
   const [loadError, setLoadError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState("");
+  /** The product whose storefront content sheet is open, if any (#1215, P1-2). */
+  const [contentFor, setContentFor] = useState<CatalogueProduct | null>(null);
   const loadSeqRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const searchParamsRef = useRef(searchParams);
@@ -328,6 +346,7 @@ export function CatalogueSection({
     setTotal(0);
     setSyncNotice("");
     setLoadError("");
+    setContentFor(null);
     setSearchDraft("");
     updateParams({ q: null, type: null, cat: null, tag: null, status: null, stock: null, page: null, size: null });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -711,9 +730,24 @@ export function CatalogueSection({
             connectionId={connectionId}
             busy={busy}
             onRetry={() => void retryQueue(product)}
+            onOpenContent={() => setContentFor(product)}
           />
         ))}
       </ul>
+
+      {contentFor ? (
+        <ProductContentSheet
+          connectionId={connectionId}
+          remoteId={contentFor.remoteId}
+          productName={contentFor.name}
+          // Editing the store's text is the storefront ability, and a paused
+          // connection has no writable half — the sheet stays readable.
+          canWrite={canEdit && connInfo?.status !== "paused"}
+          call={call}
+          onQueued={() => void load()}
+          onClose={() => setContentFor(null)}
+        />
+      ) : null}
 
       {!loading && total > 0 ? (
         <ListPager
@@ -737,6 +771,7 @@ function ProductCard({
   connectionId,
   busy,
   onRetry,
+  onOpenContent,
 }: {
   product: CatalogueProduct;
   moneyUnit: MoneyUnit;
@@ -744,6 +779,8 @@ function ProductCard({
   connectionId: string;
   busy: boolean;
   onRetry: () => void;
+  /** Open the storefront content sheet for this row (#1215, P1-2). */
+  onOpenContent: () => void;
 }) {
   const queue = product.queue ?? null;
   const patchText = queue?.state === "queued" ? pendingPatchText(queue.pendingPatch, storeUnitLabel) : null;
@@ -879,6 +916,13 @@ function ProductCard({
           ) : null}
         </ul>
       ) : null}
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button type="button" size="xs" variant="outline" disabled={busy} onClick={onOpenContent}>
+          محتوا و تصاویر
+        </Button>
+        <span className="text-[10px] text-muted-foreground">متن و تصاویر همین محصول در فروشگاه</span>
+      </div>
 
       {queue && queue.state !== "idle" ? (
         <div

@@ -128,6 +128,17 @@ The gate runs against bytes produced by the release build, in three places:
 to production requires the candidate's `desktop-release-scan.json` to report
 `ok: true` **and** the installer SHA-256 it recorded to equal the installer
 being promoted, so a gate result cannot be replayed onto a different artifact.
+Two defects in the first CI run of the gate were fixed before this commit, and
+both are worth recording because they are the failure modes a byte-level gate
+has: the ASAR header reader used the wrong pickle offsets (JSON length is at
+byte 12 and JSON starts at 16, so every real archive was unreadable — the
+committed fixture `src/lib/__fixtures__/app-asar-fixture.asar` is a real
+`@electron/asar` archive so the offsets cannot drift again), and findings were
+printed to stderr where a step log does not show them, which made the failure
+undiagnosable. The gate also now prefilters the private-key pattern on the two
+`-----BEGIN `/`PRIVATE KEY-----` literals so a backtracking-prone regex never
+runs over bundled JavaScript.
+
 Those four workflow contracts are themselves asserted by
 `src/lib/desktop-release-hardening.test.ts` ("release workflow wiring"), so
 deleting a gate step from a workflow fails `verify-shippables` instead of
@@ -142,6 +153,13 @@ release public key is injected at build time from the protected
 
 Both desktop modes run the same binary with `DEPLOYMENT_ROLE` compiled to
 `site`, so one denial path covers both:
+
+The database suites that exercise the Central realm
+(`integration/platform-*.integration.test.ts`, `session-producers-854`,
+`login-lockout-enumeration`) declare `DEPLOYMENT_ROLE=central` in `beforeAll`
+and restore it afterwards, exactly as the commission suites already did for the
+sync role. That is the point of the guard: the console's own tests have to say
+they are Central, and an install that does not say so cannot reach the realm.
 
 | Surface | Test |
 | --- | --- |

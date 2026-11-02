@@ -629,6 +629,21 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     reason:
       "A document filed against the customer. Leaving it on the loser removes it from the surviving file's document list, which is how a signed contract scan goes missing.",
   },
+  {
+    // Issue #908 — the person a signature line was assigned to. `move`, and the
+    // evidence is unaffected: a signature records the full name, the slot, the
+    // version hash and the moment it was drawn, never a party id, so re-pointing
+    // the live signer row cannot rewrite what was signed or by whom. What does
+    // break when it stays on the loser: an open round whose signer points at an
+    // archived record disappears from the surviving counterparty's file while
+    // their signing link is still live.
+    table: "contract_signers",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The counterparty a signature line belongs to. The round is live until it completes or is cancelled, and the evidence rows carry the signer's name and hash rather than this id, so the merge moves the live assignment without touching what was signed.",
+  },
 
   // -- Media client review (issue #1128 §E) ---------------------------------
   // `move`, for the same reason as the project a round hangs off: the round is
@@ -765,6 +780,30 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
                    (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
                  SELECT $1, 'agency_client_campaigns', c.id, c.party_id, $3, $4
                    FROM agency_client_campaigns c
+                  WHERE c.business_id = $1 AND c.party_id = $2`,
+  },
+
+  // Migration 0280's client column, `move` and behind 0279's door for the reason
+  // 0278's is: a *posted* cost is frozen, so the guard would refuse the re-point and
+  // one posted cost on a duplicate client record would block the merge. 0279's audit
+  // table has no fixed vocabulary CHECK, so widening it to a fourth agency register is
+  // a line here and not a migration.
+  {
+    table: "agency_reimbursable_costs",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The client this money was spent for, and the column is NOT NULL so it cannot be left behind. It is a claim on that client — 1270's balance is what they owe back — so the surviving customer's file has to carry it; stranded on an archived duplicate, an agency would be owed money by a client record nobody looks at and §D's per-client outstanding figure would understate what is recoverable. Moving the client does not move the money: the posted entry keeps its accounts and amounts, and only whose claim it is changes.",
+    preview: true,
+    previewLabel: "هزینه‌های بازدریافتی کارفرما",
+    // The door through 0280's attribution guard: the move is audited into
+    // `crm_party_attribution_moves` FIRST (same transaction), then the guard accepts
+    // the re-point under the transaction-local flag. Every other path still hits it.
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+                   (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+                 SELECT $1, 'agency_reimbursable_costs', c.id, c.party_id, $3, $4
+                   FROM agency_reimbursable_costs c
                   WHERE c.business_id = $1 AND c.party_id = $2`,
   },
 

@@ -228,6 +228,90 @@ The approval page is opened with `location.assign` rather than in a new tab, bec
 to the browser session that started the request. The `code` is never written to an audit row, never
 echoed back in the redirect, and never stored.
 
+## 6d. What a shop publishes (Wave 4)
+
+`/growth/torob/[shopId]` is the per-shop page, and the question it answers is the merchant's own:
+*which of my products go to Torob, and why does one not?* One rule plus one decision per product:
+
+| rule | what it publishes | a product nobody touched |
+| --- | --- | --- |
+| «همهٔ محصولات» (`all`) | the catalogue, **minus** the products marked `exclude` | published |
+| «فقط محصولات انتخابی» (`selected`) | **only** the products marked `include` | not published |
+
+They are one question asked from opposite ends, which is why both live in one table
+(`torob_shop_products`, migration 0282) with a single `decision` column rather than an inclusion list
+and an exclusion list that could disagree. The rule decides which decision is doing the work; the
+decisions are kept when the rule changes, so a merchant who flips back and forth loses nothing, and
+clearing a decision returns a product to the rule instead of leaving it switched off out of sight.
+
+The table is deliberately thin — an id, a decision, who and when. Names and prices stay in
+`menu_items`; copying them would make a second catalogue that drifts, and Torob would end up showing a
+price the storefront no longer charges. `product_id` is a soft reference (retail `items` are coming),
+so `setProductDecision` verifies every id against the tenant's own catalogue and reports how many it
+refused rather than silently dropping them.
+
+Four states a product can be in, and the boundary between them is the point of the page:
+
+| state | meaning |
+| --- | --- |
+| «در فید ترب» | the platform would send it, complete and priced |
+| «کنار گذاشته‌اید» | the merchant switched it off (`exclude`) |
+| «انتخاب نشده» | rule is `selected` and it has not been chosen |
+| «منتشر نمی‌شود» | wanted, and a catalogue rule stops it — the feed builder's own reason, in Persian, with the link that fixes it |
+
+The first three are the merchant's answer; only the last is a problem, and it is never conflated with
+them. The page's summary is `summariseFeed` — the same function «پیش‌نمایش فید» uses — so the two can
+not disagree about how many products a shop would send. Every decision and rule change is audited with
+the product ids and the counts; the audit never contains anything the catalogue owns.
+
+Reading the page is `torob.view`; changing the rule, the sold-out preference or a decision is
+`torob.configure`, the same key as the merchant's token, because both are channel settings rather than
+relationships.
+
+## 6e. What Torob says (Wave 4b)
+
+Everything up to here describes the platform's side of the channel. `GET /shop/` and `POST /products/`
+on the Torob **Shop API** are the other direction: the shop's status on Torob, a precomputed product
+summary, and one status list per page. The section is `/growth/torob/[shopId]`'s «وضعیت در ترب» panel,
+fed by `GET /api/growth/torob/shops/[id]/status`, and it exists because the epic's sharpest rule is
+that *feed built*, *webhook accepted* and *actually indexed* are three different claims:
+
+| stage | who knows it | shown as |
+| --- | --- | --- |
+| feed | us — `summariseFeed` and the publication rules (§6d) | «آماده در فید» |
+| sent | nobody yet — the webhook outbox is Wave 6 | always `false` in `capabilities` |
+| listing | Torob — the Shop API read | «نمایش در ترب», only once Torob has answered |
+
+A refresh is a `POST` and a read (`GET /shop/`, `POST /products/` — the document's own verb for a
+listing). Nothing on Torob changes, so both verbs are `torob.view`, the same key «پیش‌نمایش فید» uses.
+Opening the page never calls Torob: the panel reads the stored snapshot (`GET`), and the provider's
+five-requests-per-second-per-shop limit is spent only when the merchant asks.
+
+Three things the panel refuses to do:
+
+* **Call `product_summary` live.** Torob recomputes it at least every two days and says so twice;
+  `calculated_at` is printed beside the numbers, and `null` reads as «محاسبه نشده», not as «no
+  products». When the groups do not add up to `total`, the difference is stated rather than hidden.
+* **Erase the last answer on a failure.** `observed_at` moves only on success; `observed_error` records
+  why the last *attempt* failed, so a failed read says "this is what Torob said on Tuesday, and today
+  it did not answer" instead of showing an empty panel. `health` follows the last check (`attention`
+  with the failure code), which is what makes "needs attention" observable rather than decorative.
+* **Treat absence from a partial scan as deletion.** `torob_product_states` is Torob's current view, so
+  a **complete** scan replaces it (a product Torob stopped returning is gone); a `truncated` scan — more
+  pages than one refresh reads (`TOROB_SHOP_API_MAX_PAGES`) — deletes nothing.
+
+The client (`shop-api-client.ts`) is careful about three things the document warns about. Requests are
+spaced to the five-per-second-per-shop limit, and a `429` is retried honouring `Retry-After` before it
+is reported as `rate_limited`. Pagination follows the **cursor only** — the `next` link Torob returns is
+never requested, so our bearer token cannot be aimed at another host. And a status this build does not
+know is *counted*, not folded into a neighbouring one: the table's `CHECK` lists the eleven documented
+values, so an unknown string cannot become a sentence we never wrote.
+
+A read needs a credential: the merchant's own token in manual mode, the platform's generator token in
+partner mode, and a shop with neither is answered `not_configured` — before the network, like the
+`not_authorized`/`channel_disabled` cases. That is the same reading of "disconnect stops managed
+operations" the rest of the feature uses: a channel that is off is not polled.
+
 ## 7. What remains (Waves 3–6)
 
 1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
@@ -240,13 +324,21 @@ echoed back in the redirect, and never stored.
 2. **Variant catalogue.** The builder already accepts variants and emits one item each; the database
    source reads `menu_items` only, so retail `items`/`item_variant_attributes` products need their
    price source mapped before they can appear.
-3. **Wave 4 — the per-shop screen** (`/growth/torob/[shopId]`): the feed's pages, the skipped
-   products with links to fix them, and the publication rule — now that there is enough to put on it.
+3. **Wave 4 — the per-shop screen.** *Done*: `§6d` above is `/growth/torob/[shopId]`, with the
+   publication rule, the per-product decisions and the blocked products' reasons, and `§6e` adds what
+   Torob itself reports about the shop and each page. What is left of this wave is the variant
+   catalogue (item 2) and the multi-shop overview columns for Torob's own counts (item 6).
 4. **Wave 5 — opt-in attribution**: Torob order/action attribution off by default, a 403 when it is
    disabled, and a tenant-visible switch that says exactly what is shared.
-5. **Wave 6 — the drill table and the docs** for the failure classes the issue names (expired token,
+5. **Wave 5b — the sync queue and monitoring.** `§6e` reads Torob; nothing yet *writes* to Torob in the
+   background. The webhook outbox (bounded batches, dedupe, retries, dead letters, reconciliation after
+   an outage), the Shop API's activate/deactivate, and the per-shop retry/repair actions from the site
+   screen are the next slice — they are also what turns `capabilities.sent` from a constant `false` into
+   a real fact.
+6. **Wave 6 — the drill table and the docs** for the failure classes the issue names (expired token,
    rejected domain, feed refused, shop deleted on Torob's side), plus the runbook for a shop whose
-   feed has been `blocked` for longer than an hour.
+   feed has been `blocked` for longer than an hour, and for a shop whose last Shop API read failed three
+   times in a row.
 
 Nothing in Waves 2–6 may re-derive eligibility: `resolveTorobWebsites` is the single answer to "may
 this website enroll", and every later surface reads it.
@@ -268,12 +360,29 @@ this website enroll", and every later surface reads it.
 - `src/app/api/growth/torob/authorize/callback/route.ts` — where Torob returns the merchant's browser.
 - `src/app/api/v1/torob/products/[shopId]/route.ts` — the public route itself.
 - `src/app/api/growth/torob/shops/[id]/feed/route.ts` — «پیش‌نمایش فید».
+- `src/lib/torob/publication.ts` — the two rules, the decision cycle, the page's shared shapes and copy.
+- `src/lib/torob/shop-publication.ts` — the per-shop read (why each product is or is not in the feed)
+  and the writes, with the catalogue-ownership check.
+- `src/app/api/growth/torob/shops/[id]/publication/route.ts` — that page's read and write.
+- `src/app/(app)/growth/torob/[shopId]/page.tsx` + `torob-shop-detail.tsx` — the screen.
+- `migrations/0282_torob_shop_products.sql` — one decision per product per shop, RLS included.
+- `src/lib/torob/observed-state.ts` — Torob's own vocabulary: shop and product statuses, failure codes,
+  the three stages, and the summary's arithmetic. Pure, so the client component can render it.
+- `src/lib/torob/shop-api-client.ts` — the Shop API: throttled requests, `Retry-After`, cursor-only
+  pagination, and strict validation of everything Torob sends back.
+- `src/lib/torob/status-service.ts` — when a shop may be read, which credential reads it, and what a
+  success or a failure does to the stored snapshot; `torob_status_runs` is the attempt history.
+- `src/app/api/growth/torob/shops/[id]/status/route.ts` — the cached read and the explicit refresh.
+- `migrations/0283_torob_observations.sql` — the observation columns, `torob_product_states` and
+  `torob_status_runs`, RLS included.
 - `src/app/(app)/growth/torob/page.tsx` + `torob-section.tsx` — the screen.
 - `src/lib/torob/eligibility.test.ts` — the state matrix; `integration/torob-shops.integration.test.ts`
   — the lifecycle and the tenant boundary against real Postgres.
 - `src/lib/torob/contract.test.ts`, `feed.test.ts`, `auth.test.ts`, `product-api.test.ts`,
-  `shop-generator.test.ts`, `authorization-service.test.ts` — the
+  `shop-generator.test.ts`, `authorization-service.test.ts`, `publication.test.ts`,
+  `observed-state.test.ts`, `shop-api-client.test.ts` — the
   contract, the builder, the token and the endpoint's order of operations; `integration/torob-api.integration.test.ts`
   — all four request modes, 100 per page, the withdrawn product and the cross-shop audience refusal
   against real Postgres; `integration/torob-authorization.integration.test.ts` — the approval flow,
-  the window, the denial and the schema's own invariants.
+  the window, the denial and the schema's own invariants; `integration/torob-status.integration.test.ts`
+  — the snapshot, the truncated scan, the kept failure and the shops that are never read.

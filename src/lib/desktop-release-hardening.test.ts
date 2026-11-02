@@ -220,8 +220,14 @@ describe("release-scan rules", () => {
 });
 
 describe("scan-desktop-release", () => {
-  /** Build a real one-file asar so the header reader is exercised, not mocked. */
-  function asarBuffer(files: Array<{ path: string; contents: string }>): Buffer {
+  /**
+   * Write a one-level asar in the *real* layout (see `readAsarHeader`):
+   * `uint32 4`, `uint32 headerSize`, `uint32 payloadSize`, `uint32 jsonLength`,
+   * JSON, padding. The parser cross-checks those four fields, so a writer that
+   * drifts from the format fails loudly here instead of passing a test that
+   * agrees with itself.
+   */
+  function realAsar(files: Array<{ path: string; contents: string }>): Buffer {
     const tree: Record<string, unknown> = {};
     let offset = 0;
     for (const file of files) {
@@ -231,40 +237,78 @@ describe("scan-desktop-release", () => {
         node[part] = (node[part] as Record<string, unknown>) ?? { files: {} };
         node = (node[part] as { files: Record<string, unknown> }).files;
       }
-      node[parts[parts.length - 1]] = {
-        size: Buffer.byteLength(file.contents),
-        offset: String(offset),
-      };
+      node[parts[parts.length - 1]] = { size: Buffer.byteLength(file.contents), offset: String(offset) };
       offset += Buffer.byteLength(file.contents);
     }
     const json = Buffer.from(JSON.stringify({ files: tree }));
-    const headerPayloadLength = 4 + json.length + ((4 - ((4 + json.length) % 4)) % 4);
-    const header = Buffer.alloc(headerPayloadLength);
-    header.writeUInt32LE(json.length, 0);
-    json.copy(header, 4);
-    const prefix = Buffer.alloc(8);
+    // @12 holds the JSON length, the JSON itself starts at @16, and the header
+    // (from @8) is padded to a 4-byte boundary.
+    const payloadLength = Math.ceil((4 + json.length) / 4) * 4;
+    const headerSize = 4 + payloadLength;
+    const prefix = Buffer.alloc(16);
     prefix.writeUInt32LE(4, 0);
-    prefix.writeUInt32LE(header.length, 4);
+    prefix.writeUInt32LE(headerSize, 4);
+    prefix.writeUInt32LE(payloadLength, 8);
+    prefix.writeUInt32LE(json.length, 12);
+    const payload = Buffer.alloc(payloadLength);
+    json.copy(payload, 0);
     const data = Buffer.concat(files.map((file) => Buffer.from(file.contents)));
-    return Buffer.concat([prefix, header, data]);
+    return Buffer.concat([prefix, payload, data]);
   }
 
-  it("reads asar entries and their bytes from the real header layout", async () => {
+  /** A real archive produced by `@electron/asar` (see the fixture README). */
+  const REAL_FIXTURE = path.join(root, "src", "lib", "__fixtures__", "app-asar-fixture.asar");
+
+  it("reads a real electron-builder asar, names and bytes both", async () => {
     const module = (await import("../../scripts/scan-desktop-release.mjs")) as unknown as {
       readAsarHeader: (buffer: Buffer) => { header: unknown; dataOffset: number };
       asarEntries: (header: unknown) => Array<{ path: string; size: number; offset: number }>;
+      scanAsar: (
+        absolute: string,
+        relative: string,
+        inventory: Record<string, unknown>,
+      ) => Promise<Array<{ id: string; path: string }>>;
     };
-    const archive = asarBuffer([
-      { path: "smoke-probe.js", contents: "DESKTOP_SMOKE_BOOTSTRAP=1" },
-      { path: "main.js", contents: "console.log('clean')" },
-    ]);
+    const archive = readFileSync(REAL_FIXTURE);
     const { header, dataOffset } = module.readAsarHeader(archive);
+    expect(dataOffset).toBe(8 + archive.readUInt32LE(4));
     const entries = module.asarEntries(header);
-    expect(entries.map((entry) => entry.path)).toEqual(["smoke-probe.js", "main.js"]);
-    const smoke = entries[0];
-    expect(archive.subarray(dataOffset + smoke.offset, dataOffset + smoke.offset + smoke.size).toString()).toContain(
-      "DESKTOP_SMOKE_BOOTSTRAP",
+    expect(entries.map((entry) => entry.path)).toEqual([
+      "main.js",
+      "node_modules/tiny-dep/index.js",
+      "README.txt",
+    ]);
+    // The packed bytes really are where the header says they are:
+    const main = entries[0];
+    expect(archive.subarray(dataOffset + main.offset, dataOffset + main.offset + main.size).toString()).toContain(
+      "packaged Electron main process",
     );
+    // ...and the gate finds the markers inside a *packed* dependency, which is
+    // the case a name-only scan (`asar list`) would miss.
+    const findings = await module.scanAsar(REAL_FIXTURE, "resources/app.asar", {
+      files: 0,
+      bytes: 0,
+      asar: [],
+      skipped: [],
+    });
+    expect(findings.map((finding) => `${finding.id} ${finding.path}`)).toEqual(
+      expect.arrayContaining([
+        "desktop-smoke-environment resources/app.asar:node_modules/tiny-dep/index.js",
+        "smoke-owner-password resources/app.asar:node_modules/tiny-dep/index.js",
+      ]),
+    );
+  });
+
+  it("refuses an archive whose header does not describe its own bytes", async () => {
+    const module = (await import("../../scripts/scan-desktop-release.mjs")) as unknown as {
+      readAsarHeader: (buffer: Buffer) => { header: unknown; dataOffset: number };
+    };
+    const archive = realAsar([{ path: "main.js", contents: "clean" }]);
+    const truncated = archive.subarray(0, 20);
+    expect(() => module.readAsarHeader(truncated)).toThrow();
+    const inconsistent = Buffer.from(archive);
+    inconsistent.writeUInt32LE(inconsistent.readUInt32LE(8) + 4, 8); // payloadSize lies
+    expect(() => module.readAsarHeader(inconsistent)).toThrow(/inconsistent/);
   });
 
   it("fails a fixture payload that still contains the probe and passes a clean one", async () => {
@@ -276,7 +320,7 @@ describe("scan-desktop-release", () => {
       }>;
     };
     const payload = temporaryDir();
-    write(path.join(payload, "resources", "app.asar"), asarBuffer([{ path: "main.js", contents: "clean" }]));
+    write(path.join(payload, "resources", "app.asar"), realAsar([{ path: "main.js", contents: "clean" }]));
     write(path.join(payload, "resources", "desktop-runtime", "bin", "server.cjs"), "module.exports = 1;\n");
     write(path.join(payload, "resources", "desktop-runtime", ".next", "BUILD_ID"), "build-1\n");
     await expect(module.runScan({ payload })).resolves.toMatchObject({ ok: true, findings: [] });

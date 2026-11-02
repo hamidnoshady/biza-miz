@@ -94,23 +94,40 @@ function parseArgs(argv) {
  * ASAR
  *
  * electron-builder packs the Electron main process into `resources/app.asar`.
- * The format is a Chromium pickle: `uint32 4`, `uint32 headerSize`, then the
- * header pickle (`uint32 jsonLength`, JSON, padding to 4 bytes) followed by
- * the concatenated file data. Reading the header is what lets this gate judge
- * entry *names* (`/smoke-probe.js`) and file *contents* without unpacking or
- * trusting `asar list` to be installed on the runner.
+ * The layout is two Chromium pickles:
+ *
+ *   @0   uint32   4                 size of the "size" pickle
+ *   @4   uint32   headerSize        pickled size of the header (payload + 4)
+ *   @8   uint32   payloadSize       headerSize - 4
+ *   @12  uint32   jsonLength        length of the JSON string itself
+ *   @16  ...      JSON, then padding to a 4-byte boundary
+ *   dataOffset = 8 + headerSize
+ *
+ * Every field is checked against the others instead of trusting one of them
+ * (`payloadSize === headerSize - 4`, the JSON ends inside the header, the data
+ * starts inside the file), because a truncated or foreign archive must be a
+ * finding, not a silently-empty scan. This mirrors `@electron/asar`'s
+ * `readArchiveHeaderSync`; `src/lib/__fixtures__/app-asar-fixture.asar` is a
+ * real archive produced by that package so the offsets are pinned to bytes a
+ * real build produces, not to this comment.
+ *
+ * Reading the header is what lets the gate judge entry *names*
+ * (`smoke-probe.js`) and file *contents* without unpacking or trusting
+ * `asar list` to be installed on the runner.
  * ------------------------------------------------------------------------- */
 
 /** Parse an asar header from the first bytes of an archive. Pure, for tests. */
 export function readAsarHeader(buffer) {
-  if (buffer.length < 12) throw new Error("asar header truncated");
+  if (buffer.length < 16) throw new Error("asar header truncated");
+  if (buffer.readUInt32LE(0) !== 4) throw new Error("asar size pickle is not the expected 4 bytes");
   const headerSize = buffer.readUInt32LE(4);
-  const jsonLength = buffer.readUInt32LE(8);
-  if (jsonLength <= 0 || 12 + jsonLength > buffer.length) throw new Error("asar header length is invalid");
-  const json = JSON.parse(buffer.subarray(12, 12 + jsonLength).toString("utf8"));
-  let dataOffset = 12 + jsonLength;
-  while (dataOffset % 4 !== 0) dataOffset += 1;
-  if (headerSize < jsonLength + 4) throw new Error("asar header size does not cover its JSON");
+  const payloadSize = buffer.readUInt32LE(8);
+  const jsonLength = buffer.readUInt32LE(12);
+  if (payloadSize !== headerSize - 4) throw new Error("asar header sizes are inconsistent");
+  if (jsonLength <= 0 || jsonLength > payloadSize - 4) throw new Error("asar header length is invalid");
+  const dataOffset = 8 + headerSize;
+  if (dataOffset > buffer.length) throw new Error("asar header runs past the end of the archive");
+  const json = JSON.parse(buffer.subarray(16, 16 + jsonLength).toString("utf8"));
   return { header: json, dataOffset };
 }
 
@@ -404,11 +421,22 @@ async function main() {
       (report.installer ? `; installer sha256 ${report.installer.sha256}` : ""),
   );
   if (report.findings.length) {
+    // stdout, not stderr: a GitHub step's log groups workflow commands found on
+    // stdout, and the *only* thing a reader of a failed build needs is which
+    // rule fired on which path. The description is the fixed rule text — never
+    // the matched bytes — so this is safe in a public log.
     for (const finding of report.findings) {
-      console.error(`::error title=Desktop release scan::${finding.id} at ${finding.path} — ${finding.description}`);
-      console.error(`  ${finding.id}: ${finding.path}`);
+      console.log(`::error title=Desktop release scan::${finding.id} at ${finding.path} — ${finding.description}`);
     }
-    console.error(`Desktop release scan FAILED with ${report.findings.length} finding(s). Report: ${options.output}`);
+    const byRule = new Map();
+    for (const finding of report.findings) {
+      byRule.set(finding.id, [...(byRule.get(finding.id) ?? []), finding.path]);
+    }
+    console.log(`Desktop release scan FAILED with ${report.findings.length} finding(s):`);
+    for (const [id, paths] of byRule) {
+      console.log(`  ${id} (${paths.length}): ${paths.slice(0, 10).join(", ")}${paths.length > 10 ? ", …" : ""}`);
+    }
+    console.log(`Report: ${options.output}`);
     process.exit(1);
   }
   console.log(`Desktop release scan passed. Report: ${options.output}`);

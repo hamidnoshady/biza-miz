@@ -72,6 +72,11 @@ const FORBIDDEN_TEXT_MARKERS = Object.freeze([
     // dependency's documentation may legitimately *mention* a private key
     // header, while a real key always has the base64 body and END line.
     pattern: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]{0,128}?[A-Za-z0-9+/=\r\n]{64,}-----END (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----/,
+    // Both halves of the key header must be present before the pattern is
+    // worth running. A match implies both literals, so this cannot change the
+    // verdict — it only keeps a backtracking-prone regex off the ~500 MiB of
+    // bundled JavaScript a payload contains.
+    prefilter: ["-----BEGIN ", "PRIVATE KEY-----"],
     description:
       "A PEM private key (release signing, JWT signing, or TLS CA). Only the public release-verification key may ship; private material must never be in an installer.",
   },
@@ -165,6 +170,7 @@ function scanTextBuffer(buffer, payloadPath) {
     if (!buffer || buffer.length > rule.maxBytes) continue;
     // latin1 is a byte-for-byte view: it cannot throw on binary content and
     // the ASCII markers keep their offsets.
+    if (rule.prefilter?.some((literal) => !bufferContains(buffer, literal))) continue;
     if (!rule.pattern.test(buffer.toString("latin1"))) continue;
     findings.push({ id: rule.id, path: payloadPath, description: rule.description });
   }

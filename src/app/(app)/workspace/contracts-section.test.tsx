@@ -39,6 +39,22 @@ function contractRow(overrides: Partial<ContractRow> = {}): ContractRow {
   } as ContractRow;
 }
 
+/**
+ * Opens the row's metadata dialog.
+ *
+ * Since #908 the title is a LINK to the contract's own page — the document
+ * builder and the signing round — so the dialog is opened from the row itself,
+ * which is where it was always reachable. The assertions in this file are
+ * untouched: #907 F02 is about which statuses the form offers and sends, not
+ * about which element opens it.
+ */
+async function openContractDialog() {
+  const title = await screen.findByText("پیمان نما");
+  const row = title.closest("tr");
+  if (!row) throw new Error("the contract row is missing");
+  fireEvent.click(row);
+}
+
 function renderSection(contracts: ContractRow[]) {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.startsWith("/api/workspace/contracts/") && init?.method === "PATCH") {
@@ -59,7 +75,7 @@ function renderSection(contracts: ContractRow[]) {
 describe("ContractDialog — workflow-owned statuses (#907 F02)", () => {
   it("offers only the statuses an ordinary edit may set", async () => {
     renderSection([contractRow()]);
-    fireEvent.click(await screen.findByText("پیمان نما"));
+    await openContractDialog();
 
     const select = await screen.findByLabelText("وضعیت");
     const options = Array.from(select.querySelectorAll("option")).map((o) => o.getAttribute("value"));
@@ -70,7 +86,7 @@ describe("ContractDialog — workflow-owned statuses (#907 F02)", () => {
 
   it("shows an active contract's state as a badge and sends no status", async () => {
     const fetchMock = renderSection([contractRow({ status: "active" })]);
-    fireEvent.click(await screen.findByText("پیمان نما"));
+    await openContractDialog();
 
     // The badge replaced the picker: there is no status control to operate.
     expect(screen.queryByLabelText("وضعیت")).toBeNull();
@@ -90,7 +106,7 @@ describe("ContractDialog — workflow-owned statuses (#907 F02)", () => {
 
   it("still sends a status when the contract is in a state an edit owns", async () => {
     const fetchMock = renderSection([contractRow({ status: "terminated" })]);
-    fireEvent.click(await screen.findByText("پیمان نما"));
+    await openContractDialog();
 
     const select = await screen.findByLabelText("وضعیت");
     fireEvent.change(select, { target: { value: "completed" } });
