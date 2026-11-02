@@ -35,6 +35,9 @@ describe("pluginCronAlerts (issue #1206 P1)", () => {
     const [alert] = pluginCronAlerts(connection({ health: lateCron }), NOW);
     expect(alert.eventKey).toBe("integrations.plugin_cron_delayed");
     expect(alert.level).toBe("warn");
+    // A number of cycles, labelled as cycles: multiplying it by a cadence
+    // would claim a precision the plugin's clock does not have.
+    expect(alert.body).toContain("۴ اجرا");
     // `info` on purpose: three missed cycles on a shared host must not page
     // anyone at 2am.
     expect(alert.severity).toBe("info");
@@ -46,6 +49,9 @@ describe("pluginCronAlerts (issue #1206 P1)", () => {
     expect(alert.level).toBe("critical");
     expect(alert.severity).toBe("important");
     expect(alert.body).toMatch(/در صف می‌مانند/);
+    // The silence is measured, and the number is the failure threshold — not
+    // the three-minute warning window dressed up as an outage.
+    expect(alert.body).toContain("بیش از ۱۱ دقیقه");
   });
 
   it("cannot be re-raised by pressing «آزمایش اتصال» during an outage", () => {

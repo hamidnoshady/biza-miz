@@ -19,10 +19,11 @@
  * itself reads the cadence the plugin reports), and the caller only has to
  * record what this returns.
  */
+import { toPersianDigits } from "../digits";
 import { notificationDedupeKey } from "../notifications";
 import type { NotificationSeverity } from "../notifications";
 import { assessPluginCron, type PluginCronAssessment } from "./plugin-health";
-import { pluginCronWarnAfterMs } from "./sync-timing";
+import { PLUGIN_CRITICAL_AFTER_MS, pluginCronWarnAfterMs } from "./sync-timing";
 
 export type PluginCronAlertEventKey =
   | "integrations.plugin_cron_delayed"
@@ -48,9 +49,9 @@ export interface PluginCronAlert {
 /** Where the panel that can fix this lives. */
 const CONNECTIONS_URL = "/websites/wp/connections";
 
+/** A duration in whole minutes, in Persian digits. Never below one. */
 function minutes(seconds: number): string {
-  const value = Math.max(1, Math.round(seconds / 60));
-  return value.toLocaleString("fa-IR");
+  return toPersianDigits(Math.max(1, Math.round(seconds / 60)));
 }
 
 /**
@@ -103,6 +104,10 @@ export function pluginCronAlerts(
     const silentSeconds = cron.lastAttemptAt
       ? Math.max(0, Math.floor((now.getTime() - Date.parse(cron.lastAttemptAt)) / 1000))
       : null;
+    // The number in the sentence is the measured silence when there is one,
+    // and the failure threshold when there is not — never the *warning* window,
+    // which would describe a ten-minute outage as a three-minute one.
+    const silentMinutes = minutes(silentSeconds ?? PLUGIN_CRITICAL_AFTER_MS / 1000);
     return [
       {
         eventKey: "integrations.plugin_cron_failed",
@@ -110,7 +115,7 @@ export function pluginCronAlerts(
         severity: "important",
         title: "کرون فروشگاه اجرا نمی‌شود",
         body:
-          `«${connection.name}» بیش از ${minutes(warnAfterMs / 1000 * 3)} دقیقه است هیچ اجرای زمان‌بندی‌شده‌ای نداشته است. ` +
+          `«${connection.name}» بیش از ${silentMinutes} دقیقه است هیچ اجرای زمان‌بندی‌شده‌ای نداشته است. ` +
           (silentSeconds === null
             ? "از زمان فعال‌سازی، زمان‌بند هرگز اجرا نشده. "
             : `آخرین اجرای واقعی ${minutes(silentSeconds)} دقیقه پیش بود. `) +
@@ -131,7 +136,12 @@ export function pluginCronAlerts(
         title: "کرون فروشگاه دیرکرده",
         body:
           `«${connection.name}» چند اجرای پیاپی زمان‌بند را از دست داده است` +
-          (cron.missedIntervals !== null ? ` (حدود ${minutes((cron.missedIntervals * 60)).toLocaleString("fa-IR")} دقیقه)` : "") +
+          // The count, not a duration: `missedIntervals` is a number of cycles,
+          // and multiplying it by the cadence would claim a precision the
+          // plugin's own clock does not have.
+          (cron.missedIntervals !== null
+            ? ` (حدود ${toPersianDigits(cron.missedIntervals)} اجرا)`
+            : "") +
           ". هنوز چیزی از دست نرفته — صف نگه می‌دارد — ولی اگر ادامه پیدا کند، سفارش‌ها دیرتر می‌رسند.",
         url: CONNECTIONS_URL,
         dedupeKey: notificationDedupeKey("integrations.plugin_cron_delayed", connection.id, anchor),
