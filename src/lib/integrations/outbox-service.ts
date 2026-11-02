@@ -24,10 +24,8 @@ import { wooProductShape, wooUpdatePath } from "./woo-catalogue";
 import { parentRemoteIdFor, parentRemoteIdFromMeta } from "./sync-service";
 import type { ConnectionRow } from "./connections-service";
 import { effectivePushSwitches, stockPushPayload } from "./outbox-policy";
-import { shouldAlertPluginStale } from "./plugin-health";
+import { pluginCronAlerts } from "./plugin-cron-alerts";
 import { recordNotification } from "../notification-events";
-import { notificationDedupeKey } from "../notifications";
-import { formatJalali } from "../jalali";
 import { resolveMappedWooPrice } from "./woo-price-source-service";
 
 export const WOO_SYNC_TICK_INTERVAL_MS = 30 * 1000;
@@ -353,7 +351,11 @@ export type OutboxEntityType =
   | "refund_create"
   | "catalogue_export"
   | "customer_export"
-  | "orders_export";
+  | "orders_export"
+  | "content_export"
+  // App-side work, not a push: the app reads the store's tree itself (#1206
+  // PERF-05). Never leased by a plugin — its claim filters by capability.
+  | "taxonomy_sync";
 
 /**
  * Apply one queued push to the store.
@@ -454,6 +456,20 @@ async function applyOutboundEvent(
       // itself), and leaving them queued would dead-letter a job that was
       // never meant for this side.
       return;
+    case "taxonomy_sync": {
+      // A whole taxonomy tree is one HTTP page per taxonomy, sequentially, and
+      // a store with a few thousand terms makes that minutes — not something a
+      // request the owner is waiting on can hold (#1206 PERF-05). It runs here,
+      // in the background tick, with the queue's lease and retry around it.
+      const { syncTaxonomyTree } = await import("./woo-taxonomy-service");
+      const outcome = await syncTaxonomyTree(connection.business_id, connection.id, client);
+      // Partial is a delivered job: the tree was read and the per-taxonomy
+      // failures are recorded on each group's own state row (TAX-14), so
+      // retrying the whole read would only repeat work that already succeeded.
+      // Nothing landing at all is a failure, and the row retries with backoff.
+      if (outcome.status === "failed") throw new Error("taxonomy_sync_failed");
+      return;
+    }
     case "post_upsert":
     case "media_create":
       // Plugin-side jobs for WordPress content. REST mode writes content
@@ -464,6 +480,43 @@ async function applyOutboundEvent(
     default:
       return;
   }
+}
+
+/**
+ * Queue an app-side taxonomy re-read for a REST connection (#1206 PERF-05).
+ *
+ * Upserted on `(connection_id, entity_type, remote_id)`, the same key the
+ * plugin export enqueue uses, so pressing «همگام‌سازی از وب‌سایت» twice while the
+ * first read is still queued refreshes one job instead of stacking two.
+ *
+ * A row that is `processing` is left alone — the running worker owns its lease
+ * and its payload — and the caller is told so, because «در صف گذاشته شد» and
+ * «همین حالا در حال اجراست» are different sentences and only one of them is
+ * true.
+ */
+export async function enqueueTaxonomySync(
+  businessId: string,
+  connectionId: string,
+): Promise<{ jobId: string | null; alreadyRunning: boolean }> {
+  const { rows } = await query<{ id: string }>(
+    `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
+     VALUES ($1, $2, 'taxonomy_sync', 'all', '{}'::jsonb)
+     ON CONFLICT (connection_id, entity_type, remote_id)
+     DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
+                   last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
+     WHERE integration_outbox_events.status <> 'processing'
+     RETURNING id`,
+    [businessId, connectionId],
+  );
+  if (rows[0]) return { jobId: rows[0].id, alreadyRunning: false };
+  // Nothing returned means the conflict arm matched a row it refused to touch.
+  const { rows: running } = await query<{ id: string }>(
+    `SELECT id FROM integration_outbox_events
+      WHERE connection_id = $1 AND entity_type = 'taxonomy_sync' AND remote_id = 'all'
+        AND status = 'processing'`,
+    [connectionId],
+  );
+  return { jobId: running[0]?.id ?? null, alreadyRunning: (running[0]?.id ?? null) !== null };
 }
 
 export type ClaimedOutboxEvent = {
@@ -805,21 +858,21 @@ async function runWooCommerceSyncForConnection(business_id: string, id: string):
   // WooCommerce connections. Holoo's push path is a separate tick
   // (Wave 8). The guard is belt-and-braces with the SQL filter above.
   if (!isWooCommerce(connection)) return;
-  // Issue #1149 (C5): a plugin that has gone quiet for half an hour says so
-  // to the owner, once per silence (the dedupe key is the last time it spoke).
-  if (shouldAlertPluginStale(connection, new Date())) {
+  // Issue #1206 P1: warn when the scheduler is late, escalate when it has
+  // stopped, and close the loop when it comes back. The dedupe key is the cron
+  // signal, not the last contact — a manual «آزمایش اتصال» refreshes the latter
+  // and used to re-raise the same alarm on the next tick.
+  for (const alert of pluginCronAlerts(connection, new Date())) {
     await recordNotification({
       businessId: connection.business_id,
       locationId: null,
-      eventKey: "integrations.plugin_stale",
-      severity: "important",
-      title: "افزونهٔ وردپرس با سامانه تماس نمی‌گیرد",
-      body:
-        `«${connection.name}» از ${formatJalali(connection.last_plugin_seen_at!, { withTime: true })} با سامانه تماس نگرفته است؛ ` +
-        "معمولاً یعنی کرون سایت متوقف شده. سفارش‌ها و تغییرات در صف می‌مانند و از دست نمی‌روند.",
-      url: "/websites/wp/connections",
-      dedupeKey: notificationDedupeKey("integrations.plugin_stale", connection.id, connection.last_plugin_seen_at!),
-      payload: { connectionId: connection.id, lastPluginSeenAt: connection.last_plugin_seen_at },
+      eventKey: alert.eventKey,
+      severity: alert.severity,
+      title: alert.title,
+      body: alert.body,
+      url: alert.url,
+      dedupeKey: alert.dedupeKey,
+      payload: alert.payload,
     });
   }
   // Phase 38 — a scheduled order pull, in REST mode only. The plugin

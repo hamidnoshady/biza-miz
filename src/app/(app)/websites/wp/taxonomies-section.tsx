@@ -110,6 +110,10 @@ interface SyncResultRow {
 interface SyncResponse {
   ok?: boolean;
   queued?: boolean;
+  /** Which side runs a queued read: the store's plugin, or this app (#1206). */
+  via?: "app" | "plugin";
+  /** True when the app-side read is already in flight — nothing new queued. */
+  alreadyRunning?: boolean;
   jobType?: string;
   status?: "complete" | "partial" | "failed";
   results?: SyncResultRow[];
@@ -351,6 +355,18 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
     }
 
     if (data?.queued) {
+      // Two queues, two sentences (#1206 PERF-05): in plugin mode the store
+      // sends the tree, in REST mode this app reads it — and saying «افزونه
+      // می‌فرستد» to a REST store would be wrong.
+      if (data.via === "app") {
+        setNotice({
+          tone: "info",
+          text: data.alreadyRunning
+            ? "همین حالا خواندن درخت در جریان است؛ نتیجه پس از پایان آن در همین صفحه به‌روز می‌شود."
+            : "درخواست خواندن درخت در صف قرار گرفت؛ در اجرای بعدی همگام‌سازی از فروشگاه خوانده می‌شود و نتیجه در همین صفحه دیده می‌شود.",
+        });
+        return;
+      }
       setNotice({
         tone: "info",
         queueLink: true,
