@@ -61,6 +61,17 @@ const COMMAND_TIMEOUT_MS = 60_000;
 /** The stage the harness is in, so a watchdog or a throw can say where. */
 let currentStage = "starting";
 
+/**
+ * Every installed application this process started and has not seen exit.
+ *
+ * On a CI runner the harness is launched from a wrapper that treats a leftover
+ * child as "still running": a failed assertion that returned early used to
+ * leave the app (and its PostgreSQL) alive, which is both a hang and a dirty
+ * acceptance machine. Killing them synchronously from `process.on("exit")`
+ * cannot be skipped, because it runs on every exit path including `fail()`.
+ */
+const liveChildren = new Set();
+
 /** Paths middleware must deny on a site runtime (issue #1003 / #1194). */
 const PLATFORM_DENIAL_PATHS = Object.freeze([
   { method: "GET", path: "/platform" },
@@ -293,9 +304,16 @@ class InstalledApplication {
       stdio: "inherit",
     });
     this.child = child;
+    liveChildren.add(child);
     this.exited = new Promise((resolve) => {
-      child.once("exit", (code, signal) => resolve({ code, signal }));
-      child.once("error", (error) => resolve({ code: null, signal: null, error }));
+      child.once("exit", (code, signal) => {
+        liveChildren.delete(child);
+        resolve({ code, signal });
+      });
+      child.once("error", (error) => {
+        liveChildren.delete(child);
+        resolve({ code: null, signal: null, error });
+      });
     });
     currentStage = "waiting for the installed application to answer /api/health";
     const origin = await waitFor("the installed application's HTTP server", async () => {
@@ -742,6 +760,27 @@ async function runLaunchPhases({ executable, userDataDir, previouslyInitialized,
 
 /* ------------------------------------------------------------------ */
 
+/** Synchronously stop anything this run started and did not see exit. */
+function killLeftoverApplications() {
+  for (const child of liveChildren) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        windowsHide: true,
+        timeout: 30_000,
+        killSignal: "SIGKILL",
+      });
+    } else {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    liveChildren.delete(child);
+  }
+}
+
 /**
  * Start the whole-run ceiling. It is deliberately *not* `unref`ed: if every
  * other handle is gone the process is exiting anyway, and while a wedge is
@@ -753,6 +792,7 @@ function startWatchdog() {
     console.error(`last stage: ${currentStage}`);
     const profile = process.env.DESKTOP_ACCEPTANCE_USER_DATA;
     if (profile) console.error(diagnosticTail(path.resolve(profile)));
+    killLeftoverApplications();
     process.exit(1);
   }, WATCHDOG_MS);
   timer.unref?.();
@@ -760,6 +800,7 @@ function startWatchdog() {
 }
 
 if (require.main === module) {
+  process.on("exit", killLeftoverApplications);
   startWatchdog();
   runAcceptance().catch((error) => {
     console.error(`last stage: ${currentStage}`);

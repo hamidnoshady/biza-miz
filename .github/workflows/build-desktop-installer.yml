@@ -413,10 +413,28 @@ jobs:
 
             Start-Service seclogon -ErrorAction SilentlyContinue
             $credential = [pscredential]::new("$env:COMPUTERNAME\$user", $securePassword)
+            # Issue #1194 - start without -Wait and watch the batch file's own
+            # exit marker instead. `-Wait` blocks on the started process *and*
+            # anything it left behind, which turns a live application into a
+            # silent hang with no output; polling the marker ends the step when
+            # the harness ends, and the budget bounds the rest.
             $process = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /c `"$commandPath`"" `
-              -WorkingDirectory $repo -Credential $credential -LoadUser -Wait -PassThru
+              -WorkingDirectory $repo -Credential $credential -LoadUser -PassThru
+            $deadline = (Get-Date).AddMinutes(22)
+            while (-not (Test-Path $exitPath) -and (Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 15
+              if (Test-Path $outputPath) { Get-Content $outputPath -Tail 3 }
+            }
+            if (-not (Test-Path $exitPath)) {
+              if (Test-Path $outputPath) { Get-Content $outputPath -Tail 200 }
+              taskkill /pid $process.Id /t /f 2>&1 | Out-Null
+              throw "Standard-user installed smoke did not finish within its 22-minute budget"
+            }
             if (Test-Path $outputPath) { Get-Content $outputPath }
-            $smokeExit = if (Test-Path $exitPath) { [int](Get-Content $exitPath | Select-Object -First 1) } else { $process.ExitCode }
+            $smokeExit = [int](Get-Content $exitPath | Select-Object -First 1)
+            # The harness closes its application on every path; make sure a
+            # crashed run cannot leave one behind on the acceptance machine.
+            if (-not $process.HasExited) { taskkill /pid $process.Id /t /f 2>&1 | Out-Null }
             if ($smokeExit -ne 0) { throw "Standard-user installed smoke exited $smokeExit" }
           } finally {
             Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
