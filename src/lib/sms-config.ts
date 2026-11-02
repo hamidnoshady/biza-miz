@@ -133,10 +133,27 @@ export async function getKavenegarMasterKey(): Promise<{
   };
 }
 
-export async function getSmsProvider(): Promise<SmsProvider> {
+/**
+ * The transport, plus whether it is a real one.
+ *
+ * `configured` exists so a caller can say "this was not sent" without asking
+ * the provider who it is (there is no `name` on the interface — a second
+ * transport must not be forced to invent one) and without reading `NODE_ENV`:
+ * the no-op fallback *succeeds* in development and test by printing the message,
+ * which is right for a developer's terminal and wrong as evidence that a
+ * contract invitation reached a signer. Issue #908's rule — never a fake
+ * confirmation — needs the one fact, so `readSmsConfig()` answers it once here
+ * instead of every caller re-deriving it.
+ */
+export interface SmsProviderHandle {
+  provider: SmsProvider;
+  configured: boolean;
+}
+
+export async function resolveSmsProvider(): Promise<SmsProviderHandle> {
   const config = await readSmsConfig();
   if (config.apiKey) {
-    return new KavenegarProvider(config.apiKey, config.template);
+    return { provider: new KavenegarProvider(config.apiKey, config.template), configured: true };
   }
   // No key anywhere: the fallback logs the code in development and test, and
   // refuses outside them — an offline/local install has no SMS by definition
@@ -144,7 +161,11 @@ export async function getSmsProvider(): Promise<SmsProvider> {
   // not answer a login by writing a live code into a log (issue #902 DoD #9).
   // Every caller already consumes the challenge and reports
   // `sms_dispatch_failed`, so the refusal arrives on screen as a real failure.
-  return new NoopProvider();
+  return { provider: new NoopProvider(), configured: false };
+}
+
+export async function getSmsProvider(): Promise<SmsProvider> {
+  return (await resolveSmsProvider()).provider;
 }
 
 /** The console's read view. Never returns the key; only whether there is one and its last four. */

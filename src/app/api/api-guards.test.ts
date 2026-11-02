@@ -128,6 +128,17 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "setup/signup":
     "self-service business registration — creates the tenant a session would otherwise be scoped to; " +
     "refuses with 403 unless ALLOW_PUBLIC_SIGNUP is explicitly enabled",
+  // Issue #908 — the public contract-signing session. The caller is an external
+  // signatory with no account, so no session can exist by definition; the
+  // per-recipient token in the path is the credential (256 bits, HMAC-hashed at
+  // rest, bound to one signer and one frozen version, expiring, revocable). The
+  // route takes NO business/contract/signer id from the request — the token
+  // resolves them — and every mutation re-checks the token plus the envelope's
+  // live state, so a replayed or out-of-order call fails closed.
+  "sign/[token]":
+    "external signatory capability (issue #908) — the only credential is the recipient's hashed " +
+    "invitation token in the path; the caller has no session and must not, and no tenant id is " +
+    "accepted from the request",
   "auth/accept-invite":
     "invitation exchange — the invitee has no session and no membership of the inviting " +
     "business yet; the single-use token is the credential",

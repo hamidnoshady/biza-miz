@@ -53,11 +53,15 @@ interface BusinessProfileSetting {
 export async function resolveBusinessBranding(
   businessId: string,
   locationId?: string | null,
+  /** `includeLogo: false` skips the logo-setting read (a data URL) for callers
+   *  that only need the identity — a contract draft is re-read on every edit. */
+  options: { includeLogo?: boolean } = {},
 ): Promise<BusinessDocumentBranding> {
+  const includeLogo = options.includeLogo !== false;
   const [{ rows: businessRows }, profile, logoRaw] = await Promise.all([
     query<{ name: string }>("SELECT name FROM businesses WHERE id = $1", [businessId]),
     getSetting<BusinessProfileSetting>(businessId, SETTING_KEYS.businessProfile),
-    getSetting<BusinessLogo>(businessId, SETTING_KEYS.businessLogo),
+    includeLogo ? getSetting<BusinessLogo>(businessId, SETTING_KEYS.businessLogo) : Promise.resolve(null),
   ]);
 
   let branch: BusinessDocumentBranding["branch"] = null;

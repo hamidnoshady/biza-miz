@@ -82,7 +82,10 @@ describe("the OTP fallback", () => {
     const root = fileURLToPath(new URL("../../", import.meta.url));
     const config = readFileSync(`${root}src/lib/sms-config.ts`, "utf8");
 
-    expect(config).toMatch(/return new NoopProvider\(\)/);
+    // The resolver hands back the fallback *and says it is not configured*, so a
+    // caller can report "not sent" honestly even in an environment where the
+    // no-op would have printed the code (issue #908).
+    expect(config).toMatch(/provider: new NoopProvider\(\), configured: false/);
     expect(config).not.toMatch(/new NoopProvider\(\{\s*NODE_ENV:\s*"production"/);
   });
 });

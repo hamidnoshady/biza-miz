@@ -629,6 +629,21 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     reason:
       "A document filed against the customer. Leaving it on the loser removes it from the surviving file's document list, which is how a signed contract scan goes missing.",
   },
+  {
+    // Issue #908 — the person a signature line was assigned to. `move`, and the
+    // evidence is unaffected: a signature records the full name, the slot, the
+    // version hash and the moment it was drawn, never a party id, so re-pointing
+    // the live signer row cannot rewrite what was signed or by whom. What does
+    // break when it stays on the loser: an open round whose signer points at an
+    // archived record disappears from the surviving counterparty's file while
+    // their signing link is still live.
+    table: "contract_signers",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason:
+      "The counterparty a signature line belongs to. The round is live until it completes or is cancelled, and the evidence rows carry the signer's name and hash rather than this id, so the merge moves the live assignment without touching what was signed.",
+  },
 
   // -- Media client review (issue #1128 §E) ---------------------------------
   // `move`, for the same reason as the project a round hangs off: the round is

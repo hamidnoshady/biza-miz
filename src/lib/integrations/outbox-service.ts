@@ -438,6 +438,13 @@ async function applyOutboundEvent(
       });
       return;
     }
+    case "cron_probe":
+      // Plugin-only too, and never a success to record: REST mode has no
+      // scheduler of the store's to test, and nothing here applies the probe.
+      // The route refuses to queue one for a non-plugin connection; this arm
+      // exists so an old row cannot be swept into the `sent` count as if the
+      // store had proven something.
+      return;
     case "catalogue_export":
     case "customer_export":
     case "orders_export":

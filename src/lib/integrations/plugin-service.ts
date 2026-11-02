@@ -22,6 +22,7 @@
  * unchanged, and the only credential in this database is a token that grants
  * exactly this.
  */
+import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
 import { query, withoutTenantScope, withTenant, withTenantTransaction } from "../db";
 import { acknowledgeProductPublication } from "./product-publication-service";
@@ -42,7 +43,8 @@ import {
   verifyPluginEnvelope,
 } from "./plugin-link";
 import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken, registeredOrderStatuses } from "./plugin-capabilities";
-import { assertPluginJobSupported } from "./plugin-job-guard";
+import { assertPluginJobSupported, PluginJobUnsupportedError } from "./plugin-job-guard";
+import { CRON_PROBE_JOB_TYPE } from "./plugin-cron-probe";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
 import { scrubUrls } from "./url-redact";
@@ -955,6 +957,63 @@ async function auditStaleAck(connection: ConnectionRow, result: PluginJobAck): P
     error: "stale_lease_ack_ignored",
   });
   return 1;
+}
+
+/**
+ * Ask the store's plugin to prove its scheduler runs (issue #1206, P0).
+ *
+ * The app cannot see a WP-Cron event fire, so it asks the only side that can.
+ * This queues one `cron_probe` row carrying a correlation id it mints; the
+ * plugin leases it inside a real cron run and schedules a *second*,
+ * separately observed event under the same id, and the proof arrives later as
+ * signed telemetry. Nothing here claims the probe ran: returning an id means
+ * "asked", and the panel grades the answer.
+ *
+ * Refused with `plugin_job_unsupported` when the plugin never advertised the
+ * type — a row it cannot lease would sit `pending` forever looking like a
+ * broken probe rather than an old plugin.
+ */
+export async function requestCronProbe(
+  businessId: string,
+  connectionId: string,
+): Promise<{ jobId: string; probeId: string }> {
+  await assertPluginJobSupported(businessId, connectionId, CRON_PROBE_JOB_TYPE);
+  // And the link must still be plugin mode. Capabilities can outlive a mode
+  // switch — a store moved to REST keeps the blob from its last handshake, and
+  // a probe queued on that stale advertisement would never be leased.
+  const { rows: linkRows } = await query<{ link_mode: string }>(
+    `SELECT link_mode FROM integration_connections WHERE id = $1 AND business_id = $2`,
+    [connectionId, businessId],
+  );
+  if (linkRows[0]?.link_mode !== "plugin") throw new PluginJobUnsupportedError(CRON_PROBE_JOB_TYPE);
+  const probeId = randomBytes(16).toString("hex");
+  return withTenant(businessId, async () => {
+    // A second press before the first probe has been observed replaces it: two
+    // competing probes would race for the plugin's single stored record and the
+    // older one's evidence would be overwritten anyway. Rows still leased are
+    // left alone — their holder may already have scheduled an event.
+    await query(
+      `UPDATE integration_outbox_events
+          SET status = 'skipped', last_error = 'superseded_by_new_probe',
+              leased_until = NULL, lease_token = NULL, updated_at = now()
+        WHERE connection_id = $1 AND entity_type = $2 AND status IN ('pending', 'failed')`,
+      [connectionId, CRON_PROBE_JOB_TYPE],
+    );
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
+       VALUES ($1, $2, $3, $4, jsonb_build_object('probeId', $4::text))
+       RETURNING id`,
+      [businessId, connectionId, CRON_PROBE_JOB_TYPE, probeId],
+    );
+    await writeIntegrationAudit({
+      businessId,
+      connectionId,
+      action: "plugin.cron_probe_requested",
+      entityType: CRON_PROBE_JOB_TYPE,
+      remoteId: probeId,
+    });
+    return { jobId: rows[0].id, probeId };
+  });
 }
 
 /**

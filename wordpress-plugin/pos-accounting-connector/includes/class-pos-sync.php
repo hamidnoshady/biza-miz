@@ -2132,10 +2132,12 @@ class POS_Connector_Sync {
 				// invocation; the probe adds a *second*, separately scheduled
 				// one, so the app is not trusting a single lucky pass.
 				$requested = isset( $payload['probeId'] ) ? (string) $payload['probeId'] : '';
-				if ( ! preg_match( '/^[a-f0-9]{32}$/D', $requested ) ) {
+				if ( ! POS_Connector_Health::probe_id_is_valid( $requested ) ) {
 					throw new Exception( 'invalid_probe_id' );
 				}
-				$probe = self::schedule_cron_probe( 'app' );
+				// The app's id is kept, so its own record and the telemetry that
+				// eventually arrives name the same probe.
+				$probe = self::schedule_cron_probe( 'app', $requested );
 				return array( 'probeId' => $probe['id'], 'requestedProbeId' => $requested, 'dueAt' => $probe['due_at'] );
 
 			case 'taxonomy_ensure':
@@ -2948,12 +2950,15 @@ class POS_Connector_Sync {
 	 * single event due in a few seconds. `run_cron_probe()` is what turns that
 	 * into evidence, and only a separate scheduler invocation can call it.
 	 *
-	 * @param string $origin `admin` (the button) or `app` (a job from the panel).
+	 * @param string $origin       `admin` (the button) or `app` (a job from the panel).
+	 * @param string $requested_id The correlation id the app minted, when it asked.
+	 *                             Kept rather than replaced: one id per probe is the
+	 *                             only way both sides can talk about the same probe.
 	 * @return array The stored probe record.
 	 */
-	public static function schedule_cron_probe( $origin = 'admin' ) {
+	public static function schedule_cron_probe( $origin = 'admin', $requested_id = '' ) {
 		$now   = time();
-		$id    = bin2hex( random_bytes( 16 ) );
+		$id    = POS_Connector_Health::probe_id_is_valid( $requested_id ) ? (string) $requested_id : bin2hex( random_bytes( 16 ) );
 		$probe = array(
 			'id'          => $id,
 			'origin'      => 'app' === $origin ? 'app' : 'admin',

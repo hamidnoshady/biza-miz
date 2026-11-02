@@ -273,4 +273,15 @@ same( 'failed', $failed['state'], 'executed but unreported is «failed», never 
 same( 'report_failed:http_500', $failed['reason'], 'carrying the sanitized reason' );
 same( 600, POS_Connector_Health::PROBE_EXPIRY_SECONDS, 'ten minutes of grace' );
 
+// One id per probe, whichever side minted it: the app sends 32 lowercase hex,
+// the plugin mints the same shape, and anything else is refused rather than
+// stored as a correlation id that will never match.
+check( POS_Connector_Health::probe_id_is_valid( str_repeat( 'a', 32 ) ), 'thirty-two lowercase hex is a probe id' );
+check( POS_Connector_Health::probe_id_is_valid( bin2hex( random_bytes( 16 ) ) ), 'and so is what the plugin mints' );
+check( ! POS_Connector_Health::probe_id_is_valid( str_repeat( 'A', 32 ) ), 'uppercase is a different string, so it is refused' );
+check( ! POS_Connector_Health::probe_id_is_valid( str_repeat( 'a', 31 ) ), 'a short id is refused' );
+check( ! POS_Connector_Health::probe_id_is_valid( str_repeat( 'a', 32 ) . "\n" ), 'and nothing may end with a newline' );
+check( ! POS_Connector_Health::probe_id_is_valid( '' ), 'an empty id is refused' );
+check( ! POS_Connector_Health::probe_id_is_valid( null ), 'and so is a non-string' );
+
 printf( "%d cron-truth-policy assertions passed\n", $assertions );

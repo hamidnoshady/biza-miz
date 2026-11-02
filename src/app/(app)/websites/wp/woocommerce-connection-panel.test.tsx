@@ -102,3 +102,82 @@ it("reports a stopped scheduler with its reason, and does not call a connection 
   expect(screen.getByText(/کرون سیستم یا مسیر WP-CLI/)).toBeTruthy();
   expect(screen.getByText(/هنوز رفع نشده/)).toBeTruthy();
 });
+
+// Issue #1206 P0: the probe. A queued event is not evidence, an executed one
+// is, and the app must be able to *ask* — but only of a plugin that can run it.
+const cronProbe = (overrides: Record<string, unknown> = {}) => ({
+  stage: "queued",
+  reason: "awaiting_scheduler",
+  probeId: "a".repeat(32),
+  queuedAt: new Date(Date.now() - 20_000).toISOString(),
+  executedAt: null,
+  reportedAt: null,
+  expiresInSeconds: 580,
+  ...overrides,
+});
+
+it("shows a queued probe as waiting, and asks for one from the panel", async () => {
+  vi.mocked(api).mockResolvedValue({
+    ok: true,
+    data: { connections: [{ ...woo, ...pluginHealth({ cronProbe: cronProbe() }) }] },
+  } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText("منتظر اجرای زمان‌بند")).toBeTruthy();
+  expect(screen.getByText(/ثبت رویداد به‌تنهایی اجرا را ثابت نمی‌کند/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "تست کرون" }));
+  await waitFor(() =>
+    expect(api).toHaveBeenCalledWith("/api/integrations/connections/woo/cron-probe", expect.objectContaining({ method: "POST" })),
+  );
+});
+
+it("names the finding when the scheduler never ran the event", async () => {
+  vi.mocked(api).mockResolvedValue({
+    ok: true,
+    data: {
+      connections: [
+        { ...woo, ...pluginHealth({ cronProbe: cronProbe({ stage: "expired", reason: "queued_but_never_executed", expiresInSeconds: 0 }) }) },
+      ],
+    },
+  } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText("زمان‌بندی بدون اجرا")).toBeTruthy();
+  expect(screen.getByText(/هیچ اجرایی آن را برنداشت/)).toBeTruthy();
+});
+
+it("does not offer the probe to a plugin that cannot run it", async () => {
+  vi.mocked(api).mockResolvedValue({
+    ok: true,
+    data: { connections: [{ ...woo, ...pluginHealth({ cronProbe: cronProbe({ stage: "unsupported", reason: "plugin_cannot_run_probe", probeId: null }) }) }] },
+  } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText("افزونهٔ قدیمی، بدون تست کرون")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "تست کرون" })).toBeNull();
+});
+
+// Issue #1206 P1: per-domain freshness. One stalled domain must not be hidden
+// by five healthy ones, and a quiet domain must not be painted as a fault.
+it("shows each domain's own freshness, and only paints the stalled one", async () => {
+  vi.mocked(api).mockResolvedValue({
+    ok: true,
+    data: {
+      connections: [
+        {
+          ...woo,
+          ...pluginHealth(),
+          domainFreshness: [
+            { domain: "products", state: "ok", reason: "no_backlog", lastExchangeAt: new Date(Date.now() - 60_000).toISOString(), backlog: 0, oldestBacklogSeconds: null },
+            { domain: "stock", state: "delayed", reason: "backlog_not_draining", lastExchangeAt: new Date(Date.now() - 900_000).toISOString(), backlog: 4, oldestBacklogSeconds: 600 },
+            { domain: "orders", state: "never", reason: "no_traffic_yet", lastExchangeAt: null, backlog: 0, oldestBacklogSeconds: null },
+          ],
+        },
+      ],
+    },
+  } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText(/موجودی:/)).toBeTruthy();
+  expect(screen.getByText(/کار در انتظار مانده و ارسال نمی‌شود/)).toBeTruthy();
+  expect(screen.getByText(/۴ در صف/)).toBeTruthy();
+  // A domain with no traffic says so, and is not called a fault.
+  expect(screen.getByText(/هنوز تبادلی نداشته/)).toBeTruthy();
+  expect(screen.queryByText(/سفارش‌ها و مرجوعی‌ها:.*دیرکرد/)).toBeNull();
+});

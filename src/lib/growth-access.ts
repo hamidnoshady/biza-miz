@@ -146,6 +146,14 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   // `torob.view` — looking at what your catalogue would publish is reading, not
   // managing the channel.
   "/api/growth/torob/shops/[id]/feed": { POST: PERMISSIONS.torobView },
+  // The per-shop screen (issue #894 Wave 4): reading what a shop publishes is
+  // `torob.view`; the publication rule and the per-product decisions are the
+  // channel's configuration, so they are `torob.configure` — the same key the
+  // merchant's own token uses, because both are settings rather than relationships.
+  "/api/growth/torob/shops/[id]/publication": {
+    GET: PERMISSIONS.torobView,
+    POST: PERMISSIONS.torobConfigure,
+  },
   // The Shop Generator approval callback (issue #894). It is the merchant's own
   // browser arriving from Torob with a one-time code, so it manages the
   // relationship like the action that started it — and it *spends* the code, which
