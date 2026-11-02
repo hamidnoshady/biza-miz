@@ -124,6 +124,8 @@ export const OTP_SEND_TIMEOUT_MS = 10_000;
 export const OTP_TIMEOUT_MESSAGE = "سرویس پیامک به‌موقع پاسخ نداد؛ کد ارسال نشد. دوباره تلاش کنید.";
 
 export class KavenegarProvider implements SmsProvider {
+  readonly name = "kavenegar" as const;
+
   constructor(
     private apiKey: string,
     private template: string,
@@ -188,6 +190,69 @@ export class KavenegarProvider implements SmsProvider {
       // the user sees the Persian mapping. Never the other way round.
       console.error(
         `Kavenegar verify/lookup status ${status} (${data.return?.message ?? "no message"}) for ${redactKavenegarUrl(url)}`,
+      );
+      throw new KavenegarError(status);
+    }
+  }
+
+  /**
+   * Plain-text delivery, used by the contract-signing invitation (issue #908).
+   *
+   * Kavenegar needs a SENDER LINE for `sms/send`, and an install may not have
+   * one — in which case this refuses up front rather than sending a request the
+   * gateway will reject with a numeric code nobody can act on. The caller turns
+   * the refusal into «ارسال پیامک تنظیم نشده» and hands the sender the link.
+   *
+   * The key sits in the URL path here too, so a failure logs the redacted URL
+   * and the error carries only the carrier's status code.
+   */
+  async sendText(phoneE164: string, message: string): Promise<void> {
+    const sender = process.env.KAVENEGAR_SENDER?.trim();
+    if (!sender) throw new KavenegarError(413, "ارسال پیامک متنی تنظیم نشده است.");
+
+    let receptor = phoneE164;
+    if (receptor.startsWith("+98")) {
+      receptor = "0" + receptor.slice(3);
+    } else if (receptor.startsWith("98") && receptor.length === 12) {
+      receptor = "0" + receptor.slice(2);
+    }
+
+    const url = `https://api.kavenegar.com/v1/${this.apiKey}/sms/send.json?receptor=${encodeURIComponent(
+      receptor,
+    )}&sender=${encodeURIComponent(sender)}&message=${encodeURIComponent(message)}`;
+
+    let res;
+    try {
+      // Issue #902 DoD #11, applied to the plain-text door as well: a signer
+      // waiting for an invitation must not be held by a supplier that accepted
+      // the connection and went quiet. Same injected budget as `sendOtp`.
+      res = await fetch(url, { signal: AbortSignal.timeout(this.timeoutMs) });
+    } catch (err) {
+      const name = (err as Error)?.name;
+      if (name === "TimeoutError" || name === "AbortError") {
+        console.error(`Kavenegar sms/send timed out after ${this.timeoutMs}ms`);
+        throw new KavenegarError(undefined, OTP_TIMEOUT_MESSAGE);
+      }
+      throw new KavenegarError(
+        undefined,
+        `ارتباط با سرویس پیامک برقرار نشد: ${(err as Error)?.message ?? "unknown"}`,
+      );
+    }
+    if (!res.ok) {
+      console.error(`Kavenegar HTTP ${res.status} for ${redactKavenegarUrl(url)}`);
+      throw new KavenegarError(res.status);
+    }
+    let data: { return?: { status?: number; message?: string } };
+    try {
+      data = await res.json();
+    } catch {
+      console.error(`Kavenegar returned unparsable body for ${redactKavenegarUrl(url)}`);
+      throw new KavenegarError(undefined);
+    }
+    const status = data.return?.status;
+    if (status !== 200) {
+      console.error(
+        `Kavenegar sms/send status ${status} (${data.return?.message ?? "no message"}) for ${redactKavenegarUrl(url)}`,
       );
       throw new KavenegarError(status);
     }
