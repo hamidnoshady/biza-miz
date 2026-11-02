@@ -39,6 +39,7 @@ import {
   type TorobProductScan,
 } from "./shop-api-client";
 import { torobPartnerToken } from "./shop-generator";
+import { webhookCapability } from "./webhook-service";
 import { readTorobShop, readTorobShopToken, TorobShopError } from "./shop-service";
 import type {
   TorobObservation,
@@ -198,9 +199,10 @@ export async function readShopObservation(input: {
 }): Promise<TorobShopStatusView | null> {
   const row = await readObservationRow(input.businessId, input.shopId);
   if (!row) return null;
-  const [states, latestRun] = await Promise.all([
+  const [states, latestRun, webhook] = await Promise.all([
     readStatusCounts(input.businessId, input.shopId),
     readLatestRun(input.businessId, input.shopId),
+    webhookCapability({ businessId: input.businessId, shopId: input.shopId }),
   ]);
   const observation = toObservation(row);
   return {
@@ -215,10 +217,11 @@ export async function readShopObservation(input: {
     observation,
     states,
     latestRun,
-    // Torob has answered for this shop exactly when there is an observation. The
-    // other two stages stay false: nothing here sends a webhook (Wave 6), and
-    // `listing` is the observation itself, not a promise derived from it.
-    capabilities: { feed: true, sent: false, listing: observation !== null },
+    // The three stages, each answered by the thing that can prove it: `sent` is a
+    // webhook batch Torob accepted into its queue (§6f), and `listing` is Torob's
+    // own observation — never the queue, which says nothing about being displayed.
+    webhook,
+    capabilities: { feed: true, sent: webhook.sent, listing: observation !== null },
   };
 }
 
