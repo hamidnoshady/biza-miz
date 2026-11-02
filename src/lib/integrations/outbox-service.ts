@@ -351,7 +351,11 @@ export type OutboxEntityType =
   | "refund_create"
   | "catalogue_export"
   | "customer_export"
-  | "orders_export";
+  | "orders_export"
+  | "content_export"
+  // App-side work, not a push: the app reads the store's tree itself (#1206
+  // PERF-05). Never leased by a plugin — its claim filters by capability.
+  | "taxonomy_sync";
 
 /**
  * Apply one queued push to the store.
@@ -452,6 +456,20 @@ async function applyOutboundEvent(
       // itself), and leaving them queued would dead-letter a job that was
       // never meant for this side.
       return;
+    case "taxonomy_sync": {
+      // A whole taxonomy tree is one HTTP page per taxonomy, sequentially, and
+      // a store with a few thousand terms makes that minutes — not something a
+      // request the owner is waiting on can hold (#1206 PERF-05). It runs here,
+      // in the background tick, with the queue's lease and retry around it.
+      const { syncTaxonomyTree } = await import("./woo-taxonomy-service");
+      const outcome = await syncTaxonomyTree(connection.business_id, connection.id, client);
+      // Partial is a delivered job: the tree was read and the per-taxonomy
+      // failures are recorded on each group's own state row (TAX-14), so
+      // retrying the whole read would only repeat work that already succeeded.
+      // Nothing landing at all is a failure, and the row retries with backoff.
+      if (outcome.status === "failed") throw new Error("taxonomy_sync_failed");
+      return;
+    }
     case "post_upsert":
     case "media_create":
       // Plugin-side jobs for WordPress content. REST mode writes content
@@ -462,6 +480,43 @@ async function applyOutboundEvent(
     default:
       return;
   }
+}
+
+/**
+ * Queue an app-side taxonomy re-read for a REST connection (#1206 PERF-05).
+ *
+ * Upserted on `(connection_id, entity_type, remote_id)`, the same key the
+ * plugin export enqueue uses, so pressing «همگام‌سازی از وب‌سایت» twice while the
+ * first read is still queued refreshes one job instead of stacking two.
+ *
+ * A row that is `processing` is left alone — the running worker owns its lease
+ * and its payload — and the caller is told so, because «در صف گذاشته شد» and
+ * «همین حالا در حال اجراست» are different sentences and only one of them is
+ * true.
+ */
+export async function enqueueTaxonomySync(
+  businessId: string,
+  connectionId: string,
+): Promise<{ jobId: string | null; alreadyRunning: boolean }> {
+  const { rows } = await query<{ id: string }>(
+    `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
+     VALUES ($1, $2, 'taxonomy_sync', 'all', '{}'::jsonb)
+     ON CONFLICT (connection_id, entity_type, remote_id)
+     DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
+                   last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
+     WHERE integration_outbox_events.status <> 'processing'
+     RETURNING id`,
+    [businessId, connectionId],
+  );
+  if (rows[0]) return { jobId: rows[0].id, alreadyRunning: false };
+  // Nothing returned means the conflict arm matched a row it refused to touch.
+  const { rows: running } = await query<{ id: string }>(
+    `SELECT id FROM integration_outbox_events
+      WHERE connection_id = $1 AND entity_type = 'taxonomy_sync' AND remote_id = 'all'
+        AND status = 'processing'`,
+    [connectionId],
+  );
+  return { jobId: running[0]?.id ?? null, alreadyRunning: (running[0]?.id ?? null) !== null };
 }
 
 export type ClaimedOutboxEvent = {
