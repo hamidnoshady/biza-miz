@@ -52,6 +52,9 @@ export const KIND_LABELS: Record<string, { label: string; desc: string; link?: s
   orders_export: { label: "درخواست خروجی سفارش‌ها", desc: "دستور به افزونه برای ارسال سفارش‌های گذشته", link: "/websites/wp/orders" },
   content_export: { label: "درخواست خروجی محتوا", desc: "دستور به افزونه برای ارسال نوشته‌ها، برگه‌ها و رسانه‌ها", link: "/websites/wp/content" },
   taxonomy_export: { label: "درخواست خروجی دسته‌بندی‌ها", desc: "دستور به افزونه برای ارسال درخت دسته‌ها، برچسب‌ها و ویژگی‌ها", link: "/websites/wp/taxonomies" },
+  // The app-side counterpart (#1206 PERF-05): REST stores cannot be asked to
+  // send their tree, so this app reads it in the background instead.
+  taxonomy_sync: { label: "خواندن درخت دسته‌بندی‌ها از فروشگاه", desc: "در اجرای بعدی همگام‌سازی، دسته‌ها و ویژگی‌ها از فروشگاه خوانده می‌شود", link: "/websites/wp/taxonomies" },
   post_upsert: { label: "ایجاد یا ویرایش نوشته/برگه", desc: "ذخیره تغییرات متنی در وردپرس", link: "/websites/wp/content" },
   media_create: { label: "افزودن فایل رسانه‌ای", desc: "آپلود یا ثبت فایل در کتابخانه رسانه", link: "/websites/wp/media" },
   holoo_sale: { label: "ارسال فاکتور فروش به هلو", desc: "ثبت سند فاکتور در نرم‌افزار هلو" },

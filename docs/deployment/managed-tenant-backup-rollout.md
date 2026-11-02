@@ -683,6 +683,59 @@ A plan policy is not exposed to a tenant at all — the table and the thresholds
 `platform_only` under FORCE RLS, and the tenant sees only the consequences: a
 cadence, an alert that fires or does not, a drill that ran.
 
+## Increment: the margin report gets a route (issue #903 §3, §8 — and a SQL bug found on the way)
+
+§3 makes provider-cost monitoring a Superadmin job. `computeBackupMargin` and
+`backupMarginReport` had existed since the billing jobs landed, with unit tests
+over the arithmetic — but nothing called them, so "what does managed storage earn
+against what it costs us" was answerable only from a shell.
+
+**The query did not work.** Reading it properly before wiring it up turned up the
+reason the gap had never been noticed: `backupMarginReport` selected
+`SUM(quantity), SUM(amount_rial) FROM usage_events`. There is no `usage_events`
+table and no `amount_rial` column. The billing runtime splits the two — quantity
+on the append-only `billing_usage_events`, money in `billing_usage_ratings`
+(`rated_amount_rial`, one row per event, keyed by `usage_event_id`) — so the
+report would have thrown on its first call. It now joins them, and the join is
+1:1 on a primary key, so a quantity cannot be multiplied by a second rating. That
+correction is covered by `integration/tenant-backup-margin.integration.test.ts`,
+which seeds priced, unpriced and out-of-window events against a real PostgreSQL:
+arithmetic tests cannot see a table name.
+
+**Three honesty rules the route enforces.**
+
+1. *The cost is an input, never a constant.* `providerCostRialPerGbMonth` comes
+   from the query string and defaults to `DEFAULT_PROVIDER_COST_RIAL_PER_GB_MONTH`
+   (zero), which the report echoes back in `assumptions`. The panel says so in
+   words: with no stated cost, "margin" is revenue, not profit.
+2. *A partly rated line is neither priced nor flagged.* A business whose meter
+   has some priced and some unpriced events has revenue, so it is not
+   `notPriced`; the line now also carries `unpricedByteDays` — the exact quantity
+   its revenue does not cover — and the table prints it under the figure. A line
+   with no rating at all keeps `notPriced: true` and reports zero revenue plus a
+   null percentage, which is "unknown", not "free".
+3. *A window nobody asked for is refused.* `resolveMarginWindow` defaults to the
+   last 30 days, treats a date-only end bound as the end of that day (so "1 to 31
+   October" includes the 31st), accepts full timestamps, and answers
+   `invalid_window` / `window_too_long` (over 366 days) rather than scanning
+   silently.
+
+**The surface.** `GET /api/platform/backup/service/margin?from=&to=&providerCostRialPerGbMonth=`
+returns `{ report }` with `Cache-Control: no-store`. It requires
+`tenant_backup.policy`, not `tenant_backup.read`: a cost figure is commercial, the
+same trust that sets the storage policy and the supplier cost, exactly as the
+managed-SMS wholesale numbers are absent from the commercial catalogue. The
+console card «گزارش حاشیهٔ سود ذخیره‌سازی» sits last on `/platform/backup/service`
+(it reports on the service rather than configuring it), uses Jalali pickers with
+ISO on the wire, and renders per-business rows sorted by margin.
+
+**Honest limits.** Nothing is stored and nothing is billed from here: the report
+reads settled usage events and touches no wallet, price or invoice. Revenue is
+what the rating recorded, so a meter the platform never priced reads as unpriced
+rather than as profit — which is the point. The provider cost is not persisted,
+so an operator states it each time; if the owner wants it remembered, that is a
+column on the fleet row and a separate decision.
+
 ## Increment: artifact lifecycle — Cloud keeps nothing local, and retention is enforced
 
 Two gaps the epic names and nothing closed: a Cloud deployment kept a second copy
@@ -733,9 +786,10 @@ restorable" instead of showing an unverified row as fine.
 
 **Still open.** Cloud's file-restore (`/api/backup/restore` and the chunked
 upload remain physical, site-only, exactly-one-business), the tenant upload
-endpoints that §2 forbids, post-restore accounting/permission checks, per-plan
-schedules and alert thresholds, a route for the margin report, and the real
-acceptance matrix — unchanged by this increment.
+endpoints that §2 forbids, post-restore accounting/permission checks, and the
+real acceptance matrix — unchanged by this increment. (Per-plan schedules and
+alert thresholds landed in the 0280 increment; the margin report got its route in
+the increment below.)
 
 ## Increment: the tenant upload surface is removed, not hidden (§2, §10 P0)
 

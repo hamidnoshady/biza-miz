@@ -52,5 +52,9 @@ wp_unschedule_hook( 'pos_connector_customer_export_continue' );
 // reason — and a probe left behind would report on a site that no longer has the
 // plugin to report to.
 wp_unschedule_hook( 'pos_connector_cron_probe' );
+// The content export's continuation (#1206) has no arguments — the cursor names
+// the snapshot — but it is still a single event that must not outlive the site's
+// copy of the plugin.
+wp_unschedule_hook( 'pos_connector_content_export_continue' );
 // Export progress and run locks live in options under these prefixes.
-$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s", $wpdb->esc_like( 'pos_connector_product_export_' ) . '%', $wpdb->esc_like( 'pos_connector_customer_export_' ) . '%', $wpdb->esc_like( 'pos_connector_lock_' ) . '%' ) );
+$wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s OR option_name LIKE %s", $wpdb->esc_like( 'pos_connector_product_export_' ) . '%', $wpdb->esc_like( 'pos_connector_customer_export_' ) . '%', $wpdb->esc_like( 'pos_connector_export_cursor_' ) . '%', $wpdb->esc_like( 'pos_connector_lock_' ) . '%', $wpdb->esc_like( 'pos_connector_invocations' ) . '%' ) );

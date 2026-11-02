@@ -222,10 +222,25 @@ class POS_Connector_CLI {
 				'oldestPendingAt'      => $oldest,
 				'oldestPendingSeconds' => $oldest_ts > 0 ? max( 0, $now - $oldest_ts ) : null,
 			),
+			// #1206: a walk that ran out of budget is *pending work*, and the
+			// doctor must not report a half-read catalogue as finished.
+			'exportCursors' => array(
+				'content' => POS_Connector_Export_Cursor::get( 'content' ),
+				'orders'  => POS_Connector_Export_Cursor::get( 'orders' ),
+			),
 			'lastCycle'     => array(
 				'verdict' => $settings['last_cycle_verdict'],
 				'phases'  => array_values( (array) $settings['last_cycle_phases'] ),
 				'error'   => $settings['last_error'],
+			),
+			// #1206 P0: the last 20 invocations, newest first, with the exit code
+			// a monitoring crontab would have seen. `lastCycle` is one line of
+			// evidence; a store that fails four ticks in a row before it recovers
+			// leaves only this.
+			'invocations'   => array(
+				'recent'      => POS_Connector_Invocation_Log::recent(),
+				'failures24h' => POS_Connector_Invocation_Log::failures_since( DAY_IN_SECONDS ),
+				'limit'       => POS_Connector_Invocation_Log::RECENT_LIMIT,
 			),
 			'incident'      => array(
 				'open'        => ! empty( $settings['incident_open'] ),
@@ -240,6 +255,8 @@ class POS_Connector_CLI {
 			POS_CONNECTOR_CRON_RESYNC_PRODUCTS,
 			POS_CONNECTOR_CRON_RESYNC_CUSTOMERS,
 			POS_CONNECTOR_CRON_RESYNC_CONTENT,
+			POS_CONNECTOR_CRON_PRODUCT_EXPORT,
+			POS_CONNECTOR_CRON_CONTENT_EXPORT,
 		) as $hook ) {
 			$next = wp_next_scheduled( $hook );
 			$report['schedules'][ $hook ] = array(
@@ -319,6 +336,75 @@ class POS_Connector_CLI {
 		}
 		if ( '' !== $report['lastCycle']['error'] ) {
 			WP_CLI::log( '  ' . sprintf( 'خطا: %s', $report['lastCycle']['error'] ) );
+		}
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'اجراهای اخیر زمان‌بند', 'pos-accounting-connector' ) . '%n' ) );
+		if ( empty( $report['invocations']['recent'] ) ) {
+			WP_CLI::log( '  ' . __( 'هیچ اجرایی ثبت نشده است — این یعنی زمان‌بند هنوز این افزونه را صدا نزده، نه اینکه همه‌چیز خوب بوده.', 'pos-accounting-connector' ) );
+		} else {
+			foreach ( $report['invocations']['recent'] as $invocation ) {
+				$started   = isset( $invocation['startedAt'] ) ? get_date_from_gmt( $invocation['startedAt'], 'H:i:s' ) : '—';
+				$exit      = isset( $invocation['exitCode'] ) ? (int) $invocation['exitCode'] : null;
+				$runtime   = isset( $invocation['runtimeMs'] ) && null !== $invocation['runtimeMs']
+					? sprintf( '%.1f' . __( 'ثانیه', 'pos-accounting-connector' ), ( (int) $invocation['runtimeMs'] ) / 1000 )
+					: '—';
+				WP_CLI::log(
+					'  ' . sprintf(
+						'%s • %s • %s • %s %s • %s',
+						$started,
+						isset( $invocation['driver'] ) ? $invocation['driver'] : '?',
+						isset( $invocation['outcome'] ) ? $invocation['outcome'] : '?',
+						__( 'کد', 'pos-accounting-connector' ),
+						null === $exit ? '?' : (string) $exit,
+						$runtime
+					)
+				);
+				$detail = array();
+				if ( isset( $invocation['verdict'] ) && '' !== $invocation['verdict'] ) {
+					$detail[] = (string) $invocation['verdict'];
+				}
+				if ( ! empty( $invocation['phases'] ) && is_array( $invocation['phases'] ) ) {
+					$phases = array();
+					foreach ( $invocation['phases'] as $phase => $status ) {
+						$phases[] = $phase . '=' . $status;
+					}
+					$detail[] = implode( ' ', $phases );
+				}
+				if ( ! empty( $invocation['errors'] ) && is_array( $invocation['errors'] ) ) {
+					$detail[] = implode( ', ', array_map( 'strval', $invocation['errors'] ) );
+				}
+				if ( $detail ) {
+					WP_CLI::log( '      ' . implode( ' — ', $detail ) );
+				}
+			}
+			if ( (int) $report['invocations']['failures24h'] > 0 ) {
+				WP_CLI::log( '  ' . sprintf( __( '%d اجرای ناموفق در ۲۴ ساعت گذشته.', 'pos-accounting-connector' ), (int) $report['invocations']['failures24h'] ) );
+			}
+		}
+
+		$pending_walks = array();
+		if ( is_array( $report['exportCursors']['content'] ) ) {
+			$pending_walks[] = sprintf(
+				/* translators: 1: post type, 2: last post id read */
+				__( 'محتوا: نوع %1$s تا شناسهٔ %2$d', 'pos-accounting-connector' ),
+				(string) $report['exportCursors']['content']['type'],
+				(int) $report['exportCursors']['content']['cursor']
+			);
+		}
+		if ( is_array( $report['exportCursors']['orders'] ) ) {
+			$pending_walks[] = sprintf(
+				/* translators: %s: the modified time the next batch continues from */
+				__( 'سفارش‌ها: از تغییرِ %s ادامه می‌یابد', 'pos-accounting-connector' ),
+				gmdate( 'Y-m-d H:i:s', (int) $report['exportCursors']['orders']['ts'] )
+			);
+		}
+		if ( $pending_walks ) {
+			WP_CLI::log( '' );
+			WP_CLI::log( WP_CLI::colorize( '%B' . __( 'پیمایش‌های نیمه‌کاره', 'pos-accounting-connector' ) . '%n' ) );
+			foreach ( $pending_walks as $walk ) {
+				WP_CLI::log( '  ' . $walk );
+			}
 		}
 
 		WP_CLI::log( '' );
