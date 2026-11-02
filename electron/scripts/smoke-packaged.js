@@ -747,21 +747,36 @@ async function runFullOfflinePhase({ executable }) {
   }
 }
 
-async function assertLogin(origin, { email, password }) {
-  const wrong = await httpJson(`${origin}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password: `${password}-wrong` }),
-  });
+async function assertLogin(origin, { email, password, businessId = null }) {
+  const post = (body) =>
+    httpJson(`${origin}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  const wrong = await post({ email, password: `${password}-wrong` });
   if (wrong.status === 200) fail("a wrong password signed in");
-  const right = await httpJson(`${origin}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
-  if (right.status !== 200) fail(`owner login answered ${right.status} after restart: ${right.text.slice(0, 300)}`);
-  const cookie = sessionCookieFrom(right.headers);
-  if (!cookie) fail("owner login returned no session cookie");
+
+  let right = await post({ email, password, ...(businessId ? { businessId } : {}) });
+  if (right.status !== 200) fail(`owner login answered ${right.status}: ${right.text.slice(0, 300)}`);
+
+  let cookie = sessionCookieFrom(right.headers);
+  if (!cookie && right.json?.needsBusinessSelection === true) {
+    // A user with more than one business is asked which one; the acceptance
+    // install has exactly one, so picking it is what the window would do.
+    const choice = (right.json.businesses ?? [])[0];
+    if (!choice?.id) fail(`login asked for a business but offered none: ${right.text.slice(0, 300)}`);
+    log(`login asked which business; choosing ${choice.slug ?? choice.id}`);
+    right = await post({ email, password, businessId: choice.id });
+    if (right.status !== 200) fail(`owner login with an explicit business answered ${right.status}`);
+    cookie = sessionCookieFrom(right.headers);
+  }
+  if (!cookie) {
+    // Whatever this is — an MFA challenge, a blocked membership — the body is
+    // the only thing that says which, and it belongs in the failure.
+    fail(`owner login returned no session cookie: ${right.text.slice(0, 400)}`);
+  }
   return cookie;
 }
 
