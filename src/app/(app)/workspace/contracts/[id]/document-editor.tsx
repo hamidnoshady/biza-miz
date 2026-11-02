@@ -167,6 +167,13 @@ export function ContractDocumentEditor({
   const [templates, setTemplates] = useState<ContractTemplateChoice[] | null>(null);
   const [templateName, setTemplateName] = useState("");
   const [templateBusy, setTemplateBusy] = useState(false);
+  // Issue #908 D — importing an existing Word/PDF document. The warnings are
+  // kept in state rather than shown once and forgotten: they say what the
+  // conversion could NOT carry (bold runs, tables lost from a PDF, no signature
+  // lines), and that is information the sender needs while editing, not a toast
+  // they can miss.
+  const [importBusy, setImportBusy] = useState(false);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // The template library: starters plus this business's own documents. Loaded
@@ -439,6 +446,58 @@ export function ContractDocumentEditor({
     }
   };
 
+  /**
+   * Read a Word/PDF file into the canvas.
+   *
+   * The route parses and hands back blocks; it does not save. So the imported
+   * body arrives as an ordinary edit: it goes into history (undoable), marks
+   * the draft dirty, and the normal autosave persists it against the revision
+   * this editor already holds. A file the route could not read leaves the
+   * document exactly as it was and says why.
+   */
+  const importFromFile = async (file: File) => {
+    if (!canEdit || importBusy) return;
+    // Import replaces the whole body, and the debounced autosave would persist
+    // that within 1.2 s. So the confirmation is asked whenever there is anything
+    // to lose — not only when there are unsaved edits (undo is the recovery
+    // path, but a sender who imports the wrong file must be told first).
+    if (
+      (dirty || content.blocks.length > 0) &&
+      !window.confirm(`متن فعلی با محتوای «${file.name}» جایگزین می‌شود. ادامه می‌دهید؟`)
+    ) {
+      return;
+    }
+    setImportBusy(true);
+    setError("");
+    setImportWarnings([]);
+    const body = new FormData();
+    body.append("file", file);
+    const { ok, data, status } = await api<{
+      content?: ContractDocumentContent;
+      source?: { format: "docx" | "pdf"; fileName: string };
+      stats?: { headings: number; paragraphs: number; lists: number; tables: number };
+      warnings?: string[];
+      error?: string;
+      message?: string;
+    }>(`/api/workspace/contracts/${view.contract.id}/document/import`, { method: "POST", body });
+    setImportBusy(false);
+    if (!ok || !data?.content) {
+      // `message` is the server's own Persian explanation ("this PDF has no
+      // extractable text", "this is not a Word document"); the code is the
+      // fallback every other contract error uses.
+      setError(data?.message || contractError(data?.error) || `درون‌ریزی ناموفق بود (${toPersianDigits(status)}).`);
+      return;
+    }
+    apply(data.content);
+    setImportWarnings(data.warnings ?? []);
+    const stats = data.stats;
+    setNotice(
+      `«${data.source?.fileName ?? file.name}» درون‌ریزی شد — ` +
+        `${toPersianDigits(stats?.paragraphs ?? 0)} بند، ${toPersianDigits(stats?.headings ?? 0)} عنوان، ` +
+        `${toPersianDigits(stats?.tables ?? 0)} جدول. متن را بازبینی کنید؛ تغییرات خودکار ذخیره می‌شود.`,
+    );
+  };
+
   const freezeVersion = async () => {
     setSaving(true);
     const { ok, data } = await api<{ version?: { version: number }; error?: string }>(
@@ -475,6 +534,23 @@ export function ContractDocumentEditor({
         </InfoBox>
       ) : null}
       {notice ? <InfoBox>{notice}</InfoBox> : null}
+      {importWarnings.length > 0 ? (
+        <InfoBox>
+          <p className="font-medium">آنچه در درون‌ریزی منتقل نشد:</p>
+          <ul className="mt-1 list-inside list-disc space-y-1">
+            {importWarnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+          <button
+            type="button"
+            className="mt-2 font-medium text-primary hover:underline"
+            onClick={() => setImportWarnings([])}
+          >
+            بستن
+          </button>
+        </InfoBox>
+      ) : null}
 
       <SectionCard
         title="سند قرارداد"
@@ -521,6 +597,30 @@ export function ContractDocumentEditor({
         <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)_320px]">
           {/* Library ------------------------------------------------------ */}
           <div className="space-y-4 lg:order-1">
+            <div>
+              <p className="mb-2 text-xs font-semibold text-foreground">درون‌ریزی سند</p>
+              <label
+                className={`block cursor-pointer rounded-lg border border-dashed border-border/80 px-2 py-2 text-center text-[11px] text-muted-foreground transition-colors hover:border-primary/50 ${
+                  !canEdit || importBusy ? "cursor-not-allowed opacity-50" : ""
+                }`}
+              >
+                <span className="block font-medium text-foreground">
+                  {importBusy ? "در حال خواندن فایل…" : "Word یا PDF را انتخاب کنید"}
+                </span>
+                <span className="mt-0.5 block">.docx یا PDF تا ۵ مگابایت؛ متن، فهرست و جدول منتقل می‌شود</span>
+                <input
+                  type="file"
+                  className="sr-only"
+                  accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
+                  disabled={!canEdit || importBusy}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0] ?? null;
+                    event.target.value = "";
+                    if (file) void importFromFile(file);
+                  }}
+                />
+              </label>
+            </div>
             <div>
               <p className="mb-2 text-xs font-semibold text-foreground">بلوک‌ها</p>
               <div className="grid grid-cols-2 gap-2 lg:grid-cols-1">
