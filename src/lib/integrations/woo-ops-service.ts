@@ -24,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { normalizeNumericText } from "../digits";
+import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "../product-content";
 import { writeIntegrationAudit } from "./audit";
 import { assertPluginJobSupported } from "./plugin-job-guard";
 import { mergeMappingMeta } from "./mapping-service";
@@ -125,6 +126,17 @@ export function sanitizeProductPatch(patch: Record<string, unknown>): Record<str
       const status = String(value);
       if (!(PRODUCT_STATUSES as readonly string[]).includes(status)) throw new WooOpsError("invalid_product_status");
       out[field] = status;
+      continue;
+    }
+    if (field === "description" || field === "short_description") {
+      // The storefront text is Gutenberg HTML and is stored whole; the bound
+      // is the same one the Accounting product form and the editor apply
+      // (migration 0260), so a patch can never be queued that the mirror
+      // itself would have truncated on the way back in (issue #1215, P1-2).
+      const text = String(value);
+      const max = field === "description" ? PRODUCT_LONG_DESCRIPTION_MAX : PRODUCT_SHORT_DESCRIPTION_MAX;
+      if (text.length > max) throw new WooOpsError("invalid_description");
+      out[field] = text;
       continue;
     }
     out[field] = String(value);
