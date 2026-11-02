@@ -280,6 +280,21 @@ jobs:
       - name: Verify explicit unsigned-development status
         run: .\scripts\verify-windows-signatures.ps1 -ArtifactRoot electron\dist -Mode unsigned-development -OutputPath windows-signature-verification.json
 
+      - name: Release scan - no test bootstrap and no Central privileges in the payload
+        # Issue #1194 - inspects the packaged bytes (app.asar, the staged web
+        # runtime, the NSIS installer itself) rather than the source tree. Any
+        # DESKTOP_SMOKE_* trigger, smoke owner password, platform route module,
+        # seed credential or private key fails the build.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem electron/dist -File -Filter *.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer missing before the release scan" }
+          node scripts/scan-desktop-release.mjs `
+            --payload=electron/dist/win-unpacked `
+            --installer="$($installer.FullName)" `
+            --output=desktop-release-scan.json `
+            --require-installer-extraction
+
       - name: Assert packaged Electron and Node.js support posture
         run: .\scripts\verify-packaged-electron-runtime.ps1 -ArtifactRoot electron\dist\win-unpacked -OutputPath packaged-electron-runtime.json
 
@@ -329,6 +344,13 @@ jobs:
         run: npm run db:dev:stop
 
       - name: Install and run actual packaged desktop twice as a standard user
+        # Issue #1194 - when a staging Cloud is configured, the external harness
+        # also exercises Full Offline enrollment against the release bytes. The
+        # token is a secret; without it the phase reports "skipped" and the
+        # Hybrid install/restart checks still run.
+        env:
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
           $user = "SuiteSmoke"
@@ -548,6 +570,7 @@ jobs:
         with:
           name: business-suite-desktop-size-report
           path: |
+            desktop-release-scan.json
             desktop-size-before-package.md
             desktop-size-report.md
             desktop-size-diagnostics/

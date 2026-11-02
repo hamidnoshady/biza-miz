@@ -24,8 +24,14 @@ import {
   selectPrimaryMfaEnrolment,
   type MfaMethod,
 } from "@/lib/mfa";
+import { platformRealmUnavailable } from "@/lib/platform-runtime-guard";
 
 export async function POST(request: NextRequest) {
+  // Issue #1194 — the Central realm does not exist on a site runtime. Deny
+  // before reading any credential, so a local install cannot even begin a
+  // platform sign-in or MCP grant.
+  const realmUnavailable = platformRealmUnavailable();
+  if (realmUnavailable) return realmUnavailable;
   const authHeader = request.headers.get("authorization");
   if (!authHeader?.startsWith("Bearer ")) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });

@@ -236,18 +236,40 @@ jobs:
           "INSTALL_DIR=$install" >> $env:GITHUB_ENV
           "USER_DATA=$data" >> $env:GITHUB_ENV
 
+      - name: Release scan - signed candidate installer
+        # Issue #1194 - on the retail acceptance machine, inspect the exact
+        # signed installer this run will install: extraction + marker/route
+        # scan, before the first install command executes.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1
+          if (-not $installer) { throw "Signed candidate installer is missing before the release scan" }
+          node scripts/scan-desktop-release.mjs `
+            --installer="$($installer.FullName)" `
+            --output=signed-candidate-release-scan.json `
+            --require-installer-extraction
+          Copy-Item signed-candidate-release-scan.json $env:ACCEPTANCE_ROOT
+
       - name: Install prior release without elevation and launch twice
+        env:
+          # Issue #1194 - optional Full Offline enrollment against a staging Cloud.
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_TOKEN }}
         run: |
           $installer = Get-ChildItem "${{ runner.temp }}\suite-previous" -Recurse -File -Filter "$env:PREVIOUS_STEM Setup *.exe" | Select-Object -First 1
           if (-not $installer) { throw "Prior installer is missing" }
           $process = Start-Process $installer.FullName -ArgumentList "/S", "/D=$env:INSTALL_DIR" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Prior installer failed: $($process.ExitCode)" }
           $env:DESKTOP_EXECUTABLE = Join-Path $env:INSTALL_DIR "$env:PREVIOUS_STEM.exe"
-          $env:DESKTOP_SMOKE_USER_DATA = $env:USER_DATA
+          $env:DESKTOP_ACCEPTANCE_USER_DATA = $env:USER_DATA
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
 
       - name: Abrupt-stop recovery acceptance
+        env:
+          # Issue #1194 - optional Full Offline enrollment against a staging Cloud.
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_TOKEN }}
         run: |
           $exe = Join-Path $env:INSTALL_DIR "$env:PREVIOUS_STEM.exe"
           $process = Start-Process $exe -ArgumentList "--user-data-dir=$env:USER_DATA" -PassThru
@@ -255,18 +277,22 @@ jobs:
           taskkill /pid $process.Id /t /f | Out-Null
           Start-Sleep -Seconds 5
           $env:DESKTOP_EXECUTABLE = $exe
-          $env:DESKTOP_SMOKE_USER_DATA = $env:USER_DATA
+          $env:DESKTOP_ACCEPTANCE_USER_DATA = $env:USER_DATA
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
 
       - name: In-place update to signed candidate and persistence acceptance
+        env:
+          # Issue #1194 - optional Full Offline enrollment against a staging Cloud.
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_TOKEN }}
         run: |
           $installer = Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1
           if (-not $installer) { throw "Candidate installer is missing" }
           $process = Start-Process $installer.FullName -ArgumentList "/S", "/D=$env:INSTALL_DIR" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Candidate update failed: $($process.ExitCode)" }
           $env:DESKTOP_EXECUTABLE = Join-Path $env:INSTALL_DIR "Bizamiz.exe"
-          $env:DESKTOP_SMOKE_USER_DATA = $env:USER_DATA
+          $env:DESKTOP_ACCEPTANCE_USER_DATA = $env:USER_DATA
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
 
@@ -320,7 +346,7 @@ jobs:
             platform = "${{ steps.platform.outputs.caption }} build ${{ steps.platform.outputs.build }}"
             networkProfiles = "${{ steps.network.outputs.profiles }}"
             ordinaryUser = $true
-            checks = @("candidate-and-prior-provenance", "pre-execution-authenticode", "clean-state", "non-elevated-install", "two-launch", "private-network-profile", "abrupt-stop-recovery", "in-place-update", "installed-candidate-authenticode", "uac-cancellation-evidence", "uninstall", "data-preserved")
+            checks = @("candidate-and-prior-provenance", "pre-execution-authenticode", "release-scan", "clean-state", "non-elevated-install", "two-launch", "private-network-profile", "abrupt-stop-recovery", "in-place-update", "installed-candidate-authenticode", "uac-cancellation-evidence", "uninstall", "data-preserved")
           } | ConvertTo-Json -Depth 6 | Set-Content windows-11-release-evidence.json -Encoding UTF8
 
       - name: Upload retail evidence
@@ -331,6 +357,7 @@ jobs:
           if-no-files-found: warn
           path: |
             windows-11-release-evidence.json
+            signed-candidate-release-scan.json
             candidate-installer-signatures.json
             previous-installer-signatures.json
             windows-11-signatures.json

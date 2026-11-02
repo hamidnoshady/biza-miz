@@ -27,6 +27,7 @@ import {
   MFA_GRACE_DAYS_PLATFORM,
   shouldChallengeMfaOnLogin,
 } from "@/lib/mfa";
+import { platformRealmUnavailable } from "@/lib/platform-runtime-guard";
 
 interface PlatformAdminRow extends Record<string, unknown> {
   id: string;
@@ -41,6 +42,11 @@ interface PlatformAdminRow extends Record<string, unknown> {
 const DUMMY_HASH = "$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
 
 export async function POST(request: NextRequest) {
+  // Issue #1194 — the Central realm does not exist on a site runtime. Deny
+  // before reading any credential, so a local install cannot even begin a
+  // platform sign-in or MCP grant.
+  const realmUnavailable = platformRealmUnavailable();
+  if (realmUnavailable) return realmUnavailable;
   let body: { email?: string; password?: string };
   try {
     body = await request.json();

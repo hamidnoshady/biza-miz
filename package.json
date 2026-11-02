@@ -53,7 +53,9 @@
     "deployment:convert-hybrid": "tsx scripts/convert-local-to-hybrid.ts",
     "platform-company:billing-backfill": "tsx scripts/platform-company-billing-backfill.ts",
     "platform-company:health": "tsx scripts/platform-company-health.ts",
-    "test:a11y:subledger": "node scripts/subledger-accessibility.mjs"
+    "test:a11y:subledger": "node scripts/subledger-accessibility.mjs",
+    "desktop:acceptance": "node electron/scripts/smoke-packaged.js",
+    "desktop:scan-release": "node scripts/scan-desktop-release.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.78",
