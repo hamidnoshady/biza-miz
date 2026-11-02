@@ -37,6 +37,7 @@ import {
 } from "./publication";
 import { TOROB_FEED_SKIP_COPY, type TorobFeedSkipReason } from "./feed";
 import { TorobShopError } from "./shop-service";
+import { readProductTorobStates } from "./status-service";
 
 export { PRODUCT_STATE_COPY };
 export type { ProductPublicationState, ShopProductRow, ShopPublication };
@@ -94,6 +95,10 @@ export async function readShopPublication(input: {
   const catalogue = await readShopCatalogue({ businessId: input.businessId, shopId: input.shopId });
   if (!catalogue) return null;
   const { shop, rows, decisions, currency, built, summary } = catalogue;
+  // What Torob says about each product, when the shop has been read back from it.
+  // A read of our own tables only: the screen must not spend Torob's rate limit to
+  // render, and an unobserved shop simply has no statuses to show.
+  const torobStates = await readProductTorobStates({ businessId: input.businessId, shopId: shop.id });
 
   const skipByProduct = new Map<string, TorobFeedSkipReason>();
   // The builder may report several reasons for one product (one per variant); the
@@ -120,6 +125,8 @@ export async function readShopPublication(input: {
       state,
       skipReason,
       reasonCopy: skipReason ? TOROB_FEED_SKIP_COPY[skipReason] : null,
+      torobStatus: torobStates.get(row.id)?.mainStatus ?? null,
+      torobPages: torobStates.get(row.id)?.pages ?? 0,
     };
   });
 

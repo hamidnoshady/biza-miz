@@ -154,6 +154,14 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
     GET: PERMISSIONS.torobView,
     POST: PERMISSIONS.torobConfigure,
   },
+  // Reading a shop back from Torob (issue #894 Wave 4b). Both verbs are
+  // `torob.view`: the refresh consumes the Shop API's per-shop rate limit and
+  // stores what Torob said, but it changes nothing on Torob's side — no product is
+  // activated, no setting is written, no credential is spent.
+  "/api/growth/torob/shops/[id]/status": {
+    GET: PERMISSIONS.torobView,
+    POST: PERMISSIONS.torobView,
+  },
   // The Shop Generator approval callback (issue #894). It is the merchant's own
   // browser arriving from Torob with a one-time code, so it manages the
   // relationship like the action that started it — and it *spends* the code, which
