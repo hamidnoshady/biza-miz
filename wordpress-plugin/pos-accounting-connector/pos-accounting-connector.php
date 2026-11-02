@@ -159,6 +159,8 @@ define( 'POS_CONNECTOR_CRON_RESYNC_CONTENT', 'pos_connector_resync_content' );
 define( 'POS_CONNECTOR_CRON_MANUAL_JOB', 'pos_connector_manual_job' );
 /** Continuation of a chunked catalogue export (args: the export's run id). */
 define( 'POS_CONNECTOR_CRON_PRODUCT_EXPORT', 'pos_connector_product_export_continue' );
+/** Continuation of a chunked content export (#1206; its cursor carries the run id). */
+define( 'POS_CONNECTOR_CRON_CONTENT_EXPORT', 'pos_connector_content_export_continue' );
 /**
  * The cron probe (args: the probe's correlation id, issue #1206).
  *
@@ -172,6 +174,7 @@ define( 'POS_CONNECTOR_CRON_PROBE', 'pos_connector_cron_probe' );
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-log.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-health.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-invocation-log.php';
+require_once POS_CONNECTOR_PATH . 'includes/class-pos-export-cursor.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-client.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-queue.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-sync.php';
@@ -612,6 +615,7 @@ function pos_connector_deactivate() {
 	// be told; wp_unschedule_hook() clears every event on the hook.
 	wp_unschedule_hook( POS_CONNECTOR_CRON_MANUAL_JOB );
 	wp_unschedule_hook( POS_CONNECTOR_CRON_PRODUCT_EXPORT );
+	wp_unschedule_hook( POS_CONNECTOR_CRON_CONTENT_EXPORT );
 	wp_unschedule_hook( POS_CONNECTOR_CRON_PROBE );
 }
 register_deactivation_hook( __FILE__, 'pos_connector_deactivate' );

@@ -222,6 +222,12 @@ class POS_Connector_CLI {
 				'oldestPendingAt'      => $oldest,
 				'oldestPendingSeconds' => $oldest_ts > 0 ? max( 0, $now - $oldest_ts ) : null,
 			),
+			// #1206: a walk that ran out of budget is *pending work*, and the
+			// doctor must not report a half-read catalogue as finished.
+			'exportCursors' => array(
+				'content' => POS_Connector_Export_Cursor::get( 'content' ),
+				'orders'  => POS_Connector_Export_Cursor::get( 'orders' ),
+			),
 			'lastCycle'     => array(
 				'verdict' => $settings['last_cycle_verdict'],
 				'phases'  => array_values( (array) $settings['last_cycle_phases'] ),
@@ -249,6 +255,8 @@ class POS_Connector_CLI {
 			POS_CONNECTOR_CRON_RESYNC_PRODUCTS,
 			POS_CONNECTOR_CRON_RESYNC_CUSTOMERS,
 			POS_CONNECTOR_CRON_RESYNC_CONTENT,
+			POS_CONNECTOR_CRON_PRODUCT_EXPORT,
+			POS_CONNECTOR_CRON_CONTENT_EXPORT,
 		) as $hook ) {
 			$next = wp_next_scheduled( $hook );
 			$report['schedules'][ $hook ] = array(
@@ -372,6 +380,30 @@ class POS_Connector_CLI {
 			}
 			if ( (int) $report['invocations']['failures24h'] > 0 ) {
 				WP_CLI::log( '  ' . sprintf( __( '%d اجرای ناموفق در ۲۴ ساعت گذشته.', 'pos-accounting-connector' ), (int) $report['invocations']['failures24h'] ) );
+			}
+		}
+
+		$pending_walks = array();
+		if ( is_array( $report['exportCursors']['content'] ) ) {
+			$pending_walks[] = sprintf(
+				/* translators: 1: post type, 2: last post id read */
+				__( 'محتوا: نوع %1$s تا شناسهٔ %2$d', 'pos-accounting-connector' ),
+				(string) $report['exportCursors']['content']['type'],
+				(int) $report['exportCursors']['content']['cursor']
+			);
+		}
+		if ( is_array( $report['exportCursors']['orders'] ) ) {
+			$pending_walks[] = sprintf(
+				/* translators: %s: the modified time the next batch continues from */
+				__( 'سفارش‌ها: از تغییرِ %s ادامه می‌یابد', 'pos-accounting-connector' ),
+				gmdate( 'Y-m-d H:i:s', (int) $report['exportCursors']['orders']['ts'] )
+			);
+		}
+		if ( $pending_walks ) {
+			WP_CLI::log( '' );
+			WP_CLI::log( WP_CLI::colorize( '%B' . __( 'پیمایش‌های نیمه‌کاره', 'pos-accounting-connector' ) . '%n' ) );
+			foreach ( $pending_walks as $walk ) {
+				WP_CLI::log( '  ' . $walk );
 			}
 		}
 
