@@ -18,12 +18,31 @@
  * say "this server does not offer one".
  */
 
+import { BRAND_NAME_EN } from "../brand";
+
 /** The versions this server implements, newest first. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"] as const;
 
 export const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 
-export const MCP_SERVER_NAME = "cafe-restaurant-pos";
+/** The product's machine name; a business's own server name is `bizamiz-{subdomain}`. */
+export const MCP_SERVER_NAME = "bizamiz";
+
+/**
+ * What a client lists this server as. The name is a slug a config file can use
+ * as a key (`bizamiz-titea`), the title is what a connector list shows
+ * («Bizamiz - کافه ونک»). Two businesses added to one Claude account must not
+ * look alike, so both carry the business.
+ */
+export function mcpServerName(subdomain: string | null | undefined): string {
+  const slug = (subdomain ?? "").trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug ? `${MCP_SERVER_NAME}-${slug}` : MCP_SERVER_NAME;
+}
+
+export function mcpServerTitle(label: string): string {
+  const trimmed = label.trim();
+  return trimmed ? `${BRAND_NAME_EN} - ${trimmed}` : BRAND_NAME_EN;
+}
 
 /** Standard JSON-RPC 2.0 error codes, plus nothing invented. */
 export const JSON_RPC_ERRORS = {
@@ -148,8 +167,10 @@ export function negotiateProtocolVersion(requested: unknown): string {
 
 export interface InitializeResultOptions {
   protocolVersion: string;
-  /** The business's own name, so a client's connector list says «کافه ونک» rather than a product name. */
+  /** The full display title, built with `mcpServerTitle` from the business's own name. */
   title: string;
+  /** `serverInfo.name`, built with `mcpServerName`; the bare product name when omitted. */
+  serverName?: string;
   version: string;
   instructions: string;
 }
@@ -171,7 +192,7 @@ export function initializeResult(options: InitializeResultOptions) {
       prompts: { listChanged: false },
     },
     serverInfo: {
-      name: MCP_SERVER_NAME,
+      name: options.serverName ?? MCP_SERVER_NAME,
       title: options.title,
       version: options.version,
     },

@@ -77,6 +77,11 @@ const ACTION_LABELS: Record<string, string> = {
   // tab showed the raw dotted key where every other row has Persian.
   "settings.business.update": "تغییر اطلاعات کسب‌وکار",
   "settings.mfa_policy.update": "تغییر سیاست ورود دومرحله‌ای",
+  // Issue #1128 — an advertising agency's operating profile (which of the eight
+  // presets in agency.ts it works as). Labeled from the start so the audit tab
+  // never shows a raw dotted key for it, the mistake the two entries above were
+  // added to fix.
+  "settings.agency_profile.update": "تغییر پروفایل فعالیت آژانس",
   "impersonation.request": "درخواست ورود جانشینی",
   "account.created": "ایجاد حساب",
   "account.renamed": "تغییر نام حساب",
@@ -98,6 +103,10 @@ const ACTION_LABELS: Record<string, string> = {
   "floor_section.created": "ایجاد بخش سالن",
   "floor_section.updated": "ویرایش بخش سالن",
   "floor_section.deleted": "حذف بخش سالن",
+  "item.duplicate_orphan_archived": "بایگانی کالای تکراری ناشی از همگام‌سازی ووکامرس",
+  "growth.campaign_created": "ساخت پیش‌نویس کمپین",
+  "growth.campaign_updated": "ویرایش پیش‌نویس کمپین",
+  "growth.campaign_archived": "بایگانی کمپین",
 };
 
 const ENTITY_LABELS: Record<string, string> = {
@@ -118,6 +127,7 @@ const ENTITY_LABELS: Record<string, string> = {
   commission_payout: "پرداخت پورسانت",
   dining_table: "میز",
   floor_section: "بخش سالن",
+  growth_campaign: "کمپین رشد",
 };
 
 /** A Persian label for a raw `audit_log.action` value, falling back to the raw string when unrecognised. */

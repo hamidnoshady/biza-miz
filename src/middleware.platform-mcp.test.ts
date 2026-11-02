@@ -136,3 +136,51 @@ describe("issue #1126 — bearer clients reach /api/platform/mcp", () => {
     expect(result.body).toEqual({ error: "deployment_unsupported" });
   });
 });
+
+describe("platform MCP OAuth — the client's own requests carry no cookie", () => {
+  const admin = { ip: "", host: "admin.app.eshobe.com", proto: "https" as const };
+
+  it("serves register, authorize, token and revoke without a console session", async () => {
+    vi.stubEnv("DEPLOYMENT_ROLE", "central");
+    vi.stubEnv("ROOT_DOMAIN", "app.eshobe.com");
+    for (const [index, [method, path]] of [
+      ["POST", "/api/platform/mcp/oauth/register"],
+      ["GET", "/api/platform/mcp/oauth/authorize"],
+      ["POST", "/api/platform/mcp/oauth/token"],
+      ["POST", "/api/platform/mcp/oauth/revoke"],
+    ].entries()) {
+      const result = await call(method, path, { ...admin, ip: `203.0.113.${60 + index}` });
+      expect(result.passed, path).toBe(true);
+    }
+  });
+
+  it("still steers a tenant host to the admin origin", async () => {
+    vi.stubEnv("DEPLOYMENT_ROLE", "central");
+    vi.stubEnv("ROOT_DOMAIN", "app.eshobe.com");
+    const result = await call("POST", "/api/platform/mcp/oauth/token", {
+      ip: "203.0.113.70",
+      host: "titea.app.eshobe.com",
+      proto: "https",
+    });
+    expect(result.status).toBe(307);
+    expect(result.response.headers.get("location")).toContain("admin.app.eshobe.com");
+  });
+
+  it("sends a signed-out admin to login and back to exactly the consent request", async () => {
+    vi.stubEnv("DEPLOYMENT_ROLE", "central");
+    vi.stubEnv("ROOT_DOMAIN", "app.eshobe.com");
+    const consent = "/platform/mcp-connections/consent?client_id=abc&state=xyz";
+    const result = await call("GET", consent, { ...admin, ip: "203.0.113.71" });
+    expect(result.status).toBe(307);
+    const location = new URL(result.response.headers.get("location") ?? "");
+    expect(location.pathname).toBe("/platform/login");
+    expect(location.searchParams.get("next")).toBe(consent);
+  });
+
+  it("does not add a next to the login redirect of any other console page", async () => {
+    vi.stubEnv("DEPLOYMENT_ROLE", "central");
+    vi.stubEnv("ROOT_DOMAIN", "app.eshobe.com");
+    const result = await call("GET", "/platform/businesses", { ...admin, ip: "203.0.113.72" });
+    expect(new URL(result.response.headers.get("location") ?? "").search).toBe("");
+  });
+});

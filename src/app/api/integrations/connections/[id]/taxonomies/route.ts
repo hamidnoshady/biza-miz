@@ -10,6 +10,7 @@ import {
   taxonomyGroupStats,
   type TermRow,
 } from "@/lib/integrations/woo-taxonomy-service";
+import { isPluginJobUnsupportedError, PLUGIN_JOB_UNSUPPORTED } from "@/lib/integrations/plugin-job-guard";
 import { enqueuePluginExport } from "@/lib/integrations/plugin-service";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import {
@@ -195,7 +196,13 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
     const jobType = pluginSupportsJobType(connection.plugin_capabilities, "taxonomy_export")
       ? ("taxonomy_export" as const)
       : ("catalogue_export" as const);
-    await enqueuePluginExport(session.businessId, id, jobType);
+    try {
+      await enqueuePluginExport(session.businessId, id, jobType);
+    } catch (err) {
+      // Neither export type advertised: refuse rather than strand the row (#944 / OVR-08).
+      if (isPluginJobUnsupportedError(err)) return NextResponse.json({ ok: false, error: PLUGIN_JOB_UNSUPPORTED }, { status: 409 });
+      throw err;
+    }
     return NextResponse.json({ ok: true, queued: true, jobType });
   }
 

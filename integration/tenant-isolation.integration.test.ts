@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { EXEMPT_TABLES } from "../src/lib/tenant-tables";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -146,7 +146,7 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query(`DROP ROLE IF EXISTS ${APP_ROLE}`);
+    await dropAppRole(maintenance, APP_ROLE);
   } finally {
     await maintenance.end();
   }
@@ -374,6 +374,11 @@ describe("every tenant table is protected", () => {
       // any one business; therefore no business_id and no tenant policy. Its
       // tenant counterpart (mcp_connections) is RLS-protected above.
       "platform_mcp_connections",
+      // Migration 0258 — the console realm's OAuth stores (clients, codes, token
+      // hashes), same shape and same reason as platform_mcp_connections.
+      "platform_mcp_oauth_clients",
+      "platform_mcp_oauth_codes",
+      "platform_mcp_oauth_tokens",
       // Migration 0149 — the singleton S3/Parspack connection and price policy
       // behind every business's media library. One bucket credential for the
       // deployment, no business_id; tenant separation happens inside the bucket
@@ -396,7 +401,82 @@ describe("every tenant table is protected", () => {
       // shape as platform_ai_config: one account, configured once by a
       // super-admin, holding no tenant data.
       "platform_sms_config",
+      // Issue #903 — the managed tenant-backup fleet policy singleton: interval,
+      // retention ceiling, keep count and quotas, owned by Superadmin and never
+      // a tenant's to read. Its per-business overrides and the recovery
+      // approvals are `platform_only` too, but their ownership column is
+      // `subject_business_id`, so they are not part of this `platform_` census.
+      "platform_tenant_backup_service",
     ]);
+  });
+
+  /**
+   * Issue #902 — a table no tenant can ever read must not be in a tenant export.
+   *
+   * `platform_only` (FORCE RLS, `app_rls_bypass()` and nothing else) is the
+   * project's way of saying "this row is the platform's". RLS enforces it for
+   * every non-owner connection, but a per-tenant export reads with `SELECT *`
+   * **as the owner** — and FORCE RLS does not bind a superuser. So the rows of
+   * those tables silently landed in the artifact: the 0264 seeded library then
+   * made a restore collide on its own keys, and the retail markup, the alert
+   * ledger and an encrypted child key rode along with it.
+   *
+   * `EXEMPT_TABLES` is the list that keeps them out, so the two must agree. The
+   * exceptions below carry no `business_id`/`location_id` and hold nothing about
+   * a tenant: deployment-wide identity and cloud-relay bookkeeping that predates
+   * this check.
+   */
+  it("keeps every platform-only table out of the tenant export", async () => {
+    const { rows } = await ownerClient.query<{ relname: string }>(
+      `SELECT c.relname
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+         JOIN pg_policy p ON p.polrelid = c.oid
+        WHERE c.relkind = 'r' AND c.relforcerowsecurity
+        GROUP BY c.relname
+       HAVING count(*) = count(*) FILTER (WHERE p.polname = 'platform_only')
+          AND count(*) FILTER (WHERE p.polname = 'platform_only') > 0
+        ORDER BY c.relname`,
+    );
+    // Nine today: the six managed-SMS tables below plus the cloud-relay
+    // bookkeeping. The assertion is a floor, not a census — the point is that
+    // the catalog was actually read, and the family check underneath names the
+    // rows this test exists for.
+    expect(rows.length).toBeGreaterThanOrEqual(6);
+
+    const NOT_TENANT_DATA = new Set([
+      "cloud_exception_inbox",
+      "cloud_exception_installations",
+      "cloud_exception_responses",
+      "telegram_identity_links",
+      "telegram_init_data_replays",
+      "telegram_webhook_updates",
+    ]);
+    const exported = rows
+      .map((row) => row.relname)
+      .filter((name) => !EXEMPT_TABLES.has(name) && !NOT_TENANT_DATA.has(name));
+    expect(
+      exported,
+      `platform-only tables that would be dumped into a tenant export: ${exported.join(", ")}`,
+    ).toEqual([]);
+
+    // The managed-SMS fleet is the family this check was written for, and it is
+    // platform-only in every direction: the credential, the commercial policy,
+    // the alert ledger and the message library.
+    for (const table of [
+      "kavenegar_account_credentials",
+      "kavenegar_master_templates",
+      "kavenegar_retail_price_overrides",
+      "kavenegar_retail_price_slabs",
+      "kavenegar_retail_price_versions",
+      "kavenegar_service_alerts",
+      // Issue #902 §9 item 3: the wholesale side of billing — what a supplier
+      // charged us and the statement it charged against. DoD #3 keeps the cost
+      // and the margin off every tenant surface, an export included.
+      "billing_supplier_invoices",
+    ]) {
+      expect(EXEMPT_TABLES.has(table), `${table} must stay out of tenant exports`).toBe(true);
+    }
   });
 
   it("makes reporting views follow the caller rather than their owner", async () => {

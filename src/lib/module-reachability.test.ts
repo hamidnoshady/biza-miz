@@ -67,16 +67,6 @@ const REACHABLE_BY_OTHER_MEANS: Record<string, string> = {
   "types/mssql.d.ts":
     "ambient .d.ts for the untyped `mssql` driver; tsconfig loads it, the Holoo client needs it",
 
-  // The platform-support assistant's two read-only health tools. `ai.ts`
-  // already advertises both to the model for `mode: "platform"`, and
-  // `ai-service.test.ts` / `ai.test.ts` pin the realm separation. No route
-  // passes that mode today, so `runPlatformReadTool` is not reached at
-  // runtime — but deleting the executor while `ai.ts` still declares the
-  // tools would leave the model able to call two tools nothing can answer.
-  // Retained deliberately; see docs/engineering/dead-code-cleanup.md.
-  "lib/ai-platform-tools.ts":
-    "executor for the platform-support tools ai.ts declares; removing it alone would orphan those declarations",
-
 };
 
 function walk(dir: string, out: string[] = []): string[] {

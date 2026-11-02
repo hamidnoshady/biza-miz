@@ -9,7 +9,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { query } from "../db";
-import { refreshOutboxForConnection, drainOutbox, acknowledgePushedEvent } from "./outbox-service";
+import { refreshOutboxForConnection, drainOutbox, acknowledgePushedEvent, runWooCommerceSyncTick } from "./outbox-service";
 import type { ConnectionRow } from "./connections-service";
 
 const mocks = vi.hoisted(() => ({
@@ -20,6 +20,8 @@ const mocks = vi.hoisted(() => ({
   wooClientFor: vi.fn(),
   parentRemoteIdFor: vi.fn(),
   writeIntegrationAudit: vi.fn(),
+  getConnection: vi.fn(),
+  syncOrders: vi.fn(),
 }));
 
 vi.mock("../db", () => ({
@@ -27,13 +29,15 @@ vi.mock("../db", () => ({
   getPool: vi.fn(),
   closeDatabasePool: vi.fn(),
   withTenant: vi.fn(async (_businessId: string, fn: () => Promise<unknown>) => fn()),
+  withTenantTransaction: vi.fn(async (_businessId: string, fn: () => Promise<unknown>) => fn()),
   withoutTenantScope: vi.fn(async (_reason: string, fn: () => Promise<unknown>) => fn()),
   rlsEffective: vi.fn(),
   assertRlsEffective: vi.fn(),
 }));
 vi.mock("../industry-guard", () => ({ getBusinessIndustry: mocks.getBusinessIndustry }));
 vi.mock("../industries", () => ({ hasSellableCatalogue: mocks.hasSellableCatalogue }));
-vi.mock("./connections-service", () => ({ getConnection: vi.fn(), wooClientFor: mocks.wooClientFor }));
+vi.mock("./connections-service", () => ({ getConnection: mocks.getConnection, wooClientFor: mocks.wooClientFor }));
+vi.mock("../service-activation/app-gate-service", () => ({ isAppServiceOperational: vi.fn(async () => true) }));
 vi.mock("./mapping-service", () => ({
   listMappings: mocks.listMappings,
   mergeMappingMeta: mocks.mergeMappingMeta,
@@ -42,6 +46,7 @@ vi.mock("./mapping-service", () => ({
 // `parentRemoteIdFromMeta` is pure, so the mock carries its exact rule rather
 // than importing the whole module chain.
 vi.mock("./sync-service", () => ({
+  syncOrders: mocks.syncOrders,
   parentRemoteIdFor: mocks.parentRemoteIdFor,
   parentRemoteIdFromMeta: (meta: unknown) => {
     const parent = (meta as { remoteParentId?: unknown } | null | undefined)?.remoteParentId;
@@ -94,6 +99,36 @@ beforeEach(() => {
   mocks.parentRemoteIdFor.mockResolvedValue(null);
 });
 
+describe("Woo worker order reconciliation before outbound stock (#951)", () => {
+  function stubTick(pull: () => Promise<void>) {
+    const steps: string[] = [];
+    mocks.getConnection.mockResolvedValue(connection({ auto_pull_orders: true, sync_orders: true }));
+    mocks.syncOrders.mockImplementation(async () => { steps.push("orders"); await pull(); });
+    mocks.listMappings.mockImplementation(async () => { steps.push("refresh"); return []; });
+    vi.mocked(query).mockImplementation((async (sql: string) => {
+      if (sql.includes("SELECT id, business_id FROM integration_connections")) {
+        return { rows: [{ id: "conn-1", business_id: "biz-1" }] };
+      }
+      if (sql.includes("UPDATE integration_outbox_events o")) steps.push("drain");
+      return { rows: [] };
+    }) as never);
+    return steps;
+  }
+
+  it("ingests Woo sales before deriving the absolute stock push", async () => {
+    const steps = stubTick(async () => {});
+    await runWooCommerceSyncTick();
+    expect(steps).toEqual(["orders", "refresh", "drain"]);
+  });
+
+  it("retains queued absolute stock instead of sending it after a failed order pull", async () => {
+    const steps = stubTick(async () => { throw new Error("store_unreachable"); });
+    await runWooCommerceSyncTick();
+    expect(steps).toEqual(["orders"]);
+    expect(mocks.writeIntegrationAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "orders.pull_failed" }));
+  });
+});
+
 describe("refreshOutboxForConnection — variation routing", () => {
   it("queues a variation's price and stock WITH __parentRemoteId, so REST mode targets the variations path", async () => {
     mocks.listMappings.mockResolvedValue([
@@ -103,7 +138,7 @@ describe("refreshOutboxForConnection — variation routing", () => {
         localId: "local-11",
         // The parent id is recorded on the mapping when the product synced;
         // the scheduled push must read it exactly like the manual enqueue.
-        lastPushedPayload: { wooType: "variation", remoteParentId: "10" },
+        lastPushedPayload: { wooType: "variation", remoteParentId: "10", remoteManageStock: true },
         updatedAt: null,
       },
     ]);
@@ -119,9 +154,10 @@ describe("refreshOutboxForConnection — variation routing", () => {
       regular_price: "100", // 1000 Rial → 100 Toman, the store's unit
       __parentRemoteId: "10",
     });
-    expect(JSON.parse(String(stock!.params[5]))).toMatchObject({
+    // The store already tracks this variation, so only the quantity goes —
+    // `manage_stock` is the owner's call (issue #1149, C3), not the push's.
+    expect(JSON.parse(String(stock!.params[5]))).toEqual({
       stock_quantity: 9,
-      manage_stock: true,
       __parentRemoteId: "10",
     });
   });
@@ -145,7 +181,7 @@ describe("refreshOutboxForConnection — variation routing", () => {
         entityType: "product",
         remoteId: "11",
         localId: "local-11",
-        lastPushedPayload: { remoteParentId: "10" },
+        lastPushedPayload: { remoteParentId: "10", remoteManageStock: true },
         updatedAt: null,
       },
     ]);
@@ -183,7 +219,7 @@ describe("refreshOutboxForConnection — stock semantics and per-product switche
 
   it("holds a paused axis back while the other one still flows — the pause stops the automation, not the queue", async () => {
     mocks.listMappings.mockResolvedValue([
-      { entityType: "product", remoteId: "61", localId: "local-61", lastPushedPayload: { wooType: "simple", stockPushPaused: true }, updatedAt: null },
+      { entityType: "product", remoteId: "61", localId: "local-61", lastPushedPayload: { wooType: "simple", remoteManageStock: true, stockPushPaused: true }, updatedAt: null },
     ]);
     const stockPaused = stubQueries();
     await refreshOutboxForConnection(connection());
@@ -195,7 +231,7 @@ describe("refreshOutboxForConnection — stock semantics and per-product switche
     mocks.hasSellableCatalogue.mockReturnValue(true);
     mocks.parentRemoteIdFor.mockResolvedValue(null);
     mocks.listMappings.mockResolvedValue([
-      { entityType: "product", remoteId: "61", localId: "local-61", lastPushedPayload: { wooType: "simple", pricePushPaused: true }, updatedAt: null },
+      { entityType: "product", remoteId: "61", localId: "local-61", lastPushedPayload: { wooType: "simple", remoteManageStock: true, pricePushPaused: true }, updatedAt: null },
     ]);
     const pricePaused = stubQueries();
     await refreshOutboxForConnection(connection());
@@ -205,7 +241,7 @@ describe("refreshOutboxForConnection — stock semantics and per-product switche
 
   it("ignores a paused flag that is not exactly `true` — a corrupted meta value must not silently stop pushes", async () => {
     mocks.listMappings.mockResolvedValue([
-      { entityType: "product", remoteId: "62", localId: "local-62", lastPushedPayload: { wooType: "simple", stockPushPaused: "true" }, updatedAt: null },
+      { entityType: "product", remoteId: "62", localId: "local-62", lastPushedPayload: { wooType: "simple", remoteManageStock: true, stockPushPaused: "true" }, updatedAt: null },
     ]);
     const inserts = stubQueries();
 
@@ -216,7 +252,7 @@ describe("refreshOutboxForConnection — stock semantics and per-product switche
 
   it("carries the variation parent into the payload in plugin mode too — both transports read the same routing rule", async () => {
     mocks.listMappings.mockResolvedValue([
-      { entityType: "product", remoteId: "11", localId: "local-11", lastPushedPayload: { wooType: "variation", remoteParentId: "10" }, updatedAt: null },
+      { entityType: "product", remoteId: "11", localId: "local-11", lastPushedPayload: { wooType: "variation", remoteParentId: "10", remoteManageStock: true }, updatedAt: null },
     ]);
     const inserts = stubQueries();
 
@@ -228,6 +264,43 @@ describe("refreshOutboxForConnection — stock semantics and per-product switche
     // the mapping meta; writing it into the payload keeps the two transports
     // on one rule instead of one reading the payload and one reading meta.
     expect(JSON.parse(String(stock!.params[5]))).toMatchObject({ __parentRemoteId: "10" });
+  });
+});
+
+describe("refreshOutboxForConnection — manage_stock and source of truth (issue #1149, C1/C3)", () => {
+  it("never queues a stock push for a product the store does not track — no manage_stock=true, quantity 0", async () => {
+    mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "5", localId: "local-5", lastPushedPayload: { wooType: "simple", remoteManageStock: false }, updatedAt: null },
+    ]);
+    const inserts = stubQueries();
+
+    await refreshOutboxForConnection(connection());
+
+    expect(inserts.some((i) => i.params[2] === "stock")).toBe(false);
+    expect(inserts.some((i) => i.params[2] === "price")).toBe(true);
+  });
+
+  it("with the owner's opt-in, the push turns tracking on and says so", async () => {
+    mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "5", localId: "local-5", lastPushedPayload: { wooType: "simple", remoteManageStock: false }, updatedAt: null },
+    ]);
+    const inserts = stubQueries();
+
+    await refreshOutboxForConnection(connection({ manage_stock_opt_in: true }));
+
+    const stock = inserts.find((i) => i.params[2] === "stock");
+    expect(JSON.parse(String(stock!.params[5]))).toMatchObject({ stock_quantity: 9, manage_stock: true });
+  });
+
+  it("a store-owned connection queues neither axis, whatever its push switches say", async () => {
+    mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "5", localId: "local-5", lastPushedPayload: { wooType: "simple", remoteManageStock: true }, updatedAt: null },
+    ]);
+    const inserts = stubQueries();
+
+    await refreshOutboxForConnection(connection({ source_of_truth: "store" }));
+
+    expect(inserts.some((i) => i.params[2] === "stock" || i.params[2] === "price")).toBe(false);
   });
 });
 

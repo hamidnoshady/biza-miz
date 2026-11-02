@@ -44,8 +44,24 @@ class POS_Connector_Media_Import {
 		return array( $host, $port, $ips[0] );
 	}
 
+	/**
+	 * A/AAAA answers for a host.
+	 *
+	 * PHP has no per-call timeout for the system resolver, so a dead nameserver
+	 * can stall a cron run for as long as resolv.conf allows. glibc re-reads
+	 * RES_OPTIONS whenever the resolver initialises, so a tighter timeout is set
+	 * for this one lookup and then restored. That bounds the worst case on glibc;
+	 * musl and Windows ignore it, so the caller still checks the overall
+	 * deadline as soon as the lookup returns and refuses to start a fetch past it.
+	 */
 	private static function resolve( $host ) {
-		$records = dns_get_record( $host, DNS_A | DNS_AAAA );
+		$previous = getenv( 'RES_OPTIONS' );
+		putenv( 'RES_OPTIONS=timeout:2 attempts:2' );
+		try {
+			$records = dns_get_record( $host, DNS_A | DNS_AAAA );
+		} finally {
+			putenv( false === $previous ? 'RES_OPTIONS' : 'RES_OPTIONS=' . $previous );
+		}
 		$ips = array();
 		foreach ( $records ?: array() as $record ) {
 			if ( isset( $record['ip'] ) ) $ips[] = $record['ip'];
@@ -54,41 +70,73 @@ class POS_Connector_Media_Import {
 		return $ips;
 	}
 
-	public static function create( $url, $title ) {
-		if ( ! function_exists( 'curl_init' ) ) throw new Exception( 'media_curl_required' );
+	/** One bounded HTTP GET with redirects off, DNS pinned to $ip, the body streamed through $write.
+	 * Returns the HTTP status, or false when the transfer itself failed or was aborted by $write.
+	 */
+	private static function curl_get( $url, $host, $port, $ip, $seconds, $on_header, $write ) {
+		$curl = curl_init( $url );
+		curl_setopt_array( $curl, array(
+			CURLOPT_FOLLOWLOCATION => false,
+			CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+			CURLOPT_PROXY => '',
+			CURLOPT_RESOLVE => array( $host . ':' . $port . ':' . ( strpos( $ip, ':' ) !== false ? '[' . $ip . ']' : $ip ) ),
+			CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_SSL_VERIFYPEER => true,
+			CURLOPT_CONNECTTIMEOUT_MS => min( 5000, (int) ( $seconds * 1000 ) ),
+			CURLOPT_TIMEOUT_MS => (int) ( $seconds * 1000 ),
+			CURLOPT_HEADERFUNCTION => static function ( $ch, $header ) use ( $on_header ) {
+				call_user_func( $on_header, $header );
+				return strlen( $header );
+			},
+			CURLOPT_WRITEFUNCTION => static function ( $ch, $data ) use ( $write ) {
+				return call_user_func( $write, $data );
+			},
+		) );
+		try {
+			$ok = curl_exec( $curl );
+			return false === $ok ? false : (int) curl_getinfo( $curl, CURLINFO_HTTP_CODE );
+		} finally {
+			curl_close( $curl );
+		}
+	}
+
+	/**
+	 * @param array $options Test seams only; production passes none.
+	 *   'transport' => callable( $url, $host, $port, $ip, $seconds, $on_header, $write ): int|false
+	 *   'resolve'   => callable( $host ): string[]
+	 *   'timeout'   => float seconds for the whole import (default TIMEOUT)
+	 */
+	public static function create( $url, $title, array $options = array() ) {
+		$transport = isset( $options['transport'] ) ? $options['transport'] : array( __CLASS__, 'curl_get' );
+		$resolve   = isset( $options['resolve'] ) ? $options['resolve'] : null;
+		$timeout   = isset( $options['timeout'] ) ? (float) $options['timeout'] : self::TIMEOUT;
+		if ( ! isset( $options['transport'] ) && ! function_exists( 'curl_init' ) ) throw new Exception( 'media_curl_required' );
 		$tmp = wp_tempnam( 'pos-image' );
 		if ( ! $tmp ) throw new Exception( 'media_temp_failed' );
 		$started = microtime( true );
 		try {
 			for ( $hop = 0; $hop <= 3; ++$hop ) {
-				list( $host, $port, $ip ) = self::target( $url );
-				$remaining = self::TIMEOUT - ( microtime( true ) - $started );
+				// Every hop is validated and pinned again, and the deadline is checked
+				// once the lookup has returned, before any connection is opened.
+				list( $host, $port, $ip ) = self::target( $url, $resolve );
+				$remaining = $timeout - ( microtime( true ) - $started );
 				if ( $remaining <= 0 ) throw new Exception( 'media_timeout' );
 				$file = fopen( $tmp, 'wb' );
 				if ( ! $file ) throw new Exception( 'media_temp_failed' );
 				$bytes = 0; $location = ''; $mime = '';
-				$curl = curl_init( $url );
-				curl_setopt_array( $curl, array(
-					CURLOPT_FOLLOWLOCATION => false,
-					CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
-					CURLOPT_PROXY => '',
-					CURLOPT_RESOLVE => array( $host . ':' . $port . ':' . ( strpos( $ip, ':' ) !== false ? '[' . $ip . ']' : $ip ) ),
-					CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_SSL_VERIFYPEER => true,
-					CURLOPT_CONNECTTIMEOUT_MS => min( 5000, (int) ( $remaining * 1000 ) ),
-					CURLOPT_TIMEOUT_MS => (int) ( $remaining * 1000 ),
-					CURLOPT_HEADERFUNCTION => static function ( $ch, $header ) use ( &$location, &$mime ) {
-						if ( stripos( $header, 'Location:' ) === 0 ) $location = trim( substr( $header, 9 ) );
-						if ( stripos( $header, 'Content-Type:' ) === 0 ) $mime = strtolower( trim( explode( ';', substr( $header, 13 ) )[0] ) );
-						return strlen( $header );
-					},
-					CURLOPT_WRITEFUNCTION => static function ( $ch, $data ) use ( $file, &$bytes ) {
-						$bytes += strlen( $data );
-						return $bytes > self::MAX_BYTES ? 0 : fwrite( $file, $data );
-					},
-				) );
-				try { $ok = curl_exec( $curl ); $status = curl_getinfo( $curl, CURLINFO_HTTP_CODE ); }
-				finally { curl_close( $curl ); fclose( $file ); }
-				if ( false === $ok ) throw new Exception( $bytes > self::MAX_BYTES ? 'media_too_large' : 'media_download_failed' );
+				try {
+					$status = call_user_func(
+						$transport, $url, $host, $port, $ip, $remaining,
+						static function ( $header ) use ( &$location, &$mime ) {
+							if ( stripos( $header, 'Location:' ) === 0 ) $location = trim( substr( $header, 9 ) );
+							if ( stripos( $header, 'Content-Type:' ) === 0 ) $mime = strtolower( trim( explode( ';', substr( $header, 13 ) )[0] ) );
+						},
+						static function ( $data ) use ( $file, &$bytes ) {
+							$bytes += strlen( $data );
+							return $bytes > self::MAX_BYTES ? 0 : fwrite( $file, $data );
+						}
+					);
+				} finally { fclose( $file ); }
+				if ( false === $status ) throw new Exception( $bytes > self::MAX_BYTES ? 'media_too_large' : 'media_download_failed' );
 				if ( in_array( $status, array( 301, 302, 303, 307, 308 ), true ) ) {
 					if ( ! $location || $hop === 3 ) throw new Exception( 'media_redirect_limit' );
 					$next = WP_Http::make_absolute_url( $location, $url );

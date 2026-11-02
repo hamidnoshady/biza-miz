@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { AiMarkdown } from "./ai-markdown";
 import { AiProposalCard } from "./ai-proposal-card";
 import { AiInputRequestCard } from "./ai-input-request-card";
+import { GenUiBlocks } from "./genui-blocks";
 import type { InputResponse } from "@/lib/ai-input-protocol";
 import {
   animateBubbleIn,
@@ -202,7 +203,7 @@ export function ChatBubble({
                         key={attachment.id}
                         className="flex max-w-full items-center gap-1.5 rounded-xl bg-white/15 px-2 py-1 text-[11px] ring-1 ring-white/25"
                       >
-                        <span className="font-black">{attachment.kind === "pdf" ? "PDF" : "TXT"}</span>
+                        <span className="font-black">{attachment.kind === "pdf" ? "PDF" : attachment.kind === "office" ? "DOC" : "TXT"}</span>
                         <span className="truncate">{attachment.name}</span>
                       </span>
                     ),
@@ -270,6 +271,8 @@ export function ChatBubble({
             {time}
           </p>
         ) : null}
+
+        {!isUser && message.genUi?.length ? <GenUiBlocks blocks={message.genUi} /> : null}
 
         {canPropose && message.proposal ? (
           <AiProposalCard

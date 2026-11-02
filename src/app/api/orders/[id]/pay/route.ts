@@ -27,6 +27,7 @@ import {
 import { listPaymentMethods } from "@/lib/payment-methods-service";
 import { enqueueHolooSaleForOrder } from "@/lib/integrations/holoo/outbox-producer";
 import { emitDomainEvent } from "@/lib/posting-engine";
+import { notifyPaymentReceived } from "@/lib/kavenegar/lookup-triggers";
 import { earnPoints } from "@/lib/loyalty-service";
 import { releaseTableAfterOrderSettled } from "@/lib/table-session-service";
 import { appendSyncOutboxEvent } from "@/lib/sync-outbox";
@@ -379,6 +380,18 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   } finally {
     client.release();
   }
+
+  // Issue #902 §5 — the customer's receipt, if this business turned that
+  // trigger on. Deliberately after COMMIT and not awaited: the bill is paid,
+  // and a provider round trip must not sit between the cashier and the next
+  // customer. The send log's fact key (`payment:<orderId>`) is what makes a
+  // replayed settlement one receipt rather than two.
+  void notifyPaymentReceived({
+    businessId: session.businessId,
+    locationId: location.id,
+    orderId: id,
+    amountRial: Number(rialBigInt(total)),
+  });
 
   broadcast(location.id, { type: "order.updated", orderId: id });
   if (releasedSession) {

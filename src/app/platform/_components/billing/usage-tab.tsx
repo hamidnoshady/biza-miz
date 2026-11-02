@@ -14,6 +14,7 @@ import { Loader2Icon, PlusIcon, SaveIcon, Trash2Icon } from "lucide-react";
 import { toLatinDigits } from "@/lib/digits";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { tomanLabel, formatRial, parseSafeIntInput } from "@/lib/platform-money";
+import { ManagedRetailPricingCard } from "./managed-pricing-card";
 import {
   api,
   Button,
@@ -105,6 +106,9 @@ export function BillingUsageTab() {
 
       <AiRatesCard rates={rates} canManage={canManage} busy={busy === "ai"} onBusy={setBusy} onSaved={async (r) => { setRates(r); setInfo("تعرفهٔ هوش مصنوعی ذخیره شد."); }} onError={setError} />
       <MessagingRatesCard rates={rates} canManage={canManage} busy={busy === "messaging"} onBusy={setBusy} onSaved={async (r) => { setRates(r); setInfo("تعرفهٔ پیام‌رسانی ذخیره شد."); }} onError={setError} />
+      {/* Issue #902 §4 — the policy applied on top of the base per-segment rate
+          above: markup, surcharge, volume tiers, agreements, tax, allowance. */}
+      <ManagedRetailPricingCard />
       <MediaRatesCard rates={rates} canManage={canManage} busy={busy === "media"} onBusy={setBusy} onSaved={async (r) => { setRates(r); setInfo("تعرفهٔ رسانه ذخیره شد."); }} onError={setError} />
 
       <Card title="بسته‌های شارژ کیف پول">

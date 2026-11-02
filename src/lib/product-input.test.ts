@@ -38,6 +38,41 @@ describe("parseProductCreateInput", () => {
     });
   });
 
+  it("reads the storefront status and descriptions, defaulting to a published product with none", () => {
+    const plain = parseProductCreateInput({ ...validBase });
+    expect(plain.ok && plain.data).toMatchObject({ publishStatus: "published", shortDescription: null, longDescription: null });
+
+    const written = parseProductCreateInput({
+      ...validBase,
+      publishStatus: "draft",
+      shortDescription: "  خلاصه  ",
+      longDescription: "متن کامل",
+    });
+    expect(written.ok && written.data).toMatchObject({
+      publishStatus: "draft",
+      shortDescription: "خلاصه",
+      longDescription: "متن کامل",
+    });
+  });
+
+  it("rejects a bad status or an over-long description, naming the tab that holds the field", () => {
+    const bad = parseProductCreateInput({
+      ...validBase,
+      publishStatus: "archived",
+      shortDescription: "x".repeat(1001),
+      longDescription: 12,
+    });
+    expect(bad.ok).toBe(false);
+    if (bad.ok) return;
+    expect(bad.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ field: "publishStatus", code: "invalid_publish_status", section: "content" }),
+        expect.objectContaining({ field: "shortDescription", code: "text_too_long", section: "content" }),
+        expect.objectContaining({ field: "longDescription", code: "invalid_text", section: "content" }),
+      ]),
+    );
+  });
+
   it("rejects malformed request shapes instead of throwing", () => {
     expect(parseProductCreateInput(null)).toMatchObject({ ok: false });
     expect(parseProductCreateInput([])).toMatchObject({ ok: false });

@@ -887,7 +887,7 @@ export function McpPanel() {
         <pre dir="ltr" className="overflow-x-auto rounded-lg bg-primary p-3 text-xs text-primary-foreground/90">
 {`{
   "mcpServers": {
-    "cafe-pos": {
+    "bizamiz": {
       "type": "http",
       "url": "${mcpExampleUrl}",
       "headers": { "Authorization": "Bearer posmcp_..." }
@@ -904,7 +904,7 @@ export function McpPanel() {
         <pre dir="ltr" className="overflow-x-auto rounded-lg bg-primary p-3 text-xs text-primary-foreground/90">
 {`{
   "mcpServers": {
-    "cafe-pos": {
+    "bizamiz": {
       "command": "npx",
       "args": [
         "-y", "mcp-remote",

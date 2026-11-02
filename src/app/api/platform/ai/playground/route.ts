@@ -1,24 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformCapability, withPlatformScope, platformAudit } from "@/lib/platform-auth";
 import { getAiGatewayRuntimeSettings } from "@/lib/ai-gateway-service";
-import { chatCompletionsUrl } from "@/lib/ai";
 import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
 import { publishedPromptFor } from "@/lib/ai-prompt-store";
 import { AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
 import { randomUUID } from "node:crypto";
 import { brandName } from "@/lib/brand";
+import { toolDefinitions } from "@/lib/ai";
+import { gatewayChatModel, runSdkTurn, sdkToolsFrom } from "@/lib/ai-sdk-adapter";
+import { PLATFORM_ASSISTANT_MAX_TOOL_ROUNDS, platformToolsForRole, runPlatformAssistantTool } from "@/lib/ai-platform-assistant";
 
 /**
- * Superadmin-only read-only AI playground. Tests the actual configured
- * LiteLLM alias and published mode prompt without tenant data or action tools.
- * This is NOT the tenant chat endpoint and cannot make business mutations.
+ * Superadmin-only AI endpoint. By default it is the read-only playground: the
+ * configured LiteLLM alias and published mode prompt, no tools. With
+ * `tools: true` it is the platform assistant: a bounded loop over the platform
+ * health tools (`ai-platform-assistant.ts`), each gated by the administrator's
+ * own capability and audited. Never the tenant chat endpoint; no mutations.
  */
 export const POST = withPlatformScope(async (request: NextRequest) => {
   const { session, error } = await requirePlatformCapability("ai.config.manage");
   if (error) return error;
 
   const body = (await request.json().catch(() => null)) as
-    | { mode?: unknown; message?: unknown; history?: unknown }
+    | { mode?: unknown; message?: unknown; history?: unknown; tools?: unknown }
     | null;
   const mode = body?.mode;
   const message = typeof body?.message === "string" ? body.message.trim() : "";
@@ -66,66 +70,62 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     payload: { requestId, modelAlias: model, promptVersions: { base: basePrompt?.version ?? null, mode: modePrompt?.version ?? null } },
   });
 
-  let providerResponse: Response;
+  const useTools = body?.tools === true;
+  const tools = useTools ? platformToolsForRole(session.role, toolDefinitions("platform")) : [];
+  const system = [
+    useTools
+      ? `You are the ${brandName("fa")} Superadmin platform assistant. You may call only the read-only platform health tools you are given; they never expose orders, customers or financial records, and you cannot change anything. State uncertainty plainly.`
+      : `You are in the ${brandName("fa")} Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.`,
+    basePrompt?.text ?? "",
+    modePrompt?.text ?? "",
+  ].filter(Boolean).join("\n\n");
+
+  const failed = async (reason: string, status: number, extra: Record<string, unknown> = {}) => {
+    await platformAudit({ adminId: session.padmin, action: "ai.playground.failed", entity: "platform_ai_modes", entityId: mode,
+      payload: { requestId, modelAlias: model, reason, ...extra } });
+    return NextResponse.json({ error: reason }, { status });
+  };
+
+  // The Vercel AI SDK drives the step loop; LiteLLM stays the gateway behind it
+  // (`ai-sdk-adapter.ts`). The last allowed step offers no tools to the SDK's
+  // stop condition, so a turn always ends in an answer or a visible failure.
+  let turn;
   try {
-    providerResponse = await fetch(chatCompletionsUrl(gateway.baseUrl), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${gateway.masterKey}` },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        temperature: runtime.temperature ?? undefined,
-        max_tokens: Math.min(runtime.max_output_tokens ?? 512, 1024),
-        messages: [
-          {
-            role: "system",
-            content: [
-              `You are in the ${brandName("fa")} Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.`,
-              basePrompt?.text ?? "",
-              modePrompt?.text ?? "",
-            ].filter(Boolean).join("\n\n"),
-          },
-          ...history,
-          { role: "user", content: message },
-        ],
+    turn = await runSdkTurn({
+      model: gatewayChatModel({ baseUrl: gateway.baseUrl, apiKey: gateway.masterKey, model }),
+      system,
+      messages: [...history, { role: "user", content: message }],
+      tools: sdkToolsFrom(tools, async (name, args) => {
+        const outcome = await runPlatformAssistantTool(session.role, name, JSON.stringify(args));
+        await platformAudit({
+          adminId: session.padmin, action: outcome.allowed ? "ai.platform_tool.read" : "ai.platform_tool.denied",
+          entity: "platform_ai_modes", entityId: mode, payload: { requestId, tool: name },
+        });
+        return outcome.content;
       }),
-      signal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]),
-      cache: "no-store",
+      maxSteps: PLATFORM_ASSISTANT_MAX_TOOL_ROUNDS + 1,
+      temperature: runtime.temperature ?? undefined,
+      maxOutputTokens: Math.min(runtime.max_output_tokens ?? 512, 1024),
+      abortSignal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]),
     });
-  } catch {
-    await platformAudit({ adminId: session.padmin, action: "ai.playground.failed", entity: "platform_ai_modes", entityId: mode,
-      payload: { requestId, modelAlias: model, reason: "provider_unreachable" } });
-    return NextResponse.json({ error: "provider_unreachable" }, { status: 502 });
+  } catch (error) {
+    const status = (error as { statusCode?: unknown })?.statusCode;
+    return failed(typeof status === "number" ? "provider_failed" : "provider_unreachable", 502,
+      typeof status === "number" ? { status } : {});
   }
-  if (!providerResponse.ok) {
-    await platformAudit({ adminId: session.padmin, action: "ai.playground.failed", entity: "platform_ai_modes", entityId: mode,
-      payload: { requestId, modelAlias: model, reason: "provider_failed", status: providerResponse.status } });
-    return NextResponse.json({ error: "provider_failed" }, { status: 502 });
-  }
-  const reply = await providerResponse.json().catch(() => null) as
-    | { choices?: Array<{ message?: { content?: unknown } }>; usage?: { total_tokens?: unknown } }
-    | null;
-  const answer = reply?.choices?.[0]?.message?.content;
-  if (typeof answer !== "string" || !answer.trim()) {
-    return NextResponse.json({ error: "invalid_provider_reply" }, { status: 502 });
-  }
+  if (!turn.text.trim()) return failed("invalid_provider_reply", 502);
   await platformAudit({
     adminId: session.padmin,
     action: "ai.playground.test",
     entity: "platform_ai_modes",
     entityId: mode,
-    payload: {
-      requestId, modelAlias: model,
-      tokens: Number.isFinite(Number(reply?.usage?.total_tokens)) ? Math.max(0, Number(reply?.usage?.total_tokens)) : null,
-      costUsd: providerResponse.headers.has("x-litellm-response-cost") &&
-        Number.isFinite(Number(providerResponse.headers.get("x-litellm-response-cost"))) && Number(providerResponse.headers.get("x-litellm-response-cost")) >= 0
-        ? Number(providerResponse.headers.get("x-litellm-response-cost")) : null,
-    },
+    payload: { requestId, modelAlias: model, tokens: turn.totalTokens || null, costUsd: turn.costUsd, tools: turn.toolsUsed },
   });
   return NextResponse.json({
-    answer: answer.slice(0, 16_000),
+    answer: turn.text.slice(0, 16_000),
     mode,
     modelAlias: model,
     promptVersions: { base: basePrompt?.version ?? null, mode: modePrompt?.version ?? null },
+    toolsUsed: turn.toolsUsed,
   });
 });

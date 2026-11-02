@@ -28,7 +28,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { workspaceAccessFlags, type WorkspaceAccessFlags } from "../src/lib/workspace-shared";
 import { normalizeContractContent } from "../src/lib/contracts/blocks";
 
@@ -55,7 +55,12 @@ let jwtSecret: typeof import("../src/lib/jwt-secret");
  * trap; this file reuses the role-creation script rather than re-deriving it.
  */
 let appClient: Client;
-const APP_ROLE = "pos_contract_signing_test_role";
+// Unique per run. A fixed name makes the teardown fail whenever an earlier run
+// left a database behind (`role ... cannot be dropped because some objects
+// depend on it`) — the role would then outlive its database and every later run
+// would inherit the error. `tenant-isolation.integration.test.ts` can use a
+// fixed name because its database is the only object that ever holds a grant.
+const APP_ROLE = `pos_contract_signing_${randomUUID().replaceAll("-", "").slice(0, 10)}`;
 const APP_PASSWORD = "contract-signing-test-password";
 
 const alpha = { businessId: "", ownerId: "", partyId: "", projectId: "", counterpartyId: "" };
@@ -120,7 +125,12 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query(`DROP ROLE IF EXISTS ${APP_ROLE}`);
+    // `dropAppRole`, not a plain DROP ROLE: `createAppRole` grants this role SET
+    // on `session_replication_role`, and PostgreSQL records that grant in
+    // `pg_parameter_acl` — a CLUSTER-level object that depends on the role, so a
+    // bare DROP ROLE fails with "cannot be dropped because some objects depend
+    // on it" even after the database is gone.
+    await dropAppRole(maintenance, APP_ROLE);
   } finally {
     await maintenance.end();
   }
@@ -217,7 +227,13 @@ async function makeContract(overrides: Record<string, unknown> = {}) {
       valueRial: 1_250_000_000,
       startDate: "2026-01-05",
       endDate: "2026-09-30",
-      status: "active",
+      // `draft`, never `active`: #907's merge made `active` and
+      // `pending_approval` workflow-owned, so a create payload naming one is
+      // refused (`contract_status_requires_workflow`) — an approval decision
+      // is a command, not a form field. Signing does not require the lifecycle
+      // to have advanced, and the test's subject is the signing round, not the
+      // approval workflow.
+      status: "draft",
       ...overrides,
     }),
   );

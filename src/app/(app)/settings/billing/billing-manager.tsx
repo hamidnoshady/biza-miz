@@ -150,7 +150,12 @@ export function BillingManager() {
   const [subscription, setSubscription] = useState<SubscriptionBrief | null>(null);
   const [spend, setSpend] = useState<{ budgetRial: number | null; spentRial: number; action: string | null } | null>(null);
   const [canManage, setCanManage] = useState(true);
-  const [gatewayMode, setGatewayMode] = useState<string>("zarinpal");
+  /**
+   * How a top-up will be taken: through a gateway, or recorded as a manual
+   * transfer an administrator confirms. First-party wording (issue #902 §0) —
+   * the wallet API reports the distinction, never the gateway's name.
+   */
+  const [paymentMode, setPaymentMode] = useState<"online" | "manual">("online");
   const [loading, setLoading] = useState(true);
   const [minTopUpRial, setMinTopUpRial] = useState(100_000);
 
@@ -162,9 +167,10 @@ export function BillingManager() {
   const verifiedRef = useRef(false);
 
   const loadWallet = useCallback(async () => {
-    const res = await api<{ wallet: Wallet; ledger: LedgerEntry[] }>("/api/billing/wallet");
+    const res = await api<{ wallet: Wallet; ledger: LedgerEntry[]; paymentMode?: "online" | "manual" }>("/api/billing/wallet");
     if (res.ok) {
       setWallet(res.data.wallet);
+      if (res.data.paymentMode) setPaymentMode(res.data.paymentMode);
       setWalletError(null);
       if ((res.data as unknown as { canManage?: boolean }).canManage === false) setCanManage(false);
     } else {
@@ -232,10 +238,10 @@ export function BillingManager() {
   // The endpoint now returns `total` so the Next button knows whether another
   // page exists; the old code was pinned to offset=0 and never advanced.
   const loadPayments = useCallback(async (offset: number) => {
-    const res = await api<{ payments: Payment[]; total?: number; gateway: string }>(`/api/billing/payments?limit=50&offset=${offset}`);
+    const res = await api<{ payments: Payment[]; total?: number; paymentMode?: "online" | "manual" }>(`/api/billing/payments?limit=50&offset=${offset}`);
     if (res.ok) {
       setPayments(res.data.payments ?? []);
-      setGatewayMode(res.data.gateway ?? "manual");
+      setPaymentMode(res.data.paymentMode ?? "manual");
       setPayTotal(res.data.total ?? res.data.payments?.length ?? 0);
     }
   }, []);
@@ -429,14 +435,14 @@ export function BillingManager() {
       {/* Top-up packages — gateway-neutral copy */}
       <SectionCard title="شارژ اعتبار">
         <p className="mb-3 text-sm text-muted-foreground">
-          {gatewayMode === "manual" ? "یکی از بسته‌ها را انتخاب کنید یا مبلغ دلخواه وارد کنید. پرداخت به‌صورت کارت‌به‌کارت ثبت می‌شود و مدیر سامانه آن را تأیید می‌کند." : "یکی از بسته‌ها را انتخاب کنید یا مبلغ دلخواه وارد کنید. پرداخت از طریق درگاه امن انجام می‌شود."}
+          {paymentMode === "manual" ? "یکی از بسته‌ها را انتخاب کنید یا مبلغ دلخواه وارد کنید. پرداخت به‌صورت کارت‌به‌کارت ثبت می‌شود و مدیر سامانه آن را تأیید می‌کند." : "یکی از بسته‌ها را انتخاب کنید یا مبلغ دلخواه وارد کنید. پرداخت از طریق درگاه امن انجام می‌شود."}
           {!canManage ? <span className="block text-amber-600 dark:text-amber-400">برای پرداخت نیاز به مجوز «مدیریت مالی» دارید.</span> : null}
         </p>
         {pkgError ? <p className="text-sm text-destructive">{pkgError} <Button variant="secondary" size="sm" onClick={() => void loadAll()}>تلاش دوباره</Button></p> : null}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {packages.map((pkg) => {
             const bonus = pkg.creditRial - pkg.priceRial;
-            const priceWithTaxNote = gatewayMode === "manual" ? "قابل پرداخت دستی" : "پرداخت آنلاین";
+            const priceWithTaxNote = paymentMode === "manual" ? "قابل پرداخت دستی" : "پرداخت آنلاین";
             return (
               <div key={pkg.id} className={cn("flex flex-col p-4", cardClass)}>
                 <p className="font-bold">{pkg.name}</p>

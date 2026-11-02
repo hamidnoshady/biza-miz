@@ -4,9 +4,14 @@ import { requirePlatformCapability, platformAudit } from "@/lib/platform-auth";
 import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
 import { getAiGatewayRuntimeSettings } from "@/lib/ai-gateway-service";
 import { POST } from "./route";
+import { runPlatformReadTool } from "@/lib/ai-platform-tools";
 vi.mock("@/lib/platform-auth", () => ({ requirePlatformCapability: vi.fn(), platformAudit: vi.fn(), withPlatformScope: (fn: unknown) => fn }));
 vi.mock("@/lib/ai-runtime-modes", () => ({ getPlatformAiMode: vi.fn() }));
 vi.mock("@/lib/ai-gateway-service", () => ({ getAiGatewayRuntimeSettings: vi.fn() }));
+vi.mock("@/lib/ai-platform-tools", async (original) => ({
+  ...(await original<typeof import("@/lib/ai-platform-tools")>()),
+  runPlatformReadTool: vi.fn(async () => ({ ok: true, data: { failedRuns: [] } })),
+}));
 vi.mock("@/lib/ai-prompt-store", () => ({ publishedPromptFor: async (key: string) => ({ text: `published:${key}`, version: 3 }) }));
 const request = (body: unknown) => new NextRequest("https://app.test/api/platform/ai/playground", { method: "POST", body: JSON.stringify(body) });
 beforeEach(() => {
@@ -44,5 +49,44 @@ describe("platform-only model testing", () => {
     vi.mocked(getPlatformAiMode).mockResolvedValue({ is_active: false } as never);
     expect((await POST(request({ mode: "instant", message: "hello" }))).status).toBe(409);
     expect(fetch).not.toHaveBeenCalled();
+  });
+  it("runs a bounded platform-tool loop only when asked, per the admin's own role", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a", role: "owner" }, error: null } as never);
+    const replies = [
+      Response.json({ choices: [{ message: { content: null, tool_calls: [
+        { id: "c1", type: "function", function: { name: "get_backup_health", arguments: "{}" } },
+        { id: "c2", type: "function", function: { name: "get_ar_aging", arguments: "{}" } },
+      ] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 6, completion_tokens: 4, total_tokens: 10 } }),
+      Response.json({ choices: [{ message: { content: "همه چیز سالم است" }, finish_reason: "stop" }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => replies.shift() as Response));
+    const response = await POST(request({ mode: "auto", message: "backups?", tools: true }));
+    const json = await response.json();
+    expect(response.status).toBe(200);
+    expect(json.answer).toBe("همه چیز سالم است");
+    expect(json.toolsUsed).toEqual(["get_backup_health"]);
+    // The tenant tool the model invented never ran; the platform one ran once.
+    expect(runPlatformReadTool).toHaveBeenCalledTimes(1);
+    const first = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+    expect(first.tools.map((t: { function: { name: string } }) => t.function.name).sort())
+      .toEqual(["get_backup_health", "get_client_update_status"]);
+    const second = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body));
+    expect(second.messages.some((m: { role: string }) => m.role === "tool")).toBe(true);
+    expect(platformAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "ai.platform_tool.read" }));
+    expect(platformAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: "ai.playground.test", payload: expect.objectContaining({ tokens: 15, tools: ["get_backup_health"] }),
+    }));
+  });
+
+  it("stops asking for tools after the round limit and answers without them", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a", role: "owner" }, error: null } as never);
+    const loop = () => Response.json({ choices: [{ message: { content: null, tool_calls: [
+      { id: "c", type: "function", function: { name: "get_backup_health", arguments: "{}" } }] }, finish_reason: "tool_calls" }] });
+    const replies = [loop(), loop(), loop(), Response.json({ choices: [{ message: { content: "نهایی" }, finish_reason: "stop" }] })];
+    vi.stubGlobal("fetch", vi.fn(async () => replies.shift() as Response));
+    const response = await POST(request({ mode: "auto", message: "again", tools: true }));
+    expect((await response.json()).answer).toBe("نهایی");
+    const last = JSON.parse(String(vi.mocked(fetch).mock.calls[3][1]?.body));
+    expect(last.tools).toBeUndefined();
   });
 });

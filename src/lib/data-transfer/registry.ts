@@ -1570,6 +1570,11 @@ const WORKSPACE_CONTRACTS: EntityDefinition = {
       key: "status",
       label: "وضعیت",
       type: "enum",
+      // Issue #907 F02 — «جاری» is listed so a paper register's column still
+      // maps, but the adapter will not write it: an active contract needs the
+      // approval decision that made it active. The row imports as a draft and
+      // the import's warning says why.
+      hint: "وضعیت «جاری» فقط با گردش تأیید ثبت می‌شود؛ ردیفی که جاری باشد به‌صورت پیش‌نویس وارد و هشدار داده می‌شود.",
       options: [
         { value: "draft", label: "پیش‌نویس" },
         { value: "active", label: "جاری" },

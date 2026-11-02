@@ -56,7 +56,28 @@ export type RegisterClientResult =
   | { ok: true; client: RegisteredClient }
   | { ok: false; error: "invalid_client_metadata"; description: string };
 
-const MAX_CLIENTS_PER_BUSINESS = 50;
+export const MAX_CLIENTS_PER_BUSINESS = 50;
+
+/**
+ * How long a registration that never completed an exchange is kept before it
+ * counts as abandoned. A consent round trip takes minutes (the code itself
+ * lives five), so an hour never cuts a live flow short.
+ */
+const ABANDONED_CLIENT_AFTER = "1 hour";
+
+/**
+ * A client nobody ever completed an exchange with and that owns no connection.
+ * Deleting one cascades only to its unconsumed authorization codes — a client
+ * with a connection (live or revoked) is history the owner can see and is never
+ * matched here.
+ */
+const UNUSED_CLIENT = `
+  cl.business_id = $1
+  AND cl.last_used_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM mcp_connections c
+     WHERE c.client_id = cl.id AND c.business_id = cl.business_id
+  )`;
 
 /**
  * Register a public client.
@@ -72,6 +93,15 @@ const MAX_CLIENTS_PER_BUSINESS = 50;
  * unauthenticated endpoint cannot be used to fill a tenant's table. Nothing a
  * registration alone can do is sensitive — a client id with no consented code
  * grants nothing at all.
+ *
+ * The bound is on clients that matter, not on attempts. Every connect attempt
+ * registers a fresh client and an abandoned one is never used again, so
+ * counting them forever locked every standard client out of the business after
+ * 50 tries (a 400 on `/register`, with only a pasted static token still
+ * working). Abandoned registrations are therefore dropped first, and when the
+ * cap is still reached the oldest unused ones make room; a client that has a
+ * connection is never touched, and a business whose every slot is a used client
+ * still refuses.
  */
 export async function registerMcpClient(
   businessId: string,
@@ -96,11 +126,33 @@ export async function registerMcpClient(
     };
   }
 
+  await query(
+    `DELETE FROM mcp_oauth_clients cl
+      WHERE ${UNUSED_CLIENT}
+        AND cl.created_at < now() - interval '${ABANDONED_CLIENT_AFTER}'`,
+    [businessId],
+  );
   const { rows: existing } = await query<{ count: string }>(
     `SELECT count(*)::text AS count FROM mcp_oauth_clients WHERE business_id = $1`,
     [businessId],
   );
-  if (Number(existing[0]?.count ?? 0) >= MAX_CLIENTS_PER_BUSINESS) {
+  const overflow = Number(existing[0]?.count ?? 0) - MAX_CLIENTS_PER_BUSINESS + 1;
+  if (overflow > 0) {
+    await query(
+      `DELETE FROM mcp_oauth_clients
+        WHERE id IN (
+          SELECT cl.id FROM mcp_oauth_clients cl
+           WHERE ${UNUSED_CLIENT}
+           ORDER BY cl.created_at
+           LIMIT $2)`,
+      [businessId, overflow],
+    );
+  }
+  const { rows: remaining } = await query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM mcp_oauth_clients WHERE business_id = $1`,
+    [businessId],
+  );
+  if (Number(remaining[0]?.count ?? 0) >= MAX_CLIENTS_PER_BUSINESS) {
     return {
       ok: false,
       error: "invalid_client_metadata",

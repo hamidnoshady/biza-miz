@@ -86,6 +86,22 @@ function remoteKey(m: DuplicateItemMapping): string {
 }
 
 /**
+ * The mapped rows an unmapped row looks like the losing twin of: same kind,
+ * branch and parent, created within {@link RACE_WINDOW_MS} of it. More than one
+ * means the group is ambiguous, which a caller that acts on it must not guess at.
+ */
+export function raceTwinsOf(orphan: DuplicateItemMember, mapped: DuplicateItemMember[]): DuplicateItemMember[] {
+  const orphanAt = Date.parse(orphan.createdAt);
+  return mapped.filter(
+    (m) =>
+      m.kind === orphan.kind &&
+      m.locationId === orphan.locationId &&
+      m.parentItemId === orphan.parentItemId &&
+      Math.abs(Date.parse(m.createdAt) - orphanAt) <= RACE_WINDOW_MS,
+  );
+}
+
+/**
  * Classify one SKU group. Checks run from the most to the least alarming, so
  * a group that is both a variant family and holds a race orphan is reported
  * as the orphan.
@@ -108,15 +124,7 @@ export function classifyDuplicateGroup(members: DuplicateItemMember[]): Duplicat
   // 2. An unmapped twin of a mapped row, created moments apart, same kind and
   //    branch: the losing side of the creation race.
   for (const orphan of unmapped) {
-    const orphanAt = Date.parse(orphan.createdAt);
-    const twin = mapped.find(
-      (m) =>
-        m.kind === orphan.kind &&
-        m.locationId === orphan.locationId &&
-        m.parentItemId === orphan.parentItemId &&
-        Math.abs(Date.parse(m.createdAt) - orphanAt) <= RACE_WINDOW_MS,
-    );
-    if (twin) return "race_orphan";
+    if (raceTwinsOf(orphan, mapped).length > 0) return "race_orphan";
   }
 
   // 3. A legitimate family: one parent and its own children, each child a

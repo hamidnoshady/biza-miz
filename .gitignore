@@ -78,3 +78,6 @@ keystore.properties
 
 # Disposable local/browser fixtures (may contain generated test credentials)
 .cache/
+
+# Scratch narrow-typecheck configs (whole-project tsc OOMs in sandboxes)
+tsconfig.wave*.json

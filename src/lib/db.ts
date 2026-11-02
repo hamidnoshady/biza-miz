@@ -521,6 +521,47 @@ export async function withTenantTransaction<T>(
  *     that business. The redeem predicates on the payment id plus the stored
  *     authority — never a request-body business id.
 
+ *   - **kavenegar-provisioning** (issue #902) — the managed-SMS worker claims
+ *     one provisioning job with `FOR UPDATE SKIP LOCKED` and writes the
+ *     account/credential/tariff state it returns. Claiming is inherently
+ *     cross-tenant: the job queue is the platform's, and the next job belongs
+ *     to whichever business is at the head of it. Every provider write runs
+ *     inside `withTenant(job.business_id, …)` after the claim; the bypass
+ *     covers only the queue row and the platform-only credential table, and
+ *     every statement predicates on the business id the job already carries
+ *     rather than on a request body.
+ *
+ *   - **kavenegar-alerts** (issue #902) — the managed service's attention
+ *     ledger. Conditions are raised by whichever pass observes them (the
+ *     funding tick, reconciliation, a provisioning job that will not be
+ *     retried), and a fleet-level condition such as "the master account is
+ *     nearly out of credit" belongs to no tenant at all. The rows are
+ *     platform-only under FORCE RLS; a business is named at most as the
+ *     *subject* of a condition (`subject_business_id`), never as the owner, so
+ *     no tenant policy may return them and this bypass is the console's only
+ *     way in. Every statement is written by the platform and read by the
+ *     console; nothing here is ever returned by a tenant route.
+ *
+ *   - **kavenegar-credentials** (issue #902) — reading or writing ONE child
+ *     API key by the account id the caller already established. The credential
+ *     table is platform-only under FORCE RLS so that no tenant policy can
+ *     return a key by accident; this narrow reason is how the outbox resolver
+ *     (inside the business's own `withTenant`) and the provisioning worker read
+ *     it. It never selects across businesses: the account id is a parameter
+ *     derived from a row already scoped to the caller's business.
+ *
+ *   - **torob-product-api-auth** (issue #894) — resolving the opaque shop id in
+ *     Torob's Product API v3 path (`/api/v1/torob/products/<shopId>`) to the
+ *     business that owns that `torob_shops` row. The caller is Torob's fetcher
+ *     with no session of any kind, and the id in the URL is the *only* thing that
+ *     names the tenant, so this is the same identify-the-tenant-first shape as
+ *     woocommerce-webhook-auth and api-key-auth, keyed on a path segment instead
+ *     of a token. ONE read of `torob_shops.business_id`; every later statement —
+ *     the shop's publishability, its domain (the JWT audience), the catalogue and
+ *     the feed — runs inside `withTenant` for that business. The response to an
+ *     unknown id and to a shop that may not be served is identical, so this
+ *     lookup cannot be used to enumerate shops.
+ *
  * Every call is a hole in the isolation boundary, so keep them few, keep them
  * short, and never let one wrap a request body that also handles tenant data.
  */

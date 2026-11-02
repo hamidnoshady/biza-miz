@@ -100,12 +100,21 @@ const ERROR_TRANSLATIONS: Record<string, string> = {
   invalid_contract_type: "نوع قرارداد نامعتبر است.",
   invalid_contract_status: "وضعیت قرارداد نامعتبر است.",
   invalid_document_status: "وضعیت سند نامعتبر است.",
+  contract_status_requires_workflow:
+    "این وضعیت قرارداد با درخواست تأیید یا چرخهٔ عمر قرارداد تغییر می‌کند، نه با ویرایش فرم.",
+  document_status_requires_workflow:
+    "این وضعیت سند با فرایند تأیید تغییر می‌کند، نه با ویرایش فرم.",
+  approval_already_pending: "برای این مورد از قبل یک درخواست تأیید در انتظار وجود دارد.",
+  subject_not_requestable: "این مورد در وضعیت فعلی قابل ارسال برای تأیید نیست.",
+  document_already_superseded:
+    "برای این نسخهٔ سند از قبل بازنگری ثبت شده است؛ بازنگری تازه را از آخرین نسخه بسازید.",
   invalid_approval_subject: "موضوع تأیید نامعتبر است.",
   invalid_event_kind: "نوع رویداد نامعتبر است.",
   invalid_workspace_role: "نقش نامعتبر است.",
   invalid_project_budget: "بودجه نامعتبر است.",
   invalid_contract_value: "مبلغ قرارداد نامعتبر است.",
   invalid_reminder_days: "فاصلهٔ یادآوری نامعتبر است.",
+  invalid_text_field: "مقدار یکی از فیلدهای متنی نامعتبر است.",
   forbidden: "دسترسی لازم را ندارید.",
   unauthorized: "نشست شما منقضی شده است.",
 };

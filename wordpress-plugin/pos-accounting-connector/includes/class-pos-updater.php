@@ -150,6 +150,10 @@ class POS_Connector_Updater {
 			// 'self_host' or 'github' — which server the last successful
 			// answer came from, so the screen can say so.
 			'source'       => '',
+			// The self-hosted manifest's error code when GitHub answered in its
+			// place (`fallback_from`), or GitHub's own when both failed.
+			'fallback_from'  => '',
+			'fallback_error' => '',
 		);
 		$stored = get_option( self::CACHE_OPTION, array() );
 		return wp_parse_args( is_array( $stored ) ? $stored : array(), $defaults );
@@ -164,7 +168,25 @@ class POS_Connector_Updater {
 	 * behavioural one.
 	 */
 	public static function check() {
-		$result = '' !== self::update_url() ? self::fetch_self_hosted() : self::fetch_github();
+		if ( '' === self::update_url() ) {
+			return self::store( self::fetch_github() );
+		}
+
+		$result = self::fetch_self_hosted();
+		if ( '' !== $result['error'] ) {
+			// The manifest host is the preferred source, not the only one: the
+			// default one did not resolve at all from 2026-10-22, and every
+			// check ended in `manifest_unreachable` with nowhere else to look.
+			// This repository's own releases are the fallback; the manifest's
+			// error stays on the record either way, so the screen can say the
+			// preferred server is down instead of pretending it never failed.
+			$github = self::fetch_github();
+			if ( '' === $github['error'] ) {
+				$github['fallback_from'] = $result['error'];
+				return self::store( $github );
+			}
+			$result['fallback_error'] = $github['error'];
+		}
 		return self::store( $result );
 	}
 
@@ -326,9 +348,10 @@ class POS_Connector_Updater {
 
 		if ( '' !== $result['error'] ) {
 			self::maybe_log_update_failure( $result['error'], $cached['error'] );
-			$cached['checked_at'] = time();
-			$cached['ok']         = false;
-			$cached['error']      = $result['error'];
+			$cached['checked_at']     = time();
+			$cached['ok']             = false;
+			$cached['error']          = $result['error'];
+			$cached['fallback_error'] = isset( $result['fallback_error'] ) ? $result['fallback_error'] : '';
 			update_option( self::CACHE_OPTION, $cached, false );
 			return $cached;
 		}
@@ -344,7 +367,13 @@ class POS_Connector_Updater {
 			'ok'           => true,
 			'error'        => '',
 			'source'       => $result['source'],
+			'fallback_from'  => isset( $result['fallback_from'] ) ? $result['fallback_from'] : '',
+			'fallback_error' => '',
 		);
+		if ( '' !== $fresh['fallback_from'] ) {
+			// Logged like a failure (at most daily): the preferred server is down.
+			self::maybe_log_update_failure( 'manifest_fallback:' . $fresh['fallback_from'], $cached['fallback_from'] ? 'manifest_fallback:' . $cached['fallback_from'] : '' );
+		}
 		update_option( self::CACHE_OPTION, $fresh, false );
 		delete_option( 'pos_connector_update_last_log' );
 		return $fresh;
@@ -502,7 +531,22 @@ class POS_Connector_Updater {
 			'unreadable_tag'          => 'نام برچسب نسخه قابل خواندن نیست؛ الگوی v1.2.3 را رعایت کنید.',
 			'unexpected_package_url'  => 'نشانی بستهٔ دانلود از منبع مورد اعتماد نبود و نادیده گرفته شد.',
 		);
-		return isset( $map[ $error ] ) ? $map[ $error ] : $error;
+		if ( isset( $map[ $error ] ) ) {
+			return $map[ $error ];
+		}
+		if ( 0 === strpos( (string) $error, 'manifest_http_' ) ) {
+			return 'سرور مانیفست به‌روزرسانی با کد ' . substr( $error, strlen( 'manifest_http_' ) ) . ' پاسخ داد.';
+		}
+		if ( 'request_failed' === $error || 0 === strpos( (string) $error, 'cURL error' ) ) {
+			return 'به سرور به‌روزرسانی دسترسی نشد: ' . $error;
+		}
+		if ( 'http_403' === $error ) {
+			return 'GitHub درخواست را رد کرد (سقف تعداد درخواست یا فیلتر شبکه). کمی بعد دوباره امتحان کنید.';
+		}
+		if ( 'not_found' === $error ) {
+			return 'مخزن افزونه در GitHub پیدا نشد.';
+		}
+		return $error;
 	}
 
 	/**
@@ -582,7 +626,7 @@ class POS_Connector_Updater {
 			'version'       => '' !== $latest['version'] ? $latest['version'] : POS_CONNECTOR_VERSION,
 			'download_link' => $latest['download_url'],
 			'author'        => '<a href="https://github.com/hamidnoshady">hamidnoshady</a>',
-			'homepage'      => 'https://github.com/hamidnoshady/cafe-restaurant-pos',
+			'homepage'      => 'https://github.com/hamidnoshady/biza-miz',
 			'requires'      => self::header( 'Requires at least' ),
 			'requires_php'  => self::header( 'Requires PHP' ),
 			'tested'        => '6.7',
@@ -880,6 +924,13 @@ class POS_Connector_Updater {
 		check_admin_referer( 'pos_connector_check_update' );
 
 		$latest = self::check();
+
+		// The notice names the actual codes (preferred source first, then
+		// the fallback's), not just «failed».
+		if ( ! empty( $latest['error'] ) ) {
+			$codes = $latest['error'] . ( ! empty( $latest['fallback_error'] ) ? ' / ' . $latest['fallback_error'] : '' );
+			POS_Connector_Settings::flash_detail( self::explain_error( $latest['error'] ) . ' [' . $codes . ']' );
+		}
 
 		$notice = 'update_check_failed';
 		if ( empty( $latest['error'] ) && self::is_newer( $latest['version'] ) ) {

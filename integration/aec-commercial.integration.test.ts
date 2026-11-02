@@ -213,6 +213,12 @@ async function addMediaAsset(businessId: string, ownerUserId: string, fileName: 
 }
 
 /** One posted cost against a project — what Accounting's ledger holds (§20). */
+/**
+ * A posted project cost, filed the way Accounting files one: a debit on an
+ * **expense** account. Issue #907 F04 made the cockpit read the ledger's own
+ * definition of cost, so debiting whichever account sorted first (an asset in
+ * the seeded chart) no longer counts as spend — because it never was.
+ */
 async function postProjectCost(
   businessId: string,
   projectId: string,
@@ -221,9 +227,10 @@ async function postProjectCost(
 ): Promise<void> {
   await dbLib.withTenant(businessId, async () => {
     const { rows: accounts } = await dbLib.query<{ id: string }>(
-      `SELECT id FROM accounts WHERE business_id = $1 ORDER BY code LIMIT 1`,
+      `SELECT id FROM accounts WHERE business_id = $1 AND type = 'expense' ORDER BY code LIMIT 1`,
       [businessId],
     );
+    if (!accounts[0]) throw new Error("the seeded chart of accounts has no expense account");
     const { rows: entries } = await dbLib.query<{ id: string }>(
       `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, project_id)
        VALUES ($1, '2026-05-01', $2, 'manual', $3) RETURNING id`,
@@ -1309,5 +1316,53 @@ describe("gates and tenancy", () => {
 
     const loaded = await withTenant(businessId, () => commercial.loadVariation(businessId, draft.id));
     expect(loaded.responsiblePartyName).toBe("پیمانکار بازمانده");
+  });
+});
+
+describe("issue #907 F03 — an AEC submit can never file a second live request", () => {
+  /*
+   * 0258 makes one `pending` row per (business, subject_type, subject_id) a
+   * database fact. The AEC modules insert their queue row with raw SQL rather
+   * than through `requestApproval`, so the question the audit asked is whether
+   * any of those paths can now hit that index and surface a 23505 as a 500.
+   *
+   * This is the representative case, and the answer holds for all six sites
+   * (`aec-boq`, `aec-commercial` ×2, `aec-procurement` ×2, `aec-rfi`): the
+   * INSERT is inside `if (action === "submit")`, and the action is only reached
+   * after the register's own transition table accepted the move. A second
+   * submit is therefore refused by the SERVICE with a domain code, before any
+   * INSERT runs — the subject's status is the guard, and the index is the
+   * backstop that a bug in that guard would still be caught by.
+   */
+  it("refuses the second submit with the register's own code, leaving one pending row", async () => {
+    const { businessId, owner } = await provisionBusiness();
+    const { projectId, contractId } = await seedContract(owner, "پروژهٔ درخواست تکراری");
+    const variation = await withTenant(businessId, () =>
+      commercial.createVariation(owner, projectId, {
+        contractId,
+        source: "client_instruction",
+        description: "تغییر تکراری",
+        estimatedAmountRial: 400_000_000,
+        submittedAmountRial: 390_000_000,
+      }),
+    );
+    await withTenant(businessId, () => commercial.applyVariationAction(owner, variation.id, "price"));
+    await withTenant(businessId, () => commercial.applyVariationAction(owner, variation.id, "submit"));
+
+    await withTenant(businessId, async () => {
+      await expect(commercial.applyVariationAction(owner, variation.id, "submit")).rejects.toSatisfy(
+        (error: unknown) => {
+          expectAecError(error, "invalid_variation_transition");
+          return true;
+        },
+      );
+    });
+
+    const { rows } = await db.query<{ status: string }>(
+      `SELECT status FROM workspace_approvals
+        WHERE business_id = $1 AND subject_type = 'variation' AND subject_id = $2`,
+      [businessId, variation.id],
+    );
+    expect(rows).toEqual([{ status: "pending" }]);
   });
 });

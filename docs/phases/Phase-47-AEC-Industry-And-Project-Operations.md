@@ -45,9 +45,16 @@ What shipped:
 | Tests | A dedicated profile block, AEC chart assertions (including "no hospitality account leaks in"), the AEC rows in the posting/COA suites, and real-database coverage in `integration/business-industry.integration.test.ts`: provisioning stores the industry, seeds the AEC chart and *not* the café's, and turns the restaurant features off |
 | CI guard | `src/lib/industry-coverage.test.ts` |
 
-### Decision 1 — the trade is POS-less, and that is the point
+### Decision 1 — the trade has no counter, and that is the point
 
-The profile grants `[...CORE_MODULES]` only: no `pos`, no `orders`, no `tables`/`waiter`/`kitchen`/
+> **Amended after the original release.** The profile first granted `[...CORE_MODULES]` only, `pos`
+> included in the exclusions, on the theory that invoices would "arrive as Accounting documents in a
+> later wave". No wave built them, and a contractor ended up with no way to bill a client from
+> Accounting — the sidebar had no «فروش و درآمد» group at all, because that group is assembled from
+> the trade's `orders`/`pos` entries. The profile now also carries `pos`, which here means only
+> "the invoice screen lives at `/accounting/pos` (`/api/sales`)"; see Decision 40.
+
+The profile grants `[...CORE_MODULES]` plus `pos` and nothing else: no `orders`, no `tables`/`waiter`/`kitchen`/
 `reservations`/`delivery`, no `inventory`/`menu`, no `stock` and none of the trade-goods catalogue
 pages. An AEC business reaches Accounting (ledger, reports, journal, cheques, payroll, fixed
 assets), CRM and `parties`, Growth & Marketing, Website, the media library and the assistant, and
@@ -857,6 +864,28 @@ rather than a moved file with a new import in two places: the server half and
 the tests should not have to care which side of the line a name lives on, and
 the next person adding a flow adds it to the catalogue and sees the boundary
 once.
+
+### Decision 40 — a contractor bills with a service invoice, which is one more line kind
+
+The first release gave AEC (and `service_saas`) a `salesModel` of `retail_invoice` but no `pos` module
+and no line kinds, so the invoice screen, `/api/sales/invoices` and the Moodian tax records (which read
+`orders`) were all unreachable. The fix adds no table and no second invoice engine:
+
+- **One new line kind, `service`** (`retail-invoice-service.ts`, `src/lib/service-invoice.ts`): a free
+  description, a quantity, a unit price, a discount and a VAT rate. It writes an ordinary `orders` /
+  `order_items` row (`item_id` NULL, snapshot `kind: "service"`), so numbering, payments, receivables,
+  receipts, the invoice list, printing, void and the tax-invoice reconciliation work unchanged.
+- **Revenue only, no COGS and no stock.** `service.sale_revenue` (`service-posting-rules.ts`) debits
+  cash/bank-clearing/receivable by tender and credits the line's revenue account plus VAT. A contractor's
+  direct cost still reaches the books through purchases, expenses and payroll.
+- **The revenue account is the operator's choice, from the trade's own list** (`SERVICE_REVENUE_ACCOUNTS`):
+  4610/4620/4630 for AEC (design, supervision, construction), 4500/4510/4520 for a service company. An
+  account of another trade is refused rather than coerced to the default.
+- **`pos` is the address, not a till.** It makes `/accounting/pos` render the invoice screen and adds the
+  «فروش و درآمد» group to the Accounting sidebar. It does not add `orders`, `stock` or any café module
+  (`industry-profile.test.ts` still asserts that for every non-F&B trade).
+- **Not built here:** linking an invoice to a project or to a payment certificate, and printing a
+  certificate as an invoice. Both are additive on the `service` line.
 
 ## What is still not built
 

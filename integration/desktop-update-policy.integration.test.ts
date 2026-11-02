@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { dropAppRole } from "../src/lib/create-app-role";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -33,7 +34,7 @@ afterAll(async () => {
   const maintenance = new Client({ connectionString: maintenanceUrl() }); await maintenance.connect();
   await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
   // The runtime role is cluster-wide; its grants went with the database.
-  if (appRoleName) await maintenance.query(`DROP ROLE IF EXISTS "${appRoleName}"`);
+  if (appRoleName) await dropAppRole(maintenance, appRoleName);
   await maintenance.end();
 });
 

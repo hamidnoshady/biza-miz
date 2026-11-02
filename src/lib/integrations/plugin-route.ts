@@ -28,12 +28,19 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 export function pluginRoute(handler: PluginRouteHandler) {
   return async (request: NextRequest): Promise<NextResponse> => {
     const rawBody = await request.text();
-    if (rawBody.length > MAX_BODY_BYTES) {
+    // Bytes, not UTF-16 code units: a Persian catalogue is two bytes a letter,
+    // so `.length` would let a body twice the limit through.
+    if (Buffer.byteLength(rawBody, "utf8") > MAX_BODY_BYTES) {
       return NextResponse.json({ error: "payload_too_large" }, { status: 413 });
     }
 
     const auth = await authenticatePlugin(request.headers, rawBody);
-    if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+    if (!auth.ok) {
+      return NextResponse.json(
+        { error: auth.error, ...(auth.serverTime ? { serverTime: auth.serverTime } : {}) },
+        { status: auth.status },
+      );
+    }
 
     let body: Record<string, unknown> = {};
     if (rawBody.trim()) {

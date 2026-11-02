@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authorizationServerMetadata } from "@/lib/mcp/oauth";
 import { mcpIssuer } from "@/lib/mcp/origin";
+import {
+  isPlatformAdminHost,
+  platformAuthorizationServerMetadata,
+  wellKnownIsPlatformRealm,
+} from "@/lib/mcp/platform-oauth-docs";
 
 /**
  * RFC 8414 — authorization server metadata, served at
@@ -15,10 +20,23 @@ import { mcpIssuer } from "@/lib/mcp/origin";
  * `registration_endpoint`. Without dynamic client registration every business
  * would have to pre-register Claude, ChatGPT and every other client by hand
  * before an owner could connect any of them.
+ *
+ * The console realm (`/api/platform/mcp`) is its own authorization server: its
+ * document answers the path-inserted form for the console's resource path, and
+ * the bare document on the admin host, where the console is the only realm.
  */
-export async function GET(request: NextRequest) {
-  const issuer = mcpIssuer(request.headers, request.nextUrl.protocol);
-  const response = NextResponse.json(authorizationServerMetadata(issuer));
+export async function GET(
+  request: NextRequest,
+  context: { params: Promise<{ path?: string[] }> },
+) {
+  const origin = mcpIssuer(request.headers, request.nextUrl.protocol);
+  const { path } = await context.params;
+  const suffix = path?.length ? `/${path.join("/")}` : "";
+  const adminHost = isPlatformAdminHost(request.headers);
+  const document = wellKnownIsPlatformRealm(suffix, adminHost)
+    ? platformAuthorizationServerMetadata(origin, adminHost)
+    : authorizationServerMetadata(origin);
+  const response = NextResponse.json(document);
   response.headers.set("Access-Control-Allow-Origin", "*");
   response.headers.set("Cache-Control", "public, max-age=3600");
   return response;

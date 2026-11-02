@@ -86,10 +86,16 @@ export class KavenegarMessageProvider implements MessageProvider {
     if (!classification.ok) {
       return { ok: false, retryable: classification.retryable, code: classification.code, message: parsed.message };
     }
+    const providerCostRial = parsed.entries.reduce(
+      (total, entry) => total + (entry.costRial ?? 0),
+      0,
+    );
     return {
       ok: true,
       providerMessageId: classification.providerMessageId ?? `kvn:${Date.now()}`,
       segments: smsSegmentCount(msg.body),
+      // Zero is a legitimate absence here: a panel with a zero-tariff line.
+      providerCostRial,
     };
   }
 }

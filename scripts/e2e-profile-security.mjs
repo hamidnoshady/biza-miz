@@ -347,7 +347,13 @@ async function main() {
     check("a dropped sign-out says the session is still open", Boolean(offline));
     check("…keeps the member on the page", owner.url().includes("/settings/profile"), owner.url());
     const retryOut = owner.getByRole("button", { name: "تلاش دوباره برای خروج" });
-    check("…and releases the button for a retry", await retryOut.isEnabled());
+    // The card re-reads its state before it clears the in-flight flag, so the
+    // button is released one round-trip AFTER the message appears. Wait for it
+    // (bounded) instead of sampling it in the same tick — sampling was the
+    // flake: the assertion failed on a slow runner while the behaviour, and the
+    // defect it guards (F09: a dropped request leaving the button disabled
+    // forever), were both correct.
+    check("…and releases the button for a retry", Boolean(await until(() => retryOut.isEnabled())));
     check("…and the session really is still valid", await tokenAccepted(browser, retained));
     await owner.unroute("**/api/auth/logout");
 
@@ -453,7 +459,12 @@ async function main() {
     const removalFailed = await until(() => bio2.getByText(/معلوم نیست دستگاه حذف شده باشد/).isVisible());
     check("F09: a dropped removal says so", Boolean(removalFailed));
     check("…keeps the device on screen", await bio2.getByText(DEVICE_LABEL).isVisible());
-    check("…and releases the button", await bio2.getByRole("button", { name: "حذف" }).isEnabled());
+    // Same shape as the sign-out retry above: `remove()` says so first, then
+    // refreshes the list, and only then clears `busy` in its `finally`. The
+    // button is released a round-trip later, so wait for it rather than reading
+    // it in the same tick as the message. Still fails if it is never released.
+    const removeAgain = bio2.getByRole("button", { name: "حذف" });
+    check("…and releases the button", Boolean(await until(() => removeAgain.isEnabled())));
     await unsupported.unroute("**/api/auth/webauthn/credentials/**");
     await bio2.getByRole("button", { name: "حذف" }).click();
     await unsupported.getByRole("button", { name: "بله، حذف شود" }).click();

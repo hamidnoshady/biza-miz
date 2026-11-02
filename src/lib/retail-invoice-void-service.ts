@@ -284,7 +284,8 @@ export async function voidRetailInvoice(
         409,
       );
     }
-    if (!line.item_id) {
+    // A service line sold no catalogue row, so it has no item to lose.
+    if (!line.item_id && snapshot.kind !== "service") {
       throw new RetailInvoiceVoidError(
         "کالای یکی از ردیف‌های این فاکتور حذف شده است؛ ابطال خودکار ممکن نیست.",
         409,
@@ -354,6 +355,16 @@ export async function voidRetailInvoice(
         serialId: snapshot.serialId ?? null,
         reversalEntryIds: lineReversalIds,
       });
+      await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [
+        line.id,
+        params.reason,
+      ]);
+      continue;
+    }
+
+    // A service line consumed nothing: its reversal entries above are all
+    // there is to undo.
+    if (snapshot.kind === "service") {
       await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [
         line.id,
         params.reason,

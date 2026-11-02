@@ -779,9 +779,10 @@ vocabulary above). What they share is one rail entry and one sidebar.
 - **The menu is built from real connections, not a flag.** `GET /api/website/managers`
   answers which of the two systems this business actually has, and
   `visibleCmsSections`/`visibleWpSections` (`website-routes.ts`, unit-tested) turn
-  that into the menu: a manager with no connection lists its front page and the
-  screen that connects it, and nothing else. A «سفارش‌ها» entry over a site that
-  does not exist is a dead end with a number on it.
+  that into the menu: a manager with no connection has no menu at all, and a
+  business with no website sees only «نمای کلی وب‌سایت», where the site is built or
+  connected; the overview itself shows onboarding only until a site exists. A
+  «سفارش‌ها» entry over a site that does not exist is a dead end with a number on it.
 - **`integrations` gates the WordPress half only.** `/dashboard/website/wp` is in
   `PAGE_FEATURE_PREFIXES`; `/dashboard/website` is not. A business without the
   add-on still runs the platform site it pays for.
@@ -1082,18 +1083,36 @@ Issue #866 lives inside Accounting at `/accounting/tax-invoices`. Read
   is refused at the API guard (`moduleForApiPath` in `withTenantScope`), not merely hidden from the
   nav — the same discipline `features.ts` follows. The retail industries sell through a multi-line
   invoice (`retail-invoice-service.ts`) that is an `orders` row settled by Phase 21's own sell
-  services, so no posting rule is duplicated. There are **ten** industries: `food_service` is the original F&B app;
+  services, so no posting rule is duplicated. There are **twelve** industries: `food_service` is the original F&B app;
   `jewelry`/`watch`/`accessories`/`cosmetics` build on a
   parallel `items`/`item_serials`/`item_weight_attributes`/`item_stock` model and post through the
   domain-event engine (`src/lib/posting-engine.ts` + each industry's `*-posting-rules.ts`) rather
   than hand-written ledger functions; `wholesale`/`tools_fittings`/`haberdashery` are trade-goods
   trades on that same item model, reaching it through the shared `stock` module and the variant
-  board; `service_saas` is a services company whose invoices Billing/Accounting owns; and
+  board; `service_saas` is a services company whose invoices Billing/Accounting owns;
+  `automotive` (issue #839 — خودرو و نمایشگاه اتومبیل) is the vehicle dealership, whose units are
+  identified individually (`automotive_vehicle_attributes`: one chassis plate = one car) rather than
+  by a serial number; `advertising_agency` (issue #1128 — آژانس تبلیغاتی) is the advertising trade —
+  agencies, studios, media buyers, production houses, PR and event teams — one key covering the eight
+  *operating profiles* the issue lists (full-service, digital/social, branding and creative, media
+  buying, outdoor and print, content and video, PR and events, small agency/freelancer). Those are
+  `src/lib/agency.ts`, stored per business as one jsonb value in the shared `settings` table under
+  `agency.profile` (no table, no migration), read and written by `/api/settings/agency-profile` on
+  `settings.manage` and chosen in tenant settings rather than in the wizard — a preset over templates
+  and defaults, never a second authorization axis. Its operational centre is **My Workspace** like
+  AEC's (seven built-in blueprints in `src/lib/workspace-agency-templates.ts`, ordered and badged by
+  the preset), its profile is the core modules plus `pos` as the address of the service-invoice
+  screen, and `ADVERTISING_AGENCY_COA_TEMPLATE` carries four service revenues (4640 campaign
+  management — the account an invoice line credits by default — 4650 creative and content, 4660
+  media, 4670 PR and events) with four direct client-cost accounts as its cost of sales (5196–5199).
+  It has no till, no `orders`, no stock, no trade catalogue and no capability, and
+  `hasSellableCatalogue` is false for it, so no Woo/CMS product sync reaches it and a storefront
+  order is refused as `industry_not_storefront`; and
   `architecture_construction` (issue #799 — مهندسی عمران، معماری و پیمانکاری) is the AEC trade:
   architecture offices, civil/structural firms, contractors, design & build teams, supervision
   consultants and individual professionals, whose operational centre is **My Workspace**
   (`ai_projects` plus migration 0167's tables) rather than a fifth app, and whose profile carries
-  only the core modules — no POS, no `orders`, no stock. Since issue #799's Wave 2 that trade also
+  only the core modules plus `pos` as the address of the service-invoice screen (`service-invoice.ts`; a described-service line on the retail invoice) — no till, no `orders`, no stock. Since issue #799's Wave 2 that trade also
   has an **operating profile** (`src/lib/aec.ts`: architecture office, civil engineering,
   contractor, design & build, consulting/supervision, multidisciplinary, team, individual) plus
   specialties and twenty capability keys, stored per business in `aec_business_profiles` (migration

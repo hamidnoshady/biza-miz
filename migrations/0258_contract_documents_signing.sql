@@ -259,6 +259,7 @@ CREATE INDEX idx_contract_signing_events_contract
 -- ---------------------------------------------------------------------------
 -- 7. Row-level security — every row is one tenant's
 -- ---------------------------------------------------------------------------
+
 ALTER TABLE contract_templates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contract_templates FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON contract_templates FOR ALL
@@ -279,12 +280,25 @@ CREATE POLICY tenant_isolation ON contract_documents FOR ALL
 
 ALTER TABLE contract_document_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contract_document_versions FORCE ROW LEVEL SECURITY;
--- Frozen versions are immutable: SELECT + INSERT only, so a "correction" is a
--- new version rather than an edit to what somebody already signed.
-CREATE POLICY tenant_read ON contract_document_versions FOR SELECT
-    USING (app_rls_bypass() OR business_id = app_current_business());
-CREATE POLICY tenant_insert ON contract_document_versions FOR INSERT
+-- A frozen version is evidence: written once, read afterwards, never rewritten.
+--
+-- The shape is the repo's one approved RLS shape — a single permissive policy
+-- named `tenant_isolation`, which `integration/tenant-isolation.integration.test.ts`
+-- checks on every table carrying a `business_id` — plus two RESTRICTIVE policies
+-- that an UPDATE or a DELETE must also satisfy. Restrictive policies are AND-ed
+-- with the permissive one, so `USING (false)` leaves the mutation matching no
+-- row at all: history cannot be rewritten by the application role, and the
+-- bypass escape does not open it either. SELECT and INSERT-only policies under
+-- other names were the first attempt here; they are equivalent at runtime but
+-- they are not one of the two shapes the isolation census accepts, and the
+-- census is the thing that keeps the next table from slipping through.
+CREATE POLICY tenant_isolation ON contract_document_versions FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
     WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
+CREATE POLICY contract_document_versions_append_only_no_update ON contract_document_versions AS RESTRICTIVE FOR UPDATE
+    USING (false);
+CREATE POLICY contract_document_versions_append_only_no_delete ON contract_document_versions AS RESTRICTIVE FOR DELETE
+    USING (false);
 
 ALTER TABLE contract_signing_envelopes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contract_signing_envelopes FORCE ROW LEVEL SECURITY;
@@ -306,19 +320,47 @@ CREATE POLICY tenant_isolation ON contract_invitations FOR ALL
 
 ALTER TABLE contract_signatures ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contract_signatures FORCE ROW LEVEL SECURITY;
--- A signature is evidence: it is written once and read afterwards.
-CREATE POLICY tenant_read ON contract_signatures FOR SELECT
-    USING (app_rls_bypass() OR business_id = app_current_business());
-CREATE POLICY tenant_insert ON contract_signatures FOR INSERT
+-- A signature is evidence: written once, read afterwards, never rewritten.
+--
+-- The shape is the repo's one approved RLS shape — a single permissive policy
+-- named `tenant_isolation`, which `integration/tenant-isolation.integration.test.ts`
+-- checks on every table carrying a `business_id` — plus two RESTRICTIVE policies
+-- that an UPDATE or a DELETE must also satisfy. Restrictive policies are AND-ed
+-- with the permissive one, so `USING (false)` leaves the mutation matching no
+-- row at all: history cannot be rewritten by the application role, and the
+-- bypass escape does not open it either. SELECT and INSERT-only policies under
+-- other names were the first attempt here; they are equivalent at runtime but
+-- they are not one of the two shapes the isolation census accepts, and the
+-- census is the thing that keeps the next table from slipping through.
+CREATE POLICY tenant_isolation ON contract_signatures FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
     WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
+CREATE POLICY contract_signatures_append_only_no_update ON contract_signatures AS RESTRICTIVE FOR UPDATE
+    USING (false);
+CREATE POLICY contract_signatures_append_only_no_delete ON contract_signatures AS RESTRICTIVE FOR DELETE
+    USING (false);
 
 ALTER TABLE contract_signing_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contract_signing_events FORCE ROW LEVEL SECURITY;
-CREATE POLICY tenant_read ON contract_signing_events FOR SELECT
-    USING (app_rls_bypass() OR business_id = app_current_business());
-CREATE POLICY tenant_insert ON contract_signing_events FOR INSERT
+-- The timeline is evidence: written once, read afterwards, never rewritten.
+--
+-- The shape is the repo's one approved RLS shape — a single permissive policy
+-- named `tenant_isolation`, which `integration/tenant-isolation.integration.test.ts`
+-- checks on every table carrying a `business_id` — plus two RESTRICTIVE policies
+-- that an UPDATE or a DELETE must also satisfy. Restrictive policies are AND-ed
+-- with the permissive one, so `USING (false)` leaves the mutation matching no
+-- row at all: history cannot be rewritten by the application role, and the
+-- bypass escape does not open it either. SELECT and INSERT-only policies under
+-- other names were the first attempt here; they are equivalent at runtime but
+-- they are not one of the two shapes the isolation census accepts, and the
+-- census is the thing that keeps the next table from slipping through.
+CREATE POLICY tenant_isolation ON contract_signing_events FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
     WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
-
+CREATE POLICY contract_signing_events_append_only_no_update ON contract_signing_events AS RESTRICTIVE FOR UPDATE
+    USING (false);
+CREATE POLICY contract_signing_events_append_only_no_delete ON contract_signing_events AS RESTRICTIVE FOR DELETE
+    USING (false);
 -- ---------------------------------------------------------------------------
 -- The signer OTP is an `mfa_challenges` row with purpose `contract_signing`
 -- (#902's platform-managed OTP — no second provider system). The purpose

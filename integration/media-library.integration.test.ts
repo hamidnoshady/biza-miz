@@ -1944,6 +1944,73 @@ describe("issue #926 audit hardening — mirror, composite FK, protected usage, 
     expect(rasterOnly.total).toBe(allImages.total - 1);
     expect(rasterOnly.assets.every((a) => a.mimeType !== "image/svg+xml")).toBe(true);
   });
+
+  it("#941: a signed download URL echoed by a failing plugin never reaches the outbox, mapping, audit trail or queue", async () => {
+    const pluginService = await import("../src/lib/integrations/plugin-service");
+    const bytes = pngOf(941);
+    const asset = await scoped(BID, () =>
+      media.storeMediaAsset({
+        businessId: BID,
+        userId: null,
+        config,
+        kind: "image",
+        fileName: "wp-redaction.png",
+        mimeType: "image/png",
+        bytes,
+        sha256: sha256(bytes),
+      }),
+    );
+    const conn = await db.query<Record<string, unknown>>(
+      `INSERT INTO integration_connections
+         (business_id, name, provider, base_url, status, link_mode, plugin_capabilities, link_token_hash, link_token_ciphertext, consumer_key_ciphertext, consumer_secret_ciphertext, webhook_secret_ciphertext)
+       VALUES ($1, 'فروشگاه ردکشن', 'woocommerce', 'https://shop-redact.example', 'active', 'plugin', $2::jsonb, 'link-hash-r', 'link-cipher', 'ck', 'cs', 'wh')
+       RETURNING id, business_id, name, provider, base_url, status, link_mode, plugin_capabilities, currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices`,
+      [BID, JSON.stringify({ protocolVersion: 1, jobTypes: ["media_create"] })],
+    );
+    const connection = conn.rows[0];
+    const operationId = randomUUID();
+    await scoped(BID, () =>
+      media.recordWordPressMediaPush({ businessId: BID, mediaAssetId: asset.id, connectionId: String(connection.id), operationId }),
+    );
+    await db.query(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, operation_id)
+       VALUES ($1, $2, 'media_create', $3, $4::jsonb, $5)`,
+      [BID, connection.id, `asset-${asset.id}`, JSON.stringify({ __mediaAssetId: asset.id, __operationId: operationId }), operationId],
+    );
+
+    const pulled = (await (await pluginService.pluginPullJobs(connection as never)).json()) as {
+      jobs: Array<{ id: string; leaseToken?: string | null; payload: Record<string, unknown> }>;
+    };
+    expect(pulled.jobs).toHaveLength(1);
+    const minted = String(pulled.jobs[0].payload.url);
+    expect(minted).toContain("X-Amz-Signature=");
+    // The minted URL lives exactly as long as the lease.
+    expect(new URL(minted).searchParams.get("X-Amz-Expires")).toBe("300");
+    const signature = new URL(minted).searchParams.get("X-Amz-Signature")!;
+
+    // A plugin (any version) that reports the URL it was fetching in its error text.
+    const echoed = `cURL error 28: Operation timed out after 30001 milliseconds while fetching ${minted}`;
+    await pluginService.pluginAckJobs(connection as never, [
+      { id: pulled.jobs[0].id, status: "failed", error: echoed, leaseToken: pulled.jobs[0].leaseToken ?? undefined },
+    ]);
+    // Dead-letter path writes the mapping's error from the same text.
+    await scoped(BID, () => media.failWordPressMediaSync(operationId, echoed));
+
+    const tables = await db.query<{ blob: string }>(
+      `SELECT (SELECT COALESCE(string_agg(o::text, ' '), '') FROM integration_outbox_events o WHERE o.connection_id = $1)
+           || (SELECT COALESCE(string_agg(a::text, ' '), '') FROM integration_audit_log a WHERE a.connection_id = $1)
+           || (SELECT COALESCE(string_agg(m::text, ' '), '') FROM wordpress_media_mapping m WHERE m.connection_id = $1) AS blob`,
+      [connection.id],
+    );
+    expect(tables.rows[0].blob).toContain("cURL error 28");
+    expect(tables.rows[0].blob).not.toContain(signature);
+    expect(tables.rows[0].blob).not.toContain("X-Amz-Credential=" + config.accessKeyId);
+
+    const mappings = await scoped(BID, () => media.listWordPressMappingsForAsset(BID, asset.id));
+    expect(mappings[0].status).toBe("failed");
+    expect(mappings[0].lastError).toContain("cURL error 28");
+    expect(mappings[0].lastError).not.toContain(signature);
+  });
 });
 
 describe("#941 versioned attachment snapshots and tombstones", () => {

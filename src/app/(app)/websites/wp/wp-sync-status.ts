@@ -282,3 +282,78 @@ export function storeHost(baseUrl: string | undefined): string {
     return baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   }
 }
+
+/**
+ * The plugin's fast lane runs every five minutes (`POS_Connector_Health::
+ * FAST_INTERVAL_SECONDS`) and three missed runs make a store stale — the same
+ * numbers `PLUGIN_HEALTH_STALE_MS` uses on the server.
+ */
+export const PLUGIN_PULL_INTERVAL_MS = 5 * 60_000;
+const PLUGIN_PULL_MIN_MS = 60_000;
+const PLUGIN_PULL_MAX_MS = 60 * 60_000;
+/** How long after the expected pull the plugin gets to apply the job before we look. */
+const PULL_GRACE_MS = 20_000;
+const MIN_POLL_DELAY_MS = 15_000;
+const OVERDUE_POLL_DELAY_MS = 30_000;
+const MISSED_PULLS_BEFORE_GIVING_UP = 3;
+
+export interface QueuedPollPlan {
+  /** The pull cadence this store's plugin works to. */
+  intervalMs: number;
+  /** When to look next. */
+  delayMs: number;
+  /** After this long without the watermark moving, stop waiting and say so. */
+  maxWaitMs: number;
+}
+
+/**
+ * The plugin's pull interval for one store: a cadence it advertised
+ * (`capabilities.pullIntervalSeconds`, clamped to a sane range), else the
+ * fast lane's nominal five minutes. Junk is ignored, never trusted.
+ */
+export function pluginPullIntervalMs(capabilities: Record<string, unknown> | null | undefined): number {
+  const advertised = capabilities?.pullIntervalSeconds;
+  if (typeof advertised === "number" && Number.isFinite(advertised) && advertised > 0) {
+    return Math.min(PLUGIN_PULL_MAX_MS, Math.max(PLUGIN_PULL_MIN_MS, Math.round(advertised * 1000)));
+  }
+  return PLUGIN_PULL_INTERVAL_MS;
+}
+
+/**
+ * When to re-check a queued (plugin-mode) sync. A job only moves when the
+ * plugin next pulls, so looking every minute is mostly wasted reads: aim at
+ * the next expected pull (last heartbeat + interval) plus a grace window for
+ * it to apply the job. If that moment has already passed the plugin is late,
+ * so look more often until it shows up; if the store is not in a state that
+ * can pull at all (stale, never connected, site mismatch, paused, error) the
+ * overview already says why, and a cadence-length wait is enough to notice
+ * recovery. The give-up point is three missed pulls — the plugin's own
+ * definition of «بی‌پاسخ».
+ */
+export function queuedPollPlan(
+  connection: Pick<WpManagerConnection, "pluginCapabilities" | "transportHealth" | "lastPluginSeenAt"> | null,
+  now: number = Date.now(),
+): QueuedPollPlan {
+  const intervalMs = pluginPullIntervalMs(connection?.pluginCapabilities);
+  const maxWaitMs = intervalMs * MISSED_PULLS_BEFORE_GIVING_UP;
+  const state = connection?.transportHealth?.state;
+  const seen = connection?.transportHealth?.lastSeenAt ?? connection?.lastPluginSeenAt ?? null;
+  const seenAt = seen ? Date.parse(seen) : Number.NaN;
+
+  if (state && state !== "healthy") {
+    return { intervalMs, delayMs: intervalMs, maxWaitMs };
+  }
+  if (!Number.isFinite(seenAt)) {
+    return { intervalMs, delayMs: OVERDUE_POLL_DELAY_MS, maxWaitMs };
+  }
+  const expected = seenAt + intervalMs + PULL_GRACE_MS;
+  if (expected <= now) {
+    return { intervalMs, delayMs: OVERDUE_POLL_DELAY_MS, maxWaitMs };
+  }
+  return { intervalMs, delayMs: Math.min(intervalMs + PULL_GRACE_MS, Math.max(MIN_POLL_DELAY_MS, expected - now)), maxWaitMs };
+}
+
+/** «۱۵ دقیقه» for the give-up message, from the plan's own number. */
+export function waitMinutesLabel(maxWaitMs: number): string {
+  return `${Math.max(1, Math.round(maxWaitMs / 60_000)).toLocaleString("fa-IR")} دقیقه`;
+}

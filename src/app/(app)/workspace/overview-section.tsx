@@ -96,6 +96,13 @@ interface Dashboard {
   expiringContracts: number;
   myTasks: DashboardTask[];
   deadlines: DashboardEntry[];
+  /**
+   * How many entries the horizon's calendar holds in total — the slice above
+   * is only the first ten. Issue #907 F06: the KPI counts the whole horizon's
+   * deadlines (from the same query as the list), so the card can say how many
+   * it is not showing instead of implying the slice is everything.
+   */
+  calendarEntries: number;
   approvals: DashboardApproval[];
   activity: DashboardActivity[];
   aec?: DashboardAec;
@@ -181,6 +188,20 @@ export function OverviewSection() {
   }
 
   const n = (value: number) => toPersianDigits(String(value));
+
+  // Issue #907 F06 — one count, said in words. The KPI above and this list come
+  // from the same query over the same horizon (meetings excluded from
+  // «مهلت‌ها»), and a horizon with more than ten entries says so instead of
+  // quietly showing ten.
+  const meetings = Math.max(0, data.calendarEntries - data.upcomingDeadlines);
+  const hidden = Math.max(0, data.calendarEntries - data.deadlines.length);
+  const calendarDescription = [
+    `${n(data.upcomingDeadlines)} مهلت`,
+    meetings > 0 ? `${n(meetings)} رویداد` : null,
+    hidden > 0 ? `${n(hidden)} مورد دیگر در تقویم` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="flex flex-col gap-4">
@@ -323,13 +344,13 @@ export function OverviewSection() {
 
         <SectionCard
           title="مهلت‌های پیش‌رو"
-          description="مهلت پروژه‌ها و وظایف، جلسه‌ها، انقضای قرارداد و تأییدها"
+          description={calendarDescription}
           actions={
             <Link
               href={workspaceSectionHref("calendar")}
               className="text-sm text-muted-foreground underline-offset-4 hover:underline"
             >
-              تقویم
+              {data.calendarEntries > data.deadlines.length ? "همه در تقویم" : "تقویم"}
             </Link>
           }
         >

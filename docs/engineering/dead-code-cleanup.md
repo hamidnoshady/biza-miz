@@ -79,7 +79,7 @@ reviewable rather than invisible.
 | --- | --- |
 | `src/types/mssql.d.ts` | Ambient declaration loaded by `tsconfig`, never imported. **Verified by deletion:** `tsc` then fails with TS7016 in `src/lib/integrations/holoo/client.ts` and `scripts/holoo-probe.ts`. |
 | `src/lib/crm-deal-handoff.ts` | Consumed *as source text* by `crm-app-boundaries.test.ts`, which greps it to pin the invariant that the CRM prepares a sales document and never posts revenue. A documented integration contract (`docs/architecture/crm-architecture.md`); its API surface is simply unbuilt. |
-| `src/lib/ai-platform-tools.ts` | Executor for the two platform-support health tools that `src/lib/ai.ts` **still declares** to the model for `mode: "platform"`. No route passes that mode today, so it is unreached at runtime — but deleting the executor alone would leave two advertised tools nothing can answer. Removing the pair is a product decision, not a cleanup one. |
+| ~~`src/lib/ai-platform-tools.ts`~~ | **Now reachable (issue #1140):** the Superadmin playground route (`tools: true`) runs these health tools through `ai-platform-assistant.ts`, capability-gated and audited. No longer a retention. |
 | `src/app/dashboard/dashboard-grid.tsx` | The renderer half of a feature whose other half is live: «سنجاق به داشبورد» (`reports/pin-button.tsx`) is reachable from two report screens and writes to `/api/dashboard/widgets`, which `getDashboardWidgets` still serves. Deleting the renderer would make a working control write to nothing. Flagged as follow-up, not removed here. |
 | `src/lib/{ai-prompts,ai-tool-routing,app-data-rules,order-controls,order-control-service}.ts` | Reached only from tests, but these are **specification modules** — they encode prompt fragments, tool→app routing, data-ownership rules and order-control policy that their suites assert against. Retained; no evidence their lifecycle has ended. |
 | All `public/` assets | Every file, including `windows/cafe-pos-print-connector.ps1` and `offline.html`/`sw.js`, is referenced. Nothing to remove. |
@@ -258,7 +258,7 @@ build's reported chunk sizes. No claim is made about desktop installer size.
    end-to-end (control, renderer, `/api/dashboard/widgets`, `getDashboardWidgets`,
    and a backward-compatible plan for existing `dashboard_widgets` rows). A
    product decision with a data dimension, not a cleanup.
-2. **`ai-platform-tools.ts` + the `platform` agent mode.** Either wire a
+2. **(Resolved by issue #1140 — kept for history.)** **`ai-platform-tools.ts` + the `platform` agent mode.** Either wire a
    platform-support surface that passes `mode: "platform"`, or retire the tool
    declarations in `ai.ts` together with the executor. Retiring the executor
    alone would be a regression.
@@ -339,7 +339,7 @@ business's AI budget. Both fixed; `ai-permission-matrix.test.ts` now pins it.
 
 ## Still retained (unchanged from §9 above)
 
-`dashboard-grid.tsx`, `ai-platform-tools.ts` + the `platform` agent mode, and
+`dashboard-grid.tsx` and
 `crm-deal-handoff.ts` remain documented deliberate retentions in
 `module-reachability.test.ts`. Issue #812 did not touch them and did not make
 them reachable.

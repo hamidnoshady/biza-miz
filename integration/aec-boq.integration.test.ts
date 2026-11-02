@@ -160,12 +160,20 @@ async function createCustomerParty(businessId: string, name: string): Promise<st
 }
 
 /** One posted cost against a project — what Accounting's ledger holds. */
+/**
+ * A posted project cost, filed the way Accounting files one: a debit on an
+ * **expense** account. Issue #907 F04 made the cockpit read the ledger's own
+ * definition of cost, so a fixture that debited whichever account happened to
+ * sort first (an asset, in the seeded chart) was filing a balance-sheet movement
+ * and calling it spend.
+ */
 async function postProjectCost(businessId: string, projectId: string, amountRial: number): Promise<void> {
   await dbLib.withTenant(businessId, async () => {
     const { rows: accounts } = await dbLib.query<{ id: string }>(
-      `SELECT id FROM accounts WHERE business_id = $1 ORDER BY code LIMIT 1`,
+      `SELECT id FROM accounts WHERE business_id = $1 AND type = 'expense' ORDER BY code LIMIT 1`,
       [businessId],
     );
+    if (!accounts[0]) throw new Error("the seeded chart of accounts has no expense account");
     const { rows: entries } = await dbLib.query<{ id: string }>(
       `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, project_id)
        VALUES ($1, '2026-05-01', 'هزینهٔ اجرای پروژه', 'manual', $2) RETURNING id`,

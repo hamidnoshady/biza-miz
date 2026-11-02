@@ -126,3 +126,60 @@ describe("WP routes enforce the matrix", () => {
     expect(read("src/app/(app)/websites/wp/wp-store-context.tsx")).not.toContain("provider=woocommerce");
   });
 });
+
+describe("WP media routes enforce the matrix (#941)", () => {
+  // Every media route: [file, the guard it must call, whether a write path is paused-store aware].
+  const mediaRoutes: { route: string; guards: string[]; paused: boolean }[] = [
+    {
+      route: "src/app/api/integrations/wp-manager/media/route.ts",
+      guards: ["requirePermission(PERMISSIONS.woocommerceManage)"],
+      paused: true,
+    },
+    {
+      route: "src/app/api/integrations/wp-manager/media/[id]/route.ts",
+      guards: ["requirePermission(PERMISSIONS.woocommerceView)", "requirePermission(PERMISSIONS.woocommerceManage)"],
+      paused: true,
+    },
+    {
+      route: "src/app/api/integrations/wp-manager/media/[id]/link/route.ts",
+      guards: ["requirePermissions(PERMISSIONS.mediaView, PERMISSIONS.mediaManage, PERMISSIONS.woocommerceManage)"],
+      paused: true,
+    },
+    {
+      route: "src/app/api/media/[id]/wordpress/route.ts",
+      guards: [
+        "requirePermissions(PERMISSIONS.mediaView, PERMISSIONS.woocommerceView)",
+        "requirePermissions(PERMISSIONS.mediaManage, PERMISSIONS.woocommerceManage)",
+      ],
+      paused: true,
+    },
+  ];
+
+  it("each route asks for the keys the matrix names, and never a bare role", () => {
+    for (const { route, guards } of mediaRoutes) {
+      const source = read(route);
+      for (const guard of guards) expect(source, `${route} ${guard}`).toContain(guard);
+      expect(source, route).not.toContain("requireRole(");
+    }
+  });
+
+  it("each route resolves the store through the member's branch-scoped access and refuses a paused one", () => {
+    for (const { route, paused } of mediaRoutes) {
+      const source = read(route);
+      expect(source, route).toMatch(/getAccessibleConnection|listAccessibleConnections/);
+      expect(source, route).not.toMatch(/getConnection\(/);
+      if (paused) expect(source, route).toContain("connection_paused");
+    }
+  });
+
+  it("a write needs `woocommerce.manage` — a view-only or sync-only member can read but not push, edit or import", () => {
+    const viewer = new Set<Permission>([PERMISSIONS.woocommerceView, PERMISSIONS.mediaView]);
+    const syncer = new Set<Permission>([PERMISSIONS.woocommerceView, PERMISSIONS.woocommerceSync]);
+    expect(canWp(viewer, "content_manage")).toBe(false);
+    expect(canWp(syncer, "content_manage")).toBe(false);
+    expect(WP_ABILITY_PERMISSIONS.content_manage).toEqual([PERMISSIONS.woocommerceManage]);
+    // A canonical push also needs the media library's own manage key: neither half alone is enough.
+    const woo = new Set<Permission>([PERMISSIONS.woocommerceManage]);
+    expect(woo.has(PERMISSIONS.mediaManage)).toBe(false);
+  });
+});

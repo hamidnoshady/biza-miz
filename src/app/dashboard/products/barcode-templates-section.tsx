@@ -85,6 +85,7 @@ export function BarcodeTemplatesSection() {
     <div className="min-w-0 space-y-4 sm:space-y-5">
       <ErrorBox>{error}</ErrorBox>
 
+      <div data-tour-id="barcode-templates.preview">
       <SectionCard title="پیش‌نمایش برچسب" description="نمونهٔ زندهٔ الگوی فعال: پیش‌شماره، کد کالا، مقدار وزن و رقم کنترل.">
         <div className="grid min-w-0 items-center gap-6 lg:grid-cols-2">
           <div className="flex flex-col items-center gap-2 rounded-xl bg-muted/40 p-6">
@@ -101,10 +102,11 @@ export function BarcodeTemplatesSection() {
           </ul>
         </div>
       </SectionCard>
+      </div>
 
       {templates === null ? <SectionCardSkeleton rows={3} /> : null}
 
-      <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+      <div data-tour-id="barcode-templates.list" className="grid min-w-0 gap-4 xl:grid-cols-2">
         {(templates ?? []).map((template, index) => (
           <section key={template.id} className={`${cardClass} min-w-0 p-4 sm:p-5`}>
             <div className="flex items-center justify-between gap-2">
@@ -207,6 +209,7 @@ export function BarcodeTemplatesSection() {
 
       <button
         type="button"
+        data-tour-id="barcode-templates.add"
         onClick={() =>
           setDrafts((current) => [
             ...current,
@@ -219,7 +222,7 @@ export function BarcodeTemplatesSection() {
         افزودن الگو
       </button>
 
-      <Button type="button" size="lg" className="w-full font-semibold" disabled={busy || drafts.length === 0} onClick={saveDrafts}>
+      <Button type="button" data-tour-id="barcode-templates.save" size="lg" className="w-full font-semibold" disabled={busy || drafts.length === 0} onClick={saveDrafts}>
         ثبت الگو
       </Button>
       {notice ? <p className="text-xs text-emerald-600 dark:text-emerald-400">{notice}</p> : null}

@@ -235,6 +235,7 @@ export interface WooOrder {
   customer_id?: number;
   /** The watermark for an incremental order pull. */
   date_modified?: string;
+  date_modified_gmt?: string | null;
   date_paid?: string | null;
   /** UTC twins of the store-local dates above (no offset, by Woo's convention). */
   date_created_gmt?: string;
@@ -262,11 +263,13 @@ export interface WooRefund {
   /** The order the refund belongs to. */
   parent_id: number;
   date_created: string;
+  date_created_gmt?: string | null;
   amount: string;
   total_tax?: string;
   reason: string;
   line_items?: WooRefundLineItem[];
   meta_data?: WooMetaData[];
+  restock_items?: boolean | null;
 }
 
 export interface WooList<T> {
@@ -485,12 +488,17 @@ export interface WooCommerceClient {
     query: Record<string, string | number | boolean> & { page: number },
   ): Promise<WooList<WooProduct>>;
   getProduct(id: number): Promise<WooProduct>;
+  createProduct(body: Record<string, unknown>): Promise<WooProduct>;
+  getVariation(parentId: number, id: number): Promise<WooProduct>;
+  createVariation(parentId: number, body: Record<string, unknown>): Promise<WooProduct>;
   updateProduct(id: number, patch: Record<string, unknown>): Promise<WooProduct>;
   listVariations(parentId: number, query?: Record<string, string | number | boolean>): Promise<WooProduct[]>;
   updateVariation(parentId: number, variationId: number, patch: Record<string, unknown>): Promise<WooProduct>;
   listCategories(query?: Record<string, string | number | boolean>): Promise<WooTerm[]>;
   listTags(query?: Record<string, string | number | boolean>): Promise<WooTerm[]>;
   listAttributes(): Promise<WooAttribute[]>;
+  createAttribute(body: Record<string, unknown>): Promise<WooAttribute>;
+  createAttributeTerm(attributeId: number, body: Record<string, unknown>): Promise<WooAttributeTerm>;
   listAttributeTerms(attributeId: number): Promise<WooAttributeTerm[]>;
   listTaxonomies(): Promise<WooTaxonomy[]>;
   listTerms(taxonomy: string, query?: Record<string, string | number | boolean>): Promise<WooTerm[]>;
@@ -544,10 +552,15 @@ export function createWooCommerceClient(
     request<T>(credentials, fetchImpl, "GET", path, { query, namespace: "wp/v2" });
 
   return {
+    createAttribute: (body) => request<WooAttribute>(credentials, fetchImpl, "POST", "products/attributes", { body }),
+    createAttributeTerm: (id, body) => request<WooAttributeTerm>(credentials, fetchImpl, "POST", `products/attributes/${id}/terms`, { body }),
     listProducts: (query) => get<WooProduct[]>("products", query),
     listProductsPage: (query) =>
       requestPage<WooProduct>(credentials, fetchImpl, "products", { query }),
     getProduct: (id) => get<WooProduct>(`products/${id}`),
+    createProduct: (body) => request<WooProduct>(credentials, fetchImpl, "POST", "products", { body }),
+    getVariation: (parentId, id) => get<WooProduct>(`products/${parentId}/variations/${id}`),
+    createVariation: (parentId, body) => request<WooProduct>(credentials, fetchImpl, "POST", `products/${parentId}/variations`, { body }),
     updateProduct: (id, patch) =>
       request<WooProduct>(credentials, fetchImpl, "PUT", `products/${id}`, { body: patch }),
 

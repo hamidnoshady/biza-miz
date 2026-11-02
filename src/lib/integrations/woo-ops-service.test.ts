@@ -147,6 +147,14 @@ describe("sanitizeOrderStatus", () => {
     expect(() => sanitizeOrderStatus("Completed")).toThrow(WooOpsError);
     expect(() => sanitizeOrderStatus("")).toThrow(WooOpsError);
   });
+
+  it("accepts a custom status only once the store has reported it", () => {
+    expect(sanitizeOrderStatus("shipped", ["shipped", "awaiting-pickup"])).toBe("shipped");
+    expect(sanitizeOrderStatus("awaiting-pickup", ["shipped", "awaiting-pickup"])).toBe("awaiting-pickup");
+    expect(() => sanitizeOrderStatus("shipped", ["packed"])).toThrow(WooOpsError);
+    // The slug shape is checked even for a "known" value, so a stored oddity cannot be sent back.
+    expect(() => sanitizeOrderStatus("Not A Slug", ["Not A Slug"])).toThrow(WooOpsError);
+  });
 });
 
 describe("sanitizeRefund", () => {
@@ -325,6 +333,7 @@ describe("storeOrdersFor", () => {
             currency: "IRT",
             date_created: "2026-09-18T10:15:00+03:30",
             payment_method: "cod",
+            payment_method_title: "پرداخت در محل",
             billing: { first_name: "لیلا", last_name: "رضایی" },
             line_items: [{ id: 1 }, { id: 2 }],
           },
@@ -359,6 +368,9 @@ describe("storeOrdersFor", () => {
         dateCreated: "2026-09-18T10:15:00+03:30",
         customer: "لیلا رضایی",
         paymentMethod: "cod",
+        // The gateway's own name travels with the row, so the card can show it
+        // instead of the bare code (#1215 / P1-3).
+        paymentMethodTitle: "پرداخت در محل",
         ingestStatus: "processed",
         ingestError: null,
         lineCount: 2,

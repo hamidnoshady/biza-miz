@@ -1,6 +1,7 @@
 import type { Role } from "./auth";
 import type { Industry } from "./industries";
 import { hasModule, type ModuleKey } from "./industry-profile";
+import { isProductWorkspaceIndustry } from "./product-workspace";
 import { PERMISSIONS, type Permission } from "./permissions";
 
 export const SETTINGS_TAB_KEYS = [
@@ -51,6 +52,12 @@ export interface SettingsTab {
    * nav entry and its API route are.
    */
   module?: ModuleKey;
+  /**
+   * Also show this tab to the trades that run the product workspace
+   * (`PRODUCT_WORKSPACE_INDUSTRIES`), whether or not they have `module`. The
+   * tab then renders that trade's own version of the section.
+   */
+  alsoForProductWorkspace?: boolean;
   /**
    * Rewrites the tab's label/description for a given industry. Only used where
    * the F&B wording would be actively wrong — «نرخ هر دسته از منو» in a
@@ -103,11 +110,19 @@ export const SETTINGS_TABS: SettingsTab[] = [
     label: "قیمت‌گذاری",
     description: "حاشیه سود، سربار و هشدار تغییر بهای آیتم‌های منو",
     requiredAnyPermission: [PERMISSIONS.settingsManage],
-    // This policy is the recipe-backed `menu_items` cost-plus engine. Retail
-    // trades price their `items` through trade-specific formulas (gold,
-    // serialized watches, variants, etc.); showing this tab there promised a
-    // default margin that none of those engines ever read.
+    // The menu policy is the recipe-backed `menu_items` cost-plus engine.
+    // Retail trades price their `items` through trade-specific formulas (gold,
+    // serialized watches, variants, etc.); showing the menu policy there
+    // promised a default margin that none of those engines ever read. The
+    // product-workspace trades are the exception, with a section of their own:
+    // the overhead, profit target, rounding and tax basis behind the New
+    // Product «پیشنهاد قیمت فروش».
     module: "menu",
+    alsoForProductWorkspace: true,
+    industryText: (industry) =>
+      isProductWorkspaceIndustry(industry)
+        ? { description: "سربار، سود هدف، گردکردن و مبنای مالیات پیشنهاد قیمت فروش محصولات" }
+        : {},
   },
   {
     key: "online-platforms",
@@ -289,7 +304,14 @@ export function visibleSettingsTabs(
     if (tab.allowedRoles && (!options.role || !tab.allowedRoles.includes(options.role))) return false;
     if (tab.feature && !options.features?.[tab.feature]) return false;
     if (tab.requiredAnyFeature && !tab.requiredAnyFeature.some((feature) => options.features?.[feature])) return false;
-    if (tab.module && industry && !hasModule(industry, tab.module)) return false;
+    if (
+      tab.module &&
+      industry &&
+      !hasModule(industry, tab.module) &&
+      !(tab.alsoForProductWorkspace && isProductWorkspaceIndustry(industry))
+    ) {
+      return false;
+    }
     return true;
   }).map(({ industryText, ...tab }) => {
     // Rewrite wording only once the industry is known; a caller without one

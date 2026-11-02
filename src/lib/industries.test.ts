@@ -54,6 +54,25 @@ describe("industrySwitchCautions", () => {
     }
   });
 
+  it("warns before a catalogue trade loses its counter (issue #1128)", () => {
+    // The console's row counts say how much data the old trade owns; only this
+    // caution says that the new trade cannot sell any of it. It is a family
+    // rule, so it fires for the agency exactly as it does for AEC and for a
+    // service company — whichever way the operator is turning the dial.
+    for (const from of ["jewelry", "automotive", "food_service"] as const) {
+      for (const to of ["advertising_agency", "architecture_construction", "service_saas"] as const) {
+        const cautions = industrySwitchCautions(from, to);
+        expect(cautions.length, `${from} → ${to}`).toBeGreaterThan(0);
+        expect(cautions.join(" "), `${from} → ${to}`).toContain("صندوق فروش");
+      }
+    }
+    // The reverse is not a caution: an agency that becomes a shop gains a
+    // counter and keeps its own records, which is what the generic data
+    // message already covers.
+    expect(industrySwitchCautions("advertising_agency", "jewelry")).toEqual([]);
+    expect(industrySwitchCautions("service_saas", "food_service")).toEqual([]);
+  });
+
   it("adds no trade-specific caution between two unrelated trades", () => {
     expect(industrySwitchCautions("jewelry", "cosmetics")).toEqual([]);
     expect(industrySwitchCautions("food_service", "watch")).toEqual([]);

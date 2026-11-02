@@ -12,6 +12,8 @@
  * Pure, so the masking rules are unit-tested directly.
  */
 
+import { scrubUrls } from "./url-redact";
+
 const MASK = "•••";
 
 /** Keys whose value is a credential — never shown, not even partially. */
@@ -63,9 +65,11 @@ function redactValue(
   if (typeof value === "string") {
     if (key && CONTACT_KEY_RE.test(key)) return maskContact(value);
     // Bearer tokens and basic-auth blobs smuggled inside a free-text value.
-    if (/bearer\s+\S+/i.test(value)) return value.replace(/bearer\s+\S+/gi, `Bearer ${MASK}`);
-    if (value.length > maxStringLength) return `${value.slice(0, maxStringLength)}…`;
-    return value;
+    // Scrub before truncating, so a cut can never leave half a signature behind.
+    let text = scrubUrls(value);
+    if (/bearer\s+\S+/i.test(text)) text = text.replace(/bearer\s+\S+/gi, `Bearer ${MASK}`);
+    if (text.length > maxStringLength) return `${text.slice(0, maxStringLength)}…`;
+    return text;
   }
   if (value === null || typeof value !== "object") return value;
   if (depth >= maxDepth) return "…";
@@ -92,6 +96,6 @@ export function capQueueError(error: string | null, max = 500): string | null {
   if (!error) return error;
   // An error string can echo a request back (headers included); apply the
   // same bearer-token scrub as payloads before it reaches the browser.
-  const scrubbed = error.replace(/bearer\s+\S+/gi, `Bearer ${MASK}`);
+  const scrubbed = scrubUrls(error).replace(/bearer\s+\S+/gi, `Bearer ${MASK}`);
   return scrubbed.length > max ? `${scrubbed.slice(0, max)}…` : scrubbed;
 }

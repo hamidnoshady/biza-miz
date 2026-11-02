@@ -66,7 +66,13 @@ export default function PlatformLayout({ children }: { children: React.ReactNode
       const { data } = await api<Me>("/api/platform/auth/me");
       if (cancelled) return;
       if (!data.admin) {
-        router.replace("/platform/login");
+        // An OAuth client's consent page must survive the sign-in, or the
+        // authorization request the client started is lost.
+        router.replace(
+          pathname === "/platform/mcp-connections/consent"
+            ? `/platform/login?next=${encodeURIComponent(`${pathname}${window.location.search}`)}`
+            : "/platform/login",
+        );
         return;
       }
       setMe(data);

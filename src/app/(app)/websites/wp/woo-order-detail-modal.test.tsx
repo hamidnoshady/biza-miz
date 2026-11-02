@@ -39,6 +39,30 @@ describe("responsive RTL Woo detail overlay", () => {
     expect(close).toHaveBeenCalledOnce();
     expect(location.href).toBe(before);
   });
+  it("opens on a summary with the status, customer, totals and recent lines before any technical detail", async () => {
+    await open();
+    const selected = screen.getByRole("tab", { selected: true });
+    expect(selected.textContent).toBe("خلاصه");
+    expect(screen.getByRole("tabpanel").textContent).toContain("سارا احمدی");
+    // pending → its Persian label sits beside the order number, and the totals strip is labelled.
+    expect(screen.getByRole("dialog").textContent).toContain("در انتظار پرداخت");
+    expect(screen.getByRole("group", { name: "خلاصهٔ مبالغ سفارش" }) ?? screen.getByLabelText("خلاصهٔ مبالغ سفارش")).toBeTruthy();
+    // The source/version record is the second-to-last tab, not the first one.
+    expect(screen.getAllByRole("tab").map(tab => tab.textContent)).toEqual(["خلاصه", "اقلام و مبالغ", "مشتری و ارسال", "پرداخت و وضعیت", "سوابق و منبع", "چاپ"]);
+  });
+  it("changes the status from the modal, offering the store's custom statuses, and reloads", async () => {
+    const onChange = vi.fn().mockResolvedValue(true);
+    render(<MoneyProvider unit="toman"><WooOrderDetailModal connectionId={CONNECTION} remoteId="1042" onClose={close}
+      statusChoices={["pending", "processing", "completed", "shipped"]} onChangeStatus={onChange} /></MoneyProvider>);
+    await screen.findByRole("button", { name: "چاپ فاکتور" });
+    const select = screen.getByRole("combobox", { name: "تغییر وضعیت سفارش" });
+    expect([...select.querySelectorAll("option")].map(option => option.value)).toContain("shipped");
+    const calls = vi.mocked(api).mock.calls.length;
+    fireEvent.change(select, { target: { value: "shipped" } });
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith("shipped"));
+    await screen.findByText(/تغییر وضعیت به «shipped» در صف قرار گرفت/);
+    expect(vi.mocked(api).mock.calls.length).toBeGreaterThan(calls);
+  });
   it.each([
     ["IRR", "toman", "۲٫۴۴۵ تومان"],
     ["IRT", "rial", "۲۴۴٫۵ ریال"],

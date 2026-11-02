@@ -81,10 +81,18 @@ export const NOTIFICATION_EVENT_KEYS = [
   "payment.refunded",
   "inventory.low_stock",
   "backup.failed",
+  // Issue #903 §12 — the drill exists so a backup that cannot be opened is
+  // discovered in a scheduled test rather than on the day it is needed. It is a
+  // separate key from `backup.failed` because it is a separate fact: the backup
+  // ran, and still could not be restored.
+  "backup.drill_failed",
   // Issue #988 — the Hybrid security plane gating all operational traffic. The
   // gate is deliberate (a suspension must land before the orders queued behind
   // it); a block nobody could see for nine days is not.
   "sync.operational_blocked",
+  // Issue #1149 — a WordPress plugin that has stopped calling. Its cron can die
+  // without a single error anywhere; the silence is the only evidence.
+  "integrations.plugin_stale",
   "ai.coworker.pending",
   "ai.coworker.reported",
   "ai.coworker.failed",
@@ -265,6 +273,19 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     perLocation: false,
     hasAmount: false,
   },
+  "backup.drill_failed": {
+    key: "backup.drill_failed",
+    group: "system",
+    label: "ناموفق‌بودن آزمایش بازیابی پشتیبان",
+    description:
+      "وقتی آزمایش زمان‌بندی‌شدهٔ بازیابی نشان می‌دهد آخرین نسخهٔ پشتیبان این کسب‌وکار باز نمی‌شود یا بازیابی آن مجاز نیست. بحرانی است، پس ساعت سکوت را نادیده می‌گیرد.",
+    // Critical for the same reason as `backup.failed`: a failed drill is the last
+    // cheap warning before a recovery that does not work.
+    defaultSeverity: "critical",
+    defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
   "sync.operational_blocked": {
     key: "sync.operational_blocked",
     group: "system",
@@ -276,6 +297,19 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     // (the cloud or its credential must answer), so it is told, not screamed —
     // and unlike a missed backup, it keeps presenting itself every five minutes
     // in the connection panel until it clears.
+    defaultSeverity: "important",
+    defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "integrations.plugin_stale": {
+    key: "integrations.plugin_stale",
+    group: "system",
+    label: "قطع‌شدن ارتباط افزونهٔ وردپرس",
+    description:
+      "وقتی افزونهٔ وردپرس بیش از ۳۰ دقیقه با سامانه تماس نگرفته است — معمولاً یعنی کرون سایت متوقف شده و سفارش‌ها و تغییرات در صف مانده‌اند.",
+    // `important`, not `critical`: the store keeps selling and nothing is lost —
+    // the queue holds — so quiet hours stay honoured.
     defaultSeverity: "important",
     defaultRoles: ["owner"],
     perLocation: false,

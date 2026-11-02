@@ -302,8 +302,14 @@ export function eligibleIndustryLabel(metadata: PrintTemplateMetadata): string {
   return metadata.allowedIndustries.map((industry) => INDUSTRY_LABELS[industry]).join("، ");
 }
 
+/** True when the template is offered to some trades only, not to every till trade. */
+export function isTradeSpecificTemplate(template: PrintTemplate): boolean {
+  return templateMetadata(template).allowedIndustries.length < POS_INDUSTRIES.length;
+}
+
 export function templateMetadataForDisplay(template: PrintTemplate): {
   eligibleIndustry: string;
+  tradeSpecific: boolean;
   documentKind: string;
   paper: string;
   orientation: string;
@@ -316,6 +322,7 @@ export function templateMetadataForDisplay(template: PrintTemplate): {
   const usesLogo = template.blocks.some((block) => block.visible && block.type === "logo");
   return {
     eligibleIndustry: eligibleIndustryLabel(metadata),
+    tradeSpecific: metadata.allowedIndustries.length < POS_INDUSTRIES.length,
     documentKind: DOC_TYPE_LABELS[template.docType],
     paper: dimensions.label,
     orientation: landscape ? "افقی" : "عمودی",

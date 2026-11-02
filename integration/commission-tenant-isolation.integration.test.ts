@@ -20,7 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { runMigrations } from "../scripts/migrate";
 import type { CommissionActor } from "../src/lib/commission-settlement-service";
 import { PERMISSIONS } from "../src/lib/permissions";
@@ -215,7 +215,7 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query(`DROP ROLE IF EXISTS ${APP_ROLE}`);
+    await dropAppRole(maintenance, APP_ROLE);
   } finally {
     await maintenance.end();
   }

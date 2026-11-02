@@ -33,6 +33,10 @@ describe("auditActionLabel", () => {
   it("labels the settings writers, whose rows the audit tab renders", () => {
     expect(auditActionLabel("settings.business.update")).toBe("تغییر اطلاعات کسب‌وکار");
     expect(auditActionLabel("settings.mfa_policy.update")).toBe("تغییر سیاست ورود دومرحله‌ای");
+    // Issue #1128 — an agency's operating-profile change is labeled from day one.
+    expect(auditActionLabel("settings.agency_profile.update")).toBe(
+      "تغییر پروفایل فعالیت آژانس",
+    );
   });
 
   it("labels the hard membership removal as its own event (issue #1007)", () => {

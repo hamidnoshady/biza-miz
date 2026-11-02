@@ -148,6 +148,7 @@ export const MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS: readonly MemberAttribution
 ];
 
 export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = [
+  { table: 'integration_woo_attribute_mappings', columns: ["reviewed_by"] },
   { table: 'accounting_dimension_mappings', columns: ["created_by"] },
   { table: 'accounting_dimension_values', columns: ["created_by"] },
   { table: 'aec_document_revisions', columns: ["created_by", "issued_by"] },
@@ -211,6 +212,13 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'layaway_payments', columns: ["created_by"] },
   { table: 'layaway_plans', columns: ["created_by"] },
   { table: 'ledger_party_attribution_moves', columns: ["actor_id"] },
+  // Issue #1128 §E. The rest of the media library is excused as tooling in the
+  // schema-contract sweep, and this column deliberately is not: a review link is a
+  // short-lived credential handed to someone *outside* the business, it carries no
+  // name snapshot, and it is ON DELETE SET NULL — so a hard delete would erase who
+  // opened the tenant's files to an external party. That is business history, and
+  // the gate should notice before the member goes.
+  { table: 'media_review_links', columns: ["created_by"] },
   { table: 'opening_balance_sets', columns: ["approved_by", "created_by", "posted_by", "reversed_by", "submitted_by"] },
   { table: 'order_amendments', columns: ["created_by"] },
   { table: 'orders', columns: ["amended_by"], scope: { kind: 'location' } },
@@ -239,6 +247,14 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'table_sessions', columns: ["closed_by", "opened_by"], scope: { kind: 'location' } },
   { table: 'tax_invoice_events', columns: ["actor_user_id"] },
   { table: 'tax_invoice_submissions', columns: ["prepared_by"] },
+  // Issue #903 — who produced a managed backup, and who previewed/approved a
+  // tenant restore. Both are business-scoped audit attribution; a departing
+  // member's rows must be re-attributed, not silently erased on hard delete.
+  { table: 'tenant_backup_artifacts', columns: ["created_by"] },
+  { table: 'tenant_backup_restore_jobs', columns: ["actor_user_id"] },
+  // Issue #903 §3: an uploaded artifact records who staged it, so a departing
+  // member's upload sessions are re-attributed like every other attribution.
+  { table: 'tenant_backup_upload_sessions', columns: ["created_by"] },
   { table: 'voucher_renumber_log', columns: ["performed_by"] },
   { table: 'warehouse_documents', columns: ["created_by"] },
   { table: 'weight_counts', columns: ["created_by"], scope: { kind: 'location' } },

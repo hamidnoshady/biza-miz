@@ -1,31 +1,43 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession, withTenantScope } from "@/lib/auth";
+import { withTenantScope } from "@/lib/auth";
 import { addNote, listNotes } from "@/lib/ai-projects";
+import { requireProjectCapability } from "@/lib/workspace";
+import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "@/app/api/workspace/guard";
 
 /**
  * GET  — list notes for a project
  * POST — add a note to a project
+ *
+ * Issue #907 F01 — the project role, not just the business session: `view` to
+ * read a project's notes, `edit` to add one. A note is part of the project's
+ * prompt context, so writing one changes what the assistant tells everyone on
+ * that project.
  */
 
 export const GET = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
+    if (error) return error;
     const { id } = await context.params;
 
-    const notes = await listNotes({
-      businessId: session.businessId,
-      actorUserId: session.sub,
-      projectId: id,
-    });
-    return NextResponse.json({ notes });
+    try {
+      await requireProjectCapability(owner, id, "view");
+      const notes = await listNotes({
+        businessId: owner.businessId,
+        actorUserId: owner.actorUserId,
+        projectId: id,
+      });
+      return NextResponse.json({ notes });
+    } catch (err) {
+      return handleWorkspaceError(err);
+    }
   },
 );
 
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
+    if (error) return error;
     const { id } = await context.params;
 
     const body = await request.json().catch(() => null);
@@ -34,20 +46,22 @@ export const POST = withTenantScope(
     }
 
     try {
+      await requireProjectCapability(owner, id, "edit");
       const note = await addNote(
-        { businessId: session.businessId, actorUserId: session.sub, projectId: id },
+        { businessId: owner.businessId, actorUserId: owner.actorUserId, projectId: id },
         { title: body.title, content: body.content ?? "" },
       );
       return NextResponse.json({ note }, { status: 201 });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "internal_error";
-      if (message.includes("not found")) {
-        return NextResponse.json({ error: "not_found" }, { status: 404 });
+      if (err instanceof Error) {
+        if (err.message.includes("not found")) {
+          return NextResponse.json({ error: "not_found" }, { status: 404 });
+        }
+        if (err.message.includes("character limit")) {
+          return NextResponse.json({ error: err.message }, { status: 400 });
+        }
       }
-      if (message.includes("character limit")) {
-        return NextResponse.json({ error: message }, { status: 400 });
-      }
-      throw err;
+      return handleWorkspaceError(err);
     }
   },
 );

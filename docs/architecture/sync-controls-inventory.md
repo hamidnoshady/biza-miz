@@ -16,7 +16,7 @@ Issue #1115, workstream **P0 — Controls inventory + owner UX contract**. Every
 - `cloud_site_data_sync` (11) — Cloud ↔ site data sync (identity, operational events, master data)
 - `activation_refresh` (6) — Activation / licence refresh (Full Offline)
 - `software_update` (6) — Software update (signed installer, never data)
-- `integration_sync` (8) — Third-party integration sync (WooCommerce, CMS, Holoo)
+- `integration_sync` (9) — Third-party integration sync (WooCommerce, CMS, Holoo)
 - `ui_reload` (3) — UI reload (re-reads data already on this side)
 - `pairing_enrollment` (10) — Pairing / enrolment (binds or unbinds an install)
 - `client_offline_queue` (4) — Client offline queue (browser → this site's own server)
@@ -76,9 +76,10 @@ Issue #1115, workstream **P0 — Controls inventory + owner UX contract**. Every
 
 | Id | Kind | Label | API / channel | Actor | Modes | Domain | Direction | Effect | Result | Findings | Source |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `wp.woo.sync-products` | button | «همگام‌سازی محصولات» | `POST /api/integrations/connections/[id]/sync/products` | integrations (WordPress manager) | cloud, hybrid | WooCommerce products | third_party_to_site | Pulls the store's catalogue in REST mode, or queues the plugin's pull in plugin mode. | reported | — | `src/app/(app)/websites/wp/woo-store-sections.tsx` |
-| `wp.woo.sync-orders` | button | «همگام‌سازی سفارش‌ها» | `POST /api/integrations/connections/[id]/sync/orders` | integrations (WordPress manager) | cloud, hybrid | WooCommerce orders | third_party_to_site | Pulls the store's orders in REST mode, or queues the plugin's pull in plugin mode. | reported | — | `src/app/(app)/websites/wp/woo-store-sections.tsx` |
-| `wp.woo.retry-product` | button | «تلاش دوبارهٔ ارسال» | `POST /api/integrations/connections/[id]/store/products/retry` | integrations (WordPress manager) | cloud, hybrid | WooCommerce product outbox | site_to_third_party | Re-arms one failed product in the outbox; the queue page shows what was re-armed. | reported | — | `src/app/(app)/websites/wp/woo-store-sections.tsx` |
+| `wp.woo.sync-products` | button | «همگام‌سازی محصولات» | `POST /api/integrations/connections/[id]/sync/products` | integrations (WordPress manager) | cloud, hybrid | WooCommerce products | third_party_to_site | Pulls the store's catalogue in REST mode, or queues the plugin's pull in plugin mode. | reported | — | `src/app/(app)/websites/wp/catalogue-section.tsx` |
+| `wp.woo.sync-orders` | button | «همگام‌سازی سفارش‌ها» | `POST /api/integrations/connections/[id]/sync/orders` | integrations (WordPress manager) | cloud, hybrid | WooCommerce orders | third_party_to_site | Pulls the store's orders in REST mode, or queues the plugin's pull in plugin mode. | reported | — | `src/app/(app)/websites/wp/orders-section.tsx` |
+| `wp.woo.sync-orders-settings` | button | «همگام‌سازی سفارش‌ها» | `POST /api/integrations/connections/[id]/sync/orders` | integrations (WordPress manager) | cloud, hybrid | WooCommerce orders | third_party_to_site | Pulls the store's orders for the lookback window chosen on the sync-settings screen. | reported | — | `src/app/(app)/websites/wp/woo-store-sections.tsx` |
+| `wp.woo.retry-product` | button | «تلاش دوبارهٔ ارسال» | `POST /api/integrations/connections/[id]/store/products/retry` | integrations (WordPress manager) | cloud, hybrid | WooCommerce product outbox | site_to_third_party | Re-arms one failed product in the outbox; the queue page shows what was re-armed. | reported | — | `src/app/(app)/websites/wp/catalogue-section.tsx` |
 | `wp.woo.sync-customers` | button | «همگام‌سازی مشتریان» | `POST /api/integrations/connections/[id]/sync/customers` | integrations (WordPress manager) | cloud, hybrid | WooCommerce customers | third_party_to_site | Pulls customers from the store; the overview and customers screens poll a queued plugin-mode sync for its real outcome. | reported | — | `src/app/(app)/websites/wp/woocommerce-connection-panel.tsx`<br>`src/app/(app)/websites/wp/customers-section.tsx`<br>`src/app/(app)/websites/wp/overview-section.tsx` |
 | `wp.woo.push-inventory` | button | «ارسال موجودی و قیمت» | `POST /api/integrations/connections/[id]/sync/inventory` | integrations (WordPress manager) | cloud, hybrid | WooCommerce stock and price | site_to_third_party | Pushes stock and price to the store; the store never writes them back. | reported | — | `src/app/(app)/websites/wp/woocommerce-connection-panel.tsx` |
 | `wp.queue.retry` | button | «تلاش مجدد» | `POST /api/integrations/wp-manager/queue` | integrations (WordPress manager) | cloud, hybrid | WooCommerce outbox / inbox queue | site_to_third_party | Re-queues one failed row (`action: retry`); a row that has already moved on is refused with its current status. | reported | — | `src/app/(app)/websites/wp/queue-section.tsx` |
@@ -91,7 +92,7 @@ Issue #1115, workstream **P0 — Controls inventory + owner UX contract**. Every
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | `settings.cloud-sync.refresh` | button | «به‌روزرسانی» | — | any signed-in member who can open the tab | hybrid | connection indicators | none | Dispatches the browser `online` event, so the connectivity probe and the browser queue flush run now. It does not start a server-sync push or pull. | none | F1, F3 | `src/app/(app)/settings/cloud-sync-settings.tsx` |
 | `status.connection-feed` | status_feed | — | `GET /api/connection/status` | signed-in session | hybrid, local, cloud | connection indicators | none | Read-only: local server / internet / cloud-sync / fault state behind the global banner and connectivity toasts. | reported | — | `src/app/dashboard/offline-queue.tsx` |
-| `wp.woo.reload` | button | «تازه‌سازی» | — | integrations (WordPress manager) | cloud, hybrid | WooCommerce product mirror | none | Re-reads the local mirror of the store; contacts the store only through the sync buttons beside it. | none | — | `src/app/(app)/websites/wp/woo-store-sections.tsx` |
+| `wp.woo.reload` | button | «تازه‌سازی» | — | integrations (WordPress manager) | cloud, hybrid | WooCommerce product mirror | none | Re-reads the local mirror of the store; contacts the store only through the sync buttons beside it. | none | — | `src/app/(app)/websites/wp/catalogue-section.tsx` |
 
 ## Pairing / enrolment (binds or unbinds an install)
 

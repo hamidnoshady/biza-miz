@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workspaceServiceGateDecision, workspaceServiceKeyForPath } from "./guard";
+import { readBody, workspaceServiceGateDecision, workspaceServiceKeyForPath } from "./guard";
 
 describe("paid Workspace API activation gate", () => {
   it("maps separately priced capabilities without gating the shared Workspace shell", () => {
@@ -47,5 +47,34 @@ describe("paid Workspace API activation gate", () => {
         }),
       ).toBeNull();
     }
+  });
+});
+
+describe("readBody (#907 F16)", () => {
+  const body = (payload: string) =>
+    new Request("https://example.test/api/workspace/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    });
+
+  it("passes an object through untouched", async () => {
+    expect(await readBody(body(JSON.stringify({ title: "کار", status: "open" })))).toEqual({
+      title: "کار",
+      status: "open",
+    });
+  });
+
+  it("treats a JSON array as no body rather than casting it to a record", async () => {
+    // `typeof [] === "object"`, so the old cast claimed a record and handed the
+    // service numeric keys as field values. An array is not a payload.
+    expect(await readBody(body(JSON.stringify([{ title: "کار" }])))).toEqual({});
+  });
+
+  it("treats a malformed or primitive body as no body", async () => {
+    expect(await readBody(body("{"))).toEqual({});
+    expect(await readBody(body("null"))).toEqual({});
+    expect(await readBody(body('"title"'))).toEqual({});
+    expect(await readBody(body("42"))).toEqual({});
   });
 });

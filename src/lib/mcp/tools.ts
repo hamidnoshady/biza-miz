@@ -4046,32 +4046,6 @@ const WRITE_TOOL_SPECS: WriteToolSpec[] = [
     },
   },
   {
-    name: "write_backup_config_set",
-    actionType: "backup.config.set",
-    english: "Set the tenant backup schedule/config (Owner-only; passphrase rotates to whatever you send).",
-    destructive: false,
-    inputSchema: {
-      type: "object",
-      properties: {
-        enabled: { type: "boolean" },
-        intervalHours: { type: "number" },
-        retentionDays: { type: "number" },
-        localDir: { type: "string" },
-        cloud: { type: "object", description: "تنظیمات آپلود ابری (هم‌نام پیکربندی صفحه)" },
-        passphrase: { type: "string", description: "عبارت رمز نسخه — خالی یعنی بدون تغییر" },
-      },
-      required: ["enabled"],
-      additionalProperties: true,
-    },
-  },
-  {
-    name: "write_backup_run_now",
-    actionType: "backup.run_now",
-    english: "One manual backup now (+cloud upload when configured) — can charge the wallet when the plan prices it; always asks a human first.",
-    destructive: true,
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
     name: "write_backup_restore_apply",
     actionType: "backup.restore.apply",
     english:

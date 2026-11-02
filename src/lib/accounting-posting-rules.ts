@@ -70,6 +70,15 @@ const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   // is its largest asset, is financed per unit, and is reported on its own in
   // every report §15 asks for.
   automotive: WELL_KNOWN_CODES.vehicleInventory,
+  // Issue #1128 — the generic inventory account (1300 موجودی مواد و کالا), the
+  // same answer AEC and `service_saas` give. The only material an agency holds
+  // is print/production stock (vinyl, paper, ink, merch) and the trade gets no
+  // module that manages it — the profile grants neither `stock` nor
+  // `inventory`, so 1300 is reached through Accounting's own documents (the
+  // wizard's opening balances, a manual journal) and never through a warehouse
+  // screen. This mapping is what keeps those documents and the write-down rule
+  // landing in one account instead of a guessed one, exactly as for AEC.
+  advertising_agency: WELL_KNOWN_CODES.inventory,
 };
 
 /** One side of a rule — the account, and whether it is debited or credited. */
@@ -137,6 +146,17 @@ function revenueLine(industry: Industry): PostingRuleLine {
     // dimension rather than from two charts, because "new or used" is a
     // property of the unit (see automotive_vehicle_attributes.condition).
     automotive: { code: WELL_KNOWN_CODES.vehicleSalesRevenue, label: "فروش خودرو" },
+    // Issue #1128 — the default account an agency's service invoice credits,
+    // AEC's 4610 in this trade's shape. The other three revenues (creative,
+    // media, events) are seeded in the chart and named in the note below, so an
+    // agency can report what it was engaged *for* without adding an account
+    // first — and there is deliberately no revenue per billing mode: retainer,
+    // milestone, fixed-price and hourly are properties of the invoice, not of
+    // the service it bills.
+    advertising_agency: {
+      code: WELL_KNOWN_CODES.agencyCampaignRevenue,
+      label: "درآمد خدمات تبلیغاتی و مدیریت کمپین",
+    },
   };
   const entry = codes[industry] ?? { code: WELL_KNOWN_CODES.salesRevenue, label: "فروش" };
   return {
@@ -148,6 +168,11 @@ function revenueLine(industry: Industry): PostingRuleLine {
     ...(industry === "architecture_construction"
       ? {
           note: `درآمد نظارت (${WELL_KNOWN_CODES.aecSupervisionRevenue}) و پیمانکاری (${WELL_KNOWN_CODES.aecConstructionRevenue}) حساب جدا دارند؛ صورتحساب طراحی به ${WELL_KNOWN_CODES.aecDesignRevenue} می‌نشیند.`,
+        }
+      : {}),
+    ...(industry === "advertising_agency"
+      ? {
+          note: `درآمد طراحی و تولید محتوا (${WELL_KNOWN_CODES.agencyCreativeRevenue})، رسانه (${WELL_KNOWN_CODES.agencyMediaRevenue}) و رویداد و روابط عمومی (${WELL_KNOWN_CODES.agencyEventRevenue}) حساب جدا دارند؛ صورتحساب خدمات کمپین به ${WELL_KNOWN_CODES.agencyCampaignRevenue} می‌نشیند. هزینهٔ رسانه و تولیدِ کارِ مشتری بهای تمام‌شده است (${WELL_KNOWN_CODES.agencyMediaCost}/${WELL_KNOWN_CODES.agencyProductionCost})، نه کسر از درآمد؛ بازاریابی خود آژانس به ${WELL_KNOWN_CODES.marketingExpense} می‌نشیند.`,
         }
       : {}),
   };

@@ -216,7 +216,7 @@ export function ShiftSalesQuickReport({ refreshKey }: { refreshKey: number }) {
   ];
 
   return (
-    <div className={`p-4 sm:p-5 ${cardClass}`}>
+    <div data-tour-id="overview.shift-sales" className={`p-4 sm:p-5 ${cardClass}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
@@ -366,7 +366,7 @@ export function LedgerDashboardSection({
   const readinessUnavailable = readinessStatus === "failed" || readinessStatus === "refresh-failed";
 
   const filterBar = (
-    <div className={`p-4 sm:p-5 ${cardClass}`}>
+    <div data-tour-id="overview.filters" className={`p-4 sm:p-5 ${cardClass}`}>
       <div className="flex flex-wrap items-end gap-3">
         <label className="min-w-44">
           <span className="mb-1 block text-xs font-medium text-muted-foreground">
@@ -582,6 +582,7 @@ export function LedgerDashboardSection({
             card
           );
         return (
+          <div data-tour-id="overview.kpis">
           <KpiRow className="xl:grid-cols-3">
             {linked(balanceHref, (
               <KpiCard
@@ -629,9 +630,11 @@ export function LedgerDashboardSection({
               />
             ), "سود (زیان) خالص")}
           </KpiRow>
+          </div>
         );
       })()}
 
+      <div data-tour-id="overview.shortcuts">
       <SectionCard
         title={
           <div>
@@ -663,7 +666,9 @@ export function LedgerDashboardSection({
           {!canGo("directory") && !canGo("entries") ? <p className="text-xs text-muted-foreground">دسترسی سریعی برای سطح دسترسی شما در دسترس نیست.</p> : null}
         </div>
       </SectionCard>
+      </div>
 
+      <div data-tour-id="overview.recent">
       <SectionCard
         title={
           <div>
@@ -705,6 +710,7 @@ export function LedgerDashboardSection({
           </ul>
         )}
       </SectionCard>
+      </div>
     </div>
   );
 }

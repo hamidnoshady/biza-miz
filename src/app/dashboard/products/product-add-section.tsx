@@ -22,7 +22,6 @@ import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useMoney } from "@/components/money/money-context";
-import { previewRetailPrice, type RetailRecommendationOutcome } from "@/lib/retail-price-recommendation";
 import type { ParsedPriceRecommendation } from "@/lib/product-input";
 import { internalBarcodeForPayload } from "@/lib/barcode";
 import { accountingProductsHref } from "@/lib/app-routes";
@@ -43,7 +42,12 @@ import {
 } from "@/lib/product-attribute-drafts";
 import { attributeComparisonKey } from "@/lib/product-attributes";
 import { MediaGalleryField, MediaImageField } from "../media/media-picker";
+import { ProductContentFields } from "./product-content-fields";
+import { isProductPublishStatus, type ProductPublishStatus } from "@/lib/product-content";
 import { api, ErrorBox, Field, inputClass } from "../ui";
+import { PercentInput, PriceInput } from "../number-fields";
+import { RetailPriceAdvisor } from "./retail-price-advisor";
+import { ProductPublicationPanel } from "./product-publication-panel";
 import {
   cardClass,
   EmptyState,
@@ -83,6 +87,9 @@ interface FormState {
   coverMediaId: string | null;
   galleryMediaIds: string[];
   notSellable: boolean;
+  publishStatus: ProductPublishStatus;
+  shortDescription: string;
+  longDescription: string;
   sellPrice: string;
   purchasePrice: string;
   quantity: string;
@@ -108,6 +115,9 @@ const EMPTY_FORM: FormState = {
   coverMediaId: null,
   galleryMediaIds: [],
   notSellable: false,
+  publishStatus: "published",
+  shortDescription: "",
+  longDescription: "",
   sellPrice: "",
   purchasePrice: "",
   quantity: "",
@@ -133,6 +143,7 @@ interface StoredDraft {
 const TABS = [
   { key: "pricing", label: "قیمت‌گذاری" },
   { key: "general", label: "عمومی" },
+  { key: "content", label: "توضیحات و انتشار" },
   { key: "order", label: "سفارش" },
   { key: "tax", label: "مالیات" },
   { key: "attributes", label: "تنوع‌ها" },
@@ -142,6 +153,7 @@ type TabKey = (typeof TABS)[number]["key"];
 const SECTION_TO_TAB: Partial<Record<ProductFormSection, TabKey>> = {
   pricing: "pricing",
   general: "general",
+  content: "content",
   order: "order",
   tax: "tax",
   attributes: "attributes",
@@ -231,6 +243,9 @@ function safeForm(value: unknown): FormState {
     coverMediaId,
     galleryMediaIds,
     notSellable: raw.notSellable === true,
+    publishStatus: isProductPublishStatus(raw.publishStatus) ? raw.publishStatus : "published",
+    shortDescription: text(raw.shortDescription),
+    longDescription: text(raw.longDescription),
     sellPrice: text(raw.sellPrice),
     purchasePrice: text(raw.purchasePrice),
     quantity: text(raw.quantity),
@@ -349,6 +364,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [createdProductId, setCreatedProductId] = useState<string | null>(null);
   const [issues, setIssues] = useState<ProductValidationIssue[]>([]);
   /**
    * The advisor calculation the user applied to the sale price. It is sent with
@@ -628,6 +644,9 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       coverMediaId: form.coverMediaId || null,
       galleryMediaIds: form.galleryMediaIds,
       isSellable: !form.notSellable,
+      publishStatus: form.publishStatus,
+      shortDescription: form.shortDescription || null,
+      longDescription: form.longDescription || null,
       unit: form.unit || null,
       subUnit: form.subUnit || null,
       conversionFactor: form.conversionFactor || null,
@@ -702,6 +721,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     setNotice("");
     setIssues([]);
     const result = await api<{
+      item?: { id: string };
       error?: string;
       message?: string;
       issues?: ProductValidationIssue[];
@@ -742,6 +762,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       persistDrafts(drafts.filter((draft) => draft.id !== activeDraftId));
     }
     resetForm("محصول با موفقیت ذخیره شد. می‌توانید محصول بعدی را ثبت کنید.");
+    setCreatedProductId(result.data.item?.id ?? null);
   }
 
   if (definitions === null) {
@@ -779,6 +800,20 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   return (
     <div className="grid min-w-0 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-5">
       <form id="product-add-form" noValidate onSubmit={save} className="min-w-0 space-y-4">
+        {createdProductId ? (
+          <SectionCard title="انتشار اختیاری محصول ثبت‌شده">
+            {/* A product this form just created has no store mapping yet and no
+                duplicate history: the row controls are «انتشار در فروشگاه» /
+                «پیوند به محصول موجود», with nothing to refresh on this screen. */}
+            <ProductPublicationPanel
+              localId={createdProductId}
+              links={[]}
+              duplicate={false}
+              open
+              onQueued={() => {}}
+            />
+          </SectionCard>
+        ) : null}
         <div aria-live="assertive">
           <ErrorBox>{error}</ErrorBox>
         </div>
@@ -826,6 +861,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
         ) : null}
 
         <fieldset disabled={busy} className="min-w-0 space-y-4 disabled:opacity-75">
+          <div data-tour-id="product-new.identity">
           <SectionCard
             title="مشخصات اصلی"
             description="نام محصول الزامی است. کد کالا و بارکد را دستی وارد کنید یا بسازید."
@@ -949,7 +985,9 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
               </div>
             </div>
           </SectionCard>
+          </div>
 
+          <div data-tour-id="product-new.tabs">
           <TabBar
             idPrefix="product-add"
             label="بخش‌های فرم محصول"
@@ -960,31 +998,30 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
               setError("");
             }}
           />
+          </div>
           <TabPanel idPrefix="product-add" active={tab}>
             {tab === "pricing" ? (
               <>
                 <SectionCard title="قیمت و موجودی اولیه" description={commonPricingHint}>
                 <div className="grid min-w-0 gap-x-4 sm:grid-cols-2 xl:grid-cols-3">
                   <Field label={`قیمت فروش (${money.unitLabel})`} hint="در صورت ورود، باید بیشتر از صفر باشد.">
-                    <PersianNumberInput
+                    <PriceInput
                       value={form.sellPrice}
+                      showUnit={false}
                       onChange={(event) => {
                         set("sellPrice", event.target.value);
                         setAppliedRecommendation(null);
                       }}
-                      allowDecimal={false}
-                      allowNegative={false}
                       aria-invalid={fieldErrors.has("sellPrice")}
                       placeholder="۰"
                     />
                     <InlineError message={fieldErrors.get("sellPrice")} />
                   </Field>
                   <Field label={`قیمت خرید (${money.unitLabel})`} hint="می‌تواند بدون موجودی اولیه ثبت شود.">
-                    <PersianNumberInput
+                    <PriceInput
                       value={form.purchasePrice}
+                      showUnit={false}
                       onChange={(event) => set("purchasePrice", event.target.value)}
-                      allowDecimal={false}
-                      allowNegative={false}
                       aria-invalid={fieldErrors.has("purchasePrice")}
                       placeholder="۰"
                     />
@@ -992,6 +1029,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                   </Field>
                   <Field label="موجودی اولیه" hint="برای کالای شمارشی، مقدار اعشاری هم پذیرفته می‌شود.">
                     <PersianNumberInput
+                      className={inputClass}
                       value={form.quantity}
                       onChange={(event) => set("quantity", event.target.value)}
                       inputMode="decimal"
@@ -1007,11 +1045,11 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                 <RetailPriceAdvisor
                   purchasePrice={form.purchasePrice}
                   sellPrice={form.sellPrice}
+                  taxSalePercent={form.taxSalePercent}
                   onApply={(price, recommendation) => {
                     set("sellPrice", price);
                     setAppliedRecommendation(recommendation);
                   }}
-                  unitLabel={money.unitLabel}
                 />
               </>
             ) : null}
@@ -1046,6 +1084,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                   </Field>
                   <Field label="ضریب تبدیل" hint="مثلاً هر کارتن شامل ۲۴ عدد است.">
                     <PersianNumberInput
+                      className={inputClass}
                       value={form.conversionFactor}
                       onChange={(event) => set("conversionFactor", event.target.value)}
                       inputMode="decimal"
@@ -1065,6 +1104,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                 <div className="grid min-w-0 gap-x-4 sm:grid-cols-2">
                   <Field label="نقطهٔ یادآوری سفارش" hint="وقتی موجودی به این مقدار رسید، یادآوری شود.">
                     <PersianNumberInput
+                      className={inputClass}
                       value={form.reorderReminder}
                       onChange={(event) => set("reorderReminder", event.target.value)}
                       inputMode="decimal"
@@ -1077,6 +1117,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                   </Field>
                   <Field label="حداقل مقدار سفارش">
                     <PersianNumberInput
+                      className={inputClass}
                       value={form.minOrder}
                       onChange={(event) => set("minOrder", event.target.value)}
                       inputMode="decimal"
@@ -1089,6 +1130,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                   </Field>
                   <Field label="زمان تحویل (روز)">
                     <PersianNumberInput
+                      className={inputClass}
                       value={form.leadTimeDays}
                       onChange={(event) => set("leadTimeDays", event.target.value)}
                       allowDecimal={false}
@@ -1113,28 +1155,44 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
               </SectionCard>
             ) : null}
 
+            {tab === "content" ? (
+              <SectionCard
+                title="توضیحات و انتشار"
+                description="متنی که فروشگاه اینترنتی و وب‌سایت نشان می‌دهند. هوش مصنوعی فقط پیش‌نویس می‌نویسد و تا ذخیرهٔ محصول چیزی ثبت نمی‌شود."
+              >
+                <ProductContentFields
+                  value={{ publishStatus: form.publishStatus, shortDescription: form.shortDescription, longDescription: form.longDescription }}
+                  onChange={(patch) => {
+                    clearFeedback();
+                    setForm((current) => ({ ...current, ...patch }));
+                  }}
+                  facts={{ name: form.name, sku: form.sku, unit: form.unit }}
+                  disabled={busy}
+                  errors={{
+                    publishStatus: fieldErrors.get("publishStatus"),
+                    shortDescription: fieldErrors.get("shortDescription"),
+                    longDescription: fieldErrors.get("longDescription"),
+                  }}
+                />
+              </SectionCard>
+            ) : null}
+
             {tab === "tax" ? (
               <SectionCard title="مالیات" description="درصد را بین صفر تا صد وارد کنید؛ مبلغ مالیات در قیمت‌های بالا وارد نمی‌شود.">
                 <div className="grid min-w-0 gap-x-4 sm:grid-cols-2">
                   <Field label="مالیات فروش (درصد)">
-                    <PersianNumberInput
+                    <PercentInput
                       value={form.taxSalePercent}
                       onChange={(event) => set("taxSalePercent", event.target.value)}
-                      inputMode="decimal"
-                      allowDecimal
-                      allowNegative={false}
                       aria-invalid={fieldErrors.has("taxSalePercent")}
                       placeholder="۱۰"
                     />
                     <InlineError message={fieldErrors.get("taxSalePercent")} />
                   </Field>
                   <Field label="مالیات خرید (درصد)">
-                    <PersianNumberInput
+                    <PercentInput
                       value={form.taxPurchasePercent}
                       onChange={(event) => set("taxPurchasePercent", event.target.value)}
-                      inputMode="decimal"
-                      allowDecimal
-                      allowNegative={false}
                       aria-invalid={fieldErrors.has("taxPurchasePercent")}
                       placeholder="۱۰"
                     />
@@ -1325,22 +1383,20 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                             </Field>
 
                             <Field label={`قیمت فروش (${money.unitLabel})`} hint="خالی یعنی استفاده از قیمت پیش‌فرض بالا.">
-                              <PersianNumberInput
+                              <PriceInput
                                 value={variant.sellPrice}
+                                showUnit={false}
                                 onChange={(event) => setVariant(variant.id, { sellPrice: event.target.value })}
-                                allowDecimal={false}
-                                allowNegative={false}
                                 aria-invalid={fieldErrors.has(`${variantPrefix}.sellPrice`)}
                                 placeholder={form.sellPrice || "پیش‌فرض"}
                               />
                               <InlineError message={fieldErrors.get(`${variantPrefix}.sellPrice`)} />
                             </Field>
                             <Field label={`قیمت خرید (${money.unitLabel})`} hint="خالی یعنی استفاده از قیمت پیش‌فرض بالا.">
-                              <PersianNumberInput
+                              <PriceInput
                                 value={variant.purchasePrice}
+                                showUnit={false}
                                 onChange={(event) => setVariant(variant.id, { purchasePrice: event.target.value })}
-                                allowDecimal={false}
-                                allowNegative={false}
                                 aria-invalid={fieldErrors.has(`${variantPrefix}.purchasePrice`)}
                                 placeholder={form.purchasePrice || "پیش‌فرض"}
                               />
@@ -1348,6 +1404,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                             </Field>
                             <Field label="موجودی اولیه" hint="خالی یعنی استفاده از موجودی پیش‌فرض بالا.">
                               <PersianNumberInput
+                                className={inputClass}
                                 value={variant.quantity}
                                 onChange={(event) => setVariant(variant.id, { quantity: event.target.value })}
                                 inputMode="decimal"
@@ -1391,13 +1448,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
           </TabPanel>
         </fieldset>
 
-        <div className={`${cardClass} sticky bottom-3 z-20 grid gap-2 bg-card/95 p-3 backdrop-blur-sm lg:hidden`}>
+        <div data-tour-id="product-new.save" className={`${cardClass} sticky bottom-3 z-20 grid gap-2 bg-card/95 p-3 backdrop-blur-sm lg:hidden`}>
           {actionButtons}
         </div>
       </form>
 
       <aside className="min-w-0 lg:sticky lg:top-4">
-        <section className={`${cardClass} min-w-0 overflow-hidden`} aria-label="پیش‌نویس‌های محصول">
+        <section data-tour-id="product-new.drafts" className={`${cardClass} min-w-0 overflow-hidden`} aria-label="پیش‌نویس‌های محصول">
           <div className="border-b border-border/80 px-4 py-4">
             <div className="flex items-center gap-2">
               <BarcodeIcon aria-hidden="true" className="size-4 text-amber-700 dark:text-amber-300" />
@@ -1457,182 +1514,9 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
             )}
           </div>
 
-          <div className="hidden space-y-2 border-t border-border/80 bg-muted/40 p-3 lg:block">{actionButtons}</div>
+          <div data-tour-id="product-new.save" className="hidden space-y-2 border-t border-border/80 bg-muted/40 p-3 lg:block">{actionButtons}</div>
         </section>
       </aside>
     </div>
-  );
-}
-
-export function RetailPriceAdvisor({
-  purchasePrice,
-  sellPrice,
-  onApply,
-  unitLabel,
-}: {
-  purchasePrice: string;
-  sellPrice: string;
-  onApply: (value: string, recommendation: ParsedPriceRecommendation) => void;
-  unitLabel: string;
-}) {
-  const money = useMoney();
-  const [fixedOverhead, setFixedOverhead] = useState("");
-  const [percentOverhead, setPercentOverhead] = useState("");
-  const [overheadBase, setOverheadBase] = useState<"reference" | "with_fixed">("reference");
-  const [markup, setMarkup] = useState("");
-  const [margin, setMargin] = useState("");
-  const [rounding, setRounding] = useState<"none" | "nearest" | "up" | "down">("nearest");
-  const [roundStep, setRoundStep] = useState("1000");
-  const [taxPercent, setTaxPercent] = useState("");
-  const [taxMode, setTaxMode] = useState<"exclusive" | "inclusive">("exclusive");
-  const [preview, setPreview] = useState<RetailRecommendationOutcome | null>(null);
-  /**
-   * The exact calculation behind the preview on screen. «اعمال قیمت پیشنهادی»
-   * hands it to the form, which sends it with the product, so the audit row can
-   * state how the accepted price was derived (review item 3). Preview itself is
-   * pure: nothing is written until the product is saved.
-   */
-  const [previewInput, setPreviewInput] = useState<{
-    recommendation: ParsedPriceRecommendation;
-    suggestedPriceRial: number;
-  } | null>(null);
-
-  const percentOf = (value: string) => {
-    const normalized = toLatinDigits(value).replace(/[^0-9.\-]/g, "");
-    const num = Number(normalized);
-    return Number.isFinite(num) ? num : Number.NaN;
-  };
-
-  const handlePreview = () => {
-    // The form types in the business's display unit; the engine only accepts Rial.
-    const referenceCostRial = money.parse(purchasePrice.trim() || "0");
-    const fixedRial = money.parse(fixedOverhead.trim() || "0");
-    const percent = percentOverhead.trim() ? percentOf(percentOverhead) : 0;
-    const target = markup.trim()
-      ? ({ kind: "markup", percent: percentOf(markup) } as const)
-      : margin.trim()
-        ? ({ kind: "margin", percent: percentOf(margin) } as const)
-        : ({ kind: "markup", percent: 0 } as const);
-    // The form accepts whole values in the business's selected unit. Even when
-    // the operator chooses no extra rounding, the applied price must be
-    // representable in that field (10 Rial for Toman, 1 Rial for Rial).
-    const displayUnitStepRial = money.parse("1");
-    const roundingInput =
-      rounding === "none"
-        ? ({ policy: "nearest", stepRial: displayUnitStepRial } as const)
-        : ({ policy: rounding, stepRial: money.parse(roundStep.trim() || "1000") } as const);
-    const tax = taxPercent.trim() ? { percent: percentOf(taxPercent), mode: taxMode } : null;
-
-    const res = previewRetailPrice({
-      referenceCost: { amountRial: referenceCostRial, currency: "IRR" },
-      overhead: { fixedRial, percent, base: overheadBase },
-      target,
-      rounding: roundingInput,
-      tax,
-    });
-    setPreview(res);
-    setPreviewInput(
-      res.ok
-        ? {
-            suggestedPriceRial: res.suggestedPriceRial,
-            recommendation: {
-              suggestedPriceRial: res.suggestedPriceRial,
-              mode: target.kind,
-              inputs: {
-                referenceCostRial,
-                fixedOverheadRial: fixedRial,
-                percentOverhead: percent,
-                overheadBase,
-                markupPercent: target.kind === "markup" ? target.percent : null,
-                marginPercent: target.kind === "margin" ? target.percent : null,
-                // Record both the user's choice and the effective price step so
-                // the accepted recommendation can be reproduced exactly.
-                rounding: roundingInput.policy,
-                roundingSelection: rounding,
-                roundStepRial: roundingInput.stepRial ?? null,
-                taxPercent: tax ? tax.percent : null,
-                taxMode: tax ? tax.mode : null,
-                suggestedPriceRial: res.suggestedPriceRial,
-              },
-            },
-          }
-        : null,
-    );
-  };
-
-  return (
-    <SectionCard
-      title="پیشنهاد قیمت فروش (محاسبه‌گر)"
-      description="این بخش فقط پیش‌نمایش است و هیچ بهای تمام‌شده یا سندی را خودکار ثبت نمی‌کند. پس از «اعمال قیمت پیشنهادی»، قیمت فروش قابل ویرایش می‌ماند و تنها با ذخیرهٔ مجاز محصول ثبت می‌شود."
-    >
-      <div className="space-y-4">
-        <p className="text-xs text-muted-foreground">
-          مرجع خرید (reference) با سربار ثابت/درصدی جمع می‌شود، سپس نشانه‌گذاری (markup) یا حاشیهٔ سود (margin) اعمال می‌شود. گردکردن به کوچک‌ترین واحد قابل ورود در ارز کسب‌وکار احترام می‌گذارد؛ مالیات در حالت «افزوده بر قیمت» (exclusive) جداگانه نمایش داده می‌شود و وارد قیمت پایه نمی‌شود. برای آرایشی، بهای خرید هر لات جداگانه محاسبه می‌شود.
-        </p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label={`سربار ثابت (${unitLabel})`}><PersianNumberInput value={fixedOverhead} onChange={(e) => setFixedOverhead(e.target.value)} allowDecimal={false} allowNegative={false} placeholder="۰" dir="ltr" /></Field>
-          <Field label="سربار درصدی (%)">
-            <div className="flex gap-2">
-              <PersianNumberInput value={percentOverhead} onChange={(e) => setPercentOverhead(e.target.value)} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" className="flex-1" />
-              <select value={overheadBase} onChange={(e) => setOverheadBase(e.target.value as "reference" | "with_fixed")} className={inputClass + " w-32"}>
-                <option value="reference">بر مبنای مرجع</option>
-                <option value="with_fixed">با سربار ثابت</option>
-              </select>
-            </div>
-          </Field>
-          <Field label="نشانه‌گذاری markup (%)" hint="markup = cost*(1+m/100)"><PersianNumberInput value={markup} onChange={(e) => { setMarkup(e.target.value); if (e.target.value) setMargin(""); }} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" /></Field>
-          <Field label="حاشیه سود margin (%)" hint="margin = cost/(1-m/100)"><PersianNumberInput value={margin} onChange={(e) => { setMargin(e.target.value); if (e.target.value) setMarkup(""); }} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" /></Field>
-          <Field label="گرد کردن" hint={`بدون گردکردن اضافه، قیمت به کوچک‌ترین واحد قابل ورود (${unitLabel}) گرد می‌شود.`}>
-            <div className="flex gap-2">
-              <select value={rounding} onChange={(e) => setRounding(e.target.value as "none" | "nearest" | "up" | "down")} className={inputClass + " flex-1"}>
-                <option value="none">بدون گردکردن اضافه</option>
-                <option value="nearest">نزدیک‌ترین</option>
-                <option value="up">به بالا</option>
-                <option value="down">به پایین</option>
-              </select>
-              {rounding !== "none" ? <PersianNumberInput value={roundStep} onChange={(e) => setRoundStep(e.target.value)} allowDecimal={false} allowNegative={false} placeholder="1000" dir="ltr" className="w-28" /> : null}
-            </div>
-          </Field>
-          <Field label="مالیات فروش (%)">
-            <div className="flex gap-2">
-              <PersianNumberInput value={taxPercent} onChange={(e) => setTaxPercent(e.target.value)} allowDecimal allowNegative={false} placeholder="۰" dir="ltr" className="flex-1" />
-              <select value={taxMode} onChange={(e) => setTaxMode(e.target.value as "exclusive" | "inclusive")} className={inputClass + " w-36"}>
-                <option value="exclusive">افزوده بر قیمت</option>
-                <option value="inclusive">مستتر در قیمت</option>
-              </select>
-            </div>
-          </Field>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={handlePreview}>پیش‌نمایش محاسبه</Button>
-          {preview && preview.ok && preview.suggestedPriceRial > 0 ? (
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => {
-                const applied = String(money.toInput(preview.suggestedPriceRial));
-                if (previewInput) onApply(applied, previewInput.recommendation);
-                else onApply(applied, { suggestedPriceRial: preview.suggestedPriceRial, mode: "markup", inputs: {} });
-              }}
-            >
-              اعمال قیمت پیشنهادی: {toPersianDigits(money.toInput(preview.suggestedPriceRial))} {unitLabel}
-            </Button>
-          ) : null}
-        </div>
-        {preview ? (
-          preview.ok ? (
-            <div className="rounded-lg bg-muted p-3 text-xs space-y-1">
-              <p>قیمت پیشنهادی: {toPersianDigits(money.toInput(preview.suggestedPriceRial))} {unitLabel}</p>
-              <p>بهای تمام‌شده مبنا: {toPersianDigits(money.toInput(preview.breakdown.costRial))} {unitLabel}</p>
-              <p>سود ناخالص: {toPersianDigits(money.toInput(preview.breakdown.grossProfitRial))} {unitLabel} ({preview.breakdown.marginPercent.toFixed(1)}٪ حاشیه · {preview.breakdown.markupPercent.toFixed(1)}٪ نشانه‌گذاری)</p>
-              {preview.taxPreview ? <p>مالیات: {toPersianDigits(money.toInput(preview.taxPreview.taxRial))} {unitLabel} — قابل پرداخت: {toPersianDigits(money.toInput(preview.taxPreview.payableRial))} {unitLabel}</p> : null}
-            </div>
-          ) : (
-            <p className="text-xs text-destructive">{preview.error || "خطا در محاسبه"}</p>
-          )
-        ) : null}
-        {sellPrice ? <p className="text-xs text-muted-foreground">قیمت فروش فعلی فرم: {toPersianDigits(sellPrice)} {unitLabel} — قابل بازنویسی دستی است.</p> : null}
-      </div>
-    </SectionCard>
   );
 }

@@ -569,6 +569,15 @@ jobs:
           exit 1
       - name: CRM Today customer-link E2E (desktop and mobile)
         run: npm run test:e2e:crm-queue-links
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          # What the page was when the CRM shell never appeared. The script
+          # writes these only on failure; without them a timeout in an
+          # accessibility locator is undiagnosable from the log alone.
+          name: crm-queue-links-failure
+          path: .cache/crm-queue-links-*.png
+          if-no-files-found: ignore
       - name: Media E2E
         # The script itself writes platform_media_config directly (an
         # in-process mock S3, not the pos_app role) — it needs the

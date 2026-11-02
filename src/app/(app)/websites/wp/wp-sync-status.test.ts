@@ -8,9 +8,13 @@ import { describe, expect, it } from "vitest";
 import {
   classifySyncResponse,
   describeSyncOutcome,
+  PLUGIN_PULL_INTERVAL_MS,
+  pluginPullIntervalMs,
+  queuedPollPlan,
   storeDisplayName,
   syncAvailability,
   transportHealthPresentation,
+  waitMinutesLabel,
 } from "./wp-sync-status";
 import { describeStoreLoadFailure } from "./wp-store-states";
 import { resolveSelection, storageKeyFor } from "./wp-store-context";
@@ -222,5 +226,61 @@ describe("describeCallSuccess", () => {
     expect(describeCallSuccess({ ok: true, updated: 1 })).toBe("عملیات انجام شد.");
     expect(describeCallSuccess({ ok: true, contentError: "x" })).toContain("ناقص");
     expect(describeCallSuccess(null)).toBe("عملیات انجام شد.");
+  });
+});
+
+describe("queuedPollPlan (OVR-06)", () => {
+  const now = Date.parse("2026-10-27T10:00:00Z");
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  const healthy = (seenMsAgo: number | null, caps: Record<string, unknown> | null = null) => ({
+    pluginCapabilities: caps,
+    lastPluginSeenAt: seenMsAgo === null ? null : ago(seenMsAgo),
+    transportHealth: { state: "healthy", lastSeenAt: seenMsAgo === null ? null : ago(seenMsAgo) },
+  });
+
+  it("defaults to the plugin's five-minute fast lane and gives up after three missed pulls", () => {
+    expect(pluginPullIntervalMs(null)).toBe(PLUGIN_PULL_INTERVAL_MS);
+    const plan = queuedPollPlan(healthy(60_000), now);
+    expect(plan.intervalMs).toBe(300_000);
+    expect(plan.maxWaitMs).toBe(15 * 60_000);
+  });
+
+  it("aims at the next expected pull instead of polling every minute", () => {
+    // Seen 60 s ago → next pull in ~240 s, plus the apply grace.
+    expect(queuedPollPlan(healthy(60_000), now).delayMs).toBe(240_000 + 20_000);
+    // Seen 4 min ago → the pull is imminent; look just after it.
+    expect(queuedPollPlan(healthy(240_000), now).delayMs).toBe(60_000 + 20_000);
+  });
+
+  it("looks more often when the plugin is overdue or has no heartbeat yet", () => {
+    expect(queuedPollPlan(healthy(10 * 60_000), now).delayMs).toBe(30_000);
+    expect(queuedPollPlan(healthy(null), now).delayMs).toBe(30_000);
+  });
+
+  it("never schedules a look sooner than the floor", () => {
+    // Expected pull + grace is 1 s away.
+    expect(queuedPollPlan(healthy(300_000 + 20_000 - 1_000), now).delayMs).toBe(15_000);
+  });
+
+  it("waits a whole interval when the plugin cannot pull at all", () => {
+    for (const state of ["stale", "never_connected", "site_mismatch", "paused", "error"]) {
+      const plan = queuedPollPlan({ pluginCapabilities: null, lastPluginSeenAt: ago(1_000), transportHealth: { state, lastSeenAt: ago(1_000) } }, now);
+      expect(plan.delayMs).toBe(300_000);
+    }
+  });
+
+  it("follows a cadence the plugin advertised, clamped and never trusted blindly", () => {
+    expect(pluginPullIntervalMs({ pullIntervalSeconds: 900 })).toBe(900_000);
+    expect(queuedPollPlan(healthy(60_000, { pullIntervalSeconds: 900 }), now).maxWaitMs).toBe(45 * 60_000);
+    expect(pluginPullIntervalMs({ pullIntervalSeconds: 1 })).toBe(60_000);
+    expect(pluginPullIntervalMs({ pullIntervalSeconds: 10 ** 9 })).toBe(3_600_000);
+    for (const junk of ["300", -5, 0, Number.NaN, null, {}]) {
+      expect(pluginPullIntervalMs({ pullIntervalSeconds: junk })).toBe(PLUGIN_PULL_INTERVAL_MS);
+    }
+  });
+
+  it("states the give-up window in minutes from the plan itself", () => {
+    expect(waitMinutesLabel(15 * 60_000)).toContain("۱۵");
+    expect(waitMinutesLabel(45 * 60_000)).toContain("۴۵");
   });
 });

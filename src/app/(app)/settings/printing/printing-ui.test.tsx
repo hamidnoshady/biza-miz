@@ -211,6 +211,9 @@ function putBodyOf(documentType: string): Record<string, unknown> {
 }
 
 beforeEach(() => {
+  // The preview frames fetch the Persian font; answer instantly so a slow
+  // file: fetch can never hold a frame back in a loaded test run.
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
   apiMock.mockReset();
   printTemplateSampleMock.mockReset();
   printTemplateSampleMock.mockResolvedValue({ ok: true });
@@ -219,6 +222,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 /* ── the rules screen ─────────────────────────────────────────────────── */
@@ -310,6 +314,19 @@ describe("Template gallery — preview and selection", () => {
     expect(options).toEqual(["رسید فروش", "فاکتور", "سفارش آشپزخانه"]);
   });
 
+  it("separates trade-specific built-ins from general ones and badges each card", async () => {
+    await openTemplates();
+    expect(bodyText()).toContain("نوع کسب‌وکار:");
+    const specific = screen.getByRole("region", { name: /^ویژهٔ / });
+    const general = screen.getByRole("region", { name: "عمومی" });
+    const kitchen = [...specific.querySelectorAll("article")].map((card) => card.textContent ?? "");
+    expect(kitchen.length).toBeGreaterThan(0);
+    expect(kitchen.every((text) => text.includes("ویژهٔ حوزهٔ خاص"))).toBe(true);
+    const generalCards = [...general.querySelectorAll("article")].map((card) => card.textContent ?? "");
+    expect(generalCards.length).toBeGreaterThan(0);
+    expect(generalCards.some((text) => text.includes("ویژهٔ حوزهٔ خاص"))).toBe(false);
+  });
+
   it("uses a fixed scroll-free thumbnail stage and opens a monitor-only preview", async () => {
     await openTemplates();
     const stages = [...document.querySelectorAll<HTMLElement>("[aria-label^='تصویر کامل قالب']")];
@@ -360,7 +377,7 @@ describe("Template gallery — sample price units", () => {
       samplePrice("a4-invoice-jewelry", "jewelry", "toman"),
       samplePrice("label57x40-label", "wholesale", "toman"),
       samplePrice("a4-invoice", "wholesale", "toman"),
-    ]).toEqual(["۸٬۴۰۰٬۰۰۰ تومان", "۱۲۵٬۰۰۰ تومان", "۳۶۵٬۰۰۰ تومان"]);
+    ]).toEqual(["۸٬۴۰۰٬۰۰۰ تومان", "۴۸۰٬۰۰۰ تومان", "۱۲٬۵۰۰٬۰۰۰ تومان"]);
   });
 
   it("formats every hard-coded Rial sample amount in Rial when selected", () => {
@@ -368,7 +385,7 @@ describe("Template gallery — sample price units", () => {
       samplePrice("a4-invoice-jewelry", "jewelry", "rial"),
       samplePrice("label57x40-label", "wholesale", "rial"),
       samplePrice("a4-invoice", "wholesale", "rial"),
-    ]).toEqual(["۸۴٬۰۰۰٬۰۰۰ ریال", "۱٬۲۵۰٬۰۰۰ ریال", "۳٬۶۵۰٬۰۰۰ ریال"]);
+    ]).toEqual(["۸۴٬۰۰۰٬۰۰۰ ریال", "۴٬۸۰۰٬۰۰۰ ریال", "۱۲۵٬۰۰۰٬۰۰۰ ریال"]);
   });
 });
 

@@ -48,6 +48,7 @@ import {
   PROJECT_STATUSES,
   PROJECT_STATUS_LABELS,
   completionPercent,
+  type ProjectHealthSnapshot,
   type WorkspacePriority,
   type WorkspaceProjectStatus,
 } from "@/lib/workspace-shared";
@@ -99,6 +100,13 @@ export interface ProjectRow {
   documentCount: number;
   overdueTaskCount: number;
   openApprovalCount: number;
+  /** Contracts expiring within 30 days — a health input (issue #907 F07). */
+  expiringContractCount: number;
+  /**
+   * The server's health verdict (issue #907 F07). Rendered as-is: the card and
+   * the project page must not judge the same project differently.
+   */
+  health: ProjectHealthSnapshot;
 }
 
 interface TemplateOption {
@@ -238,7 +246,7 @@ export function ProjectsSection({
         ) : (
           <TabPanel idPrefix="workspace-projects" active={view}>
             {view === "portfolio" ? (
-              <ProjectCards projects={projects} today={today} />
+              <ProjectCards projects={projects} />
             ) : view === "timeline" ? (
               <ProjectTimeline projects={projects} today={today} />
             ) : (

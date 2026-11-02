@@ -45,6 +45,34 @@ Every sync route answers with a `result` so the UI never guesses:
 | `partial` | REST mode; the named operation succeeded but a substep failed — `failedSteps: [{ step, error }]` (today only `content`, after a products sync). Shown as «ناقص», with the failed sync offered on its own. |
 | HTTP 409 | `sync_*_disabled`, `connection_paused` or `plugin_job_unsupported` — the control is already disabled in the UI for the same reasons. |
 
+## Plugin job support (OVR-08)
+
+A plugin only leases the job types it advertised in its handshake
+(`plugin_capabilities.jobTypes`); a plugin that never reported any gets the
+legacy set (`LEGACY_PLUGIN_JOB_TYPES`). A row of any other type would sit
+`pending` forever, so the check lives in the two generic producers —
+`enqueuePluginExport` and `enqueueExport` — through `assertPluginJobSupported`
+(`src/lib/integrations/plugin-job-guard.ts`), not only in the routes. A refused
+job throws `PluginJobUnsupportedError` (`plugin_job_unsupported`); the sync and
+taxonomy routes answer it with a 409 and the autopilot executors with a failed
+result. The routes still pre-check from the connection row they already hold,
+so the common refusal costs no extra read. `POST …/sync/inventory` is granted by
+`woocommerce.sync` (or `integrations.manage`) like the other sync actions.
+
+## Queued-sync freshness (OVR-06)
+
+After a plugin-mode sync is queued, the overview re-reads the store until its
+watermark moves. The look is aimed at the plugin's next expected pull — last
+heartbeat plus the pull interval (`queuedPollPlan` in `wp-sync-status.ts`) —
+instead of a fixed 60 s timer, and waiting ends after three missed pulls. The
+interval is the fast lane's five minutes
+(`POS_Connector_Health::FAST_INTERVAL_SECONDS`) unless the plugin advertises
+`capabilities.pullIntervalSeconds` (clamped to 1–60 minutes); today's plugin
+does not, so a store on a slower system cron is still polled at the fast-lane
+rate until a plugin release reports its real cadence. A store whose transport is
+not healthy (stale, never connected, site mismatch, paused, error) is polled once
+per interval: the overview already says why nothing will move.
+
 ## Queue classification
 
 `summarizeQueueCounts` in `wp-manager-service.ts` is the single mapping from

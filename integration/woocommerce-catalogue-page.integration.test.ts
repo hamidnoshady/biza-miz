@@ -526,6 +526,94 @@ describe("the catalogue page: scoped, stable, honest at 1210 rows", () => {
     expect(composed.types.length).toBe(9);
   });
 
+  it("filters by taxonomy term, status and stock, offers the facets, and mirrors the gallery", async () => {
+    // A tag on the first ten simples, plus a two-image gallery on one of them.
+    await db.query(
+      `INSERT INTO integration_woo_terms (business_id, connection_id, taxonomy, remote_id, name, slug)
+       VALUES ($1, $2, 'product_tag', '910', 'پرفروش', 'best')`,
+      [A.id, A.conn1],
+    );
+    await db.query(
+      `INSERT INTO integration_woo_product_terms (business_id, connection_id, remote_id, taxonomy, term_remote_id)
+       SELECT $1, $2, remote_id, 'product_tag', '910'
+         FROM integration_mappings
+        WHERE connection_id = $2 AND entity_type = 'product' AND remote_id ~ '^[0-9]+$' AND remote_id::int BETWEEN 1 AND 10`,
+      [A.id, A.conn1],
+    );
+    await db.query(
+      `UPDATE integration_mappings
+          SET last_pushed_payload = last_pushed_payload || jsonb_build_object(
+                'remoteGallery', jsonb_build_array(
+                  jsonb_build_object('src', 'https://shop.example/g1.jpg', 'alt', 'اول'),
+                  jsonb_build_object('src', 'https://shop.example/g2.jpg', 'alt', 'دوم'),
+                  jsonb_build_object('alt', 'بدون نشانی')))
+        WHERE connection_id = $1 AND entity_type = 'product' AND remote_id = '5'`,
+      [A.conn1],
+    );
+
+    const byCategory = await sync.cataloguePageFor(A.id, A.conn1, { taxonomy: "product_cat", term: "900" });
+    expect(byCategory.total).toBe(336);
+    const byTag = await sync.cataloguePageFor(A.id, A.conn1, { taxonomy: "product_tag", term: "910" });
+    expect(byTag.total).toBe(10);
+    expect(byTag.rows.every((row) => row.tags.includes("پرفروش"))).toBe(true);
+    // A tag is searchable and shown, like a category.
+    expect((await sync.cataloguePageFor(A.id, A.conn1, { search: "پرفروش" })).total).toBe(10);
+    // Both halves of a term filter are needed; one alone filters nothing.
+    expect((await sync.cataloguePageFor(A.id, A.conn1, { taxonomy: "product_tag" })).total).toBe(1210);
+    expect((await sync.cataloguePageFor(A.id, A.conn1, { term: "910" })).total).toBe(1210);
+    // Filters compose with each other and with search.
+    const tagAndCat = await sync.cataloguePageFor(A.id, A.conn1, {
+      taxonomy: "product_tag",
+      term: "910",
+      search: "محصول 0003",
+    });
+    expect(tagAndCat.total).toBe(1);
+    // A term of another taxonomy under the same id does not leak across.
+    expect((await sync.cataloguePageFor(A.id, A.conn1, { taxonomy: "product_cat", term: "910" })).total).toBe(0);
+
+    // Stock: tracked at zero, tracked above zero, and shapes with no quantity.
+    const out = await sync.cataloguePageFor(A.id, A.conn1, { stock: "out" });
+    const inStock = await sync.cataloguePageFor(A.id, A.conn1, { stock: "in" });
+    const untracked = await sync.cataloguePageFor(A.id, A.conn1, { stock: "untracked" });
+    expect(out.total + inStock.total + untracked.total).toBe(1210);
+    expect(out.rows.every((row) => row.stockTracked && row.quantity === 0)).toBe(true);
+    expect(untracked.rows.every((row) => !row.stockTracked && row.quantity === null)).toBe(true);
+    expect(out.total).toBe(out.summary.outOfStock);
+    // An unknown stock word is no filter, not an empty page.
+    expect((await sync.cataloguePageFor(A.id, A.conn1, { stock: "sideways" })).total).toBe(1210);
+
+    // Status.
+    const published = await sync.cataloguePageFor(A.id, A.conn1, { status: "publish" });
+    expect(published.rows.every((row) => row.remoteStatus === "publish")).toBe(true);
+    const publishCount = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM integration_mappings
+        WHERE connection_id = $1 AND entity_type = 'product' AND last_pushed_payload->>'remoteStatus' = 'publish'`,
+      [A.conn1],
+    );
+    expect(published.total).toBe(publishCount.rows[0].n);
+    expect((await sync.cataloguePageFor(A.id, A.conn1, { status: "no-such-status" })).total).toBe(0);
+
+    // Facets cover the whole scoped catalogue, unfiltered, with counts.
+    const faceted = await sync.cataloguePageFor(A.id, A.conn1, { taxonomy: "product_tag", term: "910" });
+    expect(faceted.facets.categories).toEqual([{ remoteId: "900", name: "دسته ویژه", count: 336 }]);
+    expect(faceted.facets.tags).toEqual([{ remoteId: "910", name: "پرفروش", count: 10 }]);
+    expect(faceted.facets.statuses).toContain("publish");
+    // …and never another connection's or tenant's terms.
+    const other = await sync.cataloguePageFor(A.id, A.conn2, {});
+    expect(other.facets.categories.map((term) => term.remoteId)).not.toContain("900");
+    expect(other.facets.tags).toEqual([]);
+    const tenantB = await sync.cataloguePageFor(B.id, B.conn1, {});
+    expect(tenantB.facets.tags).toEqual([]);
+
+    // The gallery survives, malformed entries dropped.
+    const gallery = await sync.cataloguePageFor(A.id, A.conn1, { taxonomy: "product_tag", term: "910", search: "SKU-0005" });
+    expect(gallery.rows[0].remoteGallery).toEqual([
+      { src: "https://shop.example/g1.jpg", alt: "اول" },
+      { src: "https://shop.example/g2.jpg", alt: "دوم" },
+    ]);
+    expect(byTag.rows.find((row) => row.remoteId !== "5")?.remoteGallery).toEqual([]);
+  });
+
   it("agrees with the pure in-memory helpers on the hand-built connection", async () => {
     // The SQL reader replaced an in-memory pipeline; on a connection small
     // enough to hold in one page, the pure helpers (the old rule, kept and

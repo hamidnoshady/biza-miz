@@ -39,6 +39,10 @@ export const GROWTH_SECTION_KEYS = [
   "gift-cards",
   "loyalty",
   "commission",
+  // Channel management (issue #894): publishing to Torob from the websites the
+  // platform already runs. A section, not a second app — the issue is explicit
+  // that it never becomes its own wizard or product editor.
+  "torob",
   // Growth's *own* settings — never the platform's `/settings`.
   "settings",
 ] as const;
@@ -58,6 +62,10 @@ export const GROWTH_SECTION_PERMISSION: Readonly<Record<GrowthSectionKey, Permis
   "gift-cards": PERMISSIONS.giftCardsView,
   loyalty: PERMISSIONS.loyaltyView,
   commission: PERMISSIONS.commissionView,
+  // `torob.view` and not `torob.manage`: opening the screen is seeing which
+  // websites exist and what state each channel is in. Connecting, switching and
+  // pasting the merchant's token are buttons, gated below.
+  torob: PERMISSIONS.torobView,
   settings: PERMISSIONS.marketingConfigure,
 };
 
@@ -85,6 +93,16 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   // A read sent as POST, but it can return the matched members themselves —
   // composing a send, not browsing one.
   "/api/growth/campaign-audience": { POST: PERMISSIONS.campaignsManage },
+  // The campaign builder (issue #901): drafts of a typed trigger → reward rule.
+  // Reads are the list's own key; composing, saving and the dry run (which
+  // returns revenue-derived figures) are `campaigns.manage`.
+  "/api/growth/campaign-builder": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage },
+  "/api/growth/campaign-builder/[id]": {
+    GET: PERMISSIONS.campaignsView,
+    PATCH: PERMISSIONS.campaignsManage,
+    DELETE: PERMISSIONS.campaignsManage,
+  },
+  "/api/growth/campaign-builder/[id]/simulate": { POST: PERMISSIONS.campaignsManage },
   "/api/promotions": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage, PATCH: PERMISSIONS.campaignsManage },
   "/api/promotions/reports": { GET: PERMISSIONS.campaignsView },
   "/api/promotions/targets": { GET: PERMISSIONS.campaignsView },
@@ -116,6 +134,23 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   "/api/commission/payment-accounts": { GET: PERMISSIONS.commissionPayout },
   "/api/commission/statement": { GET: PERMISSIONS.commissionView },
   "/api/commission/liability": { GET: PERMISSIONS.commissionView },
+  // The Torob channel (issue #894). One endpoint, five actions, two keys: the
+  // store's own token is a credential even though it arrives on the same route as
+  // a channel switch, so the handler picks `torob.configure` for it and
+  // `torob.manage` for the rest.
+  "/api/growth/torob/shops": {
+    GET: PERMISSIONS.torobView,
+    POST: [PERMISSIONS.torobManage, PERMISSIONS.torobConfigure],
+  },
+  // Building the shop's feed writes a run row, so it is a POST and it reads as
+  // `torob.view` — looking at what your catalogue would publish is reading, not
+  // managing the channel.
+  "/api/growth/torob/shops/[id]/feed": { POST: PERMISSIONS.torobView },
+  // The Shop Generator approval callback (issue #894). It is the merchant's own
+  // browser arriving from Torob with a one-time code, so it manages the
+  // relationship like the action that started it — and it *spends* the code, which
+  // is why `torob.view` would be the wrong key even though it is a GET.
+  "/api/growth/torob/authorize/callback": { GET: PERMISSIONS.torobManage },
   "/api/messaging": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage },
   "/api/messaging/preview": { POST: PERMISSIONS.campaignsManage },
 };
@@ -133,6 +168,7 @@ export const GROWTH_SECTION_READS: Readonly<Record<GrowthSectionKey, readonly `$
   "gift-cards": ["GET /api/promotions/gift-cards"],
   loyalty: ["GET /api/loyalty/programs", "GET /api/loyalty/repurchase", "GET /api/loyalty/customers/[id]"],
   commission: ["GET /api/commission/rules", "GET /api/commission/report"],
+  torob: ["GET /api/growth/torob/shops"],
   settings: ["GET /api/growth/settings"],
 };
 
@@ -168,6 +204,10 @@ export interface GrowthAbilities {
   manageCommission: boolean;
   /** Commission figures on the dashboard (totals, top sellers). */
   viewCommission: boolean;
+  /** The Torob channel: connect, switch publication, disconnect. */
+  manageTorob: boolean;
+  /** Store the merchant's own Torob token — a credential, so its own key. */
+  configureTorob: boolean;
 }
 
 export function growthAbilities(permissions: ReadonlySet<string>): GrowthAbilities {
@@ -181,6 +221,8 @@ export function growthAbilities(permissions: ReadonlySet<string>): GrowthAbiliti
     redeemGiftCards: permissions.has(PERMISSIONS.giftCardsRedeem),
     manageCommission: permissions.has(PERMISSIONS.commissionManage),
     viewCommission: permissions.has(PERMISSIONS.commissionView),
+    manageTorob: permissions.has(PERMISSIONS.torobManage),
+    configureTorob: permissions.has(PERMISSIONS.torobConfigure),
   };
 }
 

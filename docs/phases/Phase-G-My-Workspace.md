@@ -35,7 +35,12 @@ parent `ai_projects` row (the `ai_messages`→`ai_conversations` shape).
 
 `/api/ai/projects`, `/api/ai/projects/[id]`, `…/notes`, `…/notes/[noteId]`,
 `…/memory`, `…/memory/[memoryId]`, `…/tasks`, `…/tasks/[taskId]`, `…/files`.
-All `withTenantScope` + `getSession`; ownership is the authorization.
+Originally `withTenantScope` + `getSession` with ownership as the authorization;
+since issue #907 F01 every route in the family also takes `workspaceOwner`
+(`workspace.view` to read, `workspace.manage` to write) and the project role via
+`requireProjectCapability`/`requireTaskWork`, and the two task writes run the
+workspace commands (`updateWorkspaceTask`, `deleteWorkspaceTask`) instead of the
+legacy service's own bypass.
 
 ### UI
 
@@ -133,6 +138,29 @@ deep link and saved AI citation from before the rename still resolves.
 - Eleven new tenant tables, each with `business_id`, indexes and an RLS policy
   in the same migration.
 
+Two migrations after 0167 change how the module behaves, both forward only:
+
+`migrations/0258_workspace_approval_integrity.sql` (issue #907 F03):
+
+- reconciles pre-existing duplicate `pending` requests: on a subject that
+  already carries several, the **newest** stays pending and every older one
+  becomes `cancelled` with a Persian note saying why (nothing is deleted and no
+  decision is invented);
+- then adds `uq_workspace_approvals_one_pending`, a partial unique index on
+  `(business_id, subject_type, subject_id) WHERE status = 'pending'`. One live
+  request per subject and revision is now a database fact rather than a
+  read-then-write check two clients can interleave — `subject_id` already names
+  the exact revision for the revision-bound AEC subjects, so no second column is
+  invented. A duplicate insert surfaces as 23505 and the command layer maps it to
+  `approval_already_pending`.
+
+`migrations/0259_workspace_document_revision_chain.sql` (issue #907 F15): a
+`BEFORE INSERT` trigger on `workspace_documents` that refuses a second successor
+for the same `supersedes_id` (one revision chain per version, 23505 →
+`document_already_superseded`). A trigger rather than a unique index because the
+index could not be created over forks that already exist, and the only ways to
+make existing data fit would rewrite history — which the issue forbids.
+
 ## 5. What the module now does (new features)
 
 Ten sections, all built on the existing primitives and reachable from the
@@ -199,7 +227,7 @@ candidate list instead of a guess.
 | **Tenant export** | The eleven new tables carry `business_id` and are picked up automatically by `tenantTablesInDependencyOrder()`. |
 | **Knowledge base** | The `projects` key is retained (it is stored in tenant rows) with the new label and `/workspace` route. |
 | **MCP** | The four tools appear in the connector catalogue with English summaries; the connection's authorizing user supplies "mine". |
-| **AI projects (legacy)** | `/api/ai/projects/**` and `src/lib/ai-projects.ts` are untouched and still live. Both services write the same rows. |
+| **AI projects (legacy)** | `/api/ai/projects/**` and `src/lib/ai-projects.ts` still live and are still the assistant's project surface; both services write the same rows. Since issue #907 F01 the API routes share the workspace guard and the project role, and task state changes go through the workspace commands. |
 
 ## 7. Remaining limitations
 
@@ -225,6 +253,48 @@ Stated plainly, because each is a decision rather than an oversight:
 6. **Contract reminders are computed, not pushed.** `contractNeedsReminder` and
    the expiry window drive the UI and the AI tool; nothing yet writes into the
    notification or messaging queue on its own schedule.
+
+## 7a. Approval and lifecycle integrity (#907 F02, F03)
+
+The approval engine owns the states it produces. `pending_approval` and `active`
+on a contract, `in_review` and `approved` on a document, are written by
+`requestApproval` and by the decision that lands on it — never by a form:
+
+- **Forms offer only what a command does not own.** `CONTRACT_FORM_STATUSES` is
+  `draft | expired | terminated | completed`; `DOCUMENT_FORM_STATUSES` is
+  `draft | rejected | archived`. `expired`/`terminated`/`completed` stay writable
+  on purpose: they are factual corrections an editor makes while reconciling a
+  paper register, and the contract's own page renders a workflow-owned state as a
+  read-only badge.
+- **Both ends of a change are guarded.** `contractStatusChangeError` /
+  `documentStatusChangeError` refuse entering *and* leaving a workflow state
+  through an ordinary edit (`contract_status_requires_workflow`,
+  `document_status_requires_workflow`, both 409). A no-op re-send is allowed, so
+  an edit that does not touch the status never trips over the gate.
+- **One live request per subject.** A retry by the same requester answers with
+  the existing row (idempotent); anybody else gets `approval_already_pending`.
+  `APPROVAL_REQUESTABLE_FROM` is `draft` for both subjects, so asking to approve
+  something already active is `subject_not_requestable`.
+- **Withdrawal reverts the subject.** Cancelling the last pending request returns
+  `pending_approval`/`in_review` to `draft` inside the same transaction as the
+  decision (`revertSubjectAfterWithdrawal`), which removes the orphan state the
+  audit found on the live deployment (`pending_approval` with an empty inbox). A
+  subject that still has another pending request is never moved.
+- **Automations are held to the same rules.** The autopilot executors pass their
+  payload straight through to the same commands, so an automation that proposes
+  `status: "active"` fails with the same code rather than silently writing it or
+  having the field quietly dropped.
+
+Rows written before these fixes are repaired through the explicit, audited path
+rather than an ordinary edit (which by design can neither enter nor leave a
+workflow state): `npm run workspace:approvals` reports stranded subjects and
+duplicate live requests, and `-- --apply` performs only those two repairs,
+writing a `workspace_activity` row per subject it moves. It never approves,
+activates or deletes anything, and it re-checks each row as it writes, so a
+decision that landed after the report is respected rather than overridden. The
+rules live in `src/lib/workspace-approval-report.ts`; the integration suite
+exercises both halves against a disposable database. Operator steps:
+`docs/runbooks/workspace-approval-reconciliation.md`.
 
 ## 7b. The access model (#761, migration 0194)
 
@@ -289,6 +359,95 @@ each, so a new section inherits them instead of re-deriving them:
   read «label — value» from each cell's `data-label`. Desktop is unchanged; the
   role-permission matrix is a real grid and keeps scrolling.
 
+## 7d. Project cost, and why the chain cannot fork (#907 F04, F15, F16)
+
+**F04 — one definition of project cost.** `src/lib/project-costs.ts` holds the
+policy as a paired subquery (`projectCostSubquerySql`,
+`projectRevenueSubquerySql`) and the report, the AEC BOQ cockpit and the
+assistant's cost report all use it:
+
+- **expense accounts only** — a receivable, bank or revenue line is not a cost,
+  and a capitalized amount is not one until it is expensed;
+- **net, `debit - credit`** — a reversal is a real posted entry that credits the
+  account it debited, so netting is what makes an undone expense stop counting;
+- **reversals are attributed through `reverses_entry_id`** — the A/P and
+  manual-journal reversal writers do not copy `project_id` onto the reversal
+  row, so the rule lives in the query instead of in every writer's memory;
+- **posted only** — every `journal_entries` row is posted in this schema
+  (drafts live in `journal_entry_drafts`, 0029), so there is no status column
+  to filter and a filter would be a lie about the model.
+
+Budget − cost is a **budget variance**. It is not profit: the report shows no
+revenue and its title/description/caption no longer say «سودآوری». Recognising
+project revenue (and deciding what is capitalized first) is an Accounting
+decision that has not been taken — see §9.
+
+**F15 — the dependency graph and the revision chain are serialized.**
+`addDependency` takes the project row's lock (`FOR UPDATE` on `ai_projects`)
+before reading the project's edges, so two simultaneous opposite edges cannot
+both pass the cycle walk; a deterministic reproduction (an uncommitted A→B edge
+held by another session, with B→A issued meanwhile) is in
+`integration/workspace.integration.test.ts`. `createDocument` locks the
+predecessor row and refuses a second revision of the same version
+(`document_already_superseded`), and migration
+`0259_workspace_document_revision_chain.sql` makes the rule a database fact with
+a `BEFORE INSERT` trigger (one successor per row). The trigger is forward-only
+on purpose: a unique index would have required rewriting the forks that already
+exist, which #907 forbids.
+
+**F16 — a wrong type is a field error.** `trimTo` no longer trusts its type
+(`invalid_text_field`, 400), `isIsoCalendarDate` checks that the day exists
+rather than that the string is shaped like a day (`2026-02-31` is now
+`invalid_date`, not a Postgres error), `reminderDays` is bounded to the 365 the
+column's CHECK allows (`invalid_reminder_days`) with the constraint still the
+backstop, and `readBody` treats a JSON array or primitive as "no body" instead
+of casting it to a record.
+
+## 7e. One number per fact (#907 F06, F07, and the import policy)
+
+**F06 — the deadline KPI and the deadline list.** The overview's «مهلت‌های
+پیش‌رو» counter counted `ai_project_tasks.due_date` only, while the list beneath
+it was `listCalendar`'s five-source union, so the live screen could show «۰ مهلت»
+above a contract expiring that day. The union now lives in one place,
+`calendarUnionSql` in `src/lib/workspace.ts`, and both callers paste that one
+text: `listCalendar` renders it, and `getWorkspaceDashboard` counts over it in a
+CTE (the same horizon, the same visibility rules). A meeting is on the calendar
+but is not a deadline, so the KPI excludes `source = 'event'`; the dashboard also
+returns `calendarEntries` (everything in the window) and the screen says
+«۳ مهلت · ۱ رویداد · ۲ مورد دیگر در تقویم» instead of letting a ten-row slice
+stand in for the horizon.
+
+**F07 — one health verdict per project.** `project-portfolio.tsx` and
+`workspaceInsights` both passed `expiringContracts: 0`, so a project whose
+contract was expiring read «در مسیر» on its card and «در معرض خطر» on its own
+page. The fact now travels with the project row:
+
+- `PROJECT_SELECT` carries `expiring_contract_count`, built by
+  `expiringContractCountSql` — the same 30-day window and status filter the
+  contracts list applies for `expiringWithinDays: 30`. It is project-scoped on
+  purpose: a project row is only readable by its members or an override holder,
+  and a contract attached to that project is visible to exactly those people.
+- `listWorkspaceProjects` and `getWorkspaceProjectWithHealth` add the ledger's
+  cost (only for a `ledger.view` holder) and attach a `ProjectHealthSnapshot`:
+  the pure verdict plus the Tehran day it was calculated for.
+- `projectReport` computes the same snapshot per row, `workspaceInsights` reads
+  it instead of recomputing, and the project API returns `project.health`
+  rather than rebuilding it. The card, the cockpit and «گزارش‌ها» now render one
+  number; a client-side verdict is no longer allowed.
+
+**Import policy.** `src/lib/data-transfer/entities/workspace.ts` used to write
+`status` straight into projects, tasks and contracts. It now applies two domain
+rules in the writer (so a saved mapping or a direct call cannot skip them):
+
+1. a status the domain does not know is a `RowRejection` on that row
+   (a sentence about the cell), not a check-constraint crash on the job;
+2. a workflow-owned state — `pending_approval`/`active` on a contract — is never
+   written. The row still imports (its title, party, dates and value are real)
+   in its own pre-workflow state, and the import's warnings explain that only the
+   approval request can make it «جاری». The mapping UI says so under the field
+   (`hint` on the status column), so the policy is visible before the file is
+   uploaded.
+
 ## 8. Testing
 
 Gates, all green:
@@ -306,6 +465,30 @@ sections plus the project detail page return 200; `dir="rtl"`, `lang="fa"`;
 dates render Shamsi with Persian digits (`۳۱ شهریور ۱۴۰۵`) and no Gregorian
 leakage; the calendar unions all five sources in date order; the legacy
 `/projects` paths 308 to their `/workspace` equivalents.
+
+## 9. Genuine remaining issues (#907)
+
+Stated here so they are not mistaken for fixed:
+
+1. **Project revenue / capitalisation (#907 F04).** `projectRevenueSubquerySql`
+   exists and uses the same attribution as cost, but nothing user-facing calls
+   it: recognising revenue (and deciding what is capitalized before it is) is an
+   Accounting decision, not a workspace one. Until then the report shows cost and
+   budget variance and says so, and shows no "profit".
+2. **Reversal writers and `project_id` (part of F04).** The canonical cost query
+   compensates for reversals that do not carry `project_id` by following
+   `reverses_entry_id`. The cleaner fix is for every reversal writer to copy the
+   original's dimension; that is an Accounting change and was left out of this
+   PR on purpose.
+3. **AEC subjects and cancellation.** Cancelling an AEC approval (variation,
+   certificate, material request, commitment, submittal) does not revert that
+   register's own status — the register owns its chain and reverts through its
+   own actions. Reaching that from a withdrawal is a follow-up, not a workspace
+   edit (`docs/runbooks/workspace-approval-reconciliation.md` §4).
+4. **`readBody` is still untyped at the route level.** The hardening is at the
+   service boundary, which is where the type was actually assumed. Typing every
+   route body against a schema is a larger refactor that the audit did not ask
+   for and that would touch thirty route files.
 
 ### Bugs this testing found and fixed
 

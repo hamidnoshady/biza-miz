@@ -79,6 +79,31 @@ import { newRestoreJournalId, tryAppendRestoreJournal } from "./restore-journal"
 import { discardRestoreUpload, readRestoreUpload, uploadSourceName } from "./restore-upload";
 import { getSetting, setSetting, SETTING_KEYS } from "./settings";
 import {
+  artifactEncryptionFor,
+  buildComponentInventory,
+  capturedAtOf,
+  encryptPayload,
+  mediaAttachmentCount,
+  physicalComponentInventory,
+  registerFinishedArtifact,
+  retentionUntilFor,
+  verifyStoredArtifact,
+  writeTenantArchive,
+  withLogicalStaging,
+} from "./tenant-backup-runner";
+import { resolveTenantBackupPolicy, resolveTenantStorage, tenantObjectPrefix } from "./tenant-backup-storage";
+import {
+  acceptGeneration,
+  drainUploadQueue,
+  enqueueUpload,
+  readHeartbeat,
+  recordHeartbeat,
+} from "./tenant-backup-hybrid";
+import { installedSchemaVersion, listStoredArtifactRows } from "./tenant-backup-artifacts-service";
+import { getMasterKey } from "./master-key";
+import { readDeploymentProfile } from "./deployment-mode";
+import { markArtifactStateByRef } from "./tenant-backup-artifacts-service";
+import {
   BACKUP_RUNS_SHOWN,
   CLOUD_RETRY_MS,
   cloudKeyFor,
@@ -181,7 +206,7 @@ export async function getBackupConfigMasked(businessId: string) {
   const config = await getBackupConfig(businessId);
   const warnings: string[] = [];
   if (!backupPassphrase(config)) {
-    warnings.push("No encryption passphrase is set. Backups will be stored in plaintext and cloud upload will fail.");
+    warnings.push("No encryption passphrase is set. Backups will fail until a passphrase is set or the platform holds a managed key.");
   }
   const mode = tenantBackupMode();
   return {
@@ -403,8 +428,15 @@ async function runTenantPhysicalBackupLocked(
     const dir = backupDir(config.directory);
     await fs.mkdir(dir, { recursive: true });
 
-    const passphrase = backupPassphrase(config);
-    const doEncryptLocal = passphrase.length > 0 && config.encryptLocal !== false;
+    // Issue #903: a site install encrypts with the platform's managed custody
+    // when it has one and falls back to the Owner's passphrase otherwise. A run
+    // with neither secret is refused below rather than writing plaintext.
+    const encryptionChoice = await artifactEncryptionFor(businessId, backupPassphrase(config));
+    if (!encryptionChoice.ok) {
+      return { status: "failed", error: encryptionChoice.error };
+    }
+    const encryption = encryptionChoice.encryption;
+    const doEncryptLocal = true;
     const artifact = await reserveArtifactName(
       dir,
       () =>
@@ -433,7 +465,7 @@ async function runTenantPhysicalBackupLocked(
       let sha256: string;
       if (doEncryptLocal) {
         // Streamed: the plaintext dump is never held in memory.
-        const streamed = await encryptFileToFile(plainTmpPath, artifactTmpPath, passphrase);
+        const streamed = await encryptFileToFile(plainTmpPath, artifactTmpPath, encryption.secret);
         sizeBytes = streamed.sizeBytes;
         sha256 = streamed.sha256;
         await secureUnlink(plainTmpPath);
@@ -475,6 +507,42 @@ async function runTenantPhysicalBackupLocked(
         await pruneDirectory(secondary, config.localRetention, businessId, true);
       }
       await pruneDirectory(dir, config.localRetention, businessId, true);
+
+      // Issue #903: register the artifact (signed manifest + inventory row) so
+      // the tenant inventory can offer it at all. Registration never fails the
+      // run — the bytes exist and the run history records them either way — but
+      // an unregistered artifact is not restorable, which the inventory shows.
+      await registerFinishedArtifact({
+        businessId,
+        artifactPath: finalPath,
+        artifactName: artifact,
+        destination: "local",
+        origin: trigger,
+        mode: "physical",
+        payloadFormat: "physical_dump_v1",
+        sizeBytes,
+        sha256,
+        encryption,
+        capturedAt: capturedAtOf(artifact),
+        components: physicalComponentInventory(),
+        schemaVersion: await installedSchemaVersion(),
+        runId,
+        retentionUntil: await retentionUntilFor(businessId, new Date()),
+      }).then(async (registered) => {
+        if (registered.ok) {
+          const verified = await verifyStoredArtifact(businessId, {
+            ref: registered.ref,
+            stagedPath: finalPath,
+            schemaVersion: await installedSchemaVersion(),
+          });
+          await markArtifactStateByRef(businessId, registered.ref, {
+            state: verified.ok ? "ready" : "failed",
+            failureCode: verified.ok ? null : verified.error,
+          });
+        }
+      }).catch((err) => {
+        console.error(`backup: registration failed for business ${businessId}:`, errText(err));
+      });
 
       await finishRun(runId, { status: "success", sizeBytes, sha256 });
       return { status: "ok", runId, artifact, sizeBytes, mode: "physical" };
@@ -528,8 +596,13 @@ async function runTenantLogicalBackupLocked(
     const dir = tenantBackupDir(businessId, config.directory);
     await fs.mkdir(dir, { recursive: true });
 
-    const passphrase = backupPassphrase(config);
-    const encrypt = passphrase.length > 0 && config.encryptLocal !== false;
+    // Issue #903 — managed custody first. A central deployment that holds a
+    // platform key never depends on a tenant-held passphrase any more; a
+    // self-hosted install without one keeps working exactly as before.
+    const encryptionChoice = await artifactEncryptionFor(businessId, backupPassphrase(config));
+    if (!encryptionChoice.ok) return { status: "failed", error: encryptionChoice.error };
+    const encryption = encryptionChoice.encryption;
+
     const artifact = await reserveArtifactName(
       dir,
       () =>
@@ -537,35 +610,73 @@ async function runTenantLogicalBackupLocked(
           scope: scopeTag,
           runId: randomUUID(),
           format: "sql",
-          encrypted: encrypt,
+          encrypted: true,
         }),
       pathExists,
     );
-    const runToken = parseArtifactName(artifact)?.runId ?? "00000000";
+    const runToken = parseArtifactName(artifact)?.runId ?? randomUUID().slice(0, 8);
     const runId = await startRun(businessId, "local", trigger, artifact, null, "logical", runToken);
     const transientPaths: string[] = [];
     try {
-      const plainTmpPath = path.join(dir, `${artifact.replace(/\.enc$/, "")}.plaintext.tmp`);
-      transientPaths.push(plainTmpPath);
-      const tables = await exportTenantData(businessId);
-      await fs.writeFile(plainTmpPath, tenantDataToSql(tables), { mode: 0o600 });
+      // The payload is a **typed archive**, not an INSERT script: the restore
+      // engine parses JSON and re-inserts parameters, so an artifact can never
+      // be executed as code (issue #903 §4).
+      const archive = await withLogicalStaging(businessId, runToken, async (stagingDir) => {
+        const payloadPath = path.join(stagingDir, `${runToken}.archive.json`);
+        transientPaths.push(payloadPath);
+        const written = await writeTenantArchive(businessId, payloadPath, new Date());
+        const encrypted = await encryptPayload(payloadPath, dir, artifact, encryption.secret);
+        return { written, encrypted };
+      });
 
-      let sizeBytes: number;
-      let sha256: string;
       const finalPath = path.join(dir, artifact);
-      if (encrypt) {
-        const streamed = await encryptFileToFile(plainTmpPath, path.join(dir, `${artifact}.tmp`), passphrase);
-        await secureUnlink(plainTmpPath);
-        await fs.rename(path.join(dir, `${artifact}.tmp`), finalPath);
-        sizeBytes = streamed.sizeBytes;
-        sha256 = streamed.sha256;
-      } else {
-        await fs.rename(plainTmpPath, finalPath);
-        sizeBytes = (await fs.stat(finalPath)).size;
-        sha256 = await sha256File(finalPath);
-      }
+      const { sizeBytes, sha256 } = archive.encrypted;
 
       await pruneDirectory(dir, config.localRetention, businessId, false);
+
+      // Register + verify before the run is called a success: an artifact that
+      // cannot be proved readable is not a backup.
+      const registered = await registerFinishedArtifact({
+        businessId,
+        artifactPath: finalPath,
+        artifactName: artifact,
+        destination: "local",
+        origin: trigger,
+        mode: "logical",
+        payloadFormat: archive.written.payloadFormat,
+        sizeBytes,
+        sha256,
+        encryption,
+        capturedAt: capturedAtOf(artifact),
+        components: buildComponentInventory(
+          archive.written.tables,
+          // Issue #903 §9 — the database rows of media are in the archive; the
+          // binary attachments are not, and the manifest says so with a count
+          // rather than by omission.
+          await mediaAttachmentCount(businessId),
+        ),
+        schemaVersion: archive.written.schemaVersion,
+        runId,
+        retentionUntil: await retentionUntilFor(businessId, new Date()),
+      });
+      if (!registered.ok) {
+        await finishRun(runId, { status: "failed", error: registered.error });
+        return { status: "failed", error: registered.error };
+      }
+
+      const verified = await verifyStoredArtifact(businessId, {
+        ref: registered.ref,
+        stagedPath: finalPath,
+        schemaVersion: archive.written.schemaVersion,
+      });
+      await markArtifactStateByRef(businessId, registered.ref, {
+        state: verified.ok ? "ready" : "failed",
+        failureCode: verified.ok ? null : verified.error,
+      });
+      if (!verified.ok) {
+        await finishRun(runId, { status: "failed", error: verified.error });
+        return { status: "failed", error: verified.error };
+      }
 
       await finishRun(runId, { status: "success", sizeBytes, sha256 });
       return { status: "ok", runId, artifact, sizeBytes, mode: "logical" };
@@ -609,10 +720,15 @@ export async function runCloudUpload(
   // Trusted profile wins over historical cloud-enable settings, before any network work.
   if (await isLocalOnly(businessId)) return { status: "disabled" };
   const config = await getBackupConfig(businessId);
-  if (!config.cloud.enabled) return { status: "disabled" };
 
   const role = deploymentRole();
   const scopeTag = parseArtifactName(artifact)?.scope ?? logicalSnapshotScopeTag(businessId);
+  // Admission runs before the destination is resolved: a physical dump or
+  // another scope's snapshot is refused for being forbidden, and that answer
+  // must not change with whether this install happens to have a bucket
+  // configured. (It also means the refusal is still exercised, and still
+  // recorded as a failed run, on a deployment whose managed storage is not set
+  // up yet.)
   const admission = admitTenantArtifact(role, businessId, artifact, scopeTag);
   if (!admission.ok) {
     // Recorded, not thrown: an attempt is exactly what an operator needs to see.
@@ -629,7 +745,27 @@ export async function runCloudUpload(
     return { status: "failed", error: admission.error };
   }
 
-  const key = cloudKeyFor(config.cloud.prefix, artifact);
+  // Issue #903: the destination is resolved server-side from the Superadmin's
+  // managed service (or, for an existing self-hosted install, its own historic
+  // bucket). A Local profile has already returned above, so this is the only
+  // place a managed tenant artifact can reach the network.
+  const profile = (await readDeploymentProfile(businessId)).profile;
+  const storage = await resolveTenantStorage({
+    businessId,
+    profile,
+    role,
+    legacyCloud: config.cloud.enabled ? config.cloud : undefined,
+  });
+  if (storage.mode === "unavailable") {
+    // Nothing to upload to. That is `disabled`, not `failed`: a Local profile has
+    // no cloud destination by definition, and an incomplete managed destination
+    // is reported on the service page (`last_check_ok`/`lastErrorCode`) rather
+    // than as a failed tenant backup every tick.
+    return { status: "disabled" };
+  }
+
+  const prefix = storage.mode === "managed" ? tenantObjectPrefix(storage.prefix, businessId) : storage.prefix;
+  const key = cloudKeyFor(prefix, artifact);
   const runId = await startRun(
     businessId,
     "cloud",
@@ -647,10 +783,13 @@ export async function runCloudUpload(
     let payloadHash = await sha256File(sourcePath);
     let sizeBytes = (await fs.stat(sourcePath)).size;
     if (!(await fileHasBackupMagic(sourcePath))) {
-      const passphrase = backupPassphrase(config);
       // An artifact written in plaintext must never reach the bucket in that
-      // state: the provider would hold the ledger behind a key of "".
-      if (!passphrase) throw new Error("passphrase_required");
+      // state: the provider would hold the ledger behind a key of "". The key is
+      // the platform's managed custody when it exists, the Owner's passphrase
+      // otherwise (a self-hosted install with its own bucket).
+      const encryptionChoice = await artifactEncryptionFor(businessId, backupPassphrase(config));
+      if (!encryptionChoice.ok) throw new Error(encryptionChoice.error);
+      const passphrase = encryptionChoice.encryption.secret;
       const encryptedPath = `${sourcePath}.uploading.tmp`;
       transient.push(encryptedPath);
       const streamed = await encryptFileToFile(sourcePath, encryptedPath, passphrase);
@@ -658,15 +797,17 @@ export async function runCloudUpload(
       payloadHash = streamed.sha256;
       sizeBytes = streamed.sizeBytes;
     }
-    const s3 = s3ConfigOf(config);
+    const s3 = storage.s3;
+    const maxBytes = storage.maxArtifactBytes;
+    if (sizeBytes > maxBytes) throw new Error("artifact_too_large");
     await s3PutFile(s3, key, uploadPath, { payloadHash, sizeBytes });
 
     try {
-      const objects = await s3List(s3, config.cloud.prefix);
+      const objects = await s3List(s3, prefix);
       // Scope-exact on purpose: a bucket may be shared, so an unscoped legacy
       // object is never assumed to be ours (a pruned object cannot be restored).
-      for (const stale of selectPrunableInScope(objects.map((o) => o.key), config.cloud.retention, businessId, {
-        adoptUnscoped: role === "site",
+      for (const stale of selectPrunableInScope(objects.map((o) => o.key), storage.keepCount, businessId, {
+        adoptUnscoped: role === "site" && storage.mode === "legacy",
       })) {
         await s3Delete(s3, stale);
       }
@@ -676,6 +817,30 @@ export async function runCloudUpload(
     }
 
     await finishRun(runId, { status: "success", sizeBytes, sha256: payloadHash });
+
+    // Issue #903 §2 — the cloud half of the mirror is its own inventory row (one
+    // artifact id, so the tenant sees ONE backup at two destinations). It is
+    // registered as `verifying`: the uploaded bytes are proved by a later verify
+    // pass, never assumed from a 200 response.
+    await registerCloudCopy(businessId, {
+      artifact,
+      key,
+      sizeBytes,
+      sha256: payloadHash,
+      trigger,
+      mode: admission.mode,
+      sourcePath: uploadPath,
+    }).catch((err) => {
+      console.error(`backup: cloud registration failed for business ${businessId}:`, errText(err));
+    });
+
+    // Issue #903 §5 — the platform's accepted generation moves forward with a
+    // successful managed upload, which is what fences out a re-imaged site later.
+    if (storage.mode === "managed") {
+      const heartbeat = await readHeartbeat(businessId);
+      if (heartbeat) await acceptGeneration(businessId, heartbeat.siteGeneration).catch(() => undefined);
+    }
+
     return { status: "ok", key, sizeBytes, mode: admission.mode };
   } catch (err) {
     await finishRun(runId, { status: "failed", error: errText(err) });
@@ -686,12 +851,112 @@ export async function runCloudUpload(
 }
 
 /**
+ * Register the managed-cloud half of a mirror. The encryption generation is
+ * taken from the local artifact's manifest when it has one (the same bytes, the
+ * same key), so a mirror is provably one backup rather than two artifacts that
+ * happen to look alike.
+ */
+async function registerCloudCopy(
+  businessId: string,
+  input: {
+    artifact: string;
+    key: string;
+    sizeBytes: number;
+    sha256: string;
+    trigger: RunTrigger;
+    mode: TenantBackupMode;
+    sourcePath: string;
+  },
+): Promise<void> {
+  const local = (await listStoredArtifactRows(businessId)).find(
+    (row) => row.destination === "local" && row.storageRef === input.artifact,
+  );
+  const masterKey = getMasterKey();
+  if (!masterKey) return;
+  // A pre-#903 artifact has no manifest, so there is no honest way to describe
+  // what it contains. It is already visible through the legacy run projection;
+  // registering it here with an invented component list would be the lie the
+  // epic forbids.
+  if (!local?.manifest) return;
+  const encryption = local.manifest.encryption;
+  const capturedAt = capturedAtOf(input.artifact);
+  const registered = await registerFinishedArtifact({
+    businessId,
+    artifactPath: input.sourcePath,
+    artifactName: input.artifact,
+    destination: "cloud",
+    origin: input.trigger,
+    mode: input.mode,
+    payloadFormat: local.manifest.payloadFormat,
+    sizeBytes: input.sizeBytes,
+    sha256: input.sha256,
+    // The encryption *generation* of the bytes that were uploaded — the mirror
+    // shares the local artifact's key; the secret itself never leaves the server.
+    encryption:
+      encryption.scheme === "managed_envelope_v1"
+        ? { scheme: "managed_envelope_v1", keyVersion: encryption.keyVersion ?? 0, secret: "" }
+        : { scheme: "legacy_passphrase_v1", keyVersion: null, secret: "" },
+    capturedAt,
+    components: local.manifest.components.map((component) => ({
+      key: component.key,
+      state: component.state,
+      rows: component.rows ?? 0,
+    })),
+    schemaVersion: local.manifest.schemaVersion,
+    retentionUntil: await retentionUntilFor(businessId, new Date()),
+  });
+  if (!registered.ok) return;
+  // The object is retrievable (the PUT succeeded and was hash-checked); a full
+  // decrypt-verify happens on demand, so this row is `ready` with an unverified
+  // integrity until then — the inventory says exactly that.
+  await markArtifactStateByRef(businessId, registered.ref, { state: "ready" });
+}
+
+/**
  * If the newest successful local artifact never made it to the cloud, try
  * again — but back off CLOUD_RETRY_MS between attempts so an offline café
  * isn't hammering its (dead) uplink every tick.
  */
 async function maybeCatchUpCloud(businessId: string, config: BackupConfig): Promise<void> {
-  if (!config.cloud.enabled || await isLocalOnly(businessId)) return;
+  if (await isLocalOnly(businessId)) return;
+  const profile = (await readDeploymentProfile(businessId)).profile;
+
+  // The platform-managed destination is a property of the deployment, not of the
+  // tenant's historic bucket settings: a Hybrid/Cloud install whose own
+  // `cloud.enabled` is false still mirrors managed copies, so the queue must
+  // drain on that path too (issue #903 §2/§5).
+  const target = await resolveTenantStorage({
+    businessId,
+    profile,
+    role: deploymentRole(),
+    legacyCloud: config.cloud.enabled ? config.cloud : undefined,
+  });
+  const managedDestination = target.mode === "managed";
+  if (!managedDestination && !config.cloud.enabled) return;
+
+  // Issue #903 §5 — the durable queue is the source of truth for "what still
+  // needs uploading". It survives restarts, keeps order and backs off, so an
+  // offline café catches up instead of forgetting. `superseded` rows are the
+  // fence refusing an artifact from an older install generation.
+  await drainUploadQueue(
+    businessId,
+    async (artifactName) => {
+      const result = await runCloudUpload(businessId, artifactName, "scheduled");
+      if (result.status === "ok") return { ok: true };
+      // "disabled" means there is no destination right now, not that this
+      // artifact is wrong: it stays queued and is retried on a later tick.
+      if (result.status === "disabled") return { ok: false, error: "storage_unavailable" };
+      return { ok: false, error: result.error };
+    },
+    new Date(),
+    // Issue #903 §3: the fleet's own concurrency bound, not one-at-a-time by
+    // accident. Default 2 matches the migration; a fleet that wants strict
+    // ordering sets it to 1.
+    { concurrency: (await resolveTenantBackupPolicy(businessId)).maxParallelUploads },
+  );
+
+  // Then the pre-queue behaviour, kept for artifacts that predate the queue: the
+  // newest successful local artifact, retried with the same backoff.
   const { rows } = await query<{ artifact: string }>(
     `SELECT artifact FROM backup_runs
       WHERE business_id = $1 AND kind = 'local' AND status = 'success' AND artifact IS NOT NULL
@@ -711,7 +976,18 @@ async function maybeCatchUpCloud(businessId: string, config: BackupConfig): Prom
   if (last?.status === "success" || last?.status === "running") return;
   if (last && Date.now() - last.started_at.getTime() < CLOUD_RETRY_MS) return;
 
-  await runCloudUpload(businessId, artifact, "scheduled");
+  const upload = await runCloudUpload(businessId, artifact, "scheduled");
+  if (upload.status === "failed") {
+    // A failed catch-up is queued, with the install's generation, so the next
+    // drain retries it under the fence rather than by newest-artifact guessing.
+    const heartbeat = await readHeartbeat(businessId);
+    await enqueueUpload({
+      businessId,
+      artifactName: artifact,
+      generation: heartbeat?.siteGeneration ?? 0,
+    }).catch(() => false);
+  }
+  void profile;
 }
 
 // ---------------------------------------------------------------------------
@@ -720,9 +996,17 @@ async function maybeCatchUpCloud(businessId: string, config: BackupConfig): Prom
 
 /** One schedule check for one business, shared by both deployment roles. */
 async function tickBusiness(businessId: string): Promise<void> {
+  // Issue #903 §3 (owner decision): the schedule is the platform's, not the
+  // tenant's. The cadence always comes from the fleet policy; the stored
+  // `enabled`/`intervalHours` fields are only the on-device default for an
+  // install that has never been reached by a managed service (a Local/exe
+  // desktop with no platform row).
+  const policy = await resolveTenantBackupPolicy(businessId);
   await withTenant(businessId, async () => {
     const config = await getBackupConfig(businessId);
-    if (!config.enabled) return;
+    const managedSchedule = policy.source === "managed" && policy.managedCloud;
+    if (!config.enabled && !managedSchedule) return;
+    const schedule = { ...config, intervalHours: policy.intervalHours };
 
     const { rows: lastRows } = await query<{ started_at: Date; status: string }>(
       `SELECT started_at, status FROM backup_runs
@@ -734,17 +1018,43 @@ async function tickBusiness(businessId: string): Promise<void> {
     const timeZone = await getBusinessTimezone(businessId);
     const now = new Date();
     if (
-      isBackupDue(last?.started_at ?? null, now, config, timeZone) ||
-      isFailedRunRetryDue(last?.started_at ?? null, last?.status ?? null, now, config, timeZone)
+      isBackupDue(last?.started_at ?? null, now, schedule, timeZone) ||
+      isFailedRunRetryDue(last?.started_at ?? null, last?.status ?? null, now, schedule, timeZone)
     ) {
       const local = await runLocalBackup(businessId, "scheduled");
       if (local.status === "ok" && config.cloud.enabled) {
-        await runCloudUpload(businessId, local.artifact, "scheduled");
+        const upload = await runCloudUpload(businessId, local.artifact, "scheduled");
+        if (upload.status === "failed") {
+          const heartbeat = await readHeartbeat(businessId);
+          await enqueueUpload({
+            businessId,
+            artifactName: local.artifact,
+            generation: heartbeat?.siteGeneration ?? 0,
+          });
+        }
       }
     } else {
       await maybeCatchUpCloud(businessId, config);
     }
   });
+
+  // Issue #903 §5 — the heartbeat is recorded once per tick, outside the tenant
+  // transaction, so the tenant inventory can say when this install was last
+  // seen (and how deep its upload queue is) instead of assuming it is online.
+  try {
+    const { rows } = await query<{ generation: string }>(
+      `SELECT COALESCE(MAX(site_generation), 0)::text AS generation
+         FROM tenant_backup_site_heartbeat WHERE business_id = $1`,
+      [businessId],
+    );
+    await recordHeartbeat({
+      businessId,
+      siteGeneration: Number(rows[0]?.generation ?? 0),
+      appVersion: process.env.APP_VERSION ?? null,
+    });
+  } catch (err) {
+    console.error(`backup: heartbeat failed for business ${businessId}:`, errText(err));
+  }
 }
 
 /** Every business id on this install — the one query that spans tenants. */
@@ -842,6 +1152,14 @@ export interface BackupHealth {
   enabled: boolean;
   cloudEnabled: boolean;
   intervalHours: number;
+  /** Issue #903 §3: the fleet's retention, shown read-only to the tenant. */
+  retentionDays: number;
+  /**
+   * `managed` when the platform's policy answered, `cached` when the platform is
+   * unreachable and this device is honouring the last policy it actually saw,
+   * `default` when there is nothing to remember (issue #903 §3).
+   */
+  policySource: "managed" | "cached" | "default";
   scope: TenantBackupMode;
   localLastSuccessAt: string | null;
   localLastError: string | null;
@@ -873,7 +1191,10 @@ async function latestRuns(businessId: string, kind: RunKind) {
 
 export async function getBackupHealth(businessId: string): Promise<BackupHealth> {
   const localOnly = await isLocalOnly(businessId);
-  const config = await getBackupConfig(businessId);
+  const [config, policy] = await Promise.all([
+    getBackupConfig(businessId),
+    resolveTenantBackupPolicy(businessId),
+  ]);
   const [local, cloud] = await Promise.all([
     latestRuns(businessId, "local"),
     latestRuns(businessId, "cloud"),
@@ -882,7 +1203,12 @@ export async function getBackupHealth(businessId: string): Promise<BackupHealth>
     localOnly,
     enabled: config.enabled,
     cloudEnabled: !localOnly && config.cloud.enabled,
-    intervalHours: config.intervalHours,
+    // Never the stored tenant value: the tenant cannot retune the schedule any
+    // more, so reporting a stale local number would describe a plan that is not
+    // the one running.
+    intervalHours: policy.intervalHours,
+    retentionDays: policy.retentionDays,
+    policySource: policy.source,
     localLastSuccessAt: local.lastSuccessAt,
     localLastError: local.lastError,
     cloudLastSuccessAt: localOnly ? null : cloud.lastSuccessAt,

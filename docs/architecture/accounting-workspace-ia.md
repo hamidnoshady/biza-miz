@@ -72,7 +72,7 @@ The rest of the workspace has these responsibilities:
 | Group | Entries |
 | --- | --- |
 | میز کار | داشبورد حسابداری (`/accounting/overview`); «نمای کلی» at the same address for a member without `ledger.view` |
-| فروش و درآمد | existing canonical sales entries, including POS and customer work |
+| فروش و درآمد | existing canonical sales entries, including POS and customer work; for the service trades (`service_saas`, `architecture_construction`) the one entry is the service invoice screen at `/accounting/pos` |
 | خرید و انبار | inventory, products and industry-specific trade entries |
 | عملیات | the industry’s canonical operations screens, such as floor, kitchen, reservations and delivery |
 | اشخاص | the one directory (`/accounting/directory`) and its `?view=` links |

@@ -143,6 +143,30 @@ forbidden from doing what the button does.
   needs. #926 (canonical Media) and #951 (explicit publish initiation)
   remain the owners of the asset store and the publish flow respectively.
 
+## 7a. Who owns the number, and what a stock push may do (issue #1149)
+
+- **`source_of_truth`** (`store` | `pos` | `two_way`, migration 0258) decides
+  the authority per connection. `store` switches the scheduled stock/price push
+  off whatever `push_stock` / `push_prices` say; `pos` and `two_way` leave the
+  two switches in charge. Existing connections default to `two_way`, so nothing
+  changes until an owner chooses. One pure function,
+  `effectivePushSwitches` (`outbox-policy.ts`), is read by the refresh, the
+  tick and the handshake (the plugin is told the effective values).
+- **Turning a push off closes its queue.** In the same SQL statement as the
+  switch, still-waiting (`pending`/`deferred`/`failed`) stock or price jobs
+  become `skipped` / `push_switch_off`. Leased jobs finish; `dead` and
+  `needs_review` are a human's; manual `product_update` events are never
+  touched. Switching back on re-arms them on the next tick.
+- **A stock push never switches tracking on by itself.** The quantity is sent
+  only for a product the store already tracks (`remoteManageStock === true`),
+  or — with the connection's `manage_stock_opt_in` — together with
+  `manage_stock: true`. An untracked or never-synced product gets no stock job,
+  so the catalogue is no longer sent `manage_stock = true, quantity = 0`.
+- **A job is dropped before it is leased** (`dropRedundantPushJobs`) when its
+  value equals what the store last reported (`equal_to_remote`, recorded as
+  acknowledged so the diff stays quiet) or when it is older than 24 hours
+  (`stale_job`; the next tick re-arms the row with the current value).
+
 ## 7. Where each clause is proven
 
 - SQL-scoped catalogue page, >1000 rows, interleaved updates, tenant and

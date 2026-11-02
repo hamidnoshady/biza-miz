@@ -251,6 +251,61 @@ describe("product attribute definition service", () => {
   });
 });
 
+describe("products workspace: publish status and descriptions (migration 0260)", () => {
+  it("defaults an item to published with no text, so every existing row behaves as before", async () => {
+    const item = await itemsService.createItem({ locationId: biz.locationId, name: "کالای قدیمی" });
+    expect(item).toMatchObject({ publishStatus: "published", shortDescription: null, longDescription: null });
+  });
+
+  it("stores the status and both descriptions from creation, and the board reads them back", async () => {
+    const parsed = productInput.parseProductCreateInput({
+      name: "دستبند",
+      sellPrice: 500_000,
+      publishStatus: "draft",
+      shortDescription: "  خلاصه  ",
+      longDescription: "متن کامل",
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const created = await productCreation.createProductRecord(biz.locationId, parsed.data);
+    expect(created.item).toMatchObject({ publishStatus: "draft", shortDescription: "خلاصه", longDescription: "متن کامل" });
+
+    const board = await accessories.listVariantBoard(biz.locationId);
+    expect(board.find((row) => row.id === created.item.id)).toMatchObject({
+      publishStatus: "draft",
+      shortDescription: "خلاصه",
+      longDescription: "متن کامل",
+    });
+  });
+
+  it("updates through the meta patch, clears a text with null, and leaves untouched fields alone", async () => {
+    const item = await itemsService.createItem({ locationId: biz.locationId, name: "کالا" });
+    const first = await itemsService.updateItemMeta(item.id, {
+      publishStatus: "private",
+      shortDescription: "کوتاه",
+      longDescription: "کامل",
+    });
+    expect(first).toMatchObject({ publishStatus: "private", shortDescription: "کوتاه", longDescription: "کامل" });
+
+    const second = await itemsService.updateItemMeta(item.id, { shortDescription: null });
+    expect(second).toMatchObject({ publishStatus: "private", shortDescription: null, longDescription: "کامل" });
+  });
+
+  it("refuses an unknown status or an over-long text at the database, whatever the caller validated", async () => {
+    const item = await itemsService.createItem({ locationId: biz.locationId, name: "کالا" });
+    await expect(
+      db.query("UPDATE items SET publish_status = 'archived' WHERE id = $1", [item.id]),
+    ).rejects.toThrow(/items_publish_status_check/);
+    await expect(
+      db.query("UPDATE items SET short_description = $2 WHERE id = $1", [item.id, "x".repeat(1001)]),
+    ).rejects.toThrow(/items_short_description_length/);
+    await expect(
+      db.query("UPDATE items SET long_description = $2 WHERE id = $1", [item.id, "x".repeat(20001)]),
+    ).rejects.toThrow(/items_long_description_length/);
+  });
+});
+
 describe("products workspace: atomic creation", () => {
   it("keeps a purchase price without inventing a zero-quantity receipt and registers the barcode for scanning", async () => {
     const code = "4006381333931";

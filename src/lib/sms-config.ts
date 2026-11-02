@@ -110,14 +110,62 @@ function encryptApiKey(plain: string, key: Buffer): Buffer {
   return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]);
 }
 
-export async function getSmsProvider(): Promise<SmsProvider> {
+/**
+ * Issue #902 — the ONE master credential, for the second caller that needs it.
+ *
+ * The customer-management API (child accounts, templates, provider funding) is
+ * driven by the same master account that sends login OTPs, so it resolves the
+ * key through the same database-then-environment precedence. A separate key
+ * store for "the reseller account" would recreate the split this issue had to
+ * close: two configurations that can disagree about which account is billing
+ * the platform.
+ */
+export async function getKavenegarMasterKey(): Promise<{
+  apiKey: string | null;
+  fromEnvironment: boolean;
+  updatedAt: string | null;
+}> {
+  const config = await readSmsConfig();
+  return {
+    apiKey: config.apiKey,
+    fromEnvironment: config.fromEnvironment,
+    updatedAt: config.updatedAt?.toISOString() ?? null,
+  };
+}
+
+/**
+ * The transport, plus whether it is a real one.
+ *
+ * `configured` exists so a caller can say "this was not sent" without asking
+ * the provider who it is (there is no `name` on the interface — a second
+ * transport must not be forced to invent one) and without reading `NODE_ENV`:
+ * the no-op fallback *succeeds* in development and test by printing the message,
+ * which is right for a developer's terminal and wrong as evidence that a
+ * contract invitation reached a signer. Issue #908's rule — never a fake
+ * confirmation — needs the one fact, so `readSmsConfig()` answers it once here
+ * instead of every caller re-deriving it.
+ */
+export interface SmsProviderHandle {
+  provider: SmsProvider;
+  configured: boolean;
+}
+
+export async function resolveSmsProvider(): Promise<SmsProviderHandle> {
   const config = await readSmsConfig();
   if (config.apiKey) {
-    return new KavenegarProvider(config.apiKey, config.template);
+    return { provider: new KavenegarProvider(config.apiKey, config.template), configured: true };
   }
-  // No key anywhere: log the OTP instead of throwing. An offline/local install
-  // has no SMS by definition and must still boot — it enrols TOTP instead.
-  return new NoopProvider();
+  // No key anywhere: the fallback logs the code in development and test, and
+  // refuses outside them — an offline/local install has no SMS by definition
+  // and must still boot (it enrols TOTP instead), but a deployed install must
+  // not answer a login by writing a live code into a log (issue #902 DoD #9).
+  // Every caller already consumes the challenge and reports
+  // `sms_dispatch_failed`, so the refusal arrives on screen as a real failure.
+  return { provider: new NoopProvider(), configured: false };
+}
+
+export async function getSmsProvider(): Promise<SmsProvider> {
+  return (await resolveSmsProvider()).provider;
 }
 
 /** The console's read view. Never returns the key; only whether there is one and its last four. */

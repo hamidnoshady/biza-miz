@@ -14,6 +14,13 @@
  */
 import { redirect } from "next/navigation";
 import { query, withTenant } from "./db";
+import { resolveFeaturesAccess } from "./billing-plans-service";
+import {
+  resolveCommercialLayer,
+  resolveFlagLayer,
+  type CommercialDenial,
+  type FlagLayerResult,
+} from "./effective-access";
 
 /**
  * Every flag this business has, with its per-business override resolved
@@ -41,29 +48,102 @@ import { query, withTenant } from "./db";
 export async function effectiveFeatures(
   businessId: string,
 ): Promise<Record<string, boolean>> {
-  const { rows } = await withTenant(businessId, () =>
-    query<{ key: string; default_enabled: boolean; override: boolean | null }>(
-      `SELECT f.key, f.default_enabled, bf.enabled AS override
+  const details = await effectiveFeatureDetails(businessId);
+  return Object.fromEntries(details.map((d) => [d.key, d.enabled]));
+}
+
+/** One capability's effective access with the layer that decided it. */
+export interface EffectiveFeatureDetail {
+  key: string;
+  enabled: boolean;
+  /** The rollout layer's own answer, before the commercial layer. */
+  flag: FlagLayerResult;
+  /** Whether the business's plan prices this capability. */
+  priced: boolean;
+  /** Why the commercial layer refused, when it did. */
+  commercialDenial: CommercialDenial | null;
+}
+
+/**
+ * The single resolver behind every flag-keyed access question: the rollout
+ * layer (audited billing override > legacy business override > catalogue
+ * default) and, for a capability the business's plan prices, the commercial
+ * layer (add-on ownership, plan inclusion, subscription lapse). The precedence
+ * itself lives in `effective-access.ts`; this is its database half.
+ *
+ * One query answers the rollout layer, including whether the business's plan
+ * has a row for each flag, so an unpriced flag costs exactly what it always
+ * did. Only priced flags add the batched commercial read, and the request gate
+ * asks about the one key it is refusing on, so it pays for that key alone.
+ * The full map (`effectiveFeatures`: navigation, the desktop site profile)
+ * evaluates every priced flag, which is what keeps the sidebar, the pages and
+ * the API from disagreeing about the same capability.
+ */
+export async function effectiveFeatureDetails(
+  businessId: string,
+  /** Answer only for these keys (the request gate asks about one); omitted = every flag. */
+  keys?: readonly string[],
+): Promise<EffectiveFeatureDetail[]> {
+  return withTenant(businessId, async () => {
+    const { rows } = await query<{
+      key: string;
+      default_enabled: boolean;
+      override: boolean | null;
+      billing_override: boolean | null;
+      priced: boolean;
+    }>(
+      `SELECT f.key, f.default_enabled, bf.enabled AS override,
+              bo.value_bool AS billing_override,
+              EXISTS (
+                SELECT 1 FROM billing_plan_features pf
+                  JOIN businesses b ON b.plan = pf.plan_key
+                 WHERE b.id = $1 AND pf.feature_key = f.key
+              ) AS priced
          FROM feature_flags f
-         LEFT JOIN business_features bf ON bf.flag_key = f.key AND bf.business_id = $1
+         LEFT JOIN business_features bf
+                ON bf.flag_key = f.key AND bf.business_id = $1
+         LEFT JOIN business_billing_overrides bo
+                ON bo.business_id = $1 AND bo.kind = 'capability' AND bo.target = f.key
+               AND bo.active AND (bo.expires_at IS NULL OR bo.expires_at > now())
+        WHERE $2::text[] IS NULL OR f.key = ANY($2::text[])
         ORDER BY f.key`,
-      [businessId],
-    ),
-  );
-  return Object.fromEntries(
-    rows.map((r) => [r.key, r.override ?? r.default_enabled]),
-  );
+      [businessId, keys ? [...keys] : null],
+    );
+
+    const pricedKeys = rows.filter((r) => r.priced).map((r) => r.key);
+    const access = new Map(
+      (await resolveFeaturesAccess(businessId, pricedKeys)).map((a) => [a.featureKey, a]),
+    );
+
+    return rows.map((r) => {
+      const flag = resolveFlagLayer({
+        catalogueDefault: r.default_enabled,
+        businessOverride: r.override,
+        billingOverride: r.billing_override,
+      });
+      const commercial = resolveCommercialLayer({
+        access: r.priced ? (access.get(r.key) ?? null) : null,
+      });
+      return {
+        key: r.key,
+        enabled: flag.enabled && commercial.allowed,
+        flag,
+        priced: commercial.priced,
+        commercialDenial: commercial.reason,
+      };
+    });
+  });
 }
 
 export async function isFeatureEnabled(
   businessId: string,
   flagKey: string,
 ): Promise<boolean> {
-  const features = await effectiveFeatures(businessId);
+  const [detail] = await effectiveFeatureDetails(businessId, [flagKey]);
   // A key with no matching feature_flags row fails open: every prefix below
   // is expected to name a real flag, so this only matters if that mapping
   // itself has a typo — not a business's entitlement to lose over a bug.
-  return features[flagKey] ?? true;
+  return detail?.enabled ?? true;
 }
 
 /**
@@ -73,7 +153,7 @@ export async function isFeatureEnabled(
  * (server-to-server, bearer-token authenticated, never carries a session —
  * see PUBLIC_PATHS in middleware.ts).
  */
-const API_FEATURE_PREFIXES: [string, string][] = [
+export const API_FEATURE_PREFIXES: [string, string][] = [
   ["/api/inventory", "inventory"],
   // Issue #864's `/api/accounting/shareholders` read/write surface shares the
   // ledger entitlement and remains server-gated like the older `/api/ledger` routes.

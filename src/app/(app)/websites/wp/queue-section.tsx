@@ -43,6 +43,8 @@ export const KIND_LABELS: Record<string, { label: string; desc: string; link?: s
   stock: { label: "به‌روزرسانی موجودی انبار", desc: "ارسال تعداد موجودی کالا به فروشگاه", link: "/websites/wp/products" },
   price: { label: "به‌روزرسانی قیمت کالا", desc: "ارسال قیمت ریالی/تومانی به فروشگاه", link: "/websites/wp/products" },
   product_update: { label: "ویرایش و تغییر محصول", desc: "تغییر عنوان، قیمت، موجودی یا وضعیت محصول", link: "/websites/wp/products" },
+  product_publish: { label: "انتشار یا پیوند محصول حسابداری", desc: "موارد بازبینی‌شده؛ ثبت پیوند پس از تأیید فروشگاه", link: "/accounting/products" },
+  taxonomy_ensure: { label: "نگاشت ویژگی و مقدارها", desc: "تطبیق یا ساخت ویژگی‌های بازبینی‌شده در فروشگاه", link: "/accounting/products/attributes" },
   order_status: { label: "تغییر وضعیت سفارش", desc: "به‌روزرسانی وضعیت پردازش یا تکمیل سفارش در فروشگاه", link: "/websites/wp/orders" },
   refund_create: { label: "ثبت برگشت وجه (مرجوعی)", desc: "ثبت مبلغ مرجوعی برای سفارش", link: "/websites/wp/orders" },
   catalogue_export: { label: "درخواست خروجی کل کاتالوگ", desc: "دستور به افزونه برای ارسال همه محصولات به سیستم", link: "/websites/wp/products" },

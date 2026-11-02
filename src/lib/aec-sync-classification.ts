@@ -13,12 +13,15 @@
  * **Nothing in the AEC register set replicates today, and that is a decision,
  * not an omission.** The desktop install is a *till*: `site-routes.ts` keeps
  * selling, the floor, the kitchen, shifts and the machine's own settings local,
- * and every other screen is cloud-by-default. An AEC business has no `pos`,
- * `orders` or `stock` module at all, so a paired AEC desktop opens with nothing
- * local to run and shows the cloud pane — which is exactly what §26 asks for
- * instead of a silently-created "cloud-only AEC workflow where the desktop
- * architecture expects operational continuity": there is no AEC workflow on the
- * desktop to lose continuity of, and this file says so with reasons.
+ * and every other screen is cloud-by-default. An AEC business has no `orders`
+ * or `stock` module and no till: its `pos` module is only the address of the
+ * invoice screen (`service-invoice.ts`), the same screen every retail trade
+ * already runs on a desktop. None of the AEC *registers* below has a desktop
+ * screen, so a paired AEC desktop shows the cloud pane for them — which is
+ * exactly what §26 asks for instead of a silently-created "cloud-only AEC
+ * workflow where the desktop architecture expects operational continuity":
+ * there is no AEC register workflow on the desktop to lose continuity of, and
+ * this file says so with reasons.
  *
  * ## Why the two buckets are not the same protocol
  *

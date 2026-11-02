@@ -42,7 +42,7 @@ import {
   redeemOtpChallenge,
   type OtpPurpose,
 } from "../otp-challenge";
-import { getSmsProvider } from "../sms-config";
+import { resolveSmsProvider } from "../sms-config";
 import { formatJalali } from "../jalali";
 import { recordActivity, WorkspaceError, type WorkspaceContract, type WorkspaceOwner } from "../workspace";
 import { CONTRACT_LIMITS, normalizeContractContent, signatureSlots, type ContractDocumentContent } from "./blocks";
@@ -590,8 +590,12 @@ async function deliverInvitation(
   message: string,
   phone: string,
 ): Promise<{ delivered: boolean; reason: MessageDelivery["reason"] }> {
-  const provider = await getSmsProvider();
-  if (provider.name === "noop") return { delivered: false, reason: "sms_not_configured" };
+  // `configured` rather than the provider's identity: the no-op fallback
+  // *succeeds* in development and test by printing the message, which would
+  // read as "sent" for a signer who will never receive it (§908: no fake
+  // confirmations). One read of the config answers it honestly.
+  const { provider, configured } = await resolveSmsProvider();
+  if (!configured) return { delivered: false, reason: "sms_not_configured" };
   if (typeof provider.sendText !== "function") return { delivered: false, reason: "sms_unavailable" };
   try {
     await provider.sendText(phone, message);
@@ -1237,8 +1241,12 @@ export async function requestSignerOtp(
       row.signer_id,
     );
 
-    const provider = await getSmsProvider();
-    if (provider.name === "noop") {
+    // Same rule as the invitation: an unconfigured transport is reported as
+    // unconfigured even though the development no-op would happily print the
+    // code. The challenge is still created — the signer reads the code from the
+    // SMS the deployment eventually sends, and nothing here claims it left.
+    const { provider, configured } = await resolveSmsProvider();
+    if (!configured) {
       return { delivered: false as const, reason: "sms_not_configured" as const, expiresAt: issued.expiresAt.toISOString() };
     }
     try {

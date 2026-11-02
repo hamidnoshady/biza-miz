@@ -223,6 +223,30 @@ const AUTOMOTIVE_LABELS: Partial<Record<LabelKey, string>> = {
 };
 
 /**
+ * Issue #1128 — an advertising agency's nouns. Like AEC's, these are the words
+ * of a trade that sells *work*: there is no menu and no «فاکتور فروش» counter,
+ * and what leaves the business is a صورتحساب for a campaign, a creative
+ * package, a media buy or an event. The words follow that, and the screens they
+ * land on are Accounting's and My Workspace's — never new ones.
+ *
+ * `sellScreen` is AEC's wording on purpose: both trades bill and collect from
+ * the accounting suite rather than from a till, so the screen is the same
+ * screen and inventing a second name for it would send a reader looking for a
+ * door that does not exist.
+ */
+const AGENCY_LABELS: Partial<Record<LabelKey, string>> = {
+  saleDocument: "صورتحساب",
+  saleDocumentPlural: "صورتحساب‌ها",
+  sellScreen: "صورتحساب و دریافت",
+  // What the trade sells, as a list: the service packages and recurring
+  // engagements a proposal or a retainer is built from. Modelled in the
+  // service/quotation/billing workflows, deliberately not as `items` — the
+  // issue's "no POS or retail goods catalogue by default" line.
+  catalogue: "خدمات و بسته‌های تبلیغاتی",
+  catalogueItem: "خدمت تبلیغاتی",
+};
+
+/**
  * The F&B-only modules. Named rather than inlined three times so that adding a
  * fifth industry is one line, and so the list reads as the answer to "what
  * makes a café a café": table service, a kitchen to send tickets to, bookings,
@@ -377,7 +401,11 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
   },  service_saas: {
     brandTitle: "شرکت خدمات و نرم‌افزار",
     brandSubtitle: "مدیریت مشتری، پروژه و درآمد اشتراکی",
-    modules: [...CORE_MODULES],
+    // `pos` here is only the address of the invoice screen (`/accounting/pos`
+    // in invoice mode, `/api/sales`): a service company still has no till,
+    // recipes or stock. Its invoice lines are described services
+    // (`service-invoice.ts`).
+    modules: [...CORE_MODULES, "pos"],
     labels: {
       saleDocument: "صورتحساب خدمات",
       saleDocumentPlural: "صورتحساب‌های خدمات",
@@ -385,8 +413,9 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
       catalogue: "خدمات و اشتراک‌ها",
       catalogueItem: "خدمت",
     },
-    // Service companies do not receive restaurant operations, POS, recipes or
-    // retail stock. Their commercial invoices are owned by Billing/Accounting.
+    // Service companies do not receive restaurant operations, recipes or
+    // retail stock. They bill from the same invoice screen every retail trade
+    // uses, with service lines instead of stocked ones.
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
     capabilities: [],
@@ -394,11 +423,13 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
   /**
    * Issue #799 — Architecture, Civil Engineering & Construction.
    *
-   * Deliberately the *core* module set and nothing else, exactly as the issue
-   * specifies: no restaurant operations (`orders`, `tables`, `waiter`,
-   * `kitchen`, `reservations`, `delivery`, `menu`), no retail selling (`pos`,
-   * `stock`) and none of the trade-goods catalogs. An AEC tenant's operational
-   * centre is **My Workspace** — projects, phases, tasks, documents,
+   * The *core* module set plus `pos` and nothing else: no restaurant operations
+   * (`orders`, `tables`, `waiter`, `kitchen`, `reservations`, `delivery`,
+   * `menu`), no retail stock (`stock`) and none of the trade-goods catalogs.
+   * `pos` is only the address of the invoice screen (`/accounting/pos` in
+   * invoice mode, `/api/sales`) — what the trade bills with is a described
+   * service (`service-invoice.ts`), never a counter cart. An AEC tenant's
+   * operational centre is **My Workspace** — projects, phases, tasks, documents,
    * approvals, events and project financials, all of which already exist and
    * are gated by the workspace shell rather than by a module key (there is
    * intentionally no `workspace`/`projects` key; see the MODULE_KEYS note).
@@ -412,10 +443,11 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
    *    architecture_construction → operating profile → enabled capabilities
    *    → My Workspace + Accounting + CRM + Growth + Website + AI
    *
-   * `salesModel` stays `retail_invoice` because this trade bills from the
-   * accounting suite's statement screen, never from a counter: progress
-   * certificates and service invoices arrive as Accounting documents in a
-   * later wave, not as a POS with a cart.
+   * `salesModel` is `retail_invoice` because this trade bills from the
+   * invoice screen with service lines, never from a counter with a cart. It
+   * once had no invoice at all (the profile granted only the core modules),
+   * which left a contractor unable to bill a client from Accounting; progress
+   * certificates remain the workspace's own commercial register.
    *
    * Restaurant-only feature flags are seeded off at provision time
    * (`defaultDisabledFeatures`), the same industry-default-not-prohibition
@@ -428,7 +460,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
   architecture_construction: {
     brandTitle: "عمران، معماری و پیمانکاری",
     brandSubtitle: "مدیریت پروژه، طراحی، اجرا و امور مالی",
-    modules: [...CORE_MODULES],
+    modules: [...CORE_MODULES, "pos"],
     labels: AEC_LABELS,
     salesModel: "retail_invoice",
     defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
@@ -471,6 +503,85 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     // (audit F05, main's #855) — a rate is a fact about the business, not the
     // trade, and the automotive sale path reads it from `tax.config` through
     // `vat-policy.ts` like every other line does.
+  },
+  /**
+   * Issue #1128 — Advertising Agency (آژانس تبلیغاتی).
+   *
+   * Deliberately the *core* module set plus the one module the trade bills
+   * through, exactly as the issue specifies: no restaurant operations
+   * (`orders`, `tables`, `waiter`, `kitchen`, `reservations`, `delivery`,
+   * `menu`), no retail selling (`stock`) and none of the trade-goods
+   * catalogues. `industry-profile.test.ts` asserts that for every non-F&B trade
+   * at once, and pins this trade's `pos` as the address of the invoice screen —
+   * one of the three service trades, and no kind of counter.
+   *
+   * What the trade gets instead is the four tenant apps and the work areas they
+   * own, all of which already exist — nothing here is a fifth app and nothing is
+   * a second CRM or a second project engine:
+   *
+   *    advertising_agency → operating profile → enabled capabilities
+   *      → My Workspace (client projects, briefs, deliverables, approvals)
+   *      + Accounting (proposals, service invoices, retainers, milestones,
+   *        pass-through client cost, campaign/project P&L)
+   *      + CRM (client companies as `parties`, contacts and brands, leads,
+   *        pipeline, briefs)
+   *      + Growth & Marketing (the agency's own campaigns *and* the client
+   *        campaigns it manages, told apart by scope)
+   *      + Website Management + the media library (deliverables, versions,
+   *        review state) + the assistant.
+   *
+   * My Workspace stays exactly what it is for every other trade: a conditional
+   * work area with no module key of its own (see the MODULE_KEYS note), reached
+   * through the shell and gated by eligibility, service state, effective
+   * permissions and project membership — never by nav visibility. Issue #1110
+   * owns that eligibility matrix and must name this trade as project-based.
+   *
+   * `salesModel` is `retail_invoice` for the reason `service_saas` and AEC
+   * give: an agency bills from the invoice screen with *service* lines, never
+   * from a counter with a cart. A creative package, a retainer, a milestone or a
+   * media recharge is a described service at a quantity, a unit price and a VAT
+   * rate, and the one accounting decision it carries is which of the trade's own
+   * four revenue accounts it credits (`service-invoice.ts`) — so the trade has
+   * no till, no stock line and no `items` rows, and `hasSellableCatalogue` is
+   * false for it. `pos` below is the address of that screen and nothing more.
+   *
+   * Print-production material is the one place this trade could have looked
+   * retail and deliberately does not: an agency that prints its own outdoor
+   * work has real stock (vinyl, paper, ink, merch) and its chart carries the
+   * generic 1300 for it, but the profile grants no `stock` and no `inventory`
+   * module, because there is no supported warehouse workflow behind them. That
+   * material is bought and expensed through Accounting's own documents until a
+   * later wave ships something real to manage it with — the issue's "opt-in
+   * only if a real supported workflow exists".
+   *
+   * The eight operating profiles (full-service, digital/social, branding and
+   * creative, media buying, outdoor and print, content and video, PR and
+   * events, small agency/freelancer) are presets over templates, default
+   * navigation and KPIs — **never** a second authorization axis: what a member
+   * may do stays `permissions.ts` and the project role. They live in
+   * `agency.ts` and in tenant settings rather than in the wizard, so the trade
+   * keeps the seven-step `service` setup shape every service trade shares
+   * (wizard-steps.ts); what a preset steers today is which of the seven
+   * Workspace blueprints are offered first.
+   */
+  advertising_agency: {
+    brandTitle: "آژانس تبلیغاتی",
+    brandSubtitle: "مدیریت مشتری، پروژه، کمپین و امور مالی",
+    // `pos` here is only the address of the invoice screen (`/accounting/pos`
+    // in invoice mode, `/api/sales`), exactly as it is for `service_saas` and
+    // AEC: an agency has no till, no orders board, no recipes and no stock, and
+    // its invoice lines are described services (`service-invoice.ts`).
+    modules: [...CORE_MODULES, "pos"],
+    labels: AGENCY_LABELS,
+    salesModel: "retail_invoice",
+    // The F&B-shaped flags off, like every other non-F&B profile: an
+    // industry default, not a prohibition — the console can flip any of them
+    // back on for one tenant. `inventory` here is the café's recipe-costed
+    // raw-material store, which is not the agency's print-material account.
+    defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
+    // No Phase 27 capability: `batch_expiry` and `barcode` are goods-catalogue
+    // capabilities, and `repairs` is a workshop this trade does not have.
+    capabilities: [],
   },
 };
 

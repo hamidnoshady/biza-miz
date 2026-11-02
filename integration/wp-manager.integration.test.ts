@@ -2456,3 +2456,51 @@ describe("plugin taxonomy snapshots are validated before they may destroy (issue
     });
   });
 });
+
+/**
+ * Issue #944 / OVR-08 — the generic enqueue functions refuse a job the plugin
+ * never advertised, so no producer can strand a `pending` row the lease query
+ * will never hand out.
+ */
+describe("plugin job support is enforced where the job is queued (OVR-08)", () => {
+  const exportRows = (entityType: string) =>
+    db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM integration_outbox_events WHERE connection_id = $1 AND entity_type = $2`,
+      [biz.pluginConnId, entityType],
+    );
+
+  it("queues nothing for a job type the plugin did not advertise, then queues it once it does", async () => {
+    const wooOps = await import("../src/lib/integrations/woo-ops-service");
+    const guard = await import("../src/lib/integrations/plugin-job-guard");
+    await db.query(`UPDATE integration_connections SET plugin_capabilities = $2::jsonb WHERE id = $1`, [
+      biz.pluginConnId,
+      JSON.stringify({ jobTypes: ["stock", "price"] }),
+    ]);
+
+    await expect(
+      dbLib!.withTenant(biz.id, () => plugin.enqueuePluginExport(biz.id, biz.pluginConnId, "customer_export")),
+    ).rejects.toBeInstanceOf(guard.PluginJobUnsupportedError);
+    await expect(
+      dbLib!.withTenant(biz.id, () => wooOps.enqueueExport(biz.id, biz.pluginConnId, "orders_export")),
+    ).rejects.toBeInstanceOf(guard.PluginJobUnsupportedError);
+    expect((await exportRows("customer_export")).rows[0].n).toBe("0");
+    expect((await exportRows("orders_export")).rows[0].n).toBe("0");
+
+    await db.query(`UPDATE integration_connections SET plugin_capabilities = $2::jsonb WHERE id = $1`, [
+      biz.pluginConnId,
+      JSON.stringify({ jobTypes: ["customer_export", "orders_export"] }),
+    ]);
+    const customer = await dbLib!.withTenant(biz.id, () => plugin.enqueuePluginExport(biz.id, biz.pluginConnId, "customer_export"));
+    const orders = await dbLib!.withTenant(biz.id, () => wooOps.enqueueExport(biz.id, biz.pluginConnId, "orders_export"));
+    expect(customer.jobId).toBeTruthy();
+    expect(orders.jobId).toBeTruthy();
+    expect((await exportRows("customer_export")).rows[0].n).toBe("1");
+  });
+
+  it("does not let one business queue a job on another business's connection", async () => {
+    await expect(
+      dbLib!.withTenant(biz.id, () => plugin.enqueuePluginExport(randomUUID(), biz.pluginConnId, "customer_export")),
+    ).rejects.toThrow();
+    expect((await exportRows("catalogue_export")).rows[0].n).toBe("0");
+  });
+});

@@ -28,6 +28,8 @@ import {
   initializeResult,
   jsonRpcError,
   jsonRpcResult,
+  mcpServerName,
+  mcpServerTitle,
   negotiateProtocolVersion,
   toolResult,
   type JsonRpcResponse,
@@ -65,13 +67,18 @@ async function resolveTenantIndustry(businessId: string): Promise<Industry> {
  * belongs in the `pos://app/conventions` resource, which the model can read when
  * it needs it, rather than in a preamble paid for on every conversation.
  */
-async function buildInstructions(auth: McpAuthentication): Promise<{ title: string; instructions: string }> {
+async function buildInstructions(
+  auth: McpAuthentication,
+): Promise<{ title: string; serverName: string; instructions: string }> {
   let businessName = "کسب‌وکار";
+  let subdomain: string | null = null;
   try {
-    const { rows } = await query<{ name: string }>(`SELECT name FROM businesses WHERE id = $1`, [
-      auth.businessId,
-    ]);
+    const { rows } = await query<{ name: string; subdomain: string | null }>(
+      `SELECT name, subdomain FROM businesses WHERE id = $1`,
+      [auth.businessId],
+    );
     businessName = rows[0]?.name?.trim() || "کسب‌وکار";
+    subdomain = rows[0]?.subdomain ?? null;
   } catch {
     businessName = "کسب‌وکار";
   }
@@ -111,7 +118,7 @@ async function buildInstructions(auth: McpAuthentication): Promise<{ title: stri
     .filter((line) => line !== "")
     .join("\n");
 
-  return { title: businessName, instructions };
+  return { title: mcpServerTitle(businessName), serverName: mcpServerName(subdomain), instructions };
 }
 
 /**
@@ -461,12 +468,13 @@ export async function dispatchMcpMessage(
 
   switch (method) {
     case "initialize": {
-      const { title, instructions } = await buildInstructions(auth);
+      const { title, serverName, instructions } = await buildInstructions(auth);
       return jsonRpcResult(
         id,
         initializeResult({
           protocolVersion: negotiateProtocolVersion(params.protocolVersion),
           title,
+          serverName,
           version: currentAppVersion(),
           instructions,
         }),

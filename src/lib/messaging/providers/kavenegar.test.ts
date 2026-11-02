@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildKavenegarSendRequest,
   kavenegarApiStatusToResult,
   parseKavenegarResponse,
 } from "./kavenegar";
 import { providerErrorLabel } from "../provider";
+import { KavenegarMessageProvider } from "./kavenegar-client";
 
 describe("buildKavenegarSendRequest", () => {
   it("points at the account's send endpoint with receptor/message/sender", () => {
@@ -89,5 +90,59 @@ describe("parseKavenegarResponse + classification", () => {
   it("renders a Persian label for any code (no raw provider code to the owner)", () => {
     expect(providerErrorLabel("invalid_number")).toContain("نامعتبر");
     expect(providerErrorLabel("bogus_unknown")).not.toBe("");
+  });
+});
+
+/**
+ * Issue #902 — the spike found two defects in this parser, both fixed here:
+ * the documented send reply puts `entries` beside `return` (not inside it), and
+ * the per-message `cost` was discarded. A recorded fixture is below.
+ */
+describe("documented send envelope (issue #902)", () => {
+  const documented = JSON.stringify({
+    return: { status: 200, message: "تایید شد" },
+    entries: [
+      {
+        messageid: 8792343,
+        message: "خدمات پیام کوتاه کاوه نگار",
+        status: 1,
+        statustext: "در صف ارسال",
+        sender: "10004346",
+        receptor: "09*********",
+        date: 1356619709,
+        cost: 120,
+      },
+    ],
+  });
+
+  it("reads the TOP-LEVEL entries array and keeps the message id", () => {
+    const parsed = parseKavenegarResponse(documented)!;
+    expect(parsed.entries).toHaveLength(1);
+    const result = kavenegarApiStatusToResult(parsed);
+    expect(result.ok).toBe(true);
+    expect(result.providerMessageId).toBe("8792343");
+  });
+
+  it("preserves the provider's wholesale cost as an integer Rial amount", () => {
+    const parsed = parseKavenegarResponse(documented)!;
+    expect(parsed.entries[0]?.costRial).toBe(120);
+  });
+
+  it("reports the provider cost on the adapter's SendResult", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(documented, { status: 200 })),
+    );
+    const provider = new KavenegarMessageProvider("KEY", "10004346");
+    const result = await provider.send({ to: "09121111111", body: "سلام" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.providerMessageId).toBe("8792343");
+      expect(result.providerCostRial).toBe(120);
+    }
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 });

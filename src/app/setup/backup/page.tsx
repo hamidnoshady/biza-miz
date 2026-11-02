@@ -94,7 +94,7 @@ export default function BackupStepPage() {
     const bridge = typeof window !== "undefined" ? window.businessSuiteDesktop : undefined;
     setCanPick(Boolean(bridge?.pickFolder));
     setCanCheck(Boolean(bridge?.storage?.checkFolder));
-    fetch("/api/backup/config")
+    fetch("/api/setup/backup")
       .then((r) => r.json())
       .then((data: BackupConfigResponse) => {
         setSiteInstall(Boolean(data.siteInstall));
@@ -182,7 +182,7 @@ export default function BackupStepPage() {
             return;
           }
         }
-        const { ok, data } = await api<{ error?: string }>("/api/backup/config", {
+        const { ok, data } = await api<{ error?: string }>("/api/setup/backup", {
           method: "PUT",
           body: JSON.stringify({
             enabled,

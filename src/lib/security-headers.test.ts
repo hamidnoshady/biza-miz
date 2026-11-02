@@ -81,6 +81,13 @@ describe("security-headers", () => {
     expect(csp).not.toContain("connect-src http: https:");
   });
 
+  it("lets the sandboxed print-template preview carry its font as a data URI, and nothing wider", () => {
+    const csp = contentSecurityPolicy("test-nonce", { https: true });
+    expect(csp).toContain("font-src 'self' data:;");
+    expect(csp).not.toContain("font-src 'self' data: https:");
+    expect(csp).toContain("script-src 'self' 'nonce-test-nonce' 'strict-dynamic'");
+  });
+
   it("allows only the loopback print-connector origins in connect-src", () => {
     process.env.NEXT_PUBLIC_PRINT_CONNECTOR_URL = "http://localhost:9555";
     const csp = contentSecurityPolicy("test-nonce", { https: true });

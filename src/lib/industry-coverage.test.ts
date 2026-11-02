@@ -54,6 +54,7 @@ import {
 } from "./industries";
 import { INDUSTRY_PROFILES, MODULE_KEYS } from "./industry-profile";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
+import { SERVICE_INVOICE_INDUSTRIES } from "./service-invoice";
 import { TRADE_GOODS_INDUSTRIES } from "./trade-goods";
 import { wizardStepsForIndustry } from "./wizard-steps";
 
@@ -87,6 +88,13 @@ const REGISTRY_SETS: readonly (readonly string[])[] = [
   PRODUCT_WORKSPACE_INDUSTRIES,
   TRADE_GOODS_INDUSTRIES,
   RETAIL_CATALOGUE_INDUSTRIES,
+  // The service-invoice trades (issue #799's engineering/contracting trade,
+  // `service_saas` and issue #1128's advertising agency): a genuine three-item
+  // set, not a restatement of another one. It is the list the invoice screen and
+  // `retail-invoice-service.ts` gate the `service` line kind on, and it is
+  // registered here so a fourth trade that bills work rather than goods has to
+  // be added deliberately, with its own revenue accounts.
+  SERVICE_INVOICE_INDUSTRIES,
 ];
 
 /**
@@ -346,6 +354,29 @@ describe("an industry's family decides which shape a shared engine uses", () => 
     expect(isRetailCatalogueIndustry("food_service")).toBe(false);
     expect(isRetailCatalogueIndustry("architecture_construction")).toBe(false);
     expect(isRetailCatalogueIndustry("service_saas")).toBe(false);
+    // Issue #1128 — an agency's creative packages are not a goods catalogue, so
+    // the trade is not in this set and the shared engines treat its site's
+    // "products" as work.
+    expect(isRetailCatalogueIndustry("advertising_agency")).toBe(false);
+  });
+
+  it("pins the family of each work-selling trade, so the fall-through cannot move one", () => {
+    // `industryFamily` answers `service` as its fall-through, which is the safe
+    // answer for a *new* non-catalogue trade but means the two trades that are
+    // service today are not pinned by the code alone. They are pinned here: if
+    // one of them ever moved into `retail`, a storefront order would start
+    // being written as a sale of goods the business does not stock, and product
+    // sync would start inventing `items` rows for creative packages.
+    expect(industryFamily("architecture_construction")).toBe("project_based");
+    expect(industryFamily("service_saas")).toBe("service");
+    expect(industryFamily("advertising_agency")).toBe("service");
+    for (const industry of [
+      "architecture_construction",
+      "service_saas",
+      "advertising_agency",
+    ] as const) {
+      expect(hasSellableCatalogue(industry), industry).toBe(false);
+    }
   });
 
   it("never treats a non-F&B industry as retail in the shared engines", () => {

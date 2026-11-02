@@ -15,6 +15,11 @@ import { getPaperDimensions, PAPERS, renderPrintTemplate, type PrintDocumentData
 
 const MM_TO_PX = 96 / 25.4;
 const EXPANDED_PADDING_PX = 16;
+const THUMBNAIL_STAGE_PX = 244;
+const THUMBNAIL_INSET_PX = 12;
+const THUMBNAIL_CROP_SCALE = 0.6;
+const CROP_MASK = "linear-gradient(to bottom, #000 calc(100% - 48px), transparent)";
+const CROP_FADE_STYLE = { maskImage: CROP_MASK, WebkitMaskImage: CROP_MASK } as const;
 
 type PreviewMode = "thumbnail" | "expanded";
 interface PreviewReport {
@@ -28,6 +33,7 @@ const BRIDGE_SCRIPT = `
 (() => {
   const report = () => {
     const pages = Array.from(document.querySelectorAll('.page'));
+    if (!pages.length) return;
     const bounds = pages.map((page) => ({ top: page.offsetTop, height: page.offsetHeight, width: page.offsetWidth }));
     const width = Math.max(1, ...bounds.map((page) => page.width));
     const height = Math.max(1, ...bounds.map((page) => page.top + page.height));
@@ -41,6 +47,7 @@ const BRIDGE_SCRIPT = `
     document.querySelectorAll('.page').forEach((page) => observer.observe(page));
   }
   window.addEventListener('load', scheduleReport, { once: true });
+  document.addEventListener('DOMContentLoaded', scheduleReport, { once: true });
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleReport).catch(() => {});
   scheduleReport();
   setTimeout(scheduleReport, 100);
@@ -48,7 +55,35 @@ const BRIDGE_SCRIPT = `
 })();
 `;
 
-function withPreviewBridge(html: string, nonce: string | null): string {
+// The preview frame is an opaque-origin document, so it cannot see the page's
+// font: without this the sheet falls back to Tahoma. The real print path embeds
+// the same file (printing/chromium.ts), so the preview shows the real glyphs.
+const FONT_URL = new URL("../../../fonts/Vazirmatn-Variable.woff2", import.meta.url);
+const FONT_LOAD_TIMEOUT_MS = 5_000;
+let fontFacePromise: Promise<string | null> | null = null;
+
+function loadFontFace(): Promise<string | null> {
+  fontFacePromise ??= (async () => {
+    try {
+      const response = await fetch(FONT_URL);
+      if (!response.ok) return null;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      return `<style>@font-face{font-family:"Vazirmatn";src:url(data:font/woff2;base64,${btoa(binary)}) format("woff2");font-weight:100 900;font-style:normal;}</style>`;
+    } catch {
+      return null;
+    }
+  })();
+  return Promise.race([
+    fontFacePromise,
+    new Promise<null>((resolve) => window.setTimeout(() => resolve(null), FONT_LOAD_TIMEOUT_MS)),
+  ]);
+}
+
+function withPreviewBridge(html: string, nonce: string | null, fontFace: string | null): string {
   // A srcDoc document inherits the parent's enforced CSP. Give the bridge the
   // page's nonce in both policies instead of relying on unsafe-inline, which
   // cannot override that inherited policy.
@@ -56,9 +91,10 @@ function withPreviewBridge(html: string, nonce: string | null): string {
   const scriptSource = safeNonce ? `'nonce-${safeNonce}'` : "'none'";
   const bridgeCsp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src ${scriptSource}; font-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />`;
   const bridgeScript = `<script${safeNonce ? ` nonce="${safeNonce}"` : ""}>${BRIDGE_SCRIPT}</script>`;
+  const head = `${bridgeCsp}${fontFace ?? ""}${BRIDGE_STYLE}`;
   const headEnd = html.toLowerCase().lastIndexOf("</head>");
-  if (headEnd < 0) return `${bridgeCsp}${BRIDGE_STYLE}${html}${bridgeScript}`;
-  return `${html.slice(0, headEnd)}${bridgeCsp}${BRIDGE_STYLE}${bridgeScript}${html.slice(headEnd)}`;
+  if (headEnd < 0) return `${head}${html}${bridgeScript}`;
+  return `${html.slice(0, headEnd)}${head}${bridgeScript}${html.slice(headEnd)}`;
 }
 
 function isPreviewReport(value: unknown): value is PreviewReport & { pageHeights: number[] } {
@@ -74,7 +110,7 @@ export function TemplatePreview({
   template,
   data,
   className,
-  maxHeightPx = 520,
+  maxHeightPx,
   mode = "expanded",
   scale = 1,
   pageIndex = 0,
@@ -83,7 +119,7 @@ export function TemplatePreview({
   template: PrintTemplate;
   data: PrintDocumentData;
   className?: string;
-  /** Thumbnail stage height or expanded viewer's maximum height. */
+  /** Thumbnail stage height (default 244) or an optional cap for the expanded viewer. */
   maxHeightPx?: number;
   mode?: PreviewMode;
   /** Expanded viewer zoom relative to fit-to-width; ignored for thumbnails. */
@@ -99,8 +135,16 @@ export function TemplatePreview({
   const [report, setReport] = useState<PreviewReport | null>(null);
   const [failed, setFailed] = useState(false);
   const [cspNonce, setCspNonce] = useState<string | null>(null);
+  // The srcDoc carries the page nonce in its own CSP, so no frame may load
+  // before the nonce has been read: a frame already loaded with `script-src
+  // 'none'` keeps its dead bridge when the srcDoc changes a moment later. The
+  // same goes for the font: load it once, before any frame, so a sheet never
+  // paints in the fallback face and then reloads.
+  const [nonceRead, setNonceRead] = useState(false);
+  // undefined while the font loads; null when it could not be (fallback face).
+  const [fontFace, setFontFace] = useState<string | null | undefined>(undefined);
   const html = useMemo(() => renderPrintTemplate(template, data), [template, data]);
-  const srcDoc = useMemo(() => withPreviewBridge(html, cspNonce), [cspNonce, html]);
+  const srcDoc = useMemo(() => withPreviewBridge(html, cspNonce, fontFace ?? null), [cspNonce, fontFace, html]);
   const paper = PAPERS[template.paper];
   const dimensions = getPaperDimensions(template.paper, template.options.orientation);
   const pageWidthPx = Math.max(1, Math.round(dimensions.widthMm * MM_TO_PX));
@@ -112,6 +156,17 @@ export function TemplatePreview({
     // nonce attributes, but the DOM `nonce` property remains readable.
     const nonce = Array.from(document.scripts).find((script) => script.nonce)?.nonce ?? null;
     setCspNonce(nonce);
+    setNonceRead(true);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void loadFontFace().then((face) => {
+      if (active) setFontFace(face);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -134,13 +189,15 @@ export function TemplatePreview({
     return () => observer.disconnect();
   }, [mode]);
 
+  const live = mounted && nonceRead && fontFace !== undefined;
+
   useEffect(() => {
     setReport(null);
     setFailed(false);
-    if (!mounted) return;
+    if (!live) return;
     const timeout = window.setTimeout(() => setFailed(true), 10_000);
     return () => window.clearTimeout(timeout);
-  }, [mounted, srcDoc]);
+  }, [live, srcDoc]);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -184,11 +241,22 @@ export function TemplatePreview({
 
   const naturalWidth = report?.width ?? pageWidthPx;
   const naturalHeight = report?.height ?? (fixedPageHeightPx ?? Math.round(340 * MM_TO_PX));
+  const stageHeightPx = maxHeightPx ?? THUMBNAIL_STAGE_PX;
+  const stageInnerWidth = Math.max(0, containerWidth - THUMBNAIL_INSET_PX * 2);
+  const stageInnerHeight = Math.max(0, stageHeightPx - THUMBNAIL_INSET_PX * 2);
+  const widthScale = Math.min(1, stageInnerWidth / naturalWidth);
+  const fitScale = Math.min(widthScale, stageInnerHeight / naturalHeight);
+  // A long thermal roll fitted whole into the stage is a 25% sliver nobody can
+  // read. Past a tall-enough ratio the thumbnail shows the top of the document
+  // at a legible scale and fades out; the monitor dialog still shows all of it.
+  const cropped = mode === "thumbnail" && fitScale < widthScale * 0.55;
+  const thumbnailScale = cropped ? Math.max(fitScale, Math.min(widthScale, THUMBNAIL_CROP_SCALE)) : fitScale;
   const frameScale = mode === "thumbnail"
-    ? Math.min(1, Math.max(0, (containerWidth - 24) / naturalWidth), Math.max(0, (maxHeightPx - 24) / naturalHeight))
+    ? thumbnailScale
     : Math.min(1, Math.max(0.1, (containerWidth - EXPANDED_PADDING_PX * 2) / naturalWidth)) * Math.min(2, Math.max(0.5, scale));
   const scaledWidth = naturalWidth * frameScale;
   const scaledHeight = naturalHeight * frameScale;
+  const visibleHeight = mode === "thumbnail" ? Math.min(scaledHeight, stageInnerHeight) : scaledHeight;
 
   useEffect(() => {
     if (mode !== "expanded" || !report || !containerRef.current) return;
@@ -202,8 +270,14 @@ export function TemplatePreview({
 
   const frame = report ? (
     <div
+      // The page is scaled from its top-left corner; in an RTL parent an
+      // iframe wider than this box would overflow to the left instead and the
+      // scaled content would land outside it, leaving a blank sheet.
+      dir="ltr"
       className="mx-auto overflow-hidden rounded-sm bg-white dark:bg-white shadow-[0_1px_7px_rgba(0,0,0,0.22)]"
-      style={{ width: scaledWidth, height: scaledHeight }}
+      // A cropped thumbnail fades out at the bottom (a mask, not a background)
+      // so it reads as "the document continues", not as a truncated page.
+      style={{ width: scaledWidth, height: visibleHeight, ...(cropped ? CROP_FADE_STYLE : {}) }}
     >
       <iframe
         ref={iframeRef}
@@ -229,7 +303,7 @@ export function TemplatePreview({
       <div
         ref={containerRef}
         className={`relative flex min-h-0 w-full items-center justify-center overflow-hidden rounded-xl border border-border/80 bg-muted/40 ${className ?? ""}`}
-        style={{ height: maxHeightPx }}
+        style={{ height: stageHeightPx }}
         aria-label={`تصویر کامل قالب ${template.name}`}
       >
         {!report && !failed ? (
@@ -241,7 +315,7 @@ export function TemplatePreview({
         {failed && !report ? (
           <p role="status" className="px-4 text-center text-xs text-muted-foreground">تصویر پیش‌نمایش آماده نشد؛ جزئیات قالب و امکان انتخاب همچنان در دسترس است.</p>
         ) : null}
-        {mounted && !report ? (
+        {live && !report ? (
           <iframe
             ref={iframeRef}
             title={`اندازه‌گیری پیش‌نمایش ${template.name}`}
@@ -250,7 +324,7 @@ export function TemplatePreview({
             srcDoc={srcDoc}
             aria-hidden="true"
             tabIndex={-1}
-            className="pointer-events-none fixed start-0 top-0 border-0 opacity-0"
+            className="pointer-events-none fixed left-0 top-0 border-0 opacity-0"
             style={{ width: pageWidthPx, height: Math.max(160, Math.min(420, fixedPageHeightPx ?? 320)) }}
           />
         ) : null}
@@ -274,7 +348,7 @@ export function TemplatePreview({
       {failed && !report ? (
         <p role="status" className="p-6 text-center text-sm text-muted-foreground">پیش‌نمایش آماده نشد؛ اصل قالب دست‌نخورده باقی مانده است. دوباره باز کنید یا به پشتیبانی اطلاع دهید.</p>
       ) : null}
-      {mounted && !report ? (
+      {live && !report ? (
         <iframe
           ref={iframeRef}
           title={`اندازه‌گیری پیش‌نمایش ${template.name}`}
@@ -283,7 +357,7 @@ export function TemplatePreview({
           srcDoc={srcDoc}
           aria-hidden="true"
           tabIndex={-1}
-          className="pointer-events-none fixed start-0 top-0 border-0 opacity-0"
+          className="pointer-events-none fixed left-0 top-0 border-0 opacity-0"
           style={{ width: pageWidthPx, height: Math.max(160, Math.min(420, fixedPageHeightPx ?? 320)) }}
         />
       ) : null}

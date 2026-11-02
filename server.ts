@@ -282,6 +282,63 @@ app.prepare().then(async () => {
     runPlatformBackupTick().catch((err) => console.error("platform backup tick failed:", err));
   scheduleCentralTick(platformBackupTick, BACKUP_TICK_INTERVAL_MS, 60_000);
 
+  // Issue #903 §7 — managed-backup billing. Two timers, because they settle
+  // different things:
+  //
+  //   sample   hourly   the retained managed-cloud bytes that the byte-day meter
+  //                     integrates, so a day's growth is actually observed;
+  //   settle   daily    the completed UTC day's `backup.storage_byte_day` event
+  //                     plus the legacy pre-charge reconciliation.
+  //
+  // Both are central-only: a site has no catalog, no wallet and no tenants. Each
+  // job is idempotent by its own window/idempotency key and takes a distributed
+  // lock, so two instances waking together produce one settlement and one busy.
+  const {
+    runBackupStorageSampleJob,
+    runBackupStorageBillingJob,
+    runBackupLegacyRefundJob,
+    STORAGE_SAMPLE_INTERVAL_MS,
+  } = await import("./src/lib/tenant-backup-billing-jobs");
+  const backupStorageSampleTick = () =>
+    runBackupStorageSampleJob().catch((err) => console.error("backup billing sample failed:", err));
+  scheduleCentralTick(backupStorageSampleTick, STORAGE_SAMPLE_INTERVAL_MS, 90_000);
+
+  const backupStorageSettleTick = () =>
+    runBackupStorageBillingJob().catch((err) => console.error("backup billing settlement failed:", err));
+  // Every day at a fixed offset hour is the intent; a daily interval achieves it
+  // without a cron parser, and the job's own window is the completed UTC day, so
+  // an extra early run settles nothing twice.
+  scheduleCentralTick(backupStorageSettleTick, 24 * 60 * 60 * 1000, 5 * 60_000);
+
+  const backupRefundTick = () =>
+    runBackupLegacyRefundJob().catch((err) => console.error("backup refund reconciliation failed:", err));
+  scheduleCentralTick(backupRefundTick, 24 * 60 * 60 * 1000, 8 * 60_000);
+
+  // Issue #903 §12 — automated recovery drills. Until now `npm run backup:drill`
+  // existed and nothing ran it, so "we can restore you" was a claim nobody
+  // exercised. This tick walks the businesses that have a restorable logical
+  // artifact and drills each one at most once a day (`runScheduledBackupDrills`
+  // owns that idempotency through `tenant_backup_drills`), notifying the Owner
+  // when a backup that exists does not open. Run on *every* role: a site install
+  // protects itself too, and the drill proves exactly the chain that role would
+  // have to walk on the day it needs the backup.
+  const { runScheduledBackupDrills } = await import("./src/lib/tenant-backup-drills-job");
+  const backupDrillTick = () =>
+    runScheduledBackupDrills().catch((err) => console.error("backup drill failed:", err));
+  scheduleBackgroundTick(backupDrillTick, 60 * 60 * 1000, 12 * 60_000);
+
+  // Issue #903 §1/§7 — artifact lifecycle. Three passes, bounded per business:
+  // verify the cloud copies that were registered `verifying` (nothing ever ran
+  // that pass, so a cloud backup stayed unproven and unrestorable), reclaim the
+  // staged local twin on a Cloud deployment (its managed-storage-only rule), and
+  // expire what `retention_until` has retired. Runs on every role: a Local or
+  // Hybrid device owns its own local retention, and a Cloud server is the only
+  // place a managed object can be removed.
+  const { runBackupLifecycleTick } = await import("./src/lib/tenant-backup-lifecycle");
+  const backupLifecycleTick = () =>
+    runBackupLifecycleTick().catch((err) => console.error("backup lifecycle tick failed:", err));
+  scheduleBackgroundTick(backupLifecycleTick, 60 * 60 * 1000, 15 * 60_000);
+
   // Phase 11: bidirectional server-to-server sync (café laptop ←→ VPS). Each
   // tick pushes locally-born sync_events to the configured remote and pulls
   // the remote's events back, replaying both through the same idempotent
@@ -367,9 +424,12 @@ app.prepare().then(async () => {
   // enumerates active connections under the documented platform bypass, then
   // wraps each business's diff/push work in withTenant — the same shape as
   // every other background tick here.
-  const wooSyncTick = () =>
-    runWooCommerceSyncTick().catch((err) => console.error("woocommerce sync tick failed:", err));
-  scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 90_000);
+  const wooSyncRunner = createSyncRunner(
+    runWooCommerceSyncTick,
+    (err) => console.error("woocommerce sync tick failed:", err),
+  );
+  const wooSyncTick = () => wooSyncRunner.run();
+  scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 10_000);
 
   // Issue #1077: delete finished WP/Woo queue rows past their retention (90 days
   // done, 180 days dead/failed). The exact hour never matters; pending,
@@ -565,6 +625,57 @@ app.prepare().then(async () => {
   const messagingTick = () =>
     runMessagingTick().catch((err) => console.error("messaging tick failed:", err));
   scheduleCentralTick(messagingTick, MESSAGE_TICK_INTERVAL_MS, 35_000);
+
+  // Issue #902: keep each business's managed SMS account in step with its
+  // Growth entitlement. The pass re-derives eligibility from the canonical
+  // resolver every time, so activating Growth provisions a child, lapsing it
+  // suspends one, and reactivation recovers it — all without a provider call
+  // ever running inside a tenant request. Idempotent by construction: the
+  // queue's partial unique index allows one open job per business and kind.
+  const { runKavenegarManagedServiceTick } = await import(
+    "./src/lib/kavenegar/provisioning-service"
+  );
+  const kavenegarManagedTick = () =>
+    runKavenegarManagedServiceTick().catch((err) =>
+      console.error("kavenegar managed-service tick failed:", err),
+    );
+  scheduleCentralTick(kavenegarManagedTick, 60_000, 65_000);
+
+  // Issue #902: keep the children funded, and prove the provider's balance
+  // against our own journal. Both passes are bounded and use the same
+  // privileged adapter; neither runs in a request. The funding pass reads the
+  // master's own credit from the provider (plan §9 item 4), so a configured
+  // floor is a real guard rather than a switch that silently stops funding.
+  const [{ runManagedFundingTick }, { runManagedReconciliationSweep }] = await Promise.all([
+    import("./src/lib/kavenegar/pricing-service"),
+    import("./src/lib/kavenegar/reconciliation-service"),
+  ]);
+  const kavenegarFundingTick = async () => {
+    const { createKavenegarManagementClient } = await import("./src/lib/kavenegar/provisioning-service");
+    await runManagedFundingTick({ client: await createKavenegarManagementClient() });
+  };
+  scheduleCentralTick(
+    () => kavenegarFundingTick().catch((err) => console.error("kavenegar funding tick failed:", err)),
+    15 * 60_000,
+    5 * 60_000,
+  );
+  const kavenegarReconciliationTick = async () => {
+    const { createKavenegarManagementClient } = await import("./src/lib/kavenegar/provisioning-service");
+    const result = await runManagedReconciliationSweep({
+      client: await createKavenegarManagementClient(),
+    });
+    if (result.drifted > 0) {
+      console.error(`kavenegar reconciliation: ${result.drifted} drifted account(s)`);
+    }
+  };
+  scheduleCentralTick(
+    () =>
+      kavenegarReconciliationTick().catch((err) =>
+        console.error("kavenegar reconciliation tick failed:", err),
+      ),
+    6 * 60 * 60_000,
+    10 * 60_000,
+  );
 
   if (process.env.DEPLOYMENT_ROLE !== "site") {
     const { runCmsEntitlementOutboxTick } = await import("./src/lib/billing/entitlement/outbox-service");

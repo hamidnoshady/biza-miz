@@ -13,6 +13,7 @@ import { useState } from "react";
 import { api, errorMessage, ErrorBox, Field, inputClass } from "../ui";
 import { MfaStep, PLATFORM_MFA_THEME, type MfaMethod } from "@/components/auth/mfa-step";
 import { toPersianDigits } from "@/lib/digits";
+import { safeLoginNextPath } from "@/lib/login-contract";
 
 /** Everything `/api/platform/auth/login` can answer beyond the plain success shape. */
 interface PlatformLoginResponse {
@@ -52,7 +53,10 @@ export default function PlatformLoginPage() {
   const [graceDaysLeft, setGraceDaysLeft] = useState<number | null | undefined>(undefined);
 
   function enterConsole() {
-    router.push("/platform");
+    // `?next=` is honoured only for a console page: the console login must
+    // never forward an admin to a tenant or an external address.
+    const requested = safeLoginNextPath(new URLSearchParams(window.location.search).get("next"), "");
+    router.push(requested.startsWith("/platform/") ? requested : "/platform");
     router.refresh();
   }
 

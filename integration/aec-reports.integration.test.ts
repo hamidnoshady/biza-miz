@@ -164,13 +164,21 @@ async function createParty(businessId: string, name: string): Promise<string> {
   return rows[0].id;
 }
 
-/** One posted cost against a project — Accounting's half of §20 (Wave 9 copied). */
+/**
+ * One posted cost against a project — what Accounting's ledger holds (§20).
+ *
+ * The debit lands on an **expense** account, because that is what a project cost
+ * is: issue #907 F04 made every reader of project spend use the ledger's own
+ * definition (net debit on expense accounts), and a fixture that debited
+ * whichever account sorted first was filing an asset movement as spend.
+ */
 async function postProjectCost(businessId: string, projectId: string, amountRial: number): Promise<void> {
   await dbLib.withTenant(businessId, async () => {
     const { rows: accounts } = await dbLib.query<{ id: string }>(
-      `SELECT id FROM accounts WHERE business_id = $1 ORDER BY code LIMIT 1`,
+      `SELECT id FROM accounts WHERE business_id = $1 AND type = 'expense' ORDER BY code LIMIT 1`,
       [businessId],
     );
+    if (!accounts[0]) throw new Error("the seeded chart of accounts has no expense account");
     const { rows: entries } = await dbLib.query<{ id: string }>(
       `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, project_id)
        VALUES ($1, '2026-05-01', 'هزینهٔ اجرای پروژه', 'manual', $2) RETURNING id`,

@@ -24,11 +24,21 @@ posts an accounting entry.
 | `contract_signatures` | the evidence row: who, when, which hash, which slot | insert-only |
 | `contract_signing_events` | the timeline | insert-only |
 
-Every table carries `business_id`, has **FORCE** row-level security and a
-`tenant_isolation` policy with the documented `app_rls_bypass()` escape. The
-three evidence tables (`contract_document_versions`, `contract_signatures`,
-`contract_signing_events`) grant **SELECT and INSERT only**, so history cannot be
-rewritten by the application role — a correction is a new version, not an edit.
+Every table carries `business_id`, has **FORCE** row-level security and the
+repository's one approved policy shape: a permissive `tenant_isolation` policy
+with the documented `app_rls_bypass()` escape — the shape
+`integration/tenant-isolation.integration.test.ts` demands of every table with a
+`business_id`, so a new table cannot quietly pick its own.
+
+The three evidence tables (`contract_document_versions`, `contract_signatures`,
+`contract_signing_events`) are **append-only**: each also carries two
+`AS RESTRICTIVE` policies for UPDATE and DELETE whose predicate is literally
+`false`. Restrictive policies are AND-ed with the permissive one, so a mutation
+matches no row at all — history cannot be rewritten by the application role, and
+a correction is a new version rather than an edit. (The first draft used
+SELECT-only and INSERT-only policies instead; they behave the same at runtime
+but they are not one of the two shapes the isolation census accepts, and CI
+caught it.)
 
 Invariants enforced in the database, not only in code:
 

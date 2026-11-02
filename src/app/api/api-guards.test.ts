@@ -289,6 +289,23 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "mcp/oauth/revoke":
     "RFC 7009 token revocation — a client handing its own token back; always answers 200, " +
     "because a truthful 'no such token' would make an unauthenticated endpoint a lookup oracle",
+  // The superadmin console's MCP OAuth flow (migration 0258) — the same four
+  // session-less steps as the tenant flow above. The step that decides, the
+  // owner admin pressing "allow", is NOT here: it is
+  // /api/platform/mcp-connections/consent, behind the console session and an
+  // `admins.manage` check.
+  "platform/mcp/oauth/register":
+    "RFC 7591 dynamic client registration for the console realm — issues a client_id and nothing " +
+    "else; a registration alone can read no row and is pruned when abandoned",
+  "platform/mcp/oauth/authorize":
+    "the console realm's authorization endpoint — validates the request and hands the browser to " +
+    "the session-guarded console consent page; it authorizes nothing itself",
+  "platform/mcp/oauth/token":
+    "the console realm's token endpoint — session-less by definition; every decision (capabilities, " +
+    "business scope, expiry) was recorded on the code by an owner admin at the consent screen",
+  "platform/mcp/oauth/revoke":
+    "RFC 7009 revocation for console tokens — always answers 200, so an unauthenticated endpoint " +
+    "is no lookup oracle",
   "well-known/oauth-protected-resource/[[...path]]":
     "RFC 9728 discovery — read by a client before it has any credential at all; discloses only " +
     "URLs already implied by the hostname (rewritten from /.well-known/… in next.config.ts)",
@@ -303,6 +320,36 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "payment id + Authority + Status; the route verifies the payment with Zarinpal server-side " +
     "using the stored gateway snapshot (no session required) and 302-redirects to /settings/billing; " +
     "authority mismatch is rejected and no session is created",
+  // Issue #1128 §E — the external client review door. These three are session-less
+  // because the party using them is not a member and must never become one: §B asks
+  // for "revocable scoped external review links" and for "resource scheduling
+  // without a new staff identity system", so the credential is the token, not a
+  // role. Authorising by membership would mean inviting the client onto the staff
+  // list to look at their own proofs, which is the second identity system §B rules
+  // out. There is deliberately no approve-style media permission for the same
+  // reason.
+  //
+  // The token is 256-bit random, stored only as sha-256 (0265 pins the hash to
+  // ^[0-9a-f]{64}$ so plaintext could not be persisted even by a bug), shown to the
+  // member who minted it exactly once, expires in ≤30 days, and is revocable with
+  // effect on the next request. resolveReviewToken runs before a single row is
+  // read, then every query runs inside withTenant(businessId) resolved *from* the
+  // link, and bytes additionally require the link's purpose to be `download` and
+  // the asset to be a member of that round — a token grants one round, never the
+  // library. streamMediaObject's keyBelongsToBusiness is the last backstop.
+  // Responses are no-store, since the URL carries the secret.
+  "media/review/[token]":
+    "client review screen for a scoped media link (issue #1128 §E) — the token is the credential; " +
+    "no session exists or may exist for an external client, and the token is resolved before any row " +
+    "is read, then every query is tenant-scoped to the business the link belongs to",
+  "media/review/[token]/items/[assetId]":
+    "client decision on one asset in a linked review round (issue #1128 §E) — same token credential; " +
+    "the item must be a member of the round the token grants, and the round must still be in `sent`",
+  "media/review/[token]/assets/[assetId]/file":
+    "byte streaming for a `download`-purpose media link (issue #1128 §E) — streamed through the app " +
+    "rather than presigned so revocation takes effect immediately and every fetch is counted; " +
+    "requires the token, the download purpose, round membership of the asset, and then defers to " +
+    "streamMediaObject's own keyBelongsToBusiness check",
 };
 
 
@@ -383,6 +430,24 @@ const COMPANION_DEVICE_ROUTES: Record<string, string> = {
     "upload completion with server-side integrity verification; session ticket pinning",
 };
 
+/**
+ * Issue #894 — Torob's **Product API v3** endpoint.
+ *
+ * It lives under `/api/v1` because that prefix *is* the platform's machine-facing
+ * surface, but its caller is a marketplace crawler holding no API key of ours:
+ * Torob signs each request with its own Ed25519 key and the platform verifies that
+ * signature against the shop's stored domain (`src/lib/torob/auth.ts`). So the
+ * `/api/v1` rule below — "must authenticate a scoped API key" — cannot apply, and
+ * this map is the documented exception. What it asserts instead is that the route
+ * delegates to the one handler that performs that verification, so a future edit
+ * cannot drop the check by inlining a query.
+ */
+const TOROB_TOKEN_ROUTES: Record<string, string> = {
+  "v1/torob/products/[shopId]":
+    "Product API v3 — Torob's EdDSA JWT in X-Torob-Token, audience checked against the " +
+    "shop's own domain; the shop id is opaque and resolves the tenant under one documented bypass",
+};
+
 /** Routes that guard via getSession() with route-specific logic instead of requireRole. */
 const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/me": "returns the caller's own session (or null) — nothing else",
@@ -434,25 +499,13 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   // authorization.
   "ai/conversations/[id]/input-requests/[requestId]":
     "answers/cancels an input request on the caller's own conversation — ownership is the authorization",
-  // Phase 35 Wave 3 — projects are scoped to the business by RLS and to the
-  // creating member by the same ownership pattern as conversations. Notes
-  // reach tenant scope through their parent project (like ai_messages through
-  // ai_conversations).
-  "ai/projects": "lists/creates projects for the caller's business — RLS + ownership",
-  "ai/projects/[id]": "reads/updates/archives a project — RLS + ownership",
-  "ai/projects/[id]/notes": "lists/adds notes to a project — RLS through parent project",
-  "ai/projects/[id]/notes/[noteId]": "deletes a note — RLS through parent project",
-  // Phase F — project memory (standing facts fed into project chat context)
-  // reaches tenant scope through its parent project, exactly like notes.
-  "ai/projects/[id]/memory": "lists/adds memory to a project — RLS through parent project",
-  "ai/projects/[id]/memory/[memoryId]": "deletes a memory entry — RLS through parent project",
-  // Phase F pt.3 — project tasks reach tenant scope through their parent
-  // project, exactly like notes and memory.
-  "ai/projects/[id]/tasks": "lists/adds tasks to a project — RLS through parent project",
-  "ai/projects/[id]/tasks/[taskId]": "toggles/deletes a task — RLS through parent project",
-  // Phase F capstone — a project's media files, scoped by project ownership and
-  // the tenant-isolated media_assets table.
-  "ai/projects/[id]/files": "lists a project's media files — ownership through parent project",
+  // Issue #907 F01 — `/api/ai/projects/**` is no longer self-guarding. These
+  // routes now take the workspace module's two gates (the platform capability
+  // through `workspaceOwner`, then the project role), because "the parent
+  // project belongs to my business" proved nothing about whether the caller
+  // may read or change it. They are matched by `isWorkspaceGuarded` above and
+  // pinned by the legacy-assistant-project test in
+  // `authorization-contract.test.ts`.
   // Issue #812 §10 — layered memory. The tenant comes from the session on every
   // path and the scope is validated against it, so ownership is the
   // authorization; the write path additionally takes `ai.manage`.
@@ -531,6 +584,26 @@ function isAecGuarded(src: string): boolean {
     /PERMISSIONS\.(?:settingsManage|workspaceView|workspaceManage|workspaceDocumentsIssue)/.test(
       src,
     )
+  );
+}
+
+/**
+ * Issue #1128 §D — `agencyOwner(PERMISSIONS.workspace…)`, the same shape again:
+ * `src/app/api/agency/guard.ts`'s only body is `workspaceOwner(permission,
+ * request)`, which is `requirePermission` behind one shared helper plus the
+ * workspace module's service-activation gate. Recognising it narrows the scan
+ * rather than loosening it, and it is a *stronger* guard than the AEC one —
+ * these routes cannot write while the tenant's projects service is deactivated.
+ *
+ * The three keys are named exactly (read, write, and the determination key §24
+ * requires to be separate from ordinary editing) rather than accepting any
+ * string, so a future route cannot satisfy the scanner with a permission it
+ * does not actually check.
+ */
+function isAgencyGuarded(src: string): boolean {
+  return (
+    /agencyOwner\(/.test(src) &&
+    /PERMISSIONS\.workspace(?:View|Manage|Approve)/.test(src)
   );
 }
 
@@ -635,6 +708,14 @@ describe("every API route is guarded", () => {
 
   for (const [key, src] of sources) {
     it(`${key} is guarded or explicitly public`, () => {
+      if (TOROB_TOKEN_ROUTES[key]) {
+        // A signed marketplace token replaces the API key; the route must hand off
+        // to the handler that verifies it.
+        expect(src, `src/app/api/${key}/route.ts must authenticate Torob's token`).toMatch(
+          /handleTorobProductRequest\(/,
+        );
+        return;
+      }
       if (key === "v1" || key.startsWith("v1/")) {
         expect(isApiKeyGuarded(src), `src/app/api/${key}/route.ts must authenticate a scoped API key`).toBe(true);
         return;
@@ -702,6 +783,9 @@ describe("every API route is guarded", () => {
       if (isDataTransferGuarded(src)) return;
       // Issue #799 Wave 2 — `aecOwner(PERMISSIONS.…)`. See isAecGuarded.
       if (isAecGuarded(src)) return;
+      // Issue #1128 §D — `agencyOwner(PERMISSIONS.workspace…)`, which delegates
+      // to the workspace owner gate. See isAgencyGuarded.
+      if (isAgencyGuarded(src)) return;
       // Phase 35 — `requireMember` is the fourth guard: any signed-in member,
       // for endpoints where every member acts only on their own rows and there
       // is therefore no role left to gate (notification devices, rules, inbox).
@@ -798,7 +882,11 @@ describe("every API route is guarded", () => {
   });
 
   it("the public list doesn't cover routes that no longer exist", () => {
-    for (const key of [...Object.keys(PUBLIC_ROUTES), ...Object.keys(SELF_GUARDING_ROUTES)]) {
+    for (const key of [
+      ...Object.keys(PUBLIC_ROUTES),
+      ...Object.keys(SELF_GUARDING_ROUTES),
+      ...Object.keys(TOROB_TOKEN_ROUTES),
+    ]) {
       expect(sources.has(key), `${key} is allowlisted but has no route file`).toBe(true);
     }
   });

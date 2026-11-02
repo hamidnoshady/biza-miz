@@ -56,6 +56,9 @@ function commonMeta(input: ParsedProductCreateInput): ItemMetaPatch {
     taxSalePercent: input.taxSalePercent,
     taxPurchasePercent: input.taxPurchasePercent,
     isSellable: input.isSellable,
+    publishStatus: input.publishStatus,
+    shortDescription: input.shortDescription,
+    longDescription: input.longDescription,
   };
 }
 

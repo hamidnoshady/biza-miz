@@ -1,13 +1,18 @@
 "use client";
 
 /**
- * «گزارش‌ها» — project health and profitability.
+ * «گزارش‌ها» — project health, cost and budget variance.
  *
  * The spent figure is NOT kept here. It is read from the ledger through
  * `journal_entries.project_id`, the cost-centre dimension Accounting already
  * owns, so the workspace and the books can never disagree about what a project
- * cost. Budget − spent is the margin; a project with no budget shows «—»
- * rather than a misleading zero.
+ * cost — and since issue #907 F04 "cost" is the ledger's own definition (net
+ * debit on expense accounts, reversals included), shared with the AEC cockpit
+ * and the assistant through `lib/project-costs`.
+ *
+ * Budget − spent is a **budget variance**, not profit: this screen shows no
+ * revenue, because revenue recognition is an Accounting decision and the label
+ * used to promise a profitability figure the number could not support.
  */
 
 import { InsightsPanel } from "./insights-panel";
@@ -134,7 +139,7 @@ export function ReportsSection() {
       </KpiRow>
 
       <SectionCard
-        title="سلامت و سودآوری پروژه‌ها"
+        title="سلامت، هزینه و ماندهٔ بودجهٔ پروژه‌ها"
         description="هزینه از سندهای حسابداریِ همین پروژه خوانده می‌شود؛ میز کار نسخهٔ دومی از این عدد نگه نمی‌دارد."
         flush
       >
@@ -162,7 +167,7 @@ export function ReportsSection() {
             پس از ساخت پروژه و ثبت هزینه‌ها، وضعیت مالی و پیشرفت هر پروژه اینجا جمع می‌شود.
           </EmptyState>
         ) : (
-          <DataTable caption="گزارش سلامت و سودآوری پروژه‌ها" frame={false} tableClassName={stackedTableClass}>
+          <DataTable caption="گزارش سلامت، هزینه و ماندهٔ بودجهٔ پروژه‌ها" frame={false} tableClassName={stackedTableClass}>
             <DataTableHead>
               <tr>
                 <Th>پروژه</Th>

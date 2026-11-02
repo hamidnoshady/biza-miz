@@ -38,6 +38,7 @@ import { CMS_NAV_ITEMS, WEBSITE_NAV_GROUPS, WP_NAV_ITEMS } from "./website-nav";
 import {
   cmsSectionHref,
   EMPTY_WEBSITE_MANAGERS_STATE,
+  hasAnyWebsite,
   isCmsSectionPathname,
   isWpSectionPathname,
   visibleCmsSections,
@@ -138,27 +139,35 @@ export function WebsiteAppNav({ shell, pathname, onNavigate }: AppShellNavProps)
       icon: WP_ICONS[item.key],
     }));
 
+  // A business with no site sees the overview and nothing else: every other
+  // entry is about a site that does not exist yet, and the overview is where
+  // one is built or connected. A manager's group appears only with its site.
+  const hasWebsite = hasAnyWebsite(state);
   const items: AppSectionNavItem<WebsiteNavKey>[] = [
     {
       key: "overview",
       label: "نمای کلی وب‌سایت",
-      description: "وضعیت مدیرهای سایت و راه‌های شروع کار",
+      description: hasWebsite ? "وضعیت سایت‌های شما" : "ساخت یا اتصال سایت",
       icon: LayoutDashboardIcon,
     },
     ...cmsItems,
     ...wpItems,
-    {
-      key: "settings",
-      label: "تنظیمات وب‌سایت",
-      description: "تنظیمات این برنامه، جدا از تنظیمات پلتفرم",
-      icon: SettingsIcon,
-    },
+    ...(hasWebsite
+      ? [
+          {
+            key: "settings" as const,
+            label: "تنظیمات وب‌سایت",
+            description: "تنظیمات این برنامه، جدا از تنظیمات پلتفرم",
+            icon: SettingsIcon,
+          },
+        ]
+      : []),
   ];
   const groups: AppSectionNavGroup<WebsiteNavKey>[] = [
     { label: "نمای کلی", keys: ["overview"] },
-    { label: WEBSITE_NAV_GROUPS[0].label, keys: cmsItems.map((item) => item.key) },
-    { label: WEBSITE_NAV_GROUPS[1].label, keys: wpItems.map((item) => item.key) },
-    { label: "تنظیمات", keys: ["settings"] },
+    ...(cmsItems.length > 0 ? [{ label: WEBSITE_NAV_GROUPS[0].label, keys: cmsItems.map((item) => item.key) }] : []),
+    ...(wpItems.length > 0 ? [{ label: WEBSITE_NAV_GROUPS[1].label, keys: wpItems.map((item) => item.key) }] : []),
+    ...(hasWebsite ? [{ label: "تنظیمات", keys: ["settings" as const] }] : []),
   ];
 
   return (

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession, withTenantScope } from "@/lib/auth";
+import { withTenantScope } from "@/lib/auth";
 import { addMemory, listMemory } from "@/lib/ai-projects";
+import { requireProjectCapability } from "@/lib/workspace";
+import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "@/app/api/workspace/guard";
 
 /**
  * Phase F — project memory: standing facts the assistant carries for a project.
@@ -9,30 +11,35 @@ import { addMemory, listMemory } from "@/lib/ai-projects";
  * POST — add one (source 'user'; the assistant writes memory through the
  *        confirmed `project.memory.add` action, which also lands here)
  *
- * Ownership is the authorization, the same shape as the notes routes: memory
- * reaches tenant scope only through its parent project, and every query here is
- * scoped by the session's business.
+ * Issue #907 F01 — `view` to read, `edit` to write. Memory is prompt context:
+ * a member who may not edit the project must not be able to plant a fact the
+ * assistant will repeat to everyone working on it.
  */
 
 export const GET = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
+    if (error) return error;
     const { id } = await context.params;
 
-    const memory = await listMemory({
-      businessId: session.businessId,
-      actorUserId: session.sub,
-      projectId: id,
-    });
-    return NextResponse.json({ memory });
+    try {
+      await requireProjectCapability(owner, id, "view");
+      const memory = await listMemory({
+        businessId: owner.businessId,
+        actorUserId: owner.actorUserId,
+        projectId: id,
+      });
+      return NextResponse.json({ memory });
+    } catch (err) {
+      return handleWorkspaceError(err);
+    }
   },
 );
 
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
+    if (error) return error;
     const { id } = await context.params;
 
     const body = await request.json().catch(() => null);
@@ -44,20 +51,22 @@ export const POST = withTenantScope(
     const source = body.source === "ai" ? "ai" : "user";
 
     try {
+      await requireProjectCapability(owner, id, "edit");
       const memory = await addMemory(
-        { businessId: session.businessId, actorUserId: session.sub, projectId: id },
+        { businessId: owner.businessId, actorUserId: owner.actorUserId, projectId: id },
         { content: body.content, source },
       );
       return NextResponse.json({ memory }, { status: 201 });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "internal_error";
-      if (message.includes("not found")) {
-        return NextResponse.json({ error: "not_found" }, { status: 404 });
+      if (err instanceof Error) {
+        if (err.message.includes("not found")) {
+          return NextResponse.json({ error: "not_found" }, { status: 404 });
+        }
+        if (err.message.includes("character limit") || err.message.includes("required") || err.message.includes("full")) {
+          return NextResponse.json({ error: err.message }, { status: 400 });
+        }
       }
-      if (message.includes("character limit") || message.includes("required") || message.includes("full")) {
-        return NextResponse.json({ error: message }, { status: 400 });
-      }
-      throw err;
+      return handleWorkspaceError(err);
     }
   },
 );

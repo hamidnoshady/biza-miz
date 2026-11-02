@@ -57,6 +57,7 @@ import { EmptyState, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } 
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useFeatureLocked } from "@/components/feature-lock";
+import { ListPager, pageSlice } from "./list-pager";
 
 export interface TermRow {
   remoteId: string;
@@ -130,7 +131,17 @@ const MAX_INDENT_LEVEL = 4;
  * taxonomy — tags have no hierarchy, so every tag is a root — is the worst
  * case the render cap exists for; collapsed subtrees are the other half.
  */
-const RENDER_PAGE = 200;
+const RENDER_PAGE = 50;
+
+/**
+ * Groups one page lists. A store with a few hundred attribute groups used to
+ * put every group card on one endless page; the page is the unit now.
+ */
+const GROUP_PAGE_SIZES = [6, 12, 24] as const;
+/** At or below this many groups on a page they open by default; above it they start closed. */
+const OPEN_BY_DEFAULT_MAX = 3;
+/** Terms a closed group card previews so it is still worth looking at. */
+const PREVIEW_TERMS = 6;
 
 function indentStyle(depth: number) {
   return { marginInlineStart: `${Math.min(depth, MAX_INDENT_LEVEL) * INDENT_REM}rem` } as const;
@@ -229,7 +240,11 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
   const [kindFilter, setKindFilter] = useState<KindFilter>("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("");
   const [onlyMapped, setOnlyMapped] = useState(false);
-  const [closed, setClosed] = useState<Record<string, boolean>>({});
+  // The owner's own open/close choice per group; a group with no entry follows
+  // the page default (open when the page is short, closed when it is long).
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
+  const [groupPage, setGroupPage] = useState(1);
+  const [groupPageSize, setGroupPageSize] = useState<number>(GROUP_PAGE_SIZES[1]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [renderLimits, setRenderLimits] = useState<Record<string, number>>({});
   const [refreshing, setRefreshing] = useState(false);
@@ -283,7 +298,8 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
 
   // A new store starts with its own disclosure state and its own search.
   useEffect(() => {
-    setClosed({});
+    setOpened({});
+    setGroupPage(1);
     setExpanded({});
     setRenderLimits({});
     setQuery("");
@@ -424,6 +440,10 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
   if (groups === null) return <SectionCardSkeleton rows={6} label="در حال خواندن دسته‌بندی‌ها" />;
 
   const hits = visible.reduce((sum, g) => sum + g.terms.length, 0);
+  const pageGroups = pageSlice(visible, groupPage, groupPageSize);
+  const openByDefault = pageGroups.length <= OPEN_BY_DEFAULT_MAX;
+  const groupIsOpen = (taxonomy: string) => searching || (opened[taxonomy] ?? openByDefault);
+  const allPageOpen = pageGroups.length > 0 && pageGroups.every((group) => groupIsOpen(group.taxonomy));
   const anyTruncated = all.some((group) => group.status === "truncated");
   const anyFailed = all.some((group) => group.status === "failed");
 
@@ -446,7 +466,10 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
               placeholder="جست‌وجو در دسته، برچسب یا ویژگی…"
               aria-label="جست‌وجو در دسته‌بندی‌ها و ویژگی‌ها"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setGroupPage(1);
+              }}
             />
           </div>
           {/* TAX-12: two actions, two meanings. The reload re-reads the local
@@ -481,7 +504,10 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
             className={`${inputClass} h-9 w-auto min-w-32 text-xs`}
             aria-label="فیلتر نوع گروه"
             value={kindFilter}
-            onChange={(event) => setKindFilter(event.target.value as KindFilter)}
+            onChange={(event) => {
+              setKindFilter(event.target.value as KindFilter);
+              setGroupPage(1);
+            }}
           >
             <option value="">همهٔ انواع</option>
             {(Object.keys(KIND_LABELS) as Exclude<KindFilter, "">[]).map((kind) => (
@@ -494,7 +520,10 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
             className={`${inputClass} h-9 w-auto min-w-32 text-xs`}
             aria-label="فیلتر وضعیت همگام‌سازی"
             value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
+            onChange={(event) => {
+              setStatusFilter(event.target.value as StatusFilter);
+              setGroupPage(1);
+            }}
           >
             <option value="">همهٔ وضعیت‌ها</option>
             {(Object.keys(STATUS_META) as TaxonomyGroupStatus[]).map((status) => (
@@ -508,7 +537,10 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
               type="checkbox"
               className="size-4 accent-primary"
               checked={onlyMapped}
-              onChange={(event) => setOnlyMapped(event.target.checked)}
+              onChange={(event) => {
+                setOnlyMapped(event.target.checked);
+                setGroupPage(1);
+              }}
             />
             فقط دارای محصول همگام‌شده
           </label>
@@ -621,10 +653,43 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
         </p>
       ) : null}
 
-      {visible.map((group) => {
+      {visible.length > 1 ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <ListPager
+            page={groupPage}
+            total={visible.length}
+            pageSize={groupPageSize}
+            pageSizeOptions={GROUP_PAGE_SIZES}
+            onPage={setGroupPage}
+            onPageSize={(size) => {
+              setGroupPageSize(size);
+              setGroupPage(1);
+            }}
+            noun="گروه"
+          />
+          {searching ? null : (
+            <button
+              type="button"
+              className="text-xs font-medium text-primary hover:underline"
+              onClick={() =>
+                setOpened((current) => {
+                  const next = { ...current };
+                  for (const group of pageGroups) next[group.taxonomy] = !allPageOpen;
+                  return next;
+                })
+              }
+            >
+              {allPageOpen ? "بستن همهٔ گروه‌های این صفحه" : "باز کردن همهٔ گروه‌های این صفحه"}
+            </button>
+          )}
+        </div>
+      ) : null}
+
+      {pageGroups.map((group) => {
         // Searching opens what it found; the disclosure state is only the
         // owner's collapse of a group they can see.
-        const open = searching ? true : !closed[group.taxonomy];
+        const open = groupIsOpen(group.taxonomy);
+        const kind = KIND_LABELS[groupKind(group)];
         const status = STATUS_META[group.status];
         const renderLimit = renderLimits[group.taxonomy] ?? RENDER_PAGE;
         const matched = searching
@@ -644,6 +709,7 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
                   <FolderTreeIcon aria-hidden="true" className="size-4 text-muted-foreground" />
                 )}
                 <span className="font-semibold text-foreground">{group.label}</span>
+                <StatusBadge tone="neutral">{kind}</StatusBadge>
                 <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
                 <span dir="ltr" className="font-mono text-[11px] text-muted-foreground">
                   {group.taxonomy}
@@ -669,9 +735,7 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
                   size="sm"
                   aria-expanded={open}
                   aria-controls={`taxonomy-${group.taxonomy}`}
-                  onClick={() =>
-                    setClosed((current) => ({ ...current, [group.taxonomy]: !current[group.taxonomy] }))
-                  }
+                  onClick={() => setOpened((current) => ({ ...current, [group.taxonomy]: !open }))}
                 >
                   {open ? "بستن" : "باز کردن"}
                   <ChevronDownIcon
@@ -682,6 +746,22 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
               )
             }
           >
+            {!open && group.terms.length > 0 ? (
+              // A closed card still says what is inside it, so thirty cards in
+              // a row are scannable instead of thirty identical headers.
+              <ul className="flex flex-wrap gap-1.5 px-4 py-3 sm:px-5" aria-label={`نمونهٔ موردهای ${group.label}`}>
+                {group.terms.slice(0, PREVIEW_TERMS).map((term) => (
+                  <li key={term.remoteId} className="rounded-full bg-muted px-2.5 py-0.5 text-[11px] text-muted-foreground">
+                    {term.name || term.slug}
+                  </li>
+                ))}
+                {group.terms.length > PREVIEW_TERMS ? (
+                  <li className="px-1 py-0.5 text-[11px] text-muted-foreground">
+                    و {toPersianDigits(group.terms.length - PREVIEW_TERMS)} مورد دیگر
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
             <div id={`taxonomy-${group.taxonomy}`} hidden={!open}>
               {group.status === "failed" ? (
                 <p className="flex items-start gap-2 border-b border-border/80 bg-red-50/60 px-4 py-2.5 text-xs leading-5 text-red-800 sm:px-5 dark:bg-red-500/10 dark:text-red-200">
@@ -801,6 +881,19 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
           </SectionCard>
         );
       })}
+
+      {visible.length > groupPageSize ? (
+        <ListPager
+          page={groupPage}
+          total={visible.length}
+          pageSize={groupPageSize}
+          onPage={(next) => {
+            setGroupPage(next);
+            window.scrollTo({ top: 0, behavior: "smooth" });
+          }}
+          noun="گروه"
+        />
+      ) : null}
     </div>
   );
 }

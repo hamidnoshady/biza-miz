@@ -43,10 +43,12 @@ import { workspaceContractHref } from "@/lib/app-routes";
 import { toPersianDigits } from "@/lib/digits";
 import {
   CONTRACT_DEFAULT_REMINDER_DAYS,
+  CONTRACT_FORM_STATUSES,
   CONTRACT_STATUSES,
   CONTRACT_STATUS_LABELS,
   CONTRACT_TYPES,
   CONTRACT_TYPE_LABELS,
+  contractStatusIsWorkflowOwned,
   type WorkspaceApprovalStatus,
   type WorkspaceContractStatus,
   type WorkspaceContractType,
@@ -368,6 +370,11 @@ function ContractDialog({
     contract?.contractType ?? "contractor",
   );
   const [status, setStatus] = useState<WorkspaceContractStatus | "">(contract?.status ?? "draft");
+  // Issue #907 F02 — a contract that is already awaiting approval, or already
+  // active, has a status the approval engine and the lifecycle commands own.
+  // The form neither offers nor sends it: the field becomes a read-only badge,
+  // and the PATCH leaves the status untouched.
+  const statusOwnedByWorkflow = contract ? contractStatusIsWorkflowOwned(contract.status) : false;
   const [projectId, setProjectId] = useState(contract?.projectId ?? defaultProjectId ?? "");
   const [partyId, setPartyId] = useState(contract?.partyId ?? "");
   const [value, setValue] = useState(
@@ -387,7 +394,7 @@ function ContractDialog({
     const payload = {
       title,
       contractType: contractType || "other",
-      status: status || "draft",
+      ...(statusOwnedByWorkflow ? {} : { status: status || "draft" }),
       projectId: projectId || null,
       partyId: partyId || null,
       valueRial: value.trim() ? money.parse(value) : null,
@@ -427,13 +434,25 @@ function ContractDialog({
           options={CONTRACT_TYPES}
           labels={CONTRACT_TYPE_LABELS}
         />
-        <SelectField
-          label="وضعیت"
-          value={status}
-          onChange={setStatus}
-          options={CONTRACT_STATUSES}
-          labels={CONTRACT_STATUS_LABELS}
-        />
+        {contract && statusOwnedByWorkflow ? (
+          <Field
+            label="وضعیت"
+            hint="با درخواست تأیید یا چرخهٔ عمر قرارداد تغییر می‌کند."
+            as="div"
+          >
+            <div className="flex h-9 items-center">
+              <ContractStatusBadge status={contract.status} />
+            </div>
+          </Field>
+        ) : (
+          <SelectField
+            label="وضعیت"
+            value={status}
+            onChange={setStatus}
+            options={CONTRACT_FORM_STATUSES}
+            labels={CONTRACT_STATUS_LABELS}
+          />
+        )}
         <PickerField
           label="پروژه"
           value={projectId}

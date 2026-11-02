@@ -96,6 +96,7 @@ function wooOrder(
 function wooRefund(id: number, parentId: number, productId: number, quantity: number, price: string, variationId?: number) {
   return JSON.stringify({
     id,
+    restock_items: true,
     parent_id: parentId,
     date_created: new Date().toISOString(),
     amount: String(Number(price) * quantity),
@@ -386,6 +387,99 @@ describe("online sale facts — chronology and breakdown", () => {
 });
 
 describe("online sale facts — refunds", () => {
+  it("cancels imported stock once and a later refund does not restock it again", async () => {
+    const itemId = await item("cancelled sale", "755", { quantity: "5", unitCost: 100 });
+    const order = JSON.parse(wooOrder(7055, 755, 2, "50000"));
+    await deliver(JSON.stringify(order));
+    await deliver(JSON.stringify({ ...order, status: "cancelled" }), "order.updated");
+    await deliver(JSON.stringify({ ...order, status: "cancelled" }), "order.updated");
+    expect((await stock(itemId)).quantity).toBe("5.000000000");
+    const [fact] = await factFor(itemId);
+    expect(fact.restored_cogs_rial).toBe("200");
+    const { rows: [{ n }] } = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM journal_entries e
+       JOIN integration_webhook_events w ON w.id = e.source_id
+       WHERE e.business_id = $1 AND w.payload->>'id' = '7055'
+         AND w.payload->>'status' = 'cancelled' AND e.posting_kind = 'customer_refund'`,
+      [biz.id],
+    );
+    expect(n).toBe("0");
+    await deliver(wooRefund(9056, 7055, 755, 2, "50000"), "refund.created");
+    expect((await stock(itemId)).quantity).toBe("5.000000000");
+    const reopened = JSON.stringify({ ...order, date_modified: new Date().toISOString() });
+    const result = await wooIngest.handleWooCommerceWebhook(biz.wooConnectionId, reopened, wooHeaders(reopened, "order.updated", `d-${randomUUID()}`));
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect((await stock(itemId)).quantity).toBe("5.000000000");
+    const { rows: [event] } = await db.query<{ error: string }>(`SELECT error FROM integration_webhook_events WHERE connection_id=$1 AND payload->>'id'='7055' ORDER BY created_at DESC LIMIT 1`, [biz.wooConnectionId]);
+    expect(event.error).toBe("cancelled_order_reopened_requires_reconciliation");
+  });
+
+  it("does not create a sale for an unpaid cancellation or a stale earlier paid delivery", async () => {
+    const itemId = await item("unpaid cancellation", "756", { quantity: "5", unitCost: 100 });
+    const order = JSON.parse(wooOrder(7056, 756, 1, "50000"));
+    await deliver(JSON.stringify({ ...order, status: "cancelled" }), "order.updated");
+    await deliver(JSON.stringify(order));
+    expect((await stock(itemId)).quantity).toBe("5.000000000");
+    expect(await factFor(itemId)).toHaveLength(0);
+  });
+
+  it("records every line of a multi-product refund and caps subsequent returns", async () => {
+    const first = await item("multi first", "751", { quantity: "5", unitCost: 100 });
+    const second = await item("multi second", "752", { quantity: "5", unitCost: 200 });
+    const order = JSON.parse(wooOrder(7051, 751, 2, "50000"));
+    order.line_items.push({ ...order.line_items[0], id: 2, product_id: 752 });
+    order.total = "200000";
+    await deliver(JSON.stringify(order));
+    const refund = JSON.parse(wooRefund(9051, 7051, 751, 2, "50000"));
+    refund.line_items.push({ ...refund.line_items[0], product_id: 752 });
+    refund.amount = "200000";
+    await deliver(JSON.stringify(refund), "refund.created");
+    const { rows: returns } = await db.query<{ quantity: string }>(
+      `SELECT l.quantity::text FROM customer_return_lines l
+       JOIN customer_returns r ON r.id = l.customer_return_id
+       WHERE r.order_id = $1 ORDER BY l.order_item_id`,
+      [(await factFor(first))[0].order_id],
+    );
+    expect(returns.map((line) => line.quantity)).toEqual(["2.000000000", "2.000000000"]);
+    await deliver(JSON.stringify({ ...refund, id: 9052 }), "refund.created");
+    await deliver(JSON.stringify(refund), "refund.created");
+    expect((await stock(first)).quantity).toBe("5.000000000");
+    expect((await stock(second)).quantity).toBe("5.000000000");
+    expect((await factFor(second))[0].restored_cogs_rial).toBe("400");
+  });
+
+  it("serializes distinct refunds of one order and never restores more than sold", async () => {
+    const itemId = await item("concurrent refunds", "753", { quantity: "5", unitCost: 100 });
+    await deliver(wooOrder(7053, 753, 1, "50000"));
+    await Promise.all([
+      deliver(wooRefund(9053, 7053, 753, 1, "50000"), "refund.created"),
+      deliver(wooRefund(9054, 7053, 753, 1, "50000"), "refund.created"),
+    ]);
+    const { rows: [{ returned }] } = await db.query<{ returned: string }>(
+      `SELECT sum(l.quantity)::text AS returned FROM customer_return_lines l
+       JOIN customer_returns r ON r.id = l.customer_return_id WHERE r.order_id = $1`,
+      [(await factFor(itemId))[0].order_id],
+    );
+    expect(returned).toBe("1.000000000");
+    expect((await stock(itemId)).quantity).toBe("5.000000000");
+    expect((await factFor(itemId))[0].restored_cogs_rial).toBe("100");
+  });
+
+  it("keeps an early refund retryable until its order is imported", async () => {
+    const itemId = await item("early refund", "754", { quantity: "5", unitCost: 100 });
+    const body = wooRefund(9055, 7054, 754, 1, "50000");
+    const early = await wooIngest.handleWooCommerceWebhook(biz.wooConnectionId, body, wooHeaders(body, "refund.created", `d-${randomUUID()}`));
+    expect(early.status).toBeGreaterThanOrEqual(400);
+    const { rowCount } = await db.query(
+      "SELECT 1 FROM integration_mappings WHERE connection_id = $1 AND entity_type = 'refund' AND remote_id = '9055'",
+      [biz.wooConnectionId],
+    );
+    expect(rowCount).toBe(0);
+    await deliver(wooOrder(7054, 754, 1, "50000"));
+    await deliver(body, "refund.created");
+    expect((await stock(itemId)).quantity).toBe("5.000000000");
+  });
+
   it("restores what a missing-cost sale relieved and reverses no COGS", async () => {
     const itemId = await item("لوسیون", "708", { quantity: "5", unitCost: null });
     await deliver(wooOrder(7008, 708, 2, "50000"));
@@ -410,10 +504,45 @@ describe("online sale facts — refunds", () => {
     await db.query("UPDATE item_stock SET remote_snapshot_at = now() WHERE item_id = $1", [itemId]);
     const placed = new Date(Date.now() - 3_600_000).toISOString().replace(/\.\d{3}Z$/, "");
     await deliver(wooOrder(7009, 709, 1, "50000", undefined, { date_created_gmt: placed }));
-    await deliver(wooRefund(9009, 7009, 709, 1, "50000"), "refund.created");
+    const refund = JSON.parse(wooRefund(9009, 7009, 709, 1, "50000"));
+    refund.date_created = new Date(Date.now() - 1_800_000).toISOString();
+    await deliver(JSON.stringify(refund), "refund.created");
     expect((await stock(itemId)).quantity).toBe("4.000000000");
     const [fact] = await factFor(itemId);
     expect(fact).toMatchObject({ restored_quantity: "0.000000000", restored_cogs_rial: "20000" });
+  });
+
+  it("restores a confirmed refund after the snapshot once, even when the sale was already reflected", async () => {
+    const itemId = await item("later restock", "759", { quantity: "4", unitCost: 20000 });
+    await db.query("UPDATE item_stock SET remote_snapshot_at = now() - interval '30 minutes' WHERE item_id = $1", [itemId]);
+    const placed = new Date(Date.now() - 3_600_000).toISOString();
+    await deliver(wooOrder(7059, 759, 1, "50000", undefined, { date_created_gmt: placed }));
+    const refund = wooRefund(9059, 7059, 759, 1, "50000");
+    await deliver(refund, "refund.created");
+    await deliver(refund, "refund.created");
+    expect((await stock(itemId)).quantity).toBe("5.000000000");
+    expect((await factFor(itemId))[0].restored_quantity).toBe("1.000000000");
+  });
+
+  it("records a financial refund without restocking when Woo explicitly declined restock", async () => {
+    const itemId = await item("no restock", "760", { quantity: "5", unitCost: 20000 });
+    await deliver(wooOrder(7060, 760, 1, "50000"));
+    const refund = { ...JSON.parse(wooRefund(9060, 7060, 760, 1, "50000")), restock_items: false };
+    await deliver(JSON.stringify(refund), "refund.created");
+    expect((await stock(itemId)).quantity).toBe("4.000000000");
+    expect((await factFor(itemId))[0]).toMatchObject({ restored_quantity: "0.000000000", restored_cogs_rial: "0" });
+  });
+
+  it("holds a refund with unknown restock intent for reconciliation without changing stock", async () => {
+    const itemId = await item("unknown restock", "761", { quantity: "5", unitCost: 20000 });
+    await deliver(wooOrder(7061, 761, 1, "50000"));
+    const refund = JSON.parse(wooRefund(9061, 7061, 761, 1, "50000"));
+    delete refund.restock_items;
+    const body = JSON.stringify(refund);
+    const result = await wooIngest.handleWooCommerceWebhook(biz.wooConnectionId, body, wooHeaders(body, "refund.created", `d-${randomUUID()}`));
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect((await stock(itemId)).quantity).toBe("4.000000000");
+    expect((await db.query(`SELECT 1 FROM integration_mappings WHERE connection_id=$1 AND entity_type='refund' AND remote_id='9061'`, [biz.wooConnectionId])).rowCount).toBe(0);
   });
 });
 

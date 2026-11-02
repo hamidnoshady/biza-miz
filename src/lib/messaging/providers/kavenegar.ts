@@ -8,9 +8,17 @@
  *   POST https://api.kavenegar.com/v1/{APIKEY}/sms/send.json
  *   body:  receptor=<number>&message=<text>&sender=<linenumber>
  *   body:  https://api.kavenegar.com/v1/{APIKEY}/sms/sendarray.json ...
- *   reply: { "return": { "status": 200, "message": "...", "entries": [{
- *            "messageid": 1, "message": "...", "status": 5, "statustext": "...",
- *            "sender": "...", "receptor": "...", "cost": 900 }] } }
+ *   reply: { "return": { "status": 200, "message": "..." },
+ *            "entries": [{ "messageid": 1, "message": "...", "status": 5,
+ *                          "statustext": "...", "sender": "...",
+ *                          "receptor": "...", "cost": 900 }] }
+ *
+ * `entries` is a TOP-LEVEL sibling of `return` in the provider's documented
+ * send reply (kavenegar.com/rest.html), not a child of it. The Phase 37 parser
+ * read `return.entries`, which always yielded an empty list — the message id
+ * fell back to a timestamp and the per-message `cost` was discarded. Both
+ * shapes are accepted now so recorded fixtures from either era replay, and the
+ * cost is carried through as `costRial` for wholesale reconciliation.
  *
  * The `return.status` is the API result: 200 means accepted; 400/401/403/406/…
  * are rejections, many of which (invalid number, blocked word, exhausted panel
@@ -41,30 +49,47 @@ export function buildKavenegarSendRequest(input: {
   };
 }
 
+export interface KavenegarSendEntry {
+  messageid: string;
+  receptor: string;
+  status: number;
+  /** Provider-reported wholesale cost in Rial, when the reply carries one. */
+  costRial: number | null;
+}
+
 export interface KavenegarApiResponse {
   status: number;
   message: string;
-  entries: { messageid: string; receptor: string; status: number; cost?: string }[];
+  entries: KavenegarSendEntry[];
 }
 
 /** Parse a Kavenegar HTTP JSON reply body. Throws only on malformed JSON. */
 export function parseKavenegarResponse(body: string): KavenegarApiResponse | null {
   const parsed = JSON.parse(body) as {
     return?: { status?: unknown; message?: unknown; entries?: unknown };
+    entries?: unknown;
   };
   const inner = parsed.return;
   if (!inner || typeof inner !== "object") return null;
   const status = Number(inner.status ?? 0);
-  const entries = Array.isArray(inner.entries) ? inner.entries : [];
+  // Documented shape first (top-level `entries`), legacy nesting second.
+  const rawEntries = Array.isArray(parsed.entries)
+    ? parsed.entries
+    : Array.isArray(inner.entries)
+      ? inner.entries
+      : [];
   return {
     status,
     message: String(inner.message ?? ""),
-    entries: entries.map((e: Record<string, unknown>) => ({
-      messageid: String(e.messageid ?? ""),
-      receptor: String(e.receptor ?? ""),
-      status: Number(e.status ?? 0),
-      cost: typeof e.cost === "string" ? e.cost : String(e.cost ?? ""),
-    })),
+    entries: rawEntries.map((e: Record<string, unknown>) => {
+      const cost = Number(e.cost);
+      return {
+        messageid: String(e.messageid ?? ""),
+        receptor: String(e.receptor ?? ""),
+        status: Number(e.status ?? 0),
+        costRial: Number.isFinite(cost) && cost >= 0 ? cost : null,
+      };
+    }),
   };
 }
 

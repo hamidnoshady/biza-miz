@@ -4,6 +4,10 @@ import { decideEstimateApproval } from "@/lib/aec-boq-service";
 import { decideCertificateApproval, decideVariationApproval } from "@/lib/aec-commercial-service";
 import { decideCommitmentApproval, decideMaterialRequestApproval } from "@/lib/aec-procurement-service";
 import { decideSubmittalApproval } from "@/lib/aec-rfi-service";
+import {
+  decideChangeRequestApproval,
+  decideMilestoneApproval,
+} from "@/lib/agency-commercial-service";
 import { approvalSubjectType, decideApproval } from "@/lib/workspace";
 import type { WorkspaceApprovalDecision } from "@/lib/workspace-shared";
 import { handleAecError } from "../../../aec/guard";
@@ -48,6 +52,18 @@ const DECISIONS: readonly WorkspaceApprovalDecision[] = [
  * and both are taken on `workspace.approve` exactly as the paragraph above says.
  * Neither register walks a review step; §18's chains go submit → approved or
  * rejected, so the service does the whole decision in one call.
+ *
+ * Issue #1128 §D adds an agency's `billing_milestone` and `change_request`, on
+ * the same arrangement and for the same reason: issuing an invoice and agreeing
+ * more money with a client must not inherit the `workspace.manage` right that
+ * writes a schedule. Two things about them are deliberately *not* this route's
+ * business. Approving a milestone does not bill it — it says the milestone may
+ * be billed, and billing is its own act, gated on the invoice screen's
+ * permissions as well as on this one, so an approver who may not take payments
+ * cannot take them by approving. And a withdrawal is the author taking their own
+ * request back, which returns the row to where it can be edited and sent again
+ * rather than stranding it in `submitted` for want of a decision nobody will
+ * make.
  */
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
@@ -106,6 +122,20 @@ export const POST = withTenantScope(
           return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
         }
         return NextResponse.json({ approval: null, certificateId: result.certificateId });
+      }
+      if (subjectType === "billing_milestone") {
+        const result = await decideMilestoneApproval(owner, id, decision, note);
+        if (!result.applied) {
+          return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
+        }
+        return NextResponse.json({ approval: null, milestoneId: result.milestoneId });
+      }
+      if (subjectType === "change_request") {
+        const result = await decideChangeRequestApproval(owner, id, decision, note);
+        if (!result.applied) {
+          return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
+        }
+        return NextResponse.json({ approval: null, changeRequestId: result.changeRequestId });
       }
       const approval = await decideApproval(owner, id, decision, note);
       // Null means "no pending approval with this id" — either it never

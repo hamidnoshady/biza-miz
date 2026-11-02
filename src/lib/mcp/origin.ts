@@ -22,6 +22,7 @@
  */
 import { hostRoutingEnabled, parseHost, preferredProto, requestHost, rootDomain } from "../host";
 import { resolveBusinessByLabel, resolveSoleBusiness, type ResolvedBusinessHost } from "../host-resolution";
+import { classifyHostname, splitHostPort } from "../public-origin";
 
 /**
  * The origin to use as the OAuth issuer and as the base of every advertised
@@ -31,8 +32,27 @@ import { resolveBusinessByLabel, resolveSoleBusiness, type ResolvedBusinessHost 
  */
 export function mcpIssuer(headers: Headers, requestProtocol = "https:"): string {
   const host = requestHost(headers);
-  const proto = preferredProto(headers.get("x-forwarded-proto"), requestProtocol);
-  return host ? `${proto}://${host}` : "";
+  const declared = preferredProto(headers.get("x-forwarded-proto"), requestProtocol);
+  return host ? `${mcpScheme(host, declared)}://${host}` : "";
+}
+
+/**
+ * A production server answering on a real public name is reached over TLS, so
+ * that is the scheme it advertises — whatever the proxy chain declared.
+ *
+ * Behind a CDN that pulls from the origin over plain HTTP, or a proxy that does
+ * not forward `X-Forwarded-Proto`, the container sees `http` and every URL in
+ * the discovery documents used to say `http://`. The MCP and OAuth rules refuse
+ * that for a non-loopback server, and a client compares the advertised
+ * `resource` with the URL it actually connected to, so it rejected the
+ * connection before the first tool call and showed nothing but "failed to
+ * connect". Loopback, LAN and container names (the desktop install, `npm run
+ * dev`) keep whatever the request used.
+ */
+function mcpScheme(host: string, declared: string): string {
+  if (process.env.NODE_ENV !== "production") return declared;
+  const { hostname } = splitHostPort(host);
+  return classifyHostname(hostname) === "public" ? "https" : declared;
 }
 
 export type McpTenantResolution =

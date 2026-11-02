@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession, withTenantScope } from "@/lib/auth";
+import { withTenantScope } from "@/lib/auth";
 import { addTask, listTasks } from "@/lib/ai-projects";
+import { requireProjectCapability } from "@/lib/workspace";
+import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "@/app/api/workspace/guard";
 
 /**
  * Phase F pt.3 — project tasks: units of work with a lifecycle (open -> done).
@@ -9,30 +11,36 @@ import { addTask, listTasks } from "@/lib/ai-projects";
  * POST — add an open task (source 'user'; the assistant adds tasks through the
  *        confirmed `project.task.add` action, which also lands here)
  *
- * Ownership is the authorization, the same shape as the notes/memory routes: a
- * task reaches tenant scope only through its parent project, and every query
- * here is scoped by the session's business.
+ * Issue #907 F01 — reading needs `view` on the project and writing needs
+ * `edit`; the business session alone is not authorization to read or file work
+ * on somebody else's project. The row-level service query stays as a second
+ * layer, so neither check is the only one.
  */
 
 export const GET = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceView, request);
+    if (error) return error;
     const { id } = await context.params;
 
-    const tasks = await listTasks({
-      businessId: session.businessId,
-      actorUserId: session.sub,
-      projectId: id,
-    });
-    return NextResponse.json({ tasks });
+    try {
+      await requireProjectCapability(owner, id, "view");
+      const tasks = await listTasks({
+        businessId: owner.businessId,
+        actorUserId: owner.actorUserId,
+        projectId: id,
+      });
+      return NextResponse.json({ tasks });
+    } catch (err) {
+      return handleWorkspaceError(err);
+    }
   },
 );
 
 export const POST = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
-    const session = await getSession();
-    if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    const { owner, error } = await workspaceOwner(PERMISSIONS.workspaceManage, request);
+    if (error) return error;
     const { id } = await context.params;
 
     const body = await request.json().catch(() => null);
@@ -44,24 +52,26 @@ export const POST = withTenantScope(
     const source = body.source === "ai" ? "ai" : "user";
 
     try {
+      await requireProjectCapability(owner, id, "edit");
       const task = await addTask(
-        { businessId: session.businessId, actorUserId: session.sub, projectId: id },
+        { businessId: owner.businessId, actorUserId: owner.actorUserId, projectId: id },
         { title: body.title, source },
       );
       return NextResponse.json({ task }, { status: 201 });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "internal_error";
-      if (message.includes("not found")) {
-        return NextResponse.json({ error: "not_found" }, { status: 404 });
+      if (err instanceof Error) {
+        if (err.message.includes("not found")) {
+          return NextResponse.json({ error: "not_found" }, { status: 404 });
+        }
+        if (
+          err.message.includes("character limit") ||
+          err.message.includes("required") ||
+          err.message.includes("too many")
+        ) {
+          return NextResponse.json({ error: err.message }, { status: 400 });
+        }
       }
-      if (
-        message.includes("character limit") ||
-        message.includes("required") ||
-        message.includes("too many")
-      ) {
-        return NextResponse.json({ error: message }, { status: 400 });
-      }
-      throw err;
+      return handleWorkspaceError(err);
     }
   },
 );

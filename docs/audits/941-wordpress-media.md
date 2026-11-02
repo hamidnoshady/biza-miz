@@ -339,3 +339,53 @@ are unchanged. The added fixture regression fails before this change and
 passes after; focused Node 24 checks pass **27/27**, PHP WASM syntax and ESLint
 pass. Native WordPress/MySQL success is still subject to the replacement CI
 run, not inferred from these source/fixture checks.
+
+## Continuation — 2026-10-27 (download-URL scope, redaction, importer fixtures)
+
+Re-audited against `main`: lease-time minting (#926), the versioned snapshot
+protocol, tombstones and the WordPress-boundary importer are all on `main`
+already, so the "Remaining acceptance gates" 1, 2, 3 and most of 6 above are
+historical. This pass closes what was still open on gate 1 and gate 6, and pins
+gate 9's permission rows. Nothing in it needs a migration.
+
+- **A download URL lives for its lease, not for 15 minutes.**
+  `MEDIA_LEASE_URL_TTL_SECONDS` is the lease window (300 s). The URL is minted
+  per delivery for one object of one tenant, is never written to the outbox, the
+  mapping, the audit trail or any response except the lease reply, and a retry
+  mints a new one. It cannot be replayed after the job could have been re-leased.
+- **Words around a URL are redacted too.** `src/lib/integrations/url-redact.ts`
+  masks userinfo and credential-bearing query values (`X-Amz-*`, `signature`,
+  `token`, `key`, …) in free text. It runs on every plugin-reported error before
+  it is stored (`last_error`, the mapping's `last_error`, the audit `error` and
+  `payload`), when the queue list and the per-row diagnostics render, and on read
+  for rows written before this change. The plugin applies the same rules to its own
+  sync log and to the error it acknowledges, so an old server never receives a
+  signed URL either. Scrubbing happens before truncation: a length cap cannot
+  leave half a signature.
+- **Importer fetch loop is now exercised end to end** by
+  `wordpress-plugin/tests/media-import-fixtures.php` (31 assertions, no network,
+  no WordPress): redirect to a private/metadata address, credentialed URL,
+  non-default port and non-HTTP scheme; HTTPS downgrade; the three-hop limit and a
+  `Location`-less redirect; size at and one byte over the limit; Content-Type vs
+  actual bytes, SVG/video/PDF refusal; 403/404/500 and empty bodies; transport
+  failure; a deadline consumed by DNS (no connection is opened); a shrinking time
+  budget across hops; DNS pinned to the validated address; temp files removed on
+  every path. The cURL call moved into `curl_get()` so a scripted transport can
+  replace it; production passes no options.
+- **DNS lookup bound (best effort).** PHP has no per-call resolver timeout. The
+  lookup now sets `RES_OPTIONS=timeout:2 attempts:2` for that call (honoured by
+  glibc, ignored by musl and Windows) and the deadline is re-checked as soon as it
+  returns. This is a tighter worst case, **not** a hard wall-clock bound on every
+  platform; a hard bound would need a DNS-over-HTTPS or UDP resolver and a decision
+  on which resolver a locked-down host may reach, so it is left open.
+- **Media permission rows are pinned** in `src/lib/wp-access.test.ts`: every
+  media route's guard, branch-scoped store resolution, paused-store refusal, and
+  that view-only and sync-only members cannot push, edit or import.
+
+Still open (unchanged): live WordPress and browser evidence, hard-kill and
+concurrent-worker stress, 1,000+ attachment runs, a hard DNS bound, and
+replacement/rename/permanent-delete (not advertised). The plugin change needs a
+plugin release: merging to `main` runs `build-plugin-zip`, which bumps the version;
+deploy the app and the plugin together. The app side is backward compatible with
+every plugin already installed (it scrubs what any version reports).
+

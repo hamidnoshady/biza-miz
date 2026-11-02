@@ -14,6 +14,7 @@ import { Loader2Icon, SaveIcon } from "lucide-react";
 import { formatPersianNumber } from "@/lib/digits";
 import { tomanLabel } from "@/lib/platform-money";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass, PlatformPageSkeleton, useCan } from "../ui";
+import { ManagedSmsAccountsCard } from "./managed-accounts-card";
 
 interface PublicConfig {
   enabled: boolean;
@@ -100,6 +101,10 @@ export default function PlatformMessagingPage() {
     </header>
     <ErrorBox>{error}</ErrorBox>{notice ? <InfoBox>{notice}</InfoBox> : null}
 
+    {/* Issue #902: one row per business, with the provider's account state and
+        an internal funding journal. Tenant screens never see any of it. */}
+    <ManagedSmsAccountsCard canManage={canManage} />
+
     <Card title="وضعیت سرویس">
       <div className="grid gap-3 text-sm sm:grid-cols-3">
         <p>ارسال: <b>{draft.enabled ? "روشن" : "خاموش"}</b></p>
@@ -127,6 +132,7 @@ export default function PlatformMessagingPage() {
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
         تعرفه‌ها فقط از <Link href="/platform/billing?tab=usage" className="underline">مرکز صورت‌حساب ← تعرفه مصرف و اعتبار</Link> تغییر می‌کنند تا یک منبع واحد برای قیمت‌ها وجود داشته باشد.
+        سیاست قیمت‌گذاری خدمات مدیریت‌شده (حاشیهٔ سود، سربار، پله‌های حجمی، استثنای کسب‌وکار، مالیات و سهمیهٔ رایگان) نیز در همان صفحه و به‌صورت نسخه‌دار منتشر می‌شود.
       </p>
     </Card>
 

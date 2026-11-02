@@ -43,6 +43,7 @@ import {
   upsertMapping,
 } from "./mapping-service";
 import { wooAmountToRial } from "./woo-money";
+import { effectivePushSwitches } from "./outbox-policy";
 import { writeIntegrationAudit } from "./audit";
 import {
   externalCustomerResolution,
@@ -317,13 +318,19 @@ async function upsertRetailProduct(
     );
     // A container is not sellable — it carries no stock/price of its own.
     if (!shape.container) {
-      await upsertItemStock(existing, remoteManagesStock(shape, product) ? stockQuantity : null, price, {
+      const switches = effectivePushSwitches(connection);
+      // Once linked to a locally owned stock catalogue, store snapshots are
+      // observations, not inventory adjustments. Woo already deducts its own
+      // orders; the order importer applies that sale to our inventory once.
+      await upsertItemStock(existing, !switches.pushStock && remoteManagesStock(shape, product) ? stockQuantity : null,
+        switches.pushPrices ? null : price, {
         businessId,
         locationId,
       });
     }
     if (attributes.length) {
-      await replaceVariantAttributes(existing, attributes);
+      const { rows: localDefinitions } = await query(`SELECT 1 FROM item_variant_attributes WHERE item_id = $1 AND attribute_definition_id IS NOT NULL LIMIT 1`, [existing]);
+      if (localDefinitions.length === 0) await replaceVariantAttributes(existing, attributes);
     }
     await recordProductShape(connection, product);
     return "updated";
@@ -335,6 +342,29 @@ async function upsertRetailProduct(
   // Every create below runs under the identity lock (audit F13): a second
   // delivery of the same new product waits, finds the first one's mapping and
   // applies its payload as an update instead of inserting a twin item.
+  const publicationId = product.meta_data?.find(m => m.key === "_bizamiz_publication_id")?.value;
+  const { rows: publications } = await query<{ local_id: string; payload: Record<string, unknown> }>(
+    `SELECT local_id, payload FROM integration_outbox_events WHERE business_id=$1 AND connection_id=$2
+      AND entity_type='product_publish' AND ((operation_id=$3 AND $3 <> '')
+        OR (payload->>'sku'=$4 AND status IN ('pending','processing','deferred','failed')))
+      ORDER BY (operation_id=$3) DESC LIMIT 1`,
+    [businessId, connection.id, typeof publicationId === "string" ? publicationId : "", product.sku ?? ""],
+  );
+  const publication = publications[0];
+  if (publication) {
+    // The signed product echo is itself remote evidence. Without its stable
+    // operation marker, wait for the delivery ACK instead of cloning a SKU.
+    if (publicationId !== publication.payload.__operationId) throw new Error("publication_awaiting_ack");
+    if (publication.payload.sku !== product.sku || publication.payload.__wooType !== inferWooProductType(product) ||
+      String(publication.payload.__parentRemoteId ?? "") !== String(product.parent_id || "")) throw new Error("publication_echo_mismatch");
+    const linked = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async client => {
+      const { rows } = await client.query(`SELECT i.id FROM items i JOIN locations l ON l.id=i.location_id
+        WHERE i.id=$1 AND i.location_id=$2 AND l.business_id=$3 AND i.is_active`, [publication.local_id, locationId, businessId]);
+      if (!rows.length) throw new Error("publication_product_not_found");
+      return publication.local_id;
+    });
+    return applyUpdate(linked.localId);
+  }
   if (shape.container) {
     const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
       const { rows } = await client.query<{ id: string }>(
@@ -418,6 +448,9 @@ async function upsertRetailProduct(
  * Accounting says» instead of one ambiguous number. This is a snapshot of the
  * remote at sync time, never a source of truth for either side.
  */
+/** How many gallery images (beyond the primary) the mirror keeps per product. */
+const REMOTE_GALLERY_LIMIT = 8;
+
 async function recordProductShape(connection: ConnectionRow, product: WooProduct): Promise<void> {
   // The primary image is the lowest-position one WooCommerce returns; the
   // mirror is display-only (issue #943) — the app never uploads through it
@@ -430,11 +463,25 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
     remoteParentId: product.parent_id ? String(product.parent_id) : null,
     remoteStatus: typeof product.status === "string" && product.status ? product.status : null,
     remoteManageStock: Boolean(product.manage_stock),
+    // What the store says it holds, so a queued stock push that only repeats
+    // it can be dropped before it is leased (issue #1149, C2). Null when the
+    // store does not track the product — unknown, never zero.
+    remoteStockQuantity:
+      product.manage_stock && typeof product.stock_quantity === "number" && Number.isFinite(product.stock_quantity)
+        ? product.stock_quantity
+        : null,
     remoteRegularPriceRial: safeWooPriceToRial(product.regular_price, connection.currency_unit),
     remoteSalePriceRial: safeWooPriceToRial(product.sale_price ?? "", connection.currency_unit),
     remoteImageSrc: primary && typeof primary.src === "string" && primary.src ? primary.src : null,
     remoteImageAlt: primary && typeof primary.alt === "string" ? primary.alt : null,
     remoteGalleryCount: images.length,
+    // The store's own gallery (every image after the primary), display-only
+    // like the primary: capped so a product with a hundred shots does not
+    // bloat the mapping row.
+    remoteGallery: images
+      .slice(1, 1 + REMOTE_GALLERY_LIMIT)
+      .filter((image) => typeof image.src === "string" && image.src)
+      .map((image) => ({ src: image.src as string, alt: typeof image.alt === "string" ? image.alt : "" })),
     // Seeing the product in any inbound payload — a sync page, a webhook —
     // clears a stale "the store no longer lists this" flag (issue #943).
     remoteMissing: false,
@@ -515,10 +562,12 @@ function remoteManagesStock(shape: ReturnType<typeof wooProductShape>, product: 
 async function upsertItemStock(
   itemId: string,
   quantity: number | null,
-  price: bigint,
+  price: bigint | null,
   audit: { businessId: string; locationId: string },
 ): Promise<void> {
-  const unitPrice = price > 0n ? Number(price) : null;
+  // Retail requires a positive shelf price; zero from Woo clears that field
+  // and stays visible in remote metadata/history, rather than retaining a stale price.
+  const unitPrice = price !== null && price > 0n ? Number(price) : null;
   // `previous` sees the row as it was before this statement, so the returned
   // old/new pair is exact and the history row can be written from the same
   // statement's result (issue #924 F07 — sync is a first-class price source).
@@ -529,7 +578,7 @@ async function upsertItemStock(
          ), upserted AS (
            INSERT INTO item_stock (item_id, quantity, unit_price)
            VALUES ($1, 0, $2)
-           ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price, updated_at = now()
+           ON CONFLICT (item_id) DO UPDATE SET unit_price = CASE WHEN $3::boolean THEN EXCLUDED.unit_price ELSE item_stock.unit_price END, updated_at = now()
            RETURNING unit_price
          )
          SELECT previous.unit_price::text AS old_price, upserted.unit_price::text AS new_price
@@ -540,17 +589,27 @@ async function upsertItemStock(
            INSERT INTO item_stock (item_id, quantity, unit_price, remote_snapshot_at)
            VALUES ($1, $2, $3, now())
            ON CONFLICT (item_id) DO UPDATE
-             SET quantity = EXCLUDED.quantity, unit_price = EXCLUDED.unit_price,
-                 remote_snapshot_at = now(), updated_at = now()
+             SET quantity = CASE WHEN EXISTS (
+                   SELECT 1 FROM integration_outbox_events o
+                    WHERE o.local_id = $1 AND o.entity_type = 'stock'
+                      AND o.status NOT IN ('sent', 'skipped')
+                 ) THEN item_stock.quantity ELSE EXCLUDED.quantity END,
+                 unit_price = CASE WHEN $4::boolean THEN EXCLUDED.unit_price ELSE item_stock.unit_price END,
+                 remote_snapshot_at = CASE WHEN EXISTS (
+                   SELECT 1 FROM integration_outbox_events o
+                    WHERE o.local_id = $1 AND o.entity_type = 'stock'
+                      AND o.status NOT IN ('sent', 'skipped')
+                 ) THEN item_stock.remote_snapshot_at ELSE now() END,
+                 updated_at = now()
            RETURNING unit_price
          )
          SELECT previous.unit_price::text AS old_price, upserted.unit_price::text AS new_price
            FROM upserted LEFT JOIN previous ON true`;
 
-  const params = quantity == null ? [itemId, unitPrice] : [itemId, quantity, unitPrice];
+  const params = quantity == null ? [itemId, unitPrice, price !== null] : [itemId, quantity, unitPrice, price !== null];
   const { rows } = await query<{ old_price: string | null; new_price: string | null }>(statement, params);
   const row = rows[0];
-  if (!row || unitPrice == null) return;
+  if (!row || price === null) return;
   const oldPrice = row.old_price == null ? null : Number(row.old_price);
   if (oldPrice === unitPrice) return;
 
@@ -563,7 +622,8 @@ async function upsertItemStock(
       oldPrice,
       newPrice: unitPrice,
       source: "sync",
-      reason: "woocommerce_product_sync",
+      reason: price === 0n ? "woocommerce_zero_price_requires_local_price" : "woocommerce_product_sync",
+      ...(price === 0n ? { metadata: { remotePriceRial: "0" } } : {}),
     },
   ]);
 }
@@ -1015,14 +1075,14 @@ export async function syncOrders(
   businessId: string,
   connectionId: string,
   options: { sinceDays?: number; maxPages?: number } = {},
-): Promise<{ imported: number; duplicates: number; failed: number; total: number }> {
+): Promise<{ imported: number; duplicates: number; failed: number; total: number; partial?: true }> {
   const connection = await getConnection(businessId, connectionId);
   if (!connection) throw new Error("not_found");
   if (!connection.sync_orders) {
     return { imported: 0, duplicates: 0, failed: 0, total: 0 };
   }
   const client = wooClientFor(connection);
-  const { ingestRemoteOrder } = await import("./webhook-ingest-service");
+  const { ingestRemoteOrder, ingestRemoteRefund } = await import("./webhook-ingest-service");
 
   const days = options.sinceDays ?? connection.order_lookback_days ?? 7;
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
@@ -1032,6 +1092,7 @@ export async function syncOrders(
   let failed = 0;
   let total = 0;
   let page = 1;
+  let partial = false;
 
   for (;;) {
     // Paged with the store's X-WP-TotalPages header, not guessed from a full
@@ -1061,10 +1122,16 @@ export async function syncOrders(
       if (outcome.status === "processed") imported += 1;
       else if (outcome.status === "duplicate") duplicates += 1;
       else failed += 1;
+        if (order.refunds?.length) {
+          for (const refund of await client.listOrderRefunds(order.id)) {
+            const refundOutcome = await ingestRemoteRefund(connection, { ...refund, parent_id: order.id }, `pull-refund:${connection.id}:${refund.id}`);
+            if (refundOutcome.status === "failed") failed += 1;
+          }
+        }
     }
     if (!totalPages || page >= totalPages) break;
     page += 1;
-    if (options.maxPages && page > options.maxPages) break;
+    if (options.maxPages && page > options.maxPages) { partial = true; break; }
   }
 
   await query(
@@ -1080,7 +1147,7 @@ export async function syncOrders(
     action: "orders.synced",
     payload: { imported, duplicates, failed, total, sinceDays: days },
   });
-  return { imported, duplicates, failed, total };
+  return { imported, duplicates, failed, total, ...(partial ? { partial: true as const } : {}) };
 }
 
 export interface CustomerSyncRunOutcome {
@@ -1837,8 +1904,12 @@ export interface CatalogueRow extends CatalogueRemoteSnapshot {
   quantity: number | null;
   parentRemoteId: string | null;
   categories: string[];
+  /** The store's product tags (the `product_tag` taxonomy mirror). */
+  tags: string[];
   /** Per-variation attributes, «رنگ: قرمز» style. */
   attributes: string[];
+  /** The store's gallery beyond the primary image — a display-only mirror. */
+  remoteGallery: { src: string; alt: string }[];
   /** When this product's mapping/metadata was last written — its "last synced" clock. */
   lastSyncedAt: string | null;
   /** The owner paused the SCHEDULED stock push for this one product (issue #943, item 4). Manual edits still queue. */
@@ -1854,6 +1925,17 @@ export interface CataloguePageOptions {
   search?: string | null;
   /** Exact WooCommerce type, as the page's own facets report it. */
   type?: string | null;
+  /**
+   * Narrow to products carrying one taxonomy term: the taxonomy slug
+   * (`product_cat`, `product_tag`, `pa_color`, a plugin's own) and the term's
+   * remote id. Both must be given; one alone is ignored.
+   */
+  taxonomy?: string | null;
+  term?: string | null;
+  /** The store's publish status as mirrored (`publish`, `draft`, …). */
+  status?: string | null;
+  /** `in` = tracked and above zero, `out` = tracked at zero, `untracked` = no quantity to speak of. */
+  stock?: string | null;
   /** 1-based; clamped to ≥ 1. */
   page?: number;
   /** Clamped to 10..100 — the dashboard's page-size picker range. */
@@ -1869,6 +1951,23 @@ export interface CataloguePageSummary {
   uncategorised: number;
 }
 
+/** One selectable term in a filter, with how many mapped products carry it. */
+export interface CatalogueFacetTerm {
+  remoteId: string;
+  name: string;
+  count: number;
+}
+
+export interface CatalogueFacets {
+  categories: CatalogueFacetTerm[];
+  tags: CatalogueFacetTerm[];
+  /** Every publish status present in the scoped catalogue. */
+  statuses: string[];
+}
+
+export const CATALOGUE_STOCK_FILTERS = ["in", "out", "untracked"] as const;
+export type CatalogueStockFilter = (typeof CATALOGUE_STOCK_FILTERS)[number];
+
 export interface CataloguePage {
   industry: string;
   /** The requested page's rows only, in the catalogue's stable order. */
@@ -1881,9 +1980,72 @@ export interface CataloguePage {
   summary: CataloguePageSummary;
   /** Every Woo type present anywhere in the scoped catalogue (the facets). */
   types: string[];
+  /** Category/tag/status choices over the WHOLE scoped catalogue (unfiltered, like `types`). */
+  facets: CatalogueFacets;
   page: number;
   pageSize: number;
   totalPages: number;
+}
+
+/** The mirrored gallery out of a mapping's metadata; anything malformed is dropped. Pure. */
+export function galleryFromMeta(value: unknown): { src: string; alt: string }[] {
+  if (!Array.isArray(value)) return [];
+  const out: { src: string; alt: string }[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const { src, alt } = entry as { src?: unknown; alt?: unknown };
+    if (typeof src === "string" && src) out.push({ src, alt: typeof alt === "string" ? alt : "" });
+  }
+  return out;
+}
+
+/** Terms offered as a filter: capped, so a store with thousands of tags cannot bloat every page response. */
+const CATALOGUE_FACET_TERM_LIMIT = 500;
+
+/**
+ * What the filter dropdowns offer: the store's categories and tags that at
+ * least one mapped product of THIS connection carries (with that count), and
+ * the publish statuses present. Unfiltered on purpose — like the type facet,
+ * a term that only exists behind another filter must stay selectable.
+ */
+async function catalogueFacets(businessId: string, connectionId: string): Promise<CatalogueFacets> {
+  const termFacet = (taxonomy: "product_cat" | "product_tag") =>
+    query<{ remote_id: string; name: string; count: number }>(
+      `SELECT t.remote_id, t.name, count(DISTINCT pt.remote_id)::int AS count
+         FROM integration_woo_product_terms pt
+         JOIN integration_woo_terms t
+           ON t.connection_id = pt.connection_id AND t.taxonomy = pt.taxonomy AND t.remote_id = pt.term_remote_id
+         JOIN integration_mappings m
+           ON m.business_id = pt.business_id AND m.connection_id = pt.connection_id
+          AND m.entity_type = 'product' AND m.remote_id = pt.remote_id
+        WHERE pt.business_id = $1 AND pt.connection_id = $2 AND pt.taxonomy = $3 AND COALESCE(t.name, '') <> ''
+        GROUP BY t.remote_id, t.name
+        ORDER BY count DESC, t.name
+        LIMIT ${CATALOGUE_FACET_TERM_LIMIT}`,
+      [businessId, connectionId, taxonomy],
+    );
+  const [categories, tags, statuses] = await Promise.all([
+    termFacet("product_cat"),
+    termFacet("product_tag"),
+    query<{ status: string }>(
+      `SELECT DISTINCT m.last_pushed_payload->>'remoteStatus' AS status
+         FROM integration_mappings m
+        WHERE m.business_id = $1 AND m.connection_id = $2 AND m.entity_type = 'product'
+          AND COALESCE(m.last_pushed_payload->>'remoteStatus', '') <> ''
+        ORDER BY 1`,
+      [businessId, connectionId],
+    ),
+  ]);
+  const toFacet = (row: { remote_id: string; name: string; count: number }): CatalogueFacetTerm => ({
+    remoteId: row.remote_id,
+    name: row.name,
+    count: row.count,
+  });
+  return {
+    categories: categories.rows.map(toFacet),
+    tags: tags.rows.map(toFacet),
+    statuses: statuses.rows.map((row) => row.status),
+  };
 }
 
 /**
@@ -1999,6 +2161,17 @@ ${baseSelect}
                       AND pt.taxonomy = 'product_cat'
                       AND pt.remote_id = b.remote_id
                       AND COALESCE(t.name, '') <> ''), '{}') AS categories,
+         COALESCE((SELECT array_agg(t.name ORDER BY pt.term_remote_id)
+                     FROM integration_woo_product_terms pt
+                     JOIN integration_woo_terms t
+                       ON t.connection_id = pt.connection_id
+                      AND t.taxonomy = pt.taxonomy
+                      AND t.remote_id = pt.term_remote_id
+                    WHERE pt.business_id = $1
+                      AND pt.connection_id = $2
+                      AND pt.taxonomy = 'product_tag'
+                      AND pt.remote_id = b.remote_id
+                      AND COALESCE(t.name, '') <> ''), '{}') AS tags,
 ${attributesSelect}
     FROM base b
 )`;
@@ -2011,8 +2184,21 @@ ${attributesSelect}
  * same exact-match type facet. One statement feeds the page AND the count,
  * so the header's «X of Y» can never disagree with the rows below it.
  */
-const CATALOGUE_FILTER_SQL = `($3::text = '' OR position($3::text IN lower(array_to_string(ARRAY[e.name, COALESCE(e.sku, ''), e.woo_type] || e.categories || e.attributes, ' '))) > 0)
-   AND ($4::text = '' OR e.woo_type = $4::text)`;
+function catalogueFilterSql(p: { taxonomy: number; term: number; status: number; stock: number }): string {
+  return `($3::text = '' OR position($3::text IN lower(array_to_string(ARRAY[e.name, COALESCE(e.sku, ''), e.woo_type] || e.categories || e.tags || e.attributes, ' '))) > 0)
+   AND ($4::text = '' OR e.woo_type = $4::text)
+   AND ($${p.term}::text = '' OR EXISTS (
+         SELECT 1 FROM integration_woo_product_terms ft
+          WHERE ft.business_id = $1 AND ft.connection_id = $2
+            AND ft.remote_id = e.remote_id
+            AND ft.taxonomy = $${p.taxonomy}::text
+            AND ft.term_remote_id = $${p.term}::text))
+   AND ($${p.status}::text = '' OR e.meta->>'remoteStatus' = $${p.status}::text)
+   AND ($${p.stock}::text = ''
+        OR ($${p.stock}::text = 'untracked' AND e.woo_type_norm = ANY($5::text[]))
+        OR ($${p.stock}::text = 'in' AND NOT (e.woo_type_norm = ANY($5::text[])) AND e.quantity > 0)
+        OR ($${p.stock}::text = 'out' AND NOT (e.woo_type_norm = ANY($5::text[])) AND e.quantity = 0))`;
+}
 
 type CatalogueRowSql = {
   remote_id: string;
@@ -2027,7 +2213,9 @@ type CatalogueRowSql = {
   unit_price: string | null;
   parent_remote_id: string | null;
   categories: string[] | null;
+  tags: string[] | null;
   attributes: string[] | null;
+  remote_gallery: unknown;
   remote_status: string | null;
   remote_manage_stock: boolean | null;
   remote_regular_price_rial: string | null;
@@ -2072,6 +2260,15 @@ export async function cataloguePageFor(
   const industry = (await getBusinessIndustry(businessId)) ?? "";
   const search = (options.search ?? "").trim().toLowerCase().slice(0, 200);
   const type = (options.type ?? "").trim();
+  // A term filter needs both halves; a stock filter must be one we know —
+  // anything else is "no filter", never an empty page from a typo'd URL.
+  const termTaxonomy = (options.taxonomy ?? "").trim().slice(0, 100);
+  const termId = (options.term ?? "").trim().slice(0, 100);
+  const filterTaxonomy = termTaxonomy && termId ? termTaxonomy : "";
+  const filterTerm = termTaxonomy && termId ? termId : "";
+  const filterStatus = (options.status ?? "").trim().slice(0, 40);
+  const stockOption = (options.stock ?? "").trim();
+  const filterStock = (CATALOGUE_STOCK_FILTERS as readonly string[]).includes(stockOption) ? stockOption : "";
   const rawPage = Number(options.page ?? 1);
   const page = Number.isFinite(rawPage) ? Math.max(1, Math.trunc(rawPage)) : 1;
   const rawSize = Number(options.pageSize ?? 25);
@@ -2084,6 +2281,7 @@ export async function cataloguePageFor(
     mappedTotal: 0,
     summary: { total: 0, sellable: 0, containers: 0, variations: 0, outOfStock: 0, uncategorised: 0 },
     types: [],
+    facets: { categories: [], tags: [], statuses: [] },
     page,
     pageSize,
     totalPages: 1,
@@ -2106,6 +2304,11 @@ export async function cataloguePageFor(
     [...NON_SELLABLE_WOO_TYPE_STRINGS],
     [...VARIATION_WOO_TYPE_STRINGS],
   ];
+  const filterParams = [filterTaxonomy, filterTerm, filterStatus, filterStock];
+  // The aggregate statement's filter params follow its $7; the page
+  // statement's follow its own LIMIT/OFFSET at $7/$8.
+  const aggFilterSql = catalogueFilterSql({ taxonomy: 8, term: 9, status: 10, stock: 11 });
+  const pageFilterSql = catalogueFilterSql({ taxonomy: 9, term: 10, status: 11, stock: 12 });
 
   // The whole-catalogue truth first: summary and facets are UNFILTERED (a
   // type that exists only behind a search is still selectable), and an
@@ -2113,7 +2316,7 @@ export async function cataloguePageFor(
   const agg = await query<CatalogueAggSql>(
     `${cte}
 SELECT count(*)::int AS mapped_total,
-       count(*) FILTER (WHERE ${CATALOGUE_FILTER_SQL})::int AS filtered_total,
+       count(*) FILTER (WHERE ${aggFilterSql})::int AS filtered_total,
        count(*) FILTER (WHERE NOT (e.woo_type_norm = ANY($6::text[])))::int AS sellable,
        count(*) FILTER (WHERE e.woo_type_norm = ANY($6::text[]))::int AS containers,
        count(*) FILTER (WHERE e.woo_type_norm = ANY($7::text[]))::int AS variations,
@@ -2121,7 +2324,7 @@ SELECT count(*)::int AS mapped_total,
        count(*) FILTER (WHERE cardinality(e.categories) = 0)::int AS uncategorised,
        COALESCE(array_agg(DISTINCT e.woo_type ORDER BY e.woo_type), '{}') AS types
   FROM enriched e`,
-    baseParams,
+    [...baseParams, ...filterParams],
   );
   const totals = agg.rows[0];
   if (!totals || totals.mapped_total === 0) return empty;
@@ -2153,7 +2356,9 @@ SELECT e.remote_id, e.local_id, e.name, e.sku, e.woo_type, e.kind AS item_kind,
        e.unit_price,
        e.parent_remote_id,
        e.categories,
+       e.tags,
        e.attributes,
+       CASE WHEN jsonb_typeof(e.meta->'remoteGallery') = 'array' THEN e.meta->'remoteGallery' END AS remote_gallery,
        CASE WHEN jsonb_typeof(e.meta->'remoteStatus') = 'string' AND COALESCE(e.meta->>'remoteStatus', '') <> ''
             THEN e.meta->>'remoteStatus' END AS remote_status,
        CASE WHEN jsonb_typeof(e.meta->'remoteManageStock') = 'boolean'
@@ -2171,13 +2376,13 @@ SELECT e.remote_id, e.local_id, e.name, e.sku, e.woo_type, e.kind AS item_kind,
        COALESCE(jsonb_typeof(e.meta->'remoteMissing') = 'boolean' AND (e.meta->>'remoteMissing')::boolean, false) AS remote_missing,
        e.updated_at
   FROM enriched e
- WHERE ${CATALOGUE_FILTER_SQL}
+ WHERE ${pageFilterSql}
  ORDER BY e.name${nameCollation}, e.remote_id COLLATE "C"
  LIMIT $7 OFFSET $8`,
       // The page statement never reads the variation list ($7 of the
       // aggregate), and an unreferenced parameter is one Postgres cannot
       // type — so this statement's $7/$8 are its own LIMIT/OFFSET.
-      [...baseParams.slice(0, 6), pageSize, (page - 1) * pageSize],
+      [...baseParams.slice(0, 6), pageSize, (page - 1) * pageSize, ...filterParams],
     );
     rows = pageResult.rows.map((r) => ({
       remoteId: r.remote_id,
@@ -2192,7 +2397,9 @@ SELECT e.remote_id, e.local_id, e.name, e.sku, e.woo_type, e.kind AS item_kind,
       quantity: r.quantity === null ? null : Number(r.quantity),
       parentRemoteId: r.parent_remote_id,
       categories: r.categories ?? [],
+      tags: r.tags ?? [],
       attributes: r.attributes ?? [],
+      remoteGallery: galleryFromMeta(r.remote_gallery),
       remoteStatus: r.remote_status,
       remoteManageStock: r.remote_manage_stock,
       remoteRegularPriceRial: r.remote_regular_price_rial,
@@ -2206,7 +2413,19 @@ SELECT e.remote_id, e.local_id, e.name, e.sku, e.woo_type, e.kind AS item_kind,
     }));
   }
 
-  return { industry, rows, total, mappedTotal: totals.mapped_total, summary, types: totals.types ?? [], page, pageSize, totalPages };
+  const facets = await catalogueFacets(businessId, connectionId);
+  return {
+    industry,
+    rows,
+    total,
+    mappedTotal: totals.mapped_total,
+    summary,
+    types: totals.types ?? [],
+    facets,
+    page,
+    pageSize,
+    totalPages,
+  };
 }
 
 

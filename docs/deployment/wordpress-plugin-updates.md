@@ -101,6 +101,12 @@ spamming the event log on every retry. To fall back to GitHub until your server 
 fixed, set `POS_CONNECTOR_UPDATE_URL` to `''` in `pos-accounting-connector.php` (or
 override with the `pos_connector_update_url` filter) and deploy that build.
 
+Since 1.6.19 that fallback is automatic: when the manifest does not answer, the check
+asks this repository's GitHub releases (`POS_CONNECTOR_UPDATE_REPO`) before giving up.
+The screen names the source that answered, and if both fail the notice carries both
+error codes (for example `manifest_unreachable` and `http_403`), so "the update
+server is down" is distinguishable from "GitHub rate-limited this host".
+
 The manifest is what WordPress cannot do without: it is how the plugin learns a new
 version exists without downloading the whole zip. The workflow generates it, so
 hosting a release is uploading two files.

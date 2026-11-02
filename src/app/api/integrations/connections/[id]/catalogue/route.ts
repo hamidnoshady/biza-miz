@@ -56,6 +56,10 @@ export const GET = withTenantScope(async (request: Request, context: { params: P
     pageSize: Number.parseInt(url.searchParams.get("pageSize") ?? "25", 10),
     search: url.searchParams.get("search"),
     type: url.searchParams.get("type"),
+    taxonomy: url.searchParams.get("taxonomy"),
+    term: url.searchParams.get("term"),
+    status: url.searchParams.get("status"),
+    stock: url.searchParams.get("stock"),
   });
   const moneyUnit = await resolveBusinessMoneyUnit(session.businessId);
 
@@ -80,6 +84,7 @@ export const GET = withTenantScope(async (request: Request, context: { params: P
     },
     summary: catalogue.summary,
     types: catalogue.types,
+    facets: catalogue.facets,
     total: catalogue.total,
     mappedTotal: catalogue.mappedTotal,
     totalPages: catalogue.totalPages,

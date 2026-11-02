@@ -80,6 +80,17 @@ describe("POST /api/integrations/connections/[id]/sync/customers", () => {
     });
   });
 
+  it("answers 409 plugin_job_unsupported, without queueing, when the plugin did not advertise customer_export (#944 / OVR-08)", async () => {
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValueOnce({
+      ...CONNECTION,
+      plugin_capabilities: { jobTypes: ["stock", "price"] },
+    } as never);
+    const response = await POST(request(), { params: Promise.resolve({ id: CONNECTION_ID }) });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ ok: false, error: "plugin_job_unsupported" });
+    expect(pluginService.enqueuePluginExport).not.toHaveBeenCalled();
+  });
+
   it("enforces the permission on direct API calls", async () => {
     const denied = NextResponse.json({ error: "forbidden" }, { status: 403 });
     vi.mocked(auth.requireAnyPermission).mockResolvedValueOnce({ session: null, error: denied } as never);

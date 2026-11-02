@@ -18,15 +18,16 @@
  *    per signer, one signature per signer;
  *  - the token is stored as a 64-hex digest and never as plaintext.
  */
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const MIGRATIONS_DIR = join(process.cwd(), "migrations");
-const SQL = readdirSync(MIGRATIONS_DIR)
-  .filter((name) => name.startsWith("0258_"))
-  .map((name) => readFileSync(join(MIGRATIONS_DIR, name), "utf8"))
-  .join("\n");
+// The ONE file, named exactly. `0258` is a shared number in this repo — Kavenegar,
+// the console's OAuth stores, workspace approvals and WordPress each ship their
+// own `0258_*` — so a prefix glob silently reads five migrations and then blames
+// this feature for another one's policies.
+const SQL = readFileSync(join(MIGRATIONS_DIR, "0258_contract_documents_signing.sql"), "utf8");
 
 /** The `CREATE TABLE <name> ( ... );` body, so column checks stay inside one table. */
 function tableBody(name: string): string {
@@ -82,11 +83,28 @@ describe("0258 — the tables exist and are tenant-scoped", () => {
     }
   });
 
-  it("makes the evidence tables append-only: INSERT, never UPDATE or DELETE", () => {
+  it("makes the evidence tables append-only with restrictive UPDATE and DELETE policies", () => {
+    // Not "no UPDATE policy at all": every table carrying a `business_id` must
+    // expose the one approved permissive policy, `tenant_isolation`, or
+    // `integration/tenant-isolation.integration.test.ts` fails the branch — the
+    // census that keeps the next table from slipping through. Append-only is
+    // therefore enforced by RESTRICTIVE policies that an UPDATE or DELETE must
+    // also satisfy; they are AND-ed with the permissive one, so `USING (false)`
+    // matches no row and history cannot be rewritten.
     for (const table of ["contract_document_versions", "contract_signatures", "contract_signing_events"]) {
-      expect(SQL).toContain(`CREATE POLICY tenant_read ON ${table} FOR SELECT`);
-      expect(SQL).toContain(`CREATE POLICY tenant_insert ON ${table} FOR INSERT`);
-      expect(SQL).not.toMatch(new RegExp(`ON ${table} FOR (?:UPDATE|DELETE|ALL)`));
+      expect(SQL, `${table} needs the approved tenant policy`).toContain(
+        `CREATE POLICY tenant_isolation ON ${table} FOR ALL`,
+      );
+      expect(SQL, `${table} must refuse UPDATE`).toMatch(
+        new RegExp(
+          `CREATE POLICY ${table}_append_only_no_update ON ${table} AS RESTRICTIVE FOR UPDATE\\s+USING \\(false\\);`,
+        ),
+      );
+      expect(SQL, `${table} must refuse DELETE`).toMatch(
+        new RegExp(
+          `CREATE POLICY ${table}_append_only_no_delete ON ${table} AS RESTRICTIVE FOR DELETE\\s+USING \\(false\\);`,
+        ),
+      );
     }
   });
 });

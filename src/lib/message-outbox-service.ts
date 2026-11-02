@@ -29,9 +29,19 @@ import { messageCostRial, smsSegmentCount } from "./messaging-billing-pure";
 import { providerErrorLabel } from "./messaging/provider";
 import { KavenegarMessageProvider } from "./messaging/providers/kavenegar-client";
 import { SmtpMessageProvider } from "./messaging/providers/smtp";
-import type { MessageProvider, SendResult } from "./messaging/provider";
+import type { MessageProvider } from "./messaging/provider";
 import { postCompletedCampaignCost } from "./message-cost-posting";
+import { backfillSendVendorCosts, recordSendVendorCost } from "./messaging-vendor-cost";
 import { isAppServiceOperational } from "./service-activation/app-gate-service";
+import { resolveBusinessSmsSender } from "./kavenegar/credentials";
+import {
+  DEFAULT_RETAIL_PRICE_VERSION,
+  quoteRetailBatch,
+  type RetailChannel,
+  type RetailChargeQuote,
+  type RetailPriceVersion,
+} from "./kavenegar/retail-pricing";
+import { quoteBusinessSends } from "./kavenegar/retail-pricing-service";
 
 export const MESSAGE_TICK_INTERVAL_MS = 20_000;
 /** Max outbox rows drained per business per tick — the per-business rate cap. */
@@ -45,6 +55,30 @@ type DrainRow = {
   subject: string;
   body: string;
 };
+
+/**
+ * Issue #902 — which SMS account a business's marketing drain may use.
+ *
+ * A business with an ACTIVE managed child sends through that child's key,
+ * resolved from the row's own `business_id` inside the tenant scope that
+ * `runMessagingTick` established. A child that exists but is not active yields
+ * `null`, and the drain leaves every SMS row queued: fail closed rather than
+ * quietly billing the platform master account for a tenant whose managed
+ * service is suspended. A business with no managed account keeps the legacy
+ * platform configuration during the rollout.
+ */
+export function applyManagedSmsSender(
+  config: MessageResolvedConfig,
+  sender: Awaited<ReturnType<typeof resolveBusinessSmsSender>>,
+): MessageResolvedConfig {
+  if (sender.mode === "legacy_platform") return config;
+  return {
+    ...config,
+    kavenegarApiKey: sender.apiKey,
+    kavenegarSender: sender.sender || config.kavenegarSender,
+    kavenegarConfigured: sender.apiKey !== null,
+  };
+}
 
 export function buildProviders(config: MessageResolvedConfig): {
   sms: MessageProvider | null;
@@ -91,9 +125,55 @@ async function drainRows(businessId: string): Promise<DrainRow[]> {
   return rows;
 }
 
-function sendResultCost(result: SendResult, channel: string, body: string, rate: MessageRate): number {
-  if (result.ok) return messageCostRial(channel as "sms" | "email", body, rate);
-  return 0;
+function unitPriceFor(channel: RetailChannel, rate: MessageRate): number {
+  return channel === "sms" ? rate.smsRialPerSegment : rate.emailRialPerSend;
+}
+
+function unitQuantityFor(channel: RetailChannel, body: string): number {
+  return channel === "sms" ? Math.max(1, smsSegmentCount(body)) : 1;
+}
+
+/**
+ * Issue #902 §4 — price the whole batch ONCE, up front, under the price version
+ * in force at reservation. Each message's retail charge is then a lookup: the
+ * amount reserved is the amount settled, minus only what did not go out.
+ *
+ * If the pricing tables cannot be read (a deployment mid-migration, a failed
+ * query), the drain falls back to the plain Billing base rate rather than
+ * stopping a business's messaging: the tenant is then charged exactly what Wave
+ * 1 charged, which is the pre-§4 behaviour, not a wrong price.
+ */
+async function priceDrainBatch(
+  businessId: string,
+  rows: DrainRow[],
+  rate: MessageRate,
+): Promise<{ quotes: Map<string, RetailChargeQuote>; version: RetailPriceVersion }> {
+  const messages = rows.map((row) => {
+    const channel = row.channel as RetailChannel;
+    return {
+      channel,
+      unitPriceRial: unitPriceFor(channel, rate),
+      quantity: unitQuantityFor(channel, row.body),
+    };
+  });
+  let batch: { quotes: RetailChargeQuote[]; version: RetailPriceVersion };
+  try {
+    const priced = await quoteBusinessSends({ businessId, messages });
+    batch = { quotes: priced.quotes, version: priced.version };
+  } catch (error) {
+    console.error("managed retail pricing unavailable; charging the base rate:", error);
+    const fallback = quoteRetailBatch({
+      businessId,
+      monthlySegments: 0,
+      version: DEFAULT_RETAIL_PRICE_VERSION,
+      messages,
+    });
+    batch = { quotes: fallback.quotes, version: DEFAULT_RETAIL_PRICE_VERSION };
+  }
+  return {
+    quotes: new Map(rows.map((row, index) => [row.id, batch.quotes[index]])),
+    version: batch.version,
+  };
 }
 
 /**
@@ -103,21 +183,37 @@ function sendResultCost(result: SendResult, channel: string, body: string, rate:
 export async function runBusinessMessageDrain(
   businessId: string,
   config: MessageResolvedConfig,
+  /**
+   * Issue #902 §9 item 3 — the transport seam for the database suite.
+   *
+   * The rating and the wallet are written from the same loop, so the only way
+   * to prove they agree when a send fails is to drive a drain whose provider
+   * refuses one row. Production passes nothing and gets `buildProviders`.
+   */
+  injectedProviders?: { sms: MessageProvider | null; email: MessageProvider | null },
 ): Promise<{ attempted: number; sent: number; failed: number; refundedRial: number }> {
   if (!config.enabled) return { attempted: 0, sent: 0, failed: 0, refundedRial: 0 };
-  const providers = buildProviders(config);
+  // Fail closed for a managed business whose child is not usable: leaving the
+  // rows queued is recoverable, billing the platform account is not.
+  const sender = await resolveBusinessSmsSender(businessId);
+  const effective = applyManagedSmsSender(config, sender);
+  const providers = injectedProviders ?? buildProviders(effective);
   const rows = await drainRows(businessId);
   if (rows.length === 0) return { attempted: 0, sent: 0, failed: 0, refundedRial: 0 };
 
-  const totalCost = rows.reduce(
-    (sum, r) => sum + messageCostRial(r.channel as "sms" | "email", r.body, config.rate),
-    0,
-  );
+  const pricing = await priceDrainBatch(businessId, rows, effective.rate);
+  const totalCost = [...pricing.quotes.values()].reduce((sum, quote) => sum + quote.totalRial, 0);
 
   let reservation: { requestId: string; reservedRial: number } | null = null;
   if (totalCost > 0) {
     try {
-      reservation = await reserveMessageSend({ businessId, reservedRial: totalCost });
+      reservation = await reserveMessageSend({
+        businessId,
+        reservedRial: totalCost,
+        // Only the version number travels with the money: the wallet entry is
+        // tenant-readable, and markup/margin are not tenant data (§0, DoD #3).
+        metadata: { retailPriceVersion: pricing.version.version },
+      });
     } catch (error) {
       if (error instanceof MessageInsufficientCreditError) {
         // Wave 1 exit #5: a business without credit is stopped before any
@@ -141,23 +237,70 @@ export async function runBusinessMessageDrain(
       // the moment the console configures one — never silently drop it.
       continue;
     }
+    // Issue #902 §6 — the provider's own share of the latency. Measured here
+    // because this is the only place that knows when the call left and when it
+    // came back; without it the report cannot tell "the drain is backed up"
+    // from "the provider is slow", which have opposite fixes.
+    const sendStartedAt = Date.now();
     const result = await provider.send({
       to: row.address,
       subject: row.subject || undefined,
       body: row.body,
     });
+    const sendLatencyMs = Math.max(0, Date.now() - sendStartedAt);
 
     if (result.ok) {
       await query(
         `UPDATE message_outbox
             SET status = 'sent', sent_at = now(), provider_message_id = $3,
+                provider_cost_rial = $4, send_latency_ms = $5,
                 last_attempt_at = now(), error = NULL, updated_at = now()
           WHERE id = $1 AND business_id = $2`,
-        [row.id, businessId, result.providerMessageId],
+        [
+          row.id,
+          businessId,
+          result.providerMessageId,
+          typeof result.providerCostRial === "number" ? result.providerCostRial : null,
+          sendLatencyMs,
+        ],
       );
       sent += 1;
-      const rowCost = sendResultCost(result, row.channel, row.body, config.rate);
+      const quote = pricing.quotes.get(row.id);
+      const rowCost = quote?.totalRial ?? messageCostRial(row.channel as "sms" | "email", row.body, effective.rate);
+      // Counted exactly ONCE per accepted send. There used to be a second
+      // `sentCost.total += rowCost` further down this same block, which made the
+      // settled figure twice the quote; since settlement charges
+      // `min(actual, reserved)`, that silently kept the WHOLE reservation for any
+      // batch containing one refused row — money taken for messages that never
+      // went out, and the exact opposite of the refund policy above. A source
+      // guard in `rating-basis.test.ts` now counts the increments.
       sentCost.total += rowCost;
+      // Issue #902 §4 — the accepted send's wholesale cost becomes a ledgered
+      // finance fact, idempotent on the outbox row, carrying the retail charge
+      // and the price version that priced it as internal evidence. A billing
+      // write must never fail a send that already went out: the backfill picks
+      // it up instead. `recordSendVendorCost` marks the row tenant-invisible
+      // (§0/DoD #3), so no supplier name or wholesale tariff can reach a tenant.
+      try {
+        await recordSendVendorCost({
+          businessId,
+          outboxId: String(row.id),
+          channel: row.channel,
+          provider: row.channel === "sms" ? effective.smsProvider : effective.emailProvider,
+          costRial: result.providerCostRial,
+          metadata: {
+            retailRial: rowCost,
+            priceVersion: pricing.version.version,
+            segments: unitQuantityFor(row.channel as RetailChannel, row.body),
+          },
+        });
+      } catch (error) {
+        console.error(
+          "message vendor cost failed:",
+          row.id,
+          error instanceof Error ? error.message : error,
+        );
+      }
       const sms = row.channel === "sms";
       await appendUsageEvent({
         eventId: String(row.id),
@@ -170,6 +313,13 @@ export async function runBusinessMessageDrain(
         resourceId: String(row.id),
         dimensions: { walletBacked: true, channel: row.channel },
         ratedAmountRial: rowCost,
+        // Issue #902 §9 item 3 — the rating must cite the version that actually
+        // produced this amount (the whole batch's version, priced once before a
+        // single send went out), not whatever meter price is current when the
+        // event lands. The number travels too: the built-in default is version 0
+        // and has no row, and the number is the part an operator recognises.
+        retailPriceVersionId: pricing.version.id,
+        retailPriceVersion: pricing.version.version,
       }).catch((error) => {
         console.error("message usage event failed:", row.id, error);
       });
@@ -179,11 +329,12 @@ export async function runBusinessMessageDrain(
         `UPDATE message_outbox
             SET attempts = attempts + 1,
                 last_attempt_at = now(),
+                send_latency_ms = $4,
                 error = $3,
                 updated_at = now()
           WHERE id = $1 AND business_id = $2
           RETURNING id`,
-        [row.id, businessId, providerErrorLabel(result.code)],
+        [row.id, businessId, providerErrorLabel(result.code), sendLatencyMs],
       );
       if (rowCount === 0) continue;
       const attemptsRow = await query<{ attempts: number; max_attempts: number }>(
@@ -199,6 +350,12 @@ export async function runBusinessMessageDrain(
           [row.id, businessId],
         );
         failed += 1;
+        // §4 failure policy: `refund` (the default) charges nothing for a send
+        // the provider never accepted; `charge` bills the attempt, and says so
+        // in the settlement rather than silently keeping the reservation.
+        if (pricing.version.failedSendPolicy === "charge") {
+          sentCost.total += pricing.quotes.get(row.id)?.totalRial ?? 0;
+        }
       } else {
         await query(
           `UPDATE message_outbox SET status = 'queued', next_attempt_at = now() + ($3::int * interval '1 millisecond'), updated_at = now()
@@ -209,17 +366,19 @@ export async function runBusinessMessageDrain(
     }
   }
 
+  let refundedRial = 0;
   if (reservation) {
-    await settleMessageSend({
+    const settled = await settleMessageSend({
       businessId,
       reservation,
       actualCostRial: sentCost.total,
       note: "ارسال پیام‌های صف",
     });
+    refundedRial = settled.refundedRial;
   }
 
   await reconcileCampaigns(businessId, [...touchedCampaigns]);
-  return { attempted: rows.length, sent, failed, refundedRial: 0 };
+  return { attempted: rows.length, sent, failed, refundedRial };
 }
 
 async function reconcileCampaigns(businessId: string, campaignIds: string[]): Promise<void> {
@@ -303,6 +462,21 @@ export async function runMessagingTick(): Promise<number> {
         );
       }
     }
+
+    // Issue #902 §4 — catch up wholesale costs for sends accepted before this
+    // module existed, or whose billing write happened to fail. Bounded per tick
+    // and driven by the absence of the event, so it self-heals and then idles.
+    try {
+      await backfillSendVendorCosts({
+        providers: { sms: config.smsProvider, email: config.emailProvider },
+      });
+    } catch (error) {
+      console.error(
+        "message vendor cost backfill failed:",
+        error instanceof Error ? error.message : error,
+      );
+    }
+
     return processed;
   } finally {
     tickInFlight = false;

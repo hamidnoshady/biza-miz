@@ -74,6 +74,7 @@ function toLine(line: RetailInvoiceDetailLine): ReceiptLine {
       };
     case "accessory":
     case "stocked":
+    case "service":
       return base;
     case "legacy":
       return {

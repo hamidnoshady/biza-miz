@@ -3,6 +3,7 @@
  * DB-touching (not unit-tested directly, per repo convention).
  */
 import { query } from "../db";
+import { scrubUrls } from "./url-redact";
 
 export interface IntegrationAuditInput {
   businessId: string;
@@ -29,8 +30,10 @@ export async function writeIntegrationAudit(input: IntegrationAuditInput): Promi
         input.entityType ?? null,
         input.remoteId ?? null,
         input.localId ?? null,
-        input.payload === undefined ? null : JSON.stringify(input.payload),
-        input.error ?? null,
+        // A signed download URL must never reach the append-only trail, whether it
+        // arrives as a field of the payload or inside a plugin's error text.
+        input.payload === undefined ? null : scrubUrls(JSON.stringify(input.payload)),
+        input.error == null ? null : scrubUrls(input.error),
       ],
     );
   } catch (err) {

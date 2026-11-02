@@ -15,23 +15,29 @@ import {
  * Per CLAUDE.md, anything that administers clients across businesses belongs
  * here rather than in a tenant dashboard: one SMS account sends every
  * business's login OTPs, and every send costs the *platform* money. Same shape
- * and same guards as `platform_ai_config` — owner-only for both read and
- * write, because a support admin reading which provider account is in use is
- * one step from reading the account itself.
+ * and same guards as `platform_ai_config` for the credential itself.
+ *
+ * Issue #902 corrected the capability: this route used `ai.config.manage`,
+ * which is owner-only and belongs to a different domain, so the SMS desk could
+ * not administer its own provider. It now asks for `messaging.manage` — the
+ * capability migration 0176 created for SMS/email technical configuration and
+ * granted to the same operators who run the rest of the messaging console. The
+ * change is a fix, not a widening: `messaging.manage` already gated the
+ * marketing provider key, rates and packages.
  *
  * The key is never returned, on any path. `keyHint` is the last four
  * characters, which is enough to answer "is this the account I think it is"
  * and not enough to send anything.
  */
 export const GET = withPlatformScope(async () => {
-  const { error } = await requirePlatformCapability("ai.config.manage");
+  const { error } = await requirePlatformCapability("messaging.manage");
   if (error) return error;
 
   return NextResponse.json({ config: await getPublicSmsConfig() });
 });
 
 export const PUT = withPlatformScope(async (request: NextRequest) => {
-  const { session, error } = await requirePlatformCapability("ai.config.manage");
+  const { session, error } = await requirePlatformCapability("messaging.manage");
   if (error) return error;
 
   let body: { apiKey?: unknown; otpTemplate?: unknown; clearApiKey?: unknown };

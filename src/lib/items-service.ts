@@ -28,6 +28,7 @@ import {
   type WeightItemStatus,
 } from "./items";
 import { validateStone, validateWeightAttributes, type Purity, type StoneInput } from "./gold";
+import type { ProductPublishStatus } from "./product-content";
 import { validateSerialUnitCost, validateServiceIntervalMonths, validateWarrantyMonths } from "./watch";
 
 export interface Item {
@@ -48,6 +49,10 @@ export interface Item {
   season: string | null;
   /** Shared `/media` cover / variant image reference (`media_assets.id`). */
   imageMediaId?: string | null;
+  /** Migration 0260 — whether the product is meant to be shown on a storefront. */
+  publishStatus: ProductPublishStatus;
+  shortDescription: string | null;
+  longDescription: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -86,6 +91,9 @@ interface ItemRow extends Record<string, unknown> {
   collection: string | null;
   season: string | null;
   image_media_id?: string | null;
+  publish_status?: ProductPublishStatus;
+  short_description?: string | null;
+  long_description?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -105,6 +113,9 @@ function mapItem(row: ItemRow): Item {
     collection: row.collection,
     season: row.season,
     imageMediaId: row.image_media_id ?? null,
+    publishStatus: row.publish_status ?? "published",
+    shortDescription: row.short_description ?? null,
+    longDescription: row.long_description ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -225,6 +236,9 @@ export interface ItemMetaPatch {
   taxSalePercent?: number | null;
   taxPurchasePercent?: number | null;
   isSellable?: boolean;
+  publishStatus?: ProductPublishStatus;
+  shortDescription?: string | null;
+  longDescription?: string | null;
 }
 
 export async function updateItemMeta(
@@ -252,6 +266,9 @@ export async function updateItemMeta(
   if (patch.taxSalePercent !== undefined) push("tax_sale_percent", patch.taxSalePercent);
   if (patch.taxPurchasePercent !== undefined) push("tax_purchase_percent", patch.taxPurchasePercent);
   if (patch.isSellable !== undefined) push("is_sellable", patch.isSellable);
+  if (patch.publishStatus !== undefined) push("publish_status", patch.publishStatus);
+  if (patch.shortDescription !== undefined) push("short_description", patch.shortDescription);
+  if (patch.longDescription !== undefined) push("long_description", patch.longDescription);
   if (sets.length === 0) return getItem(id, client);
   sets.push(`updated_at = now()`);
 

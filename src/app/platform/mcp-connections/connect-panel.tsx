@@ -271,9 +271,13 @@ async function wireRpc(
     }
     throw new WireError("network");
   }
-  // The route answers 401 only when NO bearer arrived — with one sent, that
-  // means a proxy/CDN stripped the Authorization header on the way.
-  if (response.status === 401) throw new WireError("missing_auth");
+  // The route answers 401 both when NO bearer arrived (a proxy/CDN stripped the
+  // header on the way) and when one arrived but is dead (JSON-RPC -32004,
+  // `error="invalid_token"`). Only the body tells the two apart.
+  if (response.status === 401) {
+    const dead = /error="invalid_token"/.test(response.headers.get("www-authenticate") ?? "");
+    throw new WireError(dead ? "rejected" : "missing_auth");
+  }
   if (response.status === 429) throw new WireError("rate_limited");
   if (response.status === 404 || response.status === 405 || !response.ok) {
     throw new WireError("transport", `HTTP ${response.status}`);
@@ -575,9 +579,9 @@ export function PlatformMcpConnectPanel({
       <EndpointWarnings warnings={endpointWarnings} />
       <p className="mb-3 text-xs leading-6 text-muted-foreground">
         یک دستیار خارجی (Claude Code، Claude Desktop، Codex یا هر کلاینت MCP روی HTTP) را با همین
-        نشانی و یک توکن <code dir="ltr">pospmcp_</code> به سکو وصل کنید. این اتصال فقط با توکن ثابت
-        کار می‌کند و ورود OAuth ندارد — برخلاف اتصال‌های کسب‌وکار، چیزی برای «ورود» نیست؛ توکن در
-        سرآیند <code dir="ltr">Authorization</code> فرستاده می‌شود.
+        نشانی و یک توکن <code dir="ltr">pospmcp_</code> به سکو وصل کنید. کلاینتی که
+        OAuth بلد است (Claude.ai، ChatGPT) فقط به نشانی نیاز دارد و شما را برای تأیید به همین کنسول
+        می‌آورد؛ برای بقیه توکن در سرآیند <code dir="ltr">Authorization</code> فرستاده می‌شود.
       </p>
 
       <div className="flex flex-wrap items-center gap-2">

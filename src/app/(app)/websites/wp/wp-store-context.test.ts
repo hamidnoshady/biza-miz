@@ -6,7 +6,9 @@ const context = readFileSync("src/app/(app)/websites/wp/wp-store-context.tsx", "
 const shell = readFileSync("src/app/(app)/websites/wp/wp-app-shell.tsx", "utf8");
 const host = readFileSync("src/app/(app)/websites/wp/store-section-host.tsx", "utf8");
 const layout = readFileSync("src/app/(app)/websites/wp/layout.tsx", "utf8");
-const sections = readFileSync("src/app/(app)/websites/wp/woo-store-sections.tsx", "utf8");
+const sections =
+  readFileSync("src/app/(app)/websites/wp/woo-store-sections.tsx", "utf8") +
+  readFileSync("src/app/(app)/websites/wp/catalogue-section.tsx", "utf8");
 
 describe("WP manager shared store selection", () => {
   it("provides one layout-level store provider", () => {

@@ -467,7 +467,7 @@ function PhoneLoginCard() {
           )}
           {state.policy.state === "pending_sms" && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-muted-foreground">
-              تاریخ الزام رسیده اما سرویس پیامک (کاوه‌نگار) هنوز تنظیم نشده است؛ تا تنظیم آن، ورود با رمز عددی بدون تغییر می‌ماند.
+              تاریخ الزام رسیده اما سرویس پیامک هنوز آماده نشده است؛ تا آماده شدن آن، ورود با رمز عددی بدون تغییر می‌ماند.
             </div>
           )}
           {state.policy.state === "enforced" && (

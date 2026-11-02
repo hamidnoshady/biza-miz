@@ -23,8 +23,16 @@ class POS_Connector_Queue {
 
 	const TABLE = 'pos_connector_queue';
 
-	/** Bumped when the queue schema changes; stored in `pos_connector_db_version`. */
-	const DB_VERSION = 1;
+	/**
+	 * Bumped when the queue schema changes; stored in `pos_connector_db_version`
+	 * together with the log's, and the pair is what gates `dbDelta()`.
+	 *
+	 * 2 added `topic_remote_status`: the enqueue de-duplication reads
+	 * `(topic, remote_id, status)`, which the existing keys could not serve. Not
+	 * unique — the same product legitimately has a `sent` row from yesterday and
+	 * a `pending` one from today, and two `sent` rows once it is sent twice.
+	 */
+	const DB_VERSION = 2;
 
 	/** Set when `install_table()` fails so admin notices can surface `$wpdb->last_error`. */
 	private static $last_install_error = '';
@@ -52,11 +60,26 @@ class POS_Connector_Queue {
 		return self::$last_install_error;
 	}
 
+	/** Per-request memo of the `SHOW TABLES` answer; `null` until it has been asked. */
+	private static $table_present = null;
+
+	/**
+	 * Whether the queue table exists.
+	 *
+	 * Asked once per request, not once per call: a catalogue import enqueues
+	 * hundreds of rows through the same request, and `SHOW TABLES` is a query
+	 * each time. `install_table()` clears the memo, so a table created inside
+	 * this request is visible to the next call.
+	 */
 	public static function table_exists() {
+		if ( null !== self::$table_present ) {
+			return self::$table_present;
+		}
 		global $wpdb;
 		$table = self::table_name();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-		return $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) === $table;
+		self::$table_present = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) === $table );
+		return self::$table_present;
 	}
 
 	/**
@@ -74,6 +97,7 @@ class POS_Connector_Queue {
 
 	public static function install_table() {
 		global $wpdb;
+		self::$table_present = null;
 		$table   = self::table_name();
 		$charset = $wpdb->get_charset_collate();
 
@@ -95,6 +119,7 @@ class POS_Connector_Queue {
 				available_at DATETIME NOT NULL,
 				PRIMARY KEY  (id),
 				UNIQUE KEY delivery_id (delivery_id),
+				KEY topic_remote_status (topic, remote_id, status),
 				KEY status_created (status, created_at),
 				KEY due_lookup (status, available_at)
 			) {$charset};"
@@ -248,23 +273,31 @@ class POS_Connector_Queue {
 	 */
 	public static function mark_failed( $id, $error ) {
 		global $wpdb;
-		$table = self::table_name();
-		$delay = min(
+		$table    = self::table_name();
+		$before   = self::attempts_of( $id );
+		$delay    = min(
 			self::BACKOFF_MAX_SECONDS,
-			self::BACKOFF_BASE_SECONDS * pow( 2, self::attempts_of( $id ) )
+			self::BACKOFF_BASE_SECONDS * pow( 2, $before )
 		);
 		$available = gmdate( 'Y-m-d H:i:s', time() + $delay );
+		// The attempt count and the verdict are decided together, in PHP. The
+		// single UPDATE this replaces assigned `attempts = attempts + 1` and
+		// then tested `attempts + 1 >= MAX` in the same statement; MySQL
+		// evaluates SET assignments left to right, so the test saw the new
+		// count and a row gave up one attempt early (seven, not eight).
+		$next = POS_Connector_Health::queue_failure_state( $before, self::MAX_ATTEMPTS );
 		$wpdb->query(
 			$wpdb->prepare(
 				"UPDATE {$table}
-					SET attempts = attempts + 1,
+					SET attempts = %d,
 						last_error = %s,
-						status = CASE WHEN attempts + 1 >= %d THEN 'failed' ELSE 'pending' END,
+						status = %s,
 						available_at = %s,
 						updated_at = %s
 					WHERE id = %d",
+				$next['attempts'],
 				(string) $error,
-				self::MAX_ATTEMPTS,
+				$next['status'],
 				$available,
 				current_time( 'mysql', true ),
 				(int) $id
@@ -294,6 +327,25 @@ class POS_Connector_Queue {
 				$now
 			)
 		);
+	}
+
+	/**
+	 * The oldest still-unsent row, for the backlog age in `doctor` and telemetry.
+	 *
+	 * Age is the whole point: a queue of five rows from ten minutes ago is an
+	 * outage, a queue of five hundred from ten seconds ago is a catalogue
+	 * export in progress. Read-only.
+	 *
+	 * @return string|null UTC `Y-m-d H:i:s`, or null when nothing is waiting.
+	 */
+	public static function oldest_pending_at() {
+		if ( ! self::table_exists() ) {
+			return null;
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$value = $wpdb->get_var( "SELECT MIN(created_at) FROM {$table} WHERE status IN ('pending', 'failed')" );
+		return null === $value ? null : (string) $value;
 	}
 
 	/** Counts by status, for the admin screen's summary line. */

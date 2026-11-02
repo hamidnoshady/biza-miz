@@ -23,7 +23,9 @@
  * exactly this.
  */
 import { NextResponse } from "next/server";
-import { query, withoutTenantScope, withTenant } from "../db";
+import { query, withoutTenantScope, withTenant, withTenantTransaction } from "../db";
+import { acknowledgeProductPublication } from "./product-publication-service";
+import { acknowledgeTaxonomyEnsure } from "./product-attribute-mappings-service";
 import { isFeatureEnabled } from "../features";
 import { writeIntegrationAudit } from "./audit";
 import {
@@ -39,9 +41,11 @@ import {
   hashPluginToken,
   verifyPluginEnvelope,
 } from "./plugin-link";
-import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken } from "./plugin-capabilities";
+import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken, registeredOrderStatuses } from "./plugin-capabilities";
+import { assertPluginJobSupported } from "./plugin-job-guard";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
+import { scrubUrls } from "./url-redact";
 import {
   failWordPressMediaSync,
   getMediaConfig,
@@ -50,16 +54,48 @@ import {
 } from "../media-service";
 import { acknowledgePushedEvent, claimableOutboxSql } from "./outbox-service";
 import { PLUGIN_JOB_MAX_ATTEMPTS } from "./retry";
+import { effectivePushSwitches, isNoopPush, STALE_PUSH_JOB_HOURS, type RemoteProductState } from "./outbox-policy";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
 const JOB_PULL_LIMIT = 25;
 /** How long a leased job stays invisible to a second concurrent pull. */
 const JOB_LEASE_MS = 5 * 60 * 1000;
+/**
+ * A media download URL is minted for one leased delivery and dies with that lease:
+ * it is never stored, and it cannot be replayed after the job could have been
+ * re-leased to another worker. A retry mints a new one.
+ */
+export const MEDIA_LEASE_URL_TTL_SECONDS = JOB_LEASE_MS / 1000;
 /** Cap on one push, so a compromised or looping plugin cannot submit unbounded work in one request. */
 const MAX_EVENTS_PER_PUSH = 100;
 
 function supportedPluginJobTypes(connection: ConnectionRow): string[] {
   return pluginAdvertisedJobTypes(connection.plugin_capabilities);
+}
+
+/** Sent by the plugin on every signed request (class-pos-client.php). */
+const PLUGIN_VERSION_HEADER = "x-pos-plugin";
+
+/** A version string we are willing to store: dotted digits with an optional suffix, never free text. */
+export function parsePluginVersionHeader(raw: string | null | undefined): string | null {
+  const value = raw?.trim() ?? "";
+  return /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}$/.test(value) ? value : null;
+}
+
+/**
+ * Does the site the plugin says it is match the one this connection was bound
+ * to? `null` when it does (or when either side has nothing to compare), else
+ * the two addresses. Shared by the handshake and the ping so «آزمایش اتصال»
+ * reports exactly what the next real handshake would.
+ */
+export function pluginSiteMismatch(
+  connection: Pick<ConnectionRow, "plugin_site_url">,
+  reportedSiteUrl: string | null | undefined,
+): { expectedSiteUrl: string; reportedSiteUrl: string } | null {
+  const stored = normalizeSiteUrl(connection.plugin_site_url);
+  const reported = normalizeSiteUrl(reportedSiteUrl);
+  if (!stored || !reported || stored === reported) return null;
+  return { expectedSiteUrl: connection.plugin_site_url as string, reportedSiteUrl: reportedSiteUrl as string };
 }
 
 /**
@@ -78,7 +114,7 @@ function supportedPluginJobTypes(connection: ConnectionRow): string[] {
 export async function authenticatePlugin(
   headers: Headers,
   rawBody: string,
-): Promise<{ ok: true; connection: ConnectionRow; nonce: string } | { ok: false; error: string; status: number }> {
+): Promise<{ ok: true; connection: ConnectionRow; nonce: string } | { ok: false; error: string; status: number; serverTime?: string }> {
   const authorization = headers.get("authorization");
   const token = authorization?.match(/^Bearer\s+(\S+)$/i)?.[1] ?? "";
   if (!token) return { ok: false, error: "missing_token", status: 401 };
@@ -114,8 +150,17 @@ export async function authenticatePlugin(
     Date.now(),
   );
   if (!verified.ok) {
-    return { ok: false, error: verified.error, status: 401 };
+    // A clock that is out is the one failure the caller can fix, and only if it
+    // is told by how much — the plugin's «آزمایش اتصال» prints the skew from
+    // this. It reveals nothing a stranger could not read off any HTTP Date header.
+    return {
+      ok: false,
+      error: verified.error,
+      status: 401,
+      ...(verified.error === "stale_timestamp" ? { serverTime: new Date().toISOString() } : {}),
+    };
   }
+  const reportedVersion = parsePluginVersionHeader(headers.get(PLUGIN_VERSION_HEADER));
 
   return withTenant(connection.business_id, async () => {
     if (!(await isFeatureEnabled(connection.business_id, "integrations"))) {
@@ -140,9 +185,15 @@ export async function authenticatePlugin(
       [connection.id, PLUGIN_TIMESTAMP_SKEW_MS * 2],
     );
 
+    // The version rides on every signed call, so «plugin_version» is what is
+    // installed now — not what it was at the last handshake, which a store
+    // that upgraded and has not run its cron yet would still be reporting.
     await query(
-      `UPDATE integration_connections SET last_plugin_seen_at = now() WHERE id = $1 AND business_id = $2`,
-      [connection.id, connection.business_id],
+      `UPDATE integration_connections
+          SET last_plugin_seen_at = now(),
+              plugin_version = COALESCE($3, plugin_version)
+        WHERE id = $1 AND business_id = $2`,
+      [connection.id, connection.business_id, reportedVersion],
     );
 
     return { ok: true as const, connection, nonce: verified.envelope.nonce };
@@ -161,6 +212,12 @@ export interface PluginHandshakeInput {
   capabilities?: {
     eventTypes?: string[];
     jobTypes?: string[];
+    /**
+     * The store's registered order statuses (`wc_get_order_statuses()`), which
+     * is the only truthful source of their display names — see
+     * `registeredOrderStatuses` (#1215 / P1‑3).
+     */
+    orderStatuses?: unknown;
   };
   telemetry?: Record<string, unknown>;
 }
@@ -222,10 +279,18 @@ function sanitizeLocalQueueRecent(value: unknown): Array<{
 }
 
 function pluginCapabilities(input: PluginHandshakeInput): Record<string, unknown> {
+  // The order-status registry is stored *through its own reader*, so the shape
+  // the manager displays is exactly the shape the handshake accepted: a plugin
+  // that sends junk, or none at all, leaves an empty list and the screen falls
+  // back to canonical labels plus a clearly marked raw slug (#1215 / P1‑3).
+  const orderStatuses = registeredOrderStatuses({
+    orderStatuses: input.capabilities?.orderStatuses,
+  });
   return {
     protocolVersion: Number.isFinite(input.protocolVersion) ? Math.max(1, Math.floor(input.protocolVersion ?? 1)) : 1,
     eventTypes: sanitizeStringArray(input.capabilities?.eventTypes),
     jobTypes: sanitizeStringArray(input.capabilities?.jobTypes),
+    ...(orderStatuses.length > 0 ? { orderStatuses } : {}),
   };
 }
 
@@ -235,7 +300,6 @@ export async function pluginHandshake(
 ): Promise<NextResponse> {
   return withTenant(connection.business_id, async () => {
     const siteUrl = input.siteUrl?.trim().slice(0, 500) || null;
-    const normalizedSiteUrl = normalizeSiteUrl(siteUrl);
     const version = input.pluginVersion?.trim().slice(0, 40) || null;
     const capabilities = pluginCapabilities(input);
     const telemetry = input.telemetry && typeof input.telemetry === "object" ? { ...input.telemetry } : {};
@@ -247,8 +311,7 @@ export async function pluginHandshake(
     } else {
       delete telemetry.localQueueRecent;
     }
-    const storedSiteUrl = normalizeSiteUrl(connection.plugin_site_url);
-    if (storedSiteUrl && normalizedSiteUrl && storedSiteUrl !== normalizedSiteUrl) {
+    if (pluginSiteMismatch(connection, siteUrl)) {
       await query(
         `UPDATE integration_connections
             SET pending_plugin_site_url = $3,
@@ -348,8 +411,11 @@ export async function pluginHandshake(
         syncOrders: connection.sync_orders,
         syncProducts: connection.sync_products,
         syncCustomers: connection.sync_customers,
-        pushStock: connection.push_stock,
-        pushPrices: connection.push_prices,
+        // The effective switches: a store that is the source of truth is told
+        // not to apply this app's stock and prices, whatever the raw toggles say.
+        pushStock: effectivePushSwitches(connection).pushStock,
+        pushPrices: effectivePushSwitches(connection).pushPrices,
+        sourceOfTruth: connection.source_of_truth ?? "two_way",
         status: connection.status,
         serverMessage: connection.status === "paused" ? "همگام‌سازی از سمت پنل متوقف شده است" : null,
       },
@@ -374,6 +440,8 @@ export async function pluginHandshake(
           "stock",
           "price",
           "product_update",
+          "product_publish",
+          "taxonomy_ensure",
           "order_status",
           "refund_create",
           "catalogue_export",
@@ -459,6 +527,67 @@ export interface PluginJob {
   leaseToken: string | null;
 }
 
+/** How many queued stock/price jobs one pull inspects for redundancy. */
+const REDUNDANT_PUSH_SCAN_LIMIT = 200;
+
+/**
+ * Before leasing, close the stock/price jobs that would only do harm (issue
+ * #1149, C2):
+ *
+ *  - **stale** — computed more than STALE_PUSH_JOB_HOURS ago. A plugin that was
+ *    down for a weekend must not come back and write a Thursday figure over the
+ *    store. The row is closed as `stale_job`, and the next tick re-arms it with
+ *    the *current* value (see the re-arm clause in `upsertOutbox`), so nothing
+ *    is lost — the old number is.
+ *  - **equal to the store** — the store's last report (the product mirror) is
+ *    exactly this value, so applying it changes nothing but costs a round trip
+ *    and a write that can race a store-side edit. Closed as `equal_to_remote`
+ *    and recorded as acknowledged, so the diff does not queue it again.
+ *
+ * Only `pending`/`failed` rows are touched: a leased job is mid-delivery, and
+ * `dead`/`needs_review` are a human's decision.
+ */
+async function dropRedundantPushJobs(connection: ConnectionRow): Promise<void> {
+  await query(
+    `UPDATE integration_outbox_events
+        SET status = 'skipped', last_error = 'stale_job',
+            leased_until = NULL, lease_token = NULL, updated_at = now()
+      WHERE connection_id = $1 AND entity_type IN ('stock', 'price')
+        AND status IN ('pending', 'failed')
+        AND updated_at < now() - ($2 || ' hours')::interval`,
+    [connection.id, String(STALE_PUSH_JOB_HOURS)],
+  );
+
+  const { rows } = await query<{
+    id: string;
+    entity_type: string;
+    remote_id: string;
+    payload: Record<string, unknown>;
+    remote: RemoteProductState | null;
+  }>(
+    `SELECT o.id, o.entity_type, o.remote_id, o.payload, m.last_pushed_payload AS remote
+       FROM integration_outbox_events o
+       JOIN integration_mappings m
+         ON m.connection_id = o.connection_id AND m.entity_type = 'product' AND m.remote_id = o.remote_id
+      WHERE o.connection_id = $1 AND o.entity_type IN ('stock', 'price')
+        AND o.status IN ('pending', 'failed') AND o.next_attempt_at <= now()
+      ORDER BY o.next_attempt_at
+      LIMIT ${REDUNDANT_PUSH_SCAN_LIMIT}`,
+    [connection.id],
+  );
+  for (const row of rows) {
+    if (!row.remote || !isNoopPush(row.entity_type, row.payload, row.remote, connection.currency_unit)) continue;
+    const { rowCount } = await query(
+      `UPDATE integration_outbox_events
+          SET status = 'skipped', last_error = 'equal_to_remote',
+              leased_until = NULL, lease_token = NULL, updated_at = now()
+        WHERE id = $1 AND connection_id = $2 AND status IN ('pending', 'failed')`,
+      [row.id, connection.id],
+    );
+    if ((rowCount ?? 0) > 0) await acknowledgePushedEvent(connection, row);
+  }
+}
+
 /**
  * Lease the jobs this plugin should apply next.
  *
@@ -474,6 +603,7 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
     if (connection.status === "paused") {
       return NextResponse.json({ ok: true, jobs: [], paused: true, message: "همگام‌سازی از سمت پنل متوقف شده است" });
     }
+    await dropRedundantPushJobs(connection);
     const supportedTypes = supportedPluginJobTypes(connection);
     const withLeaseToken = pluginSupportsLeaseToken(connection.plugin_capabilities);
     // A non-idempotent job without an operation id can never be verified
@@ -574,13 +704,14 @@ export async function pluginPullJobs(connection: ConnectionRow): Promise<NextRes
             continue;
           }
 
-          // Mint a brand-new short-lived presigned URL at lease time rather than
-          // relying on a URL baked at enqueue time that expires if WP-Cron lags.
+          // Mint a brand-new presigned URL at lease time rather than relying on a
+          // URL baked at enqueue time that expires if WP-Cron lags. It is scoped to
+          // this one object, this tenant and this lease window.
           const resolved = await readMediaObjectDownloadUrl(
             connection.business_id,
             mediaAssetId,
             mediaConfig,
-            15 * 60,
+            MEDIA_LEASE_URL_TTL_SECONDS,
           );
           if (!resolved) {
             await query(
@@ -643,6 +774,7 @@ export interface PluginJobAck {
   error?: string;
   /** The lease generation this job was pulled under — see PluginJob.leaseToken. */
   leaseToken?: string;
+  result?: Record<string, unknown>;
 }
 
 /** Exponential, capped — same shape as `retry.ts`'s backoff, expressed in the SQL below. */
@@ -685,17 +817,19 @@ export async function pluginAckJobs(
       const leaseToken = result.leaseToken && UUID_RE.test(result.leaseToken) ? result.leaseToken : null;
 
       if (result.status === "done") {
+        await withTenantTransaction(connection.business_id, async () => {
         const { rows } = await query<{ entity_type: string; remote_id: string; payload: Record<string, unknown> }>(
           `UPDATE integration_outbox_events
               SET status = 'sent', sent_at = now(), last_error = NULL,
+                  payload = CASE WHEN entity_type='product_publish' THEN jsonb_set(payload,'{__ackRemoteId}',to_jsonb($4::text)) ELSE payload END,
                   leased_until = NULL, lease_token = NULL, updated_at = now()
             WHERE id = $1 AND connection_id = $2 AND ${ackFenceSql("$3")}
           RETURNING entity_type, remote_id, payload`,
-          [result.id, connection.id, leaseToken],
+          [result.id, connection.id, leaseToken, typeof result.result?.remoteId === "number" || typeof result.result?.remoteId === "string" ? String(result.result.remoteId) : ""],
         );
         if (rows.length === 0) {
           stale += await auditStaleAck(connection, result);
-          continue;
+          return;
         }
         done += 1;
         // Issue #942 (F03): record what this delivery proved on the product
@@ -709,6 +843,9 @@ export async function pluginAckJobs(
         // acked payload (not current local state) means a value changed
         // mid-flight is not falsely recorded as delivered.
         await acknowledgePushedEvent(connection, rows[0]);
+        if (rows[0].entity_type === "product_publish") await acknowledgeProductPublication(connection, rows[0]);
+        if (rows[0].entity_type === "taxonomy_ensure") await acknowledgeTaxonomyEnsure(connection.business_id, connection.id, rows[0].payload, result.result);
+        });
         continue;
       }
 
@@ -717,7 +854,7 @@ export async function pluginAckJobs(
         // row closes as `skipped` — visible on the queue screen, excluded
         // from "delivered", and crucially NOT merged into the mapping's
         // last-pushed value: the store still holds the old number.
-        const reason = (result.error ?? "skipped_by_plugin_policy").slice(0, 500);
+        const reason = scrubUrls(result.error ?? "skipped_by_plugin_policy").slice(0, 500);
         const { rows } = await query<{ entity_type: string; remote_id: string }>(
           `UPDATE integration_outbox_events
               SET status = 'skipped', last_error = $4,
@@ -742,7 +879,7 @@ export async function pluginAckJobs(
         continue;
       }
 
-      const message = (result.error ?? "plugin_failed").slice(0, 500);
+      const message = scrubUrls(result.error ?? "plugin_failed").slice(0, 500);
       const { rows } = await query<{ attempts: number; status: string; entity_type: string; payload: Record<string, unknown> }>(
         `UPDATE integration_outbox_events
             SET attempts = attempts + 1,
@@ -834,6 +971,10 @@ export async function enqueuePluginExport(
   connectionId: string,
   entityType: "catalogue_export" | "customer_export" | "orders_export" | "content_export" | "taxonomy_export",
 ): Promise<{ jobId: string | null }> {
+  // A job type the plugin never advertised would sit `pending` forever (the
+  // lease filters by capability), so every producer is refused here, not just
+  // the routes that remembered to check (#944 / OVR-08).
+  await assertPluginJobSupported(businessId, connectionId, entityType);
   // Returns the outbox row's id so the caller can hand it back as the job the
   // member is now waiting on (#944 / OVR-04).
   const { rows } = await query<{ id: string }>(

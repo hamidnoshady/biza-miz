@@ -74,13 +74,18 @@ function openableSubject(type: WorkspaceApprovalSubject): type is WorkspaceEntit
 
 /**
  * The subject cell: a link into the shared entity drawer for the four subjects
- * that drawer can open, and plain text for the two it cannot.
+ * that drawer can open, and plain text for the six it cannot.
  *
  * Issue #799 — §7's estimate revision and §11's submittal revision are decided
  * through this same queue (one approval engine, as the issue requires) but are
  * not entities of `/api/workspace/**`; their own registers — «متره و برآورد»
  * and «ارسال مدارک» — are where they are read, so the queue names the subject
  * rather than offering a link that would 404.
+ *
+ * Issue #1128 §D adds two more of the same kind: an agency's billing milestone
+ * and change request are read on the project page's own commercial panel, not
+ * through the shared drawer, and naming them is what keeps the queue honest
+ * about where the decision actually lives.
  */
 function SubjectLabel({
   row,
@@ -343,7 +348,9 @@ const DECISION_EFFECTS: Record<Decision, string> = {
   approved: "با تأیید، وضعیت خودِ این مورد هم به‌روز می‌شود (قرارداد فعال، سند تأییدشده).",
   rejected: "با رد، وضعیت آن مورد «ردشده» ثبت می‌شود و می‌توان دوباره درخواست داد.",
   changes_requested: "مورد به پیش‌نویس برمی‌گردد تا درخواست‌کننده اصلاحش کند و دوباره بفرستد.",
-  cancelled: "درخواست پس گرفته می‌شود و وضعیت آن مورد تغییری نمی‌کند.",
+  // Issue #907 F03 — withdrawing the last pending request now returns the
+  // subject to `draft`; the copy used to promise the opposite.
+  cancelled: "درخواست پس گرفته می‌شود و اگر درخواست دیگری در انتظار نمانده باشد، مورد به پیش‌نویس بازمی‌گردد.",
 };
 
 function DecisionDialog({

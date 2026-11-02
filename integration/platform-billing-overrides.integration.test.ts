@@ -224,6 +224,42 @@ describe("POST overrides — removal is scoped to the uniqueness key", () => {
   });
 });
 
+describe("POST overrides — a capability override must name a real capability", () => {
+  it("refuses a target no gate or resolver reads, and stores nothing", async () => {
+    const res = await post({
+      action: "set",
+      kind: "capability",
+      target: "ai_asistant",
+      enabled: true,
+      reason: "دسترسی موقت دستیار",
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "unknown_capability", target: "ai_asistant" });
+    expect(await rows()).toHaveLength(0);
+    expect(audit).toHaveLength(0);
+  });
+
+  it("accepts a catalogue flag key and a declared capability key", async () => {
+    const flag = await post({
+      action: "set",
+      kind: "capability",
+      target: "ai_assistant",
+      enabled: true,
+      reason: "دسترسی موقت دستیار",
+    });
+    expect(flag.status).toBe(200);
+    const declared = await post({
+      action: "set",
+      kind: "capability",
+      target: "accounting.reports",
+      enabled: true,
+      reason: "دسترسی موقت گزارش",
+    });
+    expect(declared.status).toBe(200);
+    expect((await rows()).map((r) => r.kind)).toEqual(["capability", "capability"]);
+  });
+});
+
 describe("POST overrides — create and update are distinct audited events", () => {
   it("audits a first write as created and a second as updated, with the expiry in before/after", async () => {
     await post({ action: "set", kind: "limit", target: "member_limit", value: 4, reason: "قرارداد سازمانی" });

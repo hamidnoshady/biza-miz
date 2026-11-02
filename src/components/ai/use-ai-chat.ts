@@ -14,6 +14,7 @@ import type { InputRequestSpec, InputResponse } from "@/lib/ai-input-protocol";
 import {
   MAX_ATTACHMENT_IMAGE_BYTES,
   MAX_ATTACHMENT_PDF_BYTES,
+  MAX_ATTACHMENT_OFFICE_BYTES,
   MAX_ATTACHMENT_TEXT_BYTES,
   MAX_ATTACHMENTS,
 } from "@/lib/ai-attachment-limits";
@@ -28,6 +29,7 @@ import { canGrantAiSessionConsent } from "@/lib/ai-session-consent-shared";
 import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { AI_GUIDED_TOUR_EVENT } from "@/lib/ai-guided-tour-events";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
+import { parseGenUiBlocks, type GenUiBlock } from "@/lib/ai-genui";
 
 export type AssistantMode = "wizard" | "dashboard" | "floor";
 export type AiAppFocus = "all" | "accounting" | "growth" | "crm" | "website" | "workspace";
@@ -81,6 +83,8 @@ export interface AiChatMessage {
    */
   status?: AiMessageStatus;
   proposal?: ProposedAction | null;
+  /** Issue #1140 §A4 — validated report blocks; drawn by `GenUiBlocks`, never persisted. */
+  genUi?: GenUiBlock[];
   /** Phase E — a structured input request the assistant raised this turn. */
   inputRequest?: AiInputRequestState | null;
   auditId?: string | null;
@@ -103,13 +107,19 @@ export type AiAttachmentOrigin = import("@/lib/ai-attachment-source").AiAttachme
 
 export interface ChatAttachment {
   id: string;
-  kind: "image" | "pdf" | "text";
+  kind: "image" | "pdf" | "text" | "office";
   dataUrl: string;
   name: string;
   sizeBytes: number;
   /** Display/audit provenance. File bytes are verified independently by server. */
   source?: AiAttachmentOrigin;
 }
+
+const OFFICE_MIME_BY_EXTENSION: Record<string, string> = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+};
+const OFFICE_MIME_BY_TYPE = new Set(Object.values(OFFICE_MIME_BY_EXTENSION));
 
 /** One client-side id per message/attachment — never persisted as such. */
 const uid = (): string => crypto.randomUUID();
@@ -272,28 +282,39 @@ export function useAiChat({
           ? ({ txt: "text/plain", csv: "text/csv", md: "text/markdown" } as Record<string, string>)[file.name.split(".").at(-1)?.toLowerCase() ?? ""]
           : undefined;
       const isText = !!textMime;
-      if (!isImage && !isPdf && !isText) {
-        toast.error(`«${file.name}» فعلاً قابل تحلیل نیست؛ تصویر JPG/PNG/WebP، PDF یا فایل متنی UTF-8/CSV انتخاب کنید. ویدئو و Office نیاز به استخراج‌گر جداگانه دارند.`);
+      // Word/Excel are read on the server; browsers often label them
+      // `application/octet-stream`, so the extension decides when the type is blank.
+      const officeMime = OFFICE_MIME_BY_TYPE.has(file.type) ? file.type
+        : ["", "application/octet-stream"].includes(file.type)
+          ? OFFICE_MIME_BY_EXTENSION[file.name.split(".").at(-1)?.toLowerCase() ?? ""]
+          : undefined;
+      const isOffice = !!officeMime;
+      if (!isImage && !isPdf && !isText && !isOffice) {
+        toast.error(`«${file.name}» فعلاً قابل تحلیل نیست؛ تصویر JPG/PNG/WebP، PDF، Word (docx)، Excel (xlsx) یا فایل متنی UTF-8/CSV انتخاب کنید. صوت و ویدئو هنوز پشتیبانی نمی‌شوند.`);
         continue;
       }
-      const limit = isImage ? MAX_ATTACHMENT_IMAGE_BYTES : isPdf ? MAX_ATTACHMENT_PDF_BYTES : MAX_ATTACHMENT_TEXT_BYTES;
+      const limit = isImage ? MAX_ATTACHMENT_IMAGE_BYTES : isPdf ? MAX_ATTACHMENT_PDF_BYTES : isOffice ? MAX_ATTACHMENT_OFFICE_BYTES : MAX_ATTACHMENT_TEXT_BYTES;
       if (file.size > limit) {
         toast.error(
-          isImage
+          isImage || isOffice
             ? `«${file.name}» بزرگ‌تر از ۵ مگابایت است.`
             : isPdf ? `«${file.name}» بزرگ‌تر از ۱۰ مگابایت است.` : `«${file.name}» بزرگ‌تر از ۱ مگابایت است.`,
         );
         continue;
       }
       try {
-        const dataUrl = await readAsDataUrl(isText ? new File([file], file.name, { type: textMime }) : file);
+        const dataUrl = await readAsDataUrl(
+          isText ? new File([file], file.name, { type: textMime })
+            : isOffice ? new File([file], file.name, { type: officeMime })
+              : file,
+        );
         if (isImage && !parseReceiptImageDataUrl(dataUrl)) {
           toast.error(`فرمت «${file.name}» پشتیبانی نمی‌شود.`);
           continue;
         }
         accepted.push({
           id: uid(),
-          kind: isImage ? "image" : isPdf ? "pdf" : "text",
+          kind: isImage ? "image" : isPdf ? "pdf" : isOffice ? "office" : "text",
           dataUrl,
           name: file.name,
           sizeBytes: file.size,
@@ -516,6 +537,8 @@ export function useAiChat({
               null)
             : null,
           inputRequest: parseInputRequestPayload(payload.inputRequest),
+          // Re-validated here: the browser draws only what the allowlist parse keeps.
+          genUi: mode === "dashboard" ? parseGenUiBlocks(payload.genUi) : [],
           auditId: typeof payload.auditId === "string" ? payload.auditId : null,
           proposalStatus: payload.proposedAction ? "proposed" : null,
           costRial: typeof payload.costRial === "number" ? payload.costRial : null,

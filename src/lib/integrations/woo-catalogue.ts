@@ -645,11 +645,13 @@ export interface CatalogueListRow {
   sellable: boolean;
   quantity: number | null;
   categories: string[];
+  /** Product tags; optional so callers that never read tags keep their shape. */
+  tags?: string[];
   attributes: string[];
 }
 
 export interface CatalogueListFilters {
-  /** Case-insensitive substring over name, SKU, type, categories, attributes. */
+  /** Case-insensitive substring over name, SKU, type, categories, tags, attributes. */
   search?: string;
   /** Exact WooCommerce type, as classified. */
   type?: string;
@@ -665,7 +667,7 @@ export function catalogueRowMatches(row: CatalogueListRow, filters: CatalogueLis
   if (type && row.wooType !== type) return false;
   const search = filters.search?.trim().toLowerCase() ?? "";
   if (!search) return true;
-  const haystack = [row.name, row.sku ?? "", row.wooType, ...row.categories, ...row.attributes]
+  const haystack = [row.name, row.sku ?? "", row.wooType, ...row.categories, ...(row.tags ?? []), ...row.attributes]
     .join(" ")
     .toLowerCase();
   return haystack.includes(search);

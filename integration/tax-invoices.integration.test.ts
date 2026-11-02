@@ -13,7 +13,7 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { runMigrations } from "../scripts/migrate";
 import { decryptSecret, resolveEncryptionKey } from "../src/lib/integrations/secrets";
 import { verifyPayloadHash, type ProviderIssue, type TaxPayloadV1 } from "../src/lib/tax-invoice-core";
@@ -94,7 +94,7 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query(`DROP ROLE IF EXISTS ${APP_ROLE}`);
+    await dropAppRole(maintenance, APP_ROLE);
   } finally {
     await maintenance.end();
   }

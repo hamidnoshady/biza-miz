@@ -140,6 +140,11 @@ describe("visibleSettingsTabs", () => {
     expect(foodService.find((tab) => tab.key === "pricing")?.description).toContain("آیتم‌های منو");
     expect(jewelry.some((tab) => tab.key === "pricing")).toBe(false);
 
+    // The product-workspace trades get their own version of the section — the
+    // policy behind the New Product price suggestion — with its own wording.
+    const cosmetics = visibleSettingsTabs([PERMISSIONS.settingsManage], { industry: "cosmetics" });
+    expect(cosmetics.find((tab) => tab.key === "pricing")?.description).toContain("پیشنهاد قیمت فروش");
+
     // A caller with no industry still gets the F&B defaults, and still no callback.
     const noIndustry = visibleSettingsTabs([PERMISSIONS.settingsManage]);
     expect(noIndustry.find((tab) => tab.key === "tax")?.description).toBe("نرخ پیش‌فرض و نرخ هر دسته از منو");

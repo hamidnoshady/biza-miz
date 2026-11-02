@@ -133,6 +133,21 @@ describe("wizardStepsForIndustry", () => {
     );
   });
 
+  it("keeps an advertising agency on the service shape, with no operating-profile step of its own", () => {
+    // Issue #1128: business → accounts → tax → users → hardware → backup →
+    // opening. Neither of F&B's counter steps applies (no `inventory_items`
+    // recipes, no `menu_items`), and AEC's `aec_profile` is not borrowed — the
+    // agency's eight presets get a wizard step only with the wave that has
+    // something for the answer to switch on, which is the condition the issue
+    // itself puts on an agency-specific setup step.
+    expect(setupShapeForIndustry("advertising_agency")).toBe("service");
+    expect(wizardStepsForIndustry("advertising_agency")).toEqual(
+      ALL_STEPS.filter((s) => s !== "costing" && s !== "menu" && s !== "aec_profile"),
+    );
+    expect(wizardStepsForIndustry("advertising_agency")).not.toContain("aec_profile");
+    expect(requiredStepsForIndustry("advertising_agency")).toEqual(["business", "accounts", "tax"]);
+  });
+
   it("derives required steps as everything that is not optional", () => {
     for (const industry of ENABLED_INDUSTRIES) {
       const steps = wizardStepsForIndustry(industry);
@@ -170,6 +185,11 @@ describe("wizardStepsForIndustry", () => {
     // AEC sells no catalogue at all: its products workspace is gated off, so
     // the finish page gets no pointer card.
     expect(catalogueHrefFor("architecture_construction")).toBeNull();
+    // Issue #1128 — an agency has no catalogue door either. Its services and
+    // packages are configured in the normal app's quotation/billing workflows,
+    // and pointing the finish page at a goods screen the trade does not have
+    // would send a new tenant to a 403.
+    expect(catalogueHrefFor("advertising_agency")).toBeNull();
   });
 });
 
