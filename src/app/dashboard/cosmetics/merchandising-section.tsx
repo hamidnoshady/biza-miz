@@ -216,7 +216,7 @@ function BrandForm({
 
   return (
     <PanelShell title="افزودن برند">
-      <form onSubmit={submit}>
+      <form data-tour-id="cosmetics.brand" onSubmit={submit}>
         <Field label="نام برند">
           <input
             className={accInputClass}
@@ -300,7 +300,7 @@ function MatrixForm({
 
   return (
     <PanelShell title="ویرایشگر ماتریس تنوع">
-      <form onSubmit={submit}>
+      <form data-tour-id="cosmetics.matrix" onSubmit={submit}>
         <Field label="نام خانواده">
           <input
             className={accInputClass}
@@ -449,7 +449,7 @@ function ItemProfileForm({
 
   return (
     <PanelShell title="برند و هویت قانونی کالا">
-      <form onSubmit={submit}>
+      <form data-tour-id="cosmetics.profile" onSubmit={submit}>
         <Field label="کالا">
           <SearchableSelect
             className={accInputClass}
@@ -576,7 +576,7 @@ function TesterPanel({
           placeholder="انتخاب کالا"
         />
       </Field>
-      <p className="text-xs leading-5 text-muted-foreground">
+      <p data-tour-id="cosmetics.tester" className="text-xs leading-5 text-muted-foreground">
         یک واحد فروختنی را به‌عنوان تستر باز می‌کند؛ بهای تمام‌شدهٔ آن به هزینهٔ
         بازاریابی (۵۱۶۰) می‌رود، نه بهای کالای فروخته‌شده.
       </p>
@@ -715,7 +715,7 @@ function BarcodesPanel({
           placeholder="انتخاب کالا"
         />
       </Field>
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+      <div data-tour-id="cosmetics.barcodes" className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
         <input
           className={accInputClass}
           dir="ltr"

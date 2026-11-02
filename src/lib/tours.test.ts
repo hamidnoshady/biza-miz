@@ -238,6 +238,7 @@ const ARTICLE_PAGES = [
   "page:/accounting/overview",
   "page:/accounting/pos",
   "page:/accounting/inventory",
+  "page:/accounting/cosmetics",
   "page:/accounting/products",
   "page:/accounting/products/new",
   "page:/accounting/products/prices",
@@ -266,7 +267,7 @@ function viewer(
 
 const idsFor = (page: string, v: TourViewer) => toursForViewer(page, v).map((t) => t.id);
 
-describe("tour coverage of the nine article pages", () => {
+describe("tour coverage of the ten article pages", () => {
   it("has at least one tour for each of them, and every tour page is a real «آموزش» page", () => {
     for (const page of ARTICLE_PAGES) expect(toursForPage(page).length, page).toBeGreaterThan(0);
     const known = new Set(KNOWLEDGE_PAGES.map((p) => p.key));
@@ -292,6 +293,50 @@ describe("tour coverage of the nine article pages", () => {
         }
       }
     }
+  });
+
+  it("only offers Cosmetics to the right industry and the page's view permission", () => {
+    const page = "page:/accounting/cosmetics";
+    for (const industry of INDUSTRIES) {
+      expect(idsFor(page, viewer(industry)), industry).toEqual(
+        industry === "cosmetics" ? ["accounting.cosmetics.specialized"] : [],
+      );
+    }
+    expect(idsFor(page, viewer("cosmetics", noPermission))).toEqual([]);
+    expect(idsFor(page, viewer("cosmetics", new Set([PERMISSIONS.inventoryAdjust])))).toEqual([]);
+    expect(tourById("accounting.cosmetics.specialized")?.route).toBe("/accounting/cosmetics");
+  });
+
+  it("limits sensitive Cosmetics tour steps to matching inventory and report permissions", () => {
+    const page = "page:/accounting/cosmetics";
+    const viewOnly = toursForViewer(page, viewer("cosmetics", new Set([PERMISSIONS.inventoryView])))[0];
+    expect(viewOnly.steps.map((step) => step.id)).toEqual(["welcome", "tabs"]);
+    const canSeeExpiry = toursForViewer(
+      page,
+      viewer("cosmetics", new Set([PERMISSIONS.inventoryView, PERMISSIONS.reportsView])),
+    )[0];
+    expect(canSeeExpiry.steps.map((step) => step.id)).toEqual(["welcome", "tabs", "expiry", "reports"]);
+    const editor = toursForViewer(
+      page,
+      viewer("cosmetics", new Set([PERMISSIONS.inventoryView, PERMISSIONS.inventoryAdjust])),
+    )[0];
+    expect(editor.steps.map((step) => step.id)).toEqual([
+      "welcome", "tabs", "batch-receipt", "switch-tab", "brand", "matrix",
+      "compliance", "tester", "barcodes",
+    ]);
+    const all = toursForViewer(page, viewer("cosmetics"))[0];
+    expect(all.steps).toHaveLength(11);
+    expect(all.steps.filter((step) => step.kind === "spotlight").length).toBe(9);
+    // Read-only members must not be able to claim hidden write steps as seen.
+    expect(applyTourEvent(viewOnly, null, { type: "step_seen", stepId: "tester" }, T1)).toEqual({
+      ok: false, error: "unknown_step",
+    });
+  });
+
+  it("does not request inventory-system or feature facts for the Cosmetics tour", () => {
+    expect(tourFactsNeeded(toursForPage("page:/accounting/cosmetics"))).toEqual({
+      features: false, inventorySystem: false,
+    });
   });
 
   it("gives the accounting home the staff tour exactly when the page draws the staff overview", () => {
