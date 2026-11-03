@@ -316,10 +316,23 @@ describe("responsive knowledge layout regression", () => {
     expect(layout?.className).toContain("lg:flex-row");
     expect(toggle.className).toContain("w-full");
     expect(category.className).toContain("min-w-0");
-    expect(category.parentElement?.className).toContain("grid-cols-1");
-    expect(category.parentElement?.className).toContain("sm:grid-cols-2");
+    // On mobile the drawer is the only category navigation; the cards are
+    // CSS-hidden until the desktop sidebar appears at the same lg breakpoint.
+    expect(category.parentElement?.className).toContain("hidden");
+    expect(category.parentElement?.className).toContain("lg:grid");
+    expect(category.parentElement?.className).toContain("lg:grid-cols-2");
     expect(category.querySelector('a[href="/knowledge/a/daily-sales"]')?.className)
       .toContain("min-w-0");
+  });
+
+  it("keeps recent guides visible as content while mobile category cards stay hidden", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(salesCatalogue));
+    render(<KnowledgeBrowser initialTag="" />);
+    const category = await screen.findByRole("region", { name: "فروش روزانه" });
+    expect(category.parentElement?.className).toContain("hidden");
+    const recent = await screen.findByRole("region", { name: "به‌روزترین راهنماها" });
+    expect(within(recent).getByRole("link", { name: /راهنمای فروش روزانه/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /فهرست راهنماها/ })).toBeTruthy();
   });
 
   it("stacks the mobile guide drawer and article, with no fixed-width article body", async () => {
