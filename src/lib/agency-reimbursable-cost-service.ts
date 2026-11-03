@@ -31,7 +31,13 @@
  *     `agency-commercial-service.ts` applies to §D's cost side.
  */
 import { businessToday } from "./business-day-service";
-import { isCostRecharged } from "./agency-reimbursable-cost";
+import { SETTING_KEYS, getSetting, setSetting } from "./settings";
+import {
+  AGENCY_DEFAULT_PRESENTATION,
+  isCostRecharged,
+  parseAgencyCostPolicySetting,
+  type AgencyCostPolicySetting,
+} from "./agency-reimbursable-cost";
 import {
   COST_NUMBER_PREFIX,
   AGENCY_COST_DESCRIPTION_LIMIT,
@@ -456,9 +462,15 @@ export async function createAgencyReimbursableCost(
   }
   if (spentOn === null) throw new AgencyReimbursableCostError("invalid_date");
 
-  const presentation = input.presentation === undefined || input.presentation === null || input.presentation === ""
-    ? "net"
-    : input.presentation;
+  // §D: the treatment follows the business's *chosen* policy, and is never inferred
+  // from the row. Absent an explicit choice on this cost, the policy answers; absent
+  // a policy, the documented fallback does. An explicit choice always wins, and an
+  // explicit *garbage* choice is still refused rather than quietly replaced by the
+  // policy — otherwise a typo would change which account the money lands in.
+  const presentation =
+    input.presentation === undefined || input.presentation === null || input.presentation === ""
+      ? await resolveAgencyCostPresentation(businessId)
+      : input.presentation;
   if (!isAgencyPassThroughPresentation(presentation)) {
     throw new AgencyReimbursableCostError("invalid_presentation");
   }
@@ -819,6 +831,132 @@ export async function rechargeAgencyCosts(
       totalRial,
     };
   });
+}
+
+/* ------------------------------------------------------------------------- */
+/* §D's business-level presentation policy                                     */
+/* ------------------------------------------------------------------------- */
+
+export interface AgencyCostPolicyState {
+  /** The presentation new reimbursable costs default to. */
+  presentation: AgencyPassThroughPresentation;
+  /**
+   * Whether a human actually chose it. `false` means `presentation` is the
+   * documented fallback, and a screen must say «هنوز انتخاب نشده» rather than show
+   * a default as though it were a decision — the difference between a policy the
+   * business adopted and one the software supplied.
+   */
+  stored: boolean;
+  updatedAt: string | null;
+}
+
+const UNSTORED_POLICY: AgencyCostPolicyState = {
+  presentation: AGENCY_DEFAULT_PRESENTATION,
+  stored: false,
+  updatedAt: null,
+};
+
+/**
+ * The presentation a new cost falls back to: the business's stored policy, or the
+ * documented default while it has none.
+ *
+ * Kept private and separate from `loadAgencyCostPolicy` because the create path
+ * must never throw `not_agency` from a policy read — `createAgencyReimbursableCost`
+ * has already asserted the industry by the time it gets here, and a second
+ * assertion would be a second query answering a question already settled.
+ */
+async function resolveAgencyCostPresentation(
+  businessId: string,
+): Promise<AgencyPassThroughPresentation> {
+  const stored = parseAgencyCostPolicySetting(
+    await getSetting<unknown>(businessId, SETTING_KEYS.agencyCostPolicy),
+  );
+  return stored ? stored.presentation : AGENCY_DEFAULT_PRESENTATION;
+}
+
+/** What «تنظیمات» shows for this register: the policy, and whether it was chosen. */
+export async function loadAgencyCostPolicy(businessId: string): Promise<AgencyCostPolicyState> {
+  await assertAgency(businessId);
+  const stored = parseAgencyCostPolicySetting(
+    await getSetting<unknown>(businessId, SETTING_KEYS.agencyCostPolicy),
+  );
+  return stored ? { ...stored, stored: true } : UNSTORED_POLICY;
+}
+
+/**
+ * Choose the business's presentation policy.
+ *
+ * Writes the setting and its audit row in one transaction, because this is the one
+ * agency setting that moves money: it decides whether a client's media buy debits
+ * 1270 (a claim on the client) or 5197 (the agency's own cost of sale), so "who
+ * changed it, from what, to what, and when" has to have an answer.
+ *
+ * **The policy is a default for new costs and is never retroactive.** Changing it
+ * does not touch a single existing row, and cannot: 0280's trigger freezes
+ * `presentation` on any cost whose entry has landed, because the value decided which
+ * two accounts that entry used and the register may not contradict the ledger. The
+ * correction for a cost recorded under the wrong treatment is a reversal and a new
+ * record, not a policy change reaching backwards.
+ *
+ * A member's explicit choice on a row still beats the policy, which is the point of
+ * storing a policy rather than a mandate: §D's treatment varies by contract, and a
+ * business that mostly buys media in a client's name may still buy some in its own.
+ */
+export async function saveAgencyCostPolicy(
+  actor: { businessId: string; locationId?: string | null; userId?: string | null; name?: string | null },
+  body: unknown,
+): Promise<AgencyCostPolicyState> {
+  await assertAgency(actor.businessId);
+
+  const current = await loadAgencyCostPolicy(actor.businessId);
+  const saved = normalizeCostPolicyBody(body, current);
+  if (!saved) throw new AgencyReimbursableCostError("invalid_presentation");
+
+  const before = { presentation: current.presentation, stored: current.stored };
+  const value: AgencyCostPolicySetting = { presentation: saved.presentation, updatedAt: saved.updatedAt };
+  await withTenantTransaction(
+    actor.businessId,
+    async () => {
+      await setSetting(actor.businessId, SETTING_KEYS.agencyCostPolicy, value);
+      await query(
+        `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+         VALUES ($1,$2,$3,'settings.agency_cost_policy.update','settings',$4,$5::jsonb)`,
+        [
+          actor.businessId,
+          actor.locationId ?? null,
+          actor.userId ?? null,
+          SETTING_KEYS.agencyCostPolicy,
+          JSON.stringify({ before, after: value }),
+        ],
+      );
+    },
+    { locationId: actor.locationId ?? undefined, userId: actor.userId ?? undefined },
+  );
+  return { ...value, stored: true };
+}
+
+/**
+ * Pure: the policy a save request asks for, or null when the request is not one.
+ * An omitted `presentation` keeps the current choice, so a client may re-save
+ * without restating it; an unrecognised one is a refusal rather than a default.
+ *
+ * Unknown keys are refused outright, mirroring the operating-profile save: a body
+ * carrying a field this code does not know is a body written against a newer
+ * contract, and storing half of it would silently drop the half that mattered.
+ */
+function normalizeCostPolicyBody(
+  body: unknown,
+  current: AgencyCostPolicyState,
+): { presentation: AgencyPassThroughPresentation; updatedAt: string } | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const raw = body as Record<string, unknown>;
+  if (Object.keys(raw).some((key) => key !== "presentation")) return null;
+  const parsed = parseAgencyCostPolicySetting({
+    presentation: raw.presentation === undefined ? current.presentation : raw.presentation,
+    updatedAt: null,
+  });
+  if (!parsed) return null;
+  return { presentation: parsed.presentation, updatedAt: new Date().toISOString() };
 }
 
 export { AGENCY_PASS_THROUGH_PRESENTATIONS, AGENCY_COST_SETTLEMENTS };
