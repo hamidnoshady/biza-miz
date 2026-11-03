@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildRedirect } from "@/lib/mcp/oauth";
 import { validatePlatformAuthorizationRequest } from "@/lib/mcp/platform-oauth";
+import { platformRealmUnavailable } from "@/lib/platform-runtime-guard";
 
 /**
  * The console realm's OAuth authorization endpoint.
@@ -13,6 +14,11 @@ import { validatePlatformAuthorizationRequest } from "@/lib/mcp/platform-oauth";
  * order makes this an open redirect.
  */
 export async function GET(request: NextRequest) {
+  // Issue #1194 — the Central realm does not exist on a site runtime. Deny
+  // before reading any credential, so a local install cannot even begin a
+  // platform sign-in or MCP grant.
+  const realmUnavailable = platformRealmUnavailable();
+  if (realmUnavailable) return realmUnavailable;
   const result = await validatePlatformAuthorizationRequest(request.nextUrl.searchParams);
 
   if (!result.ok && result.kind === "display") {

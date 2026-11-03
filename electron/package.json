@@ -64,7 +64,6 @@
       "permissions.js",
       "support-companion.js",
       "maintenance-gate.js",
-      "smoke-probe.js",
       "desktop-release-public-key.pem",
       "package.json"
     ],

@@ -106,12 +106,20 @@ export function isCentralExecutionPath(pathname: string): boolean {
   );
 }
 
-/** The super-admin realm: the console's pages and its API. */
+/**
+ * The super-admin realm: the console's pages and its API.
+ *
+ * Segment-aware, not a bare `startsWith("/api/platform")`: that spelling also
+ * matched an unrelated future path such as `/api/platform-settings`, which a
+ * site would then have answered 404 for no reason. The realm is exactly
+ * `/api/platform` and everything below it (issue #1194 asserts the boundary).
+ */
 export function isPlatformRealmPath(pathname: string): boolean {
   return (
     pathname === "/platform" ||
     pathname.startsWith("/platform/") ||
-    pathname.startsWith("/api/platform")
+    pathname === "/api/platform" ||
+    pathname.startsWith("/api/platform/")
   );
 }
 
