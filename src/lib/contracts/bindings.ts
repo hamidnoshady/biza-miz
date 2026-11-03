@@ -73,6 +73,20 @@ export const CONTRACT_BINDING_CATALOGUE: readonly ContractBindingEntry[] = [
   { source: "business", path: "name", label: "نام کسب‌وکار", type: "text", group: "کسب‌وکار" },
   { source: "business", path: "phone", label: "تلفن کسب‌وکار", type: "text", group: "کسب‌وکار" },
   { source: "business", path: "address", label: "نشانی کسب‌وکار", type: "multiline", group: "کسب‌وکار" },
+  { source: "aec", path: "revised_value", label: "مبلغ اصلاح‌شدهٔ قرارداد", type: "money", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "advance_percent", label: "درصد پیش‌پرداخت", type: "text", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "advance_amount", label: "مبلغ پیش‌پرداخت", type: "money", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "retention_percent", label: "درصد کسور حسن انجام کار", type: "text", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "payment_terms", label: "شرایط پرداخت پیمان", type: "multiline", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "defects_liability_months", label: "مدت رفع نقص (ماه)", type: "text", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "approved_variations", label: "مجموع تغییرات تأییدشده", type: "money", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "certified_amount", label: "مبلغ صورت‌وضعیت‌های تأییدشده", type: "money", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "guarantee_type", label: "نوع ضمانت‌نامه", type: "text", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "guarantee_reference", label: "شمارهٔ ضمانت‌نامه", type: "text", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "guarantee_amount", label: "مبلغ ضمانت‌نامه", type: "money", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "guarantee_expiry", label: "تاریخ انقضای ضمانت‌نامه", type: "date", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "insurance_reference", label: "شمارهٔ بیمه‌نامه", type: "text", group: "اطلاعات پیمان (AEC)" },
+  { source: "aec", path: "insurance_expiry", label: "تاریخ انقضای بیمه", type: "date", group: "اطلاعات پیمان (AEC)" },
 ] as const;
 
 const CATALOGUE_KEYS = new Set(
@@ -130,6 +144,23 @@ export interface ContractBindingContext {
     nationalId: string;
   } | null;
   business: { name: string; phone: string; address: string };
+  /** AEC facts only from rows linked to this authorized contract; no project-wide or ledger-wide scan. */
+  aec: {
+    revisedValueRial: string;
+    advancePercent: string;
+    advanceAmountRial: string;
+    retentionPercent: string;
+    paymentTerms: string;
+    defectsLiabilityMonths: string;
+    approvedVariationsRial: string;
+    certifiedAmountRial: string;
+    guaranteeType: string;
+    guaranteeReference: string;
+    guaranteeAmountRial: string;
+    guaranteeExpiry: string;
+    insuranceReference: string;
+    insuranceExpiry: string;
+  };
 }
 
 /** An empty context — the shape a blank document validates against. */
@@ -147,6 +178,12 @@ export function emptyBindingContext(contractTitle = "", today = ""): ContractBin
     project: null,
     party: null,
     business: { name: "", phone: "", address: "" },
+    aec: {
+      revisedValueRial: "", advancePercent: "", advanceAmountRial: "", retentionPercent: "",
+      paymentTerms: "", defectsLiabilityMonths: "", approvedVariationsRial: "",
+      certifiedAmountRial: "", guaranteeType: "", guaranteeReference: "", guaranteeAmountRial: "",
+      guaranteeExpiry: "", insuranceReference: "", insuranceExpiry: "",
+    },
   };
 }
 
@@ -298,6 +335,25 @@ function boundValue(
           return context.business.address;
         default:
           return "";
+      }
+    }
+    if (source === "aec") {
+      switch (path) {
+        case "revised_value": return context.aec.revisedValueRial;
+        case "advance_percent": return context.aec.advancePercent;
+        case "advance_amount": return context.aec.advanceAmountRial;
+        case "retention_percent": return context.aec.retentionPercent;
+        case "payment_terms": return context.aec.paymentTerms;
+        case "defects_liability_months": return context.aec.defectsLiabilityMonths;
+        case "approved_variations": return context.aec.approvedVariationsRial;
+        case "certified_amount": return context.aec.certifiedAmountRial;
+        case "guarantee_type": return context.aec.guaranteeType;
+        case "guarantee_reference": return context.aec.guaranteeReference;
+        case "guarantee_amount": return context.aec.guaranteeAmountRial;
+        case "guarantee_expiry": return context.aec.guaranteeExpiry;
+        case "insurance_reference": return context.aec.insuranceReference;
+        case "insurance_expiry": return context.aec.insuranceExpiry;
+        default: return "";
       }
     }
     return "";

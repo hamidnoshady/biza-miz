@@ -124,7 +124,7 @@ export type ContractBlock =
  * — a free-text path would let one tenant's editor read a property another
  * tenant's contract never agreed to publish.
  */
-export const CONTRACT_BINDING_SOURCES = ["contract", "project", "party", "business"] as const;
+export const CONTRACT_BINDING_SOURCES = ["contract", "project", "party", "business", "aec"] as const;
 export type ContractBindingSource = (typeof CONTRACT_BINDING_SOURCES)[number];
 
 export interface ContractFieldBinding {

@@ -78,8 +78,11 @@ signing page all render the same document the same way:
 ## 3. Autofill and lineage — `src/lib/contracts/bindings.ts`
 
 `CONTRACT_BINDING_CATALOGUE` is the **allow-list** of values a contract may
-disclose (contract terms, project, party, business identity) and the same list
-the editor offers. Resolution reports where each value came from:
+disclose (contract terms, project, party, business identity, and AEC commercial
+facts linked to that exact authorized contract) and the same list the editor
+offers. AEC bindings read approved variations/certificates and the contract
+commercial block only; they do not enumerate unrelated projects or Accounting
+ledger data. Resolution reports where each value came from:
 `binding | override | literal | empty`, keeps `boundValue` when the sender typed
 over a record, and `changedBindings` turns a source that moved after review into
 a `stale` flag on the field.
@@ -87,12 +90,19 @@ a `stale` flag on the field.
 ## 4. Services and API
 
 * `src/lib/contracts/service.ts` — the draft, template library, freezing,
-  duplication, and the binding context. Freezing resolves every variable first
+  duplication, and the binding context. Contract-linked AEC commercial terms,
+  approved variations and certified certificates are allow-listed as per-field
+  bindings; reads are scoped by the authorized contract and business, not a
+  caller-supplied project id. Accounting ledger values are not exposed here.
+  Freezing resolves every variable first
   and refuses while any required value is empty; a frozen version stores the
   resolved strings inside its own JSON, so the printed contract stops moving at
   the moment it acquires a hash.
 * `src/lib/contracts/signing.ts` — envelopes, signers, invitations, delivery, and
-  the whole public session (consent → OTP → signature → receipt).
+  the whole public session (consent → OTP → signature → receipt). When the last
+  required signer commits, it queues the deduped `contract.completed` event in
+  the existing notifications outbox; Phase 35 owns delivery, and a notification
+  failure never rolls back signature evidence.
 * `src/lib/contracts/crypto.ts` — canonical-JSON SHA-256 and the HMAC-hashed
   invitation token. The plaintext token exists only in the message that carried
   it.
@@ -169,7 +179,10 @@ back as a warning (the sender may simply have attached the wrong file).
 * `/workspace/contracts/[id]` — two tabs: **سند** (the three-panel builder) and
   **امضا و ارسال** (signers, delivery, timeline), tab in the URL (`?tab=signing`).
 * `/workspace/contracts/[id]/print` — A4 print/PDF of the newest frozen version,
-  falling back to the draft with unresolved variables marked.
+  falling back to the draft with unresolved variables marked. Once its envelope
+  is completed, the print view overlays each signer's drawn mark, name and
+  Shamsi timestamp in the assigned signature slot and prints the full version
+  hash; the browser can save this view as PDF.
 * `/sign/[token]` — the external signatory's page: frozen document → explicit
   consent → phone OTP → drawn signature → receipt with the content hash.
 
@@ -184,14 +197,16 @@ canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
    than imported blank. Signature placements are never auto-detected — the
    sender adds them, because a guessed signing line is a document that cannot be
    sent. The upload is not archived.
-2. **Notifications on completion** are not wired to the notifications subsystem;
-   the timeline and the sender's screen show the state, but no message is pushed.
-3. **Settings/AEC autofill sources** are limited to the catalogue in
-   `bindings.ts` (contract, project, party, business). AEC commercial terms and
-   the CRM party file are covered through the project/party projections; there is
-   no per-field AEC binding yet.
-4. **`npm run test:db` proves this migration locally, but CI still has to run it.**
-   `integration/contract-signing.integration.test.ts` (20 tests) runs the whole
+2. **Durable final-PDF generation and verification QR** are not implemented.
+   The authorized print view now includes signatures from a completed envelope
+   and its full hash, and the browser can save it as PDF; there is not yet a
+   server-generated immutable PDF asset, QR verification flow or Media Library
+   archive.
+3. **Legal retention policy and legal hold** still require an approved policy and
+   jurisdictional review; no retention duration or evidence purge has been
+   invented. The append-only evidence must not be silently deleted.
+4. **The signing integration is green locally; CI still has to run this change.**
+   `integration/contract-signing.integration.test.ts` (21 tests) runs the whole
    flow against a real PostgreSQL: it creates a throwaway database, applies all
    420 migrations, seeds nothing but the party/project rows the contract binds to,
    and then exercises freezing, tenant isolation under an unprivileged role,
@@ -199,8 +214,8 @@ canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
    signature, link rotation and post-signature draft edits. Results are in §6a;
    the green run here does not replace the CI job.
 5. **`npm run build` was not executed** here (the sandbox has 3 GB and the
-   previous full `tsc` run exhausted it); a scoped `tsc --noEmit` over every file
-   this branch touches passes, and the full `vitest` suite passes.
+   previous full `tsc` run exhausted it); CI's production build remains the
+   authoritative build check.
 
 ## 6a. What the database suite found
 

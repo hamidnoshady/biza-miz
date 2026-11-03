@@ -11,11 +11,11 @@
  */
 import { PrinterIcon } from "lucide-react";
 
-export function PrintToolbar({ title }: { title: string }) {
+export function PrintToolbar({ title, finalSigned = false }: { title: string; finalSigned?: boolean }) {
   return (
     <div className="mb-4 flex flex-wrap items-center justify-between gap-3 print:hidden">
       <p className="text-sm text-muted-foreground">
-        پیش‌نمایش چاپ — «چاپ» را بزنید و در پنجرهٔ چاپ، «ذخیره به‌صورت PDF» را انتخاب کنید.
+        {finalSigned ? "نسخهٔ امضاشده" : "پیش‌نمایش چاپ"} — «چاپ» را بزنید و در پنجرهٔ چاپ، «ذخیره به‌صورت PDF» را انتخاب کنید.
       </p>
       <button
         type="button"
