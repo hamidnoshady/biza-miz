@@ -244,10 +244,24 @@ export async function tenantBackupInventory(
   const registeredRefs = new Set(
     registered.map((row) => tenantBackupArtifactRef(businessId, row.destination, row.storageRef)),
   );
+  // A legacy row describes a `backup_runs` row, and a managed artifact always has
+  // one — so every managed backup would otherwise be listed a second time as an
+  // unverifiable "legacy" copy. Legacy refs are namespaced (`<destination>:<name>`)
+  // and managed refs are not, so the ref set above cannot match them; the
+  // artifact's own file name can, and it is the same file. Matching on the name
+  // regardless of destination also covers Cloud's reclaimed local twin: the bytes
+  // are gone by design, so a legacy row for them is a phantom, not a backup.
+  const registeredArtifacts = new Set(registered.map((row) => row.storageRef));
+  const legacyArtifactName = (row: StoredArtifactRow) =>
+    row.storageRef.startsWith(`${row.destination}:`)
+      ? row.storageRef.slice(row.destination.length + 1)
+      : row.storageRef;
   const rows = [
     ...registered,
     ...legacy.filter(
-      (row) => !registeredRefs.has(tenantBackupArtifactRef(businessId, row.destination, row.storageRef)),
+      (row) =>
+        !registeredRefs.has(tenantBackupArtifactRef(businessId, row.destination, row.storageRef)) &&
+        !registeredArtifacts.has(legacyArtifactName(row)),
     ),
   ];
   const entries = buildTenantInventory(rows, businessId, {

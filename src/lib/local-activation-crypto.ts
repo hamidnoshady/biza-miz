@@ -265,10 +265,16 @@ export type CloudOriginValidationResult =
  *   - Must normalize cleanly to an origin (`https://host[:port]`)
  *   - Must use `https://` and resolve only to public addresses (SSRF guard)
  *   - Loopback (`http://127.0.0.1:<port>`) is permitted ONLY when explicitly
- *     running inside automated tests (`NODE_ENV === "test"` or `"development"`)
- *     or packaged CI smoke mode (`DESKTOP_SMOKE_MARKER`), AND
- *     `LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK === "1"` — NEVER in normal
- *     production Desktop runs, and NEVER for RFC1918 LAN or metadata IPs.
+ *     running from source in an automated test (`NODE_ENV === "test"` or
+ *     `"development"`) AND `LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK === "1"`.
+ *     Issue #1194: the old third condition — a `DESKTOP_SMOKE_MARKER` process
+ *     variable — was a bypass inside the *production* build, because the
+ *     packaged desktop sets `NODE_ENV=production` and the marker was only ever
+ *     a non-secret environment switch. A signed installer must not be able to
+ *     redeem a plain-HTTP loopback "cloud"; the packaged acceptance harness
+ *     therefore exercises this path only from an unpackaged/`NODE_ENV=test`
+ *     process, never from release bytes. The check stays fail-closed in
+ *     production, and still rejects RFC1918 LAN and metadata IPs at all times.
  */
 export async function validateCloudOriginForLocalActivation(
   rawUrl: string,
@@ -285,9 +291,7 @@ export async function validateCloudOriginForLocalActivation(
   const parsed = new URL(normalized.url);
   const allowTestLoopback =
     env.LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK === "1" &&
-    (env.NODE_ENV === "test" ||
-      env.NODE_ENV === "development" ||
-      Boolean(env.DESKTOP_SMOKE_MARKER?.trim()));
+    (env.NODE_ENV === "test" || env.NODE_ENV === "development");
 
   if (allowTestLoopback && parsed.hostname === "127.0.0.1") {
     return { ok: true, origin: normalized.url };

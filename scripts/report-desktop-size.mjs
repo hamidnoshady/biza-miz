@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Writes a reproducible desktop payload report before or after packaging. */
-import { readdir, stat, writeFile } from "node:fs/promises";
+import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -143,6 +143,55 @@ const lines = [
   ...files.map((row, index) => `${index + 1}. \`${row.path}\` — ${mib(row.bytes)}`),
   "",
 ];
+/* ---
+ * Issue #1194 — the manifest the review asked for, in the same report as the
+ * sizes: exactly which Electron files ship, and which Central-only paths were
+ * removed from the web runtime before packaging. Written from the artefacts
+ * (`electron/package.json`, `.desktop-runtime/runtime-build.json`), not from
+ * a hand-maintained list, so it cannot drift the way a prose manifest does.
+ * --- */
+const desktopPackage = JSON.parse(await readFile(path.join(root, "electron", "package.json"), "utf8"));
+const shippedElectronFiles = await Promise.all(
+  desktopPackage.build.files.map(async (file) => ({
+    file,
+    bytes: await bytes(path.join(root, "electron", file)),
+  })),
+);
+const runtimeBuildPath = path.join(root, ".desktop-runtime", "runtime-build.json");
+const runtimeBuild = existsSync(runtimeBuildPath) ? JSON.parse(await readFile(runtimeBuildPath, "utf8")) : null;
+const centralExclusions = runtimeBuild?.centralExclusions ?? null;
+const centralRoutePresent =
+  existsSync(path.join(root, ".desktop-runtime", ".next", "server", "app", "platform")) ||
+  existsSync(path.join(root, ".desktop-runtime", ".next", "server", "app", "api", "platform"));
+
+lines.push(
+  "## Shipped Electron manifest",
+  "",
+  `${shippedElectronFiles.length} file(s) from \`electron/package.json\` \`build.files\`:`,
+  "",
+  "| File | Size |",
+  "|---|---:|",
+  ...shippedElectronFiles.map((row) => `| \`${row.file}\` | ${mib(row.bytes)} |`),
+  "",
+  "## Central Superadmin exclusion",
+  "",
+  `Platform route directories in the staged runtime: **${centralRoutePresent ? "PRESENT (build failure)" : "absent"}**`,
+  "",
+  ...(centralExclusions
+    ? [
+        `Removed ${centralExclusions.filesRemoved} file(s), ${mib(centralExclusions.bytesRemoved)}, ` +
+          `${centralExclusions.manifestEntriesRemoved} route-manifest entr(ies) while staging:`,
+        "",
+        "| Removed path | Files | Size |",
+        "|---|---:|---:|",
+        ...centralExclusions.removed.map(
+          (row) => `| \`${row.path}\` | ${row.files ?? "-"} | ${row.bytes === undefined ? "-" : mib(row.bytes)} |`,
+        ),
+      ]
+    : ["\`runtime-build.json\` is not present; run \`npm run desktop:runtime\` before this report."]),
+  "",
+);
+
 await writeFile(output, `${lines.join("\n")}\n`);
 if (process.env.GITHUB_ACTIONS === "true") {
   const compositionNotice = composition

@@ -348,6 +348,13 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "$($f.FullName) does not parse" }
           }
 
+      - name: Test bootstrap and Central console are absent from the package shape
+        # Issue #1194 - fast source-level gate (the byte-level gate runs on the
+        # built installer in the Windows packaging workflows).
+        run: |
+          npx vitest run src/lib/desktop-shell-hardening.test.ts src/lib/desktop-release-hardening.test.ts src/lib/platform-realm-isolation.test.ts src/middleware.issue-1194.test.ts
+          node -e "const r=require('./scripts/desktop/release-scan-rules.cjs'); if (!r.FORBIDDEN_TEXT_MARKERS.length || !r.FORBIDDEN_PATH_RULES.length) process.exit(1)"
+
       - name: New positive runtime constraints hold
         working-directory: electron
         run: npm run verify:runtime

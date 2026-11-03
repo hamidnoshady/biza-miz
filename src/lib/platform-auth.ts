@@ -24,6 +24,7 @@ import {
   type PlatformSessionPayload,
 } from "./platform-auth-edge";
 import { platformCan, type PlatformCapability } from "./platform-admin";
+import { platformRealmUnavailable } from "./platform-runtime-guard";
 import { query } from "./db";
 import { enterTenantScope, runInTenantScope } from "./tenant-context";
 
@@ -75,6 +76,10 @@ export function withPlatformScope<Args extends unknown[]>(
   handler: (...args: Args) => Promise<NextResponse>,
 ): (...args: Args) => Promise<NextResponse> {
   return async (...args: Args) => {
+    // Issue #1194 — defense in depth before any cookie is read: a site runtime
+    // serves no platform route, even if the request reached this handler.
+    const unavailable = platformRealmUnavailable();
+    if (unavailable) return unavailable;
     const store = await cookies();
     const token = store.get(PLATFORM_SESSION_COOKIE)?.value;
     const session = token ? await verifyPlatformSession(token) : null;
@@ -267,6 +272,11 @@ type Guarded =
 
 /** Session guard: any authenticated, still-active platform admin. */
 export async function requirePlatformAdmin(): Promise<Guarded> {
+  // Issue #1194 — the realm check comes first. A site deployment answers 404
+  // without touching the database, so neither a forged local platform cookie
+  // nor a locally inserted `platform_admins` row can reach a handler.
+  const unavailable = platformRealmUnavailable();
+  if (unavailable) return { session: null, error: unavailable };
   const session = await getPlatformSession();
   if (!session) {
     return { session: null, error: NextResponse.json({ error: "unauthorized" }, { status: 401 }) };

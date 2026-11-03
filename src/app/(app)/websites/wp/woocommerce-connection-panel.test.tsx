@@ -103,6 +103,58 @@ it("reports a stopped scheduler with its reason, and does not call a connection 
   expect(screen.getByText(/هنوز رفع نشده/)).toBeTruthy();
 });
 
+// Issue #1206 P1: the p95 ≤ 3-minute target appears only as a measurement
+// over deliveries that happened — with the sample count in the sentence —
+// never as a promise derived from the configured cadence.
+it("shows measured latency for both directions, graded against the 3-minute target", async () => {
+  vi.mocked(api).mockResolvedValue({
+    ok: true,
+    data: {
+      connections: [
+        {
+          ...woo,
+          ...pluginHealth({
+            deliveryLatency: { samples: 212, p50Seconds: 41, p95Seconds: 158, p99Seconds: 402, maxSeconds: 3900 },
+          }),
+          applyLatency: { samples: 37, p50Seconds: 25, p95Seconds: 95, p99Seconds: 140, maxSeconds: 200 },
+        },
+      ],
+    },
+  } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText(/اندازه‌گیری‌شده از ۲۱۲ تحویل اخیر/)).toBeTruthy();
+  expect(screen.getByText(/۲ دقیقه و ۳۸ ثانیه/)).toBeTruthy();
+  expect(screen.getByText(/اعمال تغییرات بیزامیز در فروشگاه/)).toBeTruthy();
+  expect(screen.getAllByText(/زیر هدف ۳ دقیقه/).length).toBe(2);
+});
+
+it("says «not enough data» instead of quoting a p95 from a handful of deliveries", async () => {
+  vi.mocked(api).mockResolvedValue({
+    ok: true,
+    data: {
+      connections: [
+        {
+          ...woo,
+          ...pluginHealth({
+            deliveryLatency: { samples: 3, p50Seconds: 5, p95Seconds: 9, p99Seconds: 9, maxSeconds: 9 },
+          }),
+        },
+      ],
+    },
+  } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText(/هنوز قابل قضاوت نیست/)).toBeTruthy();
+  expect(screen.queryByText(/زیر هدف ۳ دقیقه/)).toBeNull();
+});
+
+it("an older plugin without the report shows no latency line at all", async () => {
+  vi.mocked(api).mockResolvedValue({ ok: true, data: { connections: [{ ...woo, ...pluginHealth() }] } } as never);
+  render(<WpConnectionPanel canRotateTokens />);
+  expect(await screen.findByText("کرون در حال اجرا")).toBeTruthy();
+  expect(screen.queryByText(/اندازه‌گیری‌شده از/)).toBeNull();
+  expect(screen.queryByText(/قابل قضاوت نیست/)).toBeNull();
+});
+
 // Issue #1206 P0: the probe. A queued event is not evidence, an executed one
 // is, and the app must be able to *ask* — but only of a plugin that can run it.
 const cronProbe = (overrides: Record<string, unknown> = {}) => ({

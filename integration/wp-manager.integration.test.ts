@@ -174,6 +174,9 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect(row!.title).toBe("Café’s “News”…");
     expect(row!.slug).toBe("cafe-news");
     expect(row!.status).toBe("publish");
+    // The card preview prefers the raw excerpt: rendered HTML would put tags
+    // in front of the owner.
+    expect(row!.excerptText).toBe("Raw summary");
 
     const detail = await content.getWpContent(biz.id, biz.pluginConnId, "post", "101");
     expect(detail?.editorTitle).toBe("Café's News");
@@ -217,6 +220,30 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
       .find((row) => row.remoteId === "901");
     expect(unsafe?.mediaUrl).toBeNull();
     expect(await content.deleteWpContent(biz.id, biz.pluginConnId, { id: 901, type: "attachment" })).toBe(true);
+  });
+
+  it("resolves a post's featured image through the mirrored attachment, and stays null when there is none", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 103,
+      type: "post",
+      title: "با تصویر شاخص",
+      excerpt: { raw: "<p>خلاصه&nbsp;کوتاه</p>" },
+      featured_media: 900,
+      status: "publish",
+    });
+    const rows = await content.listWpContent(biz.id, biz.pluginConnId, { wpType: "post" });
+    const withImage = rows.find((r) => r.remoteId === "103");
+    // Attachment 900 carries no media_details, so the source url is the fallback.
+    expect(withImage?.featuredImageUrl).toBe("https://shop.example.com/logo.png");
+    expect(withImage?.excerptText).toBe("خلاصه کوتاه");
+
+    await content.upsertWpContent(conn(), { id: 104, type: "post", title: "بدون تصویر", featured_media: 0 });
+    const withoutImage = (await content.listWpContent(biz.id, biz.pluginConnId, { wpType: "post" }))
+      .find((r) => r.remoteId === "104");
+    // The plugin sends 0 for "no featured image"; it must never resolve to the
+    // row that happens to share a made-up id.
+    expect(withoutImage?.featuredImageUrl).toBeNull();
+    expect(withoutImage?.excerptText).toBe("");
   });
 
   it("ignores invalid ids, unsafe links and malformed remote dates", async () => {

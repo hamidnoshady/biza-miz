@@ -66,6 +66,10 @@ interface ContentRow {
   mimeType: string | null;
   /** Raw post HTML when the mirror carries it; null when it does not. */
   content: string | null;
+  /** Card preview of the excerpt, already stripped and cut server-side. */
+  excerptText?: string;
+  /** The featured image, resolved through the mirrored attachment. */
+  featuredImageUrl?: string | null;
   remoteUpdatedAt: string | null;
   syncedAt: string;
   writeStatus?: "pending" | "processing" | "failed" | "dead" | "needs_review" | null;
@@ -406,13 +410,27 @@ disabled={syncing || isPaused || !contentExportSupported}
               {rows.map((row) => (
                 <li key={row.remoteId} className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:px-5">
                   <div className="flex min-w-0 flex-1 items-start gap-3">
-                    <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-                      <FileTextIcon aria-hidden="true" className="size-4" />
+                    {/* The picture the site itself shows on this post; the icon
+                        stands in when the payload carried no featured image or
+                        its attachment has not reached the mirror yet. */}
+                    <span className="relative flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-muted text-muted-foreground">
+                      {row.featuredImageUrl ? (
+                        <img
+                          src={row.featuredImageUrl}
+                          alt=""
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          className="size-full object-cover"
+                        />
+                      ) : (
+                        <FileTextIcon aria-hidden="true" className="size-4" />
+                      )}
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="break-words font-medium text-foreground">{row.title || `#${toPersianDigits(row.remoteId)}`}</p>
                       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                         <StatusBadge tone={statusTone(row.status)}>{STATUS_LABELS[row.status] ?? row.status}</StatusBadge>
+                        <span>{row.wpType === "page" ? "برگه" : "نوشته"}</span>
                         {row.writeStatus ? (
                           <StatusBadge tone={row.writeStatus === "pending" || row.writeStatus === "processing" ? "active" : "danger"}>
                             {WRITE_STATUS_LABELS[row.writeStatus]}
@@ -426,6 +444,9 @@ disabled={syncing || isPaused || !contentExportSupported}
                             : "زمان ویرایش نامشخص"}
                         </span>
                       </div>
+                      {row.excerptText ? (
+                        <p className="mt-1.5 line-clamp-2 break-words text-xs leading-5 text-muted-foreground">{row.excerptText}</p>
+                      ) : null}
                     </div>
                   </div>
                   <div className={cn("grid w-full gap-2 sm:w-auto", row.permalink && canManage ? "grid-cols-2" : "grid-cols-1")}>

@@ -180,6 +180,7 @@ require_once POS_CONNECTOR_PATH . 'includes/class-pos-queue.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-sync.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-settings.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-torob.php';
+require_once POS_CONNECTOR_PATH . 'includes/class-pos-torob-products.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-admin.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-updater.php';
 
@@ -423,6 +424,11 @@ function pos_connector_bootstrap() {
 		// store side is broken. A 403 from a live endpoint is a state the merchant
 		// can fix; a missing route looks like a broken integration.
 		POS_Connector_Torob::init();
+		// The Product API v3, served from this store's own origin — the deployable the
+		// issue names for shops whose domain the platform does not terminate, since the
+		// token's `aud` is the domain. Registered on `rest_api_init`, so it needs no
+		// traffic of its own to exist.
+		POS_Connector_Torob_Products::init();
 		add_action( 'admin_post_pos_connector_save_torob', array( 'POS_Connector_Torob', 'handle_save' ) );
 
 		if ( ! pos_connector_woocommerce_active() ) {

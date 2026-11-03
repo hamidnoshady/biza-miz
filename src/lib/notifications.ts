@@ -142,6 +142,8 @@ export const NOTIFICATION_EVENT_KEYS = [
   // deadline is a policy fact (deadline − notification lead), so this rides the
   // service-activation tick's own scan rather than a scheduler of its own.
   "service.retention_expiring",
+  // Issue #908 — tell workspace managers once every required signer completes.
+  "contract.completed",
   "system.test",
 ] as const;
 export type NotificationEventKey = (typeof NOTIFICATION_EVENT_KEYS)[number];
@@ -540,6 +542,16 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     defaultSeverity: "important",
     // The owner is the one who decides whether this business keeps the data.
     defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "contract.completed": {
+    key: "contract.completed",
+    group: "projects",
+    label: "امضای قرارداد کامل شد",
+    description: "وقتی همهٔ امضاکنندگان لازم، نسخهٔ ثابت قرارداد را امضا کرده‌اند.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
     perLocation: false,
     hasAmount: false,
   },

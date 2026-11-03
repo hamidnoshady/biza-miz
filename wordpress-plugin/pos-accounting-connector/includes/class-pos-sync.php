@@ -553,6 +553,11 @@ class POS_Connector_Sync {
 			// round-trip them; rendered HTML lives on the public site.
 			$payload['content']     = $post->post_content;
 			$payload['excerpt']     = $post->post_excerpt;
+			// The featured image by id, not by URL: the picture itself arrives
+			// with the media sync, and the app resolves this id against its own
+			// attachment mirror. 0 when the post has none, which the app reads as
+			// "no image" — never as "unknown image". */
+			$payload['featured_media'] = (int) get_post_thumbnail_id( $post );
 			// Same echo as the attachment branch: only a post this store created
 			// from a `post_upsert` job carries the meta, so the app can tell "the
 			// create I queued landed as post #123" from a post written by hand.
@@ -1730,6 +1735,11 @@ class POS_Connector_Sync {
 				'localQueueFailed'    => (int) $counts['failed'],
 				// Per-event problem list (issue #942, F12): which events are stuck and why.
 				'localQueueRecent'    => POS_Connector_Queue::recent_problems( 10 ),
+				// Measured enqueue → app-accepted percentiles over recent sent
+				// rows (#1206 P1): the app grades the p95 ≤ 3-minute target
+				// from these samples, never from the configured cadence.
+				// Null until the first delivery — "no data" is its own fact.
+				'deliveryLatency'     => POS_Connector_Queue::delivery_latency(),
 				'lastProductsSweep'   => $settings['last_products_sweep_at'],
 				'lastOrdersSweep'     => $settings['last_orders_sweep_at'],
 				'lastCustomersSweep'  => $settings['last_customers_sweep_at'],
