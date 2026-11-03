@@ -37,7 +37,7 @@ import {
 } from "@/lib/knowledge";
 import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { api, inputClass } from "../ui";
-import { cardClass } from "../page-chrome";
+import { cardClass, overlayPanelClass } from "../page-chrome";
 
 export function articleHref(slug: string): string {
   return `/knowledge/a/${encodeURIComponent(slug)}`;
@@ -643,7 +643,7 @@ export function KbSideMenuFrame({
         >
           <div
             ref={panelRef}
-            className="absolute inset-y-0 start-0 flex w-[88vw] max-w-80 min-w-0 flex-col overflow-hidden bg-card p-3 pb-6 shadow-xl"
+            className={`absolute inset-y-0 start-0 flex w-[88vw] max-w-80 min-w-0 flex-col overflow-hidden p-3 pb-6 ${overlayPanelClass}`}
             onClick={(e) => e.stopPropagation()}
           >
             <button
