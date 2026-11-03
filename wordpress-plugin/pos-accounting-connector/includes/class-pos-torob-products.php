@@ -332,7 +332,7 @@ class POS_Connector_Torob_Products {
 		}
 
 		$unique = self::clamp( isset( $row['id'] ) ? (string) $row['id'] : '', self::LIMITS['page_unique'] );
-		if ( null === $unique ) {
+		if ( null === $unique || strlen( $unique ) > self::LIMITS['page_unique'] ) {
 			return null;
 		}
 		$title = self::clamp( isset( $row['title'] ) ? (string) $row['title'] : '', self::LIMITS['title'] );
@@ -341,11 +341,20 @@ class POS_Connector_Torob_Products {
 		}
 
 		$available = isset( $row['available'] ) ? (bool) $row['available'] : true;
-		$toman     = isset( $row['price_toman'] ) ? (int) $row['price_toman'] : 0;
+		$toman     = isset( $row['price_toman'] ) ? $row['price_toman'] : null;
+		if ( ! is_int( $toman ) || $toman < 0 || $toman > 100000000000 ) {
+			// Never turn an unsupported/invalid amount into `0`: true + zero means
+			// FREE to Torob. `null` is the connector's explicit "do not publish".
+			return null;
+		}
+		$toman = is_int( $toman ) ? $toman : 0;
 
+		if ( strlen( $url ) > self::LIMITS['page_url'] ) {
+			return null;
+		}
 		$record = array(
 			'page_unique'  => $unique,
-			'page_url'     => self::clamp( $url, self::LIMITS['page_url'] ),
+			'page_url'     => $url,
 			'title'        => $title,
 			// The trap: `true` + `0` is free. An unavailable product never carries a
 			// price, and an available one never carries a zero it did not earn.
@@ -468,12 +477,11 @@ class POS_Connector_Torob_Products {
 	public static function cursor_response( $records, $has_more ) {
 		$last = $has_more && $records ? $records[ count( $records ) - 1 ]['page_unique'] : null;
 		return array(
-			'api_version'  => self::API_VERSION,
-			'current_page' => 1,
-			'total'        => count( (array) $records ),
-			'max_pages'    => null,
-			'next_cursor'  => null === $last ? null : self::encode_cursor( $last ),
-			'products'     => array_values( (array) $records ),
+			'api_version' => self::API_VERSION,
+			'total'       => count( (array) $records ),
+			'max_pages'   => null,
+			'next_cursor' => null === $last ? null : self::encode_cursor( $last ),
+			'products'    => array_values( (array) $records ),
 		);
 	}
 
@@ -558,25 +566,13 @@ class POS_Connector_Torob_Products {
 
 	/** `page` mode: WooCommerce sorts and pages; this only shapes. */
 	private static function serve_page( $request ) {
-		if ( ! function_exists( 'wc_get_products' ) ) {
-			return self::ok( self::page_response( array(), $request['page'], 0 ) );
-		}
-
-		$result = wc_get_products(
-			array(
-				'limit'    => self::PAGE_SIZE,
-				'page'     => $request['page'],
-				'status'   => 'publish',
-				'orderby'  => self::orderby( $request['sort'] ),
-				'order'    => 'DESC',
-				'paginate' => true,
-			)
-		);
-
-		$products = is_object( $result ) && isset( $result->products ) ? $result->products : array();
-		$total    = is_object( $result ) && isset( $result->total ) ? (int) $result->total : count( $products );
-
-		return self::ok( self::page_response( self::records_for( $products ), $request['page'], $total ) );
+		$records = self::all_records();
+		$records = self::sort_records( $records, $request['sort'] );
+		$total   = count( $records );
+		$max     = self::max_pages( $total );
+		$page    = max( 1, min( $max, (int) $request['page'] ) );
+		$start   = ( $page - 1 ) * self::PAGE_SIZE;
+		return self::ok( self::page_response( array_slice( $records, $start, self::PAGE_SIZE ), $page, $total ) );
 	}
 
 	/**
@@ -589,43 +585,26 @@ class POS_Connector_Torob_Products {
 	private static function serve_cursor( $request ) {
 		$after = null === $request['cursor'] ? null : self::decode_cursor( $request['cursor'] );
 		if ( null !== $after && '' === $after ) {
-			// A cursor this shop never issued is a 400, not a silent first page: the
-			// caller would otherwise re-read the catalogue from the top forever.
 			return array(
 				'status' => 400,
 				'body'   => self::error_body( 'cursor_invalid' ),
 			);
 		}
 
-		$ids      = self::cursor_ids( $after );
-		$has_more = count( $ids ) > self::PAGE_SIZE;
-		$products = array();
-		foreach ( array_slice( $ids, 0, self::PAGE_SIZE ) as $id ) {
-			$product = function_exists( 'wc_get_product' ) ? wc_get_product( $id ) : null;
-			if ( $product ) {
-				$products[] = $product;
-			}
+		$records = self::sort_records( self::all_records(), 'product_id_desc' );
+		if ( null !== $after ) {
+			$records = array_values(
+				array_filter(
+					$records,
+					static function ( $record ) use ( $after ) {
+						return strcmp( (string) $record['page_unique'], (string) $after ) < 0;
+					}
+				)
+			);
 		}
-
-		return self::ok( self::cursor_response( self::records_for( $products ), $has_more ) );
-	}
-
-	/** Up to PAGE_SIZE+1 product ids older than `$after`, so "more" is knowable. */
-	private static function cursor_ids( $after ) {
-		global $wpdb;
-		if ( ! isset( $wpdb ) ) {
-			return array();
-		}
-		$bound = null === $after ? PHP_INT_MAX : (int) $after;
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
-		$ids = $wpdb->get_col(
-			$wpdb->prepare(
-				"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'product' AND post_status = 'publish' AND ID < %d ORDER BY ID DESC LIMIT %d",
-				$bound,
-				self::PAGE_SIZE + 1
-			)
-		);
-		return array_map( 'intval', (array) $ids );
+		$has_more = count( $records ) > self::PAGE_SIZE;
+		$page     = array_slice( $records, 0, self::PAGE_SIZE );
+		return self::ok( self::cursor_response( $page, $has_more ) );
 	}
 
 	/** `page_urls` and `page_uniques`: a direct lookup, absent when unknown. */
@@ -646,13 +625,13 @@ class POS_Connector_Torob_Products {
 		// URLs are matched against the products' own permalinks rather than resolved
 		// through `url_to_postid`, because that helper trusts the request's host while
 		// this comparison must not.
-		$wanted  = array_flip( array_map( array( __CLASS__, 'strip_url' ), $request['page_urls'] ) );
+		$wanted  = array_flip( array_map( 'trim', $request['page_urls'] ) );
 		$records = array();
 		foreach ( self::all_products() as $product ) {
 			foreach ( self::rows_from_product( $product ) as $row ) {
 				// Only the page that was asked for: a URL lookup of one variation must
 				// not answer with the whole family.
-				if ( ! isset( $wanted[ self::strip_url( $row['url'] ) ] ) ) {
+				if ( ! isset( $wanted[ trim( $row['url'] ) ] ) ) {
 					continue;
 				}
 				$record = self::record( $row );
@@ -664,13 +643,82 @@ class POS_Connector_Torob_Products {
 		return self::ok( self::lookup_response( $records ) );
 	}
 
-	/** A bounded catalogue walk, used only by the URL lookup. */
+	/**
+	 * The records that are actually publishable, in deterministic catalogue batches.
+	 *
+	 * The API's `total` and page boundaries describe these records, not the raw count
+	 * of WooCommerce products: a product without a valid date/image/price is not a
+	 * Torob page and cannot count toward `max_pages`. The batches are discarded as we
+	 * go, keeping only the small contract records rather than full Woo product objects.
+	 */
+	private static function all_records() {
+		if ( ! function_exists( 'wc_get_products' ) ) {
+			return array();
+		}
+		$records = array();
+		$seen    = array();
+		for ( $page = 1; ; $page++ ) {
+			$batch = wc_get_products(
+				array(
+					'limit'   => self::PAGE_SIZE,
+					'page'    => $page,
+					'status'  => 'publish',
+					'orderby' => 'ID',
+					'order'   => 'DESC',
+				)
+			);
+			if ( empty( $batch ) ) {
+				break;
+			}
+			foreach ( self::records_for( $batch ) as $record ) {
+				$key = strtolower( $record['page_url'] );
+				if ( isset( $seen[ $record['page_unique'] ] ) || isset( $seen[ $key ] ) ) {
+					continue;
+				}
+				$seen[ $record['page_unique'] ] = true;
+				$seen[ $key ]                   = true;
+				$records[]                      = $record;
+			}
+			if ( count( $batch ) < self::PAGE_SIZE ) {
+				break;
+			}
+		}
+		return $records;
+	}
+
+	/** Sort records with the exact tie-breakers the hosted feed uses. */
+	private static function sort_records( $records, $sort ) {
+		usort(
+			$records,
+			static function ( $a, $b ) use ( $sort ) {
+				$unique = strcmp( (string) $a['page_unique'], (string) $b['page_unique'] );
+				if ( 'product_id_desc' === $sort ) {
+					return -$unique;
+				}
+				$field = 'date_updated_desc' === $sort ? 'date_updated' : 'date_added';
+				$left  = isset( $a[ $field ] ) ? (string) $a[ $field ] : '';
+				$right = isset( $b[ $field ] ) ? (string) $b[ $field ] : '';
+				if ( 'date_updated_desc' === $sort ) {
+					if ( '' === $left && '' !== $right ) {
+						return 1;
+					}
+					if ( '' !== $left && '' === $right ) {
+						return -1;
+					}
+				}
+				return strcmp( $right, $left ) ?: $unique;
+			}
+		);
+		return $records;
+	}
+
+	/** A catalogue walk for the URL lookup. */
 	private static function all_products() {
 		if ( ! function_exists( 'wc_get_products' ) ) {
 			return array();
 		}
 		$all = array();
-		for ( $page = 1; $page <= 50; $page++ ) {
+		for ( $page = 1; ; $page++ ) {
 			$batch = wc_get_products(
 				array(
 					'limit'   => 100,
@@ -834,7 +882,7 @@ class POS_Connector_Torob_Products {
 			'category'        => $category,
 			'short_desc'      => $short,
 			'spec'            => $spec,
-			'date_added'      => self::iso_timestamp( $created ? self::date_string( $created ) : '' ),
+			'date_added'      => self::iso_timestamp( $created ? self::date_string( $created ) : ( $parent && method_exists( $parent, 'get_date_created' ) && $parent->get_date_created() ? self::date_string( $parent->get_date_created() ) : '' ) ),
 			'date_updated'    => self::iso_timestamp( $modified ? self::date_string( $modified ) : '' ),
 			'group_id'        => $is_variation && $parent ? (string) $parent->get_id() : '',
 			'seller_name'     => '',
@@ -844,8 +892,10 @@ class POS_Connector_Torob_Products {
 	}
 
 	private static function date_string( $date ) {
-		if ( is_object( $date ) && method_exists( $date, 'format' ) ) {
-			return $date->format( 'Y-m-d\TH:i:s' ) . '+00:00';
+		if ( is_object( $date ) && method_exists( $date, 'getTimestamp' ) ) {
+			// A Woo date object's timezone is the store timezone, not necessarily UTC.
+			// Convert from its epoch so appending `Z` never lies about local time.
+			return gmdate( 'Y-m-d\TH:i:s', $date->getTimestamp() ) . '+00:00';
 		}
 		return '';
 	}
@@ -881,9 +931,33 @@ class POS_Connector_Torob_Products {
 		return $spec;
 	}
 
-	private static function to_toman( $amount ) {
-		$amount = (float) $amount;
-		return (int) round( (float) apply_filters( 'pos_connector_torob_amount', $amount ) );
+	public static function to_toman( $amount ) {
+		$currency = function_exists( 'get_woocommerce_currency' ) ? strtoupper( (string) get_woocommerce_currency() ) : '';
+		$amount   = trim( (string) $amount );
+		if ( ! preg_match( '/^\d+(?:\.0+)?$/', $amount ) ) {
+			return null;
+		}
+		$whole = strstr( $amount, '.', true );
+		if ( false === $whole ) {
+			$whole = $amount;
+		}
+		// Keep the canonical IRR → IRT conversion exact: no float, no rounding, no
+		// fractional Rial quietly becoming a different storefront price.
+		if ( 'IRR' === $currency ) {
+			if ( 0 !== ( (int) substr( $whole, -1 ) % 10 ) ) {
+				return null;
+			}
+			$default = (int) ( (int) $whole / 10 );
+		} elseif ( 'IRT' === $currency ) {
+			$default = (int) $whole;
+		} else {
+			return null;
+		}
+		$value = apply_filters( 'pos_connector_torob_amount', $default, $amount, $currency );
+		if ( ! is_int( $value ) || $value < 0 || $value > 100000000000 ) {
+			return null;
+		}
+		return $value;
 	}
 }
 

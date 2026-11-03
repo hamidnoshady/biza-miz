@@ -14,6 +14,7 @@
 define( 'ABSPATH', '/tmp/' );
 
 $GLOBALS['pos_test_filters'] = array();
+$GLOBALS['pos_test_currency'] = 'IRT';
 
 function apply_filters( $tag, $value ) {
 	return array_key_exists( $tag, $GLOBALS['pos_test_filters'] ) ? $GLOBALS['pos_test_filters'][ $tag ] : $value;
@@ -27,6 +28,9 @@ function wp_strip_all_tags( $value ) {
 }
 function wp_parse_url( $url ) {
 	return parse_url( $url );
+}
+function get_woocommerce_currency() {
+	return $GLOBALS['pos_test_currency'];
 }
 
 require dirname( __DIR__ ) . '/pos-accounting-connector/includes/class-pos-torob.php';
@@ -153,6 +157,17 @@ same( '2025-09-21T10:00:00.000Z', $record['date_added'], 'date_added in UTC with
 same( '2025-09-21T10:00:00.000Z', $P::iso_timestamp( '2025-09-21T10:00:00+00:00' ), 'the same instant, written another way' );
 null_value( $P::iso_timestamp( 'not a date' ), 'an unparseable date is null' );
 
+$GLOBALS['pos_test_currency'] = 'IRR';
+same( 250000, $P::to_toman( '2500000' ), 'Rial converts to whole Toman exactly' );
+null_value( $P::to_toman( '2500001' ), 'a Rial price not divisible by ten is refused, never rounded' );
+$GLOBALS['pos_test_currency'] = 'IRT';
+same( 2500000, $P::to_toman( '2500000.00' ), 'Toman stays Toman' );
+null_value( $P::to_toman( '2500000.50' ), 'fractional Toman is refused' );
+$GLOBALS['pos_test_currency'] = 'USD';
+null_value( $P::to_toman( '2500000' ), 'unsupported currency is not guessed into Toman' );
+$GLOBALS['pos_test_currency'] = 'IRT';
+null_value( $P::record( row( array( 'price_toman' => null ) ) ), 'an unavailable amount never becomes free by a failed conversion' );
+
 $free = $P::record( row( array( 'available' => false ) ) );
 same( false, $free['availability'], 'an unavailable product' );
 same( 0, $free['current_price'], 'never carries a price — true + 0 would read as free' );
@@ -207,6 +222,7 @@ same( 1, $P::max_pages( 0 ), 'and an empty catalogue is still one page' );
 
 $cursor = $P::cursor_response( $records, true );
 same( $P::encode_cursor( '100' ), $cursor['next_cursor'], 'a cursor page hands back the last id it sent' );
+check( ! array_key_exists( 'current_page', $cursor ), 'a cursor envelope has no current_page, unlike a numbered page' );
 null_value( $P::cursor_response( $records, false )['next_cursor'], 'and nothing when there is no more' );
 same( '100', $P::decode_cursor( $cursor['next_cursor'] ), 'the cursor decodes to that id' );
 same( '', $P::decode_cursor( '!!!not base64!!!' ), 'a cursor this shop never issued decodes to nothing' );
