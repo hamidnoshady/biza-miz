@@ -759,23 +759,21 @@ class POS_Connector_Torob_Products {
 		$created      = method_exists( $product, 'get_date_created' ) ? $product->get_date_created() : null;
 		$modified     = method_exists( $product, 'get_date_modified' ) ? $product->get_date_modified() : null;
 
-		$images = array();
+		$images   = array();
 		$image_id = method_exists( $product, 'get_image_id' ) ? (int) $product->get_image_id() : 0;
 		if ( ! $image_id && $parent && method_exists( $parent, 'get_image_id' ) ) {
 			$image_id = (int) $parent->get_image_id();
 		}
-		if ( $image_id && function_exists( 'wp_get_attachment_image_url' ) ) {
-			$full = wp_get_attachment_image_url( $image_id, 'full' );
-			if ( $full ) {
-				$images[] = $full;
-			}
+		$featured = self::attachment_image_url( $image_id );
+		if ( null !== $featured ) {
+			$images[] = $featured;
 		}
 		// The gallery belongs to the parent product; a variation inherits it.
 		$gallery_source = $parent ? $parent : $product;
 		if ( method_exists( $gallery_source, 'get_gallery_image_ids' ) ) {
 			foreach ( (array) $gallery_source->get_gallery_image_ids() as $gallery_id ) {
-				$url_image = function_exists( 'wp_get_attachment_image_url' ) ? wp_get_attachment_image_url( $gallery_id, 'full' ) : '';
-				if ( $url_image ) {
+				$url_image = self::attachment_image_url( (int) $gallery_id );
+				if ( null !== $url_image ) {
 					$images[] = $url_image;
 				}
 			}
@@ -825,6 +823,56 @@ class POS_Connector_Torob_Products {
 			'seller_city'     => '',
 			'guarantee'       => '',
 		);
+	}
+
+	/**
+	 * The full-resolution, publicly-addressable attachment URL Torob can fetch.
+	 *
+	 * Torob says images below 600×600 may not display and recommends at least
+	 * 900×900. Enforce the hard floor, prefer the full attachment, and refuse a
+	 * relative/private-looking URL instead of truncating it into a different URL.
+	 * This is metadata validation, not a network probe on every crawl.
+	 */
+	public static function valid_image_url( $url, $metadata ) {
+		if ( ! is_array( $metadata ) || ! isset( $metadata['width'], $metadata['height'] )
+			|| ! is_numeric( $metadata['width'] ) || ! is_numeric( $metadata['height'] )
+			|| (int) $metadata['width'] < 600 || (int) $metadata['height'] < 600 ) {
+			return null;
+		}
+		$url = trim( (string) $url );
+		if ( '' === $url || strlen( $url ) > self::LIMITS['image'] ) {
+			return null;
+		}
+		$parts = wp_parse_url_standin( $url );
+		if ( ! is_array( $parts ) || empty( $parts['host'] ) || ! isset( $parts['scheme'] )
+			|| ! in_array( strtolower( $parts['scheme'] ), array( 'http', 'https' ), true )
+			|| isset( $parts['user'] ) || isset( $parts['pass'] ) ) {
+			return null;
+		}
+		$host = strtolower( trim( (string) $parts['host'], '[]' ) );
+		if ( 'localhost' === $host || preg_match( '/\.(?:localhost|local|internal)$/', $host ) ) {
+			return null;
+		}
+		if ( filter_var( $host, FILTER_VALIDATE_IP ) && ! filter_var( $host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE ) ) {
+			return null;
+		}
+		// WordPress additionally rejects hosts which resolve to private/reserved IPs.
+		// This is a local validation call, not a request to the remote image on every
+		// feed crawl.
+		if ( function_exists( 'wp_http_validate_url' ) && false === wp_http_validate_url( $url ) ) {
+			return null;
+		}
+		return $url;
+	}
+
+	/** Resolve a WP attachment to a validated full-resolution URL. */
+	private static function attachment_image_url( $attachment_id ) {
+		if ( ! $attachment_id || ! function_exists( 'wp_get_attachment_image_url' ) || ! function_exists( 'wp_get_attachment_metadata' ) ) {
+			return null;
+		}
+		$url      = wp_get_attachment_image_url( $attachment_id, 'full' );
+		$metadata = wp_get_attachment_metadata( $attachment_id );
+		return self::valid_image_url( $url, $metadata );
 	}
 
 	private static function date_string( $date ) {
