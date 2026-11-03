@@ -530,7 +530,7 @@ class POS_Connector_Torob_Products {
 		}
 
 		$settings  = function_exists( 'pos_connector_settings' ) ? pos_connector_settings() : array();
-		$connected = ! empty( $settings['base_url'] ) && ! empty( $settings['token'] );
+		$connected = ! empty( $settings['enabled'] ) && ! empty( $settings['base_url'] ) && ! empty( $settings['token'] );
 
 		$gate = self::gate( $headers, POS_Connector_Torob::site_hosts(), $connected );
 		if ( null !== $gate ) {
