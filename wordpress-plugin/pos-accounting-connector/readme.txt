@@ -4,7 +4,7 @@ Tags: woocommerce, bizamiz, accounting, sync, erp
 Requires at least: 6.0
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.6.28
+Stable tag: 1.6.29
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -108,6 +108,9 @@ HMAC-SHA256 روی متن دقیق درخواست است. توکن فقط برا
 از دست نمی‌رود.
 
 == Changelog ==
+
+= 1.6.29 =
+* بهبودها و رفع اشکال.
 
 = 1.6.28 =
 * بهبودها و رفع اشکال.
