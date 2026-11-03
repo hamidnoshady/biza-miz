@@ -137,7 +137,7 @@ export function KbArticleView({ slug }: { slug: string }) {
   );
 
   return (
-    <PageShell>
+    <PageShell className="min-w-0">
       <div className="mb-4">
         <Link
           href="/knowledge"
@@ -148,7 +148,7 @@ export function KbArticleView({ slug }: { slug: string }) {
         </Link>
       </div>
 
-      <div className="flex items-start gap-6">
+      <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-start lg:gap-6">
         <KbSideMenuFrame
           catalogue={catalogue}
           query={search.query}
@@ -159,7 +159,7 @@ export function KbArticleView({ slug }: { slug: string }) {
           onRetry={retryCatalogue}
         />
 
-        <div className="min-w-0 flex-1">
+        <div className="w-full min-w-0 flex-1">
           {search.query.trim() ? (
             <KbSearchResults
               query={search.query}
@@ -194,7 +194,7 @@ export function KbArticleView({ slug }: { slug: string }) {
               </Link>
             </div>
           ) : (
-            <article className="space-y-6">
+            <article className="min-w-0 space-y-5 sm:space-y-6">
               <PageHeader title={article.title} description={article.summary || undefined} />
 
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
@@ -223,8 +223,8 @@ export function KbArticleView({ slug }: { slug: string }) {
                 ) : null}
               </div>
 
-              <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_240px]">
-                <div className={`${cardClass} p-5 sm:p-7`}>
+              <div className="grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_240px] xl:gap-6">
+                <div className={`${cardClass} min-w-0 overflow-hidden p-4 sm:p-7`}>
                   {article.coverImageUrl ? (
 
                     <img

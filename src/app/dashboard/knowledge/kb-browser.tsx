@@ -39,7 +39,7 @@ import { articleHref, Highlighted, KbSearchResults, KbSideMenuFrame, useKbSearch
 function KbHomeSkeleton() {
   return (
     <div role="status" aria-busy="true" aria-label="در حال آماده‌سازی مرکز آموزش">
-      <div aria-hidden="true" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <div aria-hidden="true" className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
         {Array.from({ length: 6 }).map((_, i) => (
           <Skeleton key={i} className="h-32 rounded-2xl" />
         ))}
@@ -206,13 +206,13 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
   );
 
   return (
-    <PageShell>
+    <PageShell className="min-w-0">
       <PageHeader
         title="مرکز آموزش"
         description="راهنمای کامل پلتفرم: هر بخش را قدم‌به‌قدم بیاموزید، تیترها پیوند لنگری دارند و راهنماها متن، تصویر، ویدیو و نمونه‌کد را کنار هم نشان می‌دهند."
       />
 
-      <div className="flex items-start gap-6">
+      <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-start lg:gap-6">
         <KbSideMenuFrame
           catalogue={catalogue}
           query={search.query}
@@ -220,7 +220,7 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
           searching={search.searching}
         />
 
-        <div className="min-w-0 flex-1">
+        <div className="w-full min-w-0 flex-1">
           {catalogue === null ? (
             error ? (
               <KbLoadFailure message={error} onRetry={() => setReloadKey((value) => value + 1)} />
@@ -284,8 +284,8 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
             </SectionCard>
           ) : (
             /* --- home mode --------------------------------------------------- */
-            <div className="space-y-6">
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="min-w-0 space-y-5 sm:space-y-6">
+              <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
                 {tree.map((node) => (
                   <CategoryCard
                     key={node.id}
@@ -341,18 +341,18 @@ function CategoryCard({
   count: number;
 }) {
   return (
-    <section aria-label={title} className={`${cardClass} p-4`}>
-      <h2 className="flex items-center gap-2 text-sm font-bold text-foreground">
-        <span className="flex size-9 items-center justify-center rounded-xl bg-amber-100 text-base dark:bg-amber-500/20" aria-hidden="true">
+    <section aria-label={title} className={`${cardClass} min-w-0 p-4 sm:p-5`}>
+      <h2 className="flex min-w-0 items-start gap-2 text-sm font-bold text-foreground">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-base dark:bg-amber-500/20" aria-hidden="true">
           {icon || <FolderOpenIcon className="size-4 text-amber-800 dark:text-amber-300" />}
         </span>
-        {title}
-        <span className="ms-auto rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+        <span className="min-w-0 flex-1 break-words pt-1.5 leading-5">{title}</span>
+        <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
           {formatPersianNumber(count)}
         </span>
       </h2>
       {description ? (
-        <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{description}</p>
+        <p className="mt-2 line-clamp-3 break-words text-xs leading-5 text-muted-foreground">{description}</p>
       ) : null}
       {articles.length > 0 ? (
         <ul className="mt-3 space-y-1">
@@ -360,10 +360,10 @@ function CategoryCard({
             <li key={a.id}>
               <Link
                 href={articleHref(a.slug)}
-                className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+                className="flex min-h-10 min-w-0 items-start gap-2 rounded-lg px-2 py-2 text-[13px] leading-5 text-foreground/80 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50"
               >
-                <BookOpenIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-                <span className="min-w-0 flex-1 truncate">{a.title}</span>
+                <BookOpenIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <span className="min-w-0 flex-1 break-words line-clamp-2">{a.title}</span>
               </Link>
             </li>
           ))}

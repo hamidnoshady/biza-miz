@@ -37,7 +37,7 @@ import {
 } from "@/lib/knowledge";
 import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { api, inputClass } from "../ui";
-import { cardClass } from "../page-chrome";
+import { cardClass, overlayPanelClass } from "../page-chrome";
 
 export function articleHref(slug: string): string {
   return `/knowledge/a/${encodeURIComponent(slug)}`;
@@ -405,7 +405,7 @@ function KbSideMenu({
             <TagIcon className="size-3.5" aria-hidden="true" />
             برچسب‌ها
           </p>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
             {catalogue.tags.map((t) => (
               <Link
                 key={t.slug}
@@ -533,6 +533,19 @@ export function KbSideMenuFrame({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
+  // A drawer opened on a phone must not keep the body locked or keyboard focus
+  // trapped in a hidden dialog if the viewport expands to the desktop layout.
+  useEffect(() => {
+    if (!open || typeof window.matchMedia !== "function") return;
+    const desktop = window.matchMedia("(min-width: 1024px)");
+    const closeForDesktop = () => {
+      if (desktop.matches) setOpen(false);
+    };
+    desktop.addEventListener("change", closeForDesktop);
+    closeForDesktop();
+    return () => desktop.removeEventListener("change", closeForDesktop);
+  }, [open]);
+
   // The phone drawer is a real modal: focus moves in (to the close button),
   // Tab/Shift+Tab cycle inside it, Escape closes, the page behind does not
   // scroll, and focus returns to the toggle that opened it. The desktop aside
@@ -602,7 +615,7 @@ export function KbSideMenuFrame({
         onClick={() => setOpen(true)}
         aria-expanded={open}
         aria-controls="kb-mobile-menu"
-        className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-border/80 bg-card px-3 text-sm font-semibold text-foreground/80 shadow-[0_1px_2px_rgb(41_37_36/0.035)] transition-colors hover:bg-muted lg:hidden"
+        className="inline-flex min-h-11 w-full min-w-0 items-center gap-2 rounded-xl border border-border/80 bg-card px-3 py-2 text-start text-sm font-semibold text-foreground/80 shadow-[0_1px_2px_rgb(41_37_36/0.035)] transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50 lg:hidden"
       >
         <ListTreeIcon className="size-4" aria-hidden="true" />
         فهرست راهنماها
@@ -613,8 +626,8 @@ export function KbSideMenuFrame({
         ) : null}
       </button>
 
-      <aside className="hidden w-72 shrink-0 lg:block" aria-label="فهرست پایگاه دانش">
-        <div className={`sticky top-4 max-h-[calc(100vh-6rem)] overflow-hidden p-3 ${cardClass}`}>
+      <aside className="hidden w-72 min-w-0 shrink-0 lg:block" aria-label="فهرست پایگاه دانش">
+        <div className={`sticky top-4 flex h-[min(40rem,calc(100dvh-6rem))] min-h-0 flex-col overflow-hidden p-3 ${cardClass}`}>
           {menu}
         </div>
       </aside>
@@ -625,12 +638,12 @@ export function KbSideMenuFrame({
           aria-modal="true"
           aria-label="فهرست راهنماها"
           id="kb-mobile-menu"
-          className="fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px] lg:hidden"
+          className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-[2px] lg:hidden"
           onClick={() => setOpen(false)}
         >
           <div
             ref={panelRef}
-            className="absolute inset-y-0 start-0 flex w-[86vw] max-w-80 flex-col bg-card p-3 shadow-none"
+            className={`absolute inset-y-0 start-0 flex w-[88vw] max-w-80 min-w-0 flex-col overflow-hidden p-3 pb-6 ${overlayPanelClass}`}
             onClick={(e) => e.stopPropagation()}
           >
             <button
@@ -639,7 +652,7 @@ export function KbSideMenuFrame({
               onClick={() => setOpen(false)}
               aria-label="بستن فهرست"
               title="بستن فهرست"
-              className="mb-2 inline-flex size-9 items-center justify-center self-end rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="mb-2 inline-flex size-11 shrink-0 items-center justify-center self-end rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50"
             >
               <XIcon className="size-5" aria-hidden="true" />
             </button>
