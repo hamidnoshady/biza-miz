@@ -24,6 +24,7 @@ class POS_Connector_Admin {
 			'connection'      => array( 'slug' => 'pos-connector-connection',       'label' => __( 'اتصال', 'pos-accounting-connector' ) ),
 			'synchronization' => array( 'slug' => 'pos-connector-synchronization',  'label' => __( 'همگام‌سازی', 'pos-accounting-connector' ) ),
 			'queue'           => array( 'slug' => 'pos-connector-queue',            'label' => __( 'صف و خطاها', 'pos-accounting-connector' ) ),
+			'torob'           => array( 'slug' => 'pos-connector-torob',          'label' => __( 'ترب', 'pos-accounting-connector' ) ),
 			'diagnostics'     => array( 'slug' => 'pos-connector-diagnostics',      'label' => __( 'عیب‌یابی', 'pos-accounting-connector' ) ),
 			'updates'         => array( 'slug' => 'pos-connector-updates',          'label' => __( 'به‌روزرسانی', 'pos-accounting-connector' ) ),
 		);
@@ -174,7 +175,9 @@ class POS_Connector_Admin {
 			<?php if ( $notice ) : ?>
 				<div class="notice notice-<?php echo esc_attr( $notice[0] ); ?>"><p><?php echo esc_html( $notice[1] . ( '' !== $detail ? ' ' . $detail : '' ) ); ?></p></div>
 			<?php endif; ?>
-			<?php if ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) : ?>
+			<?php if ( 'torob' === $section ) : ?>
+				<?php POS_Connector_Torob::render_admin(); ?>
+			<?php elseif ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) : ?>
 				<?php self::render_wizard( $settings ); ?>
 			<?php elseif ( 'dashboard' === $section ) : ?>
 				<?php self::render_dashboard( $settings, $counts ); ?>

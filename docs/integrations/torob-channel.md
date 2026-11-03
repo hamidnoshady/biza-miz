@@ -402,6 +402,59 @@ Surface: `POST /api/growth/torob/shops/[id]/pages` `{pageUniques, active}` and
 `POST /api/growth/torob/shops/[id]/repair`. Both are `torob.configure`, because both change the
 channel and spend the shop's rate budget.
 
+## 6h. Attribution — the store answers, and only when it says so (Wave 6)
+
+Torob refers a shopper with `?torob_clid=…` and later asks the shop for the purchases
+that came from that click (`order_tracking_api.md`, `action_tracking_api.md`). The
+epic's rule is one sentence — **off by default, `403` when off** — and it decides the
+shape of the whole feature:
+
+| consequence | where |
+| --- | --- |
+| the endpoint is the **store's own origin**, under a path ending `/torob/v1/orders` (or `/actions`); orders live in WooCommerce, so the answer is built by the plugin | `wordpress-plugin/pos-accounting-connector/includes/class-pos-torob.php` |
+| two independent switches, both absent-by-default; only an exact `1` counts as consent | `POS_Connector_Torob::is_enabled` / `set_enabled` |
+| `403 {"success":false,"error":"access_disabled"}` — the refusal is a response, not a decision to send nothing | `guard()` |
+| token → switch → parameters, in that order: the endpoint is not an oracle for a store's settings, and a disabled store never touches an order | `open_channel()` |
+
+The token rules are the same `EdDSA`/`aud`/`exp`/`nbf` set as §6b, verified against the
+site's own host (`home_url()`), with the document's one tolerated spelling: an `aud`
+that carries a port still names the same store. `alg: none` is refused before the
+signature is looked at. The only accepted version header is `1`.
+
+`torob_clid` is captured on any request that carries it — not just the product page —
+with `HttpOnly`, `SameSite=Lax`, `Secure` on https, and a 7-day life, which is the
+attribution window the document defines. It is validated as an opaque id (≤128 chars,
+no URL or markup characters), so it can never become free text in order meta, and it is
+copied onto the order at `woocommerce_checkout_create_order` — which is what the poll
+actually reads.
+
+What is sent, and nothing else: `purchase_timestamp`, `last_updated_timestamp`,
+`torob_clid`, `status`, and optionally `psp`, `order_value`, `shipping_amount`,
+`phone_number`, `products`. Three refusals matter here:
+
+- an order **without** a click id is never sent — the documents require the endpoint to
+  expose only referred purchases;
+- an **unknown** status is dropped rather than guessed: the vocabulary is closed to
+  `completed`/`cancelled`, and WooCommerce's cancelled/refunded/failed map to
+  `cancelled`, everything else to `completed`;
+- a record at or **before** the `*_gt` watermark is not repeated, and a batch is sorted
+  ascending, because the poller resumes from the last timestamp it saw.
+
+`limit` is required and bounded at 1 000: a caller asking for 5 000 gets `400`, not a
+silently trimmed 1 000 that would look like a complete window. Money is an integer in
+Toman, passed through `pos_connector_torob_amount` so a store priced in Rial divides by
+ten instead of reporting a hundredfold sale.
+
+`/torob/v1/actions` answers an honest empty list: this platform has no action events of
+its own, so a site that tracks them supplies them through `pos_connector_torob_actions`.
+An invented record would be worse than none — Torob bills against these.
+
+The switch lives in the plugin's own «ترب» screen, with the copy stating exactly what is
+shared, and `uninstall.php` deletes both options so a reinstall never arrives with
+consent already granted. `wordpress-plugin/tests/connector-torob-attribution.php` pins
+all of it under plain `php` (real Ed25519 keys, no WordPress): the defaults, the 403,
+every token failure, the parameter bounds, and each dropped record.
+
 ## 7. What remains (Waves 3–6)
 
 1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
@@ -418,8 +471,11 @@ channel and spend the shop's rate budget.
    publication rule, the per-product decisions and the blocked products' reasons, and `§6e` adds what
    Torob itself reports about the shop and each page. What is left of this wave is the variant
    catalogue (item 2) and the multi-shop overview columns for Torob's own counts (item 6).
-4. **Wave 5 — opt-in attribution**: Torob order/action attribution off by default, a 403 when it is
-   disabled, and a tenant-visible switch that says exactly what is shared.
+4. **Wave 5 — opt-in attribution.** *Done on the store's origin*: §6h serves
+   `/torob/v1/orders` and `/torob/v1/actions` with both switches off by default, `403` when they
+   are off, and the switch's own copy saying what is shared. What remains is the platform-side
+   variant for shops whose origin the platform terminates — that needs an order store here, which
+   the platform does not have today.
 5. **Wave 5b — the sync queue.** *Done*: `§6f` is the webhook outbox, bounded and coalesced, with
    dead letters, retries, reconciliation-by-fill and a per-shop queue screen. What is left of this wave
    is closed by §6g: the Shop API's **activate/deactivate** (turning a page off on Torob from here)
@@ -469,6 +525,10 @@ this website enroll", and every later surface reads it.
 - `src/app/api/growth/torob/shops/[id]/pages/route.ts` and `.../repair/route.ts` — their two surfaces.
 - `integration/torob-pages.integration.test.ts` — the guard (off, unauthorized, no credential, another
   tenant), the per-id answer, the snapshot that is left alone, and «تعمیر»'s order.
+- `wordpress-plugin/pos-accounting-connector/includes/class-pos-torob.php` — attribution on the
+  store's origin (§6h): the two switches, the 403, token verification, parameter bounds, click
+  capture, and the two REST routes.
+- `wordpress-plugin/tests/connector-torob-attribution.php` — all of the above under plain `php`.
 - `src/lib/torob/webhook.ts` — the webhook's rules: batching, the one-domain check, the two-field
   payload, and what each failure deserves. Pure.
 - `src/lib/torob/webhook-client.ts` — the one `POST`, and the mapping from Torob's statuses to the
