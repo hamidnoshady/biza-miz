@@ -524,10 +524,14 @@ the envelopes, the cursor round trip, and the gate order (401 before 403).
    dead letters, retries, reconciliation-by-fill and a per-shop queue screen. What is left of this wave
    is closed by §6g: the Shop API's **activate/deactivate** (turning a page off on Torob from here)
    and the per-shop «تعمیر» action that fills, sends and re-reads in one step.
-6. **Wave 6 — the drill table and the docs** for the failure classes the issue names (expired token,
-   rejected domain, feed refused, shop deleted on Torob's side), plus the runbook for a shop whose
-   feed has been `blocked` for longer than an hour, and for a shop whose last Shop API read failed three
-   times in a row.
+6. **Wave 6 — the failure drills and the runbook.** *Done*:
+   `integration/torob-failure-drills.integration.test.ts` drives the four classes end to end against
+   real Postgres — an expired/not-yet-valid/wrong-audience/missing token on the crawler, a domain Torob
+   rejects (health moves, the last good observation stays), a feed we refuse to serve (404 and no send),
+   a shop Torob deleted (`dead` + `attention`, our row intact) — and then disconnect → reconnect, which
+   must announce each page **once**. `docs/runbooks/torob-channel-failures.md` is the on-call page for
+   the same four, plus the two named cases (feed blocked over an hour, three failed reads in a row).
+   *Left in this wave*: nothing on the platform side.
 
 Nothing in Waves 2–6 may re-derive eligibility: `resolveTorobWebsites` is the single answer to "may
 this website enroll", and every later surface reads it.
@@ -576,6 +580,8 @@ this website enroll", and every later surface reads it.
   store's origin (§6h): the two switches, the 403, token verification, parameter bounds, click
   capture, and the two REST routes.
 - `wordpress-plugin/tests/connector-torob-attribution.php` — all of the above under plain `php`.
+- `integration/torob-failure-drills.integration.test.ts` and `docs/runbooks/torob-channel-failures.md`
+  — the four failure classes end to end, and the page on call reads.
 - `src/lib/torob/webhook.ts` — the webhook's rules: batching, the one-domain check, the two-field
   payload, and what each failure deserves. Pure.
 - `src/lib/torob/webhook-client.ts` — the one `POST`, and the mapping from Torob's statuses to the
