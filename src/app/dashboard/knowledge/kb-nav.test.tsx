@@ -158,6 +158,34 @@ describe("the phone side-menu drawer", () => {
     tags: [],
   };
 
+  it("closes an open phone drawer when switching to the desktop breakpoint", async () => {
+    const listeners = new Set<() => void>();
+    const desktop = {
+      matches: false,
+      addEventListener: vi.fn((_event: string, callback: () => void) => listeners.add(callback)),
+      removeEventListener: vi.fn((_event: string, callback: () => void) => listeners.delete(callback)),
+    };
+    vi.stubGlobal("matchMedia", vi.fn(() => desktop));
+
+    const user = userEvent.setup();
+    render(
+      <KbSideMenuFrame
+        catalogue={catalogue}
+        query=""
+        onQueryChange={() => undefined}
+        searching={false}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /فهرست راهنماها/ }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    act(() => {
+      desktop.matches = true;
+      for (const listener of listeners) listener();
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.body.style.overflow).toBe("");
+  });
+
   it("moves focus in, traps Tab, closes on Escape and restores focus", async () => {
     const user = userEvent.setup();
     render(
