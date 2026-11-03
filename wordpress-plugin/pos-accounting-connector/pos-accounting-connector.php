@@ -179,6 +179,7 @@ require_once POS_CONNECTOR_PATH . 'includes/class-pos-client.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-queue.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-sync.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-settings.php';
+require_once POS_CONNECTOR_PATH . 'includes/class-pos-torob.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-admin.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-updater.php';
 
@@ -415,6 +416,14 @@ function pos_connector_bootstrap() {
 
 		POS_Connector_Settings::init();
 		POS_Connector_Admin::init();
+
+		// Torob attribution (issue #894, `torob/v1/orders|actions`) is registered
+		// before the WooCommerce gate for a reason: the two routes are *inbound*,
+		// and the switch that keeps them answering 403 has to exist even while the
+		// store side is broken. A 403 from a live endpoint is a state the merchant
+		// can fix; a missing route looks like a broken integration.
+		POS_Connector_Torob::init();
+		add_action( 'admin_post_pos_connector_save_torob', array( 'POS_Connector_Torob', 'handle_save' ) );
 
 		if ( ! pos_connector_woocommerce_active() ) {
 			add_action(
