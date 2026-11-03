@@ -7,6 +7,7 @@ import { summarizePluginHealth } from "@/lib/integrations/plugin-health";
 import { cronProbeOffered } from "@/lib/integrations/plugin-cron-probe";
 import { assessDomainFreshness } from "@/lib/integrations/sync-freshness";
 import { pluginCronWarnAfterMs } from "@/lib/integrations/sync-timing";
+import { applyLatencyByConnection } from "@/lib/integrations/outbox-service";
 
 /**
  * Wave 6 — the panel's monitoring summary: each connection plus the number of
@@ -84,6 +85,11 @@ export const GET = withTenantScope(async () => {
       GROUP BY connection_id, event_topic`,
     [session.businessId],
   );
+  // Measured Bizamiz → store apply latency (#1206 P1): desired → ACKed over
+  // the last 30 days of deliveries, per connection. Absent (null) when
+  // nothing measurable has landed yet — never a row of zeros.
+  const applyLatency = await applyLatencyByConnection(session.businessId);
+
   const iso = (value: Date | null) => (value ? new Date(value).toISOString() : null);
   const now = new Date();
 
@@ -104,6 +110,7 @@ export const GET = withTenantScope(async () => {
       ...c,
       inbox: inboxByConnection.get(c.id) ?? {},
       outbox: outboxByConnection.get(c.id) ?? {},
+      applyLatency: applyLatency.get(c.id) ?? null,
       // Quiet is not stale: see sync-freshness.ts. Only a backlog that stops
       // moving is graded anything other than what was last exchanged.
       domainFreshness: assessDomainFreshness(

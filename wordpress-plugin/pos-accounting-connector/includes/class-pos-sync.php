@@ -1730,6 +1730,11 @@ class POS_Connector_Sync {
 				'localQueueFailed'    => (int) $counts['failed'],
 				// Per-event problem list (issue #942, F12): which events are stuck and why.
 				'localQueueRecent'    => POS_Connector_Queue::recent_problems( 10 ),
+				// Measured enqueue → app-accepted percentiles over recent sent
+				// rows (#1206 P1): the app grades the p95 ≤ 3-minute target
+				// from these samples, never from the configured cadence.
+				// Null until the first delivery — "no data" is its own fact.
+				'deliveryLatency'     => POS_Connector_Queue::delivery_latency(),
 				'lastProductsSweep'   => $settings['last_products_sweep_at'],
 				'lastOrdersSweep'     => $settings['last_orders_sweep_at'],
 				'lastCustomersSweep'  => $settings['last_customers_sweep_at'],

@@ -195,6 +195,33 @@ describe("truthful cron health (issue #1206)", () => {
   });
 });
 
+describe("measured latency & Jalali-facing admin (issue #1206 P1 / UX-02)", () => {
+  const health = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-health.php", "utf8");
+  const cli = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-cli.php", "utf8");
+
+  it("measures the local queue's delivery latency from sent rows, and only from sent rows", () => {
+    expect(queue).toContain("function delivery_latency(");
+    expect(queue).toContain("WHERE status = 'sent'");
+    expect(queue).toContain("UNIX_TIMESTAMP(updated_at) - UNIX_TIMESTAMP(created_at)");
+    expect(health).toContain("public static function percentiles(");
+    // Reported to the app, so the p95 target is graded on evidence there…
+    expect(sync).toContain("POS_Connector_Queue::delivery_latency()");
+    expect(sync).toContain("'deliveryLatency'");
+    // …and printed by the doctor, for a human with a terminal.
+    expect(cli).toContain("POS_Connector_Queue::delivery_latency( 500, true )");
+    expect(cli).toContain("'cycleRuntimeMs'");
+  });
+
+  it("admin timestamps are Jalali-facing, never raw UTC Gregorian strings", () => {
+    expect(health).toContain("public static function gregorian_to_jalali(");
+    expect(health).toContain("public static function jalali_date_label(");
+    expect(admin).toContain("POS_Connector_Health::jalali_date_label(");
+    expect(admin).not.toContain("gmdate( 'Y-m-d H:i:s', $at ) . ' UTC'");
+    expect(admin).not.toContain("'زمان UTC'");
+    expect(admin).not.toContain("echo esc_html( $entry['created_at'] )");
+  });
+});
+
 describe("WordPress plugin updater", () => {
   it("uses the platform manifest with a package checksum", () => {
     expect(main).toContain("https://updates.eshobe.app/wordpress/pos-accounting-connector/update.json");

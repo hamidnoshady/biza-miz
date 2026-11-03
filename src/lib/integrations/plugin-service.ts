@@ -280,6 +280,33 @@ function sanitizeLocalQueueRecent(value: unknown): Array<{
   return out;
 }
 
+/**
+ * The plugin's measured delivery percentiles (#1206 P1): how long real Woo
+ * events took from its local queue to this app accepting them. Reduced to
+ * five bounded, ordered numbers before storage — percentiles that are not
+ * ordered, or a lag longer than the plugin's 30-day sent-row retention, are
+ * a broken report and are dropped rather than displayed as fact.
+ */
+function sanitizeDeliveryLatency(value: unknown): {
+  samples: number;
+  p50Seconds: number;
+  p95Seconds: number;
+  p99Seconds: number;
+  maxSeconds: number;
+} | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null);
+  const samples = num(record.samples);
+  const p50 = num(record.p50Seconds);
+  const p95 = num(record.p95Seconds);
+  const p99 = num(record.p99Seconds);
+  const max = num(record.maxSeconds);
+  if (samples === null || samples < 1 || p50 === null || p95 === null || p99 === null || max === null) return null;
+  if (!(p50 <= p95 && p95 <= p99 && p99 <= max) || max > 30 * 24 * 3600) return null;
+  return { samples: Math.min(samples, 100_000), p50Seconds: p50, p95Seconds: p95, p99Seconds: p99, maxSeconds: max };
+}
+
 function pluginCapabilities(input: PluginHandshakeInput): Record<string, unknown> {
   // The order-status registry is stored *through its own reader*, so the shape
   // the manager displays is exactly the shape the handshake accepted: a plugin
@@ -312,6 +339,14 @@ export async function pluginHandshake(
       telemetry.localQueueRecent = sanitizeLocalQueueRecent(telemetry.localQueueRecent);
     } else {
       delete telemetry.localQueueRecent;
+    }
+    // Same rule for the measured latency (#1206 P1): keep absence absent, so
+    // "not measured yet" never renders as "measured zero".
+    const deliveryLatency = sanitizeDeliveryLatency(telemetry.deliveryLatency);
+    if (deliveryLatency) {
+      telemetry.deliveryLatency = deliveryLatency;
+    } else {
+      delete telemetry.deliveryLatency;
     }
     if (pluginSiteMismatch(connection, siteUrl)) {
       await query(
@@ -1041,7 +1076,8 @@ export async function enqueuePluginExport(
      VALUES ($1, $2, $3, 'all', '{}'::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
-                   last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
+                   last_error = NULL, leased_until = NULL, lease_token = NULL,
+                   desired_at = now(), updated_at = now()
      RETURNING id`,
     [businessId, connectionId, entityType],
   );
