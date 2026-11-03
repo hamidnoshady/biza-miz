@@ -39,7 +39,14 @@ import { articleHref, Highlighted, KbSearchResults, KbSideMenuFrame, useKbSearch
 function KbHomeSkeleton() {
   return (
     <div role="status" aria-busy="true" aria-label="در حال آماده‌سازی مرکز آموزش">
-      <div aria-hidden="true" className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+      {/* Mobile navigation lives in the drawer. Reserve space for recent guides,
+          not for the category cards that only appear alongside desktop sidebar. */}
+      <div aria-hidden="true" className="space-y-2 lg:hidden">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <Skeleton key={i} className="h-16 rounded-xl" />
+        ))}
+      </div>
+      <div aria-hidden="true" className="hidden min-w-0 gap-3 lg:grid lg:grid-cols-2 2xl:grid-cols-3">
         {Array.from({ length: 6 }).map((_, i) => (
           <Skeleton key={i} className="h-32 rounded-2xl" />
         ))}
@@ -285,7 +292,9 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
           ) : (
             /* --- home mode --------------------------------------------------- */
             <div className="min-w-0 space-y-5 sm:space-y-6">
-              <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+              {/* A single navigation path on phones: the drawer above owns all
+                  categories. Category cards return when the desktop sidebar is shown. */}
+              <div className="hidden min-w-0 gap-3 lg:grid lg:grid-cols-2 2xl:grid-cols-3">
                 {tree.map((node) => (
                   <CategoryCard
                     key={node.id}
@@ -308,6 +317,12 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
                       ))}
                   </ul>
                 </SectionCard>
+              ) : null}
+
+              {latest.length === 0 && catalogue.articles.length === 0 ? (
+                <p className="px-1 py-4 text-center text-sm leading-6 text-muted-foreground lg:hidden">
+                  برای دیدن دسته‌بندی‌های آموزش، فهرست راهنماها را باز کنید.
+                </p>
               ) : null}
 
               {latest.length > 0 ? (
