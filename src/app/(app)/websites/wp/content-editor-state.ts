@@ -5,6 +5,13 @@ export interface WpEditorValues {
   excerpt: string;
   slug: string;
   status: string;
+  /**
+   * When a `future` post should publish, as an ISO instant (empty when the
+   * owner has not chosen one). It travels beside the wp/v2 fields because the
+   * app translates it into WordPress's own `date_gmt` rather than letting a
+   * free-form date reach the site.
+   */
+  scheduledFor: string;
 }
 
 const API_FIELD_BY_EDITOR_FIELD: Record<keyof WpEditorValues, string> = {
@@ -13,6 +20,7 @@ const API_FIELD_BY_EDITOR_FIELD: Record<keyof WpEditorValues, string> = {
   excerpt: "excerpt",
   slug: "slug",
   status: "status",
+  scheduledFor: "scheduledFor",
 };
 
 /**

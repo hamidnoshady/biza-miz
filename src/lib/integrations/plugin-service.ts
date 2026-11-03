@@ -214,6 +214,8 @@ export interface PluginHandshakeInput {
   capabilities?: {
     eventTypes?: string[];
     jobTypes?: string[];
+    /** Whether the plugin applies a `date_gmt` on a `post_upsert` (#1215, P2‑5). */
+    postSchedule?: boolean;
     /**
      * The store's registered order statuses (`wc_get_order_statuses()`), which
      * is the only truthful source of their display names — see
@@ -319,6 +321,9 @@ function pluginCapabilities(input: PluginHandshakeInput): Record<string, unknown
     protocolVersion: Number.isFinite(input.protocolVersion) ? Math.max(1, Math.floor(input.protocolVersion ?? 1)) : 1,
     eventTypes: sanitizeStringArray(input.capabilities?.eventTypes),
     jobTypes: sanitizeStringArray(input.capabilities?.jobTypes),
+    // Absent means "does not support it": the safe reading, since the plugin
+    // would otherwise publish a `future` post immediately.
+    ...(input.capabilities?.postSchedule === true ? { postSchedule: true } : {}),
     ...(orderStatuses.length > 0 ? { orderStatuses } : {}),
   };
 }

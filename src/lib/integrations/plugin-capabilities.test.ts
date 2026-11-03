@@ -5,6 +5,7 @@ import {
   pluginAdvertisedJobTypes,
   pluginSupportsJobType,
   pluginSupportsLeaseToken,
+  pluginSupportsPostSchedule,
   registeredOrderStatuses,
 } from "./plugin-capabilities";
 
@@ -101,5 +102,16 @@ describe("registered order statuses", () => {
     expect(normalizeOrderStatusSlug(" Processing ")).toBe("processing");
     expect(normalizeOrderStatusSlug("bad slug")).toBe("");
     expect(normalizeOrderStatusSlug(null)).toBe("");
+  });
+});
+
+describe("pluginSupportsPostSchedule", () => {
+  it("trusts only an explicit advertisement", () => {
+    expect(pluginSupportsPostSchedule({ postSchedule: true })).toBe(true);
+    expect(pluginSupportsPostSchedule({ postSchedule: false })).toBe(false);
+    expect(pluginSupportsPostSchedule({ jobTypes: ["post_upsert"] })).toBe(false);
+    expect(pluginSupportsPostSchedule({ postSchedule: "yes" })).toBe(false);
+    expect(pluginSupportsPostSchedule(null)).toBe(false);
+    expect(pluginSupportsPostSchedule(undefined)).toBe(false);
   });
 });

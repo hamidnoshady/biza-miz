@@ -553,6 +553,11 @@ class POS_Connector_Sync {
 			// round-trip them; rendered HTML lives on the public site.
 			$payload['content']     = $post->post_content;
 			$payload['excerpt']     = $post->post_excerpt;
+			// The publish instant in UTC, so the app can show a scheduled post's
+			// own time instead of guessing it from the modification date.
+			$payload['date_gmt']    = $post->post_date_gmt && '0000-00-00 00:00:00' !== $post->post_date_gmt
+				? str_replace( ' ', 'T', $post->post_date_gmt )
+				: null;
 			// The featured image by id, not by URL: the picture itself arrives
 			// with the media sync, and the app resolves this id against its own
 			// attachment mirror. 0 when the post has none, which the app reads as
@@ -1631,6 +1636,9 @@ class POS_Connector_Sync {
 			// instead of a slug, and can offer every status this store accepts —
 			// including one it has not used on an order yet.
 			'orderStatuses' => self::order_status_registry(),
+			// Issue #1215: this build understands `date_gmt` on a `post_upsert`,
+			// so the app may schedule a post through it.
+			'postSchedule' => true,
 			'eventTypes' => array(
 				'order.created',
 				'order.updated',
@@ -2386,7 +2394,27 @@ class POS_Connector_Sync {
 			return empty( $found ) ? 0 : (int) $found[0];
 		}
 
-		private static function apply_post_upsert( array $payload ) {
+	/**
+	 * The app's schedule as WordPress's `post_date_gmt`, or '' when the push
+	 * carries none. Only the documented shape is accepted: UTC,
+	 * `YYYY-MM-DDTHH:MM:SS`, no zone suffix, and strictly in the future.
+	 */
+	private static function post_date_gmt_from_payload( array $payload ) {
+		if ( ! isset( $payload['date_gmt'] ) || '' === trim( (string) $payload['date_gmt'] ) ) {
+			return '';
+		}
+		$raw  = trim( (string) $payload['date_gmt'] );
+		$when = DateTimeImmutable::createFromFormat( '!Y-m-d\TH:i:s', $raw, new DateTimeZone( 'UTC' ) );
+		if ( ! $when || $when->format( 'Y-m-d\TH:i:s' ) !== $raw ) {
+			throw new Exception( 'invalid_schedule_date' );
+		}
+		if ( $when->getTimestamp() <= time() ) {
+			throw new Exception( 'schedule_date_in_past' );
+		}
+		return $when->format( 'Y-m-d H:i:s' );
+	}
+
+	private static function apply_post_upsert( array $payload ) {
 			$type         = isset( $payload['post_type'] ) && 'page' === $payload['post_type'] ? 'page' : 'post';
 			$id           = isset( $payload['id'] ) ? (int) $payload['id'] : 0;
 			$operation_id = isset( $payload['__operationId'] ) ? sanitize_text_field( (string) $payload['__operationId'] ) : '';
@@ -2428,10 +2456,32 @@ class POS_Connector_Sync {
 			throw new Exception( 'empty_post_update' );
 		}
 
+		// Scheduling (#1215, P2-5): the app sends WordPress's own `date_gmt`, in
+		// UTC and without a zone suffix. Anything else is refused rather than
+		// guessed — a mis-parsed offset schedules a post an hour off.
+		$scheduled_gmt = self::post_date_gmt_from_payload( $payload );
+		if ( '' !== $scheduled_gmt ) {
+			$data['post_date_gmt'] = $scheduled_gmt;
+			// wp_update_post ignores a changed date unless this flag says the
+			// date itself is an intentional edit.
+			$data['edit_date'] = true;
+		}
+
 		if ( $id > 0 ) {
 			$exists = get_post( $id );
 			if ( ! $exists || $exists->post_type !== $type ) {
 				throw new Exception( 'post_not_found' );
+			}
+			// "future" without a future date publishes on the next cron pass. If
+			// this push carries no date, keep the site's own schedule — and refuse
+			// when there is none to keep.
+			if ( isset( $data['post_status'] ) && 'future' === $data['post_status'] && '' === $scheduled_gmt ) {
+				$kept = $exists->post_date_gmt && '0000-00-00 00:00:00' !== $exists->post_date_gmt
+					? strtotime( $exists->post_date_gmt . ' UTC' )
+					: false;
+				if ( 'future' !== $exists->post_status || ! $kept || $kept <= time() ) {
+					throw new Exception( 'schedule_date_required' );
+				}
 			}
 			$data['ID']          = $id;
 			$data['post_type']   = $type;
@@ -2439,6 +2489,9 @@ class POS_Connector_Sync {
 		} else {
 			$data['post_type']   = $type;
 			$data['post_status'] = isset( $data['post_status'] ) ? $data['post_status'] : 'draft';
+			if ( 'future' === $data['post_status'] && '' === $scheduled_gmt ) {
+				throw new Exception( 'schedule_date_required' );
+			}
 			$result              = wp_insert_post( $data, true );
 		}
 			if ( is_wp_error( $result ) ) {

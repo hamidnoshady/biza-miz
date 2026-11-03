@@ -23,6 +23,7 @@ import { enqueueExport } from "./woo-ops-service";
 import { getConnection, type ConnectionRow } from "./connections-service";
 import { pluginSupportsJobType } from "./plugin-capabilities";
 import { safeWpExternalUrl, type WpMediaKind } from "./wp-media";
+import { parseWordPressGmt } from "../wp-schedule";
 
 export type WpContentType = "post" | "page" | "attachment" | string;
 
@@ -116,6 +117,12 @@ export interface WpContentDetail extends WpContentRow {
   editorTitle: string;
   content: string | null;
   excerpt: string;
+  /**
+   * When WordPress will publish this row, as an ISO instant — null for anything
+   * that is not a scheduled post. Read from the payload's `date_gmt`, so the
+   * editor can show the owner the schedule it is about to save over.
+   */
+  scheduledFor?: string | null;
 }
 
 /**
@@ -543,6 +550,7 @@ export async function getWpContent(
     editorTitle: editableWpField(payload.title) || row.title,
     content: mirroredContent(payload.content),
     excerpt: editableWpField(payload.excerpt),
+    scheduledFor: row.status === "future" ? parseWordPressGmt(payload.date_gmt) : null,
   };
 }
 
