@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   decodeWpEntities,
   editableWpField,
+  excerptPreview,
   mirroredContent,
   plainTitle,
   safeWpUrl,
@@ -117,5 +118,30 @@ describe("mirroredContent", () => {
     expect(mirroredContent(42)).toBeNull();
     expect(mirroredContent({ raw: 7 })).toBeNull();
     expect(mirroredContent("")).toBe("");
+  });
+});
+
+/**
+ * The excerpt preview is what a card shows under a post's title. It must read
+ * as one clean line — a raw `&hellip;`, a stray `</p>` or a mid-word cut is
+ * visible to the owner on every row.
+ */
+describe("excerptPreview", () => {
+  it("strips tags, decodes entities and collapses whitespace", () => {
+    expect(excerptPreview("<p>فرش&nbsp;دستبافت</p>\n<p>با &#8217;رنگ</p>")).toBe("فرش دستبافت با ’رنگ");
+  });
+
+  it("cuts a long excerpt on a word and marks the cut", () => {
+    const preview = excerptPreview("کلمه ".repeat(60), 60);
+    expect(preview.length).toBeLessThanOrEqual(61);
+    expect(preview.endsWith("…")).toBe(true);
+    // No half-word: the cut falls on the last space, not inside a word.
+    expect(preview.replace(/…$/, "").split(" ").every((word) => word === "کلمه")).toBe(true);
+  });
+
+  it("keeps a short excerpt whole and an empty one empty", () => {
+    expect(excerptPreview("خلاصهٔ کوتاه")).toBe("خلاصهٔ کوتاه");
+    expect(excerptPreview("")).toBe("");
+    expect(excerptPreview(null)).toBe("");
   });
 });

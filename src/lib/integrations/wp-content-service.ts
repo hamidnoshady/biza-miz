@@ -64,6 +64,12 @@ export interface WpContentPayload {
   /** Stable client create key retained in the mirror for REST retry deduplication. */
   _create_request_id?: string;
   revision?: string;
+  /**
+   * A post's featured image by attachment id — the plugin sends it, and wp/v2
+   * returns it on every post. 0 means the post has none. The URL is resolved
+   * against the mirrored attachment row at read time, never trusted from here.
+   */
+  featured_media?: number | string;
 }
 
 export interface WpContentRow {
@@ -89,6 +95,18 @@ export interface WpContentRow {
   remoteUpdatedAt: string | null;
   pagePosition?: { createdAt: string; id: string };
   thumbnailUrl?: string | null;
+  /**
+   * The post's excerpt, tags stripped and cut to a card-sized preview. Present
+   * on list rows only — the editor reads the raw excerpt through `getWpContent`
+   * so saving cannot silently rewrite it.
+   */
+  excerptText?: string;
+  /**
+   * The featured image's URL, resolved through the mirrored attachment the post
+   * points at (`featured_media`). Null when the payload carried no featured
+   * image, or before that attachment reached the mirror.
+   */
+  featuredImageUrl?: string | null;
   revision?: string | null;
   syncedAt: string;
 }
@@ -172,6 +190,15 @@ export function plainTitle(raw: unknown): string {
         ? String((raw as { rendered?: string }).rendered ?? "")
         : "";
   return decodeWpEntities(text.replace(/<[^>]*>/g, "")).trim();
+}
+
+/** A card-sized preview of a post's excerpt: tags stripped, entities decoded, cut on a word. */
+export function excerptPreview(raw: unknown, max = 200): string {
+  const text = plainTitle(raw).replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
 /**
@@ -347,11 +374,29 @@ export async function listWpContent(
     cursor_created_at: string;
     id: string;
     thumbnail: unknown;
+    excerpt_text: string;
+    featured_url: unknown;
     revision: string | null;
   }>(
     `SELECT id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at, payload->>'revision' AS revision, remote_id, wp_type, title, slug, status, permalink, author_name,
             media_url, mime_type, payload->'media_details'->'sizes'->'thumbnail'->>'source_url' AS thumbnail,
             COALESCE(payload->>'alt_text', '') AS alt_text,
+            COALESCE(payload->'excerpt'->>'raw', payload->'excerpt'->>'rendered', '') AS excerpt_text,
+            -- A post's own payload carries the featured image by id, not by URL;
+            -- the picture lives on the mirrored attachment row the media sync
+            -- writes. A scalar subquery keeps every existing column of this
+            -- query untouched, and an id the mirror has not seen yet simply
+            -- yields null — the card then draws its icon instead of a broken
+            -- image.
+            (SELECT COALESCE(fe.payload->'media_details'->'sizes'->'thumbnail'->>'source_url',
+                             fe.payload->'media_details'->'sizes'->'medium'->>'source_url',
+                             fe.media_url)
+               FROM integration_wp_content fe
+              WHERE fe.business_id = integration_wp_content.business_id
+                AND fe.connection_id = integration_wp_content.connection_id
+                AND fe.wp_type = 'attachment'
+                AND fe.remote_id = NULLIF(integration_wp_content.payload->>'featured_media', '')
+              LIMIT 1) AS featured_url,
             remote_updated_at, synced_at
        FROM integration_wp_content
       WHERE business_id = $1 AND connection_id = $2
@@ -389,6 +434,8 @@ export async function listWpContent(
     // cannot retain an executable external href forever.
     mediaUrl: safeWpExternalUrl(r.media_url),
     thumbnailUrl: safeWpExternalUrl(r.thumbnail),
+    excerptText: excerptPreview(r.excerpt_text),
+    featuredImageUrl: safeWpExternalUrl(r.featured_url),
     revision: r.revision,
     ...(options.asOf ? { pagePosition: { createdAt: r.cursor_created_at, id: r.id } } : {}),
     mimeType: r.mime_type,
