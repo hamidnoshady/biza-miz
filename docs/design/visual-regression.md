@@ -135,6 +135,31 @@ default viewport frames the form and one row of the table the baseline exists to
 protect. The harness throws if the
 selector matches nothing, rather than silently recording the unscrolled frame.
 
+## Whose session a screen runs in
+
+A screen entry may carry `email:` (and, if it ever needs one, `password:`),
+which makes the harness sign in as that fixture owner instead of the demo
+owner. **One baseline needs this today**: `accounting-products` and its dark and
+mobile forms.
+
+`/accounting/products` is gated to `PRODUCT_WORKSPACE_INDUSTRIES`, and the demo
+business the other screens photograph is `food_service` — the page redirects it
+to the overview, so a shot there would be of the wrong page entirely.
+Re-labelling the demo business instead would repaint its sidebar, menus and
+shell, i.e. every other baseline, which is the re-record this document forbids.
+So the fixture seeds a second, trade-goods tenant
+(`scripts/seed-visual-products-fixture.ts`, owner `products-owner@example.com`)
+and only the products entries name it. A screen without `email:` uses the demo
+owner exactly as before, so no existing baseline moved when the mechanism
+arrived.
+
+The catalogue it seeds is chosen to put one state on screen per element — a
+stocked row, a family with a variant, an out-of-stock row, a draft, and the
+shared-SKU pair (`zza05023`) that renders «احتمال تکراری» — and deliberately
+carries **no** store mapping: a fake WooCommerce connection would need encrypted
+credentials and a remote product the fixture cannot own, so «بدون پیوند
+ووکامرس» is the honest state here.
+
 ## Adding a screen
 
 Add an entry to `SCREENS` in `scripts/visual-regression.mjs`, run
