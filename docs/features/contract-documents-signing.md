@@ -64,8 +64,14 @@ draft of this branch drifted there (`ip_address`, `cancel_reason`, a missing
 Dependency-free, so the editor, the print view, the receipt and the public
 signing page all render the same document the same way:
 
-* block types: heading, paragraph, article, bullets, numbered, table, divider,
-  page break, signature placement;
+* block types: heading, paragraph, article, conditional clause, repeating payment
+  schedule, bullets, numbered, table, divider, page break, signature placement;
+* conditional clauses bind to a declared field and use exact equality/inequality
+  or a checkbox condition; the same renderer omits a false clause in the frozen
+  signer view;
+* repeating schedules generate monthly, quarterly, semiannual or annual due
+  dates with month-end preservation (up to 120 rows) and repeat a literal or
+  resolved per-installment amount in both preview and frozen rendering;
 * variables: `{{key}}`, substituted only through `renderTemplate`, never string
   concatenation;
 * `normalizeContractContent` is the trust boundary for anything off the wire:
@@ -81,8 +87,11 @@ signing page all render the same document the same way:
 disclose (contract terms, project, party, business identity, and AEC commercial
 facts linked to that exact authorized contract) and the same list the editor
 offers. AEC bindings read approved variations/certificates and the contract
-commercial block only; they do not enumerate unrelated projects or Accounting
-ledger data. Resolution reports where each value came from:
+commercial block only; they do not enumerate unrelated projects. Accounting
+bindings use the canonical project report (approved project budget, posted cost,
+and budget variance) and are blank unless the caller has `ledger.view` and can
+see the contract's project. They do not expose revenue or journal-line details.
+Resolution reports where each value came from:
 `binding | override | literal | empty`, keeps `boundValue` when the sender typed
 over a record, and `changedBindings` turns a source that moved after review into
 a `stale` flag on the field.
@@ -93,7 +102,8 @@ a `stale` flag on the field.
   duplication, and the binding context. Contract-linked AEC commercial terms,
   approved variations and certified certificates are allow-listed as per-field
   bindings; reads are scoped by the authorized contract and business, not a
-  caller-supplied project id. Accounting ledger values are not exposed here.
+  caller-supplied project id. Accounting bindings use `projectReport` and require
+  `ledger.view`; without that permission they resolve empty.
   Freezing resolves every variable first
   and refuses while any required value is empty; a frozen version stores the
   resolved strings inside its own JSON, so the printed contract stops moving at
@@ -206,12 +216,13 @@ canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
    jurisdictional review; no retention duration or evidence purge has been
    invented. The append-only evidence must not be silently deleted.
 4. **The signing integration is part of the required database CI gate.**
-   Locally, `integration/contract-signing.integration.test.ts` passes 21 tests
+   Locally, `integration/contract-signing.integration.test.ts` passes 23 tests
    against a real PostgreSQL: it creates a throwaway database, applies all
-   471 migrations, seeds nothing but the party/project rows the contract binds to,
-   and then exercises freezing, tenant isolation under an unprivileged role,
-   append-only evidence, parallel and sequential rounds, consent → OTP →
-   signature, link rotation and post-signature draft edits. Results are in §6a;
+   471 migrations and seeds only the required party/project rows. It exercises
+   AEC/Accounting bindings, conditional clauses and schedules, freezing, tenant
+   isolation under an unprivileged role, append-only evidence, parallel and
+   sequential rounds, consent → OTP → signature, link rotation and post-signature
+   draft edits. Results are in §6a;
    the green run here does not replace the CI job.
 5. **`npm run build` was not executed** here (the sandbox has 3 GB and the
    previous full `tsc` run exhausted it); CI's production build remains the

@@ -192,6 +192,30 @@ async function projectFacts(businessId: string, projectId: string | null): Promi
 }
 
 /**
+ * Financial figures are exposed only to members with ledger.view, through the
+ * canonical workspace project report (which itself enforces project visibility
+ * and uses the Accounting ledger's posted-cost definition). The project id is
+ * taken from the authorized contract, never from the request.
+ */
+async function accountingFacts(
+  owner: WorkspaceOwner,
+  projectId: string | null,
+): Promise<ContractBindingContext["accounting"]> {
+  const empty = { projectBudgetRial: "", postedCostRial: "", budgetVarianceRial: "" };
+  if (!projectId || owner.access?.canViewFinancials !== true) return empty;
+  const { projectReport } = await import("../workspace");
+  const project = (await projectReport(owner, { projectId }))[0];
+  if (!project) return empty;
+  const projectBudgetRial = project.budgetRial === null ? "" : String(project.budgetRial);
+  const postedCostRial = project.spentRial === null ? "" : String(project.spentRial);
+  const budgetVarianceRial =
+    project.budgetRial === null || project.spentRial === null
+      ? ""
+      : String(project.budgetRial - project.spentRial);
+  return { projectBudgetRial, postedCostRial, budgetVarianceRial };
+}
+
+/**
  * AEC commercial facts are read only through this contract's own linked rows.
  * No client-supplied project ID is accepted, no unrelated project records are
  * enumerated, and accounting ledger values are intentionally excluded.
@@ -252,11 +276,12 @@ export async function loadContractBindingContext(
   owner: WorkspaceOwner,
   contract: WorkspaceContract,
 ): Promise<ContractBindingContext> {
-  const [business, party, project, aec] = await Promise.all([
+  const [business, party, project, aec, accounting] = await Promise.all([
     businessFacts(owner.businessId),
     partyFacts(owner.businessId, contract.partyId),
     projectFacts(owner.businessId, contract.projectId),
     contractAecFacts(owner.businessId, contract.id),
+    accountingFacts(owner, contract.projectId),
   ]);
   const today = new Date();
   return {
@@ -273,6 +298,7 @@ export async function loadContractBindingContext(
     party,
     business,
     aec,
+    accounting,
   };
 }
 

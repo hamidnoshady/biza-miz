@@ -45,11 +45,14 @@ import {
 import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
 import { ErrorBox, Field, InfoBox, PrimaryButton, SecondaryButton, api, inputClass } from "@/app/dashboard/ui";
 import { ContractDocumentSheet } from "@/components/contracts/contract-document-sheet";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import {
   CONTRACT_BLOCK_HINTS,
   CONTRACT_BLOCK_LABELS,
   CONTRACT_BLOCK_TYPES,
+  CONTRACT_CONDITION_OPERATORS,
   CONTRACT_FIELD_TYPE_LABELS,
+  CONTRACT_SCHEDULE_INTERVALS,
   CONTRACT_LIMITS,
   validateContractContent,
   type ContractBlock,
@@ -72,6 +75,8 @@ const BLOCK_ICONS: Record<ContractBlockType, typeof PlusIcon> = {
   heading: PlusIcon,
   paragraph: PlusIcon,
   article: PlusIcon,
+  conditional: PlusIcon,
+  schedule: PlusIcon,
   bullets: PlusIcon,
   numbered: PlusIcon,
   table: PlusIcon,
@@ -92,6 +97,10 @@ function blockLabel(block: ContractBlock): string {
       return `${base}: ${block.text.slice(0, 40) || "—"}`;
     case "article":
       return `${base}: ${block.title.slice(0, 40) || "—"}`;
+    case "conditional":
+      return `${base}: ${block.text.slice(0, 36) || "—"}`;
+    case "schedule":
+      return `${base}: ${block.caption || "—"}`;
     case "signature":
       return `${base}: ${block.label || block.slotId}`;
     case "table":
@@ -110,6 +119,10 @@ function makeBlock(type: ContractBlockType, index: number): ContractBlock {
       return { id, type, text: "" };
     case "article":
       return { id, type, title: `مادهٔ ${toPersianDigits(index + 1)} — `, text: "" };
+    case "conditional":
+      return { id, type, condition: { fieldKey: "", operator: "equals", value: "" }, text: "" };
+    case "schedule":
+      return { id, type, caption: "برنامهٔ اقساط", startDate: "", intervalMonths: 1, count: 12, amountText: "" };
     case "bullets":
       return { id, type, items: [""] };
     case "numbered":
@@ -358,13 +371,19 @@ export function ContractDocumentEditor({
       selection?.kind === "block"
         ? content.blocks.find((block) => block.id === selection.id)
         : content.blocks.find(
-            (block) => block.type === "paragraph" || block.type === "article" || block.type === "heading",
+            (block) => block.type === "paragraph" || block.type === "article" || block.type === "heading" || block.type === "conditional" || block.type === "schedule",
           );
-    if (!target || !(target.type === "paragraph" || target.type === "article" || target.type === "heading")) {
-      setError("برای درج متغیر، یک بلوک متنی انتخاب کنید.");
+    if (!target || !(target.type === "paragraph" || target.type === "article" || target.type === "heading" || target.type === "conditional" || target.type === "schedule")) {
+      setError("برای درج متغیر، یک بلوک متنی یا برنامهٔ پرداخت انتخاب کنید.");
       return;
     }
-    updateBlock(target.id, { text: `${target.text}${target.text ? " " : ""}${token}` } as Partial<ContractBlock>);
+    if (target.type === "schedule") {
+      updateBlock(target.id, { amountText: `${target.amountText}${target.amountText ? " " : ""}${token}` });
+    } else if (target.type === "conditional") {
+      updateBlock(target.id, { text: `${target.text}${target.text ? " " : ""}${token}` });
+    } else if (target.type === "paragraph" || target.type === "article" || target.type === "heading") {
+      updateBlock(target.id, { text: `${target.text}${target.text ? " " : ""}${token}` } as Partial<ContractBlock>);
+    }
     setSelection({ kind: "block", id: target.id });
   };
 
@@ -778,6 +797,7 @@ export function ContractDocumentEditor({
               {selectedBlock ? (
                 <BlockInspector
                   block={selectedBlock}
+                  fields={content.fields}
                   canEdit={canEdit}
                   onChange={(patch) => updateBlock(selectedBlock.id, patch)}
                   onRemove={() => removeBlock(selectedBlock.id)}
@@ -915,12 +935,14 @@ function DocumentInspector({
 
 function BlockInspector({
   block,
+  fields,
   canEdit,
   onChange,
   onRemove,
   onDuplicate,
 }: {
   block: ContractBlock;
+  fields: ContractField[];
   canEdit: boolean;
   onChange: (patch: Partial<ContractBlock>) => void;
   onRemove: () => void;
@@ -970,6 +992,116 @@ function BlockInspector({
               onChange={(event) => onChange({ text: event.target.value })}
             />
           </Field>
+        </>
+      ) : null}
+      {block.type === "conditional" ? (
+        <>
+          <Field label="فیلد شرط">
+            <select
+              className={inputClass}
+              value={block.condition.fieldKey}
+              disabled={!canEdit}
+              onChange={(event) => {
+                const field = fields.find((candidate) => candidate.key === event.target.value);
+                onChange({
+                  condition: {
+                    fieldKey: event.target.value,
+                    operator: field?.type === "checkbox" ? "is_checked" : "equals",
+                    value: "",
+                  },
+                });
+              }}
+            >
+              <option value="">انتخاب متغیر…</option>
+              {fields.map((field) => (
+                <option key={field.key} value={field.key}>{field.label} · {field.key}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="شرط">
+            <select
+              className={inputClass}
+              value={block.condition.operator}
+              disabled={!canEdit || !block.condition.fieldKey}
+              onChange={(event) => onChange({
+                condition: { ...block.condition, operator: event.target.value as (typeof CONTRACT_CONDITION_OPERATORS)[number] },
+              })}
+            >
+              {CONTRACT_CONDITION_OPERATORS.filter((operator) => {
+                const field = fields.find((candidate) => candidate.key === block.condition.fieldKey);
+                return field?.type === "checkbox" || operator === "equals" || operator === "not_equals";
+              }).map((operator) => (
+                <option key={operator} value={operator}>
+                  {operator === "equals" ? "برابر باشد با" : operator === "not_equals" ? "برابر نباشد با" : operator === "is_checked" ? "تیک‌خورده باشد" : "تیک‌نخورده باشد"}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {block.condition.operator === "equals" || block.condition.operator === "not_equals" ? (
+            <Field label="مقدار مقایسه">
+              {fields.find((field) => field.key === block.condition.fieldKey)?.type === "select" ? (
+                <select
+                  className={inputClass}
+                  value={block.condition.value}
+                  disabled={!canEdit}
+                  onChange={(event) => onChange({ condition: { ...block.condition, value: event.target.value } })}
+                >
+                  <option value="">انتخاب…</option>
+                  {fields.find((field) => field.key === block.condition.fieldKey)?.options.map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  className={inputClass}
+                  value={block.condition.value}
+                  disabled={!canEdit}
+                  onChange={(event) => onChange({ condition: { ...block.condition, value: event.target.value } })}
+                />
+              )}
+            </Field>
+          ) : null}
+          <Field label="متن بند شرطی" hint="این متن فقط اگر شرط بالا برقرار باشد در سند نهایی چاپ می‌شود.">
+            <textarea
+              className={`${inputClass} min-h-32 py-2`}
+              value={block.text}
+              disabled={!canEdit}
+              onChange={(event) => onChange({ text: event.target.value })}
+            />
+          </Field>
+        </>
+      ) : null}
+      {block.type === "schedule" ? (
+        <>
+          <Field label="عنوان برنامه">
+            <input className={inputClass} value={block.caption} disabled={!canEdit}
+              onChange={(event) => onChange({ caption: event.target.value })} />
+          </Field>
+          <Field label="تاریخ اولین قسط" hint="تقویم ورودی مرورگر؛ تاریخ در سند با تقویم شمسی چاپ می‌شود.">
+            <input type="date" className={inputClass} value={block.startDate} disabled={!canEdit}
+              onChange={(event) => onChange({ startDate: event.target.value })} />
+          </Field>
+          <Field label="تکرار">
+            <select className={inputClass} value={block.intervalMonths} disabled={!canEdit}
+              onChange={(event) => onChange({ intervalMonths: Number(event.target.value) as (typeof CONTRACT_SCHEDULE_INTERVALS)[number] })}>
+              <option value={1}>ماهانه</option>
+              <option value={3}>فصلی</option>
+              <option value={6}>هر شش ماه</option>
+              <option value={12}>سالانه</option>
+            </select>
+          </Field>
+          <Field label="تعداد اقساط">
+            <PersianNumberInput min={1} max={CONTRACT_LIMITS.scheduleInstallmentsMax} className={inputClass}
+              value={block.count} disabled={!canEdit} allowDecimal={false} allowNegative={false} grouping={false}
+              onChange={(event) => onChange({ count: Number(event.target.value) || 1 })} />
+          </Field>
+          <Field label="مبلغ هر قسط" hint="مبلغ ثابت یا متغیر، مانند {{installment_amount}}.">
+            <input className={inputClass} value={block.amountText} disabled={!canEdit}
+              onChange={(event) => onChange({ amountText: event.target.value })} />
+          </Field>
+          <p className="rounded-lg bg-muted/60 p-2 text-[11px] text-muted-foreground">
+            تاریخ‌های سررسید با حفظ روز پایان ماه تولید می‌شوند؛ حداکثر {toPersianDigits(CONTRACT_LIMITS.scheduleInstallmentsMax)} قسط.
+          </p>
         </>
       ) : null}
       {block.type === "bullets" || block.type === "numbered" ? (
