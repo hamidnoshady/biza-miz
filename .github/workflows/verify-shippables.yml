@@ -52,6 +52,7 @@ on:
       - 'src/lib/chromium-executable.test.ts'
       - 'migrations/**'
       - 'scripts/build-desktop-runtime.mjs'
+      - 'scripts/stage-container-postgresql-tools.mjs'
       - 'scripts/verify-packaged-electron-runtime.ps1'
       - 'scripts/verify-windows-signatures.ps1'
       - 'scripts/accept-physical-printer.ps1'
@@ -82,6 +83,7 @@ on:
       - 'src/lib/chromium-executable.test.ts'
       - 'migrations/**'
       - 'scripts/build-desktop-runtime.mjs'
+      - 'scripts/stage-container-postgresql-tools.mjs'
       - 'scripts/verify-packaged-electron-runtime.ps1'
       - 'scripts/verify-windows-signatures.ps1'
       - 'scripts/accept-physical-printer.ps1'
@@ -203,7 +205,7 @@ jobs:
               fi
 
               case "$f" in
-                Dockerfile|docker-entrypoint.sh) container=true ;;
+                Dockerfile|docker-entrypoint.sh|scripts/stage-container-postgresql-tools.mjs) container=true ;;
               esac
 
               case "$f" in
@@ -272,7 +274,11 @@ jobs:
             test -x ./node_modules/.bin/tsx &&
             command -v chromium-browser >/dev/null &&
             command -v pg_dump >/dev/null &&
-            command -v pg_restore >/dev/null
+            command -v pg_restore >/dev/null &&
+            test "$PG_TOOLS_DIR" = "/opt/postgresql-tools" &&
+            test -s "$PG_TOOLS_DIR/provenance.json" &&
+            test -x "$PG_TOOLS_DIR/bin/pg_dump" &&
+            test -x "$PG_TOOLS_DIR/bin/pg_restore"
           '
           echo "Production image Node.js: $version"
 
