@@ -167,6 +167,9 @@ function inAlpha<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 beforeEach(async () => {
+  // AEC's approved change orders are intentionally undeletable; return this
+  // test DB's rows to the draft state before the normal tenant cascade cleanup.
+  await db.query("UPDATE aec_variations SET status = 'draft' WHERE status IN ('approved', 'implemented')");
   await db.query("DELETE FROM businesses");
   delete process.env.KAVENEGAR_API_KEY;
   delete process.env.KAVENEGAR_SENDER;
@@ -371,6 +374,53 @@ describe("the contract document", () => {
     expect(field.stale).toBe(false);
     expect(view.issues).toEqual([]);
     expect(view.capabilities.canFreeze).toBe(true);
+  });
+
+  it("resolves per-field AEC bindings only from this contract's commercial records", async () => {
+    const contract = await makeContract();
+    await db.query(
+      `INSERT INTO aec_contract_commercials
+         (business_id, contract_id, advance_percent, advance_amount_rial, retention_percent,
+          payment_terms, defects_liability_months, guarantee_type, guarantee_reference,
+          guarantee_amount_rial, guarantee_expiry, insurance_reference, insurance_expiry)
+       VALUES ($1, $2, 20, 250000000, 10, 'صورت‌وضعیت ماهانه', 12, 'بانکی', 'G-123',
+               100000000, '2027-03-21', 'I-456', '2027-04-02')`,
+      [alpha.businessId, contract.id],
+    );
+    await db.query(
+      `INSERT INTO aec_variations
+         (business_id, project_id, contract_id, variation_number, source, description,
+          submitted_amount_rial, approved_amount_rial, status, submitted_date, approved_date)
+       VALUES ($1, $2, $3, 'VO-1', 'client_instruction', 'تغییر تأییدشده',
+               60000000, 50000000, 'approved', '2026-02-01', '2026-02-10')`,
+      [alpha.businessId, alpha.projectId, contract.id],
+    );
+
+    const context = await inAlpha(() => service.loadContractBindingContext(owner(), contract));
+    expect(context.aec).toMatchObject({
+      revisedValueRial: "1300000000",
+      advancePercent: "20.00%",
+      advanceAmountRial: "250000000",
+      retentionPercent: "10.00%",
+      paymentTerms: "صورت‌وضعیت ماهانه",
+      defectsLiabilityMonths: "12",
+      approvedVariationsRial: "50000000",
+      certifiedAmountRial: "0",
+      guaranteeType: "بانکی",
+      guaranteeReference: "G-123",
+      guaranteeExpiry: "2027-03-21",
+      insuranceReference: "I-456",
+      insuranceExpiry: "2027-04-02",
+    });
+
+    const view = await inAlpha(() => service.resolveContractDocument(owner(), contract, sendableContent({
+      fields: [
+        { key: "revised", label: "مبلغ اصلاح‌شده", type: "money", required: true, binding: { source: "aec", path: "revised_value" } },
+        { key: "payment_terms", label: "شرایط پرداخت", type: "text", required: true, binding: { source: "aec", path: "payment_terms" } },
+      ],
+    })));
+    expect(view.values).toMatchObject({ revised: "۱۳۰٬۰۰۰٬۰۰۰ تومان", payment_terms: "صورت‌وضعیت ماهانه" });
+    expect(view.resolved.every((field) => field.provenance === "binding")).toBe(true);
   });
 
   it("refuses a stale save instead of overwriting the other tab's paragraph", async () => {
@@ -734,6 +784,32 @@ describe("a parallel signing round", () => {
     const overview = await inAlpha(() => signing.getSigningOverview(owner(), contract));
     expect(overview.envelope!.status).toBe("completed");
     expect(overview.progress).toMatchObject({ required: 2, signed: 2, complete: true });
+    const signedSlots = await inAlpha(() => signing.listCompletedSignatureSlots(
+      alpha.businessId,
+      contract.id,
+      overview.envelope!.documentVersionId,
+    ));
+    expect(signedSlots.employer).toMatchObject({ fullName: "کارفرما", drawnImage: DRAWN });
+    expect(signedSlots.contractor).toMatchObject({ fullName: "پیمان‌کار", drawnImage: DRAWN });
+    expect(signedSlots.employer.signedAt).toContain("۱۴۰");
+
+    const { rows: notifications } = await db.query<{
+      event_key: string;
+      dedupe_key: string;
+      url: string;
+      payload: { contractId?: string; envelopeId?: string; version?: number };
+    }>(
+      `SELECT event_key, dedupe_key, url, payload FROM notification_events
+        WHERE business_id = $1 AND dedupe_key = $2`,
+      [alpha.businessId, `contract.completed:${overview.envelope!.id}`],
+    );
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0]).toMatchObject({
+      event_key: "contract.completed",
+      dedupe_key: `contract.completed:${overview.envelope!.id}`,
+      url: `/workspace/contracts/${contract.id}`,
+      payload: { contractId: contract.id, envelopeId: overview.envelope!.id, version: 1 },
+    });
 
     const { rows: live } = await db.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM contract_invitations
@@ -749,7 +825,7 @@ describe("a parallel signing round", () => {
 
   it("holds the second party's turn in a sequential round until the first signs", async () => {
     const contract = await readyContract();
-    const { tokens } = await sendRound(contract, {
+    const { sent, tokens } = await sendRound(contract, {
       mode: "sequential",
       signers: [
         { name: "کارفرما", phone: "09121110001", slotId: "employer" },
@@ -770,6 +846,11 @@ describe("a parallel signing round", () => {
     await signing.acknowledgeSigningSession(firstToken, { consent: true });
     const code = await seedOtp(ids["کارفرما"], "+989121110001");
     await signing.submitSignature(firstToken, { code, fullName: "کارفرما", drawnImage: DRAWN });
+    expect(await inAlpha(() => signing.listCompletedSignatureSlots(
+      alpha.businessId,
+      contract.id,
+      sent.version.id,
+    ))).toEqual({});
 
     // Now the second party has a live link.
     const { rows: after } = await db.query<{ count: string }>(

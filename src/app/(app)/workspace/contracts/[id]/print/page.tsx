@@ -17,6 +17,7 @@ import { resolveWorkspaceSubject } from "@/lib/workspace";
 import { getContract } from "@/lib/workspace";
 import { workspaceAccessFlags } from "@/lib/workspace-shared";
 import { PrintToolbar } from "./print-toolbar";
+import { listCompletedSignatureSlots } from "@/lib/contracts/signing";
 
 /**
  * `/workspace/contracts/<id>/print` — the print/PDF view of a contract.
@@ -72,17 +73,19 @@ export default async function ContractPrintPage({
     values = resolveBindings(content, context, contractFormatters(unit)).values;
   }
   if (!content) notFound();
+  const signed = latest
+    ? await listCompletedSignatureSlots(owner.businessId, id, latest.id)
+    : {};
+  const isCompleted = Object.keys(signed).length > 0;
 
   return (
     <PageShell className="max-w-[900px]">
-      <PrintToolbar title={content.title} />
-      <ContractDocumentSheet content={content} values={values} markUnresolved={!latest} />
+      <PrintToolbar title={content.title} finalSigned={isCompleted} />
+      <ContractDocumentSheet content={content} values={values} signed={signed} markUnresolved={!latest} />
       {latest ? (
-        <p className="mt-3 text-center text-[11px] text-muted-foreground">
-          نسخهٔ ثابت v{latest.version} — اثر انگشت محتوا:{" "}
-          <span dir="ltr" className="font-mono">
-            {latest.contentHash.slice(0, 16)}…
-          </span>
+        <p className="mt-3 break-all text-center text-[11px] text-muted-foreground">
+          {isCompleted ? "نسخهٔ ثابت امضاشده" : "نسخهٔ ثابت"} v{latest.version} — اثر انگشت کامل محتوا:{" "}
+          <span dir="ltr" className="font-mono">{latest.contentHash}</span>
         </p>
       ) : (
         <p className="mt-3 text-center text-[11px] text-muted-foreground">
