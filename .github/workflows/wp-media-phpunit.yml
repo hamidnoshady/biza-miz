@@ -40,6 +40,7 @@ jobs:
           php wordpress-plugin/tests/connector-invocation-log.php
           php wordpress-plugin/tests/connector-export-cursor.php
           php wordpress-plugin/tests/connector-torob-attribution.php
+          php wordpress-plugin/tests/connector-torob-products.php
           php wordpress-plugin/tests/log-url-scrub.php
           php wordpress-plugin/tests/connector-admin-actions.php
       - name: Provision disposable WordPress core PHPUnit environment

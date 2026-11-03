@@ -455,15 +455,58 @@ consent already granted. `wordpress-plugin/tests/connector-torob-attribution.php
 all of it under plain `php` (real Ed25519 keys, no WordPress): the defaults, the 403,
 every token failure, the parameter bounds, and each dropped record.
 
+## 6i. The same feed served by the shop itself (Wave 3, connector half)
+
+The platform endpoint (§6b) is one of the two deployables the issue names. The other
+is the shop answering for itself, which is required wherever the platform does not
+terminate that shop's domain — the token's `aud` **is** the domain, by design.
+
+`POS_Connector_Torob_Products` serves `POST /wp-json/torob/v1/products` with the same
+contract, and copies the rules rather than re-deriving them:
+
+| rule | why it is the same code path |
+| --- | --- |
+| four modes, exactly one, no defaulting | `parse_request` refuses the same ten cases |
+| the `400` bodies are Torob's own sentences | `ERROR_MESSAGE` is the platform table verbatim — a shop that answers differently fails differently in Torob's logs |
+| 100 per page, `max_pages = ceil(total / 100)` | `page_response` / `max_pages` |
+| `spec` is a dictionary, `{}` when empty | `spec()` drops lists, nulls and unnamed entries |
+| a withdrawn product is **absent** | `record()` returns `null`; a lookup answers `total: 0` |
+| `availability: true` + `current_price: 0` reads as **free** | an unavailable product always sends `false` + `0`, and never an `old_price` |
+
+Order of operations is the platform's: **token → connection → body**. The token is
+verified before the catalogue is read, so an unauthenticated caller cannot make a store
+assemble 100 products, and the audience is the site's own host — never the request's
+`Host` header. A store that was never connected answers `403 {error: "not_connected"}`.
+
+There is deliberately **no per-channel switch here**, unlike orders and actions (§6h):
+those share personal data and the document requires an explicit opt-in; a product
+catalogue is what the merchant already published on the open web, and the enrollment
+that matters is the platform's own `torob_shops` row (authorized **and** switched on),
+which is the merchant's act on the other side. Either way, nobody can call the endpoint
+without Torob's private key.
+
+Variations are published as their own pages with the parent as `product_group_id` — the
+same shape the platform's feed builder produces — so a shop served from its own origin
+and one served from the platform publish the same set of pages. Two rows resolving to
+one URL (a duplicated SKU, or a variation whose permalink collapses to the parent) are
+de-duplicated, because two listings for one page let Torob pick at random.
+
+`cursor` mode is the one query WooCommerce cannot express (`ID < x`), so it runs as a
+direct prepared query; offset-paging over an ID sort — the obvious substitute — shifts
+under a catalogue being edited mid-crawl, which is exactly what a cursor exists to
+avoid. A cursor this shop never issued is a `400`, not a silent first page.
+
+`wordpress-plugin/tests/connector-torob-products.php` pins all of it under plain `php`:
+the four modes, every refusal and its sentence, the free-price trap, the dictionary,
+the envelopes, the cursor round trip, and the gate order (401 before 403).
+
 ## 7. What remains (Waves 3–6)
 
-1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
-   `/api/v1/torob/products/<shopId>` with `auth.ts` verifying Torob's EdDSA token, `product-api.ts`
-   owning the order of operations, and `§6c` closing the partner path from `pending_approval` to
-   `authorized`. What remains in this wave is the *other* two deployables the issue names — the
-   WordPress connector release and the CMS runtime release that serve the same contract from the
-   shop's own origin, which is needed wherever the platform does not terminate that shop's domain
-   (the token's `aud` is the domain, by design).
+1. **Wave 3 — serving the feed.** *Done for the platform and for WordPress*: §6b is live at
+   `/api/v1/torob/products/<shopId>`, §6c closes the partner path from `pending_approval` to
+   `authorized`, and §6i serves the same contract from the store's own origin. What remains is the
+   **CMS runtime** deployable (the Eshobe-CMS counterpart of §6i), which is a separate deployable
+   this repository does not contain.
 2. **Variant catalogue.** The builder already accepts variants and emits one item each; the database
    source reads `menu_items` only, so retail `items`/`item_variant_attributes` products need their
    price source mapped before they can appear.
@@ -525,6 +568,9 @@ this website enroll", and every later surface reads it.
 - `src/app/api/growth/torob/shops/[id]/pages/route.ts` and `.../repair/route.ts` — their two surfaces.
 - `integration/torob-pages.integration.test.ts` — the guard (off, unauthorized, no credential, another
   tenant), the per-id answer, the snapshot that is left alone, and «تعمیر»'s order.
+- `wordpress-plugin/pos-accounting-connector/includes/class-pos-torob-products.php` — the Product API
+  v3 served by the store itself (§6i): request parsing, record shaping, paging, cursor, and the gate.
+- `wordpress-plugin/tests/connector-torob-products.php` — all of the above under plain `php`.
 - `wordpress-plugin/pos-accounting-connector/includes/class-pos-torob.php` — attribution on the
   store's origin (§6h): the two switches, the 403, token verification, parameter bounds, click
   capture, and the two REST routes.

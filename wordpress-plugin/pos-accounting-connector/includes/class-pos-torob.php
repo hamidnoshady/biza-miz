@@ -677,7 +677,7 @@ class POS_Connector_Torob {
 	}
 
 	/** The site's own host first; the request's `Host` only as a tolerated spelling. */
-	private static function site_hosts() {
+	public static function site_hosts() {
 		$hosts = array();
 		$home  = wp_parse_url( home_url(), PHP_URL_HOST );
 		if ( $home ) {
@@ -846,6 +846,11 @@ class POS_Connector_Torob {
 				<?php esc_html_e( 'نشانی‌هایی که ترب باید بخواند:', 'pos-accounting-connector' ); ?>
 				<code><?php echo esc_html( rest_url( 'torob/v1/orders' ) ); ?></code>
 				<code><?php echo esc_html( rest_url( 'torob/v1/actions' ) ); ?></code>
+			</p>
+			<p class="description">
+				<?php esc_html_e( 'کاتالوگ محصولات برای ترب از همین فروشگاه سرو می‌شود (اگر فروشگاه متصل باشد):', 'pos-accounting-connector' ); ?>
+				<code><?php echo esc_html( rest_url( 'torob/v1/products' ) ); ?></code>
+				<?php esc_html_e( 'این نشانی فقط با توکن امضاشدهٔ ترب پاسخ می‌دهد و برخلاف سفارش‌ها و رویدادها کلید جدا ندارد؛ آنچه منتشر می‌شود همان کاتالوگ منتشرشدهٔ فروشگاه است.', 'pos-accounting-connector' ); ?>
 			</p>
 		</section>
 		<?php
