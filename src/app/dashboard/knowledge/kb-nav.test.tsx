@@ -279,7 +279,7 @@ describe("responsive knowledge layout regression", () => {
 
   it("stacks the menu above full-width cards until desktop", async () => {
     fetchMock.mockResolvedValue(jsonResponse(salesCatalogue));
-    const { container } = render(<KnowledgeBrowser initialTag="" />);
+    render(<KnowledgeBrowser initialTag="" />);
     const category = await screen.findByRole("region", { name: "فروش روزانه" });
     const toggle = screen.getByRole("button", { name: /فهرست راهنماها/ });
     const layout = toggle.parentElement;
@@ -290,7 +290,7 @@ describe("responsive knowledge layout regression", () => {
     expect(category.className).toContain("min-w-0");
     expect(category.parentElement?.className).toContain("grid-cols-1");
     expect(category.parentElement?.className).toContain("sm:grid-cols-2");
-    expect(container.querySelector('a[href="/knowledge/a/daily-sales"]')?.className)
+    expect(category.querySelector('a[href="/knowledge/a/daily-sales"]')?.className)
       .toContain("min-w-0");
   });
 
