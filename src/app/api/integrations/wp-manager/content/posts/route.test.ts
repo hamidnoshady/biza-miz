@@ -1,0 +1,166 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * Scheduling a post or page (#1215, P2-5). The dangerous half is not the write
+ * itself but the two silent failures around it: a `future` post with no date
+ * publishes on the next cron pass, and a date carried by an absolute-looking
+ * string reaches WordPress an hour off if nobody pinned its shape. Both are
+ * refused at this boundary.
+ */
+const m = vi.hoisted(() => ({
+  connection: vi.fn(),
+  getContent: vi.fn(),
+  enqueue: vi.fn(),
+  findCreate: vi.fn(),
+  upsert: vi.fn(),
+  audit: vi.fn(),
+  client: vi.fn(),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  requirePermission: async () => ({ session: { businessId: "tenant", sub: "user" }, error: null }),
+  withTenantScope: (fn: unknown) => fn,
+}));
+vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: m.connection }));
+vi.mock("@/lib/integrations/connections-service", () => ({ wooClientFor: () => ({ wpUpsertPost: m.client }) }));
+vi.mock("@/lib/integrations/audit", () => ({ writeIntegrationAudit: m.audit }));
+vi.mock("@/lib/integrations/wp-content-service", () => ({
+  enqueueWpPostUpsert: m.enqueue,
+  findWpContentCreateRequest: m.findCreate,
+  getWpContent: m.getContent,
+  upsertWpContent: m.upsert,
+}));
+
+import { POST } from "./route";
+
+const CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
+const REQUEST_ID = "22222222-2222-4222-8222-222222222222";
+const FUTURE = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+
+function post(body: Record<string, unknown>) {
+  return new Request("http://test/api", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ connectionId: CONNECTION_ID, post_type: "post", ...body }),
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  m.connection.mockResolvedValue({
+    id: CONNECTION_ID,
+    provider: "woocommerce",
+    status: "active",
+    link_mode: "plugin",
+    plugin_capabilities: { jobTypes: ["post_upsert"], postSchedule: true },
+  });
+  m.getContent.mockResolvedValue(null);
+  m.enqueue.mockResolvedValue("queued");
+  m.audit.mockResolvedValue(undefined);
+});
+
+describe("scheduling validation", () => {
+  it("refuses a future status with no date instead of letting the site publish it", async () => {
+    const response = await POST(post({ status: "future", title: "تازه" }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("scheduled_date_required");
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("refuses a date that has already passed", async () => {
+    const response = await POST(post({ status: "future", title: "تازه", scheduledFor: "2020-01-01T00:00:00.000Z" }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("scheduled_date_in_past");
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unparseable date", async () => {
+    const response = await POST(post({ status: "future", title: "تازه", scheduledFor: "فردا صبح" }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("invalid_scheduled_date");
+  });
+
+  it("refuses a date on a post that is not being scheduled", async () => {
+    m.getContent.mockResolvedValue({ status: "publish", remoteUpdatedAt: "2026-11-01T00:00:00.000Z" });
+    const response = await POST(post({ title: "تازه", scheduledFor: FUTURE }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("scheduled_date_requires_future_status");
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("lets an already-scheduled post change only its date", async () => {
+    m.getContent.mockResolvedValue({ status: "future", remoteUpdatedAt: "2026-11-01T00:00:00.000Z" });
+
+    const response = await POST(post({ id: "55", expectedRemoteUpdatedAt: "2026-11-01T00:00:00.000Z", scheduledFor: FUTURE }));
+
+    expect(response.status).toBe(200);
+    expect(m.enqueue).toHaveBeenCalledWith(
+      expect.anything(),
+      "post",
+      "55",
+      undefined,
+      expect.objectContaining({ date_gmt: FUTURE.slice(0, 19) }),
+    );
+  });
+
+  it("sends WordPress's own date_gmt, never the app's free-form instant", async () => {
+    const response = await POST(post({ status: "future", title: "تازه", scheduledFor: FUTURE, requestId: REQUEST_ID }));
+
+    expect(response.status).toBe(200);
+    const patch = m.enqueue.mock.calls[0][4];
+    expect(patch.date_gmt).toBe(FUTURE.slice(0, 19));
+    expect(patch.scheduledFor).toBeUndefined();
+    expect(patch.status).toBe("future");
+  });
+
+  it("accepts a plain save of a scheduled post that touches neither status nor date", async () => {
+    m.getContent.mockResolvedValue({ status: "future", remoteUpdatedAt: "2026-11-01T00:00:00.000Z" });
+    const response = await POST(post({ id: "55", expectedRemoteUpdatedAt: "2026-11-01T00:00:00.000Z", title: "عنوان تازه" }));
+
+    expect(response.status).toBe(200);
+    const patch = m.enqueue.mock.calls[0][4];
+    expect(patch).toEqual({ title: "عنوان تازه" });
+  });
+});
+
+describe("an older plugin is refused instead of publishing early", () => {
+  it("answers plugin_schedule_unsupported when the plugin never advertised date_gmt", async () => {
+    m.connection.mockResolvedValue({
+      id: CONNECTION_ID,
+      provider: "woocommerce",
+      status: "active",
+      link_mode: "plugin",
+      plugin_capabilities: { jobTypes: ["post_upsert"] },
+    });
+
+    const response = await POST(post({ status: "future", title: "تازه", scheduledFor: FUTURE, requestId: REQUEST_ID }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ ok: false, error: "plugin_schedule_unsupported", upgradeRequired: true });
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+});
+
+describe("REST mode carries the schedule the same way", () => {
+  beforeEach(() => {
+    m.connection.mockResolvedValue({ id: CONNECTION_ID, provider: "woocommerce", status: "active", link_mode: "rest_api" });
+    m.client.mockResolvedValue({ id: 77, type: "post", status: "future", date_gmt: FUTURE.slice(0, 19) });
+  });
+
+  it("writes date_gmt to wp/v2 and mirrors what came back", async () => {
+    const response = await POST(post({ status: "future", title: "تازه", scheduledFor: FUTURE, requestId: REQUEST_ID }));
+
+    expect(response.status).toBe(200);
+    const [endpoint, body] = m.client.mock.calls[0];
+    expect(endpoint).toBe("posts");
+    expect(body).toEqual({ title: "تازه", status: "future", date_gmt: FUTURE.slice(0, 19) });
+    expect(m.upsert).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ id: "77", status: "future", date_gmt: FUTURE.slice(0, 19) }),
+    );
+  });
+});
