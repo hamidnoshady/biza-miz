@@ -56,6 +56,9 @@ const harness = require("../../electron/scripts/smoke-packaged.js") as {
   readinessFromLog: (
     userDataDir: string,
   ) => { appPort: number; instanceId: string | null; log: string } | null;
+  setCookieValues: (headers: unknown) => string[];
+  setCookieNames: (headers: unknown) => string[];
+  totpCode: (secret: string, at?: number) => string;
   scanShippedPayload: (options: { resourcesDir: string }) => Array<{ id: string; path: string }>;
   prepareProfile: (userDataDir: string) => void;
   PLATFORM_DENIAL_PATHS: Array<{ method: string; path: string }>;
@@ -391,6 +394,28 @@ describe("packaged acceptance harness", () => {
     // The canonical path still wins when both exist.
     write(path.join(profile, "Configuration", "config.json"), JSON.stringify({ appPort: 3099 }));
     expect(harness.readDesktopConfig(profile)).toMatchObject({ appPort: 3099 });
+  });
+
+  it("reads every Set-Cookie on a response, not just the first", () => {
+    const headers = new Headers();
+    headers.append("set-cookie", "pos_session=s-1; Path=/; HttpOnly; Expires=Wed, 21 Oct 2030 07:28:00 GMT");
+    headers.append("set-cookie", "pos_trusted_device=t-1; Path=/");
+    // `Headers.get("set-cookie")` joins the two with ", " and the first cookie
+    // carries a comma of its own (Expires), which is exactly the ambiguity that
+    // hid a real session cookie. The names are all this test needs from them.
+    expect(harness.setCookieNames(headers)).toEqual(["pos_session", "pos_trusted_device"]);
+    expect(harness.sessionCookieFrom(headers)).toBe("pos_session=s-1");
+    const joined = { get: () => "pos_session=s-2; Path=/; Expires=Wed, 21 Oct 2030 07:28:00 GMT, pos_x=1; Path=/" };
+    expect(harness.setCookieNames(joined)).toEqual(["pos_session", "pos_x"]);
+    expect(harness.sessionCookieFrom(joined)).toBe("pos_session=s-2");
+  });
+
+  it("computes the RFC 6238 code the install's TOTP enrolment expects", () => {
+    // The published vector: the ASCII secret "12345678901234567890" answers
+    // 94287082 at 59 s, and the install asks for six digits.
+    expect(harness.totpCode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 59_000)).toBe("287082");
+    expect(harness.totpCode("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 1111111109_000)).toBe("081804");
+    expect(() => harness.totpCode("not base32!", 59_000)).toThrow();
   });
 
   it("exercises the legacy bypass switches without granting anything", () => {

@@ -38,6 +38,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
+const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
@@ -166,10 +167,132 @@ function appOrigin(config) {
   return `http://127.0.0.1:${config.appPort}`;
 }
 
-/** The first `name=value` pair of a Set-Cookie header, or "". */
-function sessionCookieFrom(headers) {
+/**
+ * Every `Set-Cookie` value on a response.
+ *
+ * `fetch` hands back `Headers`, whose `get("set-cookie")` joins several cookies
+ * with ", " — and a cookie carrying `Expires=Wed, 21 Oct…` contains a comma of
+ * its own, so the joined form cannot be split reliably. `getSetCookie()` is the
+ * accessor that keeps them apart; the fallback only has to cope with the joined
+ * string, and splits on a comma that starts a new `name=`.
+ */
+function setCookieValues(headers) {
+  if (typeof headers?.getSetCookie === "function") return headers.getSetCookie();
   const raw = typeof headers?.get === "function" ? headers.get("set-cookie") : headers;
-  return (raw || "").split(";")[0] || "";
+  if (!raw) return [];
+  return String(raw).split(/,(?=\s*[^;,=\s]+=)/);
+}
+
+/** The names of the cookies a response set — never the values. */
+function setCookieNames(headers) {
+  return setCookieValues(headers)
+    .map((value) => String(value).split("=")[0].trim())
+    .filter(Boolean);
+}
+
+/** The first `name=value` pair of the session cookie, or "". */
+function sessionCookieFrom(headers) {
+  const cookies = setCookieValues(headers);
+  const session = cookies.find((value) => String(value).startsWith(`${SESSION_COOKIE_NAME}=`));
+  const chosen = session ?? cookies[0] ?? "";
+  return String(chosen).split(";")[0].trim();
+}
+
+const SESSION_COOKIE_NAME = "pos_session";
+
+/* ------------------------------------------------------------------ *
+ * The second factor, from the harness side.
+ *
+ * A first-run Owner is enrolled on the spot (SMS on a Hybrid install, TOTP on
+ * a Full Offline one) and every later login therefore asks for a second
+ * factor. The acceptance machine has no handset and no authenticator app, so
+ * it uses the two things the install itself hands over exactly once at
+ * bootstrap: the TOTP secret (local installs) and the single-use recovery
+ * codes (both). That is the product's documented way back in — a real code
+ * path, not a test hook.
+ * ------------------------------------------------------------------ */
+
+function base32Decode(secret) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const clean = String(secret).toUpperCase().replace(/[\s=]+/g, "");
+  const bytes = [];
+  let value = 0;
+  let bits = 0;
+  for (const character of clean) {
+    const index = alphabet.indexOf(character);
+    if (index < 0) throw new Error("totp secret is not base32");
+    value = ((value << 5) | index) & 0xffff;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+/** The 6-digit RFC 6238 code for a secret at a moment (30-second steps). */
+function totpCode(secret, at = Date.now()) {
+  const counter = Math.floor(at / 30000);
+  const message = Buffer.alloc(8);
+  message.writeUInt32BE(Math.floor(counter / 2 ** 32), 0);
+  message.writeUInt32BE(counter % 2 ** 32, 4);
+  const digest = crypto.createHmac("sha1", base32Decode(secret)).update(message).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary =
+    ((digest[offset] & 0x7f) << 24) |
+    (digest[offset + 1] << 16) |
+    (digest[offset + 2] << 8) |
+    digest[offset + 3];
+  return String(binary % 1_000_000).padStart(6, "0");
+}
+
+/**
+ * Answer the MFA challenge `POST /api/auth/login` returned.
+ *
+ * Prefers the TOTP secret when the install revealed one; otherwise spends the
+ * next unused recovery code and writes the shortened list back, because a
+ * spent code must never be tried twice (that would count as a failed attempt
+ * against the Owner account).
+ */
+async function completeMfaChallenge(origin, challenge, credentials, userDataDir) {
+  const mfaToken = challenge.json?.mfaToken;
+  if (!mfaToken) {
+    fail(`owner login demanded a second factor but returned no pending token: ${challenge.text.slice(0, 300)}`);
+  }
+  const offered = challenge.json?.availableMethods ?? [];
+  const verify = (body) =>
+    httpJson(`${origin}/api/auth/mfa/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${mfaToken}` },
+      body: JSON.stringify(body),
+    });
+
+  if (credentials.totpSecret && offered.includes("totp")) {
+    const response = await verify({ code: totpCode(credentials.totpSecret), method: "totp" });
+    if (response.status === 200) {
+      log("owner login answered the second factor with the install's own TOTP secret");
+      return response;
+    }
+    // A drifted clock or a re-enrolled secret: spend a recovery code rather
+    // than guess again and count a failure against the account.
+    log(`TOTP was refused (${response.status}); falling back to a recovery code`);
+  }
+
+  const codes = Array.isArray(credentials.recoveryCodes) ? credentials.recoveryCodes : [];
+  if (codes.length === 0) {
+    fail(
+      `owner login demanded a second factor (${offered.join(",") || "unknown"}) and the harness holds no unused recovery code for it`,
+    );
+  }
+  const response = await verify({ code: codes[0], useRecoveryCode: true });
+  if (response.status !== 200) {
+    fail(`recovery-code login answered ${response.status}: ${response.text.slice(0, 300)}`);
+  }
+  credentials.recoveryCodes = codes.slice(1);
+  if (userDataDir) writeOwnerCredentials(userDataDir, credentials);
+  log(`owner login answered the second factor with a recovery code (${credentials.recoveryCodes.length} left)`);
+  return response;
 }
 
 /**
@@ -649,9 +772,22 @@ async function bootstrapOwner(origin, userDataDir) {
   if (!cookie) fail("first-run bootstrap returned no session cookie");
   const me = await httpJson(`${origin}/api/auth/me`, { headers: { cookie } });
   if (me.status !== 200) fail(`/api/auth/me answered ${me.status} immediately after bootstrap`);
-  writeOwnerCredentials(userDataDir, { email, password });
-  log("first-run bootstrap created the Owner and signed them in");
-  return { email, password, cookie };
+  // The install discloses the second-factor material exactly once, here. Both
+  // facts a later login needs — the TOTP secret of a local install and the
+  // single-use recovery codes — are kept beside the credentials so the restart
+  // phase can sign in again without a handset.
+  const mfa = response.json?.mfa ?? {};
+  const credentials = {
+    email,
+    password,
+    totpSecret: mfa.totpSecret ?? null,
+    recoveryCodes: Array.isArray(mfa.recoveryCodes) ? mfa.recoveryCodes : [],
+  };
+  writeOwnerCredentials(userDataDir, credentials);
+  log(
+    `first-run bootstrap created the Owner and signed them in (second factor: ${mfa.method ?? "none"}, ${credentials.recoveryCodes.length} recovery codes)`,
+  );
+  return { credentials, cookie };
 }
 
 /**
@@ -747,7 +883,8 @@ async function runFullOfflinePhase({ executable }) {
   }
 }
 
-async function assertLogin(origin, { email, password, businessId = null }) {
+async function assertLogin(origin, credentials, { userDataDir = null } = {}) {
+  const { email, password, businessId = null } = credentials;
   const post = (body) =>
     httpJson(`${origin}/api/auth/login`, {
       method: "POST",
@@ -772,10 +909,15 @@ async function assertLogin(origin, { email, password, businessId = null }) {
     if (right.status !== 200) fail(`owner login with an explicit business answered ${right.status}`);
     cookie = sessionCookieFrom(right.headers);
   }
+  if (!cookie && right.json?.mfaRequired === true) {
+    right = await completeMfaChallenge(origin, right, credentials, userDataDir);
+    cookie = sessionCookieFrom(right.headers);
+  }
   if (!cookie) {
-    // Whatever this is — an MFA challenge, a blocked membership — the body is
-    // the only thing that says which, and it belongs in the failure.
-    fail(`owner login returned no session cookie: ${right.text.slice(0, 400)}`);
+    // Whatever this is — a blocked membership, a cookie this harness cannot
+    // read — the body and the cookie *names* (never values) say which.
+    const names = setCookieNames(right.headers).join(",") || "none";
+    fail(`owner login returned no session cookie (Set-Cookie: ${names}): ${right.text.slice(0, 400)}`);
   }
   return cookie;
 }
@@ -863,7 +1005,7 @@ async function runLaunchPhases({ executable, userDataDir, previouslyInitialized,
   let credentials = readOwnerCredentials(userDataDir);
   if (stateBefore.json?.needsBootstrap === true) {
     const created = await bootstrapOwner(origin, userDataDir);
-    credentials = { email: created.email, password: created.password };
+    credentials = created.credentials;
     const stateAfter = await httpJson(`${origin}/api/setup/state`, { headers: { cookie: created.cookie } });
     if (stateAfter.json?.needsBootstrap === true) fail("setup/state still reports needsBootstrap after a successful bootstrap");
   } else if (!credentials) {
@@ -872,7 +1014,7 @@ async function runLaunchPhases({ executable, userDataDir, previouslyInitialized,
 
   let tenantCookie = "";
   if (credentials) {
-    tenantCookie = await assertLogin(origin, credentials);
+    tenantCookie = await assertLogin(origin, credentials, { userDataDir });
     log("owner login accepted the real password and rejected a wrong one");
   }
 
@@ -922,7 +1064,7 @@ async function runLaunchPhases({ executable, userDataDir, previouslyInitialized,
     fail(`a second bootstrap on an initialized install answered ${replay.status}; expected 409 already_initialized`);
   }
   if (credentials) {
-    await assertLogin(secondOrigin, credentials);
+    await assertLogin(secondOrigin, credentials, { userDataDir });
     log("existing Owner credentials still work after restart");
   }
   await second.stop("restart acceptance launch");
@@ -1031,6 +1173,9 @@ module.exports = {
   runAcceptance,
   scanShippedPayload,
   sessionCookieFrom,
+  setCookieNames,
+  setCookieValues,
+  totpCode,
   appOrigin,
   prepareProfile,
   walkFiles,
