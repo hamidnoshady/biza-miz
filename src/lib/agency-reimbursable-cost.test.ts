@@ -13,6 +13,8 @@ import { describe, expect, it } from "vitest";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import {
   AGENCY_COST_AMOUNT_MAX,
+  AGENCY_DEFAULT_PRESENTATION,
+  parseAgencyCostPolicySetting,
   AGENCY_COST_DATE_YEAR_MAX,
   AGENCY_COST_DATE_YEAR_MIN,
   AGENCY_COST_DESCRIPTION_LIMIT,
@@ -244,5 +246,46 @@ describe("free text", () => {
     expect(normalizeAgencyCostOptionalText(null, 4000).present).toBe(false);
     expect(normalizeAgencyCostOptionalText("", 4000)).toEqual({ present: true, value: "", tooLong: false });
     expect(normalizeAgencyCostOptionalText("   ", 4000)).toEqual({ present: true, value: "", tooLong: false });
+  });
+});
+
+describe("§D's business-level presentation policy", () => {
+  it("reads a stored policy for either treatment", () => {
+    expect(parseAgencyCostPolicySetting({ presentation: "net", updatedAt: "2026-11-03T08:00:00Z" })).toEqual({
+      presentation: "net",
+      updatedAt: "2026-11-03T08:00:00Z",
+    });
+    expect(parseAgencyCostPolicySetting({ presentation: "gross" })).toEqual({
+      presentation: "gross",
+      updatedAt: null,
+    });
+    // A non-string `updatedAt` is dropped rather than passed through: the value is
+    // rendered on a screen, and a number or an object there is a malformed write.
+    expect(parseAgencyCostPolicySetting({ presentation: "gross", updatedAt: 7 })?.updatedAt).toBeNull();
+  });
+
+  it("answers null for a value it cannot use, so a caller can tell «never saved» from «saved»", () => {
+    for (const raw of [null, undefined, {}, [], "net", 7, { presentation: null }, { presentation: "" }]) {
+      expect(parseAgencyCostPolicySetting(raw), JSON.stringify(raw) ?? "undefined").toBeNull();
+    }
+  });
+
+  it("does not coerce a presentation it does not recognise", () => {
+    // The load-bearing one. A value this code does not know was written by a newer
+    // version or by hand; answering the default would let the next save overwrite a
+    // decision nobody meant to reverse — and here the decision picks which of two
+    // accounts money lands in.
+    expect(parseAgencyCostPolicySetting({ presentation: "net_plus_vat" })).toBeNull();
+    expect(parseAgencyCostPolicySetting({ presentation: "NET" })).toBeNull();
+    expect(parseAgencyCostPolicySetting({ presentation: 1 })).toBeNull();
+  });
+
+  it("keeps the fallback a real presentation, and the conservative one", () => {
+    // Pinned rather than assumed: `net` puts a client's media buy in 1270 as a claim
+    // until it is recharged, so the agency's revenue is never overstated. `gross`
+    // would make it the agency's own cost of sale — a real position, but one §D says
+    // a business has to have adopted.
+    expect(AGENCY_DEFAULT_PRESENTATION).toBe("net");
+    expect(AGENCY_PASS_THROUGH_PRESENTATIONS).toContain(AGENCY_DEFAULT_PRESENTATION);
   });
 });
