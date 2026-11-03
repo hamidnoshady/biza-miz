@@ -15,6 +15,11 @@ define( 'ABSPATH', '/tmp/' );
 
 $GLOBALS['pos_test_filters'] = array();
 $GLOBALS['pos_test_currency'] = 'IRT';
+$GLOBALS['pos_fake_products'] = array();
+
+function wc_get_product( $id ) {
+	return isset( $GLOBALS['pos_fake_products'][ $id ] ) ? $GLOBALS['pos_fake_products'][ $id ] : null;
+}
 
 function apply_filters( $tag, $value ) {
 	return array_key_exists( $tag, $GLOBALS['pos_test_filters'] ) ? $GLOBALS['pos_test_filters'][ $tag ] : $value;
@@ -31,6 +36,48 @@ function wp_parse_url( $url ) {
 }
 function get_woocommerce_currency() {
 	return $GLOBALS['pos_test_currency'];
+}
+
+class Fake_Torob_Product {
+	public $id;
+	public $type;
+	public $parent_id;
+	public $children;
+	public $price;
+	public $regular;
+	public $created;
+	public $modified;
+	public $name;
+	public $attributes;
+
+	public function __construct( $id, $type = 'simple', $parent_id = 0, $children = array(), $price = '2500000', $regular = '3000000', $created = '2025-01-01 12:00:00+00:00', $name = 'Fake product', $attributes = array() ) {
+		$this->id         = $id;
+		$this->type       = $type;
+		$this->parent_id  = $parent_id;
+		$this->children   = $children;
+		$this->price      = $price;
+		$this->regular    = $regular;
+		$this->created    = null === $created ? null : new DateTimeImmutable( $created );
+		$this->modified   = $this->created;
+		$this->name       = $name;
+		$this->attributes = $attributes;
+	}
+	public function get_id() { return $this->id; }
+	public function get_type() { return $this->type; }
+	public function get_parent_id() { return $this->parent_id; }
+	public function get_children() { return $this->children; }
+	public function get_permalink() { return 'https://shop.example/product/' . $this->id; }
+	public function get_date_created() { return $this->created; }
+	public function get_date_modified() { return $this->modified; }
+	public function get_image_id() { return 0; }
+	public function get_gallery_image_ids() { return array(); }
+	public function get_price() { return $this->price; }
+	public function get_regular_price() { return $this->regular; }
+	public function get_attributes() { return $this->attributes; }
+	public function is_in_stock() { return true; }
+	public function is_purchasable() { return true; }
+	public function get_short_description() { return ''; }
+	public function get_name() { return $this->name; }
 }
 
 require dirname( __DIR__ ) . '/pos-accounting-connector/includes/class-pos-torob.php';
@@ -204,6 +251,36 @@ same( 500, strlen( $long['title'] ), 'a field longer than its cap is trimmed, no
 $grouped = $P::record( row( array( 'group_id' => '1200' ) ) );
 same( '1200', $grouped['product_group_id'], 'a variation names its parent' );
 check( ! isset( $P::record( row() )['product_group_id'] ), 'a simple product does not' );
+
+// --- WooCommerce catalogue mapping ----------------------------------------------
+
+$GLOBALS['pos_test_currency'] = 'IRR';
+$simple = new Fake_Torob_Product(
+	101,
+	'simple',
+	0,
+	array(),
+	'2500000',
+	'3000000',
+	'2025-01-01 12:00:00+01:00',
+	'Simple watch'
+);
+$simple_rows = $P::rows_from_product( $simple );
+same( 1, count( $simple_rows ), 'a simple product maps to one row' );
+same( 250000, $simple_rows[0]['price_toman'], 'WooCommerce IRR is divided exactly by ten' );
+same( 300000, $simple_rows[0]['old_price_toman'], 'and the regular price uses the same currency rule' );
+same( '2025-01-01T11:00:00.000Z', $simple_rows[0]['date_added'], 'the store-local timezone becomes the correct UTC instant' );
+
+$parent = new Fake_Torob_Product( 201, 'variable', 0, array( 202 ), '0', '0', '2025-02-01 00:00:00+00:00', 'Shirt' );
+$variation = new Fake_Torob_Product( 202, 'variation', 201, array(), '1200000', '1200000', null, 'Shirt — blue', array( 'color' => 'blue' ) );
+$GLOBALS['pos_fake_products'] = array( 201 => $parent, 202 => $variation );
+$variant_rows = $P::rows_from_product( $parent );
+same( 1, count( $variant_rows ), 'a variable product maps each child variation separately' );
+same( '202', $variant_rows[0]['id'], 'the variation owns its stable page identity' );
+same( '201', $variant_rows[0]['group_id'], 'the parent groups the variation' );
+same( '2025-02-01T00:00:00.000Z', $variant_rows[0]['date_added'], "a variation without a creation date inherits its parent's" );
+$GLOBALS['pos_fake_products'] = array();
+$GLOBALS['pos_test_currency'] = 'IRT';
 
 // --- envelopes ------------------------------------------------------------------
 
