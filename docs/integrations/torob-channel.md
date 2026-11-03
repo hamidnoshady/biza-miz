@@ -491,10 +491,11 @@ and one served from the platform publish the same set of pages. Two rows resolvi
 one URL (a duplicated SKU, or a variation whose permalink collapses to the parent) are
 de-duplicated, because two listings for one page let Torob pick at random.
 
-`cursor` mode is the one query WooCommerce cannot express (`ID < x`), so it runs as a
-direct prepared query; offset-paging over an ID sort — the obvious substitute — shifts
-under a catalogue being edited mid-crawl, which is exactly what a cursor exists to
-avoid. A cursor this shop never issued is a `400`, not a silent first page.
+`cursor` mode uses the same lexical `page_unique` ordering as the hosted feed and continues
+strictly below the last one sent; it does not silently fall back to the first page. A
+cursor that is not one this shop issued is a `400`. Both numbered and cursor pages are
+cut from the publishable contract records, so invalid/unpriced products do not inflate
+`total` or shift the page boundaries.
 
 `wordpress-plugin/tests/connector-torob-products.php` pins all of it under plain `php`:
 the four modes, every refusal and its sentence, the free-price trap, the dictionary,

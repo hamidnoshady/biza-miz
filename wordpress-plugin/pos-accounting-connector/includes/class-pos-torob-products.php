@@ -506,19 +506,6 @@ class POS_Connector_Torob_Products {
 		return false === $decoded ? '' : $decoded;
 	}
 
-	/**
-	 * `page_urls` children: match on the URL, tolerating a trailing slash and a query
-	 * string, which are the two ways the same page is written in the wild.
-	 */
-	public static function strip_url( $url ) {
-		$parts = wp_parse_url_standin( (string) $url );
-		if ( ! is_array( $parts ) || empty( $parts['host'] ) ) {
-			return '';
-		}
-		$path = isset( $parts['path'] ) ? rtrim( $parts['path'], '/' ) : '';
-		return strtolower( $parts['host'] ) . $path;
-	}
-
 	// ---------------------------------------------------------------------
 	// The route
 	// ---------------------------------------------------------------------
@@ -564,7 +551,7 @@ class POS_Connector_Torob_Products {
 		);
 	}
 
-	/** `page` mode: WooCommerce sorts and pages; this only shapes. */
+	/** `page` mode: count and sort the publishable records before slicing. */
 	private static function serve_page( $request ) {
 		$records = self::all_records();
 		$records = self::sort_records( $records, $request['sort'] );
@@ -575,13 +562,7 @@ class POS_Connector_Torob_Products {
 		return self::ok( self::page_response( array_slice( $records, $start, self::PAGE_SIZE ), $page, $total ) );
 	}
 
-	/**
-	 * `cursor` mode: strictly older than the id the cursor names.
-	 *
-	 * This is the one query WooCommerce cannot express (`ID < x`), and offset paging
-	 * over an ID sort — the "obvious" substitute — shifts under a catalogue that is
-	 * being edited mid-crawl, which is exactly what a cursor exists to avoid.
-	 */
+	/** `cursor` mode: continue strictly below the last `page_unique` we sent. */
 	private static function serve_cursor( $request ) {
 		$after = null === $request['cursor'] ? null : self::decode_cursor( $request['cursor'] );
 		if ( null !== $after && '' === $after ) {
@@ -622,24 +603,18 @@ class POS_Connector_Torob_Products {
 			return self::ok( self::lookup_response( self::records_for( $products ) ) );
 		}
 
-		// URLs are matched against the products' own permalinks rather than resolved
-		// through `url_to_postid`, because that helper trusts the request's host while
-		// this comparison must not.
+		// Match the exact published URL against the contract records, rather than
+		// `url_to_postid` (which trusts the request host) or a parent product's URL
+		// (which would return the whole family when one variation was requested).
 		$wanted  = array_flip( array_map( 'trim', $request['page_urls'] ) );
-		$records = array();
-		foreach ( self::all_products() as $product ) {
-			foreach ( self::rows_from_product( $product ) as $row ) {
-				// Only the page that was asked for: a URL lookup of one variation must
-				// not answer with the whole family.
-				if ( ! isset( $wanted[ trim( $row['url'] ) ] ) ) {
-					continue;
+		$records = array_values(
+			array_filter(
+				self::all_records(),
+				static function ( $record ) use ( $wanted ) {
+					return isset( $wanted[ $record['page_url'] ] );
 				}
-				$record = self::record( $row );
-				if ( null !== $record ) {
-					$records[] = $record;
-				}
-			}
-		}
+			)
+		);
 		return self::ok( self::lookup_response( $records ) );
 	}
 
@@ -710,45 +685,6 @@ class POS_Connector_Torob_Products {
 			}
 		);
 		return $records;
-	}
-
-	/** A catalogue walk for the URL lookup. */
-	private static function all_products() {
-		if ( ! function_exists( 'wc_get_products' ) ) {
-			return array();
-		}
-		$all = array();
-		for ( $page = 1; ; $page++ ) {
-			$batch = wc_get_products(
-				array(
-					'limit'   => 100,
-					'page'    => $page,
-					'status'  => 'publish',
-					'orderby' => 'ID',
-					'order'   => 'DESC',
-				)
-			);
-			if ( empty( $batch ) ) {
-				break;
-			}
-			foreach ( $batch as $product ) {
-				$all[] = $product;
-			}
-			if ( count( $batch ) < 100 ) {
-				break;
-			}
-		}
-		return $all;
-	}
-
-	private static function orderby( $sort ) {
-		if ( 'date_updated_desc' === $sort ) {
-			return 'modified';
-		}
-		if ( 'product_id_desc' === $sort ) {
-			return 'ID';
-		}
-		return 'date';
 	}
 
 	/** Shape every page of every product (variations included) into records. */

@@ -309,7 +309,6 @@ same( 1, $lookup['total'], 'a lookup reports what it found' );
 same( 0, $P::lookup_response( array() )['total'], 'and an absent product is total: 0 with an empty list' );
 same( array(), $P::lookup_response( array() )['products'], 'never a stub' );
 
-same( 'shop.example/product/watch', $P::strip_url( 'https://shop.example/product/watch/?utm_source=x' ), 'URLs compare by host and path' );
 
 // --- the gate -------------------------------------------------------------------
 
