@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import type { Industry } from "../src/lib/industries";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -90,7 +91,7 @@ interface Agency {
   actor: { userId: string; name: string };
 }
 
-async function agency(label = "", industry = "advertising_agency"): Promise<Agency> {
+async function agency(label = "", industry: Industry = "advertising_agency"): Promise<Agency> {
   seq += 1;
   const result = await provisioning.provisionBusiness({
     businessName: `آژانس سیاست ${seq} ${label}`,
