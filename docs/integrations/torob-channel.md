@@ -514,15 +514,21 @@ and the gate order (401 before 403).
 1. **Wave 3 — serving the feed.** *Done for the platform and for WordPress*: §6b is live at
    `/api/v1/torob/products/<shopId>`, §6c closes the partner path from `pending_approval` to
    `authorized`, and §6i serves the same contract from the store's own origin. What remains is the
-   **CMS runtime** deployable (the Eshobe-CMS counterpart of §6i), which is a separate deployable
-   this repository does not contain.
-2. **Variant catalogue.** The builder already accepts variants and emits one item each; the database
-   source reads `menu_items` only, so retail `items`/`item_variant_attributes` products need their
-   price source mapped before they can appear.
-3. **Wave 4 — the per-shop screen.** *Done*: `§6d` above is `/growth/torob/[shopId]`, with the
-   publication rule, the per-product decisions and the blocked products' reasons, and `§6e` adds what
-   Torob itself reports about the shop and each page. What is left of this wave is the variant
-   catalogue (item 2) and the multi-shop overview columns for Torob's own counts (item 6).
+   **CMS runtime** deployable (the Eshobe-CMS counterpart of §6i). The separate
+   `hamidnoshady/eshobe-cms` repository currently has no Product API v3 route (its tree has no Torob
+   product integration); this repository cannot ship that runtime.
+2. **Variant catalogue.** The builder accepts variants and emits one item each; this shop's platform
+   feed source still reads `menu_items` only. Retail `items` does have a potential price source
+   (`item_stock.unit_price`, Rial), sellability/publication fields, and `item_variant_attributes`, but
+   no approved mapping from those internal records to a public product URL on the managed website.
+   Its `image_media_id` resolves through tenant-authenticated media delivery, not a public image URL.
+   Do not publish these records until the website route and public-image policy are decided; an
+   authenticated media URL cannot be sent to Torob.
+3. **Wave 4 — the per-shop screen.** *Done*: `§6d` is `/growth/torob/[shopId]`, with publication
+   decisions and blocked reasons; `§6e` reports what Torob itself says about the shop and each page.
+   The multi-shop overview also renders Torob's per-shop page count, pages with problems, last read,
+   and live/blocked state from the persisted observation (`TorobStatusLine`). It deliberately does
+   not claim an aggregate webhook-sent count. The only remaining feed-source work is item 2.
 4. **Wave 5 — opt-in attribution.** *Done on the store's origin*: §6h serves
    `/torob/v1/orders` and `/torob/v1/actions` with both switches off by default, `403` when they
    are off, and the switch's own copy saying what is shared. What remains is the platform-side
