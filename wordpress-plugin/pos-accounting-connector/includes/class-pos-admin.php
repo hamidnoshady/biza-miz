@@ -24,6 +24,7 @@ class POS_Connector_Admin {
 			'connection'      => array( 'slug' => 'pos-connector-connection',       'label' => __( 'اتصال', 'pos-accounting-connector' ) ),
 			'synchronization' => array( 'slug' => 'pos-connector-synchronization',  'label' => __( 'همگام‌سازی', 'pos-accounting-connector' ) ),
 			'queue'           => array( 'slug' => 'pos-connector-queue',            'label' => __( 'صف و خطاها', 'pos-accounting-connector' ) ),
+			'torob'           => array( 'slug' => 'pos-connector-torob',          'label' => __( 'ترب', 'pos-accounting-connector' ) ),
 			'diagnostics'     => array( 'slug' => 'pos-connector-diagnostics',      'label' => __( 'عیب‌یابی', 'pos-accounting-connector' ) ),
 			'updates'         => array( 'slug' => 'pos-connector-updates',          'label' => __( 'به‌روزرسانی', 'pos-accounting-connector' ) ),
 		);
@@ -174,7 +175,9 @@ class POS_Connector_Admin {
 			<?php if ( $notice ) : ?>
 				<div class="notice notice-<?php echo esc_attr( $notice[0] ); ?>"><p><?php echo esc_html( $notice[1] . ( '' !== $detail ? ' ' . $detail : '' ) ); ?></p></div>
 			<?php endif; ?>
-			<?php if ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) : ?>
+			<?php if ( 'torob' === $section ) : ?>
+				<?php POS_Connector_Torob::render_admin(); ?>
+			<?php elseif ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) : ?>
 				<?php self::render_wizard( $settings ); ?>
 			<?php elseif ( 'dashboard' === $section ) : ?>
 				<?php self::render_dashboard( $settings, $counts ); ?>
@@ -275,6 +278,7 @@ class POS_Connector_Admin {
 		</div>
 		<?php self::render_domain_cards( $settings ); ?>
 		<?php self::render_running_jobs(); ?>
+		<?php self::render_recent_invocations(); ?>
 		<?php if ( ! empty( $settings['last_error'] ) ) : ?>
 			<div class="notice notice-warning"><p><strong><?php esc_html_e( 'نیاز به توجه:', 'pos-accounting-connector' ); ?></strong> <?php echo esc_html( $settings['last_error'] ); ?></p></div>
 		<?php endif; ?>
@@ -384,6 +388,53 @@ class POS_Connector_Admin {
 	 * still being read — so «در صف اجرا قرار گرفت» is something the screen can
 	 * follow up on instead of a promise.
 	 */
+	/**
+	 * The last few scheduler invocations (#1206 P1: current vs historical).
+	 *
+	 * The card above says what the scheduler is doing *now*. This says what it
+	 * did — which is the only way to tell «یک بار خطا خورد و برگشت» from «از دیروز
+	 * هر دقیقه خطا می‌خورد». Five lines here, all twenty in `wp pos-connector doctor`.
+	 *
+	 * Relative times, not calendar dates: «۳ دقیقه پیش» is the same sentence in
+	 * every locale and needs no conversion, and time-of-day is not a date.
+	 */
+	private static function render_recent_invocations() {
+		$entries = POS_Connector_Invocation_Log::recent( 5 );
+		if ( empty( $entries ) ) {
+			return;
+		}
+		echo '<section class="pos-panel"><h2>' . esc_html__( 'اجراهای اخیر زمان‌بند', 'pos-accounting-connector' ) . '</h2><ul>';
+		foreach ( $entries as $entry ) {
+			$started = isset( $entry['startedAtUnix'] ) ? (int) $entry['startedAtUnix'] : 0;
+			$when    = $started > 0
+				? sprintf(
+					/* translators: %s: human-readable time difference, e.g. «۳ دقیقه» */
+					__( '%s پیش', 'pos-accounting-connector' ),
+					human_time_diff( $started, time() )
+				)
+				: __( 'نامشخص', 'pos-accounting-connector' );
+			$clock = $started > 0 ? get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $started ), 'H:i:s' ) : '—';
+			$code  = isset( $entry['exitCode'] ) ? (int) $entry['exitCode'] : null;
+			$parts = array(
+				$clock,
+				$when,
+				isset( $entry['driver'] ) ? $entry['driver'] : '?',
+				null === $code ? __( 'کد نامشخص', 'pos-accounting-connector' ) : sprintf( __( 'کد %d', 'pos-accounting-connector' ), $code ),
+			);
+			if ( isset( $entry['runtimeMs'] ) && null !== $entry['runtimeMs'] ) {
+				$parts[] = sprintf( '%.1f' . __( 'ثانیه', 'pos-accounting-connector' ), ( (int) $entry['runtimeMs'] ) / 1000 );
+			}
+			if ( isset( $entry['outcome'] ) && 'interrupted' === $entry['outcome'] ) {
+				// The one outcome a later run cannot clean up for you.
+				$parts[] = __( 'نیمه‌کاره ماند (فرآیند از بین رفت)', 'pos-accounting-connector' );
+			} elseif ( ! empty( $entry['verdict'] ) ) {
+				$parts[] = (string) $entry['verdict'];
+			}
+			echo '<li>' . esc_html( implode( ' — ', $parts ) ) . '</li>';
+		}
+		echo '</ul></section>';
+	}
+
 	private static function render_running_jobs() {
 		$labels = array(
 			'sync'      => __( 'اجرای سریع حمل‌ونقل', 'pos-accounting-connector' ),

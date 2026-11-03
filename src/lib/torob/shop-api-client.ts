@@ -403,3 +403,68 @@ export async function listTorobProducts(
 
   return { products, pages, truncated, unknownStatuses };
 }
+
+/**
+ * `POST /products/activate/` and `POST /products/deactivate/` — a page's life on
+ * Torob, switched from here.
+ *
+ * The document's rules, and why each is enforced rather than trusted:
+ *
+ *   - **At most 5 000 ids per request.** A caller sends a bounded list, and an empty
+ *     list is refused before the network — Torob answers 400 to it, and a 400 read
+ *     as "the shop is broken" is a bad support ticket.
+ *   - **The answer is per id.** `{product_id, found}` for each; a page Torob has
+ *     never seen comes back `found: false`, and that is reported rather than
+ *     swallowed: the merchant asked about a page that is not on Torob, which is
+ *     information, not a failure.
+ *   - **Deactivation is not deletion.** A deactivated page stops showing but stays
+ *     known, so re-activating it works and the shop keeps its history.
+ *
+ * Only pages Torob already knows can be switched, so a caller passes `page_unique`
+ * values — the same identity the feed publishes.
+ */
+export const TOROB_ACTIVATE_BATCH_LIMIT = 5_000;
+
+export interface TorobPageToggleResult {
+  /** Ids Torob acted on. */
+  found: string[];
+  /** Ids Torob does not know — usually a page that was never crawled. */
+  missing: string[];
+}
+
+export async function setTorobPagesActive(
+  options: TorobShopApiOptions & { pageUniques: readonly string[]; active: boolean },
+): Promise<TorobPageToggleResult> {
+  const pageUniques = [...new Set(options.pageUniques.map((id) => id.trim()).filter(Boolean))];
+  if (pageUniques.length === 0) {
+    throw new TorobShopApiError("invalid_request", "no page ids");
+  }
+  if (pageUniques.length > TOROB_ACTIVATE_BATCH_LIMIT) {
+    throw new TorobShopApiError("invalid_request", "over 5000 page ids");
+  }
+
+  const domain = options.domain.trim().toLowerCase();
+  const body = asRecord(
+    await call(options, {
+      method: "POST",
+      path: `products/${options.active ? "activate" : "deactivate"}/?domain=${encodeURIComponent(domain)}`,
+      body: { product_ids: pageUniques },
+    }),
+  );
+
+  const results = Array.isArray(body.results) ? body.results : null;
+  if (!results) throw new TorobShopApiError("invalid_response", "missing results");
+
+  const found: string[] = [];
+  const missing: string[] = [];
+  for (const entry of results) {
+    const row = asRecord(entry);
+    const id = typeof row.product_id === "string" ? row.product_id : "";
+    if (!id) throw new TorobShopApiError("invalid_response", "result without product_id");
+    // Anything that is not an explicit `true` is "Torob did not act on it": an
+    // absent flag must not be read as success.
+    if (row.found === true) found.push(id);
+    else missing.push(id);
+  }
+  return { found, missing };
+}

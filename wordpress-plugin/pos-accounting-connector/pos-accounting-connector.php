@@ -3,7 +3,7 @@
  * Plugin Name:       Bizamiz Connector
  * Plugin URI:        https://github.com/hamidnoshady/biza-miz
  * Description:       اتصال امن دوطرفه فروشگاه ووکامرس به بیزامیز: ارسال سفارش، برگشت وجه، محصول و مشتری؛ دریافت موجودی و قیمت.
- * Version:           1.6.26
+ * Version:           1.6.28
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * WC requires at least: 7.0
@@ -77,7 +77,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'POS_CONNECTOR_VERSION', '1.6.26' );
+define( 'POS_CONNECTOR_VERSION', '1.6.28' );
 define( 'POS_CONNECTOR_DB_VERSION_OPTION', 'pos_connector_db_version' );
 define( 'POS_CONNECTOR_FILE', __FILE__ );
 define( 'POS_CONNECTOR_PATH', plugin_dir_path( __FILE__ ) );
@@ -159,6 +159,8 @@ define( 'POS_CONNECTOR_CRON_RESYNC_CONTENT', 'pos_connector_resync_content' );
 define( 'POS_CONNECTOR_CRON_MANUAL_JOB', 'pos_connector_manual_job' );
 /** Continuation of a chunked catalogue export (args: the export's run id). */
 define( 'POS_CONNECTOR_CRON_PRODUCT_EXPORT', 'pos_connector_product_export_continue' );
+/** Continuation of a chunked content export (#1206; its cursor carries the run id). */
+define( 'POS_CONNECTOR_CRON_CONTENT_EXPORT', 'pos_connector_content_export_continue' );
 /**
  * The cron probe (args: the probe's correlation id, issue #1206).
  *
@@ -171,10 +173,13 @@ define( 'POS_CONNECTOR_CRON_PROBE', 'pos_connector_cron_probe' );
 
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-log.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-health.php';
+require_once POS_CONNECTOR_PATH . 'includes/class-pos-invocation-log.php';
+require_once POS_CONNECTOR_PATH . 'includes/class-pos-export-cursor.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-client.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-queue.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-sync.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-settings.php';
+require_once POS_CONNECTOR_PATH . 'includes/class-pos-torob.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-admin.php';
 require_once POS_CONNECTOR_PATH . 'includes/class-pos-updater.php';
 
@@ -412,6 +417,14 @@ function pos_connector_bootstrap() {
 		POS_Connector_Settings::init();
 		POS_Connector_Admin::init();
 
+		// Torob attribution (issue #894, `torob/v1/orders|actions`) is registered
+		// before the WooCommerce gate for a reason: the two routes are *inbound*,
+		// and the switch that keeps them answering 403 has to exist even while the
+		// store side is broken. A 403 from a live endpoint is a state the merchant
+		// can fix; a missing route looks like a broken integration.
+		POS_Connector_Torob::init();
+		add_action( 'admin_post_pos_connector_save_torob', array( 'POS_Connector_Torob', 'handle_save' ) );
+
 		if ( ! pos_connector_woocommerce_active() ) {
 			add_action(
 				'admin_notices',
@@ -611,6 +624,7 @@ function pos_connector_deactivate() {
 	// be told; wp_unschedule_hook() clears every event on the hook.
 	wp_unschedule_hook( POS_CONNECTOR_CRON_MANUAL_JOB );
 	wp_unschedule_hook( POS_CONNECTOR_CRON_PRODUCT_EXPORT );
+	wp_unschedule_hook( POS_CONNECTOR_CRON_CONTENT_EXPORT );
 	wp_unschedule_hook( POS_CONNECTOR_CRON_PROBE );
 }
 register_deactivation_hook( __FILE__, 'pos_connector_deactivate' );

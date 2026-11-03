@@ -34,14 +34,17 @@ import {
   createShopApiThrottle,
   listTorobProducts,
   readTorobShopInfo,
+  setTorobPagesActive,
   TorobShopApiError,
   type ShopApiThrottle,
   type TorobProductScan,
 } from "./shop-api-client";
 import { torobPartnerToken } from "./shop-generator";
+import { drainWebhookQueue, enqueueChangedPages, webhookCapability } from "./webhook-service";
 import { readTorobShop, readTorobShopToken, TorobShopError } from "./shop-service";
 import type {
   TorobObservation,
+  TorobObservationBrief,
   TorobObservationError,
   TorobProductState,
   TorobProductStatus,
@@ -198,9 +201,10 @@ export async function readShopObservation(input: {
 }): Promise<TorobShopStatusView | null> {
   const row = await readObservationRow(input.businessId, input.shopId);
   if (!row) return null;
-  const [states, latestRun] = await Promise.all([
+  const [states, latestRun, webhook] = await Promise.all([
     readStatusCounts(input.businessId, input.shopId),
     readLatestRun(input.businessId, input.shopId),
+    webhookCapability({ businessId: input.businessId, shopId: input.shopId }),
   ]);
   const observation = toObservation(row);
   return {
@@ -215,11 +219,62 @@ export async function readShopObservation(input: {
     observation,
     states,
     latestRun,
-    // Torob has answered for this shop exactly when there is an observation. The
-    // other two stages stay false: nothing here sends a webhook (Wave 6), and
-    // `listing` is the observation itself, not a promise derived from it.
-    capabilities: { feed: true, sent: false, listing: observation !== null },
+    // The three stages, each answered by the thing that can prove it: `sent` is a
+    // webhook batch Torob accepted into its queue (§6f), and `listing` is Torob's
+    // own observation — never the queue, which says nothing about being displayed.
+    webhook,
+    capabilities: { feed: true, sent: webhook.sent, listing: observation !== null },
   };
+}
+
+/**
+ * Every shop's observation in one read, for the multi-shop section.
+ *
+ * One query rather than one per shop: the section renders while a merchant is
+ * looking at it, and a dozen round trips to draw a dozen lines is how a page
+ * becomes slow for a reason nobody can see. It reads only our own tables — the
+ * overview never calls Torob either.
+ */
+export async function readObservationOverview(businessId: string): Promise<TorobObservationBrief[]> {
+  const { rows } = await query<{
+    id: string;
+    observed_status: TorobShopStatus | null;
+    observed_at: Date | null;
+    observed_error: TorobObservationError | null;
+    total: string | null;
+    pages: string;
+    with_problem: string;
+  }>(
+    `SELECT s.id,
+            s.observed_status,
+            s.observed_at,
+            s.observed_error,
+            s.observed_summary->>'total' AS total,
+            COALESCE(p.pages, 0)::text AS pages,
+            COALESCE(p.with_problem, 0)::text AS with_problem
+       FROM torob_shops s
+       LEFT JOIN (
+         SELECT shop_id,
+                count(*) AS pages,
+                count(*) FILTER (WHERE main_status IS NOT NULL) AS with_problem
+           FROM torob_product_states
+          WHERE business_id = $1
+          GROUP BY shop_id
+       ) p ON p.shop_id = s.id
+      WHERE s.business_id = $1
+      ORDER BY s.created_at`,
+    [businessId],
+  );
+
+  return rows.map((row) => ({
+    shopId: row.id,
+    shopStatus: row.observed_status,
+    pages: Number(row.pages),
+    withProblem: Number(row.with_problem),
+    total: row.total === null ? 0 : Number(row.total),
+    observedAt: iso(row.observed_at),
+    error: row.observed_error,
+  }));
 }
 
 /**
@@ -513,4 +568,108 @@ async function recordFailure(
       [businessId, shopId, error, startedAt],
     );
   });
+}
+
+/**
+ * Switch a page on or off **on Torob**, from our side.
+ *
+ * This is the one operation in this feature that changes what a shopper sees, so
+ * it is guarded the way the crawler endpoint is: authorized, switched on, and with
+ * a credential — all answered before the network. A shop the merchant disconnected
+ * must not be able to change anything on Torob from a stale screen.
+ *
+ * Deliberately **not** stored: the result is Torob's, and our copy of it arrives
+ * through the next observation. Writing `page_not_active` into
+ * `torob_product_states` here would make our snapshot a prediction rather than a
+ * record of what Torob said.
+ */
+export async function setPagesOnTorob(input: {
+  businessId: string;
+  shopId: string;
+  pageUniques: readonly string[];
+  active: boolean;
+  env?: Record<string, string | undefined>;
+  fetchImpl?: typeof fetch;
+}): Promise<{ status: "applied"; found: string[]; missing: string[] } | { status: "blocked"; error: TorobObservationError }> {
+  const shop = await readTorobShop({ businessId: input.businessId, shopId: input.shopId });
+  if (!shop) throw new TorobShopError("shop_not_found");
+  if (shop.authorizationState !== "authorized") return { status: "blocked", error: "not_authorized" };
+  if (!shop.enabled) return { status: "blocked", error: "channel_disabled" };
+
+  const credential = await readTorobShopToken({ businessId: input.businessId, shopId: input.shopId });
+  const env = input.env ?? process.env;
+  const token = credential?.token?.trim() ? credential.token.trim() : (torobPartnerToken(env) ?? "");
+  if (!token) return { status: "blocked", error: "not_configured" };
+
+  try {
+    const result = await setTorobPagesActive({
+      token,
+      domain: shop.domain,
+      pageUniques: input.pageUniques,
+      active: input.active,
+      env,
+      fetchImpl: input.fetchImpl,
+      throttle: createShopApiThrottle(),
+    });
+    return { status: "applied", ...result };
+  } catch (caught) {
+    if (caught instanceof TorobShopApiError) return { status: "blocked", error: caught.code };
+    throw caught;
+  }
+}
+
+/** What one repair did, in the order a merchant experiences it. */
+export interface RepairResult {
+  fill: { queued: number; dropped: number };
+  drain: { accepted: number; sentPages: number; deadLettered: number; stoppedBy: string | null } | null;
+  observe: { status: "observed"; productsSeen: number } | { status: "failed"; error: TorobObservationError };
+}
+
+/**
+ * «تعمیر» — the one button that does what a stuck shop needs, in order.
+ *
+ * Announce (fill) → tell Torob (drain) → read Torob back (observe). The order is
+ * not cosmetic: reading before announcing shows the merchant yesterday's view of a
+ * shop they just changed, and announcing without reading leaves them unable to tell
+ * whether the announcement was accepted.
+ *
+ * Each step is guarded by its own service, so a shop that may not send still gets
+ * its observation, and a shop that may not read still gets its queue filled. The
+ * result reports each step rather than collapsing them into one boolean, because
+ * "the queue is full and Torob will not answer" is a different problem from
+ * "everything is fine".
+ */
+export async function repairShop(input: {
+  businessId: string;
+  shopId: string;
+  env?: Record<string, string | undefined>;
+  fetchImpl?: typeof fetch;
+}): Promise<RepairResult> {
+  const fill = await enqueueChangedPages({ businessId: input.businessId, shopId: input.shopId });
+  const drain = await drainWebhookQueue({
+    businessId: input.businessId,
+    shopId: input.shopId,
+    env: input.env,
+    fetchImpl: input.fetchImpl,
+  });
+  const observed = await observeTorobShop({
+    businessId: input.businessId,
+    shopId: input.shopId,
+    env: input.env,
+    fetchImpl: input.fetchImpl,
+  });
+
+  return {
+    fill,
+    drain: {
+      accepted: drain.accepted,
+      sentPages: drain.sentPages,
+      deadLettered: drain.deadLettered,
+      stoppedBy: drain.stoppedBy,
+    },
+    observe:
+      observed.status === "observed"
+        ? { status: "observed", productsSeen: observed.productsSeen }
+        : { status: "failed", error: observed.error },
+  };
 }

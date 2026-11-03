@@ -9,12 +9,14 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import {
+  TOROB_ACTIVATE_BATCH_LIMIT,
   TOROB_SHOP_API_PAGE_SIZE,
   TorobShopApiError,
   createShopApiThrottle,
   cursorFromLink,
   listTorobProducts,
   readTorobShopInfo,
+  setTorobPagesActive,
   torobShopApiBaseUrl,
 } from "./shop-api-client";
 
@@ -287,6 +289,95 @@ describe("POST /products/", () => {
     const { fetchImpl, calls } = scripted(json({ next: null, results: [] }));
     await listTorobProducts({ token: "t", domain: "a.example", env, fetchImpl, productIds: ["p1", "p2"] });
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ product_ids: ["p1", "p2"] });
+  });
+});
+
+describe("POST /products/activate|deactivate/", () => {
+  it("sends the ids to the endpoint its direction names, and never follows anything", async () => {
+    const { fetchImpl, calls } = scripted(json({ results: [{ product_id: "p1", found: true }] }));
+    const result = await setTorobPagesActive({
+      token: "t",
+      domain: "Shop.Alpha.Example",
+      pageUniques: ["p1"],
+      active: true,
+      env,
+      fetchImpl,
+    });
+
+    expect(result).toEqual({ found: ["p1"], missing: [] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.method).toBe("POST");
+    // The domain goes in the query, folded to lower case, so two spellings of one
+    // host cannot address two shops.
+    expect(calls[0].url).toBe(`${BASE}products/activate/?domain=shop.alpha.example`);
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ product_ids: ["p1"] });
+
+    const off = scripted(json({ results: [] }));
+    await setTorobPagesActive({
+      token: "t",
+      domain: "a.example",
+      pageUniques: ["p1"],
+      active: false,
+      env,
+      fetchImpl: off.fetchImpl,
+    });
+    expect(off.calls[0].url).toBe(`${BASE}products/deactivate/?domain=a.example`);
+  });
+
+  it("treats anything but found === true as a page Torob did not act on", async () => {
+    // Torob answers per id. A missing flag, a `false`, and an id we did not send
+    // must not be counted as success — the merchant is told which ones were not.
+    const { fetchImpl } = scripted(
+      json({
+        results: [
+          { product_id: "p1", found: true },
+          { product_id: "p2", found: false },
+          { product_id: "p3" },
+        ],
+      }),
+    );
+    const result = await setTorobPagesActive({
+      token: "t",
+      domain: "a.example",
+      pageUniques: ["p1", "p2", "p3"],
+      active: false,
+      env,
+      fetchImpl,
+    });
+    expect(result.found).toEqual(["p1"]);
+    expect(result.missing).toEqual(["p2", "p3"]);
+  });
+
+  it("dedupes ids and refuses an empty list without a request", async () => {
+    const { fetchImpl, calls } = scripted(json({ results: [] }));
+    await setTorobPagesActive({
+      token: "t",
+      domain: "a.example",
+      pageUniques: [" p1 ", "p1", ""],
+      active: true,
+      env,
+      fetchImpl,
+    });
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ product_ids: ["p1"] });
+
+    const none = scripted();
+    await expect(
+      setTorobPagesActive({ token: "t", domain: "a.example", pageUniques: [], active: true, env, fetchImpl: none.fetchImpl }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(none.calls).toHaveLength(0);
+  });
+
+  it("refuses a batch above the provider's ceiling and reports a body without results", async () => {
+    const tooMany = Array.from({ length: TOROB_ACTIVATE_BATCH_LIMIT + 1 }, (_, index) => `p${index}`);
+    const none = scripted();
+    await expect(
+      setTorobPagesActive({ token: "t", domain: "a.example", pageUniques: tooMany, active: true, env, fetchImpl: none.fetchImpl }),
+    ).rejects.toMatchObject({ code: "invalid_request" });
+    expect(none.calls).toHaveLength(0);
+
+    await expect(
+      setTorobPagesActive({ token: "t", domain: "a.example", pageUniques: ["p1"], active: true, env, fetchImpl: scripted(json({})).fetchImpl }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
   });
 });
 
