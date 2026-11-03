@@ -49,6 +49,7 @@ import { cn } from "@/lib/utils";
 import { ConnectionPicker, type ConnectionLite } from "./connection-lite";
 import { wpEditorIsDirty, wpEditorPatch, type WpEditorValues } from "./content-editor-state";
 import { EditorialAssistant } from "./editorial-assistant";
+import { ContentPreview } from "./content-preview";
 import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
@@ -759,6 +760,12 @@ function PostEditor({
                     placeholder={contentEditable ? "متن نوشته یا برگه…" : "متن خام در دسترس نیست"}
                   />
                 </Field>
+                <ContentPreview
+                  title={values.editorTitle}
+                  content={values.content}
+                  excerpt={values.excerpt}
+                  editable={contentEditable}
+                />
                 {/* The assistant sits under the text it works on: it drafts from
                     what is in the editor right now, and its output is only a
                     suggestion until a button here places it in a field. */}
