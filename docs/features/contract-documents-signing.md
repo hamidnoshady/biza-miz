@@ -205,10 +205,10 @@ canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
 3. **Legal retention policy and legal hold** still require an approved policy and
    jurisdictional review; no retention duration or evidence purge has been
    invented. The append-only evidence must not be silently deleted.
-4. **The signing integration is green locally; CI still has to run this change.**
-   `integration/contract-signing.integration.test.ts` (21 tests) runs the whole
-   flow against a real PostgreSQL: it creates a throwaway database, applies all
-   420 migrations, seeds nothing but the party/project rows the contract binds to,
+4. **The signing integration is part of the required database CI gate.**
+   Locally, `integration/contract-signing.integration.test.ts` passes 21 tests
+   against a real PostgreSQL: it creates a throwaway database, applies all
+   471 migrations, seeds nothing but the party/project rows the contract binds to,
    and then exercises freezing, tenant isolation under an unprivileged role,
    append-only evidence, parallel and sequential rounds, consent → OTP →
    signature, link rotation and post-signature draft edits. Results are in §6a;
