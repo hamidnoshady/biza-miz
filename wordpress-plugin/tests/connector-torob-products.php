@@ -16,6 +16,14 @@ define( 'ABSPATH', '/tmp/' );
 $GLOBALS['pos_test_filters'] = array();
 $GLOBALS['pos_test_currency'] = 'IRT';
 $GLOBALS['pos_fake_products'] = array();
+$GLOBALS['pos_fake_attachments'] = array();
+
+function wp_get_attachment_image_url( $id, $size ) {
+	return isset( $GLOBALS['pos_fake_attachments'][ $id ]['url'] ) ? $GLOBALS['pos_fake_attachments'][ $id ]['url'] : false;
+}
+function wp_get_attachment_metadata( $id ) {
+	return isset( $GLOBALS['pos_fake_attachments'][ $id ]['metadata'] ) ? $GLOBALS['pos_fake_attachments'][ $id ]['metadata'] : false;
+}
 
 function wc_get_product( $id ) {
 	return isset( $GLOBALS['pos_fake_products'][ $id ] ) ? $GLOBALS['pos_fake_products'][ $id ] : null;
@@ -49,6 +57,8 @@ class Fake_Torob_Product {
 	public $modified;
 	public $name;
 	public $attributes;
+	public $image_id = 0;
+	public $gallery_ids = array();
 
 	public function __construct( $id, $type = 'simple', $parent_id = 0, $children = array(), $price = '2500000', $regular = '3000000', $created = '2025-01-01 12:00:00+00:00', $name = 'Fake product', $attributes = array() ) {
 		$this->id         = $id;
@@ -69,8 +79,8 @@ class Fake_Torob_Product {
 	public function get_permalink() { return 'https://shop.example/product/' . $this->id; }
 	public function get_date_created() { return $this->created; }
 	public function get_date_modified() { return $this->modified; }
-	public function get_image_id() { return 0; }
-	public function get_gallery_image_ids() { return array(); }
+	public function get_image_id() { return $this->image_id; }
+	public function get_gallery_image_ids() { return $this->gallery_ids; }
 	public function get_price() { return $this->price; }
 	public function get_regular_price() { return $this->regular; }
 	public function get_attributes() { return $this->attributes; }
@@ -281,6 +291,28 @@ same( '201', $variant_rows[0]['group_id'], 'the parent groups the variation' );
 same( '2025-02-01T00:00:00.000Z', $variant_rows[0]['date_added'], "a variation without a creation date inherits its parent's" );
 $GLOBALS['pos_fake_products'] = array();
 $GLOBALS['pos_test_currency'] = 'IRT';
+
+// --- Torob image requirements ----------------------------------------------------
+
+same( 'https://cdn.example.com/full.jpg', $P::valid_image_url( 'https://cdn.example.com/full.jpg', array( 'width' => 900, 'height' => 900 ) ), 'a full-sized public HTTPS image is accepted' );
+null_value( $P::valid_image_url( '/uploads/product.jpg', array( 'width' => 1200, 'height' => 1200 ) ), 'a relative image URL is refused' );
+null_value( $P::valid_image_url( 'ftp://cdn.example.com/product.jpg', array( 'width' => 1200, 'height' => 1200 ) ), 'a non-HTTP image URL is refused' );
+null_value( $P::valid_image_url( 'http://localhost/product.jpg', array( 'width' => 1200, 'height' => 1200 ) ), 'localhost is not publicly reachable' );
+null_value( $P::valid_image_url( 'http://192.168.1.20/product.jpg', array( 'width' => 1200, 'height' => 1200 ) ), 'private IPs are not public image hosts' );
+null_value( $P::valid_image_url( 'https://user:pass@cdn.example.com/product.jpg', array( 'width' => 1200, 'height' => 1200 ) ), 'an image URL with embedded credentials is refused' );
+null_value( $P::valid_image_url( 'https://cdn.example.com/small.jpg', array( 'width' => 599, 'height' => 1200 ) ), "an image below Torob's 600px hard floor is refused" );
+null_value( $P::valid_image_url( 'https://cdn.example.com/unknown.jpg', array() ), 'an image with unknown dimensions is refused' );
+null_value( $P::valid_image_url( 'https://cdn.example.com/' . str_repeat( 'x', 1100 ), array( 'width' => 1200, 'height' => 1200 ) ), "a URL above Torob's image field cap is refused, not truncated" );
+
+$GLOBALS['pos_fake_attachments'][55] = array(
+	'url'      => 'https://cdn.example.com/product-full.jpg',
+	'metadata' => array( 'width' => 1600, 'height' => 1200 ),
+);
+$image_product = new Fake_Torob_Product( 301 );
+$image_product->image_id = 55;
+$image_rows = $P::rows_from_product( $image_product );
+same( array( 'https://cdn.example.com/product-full.jpg' ), $image_rows[0]['images'], 'the Woo adapter requests and returns the full validated image' );
+$GLOBALS['pos_fake_attachments'] = array();
 
 // --- envelopes ------------------------------------------------------------------
 

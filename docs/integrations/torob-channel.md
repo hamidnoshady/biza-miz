@@ -472,6 +472,7 @@ contract, and copies the rules rather than re-deriving them:
 | `spec` is a dictionary, `{}` when empty | `spec()` drops lists, nulls and unnamed entries |
 | a withdrawn product is **absent** | `record()` returns `null`; a lookup answers `total: 0` |
 | `availability: true` + `current_price: 0` reads as **free** | an unavailable product always sends `false` + `0`, and never an `old_price` |
+| the first image is full-resolution, public and large enough to show | attachment URL must be absolute HTTP(S), have no embedded credentials, pass WordPress URL validation (including private/reserved hosts), and have verified dimensions of at least 600×600; Torob recommends 900×900 |
 
 Order of operations is the platform's: **token → connection → body**. The token is
 verified before the catalogue is read, so an unauthenticated caller cannot make a store
@@ -484,6 +485,11 @@ catalogue is what the merchant already published on the open web, and the enroll
 that matters is the platform's own `torob_shops` row (authorized **and** switched on),
 which is the merchant's act on the other side. Either way, nobody can call the endpoint
 without Torob's private key.
+
+The connector uses Woo's `full` attachment URL and refuses an image with unknown dimensions,
+less than 600×600 pixels, a relative/non-HTTP URL, an embedded username/password, a private
+or reserved host, or a URL longer than Torob's 1,000-character field. This is metadata and
+URL validation, **not** an outbound image request on every crawl.
 
 Variations are published as their own pages with the parent as `product_group_id` — the
 same shape the platform's feed builder produces — so a shop served from its own origin
@@ -498,8 +504,10 @@ cut from the publishable contract records, so invalid/unpriced products do not i
 `total` or shift the page boundaries.
 
 `wordpress-plugin/tests/connector-torob-products.php` pins all of it under plain `php`:
-the four modes, every refusal and its sentence, the free-price trap, the dictionary,
-the envelopes, the cursor round trip, and the gate order (401 before 403).
+the four modes, every refusal and its sentence, exact Rial/Toman conversion, publishable
+page boundaries and ordering, the required dictionary, the free-price trap, the cursor
+round trip, Woo product/variation mapping, timezone conversion, public/full image validation,
+and the gate order (401 before 403).
 
 ## 7. What remains (Waves 3–6)
 
