@@ -80,6 +80,123 @@ class POS_Connector_Health {
 	}
 
 	/**
+	 * Nearest-rank percentiles over duration samples (#1206 P1).
+	 *
+	 * The «p95 ≤ 3 minutes» sync target may only ever be *reported* from
+	 * numbers like these — measured on this installation, from rows that
+	 * actually travelled — never asserted from the configured cadence (60s
+	 * plugin poll + 30s app tick says nothing about a stalled host, a backed
+	 * -up queue or a retry storm). Negative samples (clock skew between the
+	 * two stamps) are dropped, not clamped: a sample that cannot be ordered
+	 * is not evidence either way.
+	 *
+	 * @param array $samples Durations, all in one unit (seconds or ms).
+	 * @return array{samples:int,p50:float,p95:float,p99:float,max:float}|null Null when there is nothing to measure.
+	 */
+	public static function percentiles( array $samples ) {
+		$values = array();
+		foreach ( $samples as $sample ) {
+			if ( is_numeric( $sample ) && (float) $sample >= 0 ) {
+				$values[] = (float) $sample;
+			}
+		}
+		if ( empty( $values ) ) {
+			return null;
+		}
+		sort( $values, SORT_NUMERIC );
+		$count = count( $values );
+		$rank  = static function ( $percent ) use ( $values, $count ) {
+			$index = (int) ceil( $percent / 100 * $count ) - 1;
+			return $values[ max( 0, min( $count - 1, $index ) ) ];
+		};
+		return array(
+			'samples' => $count,
+			'p50'     => $rank( 50 ),
+			'p95'     => $rank( 95 ),
+			'p99'     => $rank( 99 ),
+			'max'     => $values[ $count - 1 ],
+		);
+	}
+
+	/**
+	 * Gregorian → Jalali (Shamsi) conversion, arithmetic 33-year cycle.
+	 *
+	 * WordPress core never converts to the Persian calendar, and the intl
+	 * extension is not present on every host this plugin runs on, so the
+	 * admin would otherwise keep showing raw UTC Gregorian strings to
+	 * Persian-speaking operators (#1206 UX-02: «Localized/Jalali-facing
+	 * timestamps»). This is the classic jdf arithmetic converter; the test
+	 * suite cross-checks it against ICU's astronomical calendar for the
+	 * years a store can plausibly display.
+	 *
+	 * @return array{0:int,1:int,2:int} [Jalali year, month (1-12), day].
+	 */
+	public static function gregorian_to_jalali( $gy, $gm, $gd ) {
+		$g_d_m = array( 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 );
+		$gy    = (int) $gy;
+		$gm    = (int) $gm;
+		$gd    = (int) $gd;
+		$gy2   = $gm > 2 ? $gy + 1 : $gy;
+		$days  = 355666 + 365 * $gy + (int) ( ( $gy2 + 3 ) / 4 ) - (int) ( ( $gy2 + 99 ) / 100 )
+			+ (int) ( ( $gy2 + 399 ) / 400 ) + $gd + $g_d_m[ $gm - 1 ];
+		$jy    = -1595 + 33 * (int) ( $days / 12053 );
+		$days %= 12053;
+		$jy   += 4 * (int) ( $days / 1461 );
+		$days %= 1461;
+		if ( $days > 365 ) {
+			$jy  += (int) ( ( $days - 1 ) / 365 );
+			$days = ( $days - 1 ) % 365;
+		}
+		if ( $days < 186 ) {
+			$jm = 1 + (int) ( $days / 31 );
+			$jd = 1 + $days % 31;
+		} else {
+			$jm = 7 + (int) ( ( $days - 186 ) / 30 );
+			$jd = 1 + ( $days - 186 ) % 30;
+		}
+		return array( $jy, $jm, $jd );
+	}
+
+	/** Latin digits → Persian digits (۰۱۲۳۴۵۶۷۸۹), for fa-IR display. */
+	public static function persian_digits( $text ) {
+		return strtr(
+			(string) $text,
+			array(
+				'0' => '۰',
+				'1' => '۱',
+				'2' => '۲',
+				'3' => '۳',
+				'4' => '۴',
+				'5' => '۵',
+				'6' => '۶',
+				'7' => '۷',
+				'8' => '۸',
+				'9' => '۹',
+			)
+		);
+	}
+
+	/** «۱۱ آبان ۱۴۰۵» from Gregorian date parts. */
+	public static function jalali_date_label( $gy, $gm, $gd ) {
+		$months = array(
+			1  => 'فروردین',
+			2  => 'اردیبهشت',
+			3  => 'خرداد',
+			4  => 'تیر',
+			5  => 'مرداد',
+			6  => 'شهریور',
+			7  => 'مهر',
+			8  => 'آبان',
+			9  => 'آذر',
+			10 => 'دی',
+			11 => 'بهمن',
+			12 => 'اسفند',
+		);
+		list( $jy, $jm, $jd ) = self::gregorian_to_jalali( $gy, $gm, $gd );
+		return self::persian_digits( $jd ) . ' ' . $months[ $jm ] . ' ' . self::persian_digits( $jy );
+	}
+
+	/**
 	 * The scheduler's *current* state, as one word plus the reason for it.
 	 *
 	 * `stale` (2 intervals) is kept exactly as #1149 defined it, because the

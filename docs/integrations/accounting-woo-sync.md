@@ -89,6 +89,33 @@ Hybrid's site-to-central hop. Traffic-driven WP-Cron has no guaranteed upper bou
 system cron must actually invoke due events at least once per minute to realize
 the new plugin cadence.
 
+**Measured, per installation (#1206 P1).** The working target for a healthy,
+lightly loaded upgraded plugin is **p95 ≤ 3 minutes** — and it is only ever
+judged from measurements, never from the cadence above:
+
+* **Woo → Bizamiz** — the plugin reports percentiles (`deliveryLatency` in its
+  telemetry, `latency.deliverySeconds` in `wp pos-connector doctor --json`) of
+  *enqueue → app accepted* over its most recent deliveries: a row flips to
+  `sent` only when the app answers `processed`, `duplicate` or `deferred`, so
+  the samples are events that actually travelled the whole leg.
+* **Bizamiz → Woo** — the overview reports `applyLatency` per connection:
+  `desired_at` (migration 0285, stamped when the current value became owed to
+  the store) → `sent_at` (stamped after a real apply + ACK, REST or plugin)
+  over the last 30 days.
+* `wp pos-connector doctor` also prints percentile cycle *runtimes* from the
+  invocation log — at most twenty samples: "how long the last cycles took",
+  not an SLA.
+
+Both directions carry their sample count, and the connection panel refuses to
+quote a p95 from fewer than ten samples («هنوز قابل قضاوت نیست»). Pre-0285
+history contributes no samples at all (the desire time of an old delivery is
+unrecoverable, and inventing it would fake the dataset). Until production
+installations accumulate samples, the honest status of the 3-minute target is
+**"instrumented, being measured"** — the numbers now exist per store; no claim
+about the fleet is made from them yet. Exceptions stay explicit: retries and
+outage windows land in the max/p99 rather than being silently dropped, and a
+bulk backfill inflates p95 exactly as much as it delayed real events behind it.
+
 ## Truthful cron and sync health (issue #1206)
 
 Four facts that used to be one number are now four fields. Nothing but the

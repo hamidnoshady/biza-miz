@@ -318,6 +318,9 @@ async function upsertOutbox(
                              ELSE integration_outbox_events.leased_until END,
          lease_token = CASE WHEN integration_outbox_events.status IN ('sent', 'skipped') THEN NULL
                             ELSE integration_outbox_events.lease_token END,
+         -- #1206 P1: this arm only fires when the owed value actually moved
+         -- (see the WHERE below), so the delivery clock restarts here.
+         desired_at = now(),
          updated_at = now()
        WHERE integration_outbox_events.status IN ('pending', 'deferred', 'failed', 'sent', 'skipped')
          AND (integration_outbox_events.payload IS DISTINCT FROM EXCLUDED.payload
@@ -503,7 +506,8 @@ export async function enqueueTaxonomySync(
      VALUES ($1, $2, 'taxonomy_sync', 'all', '{}'::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
-                   last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
+                   last_error = NULL, leased_until = NULL, lease_token = NULL,
+                   desired_at = now(), updated_at = now()
      WHERE integration_outbox_events.status <> 'processing'
      RETURNING id`,
     [businessId, connectionId],
@@ -610,6 +614,69 @@ export async function outboxOpenCounts(connectionId: string): Promise<{ open: nu
     [connectionId, OUTBOX_LEASE_MS],
   );
   return { open: rows[0]?.open_count ?? 0, due: rows[0]?.due_count ?? 0 };
+}
+
+/**
+ * Measured desired → applied latency for one connection's outbound jobs
+ * (#1206 P1): `sent_at - desired_at` over rows the store accepted in the
+ * last 30 days. `sent_at` is stamped only after a real apply + ACK (REST
+ * drain or plugin job ACK), and `desired_at` only when a value became owed
+ * (migration 0285), so these percentiles describe deliveries that happened
+ * — the mirror image of the plugin queue's own report, and the only basis
+ * on which the p95 ≤ 3-minute target may be discussed.
+ */
+export interface OutboxApplyLatency {
+  samples: number;
+  p50Seconds: number;
+  p95Seconds: number;
+  p99Seconds: number;
+  maxSeconds: number;
+}
+
+/**
+ * The latency above, for every connection of one business in a single
+ * grouped read (the overview page's shape). Connections with no qualifying
+ * delivery are absent from the map — "nothing measured" must not render as
+ * a row of zeros. Pre-0285 history contributes nothing: those rows were
+ * backfilled with `desired_at = sent_at` and the strict `sent_at >
+ * desired_at` predicate excludes them.
+ */
+export async function applyLatencyByConnection(businessId: string): Promise<Map<string, OutboxApplyLatency>> {
+  const { rows } = await query<{
+    connection_id: string;
+    samples: string;
+    p50: number | null;
+    p95: number | null;
+    p99: number | null;
+    max: number | null;
+  }>(
+    `SELECT connection_id,
+            count(*) AS samples,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM sent_at - desired_at)) AS p50,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM sent_at - desired_at)) AS p95,
+            percentile_cont(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM sent_at - desired_at)) AS p99,
+            max(EXTRACT(EPOCH FROM sent_at - desired_at)) AS max
+       FROM integration_outbox_events
+      WHERE business_id = $1
+        AND status = 'sent'
+        AND sent_at IS NOT NULL
+        AND sent_at > desired_at
+        AND sent_at > now() - interval '30 days'
+      GROUP BY connection_id`,
+    [businessId],
+  );
+  const byConnection = new Map<string, OutboxApplyLatency>();
+  for (const row of rows) {
+    if (row.p50 === null || row.p95 === null || row.p99 === null || row.max === null) continue;
+    byConnection.set(row.connection_id, {
+      samples: Number(row.samples),
+      p50Seconds: Math.round(row.p50),
+      p95Seconds: Math.round(row.p95),
+      p99Seconds: Math.round(row.p99),
+      maxSeconds: Math.round(row.max),
+    });
+  }
+  return byConnection;
 }
 
 export interface DrainOutboxResult {

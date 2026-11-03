@@ -205,7 +205,42 @@ describe("summarizePluginHealth (issues #1149, #1206)", () => {
       previousOutageAt: null,
       recoveredAt: null,
       incidentOpen: false,
+      deliveryLatency: null,
     });
     expect(summary.cron.state).toBe("unknown");
+  });
+});
+
+describe("measured delivery latency (issue #1206 P1)", () => {
+  const withLatency = (deliveryLatency: unknown) =>
+    summarizePluginHealth(
+      { last_plugin_seen_at: ago(5_000), last_sync_at: null, plugin_health: health({ deliveryLatency }) },
+      { size: 0, oldestAt: null },
+      now,
+    ).deliveryLatency;
+
+  it("carries the plugin's measured percentiles through, with their sample count", () => {
+    expect(withLatency({ samples: 212, p50Seconds: 41, p95Seconds: 158, p99Seconds: 402, maxSeconds: 3_900 })).toEqual({
+      samples: 212,
+      p50Seconds: 41,
+      p95Seconds: 158,
+      p99Seconds: 402,
+      maxSeconds: 3_900,
+    });
+  });
+
+  it("an older plugin that never reports it is null — not measured is not zero", () => {
+    expect(withLatency(undefined)).toBeNull();
+    expect(withLatency(null)).toBeNull();
+  });
+
+  it("percentiles that cannot be true are refused, not rendered as fact", () => {
+    // A p95 below the median is a broken report; zero samples is no report;
+    // a string where a duration belongs is junk from the wire.
+    expect(withLatency({ samples: 10, p50Seconds: 90, p95Seconds: 30, p99Seconds: 30, maxSeconds: 30 })).toBeNull();
+    expect(withLatency({ samples: 0, p50Seconds: 0, p95Seconds: 0, p99Seconds: 0, maxSeconds: 0 })).toBeNull();
+    expect(withLatency({ samples: 5, p50Seconds: "41", p95Seconds: 50, p99Seconds: 60, maxSeconds: 70 })).toBeNull();
+    expect(withLatency({ samples: 5, p50Seconds: -1, p95Seconds: 50, p99Seconds: 60, maxSeconds: 70 })).toBeNull();
+    expect(withLatency("fast")).toBeNull();
   });
 });

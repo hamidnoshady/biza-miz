@@ -66,7 +66,7 @@ export async function queueAttributeEnsure(businessId: string, connection: Conne
        VALUES ($1, $2, 'taxonomy_ensure', $3, $4::jsonb)
        ON CONFLICT (connection_id, entity_type, remote_id) DO UPDATE
        SET payload = EXCLUDED.payload, status = 'pending', attempts = 0, next_attempt_at = now(),
-           last_error = NULL, updated_at = now()
+           last_error = NULL, desired_at = now(), updated_at = now()
        WHERE integration_outbox_events.status NOT IN ('processing', 'pending', 'deferred') RETURNING id`,
       [businessId, connection.id, payload.definitionId, JSON.stringify(payload)],
     );

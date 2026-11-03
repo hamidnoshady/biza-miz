@@ -31,6 +31,19 @@ import { SyncSettingsSection } from "./woo-store-sections";
 
 type LinkMode = "rest_api" | "plugin";
 
+/**
+ * Measured delivery percentiles (#1206 P1) — computed from rows that
+ * actually travelled, with the sample count attached. Never derived from
+ * the configured cadence.
+ */
+interface MeasuredLatency {
+  samples: number;
+  p50Seconds: number;
+  p95Seconds: number;
+  p99Seconds: number;
+  maxSeconds: number;
+}
+
 interface Connection {
   provider: string;
   lastTestAt?: string | null;
@@ -85,6 +98,8 @@ interface Connection {
     incidentOpen: boolean;
     queueSize: number;
     oldestQueuedAgeSeconds: number | null;
+    /** Woo → Bizamiz delivery percentiles the plugin measured (#1206 P1); null = not measured. */
+    deliveryLatency?: MeasuredLatency | null;
     /**
      * The scheduler probe's stage (#1206 P0). `expired` means an event was
      * queued and no scheduler ever ran it — the finding a connection test
@@ -100,6 +115,8 @@ interface Connection {
       expiresInSeconds: number | null;
     };
   } | null;
+  /** Bizamiz → store desired→applied percentiles over the last 30 days (#1206 P1); null = nothing measured. */
+  applyLatency?: MeasuredLatency | null;
   status: "active" | "paused" | "error";
   lastSyncAt: string | null;
   lastCatalogueSyncAt: string | null;
@@ -254,6 +271,61 @@ const CRON_PROBE_REASON_LABELS: Record<string, string> = {
 
 
 /** A secret shown exactly once. Deliberately loud: there is no second chance to read it. */
+/** «۴۵ ثانیه»، «۲ دقیقه و ۱۰ ثانیه»، «۱ ساعت و ۵ دقیقه» — a measured duration in Persian. */
+function formatLatency(seconds: number): string {
+  const fa = (n: number) => n.toLocaleString("fa-IR");
+  const total = Math.max(0, Math.round(seconds));
+  if (total < 60) return `${fa(total)} ثانیه`;
+  const minutes = Math.floor(total / 60);
+  const restSeconds = total % 60;
+  if (minutes < 60) return restSeconds > 0 ? `${fa(minutes)} دقیقه و ${fa(restSeconds)} ثانیه` : `${fa(minutes)} دقیقه`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  if (hours < 24) return restMinutes > 0 ? `${fa(hours)} ساعت و ${fa(restMinutes)} دقیقه` : `${fa(hours)} ساعت`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours > 0 ? `${fa(days)} روز و ${fa(restHours)} ساعت` : `${fa(days)} روز`;
+}
+
+/**
+ * The p95 ≤ 3-minute target (#1206 P1) as measured fact — or explicit
+ * absence of fact.
+ *
+ * Both directions carry percentiles over deliveries that happened, sample
+ * count in the sentence: below ten samples a p95 is an anecdote, so the
+ * honest line is «هنوز قابل قضاوت نیست». Nothing here is inferred from the
+ * configured cadence; a 60s poll never proved a delivery time.
+ */
+function measuredLatencyLines(c: Connection): string[] {
+  const fa = (n: number) => n.toLocaleString("fa-IR");
+  const lines: string[] = [];
+  const delivery = c.pluginHealthSummary?.deliveryLatency ?? null;
+  if (delivery) {
+    if (delivery.samples >= 10) {
+      lines.push(
+        `تأخیر رسیدن رویدادهای فروشگاه به بیزامیز — اندازه‌گیری‌شده از ${fa(delivery.samples)} تحویل اخیرِ افزونه: ۹۵٪ حداکثر در ${formatLatency(delivery.p95Seconds)} رسیدند (${delivery.p95Seconds <= 180 ? "در این نمونه‌ها زیر هدف ۳ دقیقه" : "در این نمونه‌ها بالاتر از هدف ۳ دقیقه"}).`,
+      );
+    } else {
+      lines.push(
+        `تأخیر رسیدن رویدادهای فروشگاه به بیزامیز هنوز قابل قضاوت نیست: فقط ${fa(delivery.samples)} تحویل اندازه‌گیری شده است.`,
+      );
+    }
+  }
+  const apply = c.applyLatency ?? null;
+  if (apply) {
+    if (apply.samples >= 10) {
+      lines.push(
+        `تأخیر اعمال تغییرات بیزامیز در فروشگاه — اندازه‌گیری‌شده از ${fa(apply.samples)} کارِ ۳۰ روز گذشته: ۹۵٪ حداکثر در ${formatLatency(apply.p95Seconds)} اعمال و از فروشگاه تأیید شدند (${apply.p95Seconds <= 180 ? "در این نمونه‌ها زیر هدف ۳ دقیقه" : "در این نمونه‌ها بالاتر از هدف ۳ دقیقه"}).`,
+      );
+    } else {
+      lines.push(
+        `تأخیر اعمال تغییرات بیزامیز در فروشگاه هنوز قابل قضاوت نیست: فقط ${fa(apply.samples)} کار در ۳۰ روز گذشته اندازه‌گیری شده است.`,
+      );
+    }
+  }
+  return lines;
+}
+
 function ShowOnceSecret({ title, value, note, onDone }: { title: string; value: string; note: string; onDone: () => void }) {
   const [copyFailed, setCopyFailed] = useState(false);
   return (
@@ -678,6 +750,12 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                           : ` — رفع‌شده در ${formatDateTime(c.pluginHealthSummary.recoveredAt)}`}
                       </div>
                     ) : null}
+                    {/* #1206 P1: the p95 target, judged only by measurements
+                        (see measuredLatencyLines). An empty list renders
+                        nothing — "not measured" is silence here, not a zero. */}
+                    {measuredLatencyLines(c).map((line) => (
+                      <div key={line}>{line}</div>
+                    ))}
                     {!c.lastPluginSeenAt ? (
                       <div className="text-amber-700 dark:text-amber-300">
                         افزونه هنوز متصل نشده است. در وردپرس، آدرس بالا و توکن را وارد و «آزمایش اتصال» را بزنید.

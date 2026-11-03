@@ -222,6 +222,15 @@ class POS_Connector_CLI {
 				'oldestPendingAt'      => $oldest,
 				'oldestPendingSeconds' => $oldest_ts > 0 ? max( 0, $now - $oldest_ts ) : null,
 			),
+			// #1206 P1: measured, not configured. `deliverySeconds` is the
+			// enqueue → app-accepted lag of rows that actually travelled;
+			// `cycleRuntimeMs` is what the last invocations took. Both carry
+			// their sample count — a p95 of 3 is not a p95 of 400 — and both
+			// are null rather than 0 when there is nothing to measure yet.
+			'latency'       => array(
+				'deliverySeconds' => POS_Connector_Queue::delivery_latency( 500, true ),
+				'cycleRuntimeMs'  => self::cycle_runtime_percentiles(),
+			),
 			// #1206: a walk that ran out of budget is *pending work*, and the
 			// doctor must not report a half-read catalogue as finished.
 			'exportCursors' => array(
@@ -316,6 +325,37 @@ class POS_Connector_CLI {
 		if ( null !== $report['queue']['oldestPendingSeconds'] ) {
 			WP_CLI::log( '  ' . sprintf( 'قدیمی‌ترین ردیف منتظر: %d ثانیه (%s)', $report['queue']['oldestPendingSeconds'], $oldest ) );
 		}
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'تأخیر اندازه‌گیری‌شده', 'pos-accounting-connector' ) . '%n' ) );
+		if ( is_array( $report['latency']['deliverySeconds'] ) ) {
+			$delivery = $report['latency']['deliverySeconds'];
+			WP_CLI::log(
+				'  ' . sprintf(
+					/* translators: 1: sample count, 2: median seconds, 3: p95 seconds, 4: max seconds */
+					__( 'از ورود رویداد به صف تا پذیرش در سامانه (%1$d نمونهٔ اخیر): نیمی حداکثر %2$d ثانیه، ۹۵٪ حداکثر %3$d ثانیه، بیشترین %4$d ثانیه.', 'pos-accounting-connector' ),
+					(int) $delivery['samples'],
+					(int) $delivery['p50Seconds'],
+					(int) $delivery['p95Seconds'],
+					(int) $delivery['maxSeconds']
+				)
+			);
+		} else {
+			WP_CLI::log( '  ' . __( 'هنوز رویدادی تحویل نشده که بتوان تأخیرش را اندازه گرفت؛ «صف خالی» به‌تنهایی یعنی هیچ مدرکی نیست، نه اینکه تأخیر صفر است.', 'pos-accounting-connector' ) );
+		}
+		if ( is_array( $report['latency']['cycleRuntimeMs'] ) ) {
+			$runtime = $report['latency']['cycleRuntimeMs'];
+			WP_CLI::log(
+				'  ' . sprintf(
+					/* translators: 1: sample count, 2: median seconds, 3: p95 seconds */
+					__( 'مدت اجرای دوره‌های اخیر (%1$d نمونه): نیمی حداکثر %2$s ثانیه، ۹۵٪ حداکثر %3$s ثانیه.', 'pos-accounting-connector' ),
+					(int) $runtime['samples'],
+					sprintf( '%.1f', ( (int) $runtime['p50Ms'] ) / 1000 ),
+					sprintf( '%.1f', ( (int) $runtime['p95Ms'] ) / 1000 )
+				)
+			);
+		}
+		WP_CLI::log( '  ' . __( 'هدف «۹۵٪ رویدادها در حداکثر ۳ دقیقه» فقط با همین اندازه‌گیری‌ها سنجیده می‌شود؛ تناوب تنظیم‌شدهٔ کرون (۶۰ ثانیه) به‌تنهایی هیچ تأخیری را ثابت نمی‌کند.', 'pos-accounting-connector' ) );
 
 		WP_CLI::log( '' );
 		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'آخرین دوره', 'pos-accounting-connector' ) . '%n' ) );
@@ -447,6 +487,37 @@ class POS_Connector_CLI {
 		if ( '' === $settings['last_cycle_verdict'] ) {
 			WP_CLI::log( __( 'هنوز هیچ دوره‌ای ثبت نشده است؛ عدد «هیچ» به معنی «موفق» نیست.', 'pos-accounting-connector' ) );
 		}
+	}
+
+	/**
+	 * Percentiles over the invocation log's measured runtimes (#1206 P1).
+	 *
+	 * At most RECENT_LIMIT samples exist by design, so this is «how long did
+	 * the last twenty cycles take» — enough to tell a 2s cycle from one that
+	 * keeps bumping into the scheduler's own interval, never a production
+	 * SLA. Interrupted runs have no runtime and are skipped, not counted
+	 * as zero.
+	 *
+	 * @return array{samples:int,p50Ms:int,p95Ms:int,p99Ms:int,maxMs:int}|null
+	 */
+	private static function cycle_runtime_percentiles() {
+		$samples = array();
+		foreach ( POS_Connector_Invocation_Log::recent() as $entry ) {
+			if ( isset( $entry['runtimeMs'] ) && null !== $entry['runtimeMs'] ) {
+				$samples[] = (int) $entry['runtimeMs'];
+			}
+		}
+		$stats = POS_Connector_Health::percentiles( $samples );
+		if ( null === $stats ) {
+			return null;
+		}
+		return array(
+			'samples' => (int) $stats['samples'],
+			'p50Ms'   => (int) round( $stats['p50'] ),
+			'p95Ms'   => (int) round( $stats['p95'] ),
+			'p99Ms'   => (int) round( $stats['p99'] ),
+			'maxMs'   => (int) round( $stats['max'] ),
+		);
 	}
 
 	/**
