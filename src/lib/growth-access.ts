@@ -169,6 +169,11 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
     GET: PERMISSIONS.torobView,
     POST: PERMISSIONS.torobConfigure,
   },
+  // Torob-side page control and «تعمیر» (issue #894 Wave 5c). Both change the
+  // channel: one changes what shoppers see on Torob, the other spends the shop's
+  // rate budget to announce and read — so both are `torob.configure`.
+  "/api/growth/torob/shops/[id]/pages": { POST: PERMISSIONS.torobConfigure },
+  "/api/growth/torob/shops/[id]/repair": { POST: PERMISSIONS.torobConfigure },
   // The Shop Generator approval callback (issue #894). It is the merchant's own
   // browser arriving from Torob with a one-time code, so it manages the
   // relationship like the action that started it — and it *spends* the code, which

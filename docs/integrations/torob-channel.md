@@ -367,6 +367,41 @@ Surface: `GET/POST /api/growth/torob/shops/[id]/webhook` — `GET` the queue (ou
 `POST {action: "drain"}` to send now and `{action: "retry"}` to revive stopped pages. Reading is
 `torob.view`; both writes are `torob.configure`, because sending spends the shop's own rate budget.
 
+## 6g. Turning a page off on Torob, and «تعمیر» (Wave 5c)
+
+Everything up to here describes a shop that is either fine or stuck. Two merchant actions close that:
+one changes a single page **on Torob**, and one re-runs the whole channel for a shop in one step.
+
+**Switching a page.** `POST /products/activate/|deactivate/?domain=<host>` with `{product_ids}` (the
+Shop API's own id for a page — `page_unique`) answers **per id**: `{product_id, found}`. Consequences
+that the code keeps:
+
+| rule | where |
+| --- | --- |
+| only pages Torob already knows can be switched — an unknown id comes back not-`found` and is reported as «اعمال نشد», never as success | `setTorobPagesActive` |
+| ≤ 5 000 ids per request; the screen sends one page per click and the route caps at 500 | `TOROB_ACTIVATE_BATCH_LIMIT`, the `pages` route |
+| **deactivation is not deletion** — the page stays with Torob and can be switched back on | copy on the button, and the doc's own wording |
+| our snapshot is not rewritten from the answer | `setPagesOnTorob` writes nothing; `torob_product_states` changes only when Torob is read (§6e) |
+
+The guard is the same one the crawler gets (§6e): authorized, switched on, and with a credential,
+all answered **before** the network — a shop the merchant disconnected cannot change anything on
+Torob from a stale screen. In partner mode the deployment's `TOROB_PARTNER_TOKEN` authenticates it.
+Every switch is audited (`torob.page.toggle`).
+
+**«تعمیر»** is announce → tell → read, in that order (`repairShop`): fill the webhook queue from the
+built feed, drain it now instead of waiting for the minute tick, then read Torob back. Reading first
+would show yesterday's view of the shop being repaired; announcing without reading leaves the
+merchant unable to see whether the announcement was accepted. Each step reports itself rather than
+collapsing into one boolean — "the queue is full and Torob will not answer" is a different problem
+from "everything is fine" — and each is guarded by its own service, so a shop that may not send still
+gets its read. It is **not** a retry of everything: `dead` pages stay dead until somebody looks at the
+reason, which is the queue's own action (§6f), and a switched-off shop answers `stoppedBy` instead of
+sending behind the merchant's back. Audit: `torob.shop.repair`.
+
+Surface: `POST /api/growth/torob/shops/[id]/pages` `{pageUniques, active}` and
+`POST /api/growth/torob/shops/[id]/repair`. Both are `torob.configure`, because both change the
+channel and spend the shop's rate budget.
+
 ## 7. What remains (Waves 3–6)
 
 1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
@@ -387,8 +422,8 @@ Surface: `GET/POST /api/growth/torob/shops/[id]/webhook` — `GET` the queue (ou
    disabled, and a tenant-visible switch that says exactly what is shared.
 5. **Wave 5b — the sync queue.** *Done*: `§6f` is the webhook outbox, bounded and coalesced, with
    dead letters, retries, reconciliation-by-fill and a per-shop queue screen. What is left of this wave
-   is the Shop API's **activate/deactivate** (turning a product off on Torob from Biza Miz) and the
-   per-shop «تعمیر» action that re-runs both the fill and the status read in one step.
+   is closed by §6g: the Shop API's **activate/deactivate** (turning a page off on Torob from here)
+   and the per-shop «تعمیر» action that fills, sends and re-reads in one step.
 6. **Wave 6 — the drill table and the docs** for the failure classes the issue names (expired token,
    rejected domain, feed refused, shop deleted on Torob's side), plus the runbook for a shop whose
    feed has been `blocked` for longer than an hour, and for a shop whose last Shop API read failed three
@@ -429,6 +464,11 @@ this website enroll", and every later surface reads it.
 - `src/app/api/growth/torob/shops/[id]/status/route.ts` — the cached read and the explicit refresh.
 - `migrations/0283_torob_observations.sql` — the observation columns, `torob_product_states` and
   `torob_status_runs`, RLS included.
+- `src/lib/torob/shop-api-client.ts`'s `setTorobPagesActive` + `status-service.ts`'s `setPagesOnTorob`
+  and `repairShop` — the Torob-side switch and the one-step repair (§6g).
+- `src/app/api/growth/torob/shops/[id]/pages/route.ts` and `.../repair/route.ts` — their two surfaces.
+- `integration/torob-pages.integration.test.ts` — the guard (off, unauthorized, no credential, another
+  tenant), the per-id answer, the snapshot that is left alone, and «تعمیر»'s order.
 - `src/lib/torob/webhook.ts` — the webhook's rules: batching, the one-domain check, the two-field
   payload, and what each failure deserves. Pure.
 - `src/lib/torob/webhook-client.ts` — the one `POST`, and the mapping from Torob's statuses to the
