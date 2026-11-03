@@ -139,6 +139,9 @@ way round. See «What this change does not build».
 | **Wave 11** — the pass-through invoice line | `service-invoice.ts` grows the vocabulary: `PASS_THROUGH_RECHARGE_ACCOUNT` is 1270, `PASS_THROUGH_RECHARGE_INDUSTRIES` is the agency alone, and `resolvePassThroughCreditCode` refuses any other trade here rather than letting it fail mid-transaction with a missing-account error. `retail-invoice/types.ts` grows `ServiceLineSnapshot.passThrough?: true` — a discriminator on the existing field, not a new line kind (decision 63) — and `retail-invoice-service.ts` accepts `passThrough` on a service line, refusing it alongside an explicit `revenueCode` or a non-zero discount. `service-posting-rules.ts` branches **only the memo**, because the rule already credits whatever code the line carries |
 | **Wave 11** — §D recharge service and HTTP | `rechargeAgencyCosts` in `agency-reimbursable-cost-service.ts`: one invoice, one pass-through line per cost, written with the marks on the cost rows in a single transaction so a recharge cannot half-happen (decision 67). Seven new codes, and the guard's exhaustive status map refused to compile until each was placed — the net wave 10 built, paying off. `POST /api/agency/reimbursable-costs/recharge` asks for **both** `ordersCreate` and `financeExpensesManage`, one permission at a time, because a composite permission does not exist and inventing one would be a second way to ask for authority (decision 66). `isCostRecharged` is pure, and `sumCostsByParty` grows `unrechargedRial` computed the same way |
 | **Wave 11** — §D recharge tests | `integration/agency-recharge.integration.test.ts` (11, real database), whose headline is that recording a client's media buy and then billing it back leaves **1270 at exactly zero** — what "clearing account" means, and what neither half could prove alone — plus that the entry recognises no revenue and no VAT, that a cost cannot be billed twice, that an unposted cost is refused because there is nothing to clear, that two clients are two recharges, that the project tag appears only when every cost agrees, that voiding the invoice makes the cost billable again *with nobody updating a flag*, and that one tenant cannot recharge another's costs. The suite caught a real bug in the trigger: refusing re-pointing outright also refused the legitimate re-bill after a void, so the rule became about the invoice's state rather than about which column changed. `reimbursable-cost-guard.test.ts` grew to 10, and 48 assertions run against 0284 over Postgres, including re-pointing a cost *directly* from a voided invoice to a live one without clearing the link first — which is the service's own path, and which a trigger that cleared-then-re-pointed would have passed while still refusing it |
+| **Wave 12** — §D presentation policy | `SETTING_KEYS.agencyCostPolicy` in `settings.ts` plus `AGENCY_DEFAULT_PRESENTATION`, `AgencyCostPolicySetting` and the pure `parseAgencyCostPolicySetting` in `agency-reimbursable-cost.ts`. One business-wide jsonb choice rather than a column or a table, and deliberately *not* folded into wave 2's `agencyProfile`, which is documented as deciding blueprint ordering «and nothing else» while this one decides which of two accounts money lands in (decision 68). The parser does not coerce a value it does not recognise, for the reason the profile parser gives and at higher stakes, because the value picks an account |
+| **Wave 12** — §D policy service and HTTP | `loadAgencyCostPolicy` / `saveAgencyCostPolicy` in `agency-reimbursable-cost-service.ts`, with `AgencyCostPolicyState.stored` so a screen can report «هنوز انتخاب نشده» instead of rendering the fallback as a decision (decision 69). Saving writes the setting and its `audit_log` row — before and after in the payload — in one transaction, because this is the one agency setting that moves money. `createAgencyReimbursableCost` resolves the policy only when the caller says nothing, so an explicit choice wins and an explicit typo is still refused (decision 70). `GET`/`PUT /api/agency/reimbursable-costs/policy` ride `ledger.view` and `finance.expenses_manage` rather than `settings.manage`, under the register they govern (decision 71), and answer with the labels and hints inline because those two words decide a posting |
+| **Wave 12** — §D policy tests | `integration/agency-cost-policy.integration.test.ts` (8, real database), whose headline is that choosing `gross` makes the **next** cost debit **5197 instead of 1270** — a policy that only changed what a screen displayed would pass every other test in the file and be worth nothing — plus that the audit row names who moved it from what to what, that an explicit `net` beats a `gross` policy, that a policy change leaves an existing cost's entry identical **line for line** and that the database refuses the row-level change outright, that a typo is not substituted with the policy, that an unknown body key is refused, that a café is refused rather than defaulted, and that one agency's policy is not another's. `agency-reimbursable-cost.test.ts` grew to 26, pinning the fallback as a real presentation and the conservative one |
 | **Wave 9** — §C campaign tests | `agency-campaign.test.ts` (26, pure), `integration/agency-client-campaigns.integration.test.ts` (16, real database), `integration/agency-party-merge.integration.test.ts` (6, real database), `campaign-guard.test.ts` (6) and 66 assertions against 0278 run directly over Postgres. The integration suite covers what only a database can show: one number sequence under a race, an overspend recorded *and* reported as `over`, the four ratios and their nulls including `revenueRial: 0` giving no ROAS, list figures identical to detail figures, a one-field patch clearing nothing, the full lifecycle with its window requirements stated in words first, a closed campaign refused from both the service and a **raw** `UPDATE` that skips it, a foreign client refused by the trigger as `23514`, and two of one brand's campaigns concurrent in the same window. The merge suite pins both halves of decision 56 — the move lands with substance and lines byte-for-byte intact and an audit row written, and what was frozen stays frozen for every path that is not the audited merge |
 
 
@@ -903,6 +906,90 @@ attribution" rule exists to prevent, on the cost side.
 The invoice and the marks on the rows commit together. The failure mode of a
 half-written recharge is not a confusing screen but billing the same media buy twice.
 
+### 68 — the presentation policy is a setting of its own, and not part of the operating profile
+
+`SETTING_KEYS.agencyCostPolicy` is a jsonb value in the shared `settings` table. One
+business-wide choice, no history, nothing to join — and `settings` already carries the
+tenancy, the audit path and the desktop-sync behaviour every other business-wide
+preference uses. AEC needed `aec_business_profiles` because a profile there presets
+nineteen capability overrides; this presets one word.
+
+The question worth the decision is whether it belonged in wave 2's `agencyProfile`,
+which is also an agency-wide setting. It does not, and the reason is that setting's own
+documented claim: it decides which blueprints are listed first "and nothing else: no
+permission, no module and no authorization is derived from it". This one decides whether
+a client's media buy debits **1270** (a claim on the client) or **5197** (the agency's
+own cost of sale). Folding a money-moving accounting policy into a cosmetic preference
+would falsify that comment, and would put the policy behind `settings.manage` — a
+permission chosen for a choice that reorders a list.
+
+`inventory.costing` is the precedent that settled it: fifo/lifo/weighted-average is an
+accounting *method* the business adopts, stored as its own setting, and nobody would
+fold it into a workspace preference.
+
+### 69 — the default is a fallback for determinacy, and `stored` says so out loud
+
+`AGENCY_DEFAULT_PRESENTATION` is `net`, and it is a **fallback, not a recommendation**.
+Every cost row has to land in one of two accounts, so something must answer when nobody
+has; `net` answers because it is the one that never overstates the agency's revenue —
+under `net` a client's media buy sits in 1270 as a claim until it is recharged, while
+under `gross` the same buy is the agency's cost of sale and the recharge is its revenue.
+`gross` is a legitimate position, but §D says it has to have been *adopted*.
+
+Which is why `AgencyCostPolicyState` carries `stored: boolean`. Without it, a screen
+reading `{ presentation: "net" }` cannot tell a policy the business chose from one the
+software supplied, and renders the fallback as though a human had picked it. With it,
+the screen says «هنوز انتخاب نشده» — and §D's "must follow **chosen** business accounting
+policy" is visible as unmet rather than silently satisfied by a constant.
+
+The parser refusing to coerce an unrecognised value is the same instinct pointed at
+writes: a value this code cannot read was written by a newer version or by hand, and
+answering the default would let the next save overwrite a decision nobody meant to
+reverse.
+
+### 70 — a policy is a default, never a mandate, and never retroactive
+
+Three rules, each pinned by a test:
+
+**An explicit choice on the row wins.** §D's treatment varies by contract: a business
+that mostly buys media in its own name still has clients whose money it is merely
+handling. A policy that overrode the row would make the per-row choice wave 10 stored
+into dead weight, and would force such an agency to keep two registers.
+
+**It never reaches backwards.** A policy change touches no existing row, and cannot:
+0280's trigger freezes `presentation` on any cost whose entry has landed, because the
+value decided which two accounts that entry used and the register may not contradict the
+ledger. The integration test asserts the entry is identical *line for line* after a
+change, and that a direct row-level UPDATE is refused. Correcting a cost recorded under
+the wrong treatment is a reversal and a new record — not a policy silently re-posting
+history, which would make every past margin report a lie about the day it was printed.
+
+**A typo is not a policy.** An unrecognised explicit value is still `invalid_presentation`
+rather than being replaced by the policy's. Substituting would change which account
+money lands in because of a keystroke nobody meant, and the member would see a saved row
+that looks exactly like the one they thought they filed.
+
+### 71 — the policy route rides the register's permissions, not `settings.manage`
+
+`GET`/`PUT /api/agency/reimbursable-costs/policy` sit under the register they govern, on
+`ledger.view` and `finance.expenses_manage` — the pair decision 61 chose for the costs
+themselves.
+
+The alternative was `/api/settings/agency-cost-policy`, beside wave 2's
+`agency-profile`, which is the obvious sibling and the wrong one. The profile rides
+`settings.manage` because it is business-wide configuration that reorders a list; this
+decides a posting. Routing it through settings would hand the office's accountant a 403
+on the policy that governs the rows they record — precisely the failure decision 61
+exists to prevent, arriving from a different direction.
+
+`/api/ledger/settings` states the same rule from the other side: "the editable surfaces
+live where they are owned … rather than forking a second editor over one table."
+
+Unlike the profile route, GET answers with the labels and hints inline. The profile can
+leave them to its form because they describe a cosmetic ordering; these two words decide
+which account money lands in, so a screen rendering the choice from its own copy of the
+vocabulary could drift from the one the ledger acts on. Here the API is the only source.
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -1229,6 +1316,17 @@ link every byte fetch, which made the default link unable to show the artwork it
   year because `isValidIsoDate` is calendar-aware about days but shape-based about
   years, and free text that reports over-long rather than truncating a description
   about to appear on a client's invoice.
+* `integration/agency-cost-policy.integration.test.ts` (8) — §D's business-level
+  presentation policy. The headline is that choosing `gross` makes the *next* cost debit
+  **5197 instead of 1270**: a policy that only changed what a screen displayed would
+  pass every other test in the file and be worth nothing, so the assertion is at the
+  posting. Also that `stored: false` reports «not chosen» rather than dressing the
+  fallback up as a decision, that the audit row carries before and after and names the
+  member, that an explicit `net` beats a `gross` policy, that a policy change leaves an
+  existing cost's entry identical **line for line** while the database refuses the
+  row-level change outright, that a typo is not substituted with the policy's value,
+  that an unknown body key is refused rather than half-stored, that a café is refused
+  rather than defaulted, and that one agency's policy is not another's.
 * `integration/agency-recharge.integration.test.ts` (11) — §D's recharge half, and the
   assertion that makes the pair worth having: that recording a client's media buy and
   then billing it back leaves **1270 at exactly zero**. Also that the entry recognises
@@ -1241,6 +1339,12 @@ link every byte fetch, which made the default link unable to show the artwork it
   cost billable again with nobody updating a flag**, and that one tenant cannot recharge
   another's. Entries are found through `domain_events`, because
   `journal_entries.source_id` is a fresh identity per line and not the order.
+* `agency-reimbursable-cost.test.ts` grew to 26 with the policy parser: a stored value
+  reads for either treatment, a non-string `updatedAt` is dropped rather than passed to
+  a screen, seven unusable shapes answer `null` so a caller can tell «never saved» from
+  «saved», an unrecognised presentation is **not** coerced to the default, and
+  `AGENCY_DEFAULT_PRESENTATION` is pinned as `net` and as a real member of the
+  vocabulary — because a fallback that is not one of the two values would post nowhere.
 * `reimbursable-cost-guard.test.ts` grew to 10 with `readRechargeBody`: a location is
   trimmed, a blank one reads as absent rather than reaching the service as an id nobody
   has, tenders pass through untouched so the invoice keeps deciding payment, and
@@ -1419,12 +1523,15 @@ Deliberately, and each is named in the issue:
   gross-versus-net choice a stored, posted fact (decisions 58–62), and wave 11 closed
   the loop with the **recharge** that credits it when a cost is billed back, which is
   what turns the account from an accumulator into a clearing one (decisions 63–67).
-  Still owed: the **screen**, because the Accounting app's section key reaches ten
-  files and four contract tests of its own — and it now has two acts to show rather
-  than one, so it is the natural home for both; a **business-level** presentation
-  policy, where today the treatment is chosen per document; the **campaign and project
-  P&L** read, which wave 11 made one step closer by tagging the recharge's entries with
-  the project its costs agreed on; and the vendor quote → purchase → payable →
+  Wave 12 added the **business-level** presentation policy §D asks for, so the
+  treatment is now chosen once and inherited rather than re-decided per row
+  (decisions 68–71). Still owed: the **screen**, because the Accounting app's section
+  key reaches ten files and four contract tests of its own — and it now has three acts
+  to show rather than one (record, recharge, choose the policy), so it is the natural
+  home for all three; the **campaign and project P&L** read, which wave 11 moved closer
+  by tagging the recharge's entries with the project its costs agreed on, and which
+  cannot be complete until time tracking exists, since §D asks for hours and cost per
+  project and nothing records hours; and the vendor quote → purchase → payable →
   settlement chain, for which `settled_by = 'payable'` crediting 2140 is the seam — the
   day that chain exists it settles these rows rather than duplicating them.
 * **§C Growth** — campaign calendar and channel mix for *client* campaigns, the agency's-own vs
