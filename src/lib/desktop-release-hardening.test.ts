@@ -56,6 +56,7 @@ const harness = require("../../electron/scripts/smoke-packaged.js") as {
   readinessFromLog: (
     userDataDir: string,
   ) => { appPort: number; instanceId: string | null; log: string } | null;
+  sessionCookieFrom: (headers: unknown) => string;
   setCookieValues: (headers: unknown) => string[];
   setCookieNames: (headers: unknown) => string[];
   totpCode: (secret: string, at?: number) => string;

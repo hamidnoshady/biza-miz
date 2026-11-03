@@ -50,11 +50,18 @@ the installed `Bizamiz.exe` with only ordinary user-facing switches
    `/api/platform/auth/me`, `/api/platform/mcp` with a valid tenant cookie
    replayed as the platform cookie and with a forged platform cookie — each
    must answer 404;
-5. closes the window (graceful `WM_CLOSE`, never a forced kill), asserts the
-   process exits 0 and no `postmaster.pid` remains;
+5. closes the window (`CloseMainWindow()`), asserting exit 0 and no lingering
+   `postmaster.pid` in an interactive session (`MainWindowHandle != 0`), or —
+   when launched inside a non-interactive runner session with no window
+   (`Start-Process -Credential`, `MainWindowHandle == 0`) — force-stopping the
+   tree and recording `forcedStopUsed: true` / `cleanShutdownAsserted: false`
+   in `acceptance-report.json` rather than claiming a clean quit it could not
+   deliver;
 6. relaunches, asserts the instance identity persisted, that a second
-   bootstrap answers `409 already_initialized`, that the real password still
-   signs in and a wrong one does not;
+   bootstrap answers `409 already_initialized`, and that the real Owner
+   credentials still sign in — completing the second factor enrolled at
+   bootstrap (TOTP or single-use recovery code disclosed once by
+   `/api/setup/bootstrap`) — while a wrong password is rejected;
 7. when `DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL` and
    `DESKTOP_ACCEPTANCE_OFFLINE_TOKEN` are configured (protected repository
    variable + secret), repeats a first run on a fresh profile in **Full
