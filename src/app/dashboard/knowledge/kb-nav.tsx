@@ -533,6 +533,19 @@ export function KbSideMenuFrame({
   const panelRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
+  // A drawer opened on a phone must not keep the body locked or keyboard focus
+  // trapped in a hidden dialog if the viewport expands to the desktop layout.
+  useEffect(() => {
+    if (!open || typeof window.matchMedia !== "function") return;
+    const desktop = window.matchMedia("(min-width: 1024px)");
+    const closeForDesktop = () => {
+      if (desktop.matches) setOpen(false);
+    };
+    desktop.addEventListener("change", closeForDesktop);
+    closeForDesktop();
+    return () => desktop.removeEventListener("change", closeForDesktop);
+  }, [open]);
+
   // The phone drawer is a real modal: focus moves in (to the close button),
   // Tab/Shift+Tab cycle inside it, Escape closes, the page behind does not
   // scroll, and focus returns to the toggle that opened it. The desktop aside
@@ -614,7 +627,7 @@ export function KbSideMenuFrame({
       </button>
 
       <aside className="hidden w-72 min-w-0 shrink-0 lg:block" aria-label="فهرست پایگاه دانش">
-        <div className={`sticky top-4 max-h-[calc(100vh-6rem)] overflow-hidden p-3 ${cardClass}`}>
+        <div className={`sticky top-4 flex h-[min(40rem,calc(100dvh-6rem))] min-h-0 flex-col overflow-hidden p-3 ${cardClass}`}>
           {menu}
         </div>
       </aside>
