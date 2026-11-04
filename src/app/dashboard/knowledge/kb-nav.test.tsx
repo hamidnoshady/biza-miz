@@ -34,6 +34,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import { KnowledgeBrowser } from "./kb-browser";
+import { KbArticleView } from "./kb-article";
 import { KbSideMenuFrame, useKbSearch } from "./kb-nav";
 import type { KbCataloguePayload, KbSearchHit } from "@/lib/knowledge";
 
@@ -157,6 +158,34 @@ describe("the phone side-menu drawer", () => {
     tags: [],
   };
 
+  it("closes an open phone drawer when switching to the desktop breakpoint", async () => {
+    const listeners = new Set<() => void>();
+    const desktop = {
+      matches: false,
+      addEventListener: vi.fn((_event: string, callback: () => void) => listeners.add(callback)),
+      removeEventListener: vi.fn((_event: string, callback: () => void) => listeners.delete(callback)),
+    };
+    vi.stubGlobal("matchMedia", vi.fn(() => desktop));
+
+    const user = userEvent.setup();
+    render(
+      <KbSideMenuFrame
+        catalogue={catalogue}
+        query=""
+        onQueryChange={() => undefined}
+        searching={false}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /فهرست راهنماها/ }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    act(() => {
+      desktop.matches = true;
+      for (const listener of listeners) listener();
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(document.body.style.overflow).toBe("");
+  });
+
   it("moves focus in, traps Tab, closes on Escape and restores focus", async () => {
     const user = userEvent.setup();
     render(
@@ -243,5 +272,92 @@ describe("KnowledgeBrowser tag filter and the URL", () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(CATALOGUE));
     await user.click(screen.getByRole("button", { name: "تلاش دوباره" }));
     await screen.findByRole("heading", { name: "مرکز آموزش" });
+  });
+});
+
+
+describe("responsive knowledge layout regression", () => {
+  const salesGuide = {
+    id: "guide-1",
+    slug: "daily-sales",
+    title: "راهنمای فروش روزانه",
+    summary: "آموزش صندوق و مدیریت سفارش‌های فروش",
+    categoryId: "sales",
+    sectionKeys: [],
+    tags: [],
+    hasVideo: false,
+    hasCover: false,
+    sortOrder: 0,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const salesCatalogue: KbCataloguePayload = {
+    categories: [{
+      id: "sales",
+      parentId: null,
+      slug: "sales",
+      title: "فروش روزانه",
+      description: "صندوق فروش، سفارش‌ها و تسویه‌ها",
+      icon: "🧾",
+      tone: "amber",
+      sortOrder: 0,
+    }],
+    articles: [salesGuide],
+    tags: [],
+  };
+
+  it("stacks the menu above full-width cards until desktop", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(salesCatalogue));
+    render(<KnowledgeBrowser initialTag="" />);
+    const category = await screen.findByRole("region", { name: "فروش روزانه" });
+    const toggle = screen.getByRole("button", { name: /فهرست راهنماها/ });
+    const layout = toggle.parentElement;
+
+    expect(layout?.className).toContain("flex-col");
+    expect(layout?.className).toContain("lg:flex-row");
+    expect(toggle.className).toContain("w-full");
+    expect(category.className).toContain("min-w-0");
+    // On mobile the drawer is the only category navigation; the cards are
+    // CSS-hidden until the desktop sidebar appears at the same lg breakpoint.
+    expect(category.parentElement?.className).toContain("hidden");
+    expect(category.parentElement?.className).toContain("lg:grid");
+    expect(category.parentElement?.className).toContain("lg:grid-cols-2");
+    expect(category.querySelector('a[href="/knowledge/a/daily-sales"]')?.className)
+      .toContain("min-w-0");
+  });
+
+  it("keeps recent guides visible as content while mobile category cards stay hidden", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(salesCatalogue));
+    render(<KnowledgeBrowser initialTag="" />);
+    const category = await screen.findByRole("region", { name: "فروش روزانه" });
+    expect(category.parentElement?.className).toContain("hidden");
+    const recent = await screen.findByRole("region", { name: "به‌روزترین راهنماها" });
+    expect(within(recent).getByRole("link", { name: /راهنمای فروش روزانه/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /فهرست راهنماها/ })).toBeTruthy();
+  });
+
+  it("stacks the mobile guide drawer and article, with no fixed-width article body", async () => {
+    fetchMock.mockImplementation((url: string) =>
+      Promise.resolve(jsonResponse(
+        url.includes("/api/knowledge/articles/")
+          ? { article: {
+            ...salesGuide,
+            bodyMd: "متن راهنما",
+            videoUrl: "",
+            videoKind: null,
+            coverImageUrl: "",
+            publishedAt: null,
+            related: [],
+          } }
+          : salesCatalogue,
+      )),
+    );
+    const { container } = render(<KbArticleView slug="daily-sales" />);
+    await screen.findByRole("heading", { name: "راهنمای فروش روزانه" });
+    const toggle = screen.getByRole("button", { name: /فهرست راهنماها/ });
+    expect(toggle.parentElement?.className).toContain("flex-col");
+    expect(toggle.parentElement?.className).toContain("lg:flex-row");
+    const article = container.querySelector("article");
+    expect(article?.className).toContain("min-w-0");
+    expect(article?.querySelector(".grid")?.className).toContain("grid-cols-1");
   });
 });

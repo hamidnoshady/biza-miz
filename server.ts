@@ -282,6 +282,63 @@ app.prepare().then(async () => {
     runPlatformBackupTick().catch((err) => console.error("platform backup tick failed:", err));
   scheduleCentralTick(platformBackupTick, BACKUP_TICK_INTERVAL_MS, 60_000);
 
+  // Issue #903 §7 — managed-backup billing. Two timers, because they settle
+  // different things:
+  //
+  //   sample   hourly   the retained managed-cloud bytes that the byte-day meter
+  //                     integrates, so a day's growth is actually observed;
+  //   settle   daily    the completed UTC day's `backup.storage_byte_day` event
+  //                     plus the legacy pre-charge reconciliation.
+  //
+  // Both are central-only: a site has no catalog, no wallet and no tenants. Each
+  // job is idempotent by its own window/idempotency key and takes a distributed
+  // lock, so two instances waking together produce one settlement and one busy.
+  const {
+    runBackupStorageSampleJob,
+    runBackupStorageBillingJob,
+    runBackupLegacyRefundJob,
+    STORAGE_SAMPLE_INTERVAL_MS,
+  } = await import("./src/lib/tenant-backup-billing-jobs");
+  const backupStorageSampleTick = () =>
+    runBackupStorageSampleJob().catch((err) => console.error("backup billing sample failed:", err));
+  scheduleCentralTick(backupStorageSampleTick, STORAGE_SAMPLE_INTERVAL_MS, 90_000);
+
+  const backupStorageSettleTick = () =>
+    runBackupStorageBillingJob().catch((err) => console.error("backup billing settlement failed:", err));
+  // Every day at a fixed offset hour is the intent; a daily interval achieves it
+  // without a cron parser, and the job's own window is the completed UTC day, so
+  // an extra early run settles nothing twice.
+  scheduleCentralTick(backupStorageSettleTick, 24 * 60 * 60 * 1000, 5 * 60_000);
+
+  const backupRefundTick = () =>
+    runBackupLegacyRefundJob().catch((err) => console.error("backup refund reconciliation failed:", err));
+  scheduleCentralTick(backupRefundTick, 24 * 60 * 60 * 1000, 8 * 60_000);
+
+  // Issue #903 §12 — automated recovery drills. Until now `npm run backup:drill`
+  // existed and nothing ran it, so "we can restore you" was a claim nobody
+  // exercised. This tick walks the businesses that have a restorable logical
+  // artifact and drills each one at most once a day (`runScheduledBackupDrills`
+  // owns that idempotency through `tenant_backup_drills`), notifying the Owner
+  // when a backup that exists does not open. Run on *every* role: a site install
+  // protects itself too, and the drill proves exactly the chain that role would
+  // have to walk on the day it needs the backup.
+  const { runScheduledBackupDrills } = await import("./src/lib/tenant-backup-drills-job");
+  const backupDrillTick = () =>
+    runScheduledBackupDrills().catch((err) => console.error("backup drill failed:", err));
+  scheduleBackgroundTick(backupDrillTick, 60 * 60 * 1000, 12 * 60_000);
+
+  // Issue #903 §1/§7 — artifact lifecycle. Three passes, bounded per business:
+  // verify the cloud copies that were registered `verifying` (nothing ever ran
+  // that pass, so a cloud backup stayed unproven and unrestorable), reclaim the
+  // staged local twin on a Cloud deployment (its managed-storage-only rule), and
+  // expire what `retention_until` has retired. Runs on every role: a Local or
+  // Hybrid device owns its own local retention, and a Cloud server is the only
+  // place a managed object can be removed.
+  const { runBackupLifecycleTick } = await import("./src/lib/tenant-backup-lifecycle");
+  const backupLifecycleTick = () =>
+    runBackupLifecycleTick().catch((err) => console.error("backup lifecycle tick failed:", err));
+  scheduleBackgroundTick(backupLifecycleTick, 60 * 60 * 1000, 15 * 60_000);
+
   // Phase 11: bidirectional server-to-server sync (café laptop ←→ VPS). Each
   // tick pushes locally-born sync_events to the configured remote and pulls
   // the remote's events back, replaying both through the same idempotent
@@ -367,9 +424,12 @@ app.prepare().then(async () => {
   // enumerates active connections under the documented platform bypass, then
   // wraps each business's diff/push work in withTenant — the same shape as
   // every other background tick here.
-  const wooSyncTick = () =>
-    runWooCommerceSyncTick().catch((err) => console.error("woocommerce sync tick failed:", err));
-  scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 90_000);
+  const wooSyncRunner = createSyncRunner(
+    runWooCommerceSyncTick,
+    (err) => console.error("woocommerce sync tick failed:", err),
+  );
+  const wooSyncTick = () => wooSyncRunner.run();
+  scheduleCentralTick(wooSyncTick, WOO_SYNC_TICK_INTERVAL_MS, 10_000);
 
   // Issue #1077: delete finished WP/Woo queue rows past their retention (90 days
   // done, 180 days dead/failed). The exact hour never matters; pending,
@@ -394,6 +454,18 @@ app.prepare().then(async () => {
   const websiteSyncTick = () =>
     runWebsiteSyncTick().catch((err) => console.error("website sync tick failed:", err));
   scheduleCentralTick(websiteSyncTick, WEBSITE_SYNC_TICK_INTERVAL_MS, 100_000);
+
+  // Issue #894 (§6f): tell Torob which pages changed, so it re-fetches them
+  // sooner than a crawl would. Central, like the other outboxes, and the same
+  // shape: bypass to enumerate enabled+authorized shops, withTenant per business,
+  // one shop's failure never stopping the next. The tick fills and drains in one
+  // pass; a shop with nothing due costs one query and no HTTP call.
+  const { runTorobWebhookTick, TOROB_WEBHOOK_TICK_INTERVAL_MS } = await import(
+    "./src/lib/torob/webhook-service"
+  );
+  const torobWebhookTick = () =>
+    runTorobWebhookTick().catch((err) => console.error("torob webhook tick failed:", err));
+  scheduleCentralTick(torobWebhookTick, TOROB_WEBHOOK_TICK_INTERVAL_MS, 115_000);
 
   // Migration 0157: keep RFM scores fresh. RFM is a whole-population quintile
   // calculation, so it can never run on the checkout path — a busy Friday

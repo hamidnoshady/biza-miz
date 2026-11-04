@@ -6,6 +6,7 @@ import { MessageCircleIcon, PlusIcon, SendIcon, WalletCardsIcon } from "lucide-r
 import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { formatPersianNumber } from "@/lib/digits";
+import { triggerCodeLabel } from "@/lib/kavenegar/lookup-trigger-facts";
 import { templateVariableTokens } from "@/lib/message-template";
 import { libraryEntryView, splitLibrary, type LibraryEntryView } from "@/lib/kavenegar/template-library-view";
 import {
@@ -17,6 +18,7 @@ import {
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, errorMessageOrRaw, Field, InfoBox, inputClass, SecondaryButton } from "@/app/dashboard/ui";
+import { TREND_HEALTH_LABELS, trendBarPercent, type DeliveryTrendSummary } from "@/lib/delivery-trend-facts";
 
 type Channel = "sms" | "email";
 
@@ -101,6 +103,17 @@ interface LibraryEntry {
   alreadyAdded: boolean;
 }
 
+/** Issue #902 §9 item 0 — what the automation actually did, in first-party words. */
+interface TriggerDelivery {
+  sent: number;
+  skipped: number;
+  blocked: number;
+  failed: number;
+  unknown: number;
+  lastAttemptAt: string | null;
+  lastCode: string | null;
+}
+
 interface TriggerSetting {
   trigger: LookupTriggerKey;
   label: string;
@@ -109,6 +122,9 @@ interface TriggerSetting {
   templateId: string | null;
   templateTitle: string | null;
   problem: string | null;
+  /** The exact text this event would send, rendered by the server's dispatcher. */
+  preview: string | null;
+  delivery: TriggerDelivery;
 }
 
 interface Data {
@@ -142,6 +158,13 @@ interface Data {
    * here (`campaign-delivery-report.ts`).
    */
   campaignDelivery?: CampaignDelivery[];
+  /**
+   * Issue #902 §9 item 2 — a quarter of this business's own sends, bucketed
+   * weekly. The per-campaign rows above answer "did this one arrive"; this
+   * answers "was last month worse", which is a series and not a row. A bucket
+   * with no attempts is a gap, never a zero.
+   */
+  deliveryTrend?: DeliveryTrendSummary & { days: number; granularity: string };
   campaigns: Campaign[];
   segments: Segment[];
   projects: Project[];
@@ -247,14 +270,27 @@ function displayMessagingError(code: string | undefined, fallback: string): stri
 export const CENTRAL_BILLING_HREF = "/settings/billing";
 
 /**
- * Outbound SMS/email campaigns: templates, audience (a CRM segment, filtered
- * for consent server-side), a real sample, cost estimate and send status.
+ * What this automation did in the last week, in one sentence.
  *
- * Growth does not run a second billing centre. The balance shown is the
- * platform wallet's, the estimate is checked against it, and buying credit is
- * a link to `/settings/billing` (issue #764). Composing and sending need
- * `campaigns.manage`; `campaigns.view` sees the campaigns and their results.
+ * The zeros are deliberately spoken aloud: "no message has been sent yet" and
+ * "every message was refused because the customer did not consent" are both
+ * quiet on a screen that only shows a switch, and only one of them is fine.
  */
+function deliveryLine(delivery: TriggerDelivery): string {
+  const total =
+    delivery.sent + delivery.skipped + delivery.blocked + delivery.failed + delivery.unknown;
+  if (total === 0) {
+    return "در ۷ روز اخیر رویدادی برای این اطلاع‌رسانی ثبت نشده است.";
+  }
+  const parts = [`${formatPersianNumber(delivery.sent)} ارسال‌شده`];
+  if (delivery.skipped > 0) parts.push(`${formatPersianNumber(delivery.skipped)} رد‌شده`);
+  if (delivery.blocked > 0) parts.push(`${formatPersianNumber(delivery.blocked)} متوقف‌شده`);
+  if (delivery.failed > 0) parts.push(`${formatPersianNumber(delivery.failed)} ناموفق`);
+  if (delivery.unknown > 0) parts.push(`${formatPersianNumber(delivery.unknown)} نامشخص`);
+  const reason = triggerCodeLabel(delivery.lastCode);
+  return `۷ روز اخیر: ${parts.join(" • ")}${reason ? ` — آخرین دلیل: ${reason}` : ""}`;
+}
+
 export function MessagingSection({
   canManage,
   initialPromotionId,
@@ -937,6 +973,16 @@ export function MessagingSection({
                       ) : setting.templateTitle ? (
                         <p className="mt-1 text-xs leading-5 text-muted-foreground">پیام: {setting.templateTitle}</p>
                       ) : null}
+                      {/* §9 item 0: the exact text, rendered on the server by the
+                          dispatcher's own functions over fake facts — so what the
+                          business approves is what its customer receives. */}
+                      {setting.preview ? (
+                        <p className="mt-2 rounded-lg border border-border/70 bg-muted/40 px-2 py-1.5 text-xs leading-5 text-foreground">
+                          <span className="text-muted-foreground">پیش‌نمایش با دادهٔ نمونه: </span>
+                          {setting.preview}
+                        </p>
+                      ) : null}
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">{deliveryLine(setting.delivery)}</p>
                     </div>
                   </div>
                   {canManage ? (
@@ -1043,6 +1089,62 @@ export function MessagingSection({
             </div>
           </form>
         ) : null}
+      </SectionCard>
+
+      {/* Issue #902 §9 item 2 — the long view, in the business's own words.
+          Deliberately three numbers and a shape: this screen is for someone who
+          sent a campaign, not for an operator triaging a carrier, so there is no
+          provider vocabulary here at all — and a week with no sends is a gap,
+          because "nothing sent" and "everything failed" must never look alike. */}
+      <SectionCard
+        title={`روند ارسال (${formatPersianNumber(data.deliveryTrend?.days ?? 90)} روز اخیر)`}
+        description="هر ستون یک بازه است؛ بازهٔ بدون ارسال خالی می‌ماند، نه صفر."
+      >
+        {!data.deliveryTrend || data.deliveryTrend.activeBuckets === 0 ? (
+          <p className="text-sm text-muted-foreground">در این بازه ارسالی ثبت نشده است.</p>
+        ) : (
+          <>
+            <p className="text-sm leading-6">
+              {formatPersianNumber(data.deliveryTrend.sent)} پذیرفته ·{" "}
+              {formatPersianNumber(data.deliveryTrend.delivered)} تحویل ·{" "}
+              <span className={data.deliveryTrend.failed > 0 ? "text-destructive" : undefined}>
+                {formatPersianNumber(data.deliveryTrend.failed)} ناموفق
+              </span>
+              {data.deliveryTrend.failureRate === null
+                ? ""
+                : ` · نرخ خطا ${formatPersianNumber(Math.round(data.deliveryTrend.failureRate * 100))}٪`}
+            </p>
+            <div className="mt-3 flex items-end gap-[2px]" role="img" aria-label="روند ارسال">
+              {data.deliveryTrend.points.map((point) => {
+                const busiest = Math.max(...data.deliveryTrend!.points.map((p) => p.decided + p.pending), 0);
+                const height = point.hasData ? trendBarPercent(point.decided + point.pending, busiest) : null;
+                return (
+                  <div
+                    key={point.key}
+                    className="flex min-w-0 flex-1 flex-col items-center gap-1"
+                    title={`${point.label} — ${TREND_HEALTH_LABELS[point.health]}`}
+                  >
+                    {height === null ? (
+                      <div className="h-12 w-full rounded-sm border border-dashed border-border/70" />
+                    ) : (
+                      <div
+                        className={`w-full rounded-sm ${
+                          point.health === "attention"
+                            ? "bg-destructive"
+                            : point.health === "degraded"
+                              ? "bg-amber-500 dark:bg-amber-400"
+                              : "bg-emerald-500 dark:bg-emerald-400"
+                        }`}
+                        style={{ height: `${Math.max(4, Math.round((height / 100) * 48))}px` }}
+                      />
+                    )}
+                    <span className="truncate text-[9px] text-muted-foreground">{point.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
       </SectionCard>
 
       <SectionCard title="کمپین‌های پیام" description="با شروع ارسال، فهرست مشتریانِ مجاز همان لحظه ثابت و در صف خروجی ثبت می‌شود.">

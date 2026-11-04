@@ -292,6 +292,48 @@ describe("configuring an automation", () => {
     expect(payment.enabled).toBe(false);
     expect(payment.templateId).toBeNull();
   });
+
+  it("shows the exact message the event would send, and what it has sent so far", async () => {
+    const templateId = await lookupTemplate(alpha.businessId);
+    await triggers.saveTriggerSetting({ businessId: alpha.businessId, trigger: "order_ready", templateId });
+
+    const before = (await triggers.listTriggerSettings(alpha.businessId)).find(
+      (setting) => setting.trigger === "order_ready",
+    )!;
+    // §9 item 0: a preview rendered by the dispatcher's own renderer, with the
+    // sample facts — no %token left, and nothing a tenant could mistake for a
+    // real customer's message.
+    expect(before.preview).toBeTruthy();
+    expect(before.preview).not.toMatch(/%token/);
+    expect(before.preview).toContain("سارا محمدی");
+    // Nothing has happened yet, and the screen says so rather than showing a
+    // silent zero.
+    expect(before.delivery).toMatchObject({ sent: 0, skipped: 0, lastCode: null });
+
+    // One sent, one refused for consent: two different facts, counted apart.
+    await db.query(
+      `INSERT INTO kavenegar_lookup_trigger_sends
+         (business_id, trigger_key, event_key, status, code, charged_rial)
+       VALUES ($1, 'order_ready', 'order:1', 'sent', NULL, 2400),
+              ($1, 'order_ready', 'order:2', 'skipped', 'no_consent', 0),
+              ($1, 'payment_received', 'payment:1', 'unknown', 'unknown_outcome', 0)`,
+      [alpha.businessId],
+    );
+
+    const after = await triggers.listTriggerSettings(alpha.businessId);
+    const ready = after.find((setting) => setting.trigger === "order_ready")!;
+    expect(ready.delivery).toMatchObject({ sent: 1, skipped: 1, blocked: 0, failed: 0 });
+    expect(ready.delivery.lastCode).toBe("no_consent");
+    expect(ready.delivery.lastAttemptAt).not.toBeNull();
+
+    const payment = after.find((setting) => setting.trigger === "payment_received")!;
+    expect(payment.delivery).toMatchObject({ sent: 0, skipped: 0, unknown: 1 });
+
+    // Another business sees none of it.
+    const beta = await seedBusiness("Beta");
+    const theirs = await triggers.listTriggerSettings(beta.businessId);
+    expect(theirs.every((setting) => setting.delivery.sent === 0)).toBe(true);
+  });
 });
 
 describe("dispatching one event", () => {

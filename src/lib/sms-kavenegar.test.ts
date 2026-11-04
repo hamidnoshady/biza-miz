@@ -1,8 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   isOperatorFault,
   KavenegarError,
+  KavenegarProvider,
   kavenegarStatusMessage,
+  OTP_SEND_TIMEOUT_MS,
+  OTP_TIMEOUT_MESSAGE,
   redactKavenegarUrl,
 } from "./sms-kavenegar";
 
@@ -52,5 +55,88 @@ describe("Kavenegar status codes", () => {
     expect(err.status).toBe(418);
     expect(err.operatorFault).toBe(true);
     expect(JSON.stringify({ message: err.message, name: err.name })).not.toContain("api.kavenegar.com");
+  });
+});
+
+/**
+ * Issue #902 §9 item 7 (DoD #11) — a stalled carrier must not hold a login open.
+ *
+ * Every other supplier call in this codebase aborts on a timeout. This one — the
+ * transport that sends the codes people log in with — did not, so a supplier that
+ * accepted the connection and went quiet left the request hanging and the person
+ * waiting looking at a spinner. The stale code then stayed live for its full five
+ * minutes, because nothing had failed and so nothing consumed it.
+ */
+describe("the login-code transport gives up", () => {
+  const apiKey = "31323334353637383939616263646566";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("passes an abort signal on every dispatch, with a bounded delay", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+      signals.push(init?.signal ?? undefined);
+      return { ok: true, status: 200, json: async () => ({ return: { status: 200 } }) };
+    });
+
+    await new KavenegarProvider(apiKey, "verify").sendOtp("+989120000001", "123456");
+
+    expect(signals).toHaveLength(1);
+    // A signal, not a hand-rolled race: `AbortSignal.timeout` is what cancels the
+    // socket, and it reports `TimeoutError` rather than a generic abort.
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    expect(OTP_SEND_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it("reports a timeout in Persian, and says nothing that could log a live code", async () => {
+    const timeout = new Error("The operation was aborted due to timeout");
+    timeout.name = "TimeoutError";
+    vi.stubGlobal("fetch", async () => {
+      throw timeout;
+    });
+
+    const err = await new KavenegarProvider(apiKey, "verify", 5)
+      .sendOtp("+989120000001", "482913")
+      .then(
+        () => null,
+        (thrown: unknown) => thrown as KavenegarError,
+      );
+
+    expect(err).toBeInstanceOf(KavenegarError);
+    expect(err!.message).toBe(OTP_TIMEOUT_MESSAGE);
+    // The operator needs to know it timed out; they do not need the code, the
+    // number or the key in the same line — the code is still valid for minutes.
+    expect(err!.message).not.toContain("482913");
+    expect(err!.message).not.toContain("api.kavenegar.com");
+    expect(err!.message).not.toContain(apiKey);
+    // A timeout is not a user fault: nothing the person typed caused it.
+    expect(err!.operatorFault).toBe(false);
+  });
+
+  it("keeps a connection failure distinct from a stall", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("fetch failed");
+    });
+
+    const err = (await new KavenegarProvider(apiKey, "verify")
+      .sendOtp("+989120000001", "123456")
+      .catch((thrown: unknown) => thrown)) as KavenegarError;
+
+    // Different sentence, because the fix differs: this one is "we could not
+    // reach them", the other is "they took the request and went quiet".
+    expect(err.message).not.toBe(OTP_TIMEOUT_MESSAGE);
+    expect(err.message).toContain("برقرار نشد");
+  });
+
+  it("still sends when the carrier answers in time", async () => {
+    let called = false;
+    vi.stubGlobal("fetch", async () => {
+      called = true;
+      return { ok: true, status: 200, json: async () => ({ return: { status: 200 } }) };
+    });
+    await new KavenegarProvider(apiKey, "verify").sendOtp("+989120000001", "123456");
+    expect(called).toBe(true);
   });
 });

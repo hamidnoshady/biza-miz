@@ -24,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { normalizeNumericText } from "../digits";
+import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "../product-content";
 import { writeIntegrationAudit } from "./audit";
 import { assertPluginJobSupported } from "./plugin-job-guard";
 import { mergeMappingMeta } from "./mapping-service";
@@ -127,6 +128,17 @@ export function sanitizeProductPatch(patch: Record<string, unknown>): Record<str
       out[field] = status;
       continue;
     }
+    if (field === "description" || field === "short_description") {
+      // The storefront text is Gutenberg HTML and is stored whole; the bound
+      // is the same one the Accounting product form and the editor apply
+      // (migration 0260), so a patch can never be queued that the mirror
+      // itself would have truncated on the way back in (issue #1215, P1-2).
+      const text = String(value);
+      const max = field === "description" ? PRODUCT_LONG_DESCRIPTION_MAX : PRODUCT_SHORT_DESCRIPTION_MAX;
+      if (text.length > max) throw new WooOpsError("invalid_description");
+      out[field] = text;
+      continue;
+    }
     out[field] = String(value);
   }
   if (Object.keys(out).length === 0) throw new WooOpsError("empty_patch");
@@ -226,7 +238,8 @@ export async function enqueueOperation(
                    END,
                    operation_id = COALESCE(integration_outbox_events.operation_id, EXCLUDED.operation_id),
                    status = 'pending', attempts = 0,
-                   next_attempt_at = now(), last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()`,
+                   next_attempt_at = now(), last_error = NULL, leased_until = NULL, lease_token = NULL,
+                   desired_at = now(), updated_at = now()`,
     [businessId, connectionId, entityType, queuedRemoteId, JSON.stringify(fullPayload), operationId],
   );
   await writeIntegrationAudit({
@@ -255,7 +268,8 @@ export async function enqueueExport(
      VALUES ($1, $2, $3, 'all', $4::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET payload = EXCLUDED.payload, status = 'pending', attempts = 0,
-                   next_attempt_at = now(), last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
+                   next_attempt_at = now(), last_error = NULL, leased_until = NULL, lease_token = NULL,
+                   desired_at = now(), updated_at = now()
      RETURNING id`,
     [businessId, connectionId, entityType, JSON.stringify({ sinceDays: options.sinceDays ?? null })],
   );
@@ -463,6 +477,12 @@ export interface StoreOrderRow {
   dateCreated: string | null;
   customer: string;
   paymentMethod: string;
+  /**
+   * The gateway's own display name (`payment_method_title`, e.g. «پرداخت در
+   * محل»). The card shows this before the code, because `cod` is not what the
+   * customer chose — issue #1215 / P1‑3.
+   */
+  paymentMethodTitle: string;
   /** Whether the last delivery of this order applied cleanly. */
   ingestStatus: string;
   ingestError: string | null;
@@ -721,6 +741,7 @@ export async function storeOrdersPageFor(
       dateCreated: typeof payload.date_created === "string" ? payload.date_created : null,
       customer: name || company,
       paymentMethod: String(payload.payment_method ?? ""),
+      paymentMethodTitle: String(payload.payment_method_title ?? "").trim(),
       ingestStatus: row.ingest_status ?? "none",
       ingestError: row.ingest_error,
       lineCount: Array.isArray(payload.line_items) ? payload.line_items.length : 0,

@@ -20,8 +20,10 @@ import {
 } from "@/lib/kavenegar/policy";
 import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricing-service";
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
+import { masterBalanceView } from "@/lib/kavenegar/master-balance-facts";
 import { getDeliveryReport } from "@/lib/messaging-delivery-report";
 import { getCampaignDeliveryReport } from "@/lib/campaign-delivery-report";
+import { getDeliveryTrend } from "@/lib/delivery-trend";
 import {
   acknowledgeServiceAlert,
   getServiceAlertSummary,
@@ -76,6 +78,11 @@ export const GET = withPlatformScope(async () => {
     templates,
     delivery,
     campaignDelivery,
+    // Issue #902 §9 item 2 — the same question over months rather than a week,
+    // because "was last month worse" is a series and the campaign row cannot be
+    // a trend. Bucketed weekly for a quarter; `message_outbox` is never pruned,
+    // so this is a query, not new data.
+    deliveryTrend,
     alerts,
     alertSummary,
     masterTemplates,
@@ -91,6 +98,7 @@ export const GET = withPlatformScope(async () => {
     // latencies that decide *which* end is slow. A campaign is the unit the
     // business asks about; the fleet row above cannot answer it.
     getCampaignDeliveryReport({ sinceHours: 24 * 7, limit: 25 }),
+    getDeliveryTrend({ days: 90 }),
     // Issue #902 §3 — what needs a human right now: low master credit, cap
     // pressure, unknown transfers, drift, a child the provider disagrees about.
     listServiceAlerts({ limit: 50 }),
@@ -109,9 +117,15 @@ export const GET = withPlatformScope(async () => {
     // §5 library entries with their targeting and a rendered sample, so the
     // console can show what a business would actually receive.
     masterTemplates: masterTemplates.map(toConsoleMasterTemplate),
+    // §9 item 4: the master's credit as the last funding pass observed it, aged
+    // and flagged. Reading providers live from a screen is how an operator ends
+    // up quoting a number nobody recorded.
+    masterBalance: masterBalanceView(snapshot.masterBalance),
     delivery,
     // §6 one level down: per campaign, over a week, with queue and send latency.
     campaignDelivery,
+    // §9 item 2: the long view. Buckets with no attempts are gaps, not zeros.
+    deliveryTrend,
     // Wholesale vs. retail over the last 30 days. Retail is Billing's number,
     // provider cost is theirs; this screen only compares them.
     margin,

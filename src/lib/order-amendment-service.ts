@@ -217,6 +217,18 @@ async function platformCommissionFor(
   return commissionAmountFor(amount, snappfood.commissionPercent);
 }
 
+/**
+ * ## Why a corrected order sends no new receipt
+ *
+ * Issue #902 §9 item 0 wired the receipt trigger into every path that records a
+ * payment, including the two importers. This one is deliberately excluded, and
+ * the reason is not effort: an amendment *rewrites* what was already paid (the
+ * old rows are superseded, the new ones carry `superseded_by_amendment_id`), so
+ * the customer's money did not change hands again. A second «پرداخت ثبت شد»
+ * message would tell them they had been charged twice, which is the opposite of
+ * what an amendment means. A refund or a genuine additional tender has its own
+ * path and its own trigger.
+ */
 export async function amendClosedOrder(
   client: PoolClient,
   params: {

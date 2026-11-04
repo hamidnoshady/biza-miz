@@ -25,7 +25,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { runMigrations } from "../scripts/migrate";
 import type { Role } from "../src/lib/auth-edge";
 
@@ -310,7 +310,7 @@ afterAll(async () => {
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
     await maintenance.query(`DROP OWNED BY "${APP_ROLE}"`).catch(() => {});
-    await maintenance.query(`DROP ROLE IF EXISTS "${APP_ROLE}"`).catch(() => {});
+    await dropAppRole(maintenance, APP_ROLE).catch(() => {});
   } finally {
     await maintenance.end();
   }

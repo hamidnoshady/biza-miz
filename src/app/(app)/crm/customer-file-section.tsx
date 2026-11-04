@@ -52,6 +52,7 @@ import { EmptyState, SectionCard, StatusBadge } from "@/app/dashboard/page-chrom
 import { api, ErrorBox, errorMessage, Field, inputClass } from "@/app/dashboard/ui";
 import { crmCustomerHref, crmSectionHref } from "./crm-routes";
 import { CustomerRelationshipsCard } from "./customer-relationships-card";
+import { CustomerOrganizationCard } from "./customer-organization-card";
 import { CrmCardHeading } from "./crm-card-heading";
 
 interface Note {
@@ -500,6 +501,12 @@ export function CustomerFileSection({ customerId, permissions }: { customerId: s
           )}
         </SectionCard>
       </div>
+
+      {/* §A's multi-brand client: the hierarchy the ring beside it deliberately
+          does not draw, with the work each brand carries. Read-only — the edges
+          are created and removed through the relationships card below — and it
+          renders nothing at all for a party that is not part of a group. */}
+      {!isMerged ? <CustomerOrganizationCard customerId={customerId} /> : null}
 
       <CustomerRelationshipsCard
         customerId={customerId}

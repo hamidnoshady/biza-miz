@@ -70,6 +70,58 @@ const SECTION_ALIASES: Record<CrmSectionKey, readonly string[]> = {
   persons: ["پرونده مشتری", "پرونده ۳۶۰", "فایل مشتری"],
   leads: ["سرنخ", "سرنخ‌ها", "سرنخ تازه", "پرس‌وجو", "استعلام"],
   deals: ["فرصت", "فرصت‌ها", "معامله", "معامله‌ها", "قیف", "فروش", "پیشنهاد", "مذاکره"],
+  // §A's briefs. The aliases are what a person types when they are not reading
+  // the menu: the document they are looking for, not the section's name — which
+  // the caller already compares from `crm-nav.ts`.
+  briefs: [
+    "بریف",
+    "بریف کارفرما",
+    "خواسته کارفرما",
+    "نیازمندی",
+    "اقلام تحویلی",
+    "معیار پذیرش",
+    "دامنه کار",
+    "اسکوپ",
+    "تأییدیه کارفرما",
+  ],
+  // §A's proposals, which §D calls estimates and #1127 will print as a service
+  // quote. The vocabulary covers all three words a person might type for it, plus
+  // the two figures they are actually looking for: «پیش‌فاکتور» is what an
+  // Iranian office calls a quote, «برآورد» is §D's word for the same document,
+  // and «حاشیه سود» is the reason an agency opens the screen at all.
+  proposals: [
+    "پیشنهاد قیمت",
+    "پیشنهادهای قیمت",
+    "پیش‌فاکتور",
+    "پیش فاکتور",
+    "پیشنهاده",
+    "برآورد",
+    "برآورد هزینه",
+    "قیمت‌گذاری",
+    "حاشیه سود",
+    "تخفیف",
+    "اعتبار پیشنهاد",
+    "منقضی‌شده",
+  ],
+  // §A's and §C's client campaign. «کمپین» used to sit on the brief's list, from
+  // before 0278 gave a campaign a record of its own — it was the nearest thing to
+  // point at. Aliases match by folded substring, longest first, so leaving it there
+  // would have sent a member typing «کمپین» to the brief screen now that both
+  // exist. It moves here, and the brief keeps the words that were always its own.
+  "client-campaigns": [
+    "کمپین‌های کارفرما",
+    "کمپین کارفرما",
+    "کمپین‌ها",
+    "کمپینها",
+    "کمپین",
+    "تقویم کمپین",
+    "کانال‌های رسانه",
+    "هزینه رسانه",
+    "بازده تبلیغات",
+    "نرخ کلیک",
+    "رواس",
+    "کمپین در جریان",
+  ],
   activities: ["کار", "کارها", "پیگیری", "پیگیری‌ها", "تماس", "جلسه", "یادآوری", "وظیفه", "وظایف"],
   cases: ["تیکت", "تیکت‌ها", "شکایت", "پشتیبانی", "خدمات", "میز خدمت", "درخواست"],
   segments: ["بخش", "بخش‌بندی", "سگمنت", "گروه مشتریان", "تحلیل", "وفاداری", "چرخه عمر"],

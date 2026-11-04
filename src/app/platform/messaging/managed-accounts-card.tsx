@@ -12,9 +12,17 @@
  * nowhere else — tenant screens receive `getTenantMessagingConfig()` instead.
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { Loader2Icon, RefreshCwIcon, SaveIcon, ShieldCheckIcon, WalletCardsIcon } from "lucide-react";
 import { formatPersianNumber } from "@/lib/digits";
 import { tomanLabel } from "@/lib/platform-money";
+import { MASTER_BALANCE_STALE_HOURS } from "@/lib/kavenegar/master-balance-facts";
+import { deliveryHealth, type DeliveryHealth } from "@/lib/delivery-health";
+import {
+  TREND_HEALTH_LABELS,
+  trendBarPercent,
+  type DeliveryTrendSummary,
+} from "@/lib/delivery-trend-facts";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass } from "../ui";
 
 interface ManagedPolicy {
@@ -201,14 +209,35 @@ interface ServiceAlert {
   detail: Record<string, unknown>;
 }
 
+/** Issue #902 §9 item 4 — the master credit the last funding pass observed. */
+interface MasterBalance {
+  rial: number | null;
+  observedAt: string | null;
+  checkedAt: string | null;
+  state: "unknown" | "current" | "unreadable" | "stale";
+  ageMinutes: number | null;
+}
+
+/** Issue #902 §9 item 1 — the queued work the funding planner sizes against. */
+interface PendingDemand {
+  businessId: string;
+  messages: number;
+  segments: number;
+  campaigns: number;
+}
+
 interface Snapshot {
   error?: string;
   policy: ManagedPolicy;
+  masterBalance: MasterBalance;
+  pendingDemand: PendingDemand[];
   accounts: ManagedAccount[];
   templates: CatalogTemplate[];
   masterTemplates: MasterTemplate[];
   delivery: DeliveryRow[];
   campaignDelivery: CampaignDeliveryRow[];
+  /** Issue #902 §9 item 2 — a quarter of delivery, bucketed weekly. */
+  deliveryTrend: DeliveryTrendSummary & { granularity: string; days: number; businesses?: number };
   alerts: ServiceAlert[];
   alertSummary: { critical: number; warning: number; info: number; unacknowledged: number; total: number };
   recentJobs: ManagedJob[];
@@ -349,6 +378,31 @@ const FUNDING_PURPOSE_LABELS: Record<ManagedPolicy["fundingPurpose"], string> = 
   transactional: "تراکنشی — می‌تواند از ذخیرهٔ تراکنشی استفاده کند",
 };
 
+/**
+ * One line about the master's credit, saying how old it is and whether the last
+ * read worked — because a figure with no age is a number an operator will
+ * quote as if it were current.
+ */
+function masterBalanceLine(balance: MasterBalance): string {
+  if (balance.state === "unknown" || balance.rial === null) {
+    return "موجودی حساب اصلی: هنوز خوانده نشده است؛ پاس بعدی شارژ خودکار آن را می‌خواند.";
+  }
+  const age =
+    balance.ageMinutes === null
+      ? ""
+      : balance.ageMinutes < 60
+        ? ` (${formatPersianNumber(balance.ageMinutes)} دقیقه پیش)`
+        : ` (${formatPersianNumber(Math.floor(balance.ageMinutes / 60))} ساعت پیش)`;
+  const value = `موجودی حساب اصلی: ${tomanLabel(balance.rial)}${age}`;
+  if (balance.state === "unreadable") {
+    return `${value} — آخرین خواندن ناموفق بود؛ این عدد مربوط به آخرین خواندن موفق است.`;
+  }
+  if (balance.state === "stale") {
+    return `${value} — قدیمی‌تر از ${formatPersianNumber(Math.floor(MASTER_BALANCE_STALE_HOURS))} ساعت؛ وضعیت فعلی حساب اصلی نامعلوم است.`;
+  }
+  return value;
+}
+
 const STRATEGY_LABELS: Record<ManagedPolicy["fundingStrategy"], string> = {
   jit: "به‌موقع (JIT) — هر بار زیر هدف",
   low_watermark: "خط آب پایین — فقط پس از افت به آستانه",
@@ -375,13 +429,14 @@ function latencyLabel(stats: LatencyStats | null): string {
   return `${seconds(stats.p50)} / ${seconds(stats.p95)}`;
 }
 
-/** Mirrors `deliveryHealth` on the server; kept here for a per-row label. */
+/**
+ * The rule is the server's, imported rather than copied: `delivery-health.ts` is
+ * pure, so the card can call the same function the reports call. It used to keep
+ * its own copy of the thresholds with a comment saying it mirrored them, which is
+ * how a rule becomes two rules.
+ */
 function healthOf(row: DeliveryRow): keyof typeof DELIVERY_LABELS {
-  const decided = row.sent + row.delivered + row.failed;
-  if (decided === 0) return row.pending > 0 ? "degraded" : "idle";
-  if (row.failed > 0 && row.failed / decided >= 0.1) return "attention";
-  if (row.failed > 0 || row.pending > 0) return "degraded";
-  return "healthy";
+  return deliveryHealth(row);
 }
 
 const JOB_LABELS: Record<string, string> = {
@@ -430,6 +485,14 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       attention: accounts.filter((account) => account.state === "attention_required").length,
       suspended: accounts.filter((account) => account.state === "suspended").length,
     };
+  }, [snapshot]);
+
+  // §9 item 1: queued work by business, so the account row can say why a child
+  // was funded above its standing buffer.
+  const demandByBusiness = useMemo(() => {
+    const map = new Map<string, PendingDemand>();
+    for (const row of snapshot?.pendingDemand ?? []) map.set(row.businessId, row);
+    return map;
   }, [snapshot]);
 
   async function post(body: Record<string, unknown>, key: string) {
@@ -622,6 +685,17 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       </Card>
 
       <Card title="سیاست ساخت و تأمین اعتبار">
+        {/* §9 item 4: the balance behind every funding decision on this card,
+            with its age — read, not asked for. */}
+        <p
+          className="mb-4 rounded-lg border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+          data-testid="master-balance-mirror"
+        >
+          {masterBalanceLine(snapshot.masterBalance)}
+          {snapshot.masterBalance.checkedAt ? (
+            <span dir="ltr"> · {dateTime(snapshot.masterBalance.checkedAt)}</span>
+          ) : null}
+        </p>
         <form onSubmit={savePolicy} className="grid gap-3 sm:grid-cols-2">
           <Field label="ساخت خودکار حساب فرزند" hint="تا روشن نشدن این گزینه هیچ حسابی ساخته نمی‌شود.">
             <select
@@ -910,6 +984,18 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
       </Card>
 
       <Card title={`حساب‌ها (${formatPersianNumber(snapshot.accounts.length)})`}>
+        {/* Issue #902 §6 — the dedicated audit view is the shared log, filtered
+            rather than copied: the family filter narrows it to `sms.*`, so the
+            operator reads this card's own actions instead of the whole console's. */}
+        <p className="mb-2 text-xs text-muted-foreground">
+          <Link
+            href="/platform/audit?actionFamily=sms"
+            className="text-sky-700 hover:underline dark:text-sky-300"
+          >
+            همهٔ رویدادهای پیامک مدیریت‌شده ←
+          </Link>{" "}
+          — ساخت حساب، تعلیق، تأمین اعتبار و تغییر الگوها، با دادهٔ کامل هر رویداد.
+        </p>
         <div className="space-y-2">
           {snapshot.accounts.length === 0 ? (
             <p className="text-sm text-muted-foreground">هنوز حسابی ساخته نشده است.</p>
@@ -926,6 +1012,28 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
+                  <Link
+                    href={`/platform/audit?actionFamily=sms&businessId=${account.businessId}`}
+                    className="text-sky-700 hover:underline dark:text-sky-300"
+                  >
+                    رویدادهای این حساب ←
+                  </Link>
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {(() => {
+                    // §9 item 1: a child holding an approved queue is being
+                    // funded for that queue, not just for the standing buffer.
+                    // Without this line the transfer looks arbitrary.
+                    const demand = demandByBusiness.get(account.businessId);
+                    if (!demand || demand.messages === 0) return null;
+                    return (
+                      <>
+                        صف فعال: {formatPersianNumber(demand.messages)} پیام (
+                        {formatPersianNumber(demand.segments)} قطعه) در{" "}
+                        {formatPersianNumber(demand.campaigns)} کمپین •{" "}
+                      </>
+                    );
+                  })()}
                   تعرفه: {account.pricingName ?? "—"} • فارسی {tomanLabel(account.smsFarsiCostRial ?? 0)} • انگلیسی{" "}
                   {tomanLabel(account.smsEnglishCostRial ?? 0)} • موجودی داخلی{" "}
                   {account.providerBalanceRial === null ? "نامشخص" : tomanLabel(account.providerBalanceRial)} •{" "}
@@ -1139,6 +1247,82 @@ export function ManagedSmsAccountsCard({ canManage }: { canManage: boolean }) {
           «تأخیر صف» مدت انتظار پیام در صف ارسال است و «تأخیر ارائه‌دهنده» مدت پاسخ ارائه‌دهنده.
           ردیف‌ها بر اساس بیشترین خطا مرتب شده‌اند.
         </p>
+      </Card>
+
+      {/* Issue #902 §9 item 2 — the long view. The two cards above answer "is
+          anything failing now"; a series answers "did it get worse, and when".
+          A bucket with no attempts is drawn as a gap and labelled «بدون داده»,
+          never as a zero bar: silence and failure look identical on a chart that
+          plots zeros, and only one of them is an emergency. */}
+      <Card title={`روند تحویل (${formatPersianNumber(snapshot.deliveryTrend?.days ?? 90)} روز اخیر)`}>
+        {(snapshot.deliveryTrend?.activeBuckets ?? 0) === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            در این بازه هیچ ارسالی ثبت نشده است؛ نبودِ داده با شکست یکی نیست.
+          </p>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+              <span>
+                پذیرفته: <b className="tabular-nums">{formatPersianNumber(snapshot.deliveryTrend.sent)}</b>
+              </span>
+              <span>
+                تحویل: <b className="tabular-nums">{formatPersianNumber(snapshot.deliveryTrend.delivered)}</b>
+              </span>
+              <span className={snapshot.deliveryTrend.failed > 0 ? "text-destructive" : ""}>
+                ناموفق: <b className="tabular-nums">{formatPersianNumber(snapshot.deliveryTrend.failed)}</b>
+              </span>
+              <span className="text-xs text-muted-foreground">
+                نرخ خطا:{" "}
+                {snapshot.deliveryTrend.failureRate === null
+                  ? "—"
+                  : `${formatPersianNumber(Math.round(snapshot.deliveryTrend.failureRate * 100))}٪`}
+              </span>
+              <span
+                className={`text-xs ${
+                  snapshot.deliveryTrend.worstHealth === "attention" ? "text-destructive" : "text-muted-foreground"
+                }`}
+              >
+                بدترین وضعیت: {TREND_HEALTH_LABELS[snapshot.deliveryTrend.worstHealth]}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                تأخیر صف (میانه / صدک ۹۵): {latencyLabel(snapshot.deliveryTrend.queueLatency)}
+              </span>
+            </div>
+            <div className="mt-4 flex items-end gap-[2px]" role="img" aria-label="روند تحویل">
+              {(snapshot.deliveryTrend.points ?? []).map((point) => {
+                const max = Math.max(...snapshot.deliveryTrend.points.map((p) => p.decided + p.pending), 0);
+                const height = point.hasData ? trendBarPercent(point.decided + point.pending, max) : null;
+                const tone =
+                  point.health === "attention"
+                    ? "bg-destructive"
+                    : point.health === "degraded"
+                      ? "bg-amber-500"
+                      : "bg-emerald-500";
+                return (
+                  <div
+                    key={point.key}
+                    className="flex min-w-0 flex-1 flex-col items-center gap-1"
+                    title={`${point.label} — ${TREND_HEALTH_LABELS[point.health]}`}
+                  >
+                    {height === null ? (
+                      <div className="h-16 w-full rounded-sm border border-dashed border-border/70" />
+                    ) : (
+                      <div
+                        className={`w-full rounded-sm ${tone}`}
+                        style={{ height: `${Math.max(4, Math.round((height / 100) * 64))}px` }}
+                      />
+                    )}
+                    <span className="truncate text-[9px] text-muted-foreground">{point.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-3 text-xs text-muted-foreground">
+              هر ستون یک بازه است؛ کادر خالی یعنی در آن بازه هیچ ارسالی ثبت نشده — نه اینکه همه
+              شکست خورده باشند. نرخ خطا فقط روی ارسال‌هایی حساب می‌شود که نتیجه‌شان روشن شده است.
+            </p>
+          </>
+        )}
       </Card>
 
       {/* Issue #902 §5 — the library the catalog is built from. An entry is

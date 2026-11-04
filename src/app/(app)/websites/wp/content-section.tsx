@@ -48,10 +48,19 @@ import { formatJalali } from "@/lib/jalali";
 import { cn } from "@/lib/utils";
 import { ConnectionPicker, type ConnectionLite } from "./connection-lite";
 import { wpEditorIsDirty, wpEditorPatch, type WpEditorValues } from "./content-editor-state";
-import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
+import { EditorialAssistant } from "./editorial-assistant";
+import { ContentPreview } from "./content-preview";
+import { pluginSupportsJobType, pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
 import { WpStoreRefreshError } from "./wp-store-states";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import {
+  DEFAULT_SCHEDULE_TIME,
+  isFutureSchedule,
+  isoToTehranWallClock,
+  tehranWallClockToIso,
+} from "@/lib/wp-schedule";
 
 interface ContentRow {
   remoteId: string;
@@ -65,6 +74,10 @@ interface ContentRow {
   mimeType: string | null;
   /** Raw post HTML when the mirror carries it; null when it does not. */
   content: string | null;
+  /** Card preview of the excerpt, already stripped and cut server-side. */
+  excerptText?: string;
+  /** The featured image, resolved through the mirrored attachment. */
+  featuredImageUrl?: string | null;
   remoteUpdatedAt: string | null;
   syncedAt: string;
   writeStatus?: "pending" | "processing" | "failed" | "dead" | "needs_review" | null;
@@ -74,6 +87,8 @@ interface ContentDetail extends ContentRow {
   editorTitle: string;
   content: string | null;
   excerpt: string;
+  /** The stored schedule of an already-scheduled post, when the mirror carries it. */
+  scheduledFor?: string | null;
 }
 
 type ContentTab = "post" | "page";
@@ -94,6 +109,13 @@ const WRITE_STATUS_LABELS: Record<NonNullable<ContentRow["writeStatus"]>, string
   dead: "نیازمند رسیدگی",
   needs_review: "نیازمند بازبینی",
 };
+
+/** Tomorrow at 09:00 Tehran — what "schedule it" means until the owner says otherwise. */
+function defaultScheduleWall(): { date: string; time: string } {
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const wall = isoToTehranWallClock(tomorrow.toISOString());
+  return { date: wall?.date ?? "", time: DEFAULT_SCHEDULE_TIME };
+}
 
 function statusTone(status: string): "active" | "positive" | "neutral" | "danger" {
   if (status === "publish") return "positive";
@@ -179,6 +201,8 @@ export function WpContentSection({ canManage }: { canManage: boolean }) {
     || pluginSupportsJobType(selectedConnection?.pluginCapabilities, "content_export");
   const postWriteSupported = selectedConnection?.linkMode !== "plugin"
     || pluginSupportsJobType(selectedConnection?.pluginCapabilities, "post_upsert");
+  const scheduleSupported = selectedConnection?.linkMode !== "plugin"
+    || pluginSupportsPostSchedule(selectedConnection?.pluginCapabilities);
 
   const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
 
@@ -405,13 +429,27 @@ disabled={syncing || isPaused || !contentExportSupported}
               {rows.map((row) => (
                 <li key={row.remoteId} className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:px-5">
                   <div className="flex min-w-0 flex-1 items-start gap-3">
-                    <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-                      <FileTextIcon aria-hidden="true" className="size-4" />
+                    {/* The picture the site itself shows on this post; the icon
+                        stands in when the payload carried no featured image or
+                        its attachment has not reached the mirror yet. */}
+                    <span className="relative flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-muted text-muted-foreground">
+                      {row.featuredImageUrl ? (
+                        <img
+                          src={row.featuredImageUrl}
+                          alt=""
+                          loading="lazy"
+                          referrerPolicy="no-referrer"
+                          className="size-full object-cover"
+                        />
+                      ) : (
+                        <FileTextIcon aria-hidden="true" className="size-4" />
+                      )}
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="break-words font-medium text-foreground">{row.title || `#${toPersianDigits(row.remoteId)}`}</p>
                       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
                         <StatusBadge tone={statusTone(row.status)}>{STATUS_LABELS[row.status] ?? row.status}</StatusBadge>
+                        <span>{row.wpType === "page" ? "برگه" : "نوشته"}</span>
                         {row.writeStatus ? (
                           <StatusBadge tone={row.writeStatus === "pending" || row.writeStatus === "processing" ? "active" : "danger"}>
                             {WRITE_STATUS_LABELS[row.writeStatus]}
@@ -425,6 +463,9 @@ disabled={syncing || isPaused || !contentExportSupported}
                             : "زمان ویرایش نامشخص"}
                         </span>
                       </div>
+                      {row.excerptText ? (
+                        <p className="mt-1.5 line-clamp-2 break-words text-xs leading-5 text-muted-foreground">{row.excerptText}</p>
+                      ) : null}
                     </div>
                   </div>
                   <div className={cn("grid w-full gap-2 sm:w-auto", row.permalink && canManage ? "grid-cols-2" : "grid-cols-1")}>
@@ -489,6 +530,7 @@ disabled={syncing || isPaused || !contentExportSupported}
           key={`${selectedId}-${tab}-${editing === "new" ? "new" : editing.remoteId}`}
           connectionId={selectedId}
           connectionMode={selectedConnection?.linkMode ?? "plugin"}
+          scheduleSupported={scheduleSupported}
           lastContentSyncAt={selectedConnection?.lastContentSyncAt ?? null}
           type={tab}
           row={editing === "new" ? null : editing}
@@ -516,6 +558,7 @@ disabled={syncing || isPaused || !contentExportSupported}
 function PostEditor({
   connectionId,
   connectionMode,
+  scheduleSupported,
   lastContentSyncAt,
   type,
   row,
@@ -524,6 +567,8 @@ function PostEditor({
 }: {
   connectionId: string;
   connectionMode: ConnectionLite["linkMode"];
+  /** False when a plugin-mode store runs a build that cannot apply `date_gmt`. */
+  scheduleSupported: boolean;
   lastContentSyncAt: string | null;
   type: ContentTab;
   row: ContentRow | null;
@@ -531,12 +576,12 @@ function PostEditor({
   onSaved: (outcome: { queued: boolean; alreadyApplied?: boolean }) => void;
 }) {
   const [initial, setInitial] = useState<WpEditorValues | null>(
-    row ? null : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft" },
+    row ? null : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft", scheduledFor: "" },
   );
   const [values, setValues] = useState<WpEditorValues>(
     row
-      ? { editorTitle: row.title, content: "", excerpt: "", slug: row.slug, status: row.status }
-      : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft" },
+      ? { editorTitle: row.title, content: "", excerpt: "", slug: row.slug, status: row.status, scheduledFor: "" }
+      : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft", scheduledFor: "" },
   );
   const [contentEditable, setContentEditable] = useState(!row);
   const [loadError, setLoadError] = useState("");
@@ -546,6 +591,12 @@ function PostEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [createRequestId] = useState(() => (typeof crypto !== "undefined" ? crypto.randomUUID() : ""));
+  const [scheduleDraft, setScheduleDraft] = useState<{ date: string; time: string } | null>(null);
+
+  function updateSchedule(next: { date: string; time: string }) {
+    setScheduleDraft(next);
+    setValue("scheduledFor", tehranWallClockToIso(next.date, next.time) ?? "");
+  }
 
   useEffect(() => {
     if (!row) return;
@@ -574,6 +625,7 @@ function PostEditor({
         excerpt: detail.excerpt ?? "",
         slug: detail.slug ?? "",
         status: detail.status ?? "draft",
+        scheduledFor: detail.scheduledFor ?? "",
       };
       setContentEditable(detail.content !== null);
       setExpectedRemoteUpdatedAt(detail.remoteUpdatedAt ?? null);
@@ -599,6 +651,18 @@ function PostEditor({
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!initial || !dirty || !values.editorTitle.trim() || (row && !expectedRemoteUpdatedAt)) return;
+    // A scheduled post without a future date publishes on WordPress's next
+    // cron pass. Stop here, before anything is queued, and say why.
+    if (values.status === "future") {
+      if (!values.scheduledFor) {
+        setError("برای زمان‌بندی، تاریخ و ساعت انتشار را انتخاب کنید.");
+        return;
+      }
+      if (!isFutureSchedule(values.scheduledFor)) {
+        setError("زمان انتخاب‌شده گذشته است؛ تاریخ و ساعتی در آینده انتخاب کنید.");
+        return;
+      }
+    }
     setBusy(true);
     setError("");
 
@@ -632,7 +696,16 @@ function PostEditor({
   }
 
   const typeLabel = type === "post" ? "نوشته" : "برگه";
-  const unusualStatus = !["draft", "publish", "pending", "private"].includes(values.status);
+  const statusChoices = scheduleSupported
+    ? ["draft", "publish", "future", "pending", "private"]
+    : ["draft", "publish", "pending", "private"];
+  const unusualStatus = !statusChoices.includes(values.status);
+  // The schedule is stored as one instant and shown as a Tehran wall clock.
+  // The wall clock keeps its own draft so a half-typed time ("10:") is not
+  // rewritten out from under the owner on every keystroke; the instant in
+  // `values.scheduledFor` is still the only thing that gets saved.
+  const storedWall = isoToTehranWallClock(values.scheduledFor);
+  const scheduleWall = scheduleDraft ?? storedWall ?? defaultScheduleWall();
 
   return (
     <Dialog open onOpenChange={(open) => (!open ? requestClose() : undefined)}>
@@ -697,18 +770,61 @@ function PostEditor({
                       className={inputClass}
                       value={values.status}
                       disabled={busy}
-                      onChange={(event) => setValue("status", event.target.value)}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        setValue("status", next);
+                        if (next === "future") {
+                          // Choosing "scheduled" without a date would publish at
+                          // once; start from tomorrow morning instead.
+                          updateSchedule(defaultScheduleWall());
+                        } else {
+                          setScheduleDraft(null);
+                          setValue("scheduledFor", "");
+                        }
+                      }}
                     >
                       {unusualStatus ? (
                         <option value={values.status} disabled>{STATUS_LABELS[values.status] ?? values.status}</option>
                       ) : null}
                       <option value="draft">پیش‌نویس</option>
                       <option value="publish">منتشرشده</option>
+                      {scheduleSupported ? <option value="future">زمان‌بندی‌شده</option> : null}
                       <option value="pending">در انتظار بررسی</option>
                       <option value="private">خصوصی</option>
                     </select>
                   </Field>
                 </div>
+                {!scheduleSupported && values.status === "future" ? (
+                  <div className="mb-3">
+                    <InfoBox>
+                      این نوشته در سایت زمان‌بندی شده است، اما افزونهٔ این اتصال هنوز زمان‌بندی را پشتیبانی نمی‌کند. برای تغییر
+                      زمان انتشار، ابتدا افزونهٔ سایت را به‌روزرسانی کنید؛ تا آن زمان همین زمان در سایت حفظ می‌شود.
+                    </InfoBox>
+                  </div>
+                ) : null}
+                {values.status === "future" && scheduleSupported ? (
+                  <Field
+                    label="زمان انتشار"
+                    hint="به وقت تهران. وردپرس در این زمان آن را منتشر می‌کند و پیش از آن برای بازدیدکنندگان نمایش داده نمی‌شود."
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <JalaliDatePicker
+                        ariaLabel="تاریخ انتشار"
+                        value={scheduleWall.date}
+                        disabled={busy}
+                        onChange={(iso) => updateSchedule({ date: iso, time: scheduleWall.time })}
+                      />
+                      <input
+                        type="time"
+                        aria-label="ساعت انتشار"
+                        className={cn(inputClass, "w-32")}
+                        value={scheduleWall.time}
+                        disabled={busy}
+                        onChange={(event) => updateSchedule({ date: scheduleWall.date, time: event.target.value })}
+                      />
+                    </div>
+                  </Field>
+                ) : null}
                 <Field label="خلاصه" hint="اختیاری؛ ممکن است قالب سایت آن را در فهرست نوشته‌ها نمایش دهد.">
                   <textarea
                     className={cn(inputClass, "h-auto min-h-24 py-2 leading-6")}
@@ -737,6 +853,32 @@ function PostEditor({
                     placeholder={contentEditable ? "متن نوشته یا برگه…" : "متن خام در دسترس نیست"}
                   />
                 </Field>
+                <ContentPreview
+                  title={values.editorTitle}
+                  content={values.content}
+                  excerpt={values.excerpt}
+                  editable={contentEditable}
+                />
+                {/* The assistant sits under the text it works on: it drafts from
+                    what is in the editor right now, and its output is only a
+                    suggestion until a button here places it in a field. */}
+                <EditorialAssistant
+                  connectionId={connectionId}
+                  type={type}
+                  title={values.editorTitle}
+                  content={values.content}
+                  excerpt={values.excerpt}
+                  disabled={busy}
+                  canEditContent={contentEditable}
+                  onInsert={(target, text, mode) => {
+                    if (target === "title") setValue("editorTitle", text);
+                    else if (target === "excerpt") setValue("excerpt", text);
+                    else if (mode === "append") {
+                      const separator = values.content.trim() ? "\n\n" : "";
+                      setValue("content", `${values.content.trimEnd()}${separator}${text}`);
+                    } else setValue("content", text);
+                  }}
+                />
                 <ErrorBox>{error}</ErrorBox>
                 {row && !expectedRemoteUpdatedAt ? (
                   <div className="mb-3"><InfoBox>نسخهٔ این مورد مشخص نیست. برای جلوگیری از بازنویسی تغییرات هم‌زمان، ابتدا همگام‌سازی را اجرا کنید.</InfoBox></div>

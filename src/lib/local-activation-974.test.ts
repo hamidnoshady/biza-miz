@@ -78,14 +78,28 @@ describe("Issue #974 — Full Offline Cloud activation crypto, SSRF, state machi
       ).ok,
     ).toBe(false);
 
-    // Loopback HTTP allowed strictly when explicit test/smoke flag is present
+    // Loopback HTTP allowed strictly when a source test process opts in.
     expect(
       await validateCloudOriginForLocalActivation("http://127.0.0.1:41234", {
-        NODE_ENV: "production",
-        DESKTOP_SMOKE_MARKER: "/tmp/smoke.json",
+        NODE_ENV: "test",
         LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK: "1",
       }),
     ).toEqual({ ok: true, origin: "http://127.0.0.1:41234" });
+
+    // Issue #1194 — a packaged (production) process cannot opt into a
+    // plain-HTTP loopback "cloud" with environment switches alone. The old
+    // DESKTOP_SMOKE_MARKER condition shipped this bypass inside the signed
+    // installer, where it is just a non-secret variable.
+    for (const env of [
+      { NODE_ENV: "production", DESKTOP_SMOKE_MARKER: "/tmp/smoke.json", LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK: "1" },
+      { NODE_ENV: "production", LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK: "1" },
+      { DESKTOP_SMOKE_MARKER: "/tmp/smoke.json", LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK: "1" },
+    ]) {
+      expect(await validateCloudOriginForLocalActivation("http://127.0.0.1:41234", env)).toEqual({
+        ok: false,
+        error: "https_required",
+      });
+    }
 
     // Even with test loopback flag, RFC1918 LAN stays forbidden
     expect(

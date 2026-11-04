@@ -6,6 +6,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import * as connections from "@/lib/integrations/connections-service";
 import * as taxonomyService from "@/lib/integrations/woo-taxonomy-service";
 import * as pluginService from "@/lib/integrations/plugin-service";
+import * as outboxService from "@/lib/integrations/outbox-service";
 import { PluginJobUnsupportedError } from "@/lib/integrations/plugin-job-guard";
 import { GET, POST } from "./route";
 
@@ -24,8 +25,9 @@ import { GET, POST } from "./route";
  *
  * TAX-08/TAX-14: group totals are the unique-product/assignment split, and a
  * taxonomy with a state row but no terms is a visible empty group, not a
- * vanished one. TAX-12: the POST is the remote action — queued in plugin mode
- * (with the capability fallback), executed in REST mode.
+ * vanished one. TAX-12: the POST is the remote action — queued in both modes
+ * (capability fallback for the plugin, an app-side job for REST), and never a
+ * request that walks the catalogue while somebody waits (#1206 PERF-05).
  */
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -53,6 +55,10 @@ vi.mock("@/lib/integrations/woo-taxonomy-service", () => ({
 
 vi.mock("@/lib/integrations/plugin-service", () => ({
   enqueuePluginExport: vi.fn(),
+}));
+
+vi.mock("@/lib/integrations/outbox-service", () => ({
+  enqueueTaxonomySync: vi.fn(),
 }));
 
 const session = { businessId: "biz-1", sub: "user-1", role: "owner" };
@@ -93,6 +99,7 @@ beforeEach(() => {
   vi.mocked(taxonomyService.listTaxonomyStates).mockResolvedValue([]);
   vi.mocked(taxonomyService.taxonomyGroupStats).mockResolvedValue({ groups: [], totals: { mappedProducts: 0, assignments: 0 } });
   vi.mocked(pluginService.enqueuePluginExport).mockResolvedValue({ jobId: null });
+  vi.mocked(outboxService.enqueueTaxonomySync).mockResolvedValue({ jobId: "job-1", alreadyRunning: false });
 });
 
 const getRequest = (query = "") =>
@@ -265,44 +272,39 @@ describe("POST /api/integrations/connections/[id]/taxonomies — the remote sync
     expect(await res.json()).toEqual({ ok: false, error: "plugin_job_unsupported" });
   });
 
-  it("pulls the tree directly in REST mode and returns the per-taxonomy outcomes", async () => {
-    const client = { marker: "client" };
-    vi.mocked(connections.wooClientFor).mockReturnValue(client as never);
-    vi.mocked(taxonomyService.syncTaxonomyTree).mockResolvedValue({
-      taxonomies: ["product_cat"],
-      terms: 3,
-      truncated: false,
-      failed: ["product_tag"],
-      status: "partial",
-      results: [
-        { taxonomy: "product_cat", restBase: null, terms: 3, status: "synced" },
-        { taxonomy: "product_tag", restBase: null, terms: 0, status: "failed", error: "woocommerce_list_failed_http_500" },
-      ],
-      discoveryErrors: [],
-    } as never);
-
+  it("queues the read in REST mode instead of holding the request open (#1206 PERF-05)", async () => {
+    vi.mocked(connections.wooClientFor).mockReturnValue({ marker: "client" } as never);
     const res = await POST(postRequest(), params);
-    // Partial is an honest 200: the run happened and the results ARE the answer.
+    // The tree is one HTTP page per taxonomy, sequentially: minutes on a real
+    // catalogue. The POST answers at once and the tick does the reading.
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; queued: boolean; status: string; failed: string[] };
-    expect(body).toMatchObject({ ok: true, queued: false, status: "partial", failed: ["product_tag"] });
-    expect(taxonomyService.syncTaxonomyTree).toHaveBeenCalledWith("biz-1", "conn-1", client);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      queued: true,
+      via: "app",
+      jobType: "taxonomy_sync",
+      jobId: "job-1",
+      alreadyRunning: false,
+    });
+    expect(outboxService.enqueueTaxonomySync).toHaveBeenCalledWith("biz-1", "conn-1");
+    expect(taxonomyService.syncTaxonomyTree).not.toHaveBeenCalled();
   });
 
-  it("answers a total failure as a 502, not a success", async () => {
+  it("says when the read is already running rather than queueing a second one", async () => {
     vi.mocked(connections.wooClientFor).mockReturnValue({} as never);
-    vi.mocked(taxonomyService.syncTaxonomyTree).mockResolvedValue({
-      taxonomies: [],
-      terms: 0,
-      truncated: false,
-      failed: ["product_cat", "product_tag"],
-      status: "failed",
-      results: [],
-      discoveryErrors: [],
-    } as never);
+    vi.mocked(outboxService.enqueueTaxonomySync).mockResolvedValueOnce({ jobId: "job-9", alreadyRunning: true });
     const res = await POST(postRequest(), params);
-    expect(res.status).toBe(502);
-    expect(await res.json()).toMatchObject({ ok: true, status: "failed" });
+    expect(await res.json()).toMatchObject({ ok: true, queued: true, alreadyRunning: true });
+  });
+
+  it("answers 409 when the store's credentials cannot be read — before queueing", async () => {
+    vi.mocked(connections.wooClientFor).mockImplementation(() => {
+      throw new Error("wordpress_credentials_missing");
+    });
+    const res = await POST(postRequest(), params);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: "wordpress_credentials_missing" });
+    expect(outboxService.enqueueTaxonomySync).not.toHaveBeenCalled();
   });
 
   it("refuses a paused connection and a products-sync-off connection with an honest 409", async () => {
@@ -333,6 +335,7 @@ describe.each(["GET", "POST"] as const)("taxonomy %s live branch boundary", (met
     expect(taxonomyService.listTerms).not.toHaveBeenCalled();
     expect(taxonomyService.syncTaxonomyTree).not.toHaveBeenCalled();
     expect(pluginService.enqueuePluginExport).not.toHaveBeenCalled();
+    expect(outboxService.enqueueTaxonomySync).not.toHaveBeenCalled();
     expect(connections.wooClientFor).not.toHaveBeenCalled();
   });
 });

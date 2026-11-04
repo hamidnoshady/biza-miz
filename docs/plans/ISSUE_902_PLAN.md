@@ -545,8 +545,8 @@ missing was the rest of the provider's documented surface and the tenant screen 
 | Growth screen «پیام‌های خودکار» | The tenant finally sees its approved messages with a first-party status label, can add one, revise the text of a `needs_action` row, and remove it from the catalog |
 | Console «کاتالوگ الگوهای تأییدشده» | Rejections first, then reviews in flight: submit (add or update, chosen by the service), retire, and the stored provider-neutral error code |
 
-Still open in §5/§6 and left for the follow-ups below: the dedicated audit view, and wiring an
-approved template to a concrete send (`sendManagedLookup`) once reserve/settle is in place.
+Still open in §5 and left for the follow-ups below: wiring an approved template to a concrete send
+(`sendManagedLookup`) once reserve/settle is in place. The audit view is §6f.
 Targeting by business type/plan shipped in §5c, the delivery dashboard in §6c.
 
 ## 6c. Delivery and health reporting (§6)
@@ -562,8 +562,8 @@ A child can be `active`, funded and failing every send, and nothing on the conso
 - The console gains «وضعیت تحویل پیام (۲۴ ساعت اخیر)» with the counts, the verdict and the last
   attempt per business.
 
-Still open in §6: the dedicated audit view (platform audit entries exist and are written by every
-managed-account action, but the console links to the shared audit page rather than filtering it).
+The dedicated audit view landed as §6f: not a second page, but the shared log with the `sms` family
+and a per-account deep link — the rows were always there, they just read as raw strings.
 
 ## 6d. Retail pricing, price versions and supplier cost (§4)
 
@@ -644,6 +644,470 @@ Surfaces: the console's «تحویل به تفکیک کمپین (۷ روز اخ�
 second line under each campaign on the tenant's Growth messaging screen («تأخیر صف» / «تأخیر ارسال»,
 in «—» when nothing was measured).
 
+## 6f. The audit view is the shared log, filtered (§6)
+
+§6 asked for an audit view of the managed-SMS control plane. The rows were already being written —
+every provisioning job, suspension, transfer, funding pass, reconciliation, policy change, template
+submit and test send goes through `platformAudit` — but the console linked to the unfiltered log, and
+the log had no idea what an `sms.*` action was. An operator investigating a suspension saw
+`sms.managed_account.suspend` as literal text with a generic icon, mixed into every other privileged
+action in the platform.
+
+Copying the log into a messaging-only page would have been the wrong fix: a second place to read
+events, drifting from the first. Instead the shared page learned the vocabulary.
+
+- Every `sms.*` action now has a Persian label, a status tone and an icon — a suspension in
+  `warning`, a test send in `info` because it spends real money at the provider and reaches a real
+  handset, a key rotation in `warning` even though nothing failed, since it invalidates the credential
+  the drain is holding.
+- `AUDIT_ACTION_FAMILIES` gains «پیامک مدیریت‌شده» (`sms`). The API already matched the family as a
+  prefix (`action LIKE '<value>%'`), so one entry filters the whole plane.
+- The messaging console links into it twice: «همهٔ رویدادهای پیامک مدیریت‌شده ←» for the fleet, and
+  per account «رویدادهای این حساب ←» (`?actionFamily=sms&businessId=…`), which lands on the account's
+  own history with the detail drawer intact.
+
+The guard is a sweep, not a list: `action-meta.test.ts` reads the actions back out of the two routes
+that write them **and** follows the `jobKindFor` switch that produces
+`sms.managed_account.${action}`, so a tenth job kind cannot ship unlabeled. It also asserts the two
+deep links keep their `actionFamily=sms` parameter — the exact thing that was missing.
+
+## 5i. The master balance the last pass saw (§9 item 4, second half)
+
+§5g made the funding pass read the master's own credit from the provider instead of trusting a number
+an operator typed once. That fixed the *decision* and left the *evidence* missing: the figure lived in
+the tick's local variable and vanished when the tick returned, so the console could not show it, and
+an operator asking "how much headroom is left above the floor?" had to read it live, by hand, from the
+provider — from a screen, on a whim, with their own eyes.
+
+Migration `0269` adds three columns to `platform_sms_config` (one row, the same row the policy lives
+in — no new table, no new key, no tenant scope):
+
+| Column | Why it is separate |
+| --- | --- |
+| `managed_master_balance_rial` | the figure the provider reported; `NULL` when it never said |
+| `managed_master_balance_at` | when that figure was observed — a balance with no age is a rumour |
+| `managed_master_balance_checked_at` | when a pass last *tried*; newer than `..._at` means the last read failed |
+
+Collapsing those last two into one timestamp is exactly how a stale figure comes to look live. A
+pairing `CHECK` forbids a value without its observation time.
+
+`masterBalanceView()` turns the stored triple into one of four verdicts, and the console renders each
+differently: `unknown` (never observed — not zero, not "fine"), `current` (recent, last read did not
+fail), `unreadable` (observed once, a later pass could not read it — honest history, not a claim about
+now), `stale` (older than six hours, i.e. six missed passes). `unreadable` outranks `stale`: the
+failure is the more urgent fact.
+
+The rules live in `master-balance-facts.ts` and the two statements in `master-balance.ts`, because the
+console is a client component: `client-bundle-boundary.test.ts` refused the first version, which
+imported the constant straight from the module that owns the pool. The split is the fix it asked for,
+not a suppression.
+
+Only a pass that read the provider writes the value. An operator's typed figure is an *instruction*,
+not an observation, and must never overwrite evidence about what the provider said — which is why
+`runManagedFundingTick` guards the write on `masterBalanceRial === undefined`, and why a mirror write
+that fails is logged and swallowed: the money decision is the job, the evidence is the bonus.
+
+## 5j. An approved campaign is a funding trigger of its own (§9 item 1)
+
+Funding was sized by the *policy*: "keep 100 messages of credit on every child". That is a standing
+order, and it is right for a steady trickle. It is wrong for the thing this platform is actually used
+for — a business approves an audience of 500 and sends it. The pool then needs 500 messages of
+provider credit while the standing order still asks for 100, so the drain runs out mid-campaign, the
+provider refuses the tail with its credit error, and every remaining recipient is marked `failed` for
+a reason the business never chose and cannot see.
+
+The missing trigger is the **work already queued**, and no product decision is needed to define it: an
+approved campaign has its recipients materialized in `message_recipients` and its sends queued in
+`message_outbox` — that pair *is* the approval, because nothing is enqueued for an audience nobody
+approved. So the demand is a query, not a forecast.
+
+| Rule | Why |
+| --- | --- |
+| Demand is counted in **segments**, not recipients | The provider bills per 70-character segment. A per-recipient count under-funds every multipart campaign by a factor of two or three, and does it quietly |
+| The SQL segment expression is built from the billing constants | `smsSegmentsSql()` interpolates `SMS_FIRST_SEGMENT_CHARS`/`SMS_NEXT_SEGMENT_CHARS`, so the funding target and the invoice cannot drift; it refuses anything that is not a plain column reference |
+| The target becomes `max(buffer, demand)`, never `demand` alone | A small campaign must not let the standing order lapse. Demand raises the target; it does not replace it |
+| The **trigger** moves with the target | `low_watermark`'s hysteresis would otherwise pace a campaign that is already draining |
+| Only `queued` and `sending` count | `sent`/`delivered`/`failed` are settled questions; counting them would make the target grow forever on a busy business's history |
+| The transfer reason distinguishes the two triggers | `campaign_demand` versus `top_up`: "running low" and "500 messages are waiting" are different instructions to whoever reads the ledger |
+| Everything else still applies | Caps, the master floor, the transactional reserve and the fleet cap clamp the amount exactly as before. Demand is a target, not a bypass |
+| Read inside the funding transaction, scoped to the child | The decision must see the queue as it is at the moment of the decision, and one tenant's campaign must never fund another tenant's child |
+
+One correction worth recording: the channel lives on `message_recipients`, not on `message_outbox`,
+and the first version filtered `o.channel` — a column that does not exist. Only the database suite
+caught it; the unit guards now assert `r.channel` and the absence of `o.channel` so the mistake cannot
+return quietly.
+
+`planBusinessFunding` reads the same demand, so the console's "what would a pass do" preview cannot
+promise a healthy child a transfer it is about to receive — or the reverse. The console's account rows
+add «صف فعال: N پیام (M قطعه) در K کمپین» when a queue exists, which is the sentence that makes a
+transfer above the buffer legible instead of arbitrary. Counts only: the money it implies is the
+planner's arithmetic, and a second copy of it in a React file is how two answers start.
+
+## 5k. A trigger shows its text and its record (§9 item 0)
+
+§5e/§5f gave the tenant a switch per automation: on or off, attached to an approved message. A switch
+is not an answer to either question a business actually has — *what will my customer read?* and *did
+it work?*
+
+**The preview is the message.** §9 item 0 asked for "a tenant preview of a trigger's exact text before
+enabling it", and the word *exact* is the whole design: a hand-written sample on the screen can
+disagree with the message that goes out, and the tenant would find out from a customer. So
+`previewTriggerMessage()` runs the dispatcher's own two functions — `triggerValues()` then
+`renderTemplateTokens()` — over obviously-fake facts («سارا محمدی», a 250,000 Rial payment). The
+preview therefore shows the renderer's money formatting and Jalali date, not a second formatter's
+idea of them. A pair that cannot render is `null` and renders nothing: "we cannot show this" and "the
+message is blank" are different claims, and only one of them is true.
+
+**The record is per trigger.** `kavenegar_lookup_trigger_sends` already holds one row per (business,
+trigger, fact) with a status and a provider-neutral code; `listTriggerSettings` now aggregates it over
+a week — sent, skipped, blocked, failed, unknown, the last attempt and the last code. Sent and skipped
+are counted **apart** on purpose: a screen showing only zeros must let a business tell "nobody ordered"
+from "we are refusing every message because consent is missing", and those two have completely
+different fixes.
+
+`lastCode` is the most recent attempt that *had* a code, not the most recent attempt: a successful
+send stores `NULL`, so "latest row wins" made the reason vanish the moment a retry worked — and a
+batch written in one statement shares a timestamp, which made it arbitrary as well. The first CI run
+of the database case caught exactly that.
+
+Codes are translated by one shared map (`TRIGGER_CODE_LABELS`), imported by the client rather than
+copied into it — a code this build does not know becomes «پیام ارسال نشد», never the raw string, so a
+future or provider-shaped code cannot reach a tenant screen verbatim.
+
+## 5l. Every payment path tells the customer (§9 item 0)
+
+§5e wired the receipt trigger into the two paths that existed for the *counter*: the checkout route and
+the offline replay. Three paths that also record a payment were left out, and they are the ones where a
+receipt matters most — the customer is not standing in front of you:
+
+| Path | What it records |
+| --- | --- |
+| `ingestFnBOrder` (plugin/WooCommerce) | an online ticket, closed to `completed` with an `online` payment |
+| `ingestRetailOrder` (plugin/WooCommerce) | the same for a goods retailer, through the batch/FEFO service |
+| `importPaidCmsOrder` (CMS storefront) | a `order.paid` delivery from the business's own site |
+
+All three now call `notifyPaymentReceived` **after** their `COMMIT` and **not awaited**: notifying
+inside the transaction would send a receipt for a sale that could still roll back, and awaiting would
+put a provider round trip between the webhook and its response — then a failed message would fail an
+import that had already committed.
+
+Two details that are easy to get wrong and are now asserted:
+
+- **The scope.** A webhook and a CMS delivery carry no request session, and the lookup tables are
+  tenant-RLS, so an unscoped read finds no order and the receipt is silently never attempted. Each
+  call is wrapped in `withTenant(businessId, …)`.
+- **The amount.** `Number(total)` — the figure on the payment row that was just committed, not the
+  order's `total` re-read later (an amendment moves that, and a receipt has to say what the customer
+  paid).
+
+**The amendment bridge is deliberately excluded,** with the reason written next to the code: an
+amendment *rewrites* what was already paid (old rows superseded, new rows tagged), so no money changed
+hands again. A second «پرداخت ثبت شد» would tell the customer they had been charged twice. A refund or
+a genuine additional tender has its own path and its own trigger. `imported-payment-receipts.test.ts`
+fails if someone adds the call back without reading that note.
+
+The same guard test checks the shape of all three wirings: the call exists, it follows `COMMIT`, it is
+not awaited, and it is business-scoped — because "the dispatcher works" was never the missing part.
+
+## 5m. A rating cites the price that produced it (§9 item 3, part one)
+
+Two ledgers record every message. The **wallet** says what the business paid; the **Billing rating**
+(`billing_usage_ratings`) says what the platform booked as usage. The margin report is the subtraction
+of the two, and the supplier reconciliation is the comparison of the second against
+`billing_vendor_cost_events` — which means the rating's *provenance* is not documentation, it is the
+control. If a rating cannot name the price version that produced its amount, neither report means
+anything: they are comparing two numbers whose origins nobody can check.
+
+The rating had exactly one provenance column, `price_version_id`, foreign-keyed to
+`billing_price_versions` — the **meter** catalogue. Messaging is priced by
+`kavenegar_retail_price_versions` instead, so every messaging rating cited a version whose numbers had
+never been used to compute the amount beside it. The true version existed only inside
+`billing_vendor_cost_events.metadata` and the wallet metadata: JSON, unjoinable, and invisible to the
+two reports that most need it.
+
+The advice to follow here is Billing's own: *an amount is not evidence of how it was computed.* So the
+fix is not to change any money. It is to make the row say what happened to it:
+
+| `price_basis` | When | What it cites |
+| --- | --- | --- |
+| `retail_price_version` | the send was priced by the published retail version (§6d) | `retail_price_version_id` + the human-readable `retail_price_version`; `price_version_id` is **NULL** |
+| `explicit_amount` | the caller computed the amount itself (`ratedAmountRial`) and no retail version applies | nothing — a price version it did not use is not a citation |
+| `meter_price_version` | ordinary metered usage rated from `billing_price_versions` | `price_version_id`, as before |
+| `NULL` | the row was written before this migration | nothing, and it says nothing — a guess would be indistinguishable from evidence |
+
+Three details that make this safe to ship over existing data:
+
+- **No backfill.** `0270` adds the column with no default and no `UPDATE`. A row written before today
+  genuinely has no recorded basis, and the same rule as `0268`'s `send_latency_ms` applies: unknown is a
+  real answer.
+- **The CHECKs let legacy rows pass.** Each is written as a pairing over `IS NOT NULL`, so an all-NULL
+  row evaluates to NULL rather than FALSE and is accepted, while a row that claims
+  `retail_price_version` without an id is refused at insert time.
+- **A retail row cannot point at the meter catalogue.** The third CHECK enforces
+  `price_version_id IS NULL` when the basis is retail. This is what stops someone from "helpfully"
+  filling both columns later and restoring exactly the false provenance this replaces.
+
+The rule itself is one pure function, `resolveRatingBasis()` in `src/lib/billing/rating-basis.ts` — pure
+because the callers include a React-adjacent module, and a browser import of `../db` is a build failure
+(`client-bundle-boundary.test.ts`). `runtime.appendUsageEvent` makes the decision once and both INSERT
+branches (rating created vs. rating upserted under a correction) write the same three columns, so a
+correction cannot silently keep an older basis. `message-outbox-service` passes the exact version the
+drain priced with — the same object whose `version.id` the retail quote already used.
+
+**A bug this slice found, and had to fix.** Writing the case that asserts "what left the wallet equals
+what was rated" is what made it visible: the drain's success branch added `rowCost` to `sentCost`
+twice. Because `settleMessageSend` charges `min(actual, reserved)`, doubling `actual` did not overcharge
+a clean batch — it charged the **entire reservation** for any batch containing one refused row, and
+refunded nothing. In other words the §4 `refund` policy — "a send the provider never accepted is not
+charged to the tenant" — was inverted in the one case it exists for, and the business paid for messages
+that were never sent. Nothing tested it: no unit test drove the drain, and every database test settled
+through `settleMessageSend` directly. The duplicate is gone, the increment is now guarded (one occurrence,
+counted by `rating-basis.test.ts`), and `messaging-usage-rating` drives a real drain with a scripted
+provider that refuses one row of three and asserts the money out equals the sum of the ratings.
+
+Two smaller notes. The database test needed a transport seam — the drain builds its providers from
+config, and a test may not call a real provider — so `runBusinessMessageDrain` takes an optional third
+argument that defaults to `buildProviders(effective)`; production passes nothing. And the meter-version
+publish in that test is back-dated by a minute on purpose: `publishPriceVersion` defaults to `now()`
+while the event is rated at the JS clock's `now()`, which can sit a millisecond behind the database's.
+
+One correction worth recording: the first version of `resolveRatingBasis` *clamped* a negative version
+number to `0`. Zero already means "the built-in default", so that turned nonsense into a specific and
+wrong claim — the same class of bug this slice exists to remove. It now rejects a non-finite or
+negative version and falls through to `explicit_amount`, and `rating-basis.test.ts` pins it.
+
+What this does **not** do, and should not pretend to: generate invoice lines from ratings, or reconcile a
+supplier's invoice against `billing_vendor_cost_events`. Those are Billing's own work (§9 item 3's other
+half) and now have the join they were missing.
+
+## 5n. Usage that was rated becomes a bill (§9 item 3, part two)
+
+§5m made a rating say which price produced its amount. That answers the question for one row. It does
+not answer the question a business asks when a bill arrives — *what is this for, and on what terms?* —
+and until this slice there was no answer at all: `billing_invoice_lines` had **no `kind = 'usage'`
+writer**. Usage was reported (the ratings, the spend breakdown, the console) and separately invoiced
+(subscriptions, add-ons, the website service), and the two ledgers never met. A business could have a
+month of rated usage and no line describing it.
+
+The line is the join, and the design follows from what a reader must be able to check:
+
+| Rule | Why |
+| --- | --- |
+| A line is one **meter + one price version** | Two rows of the same meter in one month can have been priced by two retail versions — a promotion ended, a markup changed. Folding them into one line gives "which version?" a blended, false answer, which is exactly the lie 0270 removed from the ratings |
+| `amount_rial` is the **sum of the ratings**, and the unit price is derived from it | The amount is what is billed. Deriving the amount from a rounded unit would leave a Rial unexplained on any line whose quantity does not divide evenly; a test pins 10 Rial over 3 units as 10, not 9 |
+| Every rating is **linked** to the line it was billed on, with what it contributed | A line that does not add up to its parts is a bill nobody can defend. The link also answers "has this been billed?" without arithmetic |
+| One rating is billable **once, ever** (`UNIQUE (usage_event_id)`) | The invoice's own `UNIQUE (business_id, reference)` claim stops a second invoice for the same month. It does **not** stop a late event with an occurrence date in an earlier window from being collected again by the next month's run. The index is the guarantee; the application code is not |
+| Wallet-backed usage is **never** invoiced | That money already left the wallet. The same `walletBacked = false` predicate the spend breakdown uses decides it — one definition of "billable outside the wallet", asserted by a test so the two cannot drift into two answers |
+| A zero-rated event produces **no line**, but is still counted | A line of ۰ ریال is not something anyone can pay, and it would fill every invoice with rows that were entirely inside a plan allowance. `ratingCount` versus `billedCount` is what tells an operator "no usage" from "usage, all of it free" |
+| A pre-0270 rating is **billed without a citation** | It has no recorded basis. Refusing to bill it would let an accounting change decide whether a business owes money |
+| An **open** invoice accepts a rating that arrived late; a paid one does not | A crash between the claim and the lines must not strand an empty invoice, and a genuinely late rating should reach the bill it belongs to. But rewriting a settled document is how a customer is charged twice for one thing and then disputes everything after it — so a closed invoice returns `invoice_closed` and the rating waits for an amendment |
+
+**What a repeat run says.** Issuing again for a month that is already billed is not an error and not a
+silent no-op. It returns the invoice that exists, with that invoice's own total and line count, and a
+reason: `already_invoiced` (nothing new), `invoice_closed` (new usage, but the document is settled) or
+`nothing_to_bill` (no usage, no invoice). The first version returned `totalRial: 0` for the repeat case,
+which reads as "the invoice vanished" — the kind of answer that makes an operator issue a second one by
+hand. The database suite caught it; the case is now asserted.
+
+**It is an operator action, not a timer, and that is a deliberate line.** Post-paid metered usage is a
+commercial decision. Today essentially every rateable event is wallet-backed — `ai`, `media`,
+`messaging`, activation all mark theirs — so a monthly pass would be inert now and would start billing
+people the day some new source rates without charging. `POST /api/platform/billing/usage-invoices`
+issues (capability `billing.manage`, audited with the invoice it created); `GET` previews a month
+(`billing.view`) so the decision can be made from real numbers. The month's key is `usage:<YYYY-MM>`,
+and its window comes from the same `tehranMonthWindow` the spend report uses — anchored on the 15th at
+noon UTC, so the key unambiguously names the month it bills.
+
+**The portability lesson, again.** The dry run of this slice's own SQL is where a slice like this is
+usually wrong, and this repository has no local Postgres: the database suite is the only proof, so it is
+written to test the constraint rather than the happy path — it asserts that a *second* link for the same
+rating is rejected by `billing_invoice_line_usage_once`, not that the service avoids writing one.
+
+What is **still** Billing's own work: reconciling a supplier's invoice against
+`billing_vendor_cost_events`. That is the last half of §9 item 3, and it now has both halves it needs —
+the rated amount with its citation (§5m) and the invoiced amount with its citation (§5n).
+
+## 5o. The long view: delivery over months (§9 item 2, part two)
+
+_Merged as `58f94f6` (PR #1208)._
+
+§6e answered the question an operator asks while a campaign is running — *is it arriving, and at
+which end is it slow* — over seven days. It cannot answer the one they ask after a bad month: **was
+last month worse, and did it get worse gradually or fall off a cliff?** A row cannot be a series.
+
+The data was already there. `message_outbox` keeps every row (nothing prunes it, unlike the
+integration queues), and `0134`/`0268` already carry the enqueue and provider clocks. So this slice is
+a query and a shape — no new columns, no new table, no new tick.
+
+What it had to get right, in the order the mistakes would appear:
+
+| Rule | The failure it prevents |
+| --- | --- |
+| A bucket with **no attempts is a gap**, not a zero | Silence and total failure draw identically on a chart that plots zeros. An operator then chases a collapse that never happened — and a real one looks the same as the false one |
+| `failureRate` is **`null`** when nothing was decided, never `۰٪` | A week of no sends has no failure rate. Printing zero is a claim, and a flattering one |
+| Buckets are cut on the **Tehran calendar**, in SQL, by the same key the facts module builds | Grouping `created_at` in UTC moves every Iranian evening (21:00 UTC = 00:30 Tehran) into the next day, so the trend would disagree with every other figure in the product |
+| Granularity follows the span: **days ≤ 31, weeks ≤ 120, months beyond** | 365 daily bars is not a chart, and a single constant granularity is wrong at one end of the range whichever one is chosen |
+| Latencies are **pooled over the window**, not averaged per bucket | An average of medians is not a median, and it weights a two-message week like a two-thousand-message one. The test asserts the pooled p50 on a 1 000:1 split |
+| The tenant series is **business-scoped and RLS-scoped**, and selects no provider field | A trend is still a tenant surface. Counts and latencies only: no provider id, no error string, no wholesale cost |
+
+Two side effects worth naming. `deliveryHealth()` and `latencyStats()` moved out of the two reporting
+modules into `delivery-health.ts` and `latency-stats.ts`, both pure, because a third caller (the trend)
+and a client component (the console card) both need them — the card had been keeping a hand-copy of the
+thresholds with a comment saying it mirrored the server, which is how a rule becomes two rules; it now
+imports the one function. And the screens say the quiet part out loud: the console card draws an empty
+dashed box for a bucket with no sends and a note that «کادر خالی یعنی … هیچ ارسالی ثبت نشده — نه اینکه
+همه شکست خورده باشند», and the tenant card carries the same note in the business's own words.
+
+That closes §9 item 2: §6e gave the per-campaign view, this gives the window that contains it.
+
+## 5p. The supplier's invoice, checked against ours (§9 item 3, last part)
+
+§5m and §5n closed the **retail** side of item 3: a rating says which price produced it, and those
+ratings become invoice lines with one-billing-ever enforced by the database. The **wholesale** side has
+been recorded since §6a — `billing_vendor_cost_events`, one row per accepted send carrying what the
+provider charged us, tenant-invisible — but nobody could answer the only question wholesale data
+exists for: *the provider invoiced us X for March; do our books agree?* A supplier over-charge would
+have been invisible, and so would our own under-recording.
+
+`0277` adds the missing half — the statement — and the verdict of comparing it with the ledger:
+
+| Column / state | Why it exists |
+| --- | --- |
+| `claimed_rial`, `recorded_rial`, `delta_rial` | The difference is **kept with its sign**, never rounded into a match. Positive means the supplier wants more than we recorded, which is a different problem from the reverse |
+| `state ∈ open / matched / disputed / accepted` | "Not compared", "inside the tolerance", "a finding", and "a person decided to pay it anyway" are four different facts, and the console has to say which |
+| `accepted_reason`, required by a CHECK | Paying a difference your own books dispute is the decision that most needs to be legible a year later, so the database refuses `accepted` with no reason |
+| `UNIQUE (provider, statement_reference)` | The same invoice recorded twice is the same debt, not two |
+
+Three judgements worth recording, because each is where reconciliation quietly goes wrong:
+
+- **`unexplained` is checked before the tolerance.** A supplier billing a period our ledger is silent
+  about is not a small difference — it is the missing half of the books — but the arithmetic would say
+  `|0 − 0| ≤ tolerance` and pass. The state of the books decides this verdict, not the size of the
+  difference; a test passes a tolerance wide enough to swallow the whole claim and asserts the verdict
+  stays `unexplained`.
+- **Reconciling never edits the evidence.** Not to add a missing cost event, not to correct an amount.
+  The database suite snapshots `billing_vendor_cost_events` before and after a disputed reconciliation
+  and asserts it is byte-for-byte unchanged: a ledger adjusted to fit one invoice cannot test the next.
+- **An accepted statement is final.** Re-reconciling it is refused, because a later pass would erase
+  the decision while leaving the money paid — the same reasoning that keeps a **paid** usage invoice
+  from absorbing a late rating (§5n).
+
+The statement is platform data, and `0277` says so with the bypass-only policy `0262` uses for the
+retail catalogue: the suite grants an unprivileged role `SELECT` on the table and asserts it still
+reads zero rows. The route has three actions — record, reconcile, accept — because they are three
+different decisions, and each is `billing.manage` and audited with the numbers it decided on.
+
+That closes §9 item 3 in full: retail citation (§5m), retail invoice lines (§5n), wholesale
+reconciliation (§5p).
+
+_Merged as `fdfc711` (PR #1211)._
+
+## 5q. The contract reaches the other integrations (§9 item 5)
+
+§0 wrote the managed-service contract and applied it to messaging, and left a warning in the file:
+"the same bug was waiting in every other integration". This slice goes and looks, and the warning was
+half right — the *payloads* of AI, payments and media were already first-party, but none of them had
+a **readiness shape** at all. Each screen decided its own copy from whatever internal state it
+happened to hold, which is precisely how a supplier name gets into a tenant sentence: not by
+decision, but by a screen reaching for the nearest field.
+
+What changed:
+
+- `MANAGED_SERVICES` now carries **five** definitions: SMS, email, `ai.assistant` (capability
+  `ai.use`), `payments.gateway` (`billing.top_up`) and `media.storage` (`media.manage`). Torob and
+  Divar are deliberately **not** registered yet — a definition promises a readiness shape, and
+  #894/#896 have nothing to report on until they are built.
+- `readiness.ts` (pure) holds one adapter per integration, and every adapter applies the same order:
+  **our setup, then their plan, then limits and money.** The order is the substance of the slice:
+  telling a business to buy a plan for a service whose own credential we have not configured is the
+  one sentence this vocabulary must never produce, so `platform_setup_incomplete` and
+  `suspended_by_platform` are decided before the entitlement layer is consulted.
+- Two states were added to the vocabulary because the other integrations actually have them:
+  `usage_limit_reached` (a support conversation, not a top-up) and `no_access` (the *member* asking
+  lacks the permission — no first-party page fixes that, so it offers no link).
+- `readiness-service.ts` reads the deployment's real singletons — the AI gateway row and its runtime
+  readiness, the payment gateway mode and merchant id, the media switch *and* whether the bucket
+  credential is complete — resolves the three capabilities, and returns one view per service.
+  `/api/managed-services` serves that list through `assertTenantSafePayload`, and `/settings/services`
+  renders it in a «وضعیت سرویس‌های پلتفرم» card that fails independently of the activation list above
+  it.
+
+The per-integration leak guards are the point of the test file: every integration is walked through
+**every** state the contract can express, and each view is checked three ways — the shared
+`findTenantLeaks` guard, the supplier-name pattern on its label and sentence, and a search of its own
+JSON for the internal reasons it was derived from (`missing_runtime_credential`, `spend_limit_reached`,
+`zarinpal`, …). A mapping that got the status right but forwarded the runtime's own reason would pass
+a status-only test and fail a customer.
+
+SMS is the one view this service does not re-derive: `getTenantSmsReadiness` already builds it from
+the child account's provision state, which is richer than the plan layer, and two sources for one
+sentence is how two screens start disagreeing.
+
+## 5r. The failure drills, and the login that survives them (§9 item 7, DoD #11)
+
+The last open acceptance line in the issue is DoD #11:
+
+> *Tests cover errors (invalid key, insufficient master/child balance, expired account, rejected
+> template, HTTP timeout/429, duplicate responses, concurrent workers, offline replay and provider
+> outage) without external network calls; actionable first-party tenant errors and internal supplier
+> observability.*
+
+All nine had tests. What they did not have was **one pass that proves the combination**, and the
+combination is what DoD #9 promises: *"Auth OTP still works if Growth is disabled, tenant marketing
+credit is exhausted, campaign sends are paused, or an individual child's account is suspended."* A
+per-module test passes even when the seam between two modules leaks, because the seam is exactly the
+part neither module owns.
+
+Following the issue's own §7 checklist ("failure drills") we did what a drill does — broke the
+platform on purpose and checked what a customer sees:
+
+| Drill | What the platform does | What the customer sees |
+| --- | --- | --- |
+| Invalid key (403), expired master (505) | no retry, account `attention_required` | «نیازمند اقدام», never a supplier code |
+| Insufficient balance (418) | no retry, no send | «کیف پول را شارژ کنید» with the billing link |
+| Rejected template (424) | no retry | «فرستادن انجام نشد» — nothing to do, we fix it |
+| Rate limited (429, 451) | requeued with backoff, nothing charged | nothing; it goes out later |
+| Busy / unavailable (409) | requeued, nothing charged | nothing |
+| Invalid recipient (411) | failed, refunded | «شمارهٔ گیرنده نامعتبر است» |
+| Duplicate create (502/503) | adopted or retried internally | nothing — recovery, not failure |
+| Provider timeout | ambiguous, no blind retry | «سرویس ارسال به‌موقع پاسخ نداد» |
+| Provider outage | rows stay queued | nothing; the queue is the buffer |
+
+**Two real defects the drills found**, both on the *login* transport — the one path that had never
+been put through a failure drill because it is not part of the messaging feature:
+
+1. **It had no timeout.** `KavenegarProvider.sendOtp` called bare `fetch(url)`. Every other supplier
+   call in the codebase goes through `rest.ts` and aborts; this one, which sends the codes people
+   log in with, would wait as long as the socket lived. A carrier that accepted the connection and
+   went quiet held the login request open and then let the code stay live for its full five minutes,
+   because nothing had *failed*, so nothing consumed it. Now `AbortSignal.timeout(10s)`, with its own
+   Persian sentence — distinct from "we could not reach them" — so an operator can tell a stall from
+   an outage.
+2. **HTTP 429 was unclassified.** It fell through to `unknown`: retryable by luck (the fallback
+   treats unknown statuses as transient), but invisible to the console and the alert ledger, which
+   could not tell "the supplier is backing us off" from "a code nobody has ever seen". 429 now reads
+   `rate_limited`, like the supplier's own 451.
+
+The drill suite is two files:
+
+- `src/lib/kavenegar/failure-drills.test.ts` (pure) walks **supplier answer → classification →
+  contract fault → tenant sentence** for every row above, and asserts the two properties that keep
+  the boundary: the tenant sentence is Persian, contains neither a provider code nor a supplier name;
+  the operator line is English and does name the source. It also pins the retry *decision* per row —
+  the money consequence, since a retryable failure must leave the row queued and charge nothing
+  while a permanent one fails it and refunds.
+- `integration/kavenegar-failure-drills.integration.test.ts` (real database, no network) runs the
+  actual drain and the actual OTP dispatch with a business in each broken state — suspended child,
+  empty wallet, paused campaign, provider outage, no child at all — and asserts in every one that
+  **nothing was charged, the queue is intact, and a login code still goes out on the platform key**.
+  Then the reverse: a carrier that times out or rejects the platform credential must fail honestly
+  (a Persian error the screen shows) rather than log the code and pretend success.
+
+The assertion the whole slice exists for is the last one: in a single run, the marketing message
+leaves with the **business's child key** and the login code with the **platform key**, asserted on
+the two URLs that were actually built — neither containing the other's credential. That is DoD #9
+and DoD #2 in one line of evidence.
+
 ## 7. Verification run
 
 | Gate | Result |
@@ -663,6 +1127,29 @@ in «—» when nothing was measured).
 | `npx vitest run` — `lookup-trigger-facts` + `lookup-trigger-boundaries` | 15/15 pass (closed vocabulary including the `login_code` refusal, fact→variable mapping, template fits, fact keys; and the auth path's imports and the schema CHECK) |
 | `npx vitest run` — `lookup-send.test.ts` | 7/7 pass (receptor normalisation, the child-key request shape, slot spelling, cost mapping) on a migrated database, fake transport, no network (5 for the §6b lifecycle, 3 for the §5a strategies, 1 for the §6c delivery report, 3 for the §6a wholesale-cost ledger) |
 | `npm run test:db` — `kavenegar-retail-pricing` | 13/13 pass: version windows, back-date refusal, persisted markup/surcharge/tax/allowance, slab tiering from recorded usage, business and channel exceptions, reserve → settle → refund-once, supplier cost posted once and hidden from a tenant connection, RLS forced on the three new tables |
+| `npx vitest run` — `imported-payment-receipts` (§5l) | 6/6: both plugin importers (F&B and retail) and the CMS importer call the receipt trigger, in every case after `COMMIT`, never awaited, and wrapped in `withTenant` — plus the amount being the same `total` the payment row was written with; and the amendment bridge carrying no call at all, with its reason still in the file |
+| `npx vitest run` — `failure-drills` (§5r) | 9/9: every failure class DoD #11 names classified as the drain decides it (five permanent, three transient, one fallback); each fault renders a Persian sentence with no provider code and no supplier name while its operator line stays English and diagnosable; the retry decision per row asserted as a table, because it is the money consequence; both duplicate answers distinguished; an unknown status stays transient so a new supplier code cannot permanently fail a send |
+| `npx vitest run` — `sms-kavenegar` (§5r) | 10/10, four new: every dispatch carries an abort signal; a stalled carrier yields its own Persian sentence containing neither the code, the number nor the key; a connection failure stays distinguishable from a stall; a timely answer still sends |
+| `npm run test:db` — `kavenegar-failure-drills` (§5r) | run against a real PostgreSQL here, 9/9: suspended child dispatches nothing (no attempt counted, no attempt timestamped), charges nothing, leaves the queue intact — with the platform adapter switched on, so the managed-sender rule is what stops it — and login still leaves on the platform key; empty wallet never reaches the provider; a paused campaign's queue is not claimed; a provider outage requeues with a future backoff and charges nothing; a business with no child is unaffected; the carrier timing out and the carrier rejecting the platform key both fail honestly with a Persian error carrying no code; with no credential at all in production the fallback refuses rather than logging a live code; and marketing rides the child key while login rides the platform key in the same run |
+| `npx vitest run` — `managed-services` (§5q) | 38/38 across three files: the entitlement translation (plan / wallet / limit / platform / no-access, and a denial with no reason never becomes "ready"); AI's every runtime reason mapped, and the ordering fixture where both halves are broken; payments requiring a gateway *and* its merchant id; media requiring the switch *and* a complete storage account; the email relay's two answers; and, per integration, every state rendered with a first-party label and sentence, walked through the shared leak guard, searched for internal reason strings, and limited to the four first-party action links (plus the inventory-agreement check that keeps `MANAGED_SERVICES` and the audit table in step) |
+| `npm run test:db` — `managed-services` (§5q) | CI only (no Postgres here): one view per registered service, every `checkedAt` parseable; the payload passes the leak guard with the deployment *fully* configured (merchant id, bucket credential, active child account), so a configured platform does not grow a supplier field; a fresh deployment reports our setup for AI/payments/media rather than the tenant's plan; enabling each one moves it off `platform_setup_incomplete`; switching AI on without a usable credential is still not "ready"; SMS readiness follows each business's own child account, including a suspended one linking to `/settings/billing`; and every served service exists in the inventory |
+| `npx vitest run` — `supplier-invoice` (§5p) | 14/14: an exact match; a difference inside a written tolerance kept rather than erased; symmetric tolerance with a documented default; a dispute that names which way it points; `unexplained` when the ledger is silent for a billed period — including under a tolerance wide enough to swallow the whole claim; verdict→state mapping with `unexplained` stored as a dispute; nonsense normalised; `accepted` requires a reason and only for a disputed statement; an accepted statement cannot be re-reconciled; plus the schema guards (the reason CHECK, the verdict-needs-comparison CHECK, the supplier-reference unique), platform-only RLS, and the service reading — never writing — the cost events over a half-open window |
+| `npm run test:db` — `billing-supplier-invoices` (§5p) | CI only (no Postgres here): recording is idempotent on the supplier's reference and refuses a backwards period or a negative amount; reconciliation sums only that provider's events inside the half-open window (outside-window and other-supplier rows excluded); a discrepancy is stored and the ledger is asserted unchanged before and after, twice; a silent month is `disputed`/`unexplained` even with a 10 000 000 Rial tolerance; an explicit tolerance is honoured and recorded; accepting needs a reason, refuses a matched statement, and blocks re-reconciliation; the database refuses an accepted row with no reason; an unprivileged role granted SELECT still reads zero rows; disputes list first |
+| `npx vitest run` — `delivery-trend` (§5o) | 18/18: granularity from the span (day/week/month) and a contiguous series ending today; Tehran day keys (21:00 UTC is tomorrow) and Monday-start weeks (a Sunday belongs to the week before); a bucket with no rows is `hasData: false` with a `null` rate and `idle`, and an in-flight-only bucket is data with no rate; the rate is over decided attempts only; a bucket outside the window is dropped; the window's latency is pooled rather than averaged from medians (the 1 000:1 case); worst verdict and newest-first health; bars scaled to the busiest bucket with a visible minimum and `null` for an empty window; plus the guards — SQL groups on `Asia/Tehran` at every granularity, the tenant query is `withTenant` + `business_id`, no provider field is selected, the window clamps to a year, and both screens render server-computed points with the shared health rule and no hand-copied thresholds |
+| `npm run test:db` — `delivery-trend` (§5o) | CI only (no Postgres here): a 21:00 UTC send lands on the next Tehran day while a 19:00 UTC one stays on today (the UTC-grouping bug, asserted against Postgres); empty buckets stay gaps with no rate; a quarter rolls into weeks and a Sunday falls in the previous week; the window pools queue and provider latencies from the outbox's own columns; a failure counts as a decided attempt; each business sees only its own series while the fleet view counts rows across both and businesses once each |
+| `npx vitest run` — `usage-invoice` (§5n) | 16/16: ratings of one meter and version fold into one line whose amount is the sum of its parts; a mid-month price change splits into two lines, each citing one version; a retail line and a meter line for the same meter never cross catalogues; an allowance-covered rating bills nothing but is still counted; a pre-0270 rating is billed without a citation; 10 Rial over 3 units stays 10; a negative rating is dropped rather than credited; descriptions carry the catalogue's Persian name, the basis label and the version in Persian digits and no supplier word; plus the schema guards (0275's pairing CHECKs, `kind = 'usage'`, the one-billing-ever index, forced RLS), the writer's linkage and the route's two capabilities |
+| `npm run test:db` — `billing-usage-invoice` (§5n) | CI only (no Postgres here): a month of ratings becomes one invoice with one line per meter-and-version, each rating linked with what it contributed and the lines summing to the invoice; wallet-backed usage is left out; a month with nothing unbilled creates no invoice; issuing twice finds the same invoice and writes no second line; the database refuses a second link for the same rating; a late rating extends an open invoice and is refused by a paid one; another business's usage is not invoiced |
+| `npx vitest run` — `rating-basis` (§5m) | 11/11: retail wins and nulls the meter column; explicit amount cites nothing; meter stays the fallback; a zero version is a real default while a negative or non-finite one is rejected rather than clamped; plus source guards on both INSERT branches, the migration's pairing CHECK, and the drain passing the version it priced with |
+| `npm run test:db` — `messaging-usage-rating` (§5m) | CI only (no Postgres here): a drained send takes exactly what it rates out of the wallet and cites `retail_price_version` `7` by id and number with `price_version_id` NULL; a three-recipient batch rates as one version and sums to the single reservation; a batch where the provider refuses one of three charges and rates only the two that went out (the case the double-count broke); an `explicit_amount` rating stays uncited even with a meter version published; a metered event still cites the published meter version |
+| `npx vitest run` — `lookup-trigger-facts` (§5k) | 6 new fixtures: the preview rendered by the dispatcher's renderer (no `%token` left, the amount formatted as money and the date as Jalali rather than the raw rial integer or an ISO string); a template whose variables the event cannot fill previewing as `null` rather than blank; and the code map translating the refusals a tenant can act on while a code it does not know — `http_429`, `kavenegar_418` — becomes a generic sentence instead of leaking |
+| `npx vitest run` — Growth messaging section (§5k) | 3 new source guards: the screen renders `setting.preview` from the server and hard-codes no sample text of its own; the delivery line exists and speaks its zeros; and the code labels are imported from the shared map rather than copied into the component |
+| `npm run test:db` — `kavenegar-lookup-triggers` (§5k) | one added case (CI only; no Postgres here): the setting carries a real preview before anything has been sent, `delivery` reads `{sent: 0, skipped: 0}`; after one sent row, one consent refusal and one unknown payment row the two triggers report `{sent: 1, skipped: 1}` and `{unknown: 1}` with `lastCode` `no_consent`, and another business sees none of it |
+| `npx vitest run` — `campaign-demand` (§5j) | 8/8: demand priced per segment rather than per recipient, zero for an empty queue and never negative, zero when there is no tariff; only `queued`/`sending` counted; the SQL segment expression built from the billing constants and reproducing `smsSegmentCount` at every boundary (0, 70, 71, 137, 138, 205, 500) and on a Persian body; a non-column reference refused; and the read happening inside the funding transaction, scoped to one child |
+| `npx vitest run` — `pricing-service` (§5j) | 5 new fixtures: demand raising the target above the buffer and reporting `campaign_demand`; a child that satisfies the buffer but not its queue now being funded; demand below the buffer leaving the standing order in charge (`top_up`); caps, the master floor and the transactional reserve still clamping a demand-sized target; `low_watermark`'s trigger rising to the queue, and the child healthy again once it is above |
+| `npm run test:db` — `kavenegar-managed-accounts` (§5j) | two added cases (CI only; no Postgres here): a three-recipient queue whose multipart bodies total five segments reads `{messages: 3, segments: 5, campaigns: 1}` and funds the queue rather than the 10-message buffer, while another tenant's queue reads zero; and a small queue leaves the 100-message buffer as the target with reason `top_up` |
+| `npx vitest run` — `master-balance` (§5i) | 10/10: `unknown` rather than zero when nothing was observed; `current` for a fresh figure; `unreadable` when a later read failed — and outranking `stale`, because the failure is the more urgent fact; `stale` only after six hours; a future clock skew is age 0. Plus the source rules: the mirror is written only when the pass read the provider, a failed mirror write cannot fail the pass, both halves are written in one statement, both queries run in the documented platform scope with no `withTenant`, and the console reads the snapshot rather than calling the provider |
+| `npm run test:db` — `kavenegar-managed-accounts` (§5i) | one added case (CI only; no Postgres here): a live pass mirrors `10 000 000` as `current`; a pass whose read is refused leaves the figure and moves `checkedAt`, reading as `unreadable`; an operator-supplied figure does not overwrite the observation and makes no `/account/info.json` call; the console snapshot carries the mirrored value |
+| `npx vitest run` — `audit/action-meta` (§6f) | 4/4: every `sms.*` action the two SMS routes write has a label that is not the key echoed back; the `jobKindFor` switch is followed so a new job kind cannot ship unlabeled; the `sms` family exists and prefixes every one of them; and both console deep links still carry `actionFamily=sms` |
 | `npx vitest run` — `campaign-delivery-report` (§6e) | 8/8 (nearest-rank percentiles where one 90 s retry still shows at p95, `null` for silence rather than `0`, unmeasured rows excluded from the statistics, unsorted input not mutated; and the source guards: no provider name, no `o.error`/`provider_message_id` in the shared row shape, the tenant query scoped by business *and* RLS, the cross-tenant read behind the documented bypass) |
 | `npm run test:db` — `kavenegar-managed-accounts` (§6e) | one added case: a campaign with two accepted sends (2 s/4 s queue, 100 ms/300 ms provider), one queued and one refused reports `{p50: 2 000, p95: 4 000}` and `{p50: 100, p95: 300}` with health `attention`; the tenant copy is its own campaign with no business or provider field, another business sees none of it, and `[null, null]` is "no measurement" |
 | `npx vitest run` — `app-availability-callers` (§3b) | 11/11 (the sweep over ~1,100 source files finds no hand-written state decision; every allowlisted presentation file still exists; the resolver carries neither `"enabled"` nor a cast; both writers validate; the SQL CHECK matches the TypeScript states exactly; and `enabled`/`off`/`""`/`null`/`3` are all refused before any query runs) |
@@ -688,36 +1175,60 @@ in «—» when nothing was measured).
 
 ## 9. Follow-ups (each needs its own issue)
 
-0. **The rest of the triggers** (#902 §5, P1): both events are wired from the paths that commit a
-   customer-facing action (§5e). What remains: the payment writers that are not the counter or the
-   offline queue — the WooCommerce/CMS importers and the closed-order amendment bridge — which write
-   inside their own transactions and need a post-commit point before a receipt can be honest; a
-   tenant preview of a trigger's exact text before enabling it; and a per-trigger delivery view.
-   The login code is deliberately *not* one of these triggers: it stays on the platform-auth
-   transport (§5e), which is what keeps it working with an empty wallet.
-1. **Campaign-budget funding trigger** (#902 §3, P0): the three strategies and the guards are in
-   place, and the **reserved slice** is closed by §5h (a marketing-classified fleet can no longer
-   spend the credit held for transactional traffic). Still open: "approved campaign budget" as a
-   distinct funding trigger, which needs a product decision on which campaigns count.
+0. ~~**The rest of the triggers**~~ — **closed** (§5k, §5l): both events are wired from every path
+   that commits a customer-facing action — the counter, the offline replay, both plugin importers and
+   the CMS storefront — and the tenant sees each automation's **exact text** and its **per-trigger
+   record**. The amendment bridge is excluded on purpose and says so in the file: a correction is not
+   a second payment. The login code is deliberately *not* one of these triggers: it stays on the
+   platform-auth transport (§5e), which is what keeps it working with an empty wallet.
+1. ~~**Campaign-budget funding trigger**~~ — **closed** (§5j): the three strategies and the guards
+   were already in place, and the reserved slice closed in §5h. The "approved campaign budget" turn
+   out not to need a product decision after all: the approval is *materialized*, so the trigger is the
+   queue of sends the business already approved (`message_outbox` still `queued`/`sending`), counted
+   in the segments the provider bills and priced at the child's wholesale rate. The target becomes
+   `max(buffer, demand)` and the transfer reports `campaign_demand` rather than `top_up`.
 2. ~~**Delivery/health dashboards** (#902 P1): per-campaign delivery and provider latency~~
-   — **closed** (§6e): the console and the tenant screen now show delivery per campaign with the
-   queue wait and the provider wait separately, over a week. A longer *historical* view (trend over
-   months rather than a window) is still open; the outbox rows it would read are retained, so it is
-   a query and a chart, not new data.
-3. **Retail ↔ wholesale settlement in invoicing** (billing): the price versions (§6d), the
-   margin report and `billing_vendor_cost_events` (§6a) exist; emitting
-   `billing_usage_ratings`/invoice lines from the same versions, and reconciling a supplier
-   invoice against them, belongs to Billing.
-4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g): the account endpoint
-   reports the master's own credit, and the funding pass reads it once per pass, so a configured
-   floor no longer stops automation. What remains is a *mirror* of the figure for the console —
-   showing an operator the balance the last pass saw instead of making them ask the provider.
-5. **Managed-service rollout for other integrations**: #894 Torob, #896 Divar, payments,
-   media, AI — apply the contract and add leak-guard tests per integration.
+   — **closed** (§6e, §5o): the console and the tenant screen show delivery per campaign with the
+   queue wait and the provider wait separated, and now also a **long-range trend** — a quarter of
+   sends bucketed weekly (days under a month, months over a quarter), where a bucket with no
+   attempts is a gap rather than a zero and the failure rate is `null` instead of `۰٪`. The outbox
+   rows it reads are retained, so it stayed a query and a chart.
+3. ~~**Retail ↔ wholesale settlement in invoicing**~~ — **closed**, in three slices: a rating cites
+   the version that produced its amount (§5m); those ratings become **invoice lines**, one per
+   meter-and-version with one-billing-ever enforced by the database (§5n); and a **supplier statement**
+   is now recorded and reconciled against `billing_vendor_cost_events` — a discrepancy stored with its
+   sign, an accepted one requiring a reason, and the wholesale ledger never edited to fit an invoice
+   (§5p).
+4. ~~**Funding from an authoritative master balance**~~ — **closed** (§5g and §5i): the account
+   endpoint reports the master's own credit, the funding pass reads it once per pass, and the figure
+   is now mirrored with its age and its failed-read flag, so a configured floor neither stops
+   automation nor forces an operator to ask the provider what the balance is.
+5. **Managed-service rollout for other integrations** — **closed for what is built** (§5q):
+   AI, payments, media and the email relay now have readiness adapters, one payload
+   (`/api/managed-services`) served through the leak guard, a tenant card that renders it, and
+   per-integration guards that walk every state. Torob (#894) and Divar (#896) remain their own
+   issues: they are not registrations waiting to be flipped but unbuilt integrations, and the
+   inventory says so.
 6. ~~**`resolveBusinessCapability` follow-up**: audit other callers for the same stale
    `"enabled"` comparison~~ — **closed** (§3b): the audit found the same class of drift in three
    more places (an unvalidated write, a hand-copied vocabulary and a cast in the resolver), all
    fixed, and the rule is now a test rather than a note.
+7. ~~**Failure drills** (DoD #11)~~ — **closed** (§5r): every failure class the DoD names now has a
+   drill that traces it from the supplier's answer to the tenant's sentence, and the cross-cutting
+   one — a business whose marketing is broken can still log in — is asserted against a real database
+   with the queue and the wallet both unchanged. The drills found two real defects on the login
+   transport, neither of which any per-module test could see: it had no request timeout, and HTTP 429
+   was unclassified. Both fixed.
+8. **Managed Torob (#894) and Divar (#896)** — the two integrations §5q left unregistered because
+   there is nothing to report on yet. They are separate issues by the epic's own rule ("do not
+   silently expand this Kavenegar issue into undocumented rebuilds"), and they inherit §5q's contract
+   and §5r's drill table rather than inventing a second one. **In progress:** Torob's Waves 1–2 (the
+   eligibility foundation, the shop lifecycle, the credential, and the product feed with its exact
+   Toman pricing and recorded builds) are in
+   [`docs/integrations/torob-channel.md`](../integrations/torob-channel.md), which also lists the
+   waves that remain and the two facts — feed, indexing — the screen deliberately does not claim yet.
+   Torob is *not* registered in the managed-services inventory: in this wave the platform holds a
+   merchant's token at their request, not a supply relationship of its own.
 
 ## 10. Environment notes
 
@@ -726,3 +1237,9 @@ in «—» when nothing was measured).
   used for type verification. CI's `test.yml` runs the full type check with more memory.
 - `npm ci` and `npm run db:migrate` were run locally; the integration suite creates and drops
   its own scratch database, as the other `integration/*` suites do.
+- **Database suites run here too**, which earlier slices assumed they could not. `npm run db:dev:start`
+  starts the embedded PostgreSQL from `node_modules/@embedded-postgres/linux-x64`, `npm run db:migrate`
+  applies all 457 migrations, and
+  `DATABASE_URL=postgres://pos:pos@127.0.0.1:5432/pos npx vitest run --config vitest.db.config.ts integration/<file>`
+  runs one suite against it in seconds. Since §5r no database test goes to CI without a local run
+  first — which is how §5r's own two SQL/semantics mistakes were found before a CI round-trip.

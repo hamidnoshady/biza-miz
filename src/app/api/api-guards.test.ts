@@ -128,6 +128,17 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "setup/signup":
     "self-service business registration — creates the tenant a session would otherwise be scoped to; " +
     "refuses with 403 unless ALLOW_PUBLIC_SIGNUP is explicitly enabled",
+  // Issue #908 — the public contract-signing session. The caller is an external
+  // signatory with no account, so no session can exist by definition; the
+  // per-recipient token in the path is the credential (256 bits, HMAC-hashed at
+  // rest, bound to one signer and one frozen version, expiring, revocable). The
+  // route takes NO business/contract/signer id from the request — the token
+  // resolves them — and every mutation re-checks the token plus the envelope's
+  // live state, so a replayed or out-of-order call fails closed.
+  "sign/[token]":
+    "external signatory capability (issue #908) — the only credential is the recipient's hashed " +
+    "invitation token in the path; the caller has no session and must not, and no tenant id is " +
+    "accepted from the request",
   "auth/accept-invite":
     "invitation exchange — the invitee has no session and no membership of the inviting " +
     "business yet; the single-use token is the credential",
@@ -419,6 +430,24 @@ const COMPANION_DEVICE_ROUTES: Record<string, string> = {
     "upload completion with server-side integrity verification; session ticket pinning",
 };
 
+/**
+ * Issue #894 — Torob's **Product API v3** endpoint.
+ *
+ * It lives under `/api/v1` because that prefix *is* the platform's machine-facing
+ * surface, but its caller is a marketplace crawler holding no API key of ours:
+ * Torob signs each request with its own Ed25519 key and the platform verifies that
+ * signature against the shop's stored domain (`src/lib/torob/auth.ts`). So the
+ * `/api/v1` rule below — "must authenticate a scoped API key" — cannot apply, and
+ * this map is the documented exception. What it asserts instead is that the route
+ * delegates to the one handler that performs that verification, so a future edit
+ * cannot drop the check by inlining a query.
+ */
+const TOROB_TOKEN_ROUTES: Record<string, string> = {
+  "v1/torob/products/[shopId]":
+    "Product API v3 — Torob's EdDSA JWT in X-Torob-Token, audience checked against the " +
+    "shop's own domain; the shop id is opaque and resolves the tenant under one documented bypass",
+};
+
 /** Routes that guard via getSession() with route-specific logic instead of requireRole. */
 const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/me": "returns the caller's own session (or null) — nothing else",
@@ -679,6 +708,14 @@ describe("every API route is guarded", () => {
 
   for (const [key, src] of sources) {
     it(`${key} is guarded or explicitly public`, () => {
+      if (TOROB_TOKEN_ROUTES[key]) {
+        // A signed marketplace token replaces the API key; the route must hand off
+        // to the handler that verifies it.
+        expect(src, `src/app/api/${key}/route.ts must authenticate Torob's token`).toMatch(
+          /handleTorobProductRequest\(/,
+        );
+        return;
+      }
       if (key === "v1" || key.startsWith("v1/")) {
         expect(isApiKeyGuarded(src), `src/app/api/${key}/route.ts must authenticate a scoped API key`).toBe(true);
         return;
@@ -845,7 +882,11 @@ describe("every API route is guarded", () => {
   });
 
   it("the public list doesn't cover routes that no longer exist", () => {
-    for (const key of [...Object.keys(PUBLIC_ROUTES), ...Object.keys(SELF_GUARDING_ROUTES)]) {
+    for (const key of [
+      ...Object.keys(PUBLIC_ROUTES),
+      ...Object.keys(SELF_GUARDING_ROUTES),
+      ...Object.keys(TOROB_TOKEN_ROUTES),
+    ]) {
       expect(sources.has(key), `${key} is allowlisted but has no route file`).toBe(true);
     }
   });

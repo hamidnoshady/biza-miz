@@ -15,6 +15,8 @@ import { describe, expect, it } from "vitest";
 const here = (relative: string) => readFileSync(new URL(relative, import.meta.url), "utf8");
 
 const SECTION = here("./products-list-section.tsx");
+
+const EDIT_PANEL = readFileSync("src/app/dashboard/products/product-edit-panel.tsx", "utf8");
 const PAGE = here("../../(app)/accounting/products/page.tsx");
 
 describe("the products list keeps the shared-chrome contract", () => {
@@ -32,15 +34,21 @@ describe("the products list keeps the shared-chrome contract", () => {
     }
   });
 
-  it("keeps the table on the shared DataTable primitives with a status column", () => {
+  it("keeps the table on the shared DataTable primitives, now four compact columns", () => {
     expect(SECTION).toContain('from "@/app/dashboard/data-table"');
     expect(SECTION).toContain("<DataTable caption=");
-    expect(SECTION).toContain("<Th>وضعیت</Th>");
+    // Issue #1207 §B: the eleven-column RTL table became four readable ones —
+    // product, one primary stock/price state, source/store chips, actions.
+    expect(SECTION).toContain("<Th>محصول</Th>");
+    expect(SECTION).toContain("<Th>وضعیت و موجودی</Th>");
+    expect(SECTION).toContain("<Th>منبع و پیوند فروشگاه</Th>");
     expect(SECTION).toContain("StatusBadge");
     expect(SECTION).toContain("productStatus(item)");
     // The panel row still spans the whole table, whatever the column count is.
     expect(SECTION).toMatch(/Td colSpan=\{PRODUCT_COLUMNS\}/);
-    expect(SECTION).toMatch(/const PRODUCT_COLUMNS = 11/);
+    expect(SECTION).toMatch(/const PRODUCT_COLUMNS = 4/);
+    // Mobile is the same markup: the shared table turns itself into cards.
+    expect(SECTION).not.toContain("min-w-[52rem]");
   });
 
   it("keeps the page header user-facing (no architecture phrasing)", () => {
@@ -84,7 +92,7 @@ describe("search and status filtering", () => {
 
   it("returns the pager to the first page when the list narrows", () => {
     expect(SECTION).toContain(
-      "useEffect(() => setPage(0), [deferredSearch, statusFilter, pageSize]);",
+      "useEffect(() => setPage(0), [deferredSearch, statusFilter, wooFilter, sourceFilter, storeFilter, pageSize]);",
     );
   });
 
@@ -142,10 +150,14 @@ describe("the stock/price write path survives the restyle", () => {
   });
 
   it("keeps the expanded-row affordances and the busy state", () => {
-    // One expandable panel per row, now two kinds: stock/price and content.
-    expect(SECTION).toContain('aria-expanded={panel === "stock"}');
-    expect(SECTION).toContain('aria-expanded={panel === "content"}');
+    // One expandable area per row at a time: details, the store review, the
+    // duplicate review, and the stock/price and content editors it opens.
+    for (const kind of ['"store"', '"details"', '"stock"', '"content"', '"duplicate"']) {
+      expect(SECTION, `has a ${kind} panel`).toContain(kind);
+    }
+    expect(SECTION).toContain('aria-expanded={panel === "details"}');
     expect(SECTION).toContain("aria-controls={`stock-panel-${item.id}`}");
+    expect(SECTION).toContain("aria-controls={`duplicate-panel-${item.id}`}");
     expect(SECTION).toContain("در حال ذخیره…");
     // The panel keeps its measured-width shell — narrow screens stay usable.
     expect(SECTION).toContain('closest("div.overflow-x-auto")');
@@ -173,9 +185,11 @@ describe("Accounting product rows expose per-store Woo link and delivery status"
       "link.remoteId",
       "مدیریت این فروشگاه",
       "/websites/wp/products?store=${encodeURIComponent(link.connectionId)}",
-      "در صف ارسال",
-      "ارسال تأیید شد",
-      "نیازمند بررسی",
+      // The badge vocabulary moved into the pure module and is asserted here
+      // through the row's own use of it.
+      "STORE_LINK_STATE_LABEL[state]",
+      "STORE_LINK_STATE_TONE[state]",
+      "storeLinkState(link)",
       "آخرین دریافت کاتالوگ",
       "آخرین تأیید ارسال",
       "بدون پیوند ووکامرس",
@@ -184,6 +198,75 @@ describe("Accounting product rows expose per-store Woo link and delivery status"
     }
     expect(SECTION).toContain('wooLinksState === "unavailable"');
     expect(SECTION).toContain("forbidden");
+    // §B: a stale badge must be refreshable without a full page reload.
+    expect(SECTION).toContain("تازه‌سازی وضعیت ارسال");
+    expect(SECTION).toContain("void loadWooLinks()");
+  });
+});
+
+describe("issue #1207 — the compact row keeps its three store states apart", () => {
+  it("derives the row's store action instead of hard-coding one label", () => {
+    expect(SECTION).toContain("ProductStoreActionButton");
+    expect(SECTION).toContain("productRowAction({ links: wooLinks, duplicate })");
+    // The old universal control is gone from the screen.
+    expect(SECTION).not.toContain("انتشار / پیوند فروشگاه");
+  });
+
+  it("offers the four-part Woo/duplicate filter over the already-loaded list", () => {
+    expect(SECTION).toContain("PRODUCT_WOO_FILTERS");
+    expect(SECTION).toContain("matchesWooFilter(linkStateByLocalId.get(item.id) ?? \"unlinked\", isDuplicate(item), wooFilter)");
+    expect(SECTION).toContain('aria-label="فیلتر پیوند فروشگاه و تکراری"');
+  });
+
+  it("offers «ویرایش» in the row's details area, through the same meta write path", () => {
+    expect(SECTION).toContain('type ProductPanelKind = "store" | "details" | "edit" | "stock" | "content" | "duplicate"');
+    expect(SECTION).toContain('onOpenPanel("edit")');
+    expect(SECTION).toContain("aria-controls={`edit-panel-${item.id}`}");
+    expect(SECTION).toContain('panel === "edit"');
+    expect(SECTION).toContain("<ProductEditPanel item={item}");
+    // The panel owns the identity fields only; stock/price and descriptions keep
+    // their own panels, and no edit path touches a store.
+    expect(EDIT_PANEL).toContain("/api/products/items/${item.id}/meta");
+    expect(EDIT_PANEL).toContain("PATCH");
+    expect(EDIT_PANEL).not.toContain("/api/products/publications");
+  });
+
+  it("separates «محصول اصلی» from «تنوع»", () => {
+    expect(SECTION).toContain("محصول اصلی");
+    expect(SECTION).toContain("تنوع");
+    expect(SECTION).toContain("از «{item.parentName}»");
+    // The family's own stock state is "none of its own", not a fabricated zero.
+    expect(SECTION).toContain('status === "family" ? "بدون موجودی مستقل"');
+  });
+
+  it("offers the source filter and the per-store filter when more than one store exists", () => {
+    expect(SECTION).toContain("PRODUCT_SOURCE_FILTERS");
+    expect(SECTION).toContain("matchesSourceFilter(item.source, sourceFilter)");
+    expect(SECTION).toContain('aria-label="فیلتر منبع محصول"');
+    expect(SECTION).toContain("matchesStoreFilter(wooLinksByLocalId.get(item.id) ?? [], storeFilter)");
+    expect(SECTION).toContain("storesInLinks(wooLinks)");
+    expect(SECTION).toContain("stores.length > 1");
+    expect(SECTION).toContain('aria-label="فیلتر فروشگاه مشخص"');
+    // Every filter participates in "is the list narrowed?" and in the reset.
+    expect(SECTION).toContain('sourceFilter !== "all"');
+    expect(SECTION).toContain("storeFilter !== ALL_STORES");
+    expect(SECTION).toContain("setSourceFilter(\"all\")");
+    expect(SECTION).toContain("setStoreFilter(ALL_STORES)");
+  });
+
+  it("asks only for the flagged duplicate SKUs, and reviews one row on demand", () => {
+    // §C scopes the flags to the active branch — the server resolves it.
+    expect(SECTION).toContain("/api/products/duplicates?summary=1");
+    expect(SECTION).toContain("normaliseSku(item.sku)");
+    expect(SECTION).toContain("ProductDuplicatePanel");
+    // A flagged row with no mapping gets the review, never a publication.
+    expect(SECTION).toContain('panel === "duplicate"');
+  });
+
+  it("keeps the verbose facts in the details area rather than on every row", () => {
+    for (const marker of ["ProductDetailsPanel", "جزئیات", "بارکد", "قیمت خرید", "وضعیت انتشار"]) {
+      expect(SECTION, `has ${marker}`).toContain(marker);
+    }
   });
 });
 

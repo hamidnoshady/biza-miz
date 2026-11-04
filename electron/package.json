@@ -1,6 +1,6 @@
 {
   "name": "business-suite-desktop",
-  "version": "1.0.126",
+  "version": "1.0.160",
   "buildCommit": "unknown",
   "buildId": "development",
   "releaseChannel": "stable",
@@ -64,7 +64,6 @@
       "permissions.js",
       "support-companion.js",
       "maintenance-gate.js",
-      "smoke-probe.js",
       "desktop-release-public-key.pem",
       "package.json"
     ],

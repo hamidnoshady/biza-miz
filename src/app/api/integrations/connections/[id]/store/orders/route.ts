@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { enqueueOperation, storeOrderFacetsFor, storeOrderKnownFor, storeOrdersPageFor } from "@/lib/integrations/woo-ops-service";
+import { registeredOrderStatuses } from "@/lib/integrations/plugin-capabilities";
 
 /**
  * The store's orders, and the two operations an owner asks for against one:
@@ -71,11 +72,16 @@ export const POST = withTenantScope(async (request: Request, context: { params: 
   try {
     if (body.action === "status") {
       const { sanitizeOrderStatus } = await import("@/lib/integrations/woo-ops-service");
-      // A custom status is accepted only when the store has already reported
-      // it on one of its orders; the seven canonical ones always are.
+      // The valid statuses for *this* store: the seven canonical ones, the
+      // custom ones it has already used, and the ones its plugin registered
+      // (`wc_get_order_statuses()`, #1215 / P1‑3). A slug the store never
+      // registered is still refused — and the picker offers exactly this list,
+      // so a store with a status it has not used yet can finally be moved into
+      // it, while a typo still is not sent to a live order.
       const requested = String(body.status ?? "");
-      const known = (await storeOrderFacetsFor(session.businessId, id)).statuses.map((entry) => entry.value);
-      const status = sanitizeOrderStatus(requested, known);
+      const used = (await storeOrderFacetsFor(session.businessId, id)).statuses.map((entry) => entry.value);
+      const registered = registeredOrderStatuses(connection.plugin_capabilities).map((entry) => entry.slug);
+      const status = sanitizeOrderStatus(requested, [...new Set([...used, ...registered])]);
       await enqueueOperation(session.businessId, id, "order_status", remoteId, { status });
       return NextResponse.json({ ok: true, queued: true });
     }

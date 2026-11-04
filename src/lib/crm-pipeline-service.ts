@@ -32,6 +32,8 @@
  */
 
 import { query, withTenant, withTenantTransaction } from "./db";
+import { getBusinessIndustry } from "./industry-guard";
+import { agencyPipelinePreset, isAgencyPipelineName } from "./crm-agency-pipeline";
 import { recordCrmAudit } from "./crm-audit-service";
 import { runCrmAutomations } from "./crm-automation-service";
 import type { CrmAutomationEntity } from "./crm-automation-rules";
@@ -195,6 +197,107 @@ export async function defaultPipeline(businessId: string): Promise<Pipeline | nu
           stage.displayOrder,
           stage.probability,
           stage.outcome,
+        ],
+      );
+    }
+
+    const seeded = await listPipelines(businessId);
+    return seeded.find((pipeline) => pipeline.id === pipelineId) ?? null;
+  });
+}
+
+/**
+ * Issue #1128 §A — the agency's own sales pipeline, created on read exactly the
+ * way `defaultPipeline` creates the universal one.
+ *
+ * ## Why this is a second pipeline and not different seed stages
+ *
+ * See `crm-agency-pipeline.ts`, which carries the full argument: `SEED_STAGES`
+ * is deliberately the same six for every trade so a freshly provisioned business
+ * and an upgraded one are structurally identical and a win rate over the default
+ * pipeline means the same thing for every tenant. The agency's track sits beside
+ * it, which is what `createPipeline`'s own docblock anticipates ("a tender track,
+ * an after-sales track"). The default is untouched, so no existing tenant's
+ * reports move.
+ *
+ * ## Why direct inserts rather than `createPipeline` + `savePipelineStages`
+ *
+ * `createPipeline` copies the source pipeline's stages, and `savePipelineStages`
+ * *deactivates* the stages missing from the list it is given rather than deleting
+ * them — rightly, because a deleted stage would leave its deals on no board at
+ * all. Composing the two would therefore leave six deactivated copies of the
+ * default's stages alongside the seven agency ones: rows that mean nothing, in a
+ * configurator that lists inactive stages, created by a function whose job was to
+ * make a tidy starting point. Inserting the preset directly leaves exactly the
+ * seven stages the preset names.
+ *
+ * The preset still cannot be rejected by the rules `savePipelineStages` enforces,
+ * because `crm-agency-pipeline.test.ts` asserts both invariants directly — at
+ * least one `open` stage, so a deal can be created, and at least one `won` stage,
+ * so the win rate is not structurally zero.
+ *
+ * ## Why the read path creates it
+ *
+ * The same reason `defaultPipeline` does: businesses created after migration
+ * 0157 get a pipeline only if every provisioning path remembers to, there are
+ * three of them, and nothing stops a fourth. A read that creates what it needs
+ * cannot be forgotten by a new provisioning path.
+ *
+ * `is_default` is written false on purpose. Exactly one pipeline is the default,
+ * and this function has no business deciding that an agency's sales track should
+ * be it — a member who wants that promotes it through `updatePipeline`, which
+ * clears the previous default so the two cannot both be true.
+ */
+export async function ensureAgencySalesPipeline(businessId: string): Promise<Pipeline | null> {
+  const industry = await getBusinessIndustry(businessId);
+  const preset = agencyPipelinePreset(industry ?? "");
+  // Every other trade gets null and no writes at all: this is an agency
+  // capability, not a rename of the pipeline everybody has.
+  if (!preset) return null;
+
+  const existing = await listPipelines(businessId);
+  const found = existing.find((pipeline) => isAgencyPipelineName(pipeline.name));
+  // A pipeline with no stages is as unusable as no pipeline, so seed those too
+  // rather than handing the board an empty column list — the same test
+  // `defaultPipeline` applies.
+  if (found && found.stages.length > 0) return found;
+
+  return withTenant(businessId, async () => {
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO crm_pipelines (business_id, name, description, is_default, display_order, created_by)
+       VALUES ($1, $2, $3, false, 1, 'system')
+       ON CONFLICT (business_id, name) DO NOTHING
+       RETURNING id`,
+      [businessId, preset.name, preset.description],
+    );
+    // No row back means another request won the race, or the pipeline existed
+    // with no stages; either way read the id rather than failing. `(business_id,
+    // name)` is unique, which is what makes this safe under concurrency.
+    let pipelineId = rows[0]?.id;
+    if (!pipelineId) {
+      const { rows: again } = await query<{ id: string }>(
+        `SELECT id FROM crm_pipelines
+          WHERE business_id = $1 AND name = $2 AND archived_at IS NULL LIMIT 1`,
+        [businessId, preset.name],
+      );
+      pipelineId = again[0]?.id;
+      if (!pipelineId) return null;
+    }
+
+    for (const stage of preset.stages) {
+      await query(
+        `INSERT INTO crm_pipeline_stages
+           (business_id, pipeline_id, name, display_order, default_probability, outcome, requirement_note)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (pipeline_id, name) DO NOTHING`,
+        [
+          businessId,
+          pipelineId,
+          stage.name,
+          stage.displayOrder,
+          stage.defaultProbability,
+          stage.outcome,
+          stage.requirementNote,
         ],
       );
     }

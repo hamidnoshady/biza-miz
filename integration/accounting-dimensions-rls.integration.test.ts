@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL required");
@@ -68,7 +68,7 @@ afterAll(async () => {
   await app?.end(); await owner?.end();
   const m = new Client({ connectionString: maintenanceUrl() });
   await m.connect();
-  try { await m.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`); await m.query(`DROP ROLE IF EXISTS ${APP_ROLE}`); }
+  try { await m.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`); await dropAppRole(m, APP_ROLE); }
   finally { await m.end(); }
 });
 

@@ -40,6 +40,7 @@
     "db:platform-admin": "tsx scripts/seed-platform-admin.ts",
     "mfa:reset-platform": "tsx scripts/reset-platform-mfa.ts",
     "db:restore": "tsx scripts/restore.ts",
+    "backup:drill": "tsx scripts/backup-drill.ts",
     "db:restore-tenant": "tsx scripts/restore-tenant.ts",
     "db:reconcile-opening": "tsx scripts/reconcile-opening-inventory.ts",
     "media:reconcile-orphans": "tsx scripts/media-reconcile-orphans.ts",
@@ -52,7 +53,9 @@
     "deployment:convert-hybrid": "tsx scripts/convert-local-to-hybrid.ts",
     "platform-company:billing-backfill": "tsx scripts/platform-company-billing-backfill.ts",
     "platform-company:health": "tsx scripts/platform-company-health.ts",
-    "test:a11y:subledger": "node scripts/subledger-accessibility.mjs"
+    "test:a11y:subledger": "node scripts/subledger-accessibility.mjs",
+    "desktop:acceptance": "node electron/scripts/smoke-packaged.js",
+    "desktop:scan-release": "node scripts/scan-desktop-release.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.78",

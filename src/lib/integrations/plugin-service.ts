@@ -22,8 +22,11 @@
  * unchanged, and the only credential in this database is a token that grants
  * exactly this.
  */
+import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
-import { query, withoutTenantScope, withTenant } from "../db";
+import { query, withoutTenantScope, withTenant, withTenantTransaction } from "../db";
+import { acknowledgeProductPublication } from "./product-publication-service";
+import { acknowledgeTaxonomyEnsure } from "./product-attribute-mappings-service";
 import { isFeatureEnabled } from "../features";
 import { writeIntegrationAudit } from "./audit";
 import {
@@ -39,8 +42,9 @@ import {
   hashPluginToken,
   verifyPluginEnvelope,
 } from "./plugin-link";
-import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken } from "./plugin-capabilities";
-import { assertPluginJobSupported } from "./plugin-job-guard";
+import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken, registeredOrderStatuses } from "./plugin-capabilities";
+import { assertPluginJobSupported, PluginJobUnsupportedError } from "./plugin-job-guard";
+import { CRON_PROBE_JOB_TYPE } from "./plugin-cron-probe";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
 import { scrubUrls } from "./url-redact";
@@ -210,6 +214,14 @@ export interface PluginHandshakeInput {
   capabilities?: {
     eventTypes?: string[];
     jobTypes?: string[];
+    /** Whether the plugin applies a `date_gmt` on a `post_upsert` (#1215, P2‑5). */
+    postSchedule?: boolean;
+    /**
+     * The store's registered order statuses (`wc_get_order_statuses()`), which
+     * is the only truthful source of their display names — see
+     * `registeredOrderStatuses` (#1215 / P1‑3).
+     */
+    orderStatuses?: unknown;
   };
   telemetry?: Record<string, unknown>;
 }
@@ -270,11 +282,49 @@ function sanitizeLocalQueueRecent(value: unknown): Array<{
   return out;
 }
 
+/**
+ * The plugin's measured delivery percentiles (#1206 P1): how long real Woo
+ * events took from its local queue to this app accepting them. Reduced to
+ * five bounded, ordered numbers before storage — percentiles that are not
+ * ordered, or a lag longer than the plugin's 30-day sent-row retention, are
+ * a broken report and are dropped rather than displayed as fact.
+ */
+function sanitizeDeliveryLatency(value: unknown): {
+  samples: number;
+  p50Seconds: number;
+  p95Seconds: number;
+  p99Seconds: number;
+  maxSeconds: number;
+} | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null);
+  const samples = num(record.samples);
+  const p50 = num(record.p50Seconds);
+  const p95 = num(record.p95Seconds);
+  const p99 = num(record.p99Seconds);
+  const max = num(record.maxSeconds);
+  if (samples === null || samples < 1 || p50 === null || p95 === null || p99 === null || max === null) return null;
+  if (!(p50 <= p95 && p95 <= p99 && p99 <= max) || max > 30 * 24 * 3600) return null;
+  return { samples: Math.min(samples, 100_000), p50Seconds: p50, p95Seconds: p95, p99Seconds: p99, maxSeconds: max };
+}
+
 function pluginCapabilities(input: PluginHandshakeInput): Record<string, unknown> {
+  // The order-status registry is stored *through its own reader*, so the shape
+  // the manager displays is exactly the shape the handshake accepted: a plugin
+  // that sends junk, or none at all, leaves an empty list and the screen falls
+  // back to canonical labels plus a clearly marked raw slug (#1215 / P1‑3).
+  const orderStatuses = registeredOrderStatuses({
+    orderStatuses: input.capabilities?.orderStatuses,
+  });
   return {
     protocolVersion: Number.isFinite(input.protocolVersion) ? Math.max(1, Math.floor(input.protocolVersion ?? 1)) : 1,
     eventTypes: sanitizeStringArray(input.capabilities?.eventTypes),
     jobTypes: sanitizeStringArray(input.capabilities?.jobTypes),
+    // Absent means "does not support it": the safe reading, since the plugin
+    // would otherwise publish a `future` post immediately.
+    ...(input.capabilities?.postSchedule === true ? { postSchedule: true } : {}),
+    ...(orderStatuses.length > 0 ? { orderStatuses } : {}),
   };
 }
 
@@ -294,6 +344,14 @@ export async function pluginHandshake(
       telemetry.localQueueRecent = sanitizeLocalQueueRecent(telemetry.localQueueRecent);
     } else {
       delete telemetry.localQueueRecent;
+    }
+    // Same rule for the measured latency (#1206 P1): keep absence absent, so
+    // "not measured yet" never renders as "measured zero".
+    const deliveryLatency = sanitizeDeliveryLatency(telemetry.deliveryLatency);
+    if (deliveryLatency) {
+      telemetry.deliveryLatency = deliveryLatency;
+    } else {
+      delete telemetry.deliveryLatency;
     }
     if (pluginSiteMismatch(connection, siteUrl)) {
       await query(
@@ -424,6 +482,8 @@ export async function pluginHandshake(
           "stock",
           "price",
           "product_update",
+          "product_publish",
+          "taxonomy_ensure",
           "order_status",
           "refund_create",
           "catalogue_export",
@@ -756,6 +816,7 @@ export interface PluginJobAck {
   error?: string;
   /** The lease generation this job was pulled under — see PluginJob.leaseToken. */
   leaseToken?: string;
+  result?: Record<string, unknown>;
 }
 
 /** Exponential, capped — same shape as `retry.ts`'s backoff, expressed in the SQL below. */
@@ -798,17 +859,19 @@ export async function pluginAckJobs(
       const leaseToken = result.leaseToken && UUID_RE.test(result.leaseToken) ? result.leaseToken : null;
 
       if (result.status === "done") {
+        await withTenantTransaction(connection.business_id, async () => {
         const { rows } = await query<{ entity_type: string; remote_id: string; payload: Record<string, unknown> }>(
           `UPDATE integration_outbox_events
               SET status = 'sent', sent_at = now(), last_error = NULL,
+                  payload = CASE WHEN entity_type='product_publish' THEN jsonb_set(payload,'{__ackRemoteId}',to_jsonb($4::text)) ELSE payload END,
                   leased_until = NULL, lease_token = NULL, updated_at = now()
             WHERE id = $1 AND connection_id = $2 AND ${ackFenceSql("$3")}
           RETURNING entity_type, remote_id, payload`,
-          [result.id, connection.id, leaseToken],
+          [result.id, connection.id, leaseToken, typeof result.result?.remoteId === "number" || typeof result.result?.remoteId === "string" ? String(result.result.remoteId) : ""],
         );
         if (rows.length === 0) {
           stale += await auditStaleAck(connection, result);
-          continue;
+          return;
         }
         done += 1;
         // Issue #942 (F03): record what this delivery proved on the product
@@ -822,6 +885,9 @@ export async function pluginAckJobs(
         // acked payload (not current local state) means a value changed
         // mid-flight is not falsely recorded as delivered.
         await acknowledgePushedEvent(connection, rows[0]);
+        if (rows[0].entity_type === "product_publish") await acknowledgeProductPublication(connection, rows[0]);
+        if (rows[0].entity_type === "taxonomy_ensure") await acknowledgeTaxonomyEnsure(connection.business_id, connection.id, rows[0].payload, result.result);
+        });
         continue;
       }
 
@@ -934,6 +1000,63 @@ async function auditStaleAck(connection: ConnectionRow, result: PluginJobAck): P
 }
 
 /**
+ * Ask the store's plugin to prove its scheduler runs (issue #1206, P0).
+ *
+ * The app cannot see a WP-Cron event fire, so it asks the only side that can.
+ * This queues one `cron_probe` row carrying a correlation id it mints; the
+ * plugin leases it inside a real cron run and schedules a *second*,
+ * separately observed event under the same id, and the proof arrives later as
+ * signed telemetry. Nothing here claims the probe ran: returning an id means
+ * "asked", and the panel grades the answer.
+ *
+ * Refused with `plugin_job_unsupported` when the plugin never advertised the
+ * type — a row it cannot lease would sit `pending` forever looking like a
+ * broken probe rather than an old plugin.
+ */
+export async function requestCronProbe(
+  businessId: string,
+  connectionId: string,
+): Promise<{ jobId: string; probeId: string }> {
+  await assertPluginJobSupported(businessId, connectionId, CRON_PROBE_JOB_TYPE);
+  // And the link must still be plugin mode. Capabilities can outlive a mode
+  // switch — a store moved to REST keeps the blob from its last handshake, and
+  // a probe queued on that stale advertisement would never be leased.
+  const { rows: linkRows } = await query<{ link_mode: string }>(
+    `SELECT link_mode FROM integration_connections WHERE id = $1 AND business_id = $2`,
+    [connectionId, businessId],
+  );
+  if (linkRows[0]?.link_mode !== "plugin") throw new PluginJobUnsupportedError(CRON_PROBE_JOB_TYPE);
+  const probeId = randomBytes(16).toString("hex");
+  return withTenant(businessId, async () => {
+    // A second press before the first probe has been observed replaces it: two
+    // competing probes would race for the plugin's single stored record and the
+    // older one's evidence would be overwritten anyway. Rows still leased are
+    // left alone — their holder may already have scheduled an event.
+    await query(
+      `UPDATE integration_outbox_events
+          SET status = 'skipped', last_error = 'superseded_by_new_probe',
+              leased_until = NULL, lease_token = NULL, updated_at = now()
+        WHERE connection_id = $1 AND entity_type = $2 AND status IN ('pending', 'failed')`,
+      [connectionId, CRON_PROBE_JOB_TYPE],
+    );
+    const { rows } = await query<{ id: string }>(
+      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
+       VALUES ($1, $2, $3, $4, jsonb_build_object('probeId', $4::text))
+       RETURNING id`,
+      [businessId, connectionId, CRON_PROBE_JOB_TYPE, probeId],
+    );
+    await writeIntegrationAudit({
+      businessId,
+      connectionId,
+      action: "plugin.cron_probe_requested",
+      entityType: CRON_PROBE_JOB_TYPE,
+      remoteId: probeId,
+    });
+    return { jobId: rows[0].id, probeId };
+  });
+}
+
+/**
  * Ask the plugin, next time it pulls, to send everything of one kind.
  *
  * This is how "sync products now" works in plugin mode: the app cannot read
@@ -958,7 +1081,8 @@ export async function enqueuePluginExport(
      VALUES ($1, $2, $3, 'all', '{}'::jsonb)
      ON CONFLICT (connection_id, entity_type, remote_id)
      DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
-                   last_error = NULL, leased_until = NULL, lease_token = NULL, updated_at = now()
+                   last_error = NULL, leased_until = NULL, lease_token = NULL,
+                   desired_at = now(), updated_at = now()
      RETURNING id`,
     [businessId, connectionId, entityType],
   );

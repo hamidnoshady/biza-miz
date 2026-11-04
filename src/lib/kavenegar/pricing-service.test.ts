@@ -425,3 +425,112 @@ describe("the master's balance comes from the provider (issue #902 §3, plan §9
     }
   });
 });
+
+describe("an approved campaign is a funding trigger of its own (issue #902 §9 item 1)", () => {
+  const base = {
+    policy: { ...policy, childCapRial: null, dailyCapRial: null },
+    tariff,
+    childBalanceRial: 0,
+    hourOfDay: 12,
+    masterBalanceRial: 50_000_000,
+    transferredTodayRial: 0,
+    unresolvedTransferRial: 0,
+  };
+
+  it("raises the target above the standing buffer when the queue is bigger than it", () => {
+    // The buffer asks for 100 messages ≈ 207,000 Rial. A 500-recipient campaign
+    // owes 500 × 2,070 = 1,035,000. The standing order would fund a fifth of it
+    // and the tail would die on the provider's credit error.
+    const decision = planFunding({ ...base, pendingDemandRial: 1_035_000 });
+    expect(decision).toMatchObject({
+      action: "transfer",
+      amountRial: 1_035_000,
+      reason: "campaign_demand",
+      targetBalanceRial: 1_035_000,
+    });
+  });
+
+  it("triggers even when the balance already satisfies the buffer", () => {
+    // 250,000 is comfortably above the 207,000 buffer, and still not enough for
+    // the queued campaign. Before this trigger the child was "healthy" here.
+    const withQueue = planFunding({
+      ...base,
+      childBalanceRial: 250_000,
+      pendingDemandRial: 1_035_000,
+    });
+    expect(withQueue.action).toBe("transfer");
+    expect(withQueue.action === "transfer" && withQueue.amountRial).toBe(785_000);
+
+    expect(planFunding({ ...base, childBalanceRial: 250_000 })).toMatchObject({
+      action: "none",
+      reason: "healthy",
+    });
+  });
+
+  it("keeps the buffer in charge once the queue is smaller than it", () => {
+    // Demand below the buffer must not shrink the target: a small campaign is
+    // not a reason to let the standing order lapse.
+    const decision = planFunding({ ...base, pendingDemandRial: 20_700 });
+    expect(decision).toMatchObject({
+      action: "transfer",
+      amountRial: 207_000,
+      reason: "top_up",
+      targetBalanceRial: 207_000,
+    });
+  });
+
+  it("still respects caps, the floor and the reserve — demand is not a bypass", () => {
+    // The campaign wants 1,035,000, the per-child ceiling allows 300,000.
+    expect(
+      planFunding({
+        ...base,
+        policy: { ...policy, childCapRial: 300_000, dailyCapRial: null },
+        pendingDemandRial: 1_035_000,
+      }),
+    ).toMatchObject({ action: "transfer", amountRial: 300_000 });
+
+    // The master has 1,500,000 with a 1,000,000 floor: 500,000 is spendable.
+    expect(
+      planFunding({ ...base, masterBalanceRial: 1_500_000, pendingDemandRial: 1_035_000 }),
+    ).toMatchObject({ action: "transfer", amountRial: 500_000 });
+
+    // A marketing fleet may not spend the 400,000 held for transactional traffic.
+    expect(
+      planFunding({
+        ...base,
+        policy: { ...policy, childCapRial: null, dailyCapRial: null, transactionalReserveRial: 400_000 },
+        masterBalanceRial: 1_500_000,
+        pendingDemandRial: 1_035_000,
+      }),
+    ).toMatchObject({ action: "transfer", amountRial: 100_000 });
+  });
+
+  it("moves low_watermark's trigger to the queue, so a draining campaign is not paced", () => {
+    // A watermark of 50 messages would normally wait until the child fell below
+    // ~103,500 Rial. A queued campaign makes that wait dangerous, so the trigger
+    // rises to the demand while the target does too.
+    const strategy = { ...policy, strategy: "low_watermark" as const, watermarkMessages: 50 };
+
+    const idle = planFunding({ ...base, policy: strategy, childBalanceRial: 150_000 });
+    expect(idle).toMatchObject({ action: "none", reason: "healthy" });
+
+    const draining = planFunding({
+      ...base,
+      policy: strategy,
+      childBalanceRial: 150_000,
+      pendingDemandRial: 1_035_000,
+    });
+    expect(draining).toMatchObject({ action: "transfer", reason: "campaign_demand" });
+
+    // And above demand it is still healthy — the queue is a floor on the
+    // trigger, not an instruction to fund forever.
+    expect(
+      planFunding({
+        ...base,
+        policy: strategy,
+        childBalanceRial: 1_200_000,
+        pendingDemandRial: 1_035_000,
+      }),
+    ).toMatchObject({ action: "none", reason: "healthy" });
+  });
+});

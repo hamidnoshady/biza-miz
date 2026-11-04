@@ -17,7 +17,7 @@
  */
 import type { PoolClient } from "pg";
 import { getPool, withTenant, withTenantTransaction } from "./db";
-import { findDuplicateItemGroups, type DuplicateReportOptions } from "./duplicate-items-report";
+import { findDuplicateItemGroups, type DuplicateReportOptions, type DuplicateSkuGroup } from "./duplicate-items-report";
 import { planRaceOrphans, type ItemReference, type OrphanBlocker, type OrphanPlan } from "./duplicate-items-resolution";
 
 /** What the integration itself writes when it creates an item — not anyone's history. */
@@ -77,13 +77,26 @@ export async function planDuplicateOrphanArchives(
   options: DuplicateReportOptions = {},
 ): Promise<OrphanPlan[]> {
   const groups = (await findDuplicateItemGroups(businessId, options)).filter((g) => g.verdict === "race_orphan");
-  if (groups.length === 0) return [];
+  return planOrphanArchivesForGroups(businessId, groups);
+}
+
+/**
+ * The same plan for groups a caller already holds — the duplicate review screen
+ * reads the report once and plans from it, instead of reading the catalogue a
+ * second time. Writes nothing: `READ ONLY`, rolled back.
+ */
+export async function planOrphanArchivesForGroups(
+  businessId: string,
+  groups: readonly DuplicateSkuGroup[],
+): Promise<OrphanPlan[]> {
+  const orphanGroups = groups.filter((g) => g.verdict === "race_orphan");
+  if (orphanGroups.length === 0) return [];
   return withTenant(businessId, async () => {
     const client = await getPool().connect();
     try {
       await client.query("BEGIN READ ONLY");
       const plans: OrphanPlan[] = [];
-      for (const group of groups) {
+      for (const group of orphanGroups) {
         const references = new Map<string, ItemReference[]>();
         for (const member of group.members) {
           if (member.mappings.length === 0) references.set(member.itemId, await countItemReferences(client, member.itemId));

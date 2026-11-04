@@ -499,6 +499,16 @@ export const PERMISSIONS = {
   commissionPayout: "commission.payout",
   commissionReverse: "commission.reverse",
   marketingConfigure: "marketing.configure",
+  // Issue #894 — Torob is a channel *inside* Growth, not a fifth app, so its
+  // keys live in Growth's own band rather than in a Torob namespace nobody else
+  // reads. Three, not one, because the acts are different in kind:
+  //   torob.view       seeing which websites could publish and what Torob says
+  //   torob.manage     connecting, authorizing, switching a channel on/off
+  //   torob.configure  the merchant's own Shop API token and publication rules —
+  //                    credential-shaped, so it is its own key and its own audit
+  torobView: "torob.view",
+  torobManage: "torob.manage",
+  torobConfigure: "torob.configure",
   integrationsView: "integrations.view",
   integrationsManage: "integrations.manage",
   mediaView: "media.view",
@@ -681,7 +691,7 @@ const {
   growthView, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
   storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
   commissionView, commissionManage, commissionCalculate, commissionApprove, commissionPayout, commissionReverse,
-  marketingConfigure,
+  marketingConfigure, torobView, torobManage, torobConfigure,
   integrationsView, integrationsManage, mediaView, mediaManage, printingExecute, billingView, billingManage,
 } = PERMISSIONS;
 
@@ -771,6 +781,12 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // is the books' work, and stays with the accountant.
     commissionCalculate,
     marketingConfigure,
+    // Issue #894: a manager already runs the websites this channel publishes
+    // from (`website.*`, `woocommerce.*`), so withholding Torob would mean the
+    // person who owns the catalogue cannot put it on the channel. `torob.configure`
+    // is included deliberately: it is the manual-token fallback, which is the
+    // same class of credential work `woocommerce.configure` already grants.
+    torobView, torobManage, torobConfigure,
     integrationsView, integrationsManage, mediaView, mediaManage, printingExecute, billingView, billingManage,
   ],
   // Phase 16's role: the books, and only the books. No till, no floor. Manages

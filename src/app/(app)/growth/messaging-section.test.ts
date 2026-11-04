@@ -123,3 +123,31 @@ describe("a discount campaign's targeting is real", () => {
     expect(CAMPAIGNS_SOURCE).toMatch(/growthSectionHref\("messaging"\)\}\?promotion=/);
   });
 });
+
+describe("an automation shows its text and its record, not just a switch (issue #902 §9 item 0)", () => {
+  it("renders the server's exact preview instead of an example sentence", () => {
+    // The preview must come from the server (the dispatcher's own renderer over
+    // fake facts). A hand-written sample on this screen can disagree with the
+    // message the customer receives, and the tenant would hear it from them.
+    expect(SECTION_SOURCE).toMatch(/setting\.preview \? \(/);
+    expect(SECTION_SOURCE).toMatch(/پیش‌نمایش با دادهٔ نمونه/);
+    // No literal sample text is hard-coded in the screen.
+    expect(SECTION_SOURCE).not.toMatch(/سارا محمدی|فروشگاه نمونه|1042/);
+  });
+
+  it("says what the automation did, including the zeros", () => {
+    expect(SECTION_SOURCE).toMatch(/function deliveryLine\(delivery: TriggerDelivery\)/);
+    expect(SECTION_SOURCE).toMatch(/در ۷ روز اخیر رویدادی برای این اطلاع‌رسانی ثبت نشده است/);
+    expect(SECTION_SOURCE).toMatch(/deliveryLine\(setting\.delivery\)/);
+  });
+
+  it("translates a stored code with the shared map, never by echoing it", () => {
+    // Specifiers are stripped from `code()`, so this one reads the raw file.
+    expect(read("./messaging-section.tsx")).toMatch(
+      /import \{ triggerCodeLabel \} from "@\/lib\/kavenegar\/lookup-trigger-facts"/,
+    );
+    expect(SECTION_SOURCE).toMatch(/triggerCodeLabel\(delivery\.lastCode\)/);
+    // One map, not two: the screen must not keep its own copy of the vocabulary.
+    expect(SECTION_SOURCE).not.toMatch(/no_consent: "مشتری/);
+  });
+});

@@ -1,0 +1,278 @@
+# Contract documents, reusable templates and multi-party e-signing (#908)
+
+Status: **phases A–C implemented, D partially, E open.** This page is the map of
+what exists, where it lives, and what is honestly still missing. It is written to
+be read beside the code, not instead of it.
+
+Scope boundary (from the epic, unchanged): `workspace_contracts` stays the
+canonical execution-contract record — this work **extends** it. Contracts are a
+Workspace module, **not** a fifth tenant app. The SMS/OTP/wallet stack is the
+platform one from #902; there is no second messaging provider. Signing never
+posts an accounting entry.
+
+## 1. Data model — `migrations/0258_contract_documents_signing.sql`
+
+| table | what it holds | mutability |
+|---|---|---|
+| `contract_templates` | the business's own reusable documents | editable, archivable |
+| `contract_template_versions` | every published revision of a template | append-only |
+| `contract_documents` | the editable draft, one per contract (unique) | editable with optimistic `revision` |
+| `contract_document_versions` | frozen snapshots + SHA-256 content hash | insert-only |
+| `contract_signing_envelopes` | one signature round per frozen version | status machine |
+| `contract_signers` | one person per placement and per phone | until signed |
+| `contract_invitations` | the bearer token, stored as an HMAC digest | rotated on resend |
+| `contract_signatures` | the evidence row: who, when, which hash, which slot | insert-only |
+| `contract_signing_events` | the timeline | insert-only |
+
+Every table carries `business_id`, has **FORCE** row-level security and the
+repository's one approved policy shape: a permissive `tenant_isolation` policy
+with the documented `app_rls_bypass()` escape — the shape
+`integration/tenant-isolation.integration.test.ts` demands of every table with a
+`business_id`, so a new table cannot quietly pick its own.
+
+The three evidence tables (`contract_document_versions`, `contract_signatures`,
+`contract_signing_events`) are **append-only**: each also carries two
+`AS RESTRICTIVE` policies for UPDATE and DELETE whose predicate is literally
+`false`. Restrictive policies are AND-ed with the permissive one, so a mutation
+matches no row at all — history cannot be rewritten by the application role, and
+a correction is a new version rather than an edit. (The first draft used
+SELECT-only and INSERT-only policies instead; they behave the same at runtime
+but they are not one of the two shapes the isolation census accepts, and CI
+caught it.)
+
+Invariants enforced in the database, not only in code:
+
+* one document per contract (`UNIQUE (contract_id)`);
+* one **live** envelope per contract (`... WHERE status IN ('draft','sent','partially_signed')`);
+* one **live** token per signer (`... WHERE revoked_at IS NULL`), so "resend" burns the old link;
+* one signature per signer (`UNIQUE (signer_id)`);
+* two people cannot share a signature line or a phone number in the same round.
+
+The signer OTP is #902's platform-managed `mfa_challenges` row, so this migration
+also extends `mfa_challenges_purpose_check` with `contract_signing` — without that
+line no challenge can be inserted and every real OTP fails. The realm is
+`contract_signer`; the challenge is keyed to the **signer** row, never to a user
+session, and the code is never stored in plaintext.
+
+`src/lib/contracts/schema-contract.test.ts` pins the migration to every column
+the service writes, plus the five invariants above. It exists because the first
+draft of this branch drifted there (`ip_address`, `cancel_reason`, a missing
+`title`) — typechecking cannot see SQL.
+
+## 2. The document model — `src/lib/contracts/blocks.ts`
+
+Dependency-free, so the editor, the print view, the receipt and the public
+signing page all render the same document the same way:
+
+* block types: heading, paragraph, article, conditional clause, repeating payment
+  schedule, bullets, numbered, table, divider, page break, signature placement;
+* conditional clauses bind to a declared field and use exact equality/inequality
+  or a checkbox condition; the same renderer omits a false clause in the frozen
+  signer view;
+* repeating schedules generate monthly, quarterly, semiannual or annual due
+  dates with month-end preservation (up to 120 rows) and repeat a literal or
+  resolved per-installment amount in both preview and frozen rendering;
+* variables: `{{key}}`, substituted only through `renderTemplate`, never string
+  concatenation;
+* `normalizeContractContent` is the trust boundary for anything off the wire:
+  unknown block types are dropped, lengths capped, ragged table rows squared,
+  duplicate variable keys folded, duplicate signature placements **renumbered**
+  (dropping one would silently lose a party's signature line);
+* `validateContractContent` returns `{code, message, blockId?, fieldKey?}` so the
+  editor can put the sentence next to the block that caused it.
+
+## 3. Autofill and lineage — `src/lib/contracts/bindings.ts`
+
+`CONTRACT_BINDING_CATALOGUE` is the **allow-list** of values a contract may
+disclose (contract terms, project, party, business identity, and AEC commercial
+facts linked to that exact authorized contract) and the same list the editor
+offers. AEC bindings read approved variations/certificates and the contract
+commercial block only; they do not enumerate unrelated projects. Accounting
+bindings use the canonical project report (approved project budget, posted cost,
+and budget variance) and are blank unless the caller has `ledger.view` and can
+see the contract's project. They do not expose revenue or journal-line details.
+Resolution reports where each value came from:
+`binding | override | literal | empty`, keeps `boundValue` when the sender typed
+over a record, and `changedBindings` turns a source that moved after review into
+a `stale` flag on the field.
+
+## 4. Services and API
+
+* `src/lib/contracts/service.ts` — the draft, template library, freezing,
+  duplication, and the binding context. Contract-linked AEC commercial terms,
+  approved variations and certified certificates are allow-listed as per-field
+  bindings; reads are scoped by the authorized contract and business, not a
+  caller-supplied project id. Accounting bindings use `projectReport` and require
+  `ledger.view`; without that permission they resolve empty.
+  Freezing resolves every variable first
+  and refuses while any required value is empty; a frozen version stores the
+  resolved strings inside its own JSON, so the printed contract stops moving at
+  the moment it acquires a hash.
+* `src/lib/contracts/signing.ts` — envelopes, signers, invitations, delivery, and
+  the whole public session (consent → OTP → signature → receipt). When the last
+  required signer commits, it queues the deduped `contract.completed` event in
+  the existing notifications outbox; Phase 35 owns delivery, and a notification
+  failure never rolls back signature evidence.
+* `src/lib/contracts/crypto.ts` — canonical-JSON SHA-256 and the HMAC-hashed
+  invitation token. The plaintext token exists only in the message that carried
+  it.
+* `src/lib/contracts/import.ts` — DOCX/PDF → blocks (§4a). Pure: bytes and a file
+  name in, blocks plus warnings out. No database, no storage, no clock, so it is
+  tested against in-memory fixtures.
+
+| route | verbs | authority |
+|---|---|---|
+| `/api/workspace/contracts/[id]/document` | GET, PUT | `workspace.view` / `workspace.contracts_manage` + `resolveWorkspaceSubject(edit)` |
+| `/api/workspace/contracts/[id]/document/versions` | GET, POST | same |
+| `/api/workspace/contracts/[id]/document/template` | POST | same |
+| `/api/workspace/contracts/[id]/document/import` | POST (multipart, one file) | same — and it does **not** write |
+| `/api/workspace/contracts/[id]/signing` | GET, PUT, POST | same |
+| `/api/workspace/contract-templates` | GET, POST, DELETE | view / contracts_manage |
+| `/api/workspace/contracts` | POST (+`templateRef`, `duplicateOf`) | contracts_manage |
+| `/api/sign/[token]` | GET, POST | **the token only** — no session, no tenant id from the caller |
+
+The public route is the product's only session-less surface apart from the auth
+doors. It is listed in `PUBLIC_PATHS`, behind the same Origin check as the
+login mutations, and justified in `api-guards.test.ts` `PUBLIC_ROUTES`. Every id
+it acts on is resolved **from the token**, never accepted from the request.
+
+## 4a. Importing an existing Word or PDF document
+
+`src/lib/contracts/import.ts` + `POST …/document/import`. The epic asks for
+"import DOCX/PDF"; the honest version of that is *read the document, produce
+editable blocks, and say exactly what could not be carried over* — not a button
+that uploads a file and implies a perfect copy.
+
+**DOCX.** The archive is opened with the same bounded inflation the AI
+attachment reader uses (`openBoundedZip` / `inflateBoundedEntry`, exported from
+`ai-office-extract.ts` for this second caller so there is one inflate guard
+rather than two that can drift), then `word/document.xml` is walked as a tree:
+headings (a `Heading*`/`Title` style or an outline level), paragraphs, bulleted
+and numbered lists — read through `word/numbering.xml`, so a bulleted list does
+not come back numbered — tables (first row = header, which is what the block
+model requires) and page breaks. Bold/italic runs, colour, images, headers,
+footnotes, comments and tracked changes are dropped **and reported**.
+
+**PDF.** A text-layer reader, not OCR. FlateDecode streams are unwrapped and
+glyph codes are mapped through each font's `ToUnicode` CMap — without that, a
+modern Persian PDF (Identity-H: two bytes per glyph) yields nothing readable.
+A scanned page has no text and no CMap, so the import refuses with
+`pdf_no_text_layer` rather than returning an empty document: an import that
+silently produces nothing is worse than an error, because the sender would
+freeze and send a blank contract.
+
+**Three decisions worth stating:**
+
+1. **The route does not write.** It returns blocks plus warnings; the editor
+   puts them on the canvas as an ordinary edit (undoable, dirty, autosaved)
+   through the existing `PUT …/document` with the revision it already holds. One
+   write path means import cannot bypass the 409 `document_conflict` guarantee.
+2. **The file is not stored.** No media asset, no temp file, no second document
+   store: the bytes are parsed and dropped. Filing the original would make
+   import depend on object storage being configured, which would fail on a fresh
+   install for a reason unrelated to import. What is signed is the contract's own
+   frozen version, and that is the record.
+3. **No variables are invented.** Word cannot say which words were meant to be
+   `{{counterparty_name}}`, and a guessed field is a blank a signer would meet at
+   signing time. The imported document has `fields: []` and the sender binds them
+   in the inspector.
+
+Limits enforced before a parser sees the bytes: 5 MB per file, ≤ 500 archive
+entries, ≤ 20 MB per inflated part (and the whole archive bounded the same way),
+and the declared MIME type is never trusted — the format comes from the magic
+bytes, so a PDF announced as a `.docx` is read as a PDF and the mismatch comes
+back as a warning (the sender may simply have attached the wrong file).
+
+## 5. Screens
+
+* `/workspace/contracts` — the existing list; each title links to its document.
+* `/workspace/contracts/[id]` — two tabs: **سند** (the three-panel builder) and
+  **امضا و ارسال** (signers, delivery, timeline), tab in the URL (`?tab=signing`).
+* `/workspace/contracts/[id]/print` — A4 print/PDF of the newest frozen version,
+  falling back to the draft with unresolved variables marked. Once its envelope
+  is completed, the print view overlays each signer's drawn mark, name and
+  Shamsi timestamp in the assigned signature slot and prints the full version
+  hash; the browser can save this view as PDF.
+* `/sign/[token]` — the external signatory's page: frozen document → explicit
+  consent → phone OTP → drawn signature → receipt with the content hash.
+
+The builder is RTL-first: library and variables on the leading side, the A4
+canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
+
+## 6. Honest gaps (what this branch does NOT claim)
+
+1. **DOCX/PDF import is partial by design** (§4a). Word styling, images,
+   headers/footnotes and tracked changes are dropped; a PDF contributes text
+   only (no columns, no tables, no styling), and a scanned PDF is refused rather
+   than imported blank. Signature placements are never auto-detected — the
+   sender adds them, because a guessed signing line is a document that cannot be
+   sent. The upload is not archived.
+2. **Durable final-PDF generation and verification QR** are not implemented.
+   The authorized print view now includes signatures from a completed envelope
+   and its full hash, and the browser can save it as PDF; there is not yet a
+   server-generated immutable PDF asset, QR verification flow or Media Library
+   archive.
+3. **Legal retention policy and legal hold** still require an approved policy and
+   jurisdictional review; no retention duration or evidence purge has been
+   invented. The append-only evidence must not be silently deleted.
+4. **The signing integration is part of the required database CI gate.**
+   Locally, `integration/contract-signing.integration.test.ts` passes 23 tests
+   against a real PostgreSQL: it creates a throwaway database, applies all
+   471 migrations and seeds only the required party/project rows. It exercises
+   AEC/Accounting bindings, conditional clauses and schedules, freezing, tenant
+   isolation under an unprivileged role, append-only evidence, parallel and
+   sequential rounds, consent → OTP → signature, link rotation and post-signature
+   draft edits. Results are in §6a;
+   the green run here does not replace the CI job.
+5. **`npm run build` was not executed** here (the sandbox has 3 GB and the
+   previous full `tsc` run exhausted it); CI's production build remains the
+   authoritative build check.
+
+## 6a. What the database suite found
+
+Three defects were invisible to the unit tests — which mock `query()` — and only
+appeared once the SQL ran against a real server:
+
+1. **`locations` has no `is_primary` column.** `businessFacts()` selected
+   `COALESCE(l.phone, b.phone)` from locations with `ORDER BY is_primary`, so
+   *every* freeze, send and print path threw `column "is_primary" does not exist`.
+   Fixed by reusing `resolveBusinessBranding()` — the resolver every printed
+   document already goes through (#945) — so a contract now prints the same legal
+   name as an invoice, with the first active location only as the address/phone
+   fallback.
+2. **Frozen versions were written without their title.** The `INSERT` listed
+   seven columns but bound eight parameters, so no version could ever be stored.
+3. **Signing was impossible even with a correct hash.** Two independent bugs met:
+   the `mfa_challenges.purpose` CHECK in `0211` did not include
+   `contract_signing` (so no OTP challenge could be inserted), and the freeze path
+   hashed the draft's `revision` while verification hashed the content schema
+   version — every signature was refused with `contract_version_mismatch`. Both
+   are fixed; the hash payload now has exactly one definition
+   (`frozenContentHash()` in `crypto.ts`), used by both sides.
+
+## 7. Verification commands
+
+```bash
+# the new domain modules, end to end
+npx vitest run src/lib/contracts
+
+# the repo-wide gates this branch touches
+npx vitest run src/app/api/api-guards.test.ts src/app/design-lint.test.ts \
+  src/app/dashboard/design-lint.test.ts src/app/dashboard/primitive-lint.test.ts \
+  src/app/loading-coverage.test.ts src/lib/client-bundle-boundary.test.ts \
+  src/lib/brand-coverage.test.ts src/lib/mcp/registry.test.ts \
+  src/lib/billing/catalog/audit.test.ts \
+  src/components/ui/numeric-input-architecture.test.ts
+
+# the whole suite (≈12 minutes)
+npx vitest run
+
+# the migration and the signing flow, on a real database
+PGDATA=/tmp/pgdata node scripts/dev-postgres.mjs --detach
+export DATABASE_URL=postgres://pos:pos@localhost:5432/pos
+./node_modules/.bin/tsx scripts/migrate.ts
+./node_modules/.bin/vitest run --config vitest.db.config.ts \
+  integration/contract-signing.integration.test.ts
+# the whole database suite
+npm run test:db
+```

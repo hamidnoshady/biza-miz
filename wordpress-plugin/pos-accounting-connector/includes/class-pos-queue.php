@@ -23,8 +23,16 @@ class POS_Connector_Queue {
 
 	const TABLE = 'pos_connector_queue';
 
-	/** Bumped when the queue schema changes; stored in `pos_connector_db_version`. */
-	const DB_VERSION = 1;
+	/**
+	 * Bumped when the queue schema changes; stored in `pos_connector_db_version`
+	 * together with the log's, and the pair is what gates `dbDelta()`.
+	 *
+	 * 2 added `topic_remote_status`: the enqueue de-duplication reads
+	 * `(topic, remote_id, status)`, which the existing keys could not serve. Not
+	 * unique — the same product legitimately has a `sent` row from yesterday and
+	 * a `pending` one from today, and two `sent` rows once it is sent twice.
+	 */
+	const DB_VERSION = 2;
 
 	/** Set when `install_table()` fails so admin notices can surface `$wpdb->last_error`. */
 	private static $last_install_error = '';
@@ -52,11 +60,26 @@ class POS_Connector_Queue {
 		return self::$last_install_error;
 	}
 
+	/** Per-request memo of the `SHOW TABLES` answer; `null` until it has been asked. */
+	private static $table_present = null;
+
+	/**
+	 * Whether the queue table exists.
+	 *
+	 * Asked once per request, not once per call: a catalogue import enqueues
+	 * hundreds of rows through the same request, and `SHOW TABLES` is a query
+	 * each time. `install_table()` clears the memo, so a table created inside
+	 * this request is visible to the next call.
+	 */
 	public static function table_exists() {
+		if ( null !== self::$table_present ) {
+			return self::$table_present;
+		}
 		global $wpdb;
 		$table = self::table_name();
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-		return $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) === $table;
+		self::$table_present = ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) ) === $table );
+		return self::$table_present;
 	}
 
 	/**
@@ -74,6 +97,7 @@ class POS_Connector_Queue {
 
 	public static function install_table() {
 		global $wpdb;
+		self::$table_present = null;
 		$table   = self::table_name();
 		$charset = $wpdb->get_charset_collate();
 
@@ -95,6 +119,7 @@ class POS_Connector_Queue {
 				available_at DATETIME NOT NULL,
 				PRIMARY KEY  (id),
 				UNIQUE KEY delivery_id (delivery_id),
+				KEY topic_remote_status (topic, remote_id, status),
 				KEY status_created (status, created_at),
 				KEY due_lookup (status, available_at)
 			) {$charset};"
@@ -304,6 +329,25 @@ class POS_Connector_Queue {
 		);
 	}
 
+	/**
+	 * The oldest still-unsent row, for the backlog age in `doctor` and telemetry.
+	 *
+	 * Age is the whole point: a queue of five rows from ten minutes ago is an
+	 * outage, a queue of five hundred from ten seconds ago is a catalogue
+	 * export in progress. Read-only.
+	 *
+	 * @return string|null UTC `Y-m-d H:i:s`, or null when nothing is waiting.
+	 */
+	public static function oldest_pending_at() {
+		if ( ! self::table_exists() ) {
+			return null;
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$value = $wpdb->get_var( "SELECT MIN(created_at) FROM {$table} WHERE status IN ('pending', 'failed')" );
+		return null === $value ? null : (string) $value;
+	}
+
 	/** Counts by status, for the admin screen's summary line. */
 	public static function counts() {
 		if ( ! self::table_exists() ) {
@@ -367,6 +411,64 @@ class POS_Connector_Queue {
 				'createdAt' => $created ? gmdate( 'c', $created ) : null,
 			);
 		}
+		return $out;
+	}
+
+	/**
+	 * Measured delivery latency of this queue, enqueue → app accepted (#1206 P1).
+	 *
+	 * A `sent` row's `updated_at` is stamped by `mark_sent()` at the moment
+	 * the status flips, and `mark_sent()` runs only for delivery IDs the app
+	 * answered `processed`, `duplicate` or `deferred`. So the difference is
+	 * the time a real event spent between a WooCommerce hook queueing it and
+	 * the accounting system accepting it — exactly the «plugin enqueue →
+	 * Biza receive → apply/ACK» leg the p95 ≤ 3-minute target is about, and
+	 * the only honest way to talk about that target: percentiles over rows
+	 * that travelled, with the sample count attached, instead of a promise
+	 * derived from the 60s cadence. `deferred` counts as delivered here: the
+	 * app has the event and has said so; what it does with it afterwards is
+	 * the app's own queue's business (measured there, not guessed here).
+	 *
+	 * Read-only; cached for ten minutes because telemetry is built every
+	 * cycle and a percentile does not move by the minute. `doctor` asks for
+	 * a fresh read.
+	 *
+	 * @param int  $limit Most recent sent rows to measure.
+	 * @param bool $fresh Skip the transient cache.
+	 * @return array{samples:int,p50Seconds:int,p95Seconds:int,p99Seconds:int,maxSeconds:int}|null Null when nothing has been delivered yet.
+	 */
+	public static function delivery_latency( $limit = 500, $fresh = false ) {
+		$cache_key = 'pos_connector_delivery_latency';
+		if ( ! $fresh ) {
+			$cached = get_transient( $cache_key );
+			if ( is_array( $cached ) && isset( $cached['samples'] ) ) {
+				return $cached;
+			}
+		}
+		if ( ! self::table_exists() ) {
+			return null;
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$limit = max( 1, min( 2000, (int) $limit ) );
+		$rows  = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT UNIX_TIMESTAMP(updated_at) - UNIX_TIMESTAMP(created_at)\n				   FROM {$table}\n				  WHERE status = 'sent'\n				  ORDER BY id DESC\n				  LIMIT %d",
+				$limit
+			)
+		);
+		$stats = POS_Connector_Health::percentiles( (array) $rows );
+		if ( null === $stats ) {
+			return null;
+		}
+		$out = array(
+			'samples'    => (int) $stats['samples'],
+			'p50Seconds' => (int) round( $stats['p50'] ),
+			'p95Seconds' => (int) round( $stats['p95'] ),
+			'p99Seconds' => (int) round( $stats['p99'] ),
+			'maxSeconds' => (int) round( $stats['max'] ),
+		);
+		set_transient( $cache_key, $out, 10 * MINUTE_IN_SECONDS );
 		return $out;
 	}
 

@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { dropAppRole } from "../src/lib/create-app-role";
 import { deriveRuntimeDatabaseUrl } from "../scripts/derive-runtime-database-url";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -70,7 +71,10 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query("DROP ROLE IF EXISTS pos_app_runtime_url_test");
+    // deriveRuntimeDatabaseUrl provisions the role through `createAppRole`, whose
+    // replay capability is a parameter grant that depends on the role: revoke it
+    // first, or DROP ROLE refuses to run.
+    await dropAppRole(maintenance, "pos_app_runtime_url_test");
   } finally {
     await maintenance.end();
   }

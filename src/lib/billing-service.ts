@@ -9,7 +9,7 @@
  * `WalletInsufficientFundsError` and shows the buy-credits prompt.
  */
 import { getPool, query, withoutTenantScope } from "./db";
-import { chargeFeatureUse, WalletInsufficientFundsError } from "./wallet-service";
+import { chargeFeatureUse, getWalletBalanceRial, WalletInsufficientFundsError } from "./wallet-service";
 import {
   grantEntitlement,
   listPlanFeatures,
@@ -70,6 +70,42 @@ export async function billFeatureUse(input: {
     priceRial: access.perUsePriceRial,
     balanceRial: result.balanceRial,
     access,
+  };
+}
+
+export interface FeatureUsePreview {
+  entitled: boolean;
+  metered: boolean;
+  /** Per-use price in Rial right now (0 during a free promo). */
+  priceRial: number;
+  balanceRial: number;
+  promoActive: boolean;
+  freeUsesRemaining: number | null;
+}
+
+/**
+ * Issue #903 — the read-only half of `billFeatureUse`, for work that must be
+ * charged only *after* it succeeds (a backup that may fail on a full disk, an
+ * unreachable database or an empty scope). It answers "is this entitled, what
+ * would it cost, and can the wallet cover it" and debits nothing, so a caller
+ * can refuse early and settle later without buying a nonrefundable charge for
+ * work that never happened.
+ */
+export async function previewFeatureUse(input: {
+  businessId: string;
+  featureKey: string;
+}): Promise<FeatureUsePreview> {
+  const [access, balanceRial] = await Promise.all([
+    resolveFeatureAccess(input.businessId, input.featureKey),
+    getWalletBalanceRial(input.businessId),
+  ]);
+  return {
+    entitled: access.entitled,
+    metered: access.metered,
+    priceRial: access.metered ? access.perUsePriceRial : 0,
+    balanceRial,
+    promoActive: access.promoActive,
+    freeUsesRemaining: access.freeUsesRemaining,
   };
 }
 

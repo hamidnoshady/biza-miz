@@ -115,6 +115,11 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   // re-enable, quotes, wizard state). Its charge is the service layer's own
   // wallet debit, declared below so the segment is never unclassified.
   services: keys("services.activation"),
+  // Issue #902 §9 item 5 — read-only managed-service readiness for the business
+  // (messaging, AI, payments, media). It reports state; every charge behind those
+  // services is declared on the segment that performs it, so this one is
+  // classified as internal rather than pretending to bill anything.
+  "managed-services": keys("platform.internal"),
 
   ai: keys("ai.chat", "automation.run"),
   messaging: keys("growth.messaging.sms", "growth.messaging.email"),
@@ -125,6 +130,12 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   // Issue #984 — the Windows support companion's API: platform-operated
   // support infrastructure, never billed to the customer.
   "support-companion": keys("platform.support"),
+  // Issue #908 — the public contract-signing session. It is the `workspace`
+  // module's own capability reached without a session (the recipient is an
+  // external signatory holding a token), so it bills exactly as `workspace`
+  // does; sending an invitation SMS is charged by the messaging wallet, never
+  // twice here.
+  sign: keys("operations.shared"),
 };
 
 function keys(...capabilityKeys: string[]): RouteClass {

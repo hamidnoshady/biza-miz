@@ -25,10 +25,24 @@ import { useFeatureLocked } from "@/components/feature-lock";
 import { api, ErrorBox, errorMessageOrRaw, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
 import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
+import { WORDPRESS_PLUGIN_ZIP_URL } from "@/lib/integrations/wp-plugin-release";
 import { formatDateTime } from "./format";
 import { SyncSettingsSection } from "./woo-store-sections";
 
 type LinkMode = "rest_api" | "plugin";
+
+/**
+ * Measured delivery percentiles (#1206 P1) — computed from rows that
+ * actually travelled, with the sample count attached. Never derived from
+ * the configured cadence.
+ */
+interface MeasuredLatency {
+  samples: number;
+  p50Seconds: number;
+  p95Seconds: number;
+  p99Seconds: number;
+  maxSeconds: number;
+}
 
 interface Connection {
   provider: string;
@@ -46,16 +60,63 @@ interface Connection {
   orderLookbackDays: number;
   sourceOfTruth?: "store" | "pos" | "two_way";
   manageStockOptIn?: boolean;
-  /** Issue #1149 — plugin-mode health, from GET /api/integrations/overview. */
+  /**
+   * Issue #1206 P1 — per-domain freshness, from the same overview call. Always
+   * all six domains: a screen that omits a silent one makes silence look like
+   * health.
+   */
+  domainFreshness?: {
+    domain: "products" | "stock" | "prices" | "orders" | "customers" | "content";
+    state: "ok" | "delayed" | "never";
+    reason: string;
+    lastExchangeAt: string | null;
+    backlog: number;
+    oldestBacklogSeconds: number | null;
+  }[];
+  /** Issues #1149/#1206 — plugin-mode health, from GET /api/integrations/overview. */
   pluginHealthSummary?: {
     silentMinutes: number | null;
     stale: boolean;
     alert: boolean;
+    /** The scheduler graded from actual cron starts (#1206), not from any contact. */
+    cron: {
+      state: "healthy" | "delayed" | "failed" | "paused" | "test_only" | "unknown";
+      reason: string;
+      lastAttemptAt: string | null;
+      missedIntervals: number | null;
+    };
     cronStale: boolean | null;
     cronGapSeconds: number | null;
+    /** Last cycle in which every phase succeeded or was verified empty. */
+    lastVerifiedCycleAt: string | null;
+    lastDataAppliedAt: string | null;
+    lastCycleVerdict: string | null;
+    nextDueAt: string | null;
+    /** The interruption a recovered store ended: history, not a live warning. */
+    previousOutageAt: string | null;
+    recoveredAt: string | null;
+    incidentOpen: boolean;
     queueSize: number;
     oldestQueuedAgeSeconds: number | null;
+    /** Woo → Bizamiz delivery percentiles the plugin measured (#1206 P1); null = not measured. */
+    deliveryLatency?: MeasuredLatency | null;
+    /**
+     * The scheduler probe's stage (#1206 P0). `expired` means an event was
+     * queued and no scheduler ever ran it — the finding a connection test
+     * cannot produce.
+     */
+    cronProbe: {
+      stage: "never" | "requested" | "queued" | "executed" | "reported" | "expired" | "failed" | "unsupported";
+      reason: string;
+      probeId: string | null;
+      queuedAt: string | null;
+      executedAt: string | null;
+      reportedAt: string | null;
+      expiresInSeconds: number | null;
+    };
   } | null;
+  /** Bizamiz → store desired→applied percentiles over the last 30 days (#1206 P1); null = nothing measured. */
+  applyLatency?: MeasuredLatency | null;
   status: "active" | "paused" | "error";
   lastSyncAt: string | null;
   lastCatalogueSyncAt: string | null;
@@ -138,7 +199,133 @@ const OUTBOX_STATUS_LABELS: Record<string, string> = {
  */
 const PLUGIN_STALE_MS = 15 * 60 * 1000;
 
+/**
+ * How the app names the plugin's scheduler (#1206). Worded as what is known,
+ * never as a promise: `test_only` and `unknown` exist so the screen can say
+ * «نمی‌دانیم» instead of borrowing the colour of «سالم».
+ */
+const CRON_STATE_LABELS: Record<string, string> = {
+  healthy: "کرون در حال اجرا",
+  delayed: "کرون دیرکرده",
+  failed: "کرون اجرا نمی‌شود",
+  paused: "همگام‌سازی متوقف",
+  test_only: "فقط آزمایش اتصال",
+  unknown: "وضعیت کرون نامشخص",
+};
+
+/** Why the state is what it is — the actionable half of the sentence. */
+const CRON_REASON_LABELS: Record<string, string> = {
+  recent_start: "آخرین دوره به‌تازگی شروع شده است.",
+  missed_starts: "چند اجرای پیاپی کرون انجام نشده است؛ کرون سیستم را بررسی کنید.",
+  no_start_since: "کرون از مدتی پیش اجرا نشده؛ کرون سیستم یا مسیر WP-CLI را بررسی کنید.",
+  never_ran: "از زمان فعال‌سازی، کرون هرگز اجرا نشده است.",
+  awaiting_first_run: "اتصال تازه فعال شده و در انتظار نخستین اجرای کرون است.",
+  ping_without_cron: "آزمایش اتصال موفق بوده، اما این فقط اتصال را ثابت می‌کند نه کرون را.",
+  no_cycle_evidence: "هنوز هیچ نشانه‌ای از یک اجرای واقعی کرون به این سامانه نرسیده است.",
+  paused_by_owner: "همگام‌سازی از همین پنل متوقف شده است.",
+  paused_by_app: "همگام‌سازی از پنل بیزامیز متوقف شده است.",
+};
+
+/**
+ * The probe's stages, worded as what they prove (#1206 P0). «queued» never
+ * borrows «ok»: an event WordPress recorded is not an event a scheduler ran.
+ */
+const CRON_PROBE_LABELS: Record<string, string> = {
+  never: "تست کرون انجام نشده",
+  requested: "درخواست تست کرون در صف",
+  queued: "منتظر اجرای زمان‌بند",
+  executed: "زمان‌بند اجرا کرد",
+  reported: "گزارش امضاشده رسید",
+  expired: "زمان‌بندی بدون اجرا",
+  failed: "اجرا شد، گزارش نرسید",
+  unsupported: "افزونهٔ قدیمی، بدون تست کرون",
+};
+
+const DOMAIN_LABELS: Record<string, string> = {
+  products: "محصولات و تنوع‌ها",
+  stock: "موجودی",
+  prices: "قیمت‌ها",
+  orders: "سفارش‌ها و مرجوعی‌ها",
+  customers: "مشتریان",
+  content: "محتوا و دسته‌بندی‌ها",
+};
+
+/** Why a domain is graded what it is — never "no traffic is a fault". */
+const DOMAIN_REASON_LABELS: Record<string, string> = {
+  no_backlog: "بدون کار در انتظار",
+  backlog_draining: "در حال ارسال",
+  backlog_not_draining: "کار در انتظار مانده و ارسال نمی‌شود",
+  backlog_not_sent_yet: "در انتظار نخستین ارسال",
+  no_traffic_yet: "هنوز تبادلی نداشته",
+};
+
+const CRON_PROBE_REASON_LABELS: Record<string, string> = {
+  no_probe: "هنوز هیچ تست کرونی روی این فروشگاه انجام نشده است.",
+  requested_by_app: "درخواست ثبت شد؛ افزونه در اجرای بعدی کرون آن را برمی‌دارد.",
+  awaiting_scheduler: "رویداد ثبت شده و منتظر یک اجرای واقعی زمان‌بند است؛ ثبت رویداد به‌تنهایی اجرا را ثابت نمی‌کند.",
+  scheduler_ran_it: "یک اجرای واقعی زمان‌بند این رویداد را اجرا کرد؛ گزارش در راه است.",
+  telemetry_received: "گزارش امضاشده به بیزامیز رسید: زمان‌بند و مسیر همگام‌سازی هر دو کار می‌کنند.",
+  queued_but_never_executed: "رویداد ثبت شد ولی هیچ اجرایی آن را برنداشت؛ کرون سیستم اجرا نمی‌شود.",
+  plugin_cannot_run_probe: "نسخهٔ افزونهٔ نصب‌شده تست کرون را پشتیبانی نمی‌کند؛ افزونه را به‌روز کنید.",
+};
+
+
 /** A secret shown exactly once. Deliberately loud: there is no second chance to read it. */
+/** «۴۵ ثانیه»، «۲ دقیقه و ۱۰ ثانیه»، «۱ ساعت و ۵ دقیقه» — a measured duration in Persian. */
+function formatLatency(seconds: number): string {
+  const fa = (n: number) => n.toLocaleString("fa-IR");
+  const total = Math.max(0, Math.round(seconds));
+  if (total < 60) return `${fa(total)} ثانیه`;
+  const minutes = Math.floor(total / 60);
+  const restSeconds = total % 60;
+  if (minutes < 60) return restSeconds > 0 ? `${fa(minutes)} دقیقه و ${fa(restSeconds)} ثانیه` : `${fa(minutes)} دقیقه`;
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  if (hours < 24) return restMinutes > 0 ? `${fa(hours)} ساعت و ${fa(restMinutes)} دقیقه` : `${fa(hours)} ساعت`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours > 0 ? `${fa(days)} روز و ${fa(restHours)} ساعت` : `${fa(days)} روز`;
+}
+
+/**
+ * The p95 ≤ 3-minute target (#1206 P1) as measured fact — or explicit
+ * absence of fact.
+ *
+ * Both directions carry percentiles over deliveries that happened, sample
+ * count in the sentence: below ten samples a p95 is an anecdote, so the
+ * honest line is «هنوز قابل قضاوت نیست». Nothing here is inferred from the
+ * configured cadence; a 60s poll never proved a delivery time.
+ */
+function measuredLatencyLines(c: Connection): string[] {
+  const fa = (n: number) => n.toLocaleString("fa-IR");
+  const lines: string[] = [];
+  const delivery = c.pluginHealthSummary?.deliveryLatency ?? null;
+  if (delivery) {
+    if (delivery.samples >= 10) {
+      lines.push(
+        `تأخیر رسیدن رویدادهای فروشگاه به بیزامیز — اندازه‌گیری‌شده از ${fa(delivery.samples)} تحویل اخیرِ افزونه: ۹۵٪ حداکثر در ${formatLatency(delivery.p95Seconds)} رسیدند (${delivery.p95Seconds <= 180 ? "در این نمونه‌ها زیر هدف ۳ دقیقه" : "در این نمونه‌ها بالاتر از هدف ۳ دقیقه"}).`,
+      );
+    } else {
+      lines.push(
+        `تأخیر رسیدن رویدادهای فروشگاه به بیزامیز هنوز قابل قضاوت نیست: فقط ${fa(delivery.samples)} تحویل اندازه‌گیری شده است.`,
+      );
+    }
+  }
+  const apply = c.applyLatency ?? null;
+  if (apply) {
+    if (apply.samples >= 10) {
+      lines.push(
+        `تأخیر اعمال تغییرات بیزامیز در فروشگاه — اندازه‌گیری‌شده از ${fa(apply.samples)} کارِ ۳۰ روز گذشته: ۹۵٪ حداکثر در ${formatLatency(apply.p95Seconds)} اعمال و از فروشگاه تأیید شدند (${apply.p95Seconds <= 180 ? "در این نمونه‌ها زیر هدف ۳ دقیقه" : "در این نمونه‌ها بالاتر از هدف ۳ دقیقه"}).`,
+      );
+    } else {
+      lines.push(
+        `تأخیر اعمال تغییرات بیزامیز در فروشگاه هنوز قابل قضاوت نیست: فقط ${fa(apply.samples)} کار در ۳۰ روز گذشته اندازه‌گیری شده است.`,
+      );
+    }
+  }
+  return lines;
+}
+
 function ShowOnceSecret({ title, value, note, onDone }: { title: string; value: string; note: string; onDone: () => void }) {
   const [copyFailed, setCopyFailed] = useState(false);
   return (
@@ -470,11 +657,105 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                         .
                       </div>
                     ) : null}
-                    {c.pluginHealthSummary?.cronStale ? (
-                      <div className="text-amber-700 dark:text-amber-300">
-                        افزونه گزارش داده که زمان‌بند وردپرس مدتی اجرا نشده بود؛ کرون سیستمی را بررسی کنید.
+                    {c.pluginHealthSummary?.cron ? (
+                      <div
+                        className={
+                          c.pluginHealthSummary.cron.state === "failed"
+                            ? "text-red-700 dark:text-red-300"
+                            : c.pluginHealthSummary.cron.state === "delayed"
+                              ? "text-amber-700 dark:text-amber-300"
+                              : ""
+                        }
+                      >
+                        <span className="font-semibold">
+                          {CRON_STATE_LABELS[c.pluginHealthSummary.cron.state] ?? CRON_STATE_LABELS.unknown}
+                        </span>
+                        {c.pluginHealthSummary.cron.reason
+                          ? ` — ${CRON_REASON_LABELS[c.pluginHealthSummary.cron.reason] ?? c.pluginHealthSummary.cron.reason}`
+                          : null}
                       </div>
                     ) : null}
+                    {c.pluginHealthSummary?.cronProbe ? (
+                      <div
+                        className={
+                          c.pluginHealthSummary.cronProbe.stage === "expired" || c.pluginHealthSummary.cronProbe.stage === "failed"
+                            ? "text-amber-700 dark:text-amber-300"
+                            : ""
+                        }
+                      >
+                        <span className="font-semibold">
+                          {CRON_PROBE_LABELS[c.pluginHealthSummary.cronProbe.stage] ?? CRON_PROBE_LABELS.never}
+                        </span>
+                        {c.pluginHealthSummary.cronProbe.reason
+                          ? ` — ${CRON_PROBE_REASON_LABELS[c.pluginHealthSummary.cronProbe.reason] ?? c.pluginHealthSummary.cronProbe.reason}`
+                          : null}
+                        {c.pluginHealthSummary.cronProbe.executedAt
+                          ? ` • اجرای زمان‌بند: ${formatDateTime(c.pluginHealthSummary.cronProbe.executedAt)}`
+                          : ""}
+                        {c.pluginHealthSummary.cronProbe.reportedAt
+                          ? ` • گزارش: ${formatDateTime(c.pluginHealthSummary.cronProbe.reportedAt)}`
+                          : ""}
+                        {c.pluginHealthSummary.cronProbe.stage === "queued" && c.pluginHealthSummary.cronProbe.expiresInSeconds !== null
+                          ? ` • ${Math.max(0, Math.round(c.pluginHealthSummary.cronProbe.expiresInSeconds / 60)).toLocaleString("fa-IR")} دقیقه تا پایان مهلت`
+                          : ""}
+                      </div>
+                    ) : null}
+                    {c.domainFreshness?.length ? (
+                      <div className="space-y-0.5">
+                        {c.domainFreshness.map((entry) => (
+                          <div
+                            key={entry.domain}
+                            className={
+                              entry.state === "delayed"
+                                ? "text-amber-700 dark:text-amber-300"
+                                : entry.state === "never"
+                                  ? "text-muted-foreground"
+                                  : ""
+                            }
+                          >
+                            {DOMAIN_LABELS[entry.domain] ?? entry.domain}:{" "}
+                            {entry.state === "delayed" ? "دیرکرد — " : ""}
+                            {DOMAIN_REASON_LABELS[entry.reason] ?? entry.reason}
+                            {entry.lastExchangeAt ? ` • آخرین تبادل: ${formatDateTime(entry.lastExchangeAt)}` : ""}
+                            {entry.backlog > 0
+                              ? ` • ${entry.backlog.toLocaleString("fa-IR")} در صف${
+                                  entry.oldestBacklogSeconds !== null
+                                    ? ` (قدیمی‌ترین ${Math.max(1, Math.round(entry.oldestBacklogSeconds / 60)).toLocaleString("fa-IR")} دقیقه)`
+                                    : ""
+                                }`
+                              : ""}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {c.pluginHealthSummary ? (
+                      <div>
+                        آخرین اجرای واقعی کرون: {formatDateTime(c.pluginHealthSummary.cron.lastAttemptAt)}
+                        {" • "}
+                        آخرین دورهٔ تأییدشده: {formatDateTime(c.pluginHealthSummary.lastVerifiedCycleAt)}
+                        {" • "}
+                        آخرین دادهٔ اعمال‌شده: {formatDateTime(c.pluginHealthSummary.lastDataAppliedAt)}
+                        {c.pluginHealthSummary.nextDueAt
+                          ? ` • اجرای بعدی: ${formatDateTime(c.pluginHealthSummary.nextDueAt)}`
+                          : ""}
+                      </div>
+                    ) : null}
+                    {/* A recovered gap is history: shown, never painted as the
+                        current concern (#1206 P0-3). */}
+                    {c.pluginHealthSummary?.previousOutageAt ? (
+                      <div>
+                        وقفهٔ پیشین: {formatDateTime(c.pluginHealthSummary.previousOutageAt)}
+                        {c.pluginHealthSummary.incidentOpen
+                          ? " — هنوز رفع نشده"
+                          : ` — رفع‌شده در ${formatDateTime(c.pluginHealthSummary.recoveredAt)}`}
+                      </div>
+                    ) : null}
+                    {/* #1206 P1: the p95 target, judged only by measurements
+                        (see measuredLatencyLines). An empty list renders
+                        nothing — "not measured" is silence here, not a zero. */}
+                    {measuredLatencyLines(c).map((line) => (
+                      <div key={line}>{line}</div>
+                    ))}
                     {!c.lastPluginSeenAt ? (
                       <div className="text-amber-700 dark:text-amber-300">
                         افزونه هنوز متصل نشده است. در وردپرس، آدرس بالا و توکن را وارد و «آزمایش اتصال» را بزنید.
@@ -510,6 +791,22 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                   >
                     تست اتصال
                   </Button>
+                  {/* #1206 P0: the only control whose answer needs a real
+                      scheduler invocation. Hidden from a plugin that cannot
+                      run it, rather than offering a button that would queue
+                      a job nothing leases. */}
+                  {c.pluginHealthSummary?.cronProbe &&
+                  c.pluginHealthSummary.cronProbe.stage !== "unsupported" ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      onClick={() => call(`/api/integrations/connections/${c.id}/cron-probe`)}
+                      disabled={busy !== null}
+                    >
+                      تست کرون
+                    </Button>
+                  ) : null}
                   <Button
                     type="button"
                     variant="outline"
@@ -631,8 +928,8 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
 
                 {c.linkMode === "plugin" ? (
                   <p className="mt-1 text-[11px] text-muted-foreground">
-                    صف این فروشگاه توسط خودِ افزونهٔ وردپرس (هر ۵ دقیقه) تخلیه می‌شود؛ اگر «در صف» ثابت ماند، افزونه در
-                    حال اجرا نیست.
+                    صف این فروشگاه توسط خودِ افزونهٔ وردپرس و در بازه‌ای که خودش گزارش می‌کند (افزونه‌های ۱٫۶ به بالا هر
+                    دقیقه) تخلیه می‌شود؛ اگر «در صف» ثابت ماند، وضعیت کرون در بالای همین کارت را ببینید.
                   </p>
                 ) : null}
 
@@ -714,7 +1011,7 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
           <li>
             فایل{" "}
             <a
-              href="https://updates.eshobe.app/wordpress/pos-accounting-connector/pos-accounting-connector.zip"
+              href={WORDPRESS_PLUGIN_ZIP_URL}
               className="font-medium text-primary hover:underline"
               dir="ltr"
             >
@@ -727,7 +1024,14 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
             خودش نمایش داده می‌شود) آدرس <span dir="ltr" className="font-mono">{origin}</span> و توکنی که
             اینجا ساخته‌اید را وارد کنید.
           </li>
-          <li>«آزمایش اتصال از وردپرس» را بزنید؛ پس از موفقیت، همگام‌سازی خودکار هر پنج دقیقه اجرا می‌شود.</li>
+          <li>
+            «آزمایش اتصال از وردپرس» را بزنید. این آزمایش فقط اتصال را ثابت می‌کند؛ برای اثبات اجرای زمان‌بند، پس از
+            آن در پیشخوان وردپرس بخش «عیب‌یابی» وضعیت کرون را ببینید (یا در سرور{" "}
+            <code dir="ltr" className="font-mono">
+              wp pos-connector doctor
+            </code>{" "}
+            را اجرا کنید).
+          </li>
         </ol>
         <InfoBox>
           افزونه هیچ‌گاه به پایگاه‌دادهٔ این سامانه وصل نمی‌شود؛ همهٔ ارتباط‌ها امضاشده (HMAC-SHA256) و دارای
@@ -735,7 +1039,7 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
         </InfoBox>
         <InfoBox>
           کرون داخلی وردپرس فقط هنگام بازدید از سایت اجرا می‌شود؛ در فروشگاه کم‌تردد، همگام‌سازی تا مراجعهٔ بعدی به تعویق
-          می‌افتد. برای اجرای دقیق هر ۵ دقیقه، یک کرون واقعی در هاست تنظیم کنید:{" "}
+          می‌افتد. برای اجرای دقیق، یک کرون واقعی در هاست تنظیم کنید (یک خط، بدون تکرار):{" "}
           <code dir="ltr" className="font-mono">wp cron event run --due-now</code> (یا بازدید دوره‌ای از
           wp-cron.php).
         </InfoBox>

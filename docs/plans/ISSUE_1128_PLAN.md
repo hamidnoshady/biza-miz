@@ -103,6 +103,48 @@ way round. See «What this change does not build».
 | **Wave 4** — the client screen | `/review/[token]`, public in exactly the way `/invite` is, plus its middleware entries. Renders each item's preview inline from its token-scoped URL, takes a per-item decision with a note, then a whole-round decision, and maps the refusal codes onto instructions split by whether the outcome is terminal or fixable. Its wire types are redeclared locally: the service imports the Postgres driver, and importing it into a client component would drag `pg` into the browser bundle |
 | **Wave 4** — tests | `src/lib/media-review.test.ts` (42, pure), `src/app/api/media/review-guard.test.ts` (7, exhaustive status map), `integration/media-review.integration.test.ts` (18, real database), and 72 assertions against 0265 run directly over Postgres. Two MCP coverage rows were added and both generated matrices regenerated, because `media.assets`'s broad `routes: ["media"]` prefix silently absorbed all ten new route files — the only symptom was a stale route count |
 
+| **Wave 5** — §A sales pipeline | `src/lib/crm-agency-pipeline.ts`: the agency's seven sales stages — intake, qualification, the brief, the proposal, scope and contract, won, lost — each with a probability, an outcome and its own exit criterion in `requirement_note`. No table, no entity, no engine: a list the platform's own `crm_pipeline_stages` already holds and `savePipelineStages` already validates. A type-only import and no `pg`, asserted by a source scan |
+| **Wave 5** — §A wiring | `ensureAgencySalesPipeline` in `crm-pipeline-service.ts`, called from the two read routes where a member looks at pipelines: `GET /api/crm/pipelines` under `crm.configure` and `GET /api/crm/deals` under `crm.view`. Returns null and writes nothing for every other trade; inserts under `ON CONFLICT DO NOTHING` against `(business_id, name)`; writes `is_default` false so exactly one pipeline stays the default |
+| **Wave 5** — §A tests | `crm-agency-pipeline.test.ts` (13, pure: both invariants `savePipelineStages` enforces, contiguous ordering, unique names within 120, notes within 300, probabilities rising to won, no legacy key, only the agency receives it, imports nothing but a type) and `integration/crm-agency-pipeline.integration.test.ts` (8, real database: beside-not-instead, idempotence, two simultaneous first visits, the default's identity and seeded six intact with zero deactivated stages anywhere, nothing written for a `jewelry` tenant, no legacy key, the invariants as rows, and a renamed stage surviving the next visit) |
+
+| **Wave 6** — §A client briefs schema | `migrations/0274_agency_client_briefs.sql`: one table, `agency_client_briefs`. `party_id` is NOT NULL — a brief with no client is the agency guessing — while `deal_id` and `project_id` are nullable and `ON DELETE SET NULL`, because a brief is written against an opportunity, then carried by the project it becomes, and outlives either. The substance is columns rather than a jsonb blob (objective, audience, `channels text[]`, `deliverables jsonb`, `budget_rial`, dates, acceptance criteria) so it stays queryable and freezable. Two triggers: `agency_assert_brief_references_owned` validates the client, deal, project and approver against `business_id` and requires the approver to be *related to this brief's own client*; `agency_client_brief_guard` freezes the substance once confirmed, keeps `sent_at`/`confirmed_at` un-clearable, and allows a cascaded delete when the client itself is gone. Eight named CHECKs couple status to stamps. RLS shape 1, `ENABLE` + `FORCE`. Nothing in it posts a journal entry |
+| **Wave 6** — §A brief vocabulary | `src/lib/agency-brief.ts`: five statuses, five acts, the chain between them, `agencyBriefActionsFrom` (which the panel renders its buttons from), the freeze/open/deletable predicates, a twelve-key channel vocabulary, and normalisers that return `null` rather than dropping a channel or deliverable nobody recognises — a silently vanished line item is a promise quietly unmade. Deliverable formats reuse §E's `AGENCY_MEDIA_FORMATS`, which already carried `brief`. Pure, so the panel may import it |
+| **Wave 6** — §A brief service | `src/lib/agency-brief-service.ts`: fifteen refusal codes; list, read, create, patch, action, delete. Every statement carries its own `business_id` predicate (decision 31), and a PATCH tests `"field" in patch`, so omitting `budgetRial` does not clear the client's budget. Numbering is `nextBusinessRegisterNumber`, a business-scoped *sibling* added to `register-numbering.ts` rather than a change to `nextRegisterNumber`'s signature — seven registers call it positionally, and a brief has no project to scope by more often than it has one. Confirming attributes the confirmation to a name, falling back to the approver the brief already records |
+| **Wave 6** — §A brief HTTP | Three routes under `/api/crm/briefs/**`, in the CRM door rather than the agency one (decision 39): list and draft, one brief and its edits, and the chain. `crm.view` to read, `crm.manage` to write and to move a brief along its chain, `crm.delete` to delete one. One error map in `src/app/api/crm/brief-guard.ts`, exhaustive over the fifteen codes. A new CRM section key `briefs` with its access row, its command-palette aliases, and its place in the «فرصت‌ها» group |
+| **Wave 6** — §A brief screen | `/crm/briefs` and `briefs-section.tsx`. Acts are read off each row's own `actions`, so the screen never offers a button the route refuses (decision 30). The approver picker is populated from the chosen client's own relationships in both directions — exactly what 0274's trigger accepts — so another client's decision-maker is not among the options. A confirmed brief's sheet keeps only the note and the project pointer writable. Dates render through `formatJalali` and money through `formatPersianNumber`; the browser's own formatter is what `crm-rtl.test.ts` refuses |
+| **Wave 6** — §A brief tests | `agency-brief.test.ts` (26, pure), `integration/agency-client-briefs.integration.test.ts` (17, real database) and 48 assertions against 0274 run directly over Postgres. The integration suite covers what only a database can show: one number sequence per agency held under a race, a second tenant unable to load, list, patch, transition or delete the first tenant's brief, §A's approver rule in both directions with nothing written on refusal, the freeze and the §A→§B handoff coexisting, and a client's deletion taking a confirmed brief with it |
+| **Wave 7** — §A+§D proposal schema | `migrations/0276_agency_proposals.sql`: `agency_proposals` and `agency_proposal_lines`. One document for §A's "proposal/quote" and §D's "estimate", because §B's stage list puts them in one place (decision 43). The header stores `discount_rial` and `tax_rial` and no total (decision 44); each line carries `quantity numeric(14,3)`, a computed `amount_rial`, one of the trade's four revenue codes validated against the tenant's own chart, and the internal `cost_rial` + `pass_through` pair (decision 45). Four triggers: reference ownership including §A's stakeholder rule and the sharper one — a brief priced for a different client; the freeze from `sent` with its lines and the cascade-tolerant delete; the line guard that freezes with the price, refuses impossible inputs in words and then computes the amount; and the revenue account's chart check. `UNIQUE (business_id, id)` on both so a later register can composite-FK a line. `brief_id` is a simple FK because Postgres refuses `ON DELETE SET NULL` on a composite whose other column is NOT NULL. RLS shape 1 on both, `ENABLE` + `FORCE`. Nothing posts |
+| **Wave 7** — §A proposal pure module | `src/lib/agency-proposal.ts`: the chain (`draft → sent → accepted|declined|expired|withdrawn`, with `withdrawn → draft` and every decision terminal), the actions derived from it, lapsing computed from the date rather than read from a status, line normalisation that renumbers in the caller's order and refuses rather than drops, the derived totals and the internal margin, and `agencyProposalClientView` — the projection in which `costRial` and `passThrough` do not exist as properties |
+| **Wave 7** — §A proposal service | `src/lib/agency-proposal-service.ts`: fifteen refusal codes; list, read, create, patch, action, delete, plus `loadAgencyProposalClientView`. Header and lines are written in one transaction, because an offer is one statement about a price. Every statement carries its own `business_id` predicate, inside each of the six joins and the lateral aggregate too (decision 31). The list reads five figures from ONE lateral join rather than five correlated subqueries over the same rows, so its margin is real and its `costedLineCount` says whether it is complete. Two rules the database cannot enforce live here and are documented at the point of enforcement (decision 47) |
+| **Wave 7** — §A proposal HTTP | Three routes under `/api/crm/proposals/**`, in the CRM door for the reason decision 39 gives, with one exhaustive error map in `src/app/api/crm/proposal-guard.ts` over fifteen codes plus the deliberate SQLSTATEs. A new CRM section key `proposals` with its access row, its command-palette aliases (including «پیش‌فاکتور» and «برآورد», the two other words for the same document), and its place in the «فرصت‌ها» group between the brief and the leads |
+| **Wave 7** — §A proposal screen | `/crm/proposals` and `proposals-section.tsx`. حاشیهٔ سود is the central column, marked «ناقص» when only some lines were costed. A frozen row's «ویرایش» becomes «نمایش» and «پیشنهاد تازه از روی این» is the correction the freeze forces, pre-filled and with the contract and project pointers cleared. The brief picker holds only the chosen client's own briefs and the stakeholder picker only that client's contacts, in both directions — the shape of §A's rule, with 0276 as the rule. Live totals from the same pure module the service calls, so the figure being typed and the figure stored are one arithmetic |
+| **Wave 7** — §A proposal tests | `agency-proposal.test.ts` (34, pure), `integration/agency-proposals.integration.test.ts` (27, real database) and 89 assertions against 0276 run directly over Postgres. The harness found three things nothing else could see: triggers firing alphabetically, a negative price reported as a bad `amount_rial`, and a code outside the revenue vocabulary reported as missing from the chart (decision 48). The integration suite found a fourth — the schema and the service disagreeing about whether an empty draft may be withdrawn, each self-consistent (decision 46) |
+| **Wave 8** — §A multi-brand client | `src/lib/crm-org-structure.ts`: the pure reading of `crm_party_relationships`' two hierarchy kinds. Collapses `parent_organization` (parent → child) and `branch_of` (child → parent) to one `child → parent` statement, because they are the same fact stored twice and a resolver reading one direction looks correct in every test written against it. Total over any edge list: cycles terminate on a visited set, a brand with two claimed parents takes the newest and reports the other, and every walk is bounded by `ORG_DEPTH_LIMIT` with the truncation reported rather than silent. Contradictions come back in `conflicts` naming only their own members, never resolved quietly. No schema (decision 37), no industry gate (decisions 49–51) |
+| **Wave 8** — §A organisation service and route | `organizationStructureFor` in `crm-relationship-service.ts`: two queries — one for the hierarchy edges with `business_id` on each `parties` join, one grouped read over the four registers that name a client, restricted to this group's own parties. Returns `null` for a party that is not this tenant's. `GET /api/crm/customers/[id]/organization` on `crm.view`, read-only: writes stay on `/relationships`, which already gates and audits them |
+| **Wave 8** — §A organisation card | `customer-organization-card.tsx` on the 360° file, above «ارتباط‌ها». An indented, root-first list with each brand's work as a sentence rather than a grid of zeros, a link to the group's own file when this one is a brand, contradictions in words naming the parties to fix, and `paddingInlineStart` because the file is RTL. Renders nothing at all when the party is not part of a group |
+| **Wave 8** — §A organisation tests | `crm-org-structure.test.ts` (19, pure) and `integration/agency-org-structure.integration.test.ts` (12, real database). The suite pins the direction collapse against edges recorded both ways, each brand's work counted against that brand and nobody else's, a second tenant unable to resolve a party or pull one in through a join, a cycle naming only its own members, the depth bound, a contact not becoming a brand — and the *absence* of a campaign count, so adding one is a decision somebody makes |
+| **Wave 9** — §C campaign schema | `migrations/0278_agency_client_campaigns.sql`: one table, `agency_client_campaigns`. Downstream of the brief, the proposal, the contract and the project, so it carries five nullable reference FKs (`SET NULL`) and a trigger that validates each one belongs to this business *and* that a brief's or proposal's client equals the campaign's — §A's separation rule as a constraint. `party_id` NOT NULL, a `CA-` series with `UNIQUE (business_id, campaign_number)`, the window, `channels text[]`, `budget_rial` nullable and `spend_rial` NOT NULL DEFAULT 0 with **no CHECK between them** (decision 53), five attribution counts, `metrics_source` with exactly two values and `metrics_note` for the method (decision 54), RLS shape 1 with `ENABLE` + `FORCE`, `created_by` a bare uuid. The guard trigger allows DELETE only while planned and freezes a completed or cancelled campaign — with the cascade exemption and the audited-merge exemption, both narrower than they look (decision 56). Nothing in it posts |
+| **Wave 9** — §C campaign vocabulary | `src/lib/agency-campaign.ts`: five statuses, five acts and the chain between them (`planned → running ⇄ paused`, either to `completed` or `cancelled`, both terminal), the freeze/editable/deletable predicates and `isAgencyCampaignInFlight` — running *and* paused, because a paused campaign's budget is still committed. `agencyCampaignMetrics` with every ratio null on a zero denominator, `agencyCampaignBudget` with `over` as a first-class state, `isAgencyCampaignCurrent` inclusive at both ends, and `NullableFieldResult` (decision 55). Dates reuse `src/lib/iso-date.ts`'s calendar-aware validator rather than adding a fifth implementation of one. Channel vocabulary *is* `agency-brief`'s, asserted identical rather than copied. Pure, so the panel may import it |
+| **Wave 9** — §C campaign service | `src/lib/agency-campaign-service.ts`: eighteen refusal codes closed into `AGENCY_CAMPAIGN_ERROR_CODES` so the route's status map can be exhaustive over them; list, read, create, patch, action, delete. `countCampaignsByParty` answers a whole group's brands in one grouped read with `count(*) FILTER` for the in-flight subset — the piece wave 8's card was missing. The patch merges over the stored row, so `clicks` arriving alone is checked against stored impressions, and takes **no row lock**: the read exists to merge and to answer in words, but the authority on a closed record is 0278's trigger inside the write. Every statement carries its own `business_id`, inside every join |
+| **Wave 9** — §C campaign HTTP | Three routes under `/api/crm/client-campaigns/**`, in the CRM door for the reason decision 39 gives, with one exhaustive error map in `src/app/api/crm/campaign-guard.ts` over eighteen codes plus 0278's deliberate SQLSTATEs. The lifecycle step is on its own `/status` route and rides `crm.manage`: completing a campaign closes a claim about attribution rather than approving money moving, and §D's `approve` is the determination that does. A new CRM section key `campaigns` with its access row, its aliases (and «کمپین» moved off the brief's list, where it had been pointing at the nearest thing), and its place in the «فرصت‌ها» group |
+| **Wave 9** — §C campaign screen | `/crm/client-campaigns` and `campaigns-section.tsx`. Mostly arithmetic and dates rather than workflow, and §C's "no fake campaign performance" shows up as three refusals to pretend: no invented figure (every ratio «—» on a zero denominator), no platform to import from (two sources and no third), attribution stated beside the figure it explains. A closed campaign's controls are disabled rather than left to be refused, while its note fields stay open. The brief and proposal pickers hold only the chosen client's own records; the deal, project and contract pointers are shown but not settable, because project and contract live behind `workspace.view` and a CRM-only member must not get a directory of work they cannot see |
+| **Wave 9** — the audited merge door | `migrations/0279_agency_party_attribution_moves.sql`: a **bug fix in shipped code**, found by giving 0278's campaign a merge disposition. 0274 and 0276 each froze `party_id` inside their substance comparison, so `mergeCustomers` failed with a raw `23514` on the CRM's duplicates screen whenever either client held a confirmed brief or a sent proposal. 0279 redefines both guards — never editing an applied migration in place — with the attribution split out and honouring 0217's transaction-local flag, and adds `crm_party_attribution_moves` so every move is audited before the door opens. Five registry entries now declare it (decision 56) |
+| **Wave 10** — §D reimbursable cost schema | `migrations/0280_agency_reimbursable_costs.sql`: one table, and the first door to account 1270 (decision 58). `party_id` NOT NULL and `CASCADE` — a reimbursable cost with no client is an ordinary expense and the expense screen already books those; `project_id` nullable and `SET NULL`, because archiving a project does not un-spend money the client still owes. `presentation` (`net`/`gross`) and `settled_by` (`cash`/`bank`/`payable`) are stored choices, not derived ones (decision 59). `amount_rial` bigint with no CHECK against anything else. `entry_id` is a real FK to `journal_entries` with `ON DELETE SET NULL` where 0134's equivalent is a bare uuid, because a dangling id here would report "posted, therefore frozen" about an entry that is gone. `RC-` series, `UNIQUE (business_id, cost_number)` and `(business_id, id)`, three indexes including a partial one over the unposted queue, RLS shape 1 `ENABLE` + `FORCE`. Two triggers: reference ownership over **both** `party_id` and `project_id` (a NOT NULL FK proves existence, not tenancy), and a freeze keyed on `entry_id IS NOT NULL` with the client attribution split out behind 0279's flag so the table is born able to survive a merge (decision 56). Nothing posts except through the engine |
+| **Wave 10** — §D gross-versus-net, pure | `src/lib/agency-reimbursable-cost.ts`: the two vocabularies with a label *and* a hint for each presentation, because a member who cannot tell the two apart will pick one and the books will carry it; `reimbursableCostAccounts` as the one exported function that turns the choice into two account codes; `isPassThroughToClient` so §D's reporting can ask the question without a second copy of the codes; `isReimbursableCostPosted` reading the entry id rather than a status; and normalisers that refuse a fraction rather than rounding it, refuse a zero rather than storing a claim that can never clear, and bound the date to a Gregorian year because a Jalali `1406-03-01` passes both a shape regex and `isValidIsoDate` |
+| **Wave 10** — the rule that reaches 1270 | `src/lib/agency-reimbursable-cost-posting.ts`: `agency.reimbursable_cost` posts Debit 1270 on net or 5197 on gross, Credit 1100/1120/2140 by settlement, tagged with `project_id` so §D's project P&L reads it from the books, and dated the day the money was **spent** rather than the day it was recorded — a member files a platform invoice days after the platform charged the card. No VAT line and no revenue line, because this is money spent and not a sale. The memo names the treatment, since the two presentations are otherwise indistinguishable in a list of entries |
+| **Wave 10** — §D reimbursable cost service | `src/lib/agency-reimbursable-cost-service.ts`: twelve codes closed into `AGENCY_REIMBURSABLE_COST_ERROR_CODES`; list, read, create, patch, delete, plus `sumCostsByParty` separating the client's money from the agency's own cost in one grouped read. The row and its entry are written in **one transaction** against the transaction's own client, so a cost and its ledger document commit together or neither does — a row whose entry failed would be a claim on a client the books know nothing about. The presentation is carried into the entry and never re-derived. Outstanding balances are read, never stored |
+| **Wave 10** — §D reimbursable cost HTTP | Two routes under `/api/agency/reimbursable-costs/**` on `ledger.view` and `finance.expenses_manage` (decision 61), with `src/app/api/agency/reimbursable-cost-guard.ts` exhaustive over the twelve codes and **composing** with the shared `handleAgencyError` rather than replacing it, so `MissingLedgerAccountError` still answers 409 in the product's own words instead of a 500. Its own coverage-map row rather than being absorbed by `workspace.agency`'s broad `["agency"]` prefix, whose only symptom is a stale route count |
+| **Wave 10** — §D reimbursable cost tests | `agency-reimbursable-cost.test.ts` (22, pure — the four presentation × settlement combinations pinned by account code, because a mis-stated presentation moves money between cost of sale and a claim on a client and looks fine everywhere else), `integration/agency-reimbursable-costs.integration.test.ts` (12, real database), `reimbursable-cost-guard.test.ts` (6, including the hand-off to the shared handler), the merge suite extended to a **posted** cost whose entry is asserted line-for-line unchanged, and 104 assertions against 0280 over Postgres. The harness proves both halves of the merge door, which needed savepoints because a refused statement aborts the whole transaction, and needed its vacuous assertions replaced — setting a column to the value it already holds is not a change and `IS DISTINCT FROM` correctly says so |
+| **Wave 11** — §D recharge schema | `migrations/0284_agency_cost_recharge.sql`: three columns on wave 10's register — `recharged_order_id` (a real FK to `orders`, `ON DELETE SET NULL`), and the actor's bare uuid plus name in 0280's own shape. **No `status`, no `recharged_at`, no `recharged_rial`**, and the harness asserts their absence, because whether a cost has been recharged is *derived* from the invoice's live status (decision 65). One partial index over the unrecharged rows per client, which is the queue a member works from. `CREATE OR REPLACE agency_reimbursable_cost_guard()` checks the link **before** the substance freeze and exempts it — a cost is always already posted when it is recharged, so 0280's freeze would otherwise refuse the recharge itself — and restates 0280's freeze and 0279's merge door verbatim, because replacing a function replaces its whole body |
+| **Wave 11** — the pass-through invoice line | `service-invoice.ts` grows the vocabulary: `PASS_THROUGH_RECHARGE_ACCOUNT` is 1270, `PASS_THROUGH_RECHARGE_INDUSTRIES` is the agency alone, and `resolvePassThroughCreditCode` refuses any other trade here rather than letting it fail mid-transaction with a missing-account error. `retail-invoice/types.ts` grows `ServiceLineSnapshot.passThrough?: true` — a discriminator on the existing field, not a new line kind (decision 63) — and `retail-invoice-service.ts` accepts `passThrough` on a service line, refusing it alongside an explicit `revenueCode` or a non-zero discount. `service-posting-rules.ts` branches **only the memo**, because the rule already credits whatever code the line carries |
+| **Wave 11** — §D recharge service and HTTP | `rechargeAgencyCosts` in `agency-reimbursable-cost-service.ts`: one invoice, one pass-through line per cost, written with the marks on the cost rows in a single transaction so a recharge cannot half-happen (decision 67). Seven new codes, and the guard's exhaustive status map refused to compile until each was placed — the net wave 10 built, paying off. `POST /api/agency/reimbursable-costs/recharge` asks for **both** `ordersCreate` and `financeExpensesManage`, one permission at a time, because a composite permission does not exist and inventing one would be a second way to ask for authority (decision 66). `isCostRecharged` is pure, and `sumCostsByParty` grows `unrechargedRial` computed the same way |
+| **Wave 11** — §D recharge tests | `integration/agency-recharge.integration.test.ts` (11, real database), whose headline is that recording a client's media buy and then billing it back leaves **1270 at exactly zero** — what "clearing account" means, and what neither half could prove alone — plus that the entry recognises no revenue and no VAT, that a cost cannot be billed twice, that an unposted cost is refused because there is nothing to clear, that two clients are two recharges, that the project tag appears only when every cost agrees, that voiding the invoice makes the cost billable again *with nobody updating a flag*, and that one tenant cannot recharge another's costs. The suite caught a real bug in the trigger: refusing re-pointing outright also refused the legitimate re-bill after a void, so the rule became about the invoice's state rather than about which column changed. `reimbursable-cost-guard.test.ts` grew to 10, and 48 assertions run against 0284 over Postgres, including re-pointing a cost *directly* from a voided invoice to a live one without clearing the link first — which is the service's own path, and which a trigger that cleared-then-re-pointed would have passed while still refusing it |
+| **Wave 12** — §D presentation policy | `SETTING_KEYS.agencyCostPolicy` in `settings.ts` plus `AGENCY_DEFAULT_PRESENTATION`, `AgencyCostPolicySetting` and the pure `parseAgencyCostPolicySetting` in `agency-reimbursable-cost.ts`. One business-wide jsonb choice rather than a column or a table, and deliberately *not* folded into wave 2's `agencyProfile`, which is documented as deciding blueprint ordering «and nothing else» while this one decides which of two accounts money lands in (decision 68). The parser does not coerce a value it does not recognise, for the reason the profile parser gives and at higher stakes, because the value picks an account |
+| **Wave 12** — §D policy service and HTTP | `loadAgencyCostPolicy` / `saveAgencyCostPolicy` in `agency-reimbursable-cost-service.ts`, with `AgencyCostPolicyState.stored` so a screen can report «هنوز انتخاب نشده» instead of rendering the fallback as a decision (decision 69). Saving writes the setting and its `audit_log` row — before and after in the payload — in one transaction, because this is the one agency setting that moves money. `createAgencyReimbursableCost` resolves the policy only when the caller says nothing, so an explicit choice wins and an explicit typo is still refused (decision 70). `GET`/`PUT /api/agency/reimbursable-costs/policy` ride `ledger.view` and `finance.expenses_manage` rather than `settings.manage`, under the register they govern (decision 71), and answer with the labels and hints inline because those two words decide a posting |
+| **Wave 12** — §D policy tests | `integration/agency-cost-policy.integration.test.ts` (8, real database), whose headline is that choosing `gross` makes the **next** cost debit **5197 instead of 1270** — a policy that only changed what a screen displayed would pass every other test in the file and be worth nothing — plus that the audit row names who moved it from what to what, that an explicit `net` beats a `gross` policy, that a policy change leaves an existing cost's entry identical **line for line** and that the database refuses the row-level change outright, that a typo is not substituted with the policy, that an unknown body key is refused, that a café is refused rather than defaulted, and that one agency's policy is not another's. `agency-reimbursable-cost.test.ts` grew to 26, pinning the fallback as a real presentation and the conservative one |
+| **Wave 9** — §C campaign tests | `agency-campaign.test.ts` (26, pure), `integration/agency-client-campaigns.integration.test.ts` (16, real database), `integration/agency-party-merge.integration.test.ts` (6, real database), `campaign-guard.test.ts` (6) and 66 assertions against 0278 run directly over Postgres. The integration suite covers what only a database can show: one number sequence under a race, an overspend recorded *and* reported as `over`, the four ratios and their nulls including `revenueRial: 0` giving no ROAS, list figures identical to detail figures, a one-field patch clearing nothing, the full lifecycle with its window requirements stated in words first, a closed campaign refused from both the service and a **raw** `UPDATE` that skips it, a foreign client refused by the trigger as `23514`, and two of one brand's campaigns concurrent in the same window. The merge suite pins both halves of decision 56 — the move lands with substance and lines byte-for-byte intact and an audit row written, and what was frozen stays frozen for every path that is not the audited merge |
+
+
 ## Decisions
 
 ### 1 — the family is `service`, and Workspace eligibility is a separate axis
@@ -525,6 +567,428 @@ integration suite.
 
 Nothing here posts a journal entry or moves money. §E is a review and handover surface, so it stays out
 of the accounting path entirely — the media recharge in §D's P&L is a different concern.
+### 33 — §A adds no CRM engine, because the CRM is already there
+
+§A reads like a request to build something: "agency client companies with multiple contacts/brands, inbound lead intake, opportunity pipeline, client briefs, qualification, proposals/quotes, scope of work and contract renewals". Recon found twenty-one `crm_*` tables already in place — `crm_pipelines`, `crm_pipeline_stages`, `crm_deals`, `crm_deal_stage_history`, `crm_leads`, `crm_activities`, `crm_party_relationships`, `crm_consent_events`, `crm_custom_fields`, `crm_scoring_state`, `crm_merges`, `crm_audit_events` — and roughly fifty service modules covering dedup, merge, ownership, scoring, consent, automation and saved views.
+
+So the second clause of §A is the operative one: leads and opportunities "must reuse canonical CRM records and existing dedup, activity history, consent, ownership and tenant permissions". Most of that is not work, it is a constraint that rules work out. What §A actually owes is the agency's *shape* on top of machinery that already exists, which is why the pipeline slice adds no table, no entity and no engine — only a list of stage names the platform's own `crm_pipeline_stages` already holds.
+
+### 34 — the agency gets a second pipeline, not a different default
+
+The obvious implementation is to fork `SEED_STAGES` by industry, and the file argues against it in terms: its six are the six the pre-0157 `CHECK` allowed, "so a freshly provisioned business and an upgraded one have structurally identical pipelines. Anything else would mean two code paths to test and a subtle difference nobody notices until a report disagrees between two tenants."
+
+That argument holds, and it is about reports rather than about tidiness. A win rate or a forecast over the default pipeline has to mean the same thing for a café and an agency or the number is not comparable, and the divergence would be invisible until somebody reconciled two tenants side by side. So the agency's track sits *beside* the universal default — which `createPipeline`'s own docblock already anticipates, naming "a tender track, an after-sales track" as the reason a second board exists. The default is untouched, no existing tenant's reports move, and a member who wants the agency track as their default promotes it through `updatePipeline`, which clears the previous one so exactly one remains.
+
+This is also why the preset's stages carry no `legacy_key`. `SaveStageInput` has no such field and `legacyStageKey` exists to recognise the pre-0157 strings; reusing `lead`/`proposal`/`won` would have made reports keyed on the legacy vocabulary count agency stages as though they were the seeded ones, which is the same silent disagreement from the other direction.
+
+### 35 — direct inserts, because composing the two existing functions leaves wreckage
+
+`createPipeline` copies the source pipeline's stages, and `savePipelineStages` *deactivates* rather than deletes the stages missing from the list it is given — rightly, because a deleted stage would leave its deals on no board at all, invisible to every forecast and discoverable only by querying SQL. Composing the two therefore leaves six deactivated copies of the default's stages beside the seven agency ones: rows that mean nothing, listed by a configurator that shows inactive stages, created by a function whose whole job was to make a tidy starting point.
+
+Nothing catches that. It type-checks, it passes every unit test, and the seven right stages are present and active — the six wrong ones are merely also there. Only a real database shows it, so one of the eight integration tests counts inactive stages across the entire tenant and requires zero. The preset inserts directly instead, and still cannot be rejected by the rules `savePipelineStages` enforces, because the pure module's own tests assert both invariants: at least one `open` stage, so a deal can be created, and at least one `won` stage, so the win rate is not structurally zero.
+
+### 36 — the read path creates it, but only the reads that look at pipelines
+
+`defaultPipeline` self-heals for a reason worth copying: migration 0157 seeded every business that existed when it ran, and businesses created afterwards get a pipeline only if every provisioning path remembers to — there are three of them (`business-provisioning`, `pairing-apply`, `platform-service`) and nothing stops a fourth. A read that creates what it needs cannot be forgotten by a new provisioning path.
+
+The tempting version is to put the agency step inside `defaultPipeline` and inherit all six of its call sites for free. Refused, because two of those sites are deal creation and lead conversion — write paths where a second pipeline's creation has no business running — and because `defaultPipeline`'s contract is to return *the default*, which the agency's track is not. It is called from the two routes where a member actually looks at pipelines instead: the configurator under `crm.configure` and the board under `crm.view`. The second matters: a sales-only member who never opens CRM settings still gets the track the first time they open the board, and a preset that only appeared after a visit to settings would look broken to exactly the people it is for.
+
+### 37 — §A's multi-brand client needs no schema at all
+
+"Agency client companies with multiple contacts/brands" and "stakeholder/approver contact is recorded without exposing another client's information" read like new tables. `crm_party_relationships` already carries `kind` over `contact_of`, `decision_maker`, `billing_contact`, `purchasing_contact`, `owner_of`, `household`, `referred_by`, `parent_organization` and `branch_of`, plus `role_title` and `is_primary` — which is a client company, its brands, its contacts and its approver, expressed in vocabulary that already exists and already has tenant scoping, an audit trail and merge behaviour.
+
+Recording that here is the point: the next reader of §A will otherwise spend the effort discovering it again, or worse, build the table.
+
+### 38 — one brief table across both of its moments
+
+A brief is written against an opportunity while the deal is still open — §A's pipeline stage «بریف کارفرما» is exactly that moment — and it is then what the project delivers against, which is why §B lists `brief` among the project's own metadata. The temptation is two tables, one in the CRM and one in My Workspace, each scoped to the thing it belongs to. Refused: they would be the same brief in two places, free to disagree about what the client asked for, and the disagreement would be invisible until somebody priced a proposal against one and delivered against the other.
+
+So it is one table with two nullable pointers. `party_id` is NOT NULL, because a brief with no client is the agency guessing and guessing is the thing a brief exists to stop. `deal_id` and `project_id` are both optional and both `ON DELETE SET NULL` rather than `CASCADE`: a brief is the record of a requirement, and a lost deal or a cancelled project does not unask it.
+
+It is also not `crm_custom_fields`, which could hold every one of these values per tenant and still may. What a brief has and a custom-field value does not is a *life cycle* — drafted, sent to the client, confirmed by a named person, later superseded — and custom-field values have no status, no stamps and no freeze. What makes a brief worth anything is that it is the version the client confirmed, which is a fact about time rather than a value in a column.
+
+### 39 — the CRM door, not the agency door
+
+§D's registers live behind `/api/agency/*`, whose guard resolves its owner through `workspaceOwner` and so applies the workspace *projects* service gate and project membership. That is right for a billing schedule, which lives inside a project and is meaningless without one. It would be wrong for a brief, which is written during sales and usually before any project exists: gating it on the projects service would make it unusable in exactly the moment §A's pipeline stage describes, and invisible to a sales-only member who holds the CRM and not My Workspace.
+
+That is decision 36's lesson arriving from the other direction. There, the question was which *read* should create the agency pipeline, and the answer was the board rather than only the settings screen, because a preset that appeared only after a visit to settings would look broken to exactly the people it is for. Here the question is which door the feature hangs off, and the same people give the same answer: `crm.view` to read, `crm.manage` to write, `crm.delete` to delete, in `/api/crm/briefs`, as a CRM section beside the deals a brief hangs off.
+
+It is not industry-gated either, which repeats decision 32 for the same reason: the permission is the gate, and a tenant whose members hold it may use the feature. Nothing about a brief requires an advertising agency, and a preset orders and labels rather than gates.
+
+### 40 — §A's stakeholder rule is a constraint, and the picker is its shape
+
+"Stakeholder/approver contact is recorded without exposing another client's information" reads as a design instruction about the UI. It is enforceable more strongly than that, and decision 37's finding is what makes it so: `crm_party_relationships` already expresses who is a contact of whom, in vocabulary that already has tenant scoping, an audit trail and merge behaviour.
+
+So migration 0274's trigger requires an edge between the approver and *this brief's own client*, in either direction, and refuses the write without one. The consequence is concrete rather than decorative: one client's decision-maker cannot be recorded on another client's brief, so no screen that renders the approver can put one client's contact inside another client's file. Without the constraint the rule would hold only for as long as every picker remembered it.
+
+The screen then expresses the same rule as a shape rather than a warning — the approver options *are* the chosen client's contacts, so another client's decision-maker is not on offer — and picking a different client clears the approver, because the previous client's contact is not this client's. The picker is a convenience; the trigger is the rule. Both are tested, and the integration test asserts that a refusal wrote nothing at all, because a passing negative test is worth nothing if it was refused by some other constraint.
+
+### 41 — what freezes at confirmation, and what deliberately does not
+
+Once the client has confirmed, the substance stops being editable: title, objective, audience, channels, deliverables, budget, dates, acceptance criteria, the approver and the client. The reason is not tidiness — a proposal priced the brief, a project may be delivering against it, and a change request departs from it, so an edit in place would make all three cite a document that no longer says what they read. A correction is a new brief that supersedes this one, which is also what leaves a trail where an edit would leave none.
+
+Three things are deliberately *not* frozen, and each is a decision rather than an oversight:
+
+* **our own note**, which is the agency's and not part of what the client agreed — §E's review round makes the same split;
+* **`deal_id` and `project_id`**, which say where the work lives rather than what was agreed. The project normally arrives *after* confirmation, so freezing the pointer would break the §A→§B handoff, the one transition this table exists to serve. That is precisely the reasoning which leaves 0260's `invoice_order_id` writable after its milestone is approved: it is the one write that happens after the determination. An earlier version of 0274 froze `project_id`, and the 48-assertion harness caught it — the type-checker and the unit suite both passed with the handoff broken;
+* **the status chain and its own stamps**, because confirming and then superseding is the point. `sent_at` and `confirmed_at` are set once and can never be cleared: re-sending a correction is a new brief, so each stamp is a fact about the first time the client saw it.
+
+The mirror case matters as much. A client being deleted takes its briefs with it, confirmed or not: with no counterparty left there is nobody for the record to speak for, and refusing would let one confirmed brief block the deletion of the very client it belongs to. Absence of the party is what tells the guard that a delete is the cascade rather than a direct one — the test 0265's item guard applies to its round. A blanket "only a draft may be deleted" without it is the trap: it looks like a stronger rule and quietly breaks a parent's `ON DELETE CASCADE`.
+
+### 42 — one permission for the whole chain, and two acts MCP must never get
+
+§D's change requests split `workspace.manage` from `workspace.approve`, because agreeing *somebody else's figure* is a different power from drafting one, and money moves when it is agreed. A brief's `confirm` looks like the same shape and is not: it records the **client's** decision, and the agency member is only the scribe. Nothing is priced, nothing posts, and no internal determination is made. So the whole chain sits on `crm.manage`, and the split would have invented a tier with no power behind it.
+
+What does follow from that is a constraint on automation. `confirm` attests that a human at the client agreed to something, and `supersede` retires a brief they confirmed — so neither may ever become an MCP verb, because §F's rule that an assistant drafts and a human approves exists to prevent precisely that attestation being machine-made. Drafting and reading a brief are different in kind and are what a future tool should expose. The coverage row records this, so the gap reads as a decision rather than as an omission waiting to be filled.
+
+
+### 43 — §A's proposal and §D's estimate are one document
+
+§A asks for "proposals/quotes" in the CRM and §D asks for "service/project estimates" in the billing set. They are the same thing, and §B's stage list is what settles it rather than anybody's opinion: "brief → discovery → **proposal/quote** → contract → kickoff". One name, one position, one lifecycle. Two tables would be the same offer in two places, free to disagree about the price — and a price two systems disagree about is the one disagreement a client always notices.
+
+So it is built once, as `agency_proposals` and `agency_proposal_lines` (0276), and it sits where §B puts it: a brief (0274) records what the client asked for, a proposal records what the agency offers in answer and at what price, and `workspace_contracts` (0167) records what was signed. That is why a proposal carries three pointers written at three different moments — `brief_id` at the start, `deal_id` and `project_id` as the work takes shape, and `contract_id` only after acceptance. `workspace_contracts` was read before this was decided, and its `contract_type` vocabulary is mostly inbound (contractor, supplier, vendor, subcontractor); it is the signed agreement, and a proposal is the offer that precedes it.
+
+`brief_id` is a *simple* foreign key, not the composite one 0274 made possible, because Postgres refuses `ON DELETE SET NULL` on a composite key whose other column is `NOT NULL` and `business_id` here is. Tenant ownership of the brief is therefore the trigger's job, alongside the sharper question the foreign key cannot ask: whether the brief was written for *this* client. Pricing client A's brief for client B would put one client's stated requirement inside another client's offer, which is §A's leak arriving from the other direction.
+
+### 44 — the header stores no total, and a line's amount is computed rather than trusted
+
+`discount_rial` and `tax_rial` are on the header because they are policy inputs somebody chose. The subtotal is the sum of the lines and the total is derived from both, on every read, in one pure function. A stored total is a second answer to "how much", and the only way to keep two answers agreeing is a trigger whose whole job is bookkeeping — so there is one answer, which cannot disagree with itself. The integration suite asserts that a list row's figures equal the opened row's, because a summary that disagreed with its own detail view would be the more dangerous kind of wrong: it would look like agreement.
+
+Each line's own `amount_rial` *is* stored, and is computed by a trigger from quantity × unit price rather than accepted from the caller. A line whose amount disagrees with its own quantity and price is a bug nobody can see, because both readings look correct on a printed quote. Storing it at all is still right: a list, a print template and an eventual invoice all need it, and none of them should re-derive it slightly differently.
+
+The TypeScript side computes the same figure, in `agencyProposalLineAmountRial`, so the number under the member's cursor and the number in the row are one arithmetic. That is the one place a rounding rule could silently differ — Postgres rounds `numeric` half away from zero, `Math.round` rounds half up, which for the non-negative figures allowed here are the same rule — and the integration suite pins both sides on a `.5` case. A one-rial gap is invisible in review and maddening in an audit.
+
+Quantity is `numeric(14,3)` rather than an integer because agency work is sold in halves and thirds: ۱٫۵ روز مدیریت هنری, half a retainer month. An integer column would have forced every such line to be rounded up and quietly overcharged for it. The form's own digit-stripper has to keep the decimal separator for the same reason — stripping it turns «۱٫۵» into ۱۵, a tenfold overcharge that looks exactly like what was typed.
+
+### 45 — cost and pass-through are internal, and the client boundary is a type
+
+A line carries `cost_rial` and `pass_through`, and neither may ever reach a client. `cost_rial` earns its place immediately rather than waiting for a profitability report: the margin on an offer has to be visible *before* it is sent, and an agency that cannot see its own margin on a media buy is guessing at whether the work is worth taking. That is why the screen's central column is حاشیهٔ سود and not merely one field among many.
+
+The rule is enforced structurally rather than by comment. `agencyProposalClientView()` returns a type in which `costRial`, `passThrough` and `revenueCode` do not exist, and the test asserts the exact key set — so a screen built on the projection cannot render what it cannot name, and adding a cost field to the client shape fails a test. A comment saying "do not show the cost" survives one refactor; an absent property does not need to. `loadAgencyProposalClientView` is the service door that reads it from real rows, and #1127's proposal and service-quote print templates plus §A's P2 review portal are its consumers; no endpoint ships for it yet, because an endpoint with no consumer is dead surface.
+
+`pass_through` is where §D's gross-versus-net question gets *answered*, though not where it gets posted. A media recharge is either the agency's own money moving through its accounts or the client's money moving past them, and that is a decision made line by line at offer time — the only moment anybody actually knows the answer — not something discovered at invoice time or inferred from how large a line is. A pass-through line must state its cost, because a recharge of an unknown amount is a promise to book the client's money without knowing how much of it there is. Nothing here reaches account 1270 and nothing posts; §D's invoice layer reads the flag when it is built.
+
+A list row reports `costedLineCount` against `lineCount` so the screen can mark a margin «ناقص» when only some lines were costed. A margin over a half-costed offer is a guess with the missing inputs hidden, and printing it as a figure would look like an answer.
+
+### 46 — frozen at `sent`, not at acceptance
+
+A brief freezes at `confirmed`, because only then has the client agreed to something and only then does an edit make three downstream documents cite something they never read. A proposal freezes a step earlier, when it is sent, because it states a *price*: a client who reads «۵۰۰٬۰۰۰٬۰۰۰ ریال» and returns to find «۶۵۰٬۰۰۰٬۰۰۰ ریال» has been given a reason to distrust every later figure. That is 0260's rule for a submitted milestone — what an approver is reading cannot change underneath them — applied to the document an approver reads first.
+
+The lines freeze with it, because the lines *are* the price. Replacing them on a sent offer is the same change by another route, and so is deleting the last one.
+
+What stays writable is the status chain and its stamps, plus `contract_id` — the one commercial write that happens *after* the decision, for exactly the reason 0260 leaves `invoice_order_id` writable and 0274 leaves `project_id` writable. Freezing the outcome would make it unrecordable.
+
+`accepted`, `declined` and `expired` are terminal, and that follows from the freeze rather than being a separate choice: the price closed when the offer was sent, so there is nothing left to revise in place. The client who declines at ۶۵۰٬۰۰۰٬۰۰۰ and is then offered ۵۵۰٬۰۰۰٬۰۰۰ gets a *new* proposal in the same series, and the declined one stays on the record as the offer that was actually refused — the only evidence of what the client said no to. Reopening it would destroy that. `withdrawn` does reopen, as a withdrawn brief does: an offer taken back before anyone decided was never a fact about the client. The screen makes the correction a button («پیشنهاد تازه از روی این») rather than leaving the member to discover it, and clears the contract and project pointers on the way, because a new offer is a new negotiation and silently inheriting this one's contract would attach a fresh price to a signed agreement.
+
+Withdrawing an *empty* draft is allowed, and the exemption is the point of the rule rather than an escape from it: what is being prevented is an empty offer reaching the client, and withdrawing one shows it to nobody. The first version of 0276 refused it, which stranded a half-written draft — unable to be sent, unable to be withdrawn, deletable only while it was still a draft, a corner with one exit in it. Only the integration suite caught it, because the service and the schema each agreed with themselves and not with each other.
+
+### 47 — two rules no CHECK can express
+
+A discount larger than the subtotal it discounts would make the total negative: the agency paying the client to accept the work. No CHECK can refuse it, because it compares the header against the sum of another table's rows. Equal is allowed — zero-rial work is a real offer, a pro-bono campaign or a first month free to win a retainer — and the refusal is checked against the lines that will exist *after* the write, so patching only the discount or only the lines cannot sneak one past.
+
+Accepting an offer whose validity has run out is refused for the same structural reason: `valid_until < now()` is not an immutable expression, so no CHECK can express it either. Without the refusal a client could accept a six-month-old quote at the old price, which is the exact mistake a validity date exists to prevent. `decline` and `expire` are *not* refused — recording that a client turned down an offer that had already lapsed, or formally closing one, are both accurate statements about the past.
+
+Lapsing is computed from the date rather than read from the status, and the two are deliberately distinct facts. `expired` is a decision somebody recorded; lapsing is true the moment the date passes whether or not anyone has looked. A list that showed only the stored status would keep offering a quote that lapsed three weeks ago, because nothing had got round to marking it — so the screen has a «اعتبارشان تمام شده» filter that reads the date, and a sent offer can be `sent` and lapsed at once, which is exactly the case worth surfacing.
+
+### 48 — same-timing triggers fire alphabetically, so the freeze and the arithmetic are one function
+
+Postgres fires same-timing row triggers in alphabetical order by trigger name. The first version of 0276 had two functions on the lines — one computing the amount, one enforcing the freeze — and whichever sorted first answered. Both were individually correct, and together they meant that adding a badly-formed line to an already-sent offer could report the line's arithmetic instead of the fact that the offer is closed. Ordering by name is not a contract to build on, so the two became one function with the freeze first, and the comment says why, because the next person to split them will not otherwise know what breaks.
+
+The same ordering fact produced two more fixes. Both line triggers run *before* Postgres enforces a CHECK, so a negative unit price was being reported as a violation of `amount_rial >= 0` — a true statement about a number nobody asked for, and a misleading answer to the person who typed it. And a revenue code outside the vocabulary was reported as missing from the tenant's chart of accounts, which sends the reader looking for an account that must not exist. Each trigger now refuses its own impossible input in words before deriving anything from it, and the CHECKs stay: they are the structural invariant and still hold if a trigger is ever dropped. This is the same reason 0274's trigger raises on a missing client rather than leaving it to `NOT NULL`.
+
+None of the three was visible to a type-checker, to the unit suite or to a green whole-schema sweep. An 89-assertion raw-SQL harness found all of them, which is what it is for.
+
+
+### 49 — the two hierarchy kinds are one relation, and that is why this is code
+
+Decision 37 recorded that §A's multi-brand client needs no schema. What it did not say — because nothing had tried to read the edges yet — is that reading them is not a query.
+
+`crm-relationship-service.ts` states the convention: `from → to` reads "from is *kind* of to". So `parent_organization` points **parent → child** and `branch_of` points **child → parent**. They are exact inverses describing the same fact, which means one hierarchy can be recorded in either direction, and a group's two brands can legitimately be recorded in *different* directions by two members on two days. A resolver that treated them as two relations would see a group with no brands, a brand with two parents, or nothing at all — depending on which way round somebody happened to type it.
+
+So `crm-org-structure.ts` collapses both to one `child → parent` statement before anything else reasons about the structure. That collapse is the whole reason the module exists as code, and it is pure so it can be tested without a database: a resolver that only ever sees one direction looks correct in every unit test written against one direction, and fails in production on the first tenant that recorded it the other way.
+
+### 50 — nothing here may assume the edges form a tree
+
+Two members recording the same hierarchy from their own ends produce a cycle. A re-parenting recorded by adding an edge rather than removing the old one produces a brand with two claimed parents. Both are reachable in two clicks on the existing relationships card, so both are ordinary data rather than corruption.
+
+The resolver is therefore total: any edge list produces a structure. Every walk is bounded by a visited set *and* by `ORG_DEPTH_LIMIT`, and each contradiction comes back in `conflicts` rather than being resolved silently. A card that quietly picked a winner would be the reason nobody ever fixed the record — and the CRM already has a data-quality screen whose whole job is surfacing records that need a decision.
+
+Where a winner is unavoidable (a tree cannot give one node two parents) the newest statement takes it, because that is how a correction is actually recorded, and the superseded claim is reported beside it. A cycle names **only its own members**, not the whole path climbed to reach it: a brand three levels below a two-party loop is not part of the contradiction, and listing it would send a member to delete an edge that is correct.
+
+The card renders *nothing at all* for a party that is not part of a group, which is the common case. An empty card on every customer file teaches people to skip this one, so «بدون برند» is not a state this screen has. That is different from an error and different from an empty group, and the payload says which.
+
+### 51 — campaigns are not counted, and that is a schema finding
+
+The card counts four registers per brand: `crm_deals.customer_id`, `agency_client_briefs.party_id`, `agency_proposals.party_id` (with the accepted ones separately) and `workspace_contracts.party_id`. All four name a client, so all four can be attributed to a brand.
+
+**`growth_campaigns` names nobody.** It has `business_id`, `name`, `status`, `created_by` and its own version rows — no client column, in 0262 or in any later migration. So §A's "concurrent campaigns" cannot be presented per brand, and §C's agency's-own versus client-managed split is not blocked on a missing list endpoint as this document previously said: it is blocked on a missing *dimension*. That is a schema change, and it is §C's first job rather than its last.
+
+Counting campaigns as zero was refused, and the integration suite pins the refusal: a card reading «۰ کمپین» on every brand states that no brand has campaigns, which is not what the data says. A missing figure and a zero are different claims, and only one of them is true here.
+
+The card is not industry-gated. A corporate group with brands is not an agency idea — a wholesaler has the same shape — so, like §E under decision 32, this is gated by permission and not by trade. §A is the reason it was built, not a limit on who may use it.
+
+**Corrected in wave 9, and the correction is about the diagnosis rather than the decision.** Everything above about refusing to render a zero stands, and the integration suite still pins it. What was wrong is the word *blocked*: this document said §C needed "a missing dimension" on `growth_campaigns`, as though the fix were an `ALTER TABLE`. Reading #901's builder showed that adding a client there would have been a mistake rather than a small extension — that table's trigger vocabulary is exactly `pos_sale_settled` and its reward is `cashback`, so its party is the shopper earning money back, not an agency's client (decision 52). The missing thing was a missing *record*, and wave 9 added one. §A's concurrent campaigns are counted per brand from it, with the in-flight subset broken out, and the test that pinned the absence now pins the presence.
+
+
+### 52 — §C's campaign is a new table, and the name collision is the argument for it
+
+There are four unrelated records in this product that the word «campaign» already names. `growth_campaigns` is #901's **retail cashback automation**: `CAMPAIGN_TRIGGER_TYPES` is exactly `["pos_sale_settled"]`, `CAMPAIGN_REWARD_TYPES` is exactly `["cashback"]`, and its base is `net_paid` — the party it rewards is the shopper, and creating one issues no reward, no liability and no journal entry. `message_campaigns` is an SMS broadcast with its own credit ledger. `media_review_rounds.campaign_id` points at the first of those, not at anything an agency runs for a client. And `ai_projects` has no client column at all, so §B's project cannot be the campaign either.
+
+So 0278 adds `agency_client_campaigns` rather than extending any of them. The alternative — a client column on `growth_campaigns` — would have made one column mean two things in two trades, and the symptom would have been a report: a "campaigns by client" figure silently counting retail cashback automations, or an agency's media plan silently eligible to pay a shopper cashback. **A "missing column" diagnosis is only as good as the read of what the table is for**, and this wave's premise had to be overturned to find that out.
+
+What the new table is: downstream of the brief (what the client asked for), the proposal (the priced offer), the contract (what was signed) and the project (the work), so it may point at any of the four — and it records the window, the channels, the media money out, and the figures that came back. `UNIQUE (business_id, campaign_number)` over a `CA-` series from the shared register numbering, RLS shape 1 with `ENABLE` + `FORCE`, and nothing in it posts.
+
+### 53 — an overspend is recordable, and `over` is a state rather than an error
+
+0278 has **no CHECK of `spend_rial` against `budget_rial`**. A campaign that cost more than it was budgeted for is a thing that happens, and a schema that refuses to store it does not prevent it — it pushes the true figure into a note, where no report can read it and no client conversation can be had about it. The refusal would not have made the overspend less real; it would have made it invisible.
+
+So `agencyCampaignBudget` derives four states — `unbudgeted`, `under`, `at`, `over` — and the screen renders «فراتر از بودجه» with the amount past. `unbudgeted` is its own state rather than a zero budget, because "no budget was agreed" and "the budget was zero" are different claims about a client conversation.
+
+The same reasoning sets `cancelled` apart from `completed` in the window rules: a campaign cancelled while still planned never ran, so demanding an end date from it would make a member invent a window to satisfy the schema. `completed` does demand one, because a campaign that ran has a date it stopped.
+
+### 54 — every derived ratio is `null` when its denominator is zero
+
+§C asks for spend, reach, CPL, CPA and ROAS with *defensible* attribution, and the word that does the work is "defensible". `agencyCampaignMetrics` returns `null` rather than 0 for every ratio whose denominator is zero, because a CPL of 0 on a campaign that recorded no leads reads as the cheapest leads the agency ever bought. §C's own phrase for that is "fake campaign performance".
+
+ROAS needs *both* sides: `revenue_rial` is nullable, and null means "we do not know yet" where 0 means "we know it was nothing". A campaign with no revenue claim has no ROAS rather than a ROAS of zero, and the two render differently — «—» against ۰.
+
+Two more refusals to pretend sit beside it. `metrics_source` has exactly two values, `manual` and `imported`, and that *is* the documentation: there is no ad-platform integration in this product, so a third value would claim a connection that does not exist. And attribution is a member's claim, with `metrics_note` holding the method, because a number with no stated method is not defensible — the field sits beside the figure it explains rather than on a separate screen.
+
+### 55 — a nullable field needs four states, and this cost three test failures to find
+
+0276's documented lesson is that a normaliser returning `null` for an *absent* field turns "omitted" into "refused": a PATCH carrying only a title would have cleared the budget. Avoiding that is not enough, and the first version of this wave's normalisers shows why. They returned `{ present, value }`, which cannot tell **"clear the budget"** from **"that is not a number"** — both look like `{ present: true, value: null }`. So `{ budgetRial: "" }` from a form whose money input the member had emptied was refused as `invalid_metric`, and the member could not remove a budget they had set by mistake.
+
+`NullableFieldResult<T>` is therefore four states — `absent | clear | value | invalid` — with `nullableFieldStored()` collapsing them for the write. Whitespace-only counts as `clear`, not `invalid`: a form that emptied a money input hands back spaces.
+
+The second failure in the same run is the same shape of mistake on a different axis. `updateAgencyCampaign` and `applyAgencyCampaignAction` computed `current` from `todayIsoDate()`, so a campaign whose window was in May reported itself not on air in November — true in production, useless in a test and in a report backfilling a date. Both now take `options.todayIso`. **A derived "today" must be injectable**, and the reason is not only testing: a report that reconstructs last quarter's calendar needs the same parameter.
+
+### 56 — a freeze must exempt the changes the database makes on a parent's behalf, and a frozen record must still follow its client
+
+Two exemptions, both found by a harness rather than by review, and both narrower than they first look.
+
+**The cascade exemption.** 0278's freeze refuses any change to a closed campaign, and `ON DELETE SET NULL` on `brief_id` *is* an UPDATE of the child. So a completed campaign blocked the deletion of its own brief — and of its proposal, project and contract. The fix is not "NULL is fine", which would let a member un-file a campaign from its brief; it is to allow the clear **only when the parent row is gone**, checked per column, and the harness asserts both halves.
+
+**The merge exemption, and it was a bug in shipped code.** 0274 freezes a confirmed brief and 0276 freezes a sent proposal, and both put `party_id` inside the frozen-substance comparison. That is right for an edit and wrong for a merge, and the two are not the same operation: an edit says "the client agreed to something different than we recorded", which a confirmed brief must refuse; a merge says "these two client records were always one", which changes no agreement and only re-points whose file the document lives on. The result was that `mergeCustomers` — which re-points every reference the registry classifies as `move`, and a brief's client is NOT NULL so it cannot be left behind — failed with a raw `23514` on the CRM's own duplicates screen as soon as either client held a confirmed brief or a sent proposal.
+
+0279 follows 0217 rather than inventing a door. `journal_immutable_columns_guard` already drew this line: substance immutable always, attribution movable only while the transaction has declared `app.ledger_party_move = on` — a flag the merge loop sets for a reference that declares a `preMoveSql`, after that statement has written its audit row. So the move lands in the new `crm_party_attribution_moves` first, the door opens for exactly that registered move, and every other session still hits the guard. The flag's name is historical and kept for the reason `register-numbering.ts` keeps its `aec-number:` namespace; the audit table is *not* shared with the ledger's, because a brief is not a journal line.
+
+0278 was born with the split rather than patched into it, because a new table has no business shipping a bug this wave just spent a migration fixing. Neither 0274 nor 0276 was edited in place: an applied migration's checksum is in `schema_migrations`, and amending forward is the only change that reaches an install that already ran it.
+
+**The lesson is about the sweep.** `party-merge-coverage` passed throughout, because it checks that every `parties(id)` reference has a *declared disposition* — not that the declared move survives the table's own triggers. A green whole-schema sweep can be vacuous in exactly the dimension a new feature stresses, and the only thing that found this was executing a merge against a frozen document.
+
+### 57 — the CRM section is `client-campaigns`, because Growth owns the word `campaigns`
+
+`app-ownership.test.ts` asserts that the CRM's nav contains no key called `campaigns`, and that Growth's does. That is the app-ownership split doing its job: the test exists to stop one app growing a second copy of another's territory, and wave 9 walked straight into it by naming a new CRM section `campaigns`.
+
+The boundary is right and the fix is not to negotiate with it. Growth's campaign is #901's retail cashback automation (decision 52) and this record is an agency's media plan for a client — genuinely different things that happen to share an English word. Two names is the honest resolution; one name with a comment explaining the difference is the dishonest one, because the comment is the only thing standing between a member reading «کمپین‌ها» in two apps and having to know which is which.
+
+So the key, the route, the API path and the screen file are all `client-campaigns`, and the Persian label stays «کمپین‌های کارفرما» — which already carried the distinction, and is what a member reads. The command palette keeps «کمپین» pointing here rather than at the brief, where it had been sitting as the nearest available thing; Growth's own campaigns are reached by their own aliases and by the Growth door.
+
+The lesson is the one decision 51's correction already implies, from the other direction: a new section key is not one change. It reaches the permissions table, the nav and its group, the command aliases, the knowledge base's help title, the section switch, the permission test's route table, the coverage map — and the app-ownership boundary, which is the only one of those that can say *no* rather than merely needing an update. It is also the only one a compiler cannot see, and a full-suite run is what caught it.
+
+### 58 — 1270 had no door, and the cost side has to exist before the recharge side
+
+Wave 1 seeded `1270 هزینه‌های قابل بازدریافت از مشتری (رسانه و تولید)` as an asset, and `account-classification.ts` deliberately left it unclassified — it is an *unbilled* pass-through and not an invoice the client owes yet, so classifying it would put it in the A/R totals and in `ASSET_SALE_PROCEEDS_ROLES` where it does not belong. Eight waves later nothing posted to it, and that was not an oversight in the chart. It was that the account had no door:
+
+* the expense path cannot reach it. `expense-accounts.ts` returns `accounts.filter((account) => account.type === "expense")` and 1270 is an asset — and its own docblock says why the rule is that strict, because a rent payment could once be credited against inventory or recoverable VAT. Widening it to let an expense debit an asset would undo a real fix;
+* §D forbids the obvious workaround: the vendor chain must run "through existing Accounting posting/domain-event engine, **never direct ad hoc journal entries**";
+* and the recharge side — an invoice line crediting 1270 — cannot come first, because crediting an asset nothing ever debited would drive it to a credit balance and report a *negative* claim on the client.
+
+So wave 10 builds the cost side, and alone it leaves the books **correct but incomplete** rather than wrong: a debit balance in 1270 is exactly the true statement "we have spent this on clients and not yet asked them for it". The recharge is the next wave and will clear this account row by row.
+
+### 59 — gross versus net is a field a member sets, never something inferred
+
+§D says presentation "must follow chosen business accounting policy and **must not be inferred solely from spend**". Two agencies that both buy a client ۵٬۰۰۰٬۰۰۰ ریال of media make different accounting statements about it, and nothing in the spend says which: one is reselling media and recognises the whole recharge as its own revenue with the buy as cost of sales, the other is handling the client's money and never owns either side. Guessing from the size of the line, or from whether a vendor invoice exists, is precisely the inference §D rules out.
+
+So `presentation` is stored on the document and carried into the entry, and `reimbursableCostAccounts` is the one function that turns the choice into two account codes — exported rather than inlined in the posting rule, so the rule, the screen that will explain the choice, and the tests that pin it all read the same map. `net` is the default because it keeps the agency's own revenue honest: an unchosen line landing in 5197 overstates cost of sales *and*, at recharge, revenue, and a pair of errors in opposite directions is harder to see than one.
+
+§D asks for a *business-level* policy and this wave ships a *per-document* choice. The field is where the business default will land; until it does, a member states the treatment on each cost, which is stronger than inference and auditable, and the gap is recorded rather than papered over.
+
+### 60 — a posted row freezes because the books carry the figure, not because a human saw it
+
+0274, 0276 and 0278 freeze a document because somebody *relied* on it — a client confirmed a brief, accepted a price, was reported a campaign's figures. 0280 freezes for a different reason: the amount, the presentation and the settlement decided which two accounts an entry landed in, so editing one afterwards leaves the register stating something the ledger contradicts. The correction is a reversal and a new record, which is the ledger's own shape.
+
+The predicate is `entry_id IS NOT NULL` rather than a status column, which makes "recorded but not yet posted" a real state: a locked fiscal period routes an auto-posted entry to the human-approval queue rather than refusing the spend, so a member's cost is recorded and waits. `note` stays writable throughout, because what was learned afterwards desyncs nothing.
+
+**The service and the schema disagreed about exactly this, and only an integration test saw it.** The first draft refused the whole patch on a posted row, while 0280 leaves the note open. Each side was self-consistent. The check now runs after the patch is built, against `POSTED_ROW_EDITABLE_COLUMNS`, so the refusal is about what *this request* touches.
+
+### 61 — the permissions are an expense's, not a workspace document's
+
+Reading is `ledger.view` and writing is `finance.expenses_manage` — the pair `POST /api/ledger/expenses` uses — because a reimbursable cost *is* an expense in every respect but the account it lands in. The sibling agency registers ride `workspace.view`/`workspace.manage` deliberately, and routing this one through `agencyOwner` would have added the workspace's service-activation gate. The member who records what a client's media buy cost is the office's accountant as often as the project lead; gating them behind workspace activation would hand a 403 to the one person whose job it is.
+
+The industry gate stays separate and lives in the service: another trade is refused rather than defaulted, because a café has no reimbursable client cost and must not be served a register that silently means something else. A permission answers *may this member*, the industry check answers *does this trade have one*, and conflating them is how a feature leaks into a business it means something else in.
+
+### 62 — wave 10 stops at the ledger, and the screen is the next slice
+
+There is no UI in this wave, and that is a decision rather than an omission. The Accounting app's section key reaches at least ten files with exhaustive maps (`accounting-nav`, `accounting-headings`, `accounting-icons`, `accounting-manager-policy`, `accounting-manager`, `accounting-page-body`, `accounting-routes`, `accounting-workspace`, the `[section]` page) plus four contract tests of its own — the same eleven-place problem decision 57 records for a CRM section key, in a different app. Rushing it against the accounting half of a wave that had already found one shipped bug would have been the worse trade.
+
+What ships is complete and usable through the API and, more importantly, **true in the books**: 1270 is reachable, a cost posts through the domain-event engine with its project tag, and §D's gross-versus-net distinction is a stored, audited fact rather than a note in a spreadsheet. The screen that reads it is the next slice, and it will land on a register that already works.
+
+### 63 — a pass-through line is a discriminator on the service line, not a new line kind
+
+`retail-invoice-service.ts` has seven line kinds and `service` is the service trades'
+only one, so §D's pass-through could have been an eighth. It is not, and the reason is
+a recon result rather than a preference: nothing in `src/` reads
+`ServiceLineSnapshot.revenueCode` for reporting — only reprints read it — so a new kind
+would have reached every exhaustive map over line kinds for no behavioural gain.
+
+`passThrough?: true` is optional, which is what makes it cheap: absent on every
+existing snapshot, so no row needed migrating and no old invoice changed meaning.
+
+The discriminator is still load-bearing and not decorative, precisely *because* the
+field is named `revenueCode`. A report that summed it without this check would count a
+client's own media money as agency sales, which is the exact error §D exists to prevent
+— and the first thing a future reporting slice will read is that field name.
+
+### 64 — VAT on a recharge defaults to zero, and the software takes no position
+
+`PASS_THROUGH_DEFAULT_VAT_PERCENT = 0`. Whether recovering a disbursement is a taxable
+supply depends on the jurisdiction **and** on the contract between the agency and the
+client, and neither is visible from a line on an invoice. Software that picked a
+position would be asserting a tax treatment it cannot know, and the failure is
+asymmetric: a wrong zero is a missing liability the business can still correct, while a
+wrong non-zero creates a liability owed to nobody.
+
+So it is a *default* and a member can charge VAT on the line. Naming it a rule — "a
+recharge is never taxable" — would have been a claim about tax law sitting in a
+constant.
+
+### 65 — whether a cost has been recharged is derived from the invoice, never stored
+
+0284 stores `recharged_order_id` and asserts that no `status`, `recharged_at` or
+`recharged_rial` column exists. `retail-invoice-void-service.ts` does not delete an
+invoice: it flips `orders.status` to `voided`, keeps the original entry and writes a
+reversing one. So by the time anybody looks, **the ledger has already put the money
+back into 1270** — a stored flag would be a second answer to a question the order
+answers, and the two would disagree the first time somebody voided an invoice.
+
+`isCostRecharged` is pure so the rule is testable without a database, and it treats a
+missing order status as *not* recharged: the safe direction is making a cost billable
+again rather than silently writing off a claim on a client.
+
+The same derivation runs in SQL inside `sumCostsByParty`, so `unrechargedRial` — what a
+client still owes — moves back up when an invoice is voided without anything being
+written to the register. Two implementations of one rule is the cost of this decision,
+and it is paid deliberately: the alternative is a flag that lies.
+
+### 66 — the recharge needs two permissions, asked for one at a time
+
+It creates a sales invoice, so `ordersCreate` is the act; it draws down the cost
+register, so `financeExpensesManage` is where the money came from. Either alone is
+wrong: a member who can invoice but not see costs would bill a client from a register
+they cannot read, and a member who can record costs but not invoice would be able to
+raise a document.
+
+There is no composite permission in `PERMISSIONS`, and the house helper is a
+single-permission door, so the route calls `requirePermission` twice. Inventing a
+composite here would have meant a second way to ask for authority — and authority with
+two spellings is authority that gets checked in only one of them.
+
+The invoice permission is asked first, because it is the act this route performs, and
+naming the missing authority that matters most beats naming whichever check ran first.
+
+### 67 — a recharge is whole-or-nothing, one client at a time, one project only on agreement
+
+One invoice line per cost row, never a part-recharge. A remaining-balance figure would
+have to agree with both the register and 1270's ledger balance, and two sources for one
+number is how they drift; whole-or-nothing means the cost is either in an invoice or it
+is in the queue, and the partial index over `recharged_order_id IS NULL` *is* the queue.
+
+`orders.customer_id` references `parties`, so the cost's client is the invoice's
+customer and no mapping was needed or wanted — costs from two clients are therefore two
+recharges, not one invoice with a problem.
+
+The project tag is applied only when every selected cost agrees, and left null when they
+do not. Guessing one of several would put the whole recharge in a single project's P&L
+and quietly take it out of the others', which is the same error §C's "defensible
+attribution" rule exists to prevent, on the cost side.
+
+The invoice and the marks on the rows commit together. The failure mode of a
+half-written recharge is not a confusing screen but billing the same media buy twice.
+
+### 68 — the presentation policy is a setting of its own, and not part of the operating profile
+
+`SETTING_KEYS.agencyCostPolicy` is a jsonb value in the shared `settings` table. One
+business-wide choice, no history, nothing to join — and `settings` already carries the
+tenancy, the audit path and the desktop-sync behaviour every other business-wide
+preference uses. AEC needed `aec_business_profiles` because a profile there presets
+nineteen capability overrides; this presets one word.
+
+The question worth the decision is whether it belonged in wave 2's `agencyProfile`,
+which is also an agency-wide setting. It does not, and the reason is that setting's own
+documented claim: it decides which blueprints are listed first "and nothing else: no
+permission, no module and no authorization is derived from it". This one decides whether
+a client's media buy debits **1270** (a claim on the client) or **5197** (the agency's
+own cost of sale). Folding a money-moving accounting policy into a cosmetic preference
+would falsify that comment, and would put the policy behind `settings.manage` — a
+permission chosen for a choice that reorders a list.
+
+`inventory.costing` is the precedent that settled it: fifo/lifo/weighted-average is an
+accounting *method* the business adopts, stored as its own setting, and nobody would
+fold it into a workspace preference.
+
+### 69 — the default is a fallback for determinacy, and `stored` says so out loud
+
+`AGENCY_DEFAULT_PRESENTATION` is `net`, and it is a **fallback, not a recommendation**.
+Every cost row has to land in one of two accounts, so something must answer when nobody
+has; `net` answers because it is the one that never overstates the agency's revenue —
+under `net` a client's media buy sits in 1270 as a claim until it is recharged, while
+under `gross` the same buy is the agency's cost of sale and the recharge is its revenue.
+`gross` is a legitimate position, but §D says it has to have been *adopted*.
+
+Which is why `AgencyCostPolicyState` carries `stored: boolean`. Without it, a screen
+reading `{ presentation: "net" }` cannot tell a policy the business chose from one the
+software supplied, and renders the fallback as though a human had picked it. With it,
+the screen says «هنوز انتخاب نشده» — and §D's "must follow **chosen** business accounting
+policy" is visible as unmet rather than silently satisfied by a constant.
+
+The parser refusing to coerce an unrecognised value is the same instinct pointed at
+writes: a value this code cannot read was written by a newer version or by hand, and
+answering the default would let the next save overwrite a decision nobody meant to
+reverse.
+
+### 70 — a policy is a default, never a mandate, and never retroactive
+
+Three rules, each pinned by a test:
+
+**An explicit choice on the row wins.** §D's treatment varies by contract: a business
+that mostly buys media in its own name still has clients whose money it is merely
+handling. A policy that overrode the row would make the per-row choice wave 10 stored
+into dead weight, and would force such an agency to keep two registers.
+
+**It never reaches backwards.** A policy change touches no existing row, and cannot:
+0280's trigger freezes `presentation` on any cost whose entry has landed, because the
+value decided which two accounts that entry used and the register may not contradict the
+ledger. The integration test asserts the entry is identical *line for line* after a
+change, and that a direct row-level UPDATE is refused. Correcting a cost recorded under
+the wrong treatment is a reversal and a new record — not a policy silently re-posting
+history, which would make every past margin report a lie about the day it was printed.
+
+**A typo is not a policy.** An unrecognised explicit value is still `invalid_presentation`
+rather than being replaced by the policy's. Substituting would change which account
+money lands in because of a keystroke nobody meant, and the member would see a saved row
+that looks exactly like the one they thought they filed.
+
+### 71 — the policy route rides the register's permissions, not `settings.manage`
+
+`GET`/`PUT /api/agency/reimbursable-costs/policy` sit under the register they govern, on
+`ledger.view` and `finance.expenses_manage` — the pair decision 61 chose for the costs
+themselves.
+
+The alternative was `/api/settings/agency-cost-policy`, beside wave 2's
+`agency-profile`, which is the obvious sibling and the wrong one. The profile rides
+`settings.manage` because it is business-wide configuration that reorders a list; this
+decides a posting. Routing it through settings would hand the office's accountant a 403
+on the policy that governs the rows they record — precisely the failure decision 61
+exists to prevent, arriving from a different direction.
+
+`/api/ledger/settings` states the same rule from the other side: "the editable surfaces
+live where they are owned … rather than forking a second editor over one table."
+
+Unlike the profile route, GET answers with the labels and hints inline. The profile can
+leave them to its form because they describe a cosmetic ordering; these two words decide
+which account money lands in, so a screen rendering the choice from its own copy of the
+vocabulary could drift from the one the ledger acts on. Here the API is the only source.
 
 ## Sites audited and deliberately left alone
 
@@ -738,6 +1202,260 @@ superuser, which bypasses RLS even under FORCE (decision 31); and the purpose ga
 link every byte fetch, which made the default link unable to show the artwork it exists to show
 (decision 28).
 
+* `agency-brief.test.ts` (26) — §A's brief vocabulary: the chain and every
+  transition it refuses (no confirming a brief nobody was shown, no un-confirming
+  anything), `agencyBriefActionsFrom` offering only acts the route would accept,
+  the freeze covering `confirmed` and `superseded` but not `sent`, deletion only
+  from `draft`, an objective required only from `sent` onwards, channels deduped
+  into vocabulary order and *refused* rather than dropped when a key is unknown,
+  deliverables validated against §E's format vocabulary including `brief` itself,
+  a budget read as absent rather than as zero, and text trimmed but never
+  truncated.
+* `integration/agency-client-briefs.integration.test.ts` (17) — the same feature
+  against a real database: one `BR-` sequence per agency held under two
+  concurrent creates, a separate agency starting its own `BR-001`, a second tenant
+  answered `brief_not_found` for load, list, patch, transition and delete,
+  references into another tenant refused with nothing written, §A's approver rule
+  in both directions and against a stranger, the chain walked end to end with a
+  confirmation attributed to the approver already on the brief, an unattributed
+  confirmation refused, withdrawal from either side with `sent_at` surviving, the
+  freeze refusing six kinds of edit while the project pointer and the note still
+  move, absent-versus-null on a PATCH, an impossible date window refused on create
+  and on a one-sided patch, draft-only deletion, a client's deletion cascading a
+  confirmed brief away, and every list dimension including a search across the
+  brief's own words and its client's name.
+* 48 assertions run directly against `0274_agency_client_briefs.sql` over
+  Postgres — the CHECKs by name, both triggers, the cascade, and the two `SET
+  NULL` pointers. Each negative case asserts *why* it was refused, because a
+  refusal from the wrong constraint is still a refusal and still a bug. This is
+  what found the frozen `project_id` and the `BEFORE` trigger answering a NULL
+  client before the column's own NOT NULL could.
+* `agency-proposal.test.ts` (34) — §A's proposal vocabulary: the chain with every
+  decision terminal and only `withdrawn` reopening, `agencyProposalActionsFrom`
+  offering only acts the route would accept, the freeze covering everything past
+  `draft` and saying so separately about the lines, lapsing computed inclusively
+  from the date and never applied to a decided offer, `accept` blocked once an
+  offer has lapsed while `decline` and `expire` are not, the revenue accounts read
+  from the trade's own list rather than restated, the amount rounding half up
+  exactly as Postgres rounds `numeric`, zero kept as a real rial figure rather
+  than collapsed into absent, a fractional quantity surviving a browser's
+  floating-point artefact, a date refused unless it is a plain `YYYY-MM-DD` inside
+  a Gregorian year range, lines renumbered in the caller's order and refused
+  rather than dropped, a pass-through line required to state what passes through,
+  totals taxing what is left after discount and capping a discount at the
+  subtotal, margin subtracting the discount but never the tax, and the client
+  projection asserting its exact key set so a cost cannot be added to it.
+* `integration/agency-proposals.integration.test.ts` (27) — the same feature
+  against a real database: one `PR-` sequence per agency held under two
+  concurrent creates and a second agency starting its own, a stored amount equal
+  to the pure module's on the half-rial case, totals derived with no total column
+  present in the schema at all, a margin visible to the agency and provably absent
+  from the client projection read from real rows, a draft refused to the client
+  door, a discount past the subtotal refused on create and on a one-sided patch in
+  either direction, a pass-through line without a cost refused, a revenue code
+  outside the vocabulary refused, a second tenant answered `proposal_not_found`
+  for load, client-view, list, patch, transition and delete with nothing changed
+  by the attempts, §A's stakeholder rule in both directions and against a stranger
+  who is somebody else's contact, one client's brief refused as another client's
+  price, the chain walked end to end with a decision attributed to the stakeholder
+  already on the offer, an unattributed decision refused, an empty offer refused
+  at `send` but allowed at `withdraw`, the freeze refusing eight kinds of edit
+  while the contract pointer still moves, `accept` refused once lapsed and allowed
+  on the last valid day, a list whose margin equals the opened row's, every list
+  dimension including `lapsedOnly` and a search across the offer's words and its
+  client's name, absent-versus-null on a PATCH, draft-only deletion cascading its
+  lines, a client's deletion taking a sent offer with it, and a brief's deletion
+  leaving the offer that priced it standing.
+* `crm-org-structure.test.ts` (19) — §A's organisation resolver: both hierarchy
+  kinds collapsing to one `child → parent` statement, a refusal of every kind that
+  is not a hierarchy so a contact cannot become a brand, a group read from its own
+  file and from one of its brands (where the sibling appears, because seeing the
+  other brand is what stops one brand's work being priced for the other), three
+  levels root-first and depth-ordered, a hierarchy recorded in both directions
+  resolving as one tree, `isEmpty` for a party nothing hierarchical touches, an
+  unrelated group ignored, a missing name left blank rather than invented, the
+  newest of two claimed parents winning with the superseded one reported, an
+  undated claim outranked by a dated one in either arrival order, two- and
+  three-party cycles terminating and naming only their own members, and both the
+  upward and downward walks stopping at the depth bound and reporting that they
+  did.
+* `integration/agency-org-structure.integration.test.ts` (12) — the same reading
+  against a real database: one group resolved from edges recorded in both
+  directions, a brand's file rooted on its group with its sibling visible, three
+  levels depth-ordered, each brand's deals/briefs/proposals/accepted/contracts
+  counted against that brand and nobody else's with the group itself carrying
+  nothing (rolling up would double-count every figure on the card), a campaign count
+  — **pinned as an absence in wave 8 and inverted in wave 9**, so the change was a
+  decision somebody made rather than a column that appeared, a contact-only
+  party reporting `isEmpty`, a second tenant answered `null` for a valid foreign id
+  and unable to pull a foreign party into the tree through a join or a foreign deal
+  into the counts, a nonexistent and a malformed id both refused, the newest of two
+  claimed parents winning with both groups drawn, a cycle terminating with a party
+  below the loop correctly excluded from it, the depth bound, and a `contact_of`
+  edge not making a person a brand.
+* 89 assertions run directly against `0276_agency_proposals.sql` over Postgres —
+  the named CHECKs, the absence of auto-named ones, both unique keys, the
+  composite line foreign key, four triggers, RLS enabled *and forced* on both
+  tables, and the two non-vacuity checks that matter most: that no total column
+  exists on the header and that cost and pass-through exist only on the lines.
+  Each negative case asserts *why* it was refused. This is what found the
+  alphabetically-ordered triggers, the negative price reported as a bad
+  `amount_rial`, and the out-of-vocabulary revenue code reported as missing from
+  the chart — none of which a type-checker, a unit suite or a green whole-schema
+  sweep can see.
+
+* `agency-reimbursable-cost.test.ts` (22) — §D's gross-versus-net choice as
+  arithmetic a test can hold still. The four presentation × settlement combinations
+  are pinned **by account code**, because a mis-stated presentation is invisible
+  everywhere it can be seen: the row saves, the entry balances, the invoice prints,
+  and the only symptom is a margin report quietly wrong in both directions at once.
+  Also the vocabularies' labels and hints, `isPassThroughToClient` as the one
+  predicate §D's reporting filters on, `isReimbursableCostPosted` reading the entry
+  id rather than a status, an amount that refuses zero and refuses a fraction rather
+  than rounding it and stays inside the bigint column, a date that refuses a Jalali
+  year because `isValidIsoDate` is calendar-aware about days but shape-based about
+  years, and free text that reports over-long rather than truncating a description
+  about to appear on a client's invoice.
+* `integration/agency-cost-policy.integration.test.ts` (8) — §D's business-level
+  presentation policy. The headline is that choosing `gross` makes the *next* cost debit
+  **5197 instead of 1270**: a policy that only changed what a screen displayed would
+  pass every other test in the file and be worth nothing, so the assertion is at the
+  posting. Also that `stored: false` reports «not chosen» rather than dressing the
+  fallback up as a decision, that the audit row carries before and after and names the
+  member, that an explicit `net` beats a `gross` policy, that a policy change leaves an
+  existing cost's entry identical **line for line** while the database refuses the
+  row-level change outright, that a typo is not substituted with the policy's value,
+  that an unknown body key is refused rather than half-stored, that a café is refused
+  rather than defaulted, and that one agency's policy is not another's.
+* `integration/agency-recharge.integration.test.ts` (11) — §D's recharge half, and the
+  assertion that makes the pair worth having: that recording a client's media buy and
+  then billing it back leaves **1270 at exactly zero**. Also that the entry recognises
+  no revenue and no VAT (a VAT line would be a liability owed to nobody), that the
+  snapshot carries `passThrough` so a report reading `revenueCode` can tell a
+  pass-through from a sale, that a cost cannot be billed twice, that an unposted cost is
+  refused because there is nothing in 1270 to clear, that two clients are refused with
+  nothing written for either, that a duplicate id collapses into one recharge, that the
+  project tag appears only when every cost agrees, that **voiding the invoice makes the
+  cost billable again with nobody updating a flag**, and that one tenant cannot recharge
+  another's. Entries are found through `domain_events`, because
+  `journal_entries.source_id` is a fresh identity per line and not the order.
+* `agency-reimbursable-cost.test.ts` grew to 26 with the policy parser: a stored value
+  reads for either treatment, a non-string `updatedAt` is dropped rather than passed to
+  a screen, seven unusable shapes answer `null` so a caller can tell «never saved» from
+  «saved», an unrecognised presentation is **not** coerced to the default, and
+  `AGENCY_DEFAULT_PRESENTATION` is pinned as `net` and as a real member of the
+  vocabulary — because a fallback that is not one of the two values would post nowhere.
+* `reimbursable-cost-guard.test.ts` grew to 10 with `readRechargeBody`: a location is
+  trimmed, a blank one reads as absent rather than reaching the service as an id nobody
+  has, tenders pass through untouched so the invoice keeps deciding payment, and
+  anything that is not an object answers `null` rather than throwing.
+* `integration/agency-reimbursable-costs.integration.test.ts` (12) — the same feature
+  against a real database, and the proof that the door to 1270 opened rather than
+  that a row was inserted: the entry landing Dr 1270 / Cr 2140 with the project tag
+  and dated the day the money was spent; gross landing in 5197 **with 1270's balance
+  asserted at zero**; each of the three settlements crediting its own account;
+  refusals arriving in words with nothing written for any of them; a trade that is not
+  an agency refused rather than defaulted; a posted row frozen from the service *and*
+  from a raw `UPDATE` that skips it while its note stays open; an unposted row
+  editable and deletable; a one-field patch clearing nothing; the list's five filters
+  including an unknown presentation filtering nothing rather than matching nothing;
+  the per-client split of the client's money from the agency's own cost; and a second
+  tenant answered null, refused, and unable to file a cost against a foreign client.
+  Its first run failed eight of twelve for one reason worth keeping:
+  `domain_events.created_by` is a foreign key to `users`, so a posted document is
+  attributed to a member and not to a placeholder id.
+* `reimbursable-cost-guard.test.ts` (6) — §D's error map, typed exhaustively over the
+  service's codes, pinning `not_agency` as a 403 and `cost_posted` as a 409, and
+  pinning the **hand-off**: the guard must return null for `MissingLedgerAccountError`
+  so the shared agency handler answers it with a 409 in the product's own words, where
+  a cost-only map would answer a chart missing 1270 with a 500.
+* 104 assertions run directly against `0280_agency_reimbursable_costs.sql` over
+  Postgres — the named CHECKs, both unique keys, the three indexes including the
+  partial one over the unposted queue, four foreign keys and their delete actions
+  (with `entry_id` FK'd where 0134's equivalent is a bare uuid), RLS enabled *and*
+  forced, two triggers and the reference check covering `party_id` as well as
+  `project_id`, and the behaviour: refusals in words, the editable-before-posting
+  path, the freeze after it with the note exempt, and **both halves of the audited
+  merge door**. The merge section needed savepoints, because a statement that raises
+  aborts the whole transaction and the first refusal would otherwise answer every
+  later assertion with `25P02`; and two of its first-draft assertions were vacuous,
+  setting a column to the value it already held, which `IS DISTINCT FROM` correctly
+  reports as no change at all. A no-op UPDATE is not a test.
+* `agency-campaign.test.ts` (26) — §C's campaign vocabulary: the chain with both
+  terminal states and no path back to `planned`, the acts derived from it, the
+  window each act implies, `isAgencyCampaignInFlight` counting a paused campaign's
+  budget as still committed, `isAgencyCampaignCurrent` inclusive at both ends and
+  only for a campaign in flight, the four metrics with **every ratio null on a zero
+  denominator** and ROAS needing both sides because "we do not know" and "it was
+  zero" are different claims, the four budget states with `over` first-class, a
+  reversed window named rather than inferred, and the normalisers — including the
+  four-state nullable result (decision 55), channels de-duplicated in first-mention
+  order with the cap checked *before* the dedupe and an unrecognised channel refused
+  rather than silently dropped. Dates reuse `src/lib/iso-date.ts` rather than adding
+  a fifth validator, and a Jalali year is refused by bounds because `isValidIsoDate`
+  is calendar-shaped rather than calendar-correct.
+* `integration/agency-client-campaigns.integration.test.ts` (16) — the same feature
+  against a real database, which is the only place a service and a schema can be
+  caught disagreeing while each is self-consistent: one `CA-` sequence held under a
+  race, the defaults, refusals arriving in words, an overspend recorded *and*
+  reported as `over`, the four ratios and their nulls with `revenueRial: 0` giving no
+  ROAS, **list-row figures identical to the detail row's** (a list must not print a
+  figure it did not read), the five filters, a one-field patch clearing nothing while
+  an explicit clear still works, a figure pair validated against the record rather
+  than against the request, the full lifecycle with each window requirement stated in
+  words before the CHECK could say it, a closed campaign refused from the service and
+  from a **raw `UPDATE` that skips the service entirely**, deletion only while
+  planned, a second tenant answered null and refused, a foreign client refused by the
+  trigger as `23514`, §A's cross-brand brief arriving the same way, and two of one
+  brand's campaigns concurrent in one window — neither current once it has passed.
+* `integration/agency-party-merge.integration.test.ts` (6) — decision 56's merge
+  door, and the shape of the fix rather than only that a merge passes: relaxing a
+  freeze is easy and dangerous, so each test asserts both halves. A confirmed brief,
+  a sent proposal and a completed campaign each follow their client onto the
+  surviving record with the substance untouched and the proposal's lines byte-for-byte
+  intact, a brand's approver and stakeholder come along so §A's separation rule
+  survives, every move is audited into `crm_party_attribution_moves`, and an edit
+  that is *not* a merge is still refused — as is the substance, flag or no flag.
+* `campaign-guard.test.ts` (6) — §C's error map, whose value is the type rather than
+  the assertions: `EXPECTED_STATUS` is `Record<AgencyCampaignErrorCode, number>`, so
+  adding a refusal to the service without deciding its status fails `tsc` before it
+  can reach a route. The statuses are pinned too, because the screen renders «این
+  کمپین بسته شده است» off the 409s and renumbering one to a 400 would make it
+  re-show an editable form for a record that cannot be edited.
+* 66 assertions run directly against `0278_agency_client_campaigns.sql` over
+  Postgres — the named CHECKs and the deliberate absence of one between spend and
+  budget, both unique keys, the five reference foreign keys and their `SET NULL`, the
+  two triggers, RLS enabled *and forced*, and the non-vacuity checks: that
+  `metrics_source` has exactly two values and that there is no third. This is what
+  found the cascade exemption — a freeze that refuses "any change to a closed row"
+  also refuses the `ON DELETE SET NULL` a parent's deletion performs on it, so a
+  completed campaign was blocking the deletion of its own brief.
+
+* `crm-agency-pipeline.test.ts` (13) — §A's preset: both invariants
+  `savePipelineStages` enforces, so the preset can never be refused by the
+  function that writes it; exactly one `won` and one `lost`; contiguous ordering;
+  unique names within the column's 120 and notes within its 300; probabilities in
+  range and rising to `won`, because a forecast multiplies by them and a preset
+  that fell as a deal advanced would reward stalling; no `legacy_key` anywhere;
+  only `advertising_agency` receives it; and a source scan proving it imports
+  nothing but a type.
+* `integration/crm-agency-pipeline.integration.test.ts` (8) — the preset against a
+  real database, which is the only place the interaction with the tenant's
+  existing pipeline is visible: it lands beside the default rather than replacing
+  it, creating it twice writes it once, two simultaneous first visits produce one
+  pipeline, the default keeps its identity and its seeded six still active with
+  zero deactivated stages anywhere in the tenant, a `jewelry` tenant gets nothing
+  written at all, no agency stage carries a `legacy_key` while every seeded one
+  still does, the two invariants hold as rows, and a stage the agency renamed
+  survives the next visit.
+
+The count of zero deactivated stages is the assertion that justifies the file.
+Composing `createPipeline` with `savePipelineStages` — the obvious implementation
+— type-checks, passes every unit test, and leaves six deactivated copies of the
+default's stages beside the seven agency ones, because the first copies the
+source stages and the second deactivates rather than deletes what it is not
+given. Only a real database shows the wreckage (decision 35).
+
 ## Rollout checklist
 
 1. Merge; the migration is forward-only and applies in filename order. `main` has since added two
@@ -782,9 +1500,16 @@ link every byte fetch, which made the default link unable to show the artwork it
 
 Deliberately, and each is named in the issue:
 
-* **§A CRM** — agency pipeline stages, client briefs, multi-brand client accounts, proposals and
-  scope-of-work documents, contract renewals. Canonical `parties`/leads/deals exist and the agency
-  has the `crm` module; the agency-shaped pipeline and brief records do not.
+* **§A CRM** — contract renewals, and scope of work as a document rather than as prose. The
+  agency-shaped pipeline shipped in wave 5, the client briefs in wave 6, the proposals and quotes in
+  wave 7 (with §D's estimates, which are the same document — decision 43), the multi-brand client
+  presentation in wave 8 (decisions 49–51), and wave 9's client campaign record, which is §A's
+  "concurrent campaigns" and §C's first half at once (decisions 52–56). Canonical `parties`/leads/deals already existed, and
+  decision 37 records why the multi-brand account needed no schema. A proposal carries
+  `scope_of_work` and `terms` as text, which is what a client reads and disputes; a separately
+  versioned scope document with its own approvals is #1127's print-template territory and is not
+  built. Contract renewals are `workspace_contracts`' `reminder_days`, start and end dates with
+  nothing acting on them.
 * **§B My Workspace** — wave 2 added the seven project templates and the agency stages they carry.
   Still missing: deliverable revisions and version history, the approval/request-changes states as
   an agency-shaped review (Workspace has approvals; nothing here wires a client-facing review to
@@ -794,10 +1519,34 @@ Deliberately, and each is named in the issue:
   freelancers, and any client/external reviewer access — which, if it is ever built, must be scoped
   and revocable, never a share URL that bypasses tenant and project authorization. #1110's
   eligibility matrix must still name this trade when it lands.
+* **§D reimbursable client costs** — wave 10 opened account 1270 and made the
+  gross-versus-net choice a stored, posted fact (decisions 58–62), and wave 11 closed
+  the loop with the **recharge** that credits it when a cost is billed back, which is
+  what turns the account from an accumulator into a clearing one (decisions 63–67).
+  Wave 12 added the **business-level** presentation policy §D asks for, so the
+  treatment is now chosen once and inherited rather than re-decided per row
+  (decisions 68–71). Still owed: the **screen**, because the Accounting app's section
+  key reaches ten files and four contract tests of its own — and it now has three acts
+  to show rather than one (record, recharge, choose the policy), so it is the natural
+  home for all three; the **campaign and project P&L** read, which wave 11 moved closer
+  by tagging the recharge's entries with the project its costs agreed on, and which
+  cannot be complete until time tracking exists, since §D asks for hours and cost per
+  project and nothing records hours; and the vendor quote → purchase → payable →
+  settlement chain, for which `settled_by = 'payable'` crediting 2140 is the seam — the
+  day that chain exists it settles these rows rather than duplicating them.
 * **§C Growth** — campaign calendar and channel mix for *client* campaigns, the agency's-own vs
   client-managed split in reporting, spend/reach/CPL/CPA/ROAS with defensible attribution, manual
   import of platform data. No external ad-platform integration is claimed or implied anywhere in
-  this change.
+  this change. Wave 9 built the **record** half and stopped there: `agency_client_campaigns` now
+  names a client, holds the window and the channels, holds the media spend and the five attribution
+  counts, and derives CTR/CPL/CPA/ROAS with every ratio null on a zero denominator (decisions 52–54).
+  What is *not* built is the reporting half — a calendar view across campaigns, the agency's-own
+  versus client-managed split (which needs a "whose campaign is this" dimension that no record here
+  carries, and which the issue's own non-goal rules out inventing), cross-campaign CPL/CPA/ROAS
+  roll-ups, and manual import of platform data as a file rather than as typed figures. Wave 8's
+  claim that §C was "blocked on `growth_campaigns` having no client column" is corrected in decision
+  51: that table is #901's retail cashback automation and could not be given one honestly, so the
+  missing thing was a record and wave 9 added one.
 * **§D Accounting** — wave 2 gave the trade its ordinary sale document (a service invoice, on account
   or settled, one line per described service, each crediting one of the agency's four revenue
   accounts, posted by the existing `service.sale_revenue` rule), and wave 3 gave it the documents
@@ -806,18 +1555,25 @@ Deliberately, and each is named in the issue:
   apart from its posted half. Client receivables arrive through the invoice itself — an agency
   invoice defaults to on account (نسیه), so the posting engine raises the receivable and §D's
   collected/owed split is read from the invoices a project produced. What is still missing:
-  * **Estimates and quotations.** A schedule is laid out against an engagement that exists; there is
-    no pre-contract document to price work the client has not yet agreed to, and no path from a
-    quotation to a signed engagement.
+  * ~~**Estimates and quotations.**~~ Built, as `agency_proposals` (0276) — the pre-contract document
+    that prices work the client has not yet agreed to, carrying a nullable `contract_id` written
+    after acceptance so the path from a quotation to a signed engagement exists. Decision 43: §A's
+    "proposals/quotes" and §D's "estimates" are one document, because §B's stage list puts them in
+    one place. What is still missing on §D's side is the *posting*: an accepted proposal is an
+    agreement that money will become due, and turning it into an invoice is the service-invoice
+    layer's act, not this table's.
   * **True customer advances.** A `deposit` is a milestone that gets invoiced, not a liability drawn
     down against later invoices (decision 15). 2430 remains a retail layaway deposit and is
     unreached by any agency document.
   * **The vendor chain** — quote → approved purchase/expense → payable → settlement (decision 21).
     The accounts are seeded and the project dimension it needs now exists; the documents are
     procurement's.
-  * **Gross vs. net pass-through.** The media recharge is booked gross as revenue and 1270 is
-    unreached. Which way a given agency books it is a business policy needing its own document and
-    posting rule, never a flag on an invoice and never inferred from how large a line is.
+  * **Gross vs. net pass-through.** The media recharge is still booked gross as revenue and 1270 is
+    still unreached, so the *posting* remains to be built. What now exists is the decision it needs:
+    `agency_proposal_lines.pass_through` records, line by line and at offer time, whether a figure is
+    the agency's own revenue or the client's money moving past it — the only moment anybody actually
+    knows the answer, and not something to infer at invoice time from how large a line is. Which way
+    a given agency books it is still a business policy needing its own posting rule.
   * **Overdue balances per project.** `ar-service.ts` ages a *customer's* balance, and migration
     0260 added the partial index on `(business_id, due_date) WHERE status = 'approved'` that a
     per-project overdue list would read, but nothing surfaces it yet. Tax and discount are likewise

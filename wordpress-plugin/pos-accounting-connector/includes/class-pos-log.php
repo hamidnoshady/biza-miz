@@ -14,6 +14,9 @@ class POS_Connector_Log {
 
 	const TABLE = 'pos_connector_log';
 
+	/** Bumped when the log schema changes; with the queue's, it gates `dbDelta()`. */
+	const DB_VERSION = 1;
+
 	/** Kept small: this is a diagnostic tail, not an archive. */
 	const KEEP_ROWS = 500;
 

@@ -127,6 +127,101 @@ describe("WordPress plugin protocol", () => {
   });
 });
 
+// Issue #1206: «کرون زمان‌بندی شده است» and «آخرین دوره موفق بود» used to be
+// inferable from nothing. These pin the two behaviours that made a broken
+// connector look healthy: a success timestamp written after a failed phase,
+// and a recovered gap advertised as the current cron state.
+describe("truthful cron health (issue #1206)", () => {
+  const health = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-health.php", "utf8");
+  const cli = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-cli.php", "utf8");
+
+  it("records a success timestamp only for a verified cycle", () => {
+    const body = sync.slice(sync.indexOf("private static function run_locked"), sync.indexOf("private static function cycle_error_message"));
+    expect(body).toContain("$verdict   = POS_Connector_Health::cycle_verdict( $phases );");
+    // Three facts, three fields, written in three different places.
+    expect(body).toContain("'last_run_completed_at' => $completed,");
+    expect(body).toContain("if ( $verdict['verified'] ) {");
+    expect(body).toContain("$changes['last_sync_ok_at'] = $completed;");
+    expect(body).toContain("$changes['last_data_applied_at'] = $completed;");
+    expect(body).not.toMatch(/last_sync_ok_at' => current_time/);
+  });
+
+  it("no longer advertises the previous run's staleness as the current state", () => {
+    expect(sync).not.toContain("self::$previous_run");
+    // The report is graded now, and the gap it ended rides along as history.
+    const telemetry = sync.slice(sync.indexOf("private static function telemetry"), sync.indexOf("public static function handshake"));
+    expect(telemetry).toContain("POS_Connector_Health::cron_state( $settings, time() )");
+    expect(telemetry).toContain("'currentCronState'");
+    expect(telemetry).toContain("'previousOutageAt'");
+    expect(telemetry).toContain("'recoveredAt'");
+    expect(telemetry).toContain("'fastHandlerLastCompletedAt'");
+    expect(telemetry).toContain("'lastActualDataAppliedAt'");
+  });
+
+  it("never collapses an empty phase and a failed one into the same 0", () => {
+    for (const fn of ["push_queue", "pull_jobs"]) {
+      const start = sync.indexOf(`function ${fn}( POS_Connector_Client $client )`);
+      expect(start, fn).toBeGreaterThan(-1);
+      const body = sync.slice(start, start + 3_000);
+      expect(body, fn).toContain("POS_Connector_Health::PHASE_EMPTY");
+      expect(body, fn).toContain("POS_Connector_Health::PHASE_FAILED");
+      expect(body, fn).not.toMatch(/^\t\treturn 0;$/m);
+    }
+    // Applied but unacknowledged is partial, never done.
+    expect(sync).toContain("$ack_error = 'ack_' . $ack['error'];");
+    expect(sync).toContain("POS_Connector_Health::PHASE_PARTIAL;");
+  });
+
+  it("grades the scheduler with a grace window, and knows a test-only store", () => {
+    expect(health).toContain("const DELAYED_AFTER_INTERVALS = 3;");
+    expect(health).toContain("const CRITICAL_AFTER_SECONDS = 600;");
+    expect(health).toContain("public static function cron_state(");
+    expect(health).toContain("public static function cycle_verdict(");
+    expect(health).toContain("public static function note_attempt(");
+    expect(health).toContain("public static function note_cycle(");
+    expect(health).toContain("public static function peek(");
+    expect(health).toContain("'test_only'");
+    // #1149's two-interval regression is preserved, not redefined.
+    expect(health).toContain("const STALE_AFTER_INTERVALS = 2;");
+  });
+
+  it("ships a read-only doctor whose exit code is the current failure", () => {
+    expect(cli).toContain("public function doctor(");
+    expect(cli).toContain("[--json]");
+    expect(cli).toContain("[--ping]");
+    expect(cli).toContain("WP_CLI::halt( 1 )");
+    // A ping is labelled a connection test, never proof of the schedule.
+    expect(cli).toContain("connection_test_only");
+  });
+});
+
+describe("measured latency & Jalali-facing admin (issue #1206 P1 / UX-02)", () => {
+  const health = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-health.php", "utf8");
+  const cli = readFileSync("wordpress-plugin/pos-accounting-connector/includes/class-pos-cli.php", "utf8");
+
+  it("measures the local queue's delivery latency from sent rows, and only from sent rows", () => {
+    expect(queue).toContain("function delivery_latency(");
+    expect(queue).toContain("WHERE status = 'sent'");
+    expect(queue).toContain("UNIX_TIMESTAMP(updated_at) - UNIX_TIMESTAMP(created_at)");
+    expect(health).toContain("public static function percentiles(");
+    // Reported to the app, so the p95 target is graded on evidence there…
+    expect(sync).toContain("POS_Connector_Queue::delivery_latency()");
+    expect(sync).toContain("'deliveryLatency'");
+    // …and printed by the doctor, for a human with a terminal.
+    expect(cli).toContain("POS_Connector_Queue::delivery_latency( 500, true )");
+    expect(cli).toContain("'cycleRuntimeMs'");
+  });
+
+  it("admin timestamps are Jalali-facing, never raw UTC Gregorian strings", () => {
+    expect(health).toContain("public static function gregorian_to_jalali(");
+    expect(health).toContain("public static function jalali_date_label(");
+    expect(admin).toContain("POS_Connector_Health::jalali_date_label(");
+    expect(admin).not.toContain("gmdate( 'Y-m-d H:i:s', $at ) . ' UTC'");
+    expect(admin).not.toContain("'زمان UTC'");
+    expect(admin).not.toContain("echo esc_html( $entry['created_at'] )");
+  });
+});
+
 describe("WordPress plugin updater", () => {
   it("uses the platform manifest with a package checksum", () => {
     expect(main).toContain("https://updates.eshobe.app/wordpress/pos-accounting-connector/update.json");

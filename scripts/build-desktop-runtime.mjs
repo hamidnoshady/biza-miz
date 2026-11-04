@@ -24,6 +24,7 @@ const { nodeFileTrace } = require("next/dist/compiled/@vercel/nft");
 const { stripNextTraceMetadata } = require("./desktop/strip-next-trace-metadata.cjs");
 const { compactRuntimeJson } = require("./desktop/compact-runtime-json.cjs");
 const { compactNextClientManifests } = require("./desktop/compact-next-client-manifests.cjs");
+const { assertNoCentralRoutes, removeCentralRoutes } = require("./desktop/central-route-exclusions.cjs");
 
 function required(relativePath, explanation) {
   const absolute = path.join(root, relativePath);
@@ -152,6 +153,22 @@ async function main() {
   await cp(path.join(nextDir, "static"), path.join(outDir, ".next", "static"), { recursive: true });
   await cp(path.join(root, "public"), path.join(outDir, "public"), { recursive: true });
   await cp(path.join(root, "migrations"), path.join(outDir, "migrations"), { recursive: true });
+
+  /*
+   * Issue #1194 — a desktop install is a *site*. Middleware answers 404 for
+   * `/platform/*` and `/api/platform/*`, but a hidden route is not an absent
+   * one: the console's pages, API handlers and client chunks were still in the
+   * signed payload. Delete them here, then fail the build if any survived, so
+   * the trust boundary is the file system and not a request-time check a
+   * patched process could skip. Only the `platform` segments are removed;
+   * setup, activation, sync, auth and every tenant route stay.
+   */
+  const centralExclusions = await removeCentralRoutes(outDir);
+  await assertNoCentralRoutes(outDir);
+  console.log(
+    `Excluded Central Superadmin routes from the desktop runtime: ${centralExclusions.filesRemoved} file(s), ` +
+      `${(centralExclusions.bytesRemoved / 1024 / 1024).toFixed(1)} MiB, ${centralExclusions.manifestEntriesRemoved} manifest entr(ies)`,
+  );
 
   // Next's conservative package-level trace reaches its optional TypeScript
   // config loader even though this staged runtime has no TS config or source.
@@ -328,6 +345,7 @@ async function main() {
     bytes: runtimeBytes,
     mebibytes: Number((runtimeBytes / 1024 / 1024).toFixed(1)),
     clientManifests,
+    centralExclusions,
     inputs: {
       serverBundleFiles: Object.keys(serverBuild.metafile.inputs).length,
       migrateBundleFiles: Object.keys(migrateBuild.metafile.inputs).length,

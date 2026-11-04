@@ -39,6 +39,12 @@ export const LOCK_KEYS = {
   setupRestore: "restore:setup",
   /** the central logical tenant snapshot (per business) */
   tenantSnapshot: (businessId: string) => `backup:tenant-snapshot:${businessId}`,
+  /** the fleet's nightly byte-day settlement, once per window (issue #903 §7) */
+  backupBillingStorage: (windowKey: string) => `backup:billing:storage:${windowKey}`,
+  /** the pre-charge reconciliation pass, once per day (issue #903 §7) */
+  backupBillingRefund: (dayKey: string) => `backup:billing:refund:${dayKey}`,
+  /** one drill at a time per business (issue #903 §12) */
+  tenantDrill: (businessId: string) => `backup:drill:${businessId}`,
 } as const;
 
 export interface LockHandle {

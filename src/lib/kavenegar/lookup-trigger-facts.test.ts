@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   MANAGED_LOOKUP_TRIGGERS,
+  TRIGGER_CODE_LABELS,
   checkTriggerTemplate,
   isManagedLookupTrigger,
+  previewTriggerMessage,
+  triggerCodeLabel,
   triggerEventKey,
   triggerValues,
   unsupportedTriggerVariables,
@@ -105,5 +108,69 @@ describe("triggerEventKey — the identity of the fact, not of the attempt", () 
     expect(triggerEventKey("order_ready", "22222222-2222-4222-8222-222222222222")).not.toBe(
       triggerEventKey("order_ready", orderId),
     );
+  });
+});
+
+describe("the tenant's preview is the message, not an example (issue #902 §9 item 0)", () => {
+  it("renders the template through the same functions the dispatcher uses", () => {
+    const preview = previewTriggerMessage({
+      trigger: "order_ready",
+      body: "%token سلام، سفارش %token2 از %token3 آمادهٔ تحویل است.",
+      declared: ["customer_name", "store_name", "order_number"],
+    });
+    // A real render: the sample customer's name is in it, and no token is left.
+    // The order number is rendered by the shared renderer, which leaves a plain
+    // number in Latin digits — the preview deliberately does not add a second
+    // formatter in front of the one that already owns this.
+    expect(preview).toBe("سارا محمدی سلام، سفارش فروشگاه نمونه از 1042 آمادهٔ تحویل است.");
+    expect(preview).not.toMatch(/%token/);
+  });
+
+  it("renders a payment receipt with the money formatted, not the raw rial", () => {
+    const preview = previewTriggerMessage({
+      trigger: "payment_received",
+      body: "پرداخت %token به مبلغ %token2 در %token3 ثبت شد.",
+      declared: ["store_name", "amount", "date"],
+    });
+    expect(preview).toContain("فروشگاه نمونه");
+    // The amount renders as money in Persian digits with the platform's
+    // separator, and the Jalali date the renderer produces — not the raw rial
+    // integer and not an ISO string.
+    expect(preview).toContain("۲۵۰٬۰۰۰");
+    expect(preview).not.toMatch(/250000|2026-10-28/);
+  });
+
+  it("says nothing rather than something blank when the pair cannot be rendered", () => {
+    // A template declaring a variable the event cannot fill must not preview as
+    // an empty message: "we cannot show this" and "the message is blank" are
+    // different claims, and only one of them is true.
+    expect(
+      previewTriggerMessage({
+        trigger: "order_ready",
+        body: "%token سلام %token2",
+        declared: ["customer_name", "amount"],
+      }),
+    ).toBeNull();
+
+    expect(
+      previewTriggerMessage({ trigger: "order_ready", body: "بدون متغیر", declared: [] }),
+    ).toBeNull();
+  });
+});
+
+describe("a stored code becomes a first-party sentence", () => {
+  it("translates the refusals a tenant can act on", () => {
+    expect(triggerCodeLabel("no_consent")).toBe("مشتری اجازهٔ دریافت پیامک نداده است");
+    expect(triggerCodeLabel("insufficient_credit")).toBe("اعتبار کیف پول کافی نبود");
+    expect(triggerCodeLabel(null)).toBeNull();
+  });
+
+  it("never echoes a code it does not know, and never a supplier's words", () => {
+    // A future or provider-shaped code must not reach a tenant screen verbatim.
+    expect(triggerCodeLabel("http_429")).toBe("پیام ارسال نشد");
+    expect(triggerCodeLabel("kavenegar_418")).toBe("پیام ارسال نشد");
+    for (const label of Object.values(TRIGGER_CODE_LABELS)) {
+      expect(label).not.toMatch(/kavenegar|provider|HTTP|429|418/i);
+    }
   });
 });

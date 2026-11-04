@@ -16,6 +16,7 @@ import {
 import { getMessageBusinessBilling } from "@/lib/messaging-billing";
 import { getTenantMessagingConfig } from "@/lib/messaging-service-readiness";
 import { tenantCampaignDelivery } from "@/lib/campaign-delivery-report";
+import { tenantDeliveryTrend } from "@/lib/delivery-trend";
 import {
   createLookupTemplate,
   disableLookupTemplate,
@@ -68,6 +69,10 @@ export const GET = withTenantScope(async () => {
     // own campaigns by the caller and by RLS, and carrying no provider name,
     // provider error string or wholesale cost (campaign-delivery-report.ts).
     campaignDelivery,
+    // Issue #902 §9 item 2 — the long view: a quarter of this business's own
+    // sends, bucketed weekly, so "was last month worse?" has an answer. Counts
+    // and latencies only, business-scoped, inside the caller's tenant scope.
+    deliveryTrend,
   ] = await Promise.all([
       getTenantMessagingConfig(session.businessId),
       getMessageBusinessBilling(session.businessId),
@@ -86,6 +91,10 @@ export const GET = withTenantScope(async () => {
       tenantTemplateLibrary(session.businessId),
       listTriggerSettings(session.businessId),
       tenantCampaignDelivery(session.businessId, { sinceHours: 24 * 7, limit: 10 }),
+      // Issue #902 §9 item 2 — this business's own delivery over a quarter, so
+      // "was last month worse" has an answer. Counts and latencies only; the
+      // query is business-scoped and runs inside the caller's tenant scope.
+      tenantDeliveryTrend(session.businessId, { days: 90 }),
     ]);
   return NextResponse.json({
     config,
@@ -99,6 +108,7 @@ export const GET = withTenantScope(async () => {
     templateLibrary,
     triggers,
     campaignDelivery,
+    deliveryTrend,
   });
 });
 
