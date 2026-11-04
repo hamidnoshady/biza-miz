@@ -77,10 +77,17 @@ export default async function ContractPrintPage({
     ? await listCompletedSignatureSlots(owner.businessId, id, latest.id)
     : {};
   const isCompleted = Object.keys(signed).length > 0;
+  let canGenerateFinalPdf = isCompleted && owner.access?.canManageContracts === true;
+  if (canGenerateFinalPdf) {
+    canGenerateFinalPdf = await resolveWorkspaceSubject(owner, "contract", id, "edit").then(
+      () => true,
+      () => false,
+    );
+  }
 
   return (
     <PageShell className="max-w-[900px]">
-      <PrintToolbar title={content.title} finalSigned={isCompleted} />
+      <PrintToolbar title={content.title} contractId={id} finalSigned={isCompleted} canGenerateFinalPdf={canGenerateFinalPdf} />
       <ContractDocumentSheet content={content} values={values} signed={signed} markUnresolved={!latest} />
       {latest ? (
         <p className="mt-3 break-all text-center text-[11px] text-muted-foreground">

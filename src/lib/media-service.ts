@@ -1205,6 +1205,7 @@ export async function getMediaAssetUsage(
     { rows: vehicles },
     { rows: rawWorkspaceDocs },
     { rows: rawTransfers },
+    { rows: rawContractFinalPdfs },
   ] = await Promise.all([
     query<MediaAssetUsageRef>(`SELECT id, name FROM menu_items WHERE image_media_id = $1 ORDER BY name`, [assetId]),
     query<MediaAssetUsageRef>(`SELECT id, name FROM inventory_items WHERE image_media_id = $1 ORDER BY name`, [
@@ -1311,6 +1312,15 @@ export async function getMediaAssetUsage(
         ORDER BY transfer_date DESC`,
       [assetId],
     ).catch(() => ({ rows: [] })),
+    query<{ id: string; version: number }>(
+      `SELECT f.id, v.version
+         FROM contract_final_pdfs f
+         JOIN contract_document_versions v
+           ON v.id = f.document_version_id AND v.business_id = f.business_id
+        WHERE f.media_asset_id = $1
+        ORDER BY f.created_at DESC`,
+      [assetId],
+    ).catch(() => ({ rows: [] })),
   ]);
 
   const protectedItems: ProtectedMediaUsageItem[] = [];
@@ -1346,6 +1356,26 @@ export async function getMediaAssetUsage(
       redacted,
     };
   });
+
+  for (const pdf of rawContractFinalPdfs as Array<{ id: string; version: number }>) {
+    const message = "این PDF نسخهٔ نهایی و امضاشدهٔ قرارداد است و از کتابخانهٔ رسانه حذف نمی‌شود.";
+    const name = `نسخهٔ نهایی قرارداد · ${pdf.version}`;
+    protectedItems.push({
+      kind: "workspace_document",
+      id: pdf.id,
+      name,
+      reason: "contract_final_pdf",
+      message,
+    });
+    workspaceDocuments.push({
+      id: pdf.id,
+      name,
+      version: pdf.version,
+      protected: true,
+      protectedReason: "contract_final_pdf",
+      protectedMessage: message,
+    });
+  }
 
   const transfers: MediaAssetUsageRef[] = rawTransfers.map((tr) => {
     const message = "این فایل پیوست انتقال مالی ثبت‌شده در دفاتر حسابداری است و قابل حذف نیست.";

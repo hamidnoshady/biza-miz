@@ -73,7 +73,7 @@ export interface AssetRow {
   aiLabels: { category?: string | null; tags?: string[]; description?: string };
   variant: MediaAssetVariant;
   sourceAssetId: string | null;
-  source: "upload" | "ai_attachment" | "ai_generated" | "ocr_receipt" | "ocr_invoice";
+  source: "upload" | "ai_attachment" | "ai_generated" | "ocr_receipt" | "ocr_invoice" | "contract_final_pdf";
   createdByAi: boolean;
   createdAt: string;
 }
@@ -232,6 +232,7 @@ const SOURCE_FILTERS: { key: "all" | AssetRow["source"]; label: string }[] = [
   { key: "ai_attachment", label: "از گفت‌وگو" },
   { key: "ocr_receipt", label: "رسید هزینه" },
   { key: "ocr_invoice", label: "فاکتور خرید" },
+  { key: "contract_final_pdf", label: "نسخهٔ نهایی قرارداد" },
 ];
 
 interface FolderTreeActions {
@@ -1801,6 +1802,10 @@ export function MediaManager() {
                       ) : asset.source === "ocr_invoice" ? (
                         <span className="absolute bottom-1 start-1">
                           <StatusBadge tone="neutral">فاکتور خرید</StatusBadge>
+                        </span>
+                      ) : asset.source === "contract_final_pdf" ? (
+                        <span className="absolute bottom-1 start-1">
+                          <StatusBadge tone="active">نسخهٔ نهایی قرارداد</StatusBadge>
                         </span>
                       ) : null}
                     </span>
