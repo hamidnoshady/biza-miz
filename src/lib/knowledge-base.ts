@@ -170,6 +170,10 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
   ...pageGroup("رشد و بازاریابی", [
     ["/growth/overview", "میز کار رشد"],
     ["/growth/customers", "مخاطبان"],
+    ["/growth/marketers", "بازاریابان"],
+    ["/growth/marketing-targets", "مقصدهای بازاریابی"],
+    ["/growth/marketing-assignments", "ماموریت‌های بازاریابی"],
+    ["/growth/marketing-touchpoints", "تعامل‌های بازاریابی"],
     ["/growth/campaigns", "کمپین‌ها"],
     ["/growth/messaging", "پیام‌رسانی"],
     ["/growth/gift-cards", "کارت هدیه"],

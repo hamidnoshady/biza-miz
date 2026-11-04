@@ -124,6 +124,10 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "tax.export": ["tax.view"],
 
   // Growth and marketing
+  "marketers.manage": ["marketers.view"],
+  "marketing_targets.manage": ["marketing_targets.view"],
+  "marketing_assignments.manage": ["marketing_assignments.view"],
+  "marketing_attribution.manage": ["marketing_attribution.view"],
   "campaigns.manage": ["campaigns.view"],
   "loyalty.manage": ["loyalty.view"],
   "loyalty.redeem": ["loyalty.view"],

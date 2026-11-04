@@ -116,15 +116,23 @@ async function liveForeignKeys(): Promise<string[]> {
        FROM pg_constraint con
        JOIN pg_class src ON src.oid = con.conrelid
        JOIN pg_class tgt ON tgt.oid = con.confrelid
-       JOIN unnest(con.conkey) AS k(attnum) ON true
+       JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, pos) ON true
+       JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, pos) ON fk.pos = k.pos
        JOIN pg_attribute att ON att.attrelid = src.oid AND att.attnum = k.attnum
-      WHERE con.contype = 'f' AND tgt.relname = 'parties'
+       JOIN pg_attribute target_att ON target_att.attrelid = tgt.oid AND target_att.attnum = fk.attnum
+      WHERE con.contype = 'f' AND tgt.relname = 'parties' AND target_att.attname = 'id'
       ORDER BY 1, 2`,
   );
   return rows.map((row) => partyReferenceKey(row.t, row.col));
 }
 
 describe("party merge reference coverage", () => {
+  it("maps composite tenant foreign keys to the party identity column only", async () => {
+    const live = await liveForeignKeys();
+    expect(live).toContain("marketing_targets.party_id");
+    expect(live).not.toContain("marketing_targets.business_id");
+  });
+
   it("classifies every foreign key that points at parties", async () => {
     const live = await liveForeignKeys();
     const declared = new Set(
@@ -217,6 +225,7 @@ describe("party merge reference coverage", () => {
     // catch.
     expect(seeded).toContain("ai_project_tasks.party_id");
     expect(seeded).toContain("workspace_contracts.party_id");
+    expect(seeded).toContain("marketing_targets.party_id");
 
     // A historical reference, to prove the merge leaves it alone.
     await db.query(
@@ -306,6 +315,13 @@ async function seedReference(table: string, column: string, partyId: string): Pr
         params: [biz.id, partyId],
       },
     ],
+    "marketing_targets.party_id": [
+      {
+        sql: `INSERT INTO marketing_targets (business_id, location_id, site_label, party_id)
+              VALUES ($1, $2, 'Merge target', $3)`,
+        params: [biz.id, biz.locationId, partyId],
+      },
+    ],
     "customer_notes.customer_id": [
       {
         sql: `INSERT INTO customer_notes (business_id, customer_id, body, created_by)
@@ -387,7 +403,7 @@ async function seedReference(table: string, column: string, partyId: string): Pr
     // The WooCommerce mapping is the reference that caused the production
     // incident, so a seed failure there is a broken test, not a skip — hiding
     // it would quietly turn the most important assertion into a no-op.
-    if (table === "integration_mappings") throw error;
+    if (table === "integration_mappings" || table === "marketing_targets") throw error;
     // Anything else: a schema this seed does not understand is not this test's
     // business. The coverage assertions above are the part that must never be
     // skipped, and they do not depend on seeding.

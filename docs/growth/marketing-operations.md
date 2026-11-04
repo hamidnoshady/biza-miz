@@ -30,8 +30,8 @@ RLS. Migration 0285 follows 0284; no data is backfilled.
 
 Current boundaries: there is no duplicate-site review, edit/archive UI, team
 hierarchy, precise address/coordinates, route planning, lead creation, consent,
-verified attribution or evidence. Links to a party later merged/archived are not yet
-repointed automatically; review them in CRM before relying on them. Options are
+verified attribution or evidence. Links to a party follow the surviving canonical
+party on a CRM merge; archived party links still require review. Options are
 currently capped at the first 500 active targets and marketers per branch; a
 searchable picker is required for larger rosters. The assignment is made to the
 canonical branch-authorized active staff membership (or an external roster

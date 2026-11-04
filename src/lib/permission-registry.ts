@@ -278,6 +278,14 @@ const DRAFTS: Draft[] = [
 
   // --- Growth --------------------------------------------------------------
   { key: P.growthView, group: "growth", label: "میز کار رشد", description: "داشبورد مدیریتی رشد، بینش مخاطبان و پل حسابداری رشد. ابزار صندوق نیست.", risk: "medium", audit: false },
+  { key: P.marketersView, group: "growth", label: "مشاهده بازاریابان", description: "دیدن فهرست بازاریابان در شعب مجاز، بدون امکان تغییر.", risk: "low", audit: false },
+  { key: P.marketersManage, group: "growth", label: "مدیریت بازاریابان", description: "افزودن و تغییر وضعیت بازاریابان در شعب مجاز.", risk: "medium", audit: true },
+  { key: P.marketingTargetsView, group: "growth", label: "مشاهده مقصدهای بازاریابی", description: "دیدن مقصدهای عملیاتی بازاریابی در شعب مجاز.", risk: "low", audit: false },
+  { key: P.marketingTargetsManage, group: "growth", label: "ثبت مقصد بازاریابی", description: "ثبت مقصد در شعب مجاز؛ به دسترسی مشاهده اشخاص نیز نیاز دارد.", risk: "medium", audit: true },
+  { key: P.marketingAssignmentsView, group: "growth", label: "مشاهده ماموریت‌های بازاریابی", description: "دیدن ماموریت‌های بازاریابی در شعب مجاز.", risk: "low", audit: false },
+  { key: P.marketingAssignmentsManage, group: "growth", label: "مدیریت ماموریت‌های بازاریابی", description: "تخصیص ماموریت و تغییر وضعیت آن در شعب مجاز.", risk: "medium", audit: true },
+  { key: P.marketingAttributionView, group: "growth", label: "مشاهده تعامل‌های بازاریابی", description: "دیدن گزارش تعامل در شعب مجاز؛ هویت سرنخ بدون دسترسی مشاهده و مدیریت CRM پنهان است.", risk: "medium", audit: false },
+  { key: P.marketingAttributionManage, group: "growth", label: "ثبت تعامل بازاریابی", description: "ثبت گزارش تعامل با سرنخ موجود؛ به مشاهده ماموریت و مشاهده و مدیریت CRM نیز نیاز دارد.", risk: "medium", audit: true },
   { key: P.campaignsView, group: "growth", label: "مشاهده کمپین‌ها", description: "دیدن کمپین‌های تخفیف، اثربخشی آن‌ها و کمپین‌های پیامی بدون اجرای آن‌ها.", risk: "low", audit: false },
   { key: P.campaignsManage, group: "growth", label: "اجرای کمپین", description: "ساخت، توقف و ارسال کمپین تخفیف و کمپین پیامی.", risk: "high", audit: true },
   { key: P.loyaltyView, group: "growth", label: "مشاهده باشگاه مشتریان", description: "مشاهده برنامه‌های وفاداری، امتیاز و اعتبار فروشگاهی مشتری و یادآوری خرید مجدد.", risk: "low", audit: false },
