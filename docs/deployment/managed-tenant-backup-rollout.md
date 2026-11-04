@@ -987,3 +987,47 @@ resolves the managed destination itself and explicitly mirrors regardless of tha
 flag. Aligning the two gates is a scheduler behaviour change (it starts outbound
 uploads in the tick that also takes the backup, for tenants who never opted in),
 so it is reported here for an owner decision rather than changed.
+
+## Increment: membership reconciliation, and the proof of what a restore leaves alone (§5 — line closed)
+
+The earlier "a restore must never rewind the wallet" increment wrote down three
+checks it had not implemented. Two of them (`accounting_balanced`,
+`sync_fence_advanced`) and the wallet assertion landed with #1210; this closes
+the third and pays the proof the epic asked for.
+
+**`membership_reconciled`.** `users.role` is the stable category, and a
+composite foreign key keeps `custom_role_id` inside its own business *at write
+time* — but an archive is captured table by table, so a capture that lost or
+truncated `tenant_roles` still carries the users pointing at it. Those users do
+not crash: they fall back to `role`'s preset, so a manager whose narrower custom
+role vanished is silently authorised with the wider default. That is a
+permission **escalation caused by a restore**, and it belongs in the same
+transaction as the swap. The check counts active users whose custom role is
+missing or inactive after the replacement and, like the others, is refused and
+rolled back rather than committed. Inactive accounts are excluded on purpose —
+an account that cannot sign in cannot be escalated. The check runs against a
+pinned client inside the restoring transaction, so it reads the same snapshot it
+just wrote.
+
+**The proof, on a real database.** `tenant-restore-apply.integration.test.ts`
+already showed another business untouched and the wallet not rewound; it now also
+asserts, after an actual restore of A while B sits in the same tables:
+
+- `wallet_ledger` and `billing_usage_events` row counts for A are **unchanged** —
+  the balance is not rewound *and* the evidence explaining it still exists. The
+  second matters more than it looks: `billing_usage_events.event_id` is the
+  idempotency identity, so deleting it would let the next settlement re-charge a
+  window this restore had "restored away";
+- the **platform realm** (`platform_admins`, `platform_audit_log`) is unchanged.
+  `rls_proven` refuses a privileged role at the door; this proves the other half
+  — that a *permitted*, tenant-scoped role still cannot reach those rows.
+
+The journal's `apply_succeeded` entry now lists six checks
+(`rls_proven`, `owner_preserved`, `membership_reconciled`, `accounting_balanced`,
+`wallet_unchanged`, `sync_fence_advanced`), all `ok`, so an auditor reading the
+receipt sees what was proved rather than being told "restored".
+
+**Still open in §5 after this:** nothing structural. What remains is the same
+claim proved against a populated, production-shaped database — the integration
+suite runs on a fresh one — and media/website capture, which is §8's gap rather
+than §5's.
