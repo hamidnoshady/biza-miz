@@ -51,6 +51,22 @@ export function pluginSupportsJobType(
   return pluginAdvertisedJobTypes(capabilities).includes(jobType);
 }
 
+/**
+ * Whether this connection's plugin can apply a *schedule* — a `post_upsert`
+ * carrying WordPress's `date_gmt` (#1215, P2‑5).
+ *
+ * The gate matters because the failure is silent in the worst direction: a
+ * plugin that does not know `date_gmt` still accepts `status: future`, and
+ * WordPress publishes a future post with a past date on its next cron pass. So
+ * a store whose plugin never advertised support is told to update it rather
+ * than being scheduled behind its owner's back.
+ */
+export function pluginSupportsPostSchedule(
+  capabilities: Record<string, unknown> | null | undefined,
+): boolean {
+  return capabilities?.postSchedule === true;
+}
+
 /** The protocol version that introduced per-lease ack tokens (issue #942, F01). */
 export const LEASE_TOKEN_PROTOCOL_VERSION = 3;
 

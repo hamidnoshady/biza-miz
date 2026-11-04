@@ -246,6 +246,59 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect(withoutImage?.excerptText).toBe("");
   });
 
+  it("carries a scheduled post's own instant back to the editor", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 120,
+      type: "post",
+      title: "زمان‌بندی‌شده",
+      status: "future",
+      date_gmt: "2026-12-01T06:00:00",
+      modified_gmt: "2026-11-20T10:00:00",
+    });
+    const scheduled = await content.getWpContent(biz.id, biz.pluginConnId, "post", "120");
+    // WordPress sends UTC without a suffix; the editor needs one instant it can
+    // show as a Tehran wall clock and send back.
+    expect(scheduled?.status).toBe("future");
+    expect(scheduled?.scheduledFor).toBe("2026-12-01T06:00:00.000Z");
+
+    await content.upsertWpContent(conn(), {
+      id: 121,
+      type: "post",
+      title: "منتشرشده",
+      status: "publish",
+      date_gmt: "2026-01-01T06:00:00",
+    });
+    const published = await content.getWpContent(biz.id, biz.pluginConnId, "post", "121");
+    // A published post has a date, not a schedule.
+    expect(published?.scheduledFor).toBeNull();
+  });
+
+  it("keeps a post's categories and tags by id, and reads a broken list as none", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 130,
+      type: "post",
+      title: "با دسته",
+      status: "publish",
+      categories: [2, 5],
+      tags: [9],
+    });
+    const row = await content.getWpContent(biz.id, biz.pluginConnId, "post", "130");
+    expect(row?.categories).toEqual([2, 5]);
+    expect(row?.tags).toEqual([9]);
+
+    // A mirror written by an older or broken producer must not break the editor
+    // read: a malformed list is "no terms", not an exception.
+    await content.upsertWpContent(conn(), {
+      id: 131,
+      type: "post",
+      title: "خراب",
+      categories: ["فرش"] as never,
+    });
+    const broken = await content.getWpContent(biz.id, biz.pluginConnId, "post", "131");
+    expect(broken?.categories).toEqual([]);
+    expect(broken?.tags).toEqual([]);
+  });
+
   it("ignores invalid ids, unsafe links and malformed remote dates", async () => {
     await content.upsertWpContent(conn(), { id: 0, type: "post", title: "nope" });
     await content.upsertWpContent(conn(), { id: "", type: "post", title: "nope" });

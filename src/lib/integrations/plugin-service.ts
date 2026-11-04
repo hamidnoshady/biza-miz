@@ -44,6 +44,7 @@ import {
 } from "./plugin-link";
 import { pluginAdvertisedJobTypes, pluginSupportsJobType, pluginSupportsLeaseToken, registeredOrderStatuses } from "./plugin-capabilities";
 import { assertPluginJobSupported, PluginJobUnsupportedError } from "./plugin-job-guard";
+import { normaliseWpTerms } from "@/lib/wp-content-taxonomies";
 import { CRON_PROBE_JOB_TYPE } from "./plugin-cron-probe";
 import { ingestPluginEvent, type PluginEventInput } from "./webhook-ingest-service";
 import { isValidMediaUuid } from "../media";
@@ -214,6 +215,16 @@ export interface PluginHandshakeInput {
   capabilities?: {
     eventTypes?: string[];
     jobTypes?: string[];
+    /** Whether the plugin applies a `date_gmt` on a `post_upsert` (#1215, P2‑5). */
+    postSchedule?: boolean;
+    /**
+     * Whether the plugin accepts `categories`/`tags` on a `post_upsert` and
+     * reports the site's post terms (#1215, P2‑5). The two lists travel with it,
+     * capped by the plugin because a site may have thousands of tags.
+     */
+    contentTaxonomies?: boolean;
+    postCategories?: unknown;
+    postTags?: unknown;
     /**
      * The store's registered order statuses (`wc_get_order_statuses()`), which
      * is the only truthful source of their display names — see
@@ -315,10 +326,24 @@ function pluginCapabilities(input: PluginHandshakeInput): Record<string, unknown
   const orderStatuses = registeredOrderStatuses({
     orderStatuses: input.capabilities?.orderStatuses,
   });
+  // Both term lists go through the same reader the manager uses to display
+  // them, so what the handshake stores and what the picker shows cannot drift.
+  const postCategories = normaliseWpTerms(input.capabilities?.postCategories);
+  const postTags = normaliseWpTerms(input.capabilities?.postTags);
   return {
     protocolVersion: Number.isFinite(input.protocolVersion) ? Math.max(1, Math.floor(input.protocolVersion ?? 1)) : 1,
     eventTypes: sanitizeStringArray(input.capabilities?.eventTypes),
     jobTypes: sanitizeStringArray(input.capabilities?.jobTypes),
+    // Absent means "does not support it": the safe reading, since the plugin
+    // would otherwise publish a `future` post immediately.
+    ...(input.capabilities?.postSchedule === true ? { postSchedule: true } : {}),
+    ...(input.capabilities?.contentTaxonomies === true
+      ? {
+          contentTaxonomies: true,
+          ...(postCategories.length > 0 ? { postCategories } : {}),
+          ...(postTags.length > 0 ? { postTags } : {}),
+        }
+      : {}),
     ...(orderStatuses.length > 0 ? { orderStatuses } : {}),
   };
 }

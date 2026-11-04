@@ -47,13 +47,29 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { cn } from "@/lib/utils";
 import { ConnectionPicker, type ConnectionLite } from "./connection-lite";
-import { wpEditorIsDirty, wpEditorPatch, type WpEditorValues } from "./content-editor-state";
+import {
+  wpEditorIsDirty,
+  wpEditorPatch,
+  wpTaxonomiesDirty,
+  wpTaxonomyPatch,
+  type WpEditorTaxonomies,
+  type WpEditorValues,
+} from "./content-editor-state";
+import { ContentTermsPicker } from "./content-terms-picker";
+import type { WpTermOption } from "@/lib/wp-content-taxonomies";
 import { EditorialAssistant } from "./editorial-assistant";
 import { ContentPreview } from "./content-preview";
-import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
+import { pluginSupportsJobType, pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
 import { WpStoreRefreshError } from "./wp-store-states";
+import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import {
+  DEFAULT_SCHEDULE_TIME,
+  isFutureSchedule,
+  isoToTehranWallClock,
+  tehranWallClockToIso,
+} from "@/lib/wp-schedule";
 
 interface ContentRow {
   remoteId: string;
@@ -80,6 +96,11 @@ interface ContentDetail extends ContentRow {
   editorTitle: string;
   content: string | null;
   excerpt: string;
+  /** The stored schedule of an already-scheduled post, when the mirror carries it. */
+  scheduledFor?: string | null;
+  /** The terms this post carries today, as ids. */
+  categories?: number[];
+  tags?: number[];
 }
 
 type ContentTab = "post" | "page";
@@ -100,6 +121,13 @@ const WRITE_STATUS_LABELS: Record<NonNullable<ContentRow["writeStatus"]>, string
   dead: "نیازمند رسیدگی",
   needs_review: "نیازمند بازبینی",
 };
+
+/** Tomorrow at 09:00 Tehran — what "schedule it" means until the owner says otherwise. */
+function defaultScheduleWall(): { date: string; time: string } {
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const wall = isoToTehranWallClock(tomorrow.toISOString());
+  return { date: wall?.date ?? "", time: DEFAULT_SCHEDULE_TIME };
+}
 
 function statusTone(status: string): "active" | "positive" | "neutral" | "danger" {
   if (status === "publish") return "positive";
@@ -185,6 +213,8 @@ export function WpContentSection({ canManage }: { canManage: boolean }) {
     || pluginSupportsJobType(selectedConnection?.pluginCapabilities, "content_export");
   const postWriteSupported = selectedConnection?.linkMode !== "plugin"
     || pluginSupportsJobType(selectedConnection?.pluginCapabilities, "post_upsert");
+  const scheduleSupported = selectedConnection?.linkMode !== "plugin"
+    || pluginSupportsPostSchedule(selectedConnection?.pluginCapabilities);
 
   const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
 
@@ -512,6 +542,7 @@ disabled={syncing || isPaused || !contentExportSupported}
           key={`${selectedId}-${tab}-${editing === "new" ? "new" : editing.remoteId}`}
           connectionId={selectedId}
           connectionMode={selectedConnection?.linkMode ?? "plugin"}
+          scheduleSupported={scheduleSupported}
           lastContentSyncAt={selectedConnection?.lastContentSyncAt ?? null}
           type={tab}
           row={editing === "new" ? null : editing}
@@ -539,6 +570,7 @@ disabled={syncing || isPaused || !contentExportSupported}
 function PostEditor({
   connectionId,
   connectionMode,
+  scheduleSupported,
   lastContentSyncAt,
   type,
   row,
@@ -547,6 +579,8 @@ function PostEditor({
 }: {
   connectionId: string;
   connectionMode: ConnectionLite["linkMode"];
+  /** False when a plugin-mode store runs a build that cannot apply `date_gmt`. */
+  scheduleSupported: boolean;
   lastContentSyncAt: string | null;
   type: ContentTab;
   row: ContentRow | null;
@@ -554,12 +588,12 @@ function PostEditor({
   onSaved: (outcome: { queued: boolean; alreadyApplied?: boolean }) => void;
 }) {
   const [initial, setInitial] = useState<WpEditorValues | null>(
-    row ? null : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft" },
+    row ? null : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft", scheduledFor: "" },
   );
   const [values, setValues] = useState<WpEditorValues>(
     row
-      ? { editorTitle: row.title, content: "", excerpt: "", slug: row.slug, status: row.status }
-      : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft" },
+      ? { editorTitle: row.title, content: "", excerpt: "", slug: row.slug, status: row.status, scheduledFor: "" }
+      : { editorTitle: "", content: "", excerpt: "", slug: "", status: "draft", scheduledFor: "" },
   );
   const [contentEditable, setContentEditable] = useState(!row);
   const [loadError, setLoadError] = useState("");
@@ -569,6 +603,26 @@ function PostEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [createRequestId] = useState(() => (typeof crypto !== "undefined" ? crypto.randomUUID() : ""));
+  // Terms are their own patch (ids, not text), so they get their own draft and
+  // their own "did the owner touch this?" answer.
+  const [initialTaxonomies, setInitialTaxonomies] = useState<WpEditorTaxonomies | null>(
+    row ? null : { categories: [], tags: [] },
+  );
+  // The list row never carries terms; the detail read fills both below.
+  const [taxonomies, setTaxonomies] = useState<WpEditorTaxonomies>({ categories: [], tags: [] });
+  const [termOptions, setTermOptions] = useState<{
+    categories: WpTermOption[];
+    tags: WpTermOption[];
+    loading: boolean;
+    unsupported: boolean;
+    partial: boolean;
+  }>({ categories: [], tags: [], loading: true, unsupported: false, partial: false });
+  const [scheduleDraft, setScheduleDraft] = useState<{ date: string; time: string } | null>(null);
+
+  function updateSchedule(next: { date: string; time: string }) {
+    setScheduleDraft(next);
+    setValue("scheduledFor", tehranWallClockToIso(next.date, next.time) ?? "");
+  }
 
   useEffect(() => {
     if (!row) return;
@@ -597,8 +651,15 @@ function PostEditor({
         excerpt: detail.excerpt ?? "",
         slug: detail.slug ?? "",
         status: detail.status ?? "draft",
+        scheduledFor: detail.scheduledFor ?? "",
+      };
+      const nextTaxonomies = {
+        categories: detail.categories ?? [],
+        tags: detail.tags ?? [],
       };
       setContentEditable(detail.content !== null);
+      setInitialTaxonomies(nextTaxonomies);
+      setTaxonomies(nextTaxonomies);
       setExpectedRemoteUpdatedAt(detail.remoteUpdatedAt ?? null);
       setVersionConflict(false);
       setInitial(next);
@@ -607,7 +668,27 @@ function PostEditor({
     return () => controller.abort();
   }, [connectionId, type, row, loadAttempt]);
 
-  const dirty = wpEditorIsDirty(initial, values);
+  useEffect(() => {
+    const controller = new AbortController();
+    setTermOptions((current) => ({ ...current, loading: true }));
+    const query = new URLSearchParams({ connectionId });
+    void api<{ categories?: WpTermOption[]; tags?: WpTermOption[]; unsupported?: boolean; partial?: boolean }>(
+      `/api/integrations/wp-manager/content/terms?${query.toString()}`,
+      { signal: controller.signal },
+    ).then((response) => {
+      if (response.aborted) return;
+      setTermOptions({
+        categories: Array.isArray(response.data?.categories) ? response.data.categories : [],
+        tags: Array.isArray(response.data?.tags) ? response.data.tags : [],
+        loading: false,
+        unsupported: Boolean(response.data?.unsupported),
+        partial: Boolean(response.data?.partial),
+      });
+    });
+    return () => controller.abort();
+  }, [connectionId]);
+
+  const dirty = wpEditorIsDirty(initial, values) || wpTaxonomiesDirty(initialTaxonomies, taxonomies);
 
   function setValue<K extends keyof WpEditorValues>(key: K, value: WpEditorValues[K]) {
     setValues((current) => ({ ...current, [key]: value }));
@@ -622,10 +703,23 @@ function PostEditor({
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!initial || !dirty || !values.editorTitle.trim() || (row && !expectedRemoteUpdatedAt)) return;
+    // A scheduled post without a future date publishes on WordPress's next
+    // cron pass. Stop here, before anything is queued, and say why.
+    if (values.status === "future") {
+      if (!values.scheduledFor) {
+        setError("برای زمان‌بندی، تاریخ و ساعت انتشار را انتخاب کنید.");
+        return;
+      }
+      if (!isFutureSchedule(values.scheduledFor)) {
+        setError("زمان انتخاب‌شده گذشته است؛ تاریخ و ساعتی در آینده انتخاب کنید.");
+        return;
+      }
+    }
     setBusy(true);
     setError("");
 
     const patch = wpEditorPatch(initial, values);
+    const termPatch = initialTaxonomies ? wpTaxonomyPatch(initialTaxonomies, taxonomies) : {};
 
     const response = await api<{ error?: string; queued?: boolean; alreadyApplied?: boolean }>(
       "/api/integrations/wp-manager/content/posts",
@@ -638,6 +732,7 @@ function PostEditor({
             ? { id: row.remoteId, ...(expectedRemoteUpdatedAt ? { expectedRemoteUpdatedAt } : {}) }
             : { requestId: createRequestId }),
           ...patch,
+          ...termPatch,
         }),
       },
     );
@@ -655,7 +750,16 @@ function PostEditor({
   }
 
   const typeLabel = type === "post" ? "نوشته" : "برگه";
-  const unusualStatus = !["draft", "publish", "pending", "private"].includes(values.status);
+  const statusChoices = scheduleSupported
+    ? ["draft", "publish", "future", "pending", "private"]
+    : ["draft", "publish", "pending", "private"];
+  const unusualStatus = !statusChoices.includes(values.status);
+  // The schedule is stored as one instant and shown as a Tehran wall clock.
+  // The wall clock keeps its own draft so a half-typed time ("10:") is not
+  // rewritten out from under the owner on every keystroke; the instant in
+  // `values.scheduledFor` is still the only thing that gets saved.
+  const storedWall = isoToTehranWallClock(values.scheduledFor);
+  const scheduleWall = scheduleDraft ?? storedWall ?? defaultScheduleWall();
 
   return (
     <Dialog open onOpenChange={(open) => (!open ? requestClose() : undefined)}>
@@ -720,18 +824,61 @@ function PostEditor({
                       className={inputClass}
                       value={values.status}
                       disabled={busy}
-                      onChange={(event) => setValue("status", event.target.value)}
+                      onChange={(event) => {
+                        const next = event.target.value;
+                        setValue("status", next);
+                        if (next === "future") {
+                          // Choosing "scheduled" without a date would publish at
+                          // once; start from tomorrow morning instead.
+                          updateSchedule(defaultScheduleWall());
+                        } else {
+                          setScheduleDraft(null);
+                          setValue("scheduledFor", "");
+                        }
+                      }}
                     >
                       {unusualStatus ? (
                         <option value={values.status} disabled>{STATUS_LABELS[values.status] ?? values.status}</option>
                       ) : null}
                       <option value="draft">پیش‌نویس</option>
                       <option value="publish">منتشرشده</option>
+                      {scheduleSupported ? <option value="future">زمان‌بندی‌شده</option> : null}
                       <option value="pending">در انتظار بررسی</option>
                       <option value="private">خصوصی</option>
                     </select>
                   </Field>
                 </div>
+                {!scheduleSupported && values.status === "future" ? (
+                  <div className="mb-3">
+                    <InfoBox>
+                      این نوشته در سایت زمان‌بندی شده است، اما افزونهٔ این اتصال هنوز زمان‌بندی را پشتیبانی نمی‌کند. برای تغییر
+                      زمان انتشار، ابتدا افزونهٔ سایت را به‌روزرسانی کنید؛ تا آن زمان همین زمان در سایت حفظ می‌شود.
+                    </InfoBox>
+                  </div>
+                ) : null}
+                {values.status === "future" && scheduleSupported ? (
+                  <Field
+                    label="زمان انتشار"
+                    hint="به وقت تهران. وردپرس در این زمان آن را منتشر می‌کند و پیش از آن برای بازدیدکنندگان نمایش داده نمی‌شود."
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <JalaliDatePicker
+                        ariaLabel="تاریخ انتشار"
+                        value={scheduleWall.date}
+                        disabled={busy}
+                        onChange={(iso) => updateSchedule({ date: iso, time: scheduleWall.time })}
+                      />
+                      <input
+                        type="time"
+                        aria-label="ساعت انتشار"
+                        className={cn(inputClass, "w-32")}
+                        value={scheduleWall.time}
+                        disabled={busy}
+                        onChange={(event) => updateSchedule({ date: scheduleWall.date, time: event.target.value })}
+                      />
+                    </div>
+                  </Field>
+                ) : null}
                 <Field label="خلاصه" hint="اختیاری؛ ممکن است قالب سایت آن را در فهرست نوشته‌ها نمایش دهد.">
                   <textarea
                     className={cn(inputClass, "h-auto min-h-24 py-2 leading-6")}
@@ -766,6 +913,21 @@ function PostEditor({
                   excerpt={values.excerpt}
                   editable={contentEditable}
                 />
+                {/* Categories and tags belong to posts only — a page has no
+                    categories in WordPress, and offering them would be a picker
+                    whose answer core silently drops. */}
+                {type === "post" ? (
+                  <ContentTermsPicker
+                    categories={termOptions.categories}
+                    tags={termOptions.tags}
+                    selected={taxonomies}
+                    loading={termOptions.loading}
+                    unsupported={termOptions.unsupported}
+                    partial={termOptions.partial}
+                    disabled={busy}
+                    onChange={setTaxonomies}
+                  />
+                ) : null}
                 {/* The assistant sits under the text it works on: it drafts from
                     what is in the editor right now, and its output is only a
                     suggestion until a button here places it in a field. */}

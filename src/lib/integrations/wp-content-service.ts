@@ -23,6 +23,8 @@ import { enqueueExport } from "./woo-ops-service";
 import { getConnection, type ConnectionRow } from "./connections-service";
 import { pluginSupportsJobType } from "./plugin-capabilities";
 import { safeWpExternalUrl, type WpMediaKind } from "./wp-media";
+import { parseWordPressGmt } from "../wp-schedule";
+import { MAX_POST_CATEGORIES, MAX_POST_TAGS, normaliseTermIds } from "@/lib/wp-content-taxonomies";
 
 export type WpContentType = "post" | "page" | "attachment" | string;
 
@@ -70,6 +72,9 @@ export interface WpContentPayload {
    * against the mirrored attachment row at read time, never trusted from here.
    */
   featured_media?: number | string;
+  /** The post's categories and tags by term id — what the editor pre-checks. */
+  categories?: (number | string)[];
+  tags?: (number | string)[];
 }
 
 export interface WpContentRow {
@@ -116,6 +121,15 @@ export interface WpContentDetail extends WpContentRow {
   editorTitle: string;
   content: string | null;
   excerpt: string;
+  /** The terms this row carries today, as ids — empty on a page. */
+  categories?: number[];
+  tags?: number[];
+  /**
+   * When WordPress will publish this row, as an ISO instant — null for anything
+   * that is not a scheduled post. Read from the payload's `date_gmt`, so the
+   * editor can show the owner the schedule it is about to save over.
+   */
+  scheduledFor?: string | null;
 }
 
 /**
@@ -190,6 +204,12 @@ export function plainTitle(raw: unknown): string {
         ? String((raw as { rendered?: string }).rendered ?? "")
         : "";
   return decodeWpEntities(text.replace(/<[^>]*>/g, "")).trim();
+}
+
+/** A mirrored term list back to ids; anything malformed reads as "no terms". */
+function termIds(raw: unknown, max: number): number[] {
+  const parsed = normaliseTermIds(raw, max);
+  return parsed.ok ? parsed.ids : [];
 }
 
 /** A card-sized preview of a post's excerpt: tags stripped, entities decoded, cut on a word. */
@@ -543,6 +563,9 @@ export async function getWpContent(
     editorTitle: editableWpField(payload.title) || row.title,
     content: mirroredContent(payload.content),
     excerpt: editableWpField(payload.excerpt),
+    categories: termIds(payload.categories, MAX_POST_CATEGORIES),
+    tags: termIds(payload.tags, MAX_POST_TAGS),
+    scheduledFor: row.status === "future" ? parseWordPressGmt(payload.date_gmt) : null,
   };
 }
 
@@ -637,7 +660,9 @@ export async function enqueueWpPostUpsert(
   postType: "post" | "page",
   remoteId: string | undefined,
   requestId: string | undefined,
-  patch: Record<string, string>,
+  // Strings for the wp/v2 text fields, plus the two term-id lists WordPress
+  // applies through `post_category`/`tags_input`.
+  patch: Record<string, unknown>,
 ): Promise<"queued" | "already_applied" | "in_flight" | "unsupported"> {
   if (!pluginSupportsJobType(connection.plugin_capabilities, "post_upsert")) return "unsupported";
   if (!remoteId && !requestId) return "in_flight";

@@ -25,6 +25,7 @@
  */
 import "dotenv/config";
 import { Client } from "pg";
+import { PRODUCTS_OWNER_EMAIL, seedProductsFixture } from "./seed-visual-products-fixture";
 
 /** A fixed instant, so "last changed" columns never drift. */
 const T0 = "2026-03-15T08:30:00.000Z";
@@ -557,9 +558,19 @@ async function main() {
       }
     }
 
+    // ---- Products workspace (issue #1207) ----------------------------------
+    // A second tenant, because this workspace is gated to the trade-goods
+    // industries and the café above is `food_service`: `/accounting/products`
+    // would redirect it away, and switching its industry instead would repaint
+    // every other baseline. See seed-visual-products-fixture.ts.
+    const products = await seedProductsFixture(client, T0);
+
     await client.query("COMMIT");
     console.log(
       "Visual fixture ready: 6 accounts, 6 journal entries, 3 inventory items, 3 parties, 3 deals, 3 expenses, 2 receivables, 1 reversed receipt, 7 cheques across the lifecycle.",
+    );
+    console.log(
+      `Products fixture ready: business ${products.businessId}, ${products.items} items, owner ${PRODUCTS_OWNER_EMAIL}.`,
     );
   } catch (error) {
     await client.query("ROLLBACK");

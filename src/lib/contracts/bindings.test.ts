@@ -94,6 +94,7 @@ describe("the binding catalogue", () => {
       "طرف حساب",
       "کسب‌وکار",
       "اطلاعات پیمان (AEC)",
+      "حسابداری",
     ]);
   });
 });
@@ -150,6 +151,25 @@ describe("resolveBindings", () => {
       formatDate: (iso) => `تاریخ ${iso}`,
     });
     expect(changedBindings(first.values, second.values)).toContain("revised");
+  });
+
+  it("resolves accounting bindings supplied by the authorized project context", () => {
+    const accounting = {
+      projectBudgetRial: "900000000",
+      postedCostRial: "925000000",
+      budgetVarianceRial: "-25000000",
+    };
+    const resolved = resolveBindings(content([
+      field({ key: "budget", type: "money", binding: { source: "accounting", path: "project_budget" } }),
+      field({ key: "posted_cost", type: "money", binding: { source: "accounting", path: "posted_cost" } }),
+      field({ key: "variance", type: "money", binding: { source: "accounting", path: "budget_variance" } }),
+    ]), context({ accounting }), { formatMoney: (rial) => `${rial} ریال` });
+    expect(resolved.values).toEqual({
+      budget: "900000000 ریال",
+      posted_cost: "925000000 ریال",
+      variance: "-25000000 ریال",
+    });
+    expect(resolved.fields.every((field) => field.provenance === "binding")).toBe(true);
   });
 
   it("prefers a manual value but keeps the bound value beside it", () => {

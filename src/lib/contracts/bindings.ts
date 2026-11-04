@@ -87,6 +87,9 @@ export const CONTRACT_BINDING_CATALOGUE: readonly ContractBindingEntry[] = [
   { source: "aec", path: "guarantee_expiry", label: "تاریخ انقضای ضمانت‌نامه", type: "date", group: "اطلاعات پیمان (AEC)" },
   { source: "aec", path: "insurance_reference", label: "شمارهٔ بیمه‌نامه", type: "text", group: "اطلاعات پیمان (AEC)" },
   { source: "aec", path: "insurance_expiry", label: "تاریخ انقضای بیمه", type: "date", group: "اطلاعات پیمان (AEC)" },
+  { source: "accounting", path: "project_budget", label: "بودجهٔ مصوب پروژه", type: "money", group: "حسابداری" },
+  { source: "accounting", path: "posted_cost", label: "هزینهٔ ثبت‌شده در دفتر", type: "money", group: "حسابداری" },
+  { source: "accounting", path: "budget_variance", label: "مانده نسبت به بودجه", type: "money", group: "حسابداری" },
 ] as const;
 
 const CATALOGUE_KEYS = new Set(
@@ -145,6 +148,11 @@ export interface ContractBindingContext {
   } | null;
   business: { name: string; phone: string; address: string };
   /** AEC facts only from rows linked to this authorized contract; no project-wide or ledger-wide scan. */
+  accounting: {
+    projectBudgetRial: string;
+    postedCostRial: string;
+    budgetVarianceRial: string;
+  };
   aec: {
     revisedValueRial: string;
     advancePercent: string;
@@ -178,6 +186,7 @@ export function emptyBindingContext(contractTitle = "", today = ""): ContractBin
     project: null,
     party: null,
     business: { name: "", phone: "", address: "" },
+    accounting: { projectBudgetRial: "", postedCostRial: "", budgetVarianceRial: "" },
     aec: {
       revisedValueRial: "", advancePercent: "", advanceAmountRial: "", retentionPercent: "",
       paymentTerms: "", defectsLiabilityMonths: "", approvedVariationsRial: "",
@@ -260,7 +269,7 @@ export function resolveBindings(
   }
 
   const defined = new Set(content.fields.map((field) => field.key));
-  const undefinedTokens = referencedTokens(content).filter((key) => !defined.has(key));
+  const undefinedTokens = referencedTokens(content, values).filter((key) => !defined.has(key));
 
   return { values, fields, undefinedTokens };
 }
@@ -337,6 +346,14 @@ function boundValue(
           return "";
       }
     }
+    if (source === "accounting") {
+      switch (path) {
+        case "project_budget": return context.accounting.projectBudgetRial;
+        case "posted_cost": return context.accounting.postedCostRial;
+        case "budget_variance": return context.accounting.budgetVarianceRial;
+        default: return "";
+      }
+    }
     if (source === "aec") {
       switch (path) {
         case "revised_value": return context.aec.revisedValueRial;
@@ -361,7 +378,7 @@ function boundValue(
 
   const raw = pick().trim();
   if (!raw) return "";
-  if (field.type === "money" && formatters.formatMoney && /^\d+$/.test(raw)) {
+  if (field.type === "money" && formatters.formatMoney && /^-?\d+$/.test(raw)) {
     return formatters.formatMoney(raw);
   }
   if (field.type === "date") {

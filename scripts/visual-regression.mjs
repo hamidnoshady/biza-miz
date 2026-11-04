@@ -41,6 +41,23 @@ const DIFF_DIR = join(BASELINE_DIR, "__diff__");
 const BASE_URL = process.env.VISUAL_BASE_URL ?? "http://127.0.0.1:3000";
 const EMAIL = process.env.SEED_OWNER_EMAIL ?? "owner@example.com";
 const PASSWORD = process.env.SEED_OWNER_PASSWORD ?? "owner1234";
+
+/**
+ * The products workspace lives in a **second** seeded tenant, and this is why.
+ *
+ * `/accounting/products` is gated to `PRODUCT_WORKSPACE_INDUSTRIES`
+ * (`requireProductWorkspace` redirects anything else to the overview), and the
+ * demo business above is `food_service`. Re-labelling that business to a
+ * trade-goods industry would repaint every other baseline — its sidebar, its
+ * menus, its whole shell — which is the "re-record to clear a red run" this
+ * suite exists to prevent. So the fixture seeds one extra tenant
+ * (`scripts/seed-visual-products-fixture.ts`) with a fixed owner, and the
+ * products screens say whose session they need.
+ *
+ * A screen without these two fields uses the seeded owner above, so every
+ * existing baseline is untouched by this mechanism.
+ */
+const PRODUCTS_EMAIL = process.env.SEED_PRODUCTS_OWNER_EMAIL ?? "products-owner@example.com";
 const UPDATE = process.argv.includes("--update");
 
 /**
@@ -187,6 +204,45 @@ const SCREENS = [
     anchor: "table",
     maxDiffRatio: CHEQUE_REGISTER_MAX_DIFF_RATIO,
   },
+  /*
+   * — Accounting · products (issue #1207) —
+   *
+   * The catalogue board the audit rebuilt: four columns instead of eleven, one
+   * action per row, the store/duplicate chips, and the family-versus-variant
+   * split. It is the first baseline that photographs the *product* row, and it
+   * is the only screen that runs as a second tenant — `/accounting/products`
+   * redirects a `food_service` business away, so the fixture seeds a
+   * trade-goods one (`scripts/seed-visual-products-fixture.ts`) and these three
+   * entries name its owner.
+   *
+   * Light and dark, because the badge tones and the amber panels are the parts
+   * a token mistake hides; mobile, because `DataTable` turns the row into a
+   * stacked card below `sm` and that form has its own regressions. `anchor`
+   * frames the table itself: the KPI cards above it are already governed by the
+   * inventory screen, and the row is what this baseline is for.
+   */
+  {
+    id: "accounting-products",
+    path: "/accounting/products",
+    theme: "light",
+    anchor: "table",
+    email: PRODUCTS_EMAIL,
+  },
+  {
+    id: "accounting-products-dark",
+    path: "/accounting/products",
+    theme: "dark",
+    anchor: "table",
+    email: PRODUCTS_EMAIL,
+  },
+  {
+    id: "accounting-products-mobile",
+    path: "/accounting/products",
+    theme: "light",
+    viewport: { width: 390, height: 844 },
+    anchor: "table",
+    email: PRODUCTS_EMAIL,
+  },
   // — CRM —
   { id: "crm-overview", path: "/crm/overview", theme: "light" },
   { id: "crm-deals", path: "/crm/deals", theme: "light" },
@@ -322,19 +378,33 @@ async function main() {
     reducedMotion: "reduce",
   };
 
-  // Log in once and keep the session, so each screen can still get a *fresh*
-  // context. A fresh context per screen matters: init scripts accumulate on a
-  // page, so reusing one context would leave every previous screen's theme
-  // script attached and make the result depend on iteration order.
-  const authContext = await browser.newContext(contextOptions);
-  const login = await authContext.request.post(`${BASE_URL}/api/auth/login`, {
-    data: { email: EMAIL, password: PASSWORD },
+  // Log in once **per identity** and keep each session, so each screen can
+  // still get a *fresh* context. A fresh context per screen matters: init
+  // scripts accumulate on a page, so reusing one context would leave every
+  // previous screen's theme script attached and make the result depend on
+  // iteration order. One login per tenant, not per screen: the screenshot is
+  // of the page, never of the login.
+  const credentialsFor = (screen) => ({
+    email: screen.email ?? EMAIL,
+    password: screen.password ?? PASSWORD,
   });
-  if (!login.ok()) {
-    throw new Error(`login failed (${login.status()}) — is the seeded database up?`);
+  const sessions = new Map();
+  for (const screen of screens) {
+    const credentials = credentialsFor(screen);
+    const key = `${credentials.email}:${credentials.password}`;
+    if (sessions.has(key)) continue;
+    const authContext = await browser.newContext(contextOptions);
+    const login = await authContext.request.post(`${BASE_URL}/api/auth/login`, { data: credentials });
+    if (!login.ok()) {
+      await authContext.close();
+      throw new Error(
+        `login failed for ${credentials.email} (${login.status()}) — is the seeded database up, ` +
+          "and has `npm run db:seed:visual` created that owner?",
+      );
+    }
+    sessions.set(key, await authContext.storageState());
+    await authContext.close();
   }
-  const storageState = await authContext.storageState();
-  await authContext.close();
 
   const failures = [];
   const recorded = [];
@@ -347,7 +417,9 @@ async function main() {
     const context = await browser.newContext({
       ...contextOptions,
       viewport: screen.viewport ?? contextOptions.viewport,
-      storageState,
+      storageState: sessions.get(
+        `${credentialsFor(screen).email}:${credentialsFor(screen).password}`,
+      ),
       colorScheme: screen.theme,
     });
     // next-themes persists the choice in localStorage under "theme" (not a

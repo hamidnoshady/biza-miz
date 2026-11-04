@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const storeState = vi.hoisted(() => ({
@@ -147,5 +148,202 @@ describe("editorial cards", () => {
 
     await screen.findAllByText("راهنمای نگهداری فرش");
     expect(container.querySelectorAll("img")).toHaveLength(0);
+  });
+});
+
+describe("scheduling from the editor", () => {
+  const detail = {
+    ...cardRow,
+    editorTitle: "نگهداری فرش",
+    excerpt: "خلاصه",
+    permalink: "https://shop.example/rug-care",
+    scheduledFor: null,
+  };
+
+  function mockApi() {
+    apiMock.mockImplementation((path: string, init?: { method?: string; body?: string }) => {
+      const url = String(path);
+      if (url.startsWith("/api/integrations/wp-manager/content/posts") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, status: 200, data: { ok: true, queued: true } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/posts")) {
+        return Promise.resolve({ ok: true, status: 200, data: { row: detail } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content")) {
+        return Promise.resolve({ ok: true, status: 200, data: { rows: [cardRow], total: 1, page: 1, pageSize: 20 } });
+      }
+      return Promise.resolve({ ok: true, status: 200, data: {} });
+    });
+  }
+
+  async function openEditor() {
+    const user = userEvent.setup();
+    render(<WpContentSection canManage />);
+    await user.click(await screen.findByRole("button", { name: /ویرایش/ }));
+    return user;
+  }
+
+  it("shows a Jalali date and a clock only once the owner picks «زمان‌بندی‌شده»", async () => {
+    mockApi();
+    const user = await openEditor();
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    expect(screen.queryByLabelText("تاریخ انتشار")).toBeNull();
+
+    await user.selectOptions(screen.getByLabelText("وضعیت"), "future");
+
+    expect(await screen.findByLabelText("تاریخ انتشار")).toBeTruthy();
+    expect(screen.getByLabelText("ساعت انتشار")).toBeTruthy();
+  });
+
+  it("sends the schedule as one instant beside the status, never as a raw date", async () => {
+    mockApi();
+    const user = await openEditor();
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    await user.selectOptions(screen.getByLabelText("وضعیت"), "future");
+    const clock = await screen.findByLabelText("ساعت انتشار");
+    await user.clear(clock);
+    await user.type(clock, "10:15");
+    await user.click(screen.getByRole("button", { name: "ذخیره در وردپرس" }));
+
+    const posts = () =>
+      apiMock.mock.calls.filter(
+        ([, init]) => (init as { method?: string } | undefined)?.method === "POST",
+      );
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    const body = JSON.parse(String((posts()[0][1] as { body: string }).body));
+    expect(body.status).toBe("future");
+    // 10:15 Tehran is 06:45 UTC.
+    expect(body.scheduledFor).toMatch(/T06:45:00\.000Z$/);
+    expect(body.date_gmt).toBeUndefined();
+  });
+
+  it("hides «زمان‌بندی‌شده» on a store whose plugin cannot apply date_gmt", async () => {
+    storeState.value = {
+      ...storeState.value,
+      connections: [
+        {
+          id: "store-1",
+          name: "Shop",
+          linkMode: "plugin" as const,
+          status: "active",
+          pluginCapabilities: { jobTypes: ["post_upsert"] },
+        },
+      ] as never,
+    };
+    mockApi();
+    const user = await openEditor();
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    expect(screen.queryByRole("option", { name: "زمان‌بندی‌شده" })).toBeNull();
+    expect(screen.queryByLabelText("تاریخ انتشار")).toBeNull();
+    expect(user).toBeTruthy();
+  });
+
+  it("refuses to save a schedule it cannot honour, before anything is queued", async () => {
+    mockApi();
+    const user = await openEditor();
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    await user.selectOptions(screen.getByLabelText("وضعیت"), "future");
+    const clock = await screen.findByLabelText("ساعت انتشار");
+    // Clearing the clock leaves the schedule without an instant; there is
+    // nothing honest to send, so the editor stops before queuing anything.
+    await user.clear(clock);
+    await user.click(screen.getByRole("button", { name: "ذخیره در وردپرس" }));
+
+    expect(await screen.findByText(/تاریخ و ساعت انتشار را انتخاب کنید/)).toBeTruthy();
+    const posts = apiMock.mock.calls.filter(
+      ([, init]) => (init as { method?: string } | undefined)?.method === "POST",
+    );
+    expect(posts).toHaveLength(0);
+  });
+});
+
+describe("categories and tags from the editor", () => {
+  const detail = {
+    ...cardRow,
+    editorTitle: "نگهداری فرش",
+    excerpt: "خلاصه",
+    categories: [2],
+    tags: [],
+  };
+
+  function mockApi() {
+    apiMock.mockImplementation((path: string, init?: { method?: string; body?: string }) => {
+      const url = String(path);
+      if (url.startsWith("/api/integrations/wp-manager/content/posts") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, status: 200, data: { ok: true, queued: true } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/posts")) {
+        return Promise.resolve({ ok: true, status: 200, data: { row: detail } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/terms")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          data: {
+            categories: [
+              { id: 2, name: "دستهٔ اصلی", parent: 0, count: 12 },
+              { id: 5, name: "فرش", parent: 2, count: 4 },
+            ],
+            tags: [{ id: 9, name: "راهنما", parent: 0, count: 3 }],
+          },
+        });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content")) {
+        return Promise.resolve({ ok: true, status: 200, data: { rows: [cardRow], total: 1, page: 1, pageSize: 20 } });
+      }
+      return Promise.resolve({ ok: true, status: 200, data: {} });
+    });
+  }
+
+  it("pre-checks the post's own terms and saves only what changed", async () => {
+    mockApi();
+    const user = userEvent.setup();
+    render(<WpContentSection canManage />);
+    await user.click(await screen.findByRole("button", { name: /ویرایش/ }));
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    const current = await screen.findByRole("checkbox", { name: "دستهٔ اصلی" });
+    expect((current as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "فرش" }) as HTMLInputElement).checked).toBe(false);
+
+    await user.click(screen.getByRole("checkbox", { name: "راهنما" }));
+    await user.click(screen.getByRole("button", { name: "ذخیره در وردپرس" }));
+
+    const posts = apiMock.mock.calls.filter(
+      ([, init]) => (init as { method?: string } | undefined)?.method === "POST",
+    );
+    await waitFor(() => expect(posts).toHaveLength(1));
+    const body = JSON.parse(String((posts[0][1] as { body: string }).body));
+    expect(body.tags).toEqual([9]);
+    // The unchanged category list is not resent: a save must not rewrite terms
+    // with whatever the mirror last saw.
+    expect(body.categories).toBeUndefined();
+  });
+
+  it("stops the save when a plugin reported no term list", async () => {
+    apiMock.mockImplementation((path: string) => {
+      const url = String(path);
+      if (url.startsWith("/api/integrations/wp-manager/content/posts")) {
+        return Promise.resolve({ ok: true, status: 200, data: { row: { ...detail, categories: [], tags: [] } } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/terms")) {
+        return Promise.resolve({ ok: true, status: 200, data: { categories: [], tags: [], unsupported: true } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content")) {
+        return Promise.resolve({ ok: true, status: 200, data: { rows: [cardRow], total: 1, page: 1, pageSize: 20 } });
+      }
+      return Promise.resolve({ ok: true, status: 200, data: {} });
+    });
+    const user = userEvent.setup();
+    render(<WpContentSection canManage />);
+    await user.click(await screen.findByRole("button", { name: /ویرایش/ }));
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    expect(await screen.findByText(/را گزارش نمی‌کند/)).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: "راهنما" })).toBeNull();
   });
 });
