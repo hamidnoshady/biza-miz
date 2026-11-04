@@ -148,6 +148,11 @@ export const MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS: readonly MemberAttribution
 ];
 
 export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = [
+  // A roster membership is retained rather than orphaned by hard deletion.
+  { table: 'marketing_agents', columns: ["user_id", "created_by"] },
+  { table: 'marketing_targets', columns: ["created_by"] },
+  { table: 'marketing_touchpoints', columns: ["created_by"] },
+  { table: 'marketing_assignments', columns: ["created_by"] },
   { table: 'integration_woo_attribute_mappings', columns: ["reviewed_by"] },
   { table: 'accounting_dimension_mappings', columns: ["created_by"] },
   { table: 'accounting_dimension_values', columns: ["created_by"] },

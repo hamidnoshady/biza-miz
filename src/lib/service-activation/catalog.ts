@@ -725,6 +725,7 @@ const CRM_OWNERSHIP_REVIEW_PENDING: readonly PurgeScopeEntry[] = [
   { dataset: "crm.cases_and_case_events", classification: "shared", action: "block", reason: "پرونده‌ها و رویدادهای پشتیبانی ممکن است مشمول نگهداری حقوقی یا تعهدات خدمات مشتری باشند؛ تا تعیین سیاست نگهداری اختصاصی حذف نمی‌شوند." },
   { dataset: "crm.deals_linked_to_ledger_or_workspace", classification: "shared", action: "block", reason: "فرصت‌های متصل به سفارش مالی یا پروژهٔ میز کار حفظ می‌شوند تا پیوند تاریخی بین برنامه‌ها از بین نرود." },
   { dataset: "crm.converted_or_externally_linked_leads", classification: "shared", action: "block", reason: "سرنخ‌های تبدیل‌شده به شخص یا متصل به سرنخ وب‌سایت حفظ می‌شوند تا ارجاع و منشأ بین‌برنامه‌ای باقی بماند." },
+  { dataset: "crm.marketing_touch_linked_leads", classification: "shared", action: "block", reason: "سرنخ‌های متصل به تعامل ثبت‌شدهٔ Growth تا تعیین سیاست حذف میان‌برنامه‌ای حفظ می‌شوند." },
   { dataset: "crm.activities_attached_to_protected_records", classification: "shared", action: "block", reason: "پیگیری‌های متصل به پروندهٔ پشتیبانی یا رکورد CRM حفظ‌شده باقی می‌مانند." },
   { dataset: "crm.pipelines_referenced_by_protected_deals", classification: "shared", action: "block", reason: "مراحل و قیف‌های استفاده‌شده توسط فرصت‌های حفظ‌شده حذف یا از تاریخچه جدا نمی‌شوند." },
   { dataset: "crm.canonical_party_and_customer_data", classification: "shared", action: "block", reason: "یادداشت‌ها، روابط، فیلدهای سفارشی و پروندهٔ مشتری با قابلیت‌های دیگر مشترک‌اند؛ حذف نمی‌شوند." },

@@ -26,6 +26,11 @@ import { CommissionSection } from "./commission-section";
 import { GrowthCustomersSection } from "./customers-section";
 import { MessagingSection } from "./messaging-section";
 import { GrowthSettingsSection } from "./settings-section";
+import { MarketingTouchpointsSection } from "./marketing-touchpoints-section";
+import { MarketingTargetsSection } from "./marketing-targets-section";
+import { MarketingAssignmentsSection } from "./marketing-assignments-section";
+import { MarketersSection } from "./marketers-section";
+import { PERMISSIONS } from "@/lib/permissions";
 import { TorobSection } from "./torob-section";
 import { growthSectionHref, type GrowthSectionKey } from "./growth-routes";
 import { canViewGrowthSection, growthAbilities } from "@/lib/growth-access";
@@ -57,6 +62,10 @@ export function GrowthSection({
       />
     ),
     customers: () => <GrowthCustomersSection selectedCustomerId={selectedCustomerId} />,
+    marketers: () => <MarketersSection canManage={permissionSet.has(PERMISSIONS.marketersManage)} />,
+    "marketing-targets": () => <MarketingTargetsSection canManage={permissionSet.has(PERMISSIONS.marketingTargetsManage) && permissionSet.has(PERMISSIONS.partiesView)} />,
+    "marketing-assignments": () => <MarketingAssignmentsSection canManage={permissionSet.has(PERMISSIONS.marketingAssignmentsManage)} />,
+    "marketing-touchpoints": () => <MarketingTouchpointsSection canManage={permissionSet.has(PERMISSIONS.marketingAttributionManage) && permissionSet.has(PERMISSIONS.crmView) && permissionSet.has(PERMISSIONS.crmManage) && permissionSet.has(PERMISSIONS.marketingAssignmentsView)} />,
     campaigns: () => <CampaignsSection canManage={abilities.manageCampaigns} />,
     messaging: () => <MessagingSection canManage={abilities.manageCampaigns} initialPromotionId={initialPromotionId} />,
     "gift-cards": () => <GiftCardsSection abilities={abilities} />,

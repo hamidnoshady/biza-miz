@@ -33,6 +33,10 @@ export const GROWTH_SECTION_KEYS = [
   // Audience & customer insights over the shared `parties` record. Identity
   // and profile edits belong to the CRM; this screen links there.
   "customers",
+  "marketers",
+  "marketing-targets",
+  "marketing-assignments",
+  "marketing-touchpoints",
   "campaigns",
   // Consent-aware SMS/email templates and outbox campaigns.
   "messaging",
@@ -57,6 +61,10 @@ export type GrowthSectionKey = (typeof GROWTH_SECTION_KEYS)[number];
 export const GROWTH_SECTION_PERMISSION: Readonly<Record<GrowthSectionKey, Permission>> = {
   overview: PERMISSIONS.growthView,
   customers: PERMISSIONS.growthView,
+  marketers: PERMISSIONS.marketersView,
+  "marketing-targets": PERMISSIONS.marketingTargetsView,
+  "marketing-assignments": PERMISSIONS.marketingAssignmentsView,
+  "marketing-touchpoints": PERMISSIONS.marketingAttributionView,
   campaigns: PERMISSIONS.campaignsView,
   messaging: PERMISSIONS.campaignsView,
   "gift-cards": PERMISSIONS.giftCardsView,
@@ -82,10 +90,20 @@ export type HttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 
 /**
  * Every Growth-owned API, by method. A value that is a list means the handler
- * picks one of them from the request (store credit: `issue` vs `use`) — the
- * test then requires each listed key to appear in that handler.
+ * references multiple keys: some pick one from the request (store credit),
+ * while others require all of them (target creation requires directory access).
+ * This inventory does not encode AND/OR; the guard and its tests decide that.
  */
 export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<HttpMethod, Permission | readonly Permission[]>>>> = {
+  "/api/growth/marketing-touchpoints": { GET: PERMISSIONS.marketingAttributionView, POST: [PERMISSIONS.marketingAttributionManage, PERMISSIONS.crmView, PERMISSIONS.crmManage, PERMISSIONS.marketingAssignmentsView] },
+  "/api/growth/marketing-touchpoints/options": { GET: [PERMISSIONS.marketingAttributionManage, PERMISSIONS.crmView, PERMISSIONS.crmManage, PERMISSIONS.marketingAssignmentsView] },
+  "/api/growth/marketing-targets/locations": { GET: PERMISSIONS.marketingTargetsManage },
+  "/api/growth/marketing-targets": { GET: PERMISSIONS.marketingTargetsView, POST: [PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView] },
+  "/api/growth/marketing-assignments": { GET: PERMISSIONS.marketingAssignmentsView, POST: PERMISSIONS.marketingAssignmentsManage },
+  "/api/growth/marketing-assignments/options": { GET: PERMISSIONS.marketingAssignmentsManage },
+  "/api/growth/marketing-assignments/[id]": { PATCH: PERMISSIONS.marketingAssignmentsManage },
+  "/api/growth/marketers": { GET: PERMISSIONS.marketersView, POST: PERMISSIONS.marketersManage },
+  "/api/growth/marketers/candidates": { GET: PERMISSIONS.marketersManage },
   "/api/growth/overview": { GET: PERMISSIONS.growthView },
   "/api/growth/customers": { GET: PERMISSIONS.growthView },
   "/api/growth/accounting": { GET: PERMISSIONS.growthView },
@@ -179,6 +197,10 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
 export const GROWTH_SECTION_READS: Readonly<Record<GrowthSectionKey, readonly `${HttpMethod} ${string}`[]>> = {
   overview: ["GET /api/growth/overview"],
   customers: ["GET /api/growth/customers"],
+  marketers: ["GET /api/growth/marketers"],
+  "marketing-targets": ["GET /api/growth/marketing-targets"],
+  "marketing-assignments": ["GET /api/growth/marketing-assignments"],
+  "marketing-touchpoints": ["GET /api/growth/marketing-touchpoints"],
   campaigns: ["GET /api/promotions", "GET /api/promotions/reports", "GET /api/promotions/targets"],
   messaging: ["GET /api/messaging"],
   "gift-cards": ["GET /api/promotions/gift-cards"],

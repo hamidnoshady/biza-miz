@@ -1242,6 +1242,13 @@ async function clearBusinessDeleteBlockers(client: PoolClient, businessId: strin
   await purgeTaxInvoiceRecords(client, businessId);
 
   const statements = [
+    // Growth's composite tenant/branch foreign keys are not represented by the
+    // sweep's single-column ordering graph. Clear their operational history in
+    // dependency order after the explicit reset guard is enabled.
+    "DELETE FROM marketing_touchpoints WHERE business_id = $1",
+    "DELETE FROM marketing_assignments WHERE business_id = $1",
+    "DELETE FROM marketing_targets WHERE business_id = $1",
+    "DELETE FROM marketing_agents WHERE business_id = $1",
     // Dependent rows first: their foreign keys are deliberately restrictive
     // during normal operation to protect accounting provenance.
     `DELETE FROM inventory_transfer_allocations
