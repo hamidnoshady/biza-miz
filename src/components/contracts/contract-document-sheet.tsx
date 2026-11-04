@@ -23,7 +23,11 @@
  *    be the "second printing framework" the epic forbids.
  */
 import { cardClass } from "@/app/dashboard/page-chrome";
+import { formatJalali } from "@/lib/jalali";
+import { toPersianDigits } from "@/lib/digits";
 import {
+  conditionMatches,
+  contractScheduleDates,
   renderTemplate,
   tokenizeTemplate,
   type ContractBlock,
@@ -96,6 +100,46 @@ function Block({
           <RichText value={block.text} values={values} markUnresolved={markUnresolved} />
         </p>
       );
+    case "conditional":
+      return conditionMatches(block.condition, values) ? (
+        <p className="mb-3 text-[13px] leading-7 text-foreground/90">
+          <RichText value={block.text} values={values} markUnresolved={markUnresolved} />
+        </p>
+      ) : null;
+    case "schedule": {
+      const dates = contractScheduleDates(block.startDate, block.count, block.intervalMonths);
+      return (
+        <figure className="mb-4">
+          {block.caption ? (
+            <figcaption className="mb-1 text-[12px] font-medium text-muted-foreground">
+              <RichText value={block.caption} values={values} markUnresolved={markUnresolved} />
+            </figcaption>
+          ) : null}
+          <table className="w-full border-collapse text-[12px]">
+            <thead>
+              <tr>
+                {["قسط", "سررسید", "مبلغ"].map((heading) => (
+                  <th key={heading} className="border border-border bg-muted/60 px-2 py-1.5 text-start font-medium text-foreground">
+                    {heading}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {dates.map((date, index) => (
+                <tr key={date}>
+                  <td className="border border-border px-2 py-1.5 text-foreground/90">{toPersianDigits(index + 1)}</td>
+                  <td className="border border-border px-2 py-1.5 text-foreground/90">{formatJalali(date, { withMonthName: true })}</td>
+                  <td className="border border-border px-2 py-1.5 text-foreground/90">
+                    <RichText value={block.amountText} values={values} markUnresolved={markUnresolved} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </figure>
+      );
+    }
     case "article":
       return (
         <section className="mb-3">

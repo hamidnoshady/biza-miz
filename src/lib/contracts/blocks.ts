@@ -29,6 +29,8 @@ export const CONTRACT_BLOCK_TYPES = [
   "heading",
   "paragraph",
   "article",
+  "conditional",
+  "schedule",
   "bullets",
   "numbered",
   "table",
@@ -44,6 +46,8 @@ export const CONTRACT_BLOCK_LABELS: Record<ContractBlockType, string> = {
   heading: "عنوان",
   paragraph: "بند متنی",
   article: "مادهٔ قانونی",
+  conditional: "شرط درج ماده",
+  schedule: "برنامهٔ پرداخت تکرارشونده",
   bullets: "فهرست نقطه‌ای",
   numbered: "فهرست شماره‌دار",
   table: "جدول",
@@ -57,6 +61,8 @@ export const CONTRACT_BLOCK_HINTS: Record<ContractBlockType, string> = {
   heading: "عنوان بخش یا سرصفحهٔ داخلی سند",
   paragraph: "یک پاراگراف آزاد؛ متغیرها را با {{نام}} در آن جای می‌دهید",
   article: "«مادهٔ ۱ — موضوع قرارداد» با متن زیرش",
+  conditional: "متن این بند فقط وقتی شرط فیلد انتخاب‌شده برقرار باشد چاپ می‌شود",
+  schedule: "از تاریخ شروع، اقساط ماهانه/فصلی/شش‌ماهه/سالانه را با مبلغ یکسان تولید می‌کند",
   bullets: "فهرست بدون ترتیب برای شرایط و ضمائم",
   numbered: "فهرست شماره‌دار برای تعهدات و مراحل",
   table: "جدول اقساط، اقلام یا مشخصات؛ سلول‌ها متغیر می‌پذیرند",
@@ -80,6 +86,33 @@ export interface ContractArticleBlock extends ContractBlockBase {
   /** «مادهٔ ۱ — موضوع قرارداد». */
   title: string;
   text: string;
+}
+
+export const CONTRACT_CONDITION_OPERATORS = ["equals", "not_equals", "is_checked", "is_unchecked"] as const;
+export type ContractConditionOperator = (typeof CONTRACT_CONDITION_OPERATORS)[number];
+
+export interface ContractCondition {
+  fieldKey: string;
+  operator: ContractConditionOperator;
+  value: string;
+}
+
+export interface ContractConditionalBlock extends ContractBlockBase {
+  type: "conditional";
+  condition: ContractCondition;
+  text: string;
+}
+
+export const CONTRACT_SCHEDULE_INTERVALS = [1, 3, 6, 12] as const;
+export type ContractScheduleInterval = (typeof CONTRACT_SCHEDULE_INTERVALS)[number];
+
+export interface ContractScheduleBlock extends ContractBlockBase {
+  type: "schedule";
+  caption: string;
+  startDate: string;
+  intervalMonths: ContractScheduleInterval;
+  count: number;
+  amountText: string;
 }
 
 export interface ContractListBlock extends ContractBlockBase {
@@ -111,6 +144,8 @@ export interface ContractSignatureBlock extends ContractBlockBase {
 export type ContractBlock =
   | ContractTextBlock
   | ContractArticleBlock
+  | ContractConditionalBlock
+  | ContractScheduleBlock
   | ContractListBlock
   | ContractTableBlock
   | ContractRuleBlock
@@ -124,7 +159,7 @@ export type ContractBlock =
  * — a free-text path would let one tenant's editor read a property another
  * tenant's contract never agreed to publish.
  */
-export const CONTRACT_BINDING_SOURCES = ["contract", "project", "party", "business", "aec"] as const;
+export const CONTRACT_BINDING_SOURCES = ["contract", "project", "party", "business", "aec", "accounting"] as const;
 export type ContractBindingSource = (typeof CONTRACT_BINDING_SOURCES)[number];
 
 export interface ContractFieldBinding {
@@ -204,6 +239,7 @@ export const CONTRACT_LIMITS = {
   signatureLabelMax: 120,
   captionMax: 200,
   signersMax: 10,
+  scheduleInstallmentsMax: 120,
 } as const;
 
 const BLOCK_ID = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -245,6 +281,46 @@ function normalizeBlock(raw: unknown, index: number): ContractBlock | null {
         title: text(r.title, CONTRACT_LIMITS.textMax),
         text: text(r.text, CONTRACT_LIMITS.textMax),
       };
+    case "conditional": {
+      const rawCondition = r.condition && typeof r.condition === "object"
+        ? r.condition as Record<string, unknown>
+        : {};
+      const fieldKey = text(rawCondition.fieldKey, CONTRACT_LIMITS.fieldKeyMax).trim().toLowerCase();
+      const operator = (CONTRACT_CONDITION_OPERATORS as readonly string[]).includes(String(rawCondition.operator))
+        ? rawCondition.operator as ContractConditionOperator
+        : "equals";
+      return {
+        id,
+        type: "conditional",
+        condition: {
+          fieldKey: FIELD_KEY.test(fieldKey) ? fieldKey : "",
+          operator,
+          value: operator === "equals" || operator === "not_equals"
+            ? text(rawCondition.value, CONTRACT_LIMITS.fieldValueMax)
+            : "",
+        },
+        text: text(r.text, CONTRACT_LIMITS.textMax),
+      };
+    }
+    case "schedule": {
+      const rawInterval = Number(r.intervalMonths);
+      const intervalMonths = (CONTRACT_SCHEDULE_INTERVALS as readonly number[]).includes(rawInterval)
+        ? rawInterval as ContractScheduleInterval
+        : 1;
+      const rawCount = Number(r.count);
+      const count = Number.isFinite(rawCount)
+        ? Math.max(1, Math.min(CONTRACT_LIMITS.scheduleInstallmentsMax, Math.trunc(rawCount)))
+        : 1;
+      return {
+        id,
+        type: "schedule",
+        caption: text(r.caption, CONTRACT_LIMITS.captionMax),
+        startDate: text(r.startDate, 10),
+        intervalMonths,
+        count,
+        amountText: text(r.amountText, CONTRACT_LIMITS.textMax),
+      };
+    }
     case "bullets":
     case "numbered":
       return {
@@ -386,6 +462,35 @@ export function tokensIn(value: string): string[] {
   return found;
 }
 
+function validIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+/** Calendar-month sequence; month-end dates stay at month end (31 Jan → 28/29 Feb → 31 Mar). */
+export function contractScheduleDates(
+  startDate: string,
+  count: number,
+  intervalMonths: ContractScheduleInterval,
+): string[] {
+  if (!validIsoDate(startDate) || !Number.isInteger(count) || count < 1 || count > CONTRACT_LIMITS.scheduleInstallmentsMax) return [];
+  if (!(CONTRACT_SCHEDULE_INTERVALS as readonly number[]).includes(intervalMonths)) return [];
+  const [year, month, day] = startDate.split("-").map(Number);
+  const baseMonthEnd = day === new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const dates = Array.from({ length: count }, (_, index) => {
+    const absoluteMonth = year * 12 + (month - 1) + index * intervalMonths;
+    const targetYear = Math.floor(absoluteMonth / 12);
+    const targetMonth = absoluteMonth % 12;
+    if (targetYear < 1 || targetYear > 9999) return "";
+    const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+    const targetDay = baseMonthEnd ? lastDay : Math.min(day, lastDay);
+    return `${targetYear}-${String(targetMonth + 1).padStart(2, "0")}-${String(targetDay).padStart(2, "0")}`;
+  });
+  return dates.every(Boolean) ? dates : [];
+}
+
 /** The plain strings a document contains — used for search, tokens and hashing. */
 export function blockTexts(block: ContractBlock): string[] {
   switch (block.type) {
@@ -394,6 +499,10 @@ export function blockTexts(block: ContractBlock): string[] {
       return [block.text];
     case "article":
       return [block.title, block.text];
+    case "conditional":
+      return [block.text];
+    case "schedule":
+      return [block.caption, block.amountText];
     case "bullets":
     case "numbered":
       return block.items;
@@ -406,10 +515,30 @@ export function blockTexts(block: ContractBlock): string[] {
   }
 }
 
+/** Whether a conditional clause is present in the rendered, frozen document. */
+export function conditionMatches(
+  condition: ContractCondition,
+  values: Readonly<Record<string, string>>,
+): boolean {
+  const actual = (values[condition.fieldKey] ?? "").trim();
+  switch (condition.operator) {
+    case "equals": return actual === condition.value;
+    case "not_equals": return actual !== condition.value;
+    case "is_checked": return ["true", "1", "بله"].includes(actual.toLowerCase());
+    case "is_unchecked": return ["", "false", "0", "خیر"].includes(actual.toLowerCase());
+  }
+}
+
 /** Every field key the document body actually uses. */
-export function referencedTokens(content: ContractDocumentContent): string[] {
+export function referencedTokens(
+  content: ContractDocumentContent,
+  values?: Readonly<Record<string, string>>,
+): string[] {
   const out: string[] = [];
-  for (const block of content.blocks) {
+  const blocks = values
+    ? content.blocks.filter((block) => block.type !== "conditional" || conditionMatches(block.condition, values))
+    : content.blocks;
+  for (const block of blocks) {
     for (const value of blockTexts(block)) {
       for (const token of tokensIn(value)) if (!out.includes(token)) out.push(token);
     }
@@ -461,6 +590,12 @@ export const CONTRACT_ISSUE_MESSAGES: Record<string, string> = {
   field_binding_unsupported: "منبع انتخاب‌شده برای این متغیر پشتیبانی نمی‌شود.",
   text_empty: "این بلوک خالی است؛ متن یا حذفش کنید.",
   table_empty: "جدول بدون ستون یا سطر قابل چاپ نیست.",
+  condition_field_required: "برای بند شرطی، یک متغیر شرط انتخاب کنید.",
+  condition_checkbox_required: "شرط تیک‌خورده فقط برای متغیر بله/خیر مجاز است.",
+  condition_select_invalid: "مقدار شرط باید یکی از گزینه‌های متغیر انتخابی باشد.",
+  schedule_start_date_invalid: "تاریخ شروع برنامهٔ پرداخت باید یک تاریخ معتبر باشد.",
+  schedule_date_range_invalid: "سررسیدهای برنامه باید در محدودهٔ تاریخ قابل چاپ باشند.",
+  schedule_amount_required: "مبلغ هر قسط را وارد کنید یا به یک متغیر متصل کنید.",
   field_key_duplicate: "کلید متغیر تکراری است.",
   field_key_invalid: "کلید متغیر باید با حرف لاتین شروع شود و فقط حرف کوچک، رقم و _ داشته باشد.",
 };
@@ -488,14 +623,15 @@ export function validateContractContent(
   if (content.blocks.length === 0) issues.push(issue("document_empty"));
 
   const defined = new Set(content.fields.map((field) => field.key));
-  for (const token of referencedTokens(content)) {
+  const fieldByKey = new Map(content.fields.map((field) => [field.key, field]));
+  for (const token of referencedTokens(content, values)) {
     if (!defined.has(token)) {
       issues.push(issue("field_undefined", { fieldKey: token }));
     }
   }
 
   for (const block of content.blocks) {
-    const emptyText = block.type === "heading" || block.type === "paragraph" || block.type === "article";
+    const emptyText = block.type === "heading" || block.type === "paragraph" || block.type === "article" || block.type === "conditional";
     const hasText = "text" in block ? block.text.trim().length > 0 : true;
     if (emptyText && !hasText && !("title" in block && block.title.trim())) {
       issues.push(issue("text_empty", { blockId: block.id }));
@@ -505,6 +641,23 @@ export function validateContractContent(
     }
     if (block.type === "table" && (block.columns.length === 0 || block.rows.length === 0)) {
       issues.push(issue("table_empty", { blockId: block.id }));
+    }
+    if (block.type === "schedule") {
+      if (!validIsoDate(block.startDate)) issues.push(issue("schedule_start_date_invalid", { blockId: block.id }));
+      else if (contractScheduleDates(block.startDate, block.count, block.intervalMonths).length !== block.count) {
+        issues.push(issue("schedule_date_range_invalid", { blockId: block.id }));
+      }
+      if (!block.amountText.trim()) issues.push(issue("schedule_amount_required", { blockId: block.id }));
+    }
+    if (block.type === "conditional") {
+      const conditionField = fieldByKey.get(block.condition.fieldKey);
+      if (!conditionField) {
+        issues.push(issue("condition_field_required", { blockId: block.id }));
+      } else if ((block.condition.operator === "is_checked" || block.condition.operator === "is_unchecked") && conditionField.type !== "checkbox") {
+        issues.push(issue("condition_checkbox_required", { blockId: block.id, fieldKey: conditionField.key }));
+      } else if (conditionField.type === "select" && block.condition.value && !conditionField.options.includes(block.condition.value)) {
+        issues.push(issue("condition_select_invalid", { blockId: block.id, fieldKey: conditionField.key }));
+      }
     }
   }
 

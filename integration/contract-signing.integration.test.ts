@@ -423,6 +423,62 @@ describe("the contract document", () => {
     expect(view.resolved.every((field) => field.provenance === "binding")).toBe(true);
   });
 
+  it("exposes Accounting bindings only to a member with ledger.view on the linked project", async () => {
+    const contract = await makeContract();
+    await db.query("UPDATE ai_projects SET budget_rial = 900000000 WHERE id = $1 AND business_id = $2", [
+      alpha.projectId,
+      alpha.businessId,
+    ]);
+    const financialOwner = owner(workspaceAccessFlags(new Set([
+      "workspace.view",
+      "workspace.manage",
+      "workspace.contracts_manage",
+      "workspace.approve",
+      "workspace.admin",
+      "ledger.view",
+    ])));
+    const authorized = await inAlpha(() => service.loadContractBindingContext(financialOwner, contract));
+    expect(authorized.accounting).toMatchObject({
+      projectBudgetRial: "900000000",
+      postedCostRial: "0",
+      budgetVarianceRial: "900000000",
+    });
+
+    // Contract managers without ledger.view see no Accounting data even though
+    // they can otherwise edit the same contract document.
+    const unauthorized = await inAlpha(() => service.loadContractBindingContext(owner(), contract));
+    expect(unauthorized.accounting).toEqual({
+      projectBudgetRial: "",
+      postedCostRial: "",
+      budgetVarianceRial: "",
+    });
+  });
+
+  it("freezes conditional clauses and generated installment schedules into the same version hash", async () => {
+    const contract = await makeContract();
+    const document = await inAlpha(() => service.ensureContractDocument(owner(), contract));
+    const content = sendableContent({
+      fields: [
+        { key: "warranty", label: "ضمانت", type: "checkbox", required: true, value: "true" },
+        { key: "installment_amount", label: "مبلغ قسط", type: "money", required: true, value: "2500000" },
+      ],
+      blocks: [
+        { id: "clause1", type: "conditional", condition: { fieldKey: "warranty", operator: "is_checked", value: "" }, text: "ضمانت ارائه می‌شود." },
+        { id: "schedule1", type: "schedule", caption: "اقساط", startDate: "2026-01-31", intervalMonths: 3, count: 4, amountText: "{{installment_amount}}" },
+        { id: "sig1", type: "signature", slotId: "employer", label: "امضای کارفرما", caption: "" },
+      ],
+    });
+    await inAlpha(() => service.saveContractDocument(owner(), contract, { content, revision: document.revision }));
+    const frozen = await inAlpha(() => service.freezeContractDocument(owner(), contract));
+    expect(frozen.content.blocks).toMatchObject([
+      { type: "conditional", condition: { fieldKey: "warranty", operator: "is_checked" } },
+      { type: "schedule", startDate: "2026-01-31", intervalMonths: 3, count: 4 },
+      { type: "signature", slotId: "employer" },
+    ]);
+    expect(frozen.content.values?.installment_amount).toBeTruthy();
+    expect(frozen.contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("refuses a stale save instead of overwriting the other tab's paragraph", async () => {
     const contract = await makeContract();
     const document = await inAlpha(() => service.ensureContractDocument(owner(), contract));

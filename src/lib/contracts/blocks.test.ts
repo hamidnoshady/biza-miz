@@ -16,6 +16,8 @@ import { describe, expect, it } from "vitest";
 import {
   CONTRACT_ISSUE_MESSAGES,
   CONTRACT_LIMITS,
+  conditionMatches,
+  contractScheduleDates,
   documentSummary,
   formatFieldValue,
   normalizeContractContent,
@@ -36,6 +38,100 @@ const field = (input: Partial<ContractField> & { key: string }): ContractField =
   binding: input.binding ?? null,
   options: input.options ?? [],
   value: input.value ?? "",
+});
+
+describe("conditional clauses", () => {
+  it("normalizes a closed condition shape and resolves text variables in conditional text", () => {
+    const content = normalizeContractContent({
+      title: "قرارداد",
+      fields: [field({ key: "include_warranty", type: "checkbox" }), field({ key: "party_name" })],
+      blocks: [{
+        id: "clause1",
+        type: "conditional",
+        condition: { fieldKey: "include_warranty", operator: "is_checked", value: "" },
+        text: "شرکت {{party_name}} ضمانت ارائه می‌کند.",
+      }],
+    });
+    expect(content.blocks[0]).toMatchObject({
+      type: "conditional",
+      condition: { fieldKey: "include_warranty", operator: "is_checked", value: "" },
+    });
+    expect(referencedTokens(content)).toEqual(["party_name"]);
+    expect(validateContractContent(content)).toEqual([]);
+  });
+
+  it("does not require tokens in a clause that will be suppressed in the frozen view", () => {
+    const content = normalizeContractContent({
+      title: "قرارداد",
+      fields: [field({ key: "include_warranty", type: "checkbox" })],
+      blocks: [{
+        id: "clause1", type: "conditional",
+        condition: { fieldKey: "include_warranty", operator: "is_checked", value: "" },
+        text: "{{undefined_only_when_shown}}",
+      }],
+    });
+    expect(validateContractContent(content, { include_warranty: "false" }).map((entry) => entry.code)).not.toContain("field_undefined");
+    expect(validateContractContent(content, { include_warranty: "true" }).map((entry) => entry.code)).toContain("field_undefined");
+  });
+
+  it("uses exact select/string comparisons and explicit checkbox semantics", () => {
+    expect(conditionMatches({ fieldKey: "option", operator: "equals", value: "yes" }, { option: "yes" })).toBe(true);
+    expect(conditionMatches({ fieldKey: "option", operator: "not_equals", value: "yes" }, { option: "no" })).toBe(true);
+    expect(conditionMatches({ fieldKey: "flag", operator: "is_checked", value: "" }, { flag: "true" })).toBe(true);
+    expect(conditionMatches({ fieldKey: "flag", operator: "is_checked", value: "" }, { flag: "بله" })).toBe(true);
+    expect(conditionMatches({ fieldKey: "flag", operator: "is_unchecked", value: "" }, { flag: "false" })).toBe(true);
+    expect(conditionMatches({ fieldKey: "flag", operator: "is_unchecked", value: "" }, { flag: "true" })).toBe(false);
+  });
+
+  it("refuses missing fields and checkbox operators on non-checkbox fields", () => {
+    const missing = normalizeContractContent({
+      blocks: [{ id: "c1", type: "conditional", condition: { fieldKey: "missing", operator: "equals", value: "x" }, text: "شرط" }],
+    });
+    expect(validateContractContent(missing).map((entry) => entry.code)).toContain("condition_field_required");
+    const wrongType = normalizeContractContent({
+      fields: [field({ key: "name" })],
+      blocks: [{ id: "c1", type: "conditional", condition: { fieldKey: "name", operator: "is_checked", value: "" }, text: "شرط" }],
+    });
+    expect(validateContractContent(wrongType).map((entry) => entry.code)).toContain("condition_checkbox_required");
+  });
+});
+
+describe("repeating payment schedules", () => {
+  it("keeps month-end dates stable across short and leap months", () => {
+    expect(contractScheduleDates("2024-01-31", 4, 1)).toEqual([
+      "2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30",
+    ]);
+    expect(contractScheduleDates("2025-01-30", 3, 1)).toEqual([
+      "2025-01-30", "2025-02-28", "2025-03-30",
+    ]);
+    expect(contractScheduleDates("2024-01-31", 3, 3)).toEqual([
+      "2024-01-31", "2024-04-30", "2024-07-31",
+    ]);
+  });
+
+  it("rejects invalid dates/counts and bounds generated installment rows", () => {
+    expect(contractScheduleDates("2025-02-29", 2, 1)).toEqual([]);
+    expect(contractScheduleDates("2025-02-28", 0, 1)).toEqual([]);
+    expect(contractScheduleDates("2025-02-28", 121, 1)).toEqual([]);
+    expect(contractScheduleDates("9999-12-31", 2, 1)).toEqual([]);
+    const content = normalizeContractContent({
+      title: "قرارداد",
+      fields: [field({ key: "amount" })],
+      blocks: [{
+        id: "schedule1", type: "schedule", caption: "اقساط", startDate: "2025-02-29",
+        intervalMonths: 2, count: 500, amountText: "{{amount}}",
+      }],
+    });
+    expect(content.blocks[0]).toMatchObject({ type: "schedule", intervalMonths: 1, count: 120 });
+    expect(validateContractContent(content).map((entry) => entry.code)).toEqual([
+      "schedule_start_date_invalid",
+    ]);
+    const outOfRange = normalizeContractContent({
+      title: "قرارداد",
+      blocks: [{ id: "schedule2", type: "schedule", startDate: "9999-12-31", count: 2, intervalMonths: 1, amountText: "۱۰۰" }],
+    });
+    expect(validateContractContent(outOfRange).map((entry) => entry.code)).toContain("schedule_date_range_invalid");
+  });
 });
 
 describe("normalizeContractContent", () => {
