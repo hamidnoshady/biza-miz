@@ -234,7 +234,7 @@ export function TourStudioPanel() {
           </div>
           {step.kind === "spotlight" ? <label className="block text-xs">هدف برجسته‌سازی
             <select dir="ltr" className="mt-1 w-full rounded-lg border bg-card p-2" disabled={!canManage} value={step.anchor ?? ""} onChange={(e) => modifyStep(index, { anchor: e.target.value as TourStep["anchor"] })}>
-              {!pageAnchors.includes(step.anchor ?? "") ? <option value={step.anchor ?? ""}>{step.anchor ?? "انتخاب هدف"}</option> : null}
+              {(!step.anchor || !pageAnchors.includes(step.anchor)) ? <option value={step.anchor ?? ""}>{step.anchor ?? "انتخاب هدف"}</option> : null}
               {pageAnchors.map((a) => <option key={a} value={a}>{a}</option>)}
             </select>
           </label> : null}

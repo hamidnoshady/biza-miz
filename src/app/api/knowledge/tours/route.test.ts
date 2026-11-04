@@ -23,6 +23,10 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@/lib/industry-guard", () => ({ getBusinessIndustry: mocks.industry }));
 
+// Keep the real published-catalogue fallback and eligibility logic. These
+// boundary tests do not connect to Postgres; catalogue DB behavior is tested separately.
+vi.mock("@/lib/db", () => ({ query: vi.fn(async () => ({ rows: [] })) }));
+
 // Real eligibility and tour logic; only the database reads/writes are replaced.
 vi.mock("@/lib/tours-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tours-service")>();

@@ -18,7 +18,7 @@ export interface AuthoredTour extends TourDefinition {
   updatedAt: string;
   publishedAt: string | null;
 }
-interface TourRow {
+interface TourRow extends Record<string, unknown> {
   id: string; page_key: string; route: string; title: string; description: string;
   status: TourPublishStatus; version: number; eligibility: TourEligibility; steps: TourStep[];
   created_at: string | Date; updated_at: string | Date; published_at: string | Date | null;
@@ -38,7 +38,7 @@ const obj = (x: unknown): x is Record<string, unknown> =>
 export class TourStudioError extends Error {
   constructor(readonly code: string) { super(code); }
 }
-const error = (code: string): never => { throw new TourStudioError(code); };
+function error(code: string): never { throw new TourStudioError(code); }
 const knownPages = new Set(KNOWLEDGE_PAGES.map((p) => p.key));
 const knownAnchors = new Set<string>(Object.values(TOUR_ANCHORS));
 const knownPermissions = new Set<string>(ALL_PERMISSIONS);
@@ -94,7 +94,7 @@ export function parseTourStudioInput(raw: unknown): TourStudioInput {
   // everyone merely because an editor omitted its access guard.
   const hasPositiveGate = (rule: TourEligibility): boolean =>
     Boolean(rule.permissions?.length || rule.industries?.length || rule.features?.length
-      || rule.inventorySystem || rule.anyOf?.some(hasPositiveGate));
+      || rule.inventorySystem || (rule.anyOf?.length && rule.anyOf.every(hasPositiveGate)));
   if (status === "published" && !hasPositiveGate(eligibility)) error("publishing_requires_eligibility");
   const parsedSteps: TourStep[] = steps.map((value: unknown) => {
     if (!obj(value)) return error("invalid_step");
@@ -104,6 +104,8 @@ export function parseTourStudioInput(raw: unknown): TourStudioInput {
     if (typeof stepTitle !== "string" || stepTitle.trim().length < 1 || stepTitle.length > 160) error("invalid_step_title");
     if (typeof body !== "string" || body.trim().length < 1 || body.length > 3000) error("invalid_step_body");
     if (kind === "spotlight" && (typeof anchor !== "string" || !knownAnchors.has(anchor))) error("unknown_anchor");
+    if (kind === "spotlight" && !TOURS.some((tour) =>
+      tour.pageKey === pageKey && tour.steps.some((step) => step.anchor === anchor))) error("anchor_page_mismatch");
     if (kind === "explain" && anchor !== undefined) error("invalid_step_anchor");
     return {
       id: stepId, title: stepTitle, body, kind, ...(kind === "spotlight" ? { anchor: anchor as TourStep["anchor"] } : {}),
@@ -141,7 +143,7 @@ export async function publishedTourById(id: string): Promise<TourDefinition | nu
 }
 export async function listStudioTours(): Promise<{ tours: AuthoredTour[]; codeTours: TourDefinition[] }> {
   const { rows } = await query<TourRow>(`SELECT ${COLUMNS} FROM knowledge_tours ORDER BY updated_at DESC, id LIMIT 1000`);
-  return { tours: rows.map(mapTour), codeTours: TOURS };
+  return { tours: rows.map(mapTour), codeTours: [...TOURS] };
 }
 export async function getStudioTour(id: string): Promise<AuthoredTour | null> {
   const { rows } = await query<TourRow>(`SELECT ${COLUMNS} FROM knowledge_tours WHERE id = $1 LIMIT 1`, [id]);
@@ -151,13 +153,16 @@ export async function getStudioTour(id: string): Promise<AuthoredTour | null> {
 export async function saveStudioTour(raw: unknown, actor: string): Promise<{ id: string; version: number }> {
   const input = parseTourStudioInput(raw);
   return withoutTenantScopeTransaction("save authored tour", async () => {
+    // A row lock cannot serialize the first save while the row is absent.
+    await query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`knowledge_tours:${input.id}`]);
     const { rows: locked } = await query<TourRow>(
       `SELECT ${COLUMNS} FROM knowledge_tours WHERE id=$1 FOR UPDATE`, [input.id],
     );
     const current = locked[0] ? mapTour(locked[0]) : null;
+    if (current && input.pageKey !== current.pageKey) error("immutable_tour_page");
     if (current && input.expectedVersion !== current.version) error("version_conflict");
     if (!current && input.expectedVersion !== undefined) error("version_conflict");
-    const version = current ? current.version + 1 : 1;
+    const version = current ? current.version + 1 : (TOURS.find(t => t.id === input.id)?.version ?? 0) + 1;
     const args = [input.id, input.pageKey, input.pageKey.slice(5), input.title,
       input.description, input.status, version, JSON.stringify(input.eligibility),
       JSON.stringify(input.steps), actor];

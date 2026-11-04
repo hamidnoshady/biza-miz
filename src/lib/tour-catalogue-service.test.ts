@@ -42,6 +42,16 @@ describe("platform-authored tour validation", () => {
       .toThrowError("unknown_permission");
     expect(() => parseTourStudioInput({ ...base, eligibility: { unexpected: true } })).toThrowError("invalid_eligibility");
   });
+  it("rejects a spotlight target registered on a different page", () => {
+    expect(() => parseTourStudioInput({ ...base, pageKey: "page:/accounting/cosmetics",
+      steps: [{ id: "x", kind: "spotlight", anchor: "products.table", title: "x", body: "x" }],
+    })).toThrowError("anchor_page_mismatch");
+  });
+  it("rejects an unguarded alternative in published eligibility", () => {
+    expect(() => parseTourStudioInput({ ...base,
+      eligibility: { anyOf: [{}, { permissions: [PERMISSIONS.inventoryView] }] },
+    })).toThrowError("publishing_requires_eligibility");
+  });
 });
 describe("backward compatible member catalogue", () => {
   it("preserves all existing code tours until a published one overrides its id", () => {

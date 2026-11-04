@@ -110,7 +110,7 @@ export default function KnowledgePage() {
         <TagsPanel />
       ) : (
         <TourStudioPanel />
-      )
+      )}
     </div>
   );
 }

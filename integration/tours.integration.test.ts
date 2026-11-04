@@ -22,6 +22,7 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let service: typeof import("../src/lib/tours-service");
 let tours: typeof import("../src/lib/tours");
+let catalogue: typeof import("../src/lib/tour-catalogue-service");
 
 const alpha = { businessId: "", ownerId: "", staffId: "" };
 const beta = { businessId: "", ownerId: "" };
@@ -53,6 +54,7 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   service = await import("../src/lib/tours-service");
   tours = await import("../src/lib/tours");
+  catalogue = await import("../src/lib/tour-catalogue-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -89,6 +91,7 @@ async function seedBusiness(slug: string, industry: string) {
 }
 
 beforeEach(async () => {
+  await db.query("DELETE FROM knowledge_tours");
   await db.query("DELETE FROM businesses");
   Object.assign(alpha, await seedBusiness(`alpha-${randomUUID().slice(0, 8)}`, "cosmetics"));
   const other = await seedBusiness(`beta-${randomUUID().slice(0, 8)}`, "food_service");
@@ -98,6 +101,47 @@ beforeEach(async () => {
 
 const tour = () => tours.tourById("accounting.products.list")!;
 const stepIds = () => tour().steps.map((s) => s.id);
+
+describe("published Studio catalogue", () => {
+  const input = () => ({ ...tour(), status: "published" });
+  it("imports a built-in tour at a new version and preserves its eligible steps", async () => {
+    const saved = await catalogue.saveStudioTour(input(), "test-editor");
+    expect(saved.version).toBeGreaterThan(tour().version);
+    const published = await catalogue.publishedTourById(tour().id);
+    expect(published?.steps).toEqual(tour().steps);
+    expect((await catalogue.publishedToursForPage(tour().pageKey)).filter(t => t.id === tour().id)).toHaveLength(1);
+  });
+  it("keeps an authored tour on its original page", async () => {
+    const fresh = { ...input(), id: "custom.products" };
+    const saved = await catalogue.saveStudioTour(fresh, "test-editor");
+    await expect(catalogue.saveStudioTour({ ...fresh, pageKey: "page:/accounting/cosmetics",
+      steps: [{ id: "intro", kind: "explain", title: "intro", body: "intro" }],
+      expectedVersion: saved.version,
+    }, "test-editor")).rejects.toThrow("immutable_tour_page");
+  });
+  it("serializes concurrent creates with a version conflict, not a database error", async () => {
+    const fresh = { ...input(), id: "concurrent.products" };
+    const results = await Promise.allSettled([
+      catalogue.saveStudioTour(fresh, "editor-one"),
+      catalogue.saveStudioTour(fresh, "editor-two"),
+    ]);
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    const failure = results.find(r => r.status === "rejected") as PromiseRejectedResult;
+    expect(failure.reason).toBeInstanceOf(catalogue.TourStudioError);
+    expect(failure.reason.code).toBe("version_conflict");
+  });
+  it("hides drafts, snapshots updates and rolls back into a new version", async () => {
+    const fresh = { ...input(), id: "custom.revisions", status: "draft" };
+    const draft = await catalogue.saveStudioTour(fresh, "test-editor");
+    expect(await catalogue.publishedTourById(fresh.id)).toBeNull();
+    const published = await catalogue.saveStudioTour({ ...fresh, status: "published", expectedVersion: draft.version }, "test-editor");
+    expect((await catalogue.publishedTourById(fresh.id))?.version).toBe(published.version);
+    const restored = await catalogue.rollbackStudioTour(fresh.id, draft.version, published.version, "test-editor");
+    expect(restored.version).toBe(published.version + 1);
+    expect(await catalogue.publishedTourById(fresh.id)).toBeNull();
+    expect((await catalogue.listStudioTourRevisions(fresh.id)).map(r => r.version)).toEqual([restored.version, published.version, draft.version]);
+  });
+});
 
 describe("tour progress storage", () => {
   it("stores what a member has seen and reads it back", async () => {
