@@ -456,6 +456,25 @@ jobs:
         run: |
           set -o pipefail
           npm run test:visual 2>&1 | tee visual-output.log
+      # One-time recording for the approved products-screen baseline. The
+      # workflow_dispatch recording path is unavailable to the connected GitHub
+      # integration in this session, so use the same pinned runner Chromium and
+      # production build, then retrieve the artifact for human review. Remove
+      # this branch-scoped helper once the PNGs are committed.
+      - name: Capture approved products baselines (temporary)
+        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'arena/a94ffa72-biza-miz' }}
+        env:
+          CI: ""
+        run: npm run test:visual:update -- --screens=accounting-products,accounting-products-dark,accounting-products-mobile
+      - name: Upload approved products baselines (temporary)
+        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'arena/a94ffa72-biza-miz' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: approved-products-visual-baselines
+          path: |
+            docs/design/visual/accounting-products.png
+            docs/design/visual/accounting-products-dark.png
+            docs/design/visual/accounting-products-mobile.png
       - name: Subledger keyboard and WCAG checks
         if: ${{ !cancelled() }}
         run: npm run test:a11y:subledger

@@ -77,6 +77,8 @@ FROM node:24-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
+# Production backup/restore tools are resolved only from this verified payload.
+ENV PG_TOOLS_DIR=/opt/postgresql-tools
 
 # Which "sha-<short-hash>" tag this image was published as, baked in at build
 # time so the running process can report its own version — the self-update check (app-update.ts)
@@ -113,6 +115,14 @@ COPY --from=builder --chown=node:node /app/next.config.ts ./next.config.ts
 COPY --from=builder --chown=node:node /app/tsconfig.json ./tsconfig.json
 COPY --from=builder --chown=node:node /app/package.json ./package.json
 COPY --chown=node:node docker-entrypoint.sh ./docker-entrypoint.sh
+
+# apk verifies the Alpine repository signature when installing postgresql16-client.
+# Stage its exact binaries with a checksum manifest, then exercise the same
+# production resolver used by platform backup/restore. No database is needed:
+# this catches missing tools, bad manifests and version drift during image build.
+RUN node scripts/stage-container-postgresql-tools.mjs \
+  && node --import tsx --input-type=module -e 'import { resolvePgTool } from "./src/lib/pg-tools.ts"; const [dump, restore] = await Promise.all([resolvePgTool("pg_dump"), resolvePgTool("pg_restore")]); if (dump.postgresVersion !== restore.postgresVersion) throw new Error("postgresql_tools_version_pair_mismatch"); console.log(`Verified packaged PostgreSQL ${dump.postgresVersion} tools.`);'
+
 RUN chmod +x ./docker-entrypoint.sh
 
 # Fail the BUILD, not a café's Monday morning, if tsx ever drops out of the
