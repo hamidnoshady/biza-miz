@@ -260,3 +260,90 @@ describe("scheduling from the editor", () => {
     expect(posts).toHaveLength(0);
   });
 });
+
+describe("categories and tags from the editor", () => {
+  const detail = {
+    ...cardRow,
+    editorTitle: "نگهداری فرش",
+    excerpt: "خلاصه",
+    categories: [2],
+    tags: [],
+  };
+
+  function mockApi() {
+    apiMock.mockImplementation((path: string, init?: { method?: string; body?: string }) => {
+      const url = String(path);
+      if (url.startsWith("/api/integrations/wp-manager/content/posts") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, status: 200, data: { ok: true, queued: true } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/posts")) {
+        return Promise.resolve({ ok: true, status: 200, data: { row: detail } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/terms")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          data: {
+            categories: [
+              { id: 2, name: "دستهٔ اصلی", parent: 0, count: 12 },
+              { id: 5, name: "فرش", parent: 2, count: 4 },
+            ],
+            tags: [{ id: 9, name: "راهنما", parent: 0, count: 3 }],
+          },
+        });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content")) {
+        return Promise.resolve({ ok: true, status: 200, data: { rows: [cardRow], total: 1, page: 1, pageSize: 20 } });
+      }
+      return Promise.resolve({ ok: true, status: 200, data: {} });
+    });
+  }
+
+  it("pre-checks the post's own terms and saves only what changed", async () => {
+    mockApi();
+    const user = userEvent.setup();
+    render(<WpContentSection canManage />);
+    await user.click(await screen.findByRole("button", { name: /ویرایش/ }));
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    const current = await screen.findByRole("checkbox", { name: "دستهٔ اصلی" });
+    expect((current as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "فرش" }) as HTMLInputElement).checked).toBe(false);
+
+    await user.click(screen.getByRole("checkbox", { name: "راهنما" }));
+    await user.click(screen.getByRole("button", { name: "ذخیره در وردپرس" }));
+
+    const posts = apiMock.mock.calls.filter(
+      ([, init]) => (init as { method?: string } | undefined)?.method === "POST",
+    );
+    await waitFor(() => expect(posts).toHaveLength(1));
+    const body = JSON.parse(String((posts[0][1] as { body: string }).body));
+    expect(body.tags).toEqual([9]);
+    // The unchanged category list is not resent: a save must not rewrite terms
+    // with whatever the mirror last saw.
+    expect(body.categories).toBeUndefined();
+  });
+
+  it("stops the save when a plugin reported no term list", async () => {
+    apiMock.mockImplementation((path: string) => {
+      const url = String(path);
+      if (url.startsWith("/api/integrations/wp-manager/content/posts")) {
+        return Promise.resolve({ ok: true, status: 200, data: { row: { ...detail, categories: [], tags: [] } } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/terms")) {
+        return Promise.resolve({ ok: true, status: 200, data: { categories: [], tags: [], unsupported: true } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content")) {
+        return Promise.resolve({ ok: true, status: 200, data: { rows: [cardRow], total: 1, page: 1, pageSize: 20 } });
+      }
+      return Promise.resolve({ ok: true, status: 200, data: {} });
+    });
+    const user = userEvent.setup();
+    render(<WpContentSection canManage />);
+    await user.click(await screen.findByRole("button", { name: /ویرایش/ }));
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    expect(await screen.findByText(/را گزارش نمی‌کند/)).toBeTruthy();
+    expect(screen.queryByRole("checkbox", { name: "راهنما" })).toBeNull();
+  });
+});

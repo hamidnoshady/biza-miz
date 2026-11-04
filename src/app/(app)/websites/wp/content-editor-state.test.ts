@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { wpEditorIsDirty, wpEditorPatch, type WpEditorValues } from "./content-editor-state";
+import {
+  toggleTermId,
+  wpEditorIsDirty,
+  wpEditorPatch,
+  wpTaxonomiesDirty,
+  wpTaxonomyPatch,
+  type WpEditorValues,
+} from "./content-editor-state";
 
 const ORIGINAL: WpEditorValues = {
   editorTitle: "عنوان اصلی",
@@ -62,5 +69,31 @@ describe("WordPress editor schedule", () => {
 
     expect(wpEditorIsDirty(SCHEDULED, later)).toBe(true);
     expect(wpEditorPatch(SCHEDULED, later)).toEqual({ scheduledFor: "2026-12-01T06:00:00.000Z" });
+  });
+});
+describe("WordPress editor taxonomy patch", () => {
+  const EMPTY = { categories: [], tags: [] };
+
+  it("sends only the list the owner changed", () => {
+    expect(wpTaxonomyPatch(EMPTY, { categories: [3, 4], tags: [] })).toEqual({ categories: [3, 4] });
+    expect(wpTaxonomyPatch({ categories: [3], tags: [9] }, { categories: [3], tags: [] })).toEqual({ tags: [] });
+  });
+
+  it("counts a term change as a real edit, and nothing else as an edit", () => {
+    expect(wpTaxonomiesDirty(EMPTY, EMPTY)).toBe(false);
+    expect(wpTaxonomiesDirty(EMPTY, { categories: [], tags: [5] })).toBe(true);
+    expect(wpTaxonomiesDirty(null, { categories: [1], tags: [] })).toBe(false);
+  });
+
+  it("treats order as part of the selection, because WordPress shows it", () => {
+    expect(wpTaxonomyPatch({ categories: [1, 2], tags: [] }, { categories: [2, 1], tags: [] })).toEqual({
+      categories: [2, 1],
+    });
+  });
+
+  it("toggles a term without disturbing the rest", () => {
+    expect(toggleTermId([1, 2], 3)).toEqual([1, 2, 3]);
+    expect(toggleTermId([1, 2, 3], 2)).toEqual([1, 3]);
+    expect(toggleTermId([], 7)).toEqual([7]);
   });
 });

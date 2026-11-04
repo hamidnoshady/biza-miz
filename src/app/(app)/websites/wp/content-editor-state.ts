@@ -43,3 +43,46 @@ export function wpEditorPatch(
 export function wpEditorIsDirty(initial: WpEditorValues | null, current: WpEditorValues): boolean {
   return initial !== null && Object.keys(wpEditorPatch(initial, current)).length > 0;
 }
+
+/**
+ * Categories and tags travel as id lists, not as wp/v2 text fields, so they
+ * have their own patch and their own dirty rule — the same one: send only what
+ * the owner changed. A save that includes an unchanged list would rewrite the
+ * site's terms with whatever the mirror last saw.
+ */
+export interface WpEditorTaxonomies {
+  categories: number[];
+  tags: number[];
+}
+
+export interface WpEditorTermPatch {
+  categories?: number[];
+  tags?: number[];
+}
+
+function sameIds(left: readonly number[], right: readonly number[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((id, index) => id === right[index]);
+}
+
+export function wpTaxonomyPatch(
+  initial: WpEditorTaxonomies,
+  current: WpEditorTaxonomies,
+): WpEditorTermPatch {
+  const patch: WpEditorTermPatch = {};
+  if (!sameIds(initial.categories, current.categories)) patch.categories = [...current.categories];
+  if (!sameIds(initial.tags, current.tags)) patch.tags = [...current.tags];
+  return patch;
+}
+
+export function wpTaxonomiesDirty(
+  initial: WpEditorTaxonomies | null,
+  current: WpEditorTaxonomies,
+): boolean {
+  return initial !== null && Object.keys(wpTaxonomyPatch(initial, current)).length > 0;
+}
+
+/** Toggle one term in a selection, keeping the order the owner picked it in. */
+export function toggleTermId(ids: readonly number[], id: number): number[] {
+  return ids.includes(id) ? ids.filter((entry) => entry !== id) : [...ids, id];
+}

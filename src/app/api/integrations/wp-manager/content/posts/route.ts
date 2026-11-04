@@ -13,6 +13,12 @@ import {
 } from "@/lib/integrations/wp-content-service";
 import { isFutureSchedule, toWordPressGmt } from "@/lib/wp-schedule";
 import { pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
+import {
+  MAX_POST_CATEGORIES,
+  MAX_POST_TAGS,
+  normaliseTermIds,
+  pluginSupportsPostTaxonomies,
+} from "@/lib/wp-content-taxonomies";
 
 /**
  * Read one post/page with its raw editor fields. The collection endpoint never
@@ -126,6 +132,20 @@ export const POST = withTenantScope(async (request: Request) => {
     scheduledFor = new Date(body.scheduledFor).toISOString();
   }
 
+  // Categories and tags (#1215, P2-5): ids only, bounded, and never for a page
+  // — WordPress attaches categories to posts alone and would drop them without
+  // saying so.
+  const categories = normaliseTermIds(body.categories, MAX_POST_CATEGORIES);
+  const tags = normaliseTermIds(body.tags, MAX_POST_TAGS);
+  if (!categories.ok || !tags.ok) {
+    return NextResponse.json({ error: "invalid_terms" }, { status: 400 });
+  }
+  const hasCategories = body.categories !== undefined && body.categories !== null;
+  const hasTags = body.tags !== undefined && body.tags !== null;
+  if (hasCategories && postType === "page") {
+    return NextResponse.json({ error: "categories_not_supported_for_pages" }, { status: 400 });
+  }
+
   const patch: Record<string, string> = {};
   for (const field of CONTENT_FIELDS) {
     if (body[field] === undefined) continue;
@@ -142,7 +162,7 @@ export const POST = withTenantScope(async (request: Request) => {
   if (patch.status && !ALLOWED_STATUS.includes(patch.status as (typeof ALLOWED_STATUS)[number])) {
     return NextResponse.json({ error: "invalid_status" }, { status: 400 });
   }
-  if (Object.keys(patch).length === 0 && !scheduledFor) {
+  if (Object.keys(patch).length === 0 && !scheduledFor && !hasCategories && !hasTags) {
     return NextResponse.json({ error: "empty_patch" }, { status: 400 });
   }
   // A `future` post with no date publishes on WordPress's next cron pass, which
@@ -180,7 +200,10 @@ export const POST = withTenantScope(async (request: Request) => {
 
   // WordPress's own field, in WordPress's own shape; see `toWordPressGmt`.
   const dateGmt = scheduledFor ? toWordPressGmt(scheduledFor) : null;
-  const transportPatch: Record<string, string> = dateGmt ? { ...patch, date_gmt: dateGmt } : patch;
+  const transportPatch: Record<string, unknown> = {
+    ...patch,
+    ...(dateGmt ? { date_gmt: dateGmt } : {}),
+  };
 
   const requestId = typeof body.requestId === "string" ? body.requestId.toLowerCase() : "";
   if (!remoteId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)) {
@@ -196,13 +219,24 @@ export const POST = withTenantScope(async (request: Request) => {
         { status: 409 },
       );
     }
+    if ((hasCategories || hasTags) && !pluginSupportsPostTaxonomies(connection.plugin_capabilities)) {
+      return NextResponse.json(
+        { ok: false, error: "plugin_taxonomies_unsupported", upgradeRequired: true },
+        { status: 409 },
+      );
+    }
     if (remoteId && expectedRemoteUpdatedAt) {
       const mirrored = await getWpContent(session.businessId, connectionId, postType, remoteId);
       if (!mirrored || !mirrored.remoteUpdatedAt || Date.parse(mirrored.remoteUpdatedAt) !== Date.parse(expectedRemoteUpdatedAt)) {
         return NextResponse.json({ error: "content_version_changed", refreshRequired: true }, { status: 409 });
       }
     }
-    const queueOutcome = await enqueueWpPostUpsert(connection, postType, remoteId, remoteId ? undefined : requestId, transportPatch);
+    const queueOutcome = await enqueueWpPostUpsert(connection, postType, remoteId, remoteId ? undefined : requestId, {
+      ...transportPatch,
+      // The plugin applies these through WordPress's own post fields.
+      ...(hasCategories ? { post_category: categories.ids } : {}),
+      ...(hasTags ? { tags_input: tags.ids } : {}),
+    });
     if (queueOutcome === "unsupported") {
       return NextResponse.json({ error: "plugin_content_unsupported" }, { status: 409 });
     }
@@ -242,7 +276,16 @@ export const POST = withTenantScope(async (request: Request) => {
         return NextResponse.json({ error: "content_version_changed", refreshRequired: true }, { status: 409 });
       }
     }
-    const result = await client.wpUpsertPost(wpEndpoint, transportPatch, numericRemoteId);
+    const result = await client.wpUpsertPost(
+      wpEndpoint,
+      {
+        ...transportPatch,
+        // wp/v2 takes the same term ids under its own field names.
+        ...(hasCategories ? { categories: categories.ids } : {}),
+        ...(hasTags ? { tags: tags.ids } : {}),
+      },
+      numericRemoteId,
+    );
     const savedId = String(result.id ?? numericRemoteId ?? "");
     if (!/^[1-9]\d*$/.test(savedId)) throw new Error("invalid_wordpress_response");
     const resultPayload = {
