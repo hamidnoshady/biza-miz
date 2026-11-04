@@ -273,6 +273,32 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect(published?.scheduledFor).toBeNull();
   });
 
+  it("keeps a post's categories and tags by id, and reads a broken list as none", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 130,
+      type: "post",
+      title: "با دسته",
+      status: "publish",
+      categories: [2, 5],
+      tags: [9],
+    });
+    const row = await content.getWpContent(biz.id, biz.pluginConnId, "post", "130");
+    expect(row?.categories).toEqual([2, 5]);
+    expect(row?.tags).toEqual([9]);
+
+    // A mirror written by an older or broken producer must not break the editor
+    // read: a malformed list is "no terms", not an exception.
+    await content.upsertWpContent(conn(), {
+      id: 131,
+      type: "post",
+      title: "خراب",
+      categories: ["فرش"] as never,
+    });
+    const broken = await content.getWpContent(biz.id, biz.pluginConnId, "post", "131");
+    expect(broken?.categories).toEqual([]);
+    expect(broken?.tags).toEqual([]);
+  });
+
   it("ignores invalid ids, unsafe links and malformed remote dates", async () => {
     await content.upsertWpContent(conn(), { id: 0, type: "post", title: "nope" });
     await content.upsertWpContent(conn(), { id: "", type: "post", title: "nope" });

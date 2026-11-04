@@ -555,6 +555,10 @@ class POS_Connector_Sync {
 			$payload['excerpt']     = $post->post_excerpt;
 			// The publish instant in UTC, so the app can show a scheduled post's
 			// own time instead of guessing it from the modification date.
+			// The terms this post currently carries, by id — what the editor
+			// checks in its picker before the owner changes anything.
+			$payload['categories']  = 'post' === $post->post_type ? wp_get_post_categories( $post->ID ) : array();
+			$payload['tags']        = 'post' === $post->post_type ? wp_get_post_tags( $post->ID, array( 'fields' => 'ids' ) ) : array();
 			$payload['date_gmt']    = $post->post_date_gmt && '0000-00-00 00:00:00' !== $post->post_date_gmt
 				? str_replace( ' ', 'T', $post->post_date_gmt )
 				: null;
@@ -1639,6 +1643,12 @@ class POS_Connector_Sync {
 			// Issue #1215: this build understands `date_gmt` on a `post_upsert`,
 			// so the app may schedule a post through it.
 			'postSchedule' => true,
+			// Issue #1215: this build accepts `categories`/`tags` on a
+			// `post_upsert` and reports the site's own post terms, so the editor
+			// offers the real list instead of free text.
+			'contentTaxonomies' => true,
+			'postCategories'    => self::post_terms_payload( 'category' ),
+			'postTags'          => self::post_terms_payload( 'post_tag' ),
 			'eventTypes' => array(
 				'order.created',
 				'order.updated',
@@ -2395,6 +2405,64 @@ class POS_Connector_Sync {
 		}
 
 	/**
+	 * A taxonomy's terms as the app's picker wants them: id, name, parent and
+	 * how many posts use it. Capped — a site with thousands of tags must not put
+	 * thousands of entries into every handshake.
+	 */
+	private static function post_terms_payload( $taxonomy ) {
+		if ( ! taxonomy_exists( $taxonomy ) ) {
+			return array();
+		}
+		$terms = get_terms(
+			array(
+				'taxonomy'   => $taxonomy,
+				'hide_empty' => false,
+				'number'     => 60,
+				'orderby'    => 'count',
+				'order'      => 'DESC',
+			)
+		);
+		if ( is_wp_error( $terms ) || ! is_array( $terms ) ) {
+			return array();
+		}
+		$out = array();
+		foreach ( $terms as $term ) {
+			if ( ! isset( $term->term_id, $term->name ) ) {
+				continue;
+			}
+			$out[] = array(
+				'id'     => (int) $term->term_id,
+				'name'   => (string) $term->name,
+				'parent' => isset( $term->parent ) ? (int) $term->parent : 0,
+				'count'  => isset( $term->count ) ? (int) $term->count : 0,
+			);
+		}
+		return $out;
+	}
+
+	/**
+	 * Term ids from a pushed list: positive integers only, de-duplicated, bounded
+	 * — a name or a fraction is refused rather than resolved to something else.
+	 */
+	private static function term_ids_from_payload( $raw, $max ) {
+		if ( ! is_array( $raw ) ) {
+			throw new Exception( 'invalid_term_list' );
+		}
+		if ( count( $raw ) > $max ) {
+			throw new Exception( 'too_many_terms' );
+		}
+		$ids = array();
+		foreach ( $raw as $value ) {
+			$id = (int) $value;
+			if ( $id <= 0 || (string) $id !== (string) $value ) {
+				throw new Exception( 'invalid_term_list' );
+			}
+			$ids[] = $id;
+		}
+		return array_values( array_unique( $ids ) );
+	}
+
+	/**
 	 * The app's schedule as WordPress's `post_date_gmt`, or '' when the push
 	 * carries none. Only the documented shape is accepted: UTC,
 	 * `YYYY-MM-DDTHH:MM:SS`, no zone suffix, and strictly in the future.
@@ -2454,6 +2522,19 @@ class POS_Connector_Sync {
 		}
 		if ( empty( $data ) ) {
 			throw new Exception( 'empty_post_update' );
+		}
+
+		// Categories and tags (#1215, P2-5), by id and only for posts: WordPress
+		// has no categories for pages, and silently dropping them would look
+		// like a save that worked.
+		if ( isset( $payload['categories'] ) ) {
+			if ( 'post' !== $type ) {
+				throw new Exception( 'categories_not_supported_for_pages' );
+			}
+			$data['post_category'] = self::term_ids_from_payload( $payload['categories'], 20 );
+		}
+		if ( isset( $payload['tags'] ) ) {
+			$data['tags_input'] = self::term_ids_from_payload( $payload['tags'], 50 );
 		}
 
 		// Scheduling (#1215, P2-5): the app sends WordPress's own `date_gmt`, in

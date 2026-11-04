@@ -47,7 +47,16 @@ import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { cn } from "@/lib/utils";
 import { ConnectionPicker, type ConnectionLite } from "./connection-lite";
-import { wpEditorIsDirty, wpEditorPatch, type WpEditorValues } from "./content-editor-state";
+import {
+  wpEditorIsDirty,
+  wpEditorPatch,
+  wpTaxonomiesDirty,
+  wpTaxonomyPatch,
+  type WpEditorTaxonomies,
+  type WpEditorValues,
+} from "./content-editor-state";
+import { ContentTermsPicker } from "./content-terms-picker";
+import type { WpTermOption } from "@/lib/wp-content-taxonomies";
 import { EditorialAssistant } from "./editorial-assistant";
 import { ContentPreview } from "./content-preview";
 import { pluginSupportsJobType, pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
@@ -89,6 +98,9 @@ interface ContentDetail extends ContentRow {
   excerpt: string;
   /** The stored schedule of an already-scheduled post, when the mirror carries it. */
   scheduledFor?: string | null;
+  /** The terms this post carries today, as ids. */
+  categories?: number[];
+  tags?: number[];
 }
 
 type ContentTab = "post" | "page";
@@ -591,6 +603,20 @@ function PostEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [createRequestId] = useState(() => (typeof crypto !== "undefined" ? crypto.randomUUID() : ""));
+  // Terms are their own patch (ids, not text), so they get their own draft and
+  // their own "did the owner touch this?" answer.
+  const [initialTaxonomies, setInitialTaxonomies] = useState<WpEditorTaxonomies | null>(
+    row ? null : { categories: [], tags: [] },
+  );
+  // The list row never carries terms; the detail read fills both below.
+  const [taxonomies, setTaxonomies] = useState<WpEditorTaxonomies>({ categories: [], tags: [] });
+  const [termOptions, setTermOptions] = useState<{
+    categories: WpTermOption[];
+    tags: WpTermOption[];
+    loading: boolean;
+    unsupported: boolean;
+    partial: boolean;
+  }>({ categories: [], tags: [], loading: true, unsupported: false, partial: false });
   const [scheduleDraft, setScheduleDraft] = useState<{ date: string; time: string } | null>(null);
 
   function updateSchedule(next: { date: string; time: string }) {
@@ -627,7 +653,13 @@ function PostEditor({
         status: detail.status ?? "draft",
         scheduledFor: detail.scheduledFor ?? "",
       };
+      const nextTaxonomies = {
+        categories: detail.categories ?? [],
+        tags: detail.tags ?? [],
+      };
       setContentEditable(detail.content !== null);
+      setInitialTaxonomies(nextTaxonomies);
+      setTaxonomies(nextTaxonomies);
       setExpectedRemoteUpdatedAt(detail.remoteUpdatedAt ?? null);
       setVersionConflict(false);
       setInitial(next);
@@ -636,7 +668,27 @@ function PostEditor({
     return () => controller.abort();
   }, [connectionId, type, row, loadAttempt]);
 
-  const dirty = wpEditorIsDirty(initial, values);
+  useEffect(() => {
+    const controller = new AbortController();
+    setTermOptions((current) => ({ ...current, loading: true }));
+    const query = new URLSearchParams({ connectionId });
+    void api<{ categories?: WpTermOption[]; tags?: WpTermOption[]; unsupported?: boolean; partial?: boolean }>(
+      `/api/integrations/wp-manager/content/terms?${query.toString()}`,
+      { signal: controller.signal },
+    ).then((response) => {
+      if (response.aborted) return;
+      setTermOptions({
+        categories: Array.isArray(response.data?.categories) ? response.data.categories : [],
+        tags: Array.isArray(response.data?.tags) ? response.data.tags : [],
+        loading: false,
+        unsupported: Boolean(response.data?.unsupported),
+        partial: Boolean(response.data?.partial),
+      });
+    });
+    return () => controller.abort();
+  }, [connectionId]);
+
+  const dirty = wpEditorIsDirty(initial, values) || wpTaxonomiesDirty(initialTaxonomies, taxonomies);
 
   function setValue<K extends keyof WpEditorValues>(key: K, value: WpEditorValues[K]) {
     setValues((current) => ({ ...current, [key]: value }));
@@ -667,6 +719,7 @@ function PostEditor({
     setError("");
 
     const patch = wpEditorPatch(initial, values);
+    const termPatch = initialTaxonomies ? wpTaxonomyPatch(initialTaxonomies, taxonomies) : {};
 
     const response = await api<{ error?: string; queued?: boolean; alreadyApplied?: boolean }>(
       "/api/integrations/wp-manager/content/posts",
@@ -679,6 +732,7 @@ function PostEditor({
             ? { id: row.remoteId, ...(expectedRemoteUpdatedAt ? { expectedRemoteUpdatedAt } : {}) }
             : { requestId: createRequestId }),
           ...patch,
+          ...termPatch,
         }),
       },
     );
@@ -859,6 +913,21 @@ function PostEditor({
                   excerpt={values.excerpt}
                   editable={contentEditable}
                 />
+                {/* Categories and tags belong to posts only — a page has no
+                    categories in WordPress, and offering them would be a picker
+                    whose answer core silently drops. */}
+                {type === "post" ? (
+                  <ContentTermsPicker
+                    categories={termOptions.categories}
+                    tags={termOptions.tags}
+                    selected={taxonomies}
+                    loading={termOptions.loading}
+                    unsupported={termOptions.unsupported}
+                    partial={termOptions.partial}
+                    disabled={busy}
+                    onChange={setTaxonomies}
+                  />
+                ) : null}
                 {/* The assistant sits under the text it works on: it drafts from
                     what is in the editor right now, and its output is only a
                     suggestion until a button here places it in a field. */}

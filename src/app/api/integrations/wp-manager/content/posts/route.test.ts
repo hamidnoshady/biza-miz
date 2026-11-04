@@ -52,7 +52,7 @@ beforeEach(() => {
     provider: "woocommerce",
     status: "active",
     link_mode: "plugin",
-    plugin_capabilities: { jobTypes: ["post_upsert"], postSchedule: true },
+    plugin_capabilities: { jobTypes: ["post_upsert"], postSchedule: true, contentTaxonomies: true },
   });
   m.getContent.mockResolvedValue(null);
   m.enqueue.mockResolvedValue("queued");
@@ -127,6 +127,68 @@ describe("scheduling validation", () => {
   });
 });
 
+describe("categories and tags", () => {
+  beforeEach(() => {
+    m.getContent.mockResolvedValue({ status: "draft", remoteUpdatedAt: "2026-11-01T00:00:00.000Z" });
+  });
+
+  it("sends term ids under the plugin's own field names", async () => {
+    const response = await POST(post({ id: "55", expectedRemoteUpdatedAt: "2026-11-01T00:00:00.000Z", categories: [3, 4], tags: [9] }));
+
+    expect(response.status).toBe(200);
+    const patch = m.enqueue.mock.calls[0][4];
+    expect(patch.post_category).toEqual([3, 4]);
+    expect(patch.tags_input).toEqual([9]);
+    expect(patch.categories).toBeUndefined();
+  });
+
+  it("saves terms on their own, with no text field touched", async () => {
+    const response = await POST(post({ id: "55", expectedRemoteUpdatedAt: "2026-11-01T00:00:00.000Z", categories: [3] }));
+
+    expect(response.status).toBe(200);
+    expect(m.enqueue).toHaveBeenCalledWith(expect.anything(), "post", "55", undefined, { post_category: [3] });
+  });
+
+  it("refuses categories for a page instead of letting WordPress drop them", async () => {
+    const response = await POST(post({ post_type: "page", requestId: REQUEST_ID, title: "برگه", categories: [3] }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("categories_not_supported_for_pages");
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("refuses names, fractions, zeros and over-long lists", async () => {
+    const cases = [
+      { categories: ["فرش"] },
+      { tags: [1.5] },
+      { tags: [0] },
+      { categories: Array.from({ length: 21 }, (_, index) => index + 1) },
+    ];
+    for (const body of cases) {
+      const response = await POST(post({ id: "55", expectedRemoteUpdatedAt: "2026-11-01T00:00:00.000Z", ...body }));
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe("invalid_terms");
+    }
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("refuses an older plugin that cannot apply term lists", async () => {
+    m.connection.mockResolvedValue({
+      id: CONNECTION_ID,
+      provider: "woocommerce",
+      status: "active",
+      link_mode: "plugin",
+      plugin_capabilities: { jobTypes: ["post_upsert"] },
+    });
+
+    const response = await POST(post({ id: "55", expectedRemoteUpdatedAt: "2026-11-01T00:00:00.000Z", tags: [9] }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ ok: false, error: "plugin_taxonomies_unsupported", upgradeRequired: true });
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+});
+
 describe("an older plugin is refused instead of publishing early", () => {
   it("answers plugin_schedule_unsupported when the plugin never advertised date_gmt", async () => {
     m.connection.mockResolvedValue({
@@ -162,5 +224,24 @@ describe("REST mode carries the schedule the same way", () => {
       expect.anything(),
       expect.objectContaining({ id: "77", status: "future", date_gmt: FUTURE.slice(0, 19) }),
     );
+  });
+});
+
+describe("REST mode term fields", () => {
+  beforeEach(() => {
+    m.connection.mockResolvedValue({ id: CONNECTION_ID, provider: "woocommerce", status: "active", link_mode: "rest_api" });
+    m.client.mockResolvedValue({ id: 77, type: "post", status: "draft" });
+  });
+
+  it("uses wp/v2's own field names for the same ids", async () => {
+    const response = await POST(post({ requestId: REQUEST_ID, title: "تازه", categories: [3], tags: [9, 10] }));
+
+    expect(response.status).toBe(200);
+    const [, body] = m.client.mock.calls[0];
+    expect(body.categories).toEqual([3]);
+    expect(body.tags).toEqual([9, 10]);
+    // The plugin's field names must never reach wp/v2.
+    expect(body.post_category).toBeUndefined();
+    expect(body.tags_input).toBeUndefined();
   });
 });
