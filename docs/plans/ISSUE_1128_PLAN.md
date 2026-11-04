@@ -142,6 +142,11 @@ way round. See «What this change does not build».
 | **Wave 12** — §D presentation policy | `SETTING_KEYS.agencyCostPolicy` in `settings.ts` plus `AGENCY_DEFAULT_PRESENTATION`, `AgencyCostPolicySetting` and the pure `parseAgencyCostPolicySetting` in `agency-reimbursable-cost.ts`. One business-wide jsonb choice rather than a column or a table, and deliberately *not* folded into wave 2's `agencyProfile`, which is documented as deciding blueprint ordering «and nothing else» while this one decides which of two accounts money lands in (decision 68). The parser does not coerce a value it does not recognise, for the reason the profile parser gives and at higher stakes, because the value picks an account |
 | **Wave 12** — §D policy service and HTTP | `loadAgencyCostPolicy` / `saveAgencyCostPolicy` in `agency-reimbursable-cost-service.ts`, with `AgencyCostPolicyState.stored` so a screen can report «هنوز انتخاب نشده» instead of rendering the fallback as a decision (decision 69). Saving writes the setting and its `audit_log` row — before and after in the payload — in one transaction, because this is the one agency setting that moves money. `createAgencyReimbursableCost` resolves the policy only when the caller says nothing, so an explicit choice wins and an explicit typo is still refused (decision 70). `GET`/`PUT /api/agency/reimbursable-costs/policy` ride `ledger.view` and `finance.expenses_manage` rather than `settings.manage`, under the register they govern (decision 71), and answer with the labels and hints inline because those two words decide a posting |
 | **Wave 12** — §D policy tests | `integration/agency-cost-policy.integration.test.ts` (8, real database), whose headline is that choosing `gross` makes the **next** cost debit **5197 instead of 1270** — a policy that only changed what a screen displayed would pass every other test in the file and be worth nothing — plus that the audit row names who moved it from what to what, that an explicit `net` beats a `gross` policy, that a policy change leaves an existing cost's entry identical **line for line** and that the database refuses the row-level change outright, that a typo is not substituted with the policy, that an unknown body key is refused, that a café is refused rather than defaulted, and that one agency's policy is not another's. `agency-reimbursable-cost.test.ts` grew to 26, pinning the fallback as a real presentation and the conservative one |
+
+| **Wave 13** — §D project P&L: pass-through | `AgencyCommercialReport.passThrough` — spent, recharged and unrecharged, read from account **1270** on the project's entries. Wave 3's `loadPostedFigures` sums revenue by `type='revenue'` and cost by `type='expense'`, and 1270 is an *asset*, so both sums skipped it: the P&L was correct and silent, and an agency buying media in a client's name had a margin that ignored the media entirely (decision 73). Read by *code* where the others are read by type, and its two directions summed separately rather than netted, because netting would answer only «what is still owed» and lose «how much client money this project handled» (decision 74) |
+| **Wave 13** — §D project P&L: hours | `AgencyCommercialReport.hours` — `contractedHours` summed from `agency_billing_milestones.hours` and null when no milestone states any, because a fixed-price engagement has no hours to report and 0 would claim somebody estimated the work at nothing; `actualHours` typed `null` and not `number \| null`, since nothing in this product records hours worked and the type is what stops a screen printing a measurement nobody took (decision 75); and `revenuePerContractedHourRial`, a ratio of a posted numerator to a booked denominator that is null unless both are known |
+| **Wave 13** — §D P&L panel | Two full-width blocks on «سود و زیان پروژه» in `agency-billing-panel.tsx`, outside the booked and posted cards on purpose: pass-through is neither a forecast nor part of the margin, and burying it in either would invite a reader to add it to a total it does not belong in. The heading reads «خارج از حاشیهٔ سود» and the copy says gross-presentation spend is in «هزینهٔ واقعی» and not here. Worked hours render as «ثبت نشده» rather than a dash or a zero, and the ratio's hint names both its bases so it cannot be read as an hourly rate |
+| **Wave 13** — §D P&L tests | `integration/agency-project-pnl.integration.test.ts` (7, real database), whose headline is that a 5,000,000 net cost leaves a project's margin at 10,000,000 (100٪) while appearing in pass-through, and that billing it back changes neither revenue nor margin — the same rule on both sides of the account. The mirror is tested too: a gross cost lands in `actualCostRial` and not in pass-through, so the two are disjoint and a reader may add them without double-counting. Plus an untouched project reporting nulls rather than zeros, both treatments on one project, the voided-recharge case asserting what the ledger *says* rather than what we wish it said, contracted hours with a null-hours milestone not counted as zero, and one project's P&L staying out of another's. `agency-commercial.test.ts` grew to 50 |
 | **Wave 9** — §C campaign tests | `agency-campaign.test.ts` (26, pure), `integration/agency-client-campaigns.integration.test.ts` (16, real database), `integration/agency-party-merge.integration.test.ts` (6, real database), `campaign-guard.test.ts` (6) and 66 assertions against 0278 run directly over Postgres. The integration suite covers what only a database can show: one number sequence under a race, an overspend recorded *and* reported as `over`, the four ratios and their nulls including `revenueRial: 0` giving no ROAS, list figures identical to detail figures, a one-field patch clearing nothing, the full lifecycle with its window requirements stated in words first, a closed campaign refused from both the service and a **raw** `UPDATE` that skips it, a foreign client refused by the trigger as `23514`, and two of one brand's campaigns concurrent in the same window. The merge suite pins both halves of decision 56 — the move lands with substance and lines byte-for-byte intact and an audit row written, and what was frozen stays frozen for every path that is not the audited merge |
 
 
@@ -990,6 +995,105 @@ leave them to its form because they describe a cosmetic ordering; these two word
 which account money lands in, so a screen rendering the choice from its own copy of the
 vocabulary could drift from the one the ledger acts on. Here the API is the only source.
 
+### 72 — the P&L extends wave 3's report rather than becoming a module of its own
+
+Recon before writing found that §D's project P&L was already **mostly built**: wave 3's
+`AgencyCommercialReport` has `booked` (contracted, approved change, revised, scheduled,
+invoiced, unscheduled) and `posted` (revenue, collected, receivable, actual cost), a pure
+`commercialMargin` that deliberately computes from the posted figures only, and a real
+ledger read over `journal_entries.project_id`. It had even left a comment at the invoice
+call site saying «§D's project P&L is one read over `journal_entries.project_id`, and this
+is what puts the invoice's own entry on that read».
+
+So wave 13 adds two fields to that report and one query to that read. A parallel
+`agency-project-pnl.ts` would have been a second P&L beside the first, and the two would
+have disagreed about what «billed» means — one from milestones, one from the ledger —
+which is the exact failure §D's booked-versus-posted rule exists to prevent.
+
+What the recon also corrected: an earlier claim that «nothing records hours» was too
+strong. `agency_billing_milestones.hours` exists and is already carried on
+`AgencyMilestoneRecord`. *Contracted* hours are real; *worked* hours are not recorded.
+The distinction is what decision 75 turns into a type.
+
+### 73 — pass-through is reported beside the margin and never inside it
+
+`loadPostedFigures` selects accounts by **type**: revenue is credits to `type='revenue'`,
+cost is debits to `type='expense'`. That is a good rule — it survives an agency renaming
+or adding a revenue account, and it excludes the balance-sheet sides of an entry (the
+receivable, the cash, the VAT) because they are not profit and loss.
+
+Its consequence is that account **1270**, an asset, is skipped by both sums. So a
+net-presentation client cost and its recharge were invisible on the project: the P&L was
+*correct* and silent. Correct, because neither figure belongs in the margin — counting a
+client's media buy as an expense would destroy the margin of every agency that buys media
+in a client's name, and counting its recovery as revenue would inflate it. The same error
+in both directions at once, which is what §D's net presentation exists to prevent.
+
+Silent, because §D's first sentence asks that media spend be **tracked** separately from
+service fees, and tracking it nowhere is not tracking it separately. So
+`report.passThrough` reports spent, recharged and unrecharged *beside* the margin, and
+the panel's block is full width and outside both cards with a heading that says «خارج از
+حاشیهٔ سود» — placement is part of the claim, since a figure nested inside the posted card
+reads as a component of the total above it.
+
+A gross-presentation cost never appears there: it debits 5197 and is already inside
+`actualCostRial`. The two figures are disjoint by construction, so a reader may add them
+to get the project's whole outlay without counting any money twice.
+
+### 74 — pass-through is read by code, and its two directions are not netted
+
+Two deliberate asymmetries with the surrounding query, both worth stating because each
+looks like an oversight.
+
+**By code, not by type.** Revenue and cost are selected by `type` so an agency that
+renamed or added an account is still reported. 1270 is one *specific* account the chart
+template seeds (`WELL_KNOWN_CODES.agencyReimbursableClientCost`), not a category — there
+is nothing to be robust about, and selecting it by type would sweep in every asset on the
+project, including the receivable its own invoices raised.
+
+**Debits and credits summed separately.** The obvious writing is `debit - credit` for
+spent and `credit - debit` for recharged, which is how the revenue and cost sums handle
+reversals. Applied to one account it makes the two figures exact negatives of each other,
+and `unrechargedRial` would be the only information left. Both directions are events a
+member needs — *how much client money this project handled* and *how much has been billed
+back* — so they are summed as gross debits and gross credits, and the balance is derived
+from the two by `passThroughBalance`.
+
+`passThroughBalance` returns null only when *both* are null, keeping wave 3's rule that
+«nothing has posted» is not «the client owes nothing». Once either exists the answer is
+arithmetic, including a genuine zero, which then means the project's media has all been
+billed back.
+
+### 75 — `actualHours` is typed `null`, because nothing records hours worked
+
+§D asks for «hours/cost». Half of that is available and half is not, and the interface says
+which is which:
+
+```ts
+contractedHours: number | null;  // summed from agency_billing_milestones.hours
+actualHours: null;               // not `number | null`
+```
+
+Typing the second as the literal `null` rather than as `number | null` is the decision. It
+is documentation the compiler enforces: a screen cannot render it as `0`, and nobody can
+start returning a number without editing this interface deliberately — at which point the
+question «where did that number come from» has to be answered in the diff. A
+`number | null` would allow a future contributor to fill it from any plausible-looking
+column and nobody would notice, which is how a report starts claiming a measurement
+nobody took. §C's «no fake campaign performance» is the same rule applied to §D's hours.
+
+`contractedHours` is null rather than 0 when no milestone states hours, for the reason
+`AgencyCommercialPosted` gives for its own nulls: a fixed-price engagement has no hours to
+report, and printing 0 claims somebody estimated the work at nothing. Non-finite and
+negative values are skipped rather than summed, because `hours` is a `numeric` column and a
+negative hour is a keystroke that must not quietly reduce a total.
+
+`revenuePerContractedHourRial` divides a **posted** numerator by a **booked** denominator.
+That is a legitimate question — «what did the hours we sold turn into» — and it is not an
+hourly rate, so it is null unless both bases are known, rounded to whole Rial, and the
+panel's hint names both bases. Printing it with decimals would invite a reader to treat it
+as a rate somebody set.
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -1316,6 +1420,23 @@ link every byte fetch, which made the default link unable to show the artwork it
   year because `isValidIsoDate` is calendar-aware about days but shape-based about
   years, and free text that reports over-long rather than truncating a description
   about to appear on a client's invoice.
+* `integration/agency-project-pnl.integration.test.ts` (7) — §D's project P&L. The
+  headline is that a 5,000,000 net-presentation cost leaves the project's margin at
+  10,000,000 (100٪) while appearing in `passThrough`, and that recharging it changes
+  neither revenue nor margin — the same rule on both sides of the account. The mirror
+  case matters as much: a **gross** cost lands in `actualCostRial` and *not* in
+  pass-through, so the two are disjoint and a reader may add them without
+  double-counting, which is §D's «tracked separately» as an assertion. Also an untouched
+  project reporting nulls rather than a row of zeros, both treatments on one project, the
+  voided-recharge case asserting what the ledger *says* rather than what we wish it said,
+  contracted hours where a milestone stating none is not counted as zero hours, and one
+  project's P&L staying out of another's.
+* `agency-commercial.test.ts` grew to 50 with the three pure P&L helpers:
+  `passThroughBalance` (null only when both sides are null),
+  `revenuePerContractedHour` (whole Rial, null for an unknown or non-positive
+  denominator, and a real 0 for zero revenue over real hours), and `sumContractedHours`
+  (null for «no hours stated», skipping negative and non-finite values rather than
+  summing them).
 * `integration/agency-cost-policy.integration.test.ts` (8) — §D's business-level
   presentation policy. The headline is that choosing `gross` makes the *next* cost debit
   **5197 instead of 1270**: a policy that only changed what a screen displayed would
@@ -1528,10 +1649,16 @@ Deliberately, and each is named in the issue:
   (decisions 68–71). Still owed: the **screen**, because the Accounting app's section
   key reaches ten files and four contract tests of its own — and it now has three acts
   to show rather than one (record, recharge, choose the policy), so it is the natural
-  home for all three; the **campaign and project P&L** read, which wave 11 moved closer
-  by tagging the recharge's entries with the project its costs agreed on, and which
-  cannot be complete until time tracking exists, since §D asks for hours and cost per
-  project and nothing records hours; and the vendor quote → purchase → payable →
+  home for all three. Wave 13 completed the **project P&L** read §D asks for —
+  contracted, billed, collected, committed, actual cost, margin and profitability were
+  already there from wave 3, and it added the pass-through and hours columns the report
+  was silent about (decisions 72–75). What that leaves owed: the **campaign** dimension
+  of the same P&L, because `journal_entries` carries a project and not a campaign, so a
+  campaign read can only inherit its project's figures and cannot attribute an entry to
+  one campaign of several running concurrently on the same project — which is the
+  attribution §C calls «defensible» and this would not be; **actual hours**, which need
+  time tracking that does not exist (§B's resource scheduling is a calendar, not a
+  clock); and the vendor quote → purchase → payable →
   settlement chain, for which `settled_by = 'payable'` crediting 2140 is the seam — the
   day that chain exists it settles these rows rather than duplicating them.
 * **§C Growth** — campaign calendar and channel mix for *client* campaigns, the agency's-own vs
