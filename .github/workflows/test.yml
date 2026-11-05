@@ -187,11 +187,10 @@ jobs:
     name: production build
     runs-on: windows-latest
     # The web bundle now includes the archive generator, QR verifier and media
-    # protection paths. Give Next's single-process webpack build the full
-    # runner headroom; the lower 6144 MB workflow default remains appropriate
-    # for test/integration jobs.
+    # protection paths. The 16 GB hosted runner can give this single-process
+    # webpack build a 12 GB V8 ceiling while retaining headroom for native tools.
     env:
-      NODE_OPTIONS: --max-old-space-size=8192
+      NODE_OPTIONS: --max-old-space-size=12288
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -394,6 +393,7 @@ jobs:
       run:
         shell: bash
     env:
+      NODE_OPTIONS: --max-old-space-size=12288
       PGPORT: "55432"
       DATABASE_URL: postgres://pos:pos@127.0.0.1:55432/pos
       JWT_SECRET: ci-only-throwaway-secret-0123456789abcdef0123456789abcdef
@@ -541,6 +541,7 @@ jobs:
       run:
         shell: bash
     env:
+      NODE_OPTIONS: --max-old-space-size=12288
       PGPORT: "55433"
       DATABASE_URL: postgres://pos:pos@127.0.0.1:55433/pos
       JWT_SECRET: ci-only-throwaway-secret-0123456789abcdef0123456789abcdef
