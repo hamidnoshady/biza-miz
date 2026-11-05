@@ -191,15 +191,97 @@ async function projectFacts(businessId: string, projectId: string | null): Promi
   };
 }
 
+/**
+ * Financial figures are exposed only to members with ledger.view, through the
+ * canonical workspace project report (which itself enforces project visibility
+ * and uses the Accounting ledger's posted-cost definition). The project id is
+ * taken from the authorized contract, never from the request.
+ */
+async function accountingFacts(
+  owner: WorkspaceOwner,
+  projectId: string | null,
+): Promise<ContractBindingContext["accounting"]> {
+  const empty = { projectBudgetRial: "", postedCostRial: "", budgetVarianceRial: "" };
+  if (!projectId || owner.access?.canViewFinancials !== true) return empty;
+  const { projectReport } = await import("../workspace");
+  const project = (await projectReport(owner, { projectId }))[0];
+  if (!project) return empty;
+  const projectBudgetRial = project.budgetRial === null ? "" : String(project.budgetRial);
+  const postedCostRial = project.spentRial === null ? "" : String(project.spentRial);
+  const budgetVarianceRial =
+    project.budgetRial === null || project.spentRial === null
+      ? ""
+      : String(project.budgetRial - project.spentRial);
+  return { projectBudgetRial, postedCostRial, budgetVarianceRial };
+}
+
+/**
+ * AEC commercial facts are read only through this contract's own linked rows.
+ * No client-supplied project ID is accepted, no unrelated project records are
+ * enumerated, and accounting ledger values are intentionally excluded.
+ */
+async function contractAecFacts(businessId: string, contractId: string): Promise<ContractBindingContext["aec"]> {
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT COALESCE(cc.revised_value_rial,
+                      c.value_rial + COALESCE((SELECT sum(v.approved_amount_rial)
+                                                 FROM aec_variations v
+                                                WHERE v.business_id = c.business_id AND v.contract_id = c.id
+                                                  AND v.status IN ('approved', 'implemented')), 0))::text
+              AS revised_value_rial,
+            (cc.advance_percent::text || '%') AS advance_percent,
+            cc.advance_amount_rial::text AS advance_amount_rial,
+            (cc.retention_percent::text || '%') AS retention_percent,
+            cc.payment_terms,
+            cc.defects_liability_months::text AS defects_liability_months,
+            cc.guarantee_type, cc.guarantee_reference,
+            cc.guarantee_amount_rial::text AS guarantee_amount_rial,
+            cc.guarantee_expiry::text AS guarantee_expiry,
+            cc.insurance_reference, cc.insurance_expiry::text AS insurance_expiry,
+            COALESCE((SELECT sum(v.approved_amount_rial)
+                        FROM aec_variations v
+                       WHERE v.business_id = c.business_id AND v.contract_id = c.id
+                         AND v.status IN ('approved', 'implemented')), 0)::text AS approved_variations_rial,
+            COALESCE((SELECT sum(COALESCE(pc.approved_amount_rial, pc.net_rial))
+                        FROM aec_payment_certificates pc
+                       WHERE pc.business_id = c.business_id AND pc.contract_id = c.id
+                         AND pc.status = 'certified'), 0)::text AS certified_amount_rial
+       FROM workspace_contracts c
+       LEFT JOIN aec_contract_commercials cc
+         ON cc.business_id = c.business_id AND cc.contract_id = c.id
+      WHERE c.business_id = $1 AND c.id = $2`,
+    [businessId, contractId],
+  );
+  const row = rows[0];
+  const value = (key: string) => row?.[key] == null ? "" : String(row[key]);
+  return {
+    revisedValueRial: value("revised_value_rial"),
+    advancePercent: value("advance_percent"),
+    advanceAmountRial: value("advance_amount_rial"),
+    retentionPercent: value("retention_percent"),
+    paymentTerms: value("payment_terms"),
+    defectsLiabilityMonths: value("defects_liability_months"),
+    approvedVariationsRial: value("approved_variations_rial"),
+    certifiedAmountRial: value("certified_amount_rial"),
+    guaranteeType: value("guarantee_type"),
+    guaranteeReference: value("guarantee_reference"),
+    guaranteeAmountRial: value("guarantee_amount_rial"),
+    guaranteeExpiry: value("guarantee_expiry"),
+    insuranceReference: value("insurance_reference"),
+    insuranceExpiry: value("insurance_expiry"),
+  };
+}
+
 /** Everything a document's `{{variables}}` may resolve from, for one contract. */
 export async function loadContractBindingContext(
   owner: WorkspaceOwner,
   contract: WorkspaceContract,
 ): Promise<ContractBindingContext> {
-  const [business, party, project] = await Promise.all([
+  const [business, party, project, aec, accounting] = await Promise.all([
     businessFacts(owner.businessId),
     partyFacts(owner.businessId, contract.partyId),
     projectFacts(owner.businessId, contract.projectId),
+    contractAecFacts(owner.businessId, contract.id),
+    accountingFacts(owner, contract.projectId),
   ]);
   const today = new Date();
   return {
@@ -215,6 +297,8 @@ export async function loadContractBindingContext(
     project,
     party,
     business,
+    aec,
+    accounting,
   };
 }
 

@@ -22,6 +22,7 @@
  */
 import { TenantBackupServicePanel } from "./service-panel";
 import { PlanPolicyPanel } from "./plan-policy-panel";
+import { MarginPanel } from "./margin-panel";
 
 export default function PlatformTenantBackupServicePage() {
   return (
@@ -31,6 +32,12 @@ export default function PlatformTenantBackupServicePage() {
           inherits from: the envelope first, then the tiers inside it. */}
       <div className="mx-auto max-w-4xl px-6 pb-8">
         <PlanPolicyPanel />
+      </div>
+      {/* Issue #903 §3/§8 — what the storage we just configured earns against
+          what it costs. Last on the page because it is a report about the
+          service, not part of setting it up. */}
+      <div className="mx-auto max-w-4xl space-y-5 px-6 pb-8">
+        <MarginPanel />
       </div>
     </>
   );

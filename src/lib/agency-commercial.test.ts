@@ -71,6 +71,9 @@ import {
   type AgencyCommercialAction,
   type AgencyMilestoneDraft,
   type AgencyMilestoneStatus,
+  passThroughBalance,
+  revenuePerContractedHour,
+  sumContractedHours,
 } from "./agency-commercial";
 import { SERVICE_REVENUE_ACCOUNTS } from "./service-invoice";
 
@@ -769,5 +772,70 @@ describe("the module cannot decide an authorization", () => {
     expect(imports.sort()).toEqual(["./digits", "./service-invoice"]);
     expect(source).not.toContain("from \"pg\"");
     expect(source).not.toContain("next/");
+  });
+});
+
+/* ===========================================================================
+ * §D's project P&L — the arithmetic behind pass-through and hours
+ * ======================================================================== */
+
+describe("passThroughBalance — what a client still owes on a project's media", () => {
+  it("is the difference of two ledger sums", () => {
+    expect(passThroughBalance(5_000_000, 2_000_000)).toBe(3_000_000);
+    expect(passThroughBalance(5_000_000, 5_000_000)).toBe(0);
+    // One side unknown is still arithmetic, not unknown: a project that spent client
+    // money and has posted no recharge owes all of it.
+    expect(passThroughBalance(5_000_000, null)).toBe(5_000_000);
+    expect(passThroughBalance(null, 500)).toBe(-500);
+  });
+
+  it("is null only when both sides are null", () => {
+    // "Nothing has posted on this project" and "the client owes nothing" are different
+    // claims, and a P&L that prints 0 for the first is a statement nobody made.
+    expect(passThroughBalance(null, null)).toBeNull();
+  });
+});
+
+describe("revenuePerContractedHour — a ratio of two different bases", () => {
+  it("answers whole Rial when both bases are known", () => {
+    expect(revenuePerContractedHour(10_000_000, 40)).toBe(250_000);
+    // Rounded, halves away from zero: money here is integer Rial, and a per-hour figure
+    // printed with decimals invites a reader to treat it as a rate somebody set.
+    expect(revenuePerContractedHour(1000, 3)).toBe(333);
+    expect(revenuePerContractedHour(5, 2)).toBe(3);
+  });
+
+  it("is null whenever a base is unknown or unusable", () => {
+    expect(revenuePerContractedHour(null, 40)).toBeNull();
+    expect(revenuePerContractedHour(10_000_000, null)).toBeNull();
+    // Zero hours is not a small number of hours: dividing by it is not a figure.
+    expect(revenuePerContractedHour(10_000_000, 0)).toBeNull();
+    expect(revenuePerContractedHour(10_000_000, -5)).toBeNull();
+    expect(revenuePerContractedHour(10_000_000, Number.NaN)).toBeNull();
+    // Revenue of zero with real hours is a genuine answer, not an unknown one.
+    expect(revenuePerContractedHour(0, 40)).toBe(0);
+  });
+});
+
+describe("sumContractedHours — null for «no hours stated», never zero", () => {
+  it("sums the hours a schedule states", () => {
+    expect(sumContractedHours([10, 20, 5.5])).toBe(35.5);
+    expect(sumContractedHours([40])).toBe(40);
+  });
+
+  it("is null when nothing states hours", () => {
+    // A fixed-price engagement has no hours to report. Printing 0 would claim somebody
+    // estimated the work at nothing.
+    expect(sumContractedHours([])).toBeNull();
+    expect(sumContractedHours([null, undefined, null])).toBeNull();
+  });
+
+  it("skips values that are not hours rather than summing them", () => {
+    // `hours` is a numeric column, so a negative or a non-finite value can exist; it
+    // must not quietly reduce a total or poison it with NaN.
+    expect(sumContractedHours([10, -4, 20])).toBe(30);
+    expect(sumContractedHours([10, Number.NaN, 20])).toBe(30);
+    expect(sumContractedHours([10, Number.POSITIVE_INFINITY])).toBe(10);
+    expect(sumContractedHours([0, 0])).toBeNull();
   });
 });

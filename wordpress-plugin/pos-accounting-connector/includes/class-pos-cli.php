@@ -222,10 +222,34 @@ class POS_Connector_CLI {
 				'oldestPendingAt'      => $oldest,
 				'oldestPendingSeconds' => $oldest_ts > 0 ? max( 0, $now - $oldest_ts ) : null,
 			),
+			// #1206 P1: measured, not configured. `deliverySeconds` is the
+			// enqueue → app-accepted lag of rows that actually travelled;
+			// `cycleRuntimeMs` is what the last invocations took. Both carry
+			// their sample count — a p95 of 3 is not a p95 of 400 — and both
+			// are null rather than 0 when there is nothing to measure yet.
+			'latency'       => array(
+				'deliverySeconds' => POS_Connector_Queue::delivery_latency( 500, true ),
+				'cycleRuntimeMs'  => self::cycle_runtime_percentiles(),
+			),
+			// #1206: a walk that ran out of budget is *pending work*, and the
+			// doctor must not report a half-read catalogue as finished.
+			'exportCursors' => array(
+				'content' => POS_Connector_Export_Cursor::get( 'content' ),
+				'orders'  => POS_Connector_Export_Cursor::get( 'orders' ),
+			),
 			'lastCycle'     => array(
 				'verdict' => $settings['last_cycle_verdict'],
 				'phases'  => array_values( (array) $settings['last_cycle_phases'] ),
 				'error'   => $settings['last_error'],
+			),
+			// #1206 P0: the last 20 invocations, newest first, with the exit code
+			// a monitoring crontab would have seen. `lastCycle` is one line of
+			// evidence; a store that fails four ticks in a row before it recovers
+			// leaves only this.
+			'invocations'   => array(
+				'recent'      => POS_Connector_Invocation_Log::recent(),
+				'failures24h' => POS_Connector_Invocation_Log::failures_since( DAY_IN_SECONDS ),
+				'limit'       => POS_Connector_Invocation_Log::RECENT_LIMIT,
 			),
 			'incident'      => array(
 				'open'        => ! empty( $settings['incident_open'] ),
@@ -240,6 +264,8 @@ class POS_Connector_CLI {
 			POS_CONNECTOR_CRON_RESYNC_PRODUCTS,
 			POS_CONNECTOR_CRON_RESYNC_CUSTOMERS,
 			POS_CONNECTOR_CRON_RESYNC_CONTENT,
+			POS_CONNECTOR_CRON_PRODUCT_EXPORT,
+			POS_CONNECTOR_CRON_CONTENT_EXPORT,
 		) as $hook ) {
 			$next = wp_next_scheduled( $hook );
 			$report['schedules'][ $hook ] = array(
@@ -301,6 +327,37 @@ class POS_Connector_CLI {
 		}
 
 		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'تأخیر اندازه‌گیری‌شده', 'pos-accounting-connector' ) . '%n' ) );
+		if ( is_array( $report['latency']['deliverySeconds'] ) ) {
+			$delivery = $report['latency']['deliverySeconds'];
+			WP_CLI::log(
+				'  ' . sprintf(
+					/* translators: 1: sample count, 2: median seconds, 3: p95 seconds, 4: max seconds */
+					__( 'از ورود رویداد به صف تا پذیرش در سامانه (%1$d نمونهٔ اخیر): نیمی حداکثر %2$d ثانیه، ۹۵٪ حداکثر %3$d ثانیه، بیشترین %4$d ثانیه.', 'pos-accounting-connector' ),
+					(int) $delivery['samples'],
+					(int) $delivery['p50Seconds'],
+					(int) $delivery['p95Seconds'],
+					(int) $delivery['maxSeconds']
+				)
+			);
+		} else {
+			WP_CLI::log( '  ' . __( 'هنوز رویدادی تحویل نشده که بتوان تأخیرش را اندازه گرفت؛ «صف خالی» به‌تنهایی یعنی هیچ مدرکی نیست، نه اینکه تأخیر صفر است.', 'pos-accounting-connector' ) );
+		}
+		if ( is_array( $report['latency']['cycleRuntimeMs'] ) ) {
+			$runtime = $report['latency']['cycleRuntimeMs'];
+			WP_CLI::log(
+				'  ' . sprintf(
+					/* translators: 1: sample count, 2: median seconds, 3: p95 seconds */
+					__( 'مدت اجرای دوره‌های اخیر (%1$d نمونه): نیمی حداکثر %2$s ثانیه، ۹۵٪ حداکثر %3$s ثانیه.', 'pos-accounting-connector' ),
+					(int) $runtime['samples'],
+					sprintf( '%.1f', ( (int) $runtime['p50Ms'] ) / 1000 ),
+					sprintf( '%.1f', ( (int) $runtime['p95Ms'] ) / 1000 )
+				)
+			);
+		}
+		WP_CLI::log( '  ' . __( 'هدف «۹۵٪ رویدادها در حداکثر ۳ دقیقه» فقط با همین اندازه‌گیری‌ها سنجیده می‌شود؛ تناوب تنظیم‌شدهٔ کرون (۶۰ ثانیه) به‌تنهایی هیچ تأخیری را ثابت نمی‌کند.', 'pos-accounting-connector' ) );
+
+		WP_CLI::log( '' );
 		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'آخرین دوره', 'pos-accounting-connector' ) . '%n' ) );
 		WP_CLI::log( '  ' . sprintf( 'نتیجه: %s', '' !== $report['lastCycle']['verdict'] ? $report['lastCycle']['verdict'] : '—' ) );
 		foreach ( $report['lastCycle']['phases'] as $phase ) {
@@ -319,6 +376,75 @@ class POS_Connector_CLI {
 		}
 		if ( '' !== $report['lastCycle']['error'] ) {
 			WP_CLI::log( '  ' . sprintf( 'خطا: %s', $report['lastCycle']['error'] ) );
+		}
+
+		WP_CLI::log( '' );
+		WP_CLI::log( WP_CLI::colorize( '%B' . __( 'اجراهای اخیر زمان‌بند', 'pos-accounting-connector' ) . '%n' ) );
+		if ( empty( $report['invocations']['recent'] ) ) {
+			WP_CLI::log( '  ' . __( 'هیچ اجرایی ثبت نشده است — این یعنی زمان‌بند هنوز این افزونه را صدا نزده، نه اینکه همه‌چیز خوب بوده.', 'pos-accounting-connector' ) );
+		} else {
+			foreach ( $report['invocations']['recent'] as $invocation ) {
+				$started   = isset( $invocation['startedAt'] ) ? get_date_from_gmt( $invocation['startedAt'], 'H:i:s' ) : '—';
+				$exit      = isset( $invocation['exitCode'] ) ? (int) $invocation['exitCode'] : null;
+				$runtime   = isset( $invocation['runtimeMs'] ) && null !== $invocation['runtimeMs']
+					? sprintf( '%.1f' . __( 'ثانیه', 'pos-accounting-connector' ), ( (int) $invocation['runtimeMs'] ) / 1000 )
+					: '—';
+				WP_CLI::log(
+					'  ' . sprintf(
+						'%s • %s • %s • %s %s • %s',
+						$started,
+						isset( $invocation['driver'] ) ? $invocation['driver'] : '?',
+						isset( $invocation['outcome'] ) ? $invocation['outcome'] : '?',
+						__( 'کد', 'pos-accounting-connector' ),
+						null === $exit ? '?' : (string) $exit,
+						$runtime
+					)
+				);
+				$detail = array();
+				if ( isset( $invocation['verdict'] ) && '' !== $invocation['verdict'] ) {
+					$detail[] = (string) $invocation['verdict'];
+				}
+				if ( ! empty( $invocation['phases'] ) && is_array( $invocation['phases'] ) ) {
+					$phases = array();
+					foreach ( $invocation['phases'] as $phase => $status ) {
+						$phases[] = $phase . '=' . $status;
+					}
+					$detail[] = implode( ' ', $phases );
+				}
+				if ( ! empty( $invocation['errors'] ) && is_array( $invocation['errors'] ) ) {
+					$detail[] = implode( ', ', array_map( 'strval', $invocation['errors'] ) );
+				}
+				if ( $detail ) {
+					WP_CLI::log( '      ' . implode( ' — ', $detail ) );
+				}
+			}
+			if ( (int) $report['invocations']['failures24h'] > 0 ) {
+				WP_CLI::log( '  ' . sprintf( __( '%d اجرای ناموفق در ۲۴ ساعت گذشته.', 'pos-accounting-connector' ), (int) $report['invocations']['failures24h'] ) );
+			}
+		}
+
+		$pending_walks = array();
+		if ( is_array( $report['exportCursors']['content'] ) ) {
+			$pending_walks[] = sprintf(
+				/* translators: 1: post type, 2: last post id read */
+				__( 'محتوا: نوع %1$s تا شناسهٔ %2$d', 'pos-accounting-connector' ),
+				(string) $report['exportCursors']['content']['type'],
+				(int) $report['exportCursors']['content']['cursor']
+			);
+		}
+		if ( is_array( $report['exportCursors']['orders'] ) ) {
+			$pending_walks[] = sprintf(
+				/* translators: %s: the modified time the next batch continues from */
+				__( 'سفارش‌ها: از تغییرِ %s ادامه می‌یابد', 'pos-accounting-connector' ),
+				gmdate( 'Y-m-d H:i:s', (int) $report['exportCursors']['orders']['ts'] )
+			);
+		}
+		if ( $pending_walks ) {
+			WP_CLI::log( '' );
+			WP_CLI::log( WP_CLI::colorize( '%B' . __( 'پیمایش‌های نیمه‌کاره', 'pos-accounting-connector' ) . '%n' ) );
+			foreach ( $pending_walks as $walk ) {
+				WP_CLI::log( '  ' . $walk );
+			}
 		}
 
 		WP_CLI::log( '' );
@@ -361,6 +487,37 @@ class POS_Connector_CLI {
 		if ( '' === $settings['last_cycle_verdict'] ) {
 			WP_CLI::log( __( 'هنوز هیچ دوره‌ای ثبت نشده است؛ عدد «هیچ» به معنی «موفق» نیست.', 'pos-accounting-connector' ) );
 		}
+	}
+
+	/**
+	 * Percentiles over the invocation log's measured runtimes (#1206 P1).
+	 *
+	 * At most RECENT_LIMIT samples exist by design, so this is «how long did
+	 * the last twenty cycles take» — enough to tell a 2s cycle from one that
+	 * keeps bumping into the scheduler's own interval, never a production
+	 * SLA. Interrupted runs have no runtime and are skipped, not counted
+	 * as zero.
+	 *
+	 * @return array{samples:int,p50Ms:int,p95Ms:int,p99Ms:int,maxMs:int}|null
+	 */
+	private static function cycle_runtime_percentiles() {
+		$samples = array();
+		foreach ( POS_Connector_Invocation_Log::recent() as $entry ) {
+			if ( isset( $entry['runtimeMs'] ) && null !== $entry['runtimeMs'] ) {
+				$samples[] = (int) $entry['runtimeMs'];
+			}
+		}
+		$stats = POS_Connector_Health::percentiles( $samples );
+		if ( null === $stats ) {
+			return null;
+		}
+		return array(
+			'samples' => (int) $stats['samples'],
+			'p50Ms'   => (int) round( $stats['p50'] ),
+			'p95Ms'   => (int) round( $stats['p95'] ),
+			'p99Ms'   => (int) round( $stats['p99'] ),
+			'maxMs'   => (int) round( $stats['max'] ),
+		);
 	}
 
 	/**

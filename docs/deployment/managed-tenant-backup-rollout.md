@@ -308,12 +308,10 @@ the end, still explicitly.
      (`/api/backup/restore/upload`, site installs), which is a recovery step, not
      a management one. The `tenant_backup_upload_sessions` table stays as history
      (migrations are forward-only) and is no longer written.
-   - Importing a file the platform never wrote, and restoring a Cloud backup from
-     such a file, is **not delivered**: an imported archive has no signed
-     manifest, so the server cannot certify what it contains without the tenant's
-     legacy passphrase, and registering one as `ready` on the strength of an
-     operator-supplied manifest is the lie §4 forbids. It needs a designed
-     passphrase-scoped import, not a button.
+   - Restoring a business from a file it downloaded earlier is delivered: the
+     checklist item is the *two-file recovery pair* described under
+     "restoring from a file the platform never wrote" below, because the
+     signature — not the tenant's word — is what makes the file believable.
 4. **Central tenant-only restore engine** (`tenant-restore-apply.ts`,
    `POST /api/backup/restores/apply`). Phased and journalled
    (`verify_started → verify_succeeded → apply_started → apply_succeeded`, or
@@ -550,8 +548,7 @@ conditional update *after* a restore commits, so a failed attempt never burns it
 and a consumed approval cannot be revoked — the restore it authorised already
 happened.
 
-**Still open.** `import/register` (no signed manifest for an artifact the
-platform did not write — see the previous increment), media binaries, the
+**Still open.** Media binaries, the
 WordPress/WooCommerce database, and the whole "Real acceptance" line: no
 PostgreSQL, S3 or Node ≥ 24 here, so `test:db` (including the extended RLS
 suite), `build`, and a live drill remain unexecuted in this environment.
@@ -602,10 +599,11 @@ does not open. Two honest details:
   `diagnoseBusinessBackup` now reports the last run and adds `drill_failed` to
   `actions`, which the Superadmin page renders.
 
-**Still open.** `import/register` (no signed manifest for an artifact the platform
-did not write), media binaries, the WordPress/WooCommerce database, and a CI job
-for the drill: the scheduler now covers production, but nothing runs a drill on a
-pull request, which needs a seeded PostgreSQL and S3 stand-in in CI.
+**Still open.** Media binaries and the WordPress/WooCommerce database. The drill
+question is closed: `integration/tenant-backup-acceptance.integration.test.ts`
+runs real drills on a pull request — a migrated PostgreSQL, an unprivileged app
+role so RLS actually filters, and a path-style S3 stand-in that can be taken down
+or made to store part of a body — inside the ordinary integration shards.
 
 ## Increment: per-plan policy, alert thresholds and DR objectives (issue #903 §3)
 
@@ -683,6 +681,59 @@ A plan policy is not exposed to a tenant at all — the table and the thresholds
 `platform_only` under FORCE RLS, and the tenant sees only the consequences: a
 cadence, an alert that fires or does not, a drill that ran.
 
+## Increment: the margin report gets a route (issue #903 §3, §8 — and a SQL bug found on the way)
+
+§3 makes provider-cost monitoring a Superadmin job. `computeBackupMargin` and
+`backupMarginReport` had existed since the billing jobs landed, with unit tests
+over the arithmetic — but nothing called them, so "what does managed storage earn
+against what it costs us" was answerable only from a shell.
+
+**The query did not work.** Reading it properly before wiring it up turned up the
+reason the gap had never been noticed: `backupMarginReport` selected
+`SUM(quantity), SUM(amount_rial) FROM usage_events`. There is no `usage_events`
+table and no `amount_rial` column. The billing runtime splits the two — quantity
+on the append-only `billing_usage_events`, money in `billing_usage_ratings`
+(`rated_amount_rial`, one row per event, keyed by `usage_event_id`) — so the
+report would have thrown on its first call. It now joins them, and the join is
+1:1 on a primary key, so a quantity cannot be multiplied by a second rating. That
+correction is covered by `integration/tenant-backup-margin.integration.test.ts`,
+which seeds priced, unpriced and out-of-window events against a real PostgreSQL:
+arithmetic tests cannot see a table name.
+
+**Three honesty rules the route enforces.**
+
+1. *The cost is an input, never a constant.* `providerCostRialPerGbMonth` comes
+   from the query string and defaults to `DEFAULT_PROVIDER_COST_RIAL_PER_GB_MONTH`
+   (zero), which the report echoes back in `assumptions`. The panel says so in
+   words: with no stated cost, "margin" is revenue, not profit.
+2. *A partly rated line is neither priced nor flagged.* A business whose meter
+   has some priced and some unpriced events has revenue, so it is not
+   `notPriced`; the line now also carries `unpricedByteDays` — the exact quantity
+   its revenue does not cover — and the table prints it under the figure. A line
+   with no rating at all keeps `notPriced: true` and reports zero revenue plus a
+   null percentage, which is "unknown", not "free".
+3. *A window nobody asked for is refused.* `resolveMarginWindow` defaults to the
+   last 30 days, treats a date-only end bound as the end of that day (so "1 to 31
+   October" includes the 31st), accepts full timestamps, and answers
+   `invalid_window` / `window_too_long` (over 366 days) rather than scanning
+   silently.
+
+**The surface.** `GET /api/platform/backup/service/margin?from=&to=&providerCostRialPerGbMonth=`
+returns `{ report }` with `Cache-Control: no-store`. It requires
+`tenant_backup.policy`, not `tenant_backup.read`: a cost figure is commercial, the
+same trust that sets the storage policy and the supplier cost, exactly as the
+managed-SMS wholesale numbers are absent from the commercial catalogue. The
+console card «گزارش حاشیهٔ سود ذخیره‌سازی» sits last on `/platform/backup/service`
+(it reports on the service rather than configuring it), uses Jalali pickers with
+ISO on the wire, and renders per-business rows sorted by margin.
+
+**Honest limits.** Nothing is stored and nothing is billed from here: the report
+reads settled usage events and touches no wallet, price or invoice. Revenue is
+what the rating recorded, so a meter the platform never priced reads as unpriced
+rather than as profit — which is the point. The provider cost is not persisted,
+so an operator states it each time; if the owner wants it remembered, that is a
+column on the fleet row and a separate decision.
+
 ## Increment: artifact lifecycle — Cloud keeps nothing local, and retention is enforced
 
 Two gaps the epic names and nothing closed: a Cloud deployment kept a second copy
@@ -733,9 +784,10 @@ restorable" instead of showing an unverified row as fine.
 
 **Still open.** Cloud's file-restore (`/api/backup/restore` and the chunked
 upload remain physical, site-only, exactly-one-business), the tenant upload
-endpoints that §2 forbids, post-restore accounting/permission checks, per-plan
-schedules and alert thresholds, a route for the margin report, and the real
-acceptance matrix — unchanged by this increment.
+endpoints that §2 forbids, post-restore accounting/permission checks, and the
+real acceptance matrix — unchanged by this increment. (Per-plan schedules and
+alert thresholds landed in the 0280 increment; the margin report got its route in
+the increment below.)
 
 ## Increment: the tenant upload surface is removed, not hidden (§2, §10 P0)
 
@@ -759,12 +811,12 @@ own (tested) chunk validation. Two divergent chunk validators would have drifted
 The `tenant_backup_upload_sessions` table (0265) stays — migrations are
 forward-only — but nothing writes it any more.
 
-**Import stays undelivered, deliberately.** A file the platform did not write has
-no signed manifest, so it cannot be certified as restorable without the tenant's
-legacy passphrase; registering one on an operator-supplied manifest would present
-unverified bytes to the tenant as a verified backup, which §4 forbids. That is a
-designed feature (passphrase-scoped import), not a route to bolt on, and Cloud's
-"restore from a backup file" (DoD 4, §1 matrix) stays open until it exists.
+**Import was left undelivered here, deliberately.** At the time, a file the
+platform did not write had no signed manifest, so registering it on an
+operator-supplied manifest would have presented unverified bytes to the tenant as
+a verified backup, which §4 forbids. It needed a designed feature, not a route to
+bolt on — and it got one: see "restoring from a file the platform never wrote"
+below.
 
 ## Increment: a restore must never rewind the wallet (§5, §8) — found while auditing the apply path
 
@@ -798,3 +850,206 @@ consistency after the swap, permission/membership reconciliation, and sync
 fencing verification — are not implemented. The epic also wants a *proof* (a test
 that another business, the platform realm and the canonical wallet are unchanged)
 which needs `npm run test:db` and therefore PostgreSQL.
+
+## Increment: the acceptance matrix is executable (§10, last P0)
+
+§10's closing line asks for "real acceptance" across Cloud, Hybrid
+(online/offline/reconnect), Full Offline, corruption, S3 outage,
+huge/interrupted files, lost keys/device, concurrency, retention, billing and
+multi-tenant drills. Every one of those had *unit* coverage; none had been run
+end to end against a real PostgreSQL and a real provider, which is the only
+arrangement where the pieces are wired to each other rather than mocked apart.
+
+`integration/tenant-backup-acceptance.integration.test.ts` (10 cases) is that
+matrix. It provisions a database with the full migration set, connects as the
+unprivileged app role so row-level security really filters, serves a path-style
+S3 endpoint on localhost that can be told to go down or to store only part of a
+body, configures the managed service through the console's own write path
+(sealed credentials under the platform KEK), and drives three businesses on the
+three profiles.
+
+| Acceptance row | What the matrix proves |
+| --- | --- |
+| Cloud | upload → managed object exists → the inventory has **one** restorable entry → the staged local twin is reclaimed → the verifier and a full drill both open the stored object |
+| Corruption | damage applied to the object *after* the upload is caught by the verifier (`artifact_checksum_mismatch`) and the drill fails at decryption — a `ready` row is not by itself "we can restore you" |
+| Interrupted / short object | a provider that stores part of a body is caught by the same verifier; the row is never promoted by an HTTP 200 |
+| S3 outage | the upload is recorded `failed`, nothing is invented in the bucket, the artifact is queued, and the operator's catch-up drains the queue **without taking a second backup** |
+| Full Offline | zero S3 requests, zero `billing_usage_events`, a restorable local artifact, and an honest `restore_preview` blocker (`artifact_unavailable_offline`) because a Local profile has no logical apply path yet |
+| Hybrid | offline: local copy survives and the mirror fails; reconnect: the same artifact is mirrored, both rows stay, and both share one `artifact_id` |
+| Lost keys / device | a deleted custody generation fails the drill at decryption rather than at restore time, and the custody readout reports no active generation |
+| Concurrency | two simultaneous backups are one `ok` and one `busy`; one row; a repeated settlement window is a `duplicate`, not a second charge |
+| Retention | an expired-but-last backup is protected: `expired = 0`, `protectedSkipped ≥ 1`, rows unchanged |
+| Multi-tenant drills | each business drills its own artifact, the other's ref is unresolvable in this scope, and A sees no local row for B |
+
+Narrower owners stay where they are: `tenant-restore-apply.integration.test.ts`
+owns the destructive apply (lock, journal, rollback, cross-tenant) and
+`tenant-backup-isolation.integration.test.ts` owns the #807 admission guards.
+This suite does not restate them.
+
+### Two defects the matrix found (both fixed here)
+
+1. **The lifecycle tick never ran inside a tenant scope.** It listed businesses
+   through a documented bypass, then called the verify / reclaim / expire passes
+   with no scope at all. Under the RLS-enforcing app role every statement saw
+   zero rows, so the hourly scheduler verified nothing, reclaimed nothing and
+   expired nothing — a silent no-op that unit tests with a stubbed `query` could
+   not see. `runBackupLifecycleTick` now wraps each business's passes in
+   `withTenant(businessId, …)`, and the unit suite asserts the scope is opened
+   once per business.
+2. **Every managed backup appeared twice in the tenant inventory.** A managed
+   artifact always has a matching `backup_runs` row, and the legacy projection of
+   that row is namespaced (`<destination>:<name>`) so the existing dedupe by
+   opaque ref could never match it. The tenant saw their backup once as
+   restorable and once as an unverifiable "legacy" copy — and on Cloud, after
+   reclaim, a phantom `local` entry for bytes that were deliberately deleted.
+   The merge now also drops a legacy row whose artifact file name is registered,
+   whatever the destination.
+
+### Behaviours the matrix pins, deliberately
+
+- **The mirror path registers the cloud copy `ready` on the upload's payload
+  hash**, so it never enters the `verifying` queue; `pendingVerificationCount` is
+  `0` for it. The bytes are therefore proved by the verifier or by a drill, not
+  by the nightly verify pass. If the owner wants a scheduled re-read of mirrored
+  objects (bit rot, a bad replica), the change is to register the mirror
+  `verifying` and let the pass promote it — that also delays Cloud's reclaim by
+  up to one tick, which is a product decision, not a bug fix.
+- **A Local profile's logical artifact has no apply path**, so its drill reports
+  `restore_preview` failed with `artifact_unavailable_offline` while
+  `report.ok` is true for the steps the platform can prove. That is the honest
+  label, not a pass.
+- **Scheduled drills never prove `portable_envelope`**: the platform does not
+  hold the tenant's recovery passphrase, so the scheduler narrows
+  `requiredSteps` and the step reports `skipped`.
+
+### Still open after this increment
+
+Scheduled re-verification of mirrored cloud objects (above), and the
+`config.cloud.enabled` observation recorded at the end of this document.
+
+## Billing: why `backupUseChargeDecision()` is not wired (§3, §7)
+
+`backup-billing-settlement.ts` has always exported a pure **per-use** decision —
+`backupUseChargeDecision()` returns `action: "charge"` with an `amountRial` for a
+verified, success, priced attempt, and `none` for a failed, cancelled, unverified,
+empty or already-settled one. Nothing calls it, and that is now the intended
+state, not unfinished work:
+
+- the tenant's "run a backup now" endpoint was **removed** by owner decision
+  (`billing-guard.ts`, see "the tenant surface superseded" above), so there is no
+  billable *use* left to charge for;
+- managed backups are billed from **retained byte-days** —
+  `backup.storage_byte_day`, `byteDays × price ÷ (1024³ × days in the month)` —
+  which is what `runBackupStorageSampleJob` + `runBackupStorageBillingJob`
+  settle, and what the margin report (`/api/platform/backup/service/margin`)
+  reads back;
+- the function stays in the tree because it is the tested contract a future
+  per-use product would need, and deleting it would delete the only written
+  statement of *when a backup may be charged at all* (verified success only).
+
+Its sibling **is** wired: `legacyPrechargeReconciliation()` backs
+`runBackupLegacyRefundJob` (daily, central), refunding a pre-charge from before
+this policy for an attempt that failed or never verified — exactly once, keyed by
+`settlementKey(…, "refund")`.
+
+**One observation left unfixed.** `tickBusiness` (`backup-service.ts`) lets the
+tick proceed when `config.enabled || managedSchedule`, but uploads the artifact it
+just took only when the tenant's legacy `config.cloud.enabled` flag is set — two
+gates for one decision. The consequence is a delay rather than a hole: on a
+managed **Cloud** tenant whose legacy flag was never set, the backup is taken
+locally now and mirrored on the *next* non-due tick, because `maybeCatchUpCloud`
+resolves the managed destination itself and explicitly mirrors regardless of that
+flag. Aligning the two gates is a scheduler behaviour change (it starts outbound
+uploads in the tick that also takes the backup, for tenants who never opted in),
+so it is reported here for an owner decision rather than changed.
+
+## Increment: restoring from a file the platform never wrote (§2 item 4, §6)
+
+Every other path starts from an inventory row, because the platform holds the
+artifact and can resolve a reference. The Owner's worst case is the opposite —
+the server was reimaged, the bucket was deleted, the business was cancelled — and
+what survives is a file on a laptop. Nothing in the database names it.
+
+The unit of recovery is therefore a **two-file pair**, which is what the custody
+model actually allows:
+
+- the encrypted payload the Owner already downloads, plus
+- `GET /api/backup/artifacts/[ref]/manifest`, which serves that artifact's
+  **signed** manifest (`<ref>.manifest.json`), Owner-only `backup.export`, no
+  provider detail.
+
+`POST /api/backup/restores/import/upload` + `POST /api/backup/restores/import`
+take both, and register the payload as this business's `uploaded`/`verifying`
+artifact. The ordinary verifier then promotes it through the same checksum +
+signature + archive-parse gate every other artifact passes, and the ordinary
+preview/apply path restores it — **the import adds no second way to write a
+business's rows**.
+
+What it refuses, in the order it refuses it: a payload that is not
+`tenant_archive_v1` (a `.sql` dump is refused by name — nothing here executes
+text from a file); a manifest whose signature does not verify under the platform
+key; a genuine manifest naming another business; a payload whose sha256 is not
+the one the manifest signed; a schema newer than the installation; a
+Local-profile install (its restores are #807's physical path). A failed import
+removes the file and leaves a `failed` row with a provider-neutral code.
+
+Honest limits, stated rather than promised away: a payload kept without its
+manifest cannot be imported; a `managed_envelope_v1` payload opens only on the
+installation holding that business's key generation (`backup_key_missing`
+otherwise, never a partial restore); a `legacy_passphrase_v1` payload asks for its
+one-time passphrase at import.
+
+The screen says the same thing: each inventory row offers its payload and its
+manifest side by side, and a «بازگردانی از فایل پشتیبان» panel below the
+inventory takes them back. A successful import appears as an ordinary row, so the
+preview card's typed phrase, re-authentication and MFA step-up still govern the
+restore — the panel restores nothing itself.
+
+**Validation:** 36 unit tests across the module, the three routes and the two
+components; a four-case real-database suite (import after the inventory row is
+gone and restore it, wrong payload for the manifest, another business's genuine
+manifest, unsigned manifest); 514 backup/restore unit tests; design lint.
+
+## Increment: membership reconciliation, and the proof of what a restore leaves alone (§5 — line closed)
+
+The earlier "a restore must never rewind the wallet" increment wrote down three
+checks it had not implemented. Two of them (`accounting_balanced`,
+`sync_fence_advanced`) and the wallet assertion landed with #1210; this closes
+the third and pays the proof the epic asked for.
+
+**`membership_reconciled`.** `users.role` is the stable category, and a
+composite foreign key keeps `custom_role_id` inside its own business *at write
+time* — but an archive is captured table by table, so a capture that lost or
+truncated `tenant_roles` still carries the users pointing at it. Those users do
+not crash: they fall back to `role`'s preset, so a manager whose narrower custom
+role vanished is silently authorised with the wider default. That is a
+permission **escalation caused by a restore**, and it belongs in the same
+transaction as the swap. The check counts active users whose custom role is
+missing or inactive after the replacement and, like the others, is refused and
+rolled back rather than committed. Inactive accounts are excluded on purpose —
+an account that cannot sign in cannot be escalated. The check runs against a
+pinned client inside the restoring transaction, so it reads the same snapshot it
+just wrote.
+
+**The proof, on a real database.** `tenant-restore-apply.integration.test.ts`
+already showed another business untouched and the wallet not rewound; it now also
+asserts, after an actual restore of A while B sits in the same tables:
+
+- `wallet_ledger` and `billing_usage_events` row counts for A are **unchanged** —
+  the balance is not rewound *and* the evidence explaining it still exists. The
+  second matters more than it looks: `billing_usage_events.event_id` is the
+  idempotency identity, so deleting it would let the next settlement re-charge a
+  window this restore had "restored away";
+- the **platform realm** (`platform_admins`, `platform_audit_log`) is unchanged.
+  `rls_proven` refuses a privileged role at the door; this proves the other half
+  — that a *permitted*, tenant-scoped role still cannot reach those rows.
+
+The journal's `apply_succeeded` entry now lists six checks
+(`rls_proven`, `owner_preserved`, `membership_reconciled`, `accounting_balanced`,
+`wallet_unchanged`, `sync_fence_advanced`), all `ok`, so an auditor reading the
+receipt sees what was proved rather than being told "restored".
+
+**Still open in §5 after this:** nothing structural. What remains is the same
+claim proved against a populated, production-shaped database — the integration
+suite runs on a fresh one — and media/website capture, which is §8's gap rather
+than §5's.

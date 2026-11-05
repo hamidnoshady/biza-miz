@@ -92,7 +92,19 @@ export const NOTIFICATION_EVENT_KEYS = [
   "sync.operational_blocked",
   // Issue #1149 — a WordPress plugin that has stopped calling. Its cron can die
   // without a single error anywhere; the silence is the only evidence.
+  //
+  // Superseded for *plugin-mode* connections by the three keys below (#1206
+  // P1): that check graded the silence of a signed contact, which a manual
+  // «آزمایش اتصال» refreshes, so a dead scheduler could look alive. Kept in the
+  // registry because rows already written carry the key and must keep their
+  // label and permissions; nothing new is produced under it.
   "integrations.plugin_stale",
+  // Issue #1206 P1 — the scheduler's own state, graded from actual cron starts.
+  // Three keys because they are three different facts: late, stopped, and back.
+  // One pair of thresholds (three missed cycles / ten minutes) decides which.
+  "integrations.plugin_cron_delayed",
+  "integrations.plugin_cron_failed",
+  "integrations.plugin_cron_recovered",
   "ai.coworker.pending",
   "ai.coworker.reported",
   "ai.coworker.failed",
@@ -130,6 +142,8 @@ export const NOTIFICATION_EVENT_KEYS = [
   // deadline is a policy fact (deadline − notification lead), so this rides the
   // service-activation tick's own scan rather than a scheduler of its own.
   "service.retention_expiring",
+  // Issue #908 — tell workspace managers once every required signer completes.
+  "contract.completed",
   "system.test",
 ] as const;
 export type NotificationEventKey = (typeof NOTIFICATION_EVENT_KEYS)[number];
@@ -315,6 +329,45 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     perLocation: false,
     hasAmount: false,
   },
+  // Issue #1206 P1. `info` for the warning, because three missed cycles on a
+  // shared host is worth a line in the inbox and not a page at 2am; the
+  // escalation to `important` happens only when ten minutes have passed with
+  // no start at all.
+  "integrations.plugin_cron_delayed": {
+    key: "integrations.plugin_cron_delayed",
+    group: "system",
+    label: "کرون فروشگاه دیرکرده",
+    description:
+      "چند اجرای پیاپی زمان‌بند انجام نشده است. هنوز چیزی از دست نرفته — صف نگه می‌دارد — ولی تأخیر شروع شده.",
+    defaultSeverity: "info",
+    defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "integrations.plugin_cron_failed": {
+    key: "integrations.plugin_cron_failed",
+    group: "system",
+    label: "کرون فروشگاه اجرا نمی‌شود",
+    description:
+      "بیش از ده دقیقه است هیچ اجرای واقعی زمان‌بند شروع نشده. سفارش‌ها و تغییرات در صف می‌مانند و اعمال نمی‌شوند.",
+    // Escalated: ten minutes of no scheduler at all means the store and the app
+    // are drifting apart, which is worth interrupting for.
+    defaultSeverity: "important",
+    defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "integrations.plugin_cron_recovered": {
+    key: "integrations.plugin_cron_recovered",
+    group: "system",
+    label: "همگام‌سازی فروشگاه بازگشت",
+    description:
+      "زمان‌بند دوباره اجرا می‌شود و صف در حال تخلیه است. یک‌بار برای هر وقفه، تا بسته‌شدنِ حلقه معلوم باشد.",
+    defaultSeverity: "info",
+    defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
   "ai.coworker.pending": {
     key: "ai.coworker.pending",
     group: "ai",
@@ -489,6 +542,16 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     defaultSeverity: "important",
     // The owner is the one who decides whether this business keeps the data.
     defaultRoles: ["owner"],
+    perLocation: false,
+    hasAmount: false,
+  },
+  "contract.completed": {
+    key: "contract.completed",
+    group: "projects",
+    label: "امضای قرارداد کامل شد",
+    description: "وقتی همهٔ امضاکنندگان لازم، نسخهٔ ثابت قرارداد را امضا کرده‌اند.",
+    defaultSeverity: "important",
+    defaultRoles: ["owner", "manager"],
     perLocation: false,
     hasAmount: false,
   },

@@ -9,7 +9,13 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { query } from "../db";
-import { refreshOutboxForConnection, drainOutbox, acknowledgePushedEvent, runWooCommerceSyncTick } from "./outbox-service";
+import {
+  refreshOutboxForConnection,
+  drainOutbox,
+  acknowledgePushedEvent,
+  runWooCommerceSyncTick,
+  enqueueTaxonomySync,
+} from "./outbox-service";
 import type { ConnectionRow } from "./connections-service";
 
 const mocks = vi.hoisted(() => ({
@@ -22,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   writeIntegrationAudit: vi.fn(),
   getConnection: vi.fn(),
   syncOrders: vi.fn(),
+  syncTaxonomyTree: vi.fn(),
 }));
 
 vi.mock("../db", () => ({
@@ -54,6 +61,9 @@ vi.mock("./sync-service", () => ({
   },
 }));
 vi.mock("./audit", () => ({ writeIntegrationAudit: mocks.writeIntegrationAudit }));
+// The taxonomy read is imported lazily by the drain (#1206 PERF-05), so it has
+// to be mocked as a module rather than stubbed per test.
+vi.mock("./woo-taxonomy-service", () => ({ syncTaxonomyTree: mocks.syncTaxonomyTree }));
 
 function connection(overrides: Partial<ConnectionRow> = {}): ConnectionRow {
   return {
@@ -403,5 +413,73 @@ describe("acknowledgePushedEvent — the ack both delivery paths must persist (C
       stock: 4,
       priceRial: "1000",
     });
+  });
+});
+
+/**
+ * #1206 PERF-05 — a taxonomy re-read is a queued job the app's own tick
+ * executes, not a page-per-taxonomy walk inside the request that asked for it.
+ */
+describe("taxonomy sync as a queued app-side job (#1206 PERF-05)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("queues once and reports the job id", async () => {
+    vi.mocked(query).mockResolvedValue({ rows: [{ id: "job-1" }], rowCount: 1 } as never);
+    expect(await enqueueTaxonomySync("biz-1", "conn-1")).toEqual({ jobId: "job-1", alreadyRunning: false });
+    const [sql, params] = vi.mocked(query).mock.calls[0];
+    expect(String(sql)).toContain("'taxonomy_sync'");
+    // A running row keeps its lease: the upsert refuses to touch it.
+    expect(String(sql)).toContain("status <> 'processing'");
+    expect(params).toEqual(["biz-1", "conn-1"]);
+  });
+
+  it("says «already running» instead of stacking a second read", async () => {
+    vi.mocked(query)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [{ id: "job-live" }], rowCount: 1 } as never);
+    expect(await enqueueTaxonomySync("biz-1", "conn-1")).toEqual({ jobId: "job-live", alreadyRunning: true });
+  });
+
+  it("reads the tree in the background tick and marks the job sent", async () => {
+    const client = { marker: "client" };
+    mocks.wooClientFor.mockReturnValue(client);
+    mocks.syncTaxonomyTree.mockResolvedValue({ status: "complete", terms: 12, results: [] });
+    const sent: string[] = [];
+    vi.mocked(query).mockImplementation((async (sql: string) => {
+      const text = String(sql);
+      if (text.includes("FOR UPDATE SKIP LOCKED")) {
+        return { rows: [{ id: "ev-1", entity_type: "taxonomy_sync", remote_id: "all", payload: {}, attempts: 0, lease_token: "lease-1" }] };
+      }
+      if (text.includes("SELECT count(*)")) return { rows: [{ open_count: 0, due_count: 0 }] };
+      if (text.includes("SET status = 'sent'")) sent.push(text);
+      return { rows: [], rowCount: 1 };
+    }) as never);
+
+    const result = await drainOutbox(connection());
+    expect(mocks.syncTaxonomyTree).toHaveBeenCalledWith("biz-1", "conn-1", client);
+    expect(result.sent).toBe(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("rethrows a total failure so the queue retries with backoff", async () => {
+    mocks.wooClientFor.mockReturnValue({});
+    mocks.syncTaxonomyTree.mockResolvedValue({ status: "failed", terms: 0, results: [] });
+    const failed: { sql: string; params: unknown[] }[] = [];
+    vi.mocked(query).mockImplementation((async (sql: string, params?: unknown[]) => {
+      const text = String(sql);
+      if (text.includes("FOR UPDATE SKIP LOCKED")) {
+        return { rows: [{ id: "ev-2", entity_type: "taxonomy_sync", remote_id: "all", payload: {}, attempts: 0, lease_token: "lease-2" }] };
+      }
+      if (text.includes("SELECT count(*)")) return { rows: [{ open_count: 1, due_count: 1 }] };
+      if (text.includes("SET status = 'failed'")) failed.push({ sql: text, params: params ?? [] });
+      return { rows: [], rowCount: 1 };
+    }) as never);
+
+    const result = await drainOutbox(connection());
+    expect(result.failed).toBe(1);
+    // The row names the failure, and nothing is recorded as delivered.
+    expect(String(failed[0]?.params ?? "")).toContain("taxonomy_sync_failed");
   });
 });

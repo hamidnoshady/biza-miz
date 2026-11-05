@@ -37,6 +37,7 @@ import { EmptyState, KpiCard, SectionCard, StatusBadge } from "@/app/dashboard/p
 import { api, ErrorBox } from "@/app/dashboard/ui";
 import { crmCustomerHref, type CrmSectionKey } from "./crm-routes";
 import { CrmCardHeading } from "./crm-card-heading";
+import { CrmLifecycleRow } from "./crm-lifecycle-row";
 import { CrmTodayQueues } from "./today-queues";
 
 /** A labelled proportion bar — lifecycle mix and consent coverage both read better as a shape. */
@@ -263,22 +264,14 @@ export function CrmOverviewSection({
                 }))}
               />
               <ul className="divide-y divide-border/80 text-sm">
-                {overview.lifecycle.map((row) => {
-                  const meta = LIFECYCLE_STAGES[row.stage as LifecycleStage];
-                  return (
-                    <li key={row.stage} className="flex items-center justify-between gap-3 py-2.5">
-                      <div className="min-w-0">
-                        <span className="font-medium text-foreground">{meta?.label ?? row.stage}</span>
-                        {meta?.action ? (
-                          <span className="ms-2 text-xs text-muted-foreground">{meta.action}</span>
-                        ) : null}
-                      </div>
-                      <span className="shrink-0 tabular-nums text-muted-foreground">
-                        {formatPersianNumber(row.count)} نفر · {money.format(row.valueRial)}
-                      </span>
-                    </li>
-                  );
-                })}
+                {overview.lifecycle.map((row) => (
+                  <CrmLifecycleRow
+                    key={row.stage}
+                    stage={row.stage}
+                    count={row.count}
+                    amountLabel={money.format(row.valueRial)}
+                  />
+                ))}
               </ul>
               {overview.lastScoredAt ? (
                 <p className="text-xs text-muted-foreground">

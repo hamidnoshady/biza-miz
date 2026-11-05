@@ -455,6 +455,18 @@ app.prepare().then(async () => {
     runWebsiteSyncTick().catch((err) => console.error("website sync tick failed:", err));
   scheduleCentralTick(websiteSyncTick, WEBSITE_SYNC_TICK_INTERVAL_MS, 100_000);
 
+  // Issue #894 (§6f): tell Torob which pages changed, so it re-fetches them
+  // sooner than a crawl would. Central, like the other outboxes, and the same
+  // shape: bypass to enumerate enabled+authorized shops, withTenant per business,
+  // one shop's failure never stopping the next. The tick fills and drains in one
+  // pass; a shop with nothing due costs one query and no HTTP call.
+  const { runTorobWebhookTick, TOROB_WEBHOOK_TICK_INTERVAL_MS } = await import(
+    "./src/lib/torob/webhook-service"
+  );
+  const torobWebhookTick = () =>
+    runTorobWebhookTick().catch((err) => console.error("torob webhook tick failed:", err));
+  scheduleCentralTick(torobWebhookTick, TOROB_WEBHOOK_TICK_INTERVAL_MS, 115_000);
+
   // Migration 0157: keep RFM scores fresh. RFM is a whole-population quintile
   // calculation, so it can never run on the checkout path — a busy Friday
   // would make the till wait on a full scan of every customer and every order,

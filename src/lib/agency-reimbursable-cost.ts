@@ -59,6 +59,62 @@ export function isAgencyPassThroughPresentation(
 }
 
 /* ------------------------------------------------------------------------- */
+/* The business-level presentation policy (§D)                                 */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * The presentation a cost gets when the business has chosen no policy and the
+ * member chose nothing on the row.
+ *
+ * This is a **fallback for determinacy, not a recommendation**. Every cost row
+ * has to land in one of two accounts, so something has to answer when nobody
+ * has; `net` is the answer because it is the one that does not claim money the
+ * agency may not have earned. Under `net` a client's media buy sits in 1270 as a
+ * claim until it is recharged, so the agency's revenue is never overstated.
+ * Under `gross` the same buy is the agency's own cost of sale and the recharge is
+ * its revenue, which is a real position — but one a business has to have
+ * *adopted*, and §D says that adoption "must follow chosen business accounting
+ * policy and must not be inferred solely from spend".
+ *
+ * Which is why this constant is the floor and not the answer: the answer is
+ * `SETTING_KEYS.agencyCostPolicy`, and a screen shows the fallback as «not
+ * chosen yet» rather than as a selection.
+ */
+export const AGENCY_DEFAULT_PRESENTATION: AgencyPassThroughPresentation = "net";
+
+/** The stored shape of `SETTING_KEYS.agencyCostPolicy`. */
+export interface AgencyCostPolicySetting {
+  /** The presentation new reimbursable costs default to. */
+  presentation: AgencyPassThroughPresentation;
+  /** ISO time of the last save, or null while nothing has been stored. */
+  updatedAt: string | null;
+}
+
+/**
+ * Pure: reads the stored jsonb defensively and returns null when there is
+ * nothing usable, so a caller can tell "never saved" from "saved".
+ *
+ * An unrecognised presentation string is **not** coerced to the default, for the
+ * reason `parseAgencyProfileSetting` gives: a value this code does not know was
+ * written by a newer version or by hand, and answering `net` would let the next
+ * save overwrite a decision nobody meant to reverse. Here the stakes are higher
+ * than a blueprint ordering, because the value decides which account money lands
+ * in — so the caller reports the default separately and says it was not stored.
+ *
+ * `agency-reimbursable-cost-service.ts` uses this same parser to validate a save
+ * request, so a shape the reader accepts is a shape the writer can store.
+ */
+export function parseAgencyCostPolicySetting(raw: unknown): AgencyCostPolicySetting | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  if (!isAgencyPassThroughPresentation(value.presentation)) return null;
+  return {
+    presentation: value.presentation,
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : null,
+  };
+}
+
+/* ------------------------------------------------------------------------- */
 /* Settlement: the credit side                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -250,4 +306,34 @@ export function normalizeAgencyCostAmount(value: unknown): number | null {
   const parsed = BigInt(text);
   if (parsed <= 0n || parsed > AGENCY_COST_AMOUNT_MAX) return null;
   return Number(parsed);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Recharged — derived, never stored (migration 0284)                         */
+/* ------------------------------------------------------------------------- */
+
+/** The order status that means an invoice no longer asks anybody for anything. */
+export const VOIDED_ORDER_STATUS = "voided";
+
+/**
+ * Whether a cost has actually been recharged.
+ *
+ * Derived from the invoice's live status rather than stored, and 0284 asserts that
+ * no `recharged`, `recharged_at` or `recharge_status` column exists. The reason is
+ * that `retail-invoice-void-service.ts` does not delete an invoice — it flips
+ * `orders.status` to `voided` and writes a reversing entry, leaving the original in
+ * place — so the ledger has *already* put the money back into 1270 by the time
+ * anybody looks. A stored flag would be a second answer to a question the order
+ * answers, and the two would disagree the first time somebody voided an invoice.
+ *
+ * A missing order status counts as not recharged, which is the safe direction: it
+ * makes a cost billable again rather than silently writing off a claim on a client.
+ */
+export function isCostRecharged(input: {
+  rechargedOrderId: string | null;
+  orderStatus: string | null | undefined;
+}): boolean {
+  if (!input.rechargedOrderId) return false;
+  if (typeof input.orderStatus !== "string" || input.orderStatus.length === 0) return false;
+  return input.orderStatus !== VOIDED_ORDER_STATUS;
 }

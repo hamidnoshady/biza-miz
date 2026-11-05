@@ -174,6 +174,9 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect(row!.title).toBe("Café’s “News”…");
     expect(row!.slug).toBe("cafe-news");
     expect(row!.status).toBe("publish");
+    // The card preview prefers the raw excerpt: rendered HTML would put tags
+    // in front of the owner.
+    expect(row!.excerptText).toBe("Raw summary");
 
     const detail = await content.getWpContent(biz.id, biz.pluginConnId, "post", "101");
     expect(detail?.editorTitle).toBe("Café's News");
@@ -217,6 +220,83 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
       .find((row) => row.remoteId === "901");
     expect(unsafe?.mediaUrl).toBeNull();
     expect(await content.deleteWpContent(biz.id, biz.pluginConnId, { id: 901, type: "attachment" })).toBe(true);
+  });
+
+  it("resolves a post's featured image through the mirrored attachment, and stays null when there is none", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 103,
+      type: "post",
+      title: "با تصویر شاخص",
+      excerpt: { raw: "<p>خلاصه&nbsp;کوتاه</p>" },
+      featured_media: 900,
+      status: "publish",
+    });
+    const rows = await content.listWpContent(biz.id, biz.pluginConnId, { wpType: "post" });
+    const withImage = rows.find((r) => r.remoteId === "103");
+    // Attachment 900 carries no media_details, so the source url is the fallback.
+    expect(withImage?.featuredImageUrl).toBe("https://shop.example.com/logo.png");
+    expect(withImage?.excerptText).toBe("خلاصه کوتاه");
+
+    await content.upsertWpContent(conn(), { id: 104, type: "post", title: "بدون تصویر", featured_media: 0 });
+    const withoutImage = (await content.listWpContent(biz.id, biz.pluginConnId, { wpType: "post" }))
+      .find((r) => r.remoteId === "104");
+    // The plugin sends 0 for "no featured image"; it must never resolve to the
+    // row that happens to share a made-up id.
+    expect(withoutImage?.featuredImageUrl).toBeNull();
+    expect(withoutImage?.excerptText).toBe("");
+  });
+
+  it("carries a scheduled post's own instant back to the editor", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 120,
+      type: "post",
+      title: "زمان‌بندی‌شده",
+      status: "future",
+      date_gmt: "2026-12-01T06:00:00",
+      modified_gmt: "2026-11-20T10:00:00",
+    });
+    const scheduled = await content.getWpContent(biz.id, biz.pluginConnId, "post", "120");
+    // WordPress sends UTC without a suffix; the editor needs one instant it can
+    // show as a Tehran wall clock and send back.
+    expect(scheduled?.status).toBe("future");
+    expect(scheduled?.scheduledFor).toBe("2026-12-01T06:00:00.000Z");
+
+    await content.upsertWpContent(conn(), {
+      id: 121,
+      type: "post",
+      title: "منتشرشده",
+      status: "publish",
+      date_gmt: "2026-01-01T06:00:00",
+    });
+    const published = await content.getWpContent(biz.id, biz.pluginConnId, "post", "121");
+    // A published post has a date, not a schedule.
+    expect(published?.scheduledFor).toBeNull();
+  });
+
+  it("keeps a post's categories and tags by id, and reads a broken list as none", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 130,
+      type: "post",
+      title: "با دسته",
+      status: "publish",
+      categories: [2, 5],
+      tags: [9],
+    });
+    const row = await content.getWpContent(biz.id, biz.pluginConnId, "post", "130");
+    expect(row?.categories).toEqual([2, 5]);
+    expect(row?.tags).toEqual([9]);
+
+    // A mirror written by an older or broken producer must not break the editor
+    // read: a malformed list is "no terms", not an exception.
+    await content.upsertWpContent(conn(), {
+      id: 131,
+      type: "post",
+      title: "خراب",
+      categories: ["فرش"] as never,
+    });
+    const broken = await content.getWpContent(biz.id, biz.pluginConnId, "post", "131");
+    expect(broken?.categories).toEqual([]);
+    expect(broken?.tags).toEqual([]);
   });
 
   it("ignores invalid ids, unsafe links and malformed remote dates", async () => {

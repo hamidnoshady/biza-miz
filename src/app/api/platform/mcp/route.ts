@@ -18,6 +18,7 @@ import {
 import { runInTenantScope } from "@/lib/tenant-context";
 import { mcpIssuer } from "@/lib/mcp/origin";
 import { platformBearerChallenge } from "@/lib/mcp/platform-oauth-docs";
+import { platformRealmUnavailable } from "@/lib/platform-runtime-guard";
 
 export const maxDuration = 60;
 
@@ -30,7 +31,14 @@ export const maxDuration = 60;
 function withPlatformMcpScope<Args extends unknown[]>(
   handler: (...args: Args) => Promise<Response>,
 ): (...args: Args) => Promise<Response> {
-  return (...args) => runInTenantScope({ kind: "bypass", reason: "platform-mcp" }, () => handler(...args));
+  return (...args) => {
+    // Issue #1194 — same fail-closed realm check as the cookie-authenticated
+    // console. The bearer below is a Central-issued credential; a site runtime
+    // must not be able to validate or honour one it minted locally.
+    const realmUnavailable = platformRealmUnavailable();
+    if (realmUnavailable) return Promise.resolve(realmUnavailable);
+    return runInTenantScope({ kind: "bypass", reason: "platform-mcp" }, () => handler(...args));
+  };
 }
 
 /**

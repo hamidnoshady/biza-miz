@@ -76,7 +76,20 @@ async function postedPaymentTotal(invoiceId: string) {
   return Number(rows[0].amount);
 }
 
+/**
+ * Issue #1194 — these suites drive the Central realm, so the process must say
+ * it is Central. The platform guard (`src/lib/platform-runtime-guard.ts`) now
+ * answers 404 for `/api/platform/*` on any install whose `DEPLOYMENT_ROLE` is
+ * not `central`, and an unset role infers `site` from an otherwise empty
+ * environment. Declaring the role here keeps the suite honest: it exercises the
+ * same code path a Central deployment runs, and a site run is covered by
+ * `src/lib/platform-realm-isolation.test.ts` instead.
+ */
+const previousDeploymentRole = process.env.DEPLOYMENT_ROLE;
+
 beforeAll(async () => {
+  // The Central realm exists only on a central deployment (#1194).
+  process.env.DEPLOYMENT_ROLE = "central";
   databaseName = `pos_platco_review_${randomUUID().replaceAll("-", "")}`;
   const maintenance = new Client({ connectionString: databaseUrl("postgres") });
   await maintenance.connect();
@@ -111,6 +124,8 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  if (previousDeploymentRole === undefined) delete process.env.DEPLOYMENT_ROLE;
+  else process.env.DEPLOYMENT_ROLE = previousDeploymentRole;
   cookie.value = "";
   await db?.closeDatabasePool();
   await owner?.end();

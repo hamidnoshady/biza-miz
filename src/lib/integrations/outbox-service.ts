@@ -24,10 +24,8 @@ import { wooProductShape, wooUpdatePath } from "./woo-catalogue";
 import { parentRemoteIdFor, parentRemoteIdFromMeta } from "./sync-service";
 import type { ConnectionRow } from "./connections-service";
 import { effectivePushSwitches, stockPushPayload } from "./outbox-policy";
-import { shouldAlertPluginStale } from "./plugin-health";
+import { pluginCronAlerts } from "./plugin-cron-alerts";
 import { recordNotification } from "../notification-events";
-import { notificationDedupeKey } from "../notifications";
-import { formatJalali } from "../jalali";
 import { resolveMappedWooPrice } from "./woo-price-source-service";
 
 export const WOO_SYNC_TICK_INTERVAL_MS = 30 * 1000;
@@ -320,6 +318,9 @@ async function upsertOutbox(
                              ELSE integration_outbox_events.leased_until END,
          lease_token = CASE WHEN integration_outbox_events.status IN ('sent', 'skipped') THEN NULL
                             ELSE integration_outbox_events.lease_token END,
+         -- #1206 P1: this arm only fires when the owed value actually moved
+         -- (see the WHERE below), so the delivery clock restarts here.
+         desired_at = now(),
          updated_at = now()
        WHERE integration_outbox_events.status IN ('pending', 'deferred', 'failed', 'sent', 'skipped')
          AND (integration_outbox_events.payload IS DISTINCT FROM EXCLUDED.payload
@@ -353,7 +354,11 @@ export type OutboxEntityType =
   | "refund_create"
   | "catalogue_export"
   | "customer_export"
-  | "orders_export";
+  | "orders_export"
+  | "content_export"
+  // App-side work, not a push: the app reads the store's tree itself (#1206
+  // PERF-05). Never leased by a plugin — its claim filters by capability.
+  | "taxonomy_sync";
 
 /**
  * Apply one queued push to the store.
@@ -454,6 +459,20 @@ async function applyOutboundEvent(
       // itself), and leaving them queued would dead-letter a job that was
       // never meant for this side.
       return;
+    case "taxonomy_sync": {
+      // A whole taxonomy tree is one HTTP page per taxonomy, sequentially, and
+      // a store with a few thousand terms makes that minutes — not something a
+      // request the owner is waiting on can hold (#1206 PERF-05). It runs here,
+      // in the background tick, with the queue's lease and retry around it.
+      const { syncTaxonomyTree } = await import("./woo-taxonomy-service");
+      const outcome = await syncTaxonomyTree(connection.business_id, connection.id, client);
+      // Partial is a delivered job: the tree was read and the per-taxonomy
+      // failures are recorded on each group's own state row (TAX-14), so
+      // retrying the whole read would only repeat work that already succeeded.
+      // Nothing landing at all is a failure, and the row retries with backoff.
+      if (outcome.status === "failed") throw new Error("taxonomy_sync_failed");
+      return;
+    }
     case "post_upsert":
     case "media_create":
       // Plugin-side jobs for WordPress content. REST mode writes content
@@ -464,6 +483,44 @@ async function applyOutboundEvent(
     default:
       return;
   }
+}
+
+/**
+ * Queue an app-side taxonomy re-read for a REST connection (#1206 PERF-05).
+ *
+ * Upserted on `(connection_id, entity_type, remote_id)`, the same key the
+ * plugin export enqueue uses, so pressing «همگام‌سازی از وب‌سایت» twice while the
+ * first read is still queued refreshes one job instead of stacking two.
+ *
+ * A row that is `processing` is left alone — the running worker owns its lease
+ * and its payload — and the caller is told so, because «در صف گذاشته شد» and
+ * «همین حالا در حال اجراست» are different sentences and only one of them is
+ * true.
+ */
+export async function enqueueTaxonomySync(
+  businessId: string,
+  connectionId: string,
+): Promise<{ jobId: string | null; alreadyRunning: boolean }> {
+  const { rows } = await query<{ id: string }>(
+    `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
+     VALUES ($1, $2, 'taxonomy_sync', 'all', '{}'::jsonb)
+     ON CONFLICT (connection_id, entity_type, remote_id)
+     DO UPDATE SET status = 'pending', attempts = 0, next_attempt_at = now(),
+                   last_error = NULL, leased_until = NULL, lease_token = NULL,
+                   desired_at = now(), updated_at = now()
+     WHERE integration_outbox_events.status <> 'processing'
+     RETURNING id`,
+    [businessId, connectionId],
+  );
+  if (rows[0]) return { jobId: rows[0].id, alreadyRunning: false };
+  // Nothing returned means the conflict arm matched a row it refused to touch.
+  const { rows: running } = await query<{ id: string }>(
+    `SELECT id FROM integration_outbox_events
+      WHERE connection_id = $1 AND entity_type = 'taxonomy_sync' AND remote_id = 'all'
+        AND status = 'processing'`,
+    [connectionId],
+  );
+  return { jobId: running[0]?.id ?? null, alreadyRunning: (running[0]?.id ?? null) !== null };
 }
 
 export type ClaimedOutboxEvent = {
@@ -557,6 +614,69 @@ export async function outboxOpenCounts(connectionId: string): Promise<{ open: nu
     [connectionId, OUTBOX_LEASE_MS],
   );
   return { open: rows[0]?.open_count ?? 0, due: rows[0]?.due_count ?? 0 };
+}
+
+/**
+ * Measured desired → applied latency for one connection's outbound jobs
+ * (#1206 P1): `sent_at - desired_at` over rows the store accepted in the
+ * last 30 days. `sent_at` is stamped only after a real apply + ACK (REST
+ * drain or plugin job ACK), and `desired_at` only when a value became owed
+ * (migration 0285), so these percentiles describe deliveries that happened
+ * — the mirror image of the plugin queue's own report, and the only basis
+ * on which the p95 ≤ 3-minute target may be discussed.
+ */
+export interface OutboxApplyLatency {
+  samples: number;
+  p50Seconds: number;
+  p95Seconds: number;
+  p99Seconds: number;
+  maxSeconds: number;
+}
+
+/**
+ * The latency above, for every connection of one business in a single
+ * grouped read (the overview page's shape). Connections with no qualifying
+ * delivery are absent from the map — "nothing measured" must not render as
+ * a row of zeros. Pre-0285 history contributes nothing: those rows were
+ * backfilled with `desired_at = sent_at` and the strict `sent_at >
+ * desired_at` predicate excludes them.
+ */
+export async function applyLatencyByConnection(businessId: string): Promise<Map<string, OutboxApplyLatency>> {
+  const { rows } = await query<{
+    connection_id: string;
+    samples: string;
+    p50: number | null;
+    p95: number | null;
+    p99: number | null;
+    max: number | null;
+  }>(
+    `SELECT connection_id,
+            count(*) AS samples,
+            percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM sent_at - desired_at)) AS p50,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM sent_at - desired_at)) AS p95,
+            percentile_cont(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM sent_at - desired_at)) AS p99,
+            max(EXTRACT(EPOCH FROM sent_at - desired_at)) AS max
+       FROM integration_outbox_events
+      WHERE business_id = $1
+        AND status = 'sent'
+        AND sent_at IS NOT NULL
+        AND sent_at > desired_at
+        AND sent_at > now() - interval '30 days'
+      GROUP BY connection_id`,
+    [businessId],
+  );
+  const byConnection = new Map<string, OutboxApplyLatency>();
+  for (const row of rows) {
+    if (row.p50 === null || row.p95 === null || row.p99 === null || row.max === null) continue;
+    byConnection.set(row.connection_id, {
+      samples: Number(row.samples),
+      p50Seconds: Math.round(row.p50),
+      p95Seconds: Math.round(row.p95),
+      p99Seconds: Math.round(row.p99),
+      maxSeconds: Math.round(row.max),
+    });
+  }
+  return byConnection;
 }
 
 export interface DrainOutboxResult {
@@ -805,21 +925,21 @@ async function runWooCommerceSyncForConnection(business_id: string, id: string):
   // WooCommerce connections. Holoo's push path is a separate tick
   // (Wave 8). The guard is belt-and-braces with the SQL filter above.
   if (!isWooCommerce(connection)) return;
-  // Issue #1149 (C5): a plugin that has gone quiet for half an hour says so
-  // to the owner, once per silence (the dedupe key is the last time it spoke).
-  if (shouldAlertPluginStale(connection, new Date())) {
+  // Issue #1206 P1: warn when the scheduler is late, escalate when it has
+  // stopped, and close the loop when it comes back. The dedupe key is the cron
+  // signal, not the last contact — a manual «آزمایش اتصال» refreshes the latter
+  // and used to re-raise the same alarm on the next tick.
+  for (const alert of pluginCronAlerts(connection, new Date())) {
     await recordNotification({
       businessId: connection.business_id,
       locationId: null,
-      eventKey: "integrations.plugin_stale",
-      severity: "important",
-      title: "افزونهٔ وردپرس با سامانه تماس نمی‌گیرد",
-      body:
-        `«${connection.name}» از ${formatJalali(connection.last_plugin_seen_at!, { withTime: true })} با سامانه تماس نگرفته است؛ ` +
-        "معمولاً یعنی کرون سایت متوقف شده. سفارش‌ها و تغییرات در صف می‌مانند و از دست نمی‌روند.",
-      url: "/websites/wp/connections",
-      dedupeKey: notificationDedupeKey("integrations.plugin_stale", connection.id, connection.last_plugin_seen_at!),
-      payload: { connectionId: connection.id, lastPluginSeenAt: connection.last_plugin_seen_at },
+      eventKey: alert.eventKey,
+      severity: alert.severity,
+      title: alert.title,
+      body: alert.body,
+      url: alert.url,
+      dedupeKey: alert.dedupeKey,
+      payload: alert.payload,
     });
   }
   // Phase 38 — a scheduled order pull, in REST mode only. The plugin

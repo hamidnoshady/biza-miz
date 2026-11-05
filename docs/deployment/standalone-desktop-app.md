@@ -82,9 +82,11 @@ trip on the candidate folder, not just a typed path) and `main.js`'s
 `runStorageBootstrap`/`promptForStorageLocation`. The answer is written once
 to a small marker file at the *default* `userData` path (so it is always
 findable regardless of what was chosen) and reused silently on every later
-launch — the prompt never repeats. An automated/CI boot
-(`DESKTOP_SMOKE_MARKER` set) always takes the default path, unattended, so
-this never blocks a scripted run. Relocating an *already-initialised*
+launch — the prompt never repeats. The desktop has no "unattended" switch:
+the CI acceptance harness (`electron/scripts/smoke-packaged.js`, not shipped)
+pre-writes that same marker file into its disposable profile before the first
+launch, which `decideStorageBootstrap` answers with `use_marker_root`, so a
+scripted run never blocks on a dialog. Relocating an *already-initialised*
 `pgdata` directory later is out of scope for this feature and belongs with
 the Section 10 backup/restore wizard instead.
 
@@ -195,11 +197,15 @@ by design: the staged server, migrations and the runtime-role helper are
 spawned as `process.execPath` with `ELECTRON_RUN_AS_NODE=1`. Disabling it would
 leave the app unable to start its own backend.
 
-The smoke probe that can bootstrap a throwaway owner account lives in
-`electron/smoke-probe.js` and is reachable only while `DESKTOP_SMOKE_MARKER` is
-set. In a packaged build its account-creating path additionally requires
-`DESKTOP_SMOKE_PACKAGED_PROBE=1`, which only `electron/scripts/smoke-packaged.js`
-(the release workflow's harness, not part of the installed app) sets.
+There is no packaged test bootstrap (issue #1194). The #1001 probe that could
+create a known-password local Owner – and the mock Cloud activation service it
+redeemed – has been deleted: `electron/main.js` contains no test branch, no
+`DESKTOP_SMOKE_*` variable is read anywhere in the shell or the server child,
+and `electron/package.json` does not package a probe. Fresh-install,
+restart/upgrade and platform-realm checks live in
+`electron/scripts/smoke-packaged.js`, a CI-only harness that is deliberately
+outside `build.files` and drives the installed executable over its public HTTP
+API; see [desktop Superadmin isolation](../audits/1194-desktop-superadmin-isolation.md).
 
 ### Uninstall
 

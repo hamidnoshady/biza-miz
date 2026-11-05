@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assessPluginCron, shouldAlertPluginStale, summarizePluginHealth } from "./plugin-health";
+import { assessPluginCron, summarizePluginHealth } from "./plugin-health";
 import { PLUGIN_CRITICAL_AFTER_MS } from "./sync-timing";
 
 const now = new Date("2026-10-26T12:00:00Z");
@@ -205,32 +205,42 @@ describe("summarizePluginHealth (issues #1149, #1206)", () => {
       previousOutageAt: null,
       recoveredAt: null,
       incidentOpen: false,
+      deliveryLatency: null,
     });
     expect(summary.cron.state).toBe("unknown");
   });
 });
 
-describe("shouldAlertPluginStale", () => {
-  const base = {
-    link_mode: "plugin",
-    status: "active",
-    last_plugin_seen_at: ago(60_000),
-    plugin_health: health({ fastHandlerLastStartedAt: ago(PLUGIN_CRITICAL_AFTER_MS + 60_000) }),
-  };
-  it("alerts an active plugin connection whose cron has stopped", () => {
-    expect(shouldAlertPluginStale(base, now)).toBe(true);
+describe("measured delivery latency (issue #1206 P1)", () => {
+  const withLatency = (deliveryLatency: unknown) =>
+    summarizePluginHealth(
+      { last_plugin_seen_at: ago(5_000), last_sync_at: null, plugin_health: health({ deliveryLatency }) },
+      { size: 0, oldestAt: null },
+      now,
+    ).deliveryLatency;
+
+  it("carries the plugin's measured percentiles through, with their sample count", () => {
+    expect(withLatency({ samples: 212, p50Seconds: 41, p95Seconds: 158, p99Seconds: 402, maxSeconds: 3_900 })).toEqual({
+      samples: 212,
+      p50Seconds: 41,
+      p95Seconds: 158,
+      p99Seconds: 402,
+      maxSeconds: 3_900,
+    });
   });
 
-  it("does not alert on a fresh cycle, a pause, or a REST connection", () => {
-    expect(shouldAlertPluginStale({ ...base, plugin_health: health({ fastHandlerLastStartedAt: ago(120_000) }) }, now)).toBe(false);
-    expect(shouldAlertPluginStale({ ...base, status: "paused" }, now)).toBe(false);
-    expect(shouldAlertPluginStale({ ...base, link_mode: "rest_api" }, now)).toBe(false);
+  it("an older plugin that never reports it is null — not measured is not zero", () => {
+    expect(withLatency(undefined)).toBeNull();
+    expect(withLatency(null)).toBeNull();
   });
 
-  it("cannot be cleared by pressing «آزمایش اتصال» during an outage", () => {
-    // The ping refreshes last_plugin_seen_at every few seconds; the cron
-    // signal is the only thing this grades.
-    const pressed = { ...base, last_plugin_seen_at: ago(1_000) };
-    expect(shouldAlertPluginStale(pressed, now)).toBe(true);
+  it("percentiles that cannot be true are refused, not rendered as fact", () => {
+    // A p95 below the median is a broken report; zero samples is no report;
+    // a string where a duration belongs is junk from the wire.
+    expect(withLatency({ samples: 10, p50Seconds: 90, p95Seconds: 30, p99Seconds: 30, maxSeconds: 30 })).toBeNull();
+    expect(withLatency({ samples: 0, p50Seconds: 0, p95Seconds: 0, p99Seconds: 0, maxSeconds: 0 })).toBeNull();
+    expect(withLatency({ samples: 5, p50Seconds: "41", p95Seconds: 50, p99Seconds: 60, maxSeconds: 70 })).toBeNull();
+    expect(withLatency({ samples: 5, p50Seconds: -1, p95Seconds: 50, p99Seconds: 60, maxSeconds: 70 })).toBeNull();
+    expect(withLatency("fast")).toBeNull();
   });
 });

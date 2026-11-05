@@ -312,33 +312,240 @@ partner mode, and a shop with neither is answered `not_configured` — before th
 `not_authorized`/`channel_disabled` cases. That is the same reading of "disconnect stops managed
 operations" the rest of the feature uses: a channel that is off is not polled.
 
+The multi-shop section (`GET /api/growth/torob/shops`) also carries one observation line per shop —
+Torob's status, how many products it reports, how many carry a problem, when it was last read, and why the
+last attempt failed. It is read in **one** query over both Torob tables and it too never calls Torob. A
+shop that has never been read is simply absent from that list: the screen renders «از ترب خوانده نشده»
+rather than an empty panel, because "no products on Torob" and "nobody has asked Torob" look identical
+and are entirely different problems.
+
+## 6f. Telling Torob what changed (Wave 5b)
+
+The Product API is Torob pulling from us on Torob's schedule. The **Product Webhook**
+(`POST https://api.torob.com/update/webhook/v1/`) is us saying "these pages changed, pull them
+sooner", and it is the last P0 piece of the epic: without it a shop waits for a crawl.
+
+Three invariants come from the document and are enforced in `webhook.ts`, once:
+
+| invariant | where |
+| --- | --- |
+| at most **100 items** per request, **20 requests/minute/shop** | `planWebhookBatches`, `TOROB_WEBHOOK_BATCHES_PER_RUN = 4` per run |
+| **one domain per request** (400 otherwise) | an item whose URL is not on the shop's own domain is dropped and counted, never sent |
+| the payload is `{page_url, page_unique}` — **nothing else** | `webhookBody`; no price, no title, no stock, because Torob re-fetches the page itself |
+
+The queue is one row per **page** (`torob_webhook_outbox`, migration 0284), so a shop that changes a
+price three times in a minute re-arms one row instead of growing a queue of three events. Rows are
+filled from the **built feed** — the same `readShopCatalogue` the crawler is served from — so the
+platform never announces a page it would not serve: a product the merchant excluded (§6d) or withdrew
+loses its row rather than being sent to Torob. `reason` distinguishes «تازه» from «به‌روزشده» by asking
+the outbox whether Torob was ever told about the page.
+
+A drain claims up to 100 due rows with `FOR UPDATE SKIP LOCKED`, pushing `next_attempt_at` forward by a
+five-minute lease; a crash between claim and send therefore costs one interval rather than a lost
+notice. That is **at-least-once**, deliberately: the webhook's only effect is "please re-fetch", and
+fetching a page twice is free. A send that fails is settled per row:
+
+| failure | what happens | why |
+| --- | --- | --- |
+| `400 invalid_request`, `400`/`403 domain_mismatch` | dead-letter at once | retrying the same body repeats the same refusal |
+| `401 unauthorized`, `403 shop_not_active` | dead-letter, and the shop's `health` becomes `attention` | a human has to fix the credential or the shop's state |
+| `429 rate_limited` | stays `pending`, due after the documented spacing (3 s) | this is exactly what waiting fixes |
+| timeout, `5xx` | backoff, dead-letter at the attempt cap (8) | the ordinary outage path |
+
+Every request is recorded in `torob_webhook_batches` — items, `accepted` or `failed`, and the reason —
+so "rate limited", "refused" and "stopped" are visible on the screen instead of only in a log line. A
+`200 {"message": "success"}` is stored as **accepted** and never as indexed: the document says so twice,
+and the per-shop screen's three stages now read `sent` from this table (`capabilities.sent` is no longer
+a constant `false`) while `listing` still comes only from Torob's own answer (§6e).
+
+Disconnecting stops sending. An unauthorized shop, a switched-off channel, or a shop whose token Torob
+refuses is not drained — the same reading of "disconnect stops managed background operations" the read
+side (§6e) already applies. The tick (`runTorobWebhookTick`, central, every minute) enumerates only
+`enabled AND authorized` shops.
+
+Surface: `GET/POST /api/growth/torob/shops/[id]/webhook` — `GET` the queue (ours only, never Torob),
+`POST {action: "drain"}` to send now and `{action: "retry"}` to revive stopped pages. Reading is
+`torob.view`; both writes are `torob.configure`, because sending spends the shop's own rate budget.
+
+## 6g. Turning a page off on Torob, and «تعمیر» (Wave 5c)
+
+Everything up to here describes a shop that is either fine or stuck. Two merchant actions close that:
+one changes a single page **on Torob**, and one re-runs the whole channel for a shop in one step.
+
+**Switching a page.** `POST /products/activate/|deactivate/?domain=<host>` with `{product_ids}` (the
+Shop API's own id for a page — `page_unique`) answers **per id**: `{product_id, found}`. Consequences
+that the code keeps:
+
+| rule | where |
+| --- | --- |
+| only pages Torob already knows can be switched — an unknown id comes back not-`found` and is reported as «اعمال نشد», never as success | `setTorobPagesActive` |
+| ≤ 5 000 ids per request; the screen sends one page per click and the route caps at 500 | `TOROB_ACTIVATE_BATCH_LIMIT`, the `pages` route |
+| **deactivation is not deletion** — the page stays with Torob and can be switched back on | copy on the button, and the doc's own wording |
+| our snapshot is not rewritten from the answer | `setPagesOnTorob` writes nothing; `torob_product_states` changes only when Torob is read (§6e) |
+
+The guard is the same one the crawler gets (§6e): authorized, switched on, and with a credential,
+all answered **before** the network — a shop the merchant disconnected cannot change anything on
+Torob from a stale screen. In partner mode the deployment's `TOROB_PARTNER_TOKEN` authenticates it.
+Every switch is audited (`torob.page.toggle`).
+
+**«تعمیر»** is announce → tell → read, in that order (`repairShop`): fill the webhook queue from the
+built feed, drain it now instead of waiting for the minute tick, then read Torob back. Reading first
+would show yesterday's view of the shop being repaired; announcing without reading leaves the
+merchant unable to see whether the announcement was accepted. Each step reports itself rather than
+collapsing into one boolean — "the queue is full and Torob will not answer" is a different problem
+from "everything is fine" — and each is guarded by its own service, so a shop that may not send still
+gets its read. It is **not** a retry of everything: `dead` pages stay dead until somebody looks at the
+reason, which is the queue's own action (§6f), and a switched-off shop answers `stoppedBy` instead of
+sending behind the merchant's back. Audit: `torob.shop.repair`.
+
+Surface: `POST /api/growth/torob/shops/[id]/pages` `{pageUniques, active}` and
+`POST /api/growth/torob/shops/[id]/repair`. Both are `torob.configure`, because both change the
+channel and spend the shop's rate budget.
+
+## 6h. Attribution — the store answers, and only when it says so (Wave 6)
+
+Torob refers a shopper with `?torob_clid=…` and later asks the shop for the purchases
+that came from that click (`order_tracking_api.md`, `action_tracking_api.md`). The
+epic's rule is one sentence — **off by default, `403` when off** — and it decides the
+shape of the whole feature:
+
+| consequence | where |
+| --- | --- |
+| the endpoint is the **store's own origin**, under a path ending `/torob/v1/orders` (or `/actions`); orders live in WooCommerce, so the answer is built by the plugin | `wordpress-plugin/pos-accounting-connector/includes/class-pos-torob.php` |
+| two independent switches, both absent-by-default; only an exact `1` counts as consent | `POS_Connector_Torob::is_enabled` / `set_enabled` |
+| `403 {"success":false,"error":"access_disabled"}` — the refusal is a response, not a decision to send nothing | `guard()` |
+| token → switch → parameters, in that order: the endpoint is not an oracle for a store's settings, and a disabled store never touches an order | `open_channel()` |
+
+The token rules are the same `EdDSA`/`aud`/`exp`/`nbf` set as §6b, verified against the
+site's own host (`home_url()`), with the document's one tolerated spelling: an `aud`
+that carries a port still names the same store. `alg: none` is refused before the
+signature is looked at. The only accepted version header is `1`.
+
+`torob_clid` is captured on any request that carries it — not just the product page —
+with `HttpOnly`, `SameSite=Lax`, `Secure` on https, and a 7-day life, which is the
+attribution window the document defines. It is validated as an opaque id (≤128 chars,
+no URL or markup characters), so it can never become free text in order meta, and it is
+copied onto the order at `woocommerce_checkout_create_order` — which is what the poll
+actually reads.
+
+What is sent, and nothing else: `purchase_timestamp`, `last_updated_timestamp`,
+`torob_clid`, `status`, and optionally `psp`, `order_value`, `shipping_amount`,
+`phone_number`, `products`. Three refusals matter here:
+
+- an order **without** a click id is never sent — the documents require the endpoint to
+  expose only referred purchases;
+- an **unknown** status is dropped rather than guessed: the vocabulary is closed to
+  `completed`/`cancelled`, and WooCommerce's cancelled/refunded/failed map to
+  `cancelled`, everything else to `completed`;
+- a record at or **before** the `*_gt` watermark is not repeated, and a batch is sorted
+  ascending, because the poller resumes from the last timestamp it saw.
+
+`limit` is required and bounded at 1 000: a caller asking for 5 000 gets `400`, not a
+silently trimmed 1 000 that would look like a complete window. Money is an integer in
+Toman, passed through `pos_connector_torob_amount` so a store priced in Rial divides by
+ten instead of reporting a hundredfold sale.
+
+`/torob/v1/actions` answers an honest empty list: this platform has no action events of
+its own, so a site that tracks them supplies them through `pos_connector_torob_actions`.
+An invented record would be worse than none — Torob bills against these.
+
+The switch lives in the plugin's own «ترب» screen, with the copy stating exactly what is
+shared, and `uninstall.php` deletes both options so a reinstall never arrives with
+consent already granted. `wordpress-plugin/tests/connector-torob-attribution.php` pins
+all of it under plain `php` (real Ed25519 keys, no WordPress): the defaults, the 403,
+every token failure, the parameter bounds, and each dropped record.
+
+## 6i. The same feed served by the shop itself (Wave 3, connector half)
+
+The platform endpoint (§6b) is one of the two deployables the issue names. The other
+is the shop answering for itself, which is required wherever the platform does not
+terminate that shop's domain — the token's `aud` **is** the domain, by design.
+
+`POS_Connector_Torob_Products` serves `POST /wp-json/torob/v1/products` with the same
+contract, and copies the rules rather than re-deriving them:
+
+| rule | why it is the same code path |
+| --- | --- |
+| four modes, exactly one, no defaulting | `parse_request` refuses the same ten cases |
+| the `400` bodies are Torob's own sentences | `ERROR_MESSAGE` is the platform table verbatim — a shop that answers differently fails differently in Torob's logs |
+| 100 per page, `max_pages = ceil(total / 100)` | `page_response` / `max_pages` |
+| `spec` is a dictionary, `{}` when empty | `spec()` drops lists, nulls and unnamed entries |
+| a withdrawn product is **absent** | `record()` returns `null`; a lookup answers `total: 0` |
+| `availability: true` + `current_price: 0` reads as **free** | an unavailable product always sends `false` + `0`, and never an `old_price` |
+| the first image is full-resolution, public and large enough to show | attachment URL must be absolute HTTP(S), have no embedded credentials, pass WordPress URL validation (including private/reserved hosts), and have verified dimensions of at least 600×600; Torob recommends 900×900 |
+
+Order of operations is the platform's: **token → connection → body**. The token is
+verified before the catalogue is read, so an unauthenticated caller cannot make a store
+assemble 100 products, and the audience is the site's own host — never the request's
+`Host` header. A store that was never connected answers `403 {error: "not_connected"}`.
+
+There is deliberately **no per-channel switch here**, unlike orders and actions (§6h):
+those share personal data and the document requires an explicit opt-in; a product
+catalogue is what the merchant already published on the open web, and the enrollment
+that matters is the platform's own `torob_shops` row (authorized **and** switched on),
+which is the merchant's act on the other side. Either way, nobody can call the endpoint
+without Torob's private key.
+
+The connector uses Woo's `full` attachment URL and refuses an image with unknown dimensions,
+less than 600×600 pixels, a relative/non-HTTP URL, an embedded username/password, a private
+or reserved host, or a URL longer than Torob's 1,000-character field. This is metadata and
+URL validation, **not** an outbound image request on every crawl.
+
+Variations are published as their own pages with the parent as `product_group_id` — the
+same shape the platform's feed builder produces — so a shop served from its own origin
+and one served from the platform publish the same set of pages. Two rows resolving to
+one URL (a duplicated SKU, or a variation whose permalink collapses to the parent) are
+de-duplicated, because two listings for one page let Torob pick at random.
+
+`cursor` mode uses the same lexical `page_unique` ordering as the hosted feed and continues
+strictly below the last one sent; it does not silently fall back to the first page. A
+cursor that is not one this shop issued is a `400`. Both numbered and cursor pages are
+cut from the publishable contract records, so invalid/unpriced products do not inflate
+`total` or shift the page boundaries.
+
+`wordpress-plugin/tests/connector-torob-products.php` pins all of it under plain `php`:
+the four modes, every refusal and its sentence, exact Rial/Toman conversion, publishable
+page boundaries and ordering, the required dictionary, the free-price trap, the cursor
+round trip, Woo product/variation mapping, timezone conversion, public/full image validation,
+and the gate order (401 before 403).
+
 ## 7. What remains (Waves 3–6)
 
-1. **Wave 3 — serving the feed.** *The platform half is done*: `§6b` above is live at
-   `/api/v1/torob/products/<shopId>` with `auth.ts` verifying Torob's EdDSA token, `product-api.ts`
-   owning the order of operations, and `§6c` closing the partner path from `pending_approval` to
-   `authorized`. What remains in this wave is the *other* two deployables the issue names — the
-   WordPress connector release and the CMS runtime release that serve the same contract from the
-   shop's own origin, which is needed wherever the platform does not terminate that shop's domain
-   (the token's `aud` is the domain, by design).
-2. **Variant catalogue.** The builder already accepts variants and emits one item each; the database
-   source reads `menu_items` only, so retail `items`/`item_variant_attributes` products need their
-   price source mapped before they can appear.
-3. **Wave 4 — the per-shop screen.** *Done*: `§6d` above is `/growth/torob/[shopId]`, with the
-   publication rule, the per-product decisions and the blocked products' reasons, and `§6e` adds what
-   Torob itself reports about the shop and each page. What is left of this wave is the variant
-   catalogue (item 2) and the multi-shop overview columns for Torob's own counts (item 6).
-4. **Wave 5 — opt-in attribution**: Torob order/action attribution off by default, a 403 when it is
-   disabled, and a tenant-visible switch that says exactly what is shared.
-5. **Wave 5b — the sync queue and monitoring.** `§6e` reads Torob; nothing yet *writes* to Torob in the
-   background. The webhook outbox (bounded batches, dedupe, retries, dead letters, reconciliation after
-   an outage), the Shop API's activate/deactivate, and the per-shop retry/repair actions from the site
-   screen are the next slice — they are also what turns `capabilities.sent` from a constant `false` into
-   a real fact.
-6. **Wave 6 — the drill table and the docs** for the failure classes the issue names (expired token,
-   rejected domain, feed refused, shop deleted on Torob's side), plus the runbook for a shop whose
-   feed has been `blocked` for longer than an hour, and for a shop whose last Shop API read failed three
-   times in a row.
+1. **Wave 3 — serving the feed.** *Done for the platform and for WordPress*: §6b is live at
+   `/api/v1/torob/products/<shopId>`, §6c closes the partner path from `pending_approval` to
+   `authorized`, and §6i serves the same contract from the store's own origin. What remains is the
+   **CMS runtime** deployable (the Eshobe-CMS counterpart of §6i). The separate
+   `hamidnoshady/eshobe-cms` repository currently has no Product API v3 route (its tree has no Torob
+   product integration); this repository cannot ship that runtime.
+2. **Variant catalogue.** The builder accepts variants and emits one item each; this shop's platform
+   feed source still reads `menu_items` only. Retail `items` does have a potential price source
+   (`item_stock.unit_price`, Rial), sellability/publication fields, and `item_variant_attributes`, but
+   no approved mapping from those internal records to a public product URL on the managed website.
+   Its `image_media_id` resolves through tenant-authenticated media delivery, not a public image URL.
+   Do not publish these records until the website route and public-image policy are decided; an
+   authenticated media URL cannot be sent to Torob.
+3. **Wave 4 — the per-shop screen.** *Done*: `§6d` is `/growth/torob/[shopId]`, with publication
+   decisions and blocked reasons; `§6e` reports what Torob itself says about the shop and each page.
+   The multi-shop overview also renders Torob's per-shop page count, pages with problems, last read,
+   and live/blocked state from the persisted observation (`TorobStatusLine`). It deliberately does
+   not claim an aggregate webhook-sent count. The only remaining feed-source work is item 2.
+4. **Wave 5 — opt-in attribution.** *Done on the store's origin*: §6h serves
+   `/torob/v1/orders` and `/torob/v1/actions` with both switches off by default, `403` when they
+   are off, and the switch's own copy saying what is shared. What remains is the platform-side
+   variant for shops whose origin the platform terminates — that needs an order store here, which
+   the platform does not have today.
+5. **Wave 5b — the sync queue.** *Done*: `§6f` is the webhook outbox, bounded and coalesced, with
+   dead letters, retries, reconciliation-by-fill and a per-shop queue screen. What is left of this wave
+   is closed by §6g: the Shop API's **activate/deactivate** (turning a page off on Torob from here)
+   and the per-shop «تعمیر» action that fills, sends and re-reads in one step.
+6. **Wave 6 — the failure drills and the runbook.** *Done*:
+   `integration/torob-failure-drills.integration.test.ts` drives the four classes end to end against
+   real Postgres — an expired/not-yet-valid/wrong-audience/missing token on the crawler, a domain Torob
+   rejects (health moves, the last good observation stays), a feed we refuse to serve (404 and no send),
+   a shop Torob deleted (`dead` + `attention`, our row intact) — and then disconnect → reconnect, which
+   must announce each page **once**. `docs/runbooks/torob-channel-failures.md` is the on-call page for
+   the same four, plus the two named cases (feed blocked over an hour, three failed reads in a row).
+   *Left in this wave*: nothing on the platform side.
 
 Nothing in Waves 2–6 may re-derive eligibility: `resolveTorobWebsites` is the single answer to "may
 this website enroll", and every later surface reads it.
@@ -375,14 +582,38 @@ this website enroll", and every later surface reads it.
 - `src/app/api/growth/torob/shops/[id]/status/route.ts` — the cached read and the explicit refresh.
 - `migrations/0283_torob_observations.sql` — the observation columns, `torob_product_states` and
   `torob_status_runs`, RLS included.
+- `src/lib/torob/shop-api-client.ts`'s `setTorobPagesActive` + `status-service.ts`'s `setPagesOnTorob`
+  and `repairShop` — the Torob-side switch and the one-step repair (§6g).
+- `src/app/api/growth/torob/shops/[id]/pages/route.ts` and `.../repair/route.ts` — their two surfaces.
+- `integration/torob-pages.integration.test.ts` — the guard (off, unauthorized, no credential, another
+  tenant), the per-id answer, the snapshot that is left alone, and «تعمیر»'s order.
+- `wordpress-plugin/pos-accounting-connector/includes/class-pos-torob-products.php` — the Product API
+  v3 served by the store itself (§6i): request parsing, record shaping, paging, cursor, and the gate.
+- `wordpress-plugin/tests/connector-torob-products.php` — all of the above under plain `php`.
+- `wordpress-plugin/pos-accounting-connector/includes/class-pos-torob.php` — attribution on the
+  store's origin (§6h): the two switches, the 403, token verification, parameter bounds, click
+  capture, and the two REST routes.
+- `wordpress-plugin/tests/connector-torob-attribution.php` — all of the above under plain `php`.
+- `integration/torob-failure-drills.integration.test.ts` and `docs/runbooks/torob-channel-failures.md`
+  — the four failure classes end to end, and the page on call reads.
+- `src/lib/torob/webhook.ts` — the webhook's rules: batching, the one-domain check, the two-field
+  payload, and what each failure deserves. Pure.
+- `src/lib/torob/webhook-client.ts` — the one `POST`, and the mapping from Torob's statuses to the
+  queue's closed vocabulary.
+- `src/lib/torob/webhook-service.ts` — fill (from the built feed), drain (claim, send, settle), the
+  queue read, retry, and the minute tick `server.ts` schedules.
+- `src/app/api/growth/torob/shops/[id]/webhook/route.ts` — the queue and its two actions.
+- `migrations/0284_torob_webhook_outbox.sql` — the coalesced outbox and the batch log, RLS included.
 - `src/app/(app)/growth/torob/page.tsx` + `torob-section.tsx` — the screen.
 - `src/lib/torob/eligibility.test.ts` — the state matrix; `integration/torob-shops.integration.test.ts`
   — the lifecycle and the tenant boundary against real Postgres.
 - `src/lib/torob/contract.test.ts`, `feed.test.ts`, `auth.test.ts`, `product-api.test.ts`,
   `shop-generator.test.ts`, `authorization-service.test.ts`, `publication.test.ts`,
-  `observed-state.test.ts`, `shop-api-client.test.ts` — the
+  `observed-state.test.ts`, `shop-api-client.test.ts`, `webhook.test.ts`, `webhook-client.test.ts` — the
   contract, the builder, the token and the endpoint's order of operations; `integration/torob-api.integration.test.ts`
   — all four request modes, 100 per page, the withdrawn product and the cross-shop audience refusal
   against real Postgres; `integration/torob-authorization.integration.test.ts` — the approval flow,
   the window, the denial and the schema's own invariants; `integration/torob-status.integration.test.ts`
-  — the snapshot, the truncated scan, the kept failure and the shops that are never read.
+  — the snapshot, the truncated scan, the kept failure and the shops that are never read;
+  `integration/torob-webhook.integration.test.ts` — the coalesced queue, the excluded page, the accepted
+  batch, the dead letter and the channel that must not send.

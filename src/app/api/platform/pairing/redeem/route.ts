@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { handlePairingRedeem } from "@/lib/pairing-redeem";
+import { platformRealmUnavailable } from "@/lib/platform-runtime-guard";
 
 /**
  * The original desktop-pairing redemption URL, kept because every desktop
@@ -14,5 +15,10 @@ import { handlePairingRedeem } from "@/lib/pairing-redeem";
  * request should not have to follow.
  */
 export async function POST(request: NextRequest) {
+  // Issue #1194 — this is the Cloud's pairing endpoint, not a site's. A site
+  // runtime answers 404 with every other platform route, and must not redeem
+  // a code the local install could then trust as Central-issued.
+  const realmUnavailable = platformRealmUnavailable();
+  if (realmUnavailable) return realmUnavailable;
   return handlePairingRedeem(request);
 }

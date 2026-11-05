@@ -33,7 +33,14 @@ export interface ExtractedOffice {
 type JsZip = import("jszip");
 type ZipEntry = import("jszip").JSZipObject;
 
-async function openZip(bytes: Uint8Array): Promise<JsZip | null> {
+/**
+ * Opens a ZIP, refusing one with implausibly many entries.
+ *
+ * Exported because issue #908's contract importer needs the same bounded
+ * unpacking of a `.docx` and must not grow a second copy of it: two inflate
+ * guards that drift apart is how one of them ends up being the weak one.
+ */
+export async function openBoundedZip(bytes: Uint8Array): Promise<JsZip | null> {
   const JSZip = (await import("jszip")).default;
   try {
     const zip = await JSZip.loadAsync(bytes);
@@ -44,7 +51,7 @@ async function openZip(bytes: Uint8Array): Promise<JsZip | null> {
 }
 
 /** Inflates one entry, aborting the moment it passes `maxBytes` — whatever its header claims. */
-function inflateBounded(entry: ZipEntry, maxBytes: number): Promise<Buffer | null> {
+export function inflateBoundedEntry(entry: ZipEntry, maxBytes: number): Promise<Buffer | null> {
   return new Promise((resolve) => {
     const stream = entry.nodeStream("nodebuffer") as Readable;
     const chunks: Buffer[] = [];
@@ -71,12 +78,12 @@ function inflateBounded(entry: ZipEntry, maxBytes: number): Promise<Buffer | nul
 
 /** True when the whole archive inflates within the per-entry and total caps. */
 export async function zipInflatesWithinBounds(bytes: Uint8Array): Promise<boolean> {
-  const zip = await openZip(bytes);
+  const zip = await openBoundedZip(bytes);
   if (!zip) return false;
   let total = 0;
   for (const entry of Object.values(zip.files)) {
     if (entry.dir) continue;
-    const inflated = await inflateBounded(entry, Math.min(MAX_ENTRY_INFLATED_BYTES, MAX_ARCHIVE_INFLATED_BYTES - total));
+    const inflated = await inflateBoundedEntry(entry, Math.min(MAX_ENTRY_INFLATED_BYTES, MAX_ARCHIVE_INFLATED_BYTES - total));
     if (!inflated) return false;
     total += inflated.length;
   }
@@ -124,10 +131,10 @@ function capped(text: string, alreadyTruncated = false): ExtractedOffice | null 
 
 export async function extractDocxText(bytes: Uint8Array): Promise<ExtractedOffice | null> {
   try {
-    const zip = await openZip(bytes);
+    const zip = await openBoundedZip(bytes);
     const entry = zip?.file("word/document.xml");
     if (!entry) return null;
-    const xml = await inflateBounded(entry, MAX_ENTRY_INFLATED_BYTES);
+    const xml = await inflateBoundedEntry(entry, MAX_ENTRY_INFLATED_BYTES);
     return xml ? capped(wordXmlToText(xml.toString("utf8"))) : null;
   } catch {
     return null;

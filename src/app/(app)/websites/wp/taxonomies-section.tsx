@@ -34,6 +34,20 @@
  *    the DOM; search still finds every match server-normalised and shows the
  *    matched term's full path.
  *
+ * Issue #1215 (P2-4) finished the screen's last two asks:
+ *
+ *  - **Two densities, one dataset.** «فشرده» and «کامل» are the same groups in
+ *    the same order; the compact view tightens the rows, drops the slug column
+ *    and shortens the count labels so a store with hundreds of attribute
+ *    groups can be scanned, while the detailed view keeps every column. The
+ *    choice lives in the URL (`?view=compact`), so a reload, a shared link and
+ *    the back button all keep it — and the store picker's own `store` param
+ *    survives the change.
+ *  - **Search hits carry their breadcrumb.** A flat search result loses the
+ *    indentation that told the owner where a term sits, so each nested hit now
+ *    shows its full path (`پوشاک › تی‌شرت › یقه‌دار`) under the name instead of
+ *    hiding it in a `title` tooltip no keyboard user ever sees.
+ *
  * Preserved from the previous iteration: per-group expansion (opening one
  * group never closes another), the tree-order sort, Persian/Arabic letter
  * normalisation in search, logical (RTL/LTR-agnostic) spacing, Jalali dates,
@@ -51,7 +65,9 @@ import {
   SearchIcon,
   TagsIcon,
 } from "lucide-react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { api, inputClass } from "@/app/dashboard/ui";
+import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
 import { Button } from "@/components/ui/button";
 import { EmptyState, SectionCard, SectionCardSkeleton, StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
 import { toPersianDigits } from "@/lib/digits";
@@ -110,6 +126,10 @@ interface SyncResultRow {
 interface SyncResponse {
   ok?: boolean;
   queued?: boolean;
+  /** Which side runs a queued read: the store's plugin, or this app (#1206). */
+  via?: "app" | "plugin";
+  /** True when the app-side read is already in flight — nothing new queued. */
+  alreadyRunning?: boolean;
   jobType?: string;
   status?: "complete" | "partial" | "failed";
   results?: SyncResultRow[];
@@ -229,8 +249,29 @@ function collapsibleKeys(group: TermGroup): string[] {
   return keys;
 }
 
+/** The two densities of the same list (issue #1215, P2-4). */
+type ViewMode = "detailed" | "compact";
+
 export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
   const locked = useFeatureLocked();
+  // The view is URL state, not component state: a reload, a shared link or the
+  // back button must land on the density the owner chose. Everything else
+  // (filters, expansion) stays local and is preserved across paging.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const view: ViewMode = searchParams.get("view") === "compact" ? "compact" : "detailed";
+  const compact = view === "compact";
+  const setView = useCallback(
+    (next: ViewMode) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (next === "compact") params.set("view", "compact");
+      else params.delete("view");
+      const qs = params.toString();
+      router.replace(`${pathname}${qs ? `?${qs}` : ""}`, { scroll: false });
+    },
+    [pathname, router, searchParams],
+  );
   const [groups, setGroups] = useState<TermGroup[] | null>(null);
   const [totals, setTotals] = useState<TaxonomyTotals | null>(null);
   const [syncedAt, setSyncedAt] = useState<string | null>(null);
@@ -351,6 +392,18 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
     }
 
     if (data?.queued) {
+      // Two queues, two sentences (#1206 PERF-05): in plugin mode the store
+      // sends the tree, in REST mode this app reads it — and saying «افزونه
+      // می‌فرستد» to a REST store would be wrong.
+      if (data.via === "app") {
+        setNotice({
+          tone: "info",
+          text: data.alreadyRunning
+            ? "همین حالا خواندن درخت در جریان است؛ نتیجه پس از پایان آن در همین صفحه به‌روز می‌شود."
+            : "درخواست خواندن درخت در صف قرار گرفت؛ در اجرای بعدی همگام‌سازی از فروشگاه خوانده می‌شود و نتیجه در همین صفحه دیده می‌شود.",
+        });
+        return;
+      }
       setNotice({
         tone: "info",
         queueLink: true,
@@ -544,6 +597,27 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
             />
             فقط دارای محصول همگام‌شده
           </label>
+          {/* Density, not a filter: the same groups either way. */}
+          <FilterChipRow label="حالت نمایش فهرست" className="ms-auto">
+            {([
+              { key: "detailed", label: "کامل" },
+              { key: "compact", label: "فشرده" },
+            ] as const).map((option) => (
+              <FilterChip
+                key={option.key}
+                dense
+                selected={view === option.key}
+                onClick={() => setView(option.key)}
+                title={
+                  option.key === "compact"
+                    ? "ردیف‌های جمع‌وجورتر بدون ستون نشانی، برای مرور سریع گروه‌های زیاد"
+                    : "همهٔ ستون‌ها: نشانی مورد، شمار فروشگاه و شمار همگام‌شده"
+                }
+              >
+                {option.label}
+              </FilterChip>
+            ))}
+          </FilterChipRow>
         </div>
       </div>
 
@@ -719,8 +793,8 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
             description={
               <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span>
-                  {toPersianDigits(group.termCount)} مورد • {toPersianDigits(group.mappedCount)} محصول همگام‌شده •{" "}
-                  {toPersianDigits(group.assignmentCount)} عضویت
+                  {toPersianDigits(group.termCount)} مورد • {toPersianDigits(group.mappedCount)} محصول{" "}
+                  {compact ? null : "همگام‌شده "}• {toPersianDigits(group.assignmentCount)} عضویت
                 </span>
                 {group.lastSyncedAt ? (
                   <span>آخرین موفق: {formatJalali(group.lastSyncedAt, { withTime: true })}</span>
@@ -790,7 +864,9 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
                   {!searching && collapsible.length > 0 ? (
                     <div className="flex items-center justify-between border-b border-border/80 px-4 py-1.5 sm:px-5">
                       <span className="text-[11px] text-muted-foreground">
-                        {toPersianDigits(group.termCount)} مورد — زیرگروه‌ها با کلیک باز می‌شوند
+                        {compact
+                          ? `${toPersianDigits(group.termCount)} مورد`
+                          : `${toPersianDigits(group.termCount)} مورد — زیرگروه‌ها با کلیک باز می‌شوند`}
                       </span>
                       <button
                         type="button"
@@ -818,7 +894,9 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
                       return (
                         <li
                           key={term.remoteId}
-                          className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-2.5 sm:px-5"
+                          className={`flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 sm:px-5 ${
+                            compact ? "py-1.5" : "py-2.5"
+                          }`}
                         >
                           <span className="flex min-w-0 items-center gap-1.5" style={indentStyle(term.depth)}>
                             {hasChildren ? (
@@ -841,18 +919,31 @@ export function TaxonomiesSection({ connectionId }: { connectionId: string }) {
                                 └
                               </span>
                             ) : null}
-                            <span className="min-w-0 truncate text-sm text-foreground" title={term.path || term.name}>
-                              {term.name || "—"}
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm text-foreground" title={term.path || term.name}>
+                                {term.name || "—"}
+                              </span>
+                              {/* A flat search result loses the indentation that
+                                  said where the term sits, so the path travels
+                                  with the hit instead of living in a tooltip
+                                  only a mouse can reach. */}
+                              {searching && term.depth > 0 && term.path ? (
+                                <span className="block truncate text-[11px] text-muted-foreground">{term.path}</span>
+                              ) : null}
                             </span>
-                            {term.slug ? (
+                            {term.slug && !compact ? (
                               <span dir="ltr" className="hidden shrink-0 font-mono text-[10px] text-muted-foreground sm:inline">
                                 {term.slug}
                               </span>
                             ) : null}
                           </span>
-                          <span className="shrink-0 text-[11px] text-muted-foreground">
-                            در فروشگاه: {toPersianDigits(term.remoteCount)} • همگام‌شده:{" "}
-                            {toPersianDigits(term.mappedCount)}
+                          <span
+                            className="shrink-0 text-[11px] text-muted-foreground"
+                            title={`در فروشگاه ${toPersianDigits(term.remoteCount)} محصول، همگام‌شده ${toPersianDigits(term.mappedCount)}`}
+                          >
+                            {compact
+                              ? `فروشگاه ${toPersianDigits(term.remoteCount)} • همگام ${toPersianDigits(term.mappedCount)}`
+                              : `در فروشگاه: ${toPersianDigits(term.remoteCount)} • همگام‌شده: ${toPersianDigits(term.mappedCount)}`}
                           </span>
                         </li>
                       );

@@ -50,6 +50,7 @@ import {
   type ShopPublication,
   type TorobDecision,
 } from "@/lib/torob/publication";
+import { TOROB_WEBHOOK_ERROR_COPY, type TorobWebhookError } from "@/lib/torob/webhook";
 import {
   TOROB_LISTING_STAGE_COPY,
   TOROB_OBSERVATION_ERROR_COPY,
@@ -142,6 +143,47 @@ export function TorobShopDetail({ shopId, canConfigure }: { shopId: string; canC
     void loadStatus();
   }, [load, loadStatus]);
 
+  /**
+   * «تعمیر» — announce, tell Torob, read it back, in that order. Available only to
+   * a caller who may configure the channel, because the middle step spends the
+   * shop's own rate budget.
+   */
+  async function repair() {
+    setBusy(true);
+    setActionError("");
+    const { ok, data: answer } = await api<{ error?: string }>(`/api/growth/torob/shops/${shopId}/repair`, {
+      method: "POST",
+    });
+    setBusy(false);
+    if (!ok) {
+      setActionError(errorMessageOrRaw(answer.error) ?? "تعمیر ناموفق بود.");
+      return;
+    }
+    await Promise.all([load(), loadStatus()]);
+  }
+
+  /** Torob-side on/off for one page, then the panel is re-read so it says what Torob says. */
+  async function toggleOnTorob(pageUnique: string, active: boolean) {
+    setBusy(true);
+    setActionError("");
+    const { ok, data: answer } = await api<{ error?: string; message?: string; note?: string; missing?: string[] }>(
+      `/api/growth/torob/shops/${shopId}/pages`,
+      { method: "POST", body: JSON.stringify({ pageUniques: [pageUnique], active }) },
+    );
+    setBusy(false);
+    if (!ok) {
+      setActionError(errorMessageOrRaw(answer.error) ?? "این کار انجام نشد.");
+      return;
+    }
+    if (answer.message) setActionError(answer.message);
+    else if (answer.missing && answer.missing.length > 0) {
+      // Torob answered, but did not recognise the page: nothing changed there, and
+      // saying «انجام شد» would be a claim only our request supports.
+      setActionError("ترب این صفحه را نشناخت، پس چیزی روی ترب عوض نشد. «تعمیر» صفحه را دوباره معرفی می‌کند.");
+    }
+    await loadStatus();
+  }
+
   /** The merchant's explicit refresh: the only path that talks to Torob. */
   async function refreshStatus() {
     setBusy(true);
@@ -228,8 +270,16 @@ export function TorobShopDetail({ shopId, canConfigure }: { shopId: string; canC
 
       {statusError ? <ErrorBox>{statusError}</ErrorBox> : null}
       {status ? (
-        <TorobStatusPanel view={status} busy={busy} onRefresh={() => void refreshStatus()} />
+        <TorobStatusPanel
+          view={status}
+          busy={busy}
+          onRefresh={() => void refreshStatus()}
+          onRepair={canConfigure ? () => void repair() : undefined}
+          onTogglePage={canConfigure ? (pageUnique, active) => void toggleOnTorob(pageUnique, active) : undefined}
+        />
       ) : null}
+
+      <WebhookQueuePanel shopId={shopId} canConfigure={canConfigure} />
 
       <SectionCard
         title="قاعدهٔ انتشار"
@@ -492,10 +542,14 @@ function TorobStatusPanel({
   view,
   busy,
   onRefresh,
+  onRepair,
+  onTogglePage,
 }: {
   view: StatusResponse;
   busy: boolean;
   onRefresh: () => void;
+  onRepair?: () => void;
+  onTogglePage?: (pageUnique: string, active: boolean) => void;
 }) {
   const { observation, states, latestRun, problems, failure } = view;
 
@@ -534,9 +588,16 @@ function TorobStatusPanel({
       title="وضعیت در ترب"
       description="آنچه ترب دربارهٔ این فروشگاه می‌گوید — نه آنچه ما برایش فرستاده‌ایم."
       actions={
-        <Button variant="outline" disabled={busy} onClick={onRefresh}>
-          خواندن دوباره از ترب
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" disabled={busy} onClick={onRefresh}>
+            خواندن دوباره از ترب
+          </Button>
+          {onRepair ? (
+            <Button variant="outline" disabled={busy} onClick={onRepair}>
+              تعمیر
+            </Button>
+          ) : null}
+        </div>
       }
     >
       <div className="space-y-3 text-sm">
@@ -588,13 +649,26 @@ function TorobStatusPanel({
         ) : null}
 
         {errorRows.length > 0 ? (
-          <div className="space-y-0.5 text-xs text-muted-foreground">
+          <div className="space-y-1 text-xs text-muted-foreground">
             <p className="font-medium text-foreground">آخرین خطای خواندن ترب</p>
-            {errorRows.map((row) => (
-              <p key={row.pageUnique}>
-                {row.errorTitle} — {TOROB_PRODUCT_STATUS_COPY[row.mainStatus]}
-              </p>
-            ))}
+            {errorRows.map((row) => {
+              // A page Torob switched off is the merchant's to switch back on; any
+              // other problem is one they can take the page off display for while
+              // they fix it. Both are Torob-side switches, neither deletes anything.
+              const activate = row.mainStatus === "page_not_active";
+              return (
+                <div key={row.pageUnique} className="flex flex-wrap items-center gap-2">
+                  <span>
+                    {row.errorTitle} — {TOROB_PRODUCT_STATUS_COPY[row.mainStatus]}
+                  </span>
+                  {onTogglePage ? (
+                    <Button variant="outline" disabled={busy} onClick={() => onTogglePage(row.pageUnique, activate)}>
+                      {activate ? "روشن کردن در ترب" : "خاموش کردن در ترب"}
+                    </Button>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         ) : null}
 
@@ -625,7 +699,10 @@ function TorobStatusPanel({
 
         <div className="grid gap-2 border-t border-border pt-3 text-xs text-muted-foreground sm:grid-cols-3">
           {(["feed", "sent", "listing"] as const).map((stage) => {
-            const known = stage === "feed" ? true : stage === "listing" ? Boolean(observation) : false;
+            // Each stage is answered by the thing that can prove it, never by
+            // inference from a neighbour: feed is ours, `sent` is a webhook batch
+            // Torob accepted, `listing` is Torob's own observation.
+            const known = view.capabilities[stage];
             return (
               <div key={stage} className="space-y-0.5">
                 <p className={known ? "font-medium text-foreground" : "font-medium"}>
@@ -637,6 +714,168 @@ function TorobStatusPanel({
             );
           })}
         </div>
+      </div>
+    </SectionCard>
+  );
+}
+
+/** One request to Torob, as the panel's history lists it. */
+type WebhookBatchRow = {
+  items: number;
+  outcome: "accepted" | "failed";
+  error: string | null;
+  finishedAt: string;
+};
+
+type WebhookQueue = {
+  counts: { pending: number; sent: number; dead: number };
+  oldestPendingAt: string | null;
+  dead: { pageUnique: string; pageUrl: string; error: string | null; attempts: number }[];
+  batches: WebhookBatchRow[];
+  errorCopy?: Record<string, string>;
+};
+
+/**
+ * The middle stage of the channel: what we have told Torob, and what is stuck.
+ *
+ * Its whole reason for existing beside «وضعیت در ترب» is the distinction the epic
+ * keeps insisting on — **accepted is queued, not shown**. So the panel never says
+ * «منتشر شد» for a `sent` row; it says «به ترب اطلاع داده شد», and the surface that
+ * can say more is the status panel above, because only Torob can.
+ *
+ * Two actions, both explicit: send what is due now (instead of waiting for the
+ * minute tick), and put stopped pages back in the queue. Reading is a `GET` and
+ * never touches Torob; sending is a `POST` and is `torob.configure`, because it
+ * spends the shop's own rate budget.
+ */
+function WebhookQueuePanel({ shopId, canConfigure }: { shopId: string; canConfigure: boolean }) {
+  const [queue, setQueue] = useState<WebhookQueue | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+
+  const load = useCallback(async () => {
+    const { ok, data: body } = await api<WebhookQueue & { error?: string }>(
+      `/api/growth/torob/shops/${shopId}/webhook`,
+    );
+    if (!ok) {
+      setError(errorMessageOrRaw(body.error) ?? "صف اطلاع‌دادن خوانده نشد.");
+      return;
+    }
+    setError("");
+    setQueue(body);
+  }, [shopId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function act(action: "drain" | "retry") {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const { ok, data: answer } = await api<
+      WebhookQueue & { error?: string; accepted?: number; sentPages?: number; stoppedCopy?: string | null; retried?: number }
+    >(`/api/growth/torob/shops/${shopId}/webhook`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    });
+    setBusy(false);
+    if (!ok) {
+      setError(errorMessageOrRaw(answer.error) ?? "این کار انجام نشد.");
+      return;
+    }
+    setQueue(answer);
+    if (action === "retry") {
+      setNotice(`${toPersianDigits(answer.retried ?? 0)} صفحه دوباره در صف قرار گرفت.`);
+    } else if (answer.stoppedCopy) {
+      setNotice(answer.stoppedCopy);
+    } else {
+      setNotice(
+        `${toPersianDigits(answer.accepted ?? 0)} درخواست پذیرفته شد و ${toPersianDigits(answer.sentPages ?? 0)} صفحه برای بازخوانی در صف ترب قرار گرفت.`,
+      );
+    }
+    // The status panel's `sent` flag may have just changed.
+    void load();
+  }
+
+  if (error) return <ErrorBox>{error}</ErrorBox>;
+  if (!queue) return null;
+
+  const { counts, dead, batches } = queue;
+  const copy = (code: string | null) =>
+    code ? (queue.errorCopy?.[code] ?? TOROB_WEBHOOK_ERROR_COPY[code as TorobWebhookError] ?? code) : "";
+
+  return (
+    <SectionCard
+      title="اطلاع‌دادن به ترب"
+      description="ترب خودش از فروشگاه می‌خواند؛ این صف به آن می‌گوید کدام صفحه‌ها عوض شده‌اند تا زودتر بخواند."
+      actions={
+        canConfigure ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" disabled={busy} onClick={() => void act("drain")}>
+              {busy ? "در حال ارسال…" : "ارسال آنچه در صف است"}
+            </Button>
+            {counts.dead > 0 ? (
+              <Button variant="outline" disabled={busy} onClick={() => void act("retry")}>
+                تلاش دوباره برای متوقف‌شده‌ها
+              </Button>
+            ) : null}
+          </div>
+        ) : null
+      }
+    >
+      <div className="space-y-3 text-sm">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="font-medium text-foreground">{toPersianDigits(counts.pending)} در صف</span>
+          <span className="text-muted-foreground">{toPersianDigits(counts.sent)} اطلاع‌داده‌شده</span>
+          {counts.dead > 0 ? (
+            <span className="text-destructive">{toPersianDigits(counts.dead)} متوقف</span>
+          ) : null}
+          {queue.oldestPendingAt ? (
+            <span className="text-xs text-muted-foreground">
+              قدیمی‌ترین مورد در صف: {toPersianDigits(formatJalali(new Date(queue.oldestPendingAt)))}
+            </span>
+          ) : null}
+        </div>
+
+        <InfoBox>
+          «اطلاع‌داده‌شده» یعنی ترب درخواست را در صف بازخوانی خودش گذاشت — نه اینکه محصول را نمایش می‌دهد.
+          نمایش را فقط خود ترب گزارش می‌کند و در بخش «وضعیت در ترب» دیده می‌شود.
+        </InfoBox>
+
+        {notice ? <p className="text-xs text-muted-foreground">{notice}</p> : null}
+
+        {dead.length > 0 ? (
+          <div className="space-y-1 text-xs">
+            <p className="font-medium text-foreground">صفحه‌هایی که ارسالشان متوقف شده است</p>
+            {dead.slice(0, 5).map((row) => (
+              <p key={row.pageUnique} className="text-muted-foreground">
+                <span dir="ltr">{row.pageUrl}</span> — {copy(row.error) || "دلیل نامشخص"}
+              </p>
+            ))}
+          </div>
+        ) : null}
+
+        {batches.length > 0 ? (
+          <div className="space-y-1 border-t border-border pt-3 text-xs text-muted-foreground">
+            <p className="font-medium text-foreground">آخرین درخواست‌ها به ترب</p>
+            {batches.slice(0, 5).map((batch) => (
+              <p key={`${batch.finishedAt}-${batch.items}`}>
+                {batch.outcome === "accepted"
+                  ? `${toPersianDigits(batch.items)} صفحه پذیرفته شد`
+                  : `ناموفق — ${copy(batch.error) || "دلیل نامشخص"}`}
+                {" · "}
+                {toPersianDigits(formatJalali(new Date(batch.finishedAt)))}
+              </p>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            هنوز چیزی به ترب فرستاده نشده است. صف در هر دقیقه یک بار خودکار پر و خالی می‌شود؛ تغییرات
+            انتشار (بخش بالا) همان چیزی است که در آن قرار می‌گیرد.
+          </p>
+        )}
       </div>
     </SectionCard>
   );

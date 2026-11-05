@@ -30,6 +30,14 @@
  *     staler answer to a question the rows already answer — the same rule
  *     `agency-commercial-service.ts` applies to §D's cost side.
  */
+import { businessToday } from "./business-day-service";
+import { SETTING_KEYS, getSetting, setSetting } from "./settings";
+import {
+  AGENCY_DEFAULT_PRESENTATION,
+  isCostRecharged,
+  parseAgencyCostPolicySetting,
+  type AgencyCostPolicySetting,
+} from "./agency-reimbursable-cost";
 import {
   COST_NUMBER_PREFIX,
   AGENCY_COST_DESCRIPTION_LIMIT,
@@ -59,6 +67,15 @@ import { getBusinessIndustry } from "./industry-guard";
 import { postgresDateToIso } from "./jalali";
 import { nextBusinessRegisterNumber } from "./register-numbering";
 import { emitDomainEvent } from "./posting-engine";
+import {
+  PASS_THROUGH_DEFAULT_VAT_PERCENT,
+  SERVICE_DESCRIPTION_MAX_LENGTH,
+} from "./service-invoice";
+import { resolveActiveLocationForUser } from "./setup-state";
+import {
+  createRetailInvoice,
+  type CreateRetailInvoiceTenderInput,
+} from "./retail-invoice-service";
 import type { RialText } from "./inventory-exact";
 import type { PoolClient } from "pg";
 
@@ -82,6 +99,14 @@ export const AGENCY_REIMBURSABLE_COST_ERROR_CODES = [
   "invalid_settlement",
   "text_too_long",
   "cost_posted",
+  // Recharging — the act that credits 1270 and asks the client for the money.
+  "recharge_empty",
+  "invalid_cost_id",
+  "cost_not_found_for_recharge",
+  "cost_already_recharged",
+  "cost_not_posted",
+  "costs_from_different_clients",
+  "location_required",
 ] as const;
 
 export type AgencyReimbursableCostErrorCode = (typeof AGENCY_REIMBURSABLE_COST_ERROR_CODES)[number];
@@ -118,6 +143,17 @@ export interface AgencyReimbursableCost {
   accounts: { debitCode: string; creditCode: string };
   /** §D's question: is this the client's money rather than the agency's cost? */
   passThrough: boolean;
+  /** The invoice that billed this back, if there is one — voided or not. */
+  rechargedOrderId: string | null;
+  rechargedBy: string | null;
+  rechargedByName: string;
+  /**
+   * Whether that invoice still counts, derived from its live status rather than
+   * stored: voiding flips `orders.status` and writes a reversing entry without
+   * touching this register, so a stored flag would be a second answer that disagrees
+   * with the ledger the first time somebody voided an invoice.
+   */
+  recharged: boolean;
 }
 
 export interface AgencyReimbursableCostFilters {
@@ -132,16 +168,21 @@ export interface AgencyReimbursableCostFilters {
 
 const COST_COLUMNS = `c.id, c.cost_number, c.party_id, c.project_id, c.vendor_name,
        c.description, c.amount_rial, c.spent_on, c.presentation, c.settled_by,
-       c.note, c.entry_id, c.created_by, c.created_by_name, c.created_at, c.updated_at`;
+       c.note, c.entry_id, c.created_by, c.created_by_name, c.created_at, c.updated_at,
+       c.recharged_order_id, c.recharged_by, c.recharged_by_name`;
 
 // Every join carries its own `business_id`: `withTenant` establishes the RLS scope
 // but never injects one, and against the superuser test role a join without it is a
 // cross-tenant read.
 const COST_JOINS = `FROM agency_reimbursable_costs c
        JOIN parties p ON p.id = c.party_id AND p.business_id = c.business_id
-  LEFT JOIN ai_projects pr ON pr.id = c.project_id AND pr.business_id = c.business_id`;
+  LEFT JOIN ai_projects pr ON pr.id = c.project_id AND pr.business_id = c.business_id
+  LEFT JOIN orders ro ON ro.id = c.recharged_order_id`;
 
-const COST_JOINED_COLUMNS = `p.name AS client_name, pr.name AS project_name`;
+// `ro.status` is read so `recharged` can be *derived* rather than stored: voiding an
+// invoice flips the order and writes a reversing entry without touching this register,
+// so a stored flag would disagree with the ledger the first time somebody voided one.
+const COST_JOINED_COLUMNS = `p.name AS client_name, pr.name AS project_name, ro.status AS recharged_order_status`;
 
 type CostRow = Record<string, unknown> & {
   id: string;
@@ -158,6 +199,10 @@ type CostRow = Record<string, unknown> & {
   settled_by: string;
   note: string;
   entry_id: string | null;
+  recharged_order_id: string | null;
+  recharged_by: string | null;
+  recharged_by_name: string;
+  recharged_order_status: string | null;
   created_by: string | null;
   created_by_name: string;
   created_at: Date | string;
@@ -206,6 +251,13 @@ function toCost(row: CostRow): AgencyReimbursableCost {
     posted: isReimbursableCostPosted(row.entry_id),
     accounts: reimbursableCostAccounts({ presentation, settledBy }),
     passThrough: isPassThroughToClient(presentation),
+    rechargedOrderId: row.recharged_order_id,
+    rechargedBy: row.recharged_by,
+    rechargedByName: row.recharged_by_name ?? "",
+    recharged: isCostRecharged({
+      rechargedOrderId: row.recharged_order_id,
+      orderStatus: row.recharged_order_status,
+    }),
   };
 }
 
@@ -299,6 +351,8 @@ export interface CostTotalsByParty {
   total: number;
   passThrough: number;
   unposted: number;
+  /** Not yet billed back, which is what the client still owes. */
+  unrechargedRial: number;
 }
 
 export async function sumCostsByParty(
@@ -312,14 +366,27 @@ export async function sumCostsByParty(
     total: string | number;
     pass_through: string | number;
     unposted: string | number;
+    unrecharged: string | number;
   }>(
-    `SELECT party_id,
-            COALESCE(sum(amount_rial), 0)::bigint AS total,
-            COALESCE(sum(amount_rial) FILTER (WHERE presentation = 'net'), 0)::bigint AS pass_through,
-            count(*) FILTER (WHERE entry_id IS NULL)::int AS unposted
-       FROM agency_reimbursable_costs
-      WHERE business_id = $1 AND party_id = ANY($2::uuid[])
-      GROUP BY party_id`,
+    `SELECT c.party_id,
+            COALESCE(sum(c.amount_rial), 0)::bigint AS total,
+            COALESCE(sum(c.amount_rial) FILTER (WHERE c.presentation = 'net'), 0)::bigint AS pass_through,
+            count(*) FILTER (WHERE c.entry_id IS NULL)::int AS unposted,
+            -- The outstanding claim, computed the same way the row's own flag is: a
+            -- link to a voided invoice does not count, so voiding puts the money back
+            -- into what the client owes without anything being written here.
+            -- orders.status is an enum, so a missing order is handled with IS NULL
+            -- rather than by comparing it to an empty string, which is not one of its
+            -- values and would raise instead of reading as "not recharged".
+            COALESCE(sum(c.amount_rial) FILTER (
+              WHERE NOT (c.recharged_order_id IS NOT NULL
+                         AND ro.status IS NOT NULL
+                         AND ro.status <> 'voided')
+            ), 0)::bigint AS unrecharged
+       FROM agency_reimbursable_costs c
+  LEFT JOIN orders ro ON ro.id = c.recharged_order_id
+      WHERE c.business_id = $1 AND c.party_id = ANY($2::uuid[])
+      GROUP BY c.party_id`,
     [businessId, partyIds],
   );
   for (const row of rows) {
@@ -327,6 +394,7 @@ export async function sumCostsByParty(
       total: Number(row.total),
       passThrough: Number(row.pass_through),
       unposted: Number(row.unposted),
+      unrechargedRial: Number(row.unrecharged),
     });
   }
   return out;
@@ -394,9 +462,15 @@ export async function createAgencyReimbursableCost(
   }
   if (spentOn === null) throw new AgencyReimbursableCostError("invalid_date");
 
-  const presentation = input.presentation === undefined || input.presentation === null || input.presentation === ""
-    ? "net"
-    : input.presentation;
+  // §D: the treatment follows the business's *chosen* policy, and is never inferred
+  // from the row. Absent an explicit choice on this cost, the policy answers; absent
+  // a policy, the documented fallback does. An explicit choice always wins, and an
+  // explicit *garbage* choice is still refused rather than quietly replaced by the
+  // policy — otherwise a typo would change which account the money lands in.
+  const presentation =
+    input.presentation === undefined || input.presentation === null || input.presentation === ""
+      ? await resolveAgencyCostPresentation(businessId)
+      : input.presentation;
   if (!isAgencyPassThroughPresentation(presentation)) {
     throw new AgencyReimbursableCostError("invalid_presentation");
   }
@@ -584,6 +658,305 @@ export async function deleteAgencyReimbursableCost(
     businessId,
     id,
   ]);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The recharge — the act that credits 1270                                   */
+/* ------------------------------------------------------------------------- */
+
+export interface AgencyRechargeInput {
+  /** The costs to bill back. One invoice line each; they must share a client. */
+  costIds: unknown;
+  /** How the client pays. Defaults to on account, because a recharge is usually owed. */
+  tenders?: CreateRetailInvoiceTenderInput[];
+  locationId?: string | null;
+  note?: unknown;
+}
+
+export interface AgencyRechargeResult {
+  orderId: string;
+  orderNumber: number;
+  /** The costs the invoice now stands behind, in the order they were given. */
+  rechargedCostIds: string[];
+  totalRial: number;
+}
+
+/**
+ * Bill a client back for money the agency spent on their behalf.
+ *
+ * One invoice, one pass-through line per cost, each crediting **1270** rather than a
+ * revenue account — which is the whole of §D's net presentation on the recharge side,
+ * and the reason 0280 had to exist first: crediting an asset nothing ever debited
+ * would drive it past zero and report a *negative* claim on the client.
+ *
+ * The invoice and the marks on the cost rows are written in one transaction, so a
+ * recharge cannot half-happen: either the client is billed and every cost points at
+ * that invoice, or neither does. That matters more here than for an ordinary sale,
+ * because the failure mode of a half-written recharge is billing the same media buy
+ * twice.
+ *
+ * Three refusals are the point of this function rather than incidental validation:
+ *
+ *   * **already recharged** — 0284 refuses it at the trigger too, but a member is
+ *     told in words first, and the words say which invoice to void;
+ *   * **not posted** — a cost whose own entry has not landed has not debited 1270 yet,
+ *     so crediting it would clear a balance that was never there;
+ *   * **different clients** — one invoice bills one client, and `orders.customer_id`
+ *     is a single party. Costs from two clients are two recharges.
+ */
+export async function rechargeAgencyCosts(
+  businessId: string,
+  actor: { userId: string; name: string },
+  input: AgencyRechargeInput,
+): Promise<AgencyRechargeResult> {
+  await assertAgency(businessId);
+
+  const rawIds = Array.isArray(input.costIds) ? input.costIds : [];
+  const costIds = [...new Set(rawIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+  if (costIds.length === 0) throw new AgencyReimbursableCostError("recharge_empty");
+  if (rawIds.length !== costIds.length && new Set(rawIds).size === costIds.length) {
+    // Duplicates of a real id are collapsed rather than refused: asking for the same
+    // cost twice in one request is one recharge, not an error worth a round trip.
+  } else if (rawIds.some((id) => typeof id !== "string" || (id as string).trim().length === 0)) {
+    throw new AgencyReimbursableCostError("invalid_cost_id");
+  }
+
+  // Read the costs *with* the invoice status that decides whether each counts as
+  // recharged, in one query — the derived flag of `isCostRecharged` needs both halves
+  // and reading them separately would be a race against somebody voiding an invoice.
+  const { rows } = await query<Record<string, unknown> & {
+    id: string;
+    cost_number: string;
+    party_id: string;
+    project_id: string | null;
+    description: string;
+    vendor_name: string;
+    amount_rial: string | number;
+    entry_id: string | null;
+    recharged_order_id: string | null;
+    order_status: string | null;
+  }>(
+    `SELECT c.id, c.cost_number, c.party_id, c.project_id, c.description, c.vendor_name,
+            c.amount_rial, c.entry_id, c.recharged_order_id, o.status AS order_status
+       FROM agency_reimbursable_costs c
+  LEFT JOIN orders o ON o.id = c.recharged_order_id
+      WHERE c.business_id = $1 AND c.id = ANY($2::uuid[])`,
+    [businessId, costIds],
+  );
+  if (rows.length !== costIds.length) {
+    throw new AgencyReimbursableCostError("cost_not_found_for_recharge");
+  }
+
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const selected = costIds.map((id) => byId.get(id)!);
+
+  for (const row of selected) {
+    if (isReimbursableCostPosted(row.entry_id) === false) {
+      throw new AgencyReimbursableCostError("cost_not_posted");
+    }
+    if (isCostRecharged({ rechargedOrderId: row.recharged_order_id, orderStatus: row.order_status })) {
+      throw new AgencyReimbursableCostError("cost_already_recharged");
+    }
+  }
+  const clients = new Set(selected.map((row) => row.party_id));
+  if (clients.size !== 1) throw new AgencyReimbursableCostError("costs_from_different_clients");
+  const partyId = selected[0].party_id;
+
+  // One invoice can only carry one project dimension, so it is tagged when every cost
+  // agrees and left untagged when they do not. Guessing one of several would put the
+  // whole recharge in a single project's P&L and quietly take it out of the others'.
+  const projects = new Set(selected.map((row) => row.project_id));
+  const projectId = projects.size === 1 ? [...projects][0] : null;
+
+  const locationId =
+    (typeof input.locationId === "string" && input.locationId.trim() ? input.locationId.trim() : null) ??
+    (await resolveActiveLocationForUser(businessId, actor.userId))?.id ??
+    null;
+  if (!locationId) throw new AgencyReimbursableCostError("location_required");
+
+  const totalRial = selected.reduce((sum, row) => sum + Number(row.amount_rial), 0);
+  const note = normalizeAgencyCostOptionalText(input.note, AGENCY_COST_NOTE_LIMIT);
+  if (note.tooLong) throw new AgencyReimbursableCostError("text_too_long");
+
+  const tenders: CreateRetailInvoiceTenderInput[] =
+    input.tenders && input.tenders.length > 0 ? input.tenders : [{ method: "credit" }];
+
+  return withTenantTransaction(businessId, async (client: PoolClient) => {
+    const invoice = await createRetailInvoice(client, {
+      businessId,
+      locationId,
+      industry: AGENCY_INDUSTRY,
+      lines: selected.map((row) => ({
+        kind: "service" as const,
+        // The agency's own cost number leads, so the client's invoice points back at
+        // the record the agency holds and a disputed line can be found in one step.
+        // Truncated to the service line's own limit rather than the cost's, because
+        // the two differ and this is the one that is printed.
+        description: `${row.cost_number} — ${row.description}`.slice(0, SERVICE_DESCRIPTION_MAX_LENGTH),
+        quantity: "1",
+        unitPrice: Number(row.amount_rial),
+        // Zero by default, and a member may say otherwise: whether recovering a
+        // disbursement is a taxable supply depends on the jurisdiction and the
+        // contract, and software that picked one would be asserting a tax position it
+        // cannot know. Zero is the conservative direction — it cannot create a
+        // liability the business does not owe.
+        vatPercent: PASS_THROUGH_DEFAULT_VAT_PERCENT,
+        passThrough: true,
+      })),
+      tenders,
+      // `orders.customer_id` references `parties`, so the cost's client *is* the
+      // invoice's customer and no mapping is needed or wanted.
+      customerId: partyId,
+      note: note.value || `بازدریافت ${selected.length} هزینهٔ کارفرما`,
+      businessDate: await businessToday(businessId),
+      createdBy: actor.userId,
+      projectId,
+    });
+
+    // Marking the rows is what stops the same media buy being billed twice, and it
+    // happens in the same transaction as the invoice so a recharge cannot half-happen.
+    for (const row of selected) {
+      await query(
+        `UPDATE agency_reimbursable_costs
+            SET recharged_order_id = $2, recharged_by = $3, recharged_by_name = $4
+          WHERE business_id = $1 AND id = $5`,
+        [businessId, invoice.orderId, actor.userId, actor.name, row.id],
+      );
+    }
+
+    return {
+      orderId: invoice.orderId,
+      orderNumber: invoice.orderNumber,
+      rechargedCostIds: selected.map((row) => row.id),
+      totalRial,
+    };
+  });
+}
+
+/* ------------------------------------------------------------------------- */
+/* §D's business-level presentation policy                                     */
+/* ------------------------------------------------------------------------- */
+
+export interface AgencyCostPolicyState {
+  /** The presentation new reimbursable costs default to. */
+  presentation: AgencyPassThroughPresentation;
+  /**
+   * Whether a human actually chose it. `false` means `presentation` is the
+   * documented fallback, and a screen must say «هنوز انتخاب نشده» rather than show
+   * a default as though it were a decision — the difference between a policy the
+   * business adopted and one the software supplied.
+   */
+  stored: boolean;
+  updatedAt: string | null;
+}
+
+const UNSTORED_POLICY: AgencyCostPolicyState = {
+  presentation: AGENCY_DEFAULT_PRESENTATION,
+  stored: false,
+  updatedAt: null,
+};
+
+/**
+ * The presentation a new cost falls back to: the business's stored policy, or the
+ * documented default while it has none.
+ *
+ * Kept private and separate from `loadAgencyCostPolicy` because the create path
+ * must never throw `not_agency` from a policy read — `createAgencyReimbursableCost`
+ * has already asserted the industry by the time it gets here, and a second
+ * assertion would be a second query answering a question already settled.
+ */
+async function resolveAgencyCostPresentation(
+  businessId: string,
+): Promise<AgencyPassThroughPresentation> {
+  const stored = parseAgencyCostPolicySetting(
+    await getSetting<unknown>(businessId, SETTING_KEYS.agencyCostPolicy),
+  );
+  return stored ? stored.presentation : AGENCY_DEFAULT_PRESENTATION;
+}
+
+/** What «تنظیمات» shows for this register: the policy, and whether it was chosen. */
+export async function loadAgencyCostPolicy(businessId: string): Promise<AgencyCostPolicyState> {
+  await assertAgency(businessId);
+  const stored = parseAgencyCostPolicySetting(
+    await getSetting<unknown>(businessId, SETTING_KEYS.agencyCostPolicy),
+  );
+  return stored ? { ...stored, stored: true } : UNSTORED_POLICY;
+}
+
+/**
+ * Choose the business's presentation policy.
+ *
+ * Writes the setting and its audit row in one transaction, because this is the one
+ * agency setting that moves money: it decides whether a client's media buy debits
+ * 1270 (a claim on the client) or 5197 (the agency's own cost of sale), so "who
+ * changed it, from what, to what, and when" has to have an answer.
+ *
+ * **The policy is a default for new costs and is never retroactive.** Changing it
+ * does not touch a single existing row, and cannot: 0280's trigger freezes
+ * `presentation` on any cost whose entry has landed, because the value decided which
+ * two accounts that entry used and the register may not contradict the ledger. The
+ * correction for a cost recorded under the wrong treatment is a reversal and a new
+ * record, not a policy change reaching backwards.
+ *
+ * A member's explicit choice on a row still beats the policy, which is the point of
+ * storing a policy rather than a mandate: §D's treatment varies by contract, and a
+ * business that mostly buys media in a client's name may still buy some in its own.
+ */
+export async function saveAgencyCostPolicy(
+  actor: { businessId: string; locationId?: string | null; userId?: string | null; name?: string | null },
+  body: unknown,
+): Promise<AgencyCostPolicyState> {
+  await assertAgency(actor.businessId);
+
+  const current = await loadAgencyCostPolicy(actor.businessId);
+  const saved = normalizeCostPolicyBody(body, current);
+  if (!saved) throw new AgencyReimbursableCostError("invalid_presentation");
+
+  const before = { presentation: current.presentation, stored: current.stored };
+  const value: AgencyCostPolicySetting = { presentation: saved.presentation, updatedAt: saved.updatedAt };
+  await withTenantTransaction(
+    actor.businessId,
+    async () => {
+      await setSetting(actor.businessId, SETTING_KEYS.agencyCostPolicy, value);
+      await query(
+        `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+         VALUES ($1,$2,$3,'settings.agency_cost_policy.update','settings',$4,$5::jsonb)`,
+        [
+          actor.businessId,
+          actor.locationId ?? null,
+          actor.userId ?? null,
+          SETTING_KEYS.agencyCostPolicy,
+          JSON.stringify({ before, after: value }),
+        ],
+      );
+    },
+    { locationId: actor.locationId ?? undefined, userId: actor.userId ?? undefined },
+  );
+  return { ...value, stored: true };
+}
+
+/**
+ * Pure: the policy a save request asks for, or null when the request is not one.
+ * An omitted `presentation` keeps the current choice, so a client may re-save
+ * without restating it; an unrecognised one is a refusal rather than a default.
+ *
+ * Unknown keys are refused outright, mirroring the operating-profile save: a body
+ * carrying a field this code does not know is a body written against a newer
+ * contract, and storing half of it would silently drop the half that mattered.
+ */
+function normalizeCostPolicyBody(
+  body: unknown,
+  current: AgencyCostPolicyState,
+): { presentation: AgencyPassThroughPresentation; updatedAt: string } | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const raw = body as Record<string, unknown>;
+  if (Object.keys(raw).some((key) => key !== "presentation")) return null;
+  const parsed = parseAgencyCostPolicySetting({
+    presentation: raw.presentation === undefined ? current.presentation : raw.presentation,
+    updatedAt: null,
+  });
+  if (!parsed) return null;
+  return { presentation: parsed.presentation, updatedAt: new Date().toISOString() };
 }
 
 export { AGENCY_PASS_THROUGH_PRESENTATIONS, AGENCY_COST_SETTLEMENTS };

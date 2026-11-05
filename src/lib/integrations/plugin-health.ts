@@ -37,6 +37,20 @@ export interface PluginCronAssessment {
   failAfterMs: number;
 }
 
+/**
+ * Measured enqueue → app-accepted latency of the plugin's local queue
+ * (#1206 P1), over its most recent deliveries. Reported by the plugin from
+ * rows that actually travelled; `null` in the summary means "not measured"
+ * (older plugin, or nothing delivered yet), never zero latency.
+ */
+export interface PluginDeliveryLatency {
+  samples: number;
+  p50Seconds: number;
+  p95Seconds: number;
+  p99Seconds: number;
+  maxSeconds: number;
+}
+
 export interface PluginHealthSummary {
   /** Last time the plugin authenticated at all. */
   lastPluginSeenAt: string | null;
@@ -74,6 +88,12 @@ export interface PluginHealthSummary {
    */
   cronProbe: CronProbeAssessment;
   oldestQueuedAgeSeconds: number | null;
+  /**
+   * Woo → Bizamiz delivery percentiles the plugin measured locally. The
+   * p95 ≤ 3-minute target is judged against this, with the sample count —
+   * never against the configured 60s cadence.
+   */
+  deliveryLatency: PluginDeliveryLatency | null;
 }
 
 function numberOrNull(value: unknown): number | null {
@@ -82,6 +102,20 @@ function numberOrNull(value: unknown): number | null {
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** Stored telemetry is sanitized on write; this re-checks on read so a row written by anything else still cannot render as fact. */
+function deliveryLatencyOrNull(value: unknown): PluginDeliveryLatency | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const samples = numberOrNull(record.samples);
+  const p50 = numberOrNull(record.p50Seconds);
+  const p95 = numberOrNull(record.p95Seconds);
+  const p99 = numberOrNull(record.p99Seconds);
+  const max = numberOrNull(record.maxSeconds);
+  if (samples === null || samples < 1 || p50 === null || p95 === null || p99 === null || max === null) return null;
+  if (p50 < 0 || p50 > p95 || p95 > p99 || p99 > max) return null;
+  return { samples: Math.floor(samples), p50Seconds: p50, p95Seconds: p95, p99Seconds: p99, maxSeconds: max };
 }
 
 /** The ISO stamp we grade from; older plugins send `lastRunAt` only. */
@@ -187,6 +221,7 @@ export function summarizePluginHealth(
     incidentOpen: health.previousOutageOpen === true,
     queueSize: queue.size,
     oldestQueuedAgeSeconds: Number.isFinite(oldestMs) ? Math.max(0, Math.floor((now.getTime() - oldestMs) / 1000)) : null,
+    deliveryLatency: deliveryLatencyOrNull(health.deliveryLatency),
     cronProbe: assessCronProbe(
       {
         report: health.cronProbe ?? null,
@@ -196,26 +231,4 @@ export function summarizePluginHealth(
       now,
     ),
   };
-}
-
-/**
- * Should the app raise an alert for this connection right now? Only a plugin
- * that has been heard from before and is not paused by its owner — a connection
- * nobody finished setting up, or one deliberately stopped, is not an outage.
- *
- * Graded from actual cycle signals, so repeatedly pressing «آزمایش اتصال»
- * during a cron outage cannot clear the alert (#1206 acceptance).
- */
-export function shouldAlertPluginStale(
-  connection: {
-    link_mode: string;
-    status: string;
-    last_plugin_seen_at: string | null;
-    plugin_health?: Record<string, unknown> | null;
-  },
-  now: Date,
-): boolean {
-  if (connection.link_mode !== "plugin" || connection.status !== "active") return false;
-  if (!connection.last_plugin_seen_at) return false;
-  return assessPluginCron({ status: connection.status, last_plugin_seen_at: connection.last_plugin_seen_at, plugin_health: connection.plugin_health ?? null }, now).state === "failed";
 }

@@ -44,6 +44,8 @@ import {
 } from "../otp-challenge";
 import { resolveSmsProvider } from "../sms-config";
 import { formatJalali } from "../jalali";
+import { recordNotification } from "../notification-events";
+import { notificationDedupeKey } from "../notifications";
 import { recordActivity, WorkspaceError, type WorkspaceContract, type WorkspaceOwner } from "../workspace";
 import { CONTRACT_LIMITS, normalizeContractContent, signatureSlots, type ContractDocumentContent } from "./blocks";
 import { frozenContentHash, hashInvitationToken, looksLikeInvitationToken, newInvitationToken } from "./crypto";
@@ -1414,6 +1416,21 @@ export async function submitSignature(
     if (!result.progress.complete && row.signing_mode === "sequential") {
       await advanceSequential(row, result.after);
     }
+    if (result.progress.complete) {
+      // This is an outbox write, not push delivery; it is idempotent and its
+      // failure cannot undo the already-committed signature evidence.
+      await recordNotification({
+        businessId: row.business_id,
+        locationId: null,
+        eventKey: "contract.completed",
+        severity: "important",
+        title: "امضای قرارداد کامل شد",
+        body: `همهٔ امضاکنندگان قرارداد «${row.contract_title}» نسخهٔ ${row.version_number} را امضا کردند.`,
+        url: `/workspace/contracts/${row.contract_id}`,
+        dedupeKey: notificationDedupeKey("contract.completed", row.envelope_id),
+        payload: { contractId: row.contract_id, envelopeId: row.envelope_id, version: row.version_number },
+      });
+    }
 
     return {
       signedAt: new Date().toISOString(),
@@ -1492,6 +1509,49 @@ export async function declineSigningSession(
       row.signer_id,
     );
   });
+}
+
+export interface CompletedSignatureSlot {
+  fullName: string;
+  signedAt: string;
+  drawnImage: string | null;
+}
+
+/**
+ * Signature marks for the authorized print view. Only a completed envelope on
+ * this exact frozen version qualifies; drafts and partially signed rounds never
+ * paint signatures onto the document.
+ */
+export async function listCompletedSignatureSlots(
+  businessId: string,
+  contractId: string,
+  versionId: string,
+): Promise<Record<string, CompletedSignatureSlot>> {
+  const { rows } = await query<{
+    slot_id: string;
+    full_name: string;
+    signed_at: Date;
+    drawn_image: string | null;
+  }>(
+    `SELECT sig.slot_id, sig.full_name, sig.signed_at, sig.drawn_image
+       FROM contract_signing_envelopes e
+       JOIN contract_signatures sig
+         ON sig.envelope_id = e.id AND sig.business_id = e.business_id
+      WHERE e.business_id = $1 AND e.contract_id = $2
+        AND e.document_version_id = $3 AND e.status = 'completed'
+      ORDER BY e.completed_at DESC NULLS LAST, sig.signed_at DESC`,
+    [businessId, contractId, versionId],
+  );
+  const signed: Record<string, CompletedSignatureSlot> = {};
+  for (const row of rows) {
+    if (signed[row.slot_id]) continue;
+    signed[row.slot_id] = {
+      fullName: row.full_name,
+      signedAt: formatJalali(row.signed_at, { withTime: true }),
+      drawnImage: row.drawn_image,
+    };
+  }
+  return signed;
 }
 
 /** The receipt a signer can keep: their own view of a completed signature. */

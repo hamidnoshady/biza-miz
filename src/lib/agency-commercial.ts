@@ -653,6 +653,66 @@ export function revisedContractValueRial(
   return revised < 0 ? null : revised;
 }
 
+/* ------------------------------------------------------------------------- */
+/* P&L arithmetic, pure                                                        */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Pure: what a client still owes on a project's pass-through, from the two ledger
+ * sums.
+ *
+ * Null when *both* are null, because that is "nothing has posted on this project" and
+ * not "the client owes nothing" — the same distinction `AgencyCommercialPosted` draws,
+ * and the one a P&L nobody can defend usually gets wrong. Once either sum exists the
+ * answer is arithmetic, including a genuine zero, which then means the project's media
+ * has all been billed back.
+ */
+export function passThroughBalance(
+  spentRial: number | null,
+  rechargedRial: number | null,
+): number | null {
+  if (spentRial === null && rechargedRial === null) return null;
+  return (spentRial ?? 0) - (rechargedRial ?? 0);
+}
+
+/**
+ * Pure: posted revenue per contracted hour, or null until both are known.
+ *
+ * A whole-Rial answer, rounded halves away from zero, because money in this product is
+ * integer Rial and a per-hour figure printed with decimals would invite a reader to
+ * treat it as a rate somebody set. It is a *ratio of two different bases* — posted
+ * revenue over booked hours — so it is null rather than zero whenever either is
+ * unknown, and a screen has to label the bases or the number reads as an hourly rate.
+ */
+export function revenuePerContractedHour(
+  revenueRial: number | null,
+  contractedHours: number | null,
+): number | null {
+  if (revenueRial === null || contractedHours === null) return null;
+  if (!Number.isFinite(contractedHours) || contractedHours <= 0) return null;
+  return Math.round(revenueRial / contractedHours);
+}
+
+/**
+ * Pure: contracted hours from a schedule's milestones.
+ *
+ * Null when no milestone states hours, rather than 0. The two mean different things —
+ * a fixed-price engagement has no hours to report, while a schedule that stated hours
+ * and totalled none would be a data error — and a P&L that prints 0 for the first is
+ * claiming somebody estimated the work at nothing.
+ *
+ * Non-finite and negative values are skipped rather than summed: `hours` is a numeric
+ * column, so it can hold a fraction, and a negative hour is a keystroke that must not
+ * quietly reduce a total.
+ */
+export function sumContractedHours(hours: readonly (number | null | undefined)[]): number | null {
+  const known = hours.filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
+  if (known.length === 0) return null;
+  return known.reduce((sum, value) => sum + value, 0);
+}
+
 /* ===========================================================================
  * The actions each chain offers, and which of them are determinations
  * -------------------------------------------------------------------------
@@ -859,6 +919,67 @@ export interface AgencyCommercialPosted {
   actualCostRial: number | null;
 }
 
+/**
+ * The client's money this project handled — §D's first sentence, "track media spend
+ * and subcontractor/production cost separately from agency service fees".
+ *
+ * Read from account **1270** on the project's entries, which is where a
+ * net-presentation cost lands and where its recharge clears it. Every figure is
+ * deliberately **outside** `AgencyCommercialPosted` and therefore outside the margin,
+ * and the reason is the whole of §D's net presentation: this is not the agency's money.
+ * Counting a client's media buy as an expense would destroy the margin of every agency
+ * that buys media in a client's name, and counting its recovery as revenue would
+ * inflate theirs — the same error in both directions at once.
+ *
+ * A gross-presentation cost never appears here: it debits 5197, an expense account, and
+ * is already inside `actualCostRial`. So `spentRial` and `actualCostRial` are disjoint
+ * by construction, and together they are the two halves §D asks to be tracked
+ * separately.
+ */
+export interface AgencyPassThroughFigures {
+  /** Client money the agency spent on this project (1270 debits). */
+  spentRial: number | null;
+  /** Client money it has billed back (1270 credits — wave 11's recharge). */
+  rechargedRial: number | null;
+  /**
+   * Still to bill back: `spent - recharged`, or null while nothing has posted. This is
+   * the project's share of what the client owes, and it is a *derived* figure over the
+   * same two ledger sums, so voiding a recharge invoice raises it again without
+   * anything being written anywhere.
+   */
+  unrechargedRial: number | null;
+}
+
+/**
+ * §D's "hours/cost" — and the honest limit of what this product can say about it.
+ *
+ * `contractedHours` is real: `agency_billing_milestones.hours` is what a milestone
+ * bills for, so summing the schedule's hours is a *booked* figure with a source. Null
+ * when no milestone states hours, which is not the same as zero — an engagement billed
+ * at a fixed price has no hours to report, and printing 0 would claim it was estimated
+ * at nothing.
+ *
+ * `actualHours` is typed `null` and not `number | null` on purpose. Nothing in this
+ * product records hours worked: there is no timesheet, no time tracking and no
+ * resource schedule (§B's scheduling is a calendar, not a clock). The type says so, so
+ * a screen cannot render it as 0 and cannot grow a number without somebody changing
+ * this interface deliberately — at which point the question "where did that number come
+ * from" has to be answered.
+ */
+export interface AgencyHoursFigures {
+  /** Sum of the milestones' contracted hours; null when none states any. */
+  contractedHours: number | null;
+  /** Always null, and typed that way: nothing records hours worked. */
+  actualHours: null;
+  /**
+   * Posted revenue per contracted hour, or null until both are known. A *booked*
+   * denominator with a *posted* numerator, and labelled as such at the call site: it
+   * answers "what did the hours we sold turn into", which is a real question and not
+   * the same as "what did an hour of work earn".
+   */
+  revenuePerContractedHourRial: number | null;
+}
+
 export interface AgencyCommercialReport {
   booked: AgencyCommercialBooked;
   posted: AgencyCommercialPosted;
@@ -866,6 +987,16 @@ export interface AgencyCommercialReport {
   grossMarginRial: number | null;
   /** Margin as a percent of posted revenue; null when either is unknown. */
   grossMarginPercent: number | null;
+  /**
+   * The client's money handled on this project, reported beside the margin and never
+   * inside it. Added by wave 13: before it, a net-presentation agency's project P&L
+   * was *correct* and silent — 1270 is an asset, so the type-based revenue and cost
+   * sums both skipped it, and the media the agency bought for a client appeared
+   * nowhere on the project.
+   */
+  passThrough: AgencyPassThroughFigures;
+  /** §D's hours/cost, with the gap stated rather than filled. */
+  hours: AgencyHoursFigures;
 }
 
 /**

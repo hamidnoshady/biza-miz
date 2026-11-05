@@ -64,8 +64,14 @@ draft of this branch drifted there (`ip_address`, `cancel_reason`, a missing
 Dependency-free, so the editor, the print view, the receipt and the public
 signing page all render the same document the same way:
 
-* block types: heading, paragraph, article, bullets, numbered, table, divider,
-  page break, signature placement;
+* block types: heading, paragraph, article, conditional clause, repeating payment
+  schedule, bullets, numbered, table, divider, page break, signature placement;
+* conditional clauses bind to a declared field and use exact equality/inequality
+  or a checkbox condition; the same renderer omits a false clause in the frozen
+  signer view;
+* repeating schedules generate monthly, quarterly, semiannual or annual due
+  dates with month-end preservation (up to 120 rows) and repeat a literal or
+  resolved per-installment amount in both preview and frozen rendering;
 * variables: `{{key}}`, substituted only through `renderTemplate`, never string
   concatenation;
 * `normalizeContractContent` is the trust boundary for anything off the wire:
@@ -78,8 +84,14 @@ signing page all render the same document the same way:
 ## 3. Autofill and lineage — `src/lib/contracts/bindings.ts`
 
 `CONTRACT_BINDING_CATALOGUE` is the **allow-list** of values a contract may
-disclose (contract terms, project, party, business identity) and the same list
-the editor offers. Resolution reports where each value came from:
+disclose (contract terms, project, party, business identity, and AEC commercial
+facts linked to that exact authorized contract) and the same list the editor
+offers. AEC bindings read approved variations/certificates and the contract
+commercial block only; they do not enumerate unrelated projects. Accounting
+bindings use the canonical project report (approved project budget, posted cost,
+and budget variance) and are blank unless the caller has `ledger.view` and can
+see the contract's project. They do not expose revenue or journal-line details.
+Resolution reports where each value came from:
 `binding | override | literal | empty`, keeps `boundValue` when the sender typed
 over a record, and `changedBindings` turns a source that moved after review into
 a `stale` flag on the field.
@@ -87,21 +99,33 @@ a `stale` flag on the field.
 ## 4. Services and API
 
 * `src/lib/contracts/service.ts` — the draft, template library, freezing,
-  duplication, and the binding context. Freezing resolves every variable first
+  duplication, and the binding context. Contract-linked AEC commercial terms,
+  approved variations and certified certificates are allow-listed as per-field
+  bindings; reads are scoped by the authorized contract and business, not a
+  caller-supplied project id. Accounting bindings use `projectReport` and require
+  `ledger.view`; without that permission they resolve empty.
+  Freezing resolves every variable first
   and refuses while any required value is empty; a frozen version stores the
   resolved strings inside its own JSON, so the printed contract stops moving at
   the moment it acquires a hash.
 * `src/lib/contracts/signing.ts` — envelopes, signers, invitations, delivery, and
-  the whole public session (consent → OTP → signature → receipt).
+  the whole public session (consent → OTP → signature → receipt). When the last
+  required signer commits, it queues the deduped `contract.completed` event in
+  the existing notifications outbox; Phase 35 owns delivery, and a notification
+  failure never rolls back signature evidence.
 * `src/lib/contracts/crypto.ts` — canonical-JSON SHA-256 and the HMAC-hashed
   invitation token. The plaintext token exists only in the message that carried
   it.
+* `src/lib/contracts/import.ts` — DOCX/PDF → blocks (§4a). Pure: bytes and a file
+  name in, blocks plus warnings out. No database, no storage, no clock, so it is
+  tested against in-memory fixtures.
 
 | route | verbs | authority |
 |---|---|---|
 | `/api/workspace/contracts/[id]/document` | GET, PUT | `workspace.view` / `workspace.contracts_manage` + `resolveWorkspaceSubject(edit)` |
 | `/api/workspace/contracts/[id]/document/versions` | GET, POST | same |
 | `/api/workspace/contracts/[id]/document/template` | POST | same |
+| `/api/workspace/contracts/[id]/document/import` | POST (multipart, one file) | same — and it does **not** write |
 | `/api/workspace/contracts/[id]/signing` | GET, PUT, POST | same |
 | `/api/workspace/contract-templates` | GET, POST, DELETE | view / contracts_manage |
 | `/api/workspace/contracts` | POST (+`templateRef`, `duplicateOf`) | contracts_manage |
@@ -112,13 +136,63 @@ doors. It is listed in `PUBLIC_PATHS`, behind the same Origin check as the
 login mutations, and justified in `api-guards.test.ts` `PUBLIC_ROUTES`. Every id
 it acts on is resolved **from the token**, never accepted from the request.
 
+## 4a. Importing an existing Word or PDF document
+
+`src/lib/contracts/import.ts` + `POST …/document/import`. The epic asks for
+"import DOCX/PDF"; the honest version of that is *read the document, produce
+editable blocks, and say exactly what could not be carried over* — not a button
+that uploads a file and implies a perfect copy.
+
+**DOCX.** The archive is opened with the same bounded inflation the AI
+attachment reader uses (`openBoundedZip` / `inflateBoundedEntry`, exported from
+`ai-office-extract.ts` for this second caller so there is one inflate guard
+rather than two that can drift), then `word/document.xml` is walked as a tree:
+headings (a `Heading*`/`Title` style or an outline level), paragraphs, bulleted
+and numbered lists — read through `word/numbering.xml`, so a bulleted list does
+not come back numbered — tables (first row = header, which is what the block
+model requires) and page breaks. Bold/italic runs, colour, images, headers,
+footnotes, comments and tracked changes are dropped **and reported**.
+
+**PDF.** A text-layer reader, not OCR. FlateDecode streams are unwrapped and
+glyph codes are mapped through each font's `ToUnicode` CMap — without that, a
+modern Persian PDF (Identity-H: two bytes per glyph) yields nothing readable.
+A scanned page has no text and no CMap, so the import refuses with
+`pdf_no_text_layer` rather than returning an empty document: an import that
+silently produces nothing is worse than an error, because the sender would
+freeze and send a blank contract.
+
+**Three decisions worth stating:**
+
+1. **The route does not write.** It returns blocks plus warnings; the editor
+   puts them on the canvas as an ordinary edit (undoable, dirty, autosaved)
+   through the existing `PUT …/document` with the revision it already holds. One
+   write path means import cannot bypass the 409 `document_conflict` guarantee.
+2. **The file is not stored.** No media asset, no temp file, no second document
+   store: the bytes are parsed and dropped. Filing the original would make
+   import depend on object storage being configured, which would fail on a fresh
+   install for a reason unrelated to import. What is signed is the contract's own
+   frozen version, and that is the record.
+3. **No variables are invented.** Word cannot say which words were meant to be
+   `{{counterparty_name}}`, and a guessed field is a blank a signer would meet at
+   signing time. The imported document has `fields: []` and the sender binds them
+   in the inspector.
+
+Limits enforced before a parser sees the bytes: 5 MB per file, ≤ 500 archive
+entries, ≤ 20 MB per inflated part (and the whole archive bounded the same way),
+and the declared MIME type is never trusted — the format comes from the magic
+bytes, so a PDF announced as a `.docx` is read as a PDF and the mismatch comes
+back as a warning (the sender may simply have attached the wrong file).
+
 ## 5. Screens
 
 * `/workspace/contracts` — the existing list; each title links to its document.
 * `/workspace/contracts/[id]` — two tabs: **سند** (the three-panel builder) and
   **امضا و ارسال** (signers, delivery, timeline), tab in the URL (`?tab=signing`).
 * `/workspace/contracts/[id]/print` — A4 print/PDF of the newest frozen version,
-  falling back to the draft with unresolved variables marked.
+  falling back to the draft with unresolved variables marked. Once its envelope
+  is completed, the print view overlays each signer's drawn mark, name and
+  Shamsi timestamp in the assigned signature slot and prints the full version
+  hash; the browser can save this view as PDF.
 * `/sign/[token]` — the external signatory's page: frozen document → explicit
   consent → phone OTP → drawn signature → receipt with the content hash.
 
@@ -127,26 +201,32 @@ canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
 
 ## 6. Honest gaps (what this branch does NOT claim)
 
-1. **DOCX/PDF import** is not implemented. There is no parser in this change and
-   no button pretending there is. Contracts start blank, from a built-in
-   template, from a saved template, or as a duplicate.
-2. **Notifications on completion** are not wired to the notifications subsystem;
-   the timeline and the sender's screen show the state, but no message is pushed.
-3. **Settings/AEC autofill sources** are limited to the catalogue in
-   `bindings.ts` (contract, project, party, business). AEC commercial terms and
-   the CRM party file are covered through the project/party projections; there is
-   no per-field AEC binding yet.
-4. **`npm run test:db` proves this migration locally, but CI still has to run it.**
-   `integration/contract-signing.integration.test.ts` (20 tests) runs the whole
-   flow against a real PostgreSQL: it creates a throwaway database, applies all
-   420 migrations, seeds nothing but the party/project rows the contract binds to,
-   and then exercises freezing, tenant isolation under an unprivileged role,
-   append-only evidence, parallel and sequential rounds, consent → OTP →
-   signature, link rotation and post-signature draft edits. Results are in §6a;
+1. **DOCX/PDF import is partial by design** (§4a). Word styling, images,
+   headers/footnotes and tracked changes are dropped; a PDF contributes text
+   only (no columns, no tables, no styling), and a scanned PDF is refused rather
+   than imported blank. Signature placements are never auto-detected — the
+   sender adds them, because a guessed signing line is a document that cannot be
+   sent. The upload is not archived.
+2. **Durable final-PDF generation and verification QR** are not implemented.
+   The authorized print view now includes signatures from a completed envelope
+   and its full hash, and the browser can save it as PDF; there is not yet a
+   server-generated immutable PDF asset, QR verification flow or Media Library
+   archive.
+3. **Legal retention policy and legal hold** still require an approved policy and
+   jurisdictional review; no retention duration or evidence purge has been
+   invented. The append-only evidence must not be silently deleted.
+4. **The signing integration is part of the required database CI gate.**
+   Locally, `integration/contract-signing.integration.test.ts` passes 23 tests
+   against a real PostgreSQL: it creates a throwaway database, applies all
+   471 migrations and seeds only the required party/project rows. It exercises
+   AEC/Accounting bindings, conditional clauses and schedules, freezing, tenant
+   isolation under an unprivileged role, append-only evidence, parallel and
+   sequential rounds, consent → OTP → signature, link rotation and post-signature
+   draft edits. Results are in §6a;
    the green run here does not replace the CI job.
 5. **`npm run build` was not executed** here (the sandbox has 3 GB and the
-   previous full `tsc` run exhausted it); a scoped `tsc --noEmit` over every file
-   this branch touches passes, and the full `vitest` suite passes.
+   previous full `tsc` run exhausted it); CI's production build remains the
+   authoritative build check.
 
 ## 6a. What the database suite found
 

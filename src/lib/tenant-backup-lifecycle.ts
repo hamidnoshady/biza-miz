@@ -43,7 +43,7 @@
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { query, withoutTenantScope } from "./db";
+import { query, withTenant, withoutTenantScope } from "./db";
 import { getBackupConfig, tenantBackupDir } from "./backup-service";
 import { deploymentRole } from "./deployment-role";
 import { readDeploymentProfile } from "./deployment-mode";
@@ -401,18 +401,23 @@ export async function runBackupLifecycleTick(now: Date = new Date()): Promise<Li
   const total = emptyOutcome();
   for (const businessId of await businessesWithArtifacts()) {
     try {
-      const verified = await verifyPendingCloudCopies(businessId, now);
-      total.verified += verified.verified;
-      total.verifyFailed += verified.verifyFailed;
-
-      const reclaimed = await reclaimCloudStagedLocalCopies(businessId);
-      total.reclaimed += reclaimed.reclaimed;
-      total.reclaimedBytes += reclaimed.reclaimedBytes;
-
-      const expired = await expireDueArtifacts(businessId, now);
-      total.expired += expired.expired;
-      total.protectedSkipped += expired.protectedSkipped;
-      total.failedRemovals += expired.failedRemovals;
+      // Every pass below reads and writes tenant-scoped rows, so it must run in
+      // that business's RLS scope. Without this the tick *looks* wired but every
+      // statement sees zero rows on a real deployment — the scheduler would run
+      // forever and never verify, reclaim or expire anything.
+      const outcome = await withTenant(businessId, async () => {
+        const verified = await verifyPendingCloudCopies(businessId, now);
+        const reclaimed = await reclaimCloudStagedLocalCopies(businessId);
+        const expired = await expireDueArtifacts(businessId, now);
+        return { verified, reclaimed, expired };
+      });
+      total.verified += outcome.verified.verified;
+      total.verifyFailed += outcome.verified.verifyFailed;
+      total.reclaimed += outcome.reclaimed.reclaimed;
+      total.reclaimedBytes += outcome.reclaimed.reclaimedBytes;
+      total.expired += outcome.expired.expired;
+      total.protectedSkipped += outcome.expired.protectedSkipped;
+      total.failedRemovals += outcome.expired.failedRemovals;
     } catch (error) {
       console.error(
         `backup lifecycle: tick failed for business ${businessId}:`,

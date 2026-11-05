@@ -7,6 +7,13 @@
  * check, the single-instance lock is taken *after* the storage location is
  * final, and the installer carries the fuses/appId/uninstall-cleanup the issue
  * asked for.
+ *
+ * Issue #1194 tightened the first edge from "the probe is gated" to "the probe
+ * does not exist": the account-creation code, the mock cloud activation
+ * service and every `DESKTOP_SMOKE_*` trigger are gone from `main.js`, from
+ * the packaged file list and from the server child's environment. The packaged
+ * acceptance harness now drives the installed executable over HTTP from
+ * outside, and it is deliberately not in `build.files`.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -42,12 +49,32 @@ function nsisGuidFor(appId: string): string {
 }
 
 describe("the shipped main process has no smoke backdoor", () => {
-  it("neither defines the probe nor carries its hardcoded password", () => {
-    expect(mainJs).not.toMatch(/function\s+runSmokeProbe/);
-    expect(mainJs).not.toContain("Packaged-Test-Password");
-    expect(mainJs).toContain('require("./smoke-probe")');
-    // The probe is reached only in smoke mode.
-    expect(mainJs).toMatch(/if \(process\.env\.DESKTOP_SMOKE_MARKER\) \{\s*\n\s*\/\//);
+  it("contains no test-mode trigger, probe, mock activation or hardcoded credential", () => {
+    // Issue #1194 — not "gated", absent. A non-secret environment switch must
+    // never be able to turn a signed install into a test harness.
+    for (const source of [mainJs, backendManager]) {
+      expect(source).not.toContain("DESKTOP_SMOKE");
+      expect(source).not.toMatch(/runSmokeProbe|startMockCloudActivation|mayBootstrap/);
+      expect(source).not.toContain("Packaged-Test-Password");
+      expect(source).not.toContain("smoke-probe");
+    }
+    expect(existsSync(path.join(root, "electron", "smoke-probe.js"))).toBe(false);
+  });
+
+  it("spawns the server child without a test-loopback opt-in", () => {
+    // The old shell forwarded DESKTOP_SMOKE_MARKER to the server together with
+    // LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK=1, which is what let the
+    // packaged build redeem a plain-HTTP loopback "cloud". Neither may be set
+    // by the shell any more.
+    expect(backendManager).not.toContain("LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK");
+  });
+
+  it("ships an external acceptance harness that is not part of the package", () => {
+    expect(existsSync(path.join(root, "electron", "scripts", "smoke-packaged.js"))).toBe(true);
+    expect(desktopManifest.build.files).not.toContain("scripts/smoke-packaged.js");
+    expect(desktopManifest.build.files).not.toContain("smoke-packaged.js");
+    // The harness must not be reachable through a wildcard either.
+    expect(desktopManifest.build.files.filter((entry) => entry.includes("*"))).toEqual([]);
   });
 });
 
@@ -156,9 +183,10 @@ describe("installer configuration", () => {
       "permissions.js",
       "print-target-guard.js",
       "server-supervisor.js",
-      "smoke-probe.js",
     ]) {
       expect(desktopManifest.build.files, file).toContain(file);
     }
+    // Issue #1194 — the probe is not part of the payload at all.
+    expect(desktopManifest.build.files).not.toContain("smoke-probe.js");
   });
 });

@@ -203,6 +203,30 @@ jobs:
       - name: Require valid expected-signer Authenticode and RFC3161 timestamps
         run: .\scripts\verify-windows-signatures.ps1 -ArtifactRoot electron\dist -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath windows-signature-verification.json
 
+      - name: Release scan - signed payload carries no test bootstrap or Central privileges
+        # Issue #1194 - the acceptance criterion is about the SIGNED release
+        # bytes. This unpacks the signed installer with 7-Zip, scans the exact
+        # application payload it installs (app.asar + desktop runtime), and
+        # fails on any test bootstrap marker, smoke credential, Central
+        # platform route, seed credential or private key.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem electron/dist -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1
+          if (-not $installer) { throw "Signed installer missing before the release scan" }
+          node scripts/scan-desktop-release.mjs `
+            --payload=electron/dist/win-unpacked `
+            --installer="$($installer.FullName)" `
+            --output=desktop-release-scan.json `
+            --require-installer-extraction
+
+      - name: Upload release scan evidence
+        if: always() && hashFiles('desktop-release-scan.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: business-suite-windows-${{ inputs.version }}-release-scan
+          path: desktop-release-scan.json
+          if-no-files-found: error
+
       - name: Assert packaged Electron and Node.js support posture
         run: .\scripts\verify-packaged-electron-runtime.ps1 -ArtifactRoot electron\dist\win-unpacked -OutputPath packaged-electron-runtime.json
 
@@ -357,6 +381,7 @@ jobs:
             release-evidence.json
             release-readiness.json
             release-readiness.md
+            desktop-release-scan.json
             desktop-size-report.md
             windows-size-gate.json
 
@@ -378,5 +403,6 @@ jobs:
             release-provenance.json
             release-readiness.json
             release-readiness.md
+            desktop-release-scan.json
             desktop-size-report.md
             windows-size-gate.json

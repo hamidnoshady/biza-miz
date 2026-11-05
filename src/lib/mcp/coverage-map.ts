@@ -795,7 +795,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "workspace.contracts",
     module: "Workspace",
     entity: "Contracts & lifecycle",
-    routes: ["workspace/contracts"],
+    // Exact `!` on the register itself: the document/signing subroutes belong to
+    // `workspace.contract-documents` below, and the DOCX/PDF import route there
+    // must not be read as a bulk operation on the contract register (it writes
+    // nothing — the editor saves through the ordinary document PUT).
+    routes: [
+      "workspace/contracts!",
+      "workspace/contracts/[id]!",
+      "workspace/contracts/[id]/lifecycle!",
+    ],
     ops: {
       listDetail: ["list_expiring_contracts", "get_workspace_contract"],
       create: ["contract.create"],
@@ -865,7 +873,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Accounting",
     entity: "Reimbursable client costs (media, print and production spent on a client's behalf)",
     routes: ["agency/reimbursable-costs"],
-    note: "issue #1128 §D: pass-through and reimbursable client costs versus agency-owned expenses, and the first thing in the product that can post to account 1270 — seeded in wave 1 and unreachable for eight waves, because the expense path refuses asset accounts and §D forbids an ad hoc journal entry. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion, and one of them has to stay a gap: `presentation` is §D's gross-versus-net choice, which the issue says must follow chosen business accounting policy and «must not be inferred solely from spend» — so a tool that guessed it from the size of a line or the presence of a vendor name would be performing exactly the forbidden inference, and moving money between cost of sale and a claim on a client is not a draft a human rubber-stamps. Three more things a future tool must keep: a posted row is frozen except its note, because the amount, the presentation and the settlement decided which two accounts the entry landed in and the register may not contradict the ledger — the correction is a reversal and a new record; the entry is dated the day the money was *spent*, not the day it was recorded, because a member files a platform invoice days after the platform charged the card; and the recharge side does not exist yet, so 1270 can only accumulate — crediting it before anything debited it would drive an asset to a credit balance and report a negative claim on a client",
+    note: "issue #1128 §D: pass-through and reimbursable client costs versus agency-owned expenses, and the first thing in the product that can post to account 1270 — seeded in wave 1 and unreachable for eight waves, because the expense path refuses asset accounts and §D forbids an ad hoc journal entry. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion, and one of them has to stay a gap: `presentation` is §D's gross-versus-net choice, which the issue says must follow chosen business accounting policy and «must not be inferred solely from spend» — so a tool that guessed it from the size of a line or the presence of a vendor name would be performing exactly the forbidden inference, and moving money between cost of sale and a claim on a client is not a draft a human rubber-stamps. The gap is narrower now that the business-level policy exists (`…/policy`): a tool MAY read the policy the business adopted and pre-fill a new cost from it, because applying a choice somebody made is the opposite of inferring one from spend — what it must not do is choose silently, or save the policy itself, since that write decides whether the next media buy debits 1270 or 5197 and rides `finance.expenses_manage` with an audit row naming who moved it. Three more things a future tool must keep: a posted row is frozen except its note, because the amount, the presentation and the settlement decided which two accounts the entry landed in and the register may not contradict the ledger — the correction is a reversal and a new record; the entry is dated the day the money was *spent*, not the day it was recorded, because a member files a platform invoice days after the platform charged the card; and the recharge is a separate verb on the collection (`POST …/recharge`) that needs BOTH `ordersCreate` and `financeExpensesManage`, because it draws down the cost register and produces a sales invoice, and either permission alone would let a member act on a register they cannot read or raise a document they cannot invoice. A recharge is whole-or-nothing and one client at a time; it credits 1270 and recognises no revenue and no VAT, so what it clears is the claim and not a sale; and whether it happened is DERIVED from the invoice's live status rather than stored, because voiding an invoice reverses the entry and flips the order without touching this register, and a stored flag would be a second answer that disagrees with the ledger the first time somebody voided one",
     test: "integration/agency-reimbursable-costs.integration.test.ts",
   },
   {
@@ -1002,7 +1010,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       listDetail: ["get_backup_status"],
       lifecycle: ["backup.restore.apply"],
     },
-    note: "Issue #903 §3 removed the create/update verbs: backup creation, scheduling and retention are Superadmin-only, so the tenant lane is status + verified restore. Restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lane stays route-only",
+    note: "Issue #903 §3 removed the create/update verbs: backup creation, scheduling and retention are Superadmin-only, so the tenant lane is status + verified restore. Restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lanes — the site restore file, and on managed profiles the uploaded copy plus its signed-manifest import (issue #903 §2 item 4) — stay route-only because both carry a file upload no chat-side verb can complete",
     test: "integration/backup.integration.test.ts",
   },
   {

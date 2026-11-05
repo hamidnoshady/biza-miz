@@ -284,4 +284,72 @@ check( ! POS_Connector_Health::probe_id_is_valid( str_repeat( 'a', 32 ) . "\n" )
 check( ! POS_Connector_Health::probe_id_is_valid( '' ), 'an empty id is refused' );
 check( ! POS_Connector_Health::probe_id_is_valid( null ), 'and so is a non-string' );
 
+// --- P1: measured latency percentiles --------------------------------------
+//
+// The p95 ≤ 3-minute target is only ever *reported* from samples like these
+// (`POS_Connector_Queue::delivery_latency()` feeds them enqueue → accepted
+// lags). Nearest-rank, no interpolation: a percentile the operator reads is
+// a duration some real event actually experienced.
+
+same( null, POS_Connector_Health::percentiles( array() ), 'no samples is «no data», never zeros' );
+same( null, POS_Connector_Health::percentiles( array( -5, 'junk', null ) ), 'samples that cannot be ordered do not become evidence' );
+
+$one = POS_Connector_Health::percentiles( array( 42 ) );
+same( 1, $one['samples'], 'one sample is counted as one' );
+same( 42.0, $one['p95'], 'and is its own p95' );
+
+$hundred = POS_Connector_Health::percentiles( range( 100, 1 ) );
+same( 100, $hundred['samples'], 'unsorted input is sorted before ranking' );
+same( 50.0, $hundred['p50'], 'p50 of 1..100 is 50 (nearest rank)' );
+same( 95.0, $hundred['p95'], 'p95 of 1..100 is a real sample: 95' );
+same( 99.0, $hundred['p99'], 'p99 of 1..100 is 99' );
+same( 100.0, $hundred['max'], 'and the max is the slowest event, kept visible' );
+
+$skewed = POS_Connector_Health::percentiles( array_merge( array_fill( 0, 19, 30 ), array( 900 ) ) );
+same( 20, $skewed['samples'], 'a healthy store with one bad quarter-hour' );
+same( 30.0, $skewed['p50'], 'median stays where most events were' );
+same( 30.0, $skewed['p95'], 'p95 of 20 ranks the 19th — the outlier does not poison it' );
+same( 900.0, $skewed['max'], 'but the outlier is still reported as the max' );
+
+$mixed = POS_Connector_Health::percentiles( array( -10, 0, '15', 15.4, 'x' ) );
+same( 3, $mixed['samples'], 'negative (clock-skew) and non-numeric samples are dropped, zero is kept' );
+same( 15.0, $mixed['p50'], 'and numeric strings from the database rank normally' );
+
+// --- UX-02: Jalali-facing timestamps ---------------------------------------
+//
+// Vectors are cross-checked against ICU's astronomical Persian calendar
+// (`Intl.DateTimeFormat('fa-IR-u-ca-persian')`), including both kinds of
+// year boundary and a Gregorian leap day. If the arithmetic converter ever
+// disagrees with ICU inside a store's plausible date range, that is a bug
+// to surface here, not a label to shrug at.
+
+$vectors = array(
+	array( 2026, 10, 31, 1405, 8, 9 ),
+	array( 2026, 11, 2, 1405, 8, 11 ),
+	array( 2026, 11, 3, 1405, 8, 12 ),
+	array( 2024, 2, 29, 1402, 12, 10 ),
+	array( 2024, 3, 19, 1402, 12, 29 ),
+	array( 2024, 3, 20, 1403, 1, 1 ),
+	array( 2025, 3, 21, 1404, 1, 1 ),
+	array( 2000, 3, 20, 1379, 1, 1 ),
+	array( 2000, 1, 1, 1378, 10, 11 ),
+	array( 1979, 2, 11, 1357, 11, 22 ),
+	array( 2030, 1, 1, 1408, 10, 12 ),
+	array( 2023, 12, 31, 1402, 10, 10 ),
+	array( 2026, 3, 20, 1404, 12, 29 ),
+	array( 2026, 3, 21, 1405, 1, 1 ),
+);
+foreach ( $vectors as $v ) {
+	same(
+		array( $v[3], $v[4], $v[5] ),
+		POS_Connector_Health::gregorian_to_jalali( $v[0], $v[1], $v[2] ),
+		sprintf( 'gregorian %04d-%02d-%02d is jalali %d-%02d-%02d', $v[0], $v[1], $v[2], $v[3], $v[4], $v[5] )
+	);
+}
+
+same( '۱۱ آبان ۱۴۰۵', POS_Connector_Health::jalali_date_label( 2026, 11, 2 ), 'the label a Persian operator reads: day, month name, year, Persian digits' );
+same( '۱ فروردین ۱۴۰۳', POS_Connector_Health::jalali_date_label( 2024, 3, 20 ), 'nowruz formats as the first of farvardin, not a zero-padded triple' );
+same( '۱۴۰۵-۰۸-۱۱ ۱۷:۴۵', POS_Connector_Health::persian_digits( '1405-08-11 17:45' ), 'digits convert, punctuation does not move' );
+same( 'abc', POS_Connector_Health::persian_digits( 'abc' ), 'text without digits is untouched' );
+
 printf( "%d cron-truth-policy assertions passed\n", $assertions );

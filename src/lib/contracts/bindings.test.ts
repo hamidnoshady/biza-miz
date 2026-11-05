@@ -93,6 +93,8 @@ describe("the binding catalogue", () => {
       "پروژه",
       "طرف حساب",
       "کسب‌وکار",
+      "اطلاعات پیمان (AEC)",
+      "حسابداری",
     ]);
   });
 });
@@ -109,6 +111,65 @@ describe("resolveBindings", () => {
       boundValue: "شرکت الف",
       bindingSupported: true,
     });
+  });
+
+  it("resolves authorized AEC commercial values with lineage, formatting money and detecting source changes", () => {
+    const aec = {
+      ...emptyBindingContext().aec,
+      revisedValueRial: "1250000000",
+      advancePercent: "20",
+      advanceAmountRial: "250000000",
+      retentionPercent: "10",
+      paymentTerms: "صورت‌وضعیت ماهانه",
+      defectsLiabilityMonths: "12",
+      approvedVariationsRial: "50000000",
+      certifiedAmountRial: "300000000",
+      guaranteeType: "ضمانت‌نامه بانکی",
+      guaranteeReference: "G-123",
+      guaranteeAmountRial: "100000000",
+      guaranteeExpiry: "2027-03-21",
+      insuranceReference: "I-456",
+      insuranceExpiry: "2027-04-02",
+    };
+    const fields = [
+      field({ key: "revised", type: "money", binding: { source: "aec", path: "revised_value" } }),
+      field({ key: "terms", type: "multiline", binding: { source: "aec", path: "payment_terms" } }),
+      field({ key: "guarantee_expiry", type: "date", binding: { source: "aec", path: "guarantee_expiry" } }),
+    ];
+    const first = resolveBindings(content(fields), context({ aec }), {
+      formatMoney: (rial) => `${rial} ریال`,
+      formatDate: (iso) => `تاریخ ${iso}`,
+    });
+    expect(first.values).toMatchObject({
+      revised: "1250000000 ریال",
+      terms: "صورت‌وضعیت ماهانه",
+      guarantee_expiry: "تاریخ 2027-03-21",
+    });
+    expect(first.fields[0]).toMatchObject({ provenance: "binding", boundValue: "1250000000 ریال" });
+    const second = resolveBindings(content(fields), context({ aec: { ...aec, revisedValueRial: "1300000000" } }), {
+      formatMoney: (rial) => `${rial} ریال`,
+      formatDate: (iso) => `تاریخ ${iso}`,
+    });
+    expect(changedBindings(first.values, second.values)).toContain("revised");
+  });
+
+  it("resolves accounting bindings supplied by the authorized project context", () => {
+    const accounting = {
+      projectBudgetRial: "900000000",
+      postedCostRial: "925000000",
+      budgetVarianceRial: "-25000000",
+    };
+    const resolved = resolveBindings(content([
+      field({ key: "budget", type: "money", binding: { source: "accounting", path: "project_budget" } }),
+      field({ key: "posted_cost", type: "money", binding: { source: "accounting", path: "posted_cost" } }),
+      field({ key: "variance", type: "money", binding: { source: "accounting", path: "budget_variance" } }),
+    ]), context({ accounting }), { formatMoney: (rial) => `${rial} ریال` });
+    expect(resolved.values).toEqual({
+      budget: "900000000 ریال",
+      posted_cost: "925000000 ریال",
+      variance: "-25000000 ریال",
+    });
+    expect(resolved.fields.every((field) => field.provenance === "binding")).toBe(true);
   });
 
   it("prefers a manual value but keeps the bound value beside it", () => {

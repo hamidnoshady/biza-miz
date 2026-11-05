@@ -83,8 +83,13 @@ import {
   type AgencyCommercialBooked,
   type AgencyCommercialPosted,
   type AgencyCommercialReport,
+  type AgencyHoursFigures,
+  type AgencyPassThroughFigures,
   type AgencyMilestoneKind,
   type AgencyMilestoneStatus,
+  passThroughBalance,
+  revenuePerContractedHour,
+  sumContractedHours,
 } from "./agency-commercial";
 import { businessToday } from "./business-day-service";
 import { query, withTenantTransaction } from "./db";
@@ -95,6 +100,7 @@ import {
   createRetailInvoice,
   type CreateRetailInvoiceTenderInput,
 } from "./retail-invoice-service";
+import { WELL_KNOWN_CODES } from "./coa-template";
 import { SERVICE_DESCRIPTION_MAX_LENGTH } from "./service-invoice";
 import { resolveActiveLocationForUser } from "./setup-state";
 import { getBusinessVatPercent } from "./vat-policy-service";
@@ -485,18 +491,41 @@ async function loadInvoiceFigures(
 async function loadPostedFigures(
   businessId: string,
   projectId: string,
-): Promise<{ entries: number; revenueRial: number; actualCostRial: number }> {
-  const { rows } = await query<{ entries: string; revenue_rial: string; cost_rial: string }>(
+): Promise<{
+  entries: number;
+  revenueRial: number;
+  actualCostRial: number;
+  passThroughSpentRial: number;
+  passThroughRechargedRial: number;
+}> {
+  const { rows } = await query<{
+    entries: string;
+    revenue_rial: string;
+    cost_rial: string;
+    spent_rial: string;
+    recharged_rial: string;
+  }>(
     `SELECT count(DISTINCT e.id)::text AS entries,
             COALESCE(sum(CASE WHEN a.type = 'revenue' THEN l.credit - l.debit ELSE 0 END), 0) AS revenue_rial,
-            COALESCE(sum(CASE WHEN a.type = 'expense' THEN l.debit - l.credit ELSE 0 END), 0) AS cost_rial
+            COALESCE(sum(CASE WHEN a.type = 'expense' THEN l.debit - l.credit ELSE 0 END), 0) AS cost_rial,
+            -- Pass-through is read by *code* where revenue and cost are read by type,
+            -- and the asymmetry is deliberate: 1270 is one specific account the chart
+            -- template seeds, not a category, so there is nothing to be robust about.
+            -- Its two directions are summed separately rather than netted, because both
+            -- are events a member needs to see — how much client money this project
+            -- handled, and how much of it has been billed back — and netting them into
+            -- one balance would answer only the second.
+            COALESCE(sum(CASE WHEN a.code = $3 THEN l.debit ELSE 0 END), 0) AS spent_rial,
+            COALESCE(sum(CASE WHEN a.code = $3 THEN l.credit ELSE 0 END), 0) AS recharged_rial
        FROM journal_entries e
        JOIN journal_lines l ON l.entry_id = e.id
        JOIN accounts a ON a.id = l.account_id
       WHERE e.business_id = $1 AND e.project_id = $2`,
-    [businessId, projectId],
+    [businessId, projectId, WELL_KNOWN_CODES.agencyReimbursableClientCost],
   );
   return {
+    passThroughSpentRial: money(rows[0]?.spent_rial),
+    passThroughRechargedRial: money(rows[0]?.recharged_rial),
     // Whether the ledger holds anything at all on this project. Without it the
     // two sums cannot tell "nothing has posted yet" from "this campaign earned
     // nothing and cost nothing" — both arrive as zero — and `AgencyCommercialPosted`
@@ -722,10 +751,35 @@ export async function loadAgencyCommercial(
     actualCostRial: nothingPosted ? null : postedLedger.actualCostRial,
   };
 
+  // §D's "track media spend … separately from agency service fees". These three are
+  // outside `posted` and therefore outside the margin, because 1270 is an asset: the
+  // money belongs to the client and merely passed through the agency's hands. A
+  // gross-presentation cost never reaches here at all — it debits 5197 and is already
+  // inside `actualCostRial` — so the two figures are disjoint by construction.
+  const passThrough: AgencyPassThroughFigures = {
+    spentRial: nothingPosted ? null : postedLedger.passThroughSpentRial,
+    rechargedRial: nothingPosted ? null : postedLedger.passThroughRechargedRial,
+    unrechargedRial: nothingPosted
+      ? null
+      : passThroughBalance(postedLedger.passThroughSpentRial, postedLedger.passThroughRechargedRial),
+  };
+
+  // §D's "hours/cost". Contracted hours come from the schedule; worked hours come from
+  // nowhere, because nothing in this product records them, and the type of `actualHours`
+  // says so rather than leaving a zero to be mistaken for a measurement.
+  const contractedHours = sumContractedHours(milestones.map((milestone) => milestone.hours));
+  const hours: AgencyHoursFigures = {
+    contractedHours,
+    actualHours: null,
+    revenuePerContractedHourRial: revenuePerContractedHour(posted.revenueRial, contractedHours),
+  };
+
   const report: AgencyCommercialReport = {
     booked,
     posted,
     ...commercialMargin(posted.revenueRial, posted.actualCostRial),
+    passThrough,
+    hours,
   };
 
   return { projectId, engagement, milestones, schedule, changeRequests, report };

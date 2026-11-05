@@ -141,6 +141,18 @@ export interface StockedLineSnapshot extends RetailInvoiceLineSnapshotBase {
 export interface ServiceLineSnapshot extends RetailInvoiceLineSnapshotBase {
   kind: "service";
   revenueCode: string;
+  /**
+   * Issue #1128 §D — present and true when the line recovers money the agency
+   * advanced on the client's behalf rather than selling work, so `revenueCode` is
+   * then **1270, an asset**, and the line is *not* revenue.
+   *
+   * The field's name says "revenue" and its docblock says "which revenue it was",
+   * which is exactly why this discriminator has to exist: a report or a reprint that
+   * summed `revenueCode` without checking this would count a client's own media money
+   * as the agency's sales. Absent on every line written before this, so the old rows
+   * need no migration and no backfill — `undefined` and `false` both mean "a sale".
+   */
+  passThrough?: true;
 }
 
 export type RetailInvoiceLineSnapshot =
