@@ -994,6 +994,38 @@ async function maybeCatchUpCloud(businessId: string, config: BackupConfig): Prom
 // Scheduler ticks
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether this business's mirror is the platform's decision rather than a legacy
+ * tenant flag.
+ *
+ * §1 says a Cloud business is stored on managed storage *only*, and a Hybrid one
+ * on managed storage plus an optional local copy. That is the platform's policy,
+ * so it must not depend on `config.cloud.enabled` — a tenant-era switch the
+ * owner decision removed from the tenant's reach. Leaving the mirror behind that
+ * flag meant a managed Cloud tenant whose legacy field was never set took every
+ * backup locally and mirrored it only on the *next* non-due tick, through
+ * `maybeCatchUpCloud`, so for one interval its only copy sat on the app server.
+ *
+ * The profile is resolved server-side and `resolveTenantStorage` answers
+ * `unavailable` for a Local installation, so this can never create the outbound
+ * path §1 forbids: Full Offline stays Full Offline no matter what the fleet row
+ * says.
+ */
+async function managedMirrorDestination(
+  businessId: string,
+  config: Awaited<ReturnType<typeof getBackupConfig>>,
+): Promise<boolean> {
+  const { profile } = await readDeploymentProfile(businessId);
+  if (profile === "local") return false;
+  const storage = await resolveTenantStorage({
+    businessId,
+    profile,
+    role: deploymentRole(),
+    legacyCloud: config.cloud,
+  });
+  return storage.mode === "managed";
+}
+
 /** One schedule check for one business, shared by both deployment roles. */
 async function tickBusiness(businessId: string): Promise<void> {
   // Issue #903 §3 (owner decision): the schedule is the platform's, not the
@@ -1022,7 +1054,7 @@ async function tickBusiness(businessId: string): Promise<void> {
       isFailedRunRetryDue(last?.started_at ?? null, last?.status ?? null, now, schedule, timeZone)
     ) {
       const local = await runLocalBackup(businessId, "scheduled");
-      if (local.status === "ok" && config.cloud.enabled) {
+      if (local.status === "ok" && (config.cloud.enabled || (await managedMirrorDestination(businessId, config)))) {
         const upload = await runCloudUpload(businessId, local.artifact, "scheduled");
         if (upload.status === "failed") {
           const heartbeat = await readHeartbeat(businessId);

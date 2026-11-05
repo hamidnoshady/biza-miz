@@ -910,10 +910,10 @@ This suite does not restate them.
 - **The mirror path registers the cloud copy `ready` on the upload's payload
   hash**, so it never enters the `verifying` queue; `pendingVerificationCount` is
   `0` for it. The bytes are therefore proved by the verifier or by a drill, not
-  by the nightly verify pass. If the owner wants a scheduled re-read of mirrored
-  objects (bit rot, a bad replica), the change is to register the mirror
-  `verifying` and let the pass promote it — that also delays Cloud's reclaim by
-  up to one tick, which is a product decision, not a bug fix.
+  by the verifier, by a drill, or by the **drift sweep** (below). Registering the
+  mirror `verifying` instead was the other option and was rejected: it would
+  delay Cloud's reclaim by a tick and keep two copies of every tenant's data on
+  the app server, which §1 forbids for Cloud.
 - **A Local profile's logical artifact has no apply path**, so its drill reports
   `restore_preview` failed with `artifact_unavailable_offline` while
   `report.ok` is true for the steps the platform can prove. That is the honest
@@ -924,8 +924,9 @@ This suite does not restate them.
 
 ### Still open after this increment
 
-Scheduled re-verification of mirrored cloud objects (above), and the
-`config.cloud.enabled` observation recorded at the end of this document.
+Nothing from this increment. Both items — scheduled re-verification of mirrored
+cloud objects and the `config.cloud.enabled` gate — were delivered later; see
+"the drift sweep and one gate for the mirror" at the end of this document.
 
 ## Billing: why `backupUseChargeDecision()` is not wired (§3, §7)
 
@@ -952,16 +953,13 @@ Its sibling **is** wired: `legacyPrechargeReconciliation()` backs
 this policy for an attempt that failed or never verified — exactly once, keyed by
 `settlementKey(…, "refund")`.
 
-**One observation left unfixed.** `tickBusiness` (`backup-service.ts`) lets the
-tick proceed when `config.enabled || managedSchedule`, but uploads the artifact it
-just took only when the tenant's legacy `config.cloud.enabled` flag is set — two
-gates for one decision. The consequence is a delay rather than a hole: on a
-managed **Cloud** tenant whose legacy flag was never set, the backup is taken
-locally now and mirrored on the *next* non-due tick, because `maybeCatchUpCloud`
-resolves the managed destination itself and explicitly mirrors regardless of that
-flag. Aligning the two gates is a scheduler behaviour change (it starts outbound
-uploads in the tick that also takes the backup, for tenants who never opted in),
-so it is reported here for an owner decision rather than changed.
+**Was an observation, now fixed.** `tickBusiness` (`backup-service.ts`) used to
+let the tick proceed when `config.enabled || managedSchedule`, but upload the
+artifact it had just taken only when the tenant's legacy `config.cloud.enabled`
+flag was set — two gates for one decision, so a managed Cloud tenant whose legacy
+field was never set kept its only copy on the app server for a whole interval and
+mirrored on the *next* non-due tick through `maybeCatchUpCloud`. The mirror now
+follows the resolved **destination** instead: see the last increment.
 
 ## Increment: restoring from a file the platform never wrote (§2 item 4, §6)
 
@@ -1053,3 +1051,64 @@ receipt sees what was proved rather than being told "restored".
 claim proved against a populated, production-shaped database — the integration
 suite runs on a fresh one — and media/website capture, which is §8's gap rather
 than §5's.
+
+## Increment: the drift sweep, and one gate for the mirror (§1, §7)
+
+Two behaviours were recorded here as deliberate rather than fixed, each with a
+condition attached. The conditions are met without loosening either guarantee.
+
+**1. Cloud copies are re-read on a schedule (`reverifyReadyCloudCopies`).**
+
+A mirrored cloud copy registers `ready` on the upload's own payload hash, which is
+the right moment to promote it — waiting to re-download every object before
+reclaiming the local twin would either delay that reclaim or keep two copies of
+every tenant's data on the app server, and §1 forbids the second. The cost was
+that a mirror never enters the `verifying` queue, so nothing would notice bit rot,
+a truncated object or a hand-edited bucket until a restore asked for the bytes.
+
+The lifecycle tick now has a fourth pass. Every cloud copy that has not been read
+in `REVERIFY_AFTER_MS` (a week) is re-fetched and re-verified, least recently
+proved first, at most `REVERIFY_BATCH` (2) per business per tick:
+
+- **intact** → re-marked `ready`, which refreshes `verified_at` and puts it at the
+  back of the queue for another week;
+- **drifted** → `failed` with the verifier's own code (`artifact_checksum_mismatch`,
+  `archive_signature_invalid`, …), so the inventory stops offering it, the drill
+  fails honestly, and the console can say *this copy is gone* instead of the Owner
+  finding out during a restore;
+- **unreachable** → left alone. A bucket outage must not mark the whole fleet
+  `failed`; the next tick retries;
+- **inside its retention window** → skipped, because `expireDueArtifacts` is about
+  to delete it and downloading it first buys nothing.
+
+A week is a deliberate trade: the sweep downloads the whole object again, so its
+value is in being cheap enough to keep forever, not in being frequent. It reuses
+the existing verifier and adds no new state — `verified_at` already existed and
+was already what "proved" meant.
+
+**2. The mirror follows the destination, not the tenant's old switch
+(`managedMirrorDestination`).**
+
+`tickBusiness` took the backup when `config.enabled || managedSchedule` but
+uploaded it only when `config.cloud.enabled` was set — a tenant-era boolean the
+owner decision removed from the tenant's reach. On a managed Cloud business whose
+legacy field was never set, the backup was taken locally and mirrored a tick
+later, so for one interval the platform held the only copy of that business's
+data on its own disk — the shape §1 exists to prevent.
+
+The mirror now runs when the *resolved destination* is the platform's managed
+storage: the profile is read server-side, and `resolveTenantStorage` answers
+`unavailable` for a Local installation before it looks at anything else. A Local
+business therefore still makes no outbound call no matter what the fleet row or
+the legacy flag says, and the acceptance suite asserts exactly that in the same
+tick that proves the Cloud mirror now happens immediately.
+
+**Validation.** Unit: `reverifyReadyCloudCopies` ×8 (due/not-due/never-proved,
+drift → `failed` with the verifier's code, provider outage leaves the row, batch
+bound plus least-recently-proved ordering, retention skip, local rows untouched)
+and the lifecycle suite at 33. Integration, on PostgreSQL 18 with the RLS app role
+and a path-style S3 stand-in that can be made to store damaged bytes: bit rot on a
+`ready` copy is caught by the sweep (state `failed`, `artifact_checksum_mismatch`,
+drill fails) and a managed Cloud backup now mirrors inside the same
+`runTenantSnapshotTick()` while the Local business in that tick still receives no
+cloud row — the acceptance suite is 12/12.

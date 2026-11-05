@@ -432,6 +432,31 @@ describe("Cloud: a backup reaches managed storage, is proved by a drill, and lea
   }, 120_000);
 });
 
+describe("the scheduler mirrors in the tick that takes the backup", () => {
+  it("uploads a managed Cloud backup even when the legacy tenant flag is off", async () => {
+    // `backupConfig()` leaves `cloud.enabled` false on purpose: that switch is the
+    // tenant-era one the owner decision removed from the tenant's reach. §1 says a
+    // Cloud business is stored on managed storage *only*, so the mirror must
+    // follow the platform's policy, not that flag — otherwise the only copy sits
+    // on the app server for a whole interval, waiting for `maybeCatchUpCloud`.
+    await asTenant(bizA.id, () => svc.setBackupConfig(bizA.id, backupConfig()));
+    await svc.runTenantSnapshotTick();
+
+    const rows = await seed.query<{ destination: string; state: string }>(
+      "SELECT destination, state FROM tenant_backup_artifacts WHERE business_id = $1",
+      [bizA.id],
+    );
+    expect(rows.rows).toContainEqual({ destination: "cloud", state: "ready" });
+    // …and nothing reached the network for the Local business in the same tick.
+    const local = await seed.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM tenant_backup_artifacts
+        WHERE business_id = $1 AND destination = 'cloud'`,
+      [bizB.id],
+    );
+    expect(local.rows[0].n).toBe("0");
+  }, 180_000);
+});
+
 describe("corruption: damage that happened after the upload is never restored", () => {
   it("refuses a copy whose stored bytes no longer match the manifest", async () => {
     const artifact = await takeLocalBackup(bizA.id);
@@ -456,6 +481,75 @@ describe("corruption: damage that happened after the upload is never restored", 
     );
     expect(report.ok).toBe(false);
     expect(report.steps.find((step) => step.step === "payload_decrypted")?.status).toBe("failed");
+  }, 120_000);
+});
+
+describe("bit rot on a copy that was already proved good", () => {
+  it("is caught by the drift sweep instead of by the restore", async () => {
+    const artifact = await takeLocalBackup(bizA.id);
+    const upload = await asTenant(bizA.id, () => svc.runCloudUpload(bizA.id, artifact, "manual"));
+    expect(upload.status).toBe("ok");
+    // A mirror registers `ready` on the upload's own payload hash, so the first
+    // tick has nothing to promote — its job here is to reclaim the staged twin.
+    const first = await lifecycle.runBackupLifecycleTick(new Date());
+    expect(first.verified).toBe(0);
+    expect(first.reclaimed).toBeGreaterThanOrEqual(1);
+
+    // The copy is `ready`, the staged local twin is gone (Cloud keeps nothing on
+    // the app server), and nothing is queued for verification — this is the state
+    // every managed Cloud backup sits in for the rest of its retention.
+    const cloudRef = refs.tenantBackupArtifactRef(bizA.id, "cloud", artifact);
+    expect((await asTenant(bizA.id, () => artifacts.tenantBackupInventory(bizA.id, {
+      profile: "cloud",
+      connectivity: "online",
+    }))).items.find((item) => item.ref === cloudRef)?.restorable).toBe(true);
+
+    // A week passes without the object being read.
+    await seed.query(
+      `UPDATE tenant_backup_artifacts
+          SET verified_at = now() - interval '30 days'
+        WHERE business_id = $1 AND destination = 'cloud'`,
+      [bizA.id],
+    );
+    let swept = await lifecycle.runBackupLifecycleTick(new Date());
+    expect(swept.driftDetected).toBe(0);
+    expect(swept.reverified).toBeGreaterThanOrEqual(1);
+
+    // Now the bucket rots, and the next sweep is what notices — before any
+    // restore asks for the bytes.
+    await seed.query(
+      `UPDATE tenant_backup_artifacts
+          SET verified_at = now() - interval '30 days'
+        WHERE business_id = $1 AND destination = 'cloud'`,
+      [bizA.id],
+    );
+    damageStoredObject(artifact);
+    swept = await lifecycle.runBackupLifecycleTick(new Date());
+    expect(swept.driftDetected).toBe(1);
+    expect(swept.reverified).toBe(0);
+
+    // The row stopped claiming to be restorable, and says why, so the console and
+    // the Owner's inventory agree that this copy is gone rather than discovering
+    // it at restore time.
+    const row = await seed.query<{ state: string; failure_code: string | null }>(
+      "SELECT state, failure_code FROM tenant_backup_artifacts WHERE business_id = $1 AND destination = 'cloud'",
+      [bizA.id],
+    );
+    expect(row.rows[0]).toEqual({ state: "failed", failure_code: "artifact_checksum_mismatch" });
+    const report = await asTenant(bizA.id, () =>
+      drill.runDrill({
+        businessId: bizA.id,
+        deployment: { role: "central", profile: "cloud" },
+        requiredSteps: [
+          "artifact_selected",
+          "artifact_ready",
+          "payload_decrypted",
+          "archive_parsed",
+          "restore_preview",
+        ],
+      }),
+    );
+    expect(report.ok).toBe(false);
   }, 120_000);
 });
 
