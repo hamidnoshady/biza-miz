@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronLeftIcon, RefreshCwIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 
@@ -138,6 +139,12 @@ export function PluginLocalQueuePage({ connectionId, canSync }: { connectionId: 
     },
     [connectionId],
   );
+
+  // The first read reserves the control's own shape, so the card never jumps
+  // when the answer arrives.
+  if (!state && !error) {
+    return <LoadingSkeleton rows={1} compact label="در حال خواندن وضعیت صف افزونه" className="mt-2" />;
+  }
 
   // An older plugin (or a REST connection) has no paging protocol: the parent
   // only mounts this control for a plugin that advertised it, but a route
