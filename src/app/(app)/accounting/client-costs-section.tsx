@@ -517,19 +517,22 @@ export function ClientCostsSection({
           </EmptyState>
         ) : (
           <DataTable caption="فهرست هزینه‌های بازدریافتی از کارفرما" frame={false}>
+            {/* `DataTableHead` renders the `<tr>` itself — it takes `<th>` children. */}
             <DataTableHead>
-              <tr>
-                {canRecharge ? <th scope="col"><span className="sr-only">انتخاب</span></th> : null}
-                <th scope="col">شماره</th>
-                <th scope="col">کارفرما</th>
-                <th scope="col">پروژه</th>
-                <th scope="col">شرح</th>
-                <th scope="col">مبلغ</th>
-                <th scope="col">تاریخ</th>
-                <th scope="col">نحوهٔ پرداخت</th>
-                <th scope="col">حساب بدهکار</th>
-                <th scope="col">بازدریافت</th>
-              </tr>
+              {canRecharge ? (
+                <th scope="col">
+                  <span className="sr-only">انتخاب</span>
+                </th>
+              ) : null}
+              <th scope="col">شماره</th>
+              <th scope="col">کارفرما</th>
+              <th scope="col">پروژه</th>
+              <th scope="col">شرح</th>
+              <th scope="col">مبلغ</th>
+              <th scope="col">تاریخ</th>
+              <th scope="col">نحوهٔ پرداخت</th>
+              <th scope="col">حساب بدهکار</th>
+              <th scope="col">بازدریافت</th>
             </DataTableHead>
             <DataTableBody>
               {(costs ?? []).map((row) => {

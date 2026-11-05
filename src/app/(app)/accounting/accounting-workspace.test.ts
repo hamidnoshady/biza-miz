@@ -111,6 +111,37 @@ describe("the Accounting workspace menu", () => {
     }
   });
 
+  // Issue #1128 §D — the agency's reimbursable-cost register gets a group of its
+  // own rather than a slot in «عملیات»: a dealership's vehicles are what it sells,
+  // whereas an agency's operations are its projects and campaigns, which live in
+  // the CRM and Workspace. Pinned in both directions, because the group's whole
+  // claim is that it exists for one trade and for no other.
+  it("has no agency group for a business whose nav does not carry one", () => {
+    // BUSINESS_NAV is the café's. An empty group is suppressed, so the group
+    // cannot appear for a trade that has no such page — and cannot invent an
+    // entry the shell never gated in.
+    const groups = groupsFor("owner");
+    expect(groups.map((group) => group.key)).not.toContain("agency");
+    expect(accountingWorkspaceHrefs(groups)).not.toContain(
+      ACCOUNTING_WORKSPACE_HREFS.clientCosts,
+    );
+  });
+
+  it("adopts the agency's cost register into its own group", () => {
+    const groups = groupsFor("owner", [
+      ...BUSINESS_NAV,
+      { label: "هزینه‌های کارفرما", href: ACCOUNTING_WORKSPACE_HREFS.clientCosts },
+    ]);
+    const agency = groups.find((group) => group.key === "agency");
+    expect(agency, "the agency group must appear once its page is in the nav").toBeDefined();
+    expect(agency?.label).toBe("امور آژانس");
+    expect(agency?.entries.map((entry) => entry.href)).toEqual([
+      ACCOUNTING_WORKSPACE_HREFS.clientCosts,
+    ]);
+    // Adopted, never re-declared: the label the member sees is the nav's own.
+    expect(agency?.entries[0].label).toBe("هزینه‌های کارفرما");
+  });
+
   it("keeps «فضای کار حسابداری» as ONE ordinary link in the same menu position", () => {
     const groups = groupsFor("owner");
     const ledger = groups.find((group) => group.key === LEDGER_WORKSPACE_GROUP_KEY);
