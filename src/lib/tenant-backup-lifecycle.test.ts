@@ -51,11 +51,14 @@ vi.mock("./tenant-backup-storage", () => ({
 
 import { logicalSnapshotScopeTag } from "./backup-policy";
 import {
+  REVERIFY_AFTER_MS,
+  REVERIFY_BATCH,
   VERIFY_BATCH,
   expireDueArtifacts,
   localArtifactPath,
   reclaimCloudStagedLocalCopies,
   removeArtifactBytes,
+  reverifyReadyCloudCopies,
   runBackupLifecycleTick,
   verifyPendingCloudCopies,
 } from "./tenant-backup-lifecycle";
@@ -72,6 +75,7 @@ interface Row {
   state: string;
   retentionUntil: string | null;
   storedBytes: number | null;
+  verifiedAt: string | null;
 }
 
 function row(patch: Partial<Row> = {}): Row {
@@ -83,6 +87,7 @@ function row(patch: Partial<Row> = {}): Row {
     state: "ready",
     retentionUntil: null,
     storedBytes: 1024,
+    verifiedAt: null,
     ...patch,
   };
 }
@@ -99,6 +104,7 @@ function serve(rows: Row[]) {
           state: entry.state,
           retention_until: entry.retentionUntil ? new Date(entry.retentionUntil) : null,
           stored_bytes: entry.storedBytes === null ? null : String(entry.storedBytes),
+          verified_at: entry.verifiedAt ? new Date(entry.verifiedAt) : null,
         })),
         rowCount: rows.length,
       };
@@ -344,6 +350,80 @@ describe("verifyPendingCloudCopies", () => {
     serve([cloud({ retentionUntil: "2026-01-01T00:00:00.000Z" })]);
     const result = await verifyPendingCloudCopies("business-a", now);
     expect(result.verified).toBe(0);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("reverifyReadyCloudCopies", () => {
+  const cloud = (patch: Partial<Row> = {}) =>
+    row({ destination: "cloud", state: "ready", retentionUntil: "2027-01-01T00:00:00.000Z", ...patch });
+
+  it("re-reads a ready copy that has not been proved in a week, and keeps it ready", async () => {
+    serve([cloud({ verifiedAt: new Date(now.getTime() - REVERIFY_AFTER_MS - 1000).toISOString() })]);
+    const result = await reverifyReadyCloudCopies("business-a", now);
+    expect(result).toEqual({ reverified: 1, driftDetected: 0 });
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    // Still `ready` — but re-marking it moves `verified_at`, which is what takes
+    // the row out of the queue for another week.
+    expect(mocks.markState).toHaveBeenCalledWith("business-a", "row-1", { state: "ready", failureCode: null });
+  });
+
+  it("leaves a copy alone until a week has passed", async () => {
+    serve([cloud({ verifiedAt: new Date(now.getTime() - 60 * 60 * 1000).toISOString() })]);
+    const result = await reverifyReadyCloudCopies("business-a", now);
+    expect(result).toEqual({ reverified: 0, driftDetected: 0 });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("treats a copy that was never proved as due", async () => {
+    serve([cloud({ verifiedAt: null })]);
+    const result = await reverifyReadyCloudCopies("business-a", now);
+    expect(result.reverified).toBe(1);
+  });
+
+  it("takes a drifted copy out of the restorable set with the verifier's own code", async () => {
+    mocks.verify.mockResolvedValue({ ok: false, error: "artifact_checksum_mismatch" });
+    serve([cloud({ verifiedAt: new Date(now.getTime() - REVERIFY_AFTER_MS - 1000).toISOString() })]);
+    const result = await reverifyReadyCloudCopies("business-a", now);
+    expect(result).toEqual({ reverified: 0, driftDetected: 1 });
+    expect(mocks.markState).toHaveBeenCalledWith("business-a", "row-1", {
+      state: "failed",
+      failureCode: "artifact_checksum_mismatch",
+    });
+  });
+
+  it("leaves the row alone when the provider cannot be read, so one outage does not fail the fleet", async () => {
+    mocks.fetch.mockResolvedValue({ ok: false, error: "artifact_fetch_failed" });
+    serve([cloud({ verifiedAt: new Date(now.getTime() - REVERIFY_AFTER_MS - 1000).toISOString() })]);
+    const result = await reverifyReadyCloudCopies("business-a", now);
+    expect(result).toEqual({ reverified: 0, driftDetected: 0 });
+    expect(mocks.markState).not.toHaveBeenCalled();
+  });
+
+  it("reads the least recently proved copies first, and only a batch of them", async () => {
+    const old = new Date(now.getTime() - REVERIFY_AFTER_MS - 10_000).toISOString();
+    const older = new Date(now.getTime() - REVERIFY_AFTER_MS - 90_000).toISOString();
+    serve([
+      cloud({ id: "r1", artifactId: "a1", verifiedAt: old }),
+      cloud({ id: "r2", artifactId: "a2", verifiedAt: older }),
+      cloud({ id: "r3", artifactId: "a3", verifiedAt: old }),
+    ]);
+    await reverifyReadyCloudCopies("business-a", now);
+    expect(mocks.fetch).toHaveBeenCalledTimes(REVERIFY_BATCH);
+    expect(mocks.markState.mock.calls[0][1]).toBe("r2");
+  });
+
+  it("does not re-download a copy retention is about to delete", async () => {
+    serve([cloud({ verifiedAt: null, retentionUntil: "2026-01-01T00:00:00.000Z" })]);
+    const result = await reverifyReadyCloudCopies("business-a", now);
+    expect(result.reverified).toBe(0);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("never touches a local copy — there is no drift to catch without a bucket", async () => {
+    serve([row({ destination: "local", state: "ready", verifiedAt: null })]);
+    const result = await reverifyReadyCloudCopies("business-a", now);
+    expect(result.reverified).toBe(0);
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 });

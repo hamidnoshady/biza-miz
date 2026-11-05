@@ -19,7 +19,7 @@
  * records the removal, it never crosses the protected-copy floor, and it refuses
  * to claim a deletion that did not happen.
  *
- * The three passes, in the order they run:
+ * The four passes, in the order they run:
  *
  * ```text
  * verify    promoting `verifying` cloud rows by re-reading the object, bounded
@@ -27,6 +27,11 @@
  *           always promised and nothing performed. A transient provider failure
  *           leaves the row alone (the next tick retries); only bytes that
  *           arrived and failed their own checks turn a row `failed`.
+ * drift     re-read a sample of cloud copies that are already `ready` and have
+ *           not been read in a week, because a copy proved good once is not
+ *           proved good now. Transient provider failures are left for the next
+ *           tick; only bytes that arrived and failed their own checks move a row
+ *           to `failed`.
  * reclaim   Cloud + managed storage only: once a cloud copy is `ready`, the
  *           local twin's bytes and row are removed. The backup itself does not
  *           disappear — same `artifact_id`, still restorable — so this is the
@@ -62,6 +67,25 @@ import { fetchCloudArtifact } from "./tenant-backup-transport";
 /** Cloud rows are re-read at most this many per business per tick. */
 export const VERIFY_BATCH = 2;
 
+/**
+ * How long a cloud copy may go unread before the drift sweep re-reads it.
+ *
+ * A mirrored cloud copy is registered `ready` on the upload's own payload hash,
+ * which is the right moment to promote it — waiting to re-download every object
+ * before reclaiming the local twin would either delay that reclaim by a tick or
+ * keep two copies of every tenant's data on the app server. The cost of that
+ * decision is that the cloud copy never enters the `verifying` queue, so nothing
+ * would notice bit rot, a truncated object or a bucket someone edited by hand
+ * until the day a restore failed. This is the pass that notices.
+ *
+ * A week, not an hour: the sweep downloads the whole object again, so its value
+ * is in being cheap enough to keep forever rather than in being frequent.
+ */
+export const REVERIFY_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Already-`ready` cloud copies re-read per business per tick. */
+export const REVERIFY_BATCH = 2;
+
 /** States whose bytes may still be on disk and are therefore sweepable. */
 const SWEEPABLE: ReadonlyArray<StoredArtifactRow["state"]> = ["ready", "verifying", "failed"];
 
@@ -69,6 +93,10 @@ export interface LifecycleOutcome {
   /** Cloud rows promoted to `ready` (or failed) by re-reading the object. */
   verified: number;
   verifyFailed: number;
+  /** `ready` cloud copies re-read by the drift sweep and still intact. */
+  reverified: number;
+  /** `ready` cloud copies whose stored bytes no longer match what was signed. */
+  driftDetected: number;
   /** Cloud backups whose staged local twin was removed (§1). */
   reclaimed: number;
   reclaimedBytes: number;
@@ -84,6 +112,8 @@ function emptyOutcome(): LifecycleOutcome {
   return {
     verified: 0,
     verifyFailed: 0,
+    reverified: 0,
+    driftDetected: 0,
     reclaimed: 0,
     reclaimedBytes: 0,
     expired: 0,
@@ -174,6 +204,8 @@ interface LifecycleRow {
   state: StoredArtifactRow["state"];
   retentionUntil: string | null;
   storedBytes: number | null;
+  /** When the bytes were last read back and proved, or null if never. */
+  verifiedAt: string | null;
 }
 
 interface LifecycleDbRow extends Record<string, unknown> {
@@ -184,11 +216,12 @@ interface LifecycleDbRow extends Record<string, unknown> {
   state: StoredArtifactRow["state"];
   retention_until: Date | null;
   stored_bytes: string | null;
+  verified_at: Date | null;
 }
 
 async function lifecycleRows(businessId: string): Promise<LifecycleRow[]> {
   const { rows } = await query<LifecycleDbRow>(
-    `SELECT id, artifact_id, destination, storage_ref, state, retention_until, stored_bytes
+    `SELECT id, artifact_id, destination, storage_ref, state, retention_until, stored_bytes, verified_at
        FROM tenant_backup_artifacts
       WHERE business_id = $1
       ORDER BY captured_at ASC`,
@@ -202,6 +235,7 @@ async function lifecycleRows(businessId: string): Promise<LifecycleRow[]> {
     state: row.state,
     retentionUntil: row.retention_until ? row.retention_until.toISOString() : null,
     storedBytes: row.stored_bytes === null ? null : Number(row.stored_bytes),
+    verifiedAt: row.verified_at ? row.verified_at.toISOString() : null,
   }));
 }
 
@@ -330,6 +364,73 @@ export async function verifyPendingCloudCopies(
 }
 
 /**
+ * Re-read cloud copies that are already `ready`, and notice when they stopped
+ * being the bytes the platform signed.
+ *
+ * `verifyPendingCloudCopies` settles a *new* upload. This is the other half:
+ * an object that was proved good six months ago is not proved good today, and a
+ * restore is the worst possible moment to find out. The row keeps its
+ * `artifact_id` and history; only its state moves — back to the end of the queue
+ * on success (`verified_at` is refreshed), to `failed` with the verifier's own
+ * code when the stored bytes no longer match.
+ *
+ * Deliberately conservative about what it *cannot* see:
+ *
+ *  • a provider that cannot be read is a transient, so the row is left alone and
+ *    the next tick retries — turning a bucket outage into `failed` would destroy
+ *    every good backup in the fleet at once;
+ *  • a copy inside its retention window is skipped, because `expireDueArtifacts`
+ *    is about to delete it and downloading it first buys nothing;
+ *  • the batch is bounded per business per tick, so one large fleet cannot turn a
+ *    scheduler wake into an unbounded download.
+ */
+export async function reverifyReadyCloudCopies(
+  businessId: string,
+  now: Date = new Date(),
+  limit: number = REVERIFY_BATCH,
+): Promise<Pick<LifecycleOutcome, "reverified" | "driftDetected">> {
+  const result = { reverified: 0, driftDetected: 0 };
+  const due = (await lifecycleRows(businessId))
+    .filter(
+      (row) =>
+        row.destination === "cloud" &&
+        row.state === "ready" &&
+        (row.verifiedAt === null || now.getTime() - Date.parse(row.verifiedAt) >= REVERIFY_AFTER_MS),
+    )
+    // Least recently proved first, so the queue rotates instead of re-reading
+    // the same newest backup forever.
+    .sort((a, b) => (a.verifiedAt ?? "").localeCompare(b.verifiedAt ?? ""))
+    .slice(0, Math.max(1, limit));
+  if (due.length === 0) return result;
+
+  const profile = (await readDeploymentProfile(businessId)).profile;
+  const role = deploymentRole();
+  const schemaVersion = await installedSchemaVersion();
+
+  for (const candidate of due) {
+    if (candidate.retentionUntil && Date.parse(candidate.retentionUntil) <= now.getTime()) continue;
+    const ref = tenantBackupArtifactRef(businessId, "cloud", candidate.storageRef);
+    const fetched = await fetchCloudArtifact({ businessId, ref, profile, role, suffix: "lifecycle-drift" });
+    if (!fetched.ok) continue;
+    try {
+      const verified = await verifyStoredArtifact(businessId, { ref, stagedPath: fetched.path, schemaVersion });
+      if (verified.ok) {
+        // Re-mark `ready`: the state is unchanged, but `verified_at` moves, which
+        // is what takes this row out of the queue for another week.
+        await markArtifactState(businessId, candidate.id, { state: "ready", failureCode: null });
+        result.reverified += 1;
+      } else {
+        await markArtifactState(businessId, candidate.id, { state: "failed", failureCode: verified.error });
+        result.driftDetected += 1;
+      }
+    } finally {
+      await fetched.cleanup().catch(() => undefined);
+    }
+  }
+  return result;
+}
+
+/**
  * Cloud deployments keep tenant backups **only** on managed storage (§1).
  *
  * Once the cloud copy is proved `ready`, the local twin is staging that outlived
@@ -407,12 +508,15 @@ export async function runBackupLifecycleTick(now: Date = new Date()): Promise<Li
       // forever and never verify, reclaim or expire anything.
       const outcome = await withTenant(businessId, async () => {
         const verified = await verifyPendingCloudCopies(businessId, now);
+        const drift = await reverifyReadyCloudCopies(businessId, now);
         const reclaimed = await reclaimCloudStagedLocalCopies(businessId);
         const expired = await expireDueArtifacts(businessId, now);
-        return { verified, reclaimed, expired };
+        return { verified, drift, reclaimed, expired };
       });
       total.verified += outcome.verified.verified;
       total.verifyFailed += outcome.verified.verifyFailed;
+      total.reverified += outcome.drift.reverified;
+      total.driftDetected += outcome.drift.driftDetected;
       total.reclaimed += outcome.reclaimed.reclaimed;
       total.reclaimedBytes += outcome.reclaimed.reclaimedBytes;
       total.expired += outcome.expired.expired;
