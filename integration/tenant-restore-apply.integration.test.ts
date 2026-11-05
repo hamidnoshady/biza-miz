@@ -356,6 +356,19 @@ describe("a central tenant-only restore", () => {
       bWallet: await walletBalance(bizB.id),
       bOwner: await owner("SELECT full_name, is_active FROM users WHERE id = $1", [bizB.ownerId]),
     };
+    const moneyBefore = (
+      await owner(
+        `SELECT (SELECT count(*)::int FROM wallet_ledger WHERE business_id = $1) AS ledger,
+                (SELECT count(*)::int FROM billing_usage_events WHERE business_id = $1) AS usage`,
+        [bizA.id],
+      )
+    ).rows[0] as { ledger: number; usage: number };
+    const platformBefore = (
+      await owner(
+        `SELECT (SELECT count(*)::int FROM platform_admins) AS admins,
+                (SELECT count(*)::int FROM platform_audit_log) AS audits`,
+      )
+    ).rows[0] as { admins: number; audits: number };
 
     const outcome = await applyFor(bizA.id, ref);
     expect(outcome.ok ? "ok" : JSON.stringify(outcome)).toBe("ok");
@@ -386,6 +399,27 @@ describe("a central tenant-only restore", () => {
 
     // §5 — the canonical wallet was not rewound to the backup's 500 000.
     expect(await walletBalance(bizA.id)).toBe("420000");
+
+    // §5 — and the *evidence* behind that balance survived too. Deleting
+    // `wallet_ledger` would leave a balance nothing explains; deleting
+    // `billing_usage_events` would let the next settlement re-charge a window
+    // whose idempotency key this restore had removed.
+    const money = await owner(
+      `SELECT (SELECT count(*)::int FROM wallet_ledger WHERE business_id = $1) AS ledger,
+              (SELECT count(*)::int FROM billing_usage_events WHERE business_id = $1) AS usage`,
+      [bizA.id],
+    );
+    expect(money.rows[0]).toEqual({ ledger: moneyBefore.ledger, usage: moneyBefore.usage });
+
+    // §5 — the platform realm is not tenant data: a tenant restore cannot mint,
+    // edit or delete a platform administrator, nor rewrite the platform audit
+    // trail. (`rls_proven` refuses a privileged role; this proves the opposite
+    // half — that a permitted role still cannot reach those rows.)
+    const realm = await owner(
+      `SELECT (SELECT count(*)::int FROM platform_admins) AS admins,
+              (SELECT count(*)::int FROM platform_audit_log) AS audits`,
+    );
+    expect(realm.rows[0]).toEqual(platformBefore);
 
     // The restore did not delete the inventory it was started from: the newest
     // backup is how the Owner undoes the restore.
@@ -423,6 +457,7 @@ describe("a central tenant-only restore", () => {
     expect(detail.checks.map((check) => check.code)).toEqual([
       "rls_proven",
       "owner_preserved",
+      "membership_reconciled",
       "accounting_balanced",
       "wallet_unchanged",
       "sync_fence_advanced",

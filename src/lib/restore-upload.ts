@@ -107,6 +107,16 @@ export async function appendRestoreChunk(
   return { ok: true, size: size + bytes.byteLength };
 }
 
+/**
+ * Where a staged upload would live, for the import path that copies it into the
+ * tenant's own storage. Returns a validated path even when nothing was uploaded:
+ * the caller stats it and reports a missing file, rather than trusting a path
+ * taken from the request.
+ */
+export function readRestoreUploadPath(scope: string, id: string, root = restoreUploadRoot()): string {
+  return uploadPath(scope, id, root);
+}
+
 /** The staged bytes, or null when there is no such upload in this scope. */
 export async function readRestoreUpload(
   scope: string,

@@ -37,6 +37,7 @@ import { FilterChip, FilterChipRow, SearchField } from "@/app/dashboard/filters"
 import { ErrorBox, InfoBox, api, inputClass } from "../ui";
 import { LoadingSkeleton } from "../page-chrome";
 import { StepUpPrompt } from "@/components/auth/step-up-prompt";
+import { RecoveryFilePanel } from "./recovery-file-panel";
 
 type ArtifactState = "ready" | "uploading" | "verifying" | "failed" | "expired" | "unavailable_offline";
 type ArtifactOrigin = "scheduled" | "manual" | "uploaded";
@@ -263,6 +264,25 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
     await load();
   }
 
+  /**
+   * Download is two steps on purpose (see `tenant-backup-transport.ts`): mint a
+   * short-lived, single-artifact ticket, then hand the browser to the URL that
+   * redeems it. The ticket — not the session cookie — authorises the bytes, so a
+   * relocated or retried download carries no ambient authority.
+   */
+  async function downloadPayload(ref: string) {
+    setPreviewError(null);
+    const ticket = await api<{ ticket?: string; error?: string }>(`/api/backup/artifacts/${ref}/download`, {
+      method: "POST",
+    });
+    if (!ticket.ok || !ticket.data.ticket) {
+      setPreviewError("دریافت این نسخه ممکن نشد. کمی بعد دوباره تلاش کنید.");
+      return;
+    }
+    const url = `/api/backup/artifacts/${ref}/download?ticket=${encodeURIComponent(ticket.data.ticket)}`;
+    window.location.assign(url);
+  }
+
   const summary = data?.summary;
   const localOnly = data?.profile === "local";
 
@@ -333,6 +353,15 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
 
           {previewError ? <ErrorBox>{previewError}</ErrorBox> : null}
 
+          {isOwner && !localOnly ? (
+            <RecoveryFilePanel
+              onImported={async (ref) => {
+                await load();
+                await openPreview(ref);
+              }}
+            />
+          ) : null}
+
           {data.items.length === 0 ? (
             <EmptyState title="نسخه‌ای با این مشخصات پیدا نشد">
               پس از اولین پشتیبان‌گیری موفق، نسخه‌ها به‌همراه محل نگهداری و وضعیت بررسی در همین فهرست ثبت می‌شوند.
@@ -347,6 +376,7 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
                 <Th>اعتبار</Th>
                 <Th numeric>حجم</Th>
                 <Th>انقضا</Th>
+                {isOwner ? <Th>دریافت</Th> : null}
                 {isOwner ? <Th>بازگردانی</Th> : null}
               </DataTableHead>
               <DataTableBody>
@@ -374,6 +404,30 @@ export function ArtifactInventoryCard({ isOwner }: { isOwner: boolean }) {
                     </Td>
                     <Td numeric>{formatSize(item.payloadBytes ?? item.storedBytes)}</Td>
                     <Td>{item.retentionUntil ? formatJalali(item.retentionUntil) : "—"}</Td>
+                    {isOwner ? (
+                      <Td>
+                        <div className="flex flex-wrap gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={!item.downloadable}
+                            onClick={() => void downloadPayload(item.ref)}
+                          >
+                            نسخه
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            disabled={!item.downloadable}
+                            onClick={() => window.location.assign(`/api/backup/artifacts/${item.ref}/manifest`)}
+                          >
+                            شناسنامه
+                          </Button>
+                        </div>
+                      </Td>
+                    ) : null}
                     {isOwner ? (
                       <Td>
                         <Button

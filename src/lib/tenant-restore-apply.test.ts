@@ -145,6 +145,7 @@ function tenantQuery(text: string): { rows: Record<string, unknown>[] } {
   if (text.includes("rolsuper")) return { rows: [{ privileged: false }] };
   if (text.includes("balance_rial")) return { rows: [{}] };
   if (text.includes("site_generation")) return { rows: [{}] };
+  if (text.includes("tenant_roles")) return { rows: [{ total: "0" }] };
   if (text.includes("FROM users")) return { rows: [{ total: "1" }] };
   if (text.includes("journal_lines")) return { rows: [{ total: "0" }] };
   if (text.includes("count(*)")) return { rows: [{ total: "1" }] };
@@ -327,7 +328,9 @@ describe("applyTenantRestore", () => {
     mocks.withTenantTransaction.mockImplementation(async (_businessId: string, fn: (client: unknown) => Promise<unknown>) =>
       fn({
         query: vi.fn((text: string) =>
-          text.includes("FROM users") ? { rows: [{ total: "0" }] } : tenantQuery(text),
+          text.includes("FROM users") && !text.includes("tenant_roles")
+            ? { rows: [{ total: "0" }] }
+            : tenantQuery(text),
         ),
       }),
     );
