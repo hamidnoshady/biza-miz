@@ -436,7 +436,7 @@ jobs:
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - name: Build
-        run: ./scripts/ci-next-build.ps1
+        run: bash ./scripts/ci-next-build.sh
       - name: Start the production server
         # The baselines are recorded against a production build, not `next dev`:
         # the dev server compiles routes on demand, so the first visit to each
@@ -577,7 +577,7 @@ jobs:
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - name: Build
-        run: ./scripts/ci-next-build.ps1
+        run: bash ./scripts/ci-next-build.sh
       - name: Start the production server
         run: |
           BIND_ADDR=127.0.0.1 PORT=3000 DEPLOYMENT_ROLE=central \
