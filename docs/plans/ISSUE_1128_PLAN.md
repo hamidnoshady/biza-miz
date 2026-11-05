@@ -147,6 +147,9 @@ way round. See «What this change does not build».
 | **Wave 13** — §D project P&L: hours | `AgencyCommercialReport.hours` — `contractedHours` summed from `agency_billing_milestones.hours` and null when no milestone states any, because a fixed-price engagement has no hours to report and 0 would claim somebody estimated the work at nothing; `actualHours` typed `null` and not `number \| null`, since nothing in this product records hours worked and the type is what stops a screen printing a measurement nobody took (decision 75); and `revenuePerContractedHourRial`, a ratio of a posted numerator to a booked denominator that is null unless both are known |
 | **Wave 13** — §D P&L panel | Two full-width blocks on «سود و زیان پروژه» in `agency-billing-panel.tsx`, outside the booked and posted cards on purpose: pass-through is neither a forecast nor part of the margin, and burying it in either would invite a reader to add it to a total it does not belong in. The heading reads «خارج از حاشیهٔ سود» and the copy says gross-presentation spend is in «هزینهٔ واقعی» and not here. Worked hours render as «ثبت نشده» rather than a dash or a zero, and the ratio's hint names both its bases so it cannot be read as an hourly rate |
 | **Wave 13** — §D P&L tests | `integration/agency-project-pnl.integration.test.ts` (7, real database), whose headline is that a 5,000,000 net cost leaves a project's margin at 10,000,000 (100٪) while appearing in pass-through, and that billing it back changes neither revenue nor margin — the same rule on both sides of the account. The mirror is tested too: a gross cost lands in `actualCostRial` and not in pass-through, so the two are disjoint and a reader may add them without double-counting. Plus an untouched project reporting nulls rather than zeros, both treatments on one project, the voided-recharge case asserting what the ledger *says* rather than what we wish it said, contracted hours with a null-hours milestone not counted as zero, and one project's P&L staying out of another's. `agency-commercial.test.ts` grew to 50 |
+| **Wave 14** — §D cost register: plumbing | `/accounting/client-costs`, a trade page in the automotive shape rather than an accounting section key, because `AccountingSectionDef` is `{ key, label, permission? }` and has nowhere to say «this trade only» (decision 76). A new `agency` module gates it — `advertising_agency` shares its entire module set with `service_saas` and `architecture_construction`, whose charts carry no 1270, so any existing key would advertise a page whose API answers `not_agency` (decision 77). Accounting claims the module in `apps.ts`; `industry-profile.test.ts` pins it to the agency in both directions; the work menu gains an «امور آژانس» group of its own, suppressed for every trade whose nav lacks the page; plus the canonical href, the sidebar icon and the learning-centre section |
+| **Wave 14** — §D cost register: the screen | `client-costs-section.tsx` — the three acts waves 10–12 built routes for, on one page, because the choice governs the recording and the recording governs the recharge. The policy card renders the API's own labels and hints and reads «هنوز انتخاب نشده» when `stored` is false, naming the fallback separately, plus the rule that a change does not reach the ledger backwards. The list prints the debit account as served, never one re-derived locally (decision 78). The record form's first option sends *nothing* for `presentation`, so the service resolves the policy and an explicit choice is a labelled override. Recharge selects only posted, unrecharged costs of **one** client, showing the service's three refusals as disabled controls with their reason rather than letting a member discover them. Three permissions are handed down from the page, so a member who may read but not move money sees the figures and no buttons |
+| **Wave 14** — §D cost register: tests | `client-costs-section.test.tsx` (12, jsdom) — an unchosen policy named as unchosen; following the policy omitting `presentation` from the body while an override sends it; both debit accounts printed as served; unposted, recharged and cross-client selections refused before they are sent; a refusal to post with no client, description or date; and a reader-only member shown the figures and no controls. `accounting-workspace.test.ts` grew by two, pinning the agency group in both directions. The render found a real bug on the way: `DataTableHead` renders its own `<tr>`, and the header's nested `<tr>` was invalid table markup |
 | **Wave 9** — §C campaign tests | `agency-campaign.test.ts` (26, pure), `integration/agency-client-campaigns.integration.test.ts` (16, real database), `integration/agency-party-merge.integration.test.ts` (6, real database), `campaign-guard.test.ts` (6) and 66 assertions against 0278 run directly over Postgres. The integration suite covers what only a database can show: one number sequence under a race, an overspend recorded *and* reported as `over`, the four ratios and their nulls including `revenueRial: 0` giving no ROAS, list figures identical to detail figures, a one-field patch clearing nothing, the full lifecycle with its window requirements stated in words first, a closed campaign refused from both the service and a **raw** `UPDATE` that skips it, a foreign client refused by the trigger as `23514`, and two of one brand's campaigns concurrent in the same window. The merge suite pins both halves of decision 56 — the move lands with substance and lines byte-for-byte intact and an audit row written, and what was frozen stays frozen for every path that is not the audited merge |
 
 
@@ -1094,6 +1097,68 @@ hourly rate, so it is null unless both bases are known, rounded to whole Rial, a
 panel's hint names both bases. Printing it with decimals would invite a reader to treat it
 as a rate somebody set.
 
+### 76 — the register is a trade page, not an accounting section key
+
+`ACCOUNTING_SECTIONS` is a list of `{ key, label, permission? }` and
+`accountingSectionsFor(permissions)` filters it by permission alone, so a key added
+there appears in **every** trade's ledger workspace. A café would be offered
+«هزینه‌های کارفرما» and its own API would answer `not_agency` — a menu item whose only
+behaviour is a refusal. The trade-page shape exists precisely for this: `/accounting/
+automotive` (#839), `/accounting/jewelry`, `/accounting/watch` and
+`/accounting/cosmetics` are each a `page.tsx` outside `ACCOUNTING_SECTION_KEYS`, gated
+by `requireIndustryForPage` and removed from the nav by a module. This page joins them.
+
+### 77 — `agency` is a new module because this trade has no module of its own
+
+Anchoring the page on an existing key would leak it. `advertising_agency`'s module set
+is **identical** to `service_saas`'s and `architecture_construction`'s — checked, not
+assumed — and neither of those charts carries 1270, so any shared key would advertise a
+page whose service refuses to run. So `MODULE_KEYS` gains `agency`, Accounting claims it
+in `apps.ts` (where `MODULE_APP_MAP` throws at import on a module two apps claim, so the
+ownership is checked rather than documented), and `PAGE_MODULE_PREFIXES` maps
+`/accounting/client-costs` to it.
+
+Two contract tests were the interesting part. `industry-coverage.test.ts` requires every
+declared module to have "a home or a note"; the home satisfies it. And
+`industry-profile.test.ts`'s café regression loop — *gives food_service everything the
+app has today* — demands every `MODULE_KEYS` member except an explicit list of
+trade-only ones. `agency` joins that list beside `automotive`, which is not a relaxation:
+the list is "modules the café never had", so adding to it cannot hide the subtraction the
+loop exists to catch. The same file now pins the module to the agency **in both
+directions**, because the module is the only thing keeping this page out of eleven other
+trades' sidebars.
+
+### 78 — following the policy sends nothing at all
+
+The record form's first option is «پیروی از سیاست کسب‌وکار» and it omits `presentation`
+from the body rather than sending the policy's current value. Sending a copy would freeze
+into the row what the business chose once, and would make the screen a second place that
+knows what the policy says — the drift wave 12's policy route was written to prevent when
+it started serving its labels and hints inline. Choosing explicitly is therefore a
+deliberate **override**, labelled as one, and §D's "must not be inferred solely from
+spend" is honoured by the form never pre-filling an account from the row.
+
+The same rule governs the list: it prints `accounts.debitCode` as the API served it
+instead of mapping `presentation` back to a code locally. Two mappings of one fact is how
+a screen comes to disagree with its own ledger.
+
+### 79 — the project picker rides `workspace.view`, which the accountant already holds
+
+Decision 61 kept this register off `workspace.view` so the office's accountant would not
+be handed a 403, which made the project picker look like a problem: the only project list
+is `/api/workspace/projects`, behind `workspaceOwner`. It is not a problem, and the reason
+is already written down in `permissions.ts` — the accountant holds `workspaceView` because
+"a project is a cost centre the books post against (`journal_entries.project_id`)… Read
+only: **recording a cost is accounting work**, committing the business to a new contractor
+is not." So the existing route is the right one and no ledger-gated project list is
+needed.
+
+The picker is loaded best-effort: a member whose workspace is not activated still records
+costs, with no project. That is not silently dropped — the field's hint says a cost with
+no project appears in no project P&L, which is the limitation wave 13's PR already names
+for invoices raised from the general sales screen, now stated at the point of entry rather
+than only in a document.
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
@@ -1437,6 +1502,24 @@ link every byte fetch, which made the default link unable to show the artwork it
   denominator, and a real 0 for zero revenue over real hours), and `sumContractedHours`
   (null for «no hours stated», skipping negative and non-finite values rather than
   summing them).
+* `client-costs-section.test.tsx` (12, jsdom) — §D's register as a member meets it. The
+  headline pair is about the policy: while `stored` is false the card must read
+  «هنوز انتخاب نشده» and name the fallback separately, because rendering the fallback
+  alone shows a policy the software supplied as one the business adopted; and the record
+  form must **omit** `presentation` from the body while the member follows the policy,
+  sending it only on a deliberate override — the absence is the assertion, since a screen
+  that sent an account would be inferring the treatment from the row. Also both debit
+  accounts printed as the API served them, an unposted and an already-recharged cost kept
+  out of a recharge *with the reason on the same row*, a selection spanning two clients
+  refused before it is sent, a cost with no client or description or date refused at all,
+  the invoice number reported back after a successful recharge, and a member holding
+  `ledger.view` alone shown the figures and no controls.
+* `accounting-workspace.test.ts` grew by two — the «امور آژانس» group is absent for a nav
+  that does not carry the page (an empty group is suppressed, and a group can never invent
+  an entry the shell did not gate in) and present, with the nav's own label, once it does.
+* `industry-profile.test.ts` pins the `agency` module to `advertising_agency` in both
+  directions, since the module is the only thing keeping `/accounting/client-costs` out of
+  eleven other trades' sidebars while their APIs would answer `not_agency`.
 * `integration/agency-cost-policy.integration.test.ts` (8) — §D's business-level
   presentation policy. The headline is that choosing `gross` makes the *next* cost debit
   **5197 instead of 1270**: a policy that only changed what a screen displayed would
@@ -1646,10 +1729,14 @@ Deliberately, and each is named in the issue:
   what turns the account from an accumulator into a clearing one (decisions 63–67).
   Wave 12 added the **business-level** presentation policy §D asks for, so the
   treatment is now chosen once and inherited rather than re-decided per row
-  (decisions 68–71). Still owed: the **screen**, because the Accounting app's section
-  key reaches ten files and four contract tests of its own — and it now has three acts
-  to show rather than one (record, recharge, choose the policy), so it is the natural
-  home for all three. Wave 13 completed the **project P&L** read §D asks for —
+  (decisions 68–71), and wave 14 shipped the **screen** that carries all three acts —
+  record, recharge, choose the policy — as one page, because the choice governs the
+  recording and the recording governs the recharge (decisions 76–79). Wave 12's note
+  that a section key «reaches ten files» was wrong and is corrected here: only two
+  exhaustive `Record<AccountingSectionKey, …>` maps exist, in `accounting-headings.ts`
+  and `accounting-icons.ts`. The reason to keep this page out of the section list was
+  never the file count — it is that `AccountingSectionDef` is `{ key, label,
+  permission? }` and has nowhere at all to say «this trade only». Wave 13 completed the **project P&L** read §D asks for —
   contracted, billed, collected, committed, actual cost, margin and profitability were
   already there from wave 3, and it added the pass-through and hours columns the report
   was silent about (decisions 72–75). What that leaves owed: the **campaign** dimension

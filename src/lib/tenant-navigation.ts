@@ -125,6 +125,17 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       href: ACCOUNTING_WORKSPACE_HREFS.automotive,
       roles: ["owner", "manager"],
     },
+    // Issue #1128 §D — the agency's reimbursable-cost register. Same shape:
+    // one trade-titled entry the `agency` module removes entirely for every
+    // other business. The accountant is admitted here although the CRM keeps
+    // them out, because recording a cost, recharging it and reading the
+    // gross/net policy are ledger work.
+    {
+      label: "هزینه‌های کارفرما",
+      module: "agency",
+      href: ACCOUNTING_WORKSPACE_HREFS.clientCosts,
+      roles: ["owner", "manager", "accountant"],
+    },
     // Phase 42 — the retail trade-goods trades manage their catalogue in the
     // shared products workspace: a collapsible sidebar group — افزودن محصول،
     // لیست محصولات، لیست قیمت، ویژگی محصول، الگوی بارکد وزنی and the trade's
