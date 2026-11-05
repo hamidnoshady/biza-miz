@@ -517,6 +517,66 @@ export function AgencyBillingCard({
             </div>
           </div>
         </div>
+
+        {/*
+          §D's «track media spend and subcontractor/production cost separately from
+          agency service fees». Full width and outside both cards on purpose: these are
+          neither a forecast nor part of the posted margin, and burying them in either
+          would invite a reader to add them to a total they do not belong in.
+        */}
+        <div className="mt-4 rounded-xl border border-border/70 p-3">
+          <p className="text-xs font-semibold">پول کارفرما — خارج از حاشیهٔ سود</p>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            رسانه و تولیدی که به نام کارفرما خریده‌ایم و از حساب ۱۲۷۰ می‌گذرد. این پول نه هزینهٔ
+            آژانس است نه درآمد آن، پس در حاشیهٔ بالا نیست. هزینه‌ای که به نام خود آژانس خریده
+            شود (ناخالص) در «هزینهٔ واقعی» شمرده شده است، نه اینجا.
+          </p>
+          <dl className="mt-3 grid gap-3 sm:grid-cols-3">
+            <Figure
+              label="خرج‌شده برای کارفرما"
+              value={dash(report.passThrough.spentRial)}
+              hint="بدهکار شدن ۱۲۷۰ در اسناد این پروژه"
+            />
+            <Figure
+              label="بازدریافت‌شده"
+              value={dash(report.passThrough.rechargedRial)}
+              hint="بستانکار شدن ۱۲۷۰ با صورتحساب بازدریافت"
+            />
+            <Figure
+              label="هنوز بازدریافت‌نشده"
+              value={dash(report.passThrough.unrechargedRial)}
+              hint="ماندهٔ مطالبهٔ این پروژه از کارفرما"
+            />
+          </dl>
+          {report.passThrough.unrechargedRial === null ? (
+            <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+              تا وقتی سندی برای این پروژه ثبت نشده باشد، «—» می‌ماند؛ صفر یعنی «همهٔ پول کارفرما
+              بازدریافت شده» و آن ادعای دیگری است.
+            </p>
+          ) : null}
+        </div>
+
+        {/*
+          §D's «hours/cost». Contracted hours are real and come from the schedule;
+          worked hours are not recorded anywhere in this product, and the panel says so
+          in words rather than printing a zero that reads as a measurement.
+        */}
+        <div className="mt-4 rounded-xl border border-border/70 p-3">
+          <p className="text-xs font-semibold">ساعت</p>
+          <dl className="mt-3 grid gap-3 sm:grid-cols-3">
+            <Figure
+              label="ساعت قراردادشده"
+              value={report.hours.contractedHours === null ? "—" : n(report.hours.contractedHours)}
+              hint="جمع ساعت مرحله‌های صورتحساب؛ مرحلهٔ بدون ساعت، صفر شمرده نمی‌شود"
+            />
+            <Figure label="ساعت کارکرد واقعی" value="ثبت نشده" hint="این محصول زمان‌کرد ثبت نمی‌کند" />
+            <Figure
+              label="درآمد به ازای هر ساعت قراردادشده"
+              value={dash(report.hours.revenuePerContractedHourRial)}
+              hint="صورت از دفتر کل (ثبت‌شده)، مخرج از برنامهٔ صورتحساب (پیش‌بینی) — نرخ ساعتی نیست"
+            />
+          </dl>
+        </div>
       </SectionCard>
 
       {/* The schedule. */}

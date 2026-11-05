@@ -308,12 +308,10 @@ the end, still explicitly.
      (`/api/backup/restore/upload`, site installs), which is a recovery step, not
      a management one. The `tenant_backup_upload_sessions` table stays as history
      (migrations are forward-only) and is no longer written.
-   - Importing a file the platform never wrote, and restoring a Cloud backup from
-     such a file, is **not delivered**: an imported archive has no signed
-     manifest, so the server cannot certify what it contains without the tenant's
-     legacy passphrase, and registering one as `ready` on the strength of an
-     operator-supplied manifest is the lie §4 forbids. It needs a designed
-     passphrase-scoped import, not a button.
+   - Restoring a business from a file it downloaded earlier is delivered: the
+     checklist item is the *two-file recovery pair* described under
+     "restoring from a file the platform never wrote" below, because the
+     signature — not the tenant's word — is what makes the file believable.
 4. **Central tenant-only restore engine** (`tenant-restore-apply.ts`,
    `POST /api/backup/restores/apply`). Phased and journalled
    (`verify_started → verify_succeeded → apply_started → apply_succeeded`, or
@@ -550,8 +548,7 @@ conditional update *after* a restore commits, so a failed attempt never burns it
 and a consumed approval cannot be revoked — the restore it authorised already
 happened.
 
-**Still open.** `import/register` (no signed manifest for an artifact the
-platform did not write — see the previous increment), media binaries, the
+**Still open.** Media binaries, the
 WordPress/WooCommerce database, and the whole "Real acceptance" line: no
 PostgreSQL, S3 or Node ≥ 24 here, so `test:db` (including the extended RLS
 suite), `build`, and a live drill remain unexecuted in this environment.
@@ -602,10 +599,11 @@ does not open. Two honest details:
   `diagnoseBusinessBackup` now reports the last run and adds `drill_failed` to
   `actions`, which the Superadmin page renders.
 
-**Still open.** `import/register` (no signed manifest for an artifact the platform
-did not write), media binaries, the WordPress/WooCommerce database, and a CI job
-for the drill: the scheduler now covers production, but nothing runs a drill on a
-pull request, which needs a seeded PostgreSQL and S3 stand-in in CI.
+**Still open.** Media binaries and the WordPress/WooCommerce database. The drill
+question is closed: `integration/tenant-backup-acceptance.integration.test.ts`
+runs real drills on a pull request — a migrated PostgreSQL, an unprivileged app
+role so RLS actually filters, and a path-style S3 stand-in that can be taken down
+or made to store part of a body — inside the ordinary integration shards.
 
 ## Increment: per-plan policy, alert thresholds and DR objectives (issue #903 §3)
 
@@ -813,12 +811,12 @@ own (tested) chunk validation. Two divergent chunk validators would have drifted
 The `tenant_backup_upload_sessions` table (0265) stays — migrations are
 forward-only — but nothing writes it any more.
 
-**Import stays undelivered, deliberately.** A file the platform did not write has
-no signed manifest, so it cannot be certified as restorable without the tenant's
-legacy passphrase; registering one on an operator-supplied manifest would present
-unverified bytes to the tenant as a verified backup, which §4 forbids. That is a
-designed feature (passphrase-scoped import), not a route to bolt on, and Cloud's
-"restore from a backup file" (DoD 4, §1 matrix) stays open until it exists.
+**Import was left undelivered here, deliberately.** At the time, a file the
+platform did not write had no signed manifest, so registering it on an
+operator-supplied manifest would have presented unverified bytes to the tenant as
+a verified backup, which §4 forbids. It needed a designed feature, not a route to
+bolt on — and it got one: see "restoring from a file the platform never wrote"
+below.
 
 ## Increment: a restore must never rewind the wallet (§5, §8) — found while auditing the apply path
 
@@ -964,3 +962,94 @@ resolves the managed destination itself and explicitly mirrors regardless of tha
 flag. Aligning the two gates is a scheduler behaviour change (it starts outbound
 uploads in the tick that also takes the backup, for tenants who never opted in),
 so it is reported here for an owner decision rather than changed.
+
+## Increment: restoring from a file the platform never wrote (§2 item 4, §6)
+
+Every other path starts from an inventory row, because the platform holds the
+artifact and can resolve a reference. The Owner's worst case is the opposite —
+the server was reimaged, the bucket was deleted, the business was cancelled — and
+what survives is a file on a laptop. Nothing in the database names it.
+
+The unit of recovery is therefore a **two-file pair**, which is what the custody
+model actually allows:
+
+- the encrypted payload the Owner already downloads, plus
+- `GET /api/backup/artifacts/[ref]/manifest`, which serves that artifact's
+  **signed** manifest (`<ref>.manifest.json`), Owner-only `backup.export`, no
+  provider detail.
+
+`POST /api/backup/restores/import/upload` + `POST /api/backup/restores/import`
+take both, and register the payload as this business's `uploaded`/`verifying`
+artifact. The ordinary verifier then promotes it through the same checksum +
+signature + archive-parse gate every other artifact passes, and the ordinary
+preview/apply path restores it — **the import adds no second way to write a
+business's rows**.
+
+What it refuses, in the order it refuses it: a payload that is not
+`tenant_archive_v1` (a `.sql` dump is refused by name — nothing here executes
+text from a file); a manifest whose signature does not verify under the platform
+key; a genuine manifest naming another business; a payload whose sha256 is not
+the one the manifest signed; a schema newer than the installation; a
+Local-profile install (its restores are #807's physical path). A failed import
+removes the file and leaves a `failed` row with a provider-neutral code.
+
+Honest limits, stated rather than promised away: a payload kept without its
+manifest cannot be imported; a `managed_envelope_v1` payload opens only on the
+installation holding that business's key generation (`backup_key_missing`
+otherwise, never a partial restore); a `legacy_passphrase_v1` payload asks for its
+one-time passphrase at import.
+
+The screen says the same thing: each inventory row offers its payload and its
+manifest side by side, and a «بازگردانی از فایل پشتیبان» panel below the
+inventory takes them back. A successful import appears as an ordinary row, so the
+preview card's typed phrase, re-authentication and MFA step-up still govern the
+restore — the panel restores nothing itself.
+
+**Validation:** 36 unit tests across the module, the three routes and the two
+components; a four-case real-database suite (import after the inventory row is
+gone and restore it, wrong payload for the manifest, another business's genuine
+manifest, unsigned manifest); 514 backup/restore unit tests; design lint.
+
+## Increment: membership reconciliation, and the proof of what a restore leaves alone (§5 — line closed)
+
+The earlier "a restore must never rewind the wallet" increment wrote down three
+checks it had not implemented. Two of them (`accounting_balanced`,
+`sync_fence_advanced`) and the wallet assertion landed with #1210; this closes
+the third and pays the proof the epic asked for.
+
+**`membership_reconciled`.** `users.role` is the stable category, and a
+composite foreign key keeps `custom_role_id` inside its own business *at write
+time* — but an archive is captured table by table, so a capture that lost or
+truncated `tenant_roles` still carries the users pointing at it. Those users do
+not crash: they fall back to `role`'s preset, so a manager whose narrower custom
+role vanished is silently authorised with the wider default. That is a
+permission **escalation caused by a restore**, and it belongs in the same
+transaction as the swap. The check counts active users whose custom role is
+missing or inactive after the replacement and, like the others, is refused and
+rolled back rather than committed. Inactive accounts are excluded on purpose —
+an account that cannot sign in cannot be escalated. The check runs against a
+pinned client inside the restoring transaction, so it reads the same snapshot it
+just wrote.
+
+**The proof, on a real database.** `tenant-restore-apply.integration.test.ts`
+already showed another business untouched and the wallet not rewound; it now also
+asserts, after an actual restore of A while B sits in the same tables:
+
+- `wallet_ledger` and `billing_usage_events` row counts for A are **unchanged** —
+  the balance is not rewound *and* the evidence explaining it still exists. The
+  second matters more than it looks: `billing_usage_events.event_id` is the
+  idempotency identity, so deleting it would let the next settlement re-charge a
+  window this restore had "restored away";
+- the **platform realm** (`platform_admins`, `platform_audit_log`) is unchanged.
+  `rls_proven` refuses a privileged role at the door; this proves the other half
+  — that a *permitted*, tenant-scoped role still cannot reach those rows.
+
+The journal's `apply_succeeded` entry now lists six checks
+(`rls_proven`, `owner_preserved`, `membership_reconciled`, `accounting_balanced`,
+`wallet_unchanged`, `sync_fence_advanced`), all `ok`, so an auditor reading the
+receipt sees what was proved rather than being told "restored".
+
+**Still open in §5 after this:** nothing structural. What remains is the same
+claim proved against a populated, production-shaped database — the integration
+suite runs on a fresh one — and media/website capture, which is §8's gap rather
+than §5's.

@@ -19,6 +19,11 @@
  *    existed would leave a business nobody can sign in to. Refusing (and
  *    rolling back) is the only answer that does not hand the Owner a locked
  *    door.
+ *  • **membership still resolves.** `users.role` survives the swap, but a
+ *    `custom_role_id` whose role row was lost or deactivated by the same
+ *    capture leaves an active user silently falling back to the wider default
+ *    preset — a permission escalation caused by a restore, not a crash. Refused
+ *    and rolled back rather than committed.
  *  • **accounting is still internally consistent.** Every posted journal entry
  *    must still balance. This is the check that notices a partial capture
  *    (entries restored, their lines not) instead of committing it.
@@ -44,6 +49,7 @@ import type { PoolClient } from "pg";
 export type RestoreCheckCode =
   | "rls_proven"
   | "owner_preserved"
+  | "membership_reconciled"
   | "accounting_balanced"
   | "wallet_unchanged"
   | "sync_fence_advanced";
@@ -100,7 +106,37 @@ async function activeOwnerCount(client: PoolClient, businessId: string): Promise
   return Number(rows[0]?.total ?? 0);
 }
 
-/** Business-scoped journal entries whose debits do not equal their credits. */
+/** Business-scoped journal entries whose debits do not equal their credits. *//**
+ * Active users whose permission preset no longer resolves after the swap.
+ *
+ * `users.role` is the stable category (`owner`, `manager`, …) and the composite
+ * foreign key keeps a `custom_role_id` inside the same business at write time —
+ * but an archive is captured table by table, so a capture that lost or
+ * truncated `tenant_roles` still carries the users that point at it. The
+ * users then fall back to `role`'s preset: a manager whose narrower custom role
+ * vanished is silently authorised with the wider default, which is a
+ * permission *escalation* caused by a restore.
+ *
+ * A role that was deactivated between the two tables' capture is the same
+ * hazard from the other side, so both are counted. The check is deliberately
+ * about the active users only: an inactive account that cannot resolve its
+ * preset cannot sign in.
+ */
+async function unreconciledMembershipCount(client: PoolClient, businessId: string): Promise<number> {
+  const { rows } = await client.query<{ total: string }>(
+    `SELECT count(*)::text AS total
+       FROM users u
+       LEFT JOIN tenant_roles r
+         ON r.id = u.custom_role_id AND r.business_id = u.business_id
+      WHERE u.business_id = $1
+        AND u.is_active
+        AND u.custom_role_id IS NOT NULL
+        AND (r.id IS NULL OR NOT r.is_active)`,
+    [businessId],
+  );
+  return Number(rows[0]?.total ?? 0);
+}
+
 async function unbalancedEntryCount(client: PoolClient, businessId: string): Promise<number> {
   const { rows } = await client.query<{ total: string }>(
     `SELECT count(*)::text AS total FROM (
@@ -195,6 +231,16 @@ export async function verifyPostRestore(
     code: "owner_preserved",
     ok: owners > 0,
     detail: owners > 0 ? undefined : `active owners after restore: ${owners} (before: ${baseline.activeOwners})`,
+  });
+
+  const unreconciled = await unreconciledMembershipCount(client, businessId);
+  checks.push({
+    code: "membership_reconciled",
+    ok: unreconciled === 0,
+    detail:
+      unreconciled === 0
+        ? undefined
+        : `active users with an unresolved or inactive custom role: ${unreconciled}`,
   });
 
   const unbalanced = await unbalancedEntryCount(client, businessId);

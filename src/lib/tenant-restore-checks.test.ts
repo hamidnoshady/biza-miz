@@ -20,6 +20,7 @@ function client(overrides: {
   wallet?: string | null;
   owners?: number;
   unbalanced?: number;
+  unreconciled?: number;
   generation?: number | null;
 } = {}) {
   const written: { text: string; params: unknown[] }[] = [];
@@ -37,6 +38,7 @@ function client(overrides: {
       written.push({ text, params });
       return { rows: [] };
     }
+    if (text.includes("tenant_roles")) return { rows: [{ total: String(overrides.unreconciled ?? 0) }] };
     if (text.includes("FROM users")) return { rows: [{ total: String(overrides.owners ?? 1) }] };
     if (text.includes("journal_lines")) return { rows: [{ total: String(overrides.unbalanced ?? 0) }] };
     return { rows: [] };
@@ -112,6 +114,7 @@ describe("verifyPostRestore", () => {
     expect(verdict.checks.map((check) => check.code)).toEqual([
       "rls_proven",
       "owner_preserved",
+      "membership_reconciled",
       "accounting_balanced",
       "wallet_unchanged",
       "sync_fence_advanced",
@@ -121,13 +124,31 @@ describe("verifyPostRestore", () => {
 
   it("names every failed check rather than stopping at the first", async () => {
     const verdict = await verifyPostRestore(
-      client({ privileged: true, wallet: "0", owners: 0, unbalanced: 2, generation: 2 }).asClient,
+      client({ privileged: true, wallet: "0", owners: 0, unbalanced: 2, unreconciled: 1, generation: 2 }).asClient,
       "biz",
       baseline,
     );
     expect(verdict.ok).toBe(false);
     if (verdict.ok) return;
-    expect(verdict.failed).toEqual(["rls_proven", "owner_preserved", "accounting_balanced", "wallet_unchanged"]);
+    expect(verdict.failed).toEqual([
+      "rls_proven",
+      "owner_preserved",
+      "membership_reconciled",
+      "accounting_balanced",
+      "wallet_unchanged",
+    ]);
+  });
+
+  it("refuses a restore that would leave an active user falling back to a wider preset", async () => {
+    // The archive's `users` survived; the `tenant_roles` row its `custom_role_id`
+    // points at did not (or came back inactive). The user would silently be
+    // authorised with `role`'s default preset — an escalation the restore caused.
+    const verdict = await verifyPostRestore(client({ wallet: "500", unreconciled: 2 }).asClient, "biz", baseline);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.failed).toEqual(["membership_reconciled"]);
+    const check = verdict.checks.find((entry) => entry.code === "membership_reconciled");
+    expect(check?.detail).toContain("2");
   });
 
   it("does not invent a wallet comparison for a business that never had one", async () => {
