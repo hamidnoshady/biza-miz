@@ -1655,14 +1655,15 @@ describe("the enhanced WP queue summary, filtering, and retries", () => {
     let cursor: WpQueueCursor | null = null;
     for (let guard = 0; guard < 12; guard += 1) {
       // `page: 3` travels with the cursor on purpose: a cursor slice must read
-      // no offset, which is what keeps inserts from shifting the walk.
-      const page = await manager.wpQueuePage(biz.id, connectionId, {
-        status: "sent",
-        search: prefix,
-        pageSize: 2,
-        page: 3,
-        ...(cursor ? { cursor } : {}),
-      });
+      // no offset, which is what keeps inserts from shifting the walk. The
+      // first slice is a plain first page (a page number alone would jump).
+      const page = await manager.wpQueuePage(
+        biz.id,
+        connectionId,
+        cursor
+          ? { status: "sent", search: prefix, pageSize: 2, page: 3, cursor }
+          : { status: "sent", search: prefix, pageSize: 2 },
+      );
       expect(page.total).toBeGreaterThanOrEqual(6); // the filtered total, not the slice
       seen.push(...page.rows.map((row) => row.id));
       if (!page.nextCursor) break;
