@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Continue'
+$env:DEBUG = 'next:*'
 $logPath = Join-Path (Get-Location) '.next-build-ci.log'
 if (Test-Path $logPath) { Remove-Item -LiteralPath $logPath -Force }
 
