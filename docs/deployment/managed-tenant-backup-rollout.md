@@ -368,7 +368,9 @@ the end, still explicitly.
    `app.data` component means no captured table is filed under a name that lies;
    `media.metadata` counts are real, and `media.attachments` is reported
    `excluded` with the business's attachment count when there are any (the bytes
-   are not captured — stated, not implied). `website.wp` is `included` only when
+   are not captured — stated, not implied; see
+   [`media-binary-capture.md`](./media-binary-capture.md) for what capturing them
+   would cost). `website.wp` is `included` only when
    WordPress tables were actually captured; `external.woocommerce` and
    `external.eshobe_assets` stay `external`.
 10. **Granular platform permissions** (`platform-admin.ts`).
@@ -403,7 +405,13 @@ the end, still explicitly.
 - Website *content* capture is still table-based: a WordPress site's own database
   is not reachable, so `external.woocommerce` remains honest-by-declaration rather
   than captured.
-- Media **binary** capture remains out of scope and is labelled `excluded`.
+- Media **binary** capture remains out of scope and is labelled `excluded`. It is
+  now the only unimplemented item of the epic, and it is blocked on a design
+  decision rather than on effort: an artifact is one signed file of known size and
+  media lives in a second storage system, so capture changes retention, reclaim,
+  billing byte-days and the import contract together. The options, the
+  recommendation and the four decisions only the owner can make are written up in
+  [`media-binary-capture.md`](./media-binary-capture.md).
 
 ## Increment: tenant surface superseded (issue #903 §10, first P0 line)
 
@@ -1112,3 +1120,28 @@ and a path-style S3 stand-in that can be made to store damaged bytes: bit rot on
 drill fails) and a managed Cloud backup now mirrors inside the same
 `runTenantSnapshotTick()` while the Local business in that tick still receives no
 cloud row — the acceptance suite is 12/12.
+
+## Where #903 stands (2026-11-05)
+
+Every P0 and P1 line of the epic's §10 checklist is implemented and verified
+except **media binary capture**, which is a design decision rather than a task —
+see [`media-binary-capture.md`](./media-binary-capture.md).
+
+What that means concretely, in the shipped runtime:
+
+- a business on all three profiles is backed up, verified, billed, drilled and
+  restorable, and a central logical restore changes only the target business
+  (proved on a real database, including the platform realm and the canonical
+  wallet);
+- a Cloud copy that rots is caught by the weekly drift sweep instead of by a
+  restore;
+- a file the platform never wrote can be imported against its signed manifest and
+  restored through the same preview/apply path;
+- media **rows** are captured and labelled, media **bytes** are `excluded`, and no
+  screen or API claims otherwise.
+
+What is still outstanding is verification against production shapes rather than a
+fresh database: a real S3 provider round-trip, a drill on a populated
+production-sized dataset, and the desktop packaging path. CI covers
+`npm run build` and the visual suite; the provider round-trip is deliberately out
+of reach of a sandbox with a path-style stand-in.
