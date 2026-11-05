@@ -219,7 +219,7 @@ jobs:
           key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
-      - run: ./scripts/ci-next-build.ps1
+      - run: bash ./scripts/ci-next-build.sh
 
   # The ~250-file database suite is strictly serial (`fileParallelism: false`,
   # one worker, see vitest.db.config.ts), and on a single Windows runner it
