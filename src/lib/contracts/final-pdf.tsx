@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
-import { renderToStaticMarkup } from "react-dom/server";
 import QRCode from "qrcode";
-import { ContractDocumentSheet } from "@/components/contracts/contract-document-sheet";
-import { query, withoutTenantScope } from "@/lib/db";
-import { handoffOriginContext, resolveHandoffOrigin } from "@/lib/public-origin";
+import { query } from "@/lib/db";
+import {
+  handoffOriginContext,
+  resolveHandoffOrigin,
+} from "@/lib/public-origin";
 import {
   getMediaConfig,
   isMediaStorageReady,
@@ -12,18 +13,25 @@ import {
   storeMediaAsset,
 } from "@/lib/media-service";
 import { renderStaticHtmlToPdf } from "@/lib/pdf-render";
-import { WorkspaceError, type WorkspaceContract, type WorkspaceOwner } from "@/lib/workspace";
+import {
+  WorkspaceError,
+  type WorkspaceContract,
+  type WorkspaceOwner,
+} from "@/lib/workspace";
 import { frozenContentHash } from "./crypto";
 import { latestFrozenVersion, type FrozenContractVersion } from "./service";
 import { listCompletedSignatureSlots } from "./signing";
+import { renderFinalPdfContractDocument } from "./final-pdf-document";
 
 const MAX_FINAL_PDF_BYTES = 25 * 1024 * 1024;
 function safeFileStem(value: string): string {
-  return value
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 100) || "contract";
+  return (
+    value
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 100) || "contract"
+  );
 }
 
 function publicOrigin(requestUrl: string, headers: Headers): string {
@@ -31,7 +39,8 @@ function publicOrigin(requestUrl: string, headers: Headers): string {
   const resolved = resolveHandoffOrigin(
     handoffOriginContext({ headers, nextUrl: request }, null),
   );
-  if (!resolved.ok) throw new WorkspaceError("contract_final_pdf_origin_unavailable");
+  if (!resolved.ok)
+    throw new WorkspaceError("contract_final_pdf_origin_unavailable");
   return resolved.origin;
 }
 
@@ -41,22 +50,21 @@ function finalPdfHtml(input: {
   qrDataUrl: string;
   verificationUrl: string;
 }): string {
-  const markup = renderToStaticMarkup(
-    <>
-      <ContractDocumentSheet content={input.version.content} values={input.version.content.values} signed={input.signatures} />
-      <section className="contract-proof" dir="rtl" aria-label="گواهی اصالت سند">
-        <div className="contract-proof-copy">
-          <strong>نسخهٔ نهایی قرارداد — امضاشده</strong>
-          <span>نسخهٔ {input.version.version}</span>
-          <span>اثر انگشت محتوای امضاشده (SHA-256)</span>
-          <code dir="ltr">{input.version.contentHash}</code>
-          <span>برای بررسی اصالت، کد QR را اسکن کنید.</span>
-          <code dir="ltr">{input.verificationUrl}</code>
-        </div>
-        <img src={input.qrDataUrl} alt="کد QR بررسی اصالت قرارداد" />
-      </section>
-    </>,
+  const documentMarkup = renderFinalPdfContractDocument(
+    input.version.content,
+    input.signatures,
   );
+  const proofMarkup = `<section class="contract-proof" dir="rtl" aria-label="گواهی اصالت سند">
+    <div class="contract-proof-copy">
+      <strong>نسخهٔ نهایی قرارداد — امضاشده</strong>
+      <span>نسخهٔ ${input.version.version}</span>
+      <span>اثر انگشت محتوای امضاشده (SHA-256)</span>
+      <code dir="ltr">${input.version.contentHash}</code>
+      <span>برای بررسی اصالت، کد QR را اسکن کنید.</span>
+      <code dir="ltr">${input.verificationUrl}</code>
+    </div>
+    <img src="${input.qrDataUrl}" alt="کد QR بررسی اصالت قرارداد" />
+  </section>`;
   const css = `
     @page{size:A4;margin:14mm}
     *{box-sizing:border-box}
@@ -90,10 +98,14 @@ function finalPdfHtml(input: {
     .contract-proof code{font-family:monospace;font-size:7.5pt;overflow-wrap:anywhere;direction:ltr;text-align:left}
     .contract-proof img{width:34mm;height:34mm;max-height:none}
   `;
-  return `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>نسخهٔ نهایی قرارداد</title><style>${css}</style></head><body>${markup}</body></html>`;
+  return `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>نسخهٔ نهایی قرارداد</title><style>${css}</style></head><body>${documentMarkup}${proofMarkup}</body></html>`;
 }
 
-async function completedEnvelopeForVersion(businessId: string, contractId: string, versionId: string) {
+async function completedEnvelopeForVersion(
+  businessId: string,
+  contractId: string,
+  versionId: string,
+) {
   const { rows } = await query<{
     completed_at: Date;
     signature_count: string;
@@ -127,13 +139,22 @@ async function archivedPdfRow(businessId: string, versionId: string) {
   return rows[0] ?? null;
 }
 
-async function readArchivedPdf(businessId: string, version: FrozenContractVersion) {
+async function readArchivedPdf(
+  businessId: string,
+  version: FrozenContractVersion,
+) {
   const row = await archivedPdfRow(businessId, version.id);
   if (!row) return null;
-  if (row.content_hash !== version.contentHash) throw new WorkspaceError("contract_final_pdf_integrity_error");
+  if (row.content_hash !== version.contentHash)
+    throw new WorkspaceError("contract_final_pdf_integrity_error");
   const config = await getMediaConfig();
-  if (!isMediaStorageReady(config)) throw new WorkspaceError("contract_final_pdf_storage_unavailable");
-  const stored = await readMediaObject(businessId, row.media_asset_id, config).catch(() => null);
+  if (!isMediaStorageReady(config))
+    throw new WorkspaceError("contract_final_pdf_storage_unavailable");
+  const stored = await readMediaObject(
+    businessId,
+    row.media_asset_id,
+    config,
+  ).catch(() => null);
   if (!stored || stored.asset.deletedAt) {
     throw new WorkspaceError("contract_final_pdf_asset_unavailable");
   }
@@ -158,15 +179,27 @@ export async function generateOrReadFinalContractPdf(
 ) {
   const version = await latestFrozenVersion(owner.businessId, contract.id);
   if (!version) throw new WorkspaceError("contract_document_not_frozen");
-  const completed = await completedEnvelopeForVersion(owner.businessId, contract.id, version.id);
-  if (!completed || Number(completed.signature_count) < 1) throw new WorkspaceError("contract_not_completed");
-  if (frozenContentHash(version.content) !== version.contentHash) throw new WorkspaceError("contract_final_pdf_integrity_error");
+  const completed = await completedEnvelopeForVersion(
+    owner.businessId,
+    contract.id,
+    version.id,
+  );
+  if (!completed || Number(completed.signature_count) < 1)
+    throw new WorkspaceError("contract_not_completed");
+  if (frozenContentHash(version.content) !== version.contentHash)
+    throw new WorkspaceError("contract_final_pdf_integrity_error");
 
   const archived = await readArchivedPdf(owner.businessId, version);
-  if (archived) return { ...archived, version: version.version, contentHash: version.contentHash };
+  if (archived)
+    return {
+      ...archived,
+      version: version.version,
+      contentHash: version.contentHash,
+    };
 
   const config = await getMediaConfig();
-  if (!isMediaStorageReady(config)) throw new WorkspaceError("contract_final_pdf_storage_unavailable");
+  if (!isMediaStorageReady(config))
+    throw new WorkspaceError("contract_final_pdf_storage_unavailable");
 
   const verificationToken = randomBytes(32).toString("base64url");
   const verificationUrl = `${publicOrigin(requestUrl, headers)}/verify/contract/${verificationToken}`;
@@ -175,10 +208,23 @@ export async function generateOrReadFinalContractPdf(
     margin: 1,
     width: 256,
   });
-  const signatures = await listCompletedSignatureSlots(owner.businessId, contract.id, version.id);
-  const html = finalPdfHtml({ version, signatures, qrDataUrl, verificationUrl });
+  const signatures = await listCompletedSignatureSlots(
+    owner.businessId,
+    contract.id,
+    version.id,
+  );
+  const html = finalPdfHtml({
+    version,
+    signatures,
+    qrDataUrl,
+    verificationUrl,
+  });
   const bytes = await renderStaticHtmlToPdf(html, { format: "A4" });
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_FINAL_PDF_BYTES || bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
+  if (
+    bytes.byteLength === 0 ||
+    bytes.byteLength > MAX_FINAL_PDF_BYTES ||
+    bytes.subarray(0, 5).toString("ascii") !== "%PDF-"
+  ) {
     throw new WorkspaceError("contract_final_pdf_generation_failed");
   }
   const pdfSha256 = createHash("sha256").update(bytes).digest("hex");
@@ -195,7 +241,9 @@ export async function generateOrReadFinalContractPdf(
     source: "contract_final_pdf",
   });
   try {
-    const verificationTokenHash = createHash("sha256").update(verificationToken, "utf8").digest("hex");
+    const verificationTokenHash = createHash("sha256")
+      .update(verificationToken, "utf8")
+      .digest("hex");
     const { rows } = await query<{ id: string }>(
       `INSERT INTO contract_final_pdfs
          (business_id, contract_id, document_version_id, media_asset_id, content_hash,
@@ -216,13 +264,22 @@ export async function generateOrReadFinalContractPdf(
       ],
     );
     if (!rows[0]) {
-      await softDeleteMediaAsset(owner.businessId, mediaAsset.id).catch(() => false);
+      await softDeleteMediaAsset(owner.businessId, mediaAsset.id).catch(
+        () => false,
+      );
       const concurrent = await readArchivedPdf(owner.businessId, version);
-      if (!concurrent) throw new WorkspaceError("contract_final_pdf_asset_unavailable");
-      return { ...concurrent, version: version.version, contentHash: version.contentHash };
+      if (!concurrent)
+        throw new WorkspaceError("contract_final_pdf_asset_unavailable");
+      return {
+        ...concurrent,
+        version: version.version,
+        contentHash: version.contentHash,
+      };
     }
   } catch (error) {
-    await softDeleteMediaAsset(owner.businessId, mediaAsset.id).catch(() => false);
+    await softDeleteMediaAsset(owner.businessId, mediaAsset.id).catch(
+      () => false,
+    );
     throw error;
   }
   return {

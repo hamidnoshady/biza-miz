@@ -225,7 +225,7 @@ jobs:
 
       - name: Build Next production application
         env:
-          NODE_OPTIONS: --max-old-space-size=12288
+          NODE_OPTIONS: --max-old-space-size=8192
         run: npm run build
 
       - name: Build positively selected desktop runtime
