@@ -206,7 +206,7 @@ jobs:
           key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
-      - run: npm run build
+      - run: ./scripts/ci-next-build.ps1
 
   # The ~250-file database suite is strictly serial (`fileParallelism: false`,
   # one worker, see vitest.db.config.ts), and on a single Windows runner it
@@ -436,7 +436,7 @@ jobs:
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - name: Build
-        run: npm run build
+        run: ./scripts/ci-next-build.ps1
       - name: Start the production server
         # The baselines are recorded against a production build, not `next dev`:
         # the dev server compiles routes on demand, so the first visit to each
@@ -577,7 +577,7 @@ jobs:
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - name: Build
-        run: npm run build
+        run: ./scripts/ci-next-build.ps1
       - name: Start the production server
         run: |
           BIND_ADDR=127.0.0.1 PORT=3000 DEPLOYMENT_ROLE=central \
