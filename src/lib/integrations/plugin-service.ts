@@ -57,6 +57,7 @@ import {
 } from "../media-service";
 import { acknowledgePushedEvent, claimableOutboxSql } from "./outbox-service";
 import { PLUGIN_JOB_MAX_ATTEMPTS } from "./retry";
+import { parseLocalQueuePageRequest, sanitizeLocalQueuePageAnswer } from "./local-queue-page";
 import { effectivePushSwitches, isNoopPush, STALE_PUSH_JOB_HOURS, type RemoteProductState } from "./outbox-policy";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
@@ -373,6 +374,38 @@ export async function pluginHandshake(
     } else {
       delete telemetry.deliveryLatency;
     }
+    // Issue #1076: the plugin-local queue page travels on this same lane — an
+    // operator's request goes out in the handshake response, the plugin's
+    // bounded answer comes back in the next handshake's telemetry. Only a
+    // reply to the request actually outstanding is accepted, so an out-of-order
+    // answer can never replace the page the screen is waiting for.
+    const pageAnswer = sanitizeLocalQueuePageAnswer(telemetry.localQueuePage);
+    delete telemetry.localQueuePage;
+    const pageMailbox = await query<{ request: unknown; answer: unknown }>(
+      `SELECT plugin_local_queue_request AS request, plugin_local_queue_answer AS answer
+         FROM integration_connections WHERE id = $1 AND business_id = $2`,
+      [connection.id, connection.business_id],
+    );
+    let pageRequest = parseLocalQueuePageRequest(pageMailbox.rows[0]?.request);
+    if (pageAnswer && pageRequest && pageAnswer.after === pageRequest.after) {
+      await query(
+        `UPDATE integration_connections
+            SET plugin_local_queue_answer = $3::jsonb, plugin_local_queue_request = NULL, updated_at = now()
+          WHERE id = $1 AND business_id = $2`,
+        [connection.id, connection.business_id, JSON.stringify(pageAnswer)],
+      );
+      pageRequest = null;
+    } else if (pageAnswer && !pageRequest) {
+      // Nobody is waiting: keep it as the last answered page, newest wins.
+      const previous = sanitizeLocalQueuePageAnswer(pageMailbox.rows[0]?.answer);
+      if (!previous || Date.parse(pageAnswer.answeredAt) >= Date.parse(previous.answeredAt)) {
+        await query(
+          `UPDATE integration_connections SET plugin_local_queue_answer = $3::jsonb, updated_at = now()
+            WHERE id = $1 AND business_id = $2`,
+          [connection.id, connection.business_id, JSON.stringify(pageAnswer)],
+        );
+      }
+    }
     if (pluginSiteMismatch(connection, siteUrl)) {
       await query(
         `UPDATE integration_connections
@@ -482,6 +515,10 @@ export async function pluginHandshake(
         serverMessage: connection.status === "paused" ? "همگام‌سازی از سمت پنل متوقف شده است" : null,
       },
       serverStatus: connection.status === "paused" ? "paused" : "active",
+      // Issue #1076: the one page of the plugin-local queue an operator asked
+      // for. Absent when nothing is pending, so an older plugin and an idle
+      // screen both read the same shape they always did.
+      ...(pageRequest ? { localQueuePageRequest: { after: pageRequest.after, limit: pageRequest.limit } } : {}),
       // Everything time-sensitive about the protocol, so the plugin never has
       // to hardcode a constant this side owns.
       protocol: {

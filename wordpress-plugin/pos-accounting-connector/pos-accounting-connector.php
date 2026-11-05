@@ -690,6 +690,9 @@ function pos_connector_settings() {
 		'last_customers_sweep_at'  => '',
 		'last_content_sweep_at'    => '',
 		'last_run_stats'           => array(),
+		// Issue #1076 — one pending page request for the plugin-local queue,
+		// answered on the next handshake and then cleared.
+		'local_queue_page_request' => array(),
 	);
 	$stored = get_option( POS_CONNECTOR_OPTION, array() );
 	return wp_parse_args( is_array( $stored ) ? $stored : array(), $defaults );
