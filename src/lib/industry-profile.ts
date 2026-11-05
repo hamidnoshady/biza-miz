@@ -61,6 +61,15 @@ export const MODULE_KEYS = [
   // trade page over the shared `items`/`item_serials` primitives, so the
   // module gates a screen and an API prefix, never a second stock engine.
   "automotive",
+  // Issue #1128 §D — the agency's reimbursable-cost register («هزینه‌های
+  // کارفرما»). Like `automotive`/`jewelry`/`watch` it is one trade page over
+  // shared primitives — canonical parties, orders, the posting engine and the
+  // 1270 pass-through account — so the module gates a screen and never a
+  // second cost engine. It cannot borrow an existing key: `advertising_agency`
+  // shares its whole module set with `service_saas` and
+  // `architecture_construction`, and neither of their charts carries 1270, so
+  // any shared key would advertise a page whose API answers `not_agency`.
+  "agency",
   "stock",
   "ledger",
   "integrations",
@@ -571,7 +580,7 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     // in invoice mode, `/api/sales`), exactly as it is for `service_saas` and
     // AEC: an agency has no till, no orders board, no recipes and no stock, and
     // its invoice lines are described services (`service-invoice.ts`).
-    modules: [...CORE_MODULES, "pos"],
+    modules: [...CORE_MODULES, "pos", "agency"],
     labels: AGENCY_LABELS,
     salesModel: "retail_invoice",
     // The F&B-shaped flags off, like every other non-F&B profile: an
@@ -658,6 +667,8 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // the whole path is gated by the trade's own module exactly as jewellery
   // and watch are.
   ["/accounting/automotive", "automotive"],
+  // Issue #1128 §D — the agency's reimbursable-cost register.
+  ["/accounting/client-costs", "agency"],
   // The products workspace is the catalogue door every retail trade-goods
   // industry shares; anchored on `stock`, the module all five of those
   // profiles carry, so a trade without the variant board never sees it.

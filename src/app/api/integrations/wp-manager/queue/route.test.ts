@@ -5,6 +5,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import * as setup from "@/lib/setup-state";
 import * as connectionsService from "@/lib/integrations/connections-service";
 import * as wpManagerService from "@/lib/integrations/wp-manager-service";
+import { encodeWpQueueCursor } from "@/lib/integrations/wp-queue-cursor";
 import { GET, POST } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -412,5 +413,44 @@ describe("POST /api/integrations/wp-manager/queue", () => {
     expect(body.ok).toBe(true);
     expect(body.mode).toBe("plugin");
     expect(wpManagerService.flushWpOutbox).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID);
+  });
+});
+
+describe("queue keyset cursor (issue #1077)", () => {
+  const emptyPage = { rows: [], total: 0, page: 1, pageSize: 25, totalPages: 1, nextCursor: null };
+
+  beforeEach(() => {
+    vi.mocked(wpManagerService.wpQueuePage).mockResolvedValue(emptyPage as never);
+    vi.mocked(wpManagerService.wpQueueSummary).mockResolvedValue({} as never);
+  });
+
+  it("hands the parsed position to the service and echoes the next cursor", async () => {
+    const cursor = { createdAt: "2026-11-04 17:22:11.432+00", id: "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a13" };
+    const token = encodeWpQueueCursor(cursor);
+    vi.mocked(wpManagerService.wpQueuePage).mockResolvedValueOnce({ ...emptyPage, nextCursor: token } as never);
+
+    const res = await GET(
+      new Request(`http://localhost/api/integrations/wp-manager/queue?connectionId=${CONNECTION_ID}&cursor=${token}`),
+    );
+
+    expect(res.status).toBe(200);
+    expect(vi.mocked(wpManagerService.wpQueuePage).mock.calls[0][2]).toMatchObject({ cursor });
+    expect((await res.json()).nextCursor).toBe(token);
+  });
+
+  it("rejects a token it did not mint instead of silently walking the shallow page", async () => {
+    const res = await GET(
+      new Request(`http://localhost/api/integrations/wp-manager/queue?connectionId=${CONNECTION_ID}&cursor=not-a-cursor`),
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_cursor" });
+    expect(wpManagerService.wpQueuePage).not.toHaveBeenCalled();
+  });
+
+  it("never sends a cursor key for a page-number request, so that path is unchanged", async () => {
+    const res = await GET(new Request(`http://localhost/api/integrations/wp-manager/queue?connectionId=${CONNECTION_ID}&page=2`));
+    expect(res.status).toBe(200);
+    expect(vi.mocked(wpManagerService.wpQueuePage).mock.calls[0][2]).not.toHaveProperty("cursor");
+    expect((await res.json()).nextCursor).toBeNull();
   });
 });

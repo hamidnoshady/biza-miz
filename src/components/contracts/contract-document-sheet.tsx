@@ -22,7 +22,7 @@
  *    the same content, and pretending otherwise with a manual paginator would
  *    be the "second printing framework" the epic forbids.
  */
-import { cardClass } from "@/app/dashboard/page-chrome";
+import { cardClass } from "@/app/dashboard/page-chrome-styles";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import {

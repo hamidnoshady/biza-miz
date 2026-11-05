@@ -178,6 +178,9 @@ export const ACCOUNTING_WORKSPACE_HREFS = {
   // kind: its own page under Accounting, canonical from the day it ships (no
   // `/dashboard/automotive` address ever existed, so it needs no legacy row).
   automotive: "/accounting/automotive",
+  // Issue #1128 §D — the agency's reimbursable-cost register, canonical from
+  // the day it ships (no `/dashboard/…` address ever existed).
+  clientCosts: "/accounting/client-costs",
 } as const;
 
 /** One products-workspace sub-section, under the one canonical products door. */

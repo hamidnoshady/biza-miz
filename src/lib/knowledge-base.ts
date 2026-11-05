@@ -74,6 +74,13 @@ export const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
   { key: "automotive", label: "خودرو و نمایشگاه اتومبیل", route: "/accounting/automotive" },
   { key: "accessories", label: "اکسسوری", route: ACCOUNTING_WORKSPACE_HREFS.products },
   { key: "cosmetics", label: "آرایشی و بهداشتی", route: ACCOUNTING_WORKSPACE_HREFS.cosmetics },
+  // Issue #1128 §D — the agency's reimbursable-cost register. A trade page like the
+  // four above it, gated by the `agency` module rather than by a permission.
+  {
+    key: "client-costs",
+    label: "هزینه‌های کارفرما",
+    route: ACCOUNTING_WORKSPACE_HREFS.clientCosts,
+  },
 ];
 
 /**

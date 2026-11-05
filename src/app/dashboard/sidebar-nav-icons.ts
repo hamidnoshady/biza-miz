@@ -77,6 +77,10 @@ const BUSINESS_NAV_ICONS: Record<string, LucideIcon> = {
   "/accounting/watch": WatchIcon,
   // Issue #839 — the automotive manager.
   "/accounting/automotive": CarIcon,
+  // Issue #1128 §D — the agency's reimbursable-cost register. A wallet, not a
+  // receipt: the point of the screen is that this is the client's money the
+  // agency is holding, not its own expense.
+  "/accounting/client-costs": WalletIcon,
   // The Accounting app's own home (`/accounting`); the old
   // `/dashboard/ledger` address still forwards into it in middleware, so
   // nothing keys on the retired URL any more.

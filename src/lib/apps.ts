@@ -94,6 +94,11 @@ export const APPS: AppDef[] = [
       // it: a dealership's vehicle stock, holds and sales are the counter, not
       // a fifth app.
       "automotive",
+      // Issue #1128 §D — the agency's reimbursable-cost register is a work
+      // area inside Accounting for the same reason: it reads the ledger and
+      // posts through the existing engine, so it is the counter, not a
+      // fifth app.
+      "agency",
       "ledger", "reports",
     ],
   },

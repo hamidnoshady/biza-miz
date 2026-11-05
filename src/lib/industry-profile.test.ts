@@ -73,7 +73,10 @@ describe("module sets", () => {
     // the café, which is the only industry that was ever complete.
     const modules = industryProfile("food_service").modules;
     for (const module of MODULE_KEYS) {
-      // Retail-only: the four industry pages, and `stock` (F&B's equivalent is `inventory`).
+      // Trade-only: the retail industry pages, `stock` (F&B's equivalent is
+      // `inventory`), the automotive manager, and the agency's reimbursable-cost
+      // register. None of these is a module the café ever had, so excluding them
+      // cannot hide a subtraction — which is what this loop exists to catch.
       if (
         module === "jewelry" ||
         module === "watch" ||
@@ -83,6 +86,7 @@ describe("module sets", () => {
         module === "tools_fittings" ||
         module === "haberdashery" ||
         module === "automotive" ||
+        module === "agency" ||
         module === "stock"
       )
         continue;
@@ -90,6 +94,17 @@ describe("module sets", () => {
       // original F&B baseline this loop pins.
       if (module === "website" || module === "messaging") continue;
       expect(modules, module).toContain(module);
+    }
+  });
+
+  it("gives the agency module to the agency alone", () => {
+    // Issue #1128 §D. The `agency` module is the only thing that keeps
+    // /accounting/client-costs out of every other trade's sidebar, and the
+    // agency's API answers `not_agency` to anyone else, so a second industry
+    // acquiring this module would advertise a page that cannot work. Pinned
+    // in both directions: the agency has it, and nobody else does.
+    for (const industry of INDUSTRIES) {
+      expect(hasModule(industry, "agency"), industry).toBe(industry === "advertising_agency");
     }
   });
 

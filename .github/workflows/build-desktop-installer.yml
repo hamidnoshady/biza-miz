@@ -224,6 +224,8 @@ jobs:
         run: npx vitest run src/lib/desktop-runtime-posture.test.ts src/lib/desktop-network-interfaces.test.ts src/lib/chromium-executable.test.ts
 
       - name: Build Next production application
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: npm run build
 
       - name: Build positively selected desktop runtime

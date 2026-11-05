@@ -390,7 +390,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     source === "ai_attachment" ||
     source === "ai_generated" ||
     source === "ocr_receipt" ||
-    source === "ocr_invoice"
+    source === "ocr_invoice" ||
+    source === "contract_final_pdf"
   )
     filter.source = source;
   if (params.get("trashed") === "1") filter.trashed = true;
