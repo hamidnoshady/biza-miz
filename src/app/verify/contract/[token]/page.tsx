@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { formatJalali } from "@/lib/jalali";
-import { verifyFinalContractPdfToken } from "@/lib/contracts/final-pdf";
+import { verifyFinalContractPdfToken } from "@/lib/contracts/final-pdf-verification";
 import { toPersianDigits } from "@/lib/digits";
 
 export const dynamic = "force-dynamic";

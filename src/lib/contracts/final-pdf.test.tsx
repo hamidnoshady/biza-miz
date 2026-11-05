@@ -28,7 +28,8 @@ vi.mock("@/lib/media-service", () => ({
 vi.mock("@/lib/pdf-render", () => ({ renderStaticHtmlToPdf: mocks.renderStaticHtmlToPdf }));
 vi.mock("qrcode", () => ({ default: { toDataURL: mocks.qr } }));
 
-import { generateOrReadFinalContractPdf, verifyFinalContractPdfToken } from "./final-pdf";
+import { generateOrReadFinalContractPdf } from "./final-pdf";
+import { verifyFinalContractPdfToken } from "./final-pdf-verification";
 
 const content = {
   version: 1,
