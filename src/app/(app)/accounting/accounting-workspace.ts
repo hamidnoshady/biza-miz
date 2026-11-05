@@ -129,6 +129,18 @@ const WORKSPACE_GROUP_SLOTS: readonly { key: string; label: string; description?
       { href: ACCOUNTING_WORKSPACE_HREFS.cosmetics },
     ],
   },
+  {
+    // Issue #1128 §D. Its own group rather than a slot in «عملیات»: a
+    // dealership's vehicles are what it sells, whereas an agency's operations
+    // are its projects and campaigns, which live in the CRM and Workspace.
+    // What is left is money spent on a client's behalf and then recharged —
+    // neither a sale nor a purchase of the agency's own. The group is empty,
+    // and therefore absent, for every trade but this one.
+    key: "agency",
+    label: "امور آژانس",
+    description: "هزینه‌های کارفرما و بازدریافت آن‌ها",
+    slots: [{ href: ACCOUNTING_WORKSPACE_HREFS.clientCosts }],
+  },
 ];
 
 /** The reports group's business entries — kept apart because it sits after the ledger. */
