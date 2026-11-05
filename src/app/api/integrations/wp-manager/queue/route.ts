@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
+import { parseWpQueueCursor } from "@/lib/integrations/wp-queue-cursor";
 import {
   flushWpOutbox,
   resolveWpQueueReview,
@@ -45,6 +46,11 @@ export const GET = withTenantScope(async (request: Request) => {
   const limit = parsedLimit && Number.isFinite(parsedLimit) ? Math.min(500, Math.max(1, parsedLimit)) : undefined;
   const parsedPage = Number.parseInt(url.searchParams.get("page") ?? "1", 10);
   const page = Number.isFinite(parsedPage) ? Math.max(1, parsedPage) : 1;
+  // Deep-history walking (issue #1077). A malformed token is the caller's bug,
+  // never a silently-ignored parameter: it would walk the shallow page instead.
+  const rawCursor = url.searchParams.get("cursor");
+  const cursor = rawCursor ? parseWpQueueCursor(rawCursor) : null;
+  if (rawCursor && !cursor) return NextResponse.json({ error: "invalid_cursor" }, { status: 400 });
   const parsedPageSize = Number.parseInt(url.searchParams.get("pageSize") ?? String(limit ?? 25), 10);
   const pageSize = Number.isFinite(parsedPageSize) ? Math.min(100, Math.max(10, parsedPageSize)) : limit ?? 25;
 
@@ -56,6 +62,7 @@ export const GET = withTenantScope(async (request: Request) => {
       limit,
       page,
       pageSize,
+      ...(cursor ? { cursor } : {}),
     }),
     wpQueueSummary(session.businessId, connectionId),
   ]);
@@ -67,6 +74,7 @@ export const GET = withTenantScope(async (request: Request) => {
     page: pageResult.page,
     pageSize: pageResult.pageSize,
     totalPages: pageResult.totalPages,
+    nextCursor: pageResult.nextCursor ?? null,
     // The attempt cap actually in force for this connection's mode, so the
     // UI never quotes the other mode's policy (issue #942, F16).
     maxAttempts: wpQueueMaxAttempts(connection.link_mode),

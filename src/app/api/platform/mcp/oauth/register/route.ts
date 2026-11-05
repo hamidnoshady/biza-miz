@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { registerPlatformMcpClient } from "@/lib/mcp/platform-oauth";
 import { platformOauthCors, platformOauthError, platformOauthPreflight } from "@/lib/mcp/platform-oauth-http";
+import { platformRealmUnavailable } from "@/lib/platform-runtime-guard";
 
 /**
  * RFC 7591 — dynamic client registration for the console's MCP endpoint.
@@ -16,6 +17,11 @@ export async function OPTIONS() {
 }
 
 export async function POST(request: NextRequest) {
+  // Issue #1194 — the Central realm does not exist on a site runtime. Deny
+  // before reading any credential, so a local install cannot even begin a
+  // platform sign-in or MCP grant.
+  const realmUnavailable = platformRealmUnavailable();
+  if (realmUnavailable) return realmUnavailable;
   let body: Record<string, unknown>;
   try {
     body = (await request.json()) as Record<string, unknown>;

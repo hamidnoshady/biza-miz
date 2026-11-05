@@ -326,6 +326,192 @@ since the plan stops that row) and writes an `audit_log` row,
 quantities. Nothing is merged, moved or deleted; the archived row's frozen stock
 quantity is not zeroed.
 
+## The products screen (issue #1207)
+
+The report and the archive script were operator tools; a business owner never
+saw them. `/accounting/products` now carries the same evidence and the same two
+safe decisions, on the same rules — nothing on the screen can do more than
+`scripts/resolve-duplicate-items.ts` does.
+
+### §A — the store control is named after the row's state
+
+One control, `ProductStoreActionButton` (`product-publication-panel.tsx`), whose
+label comes from `src/lib/product-row-actions.ts` and from nothing else:
+
+| Row | Control | What it does |
+|---|---|---|
+| mapped to at least one store | **به‌روزرسانی دستی** (short «به‌روزرسانی») | review → confirm → queued; the store's acknowledgement is what links or updates |
+| mapped nowhere | **انتشار در فروشگاه**, plus the optional **پیوند به محصول موجود** store id | creates a new store product, or links an existing one instead of duplicating it |
+| a probable duplicate, mapped nowhere | **بررسی محصول تکراری** | opens the review; no publication until the rows are decided |
+| a probable duplicate, already mapped | **به‌روزرسانی دستی** + **بررسی تکراری** | the update creates nothing, so the review sits beside it |
+
+Both store actions open the same review the API already enforced: preview →
+confirmation → `202` queued, `reviewToken` invalidated by any change to the
+selection, `integration_mappings` written only on acknowledgement. The copy
+states plainly that automatic stock/price sync is asynchronous and needs no
+click. With several stores connected, each store shows its own link/delivery
+state and the selected store is what decides create / link / update.
+
+### §B — a compact row with one expandable details area
+
+The eleven-column RTL table became four: **محصول** (name, code, publish status,
+«محصول اصلی» or «تنوع» plus the parent it belongs to, variant attributes), **وضعیت و موجودی** (one status badge plus quantity
+and sale price), **منبع و پیوند فروشگاه** (the owning integration and one chip
+per store with that store's state, or «بدون پیوند ووکامرس», plus
+«احتمال تکراری»), and **عملیات** (the one primary action above plus «جزئیات»).
+
+Barcode, unit, cost, publish status, every store's remote id, the two separate
+times — **آخرین دریافت کاتالوگ** and **آخرین تأیید ارسال** — the last delivery
+error, «مدیریت این فروشگاه», and the three editors (**ویرایش**, «ورود کالا /
+قیمت», «توضیحات و انتشار») live behind «جزئیات».
+
+A family row draws «محصول اصلی» and states that its stock lives in its variants;
+a child draws «تنوع» and «از «<parent>»». The two are never the same word, so a
+variant is not mistaken for a product of its own.
+
+**«ویرایش»** (`product-edit-panel.tsx`) is the contextual action the screen was
+missing entirely — name, SKU, barcode and unit, PATCHed through the same
+`/api/products/items/[id]/meta` the description editor already used. It is a
+patch, not a replacement: only the changed fields are sent, and an emptied code
+clears to `NULL` rather than to an empty string. It deliberately owns none of
+the other write paths — stock and price stay on «ورود کالا / قیمت», descriptions
+and publish status on «توضیحات و انتشار» — and it never reaches a store: the
+hint beside the SKU field says a SKU change does not rename, re-link or
+re-publish the WooCommerce product. The row does not claim a sync time it does not have: a
+mapping with no acknowledged send has no send time.
+
+`DataTable` already turns its table into stacked cards below `sm`, so the same
+markup is the phone view; the panel wrapper still measures the scroll container
+so an expanded panel never opens off-screen. Three filters read the same per-row
+state as the badges (`src/lib/product-row-actions.ts`):
+
+| Filter | Values | What it means |
+|---|---|---|
+| وضعیت | موجود / ناموجود / غیر قابل فروش | the row's own stock state (unchanged) |
+| فروشگاه (Woo) | متصل / محلی / احتمال تکراری / در صف / ناموفق | link and outbox health, worst store wins |
+| منبع | ووکامرس / هلو / محلی | the integration that **owns** the row (`items`'s mapping), not whether a store knows it |
+| فروشگاه مشخص | one per connected store | drawn only when more than one store exists; a one-option dropdown is noise |
+
+«تازه‌سازی وضعیت ارسال» re-reads link/outbox/duplicate state, as does every
+successful decision, so a badge cannot stay stale until a page reload.
+
+The claim in that copy is proven, not just written:
+`integration/woocommerce-automatic-sync.integration.test.ts` drives
+`runWooCommerceSyncTick()` — the cron entry point, with no screen and no user —
+and shows a local stock/price change reaching the store as two `PUT`s with the
+mapping's acknowledged payload moving behind them, the next tick sending nothing,
+plugin mode handing the same rows to the plugin instead of a dead REST call, and
+a disabled Website app or a paused connection parking the work rather than
+dropping it.
+
+Failures are written for the reader too (`src/lib/product-publication-copy.ts`):
+an unreachable or paused store, an out-of-date WordPress plugin, a missing sale
+price, an incomplete attribute mapping, a changed review and a permission gap
+each get their own sentence and their own next step, and the panel promises a
+retry only where a retry could work. The raw code the server sent is kept in
+`data-error-code` and the hover text for support instead of being printed at the
+owner.
+
+### §C — the duplicate review on the screen
+
+`GET /api/products/duplicates` (`inventoryView` + `integrationsView`) serves two
+shapes: `?summary=1` returns only the flagged SKUs, which is what the list loads;
+`?sku=` returns that code's group with its plan, ambiguity notes and review
+token. `POST` (`inventoryAdjust` + `integrationsManage`, `confirm: true`, token
+echoed) records one of exactly two decisions:
+
+- **نگهداری جداگانه** — `item.duplicate_kept_separate` in `audit_log`, naming the
+  SKU, the verdict and the exact row set. It writes nothing to `items`, so a true
+  different product, a copy per branch, a different source or store, and a
+  variant family all stay separate; the decision stops the same candidate being
+  reported forever. No new table was needed.
+- **بایگانی نسخهٔ تکراری** — offered only when the plan says `archive` (a proven
+  creation-race twin, active WooCommerce twin, nothing referencing it). It calls
+  the existing `archiveDuplicateOrphans`, which re-checks every guard under a row
+  lock in its own transaction and writes `item.duplicate_orphan_archived`. A
+  blocked candidate lists its blockers and the referencing tables and offers no
+  archive button at all.
+
+Both shapes are scoped to the **active branch** (`resolveActiveLocation`), which is
+the last of §C's "by authorized business + branch + SKU": items are per branch, so
+a business-wide read flags a row for a twin the reader cannot see on this screen,
+and reports the legitimate `per_branch_copies` shape as a candidate. The operator
+scripts take the same scope as `--location <uuid>`; without it they keep their
+business-wide read.
+
+The review panel shows each row's id, branch, kind and parent, on-hand quantity,
+creation time (Shamsi), provenance and the store's last product payload, then why
+the candidate is ambiguous and which distinctions would justify keeping it apart.
+A shared SKU alone is never a merge key.
+
+### Runbook — dry run, apply, recover
+
+```bash
+# 1. Read-only. One SKU or the whole catalogue; writes nothing (READ ONLY, rolled back).
+#    --location <uuid> narrows it to the branch the reader is looking at.
+npx tsx scripts/report-duplicate-items.ts --business <uuid> --sku zza05023 --location <branch uuid>
+
+# 2. Plan. Still write-free: which orphans may be archived, which are blocked and why.
+npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --sku zza05023 --location <branch uuid>
+
+# 3. Snapshot before any write (the plan plus the active-item count).
+npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --json > dups-plan.json
+
+# 4. Apply, one tenant at a time, only after an authorised review.
+npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --sku zza05023 --apply
+
+# 5. Verify: the report no longer lists the archived pair as a race orphan, and
+#    the active-item count dropped by exactly the archived number.
+npx tsx scripts/report-duplicate-items.ts --business <uuid> --sku zza05023
+```
+
+Recovery is one statement per archived row — the row, its stock snapshot and its
+history were never touched:
+
+```sql
+UPDATE items SET is_active = true, updated_at = now() WHERE id = '<orphan item id>';
+```
+
+Never run this against a productive catalogue from the issue itself: #1207
+authorises the tooling and the screen, not a tenant's data. A blocked orphan (any
+sale, stock movement, batch, serial, barcode, child item or manual price row)
+needs a person's reconciliation plan, not an archive.
+
+### A blocked orphan: the reconciliation plan before any write
+
+An archive refuses whenever `countItemReferences` finds a row pointing at the
+orphan. That refusal is not a bug to route around — it means the orphan has a
+financial or stock life the twin never had, and the two must be reconciled
+*before* anybody deletes a pointer. The plan below is what an authorised review
+writes down per orphan; the tooling deliberately does not do any of it.
+
+1. **Snapshot.** `--json` output for the SKU, plus `item_stock`, every
+   `product_price_history` row, every reference row (`countItemReferences`
+   names the table and column) and the two items' `created_at`. This is the
+   recovery file.
+2. **Classify the references.** *Sales/invoices*: the orphan's lines are real
+   revenue and cost of goods; nothing may move them. *Stock movements*: the
+   orphan's on-hand is a physical count, not a copy. *Barcodes/batches/serials*:
+   identifiers a warehouse scans. Any of these means **do not archive** — the
+   orphan is a product in use, and the duplicate question is a naming problem,
+   not a data problem.
+3. **Decide direction, never both.** If the twin should own the history, the
+   move is a documented, per-row UPDATE of the referencing foreign keys inside
+   one transaction, with the audit row naming every moved row count — and only
+   for *unposted* documents or an authorised correction of posted ones through
+   the normal reversal path. There is no bulk move, and no stock snapshot is
+   ever summed into another item (see #1207 §C: never aggregate snapshots).
+4. **Or keep both.** A shared SKU is not a merge key: record «نگهداری جداگانه»
+   with the reason (different provider, different branch, variant family,
+   legitimately two products), which stops the same candidate resurfacing
+   without touching a single row.
+5. **Verify and close.** Re-run the report; the pair must not come back as
+   `race_orphan`. Keep the snapshot with the decision in the tenant's record.
+
+Nothing in steps 1–5 runs from the issue, a screen or a script without the
+tenant owner's written review (#1207 §D).
+
+
 ## Tests
 
 | File | What it proves |
@@ -334,6 +520,17 @@ quantity is not zeroed.
 | `src/lib/duplicate-items.test.ts` | the verdict rules and helpers |
 | `src/lib/duplicate-items-resolution.test.ts` | which orphans may be archived and why the rest are blocked (fails closed on unchecked references) |
 | `integration/woocommerce-duplicate-orphan-archive.integration.test.ts` | the plan writes nothing; an unreferenced orphan is archived and audited, a referenced or changed-since-plan one is left active, another business is untouched |
+| `src/lib/product-publication-copy.test.ts` | 1207 §D — every refusal in the reader's words, the offline-versus-unknown split, and no raw code on screen |
+| `integration/woocommerce-automatic-sync.integration.test.ts` | 1207 §A/§D — the scheduler's own tick delivers a stock and a price change nobody clicked (no preview, no token, no button), settles on the next tick instead of re-sending, hands the work to the plugin in plugin mode, and parks it across a disabled Website app or a paused connection without losing it |
+| `docs/design/visual/accounting-products{,-dark,-mobile}.png` | 1207 §B — the row itself, frozen: stocked / family / variant / out-of-stock / draft, the store-less chip, «احتمال تکراری» from a shared SKU, and the stacked-card form below `sm`. Recorded from a second seeded tenant because the workspace is gated to trade-goods industries (see `docs/design/visual-regression.md`). |
+| `src/app/dashboard/products/products-list-responsive.test.ts` | 1207 §B/§D — the toolbar wraps, a store chip truncates while keeping its full text, an expanded panel stays capped and stuck to the start edge (no physical `left-`/`right-`), LTR is reserved for codes, and touch targets stay 32–36px |
+| `src/app/dashboard/products/product-edit-panel.test.tsx` | 1207 §B — «ویرایش» opens on the row's values, sends only changed fields, clears a code to `NULL`, refuses an empty name, and says a SKU edit is not a store update |
+| `src/lib/product-row-actions.test.ts` | 1207 §A/B — the three row actions and their labels, per-store state, the worst-store row state, the Woo/duplicate filter, the source filter and the per-store filter |
+| `src/app/dashboard/products/product-publication-panel.test.tsx` | 1207 §A/D — manual update vs publication vs review, per-store state, review token invalidation, queued-not-synced, and the friendly offline / plugin-outdated / network-down failures |
+| `src/app/dashboard/products/products-list-section.test.tsx` | 1207 §A/B/C — the row's action per state, details behind «جزئیات», «ویرایش» from the details area, «محصول اصلی» vs «تنوع», the source and per-store filters, the duplicate chip, the review panel's keep-separate and blocked cases |
+| `src/app/api/products/duplicates/route.test.ts` | 1207 §C — summary vs one-SKU reads, both decisions, missing confirmation/token, a stale token (409), blockers (409) |
+| `src/lib/duplicate-items-copy.test.ts` | 1207 §C — every verdict and blocker word, ambiguity notes, keep-separate reasons |
+| `integration/woocommerce-duplicate-review.integration.test.ts` | 1207 §C against Postgres — the group read with its plan writes nothing, the flagged-SKU summary is tenant-scoped, «نگهداری جداگانه» is audited and touches no row, a changed token and a referenced orphan both refuse the archive, the read is branch-scoped, and a Holoo-mapped twin is never archived (`twin_not_woo_product`) |
 | `src/lib/integrations/woo-catalogue.test.ts` | 39 — the type matrix, order-line resolution, update paths, taxonomy tree sort |
 | `src/lib/integrations/woocommerce-client.test.ts` | 23 — both namespaces, pagination, update paths |
 | `src/lib/integrations/woo-ops-service.test.ts` | 16 — the closed field lists, price/quantity/refund validation, `api_refund` forced false |

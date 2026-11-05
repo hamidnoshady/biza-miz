@@ -389,6 +389,9 @@ export async function withTenantTransaction<T>(
  *     exact host-derived business and the live session recorded in the row.
  *   - **platform** — the super-user realm administers every tenant by
  *     definition (Phase 15), as does the migration runner;
+ *   - **contract-final-pdf-verification** — a 256-bit random QR locator is
+ *     hashed before lookup; the public verifier returns only content/PDF hashes,
+ *     version and completion metadata, never tenant or signer PII;
  *   - **server-sync-auth** — resolving a server-sync bearer token to the
  *     business it belongs to (Phase 17) is the same "identify the tenant
  *     first" problem as login, just keyed on a token instead of an email;
@@ -542,6 +545,16 @@ export async function withTenantTransaction<T>(
  *     way in. Every statement is written by the platform and read by the
  *     console; nothing here is ever returned by a tenant route.
  *
+ *   - **tenant-backup-plan-policy** (issue #903 §3) — the plan-shaped and
+ *     fleet-level halves of the backup policy: `tenant_backup_plan_policy`
+ *     keyed by `billing_plans.key`, plus the alert/DR threshold columns on
+ *     `platform_tenant_backup_service`. Both are platform-only under FORCE RLS
+ *     and carry no business id (a plan is a catalogue row), so the console and
+ *     the scheduler are the only readers. A business is *subject* to its plan's
+ *     policy and must never read or infer it — the same rule as the
+ *     per-business override — which is why this bypass never joins a tenant
+ *     table's data into a caller that could return it.
+ *
  *   - **kavenegar-credentials** (issue #902) — reading or writing ONE child
  *     API key by the account id the caller already established. The credential
  *     table is platform-only under FORCE RLS so that no tenant policy can
@@ -549,6 +562,18 @@ export async function withTenantTransaction<T>(
  *     (inside the business's own `withTenant`) and the provisioning worker read
  *     it. It never selects across businesses: the account id is a parameter
  *     derived from a row already scoped to the caller's business.
+ *
+ *   - **torob-product-api-auth** (issue #894) — resolving the opaque shop id in
+ *     Torob's Product API v3 path (`/api/v1/torob/products/<shopId>`) to the
+ *     business that owns that `torob_shops` row. The caller is Torob's fetcher
+ *     with no session of any kind, and the id in the URL is the *only* thing that
+ *     names the tenant, so this is the same identify-the-tenant-first shape as
+ *     woocommerce-webhook-auth and api-key-auth, keyed on a path segment instead
+ *     of a token. ONE read of `torob_shops.business_id`; every later statement —
+ *     the shop's publishability, its domain (the JWT audience), the catalogue and
+ *     the feed — runs inside `withTenant` for that business. The response to an
+ *     unknown id and to a shop that may not be served is identical, so this
+ *     lookup cannot be used to enumerate shops.
  *
  * Every call is a hole in the isolation boundary, so keep them few, keep them
  * short, and never let one wrap a request body that also handles tenant data.

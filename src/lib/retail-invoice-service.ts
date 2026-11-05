@@ -37,6 +37,7 @@ import "./service-posting-rules";
 import {
   computeServiceSalePrice,
   normalizeServiceDescription,
+  resolvePassThroughCreditCode,
   resolveServiceRevenueCode,
   isServiceInvoiceIndustry,
 } from "./service-invoice";
@@ -149,6 +150,20 @@ export type RetailInvoiceLineInput =
       discount?: number;
       vatPercent: number;
       revenueCode?: string;
+      /**
+       * Issue #1128 §D — this line recovers money the agency advanced on the
+       * client's behalf instead of selling work, so it credits **1270** (an asset)
+       * rather than a revenue account, and recognises no revenue at all.
+       *
+       * Only `advertising_agency` may set it, because only its chart carries 1270
+       * (`service-invoice.ts`); another trade is refused here rather than failing at
+       * the posting rule with a missing-account error, which is a worse place to find
+       * out. Mutually exclusive with `revenueCode`, and a discount is refused: both
+       * would silently restate what the line is, and discounting somebody else's money
+       * means the agency absorbed part of it — a different transaction that belongs in
+       * the agency's own cost, not in a reduction of a claim.
+       */
+      passThrough?: boolean;
     };
 
 /**
@@ -175,6 +190,15 @@ export interface CreateRetailInvoiceInput {
   note?: string | null;
   /** Branch business date supplied by the route for loyalty-point expiry. */
   businessDate?: string;
+  /**
+   * The project this invoice bills, when it bills one (issue #1128 §D).
+   *
+   * Carried into the service line's `service.sale_revenue` event so the entry
+   * it posts is tagged with `journal_entries.project_id` — the dimension §D's
+   * project P&L reads. Only the service trades have a project to bill; a till
+   * sale leaves it unset and nothing changes for it.
+   */
+  projectId?: string | null;
   createdBy?: string | null;
   /**
    * The till's submission key (issue #913 item 2): with a stable key, a
@@ -877,9 +901,27 @@ async function settleLine(
     let description: string;
     let revenueCode: string;
     let breakdown: ReturnType<typeof computeServiceSalePrice>;
+    // A pass-through line is a different accounting act, so it is decided before the
+    // arithmetic rather than folded into it: which account the line credits, and
+    // therefore whether the invoice recognises revenue at all.
+    const passThrough = line.passThrough === true;
+    if (passThrough) {
+      if (line.revenueCode !== undefined && line.revenueCode !== null && line.revenueCode !== "") {
+        throw new RetailInvoiceError(
+          "یک قلم بازدریافت هزینه نمی‌تواند هم‌زمان حساب درآمد داشته باشد.",
+        );
+      }
+      if ((line.discount ?? 0) !== 0) {
+        throw new RetailInvoiceError(
+          "به هزینهٔ بازدریافتی از کارفرما تخفیف تعلق نمی‌گیرد؛ مبلغ همان است که خرج شده.",
+        );
+      }
+    }
     try {
       description = normalizeServiceDescription(line.description);
-      revenueCode = resolveServiceRevenueCode(input.industry, line.revenueCode);
+      revenueCode = passThrough
+        ? resolvePassThroughCreditCode(input.industry)
+        : resolveServiceRevenueCode(input.industry, line.revenueCode);
       breakdown = computeServiceSalePrice({
         unitPrice: line.unitPrice,
         quantity: line.quantity,
@@ -898,12 +940,18 @@ async function settleLine(
         quantity: line.quantity,
         unitPrice: line.unitPrice,
         revenueCode,
+        // Carried so the entry's memo can say what it was: two lines that both credit
+        // an account look identical in a ledger listing, and one of them is a sale.
+        passThrough,
         gross: breakdown.gross,
         discount: breakdown.discount,
         net: breakdown.net,
         vat: breakdown.vat,
         total: breakdown.total,
         tenders: resolveLineTenders({ tenders: tenderQueue }, breakdown.total),
+        // Issue #1128 §D — the project being billed, so the entry this line
+        // posts carries the dimension its P&L is read by.
+        projectId: input.projectId ?? null,
       },
       sourceType: "service_sale",
       sourceId: orderId,
@@ -934,6 +982,7 @@ async function settleLine(
         net: breakdown.net,
         total: breakdown.total,
         revenueCode,
+        ...(passThrough ? { passThrough: true as const } : {}),
         ledgerEntryIds: revenueEntryId ? [revenueEntryId] : [],
       },
     };

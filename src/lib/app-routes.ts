@@ -131,6 +131,20 @@ export function workspaceProjectHref(projectId: string): string {
 }
 
 /**
+ * One contract's document and signing round (issue #908), inside the
+ * workspace's contracts section.
+ *
+ * `tab` is the panel the page should open on: the document builder by default,
+ * or `"signing"` for the signer list and the evidence timeline. It is part of
+ * the URL rather than component state so a shared link and a reload land on the
+ * same panel.
+ */
+export function workspaceContractHref(contractId: string, tab?: "document" | "signing"): string {
+  const base = `${WORKSPACE_MODULE_HOME}/contracts/${contractId}`;
+  return tab === "signing" ? `${base}?tab=signing` : base;
+}
+
+/**
  * The business work areas that belong to the primary Accounting workspace.
  *
  * These are public paths, not aliases. Every sidebar entry, link and redirect
@@ -164,6 +178,9 @@ export const ACCOUNTING_WORKSPACE_HREFS = {
   // kind: its own page under Accounting, canonical from the day it ships (no
   // `/dashboard/automotive` address ever existed, so it needs no legacy row).
   automotive: "/accounting/automotive",
+  // Issue #1128 §D — the agency's reimbursable-cost register, canonical from
+  // the day it ships (no `/dashboard/…` address ever existed).
+  clientCosts: "/accounting/client-costs",
 } as const;
 
 /** One products-workspace sub-section, under the one canonical products door. */

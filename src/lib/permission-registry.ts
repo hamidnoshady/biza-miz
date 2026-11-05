@@ -296,6 +296,11 @@ const DRAFTS: Draft[] = [
   { key: P.commissionPayout, group: "growth", label: "پرداخت پورسانت", description: "آزاد کردن دورهٔ تأییدشده برای پرداخت، ثبت پرداخت به فروشندگان و بستن دوره. پول از صندوق یا بانک خارج می‌شود.", risk: "critical", audit: true },
   { key: P.commissionReverse, group: "growth", label: "ابطال پرداخت پورسانت", description: "برگرداندن یک پرداخت پورسانت با سند اصلاحی. دفتر را اصلاح می‌کند و تأثیر آن روی مانده هر فروشنده ثبت می‌شود.", risk: "critical", audit: true },
   { key: P.marketingConfigure, group: "growth", label: "تنظیمات رشد و بازاریابی", description: "پیکربندی سراسری برنامه رشد، جدا از اجرای یک کمپین.", risk: "high", audit: true },
+  // Issue #894 — the Torob channel, inside Growth. `configure` is separate from
+  // `manage` because it is the one key that stores a merchant credential.
+  { key: P.torobView, group: "growth", label: "مشاهدهٔ کانال ترب", description: "دیدن وب‌سایت‌های تحت مدیریت و وضعیت اتصال هر کدام به ترب.", risk: "low", audit: false },
+  { key: P.torobManage, group: "growth", label: "مدیریت کانال ترب", description: "اتصال یک وب‌سایت به ترب، روشن و خاموش کردن انتشار، و قطع اتصال. ثبت‌نام انجام‌شده در ترب حذف نمی‌شود.", risk: "high", audit: true },
+  { key: P.torobConfigure, group: "growth", label: "پیکربندی اعتبارنامهٔ ترب", description: "ثبت یا جایگزینی توکن فروشگاهی ترب و قاعدهٔ انتشار محصولات. توکن رمزگذاری‌شده ذخیره می‌شود و دیگر نمایش داده نمی‌شود.", risk: "critical", audit: true },
 
   // --- Website -------------------------------------------------------------
   { key: P.websiteView, group: "website", label: "مشاهده وب‌سایت", description: "باز کردن مدیریت وب‌سایت و دیدن وضعیت کلی آن.", risk: "low", audit: false },

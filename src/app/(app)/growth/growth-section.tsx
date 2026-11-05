@@ -26,6 +26,7 @@ import { CommissionSection } from "./commission-section";
 import { GrowthCustomersSection } from "./customers-section";
 import { MessagingSection } from "./messaging-section";
 import { GrowthSettingsSection } from "./settings-section";
+import { TorobSection } from "./torob-section";
 import { growthSectionHref, type GrowthSectionKey } from "./growth-routes";
 import { canViewGrowthSection, growthAbilities } from "@/lib/growth-access";
 
@@ -61,6 +62,7 @@ export function GrowthSection({
     "gift-cards": () => <GiftCardsSection abilities={abilities} />,
     loyalty: () => <LoyaltySection abilities={abilities} />,
     commission: () => <CommissionSection canManage={abilities.manageCommission} />,
+    torob: () => <TorobSection canManage={abilities.manageTorob} canConfigure={abilities.configureTorob} />,
     settings: () => <GrowthSettingsSection />,
   } satisfies Record<GrowthSectionKey, () => React.ReactElement>;
 

@@ -227,6 +227,8 @@ describe("button abilities", () => {
       redeemGiftCards: false,
       manageCommission: false,
       viewCommission: false,
+      manageTorob: false,
+      configureTorob: false,
     });
     expect(growthApiPermission("/api/promotions/gift-cards", "POST")).toEqual([PERMISSIONS.giftCardsIssue]);
     expect(growthApiPermission("/api/promotions/gift-cards/redeem", "POST")).toEqual([PERMISSIONS.giftCardsRedeem]);

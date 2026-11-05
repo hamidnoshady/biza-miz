@@ -128,9 +128,11 @@ export class OwnerActivationError extends Error {
  * The six-digit code, texted to the owner's mobile.
  *
  * Sent through the same provider the login OTP uses, and refused outright when
- * no provider is configured: `getSmsProvider()` falls back to a no-op that
- * *logs* the code, which would leave the owner unable to activate and the code
- * sitting in a server log. No channel, no handover.
+ * no provider is configured: `getSmsProvider()` falls back to a no-op that only
+ * *logs* the code in development and now refuses in production (issue #902
+ * DoD #9), but checking first is still right — the owner should be told "no SMS
+ * channel" as a 503 they can act on, not a dispatch failure they cannot. No
+ * channel, no handover.
  *
  * Rate-limited per identity with the login's own limiter, because the two are
  * the same abuse — someone making a phone ring.

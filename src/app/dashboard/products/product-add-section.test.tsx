@@ -37,7 +37,11 @@ function legacyDraft(values: Record<string, string>) {
   }];
 }
 
-function installFetch(definitions: AttributeDefinition[], onCreate?: (payload: Record<string, unknown>) => void) {
+function installFetch(
+  definitions: AttributeDefinition[],
+  onCreate?: (payload: Record<string, unknown>) => void,
+  createdItemId?: string,
+) {
   fetchMock.mockImplementation(async (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : input.url;
     if (url === "/api/products/attributes") return jsonResponse({ definitions });
@@ -58,8 +62,10 @@ function installFetch(definitions: AttributeDefinition[], onCreate?: (payload: R
     }
     if (url === "/api/products/items" && init?.method === "POST") {
       onCreate?.(JSON.parse(String(init.body)) as Record<string, unknown>);
-      return jsonResponse({ ok: true, message: "created" });
+      return jsonResponse({ ok: true, message: "created", ...(createdItemId ? { item: { id: createdItemId } } : {}) });
     }
+    // The post-create publication panel asks which stores it may publish to.
+    if (url === "/api/products/publications") return jsonResponse({ stores: [] });
     return jsonResponse({ error: "unexpected_request" }, 500);
   });
 }
@@ -120,6 +126,24 @@ describe("ProductAddSection attribute drafts", () => {
       shortDescription: "دستبند دست‌دوز",
       longDescription: "متن کامل دستبند",
     });
+  });
+
+  it("offers an optional publication for the product it just created (no store link yet)", async () => {
+    // Issue #1207 §A — the panel now needs the row's store state, so this
+    // covers the second call site: a freshly created product is unlinked and
+    // not a duplicate, and must render as «انتشار در فروشگاه» rather than
+    // crashing the form the success banner lives in.
+    installFetch([], undefined, "0f0e6f3a-1b1c-4d5e-8f90-1a2b3c4d5e6f");
+    const user = userEvent.setup();
+    render(<ProductAddSection draftScope="business-1:branch-a" />);
+
+    await user.type(await screen.findByLabelText(/نام محصول/), "دستبند چرم");
+    await user.click(screen.getAllByRole("button", { name: /ثبت محصول/ })[0]);
+
+    expect(await screen.findByText(/محصول با موفقیت ذخیره شد/)).toBeTruthy();
+    expect(await screen.findByText("انتشار در فروشگاه")).toBeTruthy();
+    expect(screen.getByText(/اگر همان محصول از قبل در فروشگاه هست/)).toBeTruthy();
+    expect(screen.queryByText("به‌روزرسانی دستی")).toBeNull();
   });
 
   it("migrates a legacy name-keyed draft to a stable definition ID and submits that ID", async () => {

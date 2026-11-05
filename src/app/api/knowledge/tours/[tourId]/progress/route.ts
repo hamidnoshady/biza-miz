@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { TOUR_EVENT_TYPES, tourProgressView, type TourProgressEvent } from "@/lib/tours";
-import { eligibleTourById, recordTourEvent, tourViewerFor } from "@/lib/tours-service";
+import { eligibleTourById, recordTourEvent } from "@/lib/tours-service";
 
 /**
  * Records what the caller has seen of one tour (issue #972).
@@ -21,8 +21,7 @@ export const POST = withTenantScope(
     if (guard.error) return guard.error;
 
     const { tourId } = await context.params;
-    const viewer = await tourViewerFor(guard.session.businessId, guard.membership.permissions);
-    const tour = eligibleTourById(tourId, viewer);
+    const tour = await eligibleTourById(tourId, guard.session.businessId, guard.membership.permissions);
     if (!tour) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
     const body: unknown = await request.json().catch(() => null);

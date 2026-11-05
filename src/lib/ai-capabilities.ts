@@ -500,8 +500,6 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "loyalty.store_credit.issue": PERMISSIONS.storeCreditIssue,
   "loyalty.store_credit.use": PERMISSIONS.storeCreditPayout,
   "loyalty.program.upsert": PERMISSIONS.loyaltyManage,
-  "backup.config.set": PERMISSIONS.backupConfigure,
-  "backup.run_now": PERMISSIONS.backupManage,
   "backup.restore.apply": PERMISSIONS.backupRestore,
   "device.rename": PERMISSIONS.settingsManage,
   "device.revoke": PERMISSIONS.settingsManage,

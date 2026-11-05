@@ -224,6 +224,8 @@ jobs:
         run: npx vitest run src/lib/desktop-runtime-posture.test.ts src/lib/desktop-network-interfaces.test.ts src/lib/chromium-executable.test.ts
 
       - name: Build Next production application
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
         run: npm run build
 
       - name: Build positively selected desktop runtime
@@ -280,6 +282,21 @@ jobs:
       - name: Verify explicit unsigned-development status
         run: .\scripts\verify-windows-signatures.ps1 -ArtifactRoot electron\dist -Mode unsigned-development -OutputPath windows-signature-verification.json
 
+      - name: Release scan - no test bootstrap and no Central privileges in the payload
+        # Issue #1194 - inspects the packaged bytes (app.asar, the staged web
+        # runtime, the NSIS installer itself) rather than the source tree. Any
+        # DESKTOP_SMOKE_* trigger, smoke owner password, platform route module,
+        # seed credential or private key fails the build.
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Get-ChildItem electron/dist -File -Filter *.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) { throw "NSIS installer missing before the release scan" }
+          node scripts/scan-desktop-release.mjs `
+            --payload=electron/dist/win-unpacked `
+            --installer="$($installer.FullName)" `
+            --output=desktop-release-scan.json `
+            --require-installer-extraction
+
       - name: Assert packaged Electron and Node.js support posture
         run: .\scripts\verify-packaged-electron-runtime.ps1 -ArtifactRoot electron\dist\win-unpacked -OutputPath packaged-electron-runtime.json
 
@@ -329,6 +346,15 @@ jobs:
         run: npm run db:dev:stop
 
       - name: Install and run actual packaged desktop twice as a standard user
+        # Issue #1194 - when a staging Cloud is configured, the external harness
+        # also exercises Full Offline enrollment against the release bytes. The
+        # token is a secret; without it the phase reports "skipped" and the
+        # Hybrid install/restart checks still run.
+        # Issue #1194 — a wedged runner must fail this step, not the job.
+        timeout-minutes: 45
+        env:
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
           $user = "SuiteSmoke"
@@ -381,6 +407,11 @@ jobs:
             exit /b 98
           )
           set DESKTOP_EXECUTABLE=$installDir\Bizamiz.exe
+          rem Issue #1194 - a real, inspectable profile: the harness prints this
+          rem app's own log tail when a launch does not come up, and the report
+          rem lands next to the smoke output instead of a temp directory.
+          set DESKTOP_ACCEPTANCE_USER_DATA=$smokeRoot\profile
+          set DESKTOP_ACCEPTANCE_REPORT=$smokeRoot\acceptance-report.json
           "$node" "$smokeScript" > "$outputPath" 2>&1
           set RC=%ERRORLEVEL%
           echo %RC% > "$exitPath"
@@ -389,14 +420,44 @@ jobs:
 
             Start-Service seclogon -ErrorAction SilentlyContinue
             $credential = [pscredential]::new("$env:COMPUTERNAME\$user", $securePassword)
+            # Issue #1194 - start without -Wait and watch the batch file's own
+            # exit marker instead. `-Wait` blocks on the started process *and*
+            # anything it left behind, which turns a live application into a
+            # silent hang with no output; polling the marker ends the step when
+            # the harness ends, and the budget bounds the rest.
             $process = Start-Process -FilePath $env:ComSpec -ArgumentList "/d /c `"$commandPath`"" `
-              -WorkingDirectory $repo -Credential $credential -LoadUser -Wait -PassThru
+              -WorkingDirectory $repo -Credential $credential -LoadUser -PassThru
+            $deadline = (Get-Date).AddMinutes(42)
+            while (-not (Test-Path $exitPath) -and (Get-Date) -lt $deadline) {
+              Start-Sleep -Seconds 15
+              if (Test-Path $outputPath) { Get-Content $outputPath -Tail 3 }
+            }
+            if (-not (Test-Path $exitPath)) {
+              if (Test-Path $outputPath) { Get-Content $outputPath -Tail 200 }
+              taskkill /pid $process.Id /t /f 2>&1 | Out-Null
+              throw "Standard-user installed smoke did not finish within its 42-minute budget"
+            }
             if (Test-Path $outputPath) { Get-Content $outputPath }
-            $smokeExit = if (Test-Path $exitPath) { [int](Get-Content $exitPath | Select-Object -First 1) } else { $process.ExitCode }
+            $smokeExit = [int](Get-Content $exitPath | Select-Object -First 1)
+            # The harness closes its application on every path; make sure a
+            # crashed run cannot leave one behind on the acceptance machine.
+            if (-not $process.HasExited) { taskkill /pid $process.Id /t /f 2>&1 | Out-Null }
             if ($smokeExit -ne 0) { throw "Standard-user installed smoke exited $smokeExit" }
           } finally {
             Remove-LocalUser -Name $user -ErrorAction SilentlyContinue
           }
+
+      - name: Upload packaged acceptance diagnostics
+        # Issue #1194 - the step's own log is an annotation-capped summary; the
+        # full desktop log is what explains a launch that never came up.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-acceptance-diagnostics
+          path: |
+            C:\business-suite-smoke-${{ github.run_id }}\smoke-output.txt
+            C:\business-suite-smoke-${{ github.run_id }}\profile\Logs\desktop.log
+          if-no-files-found: ignore
 
       - name: Final size report and budgets
         id: sizes
@@ -548,6 +609,7 @@ jobs:
         with:
           name: business-suite-desktop-size-report
           path: |
+            desktop-release-scan.json
             desktop-size-before-package.md
             desktop-size-report.md
             desktop-size-diagnostics/

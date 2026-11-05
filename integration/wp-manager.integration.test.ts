@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { parseWpQueueCursor, type WpQueueCursor } from "../src/lib/integrations/wp-queue-cursor";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -174,6 +175,9 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
     expect(row!.title).toBe("Café’s “News”…");
     expect(row!.slug).toBe("cafe-news");
     expect(row!.status).toBe("publish");
+    // The card preview prefers the raw excerpt: rendered HTML would put tags
+    // in front of the owner.
+    expect(row!.excerptText).toBe("Raw summary");
 
     const detail = await content.getWpContent(biz.id, biz.pluginConnId, "post", "101");
     expect(detail?.editorTitle).toBe("Café's News");
@@ -217,6 +221,83 @@ describe("the content mirror upserts and decodes what WordPress sends", () => {
       .find((row) => row.remoteId === "901");
     expect(unsafe?.mediaUrl).toBeNull();
     expect(await content.deleteWpContent(biz.id, biz.pluginConnId, { id: 901, type: "attachment" })).toBe(true);
+  });
+
+  it("resolves a post's featured image through the mirrored attachment, and stays null when there is none", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 103,
+      type: "post",
+      title: "با تصویر شاخص",
+      excerpt: { raw: "<p>خلاصه&nbsp;کوتاه</p>" },
+      featured_media: 900,
+      status: "publish",
+    });
+    const rows = await content.listWpContent(biz.id, biz.pluginConnId, { wpType: "post" });
+    const withImage = rows.find((r) => r.remoteId === "103");
+    // Attachment 900 carries no media_details, so the source url is the fallback.
+    expect(withImage?.featuredImageUrl).toBe("https://shop.example.com/logo.png");
+    expect(withImage?.excerptText).toBe("خلاصه کوتاه");
+
+    await content.upsertWpContent(conn(), { id: 104, type: "post", title: "بدون تصویر", featured_media: 0 });
+    const withoutImage = (await content.listWpContent(biz.id, biz.pluginConnId, { wpType: "post" }))
+      .find((r) => r.remoteId === "104");
+    // The plugin sends 0 for "no featured image"; it must never resolve to the
+    // row that happens to share a made-up id.
+    expect(withoutImage?.featuredImageUrl).toBeNull();
+    expect(withoutImage?.excerptText).toBe("");
+  });
+
+  it("carries a scheduled post's own instant back to the editor", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 120,
+      type: "post",
+      title: "زمان‌بندی‌شده",
+      status: "future",
+      date_gmt: "2026-12-01T06:00:00",
+      modified_gmt: "2026-11-20T10:00:00",
+    });
+    const scheduled = await content.getWpContent(biz.id, biz.pluginConnId, "post", "120");
+    // WordPress sends UTC without a suffix; the editor needs one instant it can
+    // show as a Tehran wall clock and send back.
+    expect(scheduled?.status).toBe("future");
+    expect(scheduled?.scheduledFor).toBe("2026-12-01T06:00:00.000Z");
+
+    await content.upsertWpContent(conn(), {
+      id: 121,
+      type: "post",
+      title: "منتشرشده",
+      status: "publish",
+      date_gmt: "2026-01-01T06:00:00",
+    });
+    const published = await content.getWpContent(biz.id, biz.pluginConnId, "post", "121");
+    // A published post has a date, not a schedule.
+    expect(published?.scheduledFor).toBeNull();
+  });
+
+  it("keeps a post's categories and tags by id, and reads a broken list as none", async () => {
+    await content.upsertWpContent(conn(), {
+      id: 130,
+      type: "post",
+      title: "با دسته",
+      status: "publish",
+      categories: [2, 5],
+      tags: [9],
+    });
+    const row = await content.getWpContent(biz.id, biz.pluginConnId, "post", "130");
+    expect(row?.categories).toEqual([2, 5]);
+    expect(row?.tags).toEqual([9]);
+
+    // A mirror written by an older or broken producer must not break the editor
+    // read: a malformed list is "no terms", not an exception.
+    await content.upsertWpContent(conn(), {
+      id: 131,
+      type: "post",
+      title: "خراب",
+      categories: ["فرش"] as never,
+    });
+    const broken = await content.getWpContent(biz.id, biz.pluginConnId, "post", "131");
+    expect(broken?.categories).toEqual([]);
+    expect(broken?.tags).toEqual([]);
   });
 
   it("ignores invalid ids, unsafe links and malformed remote dates", async () => {
@@ -1552,6 +1633,65 @@ describe("the enhanced WP queue summary, filtering, and retries", () => {
     const searched = await manager.wpQueue(biz.id, biz.pluginConnId, { search: "5001" });
     expect(searched.length).toBeGreaterThan(0);
     expect(searched.every((r) => r.remoteId.includes("5001") || r.kind.includes("5001"))).toBe(true);
+  });
+
+  it("walks deep history by keyset cursor with no duplicates or skips while new rows land (issue #1077)", async () => {
+    const connectionId = biz.pluginConnId;
+    const prefix = `ks-${randomUUID().slice(0, 8)}`;
+    const originalIds: string[] = [];
+    for (let index = 0; index < 6; index += 1) {
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO integration_outbox_events
+           (business_id, connection_id, entity_type, remote_id, payload, status, attempts, created_at, updated_at)
+         VALUES ($1, $2, 'stock', $3, '{}'::jsonb, 'sent', 0,
+                 now() - ($4::int * interval '1 minute'), now() - ($4::int * interval '1 minute'))
+         RETURNING id`,
+        [biz.id, connectionId, `${prefix}-${index}`, index],
+      );
+      originalIds.push(rows[0].id);
+    }
+
+    const seen: string[] = [];
+    let cursor: WpQueueCursor | null = null;
+    for (let guard = 0; guard < 12; guard += 1) {
+      // `page: 3` travels with the cursor on purpose: a cursor slice must read
+      // no offset, which is what keeps inserts from shifting the walk. The
+      // first slice is a plain first page (a page number alone would jump).
+      const page = await manager.wpQueuePage(
+        biz.id,
+        connectionId,
+        cursor
+          ? { status: "sent", search: prefix, pageSize: 2, page: 3, cursor }
+          : { status: "sent", search: prefix, pageSize: 2 },
+      );
+      expect(page.total).toBeGreaterThanOrEqual(6); // the filtered total, not the slice
+      seen.push(...page.rows.map((row) => row.id));
+      if (!page.nextCursor) break;
+      cursor = parseWpQueueCursor(page.nextCursor);
+      expect(cursor).not.toBeNull();
+      // A fresher row lands in the middle of the walk.
+      await db.query(
+        `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload, status, attempts)
+         VALUES ($1, $2, 'stock', $3, '{}'::jsonb, 'sent', 0)`,
+        [biz.id, connectionId, `${prefix}-new-${guard}`],
+      );
+    }
+
+    expect(new Set(seen).size).toBe(seen.length); // no row appears twice
+    for (const id of originalIds) expect(seen).toContain(id); // and none is skipped
+    // The walk ran deeper than one page and still terminated.
+    expect(seen.length).toBeGreaterThan(2);
+  });
+
+  it("keeps page-number paging exactly as it was, reporting no next cursor on the last page (issue #1077)", async () => {
+    const all = await manager.wpQueuePage(biz.id, biz.pluginConnId, { status: "all", pageSize: 100 });
+    expect(all.nextCursor).toBeNull();
+
+    const first = await manager.wpQueuePage(biz.id, biz.pluginConnId, { status: "all", pageSize: 2 });
+    if (first.total > 2) {
+      expect(first.nextCursor).not.toBeNull();
+      expect(parseWpQueueCursor(first.nextCursor)).toEqual({ createdAt: first.rows[1].createdAt, id: first.rows[1].id });
+    }
   });
 
   it("retries a dead outbox row, resetting status to pending and attempts to 0", async () => {

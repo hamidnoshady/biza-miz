@@ -125,6 +125,17 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       href: ACCOUNTING_WORKSPACE_HREFS.automotive,
       roles: ["owner", "manager"],
     },
+    // Issue #1128 §D — the agency's reimbursable-cost register. Same shape:
+    // one trade-titled entry the `agency` module removes entirely for every
+    // other business. The accountant is admitted here although the CRM keeps
+    // them out, because recording a cost, recharging it and reading the
+    // gross/net policy are ledger work.
+    {
+      label: "هزینه‌های کارفرما",
+      module: "agency",
+      href: ACCOUNTING_WORKSPACE_HREFS.clientCosts,
+      roles: ["owner", "manager", "accountant"],
+    },
     // Phase 42 — the retail trade-goods trades manage their catalogue in the
     // shared products workspace: a collapsible sidebar group — افزودن محصول،
     // لیست محصولات، لیست قیمت، ویژگی محصول، الگوی بارکد وزنی and the trade's
@@ -197,6 +208,29 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       module: "media",
       href: "/media",
       roles: ["owner", "manager"],
+      // Issue #1128 §E — the agency's side of client review, as a child of the
+      // library it reviews from. Same shape as «گزارش‌ها» above: the parent keeps
+      // its own href and the child names the permission its route enforces.
+      //
+      // The child is `media.view`, which is what the *page* requires, and not
+      // `media.manage`: a member who may look at rounds should be able to open
+      // the list, and the screen then offers mutations only to a manager. Every
+      // mutation re-checks its own permission server side, so this is about what
+      // is offered, never about what is allowed — navigation hiding is not
+      // authorization, which the issue lists as an explicit non-goal.
+      //
+      // Not industry-gated, matching §E's decision 32: the library is core shell
+      // infrastructure for every trade, and a jeweller sending a custom design
+      // proof to a customer for approval is this feature as much as an agency
+      // sending a campaign.
+      children: [
+        {
+          label: "بررسی کارفرما",
+          module: "media" as const,
+          href: "/media/review",
+          requiredAnyPermission: ["media.view"],
+        },
+      ],
     },
     // Issue #819 — the reports door and its tabs are gated by the *reporting
     // capabilities*, not by a role list: the entry's old

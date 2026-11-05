@@ -172,12 +172,11 @@ describe("tour progress storage", () => {
 
   it("resolves the industry that gates eligibility from the business, not the request", async () => {
     const inventory = new Set<string>(["inventory.view"]);
-    const a = await service.tourViewerFor(alpha.businessId, inventory);
-    const b = await service.tourViewerFor(beta.businessId, inventory);
-    expect(service.eligibleTourById(tour().id, a)?.id).toBe(tour().id);
-    expect(service.eligibleTourById(tour().id, b)).toBeNull();
-    expect(service.eligibleTourById(tour().id, { ...a, permissions: new Set() })).toBeNull();
-    expect(service.eligibleTourById("unknown.tour", a)).toBeNull();
+    const id = tour().id;
+    expect((await service.eligibleTourById(id, alpha.businessId, inventory))?.id).toBe(id);
+    expect(await service.eligibleTourById(id, beta.businessId, inventory)).toBeNull();
+    expect(await service.eligibleTourById(id, alpha.businessId, new Set())).toBeNull();
+    expect(await service.eligibleTourById("unknown.tour", alpha.businessId, inventory)).toBeNull();
   });
 
   it("is removed with its business", async () => {

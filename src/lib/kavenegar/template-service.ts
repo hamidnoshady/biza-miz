@@ -25,6 +25,12 @@ import { query, withoutTenantScope } from "../db";
 import { readAccountApiKey } from "./credentials";
 import type { KavenegarManagementClient } from "./rest";
 import type { KavenegarTemplate } from "./client";
+import { isTemplateVariable, tokenSlots } from "./template-variables";
+import {
+  MANAGED_LOOKUP_TRIGGERS,
+  checkTriggerTemplate,
+  type ManagedLookupTrigger,
+} from "./lookup-trigger-facts";
 
 export type LookupPurpose = "verification" | "transactional";
 export type LookupTemplateState = "draft" | "submitted" | "approved" | "rejected" | "disabled";
@@ -50,6 +56,8 @@ export type LookupTemplateErrorCode =
   | "body_too_long"
   | "missing_token"
   | "unsupported_token"
+  /** The edit would change how many values the body needs (§5 mapping). */
+  | "variables_mismatch"
   | "unknown_purpose";
 
 /** Provider limit for one UCS-2 segment of a Persian template. */
@@ -209,6 +217,12 @@ export type LookupTemplateRow = {
   master_template_id: string | null;
   /** The library version at the moment the copy was made. */
   master_version: number | null;
+  /**
+   * Ordered domain variables (issue #902 §5): position 0 fills `%token`, 1 fills
+   * `%token2`, 2 fills `%token3`. Empty means "mapping unknown" — the managed
+   * send path refuses such a template rather than guessing one.
+   */
+  variables: string[];
   archived_at: Date | null;
   submitted_at: Date | null;
   decided_at: Date | null;
@@ -220,8 +234,8 @@ export type LookupTemplateRow = {
 const TEMPLATE_COLUMNS = `id, business_id, name, title, body, purpose, state,
        provider_template_id, last_sync_error, revision, submitted_title,
        submitted_body, supersedes_id, master_template_id, master_version,
-       archived_at, submitted_at, decided_at, last_synced_at, created_at,
-       updated_at`;
+       variables, archived_at, submitted_at, decided_at, last_synced_at,
+       created_at, updated_at`;
 
 /** Tenant-scoped read: the business's own catalog, never another's. */
 export async function listLookupTemplates(businessId: string): Promise<LookupTemplateRow[]> {
@@ -243,11 +257,19 @@ export interface TenantLookupTemplate {
   status: TenantTemplateStatus;
   statusLabel: string;
   updatedAt: string;
+  /**
+   * Which business events this message can serve (issue #902 §5): a trigger the
+   * template's own declared variables can fill. Empty for a message still in
+   * review, and for one whose variables no event supplies — the screen then
+   * cannot offer an automation that would be refused at send time.
+   */
+  triggers: ManagedLookupTrigger[];
 }
 
 export function toTenantLookupTemplates(rows: LookupTemplateRow[]): TenantLookupTemplate[] {
   return rows.map((row) => {
     const status = tenantTemplateStatus(row.state);
+    const declared = row.variables.filter(isTemplateVariable);
     return {
       id: row.id,
       title: row.title,
@@ -255,6 +277,10 @@ export function toTenantLookupTemplates(rows: LookupTemplateRow[]): TenantLookup
       status,
       statusLabel: TENANT_TEMPLATE_STATUS_LABELS[status],
       updatedAt: row.updated_at.toISOString(),
+      triggers:
+        status === "ready"
+          ? MANAGED_LOOKUP_TRIGGERS.filter((trigger) => checkTriggerTemplate(trigger, declared) === null)
+          : [],
     };
   });
 }
@@ -279,6 +305,8 @@ export async function createLookupTemplate(input: {
   title: string;
   body: string;
   purpose: string;
+  /** Ordered variable names; only a library copy knows them at creation. */
+  variables?: readonly string[];
 }): Promise<LookupTemplateRow> {
   const validated = validateLookupTemplate(input);
   if (!validated.ok) throw new LookupTemplateError(validated.code);
@@ -289,12 +317,12 @@ export async function createLookupTemplate(input: {
     purpose: validated.purpose,
   });
   const { rows } = await query<LookupTemplateRow>(
-    `INSERT INTO kavenegar_lookup_templates (business_id, name, title, body, purpose)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO kavenegar_lookup_templates (business_id, name, title, body, purpose, variables)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (business_id, name) DO UPDATE
        SET updated_at = now()
      RETURNING ${TEMPLATE_COLUMNS}`,
-    [input.businessId, name, validated.title, validated.body, validated.purpose],
+    [input.businessId, name, validated.title, validated.body, validated.purpose, input.variables ?? []],
   );
   return rows[0];
 }
@@ -356,6 +384,18 @@ export async function reviseLookupTemplate(input: {
   });
   if (!validated.ok) throw new LookupTemplateError(validated.code);
 
+  // Issue #902 §5 — a mapped template keeps its mapping. Editing the text of a
+  // library copy without changing the number of slots is safe; changing the
+  // slots would silently point the mapping at the wrong sentence, so it is
+  // refused (the operator maps the message again in the library instead).
+  if (current.variables.length > 0) {
+    const slots = tokenSlots(validated.body);
+    if (!slots.ok) throw new LookupTemplateError("unsupported_token");
+    if (slots.slots.length !== current.variables.length) {
+      throw new LookupTemplateError("variables_mismatch");
+    }
+  }
+
   if (plan.kind === "in_place") {
     const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
       query<LookupTemplateRow>(
@@ -384,6 +424,7 @@ export async function reviseLookupTemplate(input: {
     title: validated.title,
     body: validated.body,
     purpose: current.purpose,
+    variables: current.variables,
   });
   if (next.id === current.id) return { template: next, created: false };
   const { rows } = await withoutTenantScope("kavenegar-provisioning", async () =>
@@ -462,7 +503,7 @@ export async function listAllLookupTemplates(input: { limit?: number } = {}): Pr
       `SELECT t.id, t.business_id, t.name, t.title, t.body, t.purpose, t.state,
               t.provider_template_id, t.last_sync_error, t.revision,
               t.submitted_title, t.submitted_body, t.supersedes_id,
-              t.master_template_id, t.master_version, t.archived_at,
+              t.master_template_id, t.master_version, t.variables, t.archived_at,
               t.submitted_at, t.decided_at, t.last_synced_at, t.created_at, t.updated_at,
               b.name AS business_name
          FROM kavenegar_lookup_templates t

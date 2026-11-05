@@ -46,7 +46,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useTourRuntime } from "@/components/tours/tour-provider";
 import { toPersianDigits } from "@/lib/digits";
 import type { TourSummary } from "@/lib/tours";
-import { knowledgePageForPathname, knowledgeSection, sectionForPathname } from "@/lib/knowledge-base";
+import { knowledgePage, knowledgePageForPathname, knowledgeSection, sectionForPathname } from "@/lib/knowledge-base";
 import { api } from "./ui";
 
 interface KnowledgeEntry {
@@ -60,10 +60,15 @@ interface KnowledgeGuide {
   title: string;
 }
 
+interface KnowledgeRelatedGuide extends KnowledgeGuide {
+  summary: string;
+  sectionKeys: string[];
+}
+
 type EntryState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "ready"; entry: KnowledgeEntry | null; guide: KnowledgeGuide | null }
+  | { status: "ready"; entry: KnowledgeEntry | null; guide: KnowledgeGuide | null; relatedGuides: KnowledgeRelatedGuide[] }
   | { status: "error" };
 
 /** One tour offered by this page, with the member's progress and the Start/Continue/Review choices. */
@@ -197,18 +202,26 @@ export function KnowledgeHelpButton({ section }: { section?: string }) {
       const { ok, data } = await api<{
         entry: KnowledgeEntry | null;
         guide?: KnowledgeGuide | null;
+        relatedGuides?: KnowledgeRelatedGuide[];
       }>(`/api/knowledge?${params.toString()}`);
+      if (requestKeyRef.current !== requestKey) return;
       if (!ok) {
         setState({ status: "error" });
         return;
       }
-      setState({ status: "ready", entry: data.entry ?? null, guide: data.guide ?? null });
+      setState({
+        status: "ready",
+        entry: data.entry ?? null,
+        guide: data.guide ?? null,
+        relatedGuides: Array.isArray(data.relatedGuides) ? data.relatedGuides : [],
+      });
     } catch {
-      setState({ status: "error" });
+      if (requestKeyRef.current === requestKey) setState({ status: "error" });
     }
   }, [resolvedKey, pageKey, tourRuntime]);
 
   useEffect(() => {
+    requestKeyRef.current = `${resolvedKey ?? ""}|${pageKey ?? ""}`;
     setState({ status: "idle" });
     setFrameLoaded(false);
     setTours([]);
@@ -258,7 +271,7 @@ export function KnowledgeHelpButton({ section }: { section?: string }) {
       >
         <GraduationCapIcon className="size-5 shrink-0" aria-hidden="true" />
       </button>
-      <DialogContent className="sm:max-w-3xl">
+      <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>آموزش: {label}</DialogTitle>
           <DialogDescription>
@@ -325,6 +338,43 @@ export function KnowledgeHelpButton({ section }: { section?: string }) {
               </Link>
             ) : null}
 
+            {ready.guide && ready.relatedGuides.length > 0 ? (
+              <section aria-labelledby="knowledge-related-guides-heading" className="space-y-2">
+                <h3 id="knowledge-related-guides-heading" className="text-xs font-bold text-muted-foreground">
+                  سایر راهنماهای این بخش
+                </h3>
+                <ul className="max-h-72 space-y-2 overflow-y-auto" aria-label="فهرست راهنماهای مرتبط">
+                  {ready.relatedGuides.map((related) => {
+                    const pageLabel = related.sectionKeys
+                      .map((key) => knowledgePage(key)?.label)
+                      .find(Boolean);
+                    return (
+                      <li key={related.slug}>
+                        <Link
+                          href={`/knowledge/a/${encodeURIComponent(related.slug)}`}
+                          onClick={() => setOpen(false)}
+                          className="flex min-h-12 items-center gap-3 rounded-xl border border-border/80 px-3 py-2.5 transition-colors hover:bg-muted/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                        >
+                          <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm font-semibold text-foreground">{related.title}</span>
+                            {pageLabel ? (
+                              <span className="block text-xs text-primary">{pageLabel}</span>
+                            ) : null}
+                            {related.summary ? (
+                              <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
+                                {related.summary}
+                              </span>
+                            ) : null}
+                          </span>
+                          <ArrowLeftIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            ) : null}
             {ready.entry ? (
               <>
                 <div className="relative h-[55svh] min-h-[300px]">

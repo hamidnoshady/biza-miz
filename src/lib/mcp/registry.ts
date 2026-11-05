@@ -648,8 +648,6 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch AH — backup: config is Owner-only owner-grade settings (mode);
   // run-now can CHARGE the wallet when the plan prices the feature (step
   // up); restore replaces the tenant's whole database in place (step up).
-  { actionType: "backup.config.set", kind: "write", app: "workspace", risk: "low", approval: "mode" },
-  { actionType: "backup.run_now", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   { actionType: "backup.restore.apply", kind: "write", app: "workspace", risk: "high", approval: "always_approve" },
   // Batch AI — revoke kills the device's biometric credential along with it
   // (device-service.revokeDevice), so it steps up like any credential kill.

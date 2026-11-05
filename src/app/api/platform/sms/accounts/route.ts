@@ -12,15 +12,24 @@ import {
   transferManagedCredit,
   type ProvisioningJobKind,
 } from "@/lib/kavenegar/provisioning-service";
-import { isFundingStrategy, isValidSenderLines, saveManagedChildPolicy } from "@/lib/kavenegar/policy";
+import {
+  isFundingPurpose,
+  isFundingStrategy,
+  isValidSenderLines,
+  saveManagedChildPolicy,
+} from "@/lib/kavenegar/policy";
 import { fundManagedChild, getManagedMarginReport } from "@/lib/kavenegar/pricing-service";
 import { listReconciliationRuns, reconcileManagedChild } from "@/lib/kavenegar/reconciliation-service";
+import { masterBalanceView } from "@/lib/kavenegar/master-balance-facts";
 import { getDeliveryReport } from "@/lib/messaging-delivery-report";
+import { getCampaignDeliveryReport } from "@/lib/campaign-delivery-report";
+import { getDeliveryTrend } from "@/lib/delivery-trend";
 import {
   acknowledgeServiceAlert,
   getServiceAlertSummary,
   listServiceAlerts,
 } from "@/lib/kavenegar/alert-service";
+import { sendManagedLookup } from "@/lib/kavenegar/lookup-send-service";
 import {
   archiveLookupTemplate,
   listAllLookupTemplates,
@@ -68,6 +77,12 @@ export const GET = withPlatformScope(async () => {
     reconciliation,
     templates,
     delivery,
+    campaignDelivery,
+    // Issue #902 §9 item 2 — the same question over months rather than a week,
+    // because "was last month worse" is a series and the campaign row cannot be
+    // a trend. Bucketed weekly for a quarter; `message_outbox` is never pruned,
+    // so this is a query, not new data.
+    deliveryTrend,
     alerts,
     alertSummary,
     masterTemplates,
@@ -79,6 +94,11 @@ export const GET = withPlatformScope(async () => {
     // Issue #902 §6 — acceptance ≠ delivery. A funded, active child can still be
     // failing every send, and only this view shows it.
     getDeliveryReport({ sinceHours: 24 }),
+    // Issue #902 §9 item 2 — the same question one level down, with the two
+    // latencies that decide *which* end is slow. A campaign is the unit the
+    // business asks about; the fleet row above cannot answer it.
+    getCampaignDeliveryReport({ sinceHours: 24 * 7, limit: 25 }),
+    getDeliveryTrend({ days: 90 }),
     // Issue #902 §3 — what needs a human right now: low master credit, cap
     // pressure, unknown transfers, drift, a child the provider disagrees about.
     listServiceAlerts({ limit: 50 }),
@@ -97,7 +117,15 @@ export const GET = withPlatformScope(async () => {
     // §5 library entries with their targeting and a rendered sample, so the
     // console can show what a business would actually receive.
     masterTemplates: masterTemplates.map(toConsoleMasterTemplate),
+    // §9 item 4: the master's credit as the last funding pass observed it, aged
+    // and flagged. Reading providers live from a screen is how an operator ends
+    // up quoting a number nobody recorded.
+    masterBalance: masterBalanceView(snapshot.masterBalance),
     delivery,
+    // §6 one level down: per campaign, over a week, with queue and send latency.
+    campaignDelivery,
+    // §9 item 2: the long view. Buckets with no attempts are gaps, not zeros.
+    deliveryTrend,
     // Wholesale vs. retail over the last 30 days. Retail is Billing's number,
     // provider cost is theirs; this screen only compares them.
     margin,
@@ -185,6 +213,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       "fundingDailyCapRial",
       "fundingMasterFloorRial",
       "fundingGlobalDailyCapRial",
+      "fundingTransactionalReserveRial",
     ] as const) {
       if (body[key] !== undefined && body[key] !== null && !isNonNegativeInteger(body[key])) {
         return NextResponse.json({ error: "invalid_funding_cap" }, { status: 400 });
@@ -194,6 +223,12 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     // unknown value must be refused rather than silently treated as `jit`.
     if (body.fundingStrategy !== undefined && !isFundingStrategy(body.fundingStrategy)) {
       return NextResponse.json({ error: "invalid_funding_strategy" }, { status: 400 });
+    }
+    // Issue #902 #3 — how the fleet's spend is classified for the reserve. An
+    // unknown value would silently mean "marketing", which is the side that
+    // cannot spend the reserve, so it is refused rather than guessed.
+    if (body.fundingPurpose !== undefined && !isFundingPurpose(body.fundingPurpose)) {
+      return NextResponse.json({ error: "invalid_funding_purpose" }, { status: 400 });
     }
     if (
       body.fundingLowWatermarkMessages !== undefined &&
@@ -239,6 +274,11 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       fundingWindowEndHour:
         body.fundingWindowEndHour === undefined ? undefined : Number(body.fundingWindowEndHour),
       fundingGlobalDailyCapRial: optionalNumberOrNull(body.fundingGlobalDailyCapRial),
+      fundingTransactionalReserveRial:
+        body.fundingTransactionalReserveRial === undefined
+          ? undefined
+          : Number(body.fundingTransactionalReserveRial),
+      fundingPurpose: isFundingPurpose(body.fundingPurpose) ? body.fundingPurpose : undefined,
     });
     await platformAudit({
       adminId: session.padmin,
@@ -528,6 +568,46 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       },
     });
     return NextResponse.json({ template });
+  }
+
+  if (action === "template_send_test") {
+    // Issue #902 §5 — the operator's proof that a message works: reserve retail,
+    // send on the business's own child key, settle once. It is also how a
+    // template is verified before automation is wired to it, so the answer says
+    // exactly what happened (sent, refused, or an unknown outcome) instead of a
+    // bare success.
+    if (!UUID.test(businessId)) {
+      return NextResponse.json({ error: "invalid_business" }, { status: 400 });
+    }
+    const templateId = typeof body.templateId === "string" ? body.templateId : "";
+    if (!UUID.test(templateId)) {
+      return NextResponse.json({ error: "invalid_template" }, { status: 400 });
+    }
+    const variables =
+      body.variables && typeof body.variables === "object" && !Array.isArray(body.variables)
+        ? (body.variables as Record<string, string>)
+        : {};
+    const outcome = await sendManagedLookup({
+      businessId,
+      templateId,
+      receptor: typeof body.receptor === "string" ? body.receptor : "",
+      variables,
+    });
+    await platformAudit({
+      adminId: session.padmin,
+      businessId,
+      action: "sms.managed_account.template_send_test",
+      entity: "kavenegar_lookup_templates",
+      entityId: templateId,
+      payload: {
+        status: outcome.status,
+        code: outcome.status === "blocked" || outcome.status === "failed" ? outcome.code : null,
+        messageId: outcome.status === "sent" ? outcome.messageId : null,
+        chargedRial: outcome.status === "sent" ? outcome.chargedRial : null,
+      },
+    });
+    // A refusal is the operator's answer, not a server error.
+    return NextResponse.json({ outcome }, { status: outcome.status === "blocked" ? 400 : 200 });
   }
 
   if (action === "template_sync") {

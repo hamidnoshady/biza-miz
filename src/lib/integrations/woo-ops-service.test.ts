@@ -84,6 +84,22 @@ describe("sanitizeProductPatch", () => {
     });
   });
 
+  it("carries the storefront text whole, and refuses a field past its bound (#1215, P1-2)", () => {
+    // A description is Gutenberg HTML: it travels exactly as the editor holds
+    // it, tags and all, because rewriting it would silently redraw the page.
+    const html = '<!-- wp:paragraph --><p>چرم طبیعی</p><!-- /wp:paragraph -->';
+    expect(sanitizeProductPatch({ description: html, short_description: "کوتاه" })).toEqual({
+      description: html,
+      short_description: "کوتاه",
+    });
+    // Clearing a field is a real instruction and must survive the filter.
+    expect(sanitizeProductPatch({ short_description: "" })).toEqual({ short_description: "" });
+    // Past the bound the patch is refused rather than truncated: half a
+    // description on a live shopfront is worse than a clear error.
+    expect(() => sanitizeProductPatch({ short_description: "x".repeat(1001) })).toThrow(/invalid_description/);
+    expect(() => sanitizeProductPatch({ description: "x".repeat(20001) })).toThrow(/invalid_description/);
+  });
+
   it("refuses an empty patch — there is nothing to send", () => {
     expect(() => sanitizeProductPatch({ type: "simple" })).toThrow(WooOpsError);
     expect(() => sanitizeProductPatch({})).toThrow(WooOpsError);
@@ -333,6 +349,7 @@ describe("storeOrdersFor", () => {
             currency: "IRT",
             date_created: "2026-09-18T10:15:00+03:30",
             payment_method: "cod",
+            payment_method_title: "پرداخت در محل",
             billing: { first_name: "لیلا", last_name: "رضایی" },
             line_items: [{ id: 1 }, { id: 2 }],
           },
@@ -367,6 +384,9 @@ describe("storeOrdersFor", () => {
         dateCreated: "2026-09-18T10:15:00+03:30",
         customer: "لیلا رضایی",
         paymentMethod: "cod",
+        // The gateway's own name travels with the row, so the card can show it
+        // instead of the bare code (#1215 / P1-3).
+        paymentMethodTitle: "پرداخت در محل",
         ingestStatus: "processed",
         ingestError: null,
         lineCount: 2,

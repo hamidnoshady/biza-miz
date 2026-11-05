@@ -441,6 +441,10 @@ describe("the library is platform-only", () => {
     // A rendered sample, not a template body with `%token` in it.
     expect(mine.sample).toBe("سارا محمدی عزیز، سفارش شما آماده است.");
     expect(JSON.stringify(mine)).not.toMatch(/%token|provider|template_id/i);
+    // Issue #902 §5f — the ordered domain variables travel with the entry so the
+    // tenant screen can name what the message needs, in first-party words and
+    // without the provider's `%token` notation.
+    expect(mine.variables).toEqual(["customer_name"]);
     // An entry the business was not offered is simply absent, not present-and-
     // forbidden: the library is what the business may have, not a catalogue of
     // everything it cannot.

@@ -137,6 +137,13 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'media_collection_items.added_by': 'media library tooling',
   'media_collections.created_by': 'media library tooling',
   'media_folders.created_by': 'media library tooling',
+  // Issue #1128 §E — the client review round. Three of its four attribution
+  // columns are excused here; the fourth, media_review_links.created_by, is
+  // catalogued into the sweep instead, because issuing a link hands an external
+  // party a door to the tenant's files and that column keeps no name snapshot.
+  'media_review_rounds.created_by': 'media library tooling; created_by_name snapshots the author',
+  'media_review_round_items.added_by': 'media library tooling; the shape of media_collection_items.added_by',
+  'media_review_events.actor_user_id': 'the review trail itself; actor_label is NOT NULL, so the actor outlives the member',
   'message_credit_ledger.created_by_user_id': 'platform messaging credits',
   'native_app_devices.reactivated_by': 'device registry for the account',
   'native_app_devices.revoked_by': 'device registry for the account',
@@ -177,6 +184,14 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'tax_invoice_profiles.updated_by': 'tax profile config',
   'source_identities.linked_by': 'import reconciliation tooling; the owning run and its decisions are audited',
   'tenant_roles.created_by': 'role configuration',
+  // Issue #894 — who connected the channel, not an act the member did on a
+  // reservation or a record. The audit trail carries the real attribution.
+  'torob_shops.created_by': 'channel connection setup',
+  'torob_feed_runs.created_by': 'channel feed build (an operational act, not a record write)',
+  // Wave 4's per-product decision: which products a channel publishes is channel
+  // configuration, and the audit row says who changed it. The table keeps the
+  // decision, not a work record.
+  'torob_shop_products.created_by': 'channel publication config',
   'tenant_roles.updated_by': 'role configuration',
   'tour_member_progress.user_id': 'personal learning progress (guided tours)',
   'trusted_devices.user_id': 'sign-in security',

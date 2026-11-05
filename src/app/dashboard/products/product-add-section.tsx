@@ -47,6 +47,7 @@ import { isProductPublishStatus, type ProductPublishStatus } from "@/lib/product
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { PercentInput, PriceInput } from "../number-fields";
 import { RetailPriceAdvisor } from "./retail-price-advisor";
+import { ProductPublicationPanel } from "./product-publication-panel";
 import {
   cardClass,
   EmptyState,
@@ -363,6 +364,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [createdProductId, setCreatedProductId] = useState<string | null>(null);
   const [issues, setIssues] = useState<ProductValidationIssue[]>([]);
   /**
    * The advisor calculation the user applied to the sale price. It is sent with
@@ -719,6 +721,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     setNotice("");
     setIssues([]);
     const result = await api<{
+      item?: { id: string };
       error?: string;
       message?: string;
       issues?: ProductValidationIssue[];
@@ -759,6 +762,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
       persistDrafts(drafts.filter((draft) => draft.id !== activeDraftId));
     }
     resetForm("محصول با موفقیت ذخیره شد. می‌توانید محصول بعدی را ثبت کنید.");
+    setCreatedProductId(result.data.item?.id ?? null);
   }
 
   if (definitions === null) {
@@ -796,6 +800,20 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
   return (
     <div className="grid min-w-0 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_19rem] lg:gap-5">
       <form id="product-add-form" noValidate onSubmit={save} className="min-w-0 space-y-4">
+        {createdProductId ? (
+          <SectionCard title="انتشار اختیاری محصول ثبت‌شده">
+            {/* A product this form just created has no store mapping yet and no
+                duplicate history: the row controls are «انتشار در فروشگاه» /
+                «پیوند به محصول موجود», with nothing to refresh on this screen. */}
+            <ProductPublicationPanel
+              localId={createdProductId}
+              links={[]}
+              duplicate={false}
+              open
+              onQueued={() => {}}
+            />
+          </SectionCard>
+        ) : null}
         <div aria-live="assertive">
           <ErrorBox>{error}</ErrorBox>
         </div>
@@ -843,6 +861,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
         ) : null}
 
         <fieldset disabled={busy} className="min-w-0 space-y-4 disabled:opacity-75">
+          <div data-tour-id="product-new.identity">
           <SectionCard
             title="مشخصات اصلی"
             description="نام محصول الزامی است. کد کالا و بارکد را دستی وارد کنید یا بسازید."
@@ -966,7 +985,9 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
               </div>
             </div>
           </SectionCard>
+          </div>
 
+          <div data-tour-id="product-new.tabs">
           <TabBar
             idPrefix="product-add"
             label="بخش‌های فرم محصول"
@@ -977,6 +998,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
               setError("");
             }}
           />
+          </div>
           <TabPanel idPrefix="product-add" active={tab}>
             {tab === "pricing" ? (
               <>
@@ -1426,13 +1448,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
           </TabPanel>
         </fieldset>
 
-        <div className={`${cardClass} sticky bottom-3 z-20 grid gap-2 bg-card/95 p-3 backdrop-blur-sm lg:hidden`}>
+        <div data-tour-id="product-new.save" className={`${cardClass} sticky bottom-3 z-20 grid gap-2 bg-card/95 p-3 backdrop-blur-sm lg:hidden`}>
           {actionButtons}
         </div>
       </form>
 
       <aside className="min-w-0 lg:sticky lg:top-4">
-        <section className={`${cardClass} min-w-0 overflow-hidden`} aria-label="پیش‌نویس‌های محصول">
+        <section data-tour-id="product-new.drafts" className={`${cardClass} min-w-0 overflow-hidden`} aria-label="پیش‌نویس‌های محصول">
           <div className="border-b border-border/80 px-4 py-4">
             <div className="flex items-center gap-2">
               <BarcodeIcon aria-hidden="true" className="size-4 text-amber-700 dark:text-amber-300" />
@@ -1492,7 +1514,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
             )}
           </div>
 
-          <div className="hidden space-y-2 border-t border-border/80 bg-muted/40 p-3 lg:block">{actionButtons}</div>
+          <div data-tour-id="product-new.save" className="hidden space-y-2 border-t border-border/80 bg-muted/40 p-3 lg:block">{actionButtons}</div>
         </section>
       </aside>
     </div>

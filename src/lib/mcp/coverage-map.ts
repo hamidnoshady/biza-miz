@@ -460,8 +460,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
   {
     id: "crm.customers",
     module: "CRM",
-    entity: "Customers (profile, notes, tags, relationships, merge, duplicates, consent)",
+    entity: "Customers (profile, notes, tags, relationships, organisation structure, merge, duplicates, consent)",
     routes: ["crm/customers", "parties", "crm/external-profiles"],
+    // `customers/[id]/organization` (issue #1128 §A) lands here rather than in a
+    // row of its own, and belongs here: it is a *reading* of the relationship
+    // edges this row already owns — `parent_organization` and `branch_of` —
+    // collapsed into one direction and walked into a group/brand tree with the
+    // work each brand carries. No new entity, no new write path, no new
+    // permission.
+    note: "The organisation structure has no MCP verb, and unlike the deliberately excluded acts elsewhere in this map that is a real gap rather than a decision: an assistant asked «which brands does this group have?» or «has anybody priced مهر کیمیا yet?» can currently only answer from the flat relationship list, which does not distinguish a brand from a contact. A read verb over the resolved tree would be safe — it exposes nothing `/relationships` does not already return. What must never become a verb is a *write*: re-parenting a client rewrites an identity graph, and the two rules that keep it honest (a cycle is reported rather than resolved, and the newest of two claimed parents wins while the superseded claim is surfaced) are the kind of judgement §F reserves for a human at the screen",
     ops: {
       // Batch D (#883): notes reads + lifecycle (delete/pin), consent as a
       // logged legal event — both live behind the same services the CRM file
@@ -514,6 +521,41 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     },
     note: "stage set edits (savePipelineStages) stay route-only: structural rework belongs to the settings screen, not a chat turn",
     test: "integration/crm.integration.test.ts",
+  },
+  {
+    id: "crm.client_briefs",
+    module: "CRM",
+    entity: "Client briefs (record what the client asked for, send it, record their confirmation)",
+    routes: ["crm/briefs"],
+    // No overlap with crm.pipelines or crm.deals-leads: a brief hangs off a deal
+    // and a client but is its own entity with its own chain, and neither row's
+    // prefix reaches these files.
+    note: "issue #1128 §A: the requirement as the client stated it, written before anybody prices or builds it. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and one of them has to stay a gap. `confirm` records the *client's* decision with a name attached, so a verb that could confirm would let an assistant attest that a human at the client agreed to something, which is the one act §F's rule that an assistant drafts and a human approves exists to prevent; the same applies to `supersede`, which retires a confirmed brief. Drafting and reading a brief are different in kind and are what a future tool should expose, subject to three things it must keep: a confirmed brief is frozen (a proposal priced it and a project may be delivering against it, so a correction is a new brief that supersedes it, not an edit), an approver has to be a contact of *that brief's own client* or the write is refused — which is §A's stakeholder rule stated as a constraint rather than a convention — and nothing here prices or posts anything, because budgetRial is what the client says they intend to spend and never a receivable",
+    test: "integration/agency-client-briefs.integration.test.ts",
+  },
+  {
+    id: "crm.client_proposals",
+    module: "CRM",
+    entity: "Proposals and quotes (price a brief, send the offer, record the client's decision)",
+    routes: ["crm/proposals"],
+    // No overlap with crm.client_briefs or crm.deals-leads: a proposal prices a
+    // brief and hangs off a deal but is its own entity with its own chain and its
+    // own lines, and neither row's prefix reaches these files.
+    note: "issue #1128 §A + §D: the priced offer, which §A calls a proposal or quote, §D calls an estimate and #1127 will print as a service quote — §B's stage list puts all three in one place, so it is one row. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and two of them have to stay gaps. `accept` and `decline` record the *client's* decision with a name attached, so a verb that could accept would let an assistant attest that a human at the client agreed to a figure, which is the one act §F's rule that an assistant drafts and a human approves exists to prevent; `expire` closes an offer the client never answered, which is the same attestation wearing a different hat. Drafting and reading an offer are different in kind and are what a future tool should expose — §F names proposals among the things an assistant may draft — subject to four things it must keep: a sent offer is frozen including its lines, because the lines *are* the price and the correction is a new number in the series; a discount larger than the subtotal it discounts is refused, which no CHECK can express because it compares the header against the sum of its lines; an offer whose validity has run out cannot be accepted, which no CHECK can express either because it needs the current date; and a line's `costRial` and `passThrough` are internal, so any tool that reads a proposal has to decide which of the two shapes it is serving — the member's, with a margin, or the client's, in which those properties do not exist",
+    test: "integration/agency-proposals.integration.test.ts",
+  },
+  {
+    id: "crm.client_campaigns",
+    module: "CRM",
+    entity: "Client campaigns (the window, the channels, the media spend and the figures that came back)",
+    routes: ["crm/client-campaigns"],
+    // Not `growth/campaign-builder`, which is #901's retail cashback automation and
+    // is classified under Growth. No overlap with crm.client_briefs or
+    // crm.client_proposals either: a campaign runs *after* the offer is accepted and
+    // is its own entity with its own chain, and neither row's prefix reaches these
+    // files.
+    note: "issue #1128 §A + §C: the campaign as it ran for one client, downstream of the brief, the proposal, the contract and the project, so it may point at any of the four. Distinct from `growth_campaigns`, which has no client and cannot be given one honestly — its trigger vocabulary is exactly `pos_sale_settled` and its reward is `cashback`, so its party is the shopper earning money back. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and here, unlike the brief's `confirm` and the proposal's `accept`, no column *has* to stay a gap: `complete` and `cancel` record a member's own claim that a campaign finished, not a client's attestation, so §F's draft-and-approve rule does not bite. What a future tool must keep instead is four things about the figures. `metrics_source` has exactly two values, `manual` and `imported`, and that is the documentation: there is no ad-platform integration, so §C's «no fake campaign performance» is satisfied by having no third value to claim one. Attribution figures are a member's claim and `metrics_note` is where the method is recorded, because §C asks for *defensible* attribution and a number with no stated method is not defensible. Every ratio this row derives — CPL, CPA, ROAS, click-through — is `null` when its denominator is zero rather than zero, since a CPL of 0 on a lead-less campaign reads as the cheapest leads ever bought. And nothing here posts: media spend is §D's business and becomes real money there, so this record only reports what was spent",
+    test: "integration/agency-client-campaigns.integration.test.ts",
   },
   {
     id: "crm.segments-views",
@@ -582,6 +624,16 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     ops: { listDetail: ["list_message_templates", "list_message_campaigns"], lifecycle: ["messaging.campaign.pause", "messaging.campaign.resume", "messaging.campaign.launch"] },
     note: "growth settings screen (channels, tariffs, attribution windows) stays route-only — Twilio/SMS sender configuration is credential-shaped and never crosses the chat channel; campaign draft creation is proposal-only by design (see growth.messaging)",
     test: "integration/crm.integration.test.ts",
+  },
+  {
+    id: "settings.managed-services",
+    module: "Settings",
+    entity: "Managed-service readiness (messaging, AI, payments, media)",
+    routes: ["managed-services"],
+    status: "route-only (by design)",
+    note:
+      "issue #902 §9 item 5: the payload is the tenant contract's view (a first-party label, four states, a Persian sentence, a first-party link) and nothing else — no supplier, account id, key hint or wholesale price. There is nothing here an assistant could act on, and the whole reason the shape exists is that a chat channel is another surface a supplier name must not reach. A verb that reported 'the AI service is unavailable' without saying why would be worse than the console card that shows the action.",
+    test: "integration/managed-services.integration.test.ts",
   },
   {
     id: "growth.messaging",
@@ -743,7 +795,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "workspace.contracts",
     module: "Workspace",
     entity: "Contracts & lifecycle",
-    routes: ["workspace/contracts"],
+    // Exact `!` on the register itself: the document/signing subroutes belong to
+    // `workspace.contract-documents` below, and the DOCX/PDF import route there
+    // must not be read as a bulk operation on the contract register (it writes
+    // nothing — the editor saves through the ordinary document PUT).
+    routes: [
+      "workspace/contracts!",
+      "workspace/contracts/[id]!",
+      "workspace/contracts/[id]/lifecycle!",
+    ],
     ops: {
       listDetail: ["list_expiring_contracts", "get_workspace_contract"],
       create: ["contract.create"],
@@ -752,6 +812,25 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     },
     note: "AQ close-out: every lane re-runs resolveWorkspaceSubject(contract, id, edit) on the authorizing user's rebuilt flags; delete is a business-record erasure so it steps up on every call",
     test: "integration/workspace.integration.test.ts",
+  },
+  {
+    id: "workspace.contract-documents",
+    module: "Workspace",
+    entity: "Contract documents, reusable templates & multi-party e-signing",
+    routes: [
+      "workspace/contract-templates",
+      "workspace/contracts/[id]/document",
+      "workspace/contracts/[id]/signing",
+      "workspace/contracts/[id]/final-pdf",
+      "sign",
+    ],
+    note:
+      "Issue #908: authoring a legal document, freezing a version and collecting " +
+      "external signatures are human acts with legal consequence — route-only by " +
+      "design (no MCP verb), and the public /api/sign surface is a per-recipient " +
+      "capability credential that must never be reachable by an assistant session",
+    status: "route-only (by design)",
+    test: "src/lib/contracts/signing.test.ts",
   },
   {
     id: "workspace.approvals",
@@ -783,6 +862,28 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     },
     note: "batch BH: four grouped verbs dispatch the 54 uniform lanes entity-by-entity with the exact route capability gates (workspaceManage, workspaceApprove for review-side status actions like the routes, settingsManage for the org profile); record deletes and participant removal are always_approve/high (data-record deletes); review actions likewise (money-state decisions); the field photo upload carries media bytes and stays route-only by design, like the other media lanes",
     test: "integration/aec-rfi.integration.test.ts + aec-boq + aec-commercial + aec-document-control + aec-procurement + aec-site",
+  },
+  {
+    // Its own row rather than being absorbed by `workspace.agency` below, whose
+    // `["agency"]` prefix would otherwise claim these silently — the symptom being
+    // nothing but a stale route count, which is how a new entity goes undocumented.
+    // It is a different entity with a different story: those are workspace documents
+    // a project member writes on `workspace.manage`; these are accounting records that
+    // post to the ledger on `finance.expenses_manage`.
+    id: "agency.reimbursable_costs",
+    module: "Accounting",
+    entity: "Reimbursable client costs (media, print and production spent on a client's behalf)",
+    routes: ["agency/reimbursable-costs"],
+    note: "issue #1128 §D: pass-through and reimbursable client costs versus agency-owned expenses, and the first thing in the product that can post to account 1270 — seeded in wave 1 and unreachable for eight waves, because the expense path refuses asset accounts and §D forbids an ad hoc journal entry. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion, and one of them has to stay a gap: `presentation` is §D's gross-versus-net choice, which the issue says must follow chosen business accounting policy and «must not be inferred solely from spend» — so a tool that guessed it from the size of a line or the presence of a vendor name would be performing exactly the forbidden inference, and moving money between cost of sale and a claim on a client is not a draft a human rubber-stamps. The gap is narrower now that the business-level policy exists (`…/policy`): a tool MAY read the policy the business adopted and pre-fill a new cost from it, because applying a choice somebody made is the opposite of inferring one from spend — what it must not do is choose silently, or save the policy itself, since that write decides whether the next media buy debits 1270 or 5197 and rides `finance.expenses_manage` with an audit row naming who moved it. Three more things a future tool must keep: a posted row is frozen except its note, because the amount, the presentation and the settlement decided which two accounts the entry landed in and the register may not contradict the ledger — the correction is a reversal and a new record; the entry is dated the day the money was *spent*, not the day it was recorded, because a member files a platform invoice days after the platform charged the card; and the recharge is a separate verb on the collection (`POST …/recharge`) that needs BOTH `ordersCreate` and `financeExpensesManage`, because it draws down the cost register and produces a sales invoice, and either permission alone would let a member act on a register they cannot read or raise a document they cannot invoice. A recharge is whole-or-nothing and one client at a time; it credits 1270 and recognises no revenue and no VAT, so what it clears is the claim and not a sale; and whether it happened is DERIVED from the invoice's live status rather than stored, because voiding an invoice reverses the entry and flips the order without touching this register, and a stored flag would be a second answer that disagrees with the ledger the first time somebody voided one",
+    test: "integration/agency-reimbursable-costs.integration.test.ts",
+  },
+  {
+    id: "workspace.agency",
+    module: "Workspace",
+    entity: "Agency commercial registers (billing schedule & milestones, change requests)",
+    routes: ["agency"],
+    note: "issue #1128 §D: one project's billing schedule, the milestones in it and the change requests that revise its value. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — exposing these as tools has to satisfy §F's rule that an assistant drafts and a human approves, and agreeing more money with a client is exactly the kind of act that rule exists for. Two things a future tool must keep: approving a milestone does NOT bill it (issuing the invoice is a separate act gated on the invoice screen's own permissions, paymentsTake + ordersCreate, as well as workspaceApprove), and an approved change request moves only the engagement's revised value, never the figure the client signed",
+    test: "src/lib/agency-commercial.test.ts",
   },
 
   // ============================ Business configuration ============================
@@ -908,11 +1009,9 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     routes: ["backup"],
     ops: {
       listDetail: ["get_backup_status"],
-      create: ["backup.run_now"],
-      update: ["backup.config.set"],
       lifecycle: ["backup.restore.apply"],
     },
-    note: "run-now charges the wallet when the plan prices the feature (the route's own billing gate, reclaimed by the verb); restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lane stays route-only",
+    note: "Issue #903 §3 removed the create/update verbs: backup creation, scheduling and retention are Superadmin-only, so the tenant lane is status + verified restore. Restore is Owner-only whole-DB replacement on single-tenant installs, verify-only first; the bytes upload restore lanes — the site restore file, and on managed profiles the uploaded copy plus its signed-manifest import (issue #903 §2 item 4) — stay route-only because both carry a file upload no chat-side verb can complete",
     test: "integration/backup.integration.test.ts",
   },
   {
@@ -976,6 +1075,27 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       lifecycle: ["media.collection.delete", "media.asset.trash", "media.asset.restore"],
     },
     test: "integration/media-library.integration.test.ts",
+  },
+  {
+    id: "media.client_review",
+    module: "Media",
+    entity: "Client review rounds (assemble a batch, send it, collect the client's decisions)",
+    routes: ["media/review-rounds"],
+    // Overlaps media.assets by design: that row's "media" prefix already matched
+    // these files, and leaving them silently absorbed there would have a reader
+    // believe list_media_assets covers them. It does not — a review round is a
+    // different entity with a different state machine.
+    note: "issue #1128 §E: the agency's side of client review. A round, and not an asset, is the unit of approval — agencies send a batch, collect decisions, revise and resend, and the sequence of rounds over one asset is its version history (approved is terminal because the next round supersedes it). No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion; exposing these has to satisfy §F's rule that an assistant drafts and a human approves, and sending work to a client for sign-off is precisely that kind of act. Three things a future tool must keep: a round in «sent» is frozen so a client never finds the batch changed underneath them, approving a round requires every item decided AND every item approved, and minting a link returns a plaintext token exactly once — it is unrecoverable afterwards, which makes it a poor fit for a request/response verb",
+    test: "src/lib/media-review.test.ts",
+  },
+  {
+    id: "media.client_review_links",
+    module: "Media",
+    entity: "Scoped client review links — the external token door and its byte stream",
+    routes: ["media/review"],
+    status: "route-only (by design)",
+    note: "issue #1128 §E: the client's door, addressed by token alone. Route-only by design and not by omission — there is no session here and there must never be one. §B asks for revocable scoped external review links without a new staff identity system, so the client is authorised by holding a short-lived token, never by a tenant role, and there is deliberately no approve-style media permission (the party who approves is not a member and must not become one). An MCP connection cannot hold that token: minting one for an agent would hand a credential that opens a tenant's files to a party outside it, when the entire point of the link is that a human at the client decides. The byte route is also not a JSON envelope, for the same reason media.assets keeps upload screen-side. Bytes stream through the app rather than a presigned URL so revocation takes effect on the next request and every fetch is counted against the link",
+    test: "src/app/api/media/review-guard.test.ts",
   },
   {
     id: "knowledge.articles",
@@ -1073,6 +1193,24 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     status: "route-only (by design)",
     note: "read-only branch-scoped status for the Accounting product list; requires inventory.view and integrations.view, and intentionally exposes no separate MCP capability for store linkage details",
     test: "src/app/api/products/woo-links/route.test.ts",
+  },
+  {
+    id: "misc.product-woo-publications",
+    module: "Products (retail)",
+    entity: "Reviewed product publication and linkage to selected Woo stores",
+    routes: ["products/publications"],
+    status: "route-only (by design)",
+    note: "explicit human-reviewed cross-store publication; inventory and integration management permissions required; creates mappings only after store acknowledgement",
+    test: "src/lib/integrations/product-publication-service.test.ts",
+  },
+  {
+    id: "misc.product-duplicates",
+    module: "Products (retail)",
+    entity: "Duplicate-SKU review and safe creation-race orphan archive (issue #1207)",
+    routes: ["products/duplicates"],
+    status: "route-only (by design)",
+    note: "the same report and guarded archive the operator scripts run, behind inventory.view + integrations.view to read and inventory.adjust + integrations.manage to decide; only two decisions exist (record «keep separate» in the audit log, or archive an unreferenced race orphan), both behind a review token and an explicit confirmation, and neither merges rows, moves a mapping or aggregates stock — so no MCP/AI verb may offer a merge",
+    test: "src/app/api/products/duplicates/route.test.ts",
   },
   {
     id: "misc.price-lists",
@@ -1359,6 +1497,26 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     status: "route-only (by design)",
     note: "the operator's price policy for managed messaging (markup, surcharge, volume slabs, per-business exceptions) is published only through billing.manage with a platform audit before/after, and it reveals the platform's margin over the supplier — the console's own commercial surface, never a chat-channel verb",
     test: "integration/kavenegar-retail-pricing.integration.test.ts",
+  },
+  {
+    id: "platform.billing-supplier-invoices",
+    module: "Platform — Billing",
+    entity: "Supplier statements reconciled against the wholesale cost ledger",
+    routes: ["platform/billing/supplier-invoices"],
+    status: "route-only (by design)",
+    note:
+      "issue #902 §9 item 3: recording a supplier statement, comparing it with billing_vendor_cost_events and accepting a difference with a reason are audited billing.manage actions on wholesale data — the supplier name and the margin never reach a chat channel, same rule as the retail price catalogue row.",
+    test: "integration/billing-supplier-invoices.integration.test.ts",
+  },
+  {
+    id: "platform.billing-usage-invoices",
+    module: "Platform — Billing",
+    entity: "Usage invoices emitted from the rating ledger",
+    routes: ["platform/billing/usage-invoices"],
+    status: "route-only (by design)",
+    note:
+      "issue #902 §9 item 3: turning a month's ratings into an invoice line (and citing the price version that produced each line) is a money action with a platform audit, and the read half is a preview of what a month would bill. Both stay on the console: a chat-channel verb that issues invoices would post a receivable on someone else's word.",
+    test: "integration/billing-usage-invoice.integration.test.ts",
   },
   {
     id: "platform.services",

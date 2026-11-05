@@ -17,7 +17,8 @@ import type { WooPrintDocumentRef } from "@/lib/printing/document-request";
 import { printerErrorMessage } from "@/lib/printing/errors";
 import { PAPERS, type PaperKey } from "@/lib/print-template";
 import { formatDateTime } from "./format";
-import { orderStatusLabel, orderStatusTone } from "./order-status";
+import { orderStatusLabel } from "./order-status";
+import { OrderStatusBadge } from "./order-status-badge";
 
 // Most-used first: the summary answers "who, what, how much, what next" without
 // a click; the technical source/version record is the second-to-last tab.
@@ -41,10 +42,12 @@ interface DetailResponse { detail?: WooOrderDetail; canPrint?: boolean; printing
 interface Preview { imageBase64: string; paper: { key: PaperKey; widthMm: number; heightMm: number }; templateName: string; printerName: string; }
 
 /** One overlay, no route/search/store changes. Server references are the entire print intent. */
-export function WooOrderDetailModal({ connectionId, remoteId, onClose, onRefund, statusChoices, canChangeStatus = true, onChangeStatus }: {
+export function WooOrderDetailModal({ connectionId, remoteId, onClose, onRefund, statusChoices, statusRegistry = null, canChangeStatus = true, onChangeStatus }: {
   connectionId: string; remoteId: string; onClose: () => void; onRefund?: () => void;
   /** Statuses the order can move to (the store's own included). Omit to hide the control. */
   statusChoices?: readonly string[];
+  /** The store's registered status names, so a custom status reads as the owner named it (#1215 / P1‑3). */
+  statusRegistry?: ReadonlyMap<string, string> | null;
   canChangeStatus?: boolean;
   /** Queues the change; resolves true when it was queued, so the modal can reload the order. */
   onChangeStatus?: (status: string) => Promise<boolean>;
@@ -168,7 +171,7 @@ export function WooOrderDetailModal({ connectionId, remoteId, onClose, onRefund,
           <div className="min-w-0">
             <DialogTitle className="flex flex-wrap items-center gap-2">
               <span>سفارش #{toPersianDigits(o?.number ?? remoteId)}</span>
-              {o ? <StatusBadge tone={orderStatusTone(o.status)}>{orderStatusLabel(o.status)}</StatusBadge> : null}
+              {o ? <OrderStatusBadge status={o.status} registry={statusRegistry} /> : null}
             </DialogTitle>
             <DialogDescription>
               {o ? `${wooRecipientName(o.billing) || "مهمان"} · ${formatDateTime(o.createdAt)} · ${detail?.storeName ?? ""}` : "جزئیات سفارش ووکامرس"}
@@ -188,8 +191,8 @@ export function WooOrderDetailModal({ connectionId, remoteId, onClose, onRefund,
               <span className="text-muted-foreground">تغییر وضعیت</span>
               <select className={`${inputClass} h-8 w-auto py-0.5 text-xs`} aria-label="تغییر وضعیت سفارش" value={o.status} disabled={busy || !canChangeStatus}
                 onChange={e => { const next = e.target.value; if (next === o.status) return; busyRef.current = true; setBusy(true); setError(""); setNotice("");
-                  void onChangeStatus(next).then(queued => { if (queued) { setNotice(`تغییر وضعیت به «${orderStatusLabel(next)}» در صف قرار گرفت؛ پس از اجرا روی فروشگاه، سفارش را بازخوانی کنید.`); return load(); } }).finally(() => { busyRef.current = false; setBusy(false); }); }}>
-                {[...new Set([o.status, ...statusChoices])].filter(Boolean).map(status => <option key={status} value={status}>{orderStatusLabel(status)}</option>)}
+                  void onChangeStatus(next).then(queued => { if (queued) { setNotice(`تغییر وضعیت به «${orderStatusLabel(next, statusRegistry)}» در صف قرار گرفت؛ پس از اجرا روی فروشگاه، سفارش را بازخوانی کنید.`); return load(); } }).finally(() => { busyRef.current = false; setBusy(false); }); }}>
+                {[...new Set([o.status, ...statusChoices])].filter(Boolean).map(status => <option key={status} value={status}>{orderStatusLabel(status, statusRegistry)}</option>)}
               </select>
             </label> : null}
             {onRefund ? <Button size="sm" variant="outline" disabled={busy} onClick={onRefund}>ثبت برگشت وجه</Button> : null}
@@ -228,7 +231,7 @@ export function WooOrderDetailModal({ connectionId, remoteId, onClose, onRefund,
                 </tbody></DataTable>
                 <Details rows={[["جمع اقلام", money(o.subtotal)], ["تخفیف و کوپن", `${money(o.discount)} ${o.coupons.join("، ")}`], ["مالیات کل", money(o.tax)], ["هزینه ارسال", money(o.shippingTotal)], ...o.fees.map(f => [f.name || "هزینه", money(f.total)] as [string, string]), ["جمع منبع", money(o.total)], ["برگشت وجه", money(o.refunded)], ["مانده", money(o.due)]]} />
               </div> : null}
-              {tab === "payment" ? <SectionCard title="پرداخت و وضعیت"><Details rows={[["وضعیت ووکامرس", orderStatusLabel(o.status)], ["پرداخت", o.paymentState], ["روش پرداخت", o.paymentTitle], ["زمان پرداخت ثبت‌شده در منبع", formatDateTime(o.paidAt)], ["پرداخت تأییدشده", money(o.paid)], ["برگشت وجه", money(o.refunded)], ["مانده قابل وصول", money(o.due)]]} /></SectionCard> : null}
+              {tab === "payment" ? <SectionCard title="پرداخت و وضعیت"><Details rows={[["وضعیت ووکامرس", orderStatusLabel(o.status, statusRegistry)], ["پرداخت", o.paymentState], ["روش پرداخت", o.paymentTitle], ["زمان پرداخت ثبت‌شده در منبع", formatDateTime(o.paidAt)], ["پرداخت تأییدشده", money(o.paid)], ["برگشت وجه", money(o.refunded)], ["مانده قابل وصول", money(o.due)]]} /></SectionCard> : null}
               {tab === "history" ? <div className="space-y-3"><SectionCard title="عملیات و سوابق">
                 <Details rows={[["ورود به سیستم", JOB_STATUS[detail.ingestStatus] ?? detail.ingestStatus], ["خطای ورود", detail.ingestError || "ندارد"]]} />
                 <ul className="mt-3 space-y-2 text-sm">{detail.operations.map((op, i) => <li key={i}>{op.type === "refund_create" ? "برگشت وجه" : "تغییر وضعیت"} — {JOB_STATUS[op.status] ?? ({ dead: "متوقف", sent: "ارسال‌شده" } as Record<string, string>)[op.status] ?? op.status} · {formatDateTime(op.createdAt)}</li>)}</ul>

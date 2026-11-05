@@ -35,6 +35,22 @@ export const SETTING_KEYS = {
    * `AGENCY_DEFAULT_OPERATING_PROFILE` rather than to a stored row.
    */
   agencyProfile: "agency.profile",
+  /**
+   * AgencyCostPolicySetting (src/lib/agency-reimbursable-cost.ts) — §D's
+   * *business-level* choice of gross-versus-net presentation for reimbursable
+   * client costs (issue #1128). Not part of `agencyProfile`, and deliberately
+   * so: that setting is documented as deciding blueprint ordering "and nothing
+   * else", while this one decides which of two accounts a cost lands in — 1270,
+   * a claim on the client, or 5197, the agency's own cost of sale. Folding an
+   * accounting policy into a cosmetic preference would falsify that comment and
+   * put a money-moving choice behind `settings.manage`.
+   *
+   * Absent until the business chooses, and its absence is *reported* rather than
+   * papered over: readers fall back to `AGENCY_DEFAULT_PRESENTATION` with
+   * `stored: false`, so a screen can say «هنوز انتخاب نشده» instead of showing a
+   * default as though somebody had picked it.
+   */
+  agencyCostPolicy: "agency.cost_policy",
   /** { method: 'fifo'|'lifo'|'weighted_average', system?: 'perpetual'|'periodic', lockedAt: string|null } */
   costing: "inventory.costing",
   /** { cashierDiscountLimitPercent, wholeOrderVoidRequiresManager, postKitchenChangeRequiresManager } — order approval controls */

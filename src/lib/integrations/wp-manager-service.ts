@@ -17,6 +17,7 @@ import { writeIntegrationAudit } from "./audit";
 import { capQueueError, redactPayload } from "./payload-redact";
 import { OUTBOX_MAX_ATTEMPTS, PLUGIN_JOB_MAX_ATTEMPTS } from "./retry";
 import { toPersianDigits } from "../digits";
+import { encodeWpQueueCursor, type WpQueueCursor } from "./wp-queue-cursor";
 
 export interface WpOverviewStats {
   connections: {
@@ -737,6 +738,11 @@ export interface WpQueueFilterOptions {
   limit?: number;
   page?: number;
   pageSize?: number;
+  /**
+   * Deep-history walk (issue #1077): return the rows strictly older than this
+   * position, ignoring `page`/offset so inserts cannot shift a page boundary.
+   */
+  cursor?: WpQueueCursor;
 }
 
 export interface WpQueueSummary {
@@ -776,6 +782,12 @@ export interface WpQueuePage {
   page: number;
   pageSize: number;
   totalPages: number;
+  /**
+   * Opaque position to pass back for the next deeper slice, or null when this
+   * slice reached the end. A cursor walk ignores `page`; page-number clients
+   * keep using `page`/`totalPages` exactly as before.
+   */
+  nextCursor: string | null;
 }
 
 /**
@@ -881,7 +893,18 @@ export async function wpQueuePage(
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(requestedPage, totalPages);
-  const offset = (page - 1) * pageSize;
+
+  // Deep-history walking (issue #1077). The keyset predicate goes into the row
+  // queries only — after the counts above — so `total` stays the filtered total
+  // F17's KPI cards show, and a cursor slice reads no offset at all.
+  const cursor = options?.cursor ?? null;
+  if (cursor) {
+    params.push(cursor.createdAt, cursor.id);
+    const keyset = `(created_at, id) < ($${params.length - 1}::timestamptz, $${params.length}::uuid)`;
+    outboxParts.push(keyset);
+    inboxParts.push(keyset);
+  }
+  const offset = cursor ? 0 : (page - 1) * pageSize;
 
   const outboxSql = `
     SELECT id::text, 'out' AS direction, entity_type AS kind, status, remote_id, local_id::text,
@@ -934,6 +957,10 @@ export async function wpQueuePage(
     updated_at: string | null;
   }>(combinedSql, params);
 
+  // A page-number client has more only while the clamped page leaves rows
+  // behind; a cursor client knows it is done when a short page comes back.
+  const hasMore = cursor ? rows.length === pageSize : page * pageSize < total;
+
   return {
     rows: rows.map((r) => ({
       id: r.id,
@@ -959,6 +986,7 @@ export async function wpQueuePage(
     page,
     pageSize,
     totalPages,
+    nextCursor: hasMore ? encodeWpQueueCursor({ createdAt: rows[rows.length - 1].created_at, id: rows[rows.length - 1].id }) : null,
   };
 }
 

@@ -15,6 +15,7 @@ import { cardClass, SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { Button } from "@/components/ui/button";
 import { CatalogueSection } from "./catalogue-section";
 import { StoreOrdersSection } from "./woo-store-sections";
+import { orderStatusRegistry } from "./order-status";
 import { TaxonomiesSection } from "./taxonomies-section";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { ConnectionPicker, connectionOptionLabel } from "./connection-lite";
@@ -35,7 +36,7 @@ export function describeCallSuccess(data: Record<string, unknown> | null | undef
 }
 
 function useConnectionHost() {
-  const { connections, loadState, loadError, selectedId, setSelectedId, reloadConnections } = useWpStore();
+  const { connections, loadState, loadError, selectedId, setSelectedId, reloadConnections, canEdit } = useWpStore();
   const [busy, setBusy] = useState(false);
   const [callResult, setCallResult] = useState("");
   const [notice, setNotice] = useState("");
@@ -89,7 +90,7 @@ function useConnectionHost() {
 
   const refreshFailure = loadState === "error" && loadError ? loadError : null;
 
-  return { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call };
+  return { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call, canEdit };
 }
 
 /**
@@ -176,7 +177,7 @@ function HostFrame({
 }
 
 export function ProductsSectionHost() {
-  const { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call } = useConnectionHost();
+  const { connections, refreshFailure, reloadConnections, busy, callResult, notice, selectedId, setSelectedId, call, canEdit } = useConnectionHost();
   return (
     <HostFrame
       connections={connections}
@@ -187,7 +188,7 @@ export function ProductsSectionHost() {
       callResult={callResult}
       notice={notice}
     >
-      <CatalogueSection connectionId={selectedId} busy={busy} call={call} />
+      <CatalogueSection connectionId={selectedId} busy={busy} call={call} canEdit={canEdit} />
     </HostFrame>
   );
 }
@@ -204,7 +205,14 @@ export function OrdersSectionHost() {
       callResult={callResult}
       notice={notice}
     >
-      <StoreOrdersSection connectionId={selectedId} busy={busy} call={call} />
+      <StoreOrdersSection
+        connectionId={selectedId}
+        busy={busy}
+        call={call}
+        statusRegistry={orderStatusRegistry(
+          connections?.find((connection) => connection.id === selectedId)?.pluginCapabilities,
+        )}
+      />
     </HostFrame>
   );
 }

@@ -410,6 +410,15 @@ export const APPROVAL_SUBJECTS = [
   // procurement approval store of their own.
   "material_request",
   "commitment",
+  // Issue #1128 §D — an agency's two commercial determinations: a billing
+  // milestone that is about to become an invoice, and a change request that is
+  // about to move the engagement's value. Same reason as the four above, and
+  // §24's rule makes it a requirement rather than a convenience: issuing an
+  // invoice and agreeing more money must not inherit the `workspace.manage`
+  // right that writes a schedule, so both are filed where `workspace.approve`
+  // already is instead of in a billing approval store of their own.
+  "billing_milestone",
+  "change_request",
 ] as const;
 export type WorkspaceApprovalSubject = (typeof APPROVAL_SUBJECTS)[number];
 
@@ -428,6 +437,12 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   payment_certificate: "صورت‌وضعیت",
   material_request: "درخواست کالا",
   commitment: "تعهد خرید / پیمان جزء",
+  // Issue #1128 §D. «مرحلهٔ پرداخت» rather than a copy of the AEC register's
+  // «صورت‌وضعیت»: a progress claim certified by a supervisor and an agency's
+  // billing milestone are different documents, and the queue is where an
+  // approver reads the difference.
+  billing_milestone: "مرحلهٔ پرداخت",
+  change_request: "درخواست تغییر",
 };
 
 export const APPROVAL_STATUSES = [

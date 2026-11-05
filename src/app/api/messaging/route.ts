@@ -15,6 +15,8 @@ import {
 } from "@/lib/message-campaigns-service";
 import { getMessageBusinessBilling } from "@/lib/messaging-billing";
 import { getTenantMessagingConfig } from "@/lib/messaging-service-readiness";
+import { tenantCampaignDelivery } from "@/lib/campaign-delivery-report";
+import { tenantDeliveryTrend } from "@/lib/delivery-trend";
 import {
   createLookupTemplate,
   disableLookupTemplate,
@@ -28,6 +30,11 @@ import {
   MasterTemplateError,
   tenantTemplateLibrary,
 } from "@/lib/kavenegar/master-template-service";
+import {
+  LookupTriggerError,
+  listTriggerSettings,
+  saveTriggerSetting,
+} from "@/lib/kavenegar/lookup-triggers";
 
 const channel = (value: unknown): "sms" | "email" | null =>
   value === "sms" || value === "email" ? value : null;
@@ -54,6 +61,18 @@ export const GET = withTenantScope(async () => {
     promotions,
     lookupTemplates,
     templateLibrary,
+    // Issue #902 §5 — the business's own "when X happens, send this" decisions.
+    // Off until the business turns one on; the login code is deliberately not
+    // among them (auth runs on the platform transport, never a tenant wallet).
+    triggers,
+    // Issue #902 §9 item 2 — did this business's campaigns arrive? Scoped to its
+    // own campaigns by the caller and by RLS, and carrying no provider name,
+    // provider error string or wholesale cost (campaign-delivery-report.ts).
+    campaignDelivery,
+    // Issue #902 §9 item 2 — the long view: a quarter of this business's own
+    // sends, bucketed weekly, so "was last month worse?" has an answer. Counts
+    // and latencies only, business-scoped, inside the caller's tenant scope.
+    deliveryTrend,
   ] = await Promise.all([
       getTenantMessagingConfig(session.businessId),
       getMessageBusinessBilling(session.businessId),
@@ -70,6 +89,12 @@ export const GET = withTenantScope(async () => {
       // business's trade and plan server-side. First-party titles and a rendered
       // sample only: no provider template name, id or approval vocabulary.
       tenantTemplateLibrary(session.businessId),
+      listTriggerSettings(session.businessId),
+      tenantCampaignDelivery(session.businessId, { sinceHours: 24 * 7, limit: 10 }),
+      // Issue #902 §9 item 2 — this business's own delivery over a quarter, so
+      // "was last month worse" has an answer. Counts and latencies only; the
+      // query is business-scoped and runs inside the caller's tenant scope.
+      tenantDeliveryTrend(session.businessId, { days: 90 }),
     ]);
   return NextResponse.json({
     config,
@@ -81,6 +106,9 @@ export const GET = withTenantScope(async () => {
     promotions,
     lookupTemplates,
     templateLibrary,
+    triggers,
+    campaignDelivery,
+    deliveryTrend,
   });
 });
 
@@ -192,6 +220,31 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       return NextResponse.json({ template: toTenantLookupTemplates([template])[0] });
     }
 
+    if (body.action === "lookup_trigger") {
+      // Turning one automation on, attached to one of this business's approved
+      // messages. Every check the dispatcher makes (ownership, approval, and a
+      // mapping the event can actually fill) happens here too, so the operator
+      // reads the refusal in the form rather than in a send log.
+      if (typeof body.trigger !== "string" || typeof body.templateId !== "string") {
+        return NextResponse.json({ error: "invalid_trigger" }, { status: 400 });
+      }
+      try {
+        const trigger = await saveTriggerSetting({
+          businessId: session.businessId,
+          trigger: body.trigger,
+          templateId: body.templateId,
+          enabled: body.enabled === undefined ? true : body.enabled === true,
+        });
+        return NextResponse.json({ trigger });
+      } catch (error) {
+        if (error instanceof LookupTriggerError) {
+          const status = error.code === "template_not_found" ? 404 : 400;
+          return NextResponse.json({ error: error.code }, { status });
+        }
+        throw error;
+      }
+    }
+
     if (body.action === "campaign") {
       const selectedChannel = channel(body.channel);
       if (!selectedChannel || typeof body.name !== "string" || typeof body.templateId !== "string" || typeof body.segmentId !== "string") {
@@ -261,6 +314,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       "missing_token",
       "unsupported_token",
       "unknown_purpose",
+      "variables_mismatch",
       "template_archived",
     ];
     if (known.some((code) => message.startsWith(code)) || message.startsWith("message_variable_missing") || message.startsWith("unknown_template_variable")) {

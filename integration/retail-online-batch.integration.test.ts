@@ -93,6 +93,7 @@ function wooOrder(id: number, productId: number, quantity: number, price: string
 function wooRefund(id: number, parentId: number, productId: number, quantity: number, price: string, variationId?: number) {
   return JSON.stringify({
     id,
+    restock_items: true,
     parent_id: parentId,
     date_created: new Date().toISOString(),
     amount: String(Number(price) * quantity),

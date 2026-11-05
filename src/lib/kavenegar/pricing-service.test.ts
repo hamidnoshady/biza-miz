@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MIN_PROVIDER_TRANSFER_RIAL,
   NO_FUNDING,
@@ -6,11 +6,13 @@ import {
   planFunding,
   refillTriggerMessages,
   quoteSmsPrice,
+  readMasterBalanceRial,
   roundToProviderMinimum,
   tariffBucketFor,
   type FundingPolicy,
   type ProviderTariff,
 } from "./pricing-service";
+import type { KavenegarManagementClient } from "./rest";
 
 const tariff: ProviderTariff = {
   farsiRialPerSegment: 900,
@@ -29,6 +31,8 @@ const policy: FundingPolicy = {
   childCapRial: 500_000,
   dailyCapRial: 200_000,
   masterFloorRial: 1_000_000,
+  transactionalReserveRial: 0,
+  fundingPurpose: "marketing",
 };
 
 describe("wholesale → retail quoting", () => {
@@ -305,5 +309,228 @@ describe("funding strategies (issue #902 §3)", () => {
       action: "none",
       reason: "master_floor",
     });
+  });
+});
+
+describe("the transactional reserve (issue #902 #3, DoD #9)", () => {
+  const decide = (policy: FundingPolicy, masterBalanceRial: number | null) =>
+    planFunding({
+      policy,
+      tariff,
+      childBalanceRial: 0,
+      hourOfDay: 12,
+      masterBalanceRial,
+      transferredTodayRial: 0,
+      transferredTodayAllChildrenRial: 0,
+      unresolvedTransferRial: 0,
+    });
+  // Floor 1,000,000 and reserve 500,000 of a 1,400,000 master: 400,000 is
+  // spendable for marketing, 900,000 for transactional traffic.
+  const reserved = (overrides: Partial<FundingPolicy> = {}): FundingPolicy => ({
+    ...policy,
+    strategy: "jit",
+    bufferMessages: 100,
+    childCapRial: null,
+    dailyCapRial: null,
+    masterFloorRial: 1_000_000,
+    transactionalReserveRial: 500_000,
+    fundingPurpose: "marketing",
+    ...overrides,
+  });
+
+  it("clamps marketing to what the reserve leaves, not to the target", () => {
+    // Master 1,600,000 − 1,000,000 floor = 600,000 spendable; the 500,000
+    // reserve leaves 100,000 for marketing, which is less than the child's
+    // 207,000 target — so the reserve, not the target, is what binds.
+    const decision = decide(reserved(), 1_600_000);
+    expect(decision.action).toBe("transfer");
+    expect(decision.action === "transfer" && decision.amountRial).toBe(100_000);
+  });
+
+  it("stops marketing at the reserve with its own reason, because the money is not missing", () => {
+    expect(decide(reserved(), 1_150_000)).toMatchObject({
+      action: "none",
+      reason: "transactional_reserve",
+    });
+  });
+
+  it("lets transactional funding spend the same slice in full", () => {
+    // Same master, same fleets: the target is reachable once the reserve is
+    // this fleet's own money.
+    expect(decide(reserved({ fundingPurpose: "transactional" }), 1_600_000)).toMatchObject({
+      action: "transfer",
+      amountRial: 207_000,
+    });
+  });
+
+  it("keeps the floor itself ahead of the reserve", () => {
+    // At or under the floor nothing is spendable by anyone: the reserve is a
+    // slice above the floor, not a second floor.
+    for (const fundingPurpose of ["marketing", "transactional"] as const) {
+      expect(decide(reserved({ fundingPurpose }), 1_000_000)).toMatchObject({
+        action: "none",
+        reason: "master_floor",
+      });
+    }
+  });
+
+  it("is inert until an operator sets it, so a default fleet behaves exactly as before", () => {
+    expect(decide(reserved({ transactionalReserveRial: 0 }), 1_150_000)).toMatchObject({
+      action: "transfer",
+      amountRial: 150_000,
+    });
+    // And an unknown master balance is still refused rather than funded blindly.
+    expect(decide(reserved(), null)).toMatchObject({
+      action: "none",
+      reason: "master_balance_unknown",
+    });
+  });
+});
+
+describe("the master's balance comes from the provider (issue #902 §3, plan §9 item 4)", () => {
+  function client(info: () => Promise<{ remainCreditRial: number | null }>) {
+    return { fetchAccountInfo: info } as unknown as KavenegarManagementClient;
+  }
+
+  it("returns the figure the provider reports", async () => {
+    expect(await readMasterBalanceRial(client(async () => ({ remainCreditRial: 4_200_000 })))).toBe(
+      4_200_000,
+    );
+  });
+
+  it("keeps a genuine zero a zero, which the floor then respects", async () => {
+    expect(await readMasterBalanceRial(client(async () => ({ remainCreditRial: 0 })))).toBe(0);
+  });
+
+  it("turns a provider failure into 'unknown' rather than an exception", async () => {
+    // A funding pass must not become an incident because the balance read
+    // timed out. `null` already means something honest downstream: with a floor
+    // configured the plan refuses to move money, and the pass raises
+    // `master_balance_unknown` for the operator.
+    const read = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(
+        await readMasterBalanceRial(
+          client(async () => {
+            throw new Error("provider: timeout");
+          }),
+        ),
+      ).toBeNull();
+      // Logged for the operator...
+      expect(read).toHaveBeenCalled();
+      // ...and the message is the reason, never a credential.
+      expect(JSON.stringify(read.mock.calls)).not.toContain("MASTER");
+    } finally {
+      read.mockRestore();
+    }
+  });
+});
+
+describe("an approved campaign is a funding trigger of its own (issue #902 §9 item 1)", () => {
+  const base = {
+    policy: { ...policy, childCapRial: null, dailyCapRial: null },
+    tariff,
+    childBalanceRial: 0,
+    hourOfDay: 12,
+    masterBalanceRial: 50_000_000,
+    transferredTodayRial: 0,
+    unresolvedTransferRial: 0,
+  };
+
+  it("raises the target above the standing buffer when the queue is bigger than it", () => {
+    // The buffer asks for 100 messages ≈ 207,000 Rial. A 500-recipient campaign
+    // owes 500 × 2,070 = 1,035,000. The standing order would fund a fifth of it
+    // and the tail would die on the provider's credit error.
+    const decision = planFunding({ ...base, pendingDemandRial: 1_035_000 });
+    expect(decision).toMatchObject({
+      action: "transfer",
+      amountRial: 1_035_000,
+      reason: "campaign_demand",
+      targetBalanceRial: 1_035_000,
+    });
+  });
+
+  it("triggers even when the balance already satisfies the buffer", () => {
+    // 250,000 is comfortably above the 207,000 buffer, and still not enough for
+    // the queued campaign. Before this trigger the child was "healthy" here.
+    const withQueue = planFunding({
+      ...base,
+      childBalanceRial: 250_000,
+      pendingDemandRial: 1_035_000,
+    });
+    expect(withQueue.action).toBe("transfer");
+    expect(withQueue.action === "transfer" && withQueue.amountRial).toBe(785_000);
+
+    expect(planFunding({ ...base, childBalanceRial: 250_000 })).toMatchObject({
+      action: "none",
+      reason: "healthy",
+    });
+  });
+
+  it("keeps the buffer in charge once the queue is smaller than it", () => {
+    // Demand below the buffer must not shrink the target: a small campaign is
+    // not a reason to let the standing order lapse.
+    const decision = planFunding({ ...base, pendingDemandRial: 20_700 });
+    expect(decision).toMatchObject({
+      action: "transfer",
+      amountRial: 207_000,
+      reason: "top_up",
+      targetBalanceRial: 207_000,
+    });
+  });
+
+  it("still respects caps, the floor and the reserve — demand is not a bypass", () => {
+    // The campaign wants 1,035,000, the per-child ceiling allows 300,000.
+    expect(
+      planFunding({
+        ...base,
+        policy: { ...policy, childCapRial: 300_000, dailyCapRial: null },
+        pendingDemandRial: 1_035_000,
+      }),
+    ).toMatchObject({ action: "transfer", amountRial: 300_000 });
+
+    // The master has 1,500,000 with a 1,000,000 floor: 500,000 is spendable.
+    expect(
+      planFunding({ ...base, masterBalanceRial: 1_500_000, pendingDemandRial: 1_035_000 }),
+    ).toMatchObject({ action: "transfer", amountRial: 500_000 });
+
+    // A marketing fleet may not spend the 400,000 held for transactional traffic.
+    expect(
+      planFunding({
+        ...base,
+        policy: { ...policy, childCapRial: null, dailyCapRial: null, transactionalReserveRial: 400_000 },
+        masterBalanceRial: 1_500_000,
+        pendingDemandRial: 1_035_000,
+      }),
+    ).toMatchObject({ action: "transfer", amountRial: 100_000 });
+  });
+
+  it("moves low_watermark's trigger to the queue, so a draining campaign is not paced", () => {
+    // A watermark of 50 messages would normally wait until the child fell below
+    // ~103,500 Rial. A queued campaign makes that wait dangerous, so the trigger
+    // rises to the demand while the target does too.
+    const strategy = { ...policy, strategy: "low_watermark" as const, watermarkMessages: 50 };
+
+    const idle = planFunding({ ...base, policy: strategy, childBalanceRial: 150_000 });
+    expect(idle).toMatchObject({ action: "none", reason: "healthy" });
+
+    const draining = planFunding({
+      ...base,
+      policy: strategy,
+      childBalanceRial: 150_000,
+      pendingDemandRial: 1_035_000,
+    });
+    expect(draining).toMatchObject({ action: "transfer", reason: "campaign_demand" });
+
+    // And above demand it is still healthy — the queue is a floor on the
+    // trigger, not an instruction to fund forever.
+    expect(
+      planFunding({
+        ...base,
+        policy: strategy,
+        childBalanceRial: 1_200_000,
+        pendingDemandRial: 1_035_000,
+      }),
+    ).toMatchObject({ action: "none", reason: "healthy" });
   });
 });

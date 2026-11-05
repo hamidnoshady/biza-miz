@@ -243,6 +243,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
+      - name: Reclaim runner-local Docker storage
+        run: |
+          docker buildx prune --all --force
+          docker image prune --all --force
+          df -h /
 
       - name: Build the production image without publishing
         uses: docker/build-push-action@v7
@@ -253,7 +258,7 @@ jobs:
           tags: business-suite:ci
           build-args: |
             GIT_SHA=${{ github.sha }}
-            NODE_OPTIONS=--max-old-space-size=4096
+            NODE_OPTIONS=--max-old-space-size=8192
           # The production-publish cache is a read-only warm source for PR/main
           # validation. Verification writes only to its event/ref-specific scope,
           # so it cannot overwrite the release cache or race other ref builds.
@@ -321,6 +326,7 @@ jobs:
       - name: Build production app and staged desktop runtime
         env:
           JWT_SECRET: ci-only-throwaway-secret-0123456789abcdef0123456789abcdef
+          NODE_OPTIONS: --max-old-space-size=8192
         run: |
           npm run build
           npm run desktop:runtime
@@ -350,6 +356,13 @@ jobs:
             node --check $f.FullName
             if ($LASTEXITCODE -ne 0) { throw "$($f.FullName) does not parse" }
           }
+
+      - name: Test bootstrap and Central console are absent from the package shape
+        # Issue #1194 - fast source-level gate (the byte-level gate runs on the
+        # built installer in the Windows packaging workflows).
+        run: |
+          npx vitest run src/lib/desktop-shell-hardening.test.ts src/lib/desktop-release-hardening.test.ts src/lib/platform-realm-isolation.test.ts src/middleware.issue-1194.test.ts
+          node -e "const r=require('./scripts/desktop/release-scan-rules.cjs'); if (!r.FORBIDDEN_TEXT_MARKERS.length || !r.FORBIDDEN_PATH_RULES.length) process.exit(1)"
 
       - name: New positive runtime constraints hold
         working-directory: electron

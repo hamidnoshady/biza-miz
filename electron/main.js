@@ -28,7 +28,6 @@ const {
   validatePrintTarget,
 } = require("./print-target-guard");
 const { ServerSupervisor } = require("./server-supervisor");
-const { runSmokeProbe } = require("./smoke-probe");
 const { BRAND_NAME_EN, brandName, byLocale } = require("./brand");
 const { resolveUserDataDir } = require("./user-data-path");
 
@@ -419,13 +418,12 @@ function runDesktopShell() {
    * space/access check result) map cleanly onto `dialog`'s built-in flows
    * without needing an HTML asset pipeline of its own.
    *
-   * Never runs in packaged/CI smoke mode (`DESKTOP_SMOKE_MARKER`): an
-   * unattended run must never block on a dialog nobody can answer, so it
-   * always takes the default path there, exactly like every automated boot
-   * before this feature existed.
+   * Never blocks an unattended acceptance run: `electron/scripts/smoke-packaged.js`
+   * (CI-only, not shipped) pre-writes the storage-location marker for its
+   * temporary profile, which `decideStorageBootstrap` answers with
+   * `use_marker_root` instead of `prompt`.
    */
   async function runStorageBootstrap() {
-    if (process.env.DESKTOP_SMOKE_MARKER) return;
     const fs = require("node:fs");
     try {
       const defaultUserDataDir = app.getPath("userData");
@@ -599,26 +597,6 @@ function runDesktopShell() {
     }
   }
 
-  function writeSmokeFailure(error) {
-    const marker = process.env.DESKTOP_SMOKE_MARKER;
-    if (!marker) return;
-    const stage = error?.stage || "startup";
-    let logTail = "";
-    try {
-      const text = require("node:fs").readFileSync(logger.path, "utf8");
-      logTail = text.slice(-6_000);
-    } catch {}
-    require("node:fs").writeFileSync(marker, JSON.stringify({
-      ok: false,
-      stage,
-      error: error?.message || String(error),
-      cause: error?.cause?.message || null,
-      stack: error?.stack || null,
-      logPath: logger.path,
-      logTail,
-    }, null, 2));
-  }
-
   /**
    * Ask the owner what to do about a failed start. Returns "retry" or "exit";
    * "Open logs" and "Open support companion" are *inspection* actions, not
@@ -733,22 +711,6 @@ function runDesktopShell() {
         // passed their health checks. Only now may a pending update be marked
         // successful (and only when app.getVersion() is the expected target).
         updater?.completeStartupHealth();
-        if (process.env.DESKTOP_SMOKE_MARKER) {
-          // The probe itself lives in smoke-probe.js (issue #1001) and its
-          // account-creating path additionally needs an unpackaged build or the
-          // smoke harness's own opt-in.
-          await runSmokeProbe({
-            appUrl: state.appUrl,
-            userDataDir: app.getPath("userData"),
-            instanceId: backend.config.instanceId,
-            env: process.env,
-            isPackaged: app.isPackaged,
-          });
-          await cleanup();
-          quitting = true;
-          app.exit(0);
-          return;
-        }
         registerIpc();
         await createWindow(state.appUrl);
         startServerSupervision();
@@ -762,13 +724,6 @@ function runDesktopShell() {
           logger?.info("Desktop startup cancelled because the application is quitting");
           quitting = true;
           app.exit(0);
-          return;
-        }
-        if (process.env.DESKTOP_SMOKE_MARKER) {
-          logger.error(`Packaged smoke failed at ${error?.stage || "startup"}`, error);
-          writeSmokeFailure(error);
-          quitting = true;
-          app.exit(1);
           return;
         }
         const choice = await showStartupFailure(error);

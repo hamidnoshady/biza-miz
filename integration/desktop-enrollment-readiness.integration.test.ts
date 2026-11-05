@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { Client, type Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { readEnrollmentReadiness } from "../src/lib/desktop-enrollment-readiness-service";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -92,7 +92,7 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query(`DROP ROLE IF EXISTS ${APP_ROLE}`);
+    await dropAppRole(maintenance, APP_ROLE);
   } finally {
     await maintenance.end();
   }

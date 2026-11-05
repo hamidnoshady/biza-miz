@@ -178,7 +178,7 @@ export function AttributesSection({ canEdit }: { canEdit: boolean }) {
             </section>
           ) : null}
           <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <div data-tour-id="attributes.filters" className="grid min-w-0 flex-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
               <Field label="جست‌وجوی ویژگی">
                 <input className={inputClass} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="مثلاً رنگ" />
               </Field>
@@ -202,7 +202,7 @@ export function AttributesSection({ canEdit }: { canEdit: boolean }) {
                 : "ویژگی‌ای با این جست‌وجو و فیلتر پیدا نشد."}
             </EmptyState>
           ) : (
-            <div className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <div data-tour-id="attributes.cards" className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {visibleDefinitions.map((definition, index) => (
                 <section key={definition.id} className={`${cardClass} relative min-w-0 p-4`}>
                   <div className="flex items-start justify-between gap-2">
@@ -248,6 +248,7 @@ export function AttributesSection({ canEdit }: { canEdit: boolean }) {
               {canEdit ? (
                 <button
                   type="button"
+                  data-tour-id="attributes.add"
                   onClick={() => setView({ mode: "form", definition: null })}
                   disabled={mutating}
                   className="flex min-h-40 min-w-0 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-border text-sm font-medium text-foreground/70 transition-colors hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10 dark:hover:text-amber-300"

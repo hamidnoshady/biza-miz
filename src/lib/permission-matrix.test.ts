@@ -95,6 +95,10 @@ describe("built-in role presets", () => {
       "store_credit.issue", "store_credit.payout",
       "tables.edit", "tables.manage",
       "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
+      // Issue #894 — a manager already runs the websites a Torob channel publishes
+      // from, so the channel comes with them; `torob.configure` too, because it is
+      // the same class of credential work the preset already grants for WooCommerce.
+      "torob.configure", "torob.manage", "torob.view",
       "vehicles.archive", "vehicles.cost_edit", "vehicles.cost_view", "vehicles.create",
       "vehicles.edit", "vehicles.expense_record", "vehicles.override_min_price", "vehicles.price_edit",
       "vehicles.reservation_cancel", "vehicles.reserve", "vehicles.sell", "vehicles.trade_in", "vehicles.transfer", "vehicles.view",

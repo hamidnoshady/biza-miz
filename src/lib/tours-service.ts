@@ -9,11 +9,14 @@
  * events land (the transitions are monotone unions, see `applyTourEvent`).
  */
 import { query, withTenantTransaction } from "./db";
+import { effectiveFeatures } from "./features";
 import { getBusinessIndustry } from "./industry-guard";
+import { getInventorySystem } from "./inventory-service";
 import {
   applyTourEvent,
-  isTourEligible,
   tourById,
+  tourFactsNeeded,
+  tourForViewer,
   type TourViewer,
   type StoredTourProgress,
   type TourDefinition,
@@ -50,18 +53,39 @@ function mapRow(row: ProgressRow): StoredTourProgress {
   };
 }
 
-/** The facts eligibility is decided on, read fresh for this request. */
+/**
+ * The facts eligibility is decided on, read fresh for this request. Feature
+ * flags and the costing system cost a query each, and the lookup runs every
+ * time a page's «آموزش» button mounts, so they are read only when a tour on
+ * this page actually asks about them (`tourFactsNeeded`).
+ */
 export async function tourViewerFor(
   businessId: string,
   permissions: ReadonlySet<string>,
+  tours: readonly TourDefinition[] = [],
 ): Promise<TourViewer> {
-  return { permissions, industry: await getBusinessIndustry(businessId) };
+  const needs = tourFactsNeeded(tours);
+  const [industry, features, inventorySystem] = await Promise.all([
+    getBusinessIndustry(businessId),
+    needs.features ? effectiveFeatures(businessId) : undefined,
+    needs.inventorySystem ? getInventorySystem(businessId) : undefined,
+  ]);
+  return { permissions, industry, features, inventorySystem };
 }
 
-/** The tour with this id, only if this viewer may be told it exists. */
-export function eligibleTourById(id: string, viewer: TourViewer): TourDefinition | null {
+/**
+ * The tour with this id as this viewer sees it (narrowed to their steps), only
+ * if they may be told it exists. Reads the viewer's facts for that one tour.
+ */
+export async function eligibleTourById(
+  id: string,
+  businessId: string,
+  permissions: ReadonlySet<string>,
+): Promise<TourDefinition | null> {
   const tour = tourById(id);
-  return tour && isTourEligible(tour, viewer) ? tour : null;
+  if (!tour) return null;
+  const viewer = await tourViewerFor(businessId, permissions, [tour]);
+  return tourForViewer(tour, viewer);
 }
 
 /** The caller's stored progress for the given tours, keyed by tour id. */

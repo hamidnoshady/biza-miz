@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,8 +16,8 @@ import { describe, expect, it } from "vitest";
  * cover this work; a gate that can pass vacuously is the one bug that would make
  * every other green check meaningless.
  *
- * Read as source rather than YAML-parsed: the assertion is about what the shell
- * condition contains, and the repo has no YAML dependency.
+ * Read as source rather than YAML-parsed, then execute the actual Bash gate:
+ * its behavior must survive shell translations, not depend on a literal list.
  */
 
 const source = readFileSync(path.join(".github", "workflows", "test.yml"), "utf8");
@@ -70,10 +71,28 @@ describe("the required CI gate", () => {
     }
   });
 
-  it("fails the run when a required job is skipped, not only when it fails", () => {
+  it.each([
+    ["success success success", 0],
+    ["failure success success", 1],
+    ["success cancelled success", 1],
+    ["success success skipped", 1],
+    ["success unknown success", 1],
+    ["", 1],
+    ["   ", 1],
+  ])("checks actual job results %j with exit status %i", (results, status) => {
     const required = jobBlock("required");
-    expect(required).toContain("skipped");
-    expect(required).toMatch(/'failure',\s*'cancelled',\s*'skipped'/);
+    expect(required).toMatch(/shell:\s*bash/);
+    expect(required).toContain("RESULTS: ${{ join(needs.*.result, ' ') }}");
+    const run = /        run: \|\r?\n((?: {10}[^\n]*\n?)+)/.exec(required);
+    expect(run, "the required job must execute its gate script").not.toBeNull();
+    const script = run![1].replace(/^ {10}/gm, "");
+    const result = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], {
+      env: { ...process.env, RESULTS: results },
+      encoding: "utf8",
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(status);
+    if (status !== 0) expect(result.stdout).toContain("::error::");
   });
 
   it("runs even when an upstream job fails, so it can report on it", () => {

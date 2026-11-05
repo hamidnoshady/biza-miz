@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { dropAppRole } from "../src/lib/create-app-role";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -1377,7 +1378,7 @@ describe("issue #824 review §7: RLS isolation under a non-superuser runtime rol
     const maintenance = new Client({ connectionString: maintenanceUrl() });
     await maintenance.connect();
     try {
-      await maintenance.query(`DROP ROLE IF EXISTS "${roleName}"`);
+      await dropAppRole(maintenance, roleName);
     } finally {
       await maintenance.end();
     }

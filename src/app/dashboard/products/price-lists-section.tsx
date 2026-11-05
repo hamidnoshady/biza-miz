@@ -765,7 +765,7 @@ export function PriceListsSection({
         start on a phone instead of being pushed off the end: `justify-end`
         alone put «ذخیره قیمت‌ها» on its own overflowing row at 360px.
       */}
-      <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+      <div data-tour-id="prices.toolbar" className="flex flex-wrap items-center gap-2 sm:justify-end">
         <Button
           type="button"
           variant="outline"
@@ -917,6 +917,7 @@ export function PriceListsSection({
         </SectionCard>
       ) : null}
 
+      <div data-tour-id="prices.matrix">
       <SectionCard
         title="نمایش لیست قیمت‌های کالا"
         description={
@@ -1088,6 +1089,7 @@ export function PriceListsSection({
           </div>
         ) : null}
       </SectionCard>
+      </div>
 
       <PriceHistoryDialog
         item={historyItem}

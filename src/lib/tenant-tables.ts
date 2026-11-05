@@ -256,6 +256,44 @@ export const EXEMPT_TABLES = new Set([
   "kavenegar_retail_price_slabs",
   "kavenegar_retail_price_versions",
   "kavenegar_service_alerts",
+  // Issue #903 — the managed tenant-backup service's platform half. Same shape
+  // as the managed-SMS fleet above: `platform_only` under FORCE RLS, so no
+  // tenant connection reads them, but an export's `SELECT *` as the owner would.
+  //
+  //   * `platform_tenant_backup_service` — the fleet policy singleton every
+  //     business's cadence and retention ceiling are derived from.
+  //   * `backup_key_versions` — the platform's key custody: each business's
+  //     artifact secret **wrapped** under the platform KEK. Ciphertext, but
+  //     nobody else's export has any business carrying the material that wraps
+  //     it, and §0's rule (a credential is not tenant data) covers it too.
+  //   * `tenant_backup_business_policy` — the Superadmin override of that
+  //     policy. A business is subject to it and must never read or infer it,
+  //     which is why its ownership column is `subject_business_id`, not
+  //     `business_id` (the convention `backup_key_versions` and
+  //     `kavenegar_service_alerts` already use).
+  //   * `tenant_backup_restore_approvals` — the named, expiring, single-use
+  //     consent for one destructive restore, same `subject_business_id` shape.
+  //
+  // The tenant halves (tenant_backup_artifacts, _drills, _restore_jobs,
+  // _site_heartbeat, _storage_samples, _upload_sessions, _upload_queue) are
+  // RLS-protected and stay in the export.
+  "platform_tenant_backup_service",
+  "backup_key_versions",
+  "tenant_backup_business_policy",
+  "tenant_backup_restore_approvals",
+  // Migration 0280 — the per-plan half of that policy: schedule, retention,
+  // capacity, alert thresholds and DR objectives keyed by `billing_plans.key`.
+  // A global catalogue row like `billing_plans` itself (no business_id at all),
+  // `platform_only` under FORCE RLS. A business is *subject* to its plan's
+  // policy; the plan row is never tenant data and never rides in an export.
+  "tenant_backup_plan_policy",
+  // Issue #902 §9 item 3 — the supplier's statement and what we paid against it.
+  // `billing_supplier_invoices` is the wholesale half of billing: a provider's
+  // name, what it charged us, and the margin between that and the retail price a
+  // business sees. DoD #3 keeps every one of those off a tenant surface, so the
+  // table is `platform_only` under FORCE RLS — and, for the same reason as the
+  // retail catalogue above, it must not ride along in a tenant export either.
+  "billing_supplier_invoices",
 ]);
 
 export interface ForeignKeyEdge {

@@ -2,9 +2,9 @@
 import "dotenv/config";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createAppRole, DEFAULT_APP_ROLE } from "../src/lib/create-app-role";
+import { createAppRole, DEFAULT_APP_ROLE, dropAppRole } from "../src/lib/create-app-role";
 
-export { createAppRole, DEFAULT_APP_ROLE };
+export { createAppRole, DEFAULT_APP_ROLE, dropAppRole };
 export type { AppRoleOptions, AppRoleResult } from "../src/lib/create-app-role";
 
 export async function main() {

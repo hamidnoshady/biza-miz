@@ -508,7 +508,7 @@ export type MediaAssetVariant = "original" | "enhanced" | "transformed" | "bg_re
  * purchaser's invoice), so reporting either as "از گفت‌وگو" (from a
  * conversation) or conflating the two would be wrong.
  */
-export type MediaAssetSource = "upload" | "ai_attachment" | "ai_generated" | "ocr_receipt" | "ocr_invoice";
+export type MediaAssetSource = "upload" | "ai_attachment" | "ai_generated" | "ocr_receipt" | "ocr_invoice" | "contract_final_pdf";
 
 
 // ---------------------------------------------------------------------------

@@ -106,12 +106,20 @@ export function isCentralExecutionPath(pathname: string): boolean {
   );
 }
 
-/** The super-admin realm: the console's pages and its API. */
+/**
+ * The super-admin realm: the console's pages and its API.
+ *
+ * Segment-aware, not a bare `startsWith("/api/platform")`: that spelling also
+ * matched an unrelated future path such as `/api/platform-settings`, which a
+ * site would then have answered 404 for no reason. The realm is exactly
+ * `/api/platform` and everything below it (issue #1194 asserts the boundary).
+ */
 export function isPlatformRealmPath(pathname: string): boolean {
   return (
     pathname === "/platform" ||
     pathname.startsWith("/platform/") ||
-    pathname.startsWith("/api/platform")
+    pathname === "/api/platform" ||
+    pathname.startsWith("/api/platform/")
   );
 }
 
@@ -221,6 +229,19 @@ const PUBLIC_PATHS = [
   // Public website forms authenticate with a site-scoped bearer credential;
   // no tenant session exists in the visitor's browser.
   "/api/website/leads",
+  // Issue #908 — the public contract-signing page. The caller is an external
+  // signatory who has no Bizamiz account by definition (that is the point of
+  // the flow), so no session can exist. The credential is the per-recipient
+  // token in the URL: 256 bits of randomness, HMAC-hashed at rest, bound to one
+  // signer and one frozen document version, expiring, and revocable. The
+  // handlers behind it never take a business, contract or signer id from the
+  // request — the token names them — and the endpoints refuse a body that tries.
+  "/sign",
+  "/api/sign",
+  // The verification QR is a random, token-only locator for a hash record. Its
+  // page returns only frozen-content/PDF hashes and completion metadata, never
+  // contract or signer identifiers, so it is public like the signer token page.
+  "/verify/contract",
   // First-run flow: /welcome bootstraps an empty install; the state endpoint
   // answers "needsBootstrap" (and nothing more) without a session.
   "/welcome",
@@ -264,6 +285,20 @@ const PUBLIC_PATHS = [
   // accept-invite, and public for the same reason.
   "/activate",
   "/api/auth/owner-activation",
+  // Issue #1128 §E — the external client review door, and the same shape as
+  // /invite above: the person arriving has no session and must never be given
+  // one, because they are the client and not staff. §B asks for "revocable
+  // scoped external review links" and for resource scheduling "without a new
+  // staff identity system", so the token in the URL is the whole credential and
+  // there is deliberately no approve-style media permission behind it.
+  //
+  // The API entry is prefix-matched by `isPublicPath`, which is what keeps this
+  // safe to spell this way: `/api/media/review` publishes the three token routes
+  // under `/api/media/review/[token]/…` and does NOT publish the agency's own
+  // `/api/media/review-rounds/…`, because that path does not start with
+  // `/api/media/review/`. Those stay session-guarded with media.view/media.manage.
+  "/review",
+  "/api/media/review",
   "/reset-password",
   "/api/auth/password-reset",
   // Issue #885 L10 — the initiation half. Already covered by the entry above
@@ -502,6 +537,11 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   // given in PUBLIC_PATHS; a cross-site POST to it must still be refused, even
   // though all it could ever do is end a session the browser already left.
   "/api/auth/logout/retry",
+  // Issue #908 — the signing page's own mutations (consent, OTP request, submit
+  // signature, decline) are browser-driven and session-less, so they belong
+  // behind the same Origin rule: our page's fetch carries a matching Origin, and
+  // a cross-site page cannot make a victim's browser finish a signing step.
+  "/api/sign",
 ];
 
 /** Is this one of the browser-driven, pre-session sign-in mutations? */

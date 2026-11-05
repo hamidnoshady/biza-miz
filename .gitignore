@@ -3,6 +3,11 @@ node_modules/
 .desktop-runtime/
 .desktop-assets/
 desktop-size-report.md
+# Issue #1194 — CI release artifacts written to the workspace by the
+# byte-level release scan and the external acceptance harness.
+desktop-release-scan.json
+signed-candidate-release-scan.json
+desktop-acceptance-report.json
 /backups/
 # Build output lives at the repo root. These patterns are anchored with a
 # leading slash because the unanchored form matches a directory of that name at
@@ -78,3 +83,6 @@ keystore.properties
 
 # Disposable local/browser fixtures (may contain generated test credentials)
 .cache/
+
+# Scratch narrow-typecheck configs (whole-project tsc OOMs in sandboxes)
+tsconfig.wave*.json

@@ -24,6 +24,7 @@ class POS_Connector_Admin {
 			'connection'      => array( 'slug' => 'pos-connector-connection',       'label' => __( 'اتصال', 'pos-accounting-connector' ) ),
 			'synchronization' => array( 'slug' => 'pos-connector-synchronization',  'label' => __( 'همگام‌سازی', 'pos-accounting-connector' ) ),
 			'queue'           => array( 'slug' => 'pos-connector-queue',            'label' => __( 'صف و خطاها', 'pos-accounting-connector' ) ),
+			'torob'           => array( 'slug' => 'pos-connector-torob',          'label' => __( 'ترب', 'pos-accounting-connector' ) ),
 			'diagnostics'     => array( 'slug' => 'pos-connector-diagnostics',      'label' => __( 'عیب‌یابی', 'pos-accounting-connector' ) ),
 			'updates'         => array( 'slug' => 'pos-connector-updates',          'label' => __( 'به‌روزرسانی', 'pos-accounting-connector' ) ),
 		);
@@ -90,8 +91,57 @@ class POS_Connector_Admin {
 		return '<span class="pos-badge pos-badge--' . esc_attr( $tone ) . '">' . esc_html( $label ) . '</span>';
 	}
 
+	/**
+	 * A stored UTC stamp as the operator should read it (#1206 UX-02):
+	 * Jalali date, site-local clock and relative age — never a raw
+	 * `Y-m-d H:i:s` in a timezone nobody on this screen thinks in.
+	 *
+	 * The exact UTC value remains in `wp pos-connector doctor --json` for
+	 * support correlation; this screen answers «is the store syncing?» and
+	 * «۱۱ آبان ۱۴۰۵، ۱۷:۴۵ (۳ دقیقه پیش)» does that without arithmetic. An
+	 * unreadable stored value passes through unchanged: showing the odd
+	 * string is more honest than inventing a time.
+	 */
 	private static function format_time( $value ) {
-		return $value ? esc_html( $value ) : '—';
+		if ( ! $value ) {
+			return '—';
+		}
+		$ts = is_numeric( $value ) ? (int) $value : POS_Connector_Health::parse_utc( (string) $value );
+		if ( ! $ts ) {
+			$ts = strtotime( (string) $value );
+		}
+		if ( ! $ts ) {
+			return esc_html( (string) $value );
+		}
+		return self::format_timestamp( (int) $ts );
+	}
+
+	/** A Unix timestamp as a local, localized sentence. See format_time(). */
+	private static function format_timestamp( $ts ) {
+		$ts    = (int) $ts;
+		$local = get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $ts ), 'Y-m-d H:i' );
+		if ( self::is_persian_locale() && 1 === preg_match( '/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/', (string) $local, $m ) ) {
+			$label = POS_Connector_Health::jalali_date_label( (int) $m[1], (int) $m[2], (int) $m[3] )
+				. '، ' . $m[4] . ':' . $m[5];
+		} else {
+			$label = (string) $local;
+		}
+		$diff = time() - $ts;
+		if ( $diff >= 0 && $diff <= 7 * DAY_IN_SECONDS ) {
+			/* translators: %s: human-readable time difference, e.g. «۳ دقیقه» */
+			$label .= ' (' . sprintf( __( '%s پیش', 'pos-accounting-connector' ), human_time_diff( $ts, time() ) ) . ')';
+		} elseif ( $diff < 0 && -$diff <= 7 * DAY_IN_SECONDS ) {
+			/* translators: %s: human-readable time difference, e.g. «۵ دقیقه» */
+			$label .= ' (' . sprintf( __( '%s دیگر', 'pos-accounting-connector' ), human_time_diff( time(), $ts ) ) . ')';
+		}
+		return self::is_persian_locale() ? POS_Connector_Health::persian_digits( $label ) : $label;
+	}
+
+	private static function is_persian_locale() {
+		if ( function_exists( 'pos_connector_is_persian' ) ) {
+			return pos_connector_is_persian();
+		}
+		return function_exists( 'get_locale' ) && 0 === strpos( (string) get_locale(), 'fa' );
 	}
 
 	private static function notice_text( $key ) {
@@ -122,6 +172,9 @@ class POS_Connector_Admin {
 			'update_available'    => array( 'warning', __( 'نسخهٔ جدید افزونه آمادهٔ نصب است.', 'pos-accounting-connector' ) ),
 			'up_to_date'          => array( 'success', __( 'افزونه به‌روز است.', 'pos-accounting-connector' ) ),
 			'update_check_failed' => array( 'error', __( 'بررسی به‌روزرسانی ناموفق بود:', 'pos-accounting-connector' ) ),
+			// #1206 P0: queuing is not evidence, and the wording says so.
+			'probe_queued'        => array( 'info', __( 'آزمایش کرون زمان‌بندی شد. این هنوز اثباتی نیست: اگر کرون اجرا شود، «اجراشده» و سپس «گزارش‌شده» در بخش عیب‌یابی نمایش داده می‌شود. زمان‌بندی بدون اجرا پس از ۱۰ دقیقه «منقضی» می‌شود.', 'pos-accounting-connector' ) ),
+			'probe_queue_failed'  => array( 'error', __( 'وردپرس نتوانست رویداد آزمایش کرون را زمان‌بندی کند؛ خودِ زمان‌بندی مشکل دارد.', 'pos-accounting-connector' ) ),
 		);
 		return isset( $map[ $key ] ) ? $map[ $key ] : null;
 	}
@@ -171,7 +224,9 @@ class POS_Connector_Admin {
 			<?php if ( $notice ) : ?>
 				<div class="notice notice-<?php echo esc_attr( $notice[0] ); ?>"><p><?php echo esc_html( $notice[1] . ( '' !== $detail ? ' ' . $detail : '' ) ); ?></p></div>
 			<?php endif; ?>
-			<?php if ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) : ?>
+			<?php if ( 'torob' === $section ) : ?>
+				<?php POS_Connector_Torob::render_admin(); ?>
+			<?php elseif ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) : ?>
 				<?php self::render_wizard( $settings ); ?>
 			<?php elseif ( 'dashboard' === $section ) : ?>
 				<?php self::render_dashboard( $settings, $counts ); ?>
@@ -262,6 +317,9 @@ class POS_Connector_Admin {
 				__( 'روش اجرا', 'pos-accounting-connector' ) => defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON ? __( 'کرون واقعی/سیستمی', 'pos-accounting-connector' ) : __( 'WP-Cron فقط هنگام بازدید', 'pos-accounting-connector' ),
 				__( 'وضعیت کرون', 'pos-accounting-connector' ) => self::cron_state_label(),
 				__( 'آخرین اجرای کرون', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_at'] ),
+				__( 'آخرین پایان دوره', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_completed_at'] ),
+				__( 'آخرین دوره', 'pos-accounting-connector' ) => self::cycle_label( $settings ),
+				__( 'آخرین وقفه', 'pos-accounting-connector' ) => self::incident_label( $settings ),
 				__( 'اجرای سریع بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_HOOK ),
 				__( 'بازخوانی سفارش بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_RESYNC_ORDERS ),
 				__( 'بازخوانی کاتالوگ بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_RESYNC_PRODUCTS ),
@@ -269,6 +327,7 @@ class POS_Connector_Admin {
 		</div>
 		<?php self::render_domain_cards( $settings ); ?>
 		<?php self::render_running_jobs(); ?>
+		<?php self::render_recent_invocations(); ?>
 		<?php if ( ! empty( $settings['last_error'] ) ) : ?>
 			<div class="notice notice-warning"><p><strong><?php esc_html_e( 'نیاز به توجه:', 'pos-accounting-connector' ); ?></strong> <?php echo esc_html( $settings['last_error'] ); ?></p></div>
 		<?php endif; ?>
@@ -301,17 +360,76 @@ class POS_Connector_Admin {
 		echo '</div></section>';
 	}
 
-	/** «کرون اجرا می‌شود» / «کرون اجرا نمی‌شود» — from when the fast lane last started, never from a button press. */
+	/**
+	 * «کرون اجرا می‌شود» / «کند» / «اجرا نمی‌شود» — from when the fast lane
+	 * last started, never from a button press (#1149, refined by #1206).
+	 *
+	 * The three answers exist because one boolean could not tell a shared host
+	 * that started 100s late from a scheduler that has not fired for hours.
+	 */
 	private static function cron_state_label() {
-		$status = pos_connector_cron_status();
-		if ( ! $status['configured'] ) {
-			return __( 'اتصال فعال نیست', 'pos-accounting-connector' );
+		$state = POS_Connector_Health::cron_state( pos_connector_settings(), time() );
+		switch ( $state['state'] ) {
+			case 'paused':
+				return __( 'متوقف از سمت پنل', 'pos-accounting-connector' );
+			case 'test_only':
+				return __( 'کرون هرگز اجرا نشده — فقط آزمایش اتصال انجام شده', 'pos-accounting-connector' );
+			case 'failed':
+				/* translators: %s: how long ago the sync last started */
+				return sprintf( __( 'اجرا نمی‌شود — آخرین اجرا %s پیش', 'pos-accounting-connector' ), human_time_diff( $state['reference_ts'], time() ) );
+			case 'delayed':
+				/* translators: %s: how long ago the sync last started */
+				return sprintf( __( 'دیرکرده — آخرین اجرا %s پیش', 'pos-accounting-connector' ), human_time_diff( $state['reference_ts'], time() ) );
+			case 'healthy':
+				return __( 'در حال اجرا', 'pos-accounting-connector' );
+			default:
+				return __( 'اتصال فعال نیست', 'pos-accounting-connector' );
 		}
-		if ( $status['stale'] ) {
-			/* translators: %s: how long ago the sync last started */
-			return sprintf( __( 'اجرا نمی‌شود — آخرین اجرا %s پیش', 'pos-accounting-connector' ), human_time_diff( $status['reference_ts'], time() ) );
+	}
+
+	/**
+	 * The last cycle as the screen may state it: what it verified, what it
+	 * moved, and — as history — the interruption it ended (#1206 P0-2/P0-3).
+	 *
+	 * A cycle that failed says so instead of leaving the previous success on
+	 * screen, which is what made a broken connector look healthy.
+	 */
+	private static function cycle_label( $settings ) {
+		$verdict = isset( $settings['last_cycle_verdict'] ) ? (string) $settings['last_cycle_verdict'] : '';
+		if ( '' === $verdict ) {
+			return __( 'هنوز دوره‌ای ثبت نشده است', 'pos-accounting-connector' );
 		}
-		return __( 'در حال اجرا', 'pos-accounting-connector' );
+		if ( in_array( $verdict, array( POS_Connector_Health::PHASE_OK, POS_Connector_Health::PHASE_EMPTY, POS_Connector_Health::PHASE_SKIPPED ), true ) ) {
+			return POS_Connector_Health::PHASE_EMPTY === $verdict
+				/* translators: %s: cycle finish time */
+				? sprintf( __( 'تأییدشده و خالی (بدون تغییر) — %s', 'pos-accounting-connector' ), self::format_time( $settings['last_run_completed_at'] ) )
+				/* translators: %s: cycle finish time */
+				: sprintf( __( 'موفق — %s', 'pos-accounting-connector' ), self::format_time( $settings['last_run_completed_at'] ) );
+		}
+		return sprintf(
+			/* translators: 1: verdict, 2: hours/minutes since the last verified cycle */
+			__( '%1$s — آخرین دورهٔ تأییدشده %2$s پیش', 'pos-accounting-connector' ),
+			$verdict,
+			$settings['last_sync_ok_at'] ? human_time_diff( POS_Connector_Health::parse_utc( $settings['last_sync_ok_at'] ), time() ) : __( 'هرگز', 'pos-accounting-connector' )
+		);
+	}
+
+	/** The last interruption, as history with a resolution time — never a live warning. */
+	private static function incident_label( $settings ) {
+		if ( empty( $settings['incident_at'] ) ) {
+			return __( 'ثبت نشده', 'pos-accounting-connector' );
+		}
+		$when = self::format_time( $settings['incident_at'] );
+		if ( ! empty( $settings['incident_open'] ) ) {
+			/* translators: %s: when the interruption started */
+			return sprintf( __( 'باز — از %s', 'pos-accounting-connector' ), $when );
+		}
+		return sprintf(
+			/* translators: 1: when the interruption started, 2: when it was verified fixed */
+			__( '%1$s — رفع‌شده در %2$s', 'pos-accounting-connector' ),
+			$when,
+			self::format_time( $settings['incident_recovered_at'] )
+		);
 	}
 
 	/**
@@ -319,6 +437,53 @@ class POS_Connector_Admin {
 	 * still being read — so «در صف اجرا قرار گرفت» is something the screen can
 	 * follow up on instead of a promise.
 	 */
+	/**
+	 * The last few scheduler invocations (#1206 P1: current vs historical).
+	 *
+	 * The card above says what the scheduler is doing *now*. This says what it
+	 * did — which is the only way to tell «یک بار خطا خورد و برگشت» from «از دیروز
+	 * هر دقیقه خطا می‌خورد». Five lines here, all twenty in `wp pos-connector doctor`.
+	 *
+	 * Relative times, not calendar dates: «۳ دقیقه پیش» is the same sentence in
+	 * every locale and needs no conversion, and time-of-day is not a date.
+	 */
+	private static function render_recent_invocations() {
+		$entries = POS_Connector_Invocation_Log::recent( 5 );
+		if ( empty( $entries ) ) {
+			return;
+		}
+		echo '<section class="pos-panel"><h2>' . esc_html__( 'اجراهای اخیر زمان‌بند', 'pos-accounting-connector' ) . '</h2><ul>';
+		foreach ( $entries as $entry ) {
+			$started = isset( $entry['startedAtUnix'] ) ? (int) $entry['startedAtUnix'] : 0;
+			$when    = $started > 0
+				? sprintf(
+					/* translators: %s: human-readable time difference, e.g. «۳ دقیقه» */
+					__( '%s پیش', 'pos-accounting-connector' ),
+					human_time_diff( $started, time() )
+				)
+				: __( 'نامشخص', 'pos-accounting-connector' );
+			$clock = $started > 0 ? get_date_from_gmt( gmdate( 'Y-m-d H:i:s', $started ), 'H:i:s' ) : '—';
+			$code  = isset( $entry['exitCode'] ) ? (int) $entry['exitCode'] : null;
+			$parts = array(
+				$clock,
+				$when,
+				isset( $entry['driver'] ) ? $entry['driver'] : '?',
+				null === $code ? __( 'کد نامشخص', 'pos-accounting-connector' ) : sprintf( __( 'کد %d', 'pos-accounting-connector' ), $code ),
+			);
+			if ( isset( $entry['runtimeMs'] ) && null !== $entry['runtimeMs'] ) {
+				$parts[] = sprintf( '%.1f' . __( 'ثانیه', 'pos-accounting-connector' ), ( (int) $entry['runtimeMs'] ) / 1000 );
+			}
+			if ( isset( $entry['outcome'] ) && 'interrupted' === $entry['outcome'] ) {
+				// The one outcome a later run cannot clean up for you.
+				$parts[] = __( 'نیمه‌کاره ماند (فرآیند از بین رفت)', 'pos-accounting-connector' );
+			} elseif ( ! empty( $entry['verdict'] ) ) {
+				$parts[] = (string) $entry['verdict'];
+			}
+			echo '<li>' . esc_html( implode( ' — ', $parts ) ) . '</li>';
+		}
+		echo '</ul></section>';
+	}
+
 	private static function render_running_jobs() {
 		$labels = array(
 			'sync'      => __( 'اجرای سریع حمل‌ونقل', 'pos-accounting-connector' ),
@@ -349,9 +514,49 @@ class POS_Connector_Admin {
 		echo '</ul></section>';
 	}
 
+	/**
+	 * The probe's stage-by-stage outcome (#1206 P0).
+	 *
+	 * Deliberately a list of stages rather than a badge: «صف شد» and «اجرا شد»
+	 * are the difference between a scheduled event and a working scheduler, and
+	 * that difference is the whole reason this control exists.
+	 */
+	private static function render_cron_probe( $settings ) {
+		$probe = isset( $settings['cron_probe'] ) && is_array( $settings['cron_probe'] ) ? $settings['cron_probe'] : array();
+		$state = POS_Connector_Health::probe_state( $probe, time() );
+		if ( 'none' === $state['state'] ) {
+			echo '<p>' . esc_html__( 'هنوز آزمایشی انجام نشده است.', 'pos-accounting-connector' ) . '</p>';
+			return;
+		}
+		$stages = array(
+			array( __( '۱) زمان‌بندی رویداد', 'pos-accounting-connector' ), (string) ( isset( $probe['queued_at'] ) ? $probe['queued_at'] : '' ), ! empty( $probe['queued_at'] ) ),
+			array( __( '۲) اجرا توسط زمان‌بند', 'pos-accounting-connector' ), (string) ( isset( $probe['executed_at'] ) ? $probe['executed_at'] : '' ), ! empty( $probe['executed_at'] ) ),
+			array( __( '۳) رسیدن گزارش امضاشده', 'pos-accounting-connector' ), (string) ( isset( $probe['reported_at'] ) ? $probe['reported_at'] : '' ), ! empty( $probe['reported_at'] ) ),
+		);
+		echo '<table class="widefat striped pos-probe"><tbody>';
+		foreach ( $stages as $stage ) {
+			echo '<tr><td>' . esc_html( $stage[0] ) . '</td><td>'
+				. self::status_badge( $stage[2] ? __( 'انجام شد', 'pos-accounting-connector' ) : __( 'انجام نشده', 'pos-accounting-connector' ), $stage[2] ? 'good' : 'warn' ) // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+				. '</td><td dir="ltr">' . esc_html( $stage[1] ? $stage[1] . ' UTC' : '—' ) . '</td></tr>';
+		}
+		echo '</tbody></table>';
+		echo '<p>' . esc_html(
+			sprintf(
+				/* translators: 1: state, 2: reason, 3: seconds until the probe expires */
+				__( 'وضعیت: %1$s (%2$s) — %3$d ثانیه تا انقضا.', 'pos-accounting-connector' ),
+				$state['state'],
+				$state['reason'],
+				$state['expiresIn']
+			)
+		) . '</p>';
+		if ( 'expired' === $state['state'] ) {
+			echo '<div class="notice notice-error inline"><p>' . esc_html__( 'رویداد زمان‌بندی شد اما هیچ اجرایی آن را برنداشت: زمان‌بند وردپرس (WP-Cron یا کرون سیستم) در حال اجرای رویدادهای سررسید نیست. کرون سرور را بررسی کنید — «آزمایش اتصال» موفق بودن این را ثابت نمی‌کند.', 'pos-accounting-connector' ) . '</p></div>';
+		}
+	}
+
 	private static function next_cron_label( $hook ) {
 		$at = wp_next_scheduled( $hook );
-		return $at ? gmdate( 'Y-m-d H:i:s', $at ) . ' UTC' : __( 'زمان‌بندی نشده', 'pos-accounting-connector' );
+		return $at ? self::format_timestamp( (int) $at ) : __( 'زمان‌بندی نشده', 'pos-accounting-connector' );
 	}
 
 	private static function render_connection( $settings ) {
@@ -411,17 +616,42 @@ class POS_Connector_Admin {
 		<section class="pos-panel">
 			<h2><?php esc_html_e( 'عیب‌یابی', 'pos-accounting-connector' ); ?></h2>
 			<?php if ( ! pos_connector_woocommerce_active() ) : ?><div class="notice notice-error inline"><p><?php esc_html_e( 'ووکامرس فعال نیست؛ همگام‌سازی فروشگاهی متوقف است اما اتصال و به‌روزرسانی افزونه قابل بررسی است.', 'pos-accounting-connector' ); ?></p></div><?php endif; ?>
-			<details open><summary><?php esc_html_e( 'کرون واقعی', 'pos-accounting-connector' ); ?></summary>
-				<p><?php esc_html_e( 'یک خط کافی است:', 'pos-accounting-connector' ); ?></p>
+			<details open><summary><?php esc_html_e( 'کرون واقعی — وضعیت فعلی و اثبات آن', 'pos-accounting-connector' ); ?></summary>
+				<?php
+				$cron_state = POS_Connector_Health::cron_state( $settings, time() );
+				self::card(
+					__( 'آنچه واقعاً اندازه‌گیری شده', 'pos-accounting-connector' ),
+					array(
+						__( 'حالت', 'pos-accounting-connector' ) => self::cron_state_label(),
+						__( 'دلیل', 'pos-accounting-connector' ) => $cron_state['reason'],
+						__( 'آخرین شروع اجرا', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_at'] ),
+						__( 'آخرین پایان دوره', 'pos-accounting-connector' ) => self::format_time( $settings['last_run_completed_at'] ),
+						__( 'آخرین دورهٔ تأییدشده', 'pos-accounting-connector' ) => self::format_time( $settings['last_sync_ok_at'] ),
+						__( 'آخرین آزمایش اتصال (اثبات کرون نیست)', 'pos-accounting-connector' ) => self::format_time( $settings['last_ping_ok_at'] ),
+						__( 'اجرای سریع بعدی', 'pos-accounting-connector' ) => self::next_cron_label( POS_CONNECTOR_CRON_HOOK ),
+					)
+				);
+				?>
+				<?php if ( pos_connector_uses_system_cron() ) : ?>
+					<p><?php esc_html_e( 'DISABLE_WP_CRON در wp-config.php روشن است: یعنی زمان‌بندِ وابسته به بازدید وردپرس خاموش است. این به‌تنهایی خرابی نیست — اجرای کارها به کرون سیستم شما بستگی دارد، و تنها اثباتش «آخرین شروع اجرا» در بالا است، نه «آزمایش اتصال».', 'pos-accounting-connector' ); ?></p>
+				<?php else : ?>
+					<p><?php esc_html_e( 'DISABLE_WP_CRON تعریف نشده است: کرون داخلی وردپرس فقط هنگام بازدید از سایت اجرا می‌شود و در فروشگاه کم‌تردد عقب می‌افتد. برای بازهٔ دقیق، همین یک خط را در crontab بگذارید.', 'pos-accounting-connector' ); ?></p>
+				<?php endif; ?>
+				<p><?php esc_html_e( 'یک خط کافی است (خط دوم نسازید؛ دو زمان‌بند موازی همان کارها را دو بار می‌گیرند):', 'pos-accounting-connector' ); ?></p>
 				<p><code dir="ltr"><?php echo esc_html( implode( "\n", pos_connector_system_cron_examples() ) ); ?></code></p>
-				<p><?php esc_html_e( 'روی کانتینر یا هاستی که open_basedir اجرای wp را می‌بندد (برای کاربر root گزینهٔ --allow-root را هم اضافه کنید):', 'pos-accounting-connector' ); ?></p>
+				<p><?php esc_html_e( 'اگر و فقط اگر لاگ کرون خطای open_basedir را نشان داد، همین یک خط را با این نسخه اجرا کنید (برای کاربر root گزینهٔ --allow-root را اضافه کنید). محدودیت امنیتی سرور را به‌صورت کلی خاموش نکنید:', 'pos-accounting-connector' ); ?></p>
 				<p><code dir="ltr"><?php echo esc_html( pos_connector_system_cron_open_basedir_example() ); ?></code></p>
-				<p><?php esc_html_e( 'برای مانیتورینگ، دستور wp pos-connector status اگر کرون متوقف باشد با کد خروج غیرصفر تمام می‌شود.', 'pos-accounting-connector' ); ?></p>
+				<p><?php esc_html_e( 'برای عیب‌یابی کامل و بدون تغییر داده:', 'pos-accounting-connector' ); ?> <code dir="ltr">wp pos-connector doctor</code> — <?php esc_html_e( 'و برای مانیتورینگ:', 'pos-accounting-connector' ); ?> <code dir="ltr">wp pos-connector doctor --json</code> <?php esc_html_e( '(هنگام خرابی فعلی با کد خروج غیرصفر).', 'pos-accounting-connector' ); ?></p>
+			</details>
+			<details open><summary><?php esc_html_e( 'تست کرون و مسیر همگام‌سازی', 'pos-accounting-connector' ); ?></summary>
+				<p><?php esc_html_e( 'این آزمایش سه چیز را از هم جدا می‌کند: زمان‌بندی رویداد (که اثباتی نیست)، اجرای واقعی آن توسط زمان‌بند (که اثبات است) و رسیدن گزارش امضاشده به بیزامیز. «آزمایش اتصال» فقط آدرس و توکن را ثابت می‌کند، نه کرون را.', 'pos-accounting-connector' ); ?></p>
+				<?php self::render_cron_probe( $settings ); ?>
+				<div class="pos-actions"><?php self::action_button( 'pos_connector_cron_probe', __( 'تست کرون و مسیر همگام‌سازی', 'pos-accounting-connector' ), 'secondary' ); ?></div>
 			</details>
 			<h3><?php esc_html_e( 'گزارش رویدادها', 'pos-accounting-connector' ); ?></h3>
-			<table class="widefat striped"><thead><tr><th><?php esc_html_e( 'زمان UTC', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'رویداد', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'پیام', 'pos-accounting-connector' ); ?></th></tr></thead><tbody>
+			<table class="widefat striped"><thead><tr><th><?php esc_html_e( 'زمان', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'رویداد', 'pos-accounting-connector' ); ?></th><th><?php esc_html_e( 'پیام', 'pos-accounting-connector' ); ?></th></tr></thead><tbody>
 			<?php $entries = POS_Connector_Log::recent( 50 ); if ( empty( $entries ) ) : ?><tr><td colspan="3"><?php esc_html_e( 'گزارشی وجود ندارد.', 'pos-accounting-connector' ); ?></td></tr><?php endif; ?>
-			<?php foreach ( $entries as $entry ) : ?><tr><td><?php echo esc_html( $entry['created_at'] ); ?></td><td><?php echo esc_html( $entry['action'] ); ?></td><td><?php echo esc_html( $entry['message'] ); ?></td></tr><?php endforeach; ?>
+			<?php foreach ( $entries as $entry ) : ?><tr><td title="<?php echo esc_attr( $entry['created_at'] . ' UTC' ); ?>"><?php echo esc_html( self::format_time( $entry['created_at'] ) ); ?></td><td><?php echo esc_html( $entry['action'] ); ?></td><td><?php echo esc_html( $entry['message'] ); ?></td></tr><?php endforeach; ?>
 			</tbody></table>
 		</section>
 		<?php
@@ -438,7 +668,7 @@ class POS_Connector_Admin {
 			<?php if ( ! empty( $update['ok'] ) && ! empty( $update['fallback_from'] ) ) : ?>
 				<div class="notice notice-warning inline"><p><?php esc_html_e( 'سرور اصلی به‌روزرسانی در دسترس نبود؛ نتیجه از GitHub گرفته شد.', 'pos-accounting-connector' ); ?> <code dir="ltr"><?php echo esc_html( $update['fallback_from'] ); ?></code></p></div>
 			<?php endif; ?>
-			<?php self::card( __( 'نسخه و منبع', 'pos-accounting-connector' ), array( __( 'نسخه نصب‌شده', 'pos-accounting-connector' ) => POS_CONNECTOR_VERSION, __( 'آخرین نسخه', 'pos-accounting-connector' ) => $update['version'] ? $update['version'] : __( 'نامشخص', 'pos-accounting-connector' ), __( 'آخرین بررسی', 'pos-accounting-connector' ) => $update['checked_at'] ? gmdate( 'Y-m-d H:i:s', (int) $update['checked_at'] ) . ' UTC' : '—', __( 'منبع', 'pos-accounting-connector' ) => POS_Connector_Updater::update_url() ? POS_Connector_Updater::update_url() : __( 'GitHub اختیاری/توسعه', 'pos-accounting-connector' ) ) ); ?>
+			<?php self::card( __( 'نسخه و منبع', 'pos-accounting-connector' ), array( __( 'نسخه نصب‌شده', 'pos-accounting-connector' ) => POS_CONNECTOR_VERSION, __( 'آخرین نسخه', 'pos-accounting-connector' ) => $update['version'] ? $update['version'] : __( 'نامشخص', 'pos-accounting-connector' ), __( 'آخرین بررسی', 'pos-accounting-connector' ) => $update['checked_at'] ? self::format_timestamp( (int) $update['checked_at'] ) : '—', __( 'منبع', 'pos-accounting-connector' ) => POS_Connector_Updater::update_url() ? POS_Connector_Updater::update_url() : __( 'GitHub اختیاری/توسعه', 'pos-accounting-connector' ) ) ); ?>
 			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="pos-inline-action">
 				<?php wp_nonce_field( 'pos_connector_check_update' ); ?><input type="hidden" name="action" value="pos_connector_check_update" /><?php submit_button( __( 'بررسی به‌روزرسانی', 'pos-accounting-connector' ), 'secondary', 'submit', false ); ?>
 			</form>

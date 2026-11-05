@@ -13,6 +13,14 @@
  *     payment method for the total; Credit the line's revenue account for the
  *     net (post-discount) amount and `vatPayable` for VAT.
  *
+ * Issue #1128 §D adds one variant that needs no branch in the accounts: a
+ * **pass-through recharge** line carries `revenueCode` = 1270, the reimbursable
+ * client cost, so the same rule credits an asset instead of revenue and the entry
+ * recognises no sale. That is the whole of net presentation on the recharge side, and
+ * it works without a second rule because the account was already the line's to
+ * choose — what the flag changes is the memo, so a reader of the ledger can tell a
+ * recovery of the client's money from a sale of the agency's work.
+ *
  * The revenue account is chosen when the line is written (the payload carries
  * it, already validated against the trade's list in `service-invoice.ts`), so
  * a design fee and a site-execution fee on one invoice land in different
@@ -41,6 +49,27 @@ interface ServiceSaleRevenuePayload {
   vat: RialText;
   total: RialText;
   tenders: RetailTender[];
+  /**
+   * The project this invoice bills, when it bills one (issue #1128 §D).
+   *
+   * Carried to the accounting document rather than read back later: an agency
+   * bills a client project's milestone, and §D's project P&L is one read over
+   * `journal_entries.project_id` — revenue on one side, the project's own
+   * expenses on the other. Without the tag the invoice's revenue lands in the
+   * ledger unattributed and the P&L would have to be assembled from the
+   * invoice documents instead of from the books, which is exactly the
+   * booked/posted confusion §D forbids.
+   */
+  projectId?: string | null;
+  /**
+   * Issue #1128 §D — this line recovers money the agency advanced on a client's
+   * behalf rather than selling work, so `revenueCode` is 1270, an **asset**, and the
+   * entry recognises no revenue. The accounts need no branch here: the rule already
+   * credits whatever code the line carries, and the invoice service resolved it.
+   * What does branch is the memo, because two entries that each credit an account
+   * look identical in a listing and one of them is a sale.
+   */
+  passThrough?: boolean;
 }
 
 registerPostingRule("service.sale_revenue", async (event, client): Promise<PostingResult | null> => {
@@ -59,7 +88,14 @@ registerPostingRule("service.sale_revenue", async (event, client): Promise<Posti
       { accountId: accounts.get(payload.revenueCode)!, debit: ZERO, credit: payload.net },
       { accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: ZERO, credit: payload.vat },
     ],
-    memo: "فروش خدمات",
+    memo: payload.passThrough
+      ? "بازدریافت هزینه از کارفرما"
+      : "فروش خدمات",
     postingKind: "service_sale_revenue",
+    // Issue #1128 §D — the project this invoice bills, so the entry it posts is
+    // attributable in the ledger rather than only in the register that asked
+    // for it. Null for an invoice with no project, which is every invoice the
+    // till writes: the dimension is carried, never invented.
+    projectId: payload.projectId ?? null,
   };
 });

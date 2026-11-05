@@ -128,6 +128,17 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "setup/signup":
     "self-service business registration — creates the tenant a session would otherwise be scoped to; " +
     "refuses with 403 unless ALLOW_PUBLIC_SIGNUP is explicitly enabled",
+  // Issue #908 — the public contract-signing session. The caller is an external
+  // signatory with no account, so no session can exist by definition; the
+  // per-recipient token in the path is the credential (256 bits, HMAC-hashed at
+  // rest, bound to one signer and one frozen version, expiring, revocable). The
+  // route takes NO business/contract/signer id from the request — the token
+  // resolves them — and every mutation re-checks the token plus the envelope's
+  // live state, so a replayed or out-of-order call fails closed.
+  "sign/[token]":
+    "external signatory capability (issue #908) — the only credential is the recipient's hashed " +
+    "invitation token in the path; the caller has no session and must not, and no tenant id is " +
+    "accepted from the request",
   "auth/accept-invite":
     "invitation exchange — the invitee has no session and no membership of the inviting " +
     "business yet; the single-use token is the credential",
@@ -309,6 +320,36 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "payment id + Authority + Status; the route verifies the payment with Zarinpal server-side " +
     "using the stored gateway snapshot (no session required) and 302-redirects to /settings/billing; " +
     "authority mismatch is rejected and no session is created",
+  // Issue #1128 §E — the external client review door. These three are session-less
+  // because the party using them is not a member and must never become one: §B asks
+  // for "revocable scoped external review links" and for "resource scheduling
+  // without a new staff identity system", so the credential is the token, not a
+  // role. Authorising by membership would mean inviting the client onto the staff
+  // list to look at their own proofs, which is the second identity system §B rules
+  // out. There is deliberately no approve-style media permission for the same
+  // reason.
+  //
+  // The token is 256-bit random, stored only as sha-256 (0265 pins the hash to
+  // ^[0-9a-f]{64}$ so plaintext could not be persisted even by a bug), shown to the
+  // member who minted it exactly once, expires in ≤30 days, and is revocable with
+  // effect on the next request. resolveReviewToken runs before a single row is
+  // read, then every query runs inside withTenant(businessId) resolved *from* the
+  // link, and bytes additionally require the link's purpose to be `download` and
+  // the asset to be a member of that round — a token grants one round, never the
+  // library. streamMediaObject's keyBelongsToBusiness is the last backstop.
+  // Responses are no-store, since the URL carries the secret.
+  "media/review/[token]":
+    "client review screen for a scoped media link (issue #1128 §E) — the token is the credential; " +
+    "no session exists or may exist for an external client, and the token is resolved before any row " +
+    "is read, then every query is tenant-scoped to the business the link belongs to",
+  "media/review/[token]/items/[assetId]":
+    "client decision on one asset in a linked review round (issue #1128 §E) — same token credential; " +
+    "the item must be a member of the round the token grants, and the round must still be in `sent`",
+  "media/review/[token]/assets/[assetId]/file":
+    "byte streaming for a `download`-purpose media link (issue #1128 §E) — streamed through the app " +
+    "rather than presigned so revocation takes effect immediately and every fetch is counted; " +
+    "requires the token, the download purpose, round membership of the asset, and then defers to " +
+    "streamMediaObject's own keyBelongsToBusiness check",
 };
 
 
@@ -387,6 +428,24 @@ const COMPANION_DEVICE_ROUTES: Record<string, string> = {
     "single chunk upload (base64); session ticket pinning, idempotent per index",
   "support-companion/artifacts/[id]/complete":
     "upload completion with server-side integrity verification; session ticket pinning",
+};
+
+/**
+ * Issue #894 — Torob's **Product API v3** endpoint.
+ *
+ * It lives under `/api/v1` because that prefix *is* the platform's machine-facing
+ * surface, but its caller is a marketplace crawler holding no API key of ours:
+ * Torob signs each request with its own Ed25519 key and the platform verifies that
+ * signature against the shop's stored domain (`src/lib/torob/auth.ts`). So the
+ * `/api/v1` rule below — "must authenticate a scoped API key" — cannot apply, and
+ * this map is the documented exception. What it asserts instead is that the route
+ * delegates to the one handler that performs that verification, so a future edit
+ * cannot drop the check by inlining a query.
+ */
+const TOROB_TOKEN_ROUTES: Record<string, string> = {
+  "v1/torob/products/[shopId]":
+    "Product API v3 — Torob's EdDSA JWT in X-Torob-Token, audience checked against the " +
+    "shop's own domain; the shop id is opaque and resolves the tenant under one documented bypass",
 };
 
 /** Routes that guard via getSession() with route-specific logic instead of requireRole. */
@@ -528,6 +587,26 @@ function isAecGuarded(src: string): boolean {
   );
 }
 
+/**
+ * Issue #1128 §D — `agencyOwner(PERMISSIONS.workspace…)`, the same shape again:
+ * `src/app/api/agency/guard.ts`'s only body is `workspaceOwner(permission,
+ * request)`, which is `requirePermission` behind one shared helper plus the
+ * workspace module's service-activation gate. Recognising it narrows the scan
+ * rather than loosening it, and it is a *stronger* guard than the AEC one —
+ * these routes cannot write while the tenant's projects service is deactivated.
+ *
+ * The three keys are named exactly (read, write, and the determination key §24
+ * requires to be separate from ordinary editing) rather than accepting any
+ * string, so a future route cannot satisfy the scanner with a permission it
+ * does not actually check.
+ */
+function isAgencyGuarded(src: string): boolean {
+  return (
+    /agencyOwner\(/.test(src) &&
+    /PERMISSIONS\.workspace(?:View|Manage|Approve)/.test(src)
+  );
+}
+
 /** Public API routes are session-less only because api-auth.ts authenticates a scoped key. */
 function isApiKeyGuarded(src: string): boolean {
   return /withApiKeyScope\(/.test(src) && /requireApiScope\(/.test(src);
@@ -629,6 +708,14 @@ describe("every API route is guarded", () => {
 
   for (const [key, src] of sources) {
     it(`${key} is guarded or explicitly public`, () => {
+      if (TOROB_TOKEN_ROUTES[key]) {
+        // A signed marketplace token replaces the API key; the route must hand off
+        // to the handler that verifies it.
+        expect(src, `src/app/api/${key}/route.ts must authenticate Torob's token`).toMatch(
+          /handleTorobProductRequest\(/,
+        );
+        return;
+      }
       if (key === "v1" || key.startsWith("v1/")) {
         expect(isApiKeyGuarded(src), `src/app/api/${key}/route.ts must authenticate a scoped API key`).toBe(true);
         return;
@@ -696,6 +783,9 @@ describe("every API route is guarded", () => {
       if (isDataTransferGuarded(src)) return;
       // Issue #799 Wave 2 — `aecOwner(PERMISSIONS.…)`. See isAecGuarded.
       if (isAecGuarded(src)) return;
+      // Issue #1128 §D — `agencyOwner(PERMISSIONS.workspace…)`, which delegates
+      // to the workspace owner gate. See isAgencyGuarded.
+      if (isAgencyGuarded(src)) return;
       // Phase 35 — `requireMember` is the fourth guard: any signed-in member,
       // for endpoints where every member acts only on their own rows and there
       // is therefore no role left to gate (notification devices, rules, inbox).
@@ -792,7 +882,11 @@ describe("every API route is guarded", () => {
   });
 
   it("the public list doesn't cover routes that no longer exist", () => {
-    for (const key of [...Object.keys(PUBLIC_ROUTES), ...Object.keys(SELF_GUARDING_ROUTES)]) {
+    for (const key of [
+      ...Object.keys(PUBLIC_ROUTES),
+      ...Object.keys(SELF_GUARDING_ROUTES),
+      ...Object.keys(TOROB_TOKEN_ROUTES),
+    ]) {
       expect(sources.has(key), `${key} is allowlisted but has no route file`).toBe(true);
     }
   });

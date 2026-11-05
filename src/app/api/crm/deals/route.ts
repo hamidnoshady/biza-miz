@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { listDeals, upsertDeal } from "@/lib/crm-service";
-import { defaultPipeline, listPipelines } from "@/lib/crm-pipeline-service";
+import { defaultPipeline, ensureAgencySalesPipeline, listPipelines } from "@/lib/crm-pipeline-service";
 import { isDealStage, type DealStage } from "@/lib/crm-shared";
 import { isUuid } from "@/lib/uuid";
 import { tomanToRial } from "@/lib/money";
@@ -72,6 +72,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
           (entry) => entry.id === requestedPipelineId,
         ) ?? (await defaultPipeline(session.businessId))
       : await defaultPipeline(session.businessId);
+  // Issue #1128 §A — an advertising agency's own sales track, created on read so
+  // that it is already in the switcher below the first time anyone opens the
+  // board. Deliberately here and not inside `defaultPipeline`: that function is
+  // called from deal creation and lead conversion too, and burying a second
+  // pipeline's creation inside it would put writes on those paths and break its
+  // contract of returning *the default*. Null for every other trade, which
+  // writes nothing at all.
+  await ensureAgencySalesPipeline(session.businessId);
   const pipelines = (await listPipelines(session.businessId)).map((entry) => ({
     id: entry.id,
     name: entry.name,

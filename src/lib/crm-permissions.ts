@@ -65,6 +65,23 @@ export const CRM_SECTION_KEYS = [
   "leads",
   "segments",
   "deals",
+  // What the client asked for, written down before anybody prices it or builds
+  // it (issue #1128 §A). A section of its own rather than a card on the deal:
+  // a brief outlives the opportunity it was written against — it is carried by
+  // the project it becomes, and a lost deal does not unask what was asked.
+  "briefs",
+  // What the agency offered that client, at what price, valid until when (issue
+  // #1128 §A + §D). §A calls it a proposal or quote and §D calls it an estimate;
+  // §B's stage list puts it in one place, so it is one section. Sits beside the
+  // brief it prices rather than inside the deal it hangs off, because an offer
+  // outlives both — it is carried by the contract it becomes.
+  "proposals",
+  // The campaign as it ran for one client (issue #1128 §A + §C): the window, the
+  // channels, what media money went out, what figures came back. Sits beside the
+  // proposal that priced it because a campaign outlives the offer and is what §C's
+  // client reporting reads. **Not `growth_campaigns`** — that is #901's retail
+  // cashback automation and its party is the shopper, not an agency's client.
+  "client-campaigns",
   "activities",
   "cases",
   // The data-quality *workspace*: which records can be trusted. It hosts the
@@ -250,6 +267,43 @@ export const CRM_SECTION_ACCESS: Record<CrmSectionKey, CrmSectionAccess> = {
   deals: {
     read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
     write: [crmManage],
+  },
+  // Management work, exactly like the deals a brief hangs off: a brief carries
+  // what a client intends to spend and who on their side decides, which is
+  // forecasting and relationship data rather than floor data. Deleting one is
+  // the strongest key in the app, because a brief the client has seen is the
+  // record of what they asked for — so `crm.delete`, and the service refuses
+  // anything past draft anyway.
+  briefs: {
+    read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
+    write: [crmManage],
+    delete: [crmDelete],
+  },
+  // Management work, and more clearly so than a brief's: a proposal states a
+  // *price*, which is a commitment about money even though it posts nothing. The
+  // internal margin rides on the same `crm.view` as the offer it belongs to,
+  // because a member who may read what was offered may read what it cost —
+  // splitting them would show one figure without the other and invite a guess.
+  // `accept` and `decline` are `crm.manage` rather than a stronger key for the
+  // reason a brief's `confirm` is: they record the **client's** decision and the
+  // member is the scribe, not the decider.
+  proposals: {
+    read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
+    write: [crmManage],
+    delete: [crmDelete],
+  },
+  // The same tier as the brief and the proposal, with one difference worth stating:
+  // a campaign's figures are a **claim** about attribution, and the strongest key
+  // here is still `crm.manage`. That is deliberate rather than an oversight. The
+  // record posts nothing — no ledger entry, no receivable — so completing a campaign
+  // closes a claim rather than approving money moving, and §D's `approve` is the
+  // internal determination that does. A member who may enter the spend may also
+  // close it; what they may not do is change a closed one, which 0278 enforces
+  // below the permission system entirely.
+  "client-campaigns": {
+    read: { all: [crmView, crmManage], anyOf: MANAGEMENT_READ },
+    write: [crmManage],
+    delete: [crmDelete],
   },
   // Floor work: logging a call, ticking off a callback, taking a complaint. The
   // records live in the CRM but the read and write paths are the shared parties

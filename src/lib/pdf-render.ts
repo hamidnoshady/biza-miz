@@ -9,7 +9,7 @@
  */
 import { readFileSync } from "fs";
 import { join } from "path";
-import { chromium, type Browser } from "playwright-core";
+import { chromium, type Browser, type Route } from "playwright-core";
 import { chromiumLaunchArgs, findChromiumExecutable } from "./chromium-executable";
 
 const FONT_PATH = join(process.cwd(), "src", "app", "fonts", "Vazirmatn-Variable.woff2");
@@ -65,6 +65,59 @@ export async function renderHtmlToPdf(html: string, options: PdfRenderOptions = 
     return buffer;
   } finally {
     await page.close();
+  }
+}
+
+/**
+ * The safe path for server-generated, user-authored contract PDFs. Unlike report
+ * rendering, this accepts markup derived from tenant-editable text, so the
+ * browser is offline, JavaScript-disabled and may load only inline data URLs.
+ */
+export const STATIC_PDF_TIMEOUT_MS = 25_000;
+export const STATIC_PDF_MAX_HTML_BYTES = 8_000_000;
+
+export function isAllowedStaticPdfRequest(url: string): boolean {
+  return url === "" || url === "about:blank" || url.startsWith("data:");
+}
+
+export async function renderStaticHtmlToPdf(html: string, options: PdfRenderOptions = {}): Promise<Buffer> {
+  if (Buffer.byteLength(html, "utf8") > STATIC_PDF_MAX_HTML_BYTES) throw new Error("document_too_large");
+  const browser = await getBrowser();
+  const context = await browser.newContext({
+    javaScriptEnabled: false,
+    serviceWorkers: "block",
+    offline: true,
+  });
+  try {
+    await context.route("**/*", async (route: Route) => {
+      if (isAllowedStaticPdfRequest(route.request().url())) {
+        await route.continue().catch(() => undefined);
+      } else {
+        await route.abort("blockedbyclient").catch(() => undefined);
+      }
+    });
+    const page = await context.newPage();
+    page.setDefaultTimeout(STATIC_PDF_TIMEOUT_MS);
+    await page.setContent(withEmbeddedFont(html), { waitUntil: "load", timeout: STATIC_PDF_TIMEOUT_MS });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        page.pdf({
+          format: options.format ?? "A4",
+          landscape: options.landscape ?? false,
+          printBackground: true,
+          preferCSSPageSize: true,
+          margin: options.margin ?? { top: "0mm", bottom: "0mm", left: "0mm", right: "0mm" },
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("pdf_render_timeout")), STATIC_PDF_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  } finally {
+    await context.close().catch(() => undefined);
   }
 }
 

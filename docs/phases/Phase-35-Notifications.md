@@ -103,6 +103,7 @@ instances ticking at once produce one notification, not two.
 | `ai.coworker.pending` | `ai-coworker-service.ts` | owner |
 | `ai.coworker.reported` | `ai-coworker-service.ts` | owner |
 | `ai.coworker.failed` | `ai-coworker-service.ts` | owner |
+| `contract.completed` | `contracts/signing.ts` after the last required signer commits | owner, manager |
 
 Every key in the catalogue has a producer. A key without one is a switch in the
 settings screen that does nothing, which is worse than an absent one, and

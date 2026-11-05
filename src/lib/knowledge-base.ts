@@ -74,6 +74,13 @@ export const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
   { key: "automotive", label: "خودرو و نمایشگاه اتومبیل", route: "/accounting/automotive" },
   { key: "accessories", label: "اکسسوری", route: ACCOUNTING_WORKSPACE_HREFS.products },
   { key: "cosmetics", label: "آرایشی و بهداشتی", route: ACCOUNTING_WORKSPACE_HREFS.cosmetics },
+  // Issue #1128 §D — the agency's reimbursable-cost register. A trade page like the
+  // four above it, gated by the `agency` module rather than by a permission.
+  {
+    key: "client-costs",
+    label: "هزینه‌های کارفرما",
+    route: ACCOUNTING_WORKSPACE_HREFS.clientCosts,
+  },
 ];
 
 /**
@@ -155,6 +162,9 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/crm/directory", "مشتریان CRM"],
     ["/crm/persons", "پروندهٔ شخص"],
     ["/crm/deals", "فرصت‌ها"],
+    ["/crm/briefs", "بریف کارفرما"],
+    ["/crm/proposals", "پیشنهاد قیمت و برآورد"],
+    ["/crm/client-campaigns", "کمپین کارفرما و بازده رسانه"],
     ["/crm/leads", "سرنخ‌ها"],
     ["/crm/activities", "کارها و پیگیری‌ها"],
     ["/crm/cases", "تیکت‌های خدمات"],
@@ -172,6 +182,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/growth/gift-cards", "کارت هدیه"],
     ["/growth/loyalty", "وفاداری و اعتبار"],
     ["/growth/commission", "پورسانت فروشندگان"],
+    ["/growth/torob", "کانال ترب"],
     ["/growth/settings", "تنظیمات رشد"],
   ]),
   ...pageGroup("وب‌سایت و بیزامیز CMS", [

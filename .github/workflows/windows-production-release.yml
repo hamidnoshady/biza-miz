@@ -144,8 +144,10 @@ jobs:
           $null = Require-One 'packaged-pg-tools-acceptance.json'
           $null = Require-One 'packaged-restore-acceptance.json'
           $null = Require-One 'windows-size-gate.json'
+          $releaseScanFile = Require-One 'desktop-release-scan.json'
 
           $provenance = Get-Content $provenanceFile.FullName -Raw | ConvertFrom-Json
+          $releaseScan = Get-Content $releaseScanFile.FullName -Raw | ConvertFrom-Json
           $signingStatus = Get-Content $signingStatusFile.FullName -Raw | ConvertFrom-Json
           $signatureVerification = Get-Content $signatureVerificationFile.FullName -Raw | ConvertFrom-Json
           $candidateEvidence = Get-Content $candidateEvidenceFile.FullName -Raw | ConvertFrom-Json
@@ -163,6 +165,10 @@ jobs:
           if ($artifactRows.Count -ne 1) { throw 'Release provenance has no unique installer row' }
           $installerHash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($artifactRows[0].sha256 -cne $installerHash -or [long]($artifactRows[0].bytes) -ne $installer.Length) { throw 'Installer bytes do not match release provenance' }
+          # Issue #1194 - the signed candidate's own release scan must have
+          # passed, and must have scanned THIS installer (not a rebuild).
+          if (-not $releaseScan.ok) { throw 'The signed candidate release scan did not pass' }
+          if (-not $releaseScan.installer -or $releaseScan.installer.sha256 -cne $installerHash) { throw 'The release scan was not performed on the accepted installer bytes' }
 
           $statusHash = (Get-FileHash -LiteralPath $signingStatusFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $verificationHash = (Get-FileHash -LiteralPath $signatureVerificationFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()

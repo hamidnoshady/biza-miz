@@ -131,3 +131,85 @@ export interface ServiceSalePriceInput {
 export function computeServiceSalePrice(input: ServiceSalePriceInput): AccessorySalePriceBreakdown {
   return computeAccessorySalePrice(input);
 }
+
+/* --------------------------------------------------------------------------- */
+/* Issue #1128 §D — the pass-through recharge line                              */
+/* --------------------------------------------------------------------------- */
+
+/**
+ * The account a pass-through recharge line credits.
+ *
+ * It is not in `SERVICE_REVENUE_ACCOUNTS` and must never be added to it: 1270 is an
+ * **asset**, and `account-classification.ts` deliberately leaves it unclassified
+ * because it is an unbilled pass-through rather than an invoice the client owes yet.
+ * A line that credits it is not recognising revenue — it is collecting money the
+ * agency advanced, which is the whole of §D's net presentation. Putting 1270 in the
+ * revenue picker would let any agency line credit it as though it were income, and a
+ * revenue report summing `revenueCode` would then count a client's own media money as
+ * the agency's sales.
+ */
+export const PASS_THROUGH_RECHARGE_ACCOUNT = WELL_KNOWN_CODES.agencyReimbursableClientCost;
+
+/**
+ * Which trades may issue one.
+ *
+ * Only the advertising agency has 1270 in its chart: 0259 seeds it for
+ * `advertising_agency`, and `accountIdsByCode` throws for a code the tenant's chart
+ * does not carry. Letting a SaaS company emit a pass-through line would therefore
+ * fail at the posting rule with a missing-account error, which is a worse place to
+ * find out than here — and it would be a line whose meaning the trade has no account
+ * for, which is the same objection §D's registers raise against another industry
+ * being *defaulted* rather than refused.
+ */
+export const PASS_THROUGH_RECHARGE_INDUSTRIES = ["advertising_agency"] as const;
+
+export type PassThroughRechargeIndustry = (typeof PASS_THROUGH_RECHARGE_INDUSTRIES)[number];
+
+export function isPassThroughRechargeIndustry(industry: Industry): industry is PassThroughRechargeIndustry {
+  return (PASS_THROUGH_RECHARGE_INDUSTRIES as readonly string[]).includes(industry);
+}
+
+/**
+ * The credit account for a pass-through line, or null for a trade that has none.
+ *
+ * Returns rather than throws so the caller decides the words: the invoice service
+ * turns null into its own refusal, and a test can assert the vocabulary without
+ * catching.
+ */
+export function passThroughRechargeCreditCode(industry: Industry): string | null {
+  return isPassThroughRechargeIndustry(industry) ? PASS_THROUGH_RECHARGE_ACCOUNT : null;
+}
+
+/**
+ * The VAT a pass-through line carries when the member does not state one: none.
+ *
+ * This is a default and not a rule, and the distinction matters. Whether recovering
+ * a disbursement is a taxable supply is a question of jurisdiction *and* of the
+ * contract — in some engagements the agency buys media in its own name and resells
+ * it, in others it pays as the client's agent and merely collects the money back.
+ * Software that picked one would be asserting a tax position it cannot know, so the
+ * line defaults to zero and a member who knows their contract says otherwise sets a
+ * rate explicitly.
+ *
+ * Zero is also the conservative direction: it can never create a VAT liability the
+ * business does not owe, whereas defaulting to the trade's rate would — and an
+ * over-declared liability is a filing to correct, not a line to edit.
+ */
+export const PASS_THROUGH_DEFAULT_VAT_PERCENT = 0;
+
+/**
+ * Resolve the credit account of a pass-through line, refusing a trade that has none.
+ *
+ * The throwing sibling of `passThroughRechargeCreditCode`, for the one caller that
+ * must not continue: the invoice service. A trade whose chart does not carry 1270
+ * would otherwise reach `accountIdsByCode` inside the posting rule and fail there with
+ * a missing-account error — true, but a long way from the reason, and after the
+ * invoice's other lines had already been written in the same transaction.
+ */
+export function resolvePassThroughCreditCode(industry: Industry): string {
+  const code = passThroughRechargeCreditCode(industry);
+  if (!code) {
+    throw new Error("بازدریافت هزینه از کارفرما برای این نوع کسب‌وکار تعریف نشده است.");
+  }
+  return code;
+}

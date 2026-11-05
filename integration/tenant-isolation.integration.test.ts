@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { createAppRole } from "../scripts/create-app-role";
+import { createAppRole, dropAppRole } from "../scripts/create-app-role";
 import { EXEMPT_TABLES } from "../src/lib/tenant-tables";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -146,7 +146,7 @@ afterAll(async () => {
   await maintenance.connect();
   try {
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
-    await maintenance.query(`DROP ROLE IF EXISTS ${APP_ROLE}`);
+    await dropAppRole(maintenance, APP_ROLE);
   } finally {
     await maintenance.end();
   }
@@ -401,6 +401,12 @@ describe("every tenant table is protected", () => {
       // shape as platform_ai_config: one account, configured once by a
       // super-admin, holding no tenant data.
       "platform_sms_config",
+      // Issue #903 — the managed tenant-backup fleet policy singleton: interval,
+      // retention ceiling, keep count and quotas, owned by Superadmin and never
+      // a tenant's to read. Its per-business overrides and the recovery
+      // approvals are `platform_only` too, but their ownership column is
+      // `subject_business_id`, so they are not part of this `platform_` census.
+      "platform_tenant_backup_service",
     ]);
   });
 
@@ -464,6 +470,10 @@ describe("every tenant table is protected", () => {
       "kavenegar_retail_price_slabs",
       "kavenegar_retail_price_versions",
       "kavenegar_service_alerts",
+      // Issue #902 §9 item 3: the wholesale side of billing — what a supplier
+      // charged us and the statement it charged against. DoD #3 keeps the cost
+      // and the margin off every tenant surface, an export included.
+      "billing_supplier_invoices",
     ]) {
       expect(EXEMPT_TABLES.has(table), `${table} must stay out of tenant exports`).toBe(true);
     }

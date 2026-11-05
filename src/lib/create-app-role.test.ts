@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   queries: [] as { text: string; values?: unknown[] }[],
   state: { exists: false, is_current: false, is_superuser: false },
   failRoleLookup: false,
+  failParameterGrant: false,
 }));
 
 vi.mock("pg", () => ({
@@ -27,6 +28,9 @@ vi.mock("pg", () => ({
       if (h.failRoleLookup && text.includes("FROM pg_roles WHERE rolname = $1")) {
         throw new Error("permission denied to alter role");
       }
+      if (h.failParameterGrant && text.includes("GRANT SET ON PARAMETER")) {
+        throw Object.assign(new Error("syntax error at or near \"PARAMETER\""), { code: "42601" });
+      }
       if (text.includes("FROM pg_roles WHERE rolname = $1")) return { rows: [h.state] };
       if (text.includes("quote_literal")) return { rows: [{ literal: `'${String(values?.[0] ?? "")}'` }] };
       if (text.includes("current_database()")) return { rows: [{ current_database: "pos" }] };
@@ -35,7 +39,7 @@ vi.mock("pg", () => ({
   },
 }));
 
-import { createAppRole, decodeUrlCredential, DEFAULT_APP_ROLE } from "./create-app-role";
+import { createAppRole, decodeUrlCredential, DEFAULT_APP_ROLE, dropAppRole } from "./create-app-role";
 import { regrantAppRole } from "./restore-engine";
 
 const DATABASE_URL = "postgres://pos:pos@127.0.0.1:5432/pos";
@@ -44,6 +48,7 @@ beforeEach(() => {
   h.queries.length = 0;
   h.state = { exists: false, is_current: false, is_superuser: false };
   h.failRoleLookup = false;
+  h.failParameterGrant = false;
 });
 
 const sqlText = () => h.queries.map((entry) => entry.text);
@@ -107,6 +112,60 @@ describe("createAppRole — provisioning the restricted runtime role", () => {
     expect(find(/NOSUPERUSER/)).toBeUndefined();
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it("grants the replay capability a central tenant restore needs", async () => {
+    // Without it the replay runs through business-rule triggers that reject an
+    // ordinary archive (the order-item guard refuses even the DELETE of an item
+    // on a completed order), so a role that cannot set the parameter makes every
+    // business with a closed order unrestorable.
+    await createAppRole({ databaseUrl: DATABASE_URL, password: "s3cret", quiet: true });
+    expect(find(/GRANT SET ON PARAMETER session_replication_role TO pos_app/)).toBe(
+      "GRANT SET ON PARAMETER session_replication_role TO pos_app",
+    );
+  });
+
+  it("still provisions the role when the server cannot grant that capability", async () => {
+    // PostgreSQL 15 introduced the grant; an older server has no such parameter
+    // ACL. Provisioning must not fail there — it says so, and a restore refuses.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const original = h.queries.length;
+    h.failParameterGrant = true;
+    try {
+      await createAppRole({ databaseUrl: DATABASE_URL, password: "s3cret", quiet: true });
+    } finally {
+      h.failParameterGrant = false;
+    }
+    expect(h.queries.length).toBeGreaterThan(original);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("restore_requires_trigger_bypass"));
+    warn.mockRestore();
+  });
+
+  it("revokes the replay capability before dropping the role", async () => {
+    // The grant is recorded in `pg_parameter_acl`, which *depends on the role*:
+    // a bare DROP ROLE fails with "some objects depend on it".
+    const client = {
+      query: vi.fn(async (text: string) => {
+        h.queries.push({ text });
+        return { rows: [] };
+      }),
+    };
+    await dropAppRole(client as never, "pos_app");
+    expect(sqlText()).toEqual([
+      "REVOKE SET ON PARAMETER session_replication_role FROM pos_app",
+      "DROP ROLE IF EXISTS pos_app",
+    ]);
+  });
+
+  it("drops a role that never had the grant", async () => {
+    const client = {
+      query: vi.fn(async (text: string) => {
+        if (text.startsWith("REVOKE")) throw Object.assign(new Error("role does not exist"), { code: "42704" });
+        return { rows: [] };
+      }),
+    };
+    await expect(dropAppRole(client as never, "never_existed")).resolves.toBeUndefined();
+    expect(client.query).toHaveBeenCalledWith("DROP ROLE IF EXISTS never_existed");
   });
 
   it("reports the role as ready unless asked to stay quiet", async () => {

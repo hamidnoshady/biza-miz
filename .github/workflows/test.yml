@@ -199,6 +199,12 @@ jobs:
     defaults:
       run:
         shell: bash
+    # The web bundle now includes the archive generator, QR verifier and media
+    # protection paths. Give Next's single-process webpack build the full
+    # runner headroom; the lower 6144 MB workflow default remains appropriate
+    # for test/integration jobs.
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -213,7 +219,7 @@ jobs:
           key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
-      - run: npm run build
+      - run: ./scripts/ci-next-build.ps1
 
   # The ~250-file database suite is strictly serial (`fileParallelism: false`,
   # one worker, see vitest.db.config.ts), and on a single Windows runner it
@@ -443,7 +449,7 @@ jobs:
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - name: Build
-        run: npm run build
+        run: bash ./scripts/ci-next-build.sh
       - name: Start the production server
         # The baselines are recorded against a production build, not `next dev`:
         # the dev server compiles routes on demand, so the first visit to each
@@ -469,6 +475,25 @@ jobs:
         run: |
           set -o pipefail
           npm run test:visual 2>&1 | tee visual-output.log
+      # One-time recording for the approved products-screen baseline. The
+      # workflow_dispatch recording path is unavailable to the connected GitHub
+      # integration in this session, so use the same pinned runner Chromium and
+      # production build, then retrieve the artifact for human review. Remove
+      # this branch-scoped helper once the PNGs are committed.
+      - name: Capture approved products baselines (temporary)
+        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'arena/a94ffa72-biza-miz' }}
+        env:
+          CI: ""
+        run: npm run test:visual:update -- --screens=accounting-products,accounting-products-dark,accounting-products-mobile
+      - name: Upload approved products baselines (temporary)
+        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'arena/a94ffa72-biza-miz' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: approved-products-visual-baselines
+          path: |
+            docs/design/visual/accounting-products.png
+            docs/design/visual/accounting-products-dark.png
+            docs/design/visual/accounting-products-mobile.png
       - name: Subledger keyboard and WCAG checks
         if: ${{ !cancelled() }}
         run: npm run test:a11y:subledger
@@ -565,7 +590,7 @@ jobs:
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
       - name: Build
-        run: npm run build
+        run: bash ./scripts/ci-next-build.sh
       - name: Start the production server
         run: |
           BIND_ADDR=127.0.0.1 PORT=3000 DEPLOYMENT_ROLE=central \
@@ -582,6 +607,15 @@ jobs:
           exit 1
       - name: CRM Today customer-link E2E (desktop and mobile)
         run: npm run test:e2e:crm-queue-links
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          # What the page was when the CRM shell never appeared. The script
+          # writes these only on failure; without them a timeout in an
+          # accessibility locator is undiagnosable from the log alone.
+          name: crm-queue-links-failure
+          path: .cache/crm-queue-links-*.png
+          if-no-files-found: ignore
       - name: Media E2E
         # The script itself writes platform_media_config directly (an
         # in-process mock S3, not the pos_app role) — it needs the
@@ -700,6 +734,10 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           echo "job results: $RESULTS"
+          if [[ -z "${RESULTS//[[:space:]]/}" ]]; then
+            echo "::error::No required check results were reported"
+            exit 1
+          fi
           for result in $RESULTS; do
             if [[ "$result" != "success" ]]; then
               echo "::error::Required check did not succeed: $result"
