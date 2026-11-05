@@ -1,7 +1,6 @@
 # Contract documents, reusable templates and multi-party e-signing (#908)
 
-Status: **phases A–C implemented, D partially, E open.** This page is the map of
-what exists, where it lives, and what is honestly still missing. It is written to
+Status: **phases A–C implemented, D largely implemented with documented import limits, E open.** This page is the map of what exists, where it lives, and what is honestly still missing. It is written to
 be read beside the code, not instead of it.
 
 Scope boundary (from the epic, unchanged): `workspace_contracts` stays the
@@ -23,6 +22,7 @@ posts an accounting entry.
 | `contract_invitations` | the bearer token, stored as an HMAC digest | rotated on resend |
 | `contract_signatures` | the evidence row: who, when, which hash, which slot | insert-only |
 | `contract_signing_events` | the timeline | insert-only |
+| `contract_final_pdfs` | archived final PDF ↔ completed frozen version, hashes and token digest | insert-only |
 
 Every table carries `business_id`, has **FORCE** row-level security and the
 repository's one approved policy shape: a permissive `tenant_isolation` policy
@@ -119,6 +119,10 @@ a `stale` flag on the field.
 * `src/lib/contracts/import.ts` — DOCX/PDF → blocks (§4a). Pure: bytes and a file
   name in, blocks plus warnings out. No database, no storage, no clock, so it is
   tested against in-memory fixtures.
+* `src/lib/contracts/final-pdf.tsx` — once a frozen version has a completed
+  envelope, renders a server PDF with the shared block renderer, embedded Persian
+  font, signature overlays, content hash and QR. The PDF is stored as a protected
+  Media Library asset; the verification token is stored only as a hash.
 
 | route | verbs | authority |
 |---|---|---|
@@ -127,14 +131,17 @@ a `stale` flag on the field.
 | `/api/workspace/contracts/[id]/document/template` | POST | same |
 | `/api/workspace/contracts/[id]/document/import` | POST (multipart, one file) | same — and it does **not** write |
 | `/api/workspace/contracts/[id]/signing` | GET, PUT, POST | same |
+| `/api/workspace/contracts/[id]/final-pdf` | POST | `workspace.contracts_manage` — creates once, then returns the archived final PDF |
 | `/api/workspace/contract-templates` | GET, POST, DELETE | view / contracts_manage |
 | `/api/workspace/contracts` | POST (+`templateRef`, `duplicateOf`) | contracts_manage |
 | `/api/sign/[token]` | GET, POST | **the token only** — no session, no tenant id from the caller |
+| `/verify/contract/[token]` | GET | **the token only** — verification hashes/status, no contract or signer identity |
 
-The public route is the product's only session-less surface apart from the auth
-doors. It is listed in `PUBLIC_PATHS`, behind the same Origin check as the
-login mutations, and justified in `api-guards.test.ts` `PUBLIC_ROUTES`. Every id
-it acts on is resolved **from the token**, never accepted from the request.
+The signer and verifier pages are token-only public surfaces, not additional
+apps or workspace modules. The signer mutation is behind the same Origin check
+as login mutations; both paths are listed in `PUBLIC_PATHS` and justified in
+`api-guards.test.ts` `PUBLIC_ROUTES`. Every contract id is resolved **from the
+token**, never accepted from the request.
 
 ## 4a. Importing an existing Word or PDF document
 
@@ -150,8 +157,12 @@ rather than two that can drift), then `word/document.xml` is walked as a tree:
 headings (a `Heading*`/`Title` style or an outline level), paragraphs, bulleted
 and numbered lists — read through `word/numbering.xml`, so a bulleted list does
 not come back numbered — tables (first row = header, which is what the block
-model requires) and page breaks. Bold/italic runs, colour, images, headers,
-footnotes, comments and tracked changes are dropped **and reported**.
+model requires) and page breaks. Bold/italic runs, colours, images, headers and
+footers, footnotes, comments, hyperlinks, tracked changes, merged cells and
+nested-list levels are not represented by the editor. Warnings name the
+unsupported features actually found, and also flag editor-limit truncation;
+deleted or moved-from tracked text is excluded rather than imported as active
+contract wording.
 
 **PDF.** A text-layer reader, not OCR. FlateDecode streams are unwrapped and
 glyph codes are mapped through each font's `ToUnicode` CMap — without that, a
@@ -191,8 +202,10 @@ back as a warning (the sender may simply have attached the wrong file).
 * `/workspace/contracts/[id]/print` — A4 print/PDF of the newest frozen version,
   falling back to the draft with unresolved variables marked. Once its envelope
   is completed, the print view overlays each signer's drawn mark, name and
-  Shamsi timestamp in the assigned signature slot and prints the full version
-  hash; the browser can save this view as PDF.
+  Shamsi timestamp in the assigned signature slot. A manager can also generate
+  the immutable final PDF: it is stored as a protected Media Library asset,
+  carries both SHA-256 values and a QR verification link, and the public verifier
+  returns hashes/status only (no contract or signer PII).
 * `/sign/[token]` — the external signatory's page: frozen document → explicit
   consent → phone OTP → drawn signature → receipt with the content hash.
 
@@ -201,29 +214,24 @@ canvas in the middle, the inspector trailing. Below `lg` the three panels stack.
 
 ## 6. Honest gaps (what this branch does NOT claim)
 
-1. **DOCX/PDF import is partial by design** (§4a). Word styling, images,
-   headers/footnotes and tracked changes are dropped; a PDF contributes text
-   only (no columns, no tables, no styling), and a scanned PDF is refused rather
-   than imported blank. Signature placements are never auto-detected — the
-   sender adds them, because a guessed signing line is a document that cannot be
-   sent. The upload is not archived.
-2. **Durable final-PDF generation and verification QR** are not implemented.
-   The authorized print view now includes signatures from a completed envelope
-   and its full hash, and the browser can save it as PDF; there is not yet a
-   server-generated immutable PDF asset, QR verification flow or Media Library
-   archive.
-3. **Legal retention policy and legal hold** still require an approved policy and
+1. **DOCX/PDF import remains partial** (§4a). Word run-level styling, images,
+   footnotes, comments and tracked changes, and PDF columns/tables/layout are
+   not all preserved; scanned PDFs are refused rather than imported blank.
+   Signature placements are never auto-detected — the sender adds them, because
+   a guessed signing line is a document that cannot be sent.
+2. **Legal retention policy and legal hold** still require an approved policy and
    jurisdictional review; no retention duration or evidence purge has been
-   invented. The append-only evidence must not be silently deleted.
-4. **The signing integration is part of the required database CI gate.**
-   Locally, `integration/contract-signing.integration.test.ts` passes 23 tests
+   invented. The append-only evidence and archived final PDFs must not be silently
+   deleted.
+3. **The signing integration is part of the required database CI gate.**
+   Locally, `integration/contract-signing.integration.test.ts` passes 24 tests
    against a real PostgreSQL: it creates a throwaway database, applies all
-   471 migrations and seeds only the required party/project rows. It exercises
+   474 migrations and seeds only the required party/project rows. It exercises
    AEC/Accounting bindings, conditional clauses and schedules, freezing, tenant
-   isolation under an unprivileged role, append-only evidence, parallel and
+   isolation under an unprivileged role, append-only evidence and protected
+   final-PDF/media links, parallel and
    sequential rounds, consent → OTP → signature, link rotation and post-signature
-   draft edits. Results are in §6a;
-   the green run here does not replace the CI job.
+   draft edits. Results are in §6a; the green run here does not replace the CI job.
 5. **`npm run build` was not executed** here (the sandbox has 3 GB and the
    previous full `tsc` run exhausted it); CI's production build remains the
    authoritative build check.

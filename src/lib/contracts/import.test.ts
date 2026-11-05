@@ -162,7 +162,10 @@ describe("importing a Word document", () => {
     const body = [
       paragraph("قرارداد پیمانکاری ساختمان", `<w:pStyle w:val="Heading1"/>`),
       paragraph("مادهٔ ۱ — موضوع قرارداد", `<w:pStyle w:val="Heading2"/>`),
-      paragraph("این قرارداد میان کارفرما &amp; پیمان‌کار بسته می‌شود."),
+      paragraph("این قرارداد میان کارفرما &amp; پیمان‌کار بسته می‌شود.").replace(
+        "<w:r>",
+        "<w:r><w:rPr><w:b/></w:rPr>",
+      ),
       listParagraph("شرط نخست", 1),
       listParagraph("شرط دوم", 1),
       listParagraph("مرحلهٔ نخست", 2),
@@ -248,6 +251,20 @@ describe("importing a Word document", () => {
     ]);
   });
 
+  it("reports table-cell text that exceeds the editor limit instead of truncating silently", async () => {
+    const result = expectOk(
+      await importContractDocument({
+        bytes: await buildDocx({
+          body: `<w:tbl><w:tr>${cell("شرح")}</w:tr><w:tr>${cell("x".repeat(501))}</w:tr></w:tbl>`,
+        }),
+        fileName: "table.docx",
+      }),
+    );
+    const table = result.content.blocks.find((block) => block.type === "table");
+    expect(table?.type === "table" && table.rows[0][0]).toHaveLength(500);
+    expect(result.warnings.join(" ")).toMatch(/خانه‌های جدول/);
+  });
+
   it("decodes XML entities instead of printing them", async () => {
     const { content } = expectOk(await sample());
     const body = content.blocks.find((block) => block.type === "paragraph");
@@ -259,11 +276,43 @@ describe("importing a Word document", () => {
   it("says what it could not carry over, rather than implying a perfect copy", async () => {
     const result = expectOk(await sample());
     expect(result.warnings.length).toBeGreaterThanOrEqual(2);
-    expect(result.warnings.join(" ")).toMatch(/ضخیم/);
+    expect(result.warnings.join(" ")).toMatch(/قالب‌بندی درون‌خطی متن/);
     expect(result.warnings.join(" ")).toMatch(/جای امضا/);
     expect(result.stats.characters).toBeGreaterThan(0);
     expect(result.stats.tables).toBe(1);
     expect(result.stats.lists).toBe(2);
+  });
+
+  it("does not report unsupported features that are absent from the DOCX", async () => {
+    const result = expectOk(
+      await importContractDocument({
+        bytes: await buildDocx({ body: paragraph("فقط متن ساده."), }),
+        fileName: "plain.docx",
+      }),
+    );
+    const warnings = result.warnings.join(" ");
+    expect(warnings).not.toMatch(/تصاویر و اشیای جاسازی‌شده/);
+    expect(warnings).not.toMatch(/قالب‌بندی درون‌خطی متن/);
+    expect(warnings).toMatch(/جای امضا/);
+  });
+
+  it("omits deleted tracked-change text instead of treating it as operative wording", async () => {
+    const result = expectOk(
+      await importContractDocument({
+        bytes: await buildDocx({
+          body: `<w:p><w:r><w:t>متن معتبر</w:t></w:r><w:del><w:r><w:delText>عبارت حذف‌شده</w:delText></w:r></w:del><w:ins><w:r><w:t> و متن افزوده</w:t></w:r></w:ins></w:p>`,
+        }),
+        fileName: "tracked.docx",
+      }),
+    );
+    const text = result.content.blocks
+      .map((block) =>
+        block.type === "paragraph" || block.type === "heading" ? block.text : "",
+      )
+      .join(" ");
+    expect(text).toContain("متن معتبر و متن افزوده");
+    expect(text).not.toContain("عبارت حذف‌شده");
+    expect(result.warnings.join(" ")).toMatch(/تاریخچهٔ تغییرات/);
   });
 
   it("invents no variables: Word cannot say which words were meant to be filled", async () => {

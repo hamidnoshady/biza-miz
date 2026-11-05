@@ -238,6 +238,10 @@ const PUBLIC_PATHS = [
   // request — the token names them — and the endpoints refuse a body that tries.
   "/sign",
   "/api/sign",
+  // The verification QR is a random, token-only locator for a hash record. Its
+  // page returns only frozen-content/PDF hashes and completion metadata, never
+  // contract or signer identifiers, so it is public like the signer token page.
+  "/verify/contract",
   // First-run flow: /welcome bootstraps an empty install; the state endpoint
   // answers "needsBootstrap" (and nothing more) without a session.
   "/welcome",

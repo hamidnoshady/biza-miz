@@ -389,6 +389,9 @@ export async function withTenantTransaction<T>(
  *     exact host-derived business and the live session recorded in the row.
  *   - **platform** — the super-user realm administers every tenant by
  *     definition (Phase 15), as does the migration runner;
+ *   - **contract-final-pdf-verification** — a 256-bit random QR locator is
+ *     hashed before lookup; the public verifier returns only content/PDF hashes,
+ *     version and completion metadata, never tenant or signer PII;
  *   - **server-sync-auth** — resolving a server-sync bearer token to the
  *     business it belongs to (Phase 17) is the same "identify the tenant
  *     first" problem as login, just keyed on a token instead of an email;

@@ -28,6 +28,7 @@ const MIGRATIONS_DIR = join(process.cwd(), "migrations");
 // own `0258_*` — so a prefix glob silently reads five migrations and then blames
 // this feature for another one's policies.
 const SQL = readFileSync(join(MIGRATIONS_DIR, "0258_contract_documents_signing.sql"), "utf8");
+const FINAL_PDF_SQL = readFileSync(join(MIGRATIONS_DIR, "0286_contract_final_pdfs.sql"), "utf8");
 
 /** The `CREATE TABLE <name> ( ... );` body, so column checks stay inside one table. */
 function tableBody(name: string): string {
@@ -202,5 +203,33 @@ describe("0258 — the invariants the services rely on", () => {
     // (pre-existing, bigint) and inside resolved display strings in the frozen
     // JSON — never as a new money column of this migration.
     expect(SQL).not.toMatch(/\b(?:value|amount|price)_(?:rial|toman)?\s+(?:numeric|float|double)/);
+  });
+});
+
+describe("0286 — archived final PDFs and QR verification", () => {
+  const finalPdfBody = () => {
+    const match = /CREATE TABLE contract_final_pdfs \(([\s\S]*?)\n\);/.exec(FINAL_PDF_SQL);
+    if (!match) throw new Error("missing contract_final_pdfs table");
+    return match[1];
+  };
+
+  it("stores tenant-linked version and Media Library references with both hashes", () => {
+    const body = finalPdfBody();
+    for (const column of [
+      "business_id", "contract_id", "document_version_id", "media_asset_id",
+      "content_hash", "pdf_sha256", "verification_token_hash", "signature_count", "created_by",
+    ]) expect(body).toMatch(new RegExp(`^\\s{4}${column}\\s`, "m"));
+    expect(body).toContain("UNIQUE (document_version_id)");
+    expect(body).toContain("FOREIGN KEY (business_id, contract_id, document_version_id)");
+    expect(body).toContain("FOREIGN KEY (business_id, media_asset_id)");
+  });
+
+  it("forces tenant RLS and append-only evidence, and marks Media Library provenance", () => {
+    expect(FINAL_PDF_SQL).toContain("ALTER TABLE contract_final_pdfs ENABLE ROW LEVEL SECURITY;");
+    expect(FINAL_PDF_SQL).toContain("ALTER TABLE contract_final_pdfs FORCE ROW LEVEL SECURITY;");
+    expect(FINAL_PDF_SQL).toContain("CREATE POLICY tenant_isolation ON contract_final_pdfs FOR ALL");
+    expect(FINAL_PDF_SQL).toMatch(/contract_final_pdfs_append_only_no_update[\s\S]*?USING \(false\)/);
+    expect(FINAL_PDF_SQL).toMatch(/contract_final_pdfs_append_only_no_delete[\s\S]*?USING \(false\)/);
+    expect(FINAL_PDF_SQL).toContain("'contract_final_pdf'");
   });
 });

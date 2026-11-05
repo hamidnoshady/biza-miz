@@ -240,8 +240,12 @@ function topLevelElements(documentXml: string): DocxElement[] {
 function paragraphOf(xml: string): DocxParagraph {
   let text = "";
   let pageBreak = false;
+  // Do not import deleted or moved-from text as if it were operative contract
+  // language. Inserted/moved-to text remains visible, with its tracked-change
+  // provenance reported below as unsupported.
+  const visibleXml = xml.replace(/<w:(del|moveFrom)\b[\s\S]*?<\/w:\1>/g, "");
   const token = /<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:tab\s*\/>|<w:br\b[^>]*\/?>/g;
-  for (let match = token.exec(xml); match; match = token.exec(xml)) {
+  for (let match = token.exec(visibleXml); match; match = token.exec(visibleXml)) {
     if (match[1] !== undefined) text += decodeXml(match[1]);
     else if (match[0].startsWith("<w:tab")) text += " ";
     else if (match[0].includes('w:type="page"')) pageBreak = true;
@@ -358,6 +362,14 @@ async function importDocx(
   let title = "";
   let openList: { type: "bullets" | "numbered"; items: string[]; block: ContractBlock } | null = null;
   let droppedHeadings = 0;
+  let warnedLongListItem = false;
+  const listItemText = (text: string): string => {
+    if (text.length > CONTRACT_LIMITS.itemMax && !warnedLongListItem) {
+      warnings.push(`یک مورد فهرست از ${CONTRACT_LIMITS.itemMax} نویسه بلندتر بود و ادامهٔ آن درون‌ریزی نشد.`);
+      warnedLongListItem = true;
+    }
+    return text.slice(0, CONTRACT_LIMITS.itemMax);
+  };
 
   const flushList = () => {
     if (!openList) return;
@@ -375,6 +387,14 @@ async function importDocx(
       if (rows[0].length > CONTRACT_LIMITS.tableColumnsMax) {
         warnings.push(
           `جدولی با ${rows[0].length} ستون فقط با ${CONTRACT_LIMITS.tableColumnsMax} ستون اول درونریزی شد؛ ستون‌های دیگر را دستی اضافه کنید.`,
+        );
+      }
+      const consideredCells = rows
+        .slice(0, CONTRACT_LIMITS.tableRowsMax + 1)
+        .flatMap((row) => row.slice(0, CONTRACT_LIMITS.tableColumnsMax));
+      if (consideredCells.some((cell) => tidy(cell).length > CONTRACT_LIMITS.cellMax)) {
+        warnings.push(
+          `متن بعضی خانه‌های جدول از ${CONTRACT_LIMITS.cellMax} نویسه بیشتر بود و کوتاه شد؛ مقدار کامل را از فایل اصلی بردارید.`,
         );
       }
       const body = rows
@@ -410,6 +430,9 @@ async function importDocx(
       flushList();
       // The document's first heading is its natural title; the rest are blocks.
       if (!title) {
+        if (text.length > CONTRACT_LIMITS.titleMax) {
+          warnings.push(`عنوان قرارداد از ${CONTRACT_LIMITS.titleMax} نویسه بلندتر بود و کوتاه شد.`);
+        }
         title = text.slice(0, CONTRACT_LIMITS.titleMax);
         droppedHeadings += 1;
         continue;
@@ -423,11 +446,11 @@ async function importDocx(
       const kind = formats.get(`${paragraph.numId}:${paragraph.numLevel}`) ?? "number";
       const type = kind === "bullet" ? "bullets" : "numbered";
       if (openList && openList.type === type && openList.items.length < CONTRACT_LIMITS.listItemsMax) {
-        openList.items.push(text.slice(0, CONTRACT_LIMITS.itemMax));
+        openList.items.push(listItemText(text));
         openList.block = { ...openList.block, items: [...openList.items] } as ContractBlock;
       } else {
         flushList();
-        const items = [text.slice(0, CONTRACT_LIMITS.itemMax)];
+        const items = [listItemText(text)];
         openList = { type, items, block: { id: nextId(), type, items: [...items] } };
       }
       continue;
@@ -439,9 +462,28 @@ async function importDocx(
   }
   flushList();
 
-  warnings.push(
-    "قالب‌بندی متن (ضخیم، ایتالیک، رنگ)، تصاویر، سرصفحه و پانویس، و تغییرات ردگیرى‌شده در درون‌ریزی منتقل نمی‌شوند؛ فقط متن، فهرست‌ها و جدول‌ها می‌آیند.",
-  );
+  const entries = Object.keys(zip.files);
+  const unsupported: string[] = [];
+  if (/<w:rPr\b[\s\S]*?<\/w:rPr>|<w:(?:b|i|u|strike|color|highlight|shd|sz|rFonts)\b/i.test(xml)) {
+    unsupported.push("قالب‌بندی درون‌خطی متن مانند ضخیم، ایتالیک، رنگ و اندازهٔ قلم");
+  }
+  if (/<w:(?:drawing|pict|object)\b/i.test(xml) || entries.some((name) => /^word\/media\//i.test(name))) {
+    unsupported.push("تصاویر و اشیای جاسازی‌شده");
+  }
+  if (/<w:(?:headerReference|footerReference)\b/i.test(xml)) unsupported.push("سرصفحه و پاصفحه");
+  if (/<w:(?:footnoteReference|endnoteReference)\b/i.test(xml)) unsupported.push("پانویس و یادداشت پایانی");
+  if (/<w:commentRange(?:Start|End)\b/i.test(xml) || entries.includes("word/comments.xml")) {
+    unsupported.push("دیدگاه‌ها و حاشیه‌نویسی‌ها");
+  }
+  if (/<w:(?:ins|del|moveFrom|moveTo|customXmlInsRangeStart|customXmlDelRangeStart)\b/i.test(xml)) {
+    unsupported.push("تاریخچهٔ تغییرات؛ متن حذف‌شده یا جابه‌جا‌شده وارد نشده است");
+  }
+  if (/<w:hyperlink\b/i.test(xml)) unsupported.push("نشانی و پیوندهای قابل‌کلیک");
+  if (/<w:(?:gridSpan|vMerge)\b/i.test(xml)) unsupported.push("ادغام سلول‌های جدول");
+  if (/<w:ilvl\s+w:val="[1-9]\d*"/.test(xml)) unsupported.push("تو‌رفتگی و سطح‌بندی زیر‌فهرست‌ها");
+  if (unsupported.length > 0) {
+    warnings.push(`این فایل مواردی دارد که ویرایشگر منتقل نمی‌کند: ${unsupported.join("، ")}.`);
+  }
   warnings.push(
     "جای امضا به‌طور خودکار ساخته نمی‌شود؛ بلوک «جای امضا» را برای هر طرف اضافه کنید تا پاکت امضا بتواند آن را به یک امضاکننده بدهد.",
   );
@@ -715,9 +757,14 @@ function importPdf(
   if (!raw) return "no_text_layer";
   if (legibilityRatio(raw) < 0.8) return "no_text_layer";
 
-  warnings.push(
-    "از PDF فقط متن قابل استخراج منتقل می‌شود؛ چیدمان، ستون‌بندی، جدول‌ها و سبک‌ها بازسازی نمی‌شوند. ساختار را پس از درون‌ریزی در ویرایشگر مرتب کنید.",
-  );
+  const unsupported = ["چیدمان صفحه، ستون‌بندی، جدول‌ها و سبک‌ها بازسازی نمی‌شوند"];
+  if ([...objects.values()].some((object) => /\/Subtype\s*\/Image\b/.test(object.dict))) {
+    unsupported.push("تصاویر صفحه به متن تبدیل نمی‌شوند");
+  }
+  if ([...objects.values()].some((object) => /\/(?:AcroForm|Annots)\b/.test(object.dict))) {
+    unsupported.push("فرم‌ها، پیوندها و حاشیه‌نویسی‌ها منتقل نمی‌شوند");
+  }
+  warnings.push(`از PDF فقط متن قابل استخراج منتقل می‌شود؛ ${unsupported.join("؛ ")}. ساختار را پس از درون‌ریزی در ویرایشگر مرتب کنید.`);
   warnings.push(
     "جای امضا به‌طور خودکار ساخته نمی‌شود؛ بلوک «جای امضا» را برای هر طرف اضافه کنید.",
   );
@@ -860,6 +907,12 @@ export async function importContractDocument(input: {
         : "";
   }
 
+  if (blocks.length > CONTRACT_LIMITS.blocksMax) {
+    warnings.push(
+      `سند بیش از ${CONTRACT_LIMITS.blocksMax} بلوک داشت؛ بقیه درون‌ریزی نشد. سند را به بخش‌هایی تقسیم کنید یا بقیه را دستی اضافه کنید.`,
+    );
+  }
+
   const content = normalizeContractContent({
     version: 1,
     title: title || baseName(fileName) || "سند درون‌ریزی‌شده",
@@ -889,12 +942,6 @@ export async function importContractDocument(input: {
     if (block.type === "table") return total + block.rows.flat().join("").length;
     return total;
   }, 0);
-
-  if (content.blocks.length >= CONTRACT_LIMITS.blocksMax) {
-    warnings.push(
-      `سند بیش از ${CONTRACT_LIMITS.blocksMax} بلوک داشت؛ بقیه درون‌ریزی نشد. سند را به بخش‌هایی تقسیم کنید یا بقیه را دستی اضافه کنید.`,
-    );
-  }
 
   return {
     ok: true,

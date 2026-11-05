@@ -243,6 +243,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
+      - name: Reclaim runner-local Docker storage
+        run: |
+          docker buildx prune --all --force
+          docker image prune --all --force
+          df -h /
 
       - name: Build the production image without publishing
         uses: docker/build-push-action@v7
@@ -253,7 +258,7 @@ jobs:
           tags: business-suite:ci
           build-args: |
             GIT_SHA=${{ github.sha }}
-            NODE_OPTIONS=--max-old-space-size=4096
+            NODE_OPTIONS=--max-old-space-size=8192
           # The push and pull_request triggers run concurrently for the same PR.
           # Separate scopes avoid racing BuildKit cache manifests, and cache export
           # is only an optimization: a GHA cache outage must not fail image validation.
@@ -318,6 +323,7 @@ jobs:
       - name: Build production app and staged desktop runtime
         env:
           JWT_SECRET: ci-only-throwaway-secret-0123456789abcdef0123456789abcdef
+          NODE_OPTIONS: --max-old-space-size=8192
         run: |
           npm run build
           npm run desktop:runtime

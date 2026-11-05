@@ -170,6 +170,10 @@ beforeEach(async () => {
   // AEC's approved change orders are intentionally undeletable; return this
   // test DB's rows to the draft state before the normal tenant cascade cleanup.
   await db.query("UPDATE aec_variations SET status = 'draft' WHERE status IN ('approved', 'implemented')");
+  // Final PDF archives intentionally restrict media/business deletion; clean
+  // the test artifact in FK order before resetting tenant fixtures.
+  await db.query("DELETE FROM contract_final_pdfs");
+  await db.query("DELETE FROM media_assets");
   await db.query("DELETE FROM businesses");
   delete process.env.KAVENEGAR_API_KEY;
   delete process.env.KAVENEGAR_SENDER;
@@ -733,6 +737,55 @@ describe("tenant isolation", () => {
       contract.id,
     ]);
     expect(events.length).toBeGreaterThan(0);
+  });
+
+  it("keeps archived final PDFs tenant-scoped, append-only, and linked to protected media", async () => {
+    const contract = await readyContract();
+    const frozen = await inAlpha(() => service.freezeContractDocument(owner(), contract));
+    const pdfHash = "a".repeat(64);
+    const tokenHash = "b".repeat(64);
+    const asset = await db.query<{ id: string }>(
+      `INSERT INTO media_assets
+         (business_id, kind, file_name, mime_type, byte_size, storage_key, sha256, source)
+       VALUES ($1, 'document', 'final.pdf', 'application/pdf', 12, $2, $3, 'contract_final_pdf')
+       RETURNING id`,
+      [alpha.businessId, `${alpha.businessId}/${randomUUID()}/final.pdf`, pdfHash],
+    );
+    const assetId = asset.rows[0].id;
+    await asBusiness(alpha.businessId, () =>
+      appClient.query(
+        `INSERT INTO contract_final_pdfs
+           (business_id, contract_id, document_version_id, media_asset_id,
+            content_hash, pdf_sha256, verification_token_hash, signature_count, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8)`,
+        [alpha.businessId, contract.id, frozen.id, assetId, frozen.contentHash, pdfHash, tokenHash, alpha.ownerId],
+      ),
+    );
+
+    const updated = await asBusiness(alpha.businessId, () =>
+      appClient.query(
+        `UPDATE contract_final_pdfs SET pdf_sha256 = $2 WHERE document_version_id = $1`,
+        [frozen.id, "c".repeat(64)],
+      ),
+    );
+    expect(updated.rowCount).toBe(0);
+    const deleted = await asBusiness(alpha.businessId, () =>
+      appClient.query(`DELETE FROM contract_final_pdfs WHERE document_version_id = $1`, [frozen.id]),
+    );
+    expect(deleted.rowCount).toBe(0);
+
+    const invisibleToBeta = await asBusiness(beta.businessId, () =>
+      appClient.query(`SELECT id FROM contract_final_pdfs WHERE document_version_id = $1`, [frozen.id]),
+    );
+    expect(invisibleToBeta.rowCount).toBe(0);
+    await expect(
+      asBusiness(alpha.businessId, () => appClient.query(`DELETE FROM media_assets WHERE id = $1`, [assetId])),
+    ).rejects.toThrow(/foreign key|constraint/i);
+
+    const stillArchived = await asBusiness(alpha.businessId, () =>
+      appClient.query(`SELECT id FROM contract_final_pdfs WHERE document_version_id = $1`, [frozen.id]),
+    );
+    expect(stillArchived.rowCount).toBe(1);
   });
 });
 

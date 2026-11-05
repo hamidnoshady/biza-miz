@@ -72,6 +72,12 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/api/telegram/unlisted")).toBe(false);
   });
 
+  it("lets token-only contract PDF verification through without exposing private signer data", () => {
+    expect(isPublicPath("/verify/contract/opaque-token")).toBe(true);
+    expect(isPublicPath("/verify/contract/opaque-token/extra")).toBe(true);
+    expect(isPublicPath("/verify/contracts/opaque-token")).toBe(false);
+  });
+
   it("keeps the tenant admin door (/admin) session-less like /login", () => {
     // The login split moved the owner/manager password form to this
     // subdirectory of the business's own origin. It mints no session before

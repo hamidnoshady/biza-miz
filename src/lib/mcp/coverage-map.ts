@@ -821,6 +821,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       "workspace/contract-templates",
       "workspace/contracts/[id]/document",
       "workspace/contracts/[id]/signing",
+      "workspace/contracts/[id]/final-pdf",
       "sign",
     ],
     note:
