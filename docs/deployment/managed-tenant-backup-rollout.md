@@ -367,8 +367,10 @@ the end, still explicitly.
 9. **Manifest coverage** (migration/component list, `backup-manifest.ts`). A new
    `app.data` component means no captured table is filed under a name that lies;
    `media.metadata` counts are real, and `media.attachments` is reported
-   `excluded` with the business's attachment count when there are any (the bytes
-   are not captured — stated, not implied). `website.wp` is `included` only when
+   `included` only when every attachment was captured as a sidecar (see
+   `docs/deployment/media-binary-capture.md`); otherwise it stays `excluded` with
+   the business's attachment count, and the manifest's `media.skipped` /
+   `media.clipped` make the backup `partial`. `website.wp` is `included` only when
    WordPress tables were actually captured; `external.woocommerce` and
    `external.eshobe_assets` stay `external`.
 10. **Granular platform permissions** (`platform-admin.ts`).
@@ -403,7 +405,9 @@ the end, still explicitly.
 - Website *content* capture is still table-based: a WordPress site's own database
   is not reachable, so `external.woocommerce` remains honest-by-declaration rather
   than captured.
-- Media **binary** capture remains out of scope and is labelled `excluded`.
+- Media **binary** capture is implemented (see the last increment below and
+  `docs/deployment/media-binary-capture.md`), but has never run against a real
+  bucket from here.
 
 ## Increment: tenant surface superseded (issue #903 §10, first P0 line)
 
@@ -1112,3 +1116,62 @@ and a path-style S3 stand-in that can be made to store damaged bytes: bit rot on
 drill fails) and a managed Cloud backup now mirrors inside the same
 `runTenantSnapshotTick()` while the Local business in that tick still receives no
 cloud row — the acceptance suite is 12/12.
+
+## Increment: media binaries are captured, not just counted (§7 — the last build item)
+
+Media used to be the one part of a backup that was disclosed rather than carried:
+`media.metadata` counted the rows, `media.attachments` said `excluded` with the
+attachment count, and nothing claimed those bytes were recoverable. Every restore
+therefore restored a business whose library pointed at objects nothing had
+protected.
+
+A logical run now captures them as **sidecars** beside the payload, and the last
+open build item of #903 is done:
+
+- **Capture.** Smallest-first over `media_assets` (`deleted_at IS NULL`, so a
+  soft-deleted asset is not resurrected by a restore). Each object streams to a
+  temp file, is encrypted with the artifact's own custody secret and lands at
+  `<artifact>.media/<assetId>.enc` — in the artifact's directory locally, under
+  the artifact's prefix in the bucket. Video included.
+- **Manifest v2.** `media: { assets[], skipped, storedBytes, clipped }`. Each entry
+  carries the **plaintext** `sha256` and `bytes`, because those are the values a
+  restore can prove against `media_assets`; the ciphertext hash would prove only
+  that *something* was written. A v1 manifest carrying `media` is rejected —
+  `manifest_media_requires_v2` — since the version is what promises the block.
+- **Caps are honest.** 2 GiB per run, 512 MiB per asset, 300 assets, all
+  env-tunable. Over a cap is a skip plus `clipped`; `skipped > 0 || clipped` makes
+  `manifestCompleteness` `partial`. A row whose object is already gone is a skip
+  too — a backup must survive a bucket that has already lost a file and say so
+  rather than failing the run.
+- **`ready` means proved.** After the payload verifies, every sidecar is decrypted
+  and hashed against the manifest in the same run. A mismatch records
+  `media_asset_checksum_mismatch` / `media_asset_size_mismatch` /
+  `media_asset_missing` on the row instead of a generic failure.
+- **Billed.** `stored_bytes` is payload plus sidecars, so captured media is not
+  free storage in the byte-day meter (§8).
+- **Cloud.** Sidecars upload under the artifact's own prefix; any sidecar failure
+  fails the run (`media_sidecar_upload_failed`).
+- **Retention and #1041.** Expiry, the prune sweep and the operator delete path
+  all remove `<artifact>.media/` with the artifact — locally and by prefix in the
+  bucket. Two bugs this would otherwise have created: a pruned artifact whose
+  sidecars stayed behind (billed bytes nothing can reach), and a "destroyed"
+  business whose media was still in the bucket.
+- **Restore.** Written back after the swap commits, outside the transaction and
+  journalled (`media_restored` / `media_restore_failed`); the replaced object is
+  quarantined under `_restore-quarantine/<artifact>/<assetId>`; assets the
+  manifest does not list are left alone.
+
+`media.attachments` flips to `included` **only** when the captured count reaches
+the attachment count — a run that carried some but not all keeps the honest label
+and says how many it skipped.
+
+Verification: `tenant-backup-media.test.ts` (12 — encrypted output, missing
+object, per-asset / per-run / per-count caps, verify on good · tampered · missing
+· wrong-key sidecars, removal), `backup-manifest.test.ts` (+5 — v2 block, v1
+rejection, duplicate asset, escaping name, `partial` downgrade). Whole-tree
+`tsc --noEmit` and `eslint` clean; 17 896 unit tests pass; the real-database
+integration job passes in CI.
+
+**Not proved:** no live ArvanCloud round trip from this environment, and no drill
+against a populated business with real images and video. #903 stays open until
+that drill.
