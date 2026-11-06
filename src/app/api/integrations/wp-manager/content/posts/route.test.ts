@@ -15,6 +15,7 @@ const m = vi.hoisted(() => ({
   upsert: vi.fn(),
   audit: vi.fn(),
   client: vi.fn(),
+  getPost: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -22,7 +23,7 @@ vi.mock("@/lib/auth", () => ({
   withTenantScope: (fn: unknown) => fn,
 }));
 vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: m.connection }));
-vi.mock("@/lib/integrations/connections-service", () => ({ wooClientFor: () => ({ wpUpsertPost: m.client }) }));
+vi.mock("@/lib/integrations/connections-service", () => ({ wooClientFor: () => ({ wpUpsertPost: m.client, wpGetPost: m.getPost }) }));
 vi.mock("@/lib/integrations/audit", () => ({ writeIntegrationAudit: m.audit }));
 vi.mock("@/lib/integrations/wp-content-service", () => ({
   enqueueWpPostUpsert: m.enqueue,
@@ -243,5 +244,82 @@ describe("REST mode term fields", () => {
     // The plugin's field names must never reach wp/v2.
     expect(body.post_category).toBeUndefined();
     expect(body.tags_input).toBeUndefined();
+  });
+});
+
+/**
+ * The featured image (#1215, P2-5). WordPress keeps it as `_thumbnail_id` meta,
+ * so the id has to arrive intact and only travel to a plugin that can apply it
+ * — a save that silently drops the image is the failure this field exists to
+ * prevent.
+ */
+describe("featured image", () => {
+  const VERSION = "2026-11-06T09:00:00.000Z";
+  beforeEach(() => {
+    // A version-checked save reads the mirror (plugin mode) or the store (REST);
+    // both have to agree with `expectedRemoteUpdatedAt` or the save is refused.
+    m.getContent.mockResolvedValue({ status: "draft", remoteUpdatedAt: VERSION });
+    m.getPost.mockResolvedValue({ modified_gmt: "2026-11-06T09:00:00" });
+    m.connection.mockResolvedValue({
+      id: CONNECTION_ID,
+      provider: "woocommerce",
+      status: "active",
+      link_mode: "plugin",
+      plugin_capabilities: { jobTypes: ["post_upsert"], featuredMedia: true },
+    });
+  });
+
+  it("queues the attachment id and is not an empty patch on its own", async () => {
+    const response = await POST(post({ id: "77", expectedRemoteUpdatedAt: VERSION, featuredMediaId: 501 }));
+
+    expect(response.status).toBe(200);
+    const [, , , , payload] = m.enqueue.mock.calls[0];
+    expect(payload).toMatchObject({ featured_media: 501 });
+  });
+
+  it("clears the thumbnail with 0 rather than refusing the save", async () => {
+    const response = await POST(post({ id: "77", expectedRemoteUpdatedAt: VERSION, featuredMediaId: 0 }));
+    expect(response.status).toBe(200);
+    const [, , , , payload] = m.enqueue.mock.calls[0];
+    expect(payload).toMatchObject({ featured_media: 0 });
+  });
+
+  it("refuses an id it cannot trust instead of coercing it to zero", async () => {
+    for (const bad of ["501", -1, 1.5, 2_147_483_648, true]) {
+      const response = await POST(post({ id: "77", expectedRemoteUpdatedAt: VERSION, featuredMediaId: bad }));
+      expect(response.status, String(bad)).toBe(400);
+      expect((await response.json()).error).toBe("invalid_featured_media");
+    }
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("refuses the field on a plugin that cannot apply it, before queueing anything", async () => {
+    m.connection.mockResolvedValue({
+      id: CONNECTION_ID,
+      provider: "woocommerce",
+      status: "active",
+      link_mode: "plugin",
+      plugin_capabilities: { jobTypes: ["post_upsert"] },
+    });
+    const response = await POST(post({ id: "77", expectedRemoteUpdatedAt: VERSION, featuredMediaId: 501 }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "plugin_featured_media_unsupported", upgradeRequired: true });
+    expect(m.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("sends featured_media to wp/v2 in REST mode", async () => {
+    m.connection.mockResolvedValue({
+      id: CONNECTION_ID,
+      provider: "woocommerce",
+      status: "active",
+      link_mode: "rest_api",
+      plugin_capabilities: null,
+    });
+    m.client.mockResolvedValue({ id: 77, type: "post", modified: VERSION });
+
+    const response = await POST(post({ id: "77", expectedRemoteUpdatedAt: VERSION, featuredMediaId: 501 }));
+    expect(response.status).toBe(200);
+    expect(m.client.mock.calls[0][1]).toMatchObject({ featured_media: 501 });
   });
 });

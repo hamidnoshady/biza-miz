@@ -50,16 +50,19 @@ import { ConnectionPicker, type ConnectionLite } from "./connection-lite";
 import {
   wpEditorIsDirty,
   wpEditorPatch,
+  wpFeaturedMediaDirty,
+  wpFeaturedMediaPatch,
   wpTaxonomiesDirty,
   wpTaxonomyPatch,
   type WpEditorTaxonomies,
   type WpEditorValues,
 } from "./content-editor-state";
 import { ContentTermsPicker } from "./content-terms-picker";
+import { WpFeaturedImagePicker } from "./content-featured-image";
 import type { WpTermOption } from "@/lib/wp-content-taxonomies";
 import { EditorialAssistant } from "./editorial-assistant";
 import { ContentPreview } from "./content-preview";
-import { pluginSupportsJobType, pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
+import { pluginSupportsFeaturedMedia, pluginSupportsJobType, pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
 import { PluginWaitNote } from "./plugin-wait-note";
 import { useWpStore } from "./wp-store-context";
 import { WpStoreRefreshError } from "./wp-store-states";
@@ -101,6 +104,8 @@ interface ContentDetail extends ContentRow {
   /** The terms this post carries today, as ids. */
   categories?: number[];
   tags?: number[];
+  /** The featured image attachment id, or null; the URL comes from ContentRow. */
+  featuredMediaId?: number | null;
 }
 
 type ContentTab = "post" | "page";
@@ -215,6 +220,10 @@ export function WpContentSection({ canManage }: { canManage: boolean }) {
     || pluginSupportsJobType(selectedConnection?.pluginCapabilities, "post_upsert");
   const scheduleSupported = selectedConnection?.linkMode !== "plugin"
     || pluginSupportsPostSchedule(selectedConnection?.pluginCapabilities);
+  // The featured image needs `set_post_thumbnail` on the plugin side: a build
+  // that predates it would save the post and silently drop the image.
+  const featuredMediaSupported = selectedConnection?.linkMode !== "plugin"
+    || pluginSupportsFeaturedMedia(selectedConnection?.pluginCapabilities);
 
   const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
 
@@ -543,6 +552,7 @@ disabled={syncing || isPaused || !contentExportSupported}
           connectionId={selectedId}
           connectionMode={selectedConnection?.linkMode ?? "plugin"}
           scheduleSupported={scheduleSupported}
+          featuredMediaSupported={featuredMediaSupported}
           lastContentSyncAt={selectedConnection?.lastContentSyncAt ?? null}
           type={tab}
           row={editing === "new" ? null : editing}
@@ -571,6 +581,7 @@ function PostEditor({
   connectionId,
   connectionMode,
   scheduleSupported,
+  featuredMediaSupported,
   lastContentSyncAt,
   type,
   row,
@@ -581,6 +592,8 @@ function PostEditor({
   connectionMode: ConnectionLite["linkMode"];
   /** False when a plugin-mode store runs a build that cannot apply `date_gmt`. */
   scheduleSupported: boolean;
+  /** False when a plugin-mode build cannot apply `featured_media` (#1215, P2-5). */
+  featuredMediaSupported: boolean;
   lastContentSyncAt: string | null;
   type: ContentTab;
   row: ContentRow | null;
@@ -610,6 +623,11 @@ function PostEditor({
   );
   // The list row never carries terms; the detail read fills both below.
   const [taxonomies, setTaxonomies] = useState<WpEditorTaxonomies>({ categories: [], tags: [] });
+  // The featured image is its own patch for the same reason: it is an id, and
+  // an unchanged id must not be re-sent on a title-only save.
+  const [initialFeatured, setInitialFeatured] = useState<number | null | undefined>(row ? undefined : null);
+  const [featured, setFeatured] = useState<number | null>(null);
+  const [featuredUrl, setFeaturedUrl] = useState<string | null>(row?.featuredImageUrl ?? null);
   const [termOptions, setTermOptions] = useState<{
     categories: WpTermOption[];
     tags: WpTermOption[];
@@ -660,6 +678,9 @@ function PostEditor({
       setContentEditable(detail.content !== null);
       setInitialTaxonomies(nextTaxonomies);
       setTaxonomies(nextTaxonomies);
+      setInitialFeatured(detail.featuredMediaId ?? null);
+      setFeatured(detail.featuredMediaId ?? null);
+      setFeaturedUrl(detail.featuredImageUrl ?? null);
       setExpectedRemoteUpdatedAt(detail.remoteUpdatedAt ?? null);
       setVersionConflict(false);
       setInitial(next);
@@ -688,7 +709,9 @@ function PostEditor({
     return () => controller.abort();
   }, [connectionId]);
 
-  const dirty = wpEditorIsDirty(initial, values) || wpTaxonomiesDirty(initialTaxonomies, taxonomies);
+  const dirty = wpEditorIsDirty(initial, values)
+    || wpTaxonomiesDirty(initialTaxonomies, taxonomies)
+    || wpFeaturedMediaDirty(initialFeatured, featured);
 
   function setValue<K extends keyof WpEditorValues>(key: K, value: WpEditorValues[K]) {
     setValues((current) => ({ ...current, [key]: value }));
@@ -720,6 +743,7 @@ function PostEditor({
 
     const patch = wpEditorPatch(initial, values);
     const termPatch = initialTaxonomies ? wpTaxonomyPatch(initialTaxonomies, taxonomies) : {};
+    const featuredPatch = wpFeaturedMediaPatch(initialFeatured ?? null, featured);
 
     const response = await api<{ error?: string; queued?: boolean; alreadyApplied?: boolean }>(
       "/api/integrations/wp-manager/content/posts",
@@ -733,6 +757,7 @@ function PostEditor({
             : { requestId: createRequestId }),
           ...patch,
           ...termPatch,
+          ...featuredPatch,
         }),
       },
     );
@@ -913,6 +938,21 @@ function PostEditor({
                   excerpt={values.excerpt}
                   editable={contentEditable}
                 />
+                {/* The featured image is a page's and a post's alike in
+                    WordPress; only the plugin's ability to apply it differs. */}
+                {featuredMediaSupported ? (
+                  <WpFeaturedImagePicker
+                    connectionId={connectionId}
+                    value={featured}
+                    currentUrl={featuredUrl}
+                    disabled={busy}
+                    onChange={(id) => setFeatured(id)}
+                  />
+                ) : (
+                  <InfoBox>
+                    تصویر شاخص برای این سایت با نسخهٔ فعلی افزونه ذخیره نمی‌شود؛ برای استفاده از این فیلد، افزونهٔ وردپرس را به‌روز کنید.
+                  </InfoBox>
+                )}
                 {/* Categories and tags belong to posts only — a page has no
                     categories in WordPress, and offering them would be a picker
                     whose answer core silently drops. */}
