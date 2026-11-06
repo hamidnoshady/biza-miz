@@ -57,6 +57,7 @@ import { buildTenantArchive, serializeTenantArchive } from "./tenant-archive";
 import { exportTenantData } from "./tenant-export";
 import { installedSchemaVersion, markArtifactStateByRef, resolveOwnedArtifact } from "./tenant-backup-artifacts-service";
 import { decryptionSecretFor } from "./tenant-backup-runner";
+import { restoreMediaSidecars, stageMediaForRestore } from "./tenant-backup-media";
 import { cleanupStagingDir, ensureStagingDir } from "./tenant-backup-storage";
 import { fetchCloudArtifact, planArtifactDownload } from "./tenant-backup-transport";
 import { decryptFileToFile } from "./backup-streams";
@@ -288,6 +289,63 @@ async function loadArchive(
  * write phase is one transaction: either the business holds the archived rows,
  * or it holds exactly what it held before.
  */
+
+/**
+ * Put the backup's media back into the library, and record what happened.
+ *
+ * Reads the artifact's own manifest — the signed list — rather than the restored
+ * rows, because the manifest is the only thing that says which bytes this backup
+ * actually carried. Objects that already match are left alone; an object this
+ * restore replaces is copied to a quarantine prefix first, so a restore is a
+ * revert that can still be undone.
+ */
+async function restoreArtifactMedia(input: {
+  businessId: string;
+  ref: string;
+  legacyPassphrase: string;
+  journal: (phase: "media_restored" | "media_restore_failed", detail: Record<string, unknown>) => Promise<void>;
+}): Promise<void> {
+  const row = await resolveOwnedArtifact(input.businessId, input.ref);
+  const media = row?.manifest?.media ?? null;
+  if (!row || !media || media.assets.length === 0) return;
+
+  const opened = await decryptionSecretFor(
+    input.businessId,
+    { encryption: row.encryption, keyVersion: row.keyVersion, manifest: row.manifest },
+    input.legacyPassphrase,
+  );
+  if (!opened.ok) {
+    // A legacy passphrase artifact whose phrase was not supplied: say so, do not
+    // pretend the media was restored.
+    await input.journal("media_restore_failed", { code: opened.error, assets: media.assets.length });
+    return;
+  }
+
+  const staged = await stageMediaForRestore({
+    businessId: input.businessId,
+    artifact: row.storageRef,
+    destination: row.destination,
+    media,
+  });
+  if (!staged) {
+    await input.journal("media_restore_failed", { code: "media_sidecars_unavailable", assets: media.assets.length });
+    return;
+  }
+  try {
+    const result = await restoreMediaSidecars({
+      businessId: input.businessId,
+      artifact: row.storageRef,
+      directory: staged.directory,
+      secret: opened.secret,
+      media,
+    });
+    const phase = result.failed > 0 ? "media_restore_failed" : "media_restored";
+    await input.journal(phase, { ...result, assets: media.assets.length });
+  } finally {
+    await staged.cleanup();
+  }
+}
+
 export async function applyTenantRestore(request: TenantRestoreRequest): Promise<TenantRestoreOutcome> {
   const journalDir = request.journalDir ?? restoreJournalDir();
   const journalId = newRestoreJournalId();
@@ -430,6 +488,24 @@ export async function applyTenantRestore(request: TenantRestoreRequest): Promise
           }),
           journalDir,
         );
+
+        // §7 — the media **binaries**, after the rows. Deliberately outside the
+        // transaction: writing objects is network work, and a bucket hiccup must
+        // not roll back a database restore that already succeeded. It is
+        // journalled either way, so a half-restored business is visible rather
+        // than assumed whole.
+        try {
+          await restoreArtifactMedia({
+            businessId: request.businessId,
+            ref: request.ref,
+            legacyPassphrase: request.legacyPassphrase ?? "",
+            journal: async (phase, detail) => {
+              await tryAppendRestoreJournal(journalEntry(phase as never, detail), journalDir);
+            },
+          });
+        } catch (error) {
+          console.error(`tenant restore: media restore failed for ${request.businessId}:`, error);
+        }
 
         // Bookkeeping after a committed restore: a failure here must not turn a
         // successful restore into a reported failure, because the data is

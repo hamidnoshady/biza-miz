@@ -92,6 +92,7 @@ import {
   withLogicalStaging,
 } from "./tenant-backup-runner";
 import { resolveTenantBackupPolicy, resolveTenantStorage, tenantObjectPrefix } from "./tenant-backup-storage";
+import { captureMediaSidecars, uploadMediaSidecars, verifyMediaSidecars } from "./tenant-backup-media";
 import {
   acceptGeneration,
   drainUploadQueue,
@@ -632,6 +633,20 @@ async function runTenantLogicalBackupLocked(
       const finalPath = path.join(dir, artifact);
       const { sizeBytes, sha256 } = archive.encrypted;
 
+      // Issue #903 §7 — the media *binaries*, not just their rows. Sidecars are
+      // encrypted with the artifact's own custody secret and listed in the signed
+      // manifest; a run that hits its budget records `skipped`/`clipped` and the
+      // backup becomes `partial`, never silently smaller than it looks.
+      const media = await captureMediaSidecars({
+        businessId,
+        artifact,
+        directory: dir,
+        secret: encryption.secret,
+      }).catch((err) => {
+        console.error(`backup: media capture failed for business ${businessId}:`, errText(err));
+        return null;
+      });
+
       await pruneDirectory(dir, config.localRetention, businessId, false);
 
       // Register + verify before the run is called a success: an artifact that
@@ -644,16 +659,20 @@ async function runTenantLogicalBackupLocked(
         origin: trigger,
         mode: "logical",
         payloadFormat: archive.written.payloadFormat,
-        sizeBytes,
+        // What is actually retained: the payload plus every sidecar, so the
+        // byte-day meter cannot bill a captured video at zero (issue #903 §8).
+        sizeBytes: sizeBytes + (media?.storedBytes ?? 0),
         sha256,
         encryption,
+        media,
         capturedAt: capturedAtOf(artifact),
         components: buildComponentInventory(
           archive.written.tables,
-          // Issue #903 §9 — the database rows of media are in the archive; the
-          // binary attachments are not, and the manifest says so with a count
-          // rather than by omission.
+          // Issue #903 §9 — the media *rows* are in the archive. The binaries are
+          // captured as sidecars, and `media` tells the inventory how many were
+          // carried so the label cannot claim more than the run did.
           await mediaAttachmentCount(businessId),
+          { captured: media?.assets.length ?? 0 },
         ),
         schemaVersion: archive.written.schemaVersion,
         runId,
@@ -669,13 +688,19 @@ async function runTenantLogicalBackupLocked(
         stagedPath: finalPath,
         schemaVersion: archive.written.schemaVersion,
       });
+      // §7 — the payload is only half the backup now. Each sidecar is decrypted
+      // and hashed against the manifest inside this same run, so "ready" means
+      // the media is as restorable as the rows.
+      const mediaVerified = verified.ok
+        ? await verifyMediaSidecars({ media, directory: dir, artifact, secret: encryption.secret })
+        : verified;
       await markArtifactStateByRef(businessId, registered.ref, {
-        state: verified.ok ? "ready" : "failed",
-        failureCode: verified.ok ? null : verified.error,
+        state: mediaVerified.ok ? "ready" : "failed",
+        failureCode: mediaVerified.ok ? null : mediaVerified.error,
       });
-      if (!verified.ok) {
-        await finishRun(runId, { status: "failed", error: verified.error });
-        return { status: "failed", error: verified.error };
+      if (!mediaVerified.ok) {
+        await finishRun(runId, { status: "failed", error: mediaVerified.error });
+        return { status: "failed", error: mediaVerified.error };
       }
 
       await finishRun(runId, { status: "success", sizeBytes, sha256 });
@@ -802,14 +827,40 @@ export async function runCloudUpload(
     if (sizeBytes > maxBytes) throw new Error("artifact_too_large");
     await s3PutFile(s3, key, uploadPath, { payloadHash, sizeBytes });
 
+    // Issue #903 §7 — a cloud copy is the payload *and* its media sidecars. They
+    // go up under the same prefix as `<artifact>.media/<asset>.enc`, encrypted
+    // with the same custody secret, and the signed manifest is the index. A
+    // failed sidecar upload fails the run: a "complete" backup that silently
+    // lost its video is the lie this epic exists to remove.
+    {
+      const localManifest = (await listStoredArtifactRows(businessId)).find(
+        (row) => row.destination === "local" && row.storageRef === artifact,
+      )?.manifest;
+      const mediaSummary = await uploadMediaSidecars({
+        s3,
+        prefix,
+        artifact,
+        directory: tenantBackupDir(businessId, config.directory),
+        media: localManifest?.media ?? null,
+      });
+      if (mediaSummary.failed > 0) throw new Error("media_sidecar_upload_failed");
+    }
+
     try {
       const objects = await s3List(s3, prefix);
       // Scope-exact on purpose: a bucket may be shared, so an unscoped legacy
       // object is never assumed to be ours (a pruned object cannot be restored).
-      for (const stale of selectPrunableInScope(objects.map((o) => o.key), storage.keepCount, businessId, {
+      const allKeys = objects.map((o) => o.key);
+      for (const stale of selectPrunableInScope(allKeys, storage.keepCount, businessId, {
         adoptUnscoped: role === "site" && storage.mode === "legacy",
       })) {
         await s3Delete(s3, stale);
+        // …and the sidecars that belong to it. A pruned artifact whose media
+        // stayed behind is storage billed for bytes no restore can reach.
+        const sidecarPrefix = `${stale}.media/`;
+        for (const orphan of allKeys.filter((candidate) => candidate.startsWith(sidecarPrefix))) {
+          await s3Delete(s3, orphan).catch(() => undefined);
+        }
       }
     } catch (err) {
       // pruning is best-effort — the upload itself succeeded

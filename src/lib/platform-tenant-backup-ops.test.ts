@@ -41,7 +41,7 @@ vi.mock("./backup-service", () => ({
   // one directory per business), so the mock has to answer it.
   tenantBackupDir: () => "/srv/backups/tenants/scope",
 }));
-vi.mock("./s3-lite", () => ({ s3Delete: mocks.s3Delete }));
+vi.mock("./s3-lite", () => ({ s3Delete: mocks.s3Delete, s3List: vi.fn(async () => []) }));
 vi.mock("./tenant-backup-artifacts-service", () => ({
   listStoredArtifactRows: mocks.rows,
   resolveOwnedArtifact: mocks.resolveOwned,

@@ -38,7 +38,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { logicalSnapshotScopeTag } from "./backup-policy";
 
 /** Bumped only when the manifest shape changes incompatibly. */
-export const BACKUP_MANIFEST_VERSION = 1;
+export const BACKUP_MANIFEST_VERSION = 2;
 /** Older versions we still know how to read (and refuse to sign). */
 export const MIN_SUPPORTED_MANIFEST_VERSION = 1;
 
@@ -95,6 +95,42 @@ export interface BackupComponent {
   rows: number | null;
 }
 
+/**
+ * One media asset whose **bytes** are stored beside the payload (issue #903 §7).
+ *
+ * `sha256`/`bytes` describe the *plaintext* asset, which is what `media_assets`
+ * already records, so a sidecar can be proved against the row it belongs to
+ * rather than against itself. `sidecar` is the object name inside the artifact's
+ * `<artifact>.media/` directory, and `key` is the media-storage key the bytes
+ * came from — restore writes them back there.
+ */
+export interface BackupMediaAsset {
+  assetId: string;
+  key: string;
+  sha256: string;
+  bytes: number;
+  mimeType: string;
+  fileName: string;
+  sidecar: string;
+}
+
+/**
+ * What the run did with the business's media binaries.
+ *
+ * `skipped` is the honest half: assets the business holds that this backup does
+ * **not** carry, because a per-run budget, an asset cap or a missing object
+ * stopped the capture. It is recorded rather than hidden so a `complete` label
+ * can never be produced by losing track of bytes.
+ */
+export interface BackupMediaCapture {
+  assets: BackupMediaAsset[];
+  skipped: number;
+  /** Encrypted sidecar bytes actually stored, for billing and inventory. */
+  storedBytes: number;
+  /** True when a cap or budget stopped the capture short. */
+  clipped: boolean;
+}
+
 export interface BackupManifest {
   manifestVersion: number;
   /** The `tenant_backup_artifacts` row id this manifest belongs to. */
@@ -126,6 +162,8 @@ export interface BackupManifest {
     sha256: string;
   };
   components: BackupComponent[];
+  /** Media binaries stored with this artifact, or null when none were captured. */
+  media?: BackupMediaCapture | null;
 }
 
 export interface BuildManifestInput {
@@ -141,6 +179,7 @@ export interface BuildManifestInput {
   sizeBytes: number;
   sha256: string;
   components: { key: BackupComponentKey; state: BackupComponentState; bytes?: number | null; rows?: number | null }[];
+  media?: BackupMediaCapture | null;
 }
 
 export function businessScopeTag(businessId: string): string {
@@ -189,6 +228,7 @@ export function buildBackupManifest(input: BuildManifestInput): BackupManifest {
       bytes: component.bytes ?? null,
       rows: component.rows ?? null,
     })),
+    ...(input.media ? { media: input.media } : {}),
   };
   const validated = validateBackupManifest(manifest);
   if (!validated.ok) throw new Error(`invalid_backup_manifest:${validated.error}`);
@@ -210,7 +250,7 @@ export function validateBackupManifest(value: unknown): ManifestValidation {
 
   const allowed = [
     "manifestVersion", "artifactId", "businessId", "scope", "format", "payloadFormat", "origin",
-    "capturedAt", "schemaVersion", "appVersion", "encryption", "payload", "components",
+    "capturedAt", "schemaVersion", "appVersion", "encryption", "payload", "components", "media",
   ];
   if (Object.keys(value).some((key) => !allowed.includes(key))) {
     return { ok: false, error: "manifest_unknown_field" };
@@ -316,6 +356,9 @@ export function validateBackupManifest(value: unknown): ManifestValidation {
     });
   }
 
+  const media = validateMediaCapture(value.media, version);
+  if (!media.ok) return { ok: false, error: media.error };
+
   return {
     ok: true,
     manifest: {
@@ -335,7 +378,64 @@ export function validateBackupManifest(value: unknown): ManifestValidation {
       },
       payload: { sizeBytes: payload.sizeBytes as number, sha256: payload.sha256 as string },
       components: normalised,
+      ...(media.media ? { media: media.media } : {}),
     },
+  };
+}
+
+/**
+ * The media inventory is signed content, so it is validated as strictly as the
+ * rest of the manifest: a v1 manifest may not carry it (its signature was
+ * computed without the field ever existing), and every entry has to name a real
+ * sidecar with a checksum.
+ */
+function validateMediaCapture(
+  value: unknown,
+  version: number,
+): { ok: true; media: BackupMediaCapture | null } | { ok: false; error: string } {
+  if (value === undefined || value === null) return { ok: true, media: null };
+  if (version < 2) return { ok: false, error: "manifest_media_requires_v2" };
+  if (!isRecord(value)) return { ok: false, error: "manifest_media_invalid" };
+  if (Object.keys(value).sort().join(",") !== "assets,clipped,skipped,storedBytes") {
+    return { ok: false, error: "manifest_media_invalid" };
+  }
+  if (!Array.isArray(value.assets)) return { ok: false, error: "manifest_media_invalid" };
+  if (!isNonNegativeInteger(value.skipped)) return { ok: false, error: "manifest_media_invalid" };
+  if (!isNonNegativeInteger(value.storedBytes)) return { ok: false, error: "manifest_media_invalid" };
+  if (typeof value.clipped !== "boolean") return { ok: false, error: "manifest_media_invalid" };
+
+  const assets: BackupMediaAsset[] = [];
+  const seen = new Set<string>();
+  for (const entry of value.assets) {
+    if (!isRecord(entry)) return { ok: false, error: "manifest_media_asset_invalid" };
+    if (
+      Object.keys(entry).sort().join(",") !== "assetId,bytes,fileName,key,mimeType,sha256,sidecar"
+    ) {
+      return { ok: false, error: "manifest_media_asset_invalid" };
+    }
+    const { assetId, key, sha256, bytes, mimeType, fileName, sidecar } = entry;
+    if (typeof assetId !== "string" || !assetId) return { ok: false, error: "manifest_media_asset_invalid" };
+    if (seen.has(assetId)) return { ok: false, error: "manifest_media_asset_duplicate" };
+    seen.add(assetId);
+    if (typeof key !== "string" || !key) return { ok: false, error: "manifest_media_asset_invalid" };
+    if (typeof sha256 !== "string" || !SHA256_RE.test(sha256)) {
+      return { ok: false, error: "manifest_media_asset_invalid" };
+    }
+    if (!isNonNegativeInteger(bytes)) return { ok: false, error: "manifest_media_asset_invalid" };
+    if (typeof mimeType !== "string" || typeof fileName !== "string") {
+      return { ok: false, error: "manifest_media_asset_invalid" };
+    }
+    // A sidecar name is a file name, never a path: it is joined to a directory
+    // on the way back in, so `../` here would be a traversal.
+    if (typeof sidecar !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(sidecar) || sidecar.includes("..")) {
+      return { ok: false, error: "manifest_media_asset_invalid" };
+    }
+    assets.push({ assetId, key, sha256, bytes, mimeType, fileName, sidecar });
+  }
+
+  return {
+    ok: true,
+    media: { assets, skipped: value.skipped, storedBytes: value.storedBytes, clipped: value.clipped },
   };
 }
 
@@ -407,6 +507,12 @@ export function manifestCompleteness(manifest: BackupManifest): ManifestComplete
     if (component.state === "unavailable") result.unavailable.push(component.key);
   }
   if (result.external.length || result.excluded.length || result.unavailable.length) {
+    result.status = "partial";
+  }
+  // Media the business holds but this backup does not carry is the same kind of
+  // honesty: a run that hit its per-run budget is a partial backup even when
+  // every declared component was captured.
+  if (manifest.media && (manifest.media.skipped > 0 || manifest.media.clipped)) {
     result.status = "partial";
   }
   return result;

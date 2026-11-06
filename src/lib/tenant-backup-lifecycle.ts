@@ -52,7 +52,7 @@ import { query, withTenant, withoutTenantScope } from "./db";
 import { getBackupConfig, tenantBackupDir } from "./backup-service";
 import { deploymentRole } from "./deployment-role";
 import { readDeploymentProfile } from "./deployment-mode";
-import { s3Delete } from "./s3-lite";
+import { s3Delete, s3List } from "./s3-lite";
 import { logicalSnapshotScopeTag } from "./backup-policy";
 import {
   installedSchemaVersion,
@@ -60,6 +60,7 @@ import {
   type StoredArtifactRow,
 } from "./tenant-backup-artifacts-service";
 import { verifyStoredArtifact } from "./tenant-backup-runner";
+import { removeLocalMediaSidecars } from "./tenant-backup-media";
 import { tenantBackupArtifactRef } from "./tenant-backup-artifact-ref";
 import { resolveTenantBackupPolicy, resolveTenantStorage } from "./tenant-backup-storage";
 import { fetchCloudArtifact } from "./tenant-backup-transport";
@@ -168,6 +169,10 @@ export async function removeArtifactBytes(
       // retention must be safe to retry, so this is success with nothing removed.
       if (!located.ok) return { ok: true, removed: false };
       await fs.rm(located.path, { force: true });
+      // §7 — the media sidecars of this artifact go with it. Leaving them behind
+      // would keep billing bytes whose artifact no longer exists, and nothing
+      // could ever reach them again.
+      await removeLocalMediaSidecars(path.dirname(located.path), row.storageRef).catch(() => undefined);
       return { ok: true, removed: true };
     }
 
@@ -185,6 +190,11 @@ export async function removeArtifactBytes(
         ? `${storage.prefix}tenants/${logicalSnapshotScopeTag(businessId)}/${row.storageRef}`
         : `${storage.prefix}${row.storageRef}`;
     await s3Delete(storage.s3, key);
+    // …and the sidecars, by prefix: one artifact, one directory of objects.
+    const sidecarPrefix = `${key}.media/`;
+    for (const object of await s3List(storage.s3, sidecarPrefix).catch(() => [])) {
+      if (object.key.startsWith(sidecarPrefix)) await s3Delete(storage.s3, object.key).catch(() => undefined);
+    }
     return { ok: true, removed: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message.slice(0, 80) : "storage_delete_failed" };

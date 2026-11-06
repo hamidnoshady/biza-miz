@@ -142,6 +142,89 @@ describe("signatures", () => {
   });
 });
 
+describe("media capture in the manifest (§7)", () => {
+  const asset = {
+    assetId: "asset-1",
+    key: "media/asset-1.png",
+    sha256: SHA,
+    bytes: 2048,
+    mimeType: "image/png",
+    fileName: "photo.png",
+    sidecar: "asset-1.enc",
+  };
+
+  it("carries a media block only when the run captured something", () => {
+    expect(manifest().media).toBeUndefined();
+    const withMedia = manifest({
+      media: { assets: [asset], skipped: 0, storedBytes: 2176, clipped: false },
+    });
+    expect(withMedia.manifestVersion).toBe(2);
+    expect(withMedia.media?.assets).toEqual([asset]);
+    expect(validateBackupManifest(withMedia).ok).toBe(true);
+  });
+
+  it("refuses media on a v1 manifest — the version is what promises the block", () => {
+    const built = manifest();
+    const legacy = {
+      ...built,
+      manifestVersion: 1,
+      media: { assets: [asset], skipped: 0, storedBytes: 2176, clipped: false },
+    };
+    expect(validateBackupManifest(legacy as BackupManifest)).toEqual({
+      ok: false,
+      error: "manifest_media_requires_v2",
+    });
+  });
+
+  it("refuses two entries for the same asset", () => {
+    // buildBackupManifest refuses to build it at all…
+    expect(() =>
+      manifest({
+        media: {
+          assets: [asset, { ...asset, sidecar: "asset-1-copy.enc" }],
+          skipped: 0,
+          storedBytes: 0,
+          clipped: false,
+        },
+      }),
+    ).toThrow(/manifest_media_asset_duplicate/);
+
+    // …and validating a hand-built manifest agrees, because a peer could send one.
+    const built = manifest({ media: { assets: [asset], skipped: 0, storedBytes: 0, clipped: false } });
+    const duplicated = {
+      ...built,
+      media: { assets: [asset, { ...asset, sidecar: "asset-1-copy.enc" }], skipped: 0, storedBytes: 0, clipped: false },
+    };
+    expect(validateBackupManifest(duplicated)).toEqual({
+      ok: false,
+      error: "manifest_media_asset_duplicate",
+    });
+  });
+
+  it("refuses a sidecar name that could escape its directory", () => {
+    const built = manifest({ media: { assets: [asset], skipped: 0, storedBytes: 0, clipped: false } });
+    const escaped = {
+      ...built,
+      media: { ...built.media!, assets: [{ ...asset, sidecar: "../x.enc" }] },
+    };
+    expect(validateBackupManifest(escaped)).toMatchObject({ ok: false });
+  });
+
+  it("calls a capture that skipped assets partial, never complete", () => {
+    const skipped = manifest({
+      components: [{ key: "accounting.core", state: "included", rows: 10 }],
+      media: { assets: [asset], skipped: 3, storedBytes: 2176, clipped: true },
+    });
+    expect(manifestCompleteness(skipped).status).toBe("partial");
+
+    const whole = manifest({
+      components: [{ key: "accounting.core", state: "included", rows: 10 }],
+      media: { assets: [asset], skipped: 0, storedBytes: 2176, clipped: false },
+    });
+    expect(manifestCompleteness(whole).status).toBe("complete");
+  });
+});
+
 describe("completeness and restorability", () => {
   it("reports complete only when every component was captured", () => {
     const complete = manifest({
