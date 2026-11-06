@@ -1649,6 +1649,11 @@ class POS_Connector_Sync {
 			'contentTaxonomies' => true,
 			'postCategories'    => self::post_terms_payload( 'category' ),
 			'postTags'          => self::post_terms_payload( 'post_tag' ),
+			// Issue #1215 P2-5: this build applies `featured_media` on a
+			// `post_upsert` through `set_post_thumbnail`. Without the flag the
+			// app refuses to queue the field instead of saving a post without
+			// the image the editor showed.
+			'featuredMedia'     => true,
 			// Issue #1076: this build can answer a paged request about its own
 			// queue (`localQueuePage` in telemetry). Without this flag the app
 			// keeps the aggregate strip and never waits for a page.
@@ -2578,7 +2583,24 @@ class POS_Connector_Sync {
 			}
 			$data['post_status'] = $status;
 		}
-		if ( empty( $data ) ) {
+		// The featured image (#1215 P2-5) is not a post field: WordPress stores
+		// it as `_thumbnail_id` meta, so it is applied after the write. 0 is
+		// WordPress's own "no thumbnail" and the only way to clear one.
+		$featured_media = null;
+		if ( isset( $payload['featured_media'] ) ) {
+			$featured_media = (int) $payload['featured_media'];
+			if ( $featured_media < 0 ) {
+				throw new Exception( 'invalid_featured_media' );
+			}
+			if ( $featured_media > 0 ) {
+				$attachment = get_post( $featured_media );
+				if ( ! $attachment || 'attachment' !== $attachment->post_type ) {
+					throw new Exception( 'featured_media_not_attachment' );
+				}
+			}
+		}
+
+		if ( empty( $data ) && null === $featured_media ) {
 			throw new Exception( 'empty_post_update' );
 		}
 
@@ -2624,6 +2646,8 @@ class POS_Connector_Sync {
 			}
 			$data['ID']          = $id;
 			$data['post_type']   = $type;
+			// An image-only save must not carry `post_status`: wp_update_post
+			// would otherwise re-assert whatever status the app last saw.
 			$result              = wp_update_post( $data, true );
 		} else {
 			$data['post_type']   = $type;
@@ -2638,6 +2662,15 @@ class POS_Connector_Sync {
 			}
 			if ( '' !== $operation_id ) {
 				update_post_meta( (int) $result, '_pos_operation_id', $operation_id );
+			}
+			if ( null !== $featured_media ) {
+				if ( $featured_media > 0 ) {
+					if ( ! set_post_thumbnail( (int) $result, $featured_media ) ) {
+						throw new Exception( 'featured_media_apply_failed' );
+					}
+				} else {
+					delete_post_thumbnail( (int) $result );
+				}
 			}
 		}
 

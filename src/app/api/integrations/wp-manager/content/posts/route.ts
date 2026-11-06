@@ -12,7 +12,7 @@ import {
   type WpContentPayload,
 } from "@/lib/integrations/wp-content-service";
 import { isFutureSchedule, toWordPressGmt } from "@/lib/wp-schedule";
-import { pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
+import { pluginSupportsFeaturedMedia, pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
 import {
   MAX_POST_CATEGORIES,
   MAX_POST_TAGS,
@@ -142,6 +142,19 @@ export const POST = withTenantScope(async (request: Request) => {
   }
   const hasCategories = body.categories !== undefined && body.categories !== null;
   const hasTags = body.tags !== undefined && body.tags !== null;
+  // The featured image (#1215, P2-5) is an attachment id, and 0 is WordPress's
+  // own "no thumbnail" — the only way to clear one. Anything else is refused
+  // rather than coerced: a string id silently becoming 0 would remove the
+  // owner's image on a save they thought only changed the title.
+  const hasFeaturedMedia = body.featuredMediaId !== undefined && body.featuredMediaId !== null;
+  let featuredMediaId = 0;
+  if (hasFeaturedMedia) {
+    const raw = body.featuredMediaId;
+    if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0 || raw > 2_147_483_647) {
+      return NextResponse.json({ error: "invalid_featured_media" }, { status: 400 });
+    }
+    featuredMediaId = raw;
+  }
   if (hasCategories && postType === "page") {
     return NextResponse.json({ error: "categories_not_supported_for_pages" }, { status: 400 });
   }
@@ -162,7 +175,7 @@ export const POST = withTenantScope(async (request: Request) => {
   if (patch.status && !ALLOWED_STATUS.includes(patch.status as (typeof ALLOWED_STATUS)[number])) {
     return NextResponse.json({ error: "invalid_status" }, { status: 400 });
   }
-  if (Object.keys(patch).length === 0 && !scheduledFor && !hasCategories && !hasTags) {
+  if (Object.keys(patch).length === 0 && !scheduledFor && !hasCategories && !hasTags && !hasFeaturedMedia) {
     return NextResponse.json({ error: "empty_patch" }, { status: 400 });
   }
   // A `future` post with no date publishes on WordPress's next cron pass, which
@@ -225,6 +238,12 @@ export const POST = withTenantScope(async (request: Request) => {
         { status: 409 },
       );
     }
+    if (hasFeaturedMedia && !pluginSupportsFeaturedMedia(connection.plugin_capabilities)) {
+      return NextResponse.json(
+        { ok: false, error: "plugin_featured_media_unsupported", upgradeRequired: true },
+        { status: 409 },
+      );
+    }
     if (remoteId && expectedRemoteUpdatedAt) {
       const mirrored = await getWpContent(session.businessId, connectionId, postType, remoteId);
       if (!mirrored || !mirrored.remoteUpdatedAt || Date.parse(mirrored.remoteUpdatedAt) !== Date.parse(expectedRemoteUpdatedAt)) {
@@ -236,6 +255,9 @@ export const POST = withTenantScope(async (request: Request) => {
       // The plugin applies these through WordPress's own post fields.
       ...(hasCategories ? { post_category: categories.ids } : {}),
       ...(hasTags ? { tags_input: tags.ids } : {}),
+      // WordPress applies the thumbnail through `set_post_thumbnail`, which the
+      // plugin does for this field; 0 clears it.
+      ...(hasFeaturedMedia ? { featured_media: featuredMediaId } : {}),
     });
     if (queueOutcome === "unsupported") {
       return NextResponse.json({ error: "plugin_content_unsupported" }, { status: 409 });
@@ -283,6 +305,8 @@ export const POST = withTenantScope(async (request: Request) => {
         // wp/v2 takes the same term ids under its own field names.
         ...(hasCategories ? { categories: categories.ids } : {}),
         ...(hasTags ? { tags: tags.ids } : {}),
+        // wp/v2 takes the attachment id itself; 0 removes the thumbnail.
+        ...(hasFeaturedMedia ? { featured_media: featuredMediaId } : {}),
       },
       numericRemoteId,
     );

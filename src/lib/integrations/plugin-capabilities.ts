@@ -67,6 +67,22 @@ export function pluginSupportsPostSchedule(
   return capabilities?.postSchedule === true;
 }
 
+/**
+ * Whether this plugin can apply a featured image (`featured_media`) on a
+ * `post_upsert` (issue #1215, P2-5).
+ *
+ * WordPress has no post field for the thumbnail: it is the `_thumbnail_id`
+ * meta, so a plugin has to call `set_post_thumbnail()` itself. A build that
+ * predates this would accept the job and silently save the post without the
+ * image — the exact "the editor says it saved" failure the issue set out to
+ * remove — so the app refuses the field instead of queueing it.
+ */
+export function pluginSupportsFeaturedMedia(
+  capabilities: Record<string, unknown> | null | undefined,
+): boolean {
+  return capabilities?.featuredMedia === true;
+}
+
 /** The protocol version that introduced per-lease ack tokens (issue #942, F01). */
 export const LEASE_TOKEN_PROTOCOL_VERSION = 3;
 
