@@ -159,7 +159,7 @@ export function BatchesSection() {
 
   return (
     <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_24rem]">
-      <section className={`min-w-0 overflow-hidden ${cardClass} `}>
+      <section data-tour-id="cosmetics.expiry-list" className={`min-w-0 overflow-hidden ${cardClass} `}>
         <div className="border-b border-border/80 px-4 py-4 sm:px-5">
           <h2 className="font-semibold text-foreground">
             بچ‌های نزدیک به انقضا
@@ -224,7 +224,7 @@ export function BatchesSection() {
         </ul>
       </section>
 
-      <aside className="min-w-0">
+      <aside data-tour-id="cosmetics.batch-form" className="min-w-0">
         <div className={`${cardClass} p-4 sm:p-5`}>
           <h2 className="font-semibold text-foreground">ورود بچ</h2>
           <form onSubmit={receive} className="mt-4 space-y-3">
