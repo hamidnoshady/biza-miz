@@ -106,7 +106,6 @@ export function WpFeaturedImagePicker({
       <div className="flex flex-wrap items-center gap-3">
         <div className="size-20 overflow-hidden rounded-lg border border-border bg-muted/40">
           {previewUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element -- a mirrored store URL, not an optimized asset
             <img src={previewUrl} alt="پیش‌نمایش تصویر شاخص" className="size-full object-cover" />
           ) : (
             <div className="flex size-full items-center justify-center text-muted-foreground">
@@ -168,7 +167,6 @@ export function WpFeaturedImagePicker({
                     >
                       <span className="block aspect-square bg-muted/40">
                         {thumb ? (
-                          // eslint-disable-next-line @next/next/no-img-element -- a mirrored store URL
                           <img src={thumb} alt={row.title || "تصویر فروشگاه"} className="size-full object-cover" />
                         ) : (
                           <span className="flex size-full items-center justify-center text-muted-foreground">
