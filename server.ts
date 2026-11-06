@@ -689,7 +689,12 @@ app.prepare().then(async () => {
     10 * 60_000,
   );
 
-  if (process.env.DEPLOYMENT_ROLE !== "site") {
+  // The resolved role, not the raw variable (#1004). `runtimeRole` is what
+  // `describeDeploymentRole()` logs and what `assertSecurePosture` enforced: it
+  // falls back to inference when DEPLOYMENT_ROLE is unset, and it trims and
+  // lower-cases the value. Comparing the raw string here made a site whose role
+  // came from inference (or was spelled " Site ") run the central CMS ticks.
+  if (runtimeRole !== "site") {
     const { runCmsEntitlementOutboxTick } = await import("./src/lib/billing/entitlement/outbox-service");
     const cmsEntitlementTick = () =>
       runCmsEntitlementOutboxTick().catch((err) => console.error("cms entitlement tick failed:", err));

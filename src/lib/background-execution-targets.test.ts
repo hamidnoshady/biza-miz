@@ -22,6 +22,19 @@ describe("background execution targets", () => {
     }
   });
 
+  // Issue #1004: one source of truth for the deployment role. `deploymentRole()`
+  // infers "site" when DEPLOYMENT_ROLE is unset and trims/lower-cases what it
+  // reads; a raw `process.env.DEPLOYMENT_ROLE !== "site"` test skips both, so a
+  // site whose role came from inference — or was spelled " Site " — started the
+  // central CMS ticks and queued cloud-side entitlement refreshes.
+  it("gates central-only work on the resolved deployment role", () => {
+    expect(server).toContain('if (runtimeRole !== "site") {');
+    expect(server).not.toContain('process.env.DEPLOYMENT_ROLE !== "site"');
+    const subscriptions = readFileSync("src/lib/subscription-service.ts", "utf8");
+    expect(subscriptions).toContain('if (deploymentRole() !== "site") {');
+    expect(subscriptions).not.toContain('process.env.DEPLOYMENT_ROLE !== "site"');
+  });
+
   it("keeps local operational maintenance independent of Cloud", () => {
     for (const tick of ["crmScoringTick", "importQueueTick", "lowStockScan"]) {
       expect(server).toContain(`scheduleBackgroundTick(${tick},`);

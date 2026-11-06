@@ -34,6 +34,7 @@ import {
   listPlanFeatures,
   type BillingPlan,
 } from "./billing-plans-service";
+import { deploymentRole } from "./deployment-role";
 import { allocateInvoiceNumber } from "./billing/runtime";
 import { applyTaxAndRounding } from "./billing/rating/engine";
 import { billingLog } from "./billing/observability";
@@ -393,7 +394,10 @@ export async function changeBusinessPlan(input: {
   const subscription = await getBusinessSubscription(input.businessId);
   if (!subscription) throw new SubscriptionError("subscription_not_found");
 
-  if (process.env.DEPLOYMENT_ROLE !== "site") {
+  // Same rule as the startup ticks: the resolved role, not the raw variable
+  // (#1004). A site whose role came from inference, or was written " Site ",
+  // must not queue a cloud-side entitlement refresh.
+  if (deploymentRole() !== "site") {
     const { refreshEntitlementsForBusiness } = await import("./billing/entitlement/outbox-service");
     void refreshEntitlementsForBusiness(input.businessId).catch(() => {});
   }
