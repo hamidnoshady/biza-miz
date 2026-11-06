@@ -12,9 +12,9 @@ import { query, withTenantTransaction } from "./db";
 import { effectiveFeatures } from "./features";
 import { getBusinessIndustry } from "./industry-guard";
 import { getInventorySystem } from "./inventory-service";
+import { tourDefinitionById } from "./tour-baseline";
 import {
   applyTourEvent,
-  tourById,
   tourFactsNeeded,
   tourForViewer,
   type TourViewer,
@@ -76,13 +76,17 @@ export async function tourViewerFor(
 /**
  * The tour with this id as this viewer sees it (narrowed to their steps), only
  * if they may be told it exists. Reads the viewer's facts for that one tour.
+ *
+ * The id may be an authored tour or the automatic baseline tour of a page with
+ * no authored one; `tour-baseline.ts` owns which catalogue answers, so the
+ * lookup, the playback and the progress writes all agree.
  */
 export async function eligibleTourById(
   id: string,
   businessId: string,
   permissions: ReadonlySet<string>,
 ): Promise<TourDefinition | null> {
-  const tour = tourById(id);
+  const tour = tourDefinitionById(id);
   if (!tour) return null;
   const viewer = await tourViewerFor(businessId, permissions, [tour]);
   return tourForViewer(tour, viewer);

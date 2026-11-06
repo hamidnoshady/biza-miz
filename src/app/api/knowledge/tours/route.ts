@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { knowledgePage } from "@/lib/knowledge-base";
-import { tourForViewer, tourSummary, toursForPage } from "@/lib/tours";
+import { pageTourCandidates } from "@/lib/tour-baseline";
+import { tourForViewer, tourSummary } from "@/lib/tours";
 import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
 
 /**
@@ -13,6 +14,12 @@ import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
  * steps that apply to THEM. The response carries titles, counts and the caller's own progress —
  * never step copy or anchors; those come with `GET …/[tourId]` at start.
  *
+ * Which catalogue answers for a page is decided in `tour-baseline.ts`: the
+ * authored tours when the page has them (and nothing at all when the member is
+ * not eligible for one), otherwise the page's automatic baseline tour — so
+ * every registered page's «آموزش» button has something behind it without a
+ * second help button or a hand-written entry per page.
+ *
  * Separate from `/api/knowledge` on purpose: the article half of the modal
  * must keep working when this lookup fails, so neither depends on the other.
  */
@@ -23,7 +30,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const page = knowledgePage((request.nextUrl.searchParams.get("page") ?? "").trim());
   if (!page) return NextResponse.json({ error: "unknown_page" }, { status: 400 });
 
-  const candidates = toursForPage(page.key);
+  const candidates = pageTourCandidates(page.key);
   const viewer = await tourViewerFor(guard.session.businessId, guard.membership.permissions, candidates);
   const tours = candidates.flatMap((tour) => {
     const visible = tourForViewer(tour, viewer);

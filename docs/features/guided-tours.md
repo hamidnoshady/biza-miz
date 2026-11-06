@@ -5,9 +5,14 @@ existing «آموزش» button. There is no second help button: the button's one
 offers **تور تعاملی صفحه** (when the page has a tour the member may use) and
 **راهنمای پایگاه دانش** (the article / external learning page, unchanged).
 
-This document covers what the first slice ships and the rules the next slices
-must keep. The epic's remaining phases (hierarchy and learning paths, verified
-tasks, Learning Center, Tour Studio, AI discovery) are tracked on #972.
+The button never leads to a dead end: a page with no authored tour gets an
+**automatic baseline tour** derived from the Knowledge registry
+(`src/lib/tour-baseline.ts`). That is the owner's 2026-11-06 decision — one
+shared, metadata-driven system rather than a hand-written tour per page.
+
+This document covers what ships and the rules the next slices must keep. The
+epic's remaining phases (hierarchy and learning paths, verified tasks, Learning
+Center, Tour Studio, AI discovery) are tracked on #972.
 
 ## What ships
 
@@ -17,17 +22,29 @@ tasks, Learning Center, Tour Studio, AI discovery) are tracked on #972.
 | Popover placement and spotlight geometry (pure) | `src/lib/tour-geometry.ts` |
 | Progress storage, row lock | `src/lib/tours-service.ts`, migration `0259_tour_member_progress.sql` |
 | API | `GET /api/knowledge/tours?page=`, `GET /api/knowledge/tours/[tourId]`, `POST /api/knowledge/tours/[tourId]/progress` |
+| Automatic baseline tours (pure) | `src/lib/tour-baseline.ts` |
+| Coverage audit (pure) | `src/lib/tour-coverage.ts`, `npm run tours:audit` |
 | Runtime | `src/components/tours/tour-provider.tsx` (one, in `DashboardMain`), `tour-overlay.tsx` (lazy) |
 | Modal | `src/app/dashboard/knowledge-help.tsx` |
-| Tours | the catalogue below, in `TOURS` |
+| Tours | the catalogue below, in `TOURS`, plus one automatic baseline per registered page |
 
 ## Which pages have a tour
 
-Every page that has a published Knowledge Base article has an interactive tour
-behind its own «آموزش» button. Where one route draws different screens there is
-one tour per screen, and their eligibility rules are disjoint (`tours.test.ts`
-proves a member is never offered two, or the wrong one, for any trade, costing
-system, permission set or feature state).
+Every page in the canonical Knowledge registry (`KNOWLEDGE_PAGES`) — that is,
+every page that can carry an «آموزش» icon — answers with a tour. Two catalogues
+answer, and `tour-baseline.ts` decides which one owns a page:
+
+- **authored** (`TOURS` below): a reviewed, step-by-step walkthrough. It owns
+  its page outright: an eligible member gets it, an ineligible member gets
+  nothing (a baseline "about" a screen whose instructions are gated would
+  describe screens they may not be allowed to see).
+- **baseline** (`tour-baseline.ts`): an automatic, read-only introduction
+  derived from the page's own metadata, for every page no authored tour owns.
+
+Where one route draws different screens there is one authored tour per screen,
+and their eligibility rules are disjoint (`tours.test.ts` proves a member is
+never offered two, or the wrong one, for any trade, costing system, permission
+set or feature state).
 
 | Page | Tour id | Offered when |
 |---|---|---|
@@ -51,6 +68,67 @@ trade groups for the till and the inventory are derived from the industry
 profile (`salesModel`, `hasSellableCatalogue`, the `inventory`/`stock`
 modules), never listed by hand, so a new trade lands in the right group by what
 it is; `tours.test.ts` fails if a trade ends up with no till or inventory tour.
+
+## Automatic baseline tours
+
+`baselineTourForPage(page)` builds a tour from what the registry already knows —
+the canonical route, the page label and the navigation group it is filed under
+(the same grouping the Knowledge Center and the super-admin page picker show) —
+plus any **declared safe region**: a registered `data-tour-id` anchor an owning
+shared component really renders. It is a normal `TourDefinition`: same runtime,
+same overlay, same `tour_member_progress` row, same rules. Nothing about
+progress had to change.
+
+```
+intro    explain    what this page is, in its group
+region.* spotlight  each declared region (see below)
+where    explain    its canonical route and that only what the member sees is described
+learn    explain    where the written guide is, and that an authored tour will replace this intro
+```
+
+Rules that make it honest and universal:
+
+- **No catalogue entry, no PR.** A page added to `KNOWLEDGE_PAGES` gets basic
+  guidance immediately. `tour-baseline.test.ts` builds a page that exists only
+  in the test and proves the result is a valid tour.
+- **Nothing guessed.** Without a declared region the tour is explanation-only —
+  no highlight, no selector, no DOM heuristic. A page is *never* reported as
+  missing: "no authored tour yet" shows as a baseline row in the coverage
+  audit, which is the editorial backlog.
+- **One guide per page.** `pageTourCandidates(pageKey)` returns the authored
+  tours when the page has any, otherwise exactly one baseline. `tourDefinitionById`
+  applies the same rule to playbacks and progress writes, so a baseline id for
+  an authored page is unknown (404) rather than a second, competing tour.
+- **Ids are namespaced and stable.** `baseline.<route>` (e.g.
+  `baseline.accounting.orders`), so a baseline id can never collide with — or be
+  mistaken for — a hand-authored one, and progress survives a copy change.
+- **Declared regions, not discovered ones.** `PAGE_TOUR_REGIONS` maps a page key
+  (or `"*"` for every baseline page) to `{ anchor, title, body }`. Today the one
+  shared declaration is `page.header`, the anchor `page-chrome.tsx` now carries
+  on its `PageHeader`; it is a data attribute, no visual change. A page can
+  reword a shared region without showing it twice. `tours.test.ts` already fails
+  when a `data-tour-id` in the source is not registered in `TOUR_ANCHORS`, so a
+  declared region can never point at a selector nobody renders. A page that does
+  not render the shared header (the app shells that draw their own) degrades that
+  step to its explanation after three seconds — the overlay's normal rule — so it
+  is never a stuck highlight.
+- **Not an authorization input.** A baseline describes the page's label, group
+  and route — metadata that ships in the client bundle (`KNOWLEDGE_PAGES`) — and
+  never a control, a figure or a permission-gated instruction. Authored tours
+  keep deciding eligibility on the server, step by step.
+
+## Coverage audit
+
+`tourCoverage()` (pure) lists **every** registered page exactly once with
+`advanced` or `baseline`, its primary tour, step count, spotlight count and the
+anchors it points at, plus contract problems: an anchor nobody registers, a
+region for a page that does not exist, an authored tour attached to an
+unregistered page, a duplicate or colliding id. `npm run tours:audit` prints it
+(grouped like the console, `--json`, `--check` exits non-zero on a contract
+problem) and `tour-baseline.test.ts` asserts the same report is clean, so CI
+catches an anchor contract break without a browser. It distinguishes **content
+coverage** (this report) from **learning progress** (`tour_member_progress`)
+and from **business setup readiness** (`setup.progress`) on purpose.
 
 ## Eligibility, in one place
 
@@ -128,9 +206,9 @@ instead of trapping the member.
 ## Not in this slice
 
 The Superadmin **Tour Studio** (authoring, preview, publish, versions and
-rollback without a code change), the coverage report (article / tour / steps /
-missing anchors / last validation per page), cross-page tours and learning
-paths, verified-action steps, offline progress
+rollback without a code change), the parts of the coverage report that need
+editorial data (stale published article, last validation, per-page abandonment),
+cross-page tours and learning paths, verified-action steps, offline progress
 queueing, the Learning Center, Tour Studio, staff assignments and reports, the
 AI discovery tool, Hybrid cloud-pane handling (the overlay runs in the page that
 renders it; across the pane's origin boundary a route-based explanation is the

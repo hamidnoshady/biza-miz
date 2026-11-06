@@ -4,6 +4,10 @@
  * non-existent tour are indistinguishable, a progress write re-checks
  * eligibility and refuses anything but the five known events, and the
  * client can never name a step it was not given.
+ *
+ * The automatic baseline tours are exercised here too: a registered page with
+ * no authored tour answers with its baseline tour through the same two routes,
+ * and a baseline id for a page the authored catalogue owns is unknown.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
@@ -29,12 +33,16 @@ vi.mock("@/lib/tours-service", async (importOriginal) => {
   return { ...actual, loadTourProgress: mocks.loadProgress, recordTourEvent: mocks.record };
 });
 
+import { baselineTourIdForRoute } from "@/lib/tour-baseline";
 import { GET as listTours } from "./route";
 import { GET as getTour } from "./[tourId]/route";
 import { POST as postProgress } from "./[tourId]/progress/route";
 
 const PAGE = "page:/accounting/products";
 const TOUR = "accounting.products.list";
+// A registered page nobody has authored a tour for.
+const BASELINE_PAGE = "page:/crm/audit";
+const BASELINE_TOUR = baselineTourIdForRoute("/crm/audit");
 
 function member(permissions: string[]) {
   return {
@@ -91,6 +99,20 @@ describe("GET /api/knowledge/tours", () => {
     mocks.industry.mockResolvedValue("food_service");
     expect((await (await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(PAGE)}`))).json()).tours).toEqual([]);
   });
+
+  it("offers the automatic baseline tour on a page with no authored tour", async () => {
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(BASELINE_PAGE)}`));
+    const body = await res.json();
+    expect(body.tours).toHaveLength(1);
+    expect(body.tours[0]).toMatchObject({
+      id: BASELINE_TOUR,
+      route: "/crm/audit",
+      stepCount: 4,
+      progress: { status: "not_started" },
+    });
+    expect(JSON.stringify(body)).not.toContain("tour-id");
+    expect(body.tours[0].steps).toBeUndefined();
+  });
 });
 
 describe("GET /api/knowledge/tours/[tourId]", () => {
@@ -100,6 +122,19 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
     expect(res.status).toBe(200);
     expect(body.tour.steps.length).toBe(5);
     expect(body.progress.status).toBe("not_started");
+  });
+
+  it("plays back a baseline tour, and refuses one for a page the authored catalogue owns", async () => {
+    const res = await getTour(req(`/api/knowledge/tours/${BASELINE_TOUR}`), ctx(BASELINE_TOUR));
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.tour.id).toBe(BASELINE_TOUR);
+    expect(body.tour.steps.length).toBe(4);
+    expect(body.progress.status).toBe("not_started");
+
+    const shadowed = baselineTourIdForRoute("/accounting/products");
+    const refused = await getTour(req(`/api/knowledge/tours/${shadowed}`), ctx(shadowed));
+    expect(refused.status).toBe(404);
   });
 
   it("answers an ineligible and an unknown tour identically", async () => {
