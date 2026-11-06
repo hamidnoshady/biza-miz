@@ -1,0 +1,47 @@
+# #1128 §D — wave 15 work in progress
+
+## Implemented on the session branch (not released)
+
+- Additive migration `0287_agency_vendor_settlements.sql`: payment documents and
+  cost-to-payment links; posted substance freeze; tenant/reference checks;
+  reversal-stamp immutability; existing cost/recharge guards restated.
+- Posting rules for debit 2140 / credit 1100 or 1120, and the reverse direction.
+- `settleAgencyVendorCosts`: validates payees and methods, locks selected costs in
+  stable order inside the posting transaction, posts through the domain-event
+  engine, and links costs atomically. Queued/unposted entries roll back the act.
+- Register reads expose payment linkage and derived paid state. No stored paid flag.
+- Numbering, Persian source labels, exhaustive guard statuses, and tests.
+
+## Verification
+
+- Fresh database: 474 migrations applied, none deferred.
+- Vendor settlement integration suite: 8 passing tests, including concurrent
+  duplicate payments, ledger tie-out, cross-tenant cost/location refusal, and
+  posted reference immutability.
+- Focused pure/guard tests: 39 passing.
+- Scratch SQL guard harness: 43 passing (including prior cost/recharge rules).
+- Narrow TypeScript check: no new errors; existing Holoo/mssql and CSS-module
+  resolution noise excluded from that assessment. Changed-file ESLint passes.
+- Full suite and CI not run for this slice yet.
+
+## Next work / limitations
+
+1. Implement and test the reversal service using the original posted entry as the
+   authoritative reversal basis. The reversal posting rule alone is not a usable
+   reversal workflow. Check accounting reversal linkage and fiscal-period policy.
+2. Add guarded API operations and UI controls. Payments require the canonical
+   payable-payment permission, not just expense-management permission. Update MCP
+   documentation/coverage and boundary tests when routes exist.
+3. Add failure/rollback and reversal integration coverage, then full regression/CI.
+4. Implement quote → approved purchase → payable using canonical vendor identity.
+   This slice deliberately retains exact, nonblank vendor-name matching; it does
+   not claim supplier-level attribution or a complete procurement chain.
+
+The existing AP service resolves account 2100; agency costs credit 2140. Extending
+that service versus a trade-specific document remains an architecture choice to
+review before public endpoints. Do not claim the platform supplier directory is
+inherently unusable for agencies merely because existing stock-oriented purchase
+routes are unsuitable. No fifth app or replacement project/CRM engine is intended.
+
+The SQL guard does not prove that linked costs sum to the document amount; the
+service owns that invariant. Do not expose arbitrary link updates as a public API.

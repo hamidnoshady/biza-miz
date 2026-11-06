@@ -35,6 +35,10 @@ import { SETTING_KEYS, getSetting, setSetting } from "./settings";
 import {
   AGENCY_DEFAULT_PRESENTATION,
   isCostRecharged,
+  isCostSettled,
+  isVendorSettlementMethod,
+  SETTLEMENT_NUMBER_PREFIX,
+  type VendorSettlementMethod,
   parseAgencyCostPolicySetting,
   type AgencyCostPolicySetting,
 } from "./agency-reimbursable-cost";
@@ -66,6 +70,7 @@ import { query, withTenantTransaction } from "./db";
 import { getBusinessIndustry } from "./industry-guard";
 import { postgresDateToIso } from "./jalali";
 import { nextBusinessRegisterNumber } from "./register-numbering";
+import "./agency-vendor-settlement-posting";
 import { emitDomainEvent } from "./posting-engine";
 import {
   PASS_THROUGH_DEFAULT_VAT_PERCENT,
@@ -107,6 +112,16 @@ export const AGENCY_REIMBURSABLE_COST_ERROR_CODES = [
   "cost_not_posted",
   "costs_from_different_clients",
   "location_required",
+  // Settling — the act that debits 2140 and pays a vendor down (0287).
+  "settlement_empty",
+  "cost_not_found_for_settlement",
+  "cost_not_payable",
+  "cost_already_settled",
+  "costs_from_different_vendors",
+  "invalid_settlement_method",
+  "settlement_not_found",
+  "settlement_not_posted",
+  "settlement_already_reversed",
 ] as const;
 
 export type AgencyReimbursableCostErrorCode = (typeof AGENCY_REIMBURSABLE_COST_ERROR_CODES)[number];
@@ -154,6 +169,21 @@ export interface AgencyReimbursableCost {
    * with the ledger the first time somebody voided an invoice.
    */
   recharged: boolean;
+  /**
+   * The vendor payment that cleared this cost out of 2140, if there is one (0287).
+   * Null for a cost settled in cash or at the bank, which never touched the payable.
+   */
+  settlementId: string | null;
+  settlementNumber: string | null;
+  /** The payment's own `reversed_at`, read so `settled` can be derived beside it. */
+  settlementReversedAt: string | null;
+  /**
+   * Whether that payment still counts — derived from the document's reversal stamp
+   * rather than stored, for exactly the reason `recharged` is: reversing a payment
+   * writes a reversing entry and stamps the document without touching this register,
+   * so a stored flag would be a second answer that disagrees with the ledger.
+   */
+  settled: boolean;
 }
 
 export interface AgencyReimbursableCostFilters {
@@ -169,7 +199,7 @@ export interface AgencyReimbursableCostFilters {
 const COST_COLUMNS = `c.id, c.cost_number, c.party_id, c.project_id, c.vendor_name,
        c.description, c.amount_rial, c.spent_on, c.presentation, c.settled_by,
        c.note, c.entry_id, c.created_by, c.created_by_name, c.created_at, c.updated_at,
-       c.recharged_order_id, c.recharged_by, c.recharged_by_name`;
+       c.recharged_order_id, c.recharged_by, c.recharged_by_name, c.settlement_id`;
 
 // Every join carries its own `business_id`: `withTenant` establishes the RLS scope
 // but never injects one, and against the superuser test role a join without it is a
@@ -177,12 +207,14 @@ const COST_COLUMNS = `c.id, c.cost_number, c.party_id, c.project_id, c.vendor_na
 const COST_JOINS = `FROM agency_reimbursable_costs c
        JOIN parties p ON p.id = c.party_id AND p.business_id = c.business_id
   LEFT JOIN ai_projects pr ON pr.id = c.project_id AND pr.business_id = c.business_id
-  LEFT JOIN orders ro ON ro.id = c.recharged_order_id`;
+  LEFT JOIN orders ro ON ro.id = c.recharged_order_id
+  LEFT JOIN agency_vendor_settlements vs ON vs.id = c.settlement_id AND vs.business_id = c.business_id`;
 
 // `ro.status` is read so `recharged` can be *derived* rather than stored: voiding an
 // invoice flips the order and writes a reversing entry without touching this register,
 // so a stored flag would disagree with the ledger the first time somebody voided one.
-const COST_JOINED_COLUMNS = `p.name AS client_name, pr.name AS project_name, ro.status AS recharged_order_status`;
+const COST_JOINED_COLUMNS = `p.name AS client_name, pr.name AS project_name, ro.status AS recharged_order_status,
+       vs.settlement_number, vs.reversed_at AS settlement_reversed_at`;
 
 type CostRow = Record<string, unknown> & {
   id: string;
@@ -203,6 +235,9 @@ type CostRow = Record<string, unknown> & {
   recharged_by: string | null;
   recharged_by_name: string;
   recharged_order_status: string | null;
+  settlement_id: string | null;
+  settlement_number: string | null;
+  settlement_reversed_at: Date | string | null;
   created_by: string | null;
   created_by_name: string;
   created_at: Date | string;
@@ -257,6 +292,15 @@ function toCost(row: CostRow): AgencyReimbursableCost {
     recharged: isCostRecharged({
       rechargedOrderId: row.recharged_order_id,
       orderStatus: row.recharged_order_status,
+    }),
+    settlementId: row.settlement_id,
+    settlementNumber: row.settlement_number,
+    settlementReversedAt:
+      row.settlement_reversed_at === null ? null : toTimestamp(row.settlement_reversed_at),
+    settled: isCostSettled({
+      settlementId: row.settlement_id,
+      reversedAt:
+        row.settlement_reversed_at === null ? null : toTimestamp(row.settlement_reversed_at),
     }),
   };
 }
@@ -960,3 +1004,103 @@ function normalizeCostPolicyBody(
 }
 
 export { AGENCY_PASS_THROUGH_PRESENTATIONS, AGENCY_COST_SETTLEMENTS };
+
+/** A vendor payment clears whole costs; it never records a second expense. */
+export interface AgencyVendorSettlementInput {
+  costIds: string[];
+  method: VendorSettlementMethod;
+  paidOn: string;
+  note?: string;
+  locationId?: string;
+}
+
+export interface AgencyVendorSettlementResult {
+  id: string;
+  settlementNumber: string;
+  entryId: string;
+  totalRial: number;
+  settledCostIds: string[];
+}
+
+export async function settleAgencyVendorCosts(
+  businessId: string,
+  actor: { userId: string; name: string },
+  input: AgencyVendorSettlementInput,
+): Promise<AgencyVendorSettlementResult> {
+  await assertAgency(businessId);
+  if (!isVendorSettlementMethod(input.method)) {
+    throw new AgencyReimbursableCostError("invalid_settlement_method");
+  }
+  const paidOn = normalizeAgencyCostDate(input.paidOn);
+  if (!paidOn) throw new AgencyReimbursableCostError("invalid_date");
+  const rawIds = input.costIds;
+  if (!Array.isArray(rawIds) || rawIds.length === 0) {
+    throw new AgencyReimbursableCostError("settlement_empty");
+  }
+  if (rawIds.some((id) => typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+    throw new AgencyReimbursableCostError("invalid_cost_id");
+  }
+  const costIds = [...new Set(rawIds)].sort();
+  const note = normalizeAgencyCostOptionalText(input.note, AGENCY_COST_NOTE_LIMIT);
+  if (note.tooLong) throw new AgencyReimbursableCostError("text_too_long");
+  const locationId = input.locationId || (await resolveActiveLocationForUser(businessId, actor.userId))?.id;
+  if (!locationId) throw new AgencyReimbursableCostError("location_required");
+
+  return withTenantTransaction(businessId, async (client: PoolClient) => {
+    const location = await client.query(
+      `SELECT id FROM locations WHERE id = $1 AND business_id = $2`, [locationId, businessId],
+    );
+    if (!location.rowCount) throw new AgencyReimbursableCostError("location_required");
+    // Lock in stable order *before* reading settlement state. Two concurrent
+    // payments must not both observe the same unpaid cost and move cash twice.
+    const { rows } = await client.query<{
+      id: string; amount_rial: string; vendor_name: string; settled_by: string;
+      entry_id: string | null; project_id: string | null; settlement_id: string | null;
+    }>(
+      `SELECT id, amount_rial::text, vendor_name, settled_by, entry_id, project_id, settlement_id
+         FROM agency_reimbursable_costs
+        WHERE business_id = $1 AND id = ANY($2::uuid[])
+        ORDER BY id FOR UPDATE`, [businessId, costIds],
+    );
+    if (rows.length !== costIds.length) throw new AgencyReimbursableCostError("cost_not_found_for_settlement");
+    for (const row of rows) {
+      if (!row.entry_id) throw new AgencyReimbursableCostError("cost_not_posted");
+      if (row.settled_by !== "payable") throw new AgencyReimbursableCostError("cost_not_payable");
+      if (row.settlement_id) {
+        const existing = await client.query<{ reversed_at: Date | null }>(
+          `SELECT reversed_at FROM agency_vendor_settlements WHERE business_id=$1 AND id=$2`,
+          [businessId, row.settlement_id],
+        );
+        if (!existing.rows[0]?.reversed_at) throw new AgencyReimbursableCostError("cost_already_settled");
+      }
+    }
+    // No fuzzy matching of payees: identical text is required until the quote
+    // workflow supplies a canonical vendor identity. Blank payees are refused.
+    const vendorName = rows[0].vendor_name.trim();
+    if (!vendorName || rows.some((row) => row.vendor_name.trim() !== vendorName)) {
+      throw new AgencyReimbursableCostError("costs_from_different_vendors");
+    }
+    const total = rows.reduce((sum, row) => sum + BigInt(row.amount_rial), 0n);
+    if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new AgencyReimbursableCostError("invalid_amount");
+    const settlementNumber = await nextBusinessRegisterNumber("agency_vendor_settlements", businessId, SETTLEMENT_NUMBER_PREFIX);
+    const { rows: inserted } = await client.query<{ id: string }>(
+      `INSERT INTO agency_vendor_settlements
+        (business_id, location_id, settlement_number, vendor_name, method, amount_rial, paid_on, note, created_by, created_by_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+      [businessId, locationId, settlementNumber, vendorName, input.method, total.toString(), paidOn, note.value, actor.userId, actor.name],
+    );
+    const id = inserted[0].id;
+    const projects = new Set(rows.map((row) => row.project_id));
+    const { entryId } = await emitDomainEvent(client, {
+      businessId, locationId, eventType: "agency.vendor_settlement",
+      payload: { amount: total.toString(), method: input.method, paidOn, projectId: projects.size === 1 ? rows[0].project_id : null },
+      sourceType: "agency_vendor_settlement", sourceId: id, createdBy: actor.userId,
+    });
+    // A queued event is not a payment. Roll back the entire act rather than
+    // reserving costs with a flag while their liability remains in the ledger.
+    if (!entryId) throw new AgencyReimbursableCostError("settlement_not_posted");
+    await client.query(`UPDATE agency_vendor_settlements SET entry_id=$2 WHERE business_id=$1 AND id=$3`, [businessId, entryId, id]);
+    await client.query(`UPDATE agency_reimbursable_costs SET settlement_id=$2 WHERE business_id=$1 AND id=ANY($3::uuid[])`, [businessId, id, costIds]);
+    return { id, settlementNumber, entryId, totalRial: Number(total), settledCostIds: costIds };
+  });
+}
