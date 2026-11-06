@@ -997,3 +997,25 @@ describe("hardDeleteBusiness", () => {
     expect(leftovers[0].n).toBe("0");
   });
 });
+
+describe("marketing touchpoint destructive platform flows", () => {
+  it("clears touch history during confirmed reset and hard delete without affecting another tenant", async () => {
+    async function seedTouch(business: SeededBusiness) {
+      const params = [business.id, business.locationId];
+      const agent = (await db.query<{ id: string }>(`INSERT INTO marketing_agents (business_id,location_id,user_id,display_name,kind) VALUES ($1,$2,$3,'Agent','employee') RETURNING id`, [...params,business.ownerId])).rows[0].id;
+      const target = (await db.query<{ id: string }>(`INSERT INTO marketing_targets (business_id,location_id,site_label) VALUES ($1,$2,'Site') RETURNING id`, params)).rows[0].id;
+      const assignment = (await db.query<{ id: string }>(`INSERT INTO marketing_assignments (business_id,location_id,target_id,agent_id,title) VALUES ($1,$2,$3,$4,'Call') RETURNING id`, [...params,target,agent])).rows[0].id;
+      const lead = (await db.query<{ id: string }>(`INSERT INTO crm_leads (business_id,name) VALUES ($1,'Lead') RETURNING id`, [business.id])).rows[0].id;
+      await db.query(`INSERT INTO marketing_touchpoints (business_id,location_id,assignment_id,lead_id,created_by,channel,source,idempotency_key) VALUES ($1,$2,$3,$4,$5,'phone','phone',$6)`, [...params,assignment,lead,business.ownerId,randomUUID()]);
+    }
+    const reset = await seedBusiness("Touch reset", `touch-reset-${randomUUID().slice(0,8)}`);
+    const remove = await seedBusiness("Touch delete", `touch-delete-${randomUUID().slice(0,8)}`);
+    const other = await seedBusiness("Touch neighbour", `touch-other-${randomUUID().slice(0,8)}`);
+    await seedTouch(reset); await seedTouch(remove); await seedTouch(other);
+    await platformService.resetBusiness(reset.id);
+    await platformService.hardDeleteBusiness(remove.id);
+    expect((await db.query(`SELECT id FROM marketing_touchpoints WHERE business_id=$1`, [reset.id])).rowCount).toBe(0);
+    expect((await db.query(`SELECT id FROM marketing_touchpoints WHERE business_id=$1`, [remove.id])).rowCount).toBe(0);
+    expect((await db.query(`SELECT id FROM marketing_touchpoints WHERE business_id=$1`, [other.id])).rowCount).toBe(1);
+  });
+});

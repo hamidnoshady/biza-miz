@@ -561,7 +561,8 @@ const CRM_ELIGIBLE_DEAL = `d.business_id = $1
   AND NOT EXISTS (SELECT 1 FROM crm_leads l WHERE l.business_id = $1 AND l.converted_deal_id = d.id)`;
 const CRM_ELIGIBLE_LEAD = `l.business_id = $1
   AND l.converted_party_id IS NULL AND l.converted_deal_id IS NULL
-  AND NOT EXISTS (SELECT 1 FROM platform_company_web_leads w WHERE w.business_id = $1 AND w.lead_id = l.id)`;
+  AND NOT EXISTS (SELECT 1 FROM platform_company_web_leads w WHERE w.business_id = $1 AND w.lead_id = l.id)
+  AND NOT EXISTS (SELECT 1 FROM marketing_touchpoints t WHERE t.business_id = $1 AND t.lead_id = l.id)`;
 
 async function deleteAndVerify(
   client: PoolClient,

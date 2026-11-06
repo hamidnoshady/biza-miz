@@ -116,6 +116,21 @@ describe("dependencies", () => {
     expect(impliedPermissions([PERMISSIONS.commissionCalculate])).toContain("commission.view");
   });
 
+  it("pairs Growth management with its own read without granting CRM or directory access", () => {
+    for (const [manage, view] of [
+      [PERMISSIONS.marketersManage, PERMISSIONS.marketersView],
+      [PERMISSIONS.marketingTargetsManage, PERMISSIONS.marketingTargetsView],
+      [PERMISSIONS.marketingAssignmentsManage, PERMISSIONS.marketingAssignmentsView],
+      [PERMISSIONS.marketingAttributionManage, PERMISSIONS.marketingAttributionView],
+    ] as const) {
+      const implied = impliedPermissions([manage]);
+      expect(implied).toContain(view);
+      expect(implied).not.toContain(PERMISSIONS.crmView);
+      expect(implied).not.toContain(PERMISSIONS.crmManage);
+      expect(implied).not.toContain(PERMISSIONS.partiesView);
+    }
+  });
+
   it("resolves a chain transitively", () => {
     // amend_closed → void, and discount → create → menu.view.
     expect(impliedPermissions([PERMISSIONS.cmsPublish])).toEqual(

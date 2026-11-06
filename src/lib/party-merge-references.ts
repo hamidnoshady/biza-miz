@@ -166,6 +166,15 @@ export interface PartyReference {
  * CRM's own objects, then integrations, then the audit rows.
  */
 export const PARTY_REFERENCES: readonly PartyReference[] = [
+  {
+    table: "marketing_targets",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason: "An operational Growth target must resolve to the surviving canonical party after a CRM merge.",
+    preview: true,
+    previewLabel: "مقصد بازاریابی",
+  },
   // -- Accounting-owned operational data ------------------------------------
   {
     table: "orders",

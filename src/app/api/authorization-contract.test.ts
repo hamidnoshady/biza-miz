@@ -140,9 +140,9 @@ describe("families migrated off role-only gating stay migrated", () => {
     expect(routes.length).toBeGreaterThan(8);
     for (const relative of routes) {
       const source = read(relative);
-      // `torob` is the channel's own family (issue #894), seated in Growth.
+      // `torob` and `marketers` are their own capability families within Growth.
       expect(source, relative).toMatch(
-        /PERMISSIONS\.(growth|loyalty|campaigns|marketing|storeCredit|giftCards|commission|torob)\w+/,
+        /PERMISSIONS\.(?:marketers(?:View|Manage)|(?:growth|loyalty|campaigns|marketing|storeCredit|giftCards|commission|torob)\w+)/,
       );
       expect(source, relative).not.toMatch(/requireRole\(/);
     }

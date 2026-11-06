@@ -430,6 +430,7 @@ describe("purge manifest", () => {
       "crm.cases_and_case_events",
       "crm.deals_linked_to_ledger_or_workspace",
       "crm.converted_or_externally_linked_leads",
+      "crm.marketing_touch_linked_leads",
       "crm.activities_attached_to_protected_records",
       "crm.pipelines_referenced_by_protected_deals",
       "crm.canonical_party_and_customer_data",

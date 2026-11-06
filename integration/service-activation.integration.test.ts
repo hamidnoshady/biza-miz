@@ -1044,3 +1044,22 @@ describe("wizard state", () => {
     expect(Number(rows[0].count)).toBe(1);
   });
 });
+
+describe("CRM purge and Growth touchpoints", () => {
+  it("retains leads linked to Growth history and still purges independent leads", async () => {
+    await publishCrmTariff(); await setRetention(7); await activateCrm();
+    const location = (await db.query<{ id: string }>(`INSERT INTO locations (business_id,name) VALUES ($1,'Retention branch') RETURNING id`, [BUSINESS_A])).rows[0].id;
+    const user = (await db.query<{ id: string }>(`INSERT INTO users (business_id,full_name,role,password_hash,location_id,location_scope) VALUES ($1,'Retention actor','cashier','x',$2,'home') RETURNING id`, [BUSINESS_A, location])).rows[0].id;
+    const agent = (await db.query<{ id: string }>(`INSERT INTO marketing_agents (business_id,location_id,user_id,display_name,kind) VALUES ($1,$2,$3,'Agent','employee') RETURNING id`, [BUSINESS_A,location,user])).rows[0].id;
+    const target = (await db.query<{ id: string }>(`INSERT INTO marketing_targets (business_id,location_id,site_label) VALUES ($1,$2,'Site') RETURNING id`, [BUSINESS_A,location])).rows[0].id;
+    const assignment = (await db.query<{ id: string }>(`INSERT INTO marketing_assignments (business_id,location_id,target_id,agent_id,title) VALUES ($1,$2,$3,$4,'Call') RETURNING id`, [BUSINESS_A,location,target,agent])).rows[0].id;
+    const leads = (await db.query<{ id: string }>(`INSERT INTO crm_leads (business_id,name) VALUES ($1,'Linked'),($1,'Independent') RETURNING id`, [BUSINESS_A])).rows;
+    await db.query(`INSERT INTO marketing_touchpoints (business_id,location_id,assignment_id,lead_id,created_by,channel,source,idempotency_key) VALUES ($1,$2,$3,$4,$5,'phone','phone',$6)`, [BUSINESS_A,location,assignment,leads[0].id,user,randomUUID()]);
+    await activation.disableService({ businessId: BUSINESS_A, identity: { kind: "app", key: "crm" }, now: at(60) });
+    const purge = await retention.runDueServicePurges({ now: at(60 + 8 * 24 * 60) });
+    expect(purge.failed).toBe(0); expect(purge.partial).toBe(1);
+    expect((await db.query(`SELECT id FROM crm_leads WHERE id = $1`, [leads[0].id])).rowCount).toBe(1);
+    expect((await db.query(`SELECT id FROM crm_leads WHERE id = $1`, [leads[1].id])).rowCount).toBe(0);
+    expect((await db.query(`SELECT id FROM marketing_touchpoints WHERE lead_id = $1`, [leads[0].id])).rowCount).toBe(1);
+  });
+});

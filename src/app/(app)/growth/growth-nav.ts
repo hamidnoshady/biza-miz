@@ -50,6 +50,15 @@ export const GROWTH_NAV_ITEMS: readonly GrowthNavItem[] = [
     icon: UsersIcon,
   },
   {
+    key: "marketers",
+    label: "مدیریت بازاریابان",
+    description: "فهرست بازاریابان و همکاران",
+    icon: UsersIcon,
+  },
+  { key: "marketing-targets", label: "مقصدهای بازاریابی", description: "محل‌های هدف و ارتباط با اشخاص", icon: UsersIcon },
+  { key: "marketing-assignments", label: "ماموریت‌های بازاریابی", description: "وظایف بازاریابان", icon: UsersIcon },
+  { key: "marketing-touchpoints", label: "تعاملات بازاریابی", description: "ثبت تعاملات مرتبط با سرنخ‌های CRM", icon: MessageCircleIcon },
+  {
     key: "campaigns",
     label: "کمپین‌ها",
     description: "موتور تخفیف و اثربخشی",
