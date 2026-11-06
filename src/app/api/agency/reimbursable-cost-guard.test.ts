@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 /**
  * Pins §D's reimbursable-cost error map.
  *
@@ -218,4 +219,22 @@ describe("readRechargeBody — the recharge's request shape", () => {
     const tenders = [{ method: "cash", amount: "1000" }];
     expect((await readRechargeBody(req(JSON.stringify({ tenders }))))?.tenders).toEqual(tenders);
   });
+  it("returns a conflict for fiscal posting controls instead of a server error", async () => {
+    const response = costErrorResponse(new Error("fiscal_period_locked"));
+    expect(response?.status).toBe(409);
+    expect(await response?.json()).toEqual({ error: "fiscal_period_locked" });
+  });
+
+  it("pins payment and reversal boundaries to payable authority rather than expense authority", () => {
+    for (const path of [
+      "src/app/api/agency/reimbursable-costs/settle/route.ts",
+      "src/app/api/agency/vendor-settlements/[id]/reverse/route.ts",
+    ]) {
+      const source = readFileSync(path, "utf8");
+      expect(source).toContain("withTenantScope");
+      expect(source).toContain("requirePermission(PERMISSIONS.financePayablesManage)");
+      expect(source).not.toContain("requirePermission(PERMISSIONS.financeExpensesManage)");
+    }
+  });
+
 });
