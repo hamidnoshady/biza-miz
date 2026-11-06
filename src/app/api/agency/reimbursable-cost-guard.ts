@@ -76,6 +76,15 @@ export const REIMBURSABLE_COST_ERROR_STATUS: Record<AgencyReimbursableCostErrorC
   // Not the member's field — the tenant has no active branch to bill from, so the
   // request was reasonable and the setup is what says no.
   location_required: 409,
+  settlement_empty: 400,
+  cost_not_found_for_settlement: 404,
+  cost_not_payable: 409,
+  cost_already_settled: 409,
+  costs_from_different_vendors: 400,
+  invalid_settlement_method: 400,
+  settlement_not_found: 404,
+  settlement_not_posted: 409,
+  settlement_already_reversed: 409,
 };
 
 /** The SQLSTATE on an error, read off the shape rather than by importing `pg`. */

@@ -45,7 +45,9 @@ export type RegisterNumberedTable =
   // reason a brief and a proposal are: a campaign belongs to the client
   // relationship, and a brand of a group has its own series of them.
   | "agency_client_campaigns"
-  | "agency_reimbursable_costs";
+  | "agency_reimbursable_costs"
+  // Issue #1128 §D — the payment that clears the vendor payable it created.
+  | "agency_vendor_settlements";
 
 export type RegisterNumberedColumn =
   | "variation_number"
@@ -59,7 +61,8 @@ export type RegisterNumberedColumn =
   | "proposal_number"
   | "campaign_number"
   // Issue #1128 §D — money spent on a client's behalf, awaiting its recharge.
-  | "cost_number";
+  | "cost_number"
+  | "settlement_number";
 
 const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   aec_variations: "variation_number",
@@ -73,6 +76,11 @@ const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
   agency_proposals: "proposal_number",
   agency_client_campaigns: "campaign_number",
   agency_reimbursable_costs: "cost_number",
+  // Issue #1128 §D — the payment that clears the vendor payable. Numbered per
+  // agency, like the cost it settles: a vendor quotes a payment number over the
+  // phone without reference to one client or one project, and one payment often
+  // clears costs from several of both.
+  agency_vendor_settlements: "settlement_number",
 };
 
 /**
