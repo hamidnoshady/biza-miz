@@ -26,11 +26,13 @@
  *     the fact that this backup is gone — stays visible.
  */
 import { promises as fs } from "node:fs";
+import path from "node:path";
 import { deploymentRole } from "./deployment-role";
 import { readDeploymentProfile, type DeploymentProfile } from "./deployment-mode";
 import { getBackupConfig, runBackupNow, runCloudUpload } from "./backup-service";
 import { logicalSnapshotScopeTag } from "./backup-policy";
-import { s3Delete } from "./s3-lite";
+import { s3Delete, s3List } from "./s3-lite";
+import { removeLocalMediaSidecars } from "./tenant-backup-media";
 import {
   businessCustodySummary,
   installedSchemaVersion,
@@ -427,6 +429,10 @@ export async function deleteBusinessArtifact(
       // An already-missing file is not an error: retention is idempotent.
       if (located.ok) {
         await fs.rm(located.path, { force: true });
+        // §7 — the sidecars are the rest of the backup: deleting the payload and
+        // leaving them would keep the business's media in the bucket after an
+        // operator destroyed it, which is the opposite of #1041.
+        await removeLocalMediaSidecars(path.dirname(located.path), row.storageRef);
         deletedBytes = true;
       }
     } else {
@@ -444,6 +450,10 @@ export async function deleteBusinessArtifact(
           ? `${storage.prefix}tenants/${logicalSnapshotScopeTag(businessId)}/${row.storageRef}`
           : `${storage.prefix}${row.storageRef}`;
       await s3Delete(storage.s3, key);
+      const sidecarPrefix = `${key}.media/`;
+      for (const object of await s3List(storage.s3, sidecarPrefix)) {
+        if (object.key.startsWith(sidecarPrefix)) await s3Delete(storage.s3, object.key);
+      }
       deletedBytes = true;
     }
   } catch {

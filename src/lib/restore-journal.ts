@@ -42,6 +42,11 @@ export const RESTORE_PHASES = [
   "apply_succeeded",
   "post_restore_reconnect_succeeded",
   "post_restore_reconnect_failed",
+  // Media binaries restored beside the rows (issue #903 §7): after the swap
+  // commits, because writing objects is network work that must not be able to
+  // roll back a database transaction.
+  "media_restored",
+  "media_restore_failed",
 ] as const;
 
 export type RestorePhase = (typeof RESTORE_PHASES)[number];

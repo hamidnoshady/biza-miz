@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   tenantDir: vi.fn(),
   profile: vi.fn(),
   deleteObject: vi.fn(),
+  listObjects: vi.fn(),
   markState: vi.fn(),
   schemaVersion: vi.fn(),
   verify: vi.fn(),
@@ -37,7 +38,7 @@ vi.mock("./backup-service", () => ({
 }));
 vi.mock("./deployment-mode", () => ({ readDeploymentProfile: mocks.profile }));
 vi.mock("./deployment-role", () => ({ deploymentRole: () => "central" }));
-vi.mock("./s3-lite", () => ({ s3Delete: mocks.deleteObject }));
+vi.mock("./s3-lite", () => ({ s3Delete: mocks.deleteObject, s3List: mocks.listObjects }));
 vi.mock("./tenant-backup-artifacts-service", () => ({
   installedSchemaVersion: mocks.schemaVersion,
   markArtifactState: mocks.markState,
@@ -127,6 +128,7 @@ beforeEach(async () => {
   mocks.config.mockResolvedValue({ directory: null, cloud: { enabled: true } });
   mocks.profile.mockResolvedValue({ profile: "cloud" });
   mocks.deleteObject.mockResolvedValue(undefined);
+  mocks.listObjects.mockResolvedValue([]);
   mocks.markState.mockResolvedValue(true);
   mocks.schemaVersion.mockResolvedValue(7);
   mocks.verify.mockResolvedValue({ ok: true, tables: 3 });

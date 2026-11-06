@@ -40,6 +40,7 @@ import {
   signBackupManifest,
   type BackupComponent,
   type BackupComponentKey,
+  type BackupMediaCapture,
   type BackupComponentState,
   type BackupManifest,
   type BackupPayloadFormat,
@@ -116,6 +117,12 @@ function componentForTable(table: string): BackupComponentKey {
 export function buildComponentInventory(
   tables: { name: string; rows: number }[],
   mediaAttachments = 0,
+  /**
+   * How many of those attachments this run actually carried, and how many bytes
+   * they cost. Omitted (the pre-#903 call shape) means none were captured, which
+   * is exactly what `excluded` said before binaries existed.
+   */
+  mediaCaptured: { captured: number } = { captured: 0 },
 ): { key: BackupComponentKey; state: BackupComponentState; rows: number }[] {
   const byComponent = new Map<BackupComponentKey, number>();
   for (const table of tables) {
@@ -129,7 +136,16 @@ export function buildComponentInventory(
     components.push({ key, state: "included", rows });
   }
   if (mediaAttachments > 0 && !components.some((component) => component.key === "media.attachments")) {
-    components.push({ key: "media.attachments", state: "excluded", rows: mediaAttachments });
+    // `included` only when the binaries were actually carried. A run that
+    // captured some but not all is still `excluded` here and says why through
+    // the manifest's `skipped`/`clipped` counters, which make the backup
+    // `partial` — the label never claims bytes the bucket does not hold.
+    const allCaptured = mediaCaptured.captured >= mediaAttachments && mediaAttachments > 0;
+    components.push({
+      key: "media.attachments",
+      state: allCaptured ? "included" : "excluded",
+      rows: mediaAttachments,
+    });
   }
   for (const [key, state] of EXTERNAL_COMPONENTS) {
     if (!components.some((component) => component.key === key)) components.push({ key, state, rows: 0 });
@@ -309,6 +325,8 @@ export interface FinalizeArtifactInput {
   runId?: string | null;
   createdBy?: string | null;
   retentionUntil?: Date | null;
+  /** Media binaries stored beside the payload (issue #903 §7), or null. */
+  media?: BackupMediaCapture | null;
 }
 
 export type FinalizeResult =
@@ -349,6 +367,7 @@ export async function registerFinishedArtifact(input: FinalizeArtifactInput): Pr
       state: component.state,
       rows: component.rows,
     })) as Pick<BackupComponent, "key" | "state" | "rows">[],
+    media: input.media ?? null,
   };
 
   let manifest: BackupManifest;
