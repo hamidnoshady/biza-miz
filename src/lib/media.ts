@@ -241,6 +241,7 @@ export function normalizeKeyPrefix(prefix: string): string {
 // ---------------------------------------------------------------------------
 
 export interface MediaStorageConfig {
+  forcePathStyle?: boolean;
   enabled: boolean;
   endpoint: string;
   region: string;
@@ -258,6 +259,7 @@ export interface MediaStorageConfig {
 
 export const DEFAULT_MEDIA_CONFIG: MediaStorageConfig = {
   enabled: false,
+  forcePathStyle: true,
   endpoint: "",
   region: "us-east-1",
   bucket: "",
@@ -380,6 +382,7 @@ export function validateMediaConfigInput(input: unknown, existing: MediaStorageC
     ok: true,
     config: {
       enabled,
+      forcePathStyle: bool(body.forcePathStyle, existing.forcePathStyle ?? true),
       endpoint: endpoint.replace(/\/+$/, ""),
       region,
       bucket,

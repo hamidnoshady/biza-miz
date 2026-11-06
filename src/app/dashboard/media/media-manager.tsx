@@ -1111,6 +1111,9 @@ export function MediaManager() {
                 >
                   {UPLOAD_STATUS_LABELS[event.status]}
                   {event.status === "error" && event.message ? ` — ${event.message}` : ""}
+                  {event.status === "error" && event.stage ? (
+                    <span className="block">مرحله: {({ config: "پیکربندی", temp_file: "فایل موقت", s3_upload: "بارگذاری ابری", s3_read: "خواندن ابری", database: "پایگاه داده", aborted: "لغو درخواست" } as Record<string, string>)[event.stage] ?? "نامشخص"}</span>
+                  ) : null}
                 </span>
               </div>
             ))}

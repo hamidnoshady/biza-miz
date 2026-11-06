@@ -115,6 +115,7 @@ const STEP_LABELS: Record<MediaHealthStepId, string> = {
 
 function defaultDeps(config: MediaStorageConfig): MediaStorageHealthDeps {
   const s3 = {
+    forcePathStyle: config.forcePathStyle,
     endpoint: config.endpoint,
     region: config.region,
     bucket: config.bucket,
