@@ -244,6 +244,7 @@ const ARTICLE_PAGES = [
   "page:/accounting/products/attributes",
   "page:/accounting/products/reports",
   "page:/accounting/products/barcode-templates",
+  "page:/accounting/cosmetics",
 ] as const;
 
 const everyPermission = new Set<string>(ALL_PERMISSIONS);
@@ -266,11 +267,57 @@ function viewer(
 
 const idsFor = (page: string, v: TourViewer) => toursForViewer(page, v).map((t) => t.id);
 
-describe("tour coverage of the nine article pages", () => {
+describe("tour coverage of the article pages", () => {
   it("has at least one tour for each of them, and every tour page is a real «آموزش» page", () => {
     for (const page of ARTICLE_PAGES) expect(toursForPage(page).length, page).toBeGreaterThan(0);
     const known = new Set(KNOWLEDGE_PAGES.map((p) => p.key));
     for (const def of TOURS) expect(known.has(def.pageKey), def.id).toBe(true);
+  });
+
+  it("offers the cosmetics tour only on the cosmetics page and only to that trade", () => {
+    const page = "page:/accounting/cosmetics";
+    const cosmeticsTour = tourById("accounting.cosmetics.overview")!;
+    expect(cosmeticsTour.route).toBe("/accounting/cosmetics");
+    expect(cosmeticsTour.steps[0].kind).toBe("explain");
+    expect(cosmeticsTour.steps.map((step) => step.id)).toEqual([
+      "welcome", "sections", "expiry", "receive", "write-off",
+      "brands-matrix", "legal-profile", "testers-barcodes", "reports",
+    ]);
+    for (const industry of INDUSTRIES) {
+      expect(idsFor(page, viewer(industry)), industry).toEqual(
+        industry === "cosmetics" ? ["accounting.cosmetics.overview"] : [],
+      );
+    }
+    expect(idsFor(page, viewer("cosmetics", noPermission))).toEqual([]);
+    expect(tourFactsNeeded(toursForPage(page))).toEqual({ features: false, inventorySystem: false });
+  });
+
+  it("narrows the cosmetics walkthrough to the member's actual permissions", () => {
+    const page = "page:/accounting/cosmetics";
+    const viewOnly = toursForViewer(page, viewer(
+      "cosmetics", new Set([PERMISSIONS.inventoryView]),
+    ))[0];
+    expect(viewOnly.steps.map((step) => step.id)).toEqual(["welcome", "sections"]);
+
+    const reporting = toursForViewer(page, viewer(
+      "cosmetics", new Set([PERMISSIONS.inventoryView, PERMISSIONS.reportsView]),
+    ))[0];
+    expect(reporting.steps.map((step) => step.id)).toEqual([
+      "welcome", "sections", "expiry", "reports",
+    ]);
+
+    const editing = toursForViewer(page, viewer(
+      "cosmetics", new Set([PERMISSIONS.inventoryView, PERMISSIONS.inventoryAdjust]),
+    ))[0];
+    expect(editing.steps.map((step) => step.id)).toEqual([
+      "welcome", "sections", "receive", "brands-matrix", "legal-profile", "testers-barcodes",
+    ]);
+
+    const full = toursForViewer(page, viewer("cosmetics"))[0];
+    expect(full.steps).toHaveLength(9);
+    expect(full.steps.some((step) => step.id === "write-off")).toBe(true);
+    expect(tourSummary(viewOnly, null).stepCount).toBe(2);
+    expect(tourSummary(full, null).stepCount).toBe(9);
   });
 
   it("keeps the original five-step products tour as it was", () => {
