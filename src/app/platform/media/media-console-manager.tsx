@@ -33,6 +33,7 @@ import {
 
 interface MaskedConfig {
   enabled: boolean;
+  forcePathStyle?: boolean;
   endpoint: string;
   region: string;
   bucket: string;
@@ -115,6 +116,7 @@ interface ConnectionTestReport {
 }
 
 interface PreviousStorageSummary {
+  forcePathStyle?: boolean;
   endpoint: string;
   region: string;
   bucket: string;
@@ -271,6 +273,7 @@ export function MediaConsoleManager() {
     setNotice("");
     const body: Record<string, unknown> = {
       enabled: config.enabled,
+      forcePathStyle: config.forcePathStyle ?? true,
       endpoint: config.endpoint,
       region: config.region,
       bucket: config.bucket,
@@ -342,6 +345,7 @@ export function MediaConsoleManager() {
     const body: Record<string, unknown> = {
       mode: "migrate",
       enabled: config.enabled,
+      forcePathStyle: config.forcePathStyle ?? true,
       endpoint: config.endpoint,
       region: config.region,
       bucket: config.bucket,
@@ -528,6 +532,12 @@ export function MediaConsoleManager() {
             className="size-4"
           />
           کتابخانهٔ رسانه برای کسب‌وکارها فعال باشد
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" disabled={!canManage} checked={config.forcePathStyle ?? true}
+            onChange={(e) => patch({ forcePathStyle: e.target.checked })} />
+          آدرس‌دهی مسیر باکت (Path-style)
+          <span className="text-muted-foreground">برای Virtual-host غیرفعال کنید؛ پیش از آزمایش ذخیره کنید.</span>
         </label>
         <div className="grid gap-x-4 sm:grid-cols-2">
           <Field label="آدرس سرویس (Endpoint)">

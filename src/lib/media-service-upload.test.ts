@@ -71,7 +71,7 @@ vi.mock("./billing/runtime", () => ({
 }));
 
 import { MediaStorageBusyError } from "./media-errors";
-import { dedupeOrStoreMediaAsset, migrateMediaStorage, rollbackMediaStorage } from "./media-service";
+import { dedupeOrStoreMediaAsset, getMediaConfig, saveMediaConfig, migrateMediaStorage, rollbackMediaStorage } from "./media-service";
 
 function config(over: Partial<MediaStorageConfig> = {}): MediaStorageConfig {
   return {
@@ -117,6 +117,8 @@ const INSERT = "INSERT INTO media_assets";
 function scriptClient(input: { commitError?: unknown } = {}) {
   clientQuery.mockImplementation(async (sql: string) => {
     const text = String(sql);
+    if (text.includes("pg_try_advisory_lock_shared")) return { rows: [{ locked: true }] };
+    if (text.includes("FROM platform_media_config")) return { rows: [{ enabled: true, endpoint: "https://s3.parspack.com", region: "ir-thr-at1", bucket: "media-bucket", key_prefix: "media/", access_key_id: "AKIA_TEST", secret_access_key: "secret-value", force_path_style: true }] };
     if (text === "BEGIN" || text.startsWith("SELECT set_config") || text.includes("pg_advisory_xact_lock")) {
       return { rows: [] };
     }
@@ -134,7 +136,7 @@ function scriptClient(input: { commitError?: unknown } = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  query.mockResolvedValue({ rows: [] });
+  query.mockImplementation(async (sql: string) => ({ rows: sql.includes("gen_random_uuid") ? [{ id: ASSET_ID }] : [] }));
   s3Put.mockResolvedValue(undefined);
   s3PutFile.mockResolvedValue(undefined);
   s3Delete.mockResolvedValue(undefined);
@@ -243,5 +245,119 @@ describe("migrate/rollback serialization (issue #1080 P1.7)", () => {
     const outcome = await rollbackMediaStorage({ actorEmail: "ops@bizamiz.test", adminId: null });
     expect(outcome).toMatchObject({ ok: false, error: "migration_in_progress" });
     expect(release).toHaveBeenCalled();
+  });
+});
+
+describe("upload transaction boundaries", () => {
+  const input = () => ({ businessId: BID, userId: null, config: config(), kind: "image" as const,
+    fileName: "outside.png", mimeType: "image/png", bytes: Buffer.alloc(16), sha256: "d".repeat(64) });
+
+  it("finishes the object upload before opening the metadata transaction", async () => {
+    s3Put.mockImplementationOnce(async () => {
+      expect(clientQuery).not.toHaveBeenCalledWith("BEGIN");
+    });
+    const result = await dedupeOrStoreMediaAsset(input());
+    expect(result.action).toBe("created");
+    expect(s3Put.mock.calls[0][0]).toMatchObject({ forcePathStyle: true });
+    expect(clientQuery).toHaveBeenCalledWith("COMMIT");
+    expect(s3Delete).not.toHaveBeenCalled();
+  });
+
+  it("does not write any object when acquiring the database connection fails", async () => {
+    connect.mockRejectedValueOnce(new Error("pool unavailable"));
+    await expect(dedupeOrStoreMediaAsset(input())).rejects.toThrow("pool unavailable");
+    expect(s3Put).not.toHaveBeenCalled();
+    expect(s3Delete).not.toHaveBeenCalled();
+  });
+
+  it("compensates once after rollback when metadata insertion fails", async () => {
+    const implementation = clientQuery.getMockImplementation()!;
+    clientQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes(INSERT)) throw new Error("insert failed");
+      return implementation(sql);
+    });
+    await expect(dedupeOrStoreMediaAsset(input())).rejects.toThrow("insert failed");
+    expect(s3Delete).toHaveBeenCalledTimes(1);
+    expect(s3Delete.mock.invocationCallOrder[0]).toBeLessThan(release.mock.invocationCallOrder[0]);
+  });
+
+  it("removes only the newly staged object when a concurrent upload already won deduplication", async () => {
+    const implementation = clientQuery.getMockImplementation()!;
+    clientQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM media_assets") && sql.includes("sha256")) return { rows: [{ ...assetRow(), id: "existing-id" }] };
+      return implementation(sql);
+    });
+    const result = await dedupeOrStoreMediaAsset(input());
+    expect(result.reused).toBe(true);
+    expect(result.asset.id).toBe("existing-id");
+    expect(s3Delete.mock.calls[0][1]).toContain(ASSET_ID);
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes(INSERT))).toBe(false);
+  });
+});
+
+describe("upload storage-operation coordination", () => {
+  const input = () => ({ businessId: BID, userId: null, config: config(), kind: "image" as const,
+    fileName: "coordinated.png", mimeType: "image/png", bytes: Buffer.alloc(16), sha256: "e".repeat(64) });
+
+  it("refuses a write when an exclusive migration/rollback lock is already held", async () => {
+    const implementation = clientQuery.getMockImplementation()!;
+    clientQuery.mockImplementation(async (sql: string) => sql.includes("pg_try_advisory_lock_shared")
+      ? { rows: [{ locked: false }] } : implementation(sql));
+    await expect(dedupeOrStoreMediaAsset(input())).rejects.toBeInstanceOf(MediaStorageBusyError);
+    expect(s3Put).not.toHaveBeenCalled();
+    expect(clientQuery).not.toHaveBeenCalledWith("BEGIN");
+    expect(release).toHaveBeenCalled();
+  });
+
+  it("refuses stale request configuration read before a completed cutover", async () => {
+    const implementation = clientQuery.getMockImplementation()!;
+    clientQuery.mockImplementation(async (sql: string) => {
+      const result = await implementation(sql);
+      if (sql.includes("FROM platform_media_config")) result.rows[0].bucket = "new-bucket";
+      return result;
+    });
+    await expect(dedupeOrStoreMediaAsset(input())).rejects.toBeInstanceOf(MediaStorageBusyError);
+    expect(s3Put).not.toHaveBeenCalled();
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("pg_advisory_unlock_shared"))).toBe(true);
+  });
+
+  it("removes staged bytes and never opens a transaction if the caller cancels during S3 I/O", async () => {
+    const controller = new AbortController();
+    s3Put.mockImplementationOnce(async () => controller.abort());
+    await expect(dedupeOrStoreMediaAsset({ ...input(), signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    expect(s3Delete).toHaveBeenCalledTimes(1);
+    expect(clientQuery).not.toHaveBeenCalledWith("BEGIN");
+  });
+
+  it("evicts a session whose shared advisory unlock fails instead of leaking a pool lock", async () => {
+    const implementation = clientQuery.getMockImplementation()!;
+    clientQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes("pg_advisory_unlock_shared")) throw new Error("connection lost");
+      return implementation(sql);
+    });
+    await dedupeOrStoreMediaAsset(input());
+    expect(release).toHaveBeenCalledWith(true);
+    expect(s3Delete).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("media addressing persistence", () => {
+  it("saves the explicit addressing boolean alongside unchanged connection settings", async () => {
+    await saveMediaConfig(config({ forcePathStyle: false }), null);
+    const [sql, values] = query.mock.calls[0];
+    expect(sql).toContain("force_path_style = $15");
+    expect(values[1]).toBe("https://s3.parspack.com");
+    expect(values[3]).toBe("media-bucket");
+    expect(values[14]).toBe(false);
+  });
+
+  it("reads the primary mode and preserves legacy path-style fallback despite the old unused false default", async () => {
+    query.mockResolvedValueOnce({ rows: [{ enabled: true, endpoint: "https://s3.example.com", region: "us-east-1", bucket: "bucket",
+      force_path_style: false, previous_force_path_style: false, previous_media_force_path_style: null,
+      previous_endpoint: "https://old.example.com", previous_bucket: "old-bucket", previous_access_key: "key", previous_secret_key: "secret" }] });
+    const saved = await getMediaConfig();
+    expect(saved.forcePathStyle).toBe(false);
+    expect(saved.previousFallback?.forcePathStyle).toBe(true);
   });
 });

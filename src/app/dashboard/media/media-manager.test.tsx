@@ -630,7 +630,7 @@ describe("MediaManager upload panel", () => {
     // a 422 is not retryable, so this must appear as one attempt, not a
     // silent retry loop.
     const fetchMock = routeFetch({
-      upload: () => ({ status: 422, body: { message: "نوع فایل مجاز نیست." } }),
+      upload: () => ({ status: 422, body: { message: "نوع فایل مجاز نیست.", stage: "s3_upload", reference: "media-support-ref", retryable: false } }),
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -652,6 +652,8 @@ describe("MediaManager upload panel", () => {
         ).toContain("ناموفق");
       });
     });
+    expect(screen.getByText(/مرحله: بارگذاری ابری/)).toBeTruthy();
+    expect(screen.getAllByText(/media-support-ref/).length).toBeGreaterThan(0);
     // The failure count must survive `upload()`'s own `reload()` call — a
     // real bug this test caught: `reload()`'s underlying `load()` clears the
     // shared `error` state on every successful library refresh, which used

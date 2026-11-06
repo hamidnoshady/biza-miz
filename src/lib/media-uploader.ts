@@ -47,6 +47,7 @@ export interface UploadProgressEvent {
    * structured `[media]` log line. Appended to `message` as well, so no caller
    * can show the failure without it.
    */
+  stage?: string;
   reference?: string;
   asset?: UploadedAssetSummary;
 }
@@ -92,7 +93,7 @@ async function uploadOnce(
   signal: AbortSignal,
 ): Promise<
   | { ok: true; asset: UploadedAssetSummary }
-  | { ok: false; retryable: boolean; message: string; reference?: string }
+  | { ok: false; retryable: boolean; message: string; reference?: string; stage?: string }
 > {
   const form = new FormData();
   form.set("file", file);
@@ -121,6 +122,7 @@ async function uploadOnce(
     folderMismatch?: boolean;
     /** Server's own retry verdict; overrides the status-based guess below. */
     retryable?: boolean;
+    stage?: string;
     reference?: string;
   };
   try {
@@ -151,6 +153,7 @@ async function uploadOnce(
     retryable: typeof body.retryable === "boolean" ? body.retryable : RETRYABLE_STATUS.has(res.status),
     message: reference ? `${message} (کد پیگیری: ${reference})` : message,
     reference,
+    stage: typeof body.stage === "string" ? body.stage : undefined,
   };
 }
 
@@ -219,6 +222,7 @@ export function uploadFiles(files: File[], options: UploadFilesOptions = {}): Up
           attempt,
           message: outcome.message,
           reference: outcome.reference,
+          stage: outcome.stage,
         };
         results.push(event);
         emit(event);
