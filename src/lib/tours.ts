@@ -84,6 +84,10 @@ export const TOUR_ANCHORS = {
   barcodeTemplates: "barcode-templates.list",
   barcodeAdd: "barcode-templates.add",
   barcodeSave: "barcode-templates.save",
+  // Cosmetics uses two tabs; only the batch tab is initially mounted.
+  cosmeticsSections: "cosmetics.sections",
+  cosmeticsExpiryList: "cosmetics.expiry-list",
+  cosmeticsBatchForm: "cosmetics.batch-form",
 } as const;
 
 export type TourAnchor = (typeof TOUR_ANCHORS)[keyof typeof TOUR_ANCHORS];
@@ -1009,6 +1013,93 @@ export const TOURS: readonly TourDefinition[] = [
         title: "ثبت الگو",
         body:
           "«ثبت الگو» همهٔ پیش‌نویس‌ها را ذخیره می‌کند؛ اگر پیش‌شماره‌ای تکراری باشد پیام می‌گیرید. این تور آن را نمی‌زند.",
+      },
+    ],
+  },
+  {
+    id: "accounting.cosmetics.overview",
+    version: 1,
+    pageKey: "page:/accounting/cosmetics",
+    route: "/accounting/cosmetics",
+    title: "آشنایی با آرایشی و بهداشتی",
+    description: "بچ‌ها و انقضا، برند و ماتریس، هویت قانونی، تستر و بارکد را بشناسید.",
+    eligibility: {
+      permissions: [PERMISSIONS.inventoryView],
+      industries: ["cosmetics"],
+    },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "آرایشی و بهداشتی",
+        body:
+          "این صفحه دو بخش «بچ‌ها و انقضا» و «برند و ماتریس» دارد. تور فقط راهنماست و هیچ موجودی، قیمت یا بارکدی را تغییر نمی‌دهد. بخش اول هنگام باز کردن صفحه نمایش داده می‌شود.",
+      },
+      {
+        id: "sections",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.cosmeticsSections,
+        title: "دو زبانهٔ اصلی",
+        body:
+          "«بچ‌ها و انقضا» برای دریافت بچ و بررسی تاریخ مصرف است؛ «برند و ماتریس» برای برندها، تنوع‌ها، مشخصات قانونی، تستر و بارکد. در تلفن همراه ابتدا فهرست بخش‌ها را می‌بینید.",
+      },
+      {
+        id: "expiry",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.cosmeticsExpiryList,
+        title: "بچ‌های نزدیک به انقضا",
+        body:
+          "بچ‌های منقضی و نزدیک به انقضا در این فهرست دیده می‌شوند. این گزارش به مجوز مشاهدهٔ گزارش‌ها نیاز دارد. اگر اکنون زبانهٔ دیگری باز است، به‌جای برجسته‌سازی فقط توضیح نمایش داده می‌شود.",
+        eligibility: { permissions: [PERMISSIONS.reportsView] },
+      },
+      {
+        id: "receive",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.cosmeticsBatchForm,
+        title: "ورود بچ",
+        body:
+          "کالای بچ‌محور، شمارهٔ بچ، تاریخ انقضا، تعداد و بهای واحد را بررسی کنید. «ثبت بچ» موجودی واقعی را تغییر می‌دهد؛ تور آن را نمی‌زند. اگر زبانهٔ دیگری باز است این مرحله توضیحی نمایش داده می‌شود.",
+        eligibility: { permissions: [PERMISSIONS.inventoryAdjust] },
+      },
+      {
+        id: "write-off",
+        kind: "explain",
+        title: "خروج کالای منقضی",
+        body:
+          "«حذف منقضی‌های کالا» می‌تواند تمام بچ‌های منقضی همان کالا را از موجودی خارج و بهایشان را به هزینهٔ مربوط منتقل کند. پیش از تأیید، کالا و بچ‌ها را بررسی کنید؛ این عملیات در تور اجرا نمی‌شود.",
+        eligibility: { permissions: [PERMISSIONS.inventoryAdjust, PERMISSIONS.reportsView] },
+      },
+      {
+        id: "brands-matrix",
+        kind: "explain",
+        title: "برند و ماتریس تنوع",
+        body:
+          "در زبانهٔ «برند و ماتریس» می‌توانید برند جدید ثبت کنید و خانوادهٔ محصول را با یک یا دو محور مانند شید و حجم بسازید. ایجاد تنوع به‌تنهایی قیمت یا موجودی اولیه را ثبت نمی‌کند.",
+        eligibility: { permissions: [PERMISSIONS.inventoryAdjust] },
+      },
+      {
+        id: "legal-profile",
+        kind: "explain",
+        title: "هویت قانونی و مشخصات کالا",
+        body:
+          "برای کالای انتخاب‌شده برند، کد IRC و اطلاعات پروانه و اصالت را مطابق مدارک واقعی ذخیره کنید. ورود این مشخصات به معنی استعلام یا تأیید رسمی اصالت نیست.",
+        eligibility: { permissions: [PERMISSIONS.inventoryAdjust] },
+      },
+      {
+        id: "testers-barcodes",
+        kind: "explain",
+        title: "تستر، بارکد و لیبل",
+        body:
+          "«باز کردن تستر» یک واحد قابل‌فروش را از موجودی خارج و هزینهٔ آن را ثبت می‌کند. ثبت بارکد فروشنده، تولید بارکد داخلی و چاپ لیبل عملیات جداگانه‌اند؛ ایجاد بارکد موجودی جدید ایجاد نمی‌کند.",
+        eligibility: { permissions: [PERMISSIONS.inventoryAdjust] },
+      },
+      {
+        id: "reports",
+        kind: "explain",
+        title: "گزارش‌های آماده",
+        body:
+          "گزارش فروش تنوع‌ها، فروش به تفکیک برند و بچ‌های نزدیک انقضا از دکمهٔ «گزارش‌های آماده» در بالای همین صفحه در دسترس‌اند، نه از یک زبانهٔ جداگانه در این صفحه.",
+        eligibility: { permissions: [PERMISSIONS.reportsView] },
       },
     ],
   },
