@@ -32,16 +32,18 @@ export function CosmeticsManager() {
   const [tab, setTab] = useState<TabKey>("batches");
 
   return (
-    <IndustryManagerShell
-      idPrefix="cosmetics"
-      navLabel="بخش‌های آرایشی و بهداشتی"
-      tabs={TABS}
-      activeTab={tab}
-      onTabChange={setTab}
-      error={error}
-    >
-      {tab === "batches" ? <BatchesSection /> : null}
-      {tab === "merchandising" ? <MerchandisingSection /> : null}
-    </IndustryManagerShell>
+    <div data-tour-id="cosmetics.sections" className="min-w-0">
+      <IndustryManagerShell
+        idPrefix="cosmetics"
+        navLabel="بخش‌های آرایشی و بهداشتی"
+        tabs={TABS}
+        activeTab={tab}
+        onTabChange={setTab}
+        error={error}
+      >
+        {tab === "batches" ? <BatchesSection /> : null}
+        {tab === "merchandising" ? <MerchandisingSection /> : null}
+      </IndustryManagerShell>
+    </div>
   );
 }
