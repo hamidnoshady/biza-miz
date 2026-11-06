@@ -125,6 +125,12 @@ export interface WpContentDetail extends WpContentRow {
   categories?: number[];
   tags?: number[];
   /**
+   * The attachment id this row uses as its featured image, or null when it
+   * has none (issue #1215, P2-5). The editor needs the id, not just the URL:
+   * saving sends the id back, and `0` is what clears it on WordPress.
+   */
+  featuredMediaId?: number | null;
+  /**
    * When WordPress will publish this row, as an ISO instant — null for anything
    * that is not a scheduled post. Read from the payload's `date_gmt`, so the
    * editor can show the owner the schedule it is about to save over.
@@ -207,6 +213,12 @@ export function plainTitle(raw: unknown): string {
 }
 
 /** A mirrored term list back to ids; anything malformed reads as "no terms". */
+/** `featured_media` is an id in both transports; 0 and "" both mean "none". */
+function featuredMediaIdFromPayload(value: unknown): number | null {
+  const id = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
 function termIds(raw: unknown, max: number): number[] {
   const parsed = normaliseTermIds(raw, max);
   return parsed.ok ? parsed.ids : [];
@@ -535,10 +547,17 @@ export async function getWpContent(
     remote_updated_at: string | null;
     synced_at: string;
     payload: WpContentPayload;
+    featured_url: unknown;
   }>(
     `SELECT remote_id, wp_type, title, slug, status, permalink, author_name,
             media_url, mime_type, COALESCE(payload->>'alt_text', '') AS alt_text,
-            remote_updated_at, synced_at, payload
+            remote_updated_at, synced_at, payload,
+            -- A post carries its featured image by attachment id, so the URL
+            -- comes from the mirrored attachment the same payload points at.
+            (SELECT fe.media_url FROM integration_wp_content fe
+              WHERE fe.business_id = $1 AND fe.connection_id = $2 AND fe.wp_type = 'attachment'
+                AND fe.remote_id = NULLIF(integration_wp_content.payload->>'featured_media', '')
+              LIMIT 1) AS featured_url
        FROM integration_wp_content
       WHERE business_id = $1 AND connection_id = $2 AND wp_type = $3 AND remote_id = $4
       LIMIT 1`,
@@ -565,6 +584,8 @@ export async function getWpContent(
     excerpt: editableWpField(payload.excerpt),
     categories: termIds(payload.categories, MAX_POST_CATEGORIES),
     tags: termIds(payload.tags, MAX_POST_TAGS),
+    featuredMediaId: featuredMediaIdFromPayload(payload.featured_media),
+    featuredImageUrl: safeWpExternalUrl(row.featured_url),
     scheduledFor: row.status === "future" ? parseWordPressGmt(payload.date_gmt) : null,
   };
 }

@@ -32,6 +32,7 @@ import {
 import { api } from "@/app/dashboard/ui";
 import { cardClass, EmptyState, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { QUEUE_DEAD_RETENTION_DAYS, QUEUE_DONE_RETENTION_DAYS } from "@/lib/integrations/queue-retention-policy";
+import { PluginLocalQueuePage } from "./plugin-local-queue-page";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { ConnectionPicker } from "./connection-lite";
@@ -707,6 +708,12 @@ export function WpQueueSection() {
             <p className="mt-1.5">
               نمایش ریز رویدادهای گیرکرده به نسخهٔ جدید افزونه نیاز دارد؛ افزونهٔ وردپرس را به‌روز کنید تا هر رویداد و دلیل توقفش همین‌جا دیده شود.
             </p>
+          ) : null}
+          {/* Issue #1076: the strip above is the plugin's own top-ten. A deeper
+              backlog is walked one page at a time over the handshake lane, and
+              only a plugin that advertised the capability gets the control. */}
+          {isPluginMode && selectedId && selectedConnection?.pluginCapabilities?.localQueuePaging === true ? (
+            <PluginLocalQueuePage key={selectedId} connectionId={selectedId} canSync={canSync} />
           ) : null}
         </div>
       ) : null}

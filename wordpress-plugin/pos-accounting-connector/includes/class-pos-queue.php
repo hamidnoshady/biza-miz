@@ -400,18 +400,77 @@ class POS_Connector_Queue {
 		);
 		$out = array();
 		foreach ( (array) $rows as $row ) {
-			$created = strtotime( $row['created_at'] . ' UTC' );
-			$error   = isset( $row['last_error'] ) ? trim( (string) $row['last_error'] ) : '';
-			$out[] = array(
-				'topic'     => (string) $row['topic'],
-				'remoteId'  => (string) $row['remote_id'],
-				'status'    => (string) $row['status'],
-				'attempts'  => (int) $row['attempts'],
-				'lastError' => '' !== $error ? mb_substr( $error, 0, 240, 'UTF-8' ) : null,
-				'createdAt' => $created ? gmdate( 'c', $created ) : null,
-			);
+			$out[] = self::format_problem_row( $row );
 		}
 		return $out;
+	}
+
+	/**
+	 * One page of the same problem rows the strip shows (issue #1076).
+	 *
+	 * Keyset on the row id, deliberately NOT the strip's failure ordering: a
+	 * page has to walk every row exactly once, and ordering by status would
+	 * re-shuffle rows between pages the moment a retry flips one to `pending`.
+	 * The id order is stable for the lifetime of a row.
+	 *
+	 * @param int $after Exclusive lower bound — the `next` of the previous page.
+	 * @param int $limit Bounded page size; the app refuses more than 25 too.
+	 * @return array{rows:array<int,array<string,mixed>>,next:int|null}
+	 */
+	public static function page( $after = 0, $limit = 10 ) {
+		$empty = array( 'rows' => array(), 'next' => null );
+		if ( ! self::table_exists() ) {
+			return $empty;
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$after = max( 0, (int) $after );
+		$limit = max( 1, min( 25, (int) $limit ) );
+		// One extra row proves a further page exists without a second query.
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT id, topic, remote_id, status, attempts, last_error, created_at
+				   FROM {$table}
+				  WHERE status IN ('pending', 'failed') AND id > %d
+				  ORDER BY id ASC
+				  LIMIT %d",
+				$after,
+				$limit + 1
+			),
+			ARRAY_A
+		);
+		$rows = (array) $rows;
+		$has_more = count( $rows ) > $limit;
+		if ( $has_more ) {
+			$rows = array_slice( $rows, 0, $limit );
+		}
+		$out  = array();
+		$next = null;
+		foreach ( $rows as $row ) {
+			$out[] = self::format_problem_row( $row );
+			$next  = (int) $row['id'];
+		}
+		return array( 'rows' => $out, 'next' => $has_more ? $next : null );
+	}
+
+	/**
+	 * The one row shape both the aggregate strip and a paged answer send:
+	 * metadata only, never the event payload.
+	 *
+	 * @param array $row A queue row as ARRAY_A.
+	 * @return array<string,mixed>
+	 */
+	private static function format_problem_row( array $row ) {
+		$created = isset( $row['created_at'] ) ? strtotime( $row['created_at'] . ' UTC' ) : false;
+		$error   = isset( $row['last_error'] ) ? trim( (string) $row['last_error'] ) : '';
+		return array(
+			'topic'     => (string) $row['topic'],
+			'remoteId'  => (string) $row['remote_id'],
+			'status'    => (string) $row['status'],
+			'attempts'  => (int) $row['attempts'],
+			'lastError' => '' !== $error ? mb_substr( $error, 0, 240, 'UTF-8' ) : null,
+			'createdAt' => $created ? gmdate( 'c', $created ) : null,
+		);
 	}
 
 	/**

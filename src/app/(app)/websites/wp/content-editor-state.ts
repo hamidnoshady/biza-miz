@@ -86,3 +86,21 @@ export function wpTaxonomiesDirty(
 export function toggleTermId(ids: readonly number[], id: number): number[] {
   return ids.includes(id) ? ids.filter((entry) => entry !== id) : [...ids, id];
 }
+
+/**
+ * The featured image (#1215, P2-5) travels as an attachment id, and its own
+ * dirty rule for the same reason the taxonomies have one: a save that repeats
+ * an unchanged id would re-assert whatever the mirror last saw. `null` is "no
+ * image" and leaves as `0`, which is WordPress's own way to clear a thumbnail.
+ */
+export function wpFeaturedMediaPatch(
+  initial: number | null,
+  current: number | null,
+): Record<string, number> {
+  if (initial === current) return {};
+  return { featuredMediaId: current ?? 0 };
+}
+
+export function wpFeaturedMediaDirty(initial: number | null | undefined, current: number | null): boolean {
+  return initial !== undefined && initial !== current;
+}

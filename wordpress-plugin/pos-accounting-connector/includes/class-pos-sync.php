@@ -1649,6 +1649,15 @@ class POS_Connector_Sync {
 			'contentTaxonomies' => true,
 			'postCategories'    => self::post_terms_payload( 'category' ),
 			'postTags'          => self::post_terms_payload( 'post_tag' ),
+			// Issue #1215 P2-5: this build applies `featured_media` on a
+			// `post_upsert` through `set_post_thumbnail`. Without the flag the
+			// app refuses to queue the field instead of saving a post without
+			// the image the editor showed.
+			'featuredMedia'     => true,
+			// Issue #1076: this build can answer a paged request about its own
+			// queue (`localQueuePage` in telemetry). Without this flag the app
+			// keeps the aggregate strip and never waits for a page.
+			'localQueuePaging'  => true,
 			'eventTypes' => array(
 				'order.created',
 				'order.updated',
@@ -1753,6 +1762,10 @@ class POS_Connector_Sync {
 				'localQueueFailed'    => (int) $counts['failed'],
 				// Per-event problem list (issue #942, F12): which events are stuck and why.
 				'localQueueRecent'    => POS_Connector_Queue::recent_problems( 10 ),
+				// Issue #1076: the page the app asked for last time, answered
+				// once and then cleared. Null when nothing was requested, so
+				// the field never turns into a repeated full walk.
+				'localQueuePage'      => self::local_queue_page_answer(),
 				// Measured enqueue → app-accepted percentiles over recent sent
 				// rows (#1206 P1): the app grades the p95 ≤ 3-minute target
 				// from these samples, never from the configured cadence.
@@ -1799,6 +1812,39 @@ class POS_Connector_Sync {
 			);
 		}
 
+		/**
+		 * Issue #1076 — answer the app's one pending page request, and clear it.
+		 *
+		 * Runs inside `telemetry()`, so it is read once and reported once: the
+		 * app stores the answer and the screen shows it until the next request.
+		 * A request with no matching rows still answers (an empty page is a
+		 * fact), and `next` is the cursor the screen sends back for more.
+		 *
+		 * @return array|null Null when nothing is pending.
+		 */
+		private static function local_queue_page_answer() {
+			$settings = pos_connector_settings();
+			$request  = isset( $settings['local_queue_page_request'] ) && is_array( $settings['local_queue_page_request'] )
+				? $settings['local_queue_page_request']
+				: array();
+			if ( ! isset( $request['after'], $request['limit'] ) ) {
+				return null;
+			}
+			$after = max( 0, (int) $request['after'] );
+			$limit = max( 1, min( 25, (int) $request['limit'] ) );
+			// Cleared first: a fatal in the query must not leave the plugin
+			// sending the same page on every run forever.
+			pos_connector_update_settings( array( 'local_queue_page_request' => array() ) );
+			$page = POS_Connector_Queue::page( $after, $limit );
+			return array(
+				'after'      => $after,
+				'limit'      => $limit,
+				'rows'       => $page['rows'],
+				'next'       => $page['next'],
+				'answeredAt' => gmdate( 'c' ),
+			);
+		}
+
 		public static function handshake( POS_Connector_Client $client ) {
 			$response = $client->post(
 				'/api/integrations/wordpress/handshake',
@@ -1815,6 +1861,23 @@ class POS_Connector_Sync {
 			);
 		if ( ! $response['ok'] ) {
 			return $response;
+		}
+
+		// Issue #1076: the app hands over one page request in this response.
+		// Store it; `telemetry()` answers it on the next run, which is the same
+		// lane the plugin already uses — no extra endpoint, no extra cron.
+		$page_request = isset( $response['data']['localQueuePageRequest'] ) && is_array( $response['data']['localQueuePageRequest'] )
+			? $response['data']['localQueuePageRequest']
+			: array();
+		if ( isset( $page_request['after'], $page_request['limit'] ) ) {
+			pos_connector_update_settings(
+				array(
+					'local_queue_page_request' => array(
+						'after' => max( 0, (int) $page_request['after'] ),
+						'limit' => max( 1, min( 25, (int) $page_request['limit'] ) ),
+					),
+				)
+			);
 		}
 
 		$connection = isset( $response['data']['connection'] ) ? $response['data']['connection'] : array();
@@ -2520,7 +2583,24 @@ class POS_Connector_Sync {
 			}
 			$data['post_status'] = $status;
 		}
-		if ( empty( $data ) ) {
+		// The featured image (#1215 P2-5) is not a post field: WordPress stores
+		// it as `_thumbnail_id` meta, so it is applied after the write. 0 is
+		// WordPress's own "no thumbnail" and the only way to clear one.
+		$featured_media = null;
+		if ( isset( $payload['featured_media'] ) ) {
+			$featured_media = (int) $payload['featured_media'];
+			if ( $featured_media < 0 ) {
+				throw new Exception( 'invalid_featured_media' );
+			}
+			if ( $featured_media > 0 ) {
+				$attachment = get_post( $featured_media );
+				if ( ! $attachment || 'attachment' !== $attachment->post_type ) {
+					throw new Exception( 'featured_media_not_attachment' );
+				}
+			}
+		}
+
+		if ( empty( $data ) && null === $featured_media ) {
 			throw new Exception( 'empty_post_update' );
 		}
 
@@ -2566,6 +2646,8 @@ class POS_Connector_Sync {
 			}
 			$data['ID']          = $id;
 			$data['post_type']   = $type;
+			// An image-only save must not carry `post_status`: wp_update_post
+			// would otherwise re-assert whatever status the app last saw.
 			$result              = wp_update_post( $data, true );
 		} else {
 			$data['post_type']   = $type;
@@ -2580,6 +2662,15 @@ class POS_Connector_Sync {
 			}
 			if ( '' !== $operation_id ) {
 				update_post_meta( (int) $result, '_pos_operation_id', $operation_id );
+			}
+			if ( null !== $featured_media ) {
+				if ( $featured_media > 0 ) {
+					if ( ! set_post_thumbnail( (int) $result, $featured_media ) ) {
+						throw new Exception( 'featured_media_apply_failed' );
+					}
+				} else {
+					delete_post_thumbnail( (int) $result );
+				}
 			}
 		}
 

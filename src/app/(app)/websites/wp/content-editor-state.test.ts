@@ -3,6 +3,8 @@ import {
   toggleTermId,
   wpEditorIsDirty,
   wpEditorPatch,
+  wpFeaturedMediaDirty,
+  wpFeaturedMediaPatch,
   wpTaxonomiesDirty,
   wpTaxonomyPatch,
   type WpEditorValues,
@@ -95,5 +97,27 @@ describe("WordPress editor taxonomy patch", () => {
     expect(toggleTermId([1, 2], 3)).toEqual([1, 2, 3]);
     expect(toggleTermId([1, 2, 3], 2)).toEqual([1, 3]);
     expect(toggleTermId([], 7)).toEqual([7]);
+  });
+});
+
+describe("featured image patch (#1215, P2-5)", () => {
+  it("sends only a changed attachment id", () => {
+    expect(wpFeaturedMediaPatch(501, 501)).toEqual({});
+    expect(wpFeaturedMediaPatch(501, 777)).toEqual({ featuredMediaId: 777 });
+    expect(wpFeaturedMediaPatch(null, 501)).toEqual({ featuredMediaId: 501 });
+  });
+
+  it("clears with 0, which is WordPress's own 'no thumbnail'", () => {
+    expect(wpFeaturedMediaPatch(501, null)).toEqual({ featuredMediaId: 0 });
+  });
+
+  it("is dirty only after the detail read has settled", () => {
+    // `undefined` means the detail read has not answered yet: a save before it
+    // arrives must not look dirty and must not clear the site's image.
+    expect(wpFeaturedMediaDirty(undefined, 501)).toBe(false);
+    expect(wpFeaturedMediaDirty(undefined, null)).toBe(false);
+    expect(wpFeaturedMediaDirty(null, null)).toBe(false);
+    expect(wpFeaturedMediaDirty(null, 501)).toBe(true);
+    expect(wpFeaturedMediaDirty(501, null)).toBe(true);
   });
 });

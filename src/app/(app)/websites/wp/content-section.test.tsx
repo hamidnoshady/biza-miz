@@ -347,3 +347,80 @@ describe("categories and tags from the editor", () => {
     expect(screen.queryByRole("checkbox", { name: "راهنما" })).toBeNull();
   });
 });
+
+describe("featured image from the editor (#1215, P2-5)", () => {
+  const detail = {
+    ...cardRow,
+    editorTitle: "نگهداری فرش",
+    excerpt: "خلاصه",
+    categories: [],
+    tags: [],
+    featuredMediaId: 501,
+    featuredImageUrl: "https://shop.test/501.jpg",
+  };
+
+  function mockApi() {
+    apiMock.mockImplementation((path: string, init?: { method?: string }) => {
+      const url = String(path);
+      if (url.startsWith("/api/integrations/wp-manager/content/posts") && init?.method === "POST") {
+        return Promise.resolve({ ok: true, status: 200, data: { ok: true, queued: true } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/posts")) {
+        return Promise.resolve({ ok: true, status: 200, data: { row: detail } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content/terms")) {
+        return Promise.resolve({ ok: true, status: 200, data: { categories: [], tags: [] } });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          data: { rows: [{ remoteId: "777", title: "قاب تازه", thumbnailUrl: "https://shop.test/777.jpg" }] },
+        });
+      }
+      if (url.startsWith("/api/integrations/wp-manager/content")) {
+        return Promise.resolve({ ok: true, status: 200, data: { rows: [cardRow], total: 1, page: 1, pageSize: 20 } });
+      }
+      return Promise.resolve({ ok: true, status: 200, data: {} });
+    });
+  }
+
+  it("shows the saved image and sends only the id the owner picked", async () => {
+    mockApi();
+    const user = userEvent.setup();
+    render(<WpContentSection canManage />);
+    await user.click(await screen.findByRole("button", { name: /ویرایش/ }));
+
+    await screen.findByDisplayValue("نگهداری فرش");
+    // The saved image comes back from the mirror, so the editor is not blank.
+    expect(screen.getByAltText("پیش‌نمایش تصویر شاخص").getAttribute("src")).toBe("https://shop.test/501.jpg");
+
+    await user.click(screen.getByRole("button", { name: "تغییر تصویر شاخص" }));
+    await user.click(await screen.findByRole("button", { name: /قاب تازه/ }));
+    await user.click(screen.getByRole("button", { name: "ذخیره در وردپرس" }));
+
+    const posts = apiMock.mock.calls.filter(([, init]) => (init as { method?: string } | undefined)?.method === "POST");
+    await waitFor(() => expect(posts).toHaveLength(1));
+    const body = JSON.parse(String((posts[0][1] as { body: string }).body));
+    // An id, not a URL — and only because it changed.
+    expect(body.featuredMediaId).toBe(777);
+  });
+
+  it("does not resend an unchanged featured image on a title-only save", async () => {
+    mockApi();
+    const user = userEvent.setup();
+    render(<WpContentSection canManage />);
+    await user.click(await screen.findByRole("button", { name: /ویرایش/ }));
+
+    const title = await screen.findByDisplayValue("نگهداری فرش");
+    await user.clear(title);
+    await user.type(title, "نگهداری فرش دستباف");
+    await user.click(screen.getByRole("button", { name: "ذخیره در وردپرس" }));
+
+    const posts = apiMock.mock.calls.filter(([, init]) => (init as { method?: string } | undefined)?.method === "POST");
+    await waitFor(() => expect(posts).toHaveLength(1));
+    const body = JSON.parse(String((posts[0][1] as { body: string }).body));
+    expect(body.title).toBe("نگهداری فرش دستباف");
+    expect(body.featuredMediaId).toBeUndefined();
+  });
+});
