@@ -64,6 +64,7 @@ import { phoneE164 } from "./phone";
 import { phoneMatchKeys, phoneMatchSql } from "./parties-service";
 import { syncCustomerPhone } from "./crm-service";
 import { recordCrmAudit } from "./crm-audit-service";
+import { customerDisplayName } from "./customer-display-name";
 
 /**
  * How a profile relates to the canonical directory.
@@ -693,7 +694,7 @@ export async function reconcileExternalIdentity(
     }
 
     const partyId = await createPartyFromExternal(businessId, {
-      name: effectiveIdentity.name || effectiveIdentity.email || effectiveIdentity.phone || "مشتری فروشگاه",
+      name: effectiveIdentity.name,
       email: effectiveIdentity.email,
       phone: effectiveIdentity.phone,
       address: effectiveIdentity.address,
@@ -819,7 +820,7 @@ async function createPartyFromExternal(
         acquisition_source, acquisition_detail, acquisition_at, last_source)
      VALUES ($1, $2, $3, $4, $5, $6, ARRAY['customer']::text[], $7, $8, now(), $7)
      RETURNING id`,
-    [businessId, input.name || input.email || input.phone || "مشتری آنلاین", input.phone, e164, input.email, input.address, input.provider, "sync"],
+    [businessId, customerDisplayName(input), input.phone, e164, input.email, input.address, input.provider, "sync"],
   );
   const partyId = rows[0].id;
   // INSERT does not fire the invalidation trigger (it is BEFORE UPDATE), so a
@@ -1178,7 +1179,7 @@ export async function resolveExternalProfile(
         throw new Error("insufficient_identity");
       }
       partyId = await createPartyFromExternal(businessId, {
-        name: profile.remote_name || profile.remote_email || profile.remote_phone || "مشتری فروشگاه",
+        name: profile.remote_name,
         email: profile.remote_email,
         phone: profile.remote_phone,
         address: profile.remote_address,

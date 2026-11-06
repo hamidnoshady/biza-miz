@@ -1246,6 +1246,8 @@ class POS_Connector_Sync {
 			'orders_count'        => $order_count,
 			'is_paying_customer' => $is_paying,
 			'billing'            => array(
+				'first_name' => $customer->get_billing_first_name(),
+				'last_name'  => $customer->get_billing_last_name(),
 				'phone'     => $customer->get_billing_phone(),
 				'address_1' => $customer->get_billing_address_1(),
 				'city'      => $customer->get_billing_city(),
