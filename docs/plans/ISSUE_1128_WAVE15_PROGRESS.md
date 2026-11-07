@@ -1,6 +1,6 @@
 # #1128 §D — wave 15 work in progress
 
-## Implemented on the session branch (not released)
+## Foundation merged in #1281
 
 - Additive migration `0287_agency_vendor_settlements.sql`: payment documents and
   cost-to-payment links; posted substance freeze; tenant/reference checks;
@@ -86,3 +86,27 @@ Follow-up verification in this session:
 - Narrow TypeScript check: only the two pre-existing Holoo `mssql` declaration /
   untyped-generic errors; no errors in the changed files.
 - Full unit suite launched separately; result pending at the time of this entry.
+
+
+## Canonical vendor identity follow-up (decision 80)
+
+Migration 0288 adds optional supplier-party links to costs and payments, with no
+backfill and no name-based inference. Cost creation snapshots the selected party's
+name and carries its ID through the domain event to the payable journal leg.
+Payments group linked costs by ID; text-only legacy costs retain exact-name matching
+and cannot mix with linked costs. The payment inherits the selected vendor ID.
+
+The cost form uses the existing Supplier directory and exposes its picker only with
+`parties.view`; POST/PATCH also require directory-read authority when assigning a
+vendor ID. Existing expense/payable/ledger permissions remain independently required.
+Both references participate in audited party merges. Historical names and amounts
+are unchanged; new payments refuse inactive or merged-away vendors.
+
+Verification: vendor-settlement integration 20/20; live party-reference coverage
+6/6; focused UI/guard/MCP/route/design tests 124/124. Changed-file lint passes. The
+narrow TypeScript check still reports only the existing two Holoo/mssql errors.
+Full regression suite is running separately; do not treat it as passed yet.
+
+Remaining next step: quote → approved purchase → payable documents using this
+identity. Supplier-only merging remains outside the existing customer-merge endpoint.
+No procurement documents, automatic tools or fifth app are claimed by this slice.

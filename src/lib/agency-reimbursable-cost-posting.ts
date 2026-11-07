@@ -62,6 +62,8 @@ export interface ReimbursableCostPayload {
    * books — which is the booked/posted confusion §D forbids.
    */
   projectId?: string | null;
+  /** Canonical supplier attribution on the payable leg, when explicitly selected. */
+  vendorPartyId?: string | null;
 }
 
 registerPostingRule(
@@ -91,7 +93,7 @@ registerPostingRule(
     return {
       lines: [
         { accountId: ids.get(accounts.debitCode)!, debit: payload.amount, credit: ZERO },
-        { accountId: ids.get(accounts.creditCode)!, debit: ZERO, credit: payload.amount },
+        { accountId: ids.get(accounts.creditCode)!, debit: ZERO, credit: payload.amount, partyId: payload.settledBy === "payable" ? payload.vendorPartyId ?? null : null },
       ],
       // The memo names the treatment, because the two presentations look identical on
       // a list of entries and an accountant reading the ledger should not have to

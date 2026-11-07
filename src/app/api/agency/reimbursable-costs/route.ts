@@ -75,6 +75,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const body = await readCostBody(request);
   if (!body) return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+  // Resolving a new canonical party also requires directory-read authority.
+  if (body.vendorPartyId !== undefined && body.vendorPartyId !== null && body.vendorPartyId !== "") {
+    const directory = await requirePermission(PERMISSIONS.partiesView);
+    if (directory.error) return directory.error;
+  }
 
   try {
     const cost = await createAgencyReimbursableCost(
