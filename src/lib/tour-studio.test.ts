@@ -115,6 +115,70 @@ describe("steps", () => {
     expect(missing).toMatchObject({ ok: false, error: "invalid_steps" });
   });
 
+  it("accepts a verified action step only with a registered verifier", () => {
+    const valid = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "x", body: "." },
+        {
+          id: "do-it",
+          kind: "action",
+          verifier: "party.created",
+          anchor: TOUR_ANCHORS.partiesAdd,
+          title: "ثبت کنید",
+          body: ".",
+        },
+      ],
+    });
+    expect(valid.ok).toBe(true);
+    if (valid.ok) expect(valid.input.steps[1]).toMatchObject({ kind: "action", verifier: "party.created" });
+
+    const noVerifier = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "x", body: "." },
+        { id: "do-it", kind: "action", title: "ثبت کنید", body: "." },
+      ],
+    });
+    expect(noVerifier).toMatchObject({ ok: false, error: "invalid_steps" });
+    if (!noVerifier.ok) expect(noVerifier.detail).toContain("registered verifier");
+
+    const unknownVerifier = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "x", body: "." },
+        { id: "do-it", kind: "action", verifier: "made.up", title: "ثبت کنید", body: "." },
+      ],
+    });
+    expect(unknownVerifier).toMatchObject({ ok: false, error: "invalid_steps" });
+  });
+
+  it("anchors an action step only at a registered anchor, and allows none", () => {
+    const bad = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "x", body: "." },
+        { id: "do-it", kind: "action", verifier: "party.created", anchor: "#save", title: "x", body: "." },
+      ],
+    });
+    expect(bad).toMatchObject({ ok: false, error: "invalid_steps" });
+
+    const unanchored = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "x", body: "." },
+        { id: "do-it", kind: "action", verifier: "party.created", title: "x", body: "." },
+      ],
+    });
+    expect(unanchored.ok).toBe(true);
+    if (unanchored.ok) expect(unanchored.input.steps[1].anchor).toBeUndefined();
+  });
+
+  it("refuses a verifier on a step that asks for nothing real", () => {
+    const mismatch = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "x", body: ".", verifier: "party.created" },
+        { id: "anchor", kind: "spotlight", anchor: TOUR_ANCHORS.pageHeader, title: "x", body: "." },
+      ],
+    });
+    expect(mismatch).toMatchObject({ ok: false, error: "invalid_steps" });
+  });
+
   it("keeps explanations free of anchors, and refuses duplicates and empty copy", () => {
     const explainWithAnchor = parse({
       steps: [{ id: "intro", kind: "explain", anchor: TOUR_ANCHORS.pageHeader, title: "x", body: "." }],

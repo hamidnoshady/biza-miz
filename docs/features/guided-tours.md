@@ -23,6 +23,9 @@ Center, AI discovery, offline progress) are tracked on #972.
 | Progress storage, row lock | `src/lib/tours-service.ts`, migration `0259_tour_member_progress.sql` |
 | API | `GET /api/knowledge/tours?page=`, `GET /api/knowledge/tours/[tourId]`, `POST /api/knowledge/tours/[tourId]/progress` |
 | Automatic baseline tours (pure) | `src/lib/tour-baseline.ts` |
+| Verified-action whitelist (pure) | `src/lib/tour-verifiers.ts` |
+| Verified-action evidence (storage) | `src/lib/tour-evidence-service.ts`, migration `0289_tour_action_evidence.sql` |
+| Verified-action API | `POST /api/knowledge/tours/[tourId]/verify` |
 | Coverage audit (pure) | `src/lib/tour-coverage.ts`, `npm run tours:audit` |
 | Console authoring rules (pure) | `src/lib/tour-studio.ts` |
 | Console authoring storage | `src/lib/tour-studio-service.ts`, migration `0288_knowledge_tours.sql` |
@@ -168,6 +171,55 @@ coverage sentence, default key, read-only mode, anchor picker, payloads),
 never drafts or archived ones), and `integration/guided-tours.integration.test.ts`
 (the same lifecycle against a migrated database, including visibility).
 
+## Verified action steps
+
+Phase 2 of the epic: a tour may ask the member to do something real — register
+the first customer, create a product, take an order. The honest way to grade
+that is not a click on «بعدی».
+
+- **A step names a whitelisted event, not a URL.** `kind: "action"` requires a
+  key from `TOUR_VERIFIERS` (`product.created`, `party.created`,
+  `order.created`, …). Each entry carries the Persian promise shown in the card
+  and the endpoint that records it; `tour-verifiers.test.ts` asserts every
+  `recordedBy` really calls `recordTourEvidence` with that key, so a tour can
+  never be published around a writer that does not exist.
+- **Only the server credits the action.** The success path itself records
+  evidence — `POST /api/products/items`, `POST /api/parties`, `POST /api/orders`
+  — after the write succeeded, inside the same tenant scope. The client's
+  `POST …/verify` body carries one field, a step id; the server looks the
+  evidence up and answers `200` or `409 evidence_missing`. There is no field a
+  page could set to claim success, and `step_seen` on an action step is a
+  `400 requires_evidence`.
+- **Nothing about the member's data is stored.** `tour_action_evidence`
+  (migration 0289) holds one row per business/member/verifier: first and last
+  time, a counter, and an opaque entity id — never a customer's name, an order's
+  contents or a form value. It is tenant data (RLS forced) and is not in the
+  platform exemption list.
+- **Recording is best-effort in one direction only.** A failure to credit the
+  tour never fails the sale, the product or the customer — the member retries
+  the tour step. The reverse is not possible: a failed write leaves no evidence.
+- **No duplicate work to prove learning.** Evidence is read as "has this member
+  ever done this", so a member who registered a customer last week finishes the
+  step by pressing «بررسی»; the card says «قبلاً هم انجام داده بودید» instead of
+  asking for a second record. That is also why the epic's rule against writing
+  demo rows to production is respected: the tour never creates anything.
+- **The overlay gets out of the way.** For an action step there is no click
+  blocker and no dimmer; the card docks at the bottom, keeps the page usable,
+  polls the server (and re-checks on focus) until the evidence appears, and only
+  then enables Next. Skip is still available and is still not completion. If the
+  member's own save navigates away, the runtime sends the same verify before it
+  pauses the tour, so a completed action is not lost to a route change.
+- **Authoring.** The console's step editor offers «کار واقعی» with the verifier
+  list and shows the promise plus the recording endpoint; the tour validator
+  refuses an action step without a registered verifier, a verifier on any other
+  kind, and an action step pointing at an unregistered anchor.
+
+The pilot is `crm.directory.first-customer` on `/crm/directory`: the page stays
+usable, the member registers the customer themselves, and the third step clears
+when `party.created` evidence exists. Its action step points at the shared
+«افزودن مشتری» button (`data-tour-id="parties.add"`), which the store's
+suppliers and the ledger's party file reuse — one button, one anchor.
+
 ## Coverage audit
 
 `tourCoverage()` (pure) lists **every** registered page exactly once with
@@ -233,11 +285,13 @@ instead of trapping the member.
   permissions, the business's industry, feature flags and costing system, on the lookup *and* on every
   progress write. An ineligible tour is indistinguishable from a non-existent
   one (404) and is never described in a list.
-- **Seen is not learned; skipped is not seen.** Every step in this slice is an
-  explanation, so "seen" means the member pressed Next. A step that asks for a
-  real action must complete on a server-verified success event, never on a click
-  — that step kind does not exist yet and the progress API accepts no
-  client-claimed success. A tour is completed only when every step was seen.
+- **Seen is not learned; skipped is not seen.** An explanation or a spotlight is
+  "seen" when the member pressed Next. A step that asks for something real
+  (`kind: "action"`) is not: `step_seen` is refused for it
+  (`requires_evidence`), and it completes only through the server's own
+  verification of the business event it names — see *Verified action steps*
+  below. The progress and verify APIs accept no client-claimed success, and a
+  tour is completed only when every step was seen.
 - **Progress is monotone.** Events are unions of seen steps, so two devices or a
   retry converge; the row is locked `FOR UPDATE` per write. Replaying a completed
   tour never lowers it. Only an explicit `reset` removes anything.
@@ -263,7 +317,8 @@ live in-panel preview, conditional branches, and the parts of the coverage repor
 that need editorial data (stale published article, last validation, per-page
 abandonment). Also: eligibility **rules** the API already accepts but the panel
 does not yet expose (`anyOf`, feature flags, `withoutPermissions`), cross-page
-tours and learning paths, verified-action steps, offline progress
+tours and learning paths, further verified actions (payments, stock receipts,
+role changes — each needs its own reviewer-approved success point), offline progress
 queueing, the Learning Center, staff assignments and reports, the AI discovery
 tool, Hybrid cloud-pane handling (the overlay runs in the page that
 renders it; across the pane's origin boundary a route-based explanation is the

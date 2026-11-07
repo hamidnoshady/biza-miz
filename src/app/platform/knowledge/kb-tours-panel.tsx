@@ -39,6 +39,11 @@ import { KNOWLEDGE_PAGES } from "@/lib/knowledge-base";
 import { tourCoverage } from "@/lib/tour-coverage";
 import { TOUR_ANCHORS } from "@/lib/tours";
 import { STUDIO_ERROR_TEXT, type StudioTour, type StudioTourRevision } from "@/lib/tour-studio";
+import {
+  TOUR_VERIFIERS,
+  TOUR_VERIFIER_KEYS,
+  tourVerifierDefinition,
+} from "@/lib/tour-verifiers";
 import type { TourEligibility, TourInventorySystem } from "@/lib/tours";
 import {
   api,
@@ -57,8 +62,10 @@ import {
 
 type EditableStep = {
   id: string;
-  kind: "explain" | "spotlight";
+  kind: "explain" | "spotlight" | "action";
   anchor: string;
+  /** Only an `action` step has one; the key the server verifies. */
+  verifier: string;
   title: string;
   body: string;
 };
@@ -123,6 +130,7 @@ function formFor(tour: StudioTour): Form {
       id: step.id,
       kind: step.kind,
       anchor: step.anchor ?? "",
+      verifier: step.verifier ?? "",
       title: step.title,
       body: step.body,
     })),
@@ -139,7 +147,10 @@ function payloadFor(form: Form): Record<string, unknown> {
     steps: form.steps.map((step) => ({
       id: step.id.trim(),
       kind: step.kind,
-      ...(step.kind === "spotlight" ? { anchor: step.anchor } : {}),
+      ...(step.kind === "spotlight" || (step.kind === "action" && step.anchor)
+        ? { anchor: step.anchor }
+        : {}),
+      ...(step.kind === "action" ? { verifier: step.verifier } : {}),
       title: step.title,
       body: step.body,
     })),
@@ -250,6 +261,7 @@ export function ToursPanel() {
           id: nextStepId(current.steps),
           kind,
           anchor: kind === "spotlight" ? ANCHORS[0] ?? "" : "",
+          verifier: kind === "action" ? TOUR_VERIFIER_KEYS[0] ?? "" : "",
           title: "",
           body: "",
         },
@@ -550,6 +562,10 @@ export function ToursPanel() {
                 <PlusIcon className="size-4" aria-hidden="true" />
                 هایلایت
               </Button>
+              <Button type="button" onClick={() => addStep("action")} disabled={!canManage}>
+                <PlusIcon className="size-4" aria-hidden="true" />
+                کار واقعی
+              </Button>
             </div>
           </div>
 
@@ -572,12 +588,24 @@ export function ToursPanel() {
                         const kind = event.target.value as EditableStep["kind"];
                         updateStep(index, {
                           kind,
-                          anchor: kind === "spotlight" ? step.anchor || ANCHORS[0] || "" : "",
+                          // An action step may point at the button to press,
+                          // but a spotlight must; an explanation never does.
+                          anchor:
+                            kind === "spotlight"
+                              ? step.anchor || ANCHORS[0] || ""
+                              : kind === "action"
+                                ? step.anchor
+                                : "",
+                          verifier:
+                            kind === "action"
+                              ? step.verifier || TOUR_VERIFIER_KEYS[0] || ""
+                              : "",
                         });
                       }}
                     >
                       <option value="explain">توضیح</option>
                       <option value="spotlight">هایلایت</option>
+                      <option value="action">کار واقعی</option>
                     </select>
                     <input
                       className={`${inputClass} w-36 font-mono`}
@@ -587,7 +615,7 @@ export function ToursPanel() {
                       onChange={(event) => updateStep(index, { id: event.target.value })}
                       aria-label={`شناسهٔ مرحلهٔ ${index + 1}`}
                     />
-                    {step.kind === "spotlight" ? (
+                    {step.kind === "spotlight" || step.kind === "action" ? (
                       <select
                         className={`${selectClass} w-56 font-mono`}
                         dir="ltr"
@@ -596,9 +624,25 @@ export function ToursPanel() {
                         onChange={(event) => updateStep(index, { anchor: event.target.value })}
                         aria-label="لنگر"
                       >
+                        {step.kind === "action" ? <option value="">بدون لنگر</option> : null}
                         {ANCHORS.map((anchor) => (
                           <option key={anchor} value={anchor}>
                             {anchor}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    {step.kind === "action" ? (
+                      <select
+                        className={`${selectClass} w-60`}
+                        value={step.verifier}
+                        disabled={!canManage}
+                        onChange={(event) => updateStep(index, { verifier: event.target.value })}
+                        aria-label="تأییدکنندهٔ کار"
+                      >
+                        {TOUR_VERIFIER_KEYS.map((key) => (
+                          <option key={key} value={key}>
+                            {TOUR_VERIFIERS[key].label}
                           </option>
                         ))}
                       </select>
@@ -652,6 +696,15 @@ export function ToursPanel() {
                     disabled={!canManage}
                     onChange={(event) => updateStep(index, { body: event.target.value })}
                   />
+                  {step.kind === "action" ? (
+                    <p className="mt-1.5 px-1 text-[11px] leading-5 text-muted-foreground">
+                      {tourVerifierDefinition(step.verifier)?.promise ??
+                        "این مرحله فقط با تأیید سرور کامل می‌شود؛ تأییدکننده را انتخاب کنید."}{" "}
+                      <span className="font-mono" dir="ltr">
+                        {tourVerifierDefinition(step.verifier)?.recordedBy}
+                      </span>
+                    </p>
+                  ) : null}
                 </li>
               ))}
             </ol>
