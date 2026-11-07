@@ -130,6 +130,59 @@ function wooCustomer(overrides: Record<string, unknown> = {}) {
   };
 }
 
+describe("WooCommerce customer display names", () => {
+  const connection = () => ({ id: biz.connectionId, business_id: biz.id }) as never;
+
+  it.each([
+    ["account name", "سارا", "محمدی", "نام", "صورتحساب", "سارا محمدی"],
+    ["billing name", " ", "", "سارا", "محمدی", "سارا محمدی"],
+    ["missing name", "", "", "", "", "09332443370"],
+  ])("uses %s for a registered customer", async (_label, first, last, billingFirst, billingLast, expected) => {
+    await sync.upsertCustomerFromWoo(connection(), {
+      id: 812, first_name: first, last_name: last, email: "09332443370@zaniziba.com",
+      billing: { first_name: billingFirst, last_name: billingLast, phone: "09332443370" },
+    });
+    const { rows } = await db.query("SELECT name, email FROM parties WHERE business_id = $1", [biz.id]);
+    expect(rows).toEqual([{ name: expected, email: "09332443370@zaniziba.com" }]);
+  });
+
+  it.each([
+    [0, "لیلا", "رضایی", "09332443370", "لیلا رضایی"],
+    [0, "", "", "09332443370", "09332443370"],
+    [813, "", "", "09332443370", "09332443370"],
+    [0, "", "", "", "مشتری آنلاین"],
+  ])("names an order customer (%s, %s, %s, %s)", async (customerId, first, last, phone, expected) => {
+    const partyId = await sync.resolveOrderCustomerId(connection(), {
+      customer_id: customerId,
+      billing: { first_name: first, last_name: last, phone, email: "09332443370@zaniziba.com" },
+    });
+    const { rows } = await db.query("SELECT name, email FROM parties WHERE id = $1", [partyId]);
+    expect(rows).toEqual([{ name: expected, email: "09332443370@zaniziba.com" }]);
+  });
+
+  it("preserves a staff-maintained CRM name through sync and order ingestion", async () => {
+    const partyId = await makeCustomer("نام ثبت‌شده توسط کارمند", { phone: "+989332443370" });
+    await sync.upsertCustomerFromWoo(connection(), {
+      id: 814, first_name: "نام", last_name: "فروشگاه", email: "09332443370@zaniziba.com",
+      billing: { phone: "09332443370" },
+    });
+    expect(await sync.resolveOrderCustomerId(connection(), {
+      customer_id: 814, billing: { first_name: "دیگر", phone: "09332443370" },
+    })).toBe(partyId);
+    expect((await db.query("SELECT name FROM parties WHERE id = $1", [partyId])).rows[0].name)
+      .toBe("نام ثبت‌شده توسط کارمند");
+  });
+
+  it("uses the same fallback when a person creates a CRM record from the review queue", async () => {
+    const profile = await identity.reconcileExternalIdentity(wooCustomer({
+      name: "", email: "09332443370@zaniziba.com", phone: "09332443370",
+    }));
+    await identity.resolveExternalProfile(biz.id, profile.profileId, { action: "create" }, { name: "مدیر" });
+    const { rows } = await db.query("SELECT name FROM parties WHERE business_id = $1", [biz.id]);
+    expect(rows).toEqual([{ name: "09332443370" }]);
+  });
+});
+
 describe("ambiguous external identity", () => {
   it("refuses to guess when two customers share a phone number", async () => {
     // A family on one mobile number. Both are real customers; neither is the
