@@ -10,8 +10,9 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (error) return error;
   const page = Number(request.nextUrl.searchParams.get("page") ?? 1);
   const q = (request.nextUrl.searchParams.get("q") ?? "").trim();
-  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || q.length > 150) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  return NextResponse.json(await listTargets(session.businessId, await actionableLocationIds(membership), q, page));
+  const status = request.nextUrl.searchParams.get("status") ?? "active";
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || q.length > 150 || (status !== "active" && status !== "archived")) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  return NextResponse.json(await listTargets(session.businessId, await actionableLocationIds(membership), q, page, status));
 });
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, membership, error } = await requirePermissions(PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView);

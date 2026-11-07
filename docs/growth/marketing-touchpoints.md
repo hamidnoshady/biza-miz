@@ -51,6 +51,6 @@ The event time is displayed in the branch timezone with Jalali formatting; it is
 when the server recorded the report, not a claimed or verified contact time.
 There is no link to a specific CRM lead page because that page does not yet
 consume lead deep links. Assignment options and lead results are paginated. This
-slice does not implement team hierarchy, scoped marketer self-service, CRM
+slice does not implement team hierarchy, touchpoint self-service, CRM
 conversion attribution and reporting, GPS/visit evidence, offline sync, online
 tracking, rewards/settlement, analytics, or the remainder of issue #900.
