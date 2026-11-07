@@ -52,6 +52,7 @@ export default async function ClientCostsPage() {
         actions={<KnowledgeHelpButton section="client-costs" />}
       />
       <ClientCostsSection
+        canSettle={member.permissions.has(PERMISSIONS.financePayablesManage)}
         canRecord={canRecord}
         canRecharge={canRecharge}
         canSetPolicy={canRecord}

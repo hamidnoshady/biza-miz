@@ -188,4 +188,51 @@ describe("agency vendor settlement", () => {
     await expect(db.query(`UPDATE agency_vendor_settlements SET business_id=$2 WHERE id=$1`, [paid.id, b.businessId])).rejects.toThrow("immutable");
   });
 
+  it("mirrors the original entry, restores 2140, and frees costs without editing their links", async () => {
+    const a = await agency(); const c = await cost(a); const paid = await settle(a, [c.id]);
+    const undone = await service.reverseAgencyVendorSettlement(a.businessId, a.actor, paid.id, { reversedOn: "2026-11-02" });
+    expect(await balance(a, "2140")).toBe(5000000);
+    expect(await balance(a, "1270")).toBe(-5000000);
+    const loaded = await service.loadAgencyReimbursableCost(a.businessId, c.id);
+    expect(loaded?.settled).toBe(false);
+    expect(loaded?.settlementId).toBe(paid.id);
+    const journal = await db.query(`SELECT project_id, reverses_entry_id FROM journal_entries WHERE id=$1`, [undone.reversalEntryId]);
+    expect(journal.rows[0]).toMatchObject({ project_id: a.projectId, reverses_entry_id: paid.entryId });
+    const original = await db.query(`SELECT account_id, debit::text, credit::text FROM journal_lines WHERE entry_id=$1 ORDER BY account_id`, [paid.entryId]);
+    const reversal = await db.query(`SELECT account_id, credit::text AS debit, debit::text AS credit FROM journal_lines WHERE entry_id=$1 ORDER BY account_id`, [undone.reversalEntryId]);
+    expect(reversal.rows).toEqual(original.rows);
+    const event = await db.query(`SELECT entry_id FROM domain_events WHERE business_id=$1 AND source_type='agency_vendor_settlement_reversal' AND source_id=$2`, [a.businessId, paid.id]);
+    expect(event.rows[0].entry_id).toBe(undone.reversalEntryId);
+    await settle(a, [c.id]);
+    expect(await balance(a, "2140")).toBe(0);
+  });
+  it("allows just one of two concurrent reversals and refuses subsequent reversals", async () => {
+    const a = await agency(); const c = await cost(a); const paid = await settle(a, [c.id]);
+    const results = await Promise.allSettled([1, 2].map(() => service.reverseAgencyVendorSettlement(a.businessId, a.actor, paid.id, { reversedOn: "2026-11-02" })));
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect(await balance(a, "2140")).toBe(5000000);
+    await expect(service.reverseAgencyVendorSettlement(a.businessId, a.actor, paid.id, { reversedOn: "2026-11-02" })).rejects.toThrow("settlement_already_reversed");
+  });
+  it("does not reverse a foreign tenant's payment or accept an invalid date", async () => {
+    const a = await agency(); const b = await agency(); const c = await cost(a); const paid = await settle(a, [c.id]);
+    await expect(service.reverseAgencyVendorSettlement(b.businessId, b.actor, paid.id, { reversedOn: "2026-11-02" })).rejects.toThrow("settlement_not_found");
+    await expect(service.reverseAgencyVendorSettlement(a.businessId, a.actor, paid.id, { reversedOn: "1405-08-01" })).rejects.toThrow("invalid_date");
+    expect(await balance(a, "2140")).toBe(0);
+  });
+
+  it("rolls back a reversal in a locked fiscal period without freeing the costs", async () => {
+    const a = await agency(); const c = await cost(a); const paid = await settle(a, [c.id]);
+    const year = await db.query(`INSERT INTO fiscal_years (business_id,label,starts_on,ends_on)
+      VALUES ($1,'reversal-test','2027-01-01','2027-12-31') RETURNING id`, [a.businessId]);
+    await db.query(`INSERT INTO fiscal_periods (business_id,fiscal_year_id,label,starts_on,ends_on,status)
+      VALUES ($1,$2,'locked','2027-01-01','2027-01-31','locked')`, [a.businessId, year.rows[0].id]);
+    await expect(service.reverseAgencyVendorSettlement(a.businessId, a.actor, paid.id, { reversedOn: "2027-01-02" })).rejects.toThrow();
+    expect(await balance(a, "2140")).toBe(0);
+    expect((await service.loadAgencyReimbursableCost(a.businessId, c.id))?.settled).toBe(true);
+    const events = await db.query(`SELECT id FROM domain_events WHERE business_id=$1 AND event_type='agency.vendor_settlement_reversal'`, [a.businessId]);
+    expect(events.rows).toHaveLength(0);
+    const original = await db.query(`SELECT reversed_at FROM journal_entries WHERE id=$1`, [paid.entryId]);
+    expect(original.rows[0].reversed_at).toBeNull();
+  });
+
 });

@@ -45,3 +45,44 @@ routes are unsuitable. No fifth app or replacement project/CRM engine is intende
 
 The SQL guard does not prove that linked costs sum to the document amount; the
 service owns that invariant. Do not expose arbitrary link updates as a public API.
+
+## Follow-up: payment and reversal member workflow
+
+Implemented after the foundation merged in #1281:
+
+- `POST /api/agency/reimbursable-costs/settle` and
+  `POST /api/agency/vendor-settlements/[id]/reverse`, both requiring
+  `finance.payables_manage`. Writes remain agency-only in the service. Payment
+  location is resolved from the active session; services verify branch access.
+- Reversal records a domain event and uses `postExactMirrorEntry` rather than a
+  mapping-based reversal rule. The shared mirror accepts an optional project ID
+  so the reversal preserves the original entry's project as well as its account,
+  exact amounts, line dimensions and party attribution. Original and reversing
+  entries are linked. Payment and original entry are locked; only one concurrent
+  reversal succeeds.
+- A non-posting reversal or a fiscal-period refusal rolls the entire transaction
+  back, including its event and original-entry reversal stamp. Costs are not
+  freed merely because a reversal was requested.
+- The cost register exposes separate payable-manager controls. Expense/invoice
+  authority alone does not show them. The initial UI pays one cost at a time;
+  reversal explicitly confirms the **whole payment**, including costs outside the
+  loaded page. It is not a partial-payment UI or a global payment register.
+- MCP coverage is regenerated; no automatic money-moving tools were added.
+
+Focused tests cover original-line mirrors, project/reversal linkage, balance
+restoration, re-payment, concurrency, foreign-tenant refusal and locked-period
+rollback, plus UI selection, request bodies and whole-payment confirmation.
+
+Still owed: quote → approved purchase → payable with canonical vendor identity,
+resource/time capture, campaign attribution/reporting, and the other open #1128
+items. This follow-up must not be described as completing §D or #1128.
+
+Follow-up verification in this session:
+
+- Vendor settlement integration: **12/12**, including locked-period rollback.
+- Focused UI/guard/MCP tests: **46/46**.
+- Route/navigation/design boundaries: **81/81**.
+- Changed-file ESLint and `git diff --check`: pass.
+- Narrow TypeScript check: only the two pre-existing Holoo `mssql` declaration /
+  untyped-generic errors; no errors in the changed files.
+- Full unit suite launched separately; result pending at the time of this entry.

@@ -1,3 +1,4 @@
+import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
 /**
  * The error map for `/api/agency/reimbursable-costs/**`, exhaustive over the codes
  * `agency-reimbursable-cost-service.ts` can throw.
@@ -108,6 +109,8 @@ function messageOf(err: unknown): string | undefined {
  * it is translated here rather than surfacing as a 500.
  */
 export function costErrorResponse(err: unknown): NextResponse | null {
+  const lockCode = fiscalPeriodLockErrorCode(err);
+  if (lockCode) return NextResponse.json({ error: lockCode }, { status: 409 });
   if (err instanceof AgencyReimbursableCostError) {
     const status = REIMBURSABLE_COST_ERROR_STATUS[err.code] ?? 400;
     return NextResponse.json({ error: err.code }, { status });
