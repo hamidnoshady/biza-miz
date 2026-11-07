@@ -1810,6 +1810,7 @@ class POS_Connector_Sync {
 			// queue (`localQueuePage` in telemetry). Without this flag the app
 			// keeps the aggregate strip and never waits for a page.
 			'localQueuePaging'  => true,
+			'publicationLinkAttributes' => true,
 			'eventTypes' => array(
 				'order.created',
 				'order.updated',
@@ -2352,6 +2353,12 @@ class POS_Connector_Sync {
 				if ( ! empty( $payload['__linkOnly'] ) ) {
 					if ( $product->get_sku() !== $sku ) {
 						throw new Exception( 'publication_review:link_sku_mismatch' );
+					}
+					foreach ( (array) ( $payload['__expectedLinkAttributes'] ?? array() ) as $expected ) {
+						$taxonomy = wc_attribute_taxonomy_name_by_id( (int) $expected['id'] );
+						if ( ! $taxonomy || $product->get_attribute( $taxonomy ) !== (string) $expected['option'] ) {
+							throw new Exception( 'publication_review:link_option_mismatch' );
+						}
 					}
 					return array( 'remoteId' => $target );
 				}

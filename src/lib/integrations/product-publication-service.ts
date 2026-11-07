@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { applyCatalogueTaxonomy, type CatalogueTaxonomyPlan } from "./catalogue-publication-taxonomy";
 import { query, withTenantTransaction } from "../db";
 import { getConnection, type ConnectionRow } from "./connections-service";
 import { isWooCommerce } from "./provider-registry";
@@ -67,8 +68,12 @@ export async function previewProductPublication(businessId: string, locationId: 
   return { connectionId, storeName: connection.name, localId, name: item.name, action: payload.__linkOnly ? "link" : payload.__targetRemoteId ? "update" : "create", reviewToken, payload };
 }
 
+export function publicationOperationId(preview: PublicationPreview): string {
+  return `publication:${preview.connectionId}:${preview.localId}:${preview.reviewToken}`;
+}
+
 export async function queueProductPublication(businessId: string, preview: PublicationPreview): Promise<void> {
-  const operationId = `publication:${preview.connectionId}:${preview.localId}:${preview.reviewToken}`;
+  const operationId = publicationOperationId(preview);
   await query(`INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, local_id, payload, operation_id)
     VALUES ($1,$2,'product_publish',$3,$4,$5,$6) ON CONFLICT (connection_id,entity_type,remote_id) DO NOTHING`,
   [businessId, preview.connectionId, operationId, preview.localId, JSON.stringify({ ...preview.payload, __operationId: operationId }), operationId]);
@@ -86,18 +91,36 @@ export async function applyProductPublication(connection: ConnectionRow, client:
     remote = parent ? await client.getVariation(parent, target) : await client.getProduct(target);
     if ((parent && remote.parent_id !== parent) || (!parent && remote.type !== payload.__wooType)) throw new Error("publication_review:remote_type_mismatch");
     if (payload.__linkOnly && remote.sku !== body.sku) throw new Error("publication_review:link_sku_mismatch");
+    const expected = (payload.__expectedLinkAttributes ?? []) as Array<{ id: number; option: string }>;
+    if (expected.some((wanted) => !remote.attributes?.some((entry) => entry.id === wanted.id && entry.option === wanted.option))) {
+      throw new Error("publication_review:link_option_mismatch");
+    }
     if (!payload.__linkOnly) remote = parent ? await client.updateVariation(parent, target, body) : await client.updateProduct(target, body);
   } else {
     const existing = parent ? await client.listVariations(parent, { sku: String(body.sku) }) : await client.listProducts({ sku: String(body.sku) });
     const recovered = publicationRetryTarget(existing, operationId);
     body.meta_data = [{ key: PUBLICATION_META_KEY, value: operationId }];
     if (recovered && ((parent && recovered.parent_id !== parent) || (!parent && recovered.type !== payload.__wooType))) throw new Error("publication_review:remote_type_mismatch");
+    if (payload.__catalogueTaxonomy) {
+      const taxonomy = await applyCatalogueTaxonomy(client, payload.__catalogueTaxonomy as CatalogueTaxonomyPlan);
+      Object.assign(body, taxonomy.body);
+      payload.__taxonomyAck = taxonomy.identities;
+    }
     remote = recovered ?? (parent ? await client.createVariation(parent, body) : await client.createProduct(body));
   }
+  if (payload.__catalogueTaxonomy) {
+    const categories = (body.categories ?? []) as Array<{ id: number }>;
+    const attributes = (body.attributes ?? []) as Array<{ id: number; options: string[] }>;
+    if (categories.some((wanted) => !remote.categories?.some((entry) => entry.id === wanted.id)) ||
+        attributes.some((wanted) => !remote.attributes?.some((entry) => entry.id === wanted.id &&
+          entry.variation === false && wanted.options.every((option) => entry.options.includes(option))))) {
+      throw new Error("publication_taxonomy_ack_mismatch");
+    }
+  }
   payload.__ackRemoteId = publicationRemoteId(remote.id);
-  await query(`UPDATE integration_outbox_events SET payload=jsonb_set(payload,'{__ackRemoteId}',to_jsonb($3::text))
+  await query(`UPDATE integration_outbox_events SET payload=jsonb_set(payload,'{__ackRemoteId}',to_jsonb($3::text)) || $5::jsonb
     WHERE connection_id=$1 AND entity_type='product_publish' AND remote_id=$2 AND payload->>'__operationId'=$4`,
-  [connection.id, event.remote_id, payload.__ackRemoteId, operationId]);
+  [connection.id, event.remote_id, payload.__ackRemoteId, operationId, JSON.stringify(payload.__taxonomyAck ? { __taxonomyAck: payload.__taxonomyAck } : {})]);
 }
 
 /** Called only for a successful, lease-fenced delivery; never maps a queued intention. */
@@ -116,6 +139,8 @@ export async function acknowledgeProductPublication(connection: ConnectionRow, e
     await query(`INSERT INTO integration_mappings (business_id,connection_id,entity_type,remote_id,local_id,last_pushed_payload)
       VALUES ($1,$2,'product',$3,$4,$5) ON CONFLICT (connection_id,entity_type,remote_id) DO UPDATE SET last_pushed_payload=integration_mappings.last_pushed_payload || EXCLUDED.last_pushed_payload, updated_at=now() WHERE integration_mappings.local_id=EXCLUDED.local_id`,
     [connection.business_id, connection.id, remoteId, localId, JSON.stringify({ wooType: payload.__wooType,
+      ...(payload.__catalogueRunId ? { catalogueMetadataOnly: true } : {}),
+      ...(payload.__taxonomyAck ? { catalogueTaxonomy: payload.__taxonomyAck } : {}),
       ...(payload.__priceRial ? { priceRial: payload.__priceRial } : {}),
       ...(payload.__parentRemoteId ? { remoteParentId: payload.__parentRemoteId } : {}) })]);
     for (const child of (payload.__children ?? []) as Record<string, unknown>[]) {
