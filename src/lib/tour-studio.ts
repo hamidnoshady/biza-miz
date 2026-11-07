@@ -34,6 +34,7 @@
 import { INDUSTRIES, type Industry } from "./industries";
 import { knowledgePage } from "./knowledge-base";
 import { PERMISSIONS, type Permission } from "./permissions";
+import { TOUR_VERIFIER_KEYS, isTourVerifier, type TourVerifier } from "./tour-verifiers";
 import {
   MAX_TOUR_STEPS,
   TOUR_ANCHORS,
@@ -294,8 +295,8 @@ function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourI
     ids.add(id);
 
     const kind = entry.kind;
-    if (kind !== "explain" && kind !== "spotlight") {
-      return invalid("invalid_steps", `${at}: kind must be explain or spotlight`);
+    if (kind !== "explain" && kind !== "spotlight" && kind !== "action") {
+      return invalid("invalid_steps", `${at}: kind must be explain, spotlight or action`);
     }
 
     const title = text(entry.title);
@@ -308,7 +309,27 @@ function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourI
     }
 
     let anchor: (typeof TOUR_ANCHORS)[keyof typeof TOUR_ANCHORS] | undefined;
-    if (kind === "spotlight") {
+    // An `action` step asks for something real and completes on server
+    // evidence, so it names a whitelisted verifier instead of an anchor. The
+    // anchor is optional (the button to press); when given it must be real.
+    let verifier: TourVerifier | undefined;
+    if (kind === "action") {
+      const rawVerifier = text(entry.verifier);
+      if (!isTourVerifier(rawVerifier)) {
+        return invalid(
+          "invalid_steps",
+          `${at}: an action step needs a registered verifier (${TOUR_VERIFIER_KEYS.join(", ")})`,
+        );
+      }
+      verifier = rawVerifier;
+      const rawAnchor = text(entry.anchor);
+      if (rawAnchor) {
+        if (!ANCHOR_VALUES.has(rawAnchor)) {
+          return invalid("invalid_steps", `${at}: anchor "${rawAnchor}" is not registered on any component`);
+        }
+        anchor = rawAnchor as (typeof TOUR_ANCHORS)[keyof typeof TOUR_ANCHORS];
+      }
+    } else if (kind === "spotlight") {
       const rawAnchor = text(entry.anchor);
       if (!rawAnchor) return invalid("invalid_steps", `${at}: a spotlight needs an anchor`);
       if (!ANCHOR_VALUES.has(rawAnchor)) {
@@ -323,6 +344,11 @@ function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourI
       // "describe this, do not point at a control".
       return invalid("invalid_steps", `${at}: an explanation must not name an anchor`);
     }
+    if (kind !== "action" && entry.verifier !== undefined && entry.verifier !== null && text(entry.verifier) !== "") {
+      // Silently dropping it would leave the editor believing the step is
+      // verified when nothing will ever confirm it.
+      return invalid("invalid_steps", `${at}: only an action step may name a verifier`);
+    }
 
     const eligibility = parseEligibility(entry.eligibility, at);
     if (!eligibility.ok) return eligibility;
@@ -333,12 +359,13 @@ function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourI
       ...(anchor ? { anchor } : {}),
       title,
       body,
+      ...(verifier ? { verifier } : {}),
       ...(Object.keys(eligibility.value).length > 0 ? { eligibility: eligibility.value } : {}),
     });
   }
 
   if (steps[0].kind !== "explain") {
-    return invalid("invalid_steps", "the first step must be an explanation, not a spotlight");
+    return invalid("invalid_steps", "the first step must be an explanation, before any spotlight or action");
   }
   return { ok: true, steps };
 }

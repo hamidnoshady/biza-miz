@@ -774,7 +774,16 @@ export function PartiesSection({
               </Button>
             ) : null}
             {canManage ? (
-              <Button type="button" size="sm" onClick={() => setForm({})}>
+              // Issue #972 — the one button a "register a customer/supplier"
+              // task tour points at. It is on the section, not on an app, so
+              // the same anchor serves the CRM directory, the store's
+              // suppliers and the ledger's party file.
+              <Button
+                type="button"
+                size="sm"
+                data-tour-id="parties.add"
+                onClick={() => setForm({})}
+              >
                 {addLabel}
               </Button>
             ) : null}

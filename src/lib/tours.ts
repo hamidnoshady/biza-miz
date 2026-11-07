@@ -20,11 +20,13 @@
  *
  * Two rules carry the design:
  *
- *  - **Seen is not learned.** The only steps in this slice are explanations,
- *    so "seen" means the member pressed Next on them. A step that asks the
- *    member to do something real must complete on a server-verified success
- *    event, never on a click of Next — that step kind does not exist yet, and
- *    the progress API accepts no client-claimed success of any kind.
+ *  - **Seen is not learned.** An explanation or a spotlight is "seen" when the
+ *    member pressed Next. A step that asks for something REAL (`kind: "action"`)
+ *    does not work that way: `step_seen` is refused for it, and it completes
+ *    only through the `verified` event, which the server raises after it finds
+ *    evidence that the action succeeded (`tour_action_evidence`, migration
+ *    0289, written by the domain endpoint that did the write). No client can
+ *    claim a business action happened.
  *  - **Skipped is not seen.** A tour is completed only when every step has
  *    been seen; skipping leaves it in progress and the unseen steps still
  *    count against the denominator.
@@ -35,6 +37,7 @@ import { INDUSTRIES, hasSellableCatalogue, type Industry } from "./industries";
 import { hasCapability, hasModule, industryProfile } from "./industry-profile";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
 import { PERMISSIONS, type Permission } from "./permissions";
+import { isTourVerifier, type TourVerifier } from "./tour-verifiers";
 
 /**
  * Every `data-tour-id` an owning component exposes. A tour step names an
@@ -72,6 +75,9 @@ export const TOUR_ANCHORS = {
   posInvoiceCustomer: "pos.invoice-customer",
   posInvoicePayment: "pos.invoice-payment",
   posInvoiceSubmit: "pos.invoice-submit",
+  // The shared party directory's «افزودن مشتری» (dashboard/parties), the same
+  // button in the CRM directory, the store's suppliers and the ledger's file.
+  partiesAdd: "parties.add",
   // The one inventory workspace (rail + panel) of either stock model.
   inventoryWorkspace: "inventory.workspace",
   // Products workspace.
@@ -100,16 +106,28 @@ export type TourStepKind =
   /** Centered card — no element involved. */
   | "explain"
   /** Dimmed page with a cut-out around `anchor`. */
-  | "spotlight";
+  | "spotlight"
+  /**
+   * The member must DO something on the page. The overlay steps out of the
+   * way (no click blocker), the page stays usable, and the step completes only
+   * when the server confirms the action through `verifier`.
+   */
+  | "action";
 
 export interface TourStep {
   /** Stable across revisions: progress is keyed on it. Never reuse an id for a different step. */
   id: string;
   kind: TourStepKind;
-  /** Required for `spotlight`. */
+  /** Required for `spotlight`; optional for `action` (the button to press). */
   anchor?: TourAnchor;
   title: string;
   body: string;
+  /**
+   * Required for `action`, forbidden otherwise: the whitelisted success event
+   * the server must find evidence for (`TOUR_VERIFIERS`). It is a key, never a
+   * URL or a selector, so a step cannot be verified by an arbitrary request.
+   */
+  verifier?: TourVerifier;
   /**
    * Narrows the tour for the viewer: a step the viewer does not match is not
    * part of THEIR tour at all (not described, not counted, not required for
@@ -253,6 +271,41 @@ const INVOICE_TAIL_STEPS: readonly TourStep[] = [
 ];
 
 export const TOURS: readonly TourDefinition[] = [
+  {
+    id: "crm.directory.first-customer",
+    version: 1,
+    pageKey: "page:/crm/directory",
+    route: "/crm/directory",
+    title: "اولین مشتری را ثبت کنید",
+    description:
+      "این تور با شما کار می‌کند: صفحه قفل نمی‌شود، مشتری را خودتان ثبت می‌کنید و مرحلهٔ آخر وقتی کامل می‌شود که سرور همان ثبت را تأیید کند.",
+    eligibility: { permissions: [PERMISSIONS.partiesManage] },
+    steps: [
+      {
+        id: "how-it-works",
+        kind: "explain",
+        title: "این بار خودتان انجام می‌دهید",
+        body:
+          "در این تور صفحه قفل نمی‌شود و هیچ دکمه‌ای هم به‌جای شما زده نمی‌شود: «افزودن مشتری» را خودتان می‌زنید و فرم را پر می‌کنید. مرحلهٔ آخر با فشردن دکمهٔ «بعدی» کامل نمی‌شود؛ وقتی سرور ثبت مشتری را تأیید کند، خودکار تأیید می‌شود.",
+      },
+      {
+        id: "what-is-a-party",
+        kind: "explain",
+        title: "این فهرست مشترک است",
+        body:
+          "این فهرست همان فهرست «اشخاص» است که تأمین‌کنندگان، کارکنان و پروندهٔ طرف حساب در حسابداری هم از آن می‌خوانند. یک مشتری را یک بار ثبت می‌کنید و همه‌جا همان پرونده دیده می‌شود؛ به همین دلیل هم فقط کسی با دسترسی «مدیریت اشخاص» می‌تواند چیزی اضافه کند.",
+      },
+      {
+        id: "register",
+        kind: "action",
+        anchor: TOUR_ANCHORS.partiesAdd,
+        verifier: "party.created",
+        title: "مشتری را ثبت کنید",
+        body:
+          "دکمهٔ «افزودن مشتری» را بزنید، نام را بنویسید (شمارهٔ تماس و بقیهٔ فیلدها اختیاری‌اند) و فرم را ذخیره کنید. اگر همین حالا این کار را کرده بودید، نیازی به تکرار نیست: «بررسی» را بزنید تا همان ثبت قبلی تأیید شود.",
+      },
+    ],
+  },
   {
     id: "accounting.products.list",
     version: 1,
@@ -1142,6 +1195,16 @@ export function validateTours(tours: readonly TourDefinition[]): string[] {
       if (step.kind === "explain" && step.anchor) {
         problems.push(`${tour.id}/${step.id}: explain step must not name an anchor`);
       }
+      if (step.kind === "action") {
+        if (!isTourVerifier(step.verifier)) {
+          problems.push(`${tour.id}/${step.id}: action step needs a registered verifier`);
+        }
+        if (step.anchor && !anchors.has(step.anchor)) {
+          problems.push(`${tour.id}/${step.id}: action step points at an unregistered anchor`);
+        }
+      } else if (step.verifier) {
+        problems.push(`${tour.id}/${step.id}: only an action step may name a verifier`);
+      }
     }
   }
   return problems;
@@ -1188,11 +1251,26 @@ export type TourProgressEvent =
   | { type: "step_seen"; stepId: string }
   | { type: "pause"; stepId: string }
   | { type: "complete" }
-  | { type: "reset" };
+  | { type: "reset" }
+  /**
+   * An `action` step completed. This one is raised by the SERVER after it has
+   * checked evidence; the public progress route refuses it, so a client cannot
+   * send it even though it appears in the union the pure rules understand.
+   */
+  | { type: "verified"; stepId: string };
 
 export const TOUR_EVENT_TYPES = ["start", "step_seen", "pause", "complete", "reset"] as const;
 
-export type TourEventError = "unknown_step" | "steps_unseen";
+/** The events the member-facing progress route accepts — never `verified`. */
+export type TourClientEventType = (typeof TOUR_EVENT_TYPES)[number];
+
+export type TourEventError =
+  | "unknown_step"
+  | "steps_unseen"
+  /** A client tried to mark an `action` step as merely seen. */
+  | "requires_evidence"
+  /** A `verified` event named a step that asks for nothing real. */
+  | "not_verifiable";
 
 /**
  * Narrows stored progress to what still applies to `tour`: seen ids that no
@@ -1271,10 +1349,20 @@ export function applyTourEvent(
   const index = tour.steps.findIndex((step) => step.id === event.stepId);
   if (index < 0) return { ok: false, error: "unknown_step" };
 
-  if (event.type === "step_seen") {
+  if (event.type === "step_seen" || event.type === "verified") {
+    const step = tour.steps[index];
+    // The two kinds are not interchangeable, in either direction: pressing
+    // Next never proves an action, and a verified action is not something a
+    // step without a verifier can claim.
+    if (event.type === "step_seen" && step.kind === "action") {
+      return { ok: false, error: "requires_evidence" };
+    }
+    if (event.type === "verified" && step.kind !== "action") {
+      return { ok: false, error: "not_verifiable" };
+    }
     if (!next.seenStepIds.includes(event.stepId)) next.seenStepIds = [...next.seenStepIds, event.stepId];
     if (!completed) {
-      next.currentStepId = firstUnseenStep(tour, next.seenStepIds) ?? tour.steps[index].id;
+      next.currentStepId = firstUnseenStep(tour, next.seenStepIds) ?? step.id;
     }
     return { ok: true, progress: next };
   }

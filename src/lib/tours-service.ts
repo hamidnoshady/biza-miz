@@ -14,6 +14,7 @@ import { getBusinessIndustry } from "./industry-guard";
 import { getInventorySystem } from "./inventory-service";
 import { tourDefinitionById } from "./tour-baseline";
 import { publishedTourById } from "./tour-studio-service";
+import { hasTourEvidence } from "./tour-evidence-service";
 import {
   applyTourEvent,
   tourFactsNeeded,
@@ -183,4 +184,36 @@ export async function recordTourEvent(
     );
     return { ok: true as const, progress: next };
   });
+}
+
+export type VerifyTourStepResult =
+  | { ok: true; progress: StoredTourProgress | null; evidenceAt: string }
+  | { ok: false; error: "unknown_step" | "not_verifiable" | "evidence_missing" };
+
+/**
+ * Completes one `action` step, if — and only if — the server holds evidence
+ * that this member performed the step's verifier (issue #972, phase 2).
+ *
+ * This is the only path that can record an action step, and it takes no claim
+ * from the client: the body names a step id, and everything else is looked up
+ * here. `evidenceAt` is returned so the route can be honest about a member who
+ * did the thing before the tour started ("قبلاً هم انجام داده‌اید") instead of
+ * asking them to write a duplicate record just to finish a lesson.
+ */
+export async function verifyTourStep(
+  businessId: string,
+  userId: string,
+  tour: TourDefinition,
+  stepId: string,
+): Promise<VerifyTourStepResult> {
+  const step = tour.steps.find((entry) => entry.id === stepId);
+  if (!step) return { ok: false, error: "unknown_step" };
+  if (step.kind !== "action" || !step.verifier) return { ok: false, error: "not_verifiable" };
+
+  const evidence = await hasTourEvidence(businessId, userId, step.verifier);
+  if (!evidence) return { ok: false, error: "evidence_missing" };
+
+  const result = await recordTourEvent(businessId, userId, tour, { type: "verified", stepId });
+  if (!result.ok) return { ok: false, error: "not_verifiable" };
+  return { ok: true, progress: result.progress, evidenceAt: evidence.lastAt };
 }

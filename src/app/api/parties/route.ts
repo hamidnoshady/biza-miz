@@ -12,6 +12,7 @@ import { partyReadAudienceForPermissions } from "@/lib/personnel-access";
 import { PARTY_ROLES, parsePartyRequestBody, type PartyRole } from "@/lib/parties";
 import { arBalancesForCustomers } from "@/lib/ar-service";
 import { storeCreditBalancesFor } from "@/lib/loyalty-service";
+import { recordTourEvidence } from "@/lib/tour-evidence-service";
 
 /**
  * The party directory — one endpoint for «اشخاص» in every app.
@@ -175,6 +176,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     // very fields the list withholds, one «ذخیره» later.
     const audience = partyReadAudienceForPermissions([...membership.permissions]);
     const projected = partyForAudience(party, audience);
+    // Issue #972 — the guided task "register a customer/supplier" is proven by
+    // this write, never by a click inside the tour. The evidence row stores the
+    // id only, never the name, phone or address the member typed.
+    await recordTourEvidence({
+      businessId: session.businessId,
+      userId: session.sub,
+      verifier: "party.created",
+      entityId: party.id,
+    });
     return NextResponse.json({ party: projected, customer: projected }, { status: 201 });
   } catch (err) {
     if (err instanceof PartyValidationError) {

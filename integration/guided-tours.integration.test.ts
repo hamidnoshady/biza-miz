@@ -32,6 +32,8 @@ let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let service: typeof import("../src/lib/tour-studio-service");
+let toursService: typeof import("../src/lib/tours-service");
+let evidence: typeof import("../src/lib/tour-evidence-service");
 
 function urlFor(database: string): string {
   const url = new URL(rootDatabaseUrl!);
@@ -59,6 +61,8 @@ beforeAll(async () => {
   process.env.DATABASE_URL = urlFor(databaseName);
   dbLib = await import("../src/lib/db");
   service = await import("../src/lib/tour-studio-service");
+  toursService = await import("../src/lib/tours-service");
+  evidence = await import("../src/lib/tour-evidence-service");
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
@@ -245,5 +249,98 @@ describe("authoring a tour in the console", () => {
     const tours = await service.listStudioTours();
     expect(tours.map((tour) => tour.tourKey)).toEqual(["studio.a", "studio.b"]);
     expect(tours[0].status).toBe("draft");
+  });
+});
+
+/**
+ * Verified business actions (phase 2) — the table, the RLS and the completion
+ * rule, against the real schema. A member can only ever be credited for their
+ * own action in their own business, and a step completes on that evidence, not
+ * on a request that merely says it happened.
+ */
+describe("verified action evidence", () => {
+  let businessId = "";
+  let userId = "";
+  let otherBusinessId = "";
+
+  beforeAll(async () => {
+    const inserted = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Tours Co', $1) RETURNING id",
+      [`tours-${randomUUID().slice(0, 8)}`],
+    );
+    businessId = inserted.rows[0].id;
+    otherBusinessId = (
+      await db.query<{ id: string }>(
+        "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
+        [`other-${randomUUID().slice(0, 8)}`],
+      )
+    ).rows[0].id;
+    userId = (
+      await db.query<{ id: string }>(
+        "INSERT INTO users (business_id, role, full_name, pin_hash) VALUES ($1, 'owner', 'Owner', 'x') RETURNING id",
+        [businessId],
+      )
+    ).rows[0].id;
+  });
+
+  beforeEach(async () => {
+    await db.query("DELETE FROM tour_action_evidence");
+    await db.query("DELETE FROM tour_member_progress");
+  });
+
+  it("counts repeats of the same action instead of logging every one", async () => {
+    await dbLib.withTenantTransaction(businessId, async () => {
+      await evidence.recordTourEvidence({ businessId, userId, verifier: "product.created", entityId: "item-1" });
+      await evidence.recordTourEvidence({ businessId, userId, verifier: "product.created", entityId: "item-2" });
+    });
+    const record = await dbLib.withTenantTransaction(businessId, () =>
+      evidence.hasTourEvidence(businessId, userId, "product.created"),
+    );
+    expect(record?.count).toBe(2);
+    expect(record?.verifier).toBe("product.created");
+  });
+
+  it("is invisible to another business, even for the same member id", async () => {
+    await dbLib.withTenantTransaction(businessId, () =>
+      evidence.recordTourEvidence({ businessId, userId, verifier: "order.created" }),
+    );
+    const foreign = await dbLib.withTenantTransaction(otherBusinessId, () =>
+      evidence.hasTourEvidence(otherBusinessId, userId, "order.created"),
+    );
+    expect(foreign).toBeNull();
+  });
+
+  it("completes the step only after the evidence row exists", async () => {
+    const tour = (await import("../src/lib/tours")).tourById("crm.directory.first-customer")!;
+    const step = tour.steps.find((entry) => entry.kind === "action")!;
+
+    const before = await dbLib.withTenantTransaction(businessId, () =>
+      toursService.verifyTourStep(businessId, userId, tour, step.id),
+    );
+    expect(before).toEqual({ ok: false, error: "evidence_missing" });
+
+    await dbLib.withTenantTransaction(businessId, () =>
+      evidence.recordTourEvidence({ businessId, userId, verifier: "party.created" }),
+    );
+
+    const after = await dbLib.withTenantTransaction(businessId, () =>
+      toursService.verifyTourStep(businessId, userId, tour, step.id),
+    );
+    expect(after.ok).toBe(true);
+    if (after.ok) {
+      expect(after.progress?.seenStepIds).toContain(step.id);
+      // The row exists exactly once, and it belongs to the caller.
+      const rows = await db.query("SELECT user_id, verifier FROM tour_action_evidence WHERE verifier = 'party.created'");
+      expect(rows.rows).toEqual([{ user_id: userId, verifier: "party.created" }]);
+    }
+  });
+
+  it("refuses to verify a step that asks for nothing real", async () => {
+    const tour = (await import("../src/lib/tours")).tourById("crm.directory.first-customer")!;
+    const explain = tour.steps[0];
+    const result = await dbLib.withTenantTransaction(businessId, () =>
+      toursService.verifyTourStep(businessId, userId, tour, explain.id),
+    );
+    expect(result).toEqual({ ok: false, error: "not_verifiable" });
   });
 });
