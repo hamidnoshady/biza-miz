@@ -77,6 +77,30 @@ class POS_Connector_Sync {
 	const VARIATION_FANOUT_HOOK = 'pos_connector_variation_fanout_continue';
 
 	/**
+	 * The media snapshot, in bounded slices (#1206 PERF-05).
+	 *
+	 * The verified media generation (#941) used to be walked end to end inside
+	 * one content sweep — up to 500k attachments, each with its own `GET_LOCK(5)`
+	 * and transaction, minutes of lock amplification on the same single PHP
+	 * worker that owes checkout its 60-second fast lane. One invocation now
+	 * reads for a bounded time, persists where it stopped and schedules the
+	 * next slice.
+	 */
+	const MEDIA_SNAPSHOT_PAGE = 100;
+	const MEDIA_SNAPSHOT_BUDGET_SECONDS = 20;
+	const MEDIA_SNAPSHOT_DELAY = 5;
+	const MEDIA_SNAPSHOT_HOOK = 'pos_connector_media_snapshot_continue';
+
+	/** Cursor kind — one non-autoloaded option while a generation is open. */
+	const MEDIA_SNAPSHOT_KIND = 'media_snapshot';
+
+	/** A generation larger than this is not a snapshot; #941 caps it on both sides. */
+	const MEDIA_SNAPSHOT_MAX_ROWS = 500000;
+
+	/** Slices that may fail before the generation is abandoned. */
+	const MEDIA_SNAPSHOT_MAX_FAILURES = 3;
+
+	/**
 	 * Most rows one push may carry. The app's own cap is 100 events per request.
 	 */
 	const PUSH_BATCH_ROWS = 100;
@@ -160,6 +184,8 @@ class POS_Connector_Sync {
 		// The rest of a variation family whose save exceeded one bounded page
 		// (#1206 PERF-02). Same idea as the export continuations above.
 		add_action( self::VARIATION_FANOUT_HOOK, array( __CLASS__, 'continue_variation_fanout' ), 10, 1 );
+		// The next slice of an open media generation (#1206 PERF-05).
+		add_action( self::MEDIA_SNAPSHOT_HOOK, array( __CLASS__, 'continue_media_snapshot' ), 10, 1 );
 		// A button press, run by cron instead of inside the admin request.
 		add_action( POS_CONNECTOR_CRON_MANUAL_JOB, array( __CLASS__, 'run_manual_job' ), 10, 1 );
 		// The cron probe (#1206): its callback running at all is the evidence
@@ -1531,6 +1557,7 @@ class POS_Connector_Sync {
 		// (cron option rebuilt, event fired while paused) is put back.
 		self::schedule_pending_product_exports();
 		self::schedule_pending_content_export();
+		self::schedule_pending_media_snapshot();
 
 		if ( null === $gate || true !== $gate['state'] ) {
 			$gate = self::gate();
@@ -3982,50 +4009,218 @@ class POS_Connector_Sync {
 		return $count;
 	}
 
-	/** Keyset export: new attachments beyond the captured upper ID belong to a
-	 * later generation. No completion marker is emitted after any queue error.
+	/**
+	 * Start (or resume) the media snapshot and run one bounded slice of it.
+	 *
+	 * Issue #941's contract is unchanged: attachments travel as one verified
+	 * generation keyed by a snapshot id, attachments created beyond the
+	 * captured upper id belong to a later generation, and no completion marker
+	 * is emitted after any queue error — the app proves completeness from
+	 * contiguous unique ordinals, never from the marker alone.
+	 *
+	 * What changed is how much of that happens in one request (#1206 PERF-05).
+	 * One invocation now reads for at most MEDIA_SNAPSHOT_BUDGET_SECONDS, and
+	 * the cursor is persisted *after every round*, so a resumed walk continues
+	 * past the last stored id instead of re-walking the head with new ordinals.
 	 */
 	private static function export_media_snapshot() {
+		$state = self::resume_media_snapshot();
+		if ( null === $state ) {
+			$state = self::start_media_snapshot();
+		}
+		self::run_media_snapshot_slice( $state );
+	}
+
+	/** The stored generation, while it is still worth resuming. */
+	private static function resume_media_snapshot() {
+		$state = POS_Connector_Export_Cursor::resume( self::MEDIA_SNAPSHOT_KIND, array() );
+		if ( null === $state || empty( $state['snapshot_id'] ) || empty( $state['boundary'] ) ) {
+			return null;
+		}
+		return $state;
+	}
+
+	/** Open a new generation: its id and boundary are fixed for the whole walk. */
+	private static function start_media_snapshot() {
 		global $wpdb;
 		if ( ! POS_Connector_Queue::maybe_install() ) throw new Exception( 'media_queue_unavailable' );
 		foreach ( array( $wpdb->posts, $wpdb->postmeta, $wpdb->options, POS_Connector_Queue::table_name() ) as $table ) {
 			if ( 'innodb' !== strtolower( (string) $wpdb->get_var( $wpdb->prepare( 'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s', $table ) ) ) ) throw new Exception( 'media_requires_innodb' );
 		}
-		$id = wp_generate_uuid4();
-		$boundary = self::next_content_revision();
-		$upper = (int) $wpdb->get_var( "SELECT COALESCE(MAX(ID), 0) FROM {$wpdb->posts} WHERE post_type = 'attachment'" );
-		$last = 0; $count = 0;
-		do {
-			$ids = $wpdb->get_col( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status <> 'auto-draft' AND ID > %d AND ID <= %d ORDER BY ID ASC LIMIT 100", $last, $upper ) );
+		$state = array(
+			'snapshot_id' => wp_generate_uuid4(),
+			'boundary'    => self::next_content_revision(),
+			'upper'       => (int) $wpdb->get_var( "SELECT COALESCE(MAX(ID), 0) FROM {$wpdb->posts} WHERE post_type = 'attachment'" ),
+			'cursor'      => 0,
+			'count'       => 0,
+			'failures'    => 0,
+		);
+		POS_Connector_Export_Cursor::set( self::MEDIA_SNAPSHOT_KIND, $state );
+		return $state;
+	}
+
+	/**
+	 * Walk rounds until the generation ends or the time budget is spent.
+	 *
+	 * The cursor and the ordinal counter are persisted together after each
+	 * round, which is what keeps the app's contiguous-ordinal proof intact: a
+	 * resumed slice starts on the id after the last stored one, so no attachment
+	 * is ever sent twice under two different ordinals.
+	 */
+	private static function run_media_snapshot_slice( array $state ) {
+		global $wpdb;
+		$started = microtime( true );
+		while ( true ) {
+			$ids = $wpdb->get_col(
+				$wpdb->prepare(
+					"SELECT ID FROM {$wpdb->posts} WHERE post_type = 'attachment' AND post_status <> 'auto-draft' AND ID > %d AND ID <= %d ORDER BY ID ASC LIMIT %d",
+					(int) $state['cursor'],
+					(int) $state['upper'],
+					self::MEDIA_SNAPSHOT_PAGE
+				)
+			);
 			if ( $wpdb->last_error ) throw new Exception( 'media_snapshot_query_failed' );
 			foreach ( $ids as $post_id ) {
-				$last = (int) $post_id;
-				// Read the row/meta and allocate its revision under the same DB
-				// locks. A stale WP object cache must never receive a revision
-				// newer than a concurrently committed edit and overwrite it.
-				$lock = self::media_payload_lock( $post_id );
-				if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) throw new Exception( 'media_payload_busy' );
-				try {
-					if ( false === $wpdb->query( 'START TRANSACTION' ) ) throw new Exception( 'media_snapshot_transaction_failed' );
-					$wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE ID = %d FOR UPDATE", $post_id ) );
-					$wpdb->get_col( $wpdb->prepare( "SELECT meta_id FROM {$wpdb->postmeta} WHERE post_id = %d FOR UPDATE", $post_id ) );
-					if ( $wpdb->last_error ) throw new Exception( 'media_snapshot_lock_failed' );
-					clean_post_cache( $post_id );
-					$post = get_post( $post_id );
-					if ( ! $post ) { $wpdb->query( 'ROLLBACK' ); continue; }
-					if ( $count >= 500000 ) throw new Exception( 'media_snapshot_limit' );
-					$payload = self::content_payload( $post );
-					$payload['snapshot'] = array( 'id' => $id, 'boundary' => $boundary, 'index' => $count + 1 );
-					// Generation-specific keys cannot coalesce with live events.
-					if ( ! POS_Connector_Queue::enqueue( 'content.updated', 'snapshot:' . $id . ':' . $post_id, $payload ) ) throw new Exception( 'media_snapshot_enqueue_failed' );
-					if ( false === $wpdb->query( 'COMMIT' ) ) throw new Exception( 'media_snapshot_commit_failed' );
-					++$count;
-				} catch ( \Throwable $error ) {
-					$wpdb->query( 'ROLLBACK' ); clean_post_cache( $post_id ); throw $error;
-				} finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
+				self::export_one_attachment( (int) $post_id, $state );
 			}
-		} while ( count( $ids ) === 100 );
-		if ( ! POS_Connector_Queue::enqueue( 'content.media_snapshot_completed', $id, array( 'snapshot' => array( 'id' => $id, 'boundary' => $boundary, 'count' => $count ) ) ) ) throw new Exception( 'media_snapshot_enqueue_failed' );
+			POS_Connector_Export_Cursor::set( self::MEDIA_SNAPSHOT_KIND, $state );
+			if ( count( $ids ) < self::MEDIA_SNAPSHOT_PAGE ) {
+				self::finish_media_snapshot( $state );
+				return;
+			}
+			if ( ( microtime( true ) - $started ) >= self::MEDIA_SNAPSHOT_BUDGET_SECONDS ) {
+				self::schedule_media_snapshot_continuation( (string) $state['snapshot_id'] );
+				return;
+			}
+		}
+	}
+
+	/**
+	 * One attachment: read it and allocate its revision under the same locks.
+	 *
+	 * A stale WP object cache must never receive a revision newer than a
+	 * concurrently committed edit and overwrite it.
+	 */
+	private static function export_one_attachment( $post_id, array &$state ) {
+		global $wpdb;
+		if ( (int) $state['count'] >= self::MEDIA_SNAPSHOT_MAX_ROWS ) throw new Exception( 'media_snapshot_limit' );
+		$lock = self::media_payload_lock( $post_id );
+		if ( '1' !== (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 5)', $lock ) ) ) throw new Exception( 'media_payload_busy' );
+		try {
+			if ( false === $wpdb->query( 'START TRANSACTION' ) ) throw new Exception( 'media_snapshot_transaction_failed' );
+			$wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->posts} WHERE ID = %d FOR UPDATE", $post_id ) );
+			$wpdb->get_col( $wpdb->prepare( "SELECT meta_id FROM {$wpdb->postmeta} WHERE post_id = %d FOR UPDATE", $post_id ) );
+			if ( $wpdb->last_error ) throw new Exception( 'media_snapshot_lock_failed' );
+			clean_post_cache( $post_id );
+			$post = get_post( $post_id );
+			if ( ! $post ) {
+				$wpdb->query( 'ROLLBACK' );
+				// Deleted between the page query and this row: step over it so
+				// the walk cannot stall on an id that no longer exists.
+				$state['cursor'] = (int) $post_id;
+				return;
+			}
+			$payload = self::content_payload( $post );
+			$payload['snapshot'] = array(
+				'id'       => (string) $state['snapshot_id'],
+				'boundary' => (string) $state['boundary'],
+				'index'    => (int) $state['count'] + 1,
+			);
+			// Generation-specific keys cannot coalesce with live events.
+			if ( ! POS_Connector_Queue::enqueue( 'content.updated', 'snapshot:' . $state['snapshot_id'] . ':' . $post_id, $payload ) ) throw new Exception( 'media_snapshot_enqueue_failed' );
+			if ( false === $wpdb->query( 'COMMIT' ) ) throw new Exception( 'media_snapshot_commit_failed' );
+			$state['cursor'] = (int) $post_id;
+			++$state['count'];
+		} catch ( \Throwable $error ) {
+			$wpdb->query( 'ROLLBACK' );
+			clean_post_cache( $post_id );
+			throw $error;
+		} finally {
+			$wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+		}
+	}
+
+	/** The walk ended: one marker behind every row, then forget the generation. */
+	private static function finish_media_snapshot( array $state ) {
+		$snapshot_id = (string) $state['snapshot_id'];
+		$count       = (int) $state['count'];
+		if ( ! POS_Connector_Queue::enqueue(
+			'content.media_snapshot_completed',
+			$snapshot_id,
+			array(
+				'snapshot' => array(
+					'id'       => $snapshot_id,
+					'boundary' => (string) $state['boundary'],
+					'count'    => $count,
+				),
+			)
+		) ) {
+			throw new Exception( 'media_snapshot_enqueue_failed' );
+		}
+		POS_Connector_Export_Cursor::clear( self::MEDIA_SNAPSHOT_KIND );
+		POS_Connector_Log::info(
+			'export',
+			sprintf( '%d پیوست در یک نسل تصویر رسانه در صف ارسال قرار گرفت.', $count )
+		);
+	}
+
+	/** Run the next slice, if this generation is still the open one. */
+	public static function continue_media_snapshot( $snapshot_id ) {
+		$snapshot_id = (string) $snapshot_id;
+		$state       = self::resume_media_snapshot();
+		if ( null === $state || (string) $state['snapshot_id'] !== $snapshot_id ) {
+			return;
+		}
+		$settings = pos_connector_settings();
+		if ( empty( $settings['enabled'] ) ) {
+			return;
+		}
+		$gate = self::gate();
+		if ( true !== $gate['state'] ) {
+			// Paused or unreachable: the cursor stays, and the fast lane puts
+			// this event back on its next tick.
+			return;
+		}
+		try {
+			self::run_media_snapshot_slice( $state );
+		} catch ( \Throwable $error ) {
+			$state['failures'] = (int) ( isset( $state['failures'] ) ? $state['failures'] : 0 ) + 1;
+			POS_Connector_Log::error(
+				'export',
+				sprintf( 'نوبت تصویر رسانه شکست خورد (%s)؛ تلاش %d.', $error->getMessage(), (int) $state['failures'] )
+			);
+			if ( (int) $state['failures'] >= self::MEDIA_SNAPSHOT_MAX_FAILURES ) {
+				// A store whose media cannot be walked must not keep a stuck
+				// generation alive: the next content sweep opens a fresh one,
+				// exactly as this code did when the whole walk threw.
+				POS_Connector_Export_Cursor::clear( self::MEDIA_SNAPSHOT_KIND );
+				return;
+			}
+			POS_Connector_Export_Cursor::set( self::MEDIA_SNAPSHOT_KIND, $state );
+			self::schedule_media_snapshot_continuation( $snapshot_id, 60 );
+			return;
+		}
+		self::run( $gate );
+	}
+
+	/** One single event per generation; never two. */
+	private static function schedule_media_snapshot_continuation( $snapshot_id, $delay = self::MEDIA_SNAPSHOT_DELAY ) {
+		$args = array( (string) $snapshot_id );
+		if ( wp_next_scheduled( self::MEDIA_SNAPSHOT_HOOK, $args ) ) {
+			return;
+		}
+		if ( false === wp_schedule_single_event( time() + max( 1, (int) $delay ), self::MEDIA_SNAPSHOT_HOOK, $args ) ) {
+			POS_Connector_Log::error( 'export', 'media_snapshot_continuation_schedule_failed' );
+		}
+	}
+
+	/** The fast lane puts back a media continuation that was never scheduled. */
+	private static function schedule_pending_media_snapshot() {
+		$state = self::resume_media_snapshot();
+		if ( null === $state ) {
+			return;
+		}
+		self::schedule_media_snapshot_continuation( (string) $state['snapshot_id'] );
 	}
 
 	/** The customer sweep: re-queue the whole customer book. */
