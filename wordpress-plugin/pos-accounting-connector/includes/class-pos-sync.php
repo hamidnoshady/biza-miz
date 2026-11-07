@@ -57,6 +57,26 @@ class POS_Connector_Sync {
 	const CUSTOMER_EXPORT_RECHECK_SECONDS = 300;
 
 	/**
+	 * How many variations one parent save may fan out inside the request
+	 * (#1206 PERF-02).
+	 *
+	 * Saving a variable product rewrites every child and WooCommerce fires no
+	 * hook for the ones it changed, so the plugin walks the family itself. It
+	 * used to do that with `limit => -1` on the admin/checkout request thread:
+	 * a 1,000-variation family meant 1,000 product hydrations and 1,000 payload
+	 * builds before the save returned. Now the first page goes out inline and
+	 * the rest follows in bounded slices on cron, which is where the push
+	 * happens anyway.
+	 */
+	const VARIATION_FANOUT_PAGE = 100;
+
+	/** Seconds before the next fan-out slice runs. */
+	const VARIATION_FANOUT_DELAY = 5;
+
+	/** Cron event that finishes a variation fan-out past the inline page. */
+	const VARIATION_FANOUT_HOOK = 'pos_connector_variation_fanout_continue';
+
+	/**
 	 * Most rows one push may carry. The app's own cap is 100 events per request.
 	 */
 	const PUSH_BATCH_ROWS = 100;
@@ -137,6 +157,9 @@ class POS_Connector_Sync {
 		// budget leaves a cursor, and this event finishes the walk minutes
 		// later instead of waiting for tomorrow's resync to find it expired.
 		add_action( POS_CONNECTOR_CRON_CONTENT_EXPORT, array( __CLASS__, 'continue_content_export' ) );
+		// The rest of a variation family whose save exceeded one bounded page
+		// (#1206 PERF-02). Same idea as the export continuations above.
+		add_action( self::VARIATION_FANOUT_HOOK, array( __CLASS__, 'continue_variation_fanout' ), 10, 1 );
 		// A button press, run by cron instead of inside the admin request.
 		add_action( POS_CONNECTOR_CRON_MANUAL_JOB, array( __CLASS__, 'run_manual_job' ), 10, 1 );
 		// The cron probe (#1206): its callback running at all is the evidence
@@ -675,25 +698,109 @@ class POS_Connector_Sync {
 
 	/** Queue every child of a variable product as its own event. */
 	private static function enqueue_variations( $parent_id ) {
-		$children = wc_get_products(
-			array(
-				'parent' => $parent_id,
-				'type'   => 'variation',
-				'limit'  => -1,
-				'return' => 'ids',
+		$ids = self::enqueue_variation_page( $parent_id, 0 );
+		if ( count( $ids ) < self::VARIATION_FANOUT_PAGE ) {
+			// The whole family fitted in one page: nothing left to schedule.
+			delete_option( self::variation_fanout_state_key( $parent_id ) );
+			return;
+		}
+		self::schedule_variation_fanout( $parent_id, end( $ids ) );
+	}
+
+	/**
+	 * Enqueue one bounded page of a variation family, starting after $after_id.
+	 *
+	 * Keyset by post id rather than `offset`: a variation deleted mid-walk (the
+	 * admin screen can do that while the slices run) would shift an offset and
+	 * silently skip the next child, whereas `ID > cursor` cannot. The query is
+	 * against the variations table alone — hydrating the products happens below,
+	 * one bounded page at a time.
+	 *
+	 * @return int[] The variation ids this page covered, ascending. A short page
+	 *               is the signal that the family ends here.
+	 */
+	private static function enqueue_variation_page( $parent_id, $after_id ) {
+		global $wpdb;
+		$ids = array_map(
+			'absint',
+			(array) $wpdb->get_col(
+				$wpdb->prepare(
+					"SELECT ID FROM {$wpdb->posts}
+						WHERE post_parent = %d AND post_type = 'product_variation' AND ID > %d
+						ORDER BY ID ASC LIMIT %d",
+					absint( $parent_id ),
+					absint( $after_id ),
+					self::VARIATION_FANOUT_PAGE
+				)
 			)
 		);
-		foreach ( $children as $child_id ) {
+		foreach ( $ids as $child_id ) {
 			$child = wc_get_product( $child_id );
-			if ( $child ) {
-				self::safe_enqueue_callable(
-					'product.updated',
-					$child_id,
-					static function () use ( $child ) {
-						return self::product_payload( $child );
-					}
-				);
+			if ( ! $child ) {
+				continue;
 			}
+			self::safe_enqueue_callable(
+				'product.updated',
+				$child_id,
+				static function () use ( $child ) {
+					return self::product_payload( $child );
+				}
+			);
+		}
+		return $ids;
+	}
+
+	/** Continue a variation fan-out the inline page could not finish. */
+	public static function continue_variation_fanout( $parent_id ) {
+		$parent_id = absint( $parent_id );
+		if ( ! $parent_id ) {
+			return;
+		}
+		$settings = pos_connector_settings();
+		if ( empty( $settings['enabled'] ) || empty( $settings['sync_products'] ) ) {
+			// Sync was switched off while the family was still being walked. Stop
+			// here: whatever is already queued keeps its rows, and the next save
+			// that matters re-arms the walk.
+			delete_option( self::variation_fanout_state_key( $parent_id ) );
+			return;
+		}
+		$state_key = self::variation_fanout_state_key( $parent_id );
+		$cursor    = absint( get_option( $state_key, 0 ) );
+		$ids       = self::enqueue_variation_page( $parent_id, $cursor );
+		if ( count( $ids ) < self::VARIATION_FANOUT_PAGE ) {
+			delete_option( $state_key );
+			return;
+		}
+		self::schedule_variation_fanout( $parent_id, end( $ids ) );
+	}
+
+	private static function variation_fanout_state_key( $parent_id ) {
+		return 'pos_connector_variation_fanout_' . absint( $parent_id );
+	}
+
+	/**
+	 * One single event per parent; never two.
+	 *
+	 * The cursor is the resume point, so a second save landing while a fan-out
+	 * is pending cannot start a parallel walk: it re-arms the same event, which
+	 * carries the newest cursor, and the remaining children are enqueued with
+	 * whatever state they have by the time their slice runs.
+	 */
+	private static function schedule_variation_fanout( $parent_id, $cursor ) {
+		$parent_id = absint( $parent_id );
+		$cursor    = absint( $cursor );
+		if ( ! $parent_id || ! $cursor ) {
+			return;
+		}
+		update_option( self::variation_fanout_state_key( $parent_id ), $cursor, false );
+		if ( wp_next_scheduled( self::VARIATION_FANOUT_HOOK, array( $parent_id ) ) ) {
+			return;
+		}
+		if ( false === wp_schedule_single_event( time() + self::VARIATION_FANOUT_DELAY, self::VARIATION_FANOUT_HOOK, array( $parent_id ) ) ) {
+			POS_Connector_Log::error(
+				'export',
+				sprintf( 'زمان‌بندی ادامهٔ ارسال تنوع‌های محصول %d انجام نشد.', $parent_id )
+			);
 		}
 	}
 

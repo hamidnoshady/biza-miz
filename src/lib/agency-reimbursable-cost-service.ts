@@ -71,6 +71,8 @@ import { getBusinessIndustry } from "./industry-guard";
 import { postgresDateToIso } from "./jalali";
 import { nextBusinessRegisterNumber } from "./register-numbering";
 import "./agency-vendor-settlement-posting";
+import { postExactMirrorEntry } from "./ledger-service";
+import { recordDomainEvent } from "./posting-engine";
 import { emitDomainEvent } from "./posting-engine";
 import {
   PASS_THROUGH_DEFAULT_VAT_PERCENT,
@@ -1043,8 +1045,11 @@ export async function settleAgencyVendorCosts(
   const costIds = [...new Set(rawIds)].sort();
   const note = normalizeAgencyCostOptionalText(input.note, AGENCY_COST_NOTE_LIMIT);
   if (note.tooLong) throw new AgencyReimbursableCostError("text_too_long");
-  const locationId = input.locationId || (await resolveActiveLocationForUser(businessId, actor.userId))?.id;
-  if (!locationId) throw new AgencyReimbursableCostError("location_required");
+  const accessibleLocation = await resolveActiveLocationForUser(businessId, actor.userId, input.locationId ?? null);
+  const locationId = accessibleLocation?.id;
+  if (!locationId || (input.locationId && locationId !== input.locationId)) {
+    throw new AgencyReimbursableCostError("location_required");
+  }
 
   return withTenantTransaction(businessId, async (client: PoolClient) => {
     const location = await client.query(
@@ -1102,5 +1107,67 @@ export async function settleAgencyVendorCosts(
     await client.query(`UPDATE agency_vendor_settlements SET entry_id=$2 WHERE business_id=$1 AND id=$3`, [businessId, entryId, id]);
     await client.query(`UPDATE agency_reimbursable_costs SET settlement_id=$2 WHERE business_id=$1 AND id=ANY($3::uuid[])`, [businessId, id, costIds]);
     return { id, settlementNumber, entryId, totalRial: Number(total), settledCostIds: costIds };
+  });
+}
+
+
+/** Undo a posted vendor payment using the original journal, never current mappings. */
+export async function reverseAgencyVendorSettlement(
+  businessId: string,
+  actor: { userId: string; name: string },
+  settlementId: string,
+  input: { reversedOn: string },
+): Promise<{ settlementId: string; reversalEntryId: string }> {
+  await assertAgency(businessId);
+  const date = normalizeAgencyCostDate(input.reversedOn);
+  if (!date) throw new AgencyReimbursableCostError("invalid_date");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(settlementId)) {
+    throw new AgencyReimbursableCostError("settlement_not_found");
+  }
+  return withTenantTransaction(businessId, async (client: PoolClient) => {
+    const { rows } = await client.query<{
+      id: string; entry_id: string | null; reversed_at: Date | null;
+    }>(`SELECT id, entry_id, reversed_at FROM agency_vendor_settlements
+         WHERE business_id=$1 AND id=$2 FOR UPDATE`, [businessId, settlementId]);
+    const payment = rows[0];
+    if (!payment) throw new AgencyReimbursableCostError("settlement_not_found");
+    if (payment.reversed_at) throw new AgencyReimbursableCostError("settlement_already_reversed");
+    if (!payment.entry_id) throw new AgencyReimbursableCostError("settlement_not_posted");
+    const original = await client.query<{
+      location_id: string | null; project_id: string | null; reversed_at: Date | null;
+      source_type: string | null; source_id: string | null; reverses_entry_id: string | null;
+    }>(`SELECT location_id, project_id, reversed_at, source_type, source_id, reverses_entry_id
+         FROM journal_entries WHERE business_id=$1 AND id=$2 FOR UPDATE`, [businessId, payment.entry_id]);
+    const entry = original.rows[0];
+    if (!entry || entry.source_type !== "agency_vendor_settlement" ||
+        entry.source_id !== payment.id || entry.reverses_entry_id) {
+      throw new AgencyReimbursableCostError("settlement_not_posted");
+    }
+    if (entry.reversed_at) throw new AgencyReimbursableCostError("settlement_already_reversed");
+    const accessibleLocation = await resolveActiveLocationForUser(businessId, actor.userId, entry.location_id);
+    if (!entry.location_id || accessibleLocation?.id !== entry.location_id) {
+      throw new AgencyReimbursableCostError("location_required");
+    }
+    const event = await recordDomainEvent(client, {
+      businessId, locationId: entry.location_id, eventType: "agency.vendor_settlement_reversal",
+      sourceType: "agency_vendor_settlement_reversal", sourceId: payment.id, createdBy: actor.userId,
+      payload: { originalEntryId: payment.entry_id, reversedOn: date },
+    });
+    // The canonical mirror path retains original line dimensions, party IDs,
+    // exact integer values and reversal linkage. Fiscal-period checks still apply.
+    const reversalEntryId = await postExactMirrorEntry(client, {
+      businessId, locationId: entry.location_id, projectId: entry.project_id,
+      originalEntryId: payment.entry_id, sourceType: "agency_vendor_settlement_reversal",
+      sourceId: payment.id, postingKind: "agency_vendor_settlement_reversal",
+      memo: "برگشت تسویهٔ پرداختنی رسانه و تولید", createdBy: actor.userId, entryDate: date,
+    });
+    // Some posting policies queue rather than post. Roll back the event and any
+    // original-entry stamps too: a queued reversal must not free costs for payment.
+    if (!reversalEntryId) throw new AgencyReimbursableCostError("settlement_not_posted");
+    await client.query(`UPDATE domain_events SET entry_id=$2 WHERE business_id=$1 AND id=$3`, [businessId, reversalEntryId, event.id]);
+    await client.query(`UPDATE agency_vendor_settlements
+      SET reversed_at=now(), reversal_entry_id=$2 WHERE business_id=$1 AND id=$3`,
+      [businessId, reversalEntryId, payment.id]);
+    return { settlementId: payment.id, reversalEntryId };
   });
 }

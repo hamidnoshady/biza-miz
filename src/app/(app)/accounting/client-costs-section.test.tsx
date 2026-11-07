@@ -336,6 +336,7 @@ describe("ClientCostsSection — reading is not moving money", () => {
     // …and nothing on it can be acted on.
     expect(screen.queryByText("ثبت هزینه")).toBeNull();
     expect(screen.queryByText("تغییر سیاست")).toBeNull();
+    expect(screen.queryByText("ثبت پرداخت به فروشنده")).toBeNull();
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
@@ -346,4 +347,20 @@ describe("ClientCostsSection — reading is not moving money", () => {
     expect(await screen.findByText("ثبت هزینه")).toBeTruthy();
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
+  it("admits a payable manager independently of expense or invoice permissions", async () => {
+    stubApi();
+    render(<ClientCostsSection canRecord={false} canRecharge={false} canSetPolicy={false} canSettle />);
+    expect(await screen.findByText("ثبت پرداخت به فروشنده")).toBeTruthy();
+    expect(screen.queryByText("ثبت هزینه")).toBeNull();
+    expect(screen.queryByText("صدور فاکتور بازدریافت")).toBeNull();
+  });
+
+  it("shows vendor-payment facts to readers without exposing payment controls", async () => {
+    stubApi({ costs: [cost({ settledBy: "payable", settled: true, settlementNumber: "VS-001" })] });
+    render(<ClientCostsSection canRecord={false} canRecharge={false} canSetPolicy={false} />);
+    expect(await screen.findByText("تسویه‌شده با فروشنده")).toBeTruthy();
+    expect(screen.getByText(toPersianDigits("VS-001"))).toBeTruthy();
+    expect(screen.queryByText("ثبت پرداخت به فروشنده")).toBeNull();
+  });
+
 });

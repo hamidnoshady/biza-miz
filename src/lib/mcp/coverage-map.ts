@@ -878,6 +878,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/agency-reimbursable-costs.integration.test.ts",
   },
   {
+    id: "agency.vendor_settlements",
+    module: "Accounting",
+    entity: "Agency vendor payments and exact journal reversals",
+    routes: ["agency/vendor-settlements"],
+    note: "Issue #1128 §D: payments on POST agency/reimbursable-costs/settle and reversals here both require finance.payables_manage. No MCP write verbs: moving money is not inferred from spend. Reversals mirror the original posted journal, preserving accounts, dimensions and project, and cost paid state is derived from the payment reversal stamp. Quote and purchase documents remain separate work.",
+    test: "integration/agency-vendor-settlements.integration.test.ts",
+  },
+  {
     id: "workspace.agency",
     module: "Workspace",
     entity: "Agency commercial registers (billing schedule & milestones, change requests)",

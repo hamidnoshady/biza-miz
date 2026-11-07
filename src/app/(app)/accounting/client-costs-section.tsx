@@ -47,6 +47,7 @@
  * authorization, and neither is a hidden control.
  */
 
+import { VendorPaymentControls } from "./vendor-payment-controls";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   api,
@@ -101,6 +102,9 @@ type CostWire = {
   rechargedOrderId: string | null;
   rechargedByName: string;
   recharged: boolean;
+  settled?: boolean;
+  settlementId?: string | null;
+  settlementNumber?: string | null;
 };
 
 type PolicyWire = {
@@ -158,6 +162,7 @@ export function ClientCostsSection({
   canRecord,
   canRecharge,
   canSetPolicy,
+  canSettle = false,
 }: {
   /** `finance.expenses_manage` — record a cost. */
   canRecord: boolean;
@@ -165,6 +170,7 @@ export function ClientCostsSection({
   canRecharge: boolean;
   /** `finance.expenses_manage` — choose the business's presentation policy. */
   canSetPolicy: boolean;
+  canSettle?: boolean;
 }) {
   const money = useMoney();
 
@@ -531,6 +537,7 @@ export function ClientCostsSection({
               <th scope="col">مبلغ</th>
               <th scope="col">تاریخ</th>
               <th scope="col">نحوهٔ پرداخت</th>
+              <th scope="col">وضعیت پرداخت به فروشنده</th>
               <th scope="col">حساب بدهکار</th>
               <th scope="col">بازدریافت</th>
             </DataTableHead>
@@ -566,6 +573,12 @@ export function ClientCostsSection({
                     </td>
                     <td className="whitespace-nowrap text-xs">{formatJalali(row.spentOn)}</td>
                     <td className="text-xs">{AGENCY_COST_SETTLEMENT_LABELS[row.settledBy]}</td>
+                    <td className="text-xs">
+                      <StatusBadge tone={row.settledBy !== "payable" || row.settled ? "positive" : "neutral"}>
+                        {row.settledBy !== "payable" ? "پرداخت هنگام ثبت هزینه" : row.settled ? "تسویه‌شده با فروشنده" : "پرداختنی به فروشنده"}
+                      </StatusBadge>
+                      {row.settlementNumber ? <div className="mt-1 text-muted-foreground">{toPersianDigits(row.settlementNumber)}</div> : null}
+                    </td>
                     <td className="whitespace-nowrap">
                       <StatusBadge tone={row.passThrough ? "active" : "neutral"}>
                         {toPersianDigits(row.accounts.debitCode)}
@@ -618,6 +631,8 @@ export function ClientCostsSection({
           </p>
         </SectionCard>
       ) : null}
+
+      {canSettle ? <VendorPaymentControls costs={costs ?? []} onChanged={() => setReloadKey(key => key + 1)} /> : null}
 
       {/* Act one: record a cost. */}
       <Sheet open={recordOpen} onOpenChange={setRecordOpen}>

@@ -1005,6 +1005,8 @@ export async function postExactMirrorEntry(
     locationId: string | null;
     /** the entry being undone */
     originalEntryId: string;
+    /** Original document's project, preserved by project-scoped callers. */
+    projectId?: string | null;
     /** identity of the reversal itself */
     sourceType: string;
     sourceId: string;
@@ -1049,6 +1051,7 @@ export async function postExactMirrorEntry(
     inventoryEventId: params.inventoryEventId ?? null,
     journalIdempotencyKey: params.idempotencyKey ?? null,
     dimensionMirror: true,
+    projectId: params.projectId ?? null,
     lines: lines.map((line) => ({
       accountId: line.account_id,
       debit: line.credit as RialText,
