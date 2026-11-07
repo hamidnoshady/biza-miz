@@ -14,6 +14,7 @@ export type VendorPaymentCost = {
 };
 
 const ERRORS: Record<string, string> = {
+  invalid_vendor: "تأمین‌کننده دیگر فعال نیست یا نقش تأمین‌کننده ندارد؛ دفتر اشخاص را بررسی کنید.",
   cost_already_settled: "این هزینه قبلاً پرداخت شده است؛ فهرست را تازه کنید.",
   cost_not_posted: "هزینه هنوز در دفتر ثبت نشده است.",
   cost_not_payable: "این هزینه از حساب پرداختنی ثبت نشده است.",

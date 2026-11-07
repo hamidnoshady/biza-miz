@@ -37,6 +37,7 @@ interface VendorSettlementPayload {
    * the other's.
    */
   projectId?: string | null;
+  vendorPartyId?: string | null;
 }
 
 /**
@@ -67,7 +68,7 @@ async function settlementLines(
 
   return {
     lines: [
-      { accountId: payable, debit: payload.amount, credit: ZERO },
+      { accountId: payable, debit: payload.amount, credit: ZERO, partyId: payload.vendorPartyId ?? null },
       { accountId: cashOrBank, debit: ZERO, credit: payload.amount },
     ],
     // The memo names the account, because «پرداخت» on a list of entries does not say

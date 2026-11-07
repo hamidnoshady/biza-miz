@@ -44,6 +44,11 @@ vi.mock("@/app/(app)/crm/customer-search", () => ({
   ),
 }));
 
+vi.mock("./supplier-party-picker", () => ({
+  SupplierPartyPicker: ({ onPick }: { onPick: (id: string, name: string) => void }) =>
+    <button type="button" onClick={() => onPick("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "رسانه ثبت‌شده")}>انتخاب تأمین‌کننده ثبت‌شده</button>,
+}));
+
 import { ClientCostsSection } from "./client-costs-section";
 import { toPersianDigits } from "@/lib/digits";
 
@@ -219,9 +224,25 @@ describe("ClientCostsSection — recording a cost", () => {
     // The absence *is* the assertion: the service resolves the policy, and a screen
     // that sent an account would be inferring the treatment from the row.
     expect("presentation" in body).toBe(false);
+    expect("vendorPartyId" in body).toBe(false);
     expect(body.partyId).toBe(CLIENT_A);
     expect(body.description).toBe("پرداخت چاپ بنر");
     expect(body.settledBy).toBe("payable");
+  });
+
+  it("sends a deliberately selected supplier ID, not an inferred name match", async () => {
+    const writes = stubApi(); const user = userEvent.setup();
+    render(<ClientCostsSection {...EVERY_CAPABILITY} canChooseVendor />);
+    await user.click(await screen.findByText("ثبت هزینه"));
+    await user.click(screen.getByText("انتخاب کارفرما"));
+    await user.click(screen.getByText("انتخاب تأمین‌کننده ثبت‌شده"));
+    expect((screen.getByPlaceholderText("مثلاً رسانهٔ آفتاب") as HTMLInputElement).disabled).toBe(true);
+    await user.type(screen.getByPlaceholderText("مثلاً خرید فضای تبلیغاتی آبان"), "پرداخت چاپ بنر");
+    await user.type(screen.getByLabelText("مبلغ به ریال"), "5000000");
+    await user.type(screen.getByLabelText("تاریخ پرداخت"), "2026-10-05");
+    await user.click(screen.getByText("ثبت و صدور سند"));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(JSON.parse(writes[0].body).vendorPartyId).toBe("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
   });
 
   it("sends the treatment only when the member overrides the policy", async () => {

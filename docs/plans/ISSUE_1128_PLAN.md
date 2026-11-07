@@ -1159,6 +1159,34 @@ no project appears in no project P&L, which is the limitation wave 13's PR alrea
 for invoices raised from the general sales screen, now stated at the point of entry rather
 than only in a document.
 
+### 80 — supplier identity is not the name printed on a document
+
+The payment foundation (#1281, #1288) could only group costs by identical nonblank
+`vendor_name`. This remains the legacy fallback, not a supplier identity. Migration
+0288 adds nullable `vendor_party_id` references to the cost and payment registers,
+without backfilling a single row from names. A selected vendor must be an active,
+unmerged party of this tenant holding the Supplier role. The canonical directory
+and its `parties.view` permission are reused; no parallel supplier directory is built.
+
+Linked costs group by ID: two suppliers called the same thing cannot share a payment,
+and two historical spellings of one renamed supplier can. Linked and unlinked costs
+never mix. `vendor_name` stays the immutable document snapshot; live
+`vendorPartyName` is separately read rather than silently rewriting history. The
+selected supplier also tags the 2140 journal leg through the existing posting engine,
+and exact-mirror reversals retain that attribution.
+
+Both vendor FKs declare audited merge dispositions in `party-merge-references.ts`.
+Posted vendor attribution is otherwise frozen, including clearing the link. An
+archive does not prevent historical note edits or reversal of an existing payment,
+but an inactive supplier cannot receive a new payment. The existing CRM merge only
+accepts customer-role records; a supplier participating through that workflow must
+also hold Customer, and the surviving party must retain Supplier. This slice does
+not widen the merge endpoint or infer roles.
+
+This is the identity prerequisite, not a claim that quote → approved purchase →
+payable documents now exist. Those documents, campaign reporting, actual time capture,
+and #1110 remain owed.
+
 ## Sites audited and deliberately left alone
 
 The issue asks for every enumeration to be audited, so these are recorded rather than left to a
