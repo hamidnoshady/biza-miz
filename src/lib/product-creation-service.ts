@@ -296,11 +296,12 @@ export async function createProductRecord(
   locationId: string,
   input: ParsedProductCreateInput,
   audit?: ProductCreateAudit,
+  transactionClient?: PoolClient,
 ): Promise<CreatedProduct> {
-  const client = await getPool().connect();
+  const client = transactionClient ?? await getPool().connect();
   const priced: { itemId: string; sellPrice: number }[] = [];
   try {
-    await client.query("BEGIN");
+    if (!transactionClient) await client.query("BEGIN");
 
     const resolvedInput = await resolveVariantDefinitions(client, locationId, input);
     await assertProductMediaReferences(client, locationId, resolvedInput);
@@ -382,16 +383,16 @@ export async function createProductRecord(
       );
     }
 
-    await client.query("COMMIT");
+    if (!transactionClient) await client.query("COMMIT");
     return {
       item: updatedParent ?? parent,
       variants,
       galleryMediaIds,
     };
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (!transactionClient) await client.query("ROLLBACK");
     throw error;
   } finally {
-    client.release();
+    if (!transactionClient) client.release();
   }
 }

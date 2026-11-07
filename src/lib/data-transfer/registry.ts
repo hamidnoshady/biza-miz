@@ -32,6 +32,18 @@ import { EXPENSE_SETTLEMENT_LABELS, EXPENSE_SETTLEMENTS } from "../payables-inpu
 import { DIMENSION_CODE_FIELD, DIMENSION_KIND_LABELS, type DimensionKind } from "../accounting-dimensions";
 import type { DataModuleKey, EntityDefinition, EntityField } from "./types";
 
+/** Dedicated reviewed import. It has no generic row adapter or export entry. */
+export const REVIEWED_PRODUCT_CATALOGUE: EntityDefinition = {
+  key: "inventory.product_catalogue",
+  module: "inventory",
+  label: "کاتالوگ محصولات",
+  description: "تطبیق بازبینی‌شدهٔ محصولات فروش و مدل‌های ساعت",
+  importPermission: PERMISSIONS.inventoryAdjust,
+  exportPermission: PERMISSIONS.inventoryView,
+  locationScoped: true,
+  fields: [],
+};
+
 // ---------------------------------------------------------------------------
 // Shared field fragments
 // ---------------------------------------------------------------------------

@@ -17,9 +17,10 @@ import { DataTransferSkeleton, useDataCatalogue } from "./data-transfer-ui";
 import { ExportSection } from "./export-section";
 import { HistorySection } from "./history-section";
 import { ImportSection } from "./import-section";
+import { CatalogueSection } from "./catalogue-section";
 import { HolooTransferSection } from "./holoo-transfer-section";
 
-type PanelKey = "import" | "export" | "history" | "holoo";
+type PanelKey = "import" | "export" | "history" | "holoo" | "catalogue";
 
 export function DataTransferSettings() {
   const { entities, canImport, error } = useDataCatalogue();
@@ -29,6 +30,18 @@ export function DataTransferSettings() {
   const bump = useCallback(() => setRevision((current) => current + 1), []);
   const [panel, setPanel] = useState<PanelKey>("import");
   const [holooPermitted, setHolooPermitted] = useState(false);
+  const [cataloguePermitted, setCataloguePermitted] = useState(false);
+
+  useEffect(() => {
+    if (!canImport) return;
+    let mounted = true;
+    void api("/api/data/catalogue").then(result => {
+      if (!mounted || !result.ok) return;
+      setCataloguePermitted(true);
+      if (new URLSearchParams(window.location.search).get("import") === "catalogue") setPanel("catalogue");
+    });
+    return () => { mounted = false; };
+  }, [canImport]);
 
   useEffect(() => {
     if (entities === null) {
@@ -46,6 +59,7 @@ export function DataTransferSettings() {
     ...(canImport ? [{ key: "import" as const, label: "ورود اطلاعات" }] : []),
     { key: "export", label: "خروجی گرفتن" },
     { key: "history", label: "تاریخچه" },
+    ...(cataloguePermitted ? [{ key: "catalogue" as const, label: "کاتالوگ محصولات" }] : []),
     ...(holooPermitted ? [{ key: "holoo" as const, label: "انتقال هلو" }] : []),
   ];
   const active = tabs.some((tab) => tab.key === panel) ? panel : (tabs[0]?.key ?? "export");
@@ -70,6 +84,7 @@ export function DataTransferSettings() {
       </SectionCard>
 
       {active === "import" ? <ImportSection entities={entities} onJobQueued={bump} /> : null}
+      {active === "catalogue" ? <CatalogueSection /> : null}
       {active === "export" ? <ExportSection entities={entities} onExported={bump} /> : null}
       {active === "history" ? (
         <HistorySection canImport={canImport} revision={revision} />

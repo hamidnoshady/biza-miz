@@ -104,6 +104,53 @@ export async function xlsxToWorkbook(buffer: ArrayBuffer): Promise<ParsedWorkboo
   });
 }
 
+/**
+ * Strict first-sheet view for reviewed catalogue imports. Formula caches are
+ * evidence only: even a numeric cache can refer to a missing external workbook.
+ * Keep physical worksheet row numbers, including after blank lines.
+ */
+export async function readCatalogueWorksheet(buffer: ArrayBuffer, maxRows: number) {
+  const JSZip = (await import("jszip")).default;
+  const zip = await JSZip.loadAsync(buffer);
+  const parts = Object.values(zip.files).filter(entry => !entry.dir);
+  if (parts.length > 256) throw new Error("catalogue_sheet_limit");
+  let expanded = 0;
+  for (const part of parts) {
+    for await (const bytes of part.nodeStream()) {
+      expanded += (bytes as Buffer).length;
+      if (expanded > 32 * 1024 * 1024) throw new Error("catalogue_sheet_limit");
+    }
+  }
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const sheet = workbook.worksheets[0];
+  if (!sheet || sheet.rowCount < 2) throw new Error("catalogue_empty");
+  if (sheet.rowCount > maxRows + 1 || sheet.columnCount > 100) throw new Error("catalogue_sheet_limit");
+  const rows: { number: number; cells: { text: string; issue?: "formula" | "error" | "unsafe_number" }[] }[] = [];
+  sheet.eachRow((row, number) => {
+    const cells = Array.from({ length: sheet.columnCount }, (_, i) => {
+      const value = row.getCell(i + 1).value;
+      if (value && typeof value === "object") {
+        if ("formula" in value || "sharedFormula" in value) {
+          return { text: String("formula" in value ? value.formula : value.sharedFormula).slice(0, 500), issue: "formula" as const };
+        }
+        if ("error" in value) return { text: value.error, issue: "error" as const };
+      }
+      if (typeof value === "number" && Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+        return { text: String(value), issue: "unsafe_number" as const };
+      }
+      const text = xlsxCellToString(value);
+      if (text.length > 2_000) throw new Error("catalogue_cell_limit");
+      return { text };
+    });
+    rows.push({ number, cells });
+  });
+  if (rows[0]?.number !== 1 || rows.length < 2) throw new Error("catalogue_empty");
+  const columns = rows.shift()!.cells.map((cell) => cell.issue ? "" : cell.text.trim());
+  return { name: sheet.name, columns, rows };
+}
+
 function worksheetToRows(sheet: import("exceljs").Worksheet, rejectUnsafeNumbers = false): string[][] {
   const rows: string[][] = [];
   sheet.eachRow((row) => {
