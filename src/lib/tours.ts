@@ -43,6 +43,10 @@ import { PERMISSIONS, type Permission } from "./permissions";
  * anchor is not registered.
  */
 export const TOUR_ANCHORS = {
+  // The shared page header (`page-chrome.tsx`). Universal on purpose: it is
+  // what the automatic baseline tour of every registered page points at
+  // (`tour-baseline.ts`), so a page needs no anchor of its own to get one.
+  pageHeader: "page.header",
   productsKpis: "products.kpis",
   productsToolbar: "products.toolbar",
   productsExport: "products.export",
