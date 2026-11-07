@@ -105,7 +105,11 @@ are unchanged; new payments refuse inactive or merged-away vendors.
 Verification: vendor-settlement integration 20/20; live party-reference coverage
 6/6; focused UI/guard/MCP/route/design tests 124/124. Changed-file lint passes. The
 narrow TypeScript check still reports only the existing two Holoo/mssql errors.
-Full regression suite is running separately; do not treat it as passed yet.
+Full regression completed with 1,450 files passing, one skipped, and one
+failure: the new supplier picker did not explicitly render a loading skeleton.
+Added a reserved LoadingSkeleton region; loading coverage plus the picker,
+register, guard and MCP tests then passed 62/62. The complete suite has not been
+rerun after that correction; CI review remains required.
 
 Remaining next step: quote → approved purchase → payable documents using this
 identity. Supplier-only merging remains outside the existing customer-merge endpoint.

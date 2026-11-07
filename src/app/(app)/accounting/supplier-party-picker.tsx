@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox } from "@/app/dashboard/ui";
 
 type Supplier = { id: string; displayName: string };
@@ -12,7 +13,7 @@ export function SupplierPartyPicker({ value, name, onPick }: {
 }) {
   const [query, setQuery] = useState("");
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
@@ -35,6 +36,9 @@ export function SupplierPartyPicker({ value, name, onPick }: {
     <SearchableSelect value={value} options={options} loading={loading} onQueryChange={setQuery}
       ariaLabel="انتخاب تأمین‌کننده از اشخاص" placeholder="تأمین‌کنندهٔ ثبت‌شده (اختیاری)"
       onChange={id => onPick(id, suppliers.find(p => p.id === id)?.displayName ?? (id === value ? name : ""))} />
+    <div className="min-h-8">
+      {loading ? <LoadingSkeleton rows={1} compact label="جست‌وجوی تأمین‌کنندگان" /> : null}
+    </div>
     {failed ? <ErrorBox>جست‌وجوی تأمین‌کنندگان ممکن نشد؛ مجوز مشاهدهٔ اشخاص و اتصال را بررسی کنید. پیوندی خودکار ساخته نمی‌شود.</ErrorBox> : null}
   </div>;
 }
