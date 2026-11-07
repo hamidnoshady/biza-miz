@@ -11,11 +11,10 @@ import { serviceGateBlocks } from "@/lib/service-activation/app-gate";
 import { getAccessibleConnection, listAccessibleConnections } from "@/lib/integrations/connection-access";
 import { publicationStores } from "@/lib/integrations/product-publication-service";
 import { readBoundedJson } from "@/lib/product-attributes";
-import { readCatalogueWorksheet } from "@/lib/data-transfer/codecs";
 import { toCsv } from "@/lib/data-transfer/csv";
 import { REVIEWED_PRODUCT_CATALOGUE } from "@/lib/data-transfer/registry";
 import {
-  CATALOGUE_MAX_FILE_BYTES, CATALOGUE_MAX_ROWS, parseCatalogueRows, suggestCatalogueMapping, validateCatalogueMapping,
+  CATALOGUE_MAX_FILE_BYTES, CATALOGUE_MAX_ROWS, readCatalogueWorksheet, parseCatalogueRows, suggestCatalogueMapping, validateCatalogueMapping,
 } from "@/lib/data-transfer/catalogue-profile";
 import {
   applyCatalogue, catalogueItems, catalogueRuns, catalogueSummary, reviewCatalogueItem, stageCatalogue, type CatalogueOwner,

@@ -1,8 +1,7 @@
 import { readFile } from "node:fs/promises";
 import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
-import { readCatalogueWorksheet } from "./codecs";
-import { parseCatalogueRows, suggestCatalogueMapping, validateCatalogueMapping } from "./catalogue-profile";
+import { readCatalogueWorksheet, parseCatalogueRows, suggestCatalogueMapping, validateCatalogueMapping } from "./catalogue-profile";
 
 describe("catalogue XLSX profile", () => {
   it("preserves physical rows and flags even numeric formula caches", async () => {
