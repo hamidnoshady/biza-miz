@@ -8,9 +8,10 @@
  * same definitions and the same progress rules:
  *
  *  - the catalogue (`TOURS`): code-defined, versioned and reviewed like any
- *    other source file. A Superadmin-authored catalogue is a later phase of
- *    the epic; nothing here prevents it, and `TourDefinition` is the shape
- *    that catalogue would store;
+ *    other source file. The super-admin console publishes to this same shape
+ *    (`tour-studio.ts`, migration 0288); a published tour replaces a code tour
+ *    with the same id and is otherwise added beside it, so a tour can be edited
+ *    without a deployment;
  *  - eligibility (`isTourEligible`): the same permission and industry facts
  *    the page's own guard reads, evaluated on the SERVER before a tour is
  *    ever described to a member (a tour's title is itself metadata);

@@ -12,7 +12,7 @@ shared, metadata-driven system rather than a hand-written tour per page.
 
 This document covers what ships and the rules the next slices must keep. The
 epic's remaining phases (hierarchy and learning paths, verified tasks, Learning
-Center, Tour Studio, AI discovery) are tracked on #972.
+Center, AI discovery, offline progress) are tracked on #972.
 
 ## What ships
 
@@ -24,6 +24,10 @@ Center, Tour Studio, AI discovery) are tracked on #972.
 | API | `GET /api/knowledge/tours?page=`, `GET /api/knowledge/tours/[tourId]`, `POST /api/knowledge/tours/[tourId]/progress` |
 | Automatic baseline tours (pure) | `src/lib/tour-baseline.ts` |
 | Coverage audit (pure) | `src/lib/tour-coverage.ts`, `npm run tours:audit` |
+| Console authoring rules (pure) | `src/lib/tour-studio.ts` |
+| Console authoring storage | `src/lib/tour-studio-service.ts`, migration `0288_knowledge_tours.sql` |
+| Console API | `GET/POST /api/platform/knowledge/tours`, `GET/POST/DELETE /api/platform/knowledge/tours/[tourId]` |
+| Console UI | «تورهای تعاملی» tab in `/platform/knowledge` (`kb-tours-panel.tsx`) |
 | Runtime | `src/components/tours/tour-provider.tsx` (one, in `DashboardMain`), `tour-overlay.tsx` (lazy) |
 | Modal | `src/app/dashboard/knowledge-help.tsx` |
 | Tours | the catalogue below, in `TOURS`, plus one automatic baseline per registered page |
@@ -117,6 +121,53 @@ Rules that make it honest and universal:
   never a control, a figure or a permission-gated instruction. Authored tours
   keep deciding eligibility on the server, step by step.
 
+## Tour Studio (super-admin authoring)
+
+The console tab «تورهای تعاملی» authors the tours the runtime serves, without a
+deployment (migration 0288):
+
+- **Two tables, one shape as the articles.** `knowledge_tours` holds a tour's
+  identity, working copy and which revision is live;
+  `knowledge_tour_revisions` holds immutable snapshots. Both are platform
+  catalogues with no `business_id` (listed in `src/lib/tenant-tables.ts`), so
+  one published set of tours teaches every business. Member progress stays where
+  it was — `tour_member_progress`, per business and per member.
+- **Drafts are invisible.** Saving appends a revision; publishing points members
+  at it; editing a published tour leaves the live revision in place until the
+  editor publishes again, and the panel says so. Archiving hides a tour without
+  deleting what was taught; a never-published draft can be deleted outright.
+- **Rollback is a new version.** Going back copies the old revision into
+  `version + 1` and publishes it, so history stays append-only and the step ids a
+  member already saw become seen again rather than being renumbered.
+- **Validation is the review.** `parseStudioTourInput` refuses an unknown page, a
+  route that is not that page's own, a malformed or `baseline.` id, a reused
+  code-tour id on a different page, an unregistered anchor (the picker offers
+  only `TOUR_ANCHORS`), an explanation that names an anchor, a tour that does not
+  open with an explanation, and eligibility naming a permission, trade, flag or
+  rule the runtime does not know. A stored tour is validated again before it is
+  served, so a row left behind by a renamed page is skipped rather than shown.
+- **Precedence.** A published tour with a code tour's id replaces it; a published
+  tour with a new id joins that page's catalogue; a page with none still falls
+  back to its automatic baseline. `tourCoverage(tours, regions, published)` counts
+  published tours as `advanced` coverage, and the console lists both.
+- **Concurrency and audit.** Saves carry the version the editor read (a stale one
+  is a 409, never a silent overwrite); publish/rollback/archive lock the row and
+  write a `platform_audit_log` entry under `knowledge.manage`, the same
+  capability that guards the article editor.
+- **Refusals are Persian and tour-specific.** `STUDIO_ERROR_TEXT` maps every code
+  this feature emits to its own sentence (`version_conflict` here is a tour
+  revision, not a knowledge article; `not_draft` explains why delete was
+  refused), and the API's English diagnostic `detail` is shown only as a small
+  LTR line under it — never instead of it.
+
+Where each promise is checked: `tour-studio.test.ts` (rules, precedence,
+operator text), `src/app/api/platform/knowledge/tours/route.test.ts` (auth,
+validation, 409, lifecycle, audit), `kb-tours-panel.test.tsx` (mounted panel:
+coverage sentence, default key, read-only mode, anchor picker, payloads),
+`src/app/api/knowledge/tours/route.test.ts` (members see published tours and
+never drafts or archived ones), and `integration/guided-tours.integration.test.ts`
+(the same lifecycle against a migrated database, including visibility).
+
 ## Coverage audit
 
 `tourCoverage()` (pure) lists **every** registered page exactly once with
@@ -168,9 +219,11 @@ instead of trapping the member.
 
 ## Rules
 
-- **The catalogue is code, for now.** `TOURS` is reviewed like any source file
-  and versioned by `version`. `TourDefinition` is the shape a Superadmin-authored
-  catalogue would store; nothing else should need to change when that lands.
+- **Two catalogues, one shape.** `TOURS` is reviewed like any source file and
+  versioned by `version`; the console publishes to the same `TourDefinition`
+  shape (migration 0288) and a published tour replaces a code tour with the same
+  id. Neither path is privileged in the runtime: the member API composes them in
+  `pageTourCandidates`, and the baseline answers only when both are empty.
 - **Anchors are `data-tour-id`**, registered in `TOUR_ANCHORS`. Never target a
   class, a label or a DOM position. `tours.test.ts` fails when a registered
   anchor is missing from the source or a source anchor is unregistered. Put the
@@ -205,12 +258,14 @@ instead of trapping the member.
 
 ## Not in this slice
 
-The Superadmin **Tour Studio** (authoring, preview, publish, versions and
-rollback without a code change), the parts of the coverage report that need
-editorial data (stale published article, last validation, per-page abandonment),
-cross-page tours and learning paths, verified-action steps, offline progress
-queueing, the Learning Center, Tour Studio, staff assignments and reports, the
-AI discovery tool, Hybrid cloud-pane handling (the overlay runs in the page that
+Rich Studio features beyond authoring and publishing: reusable templates, a
+live in-panel preview, conditional branches, and the parts of the coverage report
+that need editorial data (stale published article, last validation, per-page
+abandonment). Also: eligibility **rules** the API already accepts but the panel
+does not yet expose (`anyOf`, feature flags, `withoutPermissions`), cross-page
+tours and learning paths, verified-action steps, offline progress
+queueing, the Learning Center, staff assignments and reports, the AI discovery
+tool, Hybrid cloud-pane handling (the overlay runs in the page that
 renders it; across the pane's origin boundary a route-based explanation is the
 fallback), and per-tenant analytics. Each needs its own design decision on the
 epic.
