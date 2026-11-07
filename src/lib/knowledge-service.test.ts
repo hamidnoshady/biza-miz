@@ -253,6 +253,53 @@ describe("member reads apply the inactive-category visibility policy (P1)", () =
     expect(calls.filter((sql) => sql.includes("a.category_id IS NULL OR a.category_id IN"))).toHaveLength(3);
   });
 
+  /**
+   * `pg` returns `timestamptz` columns as `Date`, not the `string` every
+   * knowledge payload declares. JSON-encoding a `Date` also yields an ISO
+   * string, so the difference was invisible until the catalogue sorted its own
+   * rows — `b.updatedAt.localeCompare(a.updatedAt)` on a `Date` throws
+   * `localeCompare is not a function`, which turned the whole of «مرکز آموزش»
+   * into «بارگذاری مرکز آموزش ممکن نشد». Two published articles tied on
+   * `sort_order` (the default `0`) is the ordinary shape that reached it.
+   */
+  it("serialises driver Date timestamps so tied sort orders still sort", async () => {
+    const row = (slug: string, updatedAt: Date) => ({
+      id: `id-${slug}`,
+      slug,
+      category_id: CATEGORY_UUID,
+      section_keys: [],
+      title: slug,
+      summary: "",
+      video_url: "",
+      cover_image_url: "",
+      sort_order: 0,
+      updated_at: updatedAt,
+    });
+    db.query.mockImplementation(
+      handler((sql) => {
+        if (sql.includes("FROM knowledge_articles a")) {
+          return {
+            rows: [
+              row("first", new Date("2026-01-01T00:00:00Z")),
+              row("second", new Date("2026-02-01T00:00:00Z")),
+            ],
+            rowCount: 2,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      }),
+    );
+
+    const catalogue = await listKbCatalogue();
+    // Newest first — the tie on sort_order is broken by updated_at, which only
+    // works once the value being compared is a string.
+    expect(catalogue.articles.map((a) => a.slug)).toEqual(["second", "first"]);
+    for (const article of catalogue.articles) {
+      expect(typeof article.updatedAt).toBe("string");
+      expect(article.updatedAt).toBe(new Date(article.updatedAt).toISOString());
+    }
+  });
+
   it("hides an article whose category branch is inactive on a direct slug", async () => {
     const calls: string[] = [];
     db.query.mockImplementation(
