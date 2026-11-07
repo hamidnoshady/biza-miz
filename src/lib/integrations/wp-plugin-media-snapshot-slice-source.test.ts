@@ -101,6 +101,19 @@ describe("#1206 PERF-05 media snapshot is sliced and resumable", () => {
     expect(continuation).toContain("self::schedule_media_snapshot_continuation( $snapshot_id, 60 )");
   });
 
+  // The WordPress PHPUnit bootstrap loads only log + queue + sync. The walk now
+  // stores its generation through the export cursor, so the fixture must load
+  // that class too — otherwise the first slice is a fatal, which is exactly how
+  // this change first failed CI's `wordpress-media` job.
+  it("loads the export cursor in the WordPress unit-test bootstrap", () => {
+    const bootstrap = readFileSync("wordpress-plugin/tests/bootstrap.php", "utf8");
+    const cursor = bootstrap.indexOf("class-pos-export-cursor.php");
+    const sync = bootstrap.indexOf("class-pos-sync.php");
+    expect(cursor).toBeGreaterThan(-1);
+    expect(sync).toBeGreaterThan(cursor);
+    expect(sync).toBeLessThan(bootstrap.indexOf("$tests_dir . '/includes/bootstrap.php'"));
+  });
+
   it("schedules one event per generation and re-arms a lost one from the fast lane", () => {
     const schedule = method("private static function schedule_media_snapshot_continuation(");
     expect(schedule).toContain("if ( wp_next_scheduled( self::MEDIA_SNAPSHOT_HOOK, $args ) ) {");
