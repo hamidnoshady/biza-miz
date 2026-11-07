@@ -30,6 +30,7 @@
  * them — the same lazy shape `ai-attachment.ts` uses for `unpdf`.
  */
 
+import { Readable } from "node:stream";
 import { toPersianDigits } from "../digits";
 import { formatJalali } from "../jalali";
 import type { FieldType } from "./types";
@@ -116,7 +117,7 @@ export async function readCatalogueWorksheet(buffer: ArrayBuffer, maxRows: numbe
   if (parts.length > 256) throw new Error("catalogue_sheet_limit");
   let expanded = 0;
   for (const part of parts) {
-    for await (const bytes of part.nodeStream()) {
+    for await (const bytes of Readable.wrap(part.nodeStream())) {
       expanded += (bytes as Buffer).length;
       if (expanded > 32 * 1024 * 1024) throw new Error("catalogue_sheet_limit");
     }
