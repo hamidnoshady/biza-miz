@@ -13,6 +13,7 @@ import { effectiveFeatures } from "./features";
 import { getBusinessIndustry } from "./industry-guard";
 import { getInventorySystem } from "./inventory-service";
 import { tourDefinitionById } from "./tour-baseline";
+import { publishedTourById } from "./tour-studio-service";
 import {
   applyTourEvent,
   tourFactsNeeded,
@@ -77,16 +78,20 @@ export async function tourViewerFor(
  * The tour with this id as this viewer sees it (narrowed to their steps), only
  * if they may be told it exists. Reads the viewer's facts for that one tour.
  *
- * The id may be an authored tour or the automatic baseline tour of a page with
- * no authored one; `tour-baseline.ts` owns which catalogue answers, so the
- * lookup, the playback and the progress writes all agree.
+ * The id may be a code tour, a tour the super-admin published from the console
+ * (migration 0288) or the automatic baseline tour of a page with no authored
+ * one; `tour-baseline.ts` owns which catalogue answers, so the lookup, the
+ * playback and the progress writes all agree. A published-lookup failure (no
+ * database, a transient error) degrades to the code catalogue rather than
+ * breaking a tour that ships in source.
  */
 export async function eligibleTourById(
   id: string,
   businessId: string,
   permissions: ReadonlySet<string>,
 ): Promise<TourDefinition | null> {
-  const tour = tourDefinitionById(id);
+  const published = await publishedTourById(id).catch(() => null);
+  const tour = tourDefinitionById(id, published ? [published] : []);
   if (!tour) return null;
   const viewer = await tourViewerFor(businessId, permissions, [tour]);
   return tourForViewer(tour, viewer);
