@@ -284,6 +284,7 @@ const DRAFTS: Draft[] = [
   { key: P.marketingTargetsManage, group: "growth", label: "ثبت مقصد بازاریابی", description: "ثبت مقصد در شعب مجاز؛ به دسترسی مشاهده اشخاص نیز نیاز دارد.", risk: "medium", audit: true },
   { key: P.marketingAssignmentsView, group: "growth", label: "مشاهده ماموریت‌های بازاریابی", description: "دیدن ماموریت‌های بازاریابی در شعب مجاز.", risk: "low", audit: false },
   { key: P.marketingAssignmentsManage, group: "growth", label: "مدیریت ماموریت‌های بازاریابی", description: "تخصیص ماموریت و تغییر وضعیت آن در شعب مجاز.", risk: "medium", audit: true },
+  { key: P.marketingAssignmentsSelf, group: "growth", label: "ماموریت‌های بازاریابی خودم", description: "دیدن و شروع یا تکمیل فقط ماموریت‌های منتسب به خود در شعب مجاز؛ بدون دسترسی به ماموریت دیگران.", risk: "medium", audit: true },
   { key: P.marketingAttributionView, group: "growth", label: "مشاهده تعامل‌های بازاریابی", description: "دیدن گزارش تعامل در شعب مجاز؛ هویت سرنخ بدون دسترسی مشاهده و مدیریت CRM پنهان است.", risk: "medium", audit: false },
   { key: P.marketingAttributionManage, group: "growth", label: "ثبت تعامل بازاریابی", description: "ثبت گزارش تعامل با سرنخ موجود؛ به مشاهده ماموریت و مشاهده و مدیریت CRM نیز نیاز دارد.", risk: "medium", audit: true },
   { key: P.campaignsView, group: "growth", label: "مشاهده کمپین‌ها", description: "دیدن کمپین‌های تخفیف، اثربخشی آن‌ها و کمپین‌های پیامی بدون اجرای آن‌ها.", risk: "low", audit: false },
