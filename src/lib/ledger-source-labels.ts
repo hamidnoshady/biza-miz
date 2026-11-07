@@ -133,6 +133,12 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   // for. The wording follows account 1270's own name («هزینه‌های قابل بازدریافت از
   // مشتری») so the entry and the account it debits read as one idea.
   agency_reimbursable_cost: "هزینهٔ بازدریافتی از کارفرما",
+  // Issue #1128 §D — the payment that clears the agency's vendor payable (2140),
+  // and its reversal. Two labels because a list of entries has to be able to say
+  // which of the two a row is: «تسویه» and «برگشت تسویه» are opposite acts on the
+  // same account, and one label for both would read as a payment either way.
+  agency_vendor_settlement: "تسویهٔ پرداختنی رسانه و تولید",
+  agency_vendor_settlement_reversal: "برگشت تسویهٔ پرداختنی رسانه و تولید",
 
   // The ledger's own documents
   manual: "سند دستی",

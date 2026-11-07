@@ -513,3 +513,19 @@ describe("validateStorageEndpoint — the HTTPS rule the console message always 
     expect(insecure).toEqual({ ok: false, error: "endpoint_insecure" });
   });
 });
+
+describe("media addressing configuration", () => {
+  it("keeps path-style for old records and accepts an explicit virtual-host choice", () => {
+    const stored = { ...DEFAULT_MEDIA_CONFIG, enabled: true, endpoint: "https://s3.example.com", bucket: "media-bucket", accessKeyId: "key", secretAccessKey: "secret" };
+    const legacy = { ...stored, forcePathStyle: undefined };
+    const unchanged = validateMediaConfigInput({}, legacy);
+    expect(unchanged.ok && unchanged.config.forcePathStyle).toBe(true);
+    const virtual = validateMediaConfigInput({ forcePathStyle: false }, stored);
+    expect(virtual.ok && virtual.config).toMatchObject({ ...stored, forcePathStyle: false });
+    if (virtual.ok) {
+      const masked = maskMediaConfig(virtual.config);
+      expect(masked.forcePathStyle).toBe(false);
+      expect(masked).not.toHaveProperty("secretAccessKey");
+    }
+  });
+});

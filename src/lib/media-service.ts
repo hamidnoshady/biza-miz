@@ -91,6 +91,7 @@ export class MediaAssetProtectedError extends Error {
 export type MigrationState = "idle" | "migrating" | "completed" | "failed" | "rolled_back";
 
 export interface PreviousStorageFallback {
+  forcePathStyle?: boolean;
   endpoint: string;
   region: string;
   bucket: string;
@@ -105,6 +106,8 @@ export interface ExtendedMediaStorageConfig extends MediaStorageConfig {
 }
 
 type ConfigRow = {
+  force_path_style?: boolean;
+  previous_media_force_path_style?: boolean | null;
   enabled: boolean;
   endpoint: string;
   region: string;
@@ -137,6 +140,7 @@ function rowToConfig(row: ConfigRow | undefined): ExtendedMediaStorageConfig {
   );
   return {
     enabled: row.enabled,
+    forcePathStyle: row.force_path_style ?? true,
     endpoint: row.endpoint,
     region: row.region,
     bucket: row.bucket,
@@ -152,6 +156,7 @@ function rowToConfig(row: ConfigRow | undefined): ExtendedMediaStorageConfig {
     migrationState: row.migration_state ?? "idle",
     previousFallback: hasPrevious
       ? {
+          forcePathStyle: row.previous_media_force_path_style ?? true,
           endpoint: row.previous_endpoint!,
           region: row.previous_region || "us-east-1",
           bucket: row.previous_bucket!,
@@ -175,7 +180,7 @@ export async function saveMediaConfig(config: MediaStorageConfig, adminId: strin
         access_key_id = $6, secret_access_key = $7,
         billing_enabled = $8, daily_flat_rial = $9, daily_per_gb_rial = $10, free_quota_mb = $11,
         enhance_model = $12, enhance_price_rial = $13,
-        updated_by = $14, updated_at = now()
+        force_path_style = $15, updated_by = $14, updated_at = now()
       WHERE id = true`,
     [
       config.enabled,
@@ -192,6 +197,7 @@ export async function saveMediaConfig(config: MediaStorageConfig, adminId: strin
       config.enhanceModel,
       config.enhancePriceRial,
       adminId,
+      config.forcePathStyle ?? true,
     ],
   );
   await publishMediaPrices(config, adminId);
@@ -251,8 +257,9 @@ async function publishMediaPrices(
   });
 }
 
-function s3ConfigOf(config: Pick<MediaStorageConfig, "endpoint" | "region" | "bucket" | "accessKeyId" | "secretAccessKey">): S3Config {
+function s3ConfigOf(config: Pick<MediaStorageConfig, "endpoint" | "region" | "bucket" | "accessKeyId" | "secretAccessKey" | "forcePathStyle">): S3Config {
   return {
+    forcePathStyle: config.forcePathStyle,
     endpoint: config.endpoint,
     region: config.region,
     bucket: config.bucket,
@@ -670,6 +677,8 @@ async function migrateMediaStorageLocked(input: {
             access_key_id = $12,
             secret_access_key = $13,
             enhance_model = $14,
+            force_path_style = $16,
+            previous_media_force_path_style = $17,
             migration_state = 'completed',
             updated_by = $15,
             updated_at = now()
@@ -690,6 +699,8 @@ async function migrateMediaStorageLocked(input: {
           input.target.secretAccessKey,
           input.target.enhanceModel,
           input.adminId,
+          input.target.forcePathStyle ?? true,
+          source.forcePathStyle ?? true,
         ],
       );
       await client.query("COMMIT");
@@ -781,6 +792,7 @@ async function rollbackMediaStorageLocked(input: {
     return { ok: false, error: "no_previous_storage", detail: "پیکربندی قبلی برای بازگشت ثبت نشده است." };
   }
   const prevS3: S3Config = {
+    forcePathStyle: prev.forcePathStyle,
     endpoint: prev.endpoint,
     region: prev.region,
     bucket: prev.bucket,
@@ -831,6 +843,7 @@ async function rollbackMediaStorageLocked(input: {
           key_prefix = $4,
           access_key_id = $5,
           secret_access_key = $6,
+          force_path_style = $8,
           migration_state = 'rolled_back',
           updated_by = $7,
           updated_at = now()
@@ -843,6 +856,7 @@ async function rollbackMediaStorageLocked(input: {
         prev.accessKeyId,
         prev.secretAccessKey,
         input.adminId,
+        prev.forcePathStyle ?? true,
       ],
     );
     await client.query("COMMIT");
@@ -860,6 +874,7 @@ async function rollbackMediaStorageLocked(input: {
     sourceSummary: summarizeLocationPublic(current),
     targetSummary: {
       enabled: current.enabled,
+      forcePathStyle: prev.forcePathStyle,
       endpoint: prev.endpoint,
       region: prev.region,
       bucket: prev.bucket,
@@ -1566,6 +1581,7 @@ export async function assertTenantFolderExists(
 }
 
 export type StoreMediaAssetInput = {
+  signal?: AbortSignal;
   businessId: string;
   userId: string | null;
   config: MediaStorageConfig;
@@ -1592,14 +1608,14 @@ export type StoreMediaAssetInput = {
   projectId?: string | null;
 };
 
-async function storeMediaAssetInternal(
-  input: StoreMediaAssetInput,
-  client?: PoolClient,
-): Promise<MediaAssetRecord> {
-  const validatedFolderId = await assertTenantFolderExists(input.businessId, input.folderId, client);
-  const runQuery = <R extends Record<string, unknown>>(text: string, values?: unknown[]) =>
-    client ? client.query<R>(text, values) : query<R>(text, values);
+interface PreparedMediaObject {
+  assetId: string;
+  key: string;
+  actualByteSize: number;
+}
 
+/** Network I/O must finish before opening the deduplication transaction. */
+async function prepareMediaObject(input: StoreMediaAssetInput, client: PoolClient): Promise<PreparedMediaObject> {
   // Issue #1080 (P1.7): a verified storage migration copies the assets it saw
   // when it started and then switches the configuration atomically. An upload
   // that begins mid-migration would land in the *source* bucket while the row it
@@ -1610,7 +1626,7 @@ async function storeMediaAssetInternal(
     throw new MediaStorageBusyError();
   }
 
-  const { rows: idRows } = await runQuery<{ id: string }>(`SELECT gen_random_uuid() AS id`);
+  const { rows: idRows } = await client.query<{ id: string }>(`SELECT gen_random_uuid() AS id`);
   const assetId = idRows[0].id;
   const key = buildMediaKey(input.config.keyPrefix, input.businessId, assetId, input.fileName);
   const s3Cfg = s3ConfigOf(input.config);
@@ -1633,48 +1649,60 @@ async function storeMediaAssetInternal(
     throw new Error("missing_upload_payload");
   }
 
+  return { assetId, key, actualByteSize };
+}
+
+async function cleanupPreparedMediaObject(input: StoreMediaAssetInput, prepared: PreparedMediaObject): Promise<void> {
+  await s3Delete(s3ConfigOf(input.config), prepared.key).catch(() => {
+    // Never log provider exception messages (they can contain signed URLs).
+    console.error("[media] object compensation failed", JSON.stringify({ businessId: input.businessId, assetId: prepared.assetId }));
+  });
+}
+
+async function storeMediaAssetInternal(
+  input: StoreMediaAssetInput,
+  client: PoolClient,
+  prepared: PreparedMediaObject,
+): Promise<MediaAssetRecord> {
+  const validatedFolderId = await assertTenantFolderExists(input.businessId, input.folderId, client);
+  const runQuery = <R extends Record<string, unknown>>(text: string, values?: unknown[]) =>
+    client.query<R>(text, values);
+  const { assetId, key, actualByteSize } = prepared;
+
   const source = input.source ?? "upload";
   const createdByAi = input.createdByAi ?? source === "ai_generated";
 
-  try {
-    const { rows } = await runQuery<AssetRow>(
-      `INSERT INTO media_assets
-         (id, business_id, folder_id, kind, file_name, mime_type, byte_size, storage_key, sha256,
-          variant, source_asset_id, created_by, source, created_by_ai, conversation_id, project_id, transform_ops)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb)
-       RETURNING ${ASSET_COLUMNS}`,
-      [
-        assetId,
-        input.businessId,
-        validatedFolderId,
-        input.kind,
-        input.fileName.slice(0, 200),
-        input.mimeType,
-        actualByteSize,
-        key,
-        input.sha256,
-        input.variant ?? "original",
-        input.sourceAssetId ?? null,
-        input.userId,
-        source,
-        createdByAi,
-        input.conversationId ?? null,
-        input.projectId ?? null,
-        JSON.stringify(input.transformOps ?? []),
-      ],
-    );
-    return rowToAsset(rows[0]);
-  } catch (dbErr) {
-    // Compensating cleanup: never leave orphaned S3 bytes behind when DB INSERT fails.
-    await s3Delete(s3Cfg, key).catch((cleanupErr) => {
-      console.error("[media] failed to clean up object after DB failure:", key, cleanupErr);
-    });
-    throw dbErr;
-  }
+  const { rows } = await runQuery<AssetRow>(
+    `INSERT INTO media_assets
+       (id, business_id, folder_id, kind, file_name, mime_type, byte_size, storage_key, sha256,
+        variant, source_asset_id, created_by, source, created_by_ai, conversation_id, project_id, transform_ops)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb)
+     RETURNING ${ASSET_COLUMNS}`,
+    [
+      assetId,
+      input.businessId,
+      validatedFolderId,
+      input.kind,
+      input.fileName.slice(0, 200),
+      input.mimeType,
+      actualByteSize,
+      key,
+      input.sha256,
+      input.variant ?? "original",
+      input.sourceAssetId ?? null,
+      input.userId,
+      source,
+      createdByAi,
+      input.conversationId ?? null,
+      input.projectId ?? null,
+      JSON.stringify(input.transformOps ?? []),
+    ],
+  );
+  return rowToAsset(rows[0]);
 }
 
 export async function storeMediaAsset(input: StoreMediaAssetInput): Promise<MediaAssetRecord> {
-  return storeMediaAssetInternal(input);
+  return (await dedupeOrStoreMediaAsset({ ...input, onDuplicate: "duplicate" })).asset;
 }
 
 export type DuplicatePolicy = "reuse" | "move" | "duplicate";
@@ -1690,7 +1718,8 @@ export interface DedupeOrStoreMediaResult {
 /**
  * Atomic duplicate-aware upload helper (issue #926 P2.10):
  *   • Validates `folderId` upfront before locking or touching S3.
- *   • Serializes concurrent uploads of the identical `(businessId, sha256)` via
+ *   • Uploads bytes before opening a transaction, then serializes metadata for
+ *     identical `(businessId, sha256)` via
  *     `pg_advisory_xact_lock(hashtextextended(...))` so simultaneous requests
  *     cannot write duplicate rows when duplicates were not requested.
  *   • Makes folder placement explicit (`reuse` keeps original folder and sets
@@ -1708,20 +1737,37 @@ export async function dedupeOrStoreMediaAsset(
   }
   const policy: DuplicatePolicy = input.onDuplicate ?? "reuse";
 
-  if (policy === "duplicate") {
-    const asset = await storeMediaAssetInternal({ ...input, folderId: validatedFolderId });
-    return {
-      asset,
-      reused: false,
-      action: "created",
-      requestedFolderId: validatedFolderId,
-      folderMismatch: false,
-    };
-  }
-
+  // Shared session lock coordinates writes with the existing exclusive
+  // migration/rollback lock without keeping a transaction open during S3 I/O.
   const client = await getPool().connect();
+  let locked = false;
+  let prepared: PreparedMediaObject | undefined;
+  let keepObject = false;
+  let transactionStarted = false;
+  let destroyConnection = false;
   try {
+    const lockResult = await client.query<{ locked: boolean }>(
+      `SELECT pg_try_advisory_lock_shared(hashtextextended($1::text, 0)) AS locked`,
+      [MEDIA_MIGRATION_LOCK],
+    );
+    locked = Boolean(lockResult.rows[0]?.locked);
+    if (!locked) throw new MediaStorageBusyError();
+    // A request can have read its config before a completed cutover. Refuse
+    // stale writes even after acquiring the lock; never write to the old bucket.
+    const current = await client.query<ConfigRow>(`SELECT * FROM platform_media_config WHERE id = true`);
+    const saved = rowToConfig(current.rows[0]);
+    if (saved.migrationState === "migrating" ||
+        saved.endpoint !== input.config.endpoint || saved.region !== input.config.region ||
+        saved.bucket !== input.config.bucket || saved.keyPrefix !== input.config.keyPrefix ||
+        saved.accessKeyId !== input.config.accessKeyId || saved.secretAccessKey !== input.config.secretAccessKey ||
+        (saved.forcePathStyle ?? true) !== (input.config.forcePathStyle ?? true) || saved.enabled !== input.config.enabled) {
+      throw new MediaStorageBusyError();
+    }
+    input.signal?.throwIfAborted();
+    prepared = await prepareMediaObject(input, client);
+    input.signal?.throwIfAborted();
     await client.query("BEGIN");
+    transactionStarted = true;
     await client.query(`SELECT set_config('app.current_business_id', $1, true)`, [input.businessId]);
     await client.query(
       `SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':media_sha256:' || $2::text, 0))`,
@@ -1737,7 +1783,7 @@ export async function dedupeOrStoreMediaAsset(
       [input.businessId, input.sha256],
     );
 
-    if (existingRows[0]) {
+    if (policy !== "duplicate" && existingRows[0]) {
       let existing = rowToAsset(existingRows[0]);
       const currentFolder = existing.folderId ?? null;
       if (policy === "move" && currentFolder !== validatedFolderId) {
@@ -1768,28 +1814,10 @@ export async function dedupeOrStoreMediaAsset(
       };
     }
 
-    const created = await storeMediaAssetInternal({ ...input, folderId: validatedFolderId }, client);
-    try {
-      await client.query("COMMIT");
-    } catch (commitError) {
-      // The object is already in the bucket but the row will be rolled back: the
-      // compensating delete inside `storeMediaAssetInternal` does not run here
-      // because the INSERT itself succeeded. Without this, every commit-time
-      // failure (a dropped connection, a cancelled transaction, a failover)
-      // leaves an unreferenced object behind that only an orphan scan can find.
-      const orphanKey = buildMediaKey(input.config.keyPrefix, input.businessId, created.id, input.fileName);
-      await s3Delete(s3ConfigOf(input.config), orphanKey).catch((cleanupError) => {
-        console.error(
-          "[media] failed to clean up object after COMMIT failure:",
-          JSON.stringify({
-            businessId: input.businessId,
-            assetId: created.id,
-            cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-          }),
-        );
-      });
-      throw commitError;
-    }
+    const created = await storeMediaAssetInternal({ ...input, folderId: validatedFolderId }, client, prepared);
+    input.signal?.throwIfAborted();
+    await client.query("COMMIT");
+    keepObject = true;
     return {
       asset: created,
       reused: false,
@@ -1798,10 +1826,18 @@ export async function dedupeOrStoreMediaAsset(
       folderMismatch: false,
     };
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (transactionStarted) await client.query("ROLLBACK").catch(() => { destroyConnection = true; });
     throw err;
   } finally {
-    client.release();
+    // Compensate before releasing the shared lock so migration cannot snapshot
+    // the database while an unsuccessful staged object is still being resolved.
+    if (prepared && !keepObject) await cleanupPreparedMediaObject(input, prepared);
+    if (locked) {
+      await client.query(`SELECT pg_advisory_unlock_shared(hashtextextended($1::text, 0))`, [MEDIA_MIGRATION_LOCK])
+        .catch(() => { destroyConnection = true; });
+    }
+    // A session whose unlock failed must not re-enter the pool holding a lock.
+    client.release(destroyConnection);
   }
 }
 
@@ -1825,6 +1861,7 @@ async function readStorageBytesWithFallback(
       const prevKey = rewriteKeyPrefix(storageKey, config.keyPrefix, prev.keyPrefix);
       return await s3Get(
         {
+          forcePathStyle: prev.forcePathStyle,
           endpoint: prev.endpoint,
           region: prev.region,
           bucket: prev.bucket,
@@ -1874,6 +1911,7 @@ export async function streamMediaObject(
   const prevKey = rewriteKeyPrefix(storageKey, config.keyPrefix, prev.keyPrefix);
   return s3GetStream(
     {
+      forcePathStyle: prev.forcePathStyle,
       endpoint: prev.endpoint,
       region: prev.region,
       bucket: prev.bucket,

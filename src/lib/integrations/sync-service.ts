@@ -28,6 +28,7 @@
  * lose it the way the one-at-a-time version did.
  */
 import { randomUUID } from "node:crypto";
+import { customerPersonName } from "../customer-display-name";
 import { getPool, query, withTenant, withTenantTransaction } from "../db";
 import { isUuid } from "../uuid";
 import { insertPriceHistory, recordPriceHistory } from "../price-history";
@@ -707,7 +708,9 @@ export async function upsertCustomerFromWoo(
       connectionId: connection.id,
       provider: "woocommerce",
       remoteId,
-      name: `${customer.first_name ?? ""} ${customer.last_name ?? ""}`.trim() || null,
+      name: customerPersonName(customer.first_name, customer.last_name)
+        || customerPersonName(customer.billing?.first_name, customer.billing?.last_name)
+        || null,
       email: customer.email?.trim() || customer.billing?.email?.trim() || null,
       phone: customer.billing?.phone ?? null,
       address: customer.billing?.address_1 ?? null,
@@ -790,7 +793,7 @@ export async function resolveOrderCustomerId(
 
   const phone = order.billing?.phone?.trim() || null;
   const email = order.billing?.email?.trim().toLowerCase() || null;
-  const name = `${order.billing?.first_name ?? ""} ${order.billing?.last_name ?? ""}`.trim();
+  const name = customerPersonName(order.billing?.first_name, order.billing?.last_name);
 
   // A guest with no phone, no email and no store account is not a person this
   // system can identify. The order keeps their name in its note; inventing a

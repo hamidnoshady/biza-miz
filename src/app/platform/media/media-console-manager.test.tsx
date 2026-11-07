@@ -293,3 +293,24 @@ describe("/platform/media — reconciliation and audit history", () => {
     expect(document.body.textContent ?? "").not.toContain("config_saved");
   });
 });
+
+
+it("persists an explicit virtual-host choice without changing endpoint or bucket", async () => {
+  fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+    if (init?.method === "PUT") {
+      const body = JSON.parse(String(init.body));
+      expect(body.forcePathStyle).toBe(false);
+      expect(body.endpoint).toBe(CONFIG.endpoint);
+      expect(body.bucket).toBe(CONFIG.bucket);
+      return jsonResponse({ config: { ...CONFIG, forcePathStyle: false } });
+    }
+    return jsonResponse(overview());
+  });
+  render(<MediaConsoleManager />);
+  const checkbox = await screen.findByRole("checkbox", { name: /Path-style/ });
+  expect((checkbox as HTMLInputElement).checked).toBe(true);
+  await userEvent.click(checkbox);
+  await userEvent.click(screen.getByRole("button", { name: "ذخیرهٔ تنظیمات" }));
+  await screen.findByText("تنظیمات ذخیره شد.");
+  expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true);
+});

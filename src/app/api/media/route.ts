@@ -531,6 +531,7 @@ async function handleMediaUpload(request: NextRequest, requestId: string): Promi
     spooledTempPath = consumed.payload.tempFilePath;
 
     const outcome = await dedupeOrStoreMediaAsset({
+      signal: request.signal,
       businessId: session.businessId,
       userId: session.sub,
       config,

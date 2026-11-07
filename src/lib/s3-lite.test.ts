@@ -247,3 +247,33 @@ describe("streaming S3 operations — s3PutFile, s3GetStream, s3Head, s3CopyObje
     expect(calls[1].headers?.["x-amz-copy-source"]).toContain("/source-bucket/media/");
   });
 });
+
+describe("virtual-host addressing", () => {
+  it("signs the bucket host and tenant URI, preserving endpoint port and base path", () => {
+    const signed = signS3Request({ ...config, endpoint: "https://s3.example.com:9443/api", forcePathStyle: false }, {
+      method: "PUT", key: "media/business/asset/تصویر 1.png", payloadHash: sha256Hex("png"), now,
+    });
+    const url = new URL(signed.url);
+    expect(url.host).toBe("cafe-backups.s3.example.com:9443");
+    expect(signed.headers.host).toBe(url.host);
+    expect(url.pathname).toBe(`/api/media/business/asset/${encodeURIComponent("تصویر 1.png")}`);
+    expect(signed.headers.Authorization).toContain("SignedHeaders=host;");
+  });
+
+  it("uses virtual-host addressing for presigned reads and bucket-level lists too", () => {
+    const virtual = { ...config, forcePathStyle: false };
+    const read = new URL(presignS3Get(virtual, "media/tenant/asset.png", 60, now));
+    expect(read.host).toBe("cafe-backups.s3.example.com");
+    expect(read.pathname).toBe("/media/tenant/asset.png");
+    const list = new URL(signS3Request(virtual, {
+      method: "GET", key: "", query: { "list-type": "2", prefix: "media/" }, payloadHash: sha256Hex(""), now,
+    }).url);
+    expect(list.pathname).toBe("/");
+    expect(list.host).toBe(read.host);
+  });
+
+  it("keeps legacy signatures when path-style is explicitly enabled", () => {
+    const input = { method: "PUT" as const, key: "media/tenant/file.png", payloadHash: sha256Hex("png"), now };
+    expect(signS3Request({ ...config, forcePathStyle: true }, input)).toEqual(signS3Request(config, input));
+  });
+});

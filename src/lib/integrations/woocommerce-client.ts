@@ -174,7 +174,7 @@ export interface WooCustomer {
   is_paying_customer?: boolean;
   orders_count?: number;
   role?: string;
-  billing?: { phone?: string; address_1?: string; city?: string; email?: string };
+  billing?: { first_name?: string; last_name?: string; phone?: string; address_1?: string; city?: string; email?: string };
 }
 
 /**

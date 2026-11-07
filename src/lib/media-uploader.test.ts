@@ -173,3 +173,13 @@ describe("summarizeUploadResults", () => {
     expect(summarizeUploadResults(events)).toEqual({ stored: 1, reused: 1, failed: 1, canceled: 1 });
   });
 });
+
+it("preserves failure stage and support reference without retrying permanent provider errors", async () => {
+  const fetchImpl = vi.fn(async () => jsonResponse(502, {
+    message: "دسترسی رد شد", stage: "s3_upload", reference: "safe-ref", retryable: false,
+  }));
+  const [result] = await uploadFiles([file("a.png")], { fetchImpl, sleepImpl: immediateSleep() }).done;
+  expect(result).toMatchObject({ status: "error", stage: "s3_upload", reference: "safe-ref", attempt: 1 });
+  expect(result.message).toContain("safe-ref");
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+});

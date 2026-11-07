@@ -337,3 +337,84 @@ export function isCostRecharged(input: {
   if (typeof input.orderStatus !== "string" || input.orderStatus.length === 0) return false;
   return input.orderStatus !== VOIDED_ORDER_STATUS;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Settled — derived, never stored (migration 0287)                           */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Whether a cost has actually been settled out of the vendor payable.
+ *
+ * The same shape as `isCostRecharged` and for the same reason: reversing a payment
+ * writes a reversing entry and stamps the document, so the ledger has already put the
+ * money back into 2140 by the time anybody looks, and a stored `settled` column would
+ * be a second answer that disagrees with it.
+ *
+ * ## The unknown direction is the *opposite* of the recharge's, deliberately
+ *
+ * `isCostRecharged` treats a missing order as **not** recharged, because that makes a
+ * cost billable again rather than silently writing off a claim on a client. Here an
+ * unreadable reversal state counts as **still settled**, because the two failure modes
+ * are not symmetric: leaving a payable open costs an investigation, while freeing a cost
+ * that was in fact paid lets the same media buy be paid a second time. Only a reversal
+ * this function can positively read frees the row.
+ */
+export function isCostSettled(input: {
+  settlementId: string | null;
+  /** The settlement document's `reversed_at`, when the caller read it. */
+  reversedAt?: string | null;
+}): boolean {
+  if (!input.settlementId) return false;
+  return !(typeof input.reversedAt === "string" && input.reversedAt.length > 0);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The vendor settlement: how the payable is paid down                        */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * How the agency pays a vendor down, which is the settlement entry's credit side.
+ *
+ * Two values and not the register's three: `payable` is what *created* the balance in
+ * 2140, so offering it here would debit the account and credit it in one entry — a
+ * payment to oneself that clears nothing and looks like it did.
+ */
+export const VENDOR_SETTLEMENT_METHODS = ["cash", "bank"] as const;
+
+export type VendorSettlementMethod = (typeof VENDOR_SETTLEMENT_METHODS)[number];
+
+export const VENDOR_SETTLEMENT_METHOD_LABELS: Record<VendorSettlementMethod, string> = {
+  cash: "نقدی (صندوق)",
+  bank: "بانکی (حساب بانکی)",
+};
+
+/** The credit account each method implies — the same two the register's own cash and bank settlements use. */
+export const VENDOR_SETTLEMENT_METHOD_ACCOUNTS: Record<VendorSettlementMethod, string> = {
+  cash: AGENCY_COST_SETTLEMENT_ACCOUNTS.cash,
+  bank: AGENCY_COST_SETTLEMENT_ACCOUNTS.bank,
+};
+
+export function isVendorSettlementMethod(value: unknown): value is VendorSettlementMethod {
+  return typeof value === "string" && (VENDOR_SETTLEMENT_METHODS as readonly string[]).includes(value);
+}
+
+/** `VS-` from the shared register numbering, per business. */
+export const SETTLEMENT_NUMBER_PREFIX = "VS";
+
+/**
+ * The two accounts a vendor settlement touches.
+ *
+ * The debit is always 2140 — that is the whole of what 0287 exists to do, since the
+ * account had been credited in exactly one place and debited in none. Exported beside
+ * `reimbursableCostAccounts` so the pair of functions reads as the two halves of one
+ * loop: the cost puts money into the payable, the settlement takes it out.
+ */
+export function vendorSettlementAccounts(method: VendorSettlementMethod): {
+  debitCode: string;
+  creditCode: string;
+} {
+  return {
+    debitCode: AGENCY_COST_SETTLEMENT_ACCOUNTS.payable,
+    creditCode: VENDOR_SETTLEMENT_METHOD_ACCOUNTS[method],
+  };
+}

@@ -41,6 +41,22 @@ class POS_Connector_Sync {
 	const ORDER_SWEEP_LIMIT = 200;
 
 	/**
+	 * How many persisted customer exports are open right now (#1206 PERF-06).
+	 *
+	 * Bootstrapping used to scan `wp_options` for `pos_connector_customer_export_%`
+	 * on *every* request — a LIKE scan per storefront page view to find a row that
+	 * exists for a few minutes a day. This counter, autoloaded with the rest of the
+	 * options, is the only thing that lets the bootstrap run that scan.
+	 */
+	const CUSTOMER_EXPORT_OPEN_OPTION = 'pos_connector_customer_export_open_count';
+
+	/** When the cron-side safety recheck last listed open exports. */
+	const CUSTOMER_EXPORT_RECHECK_OPTION = 'pos_connector_customer_export_rechecked_at';
+
+	/** How often, at most, a cron/admin request may re-scan for lost exports. */
+	const CUSTOMER_EXPORT_RECHECK_SECONDS = 300;
+
+	/**
 	 * Most rows one push may carry. The app's own cap is 100 events per request.
 	 */
 	const PUSH_BATCH_ROWS = 100;
@@ -130,7 +146,7 @@ class POS_Connector_Sync {
 		add_action( POS_CONNECTOR_CRON_PROBE, array( __CLASS__, 'run_cron_probe' ), 10, 1 );
 
 		$settings = pos_connector_settings();
-		if ( ! empty( $settings['enabled'] ) && ! empty( $settings['sync_customers'] ) ) {
+		if ( ! empty( $settings['enabled'] ) && ! empty( $settings['sync_customers'] ) && self::customer_export_recovery_due() ) {
 			// Recover exports that were paused, missed by WP-Cron, or interrupted
 			// while this plugin was disabled; the persisted keyset is authoritative.
 			self::schedule_pending_customer_exports();
@@ -1230,6 +1246,8 @@ class POS_Connector_Sync {
 			'orders_count'        => $order_count,
 			'is_paying_customer' => $is_paying,
 			'billing'            => array(
+				'first_name' => $customer->get_billing_first_name(),
+				'last_name'  => $customer->get_billing_last_name(),
 				'phone'     => $customer->get_billing_phone(),
 				'address_1' => $customer->get_billing_address_1(),
 				'city'      => $customer->get_billing_city(),
@@ -3548,6 +3566,47 @@ class POS_Connector_Sync {
 		return array_map( 'absint', (array) $wpdb->get_col( $prepared ) );
 	}
 
+	/**
+	 * Should this request pay for a customer-export recovery scan?
+	 *
+	 * Two ways in only: the open counter says an export is still persisted, or
+	 * this is a cron/admin request and the periodic safety recheck is due. A
+	 * storefront or REST page render therefore never runs the `LIKE` scan — the
+	 * counter is autoloaded, so even the check itself costs no query (#1206
+	 * PERF-06). The safety recheck is what keeps recovery working if the counter
+	 * ever drifts (concurrent exports, an option restored from a backup).
+	 */
+	private static function customer_export_recovery_due() {
+		if ( (int) get_option( self::CUSTOMER_EXPORT_OPEN_OPTION, 0 ) > 0 ) {
+			return true;
+		}
+		if ( ! ( wp_doing_cron() || is_admin() ) ) {
+			return false;
+		}
+		$last = (int) get_option( self::CUSTOMER_EXPORT_RECHECK_OPTION, 0 );
+		if ( $last > 0 && ( time() - $last ) < self::CUSTOMER_EXPORT_RECHECK_SECONDS ) {
+			return false;
+		}
+		// Autoloaded on purpose: the next request must not pay a query to read it.
+		update_option( self::CUSTOMER_EXPORT_RECHECK_OPTION, time(), true );
+		return true;
+	}
+
+	/** Mark one persisted customer export as open so bootstrap recovery keeps watching it. */
+	private static function mark_customer_export_open() {
+		update_option( self::CUSTOMER_EXPORT_OPEN_OPTION, (int) get_option( self::CUSTOMER_EXPORT_OPEN_OPTION, 0 ) + 1, true );
+	}
+
+	/** Mark one persisted customer export as finished, so quiet stores stop scanning. */
+	private static function mark_customer_export_closed() {
+		$open = (int) get_option( self::CUSTOMER_EXPORT_OPEN_OPTION, 0 ) - 1;
+		if ( $open > 0 ) {
+			update_option( self::CUSTOMER_EXPORT_OPEN_OPTION, $open, true );
+			return;
+		}
+		delete_option( self::CUSTOMER_EXPORT_OPEN_OPTION );
+	}
+
 	/** Schedule one resumable slice without creating duplicate cron events. */
 	private static function schedule_customer_export_continuation( $sync_id ) {
 		$hook = 'pos_connector_customer_export_continue';
@@ -3570,11 +3629,20 @@ class POS_Connector_Sync {
 				$wpdb->esc_like( $prefix ) . '%'
 			)
 		);
+		$open = 0;
 		foreach ( (array) $option_names as $option_name ) {
 			$sync_id = substr( (string) $option_name, strlen( $prefix ) );
 			if ( preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) ) {
+				$open++;
 				self::schedule_customer_export_continuation( $sync_id );
 			}
+		}
+		// The scan is the source of truth for the counter: an export whose state
+		// row is gone is not open any more, whatever the counter believed.
+		if ( $open > 0 ) {
+			update_option( self::CUSTOMER_EXPORT_OPEN_OPTION, $open, true );
+		} else {
+			delete_option( self::CUSTOMER_EXPORT_OPEN_OPTION );
 		}
 	}
 
@@ -3615,6 +3683,7 @@ class POS_Connector_Sync {
 				POS_Connector_Log::error( 'export', 'customer_export_state_create_failed' );
 				return 0;
 			}
+			self::mark_customer_export_open();
 		} else {
 			$sync_id = (string) $sync_id;
 			if ( ! preg_match( '/\A[a-f0-9-]{36}\z/i', $sync_id ) ) {
@@ -3647,6 +3716,7 @@ class POS_Connector_Sync {
 				return $expected_count;
 			}
 			delete_option( $state_key );
+			self::mark_customer_export_closed();
 			POS_Connector_Log::info(
 				'export',
 				sprintf(

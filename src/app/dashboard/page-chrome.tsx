@@ -53,6 +53,11 @@ export function PageShell({ children, className }: { children: ReactNode; classN
  * so `heading-focus.tsx` can move focus here once a navigation has actually
  * committed, the same way a "skip to content" target works — it is never in
  * the Tab order itself, only a programmatic focus destination.
+ *
+ * It also carries the one universal guided-tour anchor (`data-tour-id`) of the
+ * platform: the automatic baseline tour of a registered page (`tour-baseline.ts`,
+ * issue #972) spotlights this header, so a new page needs no anchor of its own
+ * to get basic guidance. It is a data attribute — no visual change.
  */
 export function PageHeader({
   title,
@@ -65,7 +70,10 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="mb-5 flex flex-wrap items-start justify-between gap-3 border-b border-border/80 pb-5 sm:mb-6 sm:pb-6">
+    <header
+      data-tour-id="page.header"
+      className="mb-5 flex flex-wrap items-start justify-between gap-3 border-b border-border/80 pb-5 sm:mb-6 sm:pb-6"
+    >
       <div className="min-w-0">
         <h1
           id={PAGE_HEADING_ID}
