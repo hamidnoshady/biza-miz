@@ -86,6 +86,17 @@ function resolvePersianErrorMessage(reason: unknown, fallback: string): string {
   return reason.message;
 }
 
+function historyError(status: number, message: string | undefined, fallback: string) {
+  if (status === 401) return "نشست شما منقضی شده است. دوباره وارد شوید.";
+  if (status === 403) return "به تاریخچهٔ گفتگوها دسترسی ندارید.";
+  if (status === 503) return "تاریخچهٔ گفتگوها موقتاً در دسترس نیست. دوباره تلاش کنید.";
+  return message ?? fallback;
+}
+
+function historyNetworkFallback(fallback: string) {
+  return navigator.onLine ? fallback : "برای خواندن تاریخچهٔ گفتگوها به اینترنت متصل شوید.";
+}
+
 export function AiConversationsSidebar({
   activeId,
   /** Bumped by the parent when a new conversation may have been created. */
@@ -182,7 +193,7 @@ export function AiConversationsSidebar({
         }
         const response = await fetch(
           `/api/ai/conversations?${params.toString()}`,
-          { signal: controller.signal },
+          { cache: "no-store", signal: controller.signal },
         );
         if (
           !mountedRef.current ||
@@ -206,9 +217,11 @@ export function AiConversationsSidebar({
           return;
         }
         if (!response.ok) {
-          throw new Error(data.message ?? "خواندن گفتگوهای اخیر ممکن نشد.");
+          if (response.status === 401 || response.status === 403) setItems([]);
+          throw new Error(historyError(response.status, data.message, "خواندن گفتگوهای اخیر ممکن نشد."));
         }
-        const list = (data.conversations ?? []).filter(
+        if (!Array.isArray(data.conversations)) throw new Error("پاسخ تاریخچهٔ گفتگوها معتبر نیست.");
+        const list = data.conversations.filter(
           (item) => item.mode === "dashboard",
         );
         setItems(list);
@@ -225,7 +238,7 @@ export function AiConversationsSidebar({
         }
         const msg = resolvePersianErrorMessage(
           reason,
-          "خواندن گفتگوهای اخیر ممکن نشد.",
+          historyNetworkFallback("خواندن گفتگوهای اخیر ممکن نشد."),
         );
         setError(msg);
         setItems((current) => current ?? []);
@@ -288,7 +301,7 @@ export function AiConversationsSidebar({
       }
       const response = await fetch(
         `/api/ai/conversations?${params.toString()}`,
-        { signal: controller.signal },
+        { cache: "no-store", signal: controller.signal },
       );
       if (
         !mountedRef.current ||
@@ -313,9 +326,18 @@ export function AiConversationsSidebar({
         return;
       }
       if (!response.ok) {
-        throw new Error(data.message ?? "خواندن گفتگوهای قدیمی‌تر ممکن نشد.");
+        const message = historyError(response.status, data.message, "خواندن گفتگوهای قدیمی‌تر ممکن نشد.");
+        if (response.status === 401 || response.status === 403) {
+          setItems([]);
+          setHasMore(false);
+          setNextCursor(null);
+          setError(message);
+          return;
+        }
+        throw new Error(message);
       }
-      const older = (data.conversations ?? []).filter(
+      if (!Array.isArray(data.conversations)) throw new Error("پاسخ تاریخچهٔ گفتگوها معتبر نیست.");
+      const older = data.conversations.filter(
         (item) => item.mode === "dashboard",
       );
       setItems((current) => {
@@ -335,7 +357,7 @@ export function AiConversationsSidebar({
         return;
       }
       toast.error(
-        resolvePersianErrorMessage(reason, "خواندن گفتگوهای قدیمی‌تر ممکن نشد."),
+        resolvePersianErrorMessage(reason, historyNetworkFallback("خواندن گفتگوهای قدیمی‌تر ممکن نشد.")),
       );
     } finally {
       if (
