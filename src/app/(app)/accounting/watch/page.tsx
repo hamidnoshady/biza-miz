@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { settingsTabHref } from "@/lib/settings-routes";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
@@ -18,7 +20,10 @@ export default async function WatchPage() {
       <PageHeader
         title="ساعت"
         description="مدل‌ها و دستگاه‌های سریال‌دار، فروش با گارانتی، و تیکت‌های تعمیر."
-        actions={<KnowledgeHelpButton section="watch" />}
+        actions={<>
+          {member.permissions.has("inventory.adjust") && member.permissions.has("data.import") && <Link className="text-primary underline" href={`${settingsTabHref("data-transfer")}#catalogue-import`}>ورود کاتالوگ اکسل</Link>}
+          <KnowledgeHelpButton section="watch" />
+        </>}
       />
       <WatchManager />
     </PageShell>

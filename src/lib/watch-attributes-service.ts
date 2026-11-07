@@ -21,6 +21,11 @@ export interface WatchItemAttributes {
   dialColor: string | null;
   braceletMaterial: string | null;
   gender: WatchGender | null;
+  braceletColor?: string | null;
+  claspType?: string | null;
+  caseColor?: string | null;
+  caseShape?: string | null;
+  caseDimensions?: string | null;
 }
 
 export interface WatchItemAttributesInput {
@@ -32,6 +37,11 @@ export interface WatchItemAttributesInput {
   dialColor?: string | null;
   braceletMaterial?: string | null;
   gender?: string | null;
+  braceletColor?: string | null;
+  claspType?: string | null;
+  caseColor?: string | null;
+  caseShape?: string | null;
+  caseDimensions?: string | null;
 }
 
 export function validateWatchAttributes(input: WatchItemAttributesInput): string[] {
@@ -67,7 +77,12 @@ function isEmpty(input: WatchItemAttributesInput): boolean {
     input.waterResistanceM == null &&
     !input.dialColor?.trim() &&
     !input.braceletMaterial?.trim() &&
-    input.gender == null
+    input.gender == null &&
+    input.braceletColor === undefined &&
+    input.claspType === undefined &&
+    input.caseColor === undefined &&
+    input.caseShape === undefined &&
+    input.caseDimensions === undefined
   );
 }
 
@@ -80,15 +95,20 @@ export async function upsertWatchAttributes(
   if (errors.length > 0) throw new Error(errors.join("؛ "));
 
   if (isEmpty(input)) {
-    await query(`DELETE FROM watch_item_attributes WHERE item_id = $1`, [itemId]);
-    return null;
+    const { rows } = await query(`SELECT 1 FROM watch_item_attributes WHERE item_id=$1 AND
+      COALESCE(bracelet_color, clasp_type, case_color, case_shape, case_dimensions) IS NOT NULL`, [itemId]);
+    if (!rows.length) {
+      await query(`DELETE FROM watch_item_attributes WHERE item_id = $1`, [itemId]);
+      return null;
+    }
   }
 
   await query(
     `INSERT INTO watch_item_attributes
        (item_id, reference_no, movement, case_material, case_diameter_mm,
-        water_resistance_m, dial_color, bracelet_material, gender, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+        water_resistance_m, dial_color, bracelet_material, gender,
+        bracelet_color, clasp_type, case_color, case_shape, case_dimensions, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
      ON CONFLICT (item_id) DO UPDATE SET
        reference_no = EXCLUDED.reference_no,
        movement = EXCLUDED.movement,
@@ -98,6 +118,11 @@ export async function upsertWatchAttributes(
        dial_color = EXCLUDED.dial_color,
        bracelet_material = EXCLUDED.bracelet_material,
        gender = EXCLUDED.gender,
+       bracelet_color = CASE WHEN $15::jsonb ? 'braceletColor' THEN EXCLUDED.bracelet_color ELSE watch_item_attributes.bracelet_color END,
+       clasp_type = CASE WHEN $15::jsonb ? 'claspType' THEN EXCLUDED.clasp_type ELSE watch_item_attributes.clasp_type END,
+       case_color = CASE WHEN $15::jsonb ? 'caseColor' THEN EXCLUDED.case_color ELSE watch_item_attributes.case_color END,
+       case_shape = CASE WHEN $15::jsonb ? 'caseShape' THEN EXCLUDED.case_shape ELSE watch_item_attributes.case_shape END,
+       case_dimensions = CASE WHEN $15::jsonb ? 'caseDimensions' THEN EXCLUDED.case_dimensions ELSE watch_item_attributes.case_dimensions END,
        updated_at = now()`,
     [
       itemId,
@@ -109,6 +134,12 @@ export async function upsertWatchAttributes(
       input.dialColor?.trim() || null,
       input.braceletMaterial?.trim() || null,
       input.gender ?? null,
+      input.braceletColor?.trim() || null,
+      input.claspType?.trim() || null,
+      input.caseColor?.trim() || null,
+      input.caseShape?.trim() || null,
+      input.caseDimensions?.trim() || null,
+      JSON.stringify(input),
     ],
   );
   return (await getWatchAttributes(itemId))!;
@@ -124,6 +155,11 @@ type AttributesRow = {
   dial_color: string | null;
   bracelet_material: string | null;
   gender: WatchGender | null;
+  bracelet_color: string | null;
+  clasp_type: string | null;
+  case_color: string | null;
+  case_shape: string | null;
+  case_dimensions: string | null;
 }
 
 function mapRow(row: AttributesRow): WatchItemAttributes {
@@ -136,13 +172,20 @@ function mapRow(row: AttributesRow): WatchItemAttributes {
     dialColor: row.dial_color,
     braceletMaterial: row.bracelet_material,
     gender: row.gender,
+    braceletColor: row.bracelet_color,
+    claspType: row.clasp_type,
+    caseColor: row.case_color,
+    caseShape: row.case_shape,
+    caseDimensions: row.case_dimensions,
+
   };
 }
 
 export async function getWatchAttributes(itemId: string): Promise<WatchItemAttributes | null> {
   const { rows } = await query<AttributesRow>(
     `SELECT item_id, reference_no, movement, case_material, case_diameter_mm::text AS case_diameter_mm,
-            water_resistance_m, dial_color, bracelet_material, gender
+            water_resistance_m, dial_color, bracelet_material, gender,
+            bracelet_color, clasp_type, case_color, case_shape, case_dimensions
        FROM watch_item_attributes WHERE item_id = $1`,
     [itemId],
   );

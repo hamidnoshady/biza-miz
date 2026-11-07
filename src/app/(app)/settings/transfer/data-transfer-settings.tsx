@@ -16,6 +16,7 @@ import { ErrorBox, api } from "@/app/dashboard/ui";
 import { DataTransferSkeleton, useDataCatalogue } from "./data-transfer-ui";
 import { ExportSection } from "./export-section";
 import { HistorySection } from "./history-section";
+import { CatalogueImportWizard } from "./catalogue-import-wizard";
 import { ImportSection } from "./import-section";
 import { HolooTransferSection } from "./holoo-transfer-section";
 
@@ -69,7 +70,10 @@ export function DataTransferSettings() {
         />
       </SectionCard>
 
-      {active === "import" ? <ImportSection entities={entities} onJobQueued={bump} /> : null}
+      {active === "import" ? <>
+        <CatalogueImportWizard />
+        <ImportSection entities={entities} onJobQueued={bump} />
+      </> : null}
       {active === "export" ? <ExportSection entities={entities} onExported={bump} /> : null}
       {active === "history" ? (
         <HistorySection canImport={canImport} revision={revision} />

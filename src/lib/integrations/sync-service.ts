@@ -30,6 +30,7 @@
 import { randomUUID } from "node:crypto";
 import { customerPersonName } from "../customer-display-name";
 import { getPool, query, withTenant, withTenantTransaction } from "../db";
+import { normalizeSkuKey } from "../import-reconciliation/normalize";
 import { isUuid } from "../uuid";
 import { insertPriceHistory, recordPriceHistory } from "../price-history";
 import { changeMenuItemPrice } from "../menu-price-service";
@@ -214,7 +215,10 @@ export async function upsertProductFromWoo(
   // land — `items` and `menu_items` are both the wrong shape — so the product
   // is skipped rather than written as a retail row.
   if (isRetailCatalogueIndustry(industry)) {
-    return upsertRetailProduct(connection, locationId, product);
+    return withTenantTransaction(connection.business_id, async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`catalogue-import:${locationId}`]);
+      return upsertRetailProduct(connection, locationId, product);
+    }, { locationId });
   }
   if (industry === "food_service") {
     return upsertFnbProduct(connection, locationId, product);
@@ -339,7 +343,16 @@ async function upsertRetailProduct(
   };
 
   const existing = await localIdForRemote(businessId, connection.id, "product", remoteId);
-  if (existing) return applyUpdate(existing);
+  if (existing) {
+    const { rows } = await query(`SELECT 1 FROM integration_mappings
+      WHERE business_id=$1 AND connection_id=$2 AND entity_type='product' AND remote_id=$3
+        AND last_pushed_payload->>'catalogueMetadataOnly'='true'`, [businessId, connection.id, remoteId]);
+    if (rows.length) {
+      await recordProductShape(connection, product);
+      return "updated";
+    }
+    return applyUpdate(existing);
+  }
 
   // Every create below runs under the identity lock (audit F13): a second
   // delivery of the same new product waits, finds the first one's mapping and
@@ -357,6 +370,7 @@ async function upsertRetailProduct(
     // The signed product echo is itself remote evidence. Without its stable
     // operation marker, wait for the delivery ACK instead of cloning a SKU.
     if (publicationId !== publication.payload.__operationId) throw new Error("publication_awaiting_ack");
+    if (publication.payload.__catalogueRunId) throw new Error("publication_awaiting_ack");
     if (publication.payload.sku !== product.sku || publication.payload.__wooType !== inferWooProductType(product) ||
       String(publication.payload.__parentRemoteId ?? "") !== String(product.parent_id || "")) throw new Error("publication_echo_mismatch");
     const linked = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async client => {
@@ -366,6 +380,18 @@ async function upsertRetailProduct(
       return publication.local_id;
     });
     return applyUpdate(linked.localId);
+  }
+  // An unverified Woo identity may not duplicate a product being reviewed in
+  // the XLSX catalogue workflow. Retry after the operator links the store.
+  const sku = normalizeSkuKey(product.sku);
+  if (sku) {
+    const { rows } = await query(`SELECT 1 FROM import_reconciliation_items i
+      JOIN import_reconciliation_runs r ON r.id=i.run_id AND r.business_id=i.business_id
+      WHERE r.business_id=$1 AND r.location_id=$2 AND r.profile_key='accounting.catalogue.xlsx'
+        AND r.status IN ('discovering','staged','in_review','applying','partially_applied','applied')
+        AND (i.snapshot->>'sku'=$3 OR i.snapshot->>'parentExternalId'=$3)
+        AND i.status NOT IN ('skipped','failed') LIMIT 1`, [businessId, locationId, sku]);
+    if (rows.length) throw new Error("publication_catalogue_review_required");
   }
   if (shape.container) {
     const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {

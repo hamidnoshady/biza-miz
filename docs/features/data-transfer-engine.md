@@ -350,3 +350,40 @@ Stated plainly, because each one is a real limit:
    turn a run green. The job passes because the new screen is additive and no
    existing baseline shifted; recording one for `/settings/data-transfer` is a
    deliberate follow-up for whoever approves the look.
+
+## Reviewed Excel product catalogue
+
+In **Settings → Data Transfer → Import**, use **Excel product catalogue** for retail
+items and watch models. The Products and Watch workspaces link to the same wizard.
+The catalogue profile uses the shared reconciliation run, audit and source identity
+services. It requires both data import and inventory adjustment permission.
+
+1. Analyse the first worksheet of an XLSX file. Map SKU and title, then map any
+   collection, brand, watch specification or explicit retail variant columns. Use
+   a stable source name for later files from the same supplier. To reuse a mapping,
+   open its saved review and select it while analysing a workbook with the same headers.
+2. Review original Excel row numbers, raw values and normalized specifications.
+   When a SKU occurs more than once, choose one row and skip the others. A watch SKU
+   represents a serialized model. Physical watch units are entered in the Watch
+   workspace. Ambiguous movement and multi-sided dimensions remain in the evidence.
+3. An explicit retail variant row requires a parent SKU and a recognized option
+   name and value from the branch's product attribute definitions. A new parent
+   also requires a title. Ordinary specification columns do not create variations.
+4. Confirm the local metadata apply. Existing products are linked without being
+   overwritten. Spreadsheet price and quantity are report-only, even if a formula
+   includes a cached number. Use the existing pricing and inventory workflows for
+   financial or stock changes. Reopen a saved run to retry eligible decisions or
+   download its row-level CSV report.
+5. Review each store separately. Woo REST connections can show live SKU candidates.
+   Plugin connections show available mapping evidence and verify the selected ID at
+   acknowledgement. Use a link for a compatible existing item or explicitly create
+   a draft. For a family, acknowledge the parent before queueing a child.
+6. For REST drafts, review category and global attribute terms before queuing. The
+   separate creation option allows missing categories, global attributes and terms
+   to be created with stable identities. Brand matches are shown as evidence.
+   Plugin drafts use existing attribute mappings for variant options. An outbox row
+   is shown as acknowledged only when delivery records the Woo product ID.
+
+The supported upload is up to 5 MiB with up to 2,000 data rows and 64 columns.
+The customer workbook can be checked locally with
+`ESH_142_WORKBOOK=/absolute/path/to/workbook.xlsx npm test -- src/lib/data-transfer/catalogue-workbook.test.ts`.

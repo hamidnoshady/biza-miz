@@ -104,6 +104,35 @@ export async function xlsxToWorkbook(buffer: ArrayBuffer): Promise<ParsedWorkboo
   });
 }
 
+/** Catalogue review needs physical Excel rows and must distrust cached formula results. */
+export async function readCatalogueWorksheet(buffer: ArrayBuffer) {
+  const ExcelJS = (await import("exceljs")).default;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const sheet = workbook.worksheets[0];
+  if (!sheet || sheet.rowCount > 2001 || sheet.columnCount > 64) throw new Error("catalogue_sheet_bounds");
+  const columns = Array.from({ length: sheet.columnCount }, (_, i) => sheet.getRow(1).getCell(i + 1).text);
+  const rows: Array<{ rowNumber: number; values: string[]; unsafe: number[] }> = [];
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const unsafe: number[] = [];
+    const values = columns.map((_, index) => {
+      const cell = row.getCell(index + 1);
+      if (cell.type === ExcelJS.ValueType.Formula || cell.type === ExcelJS.ValueType.Error ||
+          (typeof cell.value === "number" && Math.abs(cell.value) > Number.MAX_SAFE_INTEGER) ||
+          /^#(?:NAME\?|REF!|N\/A|VALUE!|DIV\/0!|NUM!|NULL!|SPILL!|CALC!)/i.test(cell.text)) {
+        unsafe.push(index);
+        return cell.formula ? `=${cell.formula}` : cell.text;
+      }
+      return xlsxCellToString(cell.value);
+    });
+    if (values.some((value) => value.length > 4000)) throw new Error("catalogue_cell_too_long");
+    if (values.some((value) => value.trim())) rows.push({ rowNumber, values, unsafe });
+  });
+  if (!columns.length || !rows.length) throw new Error("catalogue_empty_sheet");
+  return { columns, rows, name: sheet.name };
+}
+
 function worksheetToRows(sheet: import("exceljs").Worksheet, rejectUnsafeNumbers = false): string[][] {
   const rows: string[][] = [];
   sheet.eachRow((row) => {
