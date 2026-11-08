@@ -599,6 +599,7 @@ export function AccountingManager({
               busy={busy}
               refreshKey={refreshKey}
               canManage={canManageFinancialAccounts}
+              initialKind={searchParams.get("kind") === "bank" ? "bank" : "all"}
             />
           ) : null}
           {section === "transfers" ? (
