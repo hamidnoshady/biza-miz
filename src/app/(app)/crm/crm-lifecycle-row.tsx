@@ -1,3 +1,4 @@
+import { supportingTextClass } from "@/app/dashboard/typography";
 import { LIFECYCLE_STAGES, type LifecycleStage } from "@/lib/crm-scoring";
 import { formatPersianNumber } from "@/lib/digits";
 
@@ -24,7 +25,7 @@ export function CrmLifecycleRow({
           {meta?.label ?? stage}
         </strong>
         {meta?.action ? (
-          <p className="mt-0.5 text-sm leading-6 text-muted-foreground">{meta.action}</p>
+          <p className={`mt-0.5 text-muted-foreground ${supportingTextClass}`}>{meta.action}</p>
         ) : null}
       </div>
       <span

@@ -165,14 +165,18 @@ always `rounded-xl`. Don't mix (no `rounded-md` buttons, no `rounded-3xl` cards)
 - Card/section title: `font-semibold text-stone-950` (base size).
 - **Amber eyebrow** above a card title: `text-xs font-semibold text-amber-700` — the small
   category line («عملیات هزینه», «سوابق عملیاتی») that introduces a card.
-- Body: `text-sm text-stone-700`; supporting copy: `text-sm text-muted-foreground`;
-  metadata/labels-of-groups: `text-[11px] font-semibold tracking-wide text-stone-400`.
+- Body and actionable labels use `text-sm`. Supporting copy such as instructions, field hints
+  and recovery guidance uses `supportingTextClass` (`text-sm leading-relaxed wrap-anywhere`),
+  with `text-muted-foreground` on neutral surfaces. Use `text-xs` for brief secondary metadata
+  and category labels. Keep compact roles readable in both themes.
 - Table money/number cells: `font-medium` or `font-semibold`, Persian digits, unit spelled
   out («تومان» / «ریال»); time columns get `tabular-nums`.
 - **Persian digits are display-only** (`toPersianDigits` from `@/lib/digits`); money text via
   `formatMoneyText` (`@/lib/money`). Never hand-format currency; never print Latin digits in
   a label.
-- Descriptions live *under* titles, one line, `mt-1`/`mt-2`, max-width capped (`max-w-3xl`).
+- Descriptions live *under* titles (`mt-1`/`mt-2`) and wrap as needed. Page descriptions are
+  capped at `max-w-3xl`. Isolate mixed-direction values with `<bdi>`. Use `dir="ltr"` for
+  numeric date and time sequences that must preserve their display order.
 
 ### Iconography
 
@@ -214,7 +218,7 @@ for what it renders and for the few places a bespoke layout is warranted.
 ```
 
 Card header (from `SectionCard`): `px-4 py-4 sm:px-5`, title `font-semibold text-stone-950`,
-description `mt-1 text-xs leading-5 text-muted-foreground`, hairline underneath
+description `mt-1` with the supporting text role, hairline underneath
 (`border-b border-stone-200/80`); footer `bg-stone-50/60 text-xs text-stone-600`.
 An optional amber eyebrow sits above the title:
 `<p className="text-xs font-semibold text-amber-700">…</p>` then the `<h2>` with `mt-1`.
@@ -297,7 +301,7 @@ everywhere else the filled button is teal. Don't port the amber button to dashbo
 ```
 
 - Label above via `<Field>`: `text-sm font-medium text-foreground`, `mb-1`; optional hint
-  below `text-xs text-muted-foreground`; optional marker `(اختیاری)` as
+  below in the supporting text role; optional marker `(اختیاری)` as
   `<span className="font-normal text-muted-foreground">(اختیاری)</span>` inside the label.
 - Numeric inputs are `dir="ltr" inputMode="numeric"` with a Persian-digit placeholder «۰».
 - A `<select>` gets `inputClass` plus a chevron (`ChevronDownIcon size-4 text-muted-foreground`)
@@ -415,7 +419,7 @@ text-center text-sm text-muted-foreground`. Rich (see
 [reservations.png](design/reference/archive-2026-09/reservations.png)): a centered column inside a dashed
 panel — an amber icon chip `grid size-12 place-items-center rounded-2xl bg-amber-100/70
 text-amber-700`, title `text-sm font-semibold text-stone-900`, one-line description
-`mt-1 text-xs text-muted-foreground`. Both forms name what will exist here, in Persian,
+the supporting text role. Both forms name what will exist here, in Persian,
 with a leading verb («هنوز هزینه‌ای ثبت نشده است.»).
 
 ### Stat / KPI cards (dashboard)

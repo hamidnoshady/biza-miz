@@ -88,7 +88,7 @@ export function Field({
     <label className="mb-4 block">
       <span className="mb-1 block text-sm font-medium text-foreground">{label}</span>
       {children}
-      {hint ? <span className="mt-1 block text-xs text-muted-foreground">{hint}</span> : null}
+      {hint ? <span className="mt-1 block text-sm leading-relaxed wrap-anywhere text-muted-foreground">{hint}</span> : null}
     </label>
   );
 }
@@ -311,7 +311,7 @@ export function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-card px-4 py-12 text-center">
       <p className="text-sm font-medium text-foreground">{title}</p>
-      {hint ? <p className="max-w-sm text-xs leading-6 text-muted-foreground">{hint}</p> : null}
+      {hint ? <p className="max-w-sm text-sm leading-relaxed wrap-anywhere text-muted-foreground">{hint}</p> : null}
       {action ? <div className="mt-2">{action}</div> : null}
     </div>
   );

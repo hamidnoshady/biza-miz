@@ -11,7 +11,7 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { TabBar, TabPanel } from "./page-chrome";
+import { EmptyState, PageHeader, SectionCard, TabBar, TabPanel } from "./page-chrome";
 
 afterEach(() => {
   cleanup();
@@ -97,5 +97,30 @@ describe("TabBar / TabPanel", () => {
     tabs = screen.getAllByRole("tab");
     fireEvent.keyDown(tabs[2], { key: "Home" });
     expect(onChange).toHaveBeenLastCalledWith("a");
+  });
+});
+
+describe("Persian supporting text in shared dashboard components", () => {
+  it("keeps descriptions and recovery instructions readable while allowing long text to wrap", () => {
+    const pageDescription = "نمای کلی فروش و موجودی کسب‌وکار را در این صفحه ببینید.";
+    const cardDescription = "برای ادامه، حساب بانکی و شیوهٔ پرداخت را انتخاب کنید.";
+    const emptyDescription = "برای دیدن نتیجه، بازهٔ زمانی بزرگ‌تری انتخاب کنید.";
+
+    render(
+      <main lang="fa" dir="rtl">
+        <PageHeader title="گزارش‌ها" description={pageDescription} />
+        <SectionCard title="تنظیمات پرداخت" description={cardDescription} />
+        <EmptyState title="نتیجه‌ای پیدا نشد">{emptyDescription}</EmptyState>
+      </main>,
+    );
+
+    for (const copy of [pageDescription, cardDescription, emptyDescription]) {
+      const classes = screen.getByText(copy).classList;
+      expect(classes).toContain("text-sm");
+      expect(classes).toContain("leading-relaxed");
+      expect(classes).toContain("wrap-anywhere");
+      expect(classes).not.toContain("text-xs");
+      expect(classes).not.toContain("truncate");
+    }
   });
 });
