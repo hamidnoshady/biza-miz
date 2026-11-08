@@ -240,10 +240,13 @@ export function FinancialAccountsSection({
   busy,
   refreshKey,
   canManage,
+  initialKind = "all",
 }: {
   busy: boolean;
   refreshKey: number;
   canManage: boolean;
+  /** Sidebar's «حساب بانکی» deep link opens the bank filter. */
+  initialKind?: KindTab;
 }) {
   const money = useMoney();
   const [data, setData] = useState<ListResponse | null>(null);
@@ -252,7 +255,10 @@ export function FinancialAccountsSection({
   const [baseCurrency, setBaseCurrency] = useState("IRR");
   const [enabledCurrencies, setEnabledCurrencies] = useState<string[]>([]);
 
-  const [kind, setKind] = useState<KindTab>("all");
+  const [kind, setKind] = useState<KindTab>(initialKind);
+  useEffect(() => {
+    setKind(initialKind);
+  }, [initialKind]);
   const [status, setStatus] = useState<StatusFilter>("active");
   const [search, setSearch] = useState("");
   const [locationId, setLocationId] = useState("");
