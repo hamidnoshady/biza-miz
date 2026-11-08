@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1050" viewBox="0 0 1600 1050">
+<title>Inventory Purchase RTL redesign — implementation reference, issue 915</title>
+<desc>Design reference showing a teal and white Persian right-to-left purchase form and filtered purchase history. Wireframe only, not a production screenshot or exact copy of a previously generated mockup.</desc>
+<defs>
+ <style>
+  text{font-family:Tahoma,Arial,sans-serif;direction:rtl;unicode-bidi:plaintext}
+  .muted{fill:#667d87;font-size:17px}.label{fill:#345762;font-size:17px;font-weight:600}
+  .title{fill:#143941;font-size:31px;font-weight:700}.sub{fill:#315661;font-size:22px;font-weight:700}
+  .micro{fill:#62808a;font-size:14px}.value{fill:#1c434e;font-size:18px}
+ </style>
+ <filter id="shadow"><feDropShadow dx="0" dy="4" stdDeviation="9" flood-color="#244e58" flood-opacity=".07"/></filter>
+</defs>
+<rect width="1600" height="1050" fill="#eef5f6"/>
+<rect x="0" y="0" width="1600" height="74" fill="#fff"/>
+<rect x="1320" y="0" width="280" height="1050" fill="#103e49"/>
+<text x="1552" y="49" text-anchor="end" font-size="27" font-weight="700" fill="#fff">Biza Miz</text>
+<text x="1546" y="132" text-anchor="end" font-size="19" fill="#c7eced">عملیات حسابداری</text>
+<rect x="1338" y="160" width="242" height="55" rx="12" fill="#176a70"/>
+<text x="1545" y="195" text-anchor="end" font-size="19" fill="#fff">انبار / خرید</text>
+<text x="1545" y="248" text-anchor="end" font-size="18" fill="#b8d7dc">کالا و موجودی</text>
+<text x="1545" y="290" text-anchor="end" font-size="18" fill="#b8d7dc">تأمین‌کنندگان</text>
+<text x="1545" y="332" text-anchor="end" font-size="18" fill="#b8d7dc">گزارش‌ها</text>
+<text x="1275" y="47" text-anchor="end" class="muted">حسابداری / انبار / خرید</text>
+<text x="1267" y="124" text-anchor="end" class="title">خرید و دریافت کالا</text>
+<text x="1267" y="157" text-anchor="end" class="muted">ثبت خرید، دریافت اقلام و مشاهده سوابق در یک فضای کاری</text>
+<rect x="1048" y="194" width="218" height="51" rx="13" fill="#087f81"/>
+<text x="1239" y="226" text-anchor="end" font-size="20" fill="#fff">+ خرید جدید</text>
+<rect x="817" y="194" width="218" height="51" rx="13" fill="#fff" stroke="#bfd4d8"/>
+<text x="1007" y="226" text-anchor="end" class="value">سوابق خرید</text>
+<rect x="45" y="274" width="1221" height="390" rx="20" fill="#fff" filter="url(#shadow)"/>
+<text x="1237" y="315" text-anchor="end" class="sub">۱. اطلاعات خرید</text>
+<text x="1236" y="363" text-anchor="end" class="label">تأمین‌کننده</text>
+<rect x="853" y="376" width="385" height="58" rx="10" fill="#f7fbfb" stroke="#c9dfe1"/>
+<text x="1208" y="412" text-anchor="end" class="value">انتخاب تأمین‌کننده  ⌄</text>
+<text x="827" y="363" text-anchor="end" class="label">تاریخ خرید</text>
+<rect x="573" y="376" width="255" height="58" rx="10" fill="#f7fbfb" stroke="#c9dfe1"/>
+<text x="796" y="412" text-anchor="end" class="value">۱۴۰۵/۰۸/۱۷</text>
+<text x="544" y="363" text-anchor="end" class="label">شماره فاکتور</text>
+<rect x="75" y="376" width="472" height="58" rx="10" fill="#f7fbfb" stroke="#c9dfe1"/>
+<text x="515" y="412" text-anchor="end" class="muted">شماره فاکتور تأمین‌کننده</text>
+<text x="1236" y="478" text-anchor="end" class="sub">۲. اقلام و مقادیر</text>
+<rect x="75" y="497" width="1162" height="51" rx="9" fill="#edf7f7"/>
+<text x="1197" y="530" text-anchor="end" class="label">کالا / SKU</text>
+<text x="852" y="530" text-anchor="end" class="label">تعداد</text>
+<text x="658" y="530" text-anchor="end" class="label">واحد</text>
+<text x="475" y="530" text-anchor="end" class="label">بهای واحد</text>
+<text x="231" y="530" text-anchor="end" class="label">مبلغ کل</text>
+<rect x="75" y="557" width="1162" height="59" rx="8" fill="#fff" stroke="#dce9eb"/>
+<text x="1197" y="593" text-anchor="end" class="value">انتخاب کالا...</text>
+<text x="837" y="593" text-anchor="end" class="value">۱</text>
+<text x="655" y="593" text-anchor="end" class="value">عدد</text>
+<text x="468" y="593" text-anchor="end" class="value">—</text>
+<text x="227" y="593" text-anchor="end" class="value">—</text>
+<text x="1228" y="647" text-anchor="end" font-size="17" fill="#007f81">+ افزودن ردیف کالا</text>
+<rect x="730" y="691" width="536" height="225" rx="20" fill="#fff" filter="url(#shadow)"/>
+<text x="1235" y="735" text-anchor="end" class="sub">۳. تسویه و اطلاعات مالی</text>
+<rect x="1110" y="758" width="120" height="41" rx="12" fill="#087f81"/>
+<text x="1205" y="785" text-anchor="end" font-size="17" fill="#fff">نسیه</text>
+<rect x="961" y="758" width="135" height="41" rx="12" fill="#eaf3f4"/>
+<text x="1065" y="785" text-anchor="end" class="value">بانکی</text>
+<rect x="818" y="758" width="129" height="41" rx="12" fill="#eaf3f4"/>
+<text x="920" y="785" text-anchor="end" class="value">نقدی</text>
+<text x="1234" y="842" text-anchor="end" class="label">جمع کل با مالیات</text>
+<text x="1023" y="842" text-anchor="end" class="sub">۰ ریال</text>
+<text x="1234" y="881" text-anchor="end" class="micro">انتخاب حساب بانکی، مالیات، سررسید و پیش‌نمایش سند</text>
+<rect x="45" y="691" width="658" height="225" rx="20" fill="#fff" filter="url(#shadow)"/>
+<text x="669" y="735" text-anchor="end" class="sub">سوابق خرید — نمای فهرست</text>
+<rect x="70" y="756" width="600" height="43" rx="10" fill="#f7fbfb" stroke="#cbdedf"/>
+<text x="636" y="784" text-anchor="end" class="muted">جست‌وجو با نام تأمین‌کننده، شماره فاکتور یا کالا</text>
+<rect x="70" y="816" width="600" height="70" rx="10" fill="#eff8f8"/>
+<text x="633" y="846" text-anchor="end" class="value">فیلتر: وضعیت | بازه تاریخ | تأمین‌کننده</text>
+<text x="633" y="875" text-anchor="end" class="micro">صفحه‌بندی، خروجی CSV، جزئیات، چاپ و رسید</text>
+<rect x="1047" y="944" width="218" height="62" rx="14" fill="#087f81"/>
+<text x="1241" y="983" text-anchor="end" font-size="20" fill="#fff">ثبت خرید</text>
+<rect x="814" y="944" width="218" height="62" rx="14" fill="#fff" stroke="#cbdcdf"/>
+<text x="1007" y="983" text-anchor="end" class="value">ذخیره پیش‌نویس</text>
+<text x="74" y="982" text-anchor="start" class="micro">Design reference · issue #915 · RTL · desktop composition · responsive behavior defined in implementation plan</text>
+</svg>
