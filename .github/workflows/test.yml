@@ -389,7 +389,9 @@ jobs:
   # auto-accepted to make a red run go green.
   visual-regression:
     name: visual regression
-    runs-on: ubuntu-latest
+    # Playwright 1.56 does not support Ubuntu 26.04; keep the browser and
+    # baseline font/rasterisation environment on the supported 24.04 image.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -536,7 +538,8 @@ jobs:
   # unrelated, already-tracked baseline-image diff in that job.
   media-e2e-tests:
     name: media E2E tests
-    runs-on: ubuntu-latest
+    # Match visual-regression: Playwright 1.56 does not support Ubuntu 26.04.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
