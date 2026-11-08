@@ -54,6 +54,7 @@ import {
   SectionCardSkeleton,
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
+import { narrowSupportingTextClass } from "@/app/dashboard/typography";
 import {
   api,
   errorMessageOrRaw,
@@ -420,8 +421,8 @@ export function CmsOverviewSection() {
                 className="flex w-full items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-start transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <span className="min-w-0">
-                  <span className="block truncate text-sm font-medium text-foreground">{entry.title}</span>
-                  <span className="block truncate text-xs text-muted-foreground">{entry.hint}</span>
+                  <span className="block text-sm font-medium text-foreground max-sm:leading-relaxed max-sm:wrap-anywhere sm:truncate">{entry.title}</span>
+                  <span className={`block text-xs text-muted-foreground sm:truncate ${narrowSupportingTextClass}`}>{entry.hint}</span>
                 </span>
                 <PencilIcon className="size-4 shrink-0 text-muted-foreground" />
               </button>
