@@ -375,8 +375,11 @@ export function iranianBankByCode(code: unknown) {
 }
 
 function validIranianIban(iban: string): boolean {
+  if (!IBAN_SHAPE.test(iban)) return false;
+  const checkDigits = Number(iban.slice(2, 4));
+  if (checkDigits < 2 || checkDigits > 98) return false;
   // Move IR and the check digits to the end, then encode I = 18 and R = 27.
-  return IBAN_SHAPE.test(iban) && BigInt(iban.slice(4) + "1827" + iban.slice(2, 4)) % 97n === 1n;
+  return BigInt(iban.slice(4) + "1827" + iban.slice(2, 4)) % 97n === 1n;
 }
 
 function validCardNumber(card: string): boolean {

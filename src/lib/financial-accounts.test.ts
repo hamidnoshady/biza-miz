@@ -231,6 +231,8 @@ describe("what a form may store", () => {
 
   it("rejects shaped identifiers with incorrect check digits", () => {
     expect(financialAccountInputProblem({ ...base, iban: "IR820540102680020817909003" })?.code).toBe("iban_invalid");
+    expect(financialAccountInputProblem({ ...base, iban: "IR020120000000000000000060" })).toBeNull();
+    expect(financialAccountInputProblem({ ...base, iban: "IR990120000000000000000060" })?.code).toBe("iban_invalid");
     expect(financialAccountInputProblem({ ...base, cardNumber: "6037991234567890" })?.code).toBe("card_number_invalid");
     expect(financialAccountInputProblem({ ...base, cardNumber: "0000000000000000" })?.code).toBe("card_number_invalid");
   });
