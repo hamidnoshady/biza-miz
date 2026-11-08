@@ -123,7 +123,7 @@ function worksheetToRows(sheet: import("exceljs").Worksheet, rejectUnsafeNumbers
   return rows;
 }
 
-function xlsxCellToString(value: unknown): string {
+export function xlsxCellToString(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (value instanceof Date) return value.toISOString().slice(0, 10);
   if (typeof value === "object") {

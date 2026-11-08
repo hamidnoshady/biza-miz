@@ -348,6 +348,7 @@ export async function api<T = Record<string, unknown>>(
 
 /** Persian messages for the API's error codes. */
 const ERROR_MESSAGES: Record<string, string> = {
+  invalid_vendor: "تأمین‌کننده باید شخص فعال همین کسب‌وکار با نقش تأمین‌کننده باشد؛ انتخاب را دوباره بررسی کنید.",
     // The fixed-asset register's domain errors live in their own dictionary
     // (fixed-assets-errors.ts) — spread here so every screen shares them.
     ...FIXED_ASSET_ERROR_TRANSLATIONS,

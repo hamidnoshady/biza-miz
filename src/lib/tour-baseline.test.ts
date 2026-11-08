@@ -164,6 +164,45 @@ describe("automatic baseline tours", () => {
     expect(isBaselineTourId(baseline[0].id)).toBe(true);
   });
 
+  it("serves a published Studio tour instead of the baseline, and replaces a code tour by id", () => {
+    const published = (pageKey: string, id: string, title: string) => ({
+      id,
+      version: 3,
+      pageKey,
+      route: pageKey.slice("page:".length),
+      title,
+      description: "از استودیو",
+      eligibility: {},
+      steps: [
+        { id: "intro", kind: "explain" as const, title: "شروع", body: "." },
+        { id: "header", kind: "spotlight" as const, anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحه", body: "." },
+      ],
+    });
+
+    // A page that only had the automatic baseline now answers with the tour the
+    // super-admin wrote and published.
+    const edited = pageTourCandidates("page:/crm/audit", [published("page:/crm/audit", "studio.crm.audit", "تور استودیو")]);
+    expect(edited.map((tour) => tour.id)).toEqual(["studio.crm.audit"]);
+    expect(edited[0].title).toBe("تور استودیو");
+
+    // A published tour with a code tour's id replaces it, and the page's other
+    // tours (the ledger's and the staff overview's) stay where they were.
+    const overview = pageTourCandidates("page:/accounting/overview", [
+      published("page:/accounting/overview", "accounting.overview.ledger", "نسخهٔ استودیو"),
+    ]);
+    expect(overview.map((tour) => tour.id)).toEqual([
+      "accounting.overview.ledger",
+      "accounting.overview.staff",
+    ]);
+    expect(overview[0].title).toBe("نسخهٔ استودیو");
+    expect(overview[1].title).not.toBe("نسخهٔ استودیو");
+
+    // A published tour of another page never leaks into this one.
+    expect(pageTourCandidates("page:/crm/audit", [published("page:/crm/quality", "studio.x", "x")])[0].id).toMatch(
+      /^baseline\./,
+    );
+  });
+
   it("records progress with the same rules as any other tour", () => {
     const tour = baselineTourForPage(NEW_PAGE);
     const ids = tour.steps.map((step) => step.id);
@@ -225,6 +264,30 @@ describe("the coverage audit", () => {
     // without at least one real spotlight.
     expect(report.pages.every((row) => row.spotlightCount > 0)).toBe(true);
     expect(PAGE_TOUR_REGIONS["*"]?.length).toBeGreaterThan(0);
+  });
+
+  it("counts a published Studio tour as real coverage, not as the baseline", () => {
+    const studio = {
+      id: "studio.accounting.orders",
+      version: 2,
+      pageKey: "page:/accounting/orders",
+      route: "/accounting/orders",
+      title: "سفارش‌ها",
+      description: "از استودیو",
+      eligibility: {},
+      steps: [
+        { id: "intro", kind: "explain" as const, title: "شروع", body: "." },
+        { id: "header", kind: "spotlight" as const, anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحه", body: "." },
+      ],
+    };
+    const withStudio = tourCoverage(TOURS, PAGE_TOUR_REGIONS, [studio]);
+    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/accounting/orders")!;
+    expect(row.kind).toBe("advanced");
+    expect(row.studioTourIds).toEqual([studio.id]);
+    expect(row.primaryTourId).toBe(studio.id);
+    expect(withStudio.studioTours).toBe(1);
+    expect(withStudio.baselinePages).toBe(report.baselinePages - 1);
+    expect(withStudio.issues).toEqual([]);
   });
 
   it("names a broken contract instead of hiding it", () => {

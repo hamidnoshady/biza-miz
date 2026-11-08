@@ -22,6 +22,7 @@ export async function requireProductWorkspace(options: { edit?: boolean } = {}):
   apiBase: string;
   draftScope: string;
   canEdit: boolean;
+  canImport: boolean;
 }> {
   const session = await getSession();
   if (!session) redirect("/login");
@@ -36,5 +37,6 @@ export async function requireProductWorkspace(options: { edit?: boolean } = {}):
     apiBase: productApiBaseFor(industry),
     draftScope: `${session.businessId}:${draftLocation}`,
     canEdit: access.permissions.has(PERMISSIONS.inventoryAdjust),
+    canImport: access.permissions.has(PERMISSIONS.dataImport),
   };
 }

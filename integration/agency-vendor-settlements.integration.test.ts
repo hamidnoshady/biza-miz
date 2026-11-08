@@ -235,4 +235,91 @@ describe("agency vendor settlement", () => {
     expect(original.rows[0].reversed_at).toBeNull();
   });
 
+  async function supplier(a: Agency, name = "رسانه آفتاب") {
+    const result = await db.query(`INSERT INTO parties (business_id,name,role,roles)
+      VALUES ($1,$2,'supplier',ARRAY['customer','supplier']) RETURNING id`, [a.businessId, name]);
+    return result.rows[0].id as string;
+  }
+
+  it("captures canonical supplier identity and ignores a conflicting caller-supplied name", async () => {
+    const a = await agency(); const vendorId = await supplier(a);
+    const c = await cost(a, { vendorPartyId: vendorId, vendorName: "نام جعلی" });
+    expect(c.vendorPartyId).toBe(vendorId);
+    expect(c.vendorName).toBe("رسانه آفتاب");
+    const paid = await settle(a, [c.id]);
+    const row = await db.query(`SELECT vendor_party_id FROM agency_vendor_settlements WHERE id=$1`, [paid.id]);
+    expect(row.rows[0].vendor_party_id).toBe(vendorId);
+    const legs = await db.query(`SELECT jl.party_id, jl.debit::text, jl.credit::text
+      FROM journal_lines jl JOIN accounts ac ON ac.id=jl.account_id
+      JOIN journal_entries je ON je.id=jl.entry_id
+      WHERE je.business_id=$1 AND ac.code='2140' ORDER BY jl.debit`, [a.businessId]);
+    expect(legs.rows).toHaveLength(2);
+    expect(legs.rows.every(line => line.party_id === vendorId)).toBe(true);
+  });
+  it("never groups different supplier identities just because their names match", async () => {
+    const a = await agency(); const x = await supplier(a); const y = await supplier(a);
+    const c = await cost(a, { vendorPartyId: x }); const d = await cost(a, { vendorPartyId: y });
+    await expect(settle(a, [c.id, d.id])).rejects.toThrow("costs_from_different_vendors");
+    expect(await balance(a, "2140")).toBe(10000000);
+  });
+  it("groups one renamed supplier by ID and retains the original cost-name snapshot", async () => {
+    const a = await agency(); const id = await supplier(a);
+    const x = await cost(a, { vendorPartyId: id });
+    await db.query(`UPDATE parties SET name='رسانه نو' WHERE id=$1`, [id]);
+    const y = await cost(a, { vendorPartyId: id });
+    expect(x.vendorName).not.toBe(y.vendorName);
+    await settle(a, [x.id, y.id]);
+    const loaded = await service.loadAgencyReimbursableCost(a.businessId, x.id);
+    expect(loaded?.vendorName).toBe("رسانه آفتاب");
+    expect(loaded?.vendorPartyName).toBe("رسانه نو");
+    expect(await balance(a, "2140")).toBe(0);
+  });
+  it("keeps linked and text-only costs separate even with the same payee name", async () => {
+    const a = await agency(); const id = await supplier(a);
+    const x = await cost(a, { vendorPartyId: id }); const y = await cost(a);
+    await expect(settle(a, [x.id, y.id])).rejects.toThrow("costs_from_different_vendors");
+    expect(y.vendorPartyId).toBeNull();
+  });
+  it("refuses invalid, inactive, non-supplier and foreign vendor identities", async () => {
+    const a = await agency(); const b = await agency(); const foreign = await supplier(b);
+    const inactive = await supplier(a); await db.query(`UPDATE parties SET is_active=false WHERE id=$1`, [inactive]);
+    for (const vendorPartyId of ["not-a-uuid", 42, a.clientId, foreign, inactive]) {
+      await expect(cost(a, { vendorPartyId })).rejects.toThrow("invalid_vendor");
+    }
+    await expect(db.query(`INSERT INTO agency_reimbursable_costs
+      (business_id,cost_number,party_id,description,amount_rial,spent_on,vendor_party_id)
+      VALUES ($1,'RC-invalid-vendor',$2,'test',1000,'2026-10-05',$3)`, [a.businessId, a.clientId, foreign])).rejects.toThrow("active supplier party of this business");
+    expect(await balance(a, "2140")).toBe(0);
+  });
+  it("freezes posted vendor attribution against PATCH and direct SQL changes", async () => {
+    const a = await agency(); const x = await supplier(a); const y = await supplier(a);
+    const c = await cost(a, { vendorPartyId: x });
+    await expect(service.updateAgencyReimbursableCost(a.businessId, c.id, a.actor, { vendorPartyId: y })).rejects.toThrow("cost_posted");
+    await expect(db.query(`UPDATE agency_reimbursable_costs SET vendor_party_id=$2 WHERE id=$1`, [c.id, y])).rejects.toThrow("audited party merge");
+    await expect(db.query(`UPDATE agency_reimbursable_costs SET vendor_party_id=NULL WHERE id=$1`, [c.id])).rejects.toThrow("audited party merge");
+  });
+  it("moves both posted vendor references through a real audited merge without rewriting money", async () => {
+    const a = await agency(); const winner = await supplier(a, "برنده"); const loser = await supplier(a, "تکراری");
+    const c = await cost(a, { vendorPartyId: loser }); const paid = await settle(a, [c.id]);
+    const crm = await import("../src/lib/crm-service");
+    expect(await crm.mergeCustomers(a.businessId, winner, loser, { mergedByUserId: a.actor.userId })).not.toBeNull();
+    const loaded = await service.loadAgencyReimbursableCost(a.businessId, c.id);
+    expect(loaded?.vendorPartyId).toBe(winner); expect(loaded?.vendorName).toBe("تکراری");
+    const payment = await db.query(`SELECT vendor_party_id, vendor_name FROM agency_vendor_settlements WHERE id=$1`, [paid.id]);
+    expect(payment.rows[0]).toEqual({ vendor_party_id: winner, vendor_name: "تکراری" });
+    expect(await balance(a, "2140")).toBe(0);
+    const audits = await db.query(`SELECT id FROM crm_party_attribution_moves WHERE business_id=$1 AND old_party_id=$2 AND new_party_id=$3`, [a.businessId, loser, winner]);
+    expect(audits.rows).toHaveLength(2);
+  });
+
+  it("keeps historical note edits and reversals usable after a supplier is archived", async () => {
+    const a = await agency(); const id = await supplier(a);
+    const c = await cost(a, { vendorPartyId: id }); const paid = await settle(a, [c.id]);
+    await db.query(`UPDATE parties SET is_active=false WHERE id=$1`, [id]);
+    await service.updateAgencyReimbursableCost(a.businessId, c.id, a.actor, { note: "پیگیری پس از بایگانی" });
+    await service.reverseAgencyVendorSettlement(a.businessId, a.actor, paid.id, { reversedOn: "2026-11-02" });
+    expect(await balance(a, "2140")).toBe(5000000);
+    await expect(settle(a, [c.id])).rejects.toThrow("invalid_vendor");
+  });
+
 });

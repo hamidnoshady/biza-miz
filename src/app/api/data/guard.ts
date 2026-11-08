@@ -82,10 +82,10 @@ export async function dataOwner(
  */
 export async function entityAccess(
   owner: DataOwner,
-  entityKey: string | null,
+  entityKey: string | EntityDefinition | null,
   direction: "import" | "export",
 ): Promise<{ entity: EntityDefinition; error: null } | { entity: null; error: NextResponse }> {
-  const entity = findEntity(entityKey);
+  const entity = typeof entityKey === "object" && entityKey ? entityKey : findEntity(entityKey);
   if (!entity) {
     return {
       entity: null,

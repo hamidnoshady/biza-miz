@@ -494,6 +494,7 @@ export interface WooCommerceClient {
   updateProduct(id: number, patch: Record<string, unknown>): Promise<WooProduct>;
   listVariations(parentId: number, query?: Record<string, string | number | boolean>): Promise<WooProduct[]>;
   updateVariation(parentId: number, variationId: number, patch: Record<string, unknown>): Promise<WooProduct>;
+  createCategory(body: { name: string; slug: string }): Promise<WooTerm>;
   listCategories(query?: Record<string, string | number | boolean>): Promise<WooTerm[]>;
   listTags(query?: Record<string, string | number | boolean>): Promise<WooTerm[]>;
   listAttributes(): Promise<WooAttribute[]>;
@@ -592,6 +593,7 @@ export function createWooCommerceClient(
         body: patch,
       }),
 
+    createCategory: (body) => request<WooTerm>(credentials, fetchImpl, "POST", "products/categories", { body }),
     listCategories: async (query) => {
       const all: WooTerm[] = [];
       let page = 1;
