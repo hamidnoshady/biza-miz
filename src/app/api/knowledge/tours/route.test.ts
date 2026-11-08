@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   industry: vi.fn(),
   loadProgress: vi.fn(),
   record: vi.fn(),
+  publishedForPage: vi.fn(),
+  publishedById: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -26,6 +28,14 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/lib/industry-guard", () => ({ getBusinessIndustry: mocks.industry }));
+
+// The super-admin catalogue (migration 0288) is a database read; the routes are
+// exercised here with it replaced, so the HTTP contract is tested without a
+// database and the pure merge/validation rules are covered by the unit suite.
+vi.mock("@/lib/tour-studio-service", () => ({
+  publishedToursForPage: mocks.publishedForPage,
+  publishedTourById: mocks.publishedById,
+}));
 
 // Real eligibility and tour logic; only the database reads/writes are replaced.
 vi.mock("@/lib/tours-service", async (importOriginal) => {
@@ -69,6 +79,8 @@ beforeEach(() => {
   mocks.industry.mockResolvedValue("cosmetics");
   mocks.loadProgress.mockResolvedValue(new Map());
   mocks.record.mockResolvedValue({ ok: true, progress: null });
+  mocks.publishedForPage.mockResolvedValue([]);
+  mocks.publishedById.mockResolvedValue(null);
 });
 
 describe("GET /api/knowledge/tours", () => {
@@ -112,6 +124,72 @@ describe("GET /api/knowledge/tours", () => {
     });
     expect(JSON.stringify(body)).not.toContain("tour-id");
     expect(body.tours[0].steps).toBeUndefined();
+  });
+});
+
+describe("published Studio tours", () => {
+  const STUDIO_ID = "studio.crm.audit";
+  const studio = {
+    id: STUDIO_ID,
+    version: 4,
+    pageKey: BASELINE_PAGE,
+    route: "/crm/audit",
+    title: "سابقهٔ تصمیم‌ها",
+    description: "تور منتشرشده از استودیو",
+    eligibility: {},
+    steps: [
+      { id: "intro", kind: "explain" as const, title: "شروع", body: "." },
+      { id: "header", kind: "spotlight" as const, anchor: "page.header", title: "سرصفحه", body: "." },
+    ],
+  };
+
+  it("offers the published tour instead of the automatic baseline", async () => {
+    mocks.publishedForPage.mockResolvedValue([studio]);
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(BASELINE_PAGE)}`));
+    const body = await res.json();
+    expect(body.tours).toHaveLength(1);
+    expect(body.tours[0]).toMatchObject({ id: STUDIO_ID, title: "سابقهٔ تصمیم‌ها", stepCount: 2 });
+    expect(mocks.publishedForPage).toHaveBeenCalledWith(BASELINE_PAGE);
+  });
+
+  it("plays a published tour back and records its progress", async () => {
+    mocks.publishedById.mockResolvedValue(studio);
+    const res = await getTour(req(`/api/knowledge/tours/${STUDIO_ID}`), ctx(STUDIO_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.tour.id).toBe(STUDIO_ID);
+    expect(body.tour.steps).toHaveLength(2);
+
+    const write = await postProgress(
+      req(`/api/knowledge/tours/${STUDIO_ID}/progress`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ event: "start" }),
+      }),
+      ctx(STUDIO_ID),
+    );
+    expect(write.status).toBe(200);
+    expect(mocks.record).toHaveBeenCalledWith("biz-1", "user-1", expect.objectContaining({ id: STUDIO_ID }), {
+      type: "start",
+    });
+  });
+
+  it("still answers when the console catalogue cannot be read", async () => {
+    // The button must not break because the database is unavailable: the code
+    // catalogue and the baseline are the fallback.
+    mocks.publishedForPage.mockRejectedValue(new Error("database down"));
+    mocks.publishedById.mockRejectedValue(new Error("database down"));
+    const list = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(PAGE)}`));
+    expect((await list.json()).tours).toHaveLength(1);
+    const play = await getTour(req(`/api/knowledge/tours/${TOUR}`), ctx(TOUR));
+    expect(play.status).toBe(200);
+  });
+
+  it("never serves a draft: an unpublished id is indistinguishable from an unknown one", async () => {
+    mocks.publishedById.mockResolvedValue(null);
+    const res = await getTour(req(`/api/knowledge/tours/${STUDIO_ID}`), ctx(STUDIO_ID));
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not_found" });
   });
 });
 

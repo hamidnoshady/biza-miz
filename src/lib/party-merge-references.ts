@@ -175,6 +175,13 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     preview: true,
     previewLabel: "مقصد بازاریابی",
   },
+  {
+    table: "historical_sales_invoices",
+    column: "party_id",
+    scope: "business",
+    disposition: "historical",
+    reason: "The archived source evidence preserves its originally reviewed party; customer history follows the CRM merge chain without rewriting this immutable attribution.",
+  },
   // -- Accounting-owned operational data ------------------------------------
   {
     table: "orders",
@@ -814,6 +821,34 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
                  SELECT $1, 'agency_reimbursable_costs', c.id, c.party_id, $3, $4
                    FROM agency_reimbursable_costs c
                   WHERE c.business_id = $1 AND c.party_id = $2`,
+  },
+
+  {
+    table: "agency_reimbursable_costs",
+    column: "vendor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason: "Canonical vendor attribution follows the surviving supplier; historical vendor_name and posted money remain unchanged.",
+    preview: true,
+    previewLabel: "فروشندهٔ هزینه‌های کارفرما",
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+      (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+      SELECT $1, 'agency_reimbursable_costs', c.id, c.vendor_party_id, $3, $4
+      FROM agency_reimbursable_costs c WHERE c.business_id=$1 AND c.vendor_party_id=$2`,
+  },
+
+  {
+    table: "agency_vendor_settlements",
+    column: "vendor_party_id",
+    scope: "business",
+    disposition: "move",
+    reason: "Canonical vendor attribution follows the surviving supplier; historical vendor_name and posted money remain unchanged.",
+    preview: true,
+    previewLabel: "فروشندهٔ پرداخت‌های آژانس",
+    preMoveSql: `INSERT INTO crm_party_attribution_moves
+      (business_id, table_name, row_id, old_party_id, new_party_id, actor_id)
+      SELECT $1, 'agency_vendor_settlements', c.id, c.vendor_party_id, $3, $4
+      FROM agency_vendor_settlements c WHERE c.business_id=$1 AND c.vendor_party_id=$2`,
   },
 
   // -- AEC (issue #799 Wave 2) ----------------------------------------------

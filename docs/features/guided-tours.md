@@ -12,7 +12,7 @@ shared, metadata-driven system rather than a hand-written tour per page.
 
 This document covers what ships and the rules the next slices must keep. The
 epic's remaining phases (hierarchy and learning paths, verified tasks, Learning
-Center, Tour Studio, AI discovery) are tracked on #972.
+Center, AI discovery, offline progress) are tracked on #972.
 
 ## What ships
 
@@ -23,7 +23,14 @@ Center, Tour Studio, AI discovery) are tracked on #972.
 | Progress storage, row lock | `src/lib/tours-service.ts`, migration `0259_tour_member_progress.sql` |
 | API | `GET /api/knowledge/tours?page=`, `GET /api/knowledge/tours/[tourId]`, `POST /api/knowledge/tours/[tourId]/progress` |
 | Automatic baseline tours (pure) | `src/lib/tour-baseline.ts` |
+| Verified-action whitelist (pure) | `src/lib/tour-verifiers.ts` |
+| Verified-action evidence (storage) | `src/lib/tour-evidence-service.ts`, migration `0289_tour_action_evidence.sql` |
+| Verified-action API | `POST /api/knowledge/tours/[tourId]/verify` |
 | Coverage audit (pure) | `src/lib/tour-coverage.ts`, `npm run tours:audit` |
+| Console authoring rules (pure) | `src/lib/tour-studio.ts` |
+| Console authoring storage | `src/lib/tour-studio-service.ts`, migration `0288_knowledge_tours.sql` |
+| Console API | `GET/POST /api/platform/knowledge/tours`, `GET/POST/DELETE /api/platform/knowledge/tours/[tourId]` |
+| Console UI | «تورهای تعاملی» tab in `/platform/knowledge` (`kb-tours-panel.tsx`) |
 | Runtime | `src/components/tours/tour-provider.tsx` (one, in `DashboardMain`), `tour-overlay.tsx` (lazy) |
 | Modal | `src/app/dashboard/knowledge-help.tsx` |
 | Tours | the catalogue below, in `TOURS`, plus one automatic baseline per registered page |
@@ -117,6 +124,102 @@ Rules that make it honest and universal:
   never a control, a figure or a permission-gated instruction. Authored tours
   keep deciding eligibility on the server, step by step.
 
+## Tour Studio (super-admin authoring)
+
+The console tab «تورهای تعاملی» authors the tours the runtime serves, without a
+deployment (migration 0288):
+
+- **Two tables, one shape as the articles.** `knowledge_tours` holds a tour's
+  identity, working copy and which revision is live;
+  `knowledge_tour_revisions` holds immutable snapshots. Both are platform
+  catalogues with no `business_id` (listed in `src/lib/tenant-tables.ts`), so
+  one published set of tours teaches every business. Member progress stays where
+  it was — `tour_member_progress`, per business and per member.
+- **Drafts are invisible.** Saving appends a revision; publishing points members
+  at it; editing a published tour leaves the live revision in place until the
+  editor publishes again, and the panel says so. Archiving hides a tour without
+  deleting what was taught; a never-published draft can be deleted outright.
+- **Rollback is a new version.** Going back copies the old revision into
+  `version + 1` and publishes it, so history stays append-only and the step ids a
+  member already saw become seen again rather than being renumbered.
+- **Validation is the review.** `parseStudioTourInput` refuses an unknown page, a
+  route that is not that page's own, a malformed or `baseline.` id, a reused
+  code-tour id on a different page, an unregistered anchor (the picker offers
+  only `TOUR_ANCHORS`), an explanation that names an anchor, a tour that does not
+  open with an explanation, and eligibility naming a permission, trade, flag or
+  rule the runtime does not know. A stored tour is validated again before it is
+  served, so a row left behind by a renamed page is skipped rather than shown.
+- **Precedence.** A published tour with a code tour's id replaces it; a published
+  tour with a new id joins that page's catalogue; a page with none still falls
+  back to its automatic baseline. `tourCoverage(tours, regions, published)` counts
+  published tours as `advanced` coverage, and the console lists both.
+- **Concurrency and audit.** Saves carry the version the editor read (a stale one
+  is a 409, never a silent overwrite); publish/rollback/archive lock the row and
+  write a `platform_audit_log` entry under `knowledge.manage`, the same
+  capability that guards the article editor.
+- **Refusals are Persian and tour-specific.** `STUDIO_ERROR_TEXT` maps every code
+  this feature emits to its own sentence (`version_conflict` here is a tour
+  revision, not a knowledge article; `not_draft` explains why delete was
+  refused), and the API's English diagnostic `detail` is shown only as a small
+  LTR line under it — never instead of it.
+
+Where each promise is checked: `tour-studio.test.ts` (rules, precedence,
+operator text), `src/app/api/platform/knowledge/tours/route.test.ts` (auth,
+validation, 409, lifecycle, audit), `kb-tours-panel.test.tsx` (mounted panel:
+coverage sentence, default key, read-only mode, anchor picker, payloads),
+`src/app/api/knowledge/tours/route.test.ts` (members see published tours and
+never drafts or archived ones), and `integration/guided-tours.integration.test.ts`
+(the same lifecycle against a migrated database, including visibility).
+
+## Verified action steps
+
+Phase 2 of the epic: a tour may ask the member to do something real — register
+the first customer, create a product, take an order. The honest way to grade
+that is not a click on «بعدی».
+
+- **A step names a whitelisted event, not a URL.** `kind: "action"` requires a
+  key from `TOUR_VERIFIERS` (`product.created`, `party.created`,
+  `order.created`, …). Each entry carries the Persian promise shown in the card
+  and the endpoint that records it; `tour-verifiers.test.ts` asserts every
+  `recordedBy` really calls `recordTourEvidence` with that key, so a tour can
+  never be published around a writer that does not exist.
+- **Only the server credits the action.** The success path itself records
+  evidence — `POST /api/products/items`, `POST /api/parties`, `POST /api/orders`
+  — after the write succeeded, inside the same tenant scope. The client's
+  `POST …/verify` body carries one field, a step id; the server looks the
+  evidence up and answers `200` or `409 evidence_missing`. There is no field a
+  page could set to claim success, and `step_seen` on an action step is a
+  `400 requires_evidence`.
+- **Nothing about the member's data is stored.** `tour_action_evidence`
+  (migration 0289) holds one row per business/member/verifier: first and last
+  time, a counter, and an opaque entity id — never a customer's name, an order's
+  contents or a form value. It is tenant data (RLS forced) and is not in the
+  platform exemption list.
+- **Recording is best-effort in one direction only.** A failure to credit the
+  tour never fails the sale, the product or the customer — the member retries
+  the tour step. The reverse is not possible: a failed write leaves no evidence.
+- **No duplicate work to prove learning.** Evidence is read as "has this member
+  ever done this", so a member who registered a customer last week finishes the
+  step by pressing «بررسی»; the card says «قبلاً هم انجام داده بودید» instead of
+  asking for a second record. That is also why the epic's rule against writing
+  demo rows to production is respected: the tour never creates anything.
+- **The overlay gets out of the way.** For an action step there is no click
+  blocker and no dimmer; the card docks at the bottom, keeps the page usable,
+  polls the server (and re-checks on focus) until the evidence appears, and only
+  then enables Next. Skip is still available and is still not completion. If the
+  member's own save navigates away, the runtime sends the same verify before it
+  pauses the tour, so a completed action is not lost to a route change.
+- **Authoring.** The console's step editor offers «کار واقعی» with the verifier
+  list and shows the promise plus the recording endpoint; the tour validator
+  refuses an action step without a registered verifier, a verifier on any other
+  kind, and an action step pointing at an unregistered anchor.
+
+The pilot is `crm.directory.first-customer` on `/crm/directory`: the page stays
+usable, the member registers the customer themselves, and the third step clears
+when `party.created` evidence exists. Its action step points at the shared
+«افزودن مشتری» button (`data-tour-id="parties.add"`), which the store's
+suppliers and the ledger's party file reuse — one button, one anchor.
+
 ## Coverage audit
 
 `tourCoverage()` (pure) lists **every** registered page exactly once with
@@ -168,9 +271,11 @@ instead of trapping the member.
 
 ## Rules
 
-- **The catalogue is code, for now.** `TOURS` is reviewed like any source file
-  and versioned by `version`. `TourDefinition` is the shape a Superadmin-authored
-  catalogue would store; nothing else should need to change when that lands.
+- **Two catalogues, one shape.** `TOURS` is reviewed like any source file and
+  versioned by `version`; the console publishes to the same `TourDefinition`
+  shape (migration 0288) and a published tour replaces a code tour with the same
+  id. Neither path is privileged in the runtime: the member API composes them in
+  `pageTourCandidates`, and the baseline answers only when both are empty.
 - **Anchors are `data-tour-id`**, registered in `TOUR_ANCHORS`. Never target a
   class, a label or a DOM position. `tours.test.ts` fails when a registered
   anchor is missing from the source or a source anchor is unregistered. Put the
@@ -180,11 +285,13 @@ instead of trapping the member.
   permissions, the business's industry, feature flags and costing system, on the lookup *and* on every
   progress write. An ineligible tour is indistinguishable from a non-existent
   one (404) and is never described in a list.
-- **Seen is not learned; skipped is not seen.** Every step in this slice is an
-  explanation, so "seen" means the member pressed Next. A step that asks for a
-  real action must complete on a server-verified success event, never on a click
-  — that step kind does not exist yet and the progress API accepts no
-  client-claimed success. A tour is completed only when every step was seen.
+- **Seen is not learned; skipped is not seen.** An explanation or a spotlight is
+  "seen" when the member pressed Next. A step that asks for something real
+  (`kind: "action"`) is not: `step_seen` is refused for it
+  (`requires_evidence`), and it completes only through the server's own
+  verification of the business event it names — see *Verified action steps*
+  below. The progress and verify APIs accept no client-claimed success, and a
+  tour is completed only when every step was seen.
 - **Progress is monotone.** Events are unions of seen steps, so two devices or a
   retry converge; the row is locked `FOR UPDATE` per write. Replaying a completed
   tour never lowers it. Only an explicit `reset` removes anything.
@@ -205,12 +312,15 @@ instead of trapping the member.
 
 ## Not in this slice
 
-The Superadmin **Tour Studio** (authoring, preview, publish, versions and
-rollback without a code change), the parts of the coverage report that need
-editorial data (stale published article, last validation, per-page abandonment),
-cross-page tours and learning paths, verified-action steps, offline progress
-queueing, the Learning Center, Tour Studio, staff assignments and reports, the
-AI discovery tool, Hybrid cloud-pane handling (the overlay runs in the page that
+Rich Studio features beyond authoring and publishing: reusable templates, a
+live in-panel preview, conditional branches, and the parts of the coverage report
+that need editorial data (stale published article, last validation, per-page
+abandonment). Also: eligibility **rules** the API already accepts but the panel
+does not yet expose (`anyOf`, feature flags, `withoutPermissions`), cross-page
+tours and learning paths, further verified actions (payments, stock receipts,
+role changes — each needs its own reviewer-approved success point), offline progress
+queueing, the Learning Center, staff assignments and reports, the AI discovery
+tool, Hybrid cloud-pane handling (the overlay runs in the page that
 renders it; across the pane's origin boundary a route-based explanation is the
 fallback), and per-tenant analytics. Each needs its own design decision on the
 epic.

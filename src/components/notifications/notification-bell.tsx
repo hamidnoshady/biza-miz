@@ -1,134 +1,186 @@
 "use client";
 import { Bell } from "lucide-react";
 import Link from "next/link";
+import { Popover } from "radix-ui";
+import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { CLOUD_EMBED_ATTRIBUTE } from "@/lib/cloud-embed";
 import { toPersianDigits } from "@/lib/digits";
 import type { InboxEntry } from "@/lib/notifications-service";
 
-/** First-party inbox works without Push permission. Poll only while visible,
- * refresh on focus, never overlap requests or keep data across identity changes. */
-export function NotificationBell({ identity }: { identity: string }) {
+/** Keep push privacy binding in each authenticated origin, even when its inbox is hidden. */
+export function NotificationPushBinding({ identity }: { identity: string }) {
+  useEffect(() => {
+    let active = true;
+    if ("serviceWorker" in navigator)
+      void navigator.serviceWorker
+        .getRegistration()
+        .then((reg) => {
+          if (active) reg?.active?.postMessage({ type: "notification-binding", identity });
+        })
+        .catch(() => {});
+    return () => { active = false; };
+  }, [identity]);
+  return null;
+}
+
+export function NotificationBell({ identity, local }: { identity: string; local?: boolean }) {
+  const [ownsInbox, setOwnsInbox] = useState(false);
+  useEffect(() => {
+    // The root marker survives service-worker navigations whose request lost
+    // the embed user agent. An embedded guest never polls or opens a second inbox.
+    setOwnsInbox(!document.documentElement.hasAttribute(CLOUD_EMBED_ATTRIBUTE));
+  }, []);
+  return ownsInbox ? <NotificationInbox key={identity} local={local} /> : null;
+}
+
+const loadError = "دریافت اعلان‌ها ناموفق بود؛ دوباره تلاش کنید.";
+const offlineError = "اتصال اینترنت برقرار نیست. شمار اعلان‌ها ممکن است به‌روز نباشد.";
+
+function NotificationInbox({ local }: { local?: boolean }) {
+  const pathname = usePathname();
   const [entries, setEntries] = useState<InboxEntry[]>([]);
-  const [unread, setUnread] = useState(0);
+  const [unread, setUnread] = useState<number | null>(null);
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("all");
   const [error, setError] = useState("");
+  const [stale, setStale] = useState(false);
   const [busy, setBusy] = useState(false);
   const [retention, setRetention] = useState(90);
-  const inFlight = useRef(false);
+  const inFlight = useRef<AbortController | null>(null);
+  const write = useRef<AbortController | null>(null);
   const refreshAgain = useRef(false);
-  const panel = useRef<HTMLDivElement>(null);
-  const button = useRef<HTMLButtonElement>(null);
   const refresh = useCallback(async (): Promise<void> => {
     if (document.hidden) return;
     if (inFlight.current) {
       refreshAgain.current = true;
       return;
     }
-    inFlight.current = true;
+    const request = new AbortController();
+    inFlight.current = request;
     try {
-      const res = await fetch("/api/notifications/inbox?limit=200", { cache: "no-store" });
+      const res = await fetch("/api/notifications/inbox?limit=200", {
+        cache: "no-store",
+        signal: request.signal,
+      });
+      if (request.signal.aborted) return;
+      if (res.status === 401 || res.status === 403) {
+        setEntries([]);
+        setUnread(null);
+        setStale(false);
+        setError(res.status === 401 ? "برای دیدن اعلان‌ها دوباره وارد شوید." : "دسترسی به اعلان‌ها برقرار نیست.");
+        return;
+      }
       if (!res.ok) throw new Error();
       const body = (await res.json()) as {
         entries: InboxEntry[];
         unread: number;
         retentionDays: number;
       };
+      if (request.signal.aborted) return;
+      if (!Array.isArray(body.entries) || !Number.isSafeInteger(body.unread) || body.unread < 0) {
+        throw new Error();
+      }
       setEntries(body.entries);
       setUnread(body.unread);
       setRetention(body.retentionDays);
+      setStale(false);
       setError("");
     } catch {
-      setError("دریافت اعلان‌ها ناموفق بود؛ دوباره تلاش کنید.");
+      if (request.signal.aborted) return;
+      setStale(true);
+      setError(navigator.onLine ? loadError : offlineError);
     } finally {
-      inFlight.current = false;
-      if (refreshAgain.current) {
-        refreshAgain.current = false;
-        void refresh();
+      if (inFlight.current === request) {
+        inFlight.current = null;
+        if (refreshAgain.current) {
+          refreshAgain.current = false;
+          void refresh();
+        }
       }
     }
   }, []);
   useEffect(() => {
-    setEntries([]);
-    setUnread(0);
-    if ("serviceWorker" in navigator)
-      void navigator.serviceWorker
-        .getRegistration()
-        .then((reg) => reg?.active?.postMessage({ type: "notification-binding", identity }))
-        .catch(() => {});
+    const openFromLink = new URLSearchParams(window.location.search).get("inbox") === "1";
+    setOpen(openFromLink);
+  }, [pathname]);
+  useEffect(() => {
+    const onRefresh = () => void refresh();
     void refresh();
-    const timer = setInterval(() => void refresh(), 30_000);
-    const onFocus = () => void refresh();
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onFocus);
-    setOpen(new URLSearchParams(window.location.search).get("inbox") === "1");
+    const timer = setInterval(onRefresh, 30_000);
+    window.addEventListener("focus", onRefresh);
+    window.addEventListener("online", onRefresh);
+    window.addEventListener("offline", onRefresh);
+    document.addEventListener("visibilitychange", onRefresh);
     return () => {
       clearInterval(timer);
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onFocus);
+      inFlight.current?.abort();
+      inFlight.current = null;
+      write.current?.abort();
+      refreshAgain.current = false;
+      window.removeEventListener("focus", onRefresh);
+      window.removeEventListener("online", onRefresh);
+      window.removeEventListener("offline", onRefresh);
+      document.removeEventListener("visibilitychange", onRefresh);
     };
-  }, [identity, refresh]);
+  }, [refresh]);
   useEffect(() => {
-    if (open) {
-      void refresh();
-      panel.current?.focus();
-    }
+    if (open) void refresh();
   }, [open, refresh]);
   async function mark(id?: string) {
+    if (write.current) return;
+    const request = new AbortController();
+    write.current = request;
     setBusy(true);
     try {
       const res = await fetch("/api/notifications/inbox", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(id ? { id } : {}),
+        signal: request.signal,
       });
+      if (request.signal.aborted) return;
       if (!res.ok) throw new Error();
       await refresh();
     } catch {
-      setError("ثبت خواندن ناموفق بود؛ دوباره تلاش کنید.");
+      if (!request.signal.aborted) setError("ثبت خواندن ناموفق بود؛ دوباره تلاش کنید.");
     } finally {
-      setBusy(false);
+      if (write.current === request) {
+        write.current = null;
+        if (!request.signal.aborted) setBusy(false);
+      }
     }
   }
+  const scope = local ? "اعلان‌های این دستگاه" : "اعلان‌ها";
+  const label = unread === null
+    ? `${scope}، شمار خوانده‌نشده نامشخص است`
+    : `${scope}، ${unread} خوانده‌نشده${stale ? "، ممکن است به‌روز نباشد" : ""}`;
   return (
-    <div className="fixed bottom-20 left-3 z-40 sm:bottom-4" dir="rtl">
-      <Button
-        ref={button}
-        variant="outline"
-        aria-expanded={open}
-        aria-controls="notification-inbox"
-        aria-label={`اعلان‌ها، ${unread} خوانده‌نشده`}
-        onClick={() => setOpen(!open)}
-      >
-        <Bell aria-hidden="true" className="size-4" /> {toPersianDigits(unread)}
-      </Button>
-      {open && (
-        <div
-          id="notification-inbox"
-          ref={panel}
-          tabIndex={-1}
-          role="region"
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <Button variant="outline" size="icon-sm" aria-label={label} title={label} className="relative shrink-0">
+          <Bell aria-hidden="true" className="size-4" />
+          {unread !== null ? (
+            <span aria-hidden="true" className="absolute -top-1 -end-1 rounded-full bg-background px-0.5 text-[10px] leading-none">
+              {toPersianDigits(unread)}{stale ? "؟" : ""}
+            </span>
+          ) : null}
+        </Button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          dir="rtl"
           aria-label="صندوق اعلان"
-          className="absolute bottom-12 left-0 flex max-h-[70dvh] w-[min(92vw,26rem)] flex-col rounded-xl border bg-background p-3 text-foreground "
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              setOpen(false);
-              button.current?.focus();
-            }
-          }}
+          side="bottom"
+          align="center"
+          sideOffset={8}
+          collisionPadding={12}
+          className="z-50 flex max-h-[min(70dvh,var(--radix-popover-content-available-height))] w-[min(92vw,26rem)] flex-col rounded-xl border bg-background p-3 text-foreground"
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="font-semibold">صندوق اعلان</h2>
-            <Button
-              variant="ghost"
-              onClick={() => {
-                setOpen(false);
-                button.current?.focus();
-              }}
-            >
-              بستن
-            </Button>
+            <h2 className="font-semibold">{local ? "صندوق اعلان این دستگاه" : "صندوق اعلان"}</h2>
+            <Popover.Close asChild><Button variant="ghost">بستن</Button></Popover.Close>
           </div>
           <p className="text-xs text-muted-foreground">
             تاریخچه تا {toPersianDigits(retention)} روز نگهداری می‌شود. ساعت سکوت فقط ارسال Push را
@@ -191,7 +243,7 @@ export function NotificationBell({ identity }: { identity: string }) {
                 </li>
               ))}
           </ul>
-          {!entries.length && !error && (
+          {!entries.length && !error && unread !== null && (
             <p role="status" className="py-5 text-center text-sm">
               هنوز اعلانی ندارید.
             </p>
@@ -199,8 +251,8 @@ export function NotificationBell({ identity }: { identity: string }) {
           <Link className="mt-2 text-sm underline" href="/settings/notifications">
             تنظیمات و کاهش تعداد اعلان‌ها
           </Link>
-        </div>
-      )}
-    </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

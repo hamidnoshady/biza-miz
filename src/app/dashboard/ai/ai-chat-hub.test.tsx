@@ -136,11 +136,13 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     expect(within(composerBox as HTMLElement).queryByLabelText("جست‌وجو در گزارش‌ها و گفتگوهای قبلی")).toBeNull();
 
     const sendBtn = within(composerBox as HTMLElement).getByRole("button", { name: "ارسال پیام" });
-    expect(sendBtn.parentElement?.className).toContain("right-2.5");
-    expect(sendBtn.parentElement?.className).toContain("bottom-2.5");
     const plusBtn = within(composerBox as HTMLElement).getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" });
-    expect(plusBtn.parentElement?.className).toContain("left-2.5");
-    expect(plusBtn.parentElement?.className).toContain("bottom-2.5");
+    const taskSelector = within(composerBox as HTMLElement).getByRole("combobox", { name: /وظیفه دستیار/ });
+    const toolbar = sendBtn.parentElement!;
+    expect(toolbar.dir).toBe("rtl");
+    expect(toolbar.firstElementChild).toBe(plusBtn);
+    expect(plusBtn.nextElementSibling).toBe(taskSelector.parentElement);
+    expect(toolbar.lastElementChild).toBe(sendBtn);
 
     // Desktop physical-left history panel is rendered with New Chat inside it
     const historyAside = screen.getByRole("complementary", {
@@ -448,6 +450,18 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
         String(url).includes("beforeId=11111111-1111-4111-8111-111111111111"),
       ),
     ).toBe(true);
+  });
+
+  it.each([
+    [401, "نشست شما منقضی شده است. دوباره وارد شوید."],
+    [403, "به تاریخچهٔ گفتگوها دسترسی ندارید."],
+    [503, "تاریخچهٔ گفتگوها موقتاً در دسترس نیست. دوباره تلاش کنید."],
+    [200, "پاسخ تاریخچهٔ گفتگوها معتبر نیست."],
+  ])("distinguishes history response %s from an empty list", async (status, message) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>fallback</html>", { status })));
+    render(<AiConversationsSidebar activeId={null} refreshToken={0} onSelect={vi.fn()} />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(message);
   });
 
   it("filters management sheet tabs by allowedSections and updates retired Knowledge copy in AiMemoryPanel", async () => {

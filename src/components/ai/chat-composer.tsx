@@ -78,6 +78,7 @@ interface ChatComposerProps {
   onCustomTaskChange: (text: string) => void;
   eligibleTaskIds?: readonly AiTaskId[];
   showTaskSelector?: boolean;
+  compact?: boolean;
   workspaceContext?: Omit<AiWorkspaceContextProps, "disabled" | "compact">;
   inputRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
   actionsAllowed: boolean;
@@ -105,6 +106,7 @@ export function ChatComposer({
   onCustomTaskChange,
   eligibleTaskIds,
   showTaskSelector = true,
+  compact = false,
   workspaceContext,
   inputRef,
   sendMessage,
@@ -274,7 +276,8 @@ export function ChatComposer({
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
         className={cn(
-          "relative rounded-2xl border bg-card shadow-[0_1px_2px_rgb(41_37_36/0.04)] transition-all duration-200 p-3 pb-12 sm:p-3.5 sm:pb-12",
+          "relative rounded-2xl border bg-card shadow-[0_1px_2px_rgb(41_37_36/0.04)] transition-all duration-200",
+          compact ? "p-2" : "p-3 sm:p-3.5",
           dragOver
             ? "border-primary ring-4 ring-primary/20"
             : focused
@@ -320,10 +323,11 @@ export function ChatComposer({
           />
         ) : null}
 
-        {/* `+` secondary-tools entry point on the physical bottom-RIGHT (trailing tools side) */}
-        {showSecondaryMenu ? (
-          <div className={cn("absolute bottom-2.5 z-10 flex items-center sm:bottom-3", mode === "dashboard" ? "left-2.5 sm:left-3" : "right-2.5 sm:right-3")}>
+        {/* Explicit direction keeps the tools at the physical right in both page directions. */}
+        <div dir="rtl" className="flex items-center gap-1 pt-1">
+          {showSecondaryMenu ? (
             <DropdownMenu
+              dir="rtl"
               open={menuOpen}
               onOpenChange={(open) => {
                 pointerToggleRef.current = true;
@@ -355,7 +359,7 @@ export function ChatComposer({
                       return next;
                     });
                   }}
-                  className="size-8 rounded-full text-muted-foreground hover:text-foreground"
+                  className="size-8 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
                 >
                   <PlusIcon className="size-4" />
                 </Button>
@@ -734,11 +738,8 @@ export function ChatComposer({
 
               </DropdownMenuContent>
             </DropdownMenu>
-          </div>
-        ) : null}
+          ) : null}
 
-        {/* Persistent task/mode controls next to Send in the physical RIGHT edge. */}
-        <div className={cn("absolute bottom-2.5 z-10 flex items-center gap-1 sm:bottom-3", mode === "dashboard" ? "right-2.5 sm:right-3" : "left-2.5 sm:left-3")}>
           {mode === "dashboard" && showTaskSelector ? (
             <label className="relative min-w-0">
               <span className="sr-only">وظیفه دستیار</span>
@@ -757,7 +758,7 @@ export function ChatComposer({
                   onTaskChange(event.target.value as AiTaskId);
                   if (customTask) onCustomTaskChange("");
                 }}
-                className="h-8 max-w-28 appearance-none rounded-full border border-border bg-card ps-2 pe-5 text-[11px] outline-none focus-visible:ring focus-visible:ring-ring/50 sm:max-w-36"
+                className="h-8 w-full max-w-28 appearance-none rounded-full border border-border bg-card ps-2 pe-5 text-[11px] outline-none focus-visible:ring focus-visible:ring-ring/50 sm:max-w-36"
               >
                 {availableTasks.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
                 <option value="custom">وظیفه سفارشی…</option>
@@ -785,7 +786,7 @@ export function ChatComposer({
               onClick={onCancelGeneration}
               aria-label="توقف پاسخ‌گویی"
               title="توقف پاسخ‌گویی"
-              className="size-8 rounded-full bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className="ms-auto size-8 shrink-0 rounded-full bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               <SquareIcon className="size-3.5 fill-current" />
             </Button>
@@ -799,7 +800,7 @@ export function ChatComposer({
               aria-label="ارسال پیام"
               title="ارسال پیام (Enter)"
               className={cn(
-                "size-8 rounded-full transition-all",
+                "ms-auto size-8 shrink-0 rounded-full transition-all",
                 !busy && input.trim() && "opacity-100",
               )}
             >

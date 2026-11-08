@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { knowledgePage } from "@/lib/knowledge-base";
 import { pageTourCandidates } from "@/lib/tour-baseline";
+import { publishedToursForPage } from "@/lib/tour-studio-service";
 import { tourForViewer, tourSummary } from "@/lib/tours";
 import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
 
@@ -30,7 +31,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const page = knowledgePage((request.nextUrl.searchParams.get("page") ?? "").trim());
   if (!page) return NextResponse.json({ error: "unknown_page" }, { status: 400 });
 
-  const candidates = pageTourCandidates(page.key);
+  // A console lookup failure degrades to the code catalogue, exactly like the
+  // article half of the modal: the button never breaks because the database is
+  // slow, and it never shows a draft.
+  const published = await publishedToursForPage(page.key).catch(() => []);
+  const candidates = pageTourCandidates(page.key, published);
   const viewer = await tourViewerFor(guard.session.businessId, guard.membership.permissions, candidates);
   const tours = candidates.flatMap((tour) => {
     const visible = tourForViewer(tour, viewer);

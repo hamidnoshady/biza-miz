@@ -6,6 +6,7 @@ import * as industry from "@/lib/industry-guard";
 import * as creation from "@/lib/product-creation-service";
 import { PERMISSIONS } from "@/lib/permissions";
 import { PRODUCT_CREATE_REQUEST_MAX_BYTES } from "@/lib/product-attributes";
+import * as evidence from "@/lib/tour-evidence-service";
 import { POST } from "./route";
 
 vi.mock("@/lib/auth", () => ({
@@ -20,6 +21,12 @@ vi.mock("@/lib/product-creation-service", () => ({
 }));
 vi.mock("@/lib/item-barcodes-service", () => ({
   BarcodeConflictError: class BarcodeConflictError extends Error {},
+}));
+// Issue #972 — the tour evidence write is best-effort and must never be the
+// reason a saved product is reported as failed, so it is replaced here.
+vi.mock("@/lib/tour-evidence-service", () => ({
+  recordTourEvidence: vi.fn(async () => {}),
+  hasTourEvidence: vi.fn(async () => null),
 }));
 
 const session = { businessId: "business-1", locationId: "branch-a", activeLocationId: "branch-a" };
@@ -60,5 +67,23 @@ describe("POST /api/products/items request bounds", () => {
     });
     expect(setup.resolveActiveLocation).not.toHaveBeenCalled();
     expect(creation.createProductRecord).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/products/items — guided task evidence (issue #972)", () => {
+  it("credits the tour verifier after the product is really created", async () => {
+    const response = await POST(
+      request(
+        JSON.stringify({ name: "کالای تازه" }),
+        { "content-type": "application/json" },
+      ),
+    );
+    expect(response.status).toBe(201);
+    expect(evidence.recordTourEvidence).toHaveBeenCalledWith({
+      businessId: "business-1",
+      userId: undefined,
+      verifier: "product.created",
+      entityId: "item-1",
+    });
   });
 });

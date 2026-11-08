@@ -29,6 +29,7 @@ import {
   regionsForPage,
   type PageTourRegion,
 } from "./tour-baseline";
+import { mergePublishedTours } from "./tour-studio";
 import { TOURS, TOUR_ANCHORS, validateTours, type TourDefinition } from "./tours";
 
 export type TourCoverageKind = "advanced" | "baseline";
@@ -39,8 +40,10 @@ export interface TourCoverageRow {
   label: string;
   group: string;
   kind: TourCoverageKind;
-  /** The authored tours on this page; empty for a baseline page. */
+  /** The authored tours on this page (code and published); empty for a baseline page. */
   tourIds: string[];
+  /** Of those, the ones the super-admin published from the console (migration 0288). */
+  studioTourIds: string[];
   /** The tour a fully eligible member is offered, and the one progress is keyed on. */
   primaryTourId: string;
   stepCount: number;
@@ -59,6 +62,8 @@ export interface TourCoverageReport {
   /** Pages on the automatic baseline — i.e. the editorial backlog. */
   baselinePages: number;
   authoredTours: number;
+  /** Published console tours included in this report. */
+  studioTours: number;
   /** Steps across every tour the button can offer, baseline tours included. */
   steps: number;
   /** Catalogue-level contract problems. Empty means the whole registry is consistent. */
@@ -78,6 +83,7 @@ function anchorsOf(tour: TourDefinition): string[] {
 export function tourCoverage(
   tours: readonly TourDefinition[] = TOURS,
   regions: Readonly<Record<string, readonly PageTourRegion[]>> = PAGE_TOUR_REGIONS,
+  published: readonly TourDefinition[] = [],
 ): TourCoverageReport {
   const issues: string[] = [...validateTours(tours)];
   const registeredAnchors = new Set<string>(Object.values(TOUR_ANCHORS));
@@ -88,6 +94,11 @@ export function tourCoverage(
   // not exist.
   for (const tour of tours) {
     if (!pagesByKey.has(tour.pageKey)) issues.push(`${tour.id}: page ${tour.pageKey} is not registered`);
+  }
+  for (const tour of published) {
+    if (!pagesByKey.has(tour.pageKey)) {
+      issues.push(`${tour.id}: published tour points at unregistered page ${tour.pageKey}`);
+    }
   }
   for (const [pageKey, declared] of Object.entries(regions)) {
     if (pageKey !== "*" && !pagesByKey.has(pageKey)) {
@@ -111,7 +122,10 @@ export function tourCoverage(
   }
 
   const rows = KNOWLEDGE_PAGES.map((page): TourCoverageRow => {
-    const authored = authoredByPage.get(page.key) ?? [];
+    const publishedForPage = published.filter((tour) => tour.pageKey === page.key);
+    // A published console tour replaces a code tour with the same id and is
+    // otherwise added, exactly as the member lookup composes the catalogue.
+    const authored = mergePublishedTours(authoredByPage.get(page.key) ?? [], publishedForPage);
     const baseline = baselineTourForPage(page, regions);
     const primary = authored[0] ?? baseline;
     const pageIssues: string[] = [];
@@ -125,6 +139,7 @@ export function tourCoverage(
       group: page.group,
       kind: authored.length > 0 ? "advanced" : "baseline",
       tourIds: authored.map((tour) => tour.id),
+      studioTourIds: publishedForPage.map((tour) => tour.id),
       primaryTourId: primary.id,
       stepCount: primary.steps.length,
       spotlightCount: anchorsOf(primary).length,
@@ -150,7 +165,10 @@ export function tourCoverage(
   // overview); the button then offers both, so the totals count every tour it
   // can offer rather than only the row's primary one.
   const offeredSteps = KNOWLEDGE_PAGES.reduce((total, page) => {
-    const authored = authoredByPage.get(page.key) ?? [];
+    const authored = mergePublishedTours(
+      authoredByPage.get(page.key) ?? [],
+      published.filter((tour) => tour.pageKey === page.key),
+    );
     const offered = authored.length > 0 ? authored : [baselineTourForPage(page, regions)];
     return total + offered.reduce((sum, tour) => sum + tour.steps.length, 0);
   }, 0);
@@ -160,6 +178,7 @@ export function tourCoverage(
     advancedPages: rows.filter((row) => row.kind === "advanced").length,
     baselinePages: rows.filter((row) => row.kind === "baseline").length,
     authoredTours: tours.length,
+    studioTours: published.length,
     steps: offeredSteps,
     issues,
     editorialGaps: rows.filter((row) => row.kind === "baseline").map((row) => row.pageKey),

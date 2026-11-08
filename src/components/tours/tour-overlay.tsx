@@ -10,6 +10,13 @@
  * only thing it does to the host UI is scroll an anchor into view. Anchors
  * are found by `data-tour-id` (see `TOUR_ANCHORS`), never by class or label.
  *
+ * A step of kind `action` (issue #972, phase 2) is the exception to "never
+ * operates the app": the member is asked to do something real, so the click
+ * blocker and the dimmer are gone and the whole page stays usable while the
+ * card docks at the bottom. The card polls the server (and re-checks on focus)
+ * until the action's evidence exists; only then does Next become available.
+ * The overlay never clicks, types or reads the form itself.
+ *
  * Nothing here can trap a member:
  *  - Escape and the close button pause the tour at the current step;
  *  - an anchor that is missing, hidden or unmounted for a few seconds turns
@@ -34,17 +41,48 @@ import {
   type TourPlayback,
   type TourProgressEvent,
 } from "@/lib/tours";
+import { tourVerifierDefinition } from "@/lib/tour-verifiers";
+
+/**
+ * How often an `action` step asks the server whether the member has done it
+ * yet. Long enough to be invisible in the logs, short enough that finishing a
+ * form feels acknowledged; the member can also press «بررسی» (or focus the
+ * window) instead of waiting.
+ *
+ * Polling backs off to one request every four intervals after the first
+ * couple of minutes: a member who leaves the tab open on the step should not
+ * cost the server a request every seven seconds forever.
+ */
+const ACTION_POLL_MS = 7000;
+const ACTION_POLL_EAGER_TICKS = 20;
 
 /** How long a missing anchor is waited for before the step degrades to an explanation. */
 const ANCHOR_WAIT_MS = 3000;
 
 export type TourExit = "completed" | "incomplete" | "paused";
 
+/** The answer to "has the member done this yet?" — decided by the server. */
+export type TourActionCheck =
+  | { status: "verified"; evidenceAt: string | null; beforeTour?: boolean }
+  | { status: "pending" }
+  | { status: "error" };
+
 export interface TourOverlayProps {
   tour: TourPlayback;
   startIndex: number;
   /** Queues a progress event; resolves to whether the server accepted it. */
   onEvent: (event: TourProgressEvent) => Promise<boolean>;
+  /**
+   * Asks the server to confirm an `action` step. Omitted by callers that never
+   * show one; when an action step is reached without it the step degrades to a
+   * plain explanation instead of pretending to verify.
+   */
+  onVerify?: (stepId: string) => Promise<TourActionCheck>;
+  /**
+   * Reports the step on screen, so the runtime can confirm a pending action
+   * when the member's own save navigates away before the poll caught it.
+   */
+  onStepChange?: (stepId: string) => void;
   onExit: (reason: TourExit) => void;
   /** Where focus goes when the tour ends — the button that started it. */
   returnFocus?: HTMLElement | null;
@@ -73,7 +111,15 @@ function prefersReducedMotion(): boolean {
   return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: TourOverlayProps) {
+export function TourOverlay({
+  tour,
+  startIndex,
+  onEvent,
+  onVerify,
+  onStepChange,
+  onExit,
+  returnFocus,
+}: TourOverlayProps) {
   const titleId = useId();
   const bodyId = useId();
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -83,6 +129,8 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
   const [index, setIndex] = useState(() =>
     Math.min(Math.max(0, startIndex), tour.steps.length - 1),
   );
+  /** Set once the server confirmed the current action step; stops the polling. */
+  const verifiedRef = useRef(false);
   const [box, setBox] = useState<Box | null>(null);
   const [missing, setMissing] = useState(false);
   const [lostNonce, setLostNonce] = useState(0);
@@ -92,6 +140,12 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
   const step = tour.steps[index];
   const isLast = index === tour.steps.length - 1;
   const isSpotlight = step.kind === "spotlight" && Boolean(step.anchor);
+  // An `action` step may point at a button, but unlike a spotlight it leaves
+  // the page interactive — the member has to do the thing themselves.
+  const isAction = step.kind === "action" && Boolean(onVerify);
+  const actionAnchor = step.kind === "action" && step.anchor ? step.anchor : null;
+  const verifier = step.kind === "action" ? tourVerifierDefinition(step.verifier) : null;
+  const highlighted = isSpotlight || (isAction && actionAnchor !== null);
 
   // Remember where focus was so closing the tour hands it back.
   useEffect(() => {
@@ -119,7 +173,7 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
     targetRef.current = null;
     setBox(null);
     setMissing(false);
-    if (!isSpotlight || !step.anchor) return;
+    if (!highlighted || !step.anchor) return;
     const selector = `[${TOUR_ANCHOR_ATTRIBUTE}="${step.anchor}"]`;
 
     let settled = false;
@@ -153,12 +207,12 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
       observer.disconnect();
       window.clearTimeout(timeout);
     };
-  }, [index, isSpotlight, step.anchor, lostNonce]);
+  }, [index, highlighted, step.anchor, lostNonce]);
 
   // Follow the anchor while the page scrolls, resizes or re-renders.
   const hasBox = box !== null;
   useEffect(() => {
-    if (!isSpotlight || !step.anchor) return;
+    if (!highlighted || !step.anchor) return;
     const selector = `[${TOUR_ANCHOR_ATTRIBUTE}="${step.anchor}"]`;
     let frame = 0;
     const update = () => {
@@ -192,7 +246,7 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
       resizeObserver?.disconnect();
       if (frame) window.cancelAnimationFrame(frame);
     };
-  }, [index, isSpotlight, step.anchor, lostNonce, hasBox]);
+  }, [index, highlighted, step.anchor, lostNonce, hasBox]);
 
   // The popover's own size drives its placement.
   useLayoutEffect(() => {
@@ -201,6 +255,10 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
     const { width, height } = el.getBoundingClientRect();
     setPopoverSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
   }, [index, missing, box, viewport]);
+
+  useEffect(() => {
+    onStepChange?.(step.id);
+  }, [onStepChange, step.id]);
 
   // Each step announces itself by taking focus.
   // The «آموزش» dialog may still be animating closed (and holding a focus
@@ -218,6 +276,65 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
     };
   }, [index]);
 
+  // ---- verified action steps -------------------------------------------------
+  const [actionState, setActionState] = useState<"idle" | "checking" | "verified" | "pending" | "error">(
+    "idle",
+  );
+  const [evidenceBeforeTour, setEvidenceBeforeTour] = useState(false);
+
+  // Every step starts unverified; a resumed tour re-checks on entry.
+  useEffect(() => {
+    setActionState("idle");
+    setEvidenceBeforeTour(false);
+  }, [index]);
+
+  const checkAction = useCallback(async () => {
+    if (!isAction || !onVerify || verifiedRef.current) return;
+    setActionState((current) => (current === "verified" ? current : "checking"));
+    try {
+      const result = await onVerify(step.id);
+      if (result.status === "verified") {
+        verifiedRef.current = true;
+        setActionState("verified");
+        setEvidenceBeforeTour(result.beforeTour === true);
+        return;
+      }
+      setActionState(result.status === "pending" ? "pending" : "error");
+    } catch {
+      setActionState("error");
+    }
+  }, [isAction, onVerify, step.id]);
+
+  // Check once on entry — a member who did this before must not be asked to do
+  // it twice — then keep checking quietly while the page is in front of them.
+  // Polling stops for good once the server confirms the step.
+  useEffect(() => {
+    verifiedRef.current = false;
+    if (!isAction) return;
+    void checkAction();
+    let timer = 0;
+    let ticks = 0;
+    const tick = () => {
+      if (verifiedRef.current) return;
+      if (document.visibilityState !== "visible") return;
+      void checkAction();
+      ticks += 1;
+      schedule(ticks < ACTION_POLL_EAGER_TICKS ? ACTION_POLL_MS : ACTION_POLL_MS * 4);
+    };
+    const schedule = (delay: number) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(tick, delay);
+    };
+    schedule(ACTION_POLL_MS);
+    document.addEventListener("visibilitychange", tick);
+    window.addEventListener("focus", tick);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", tick);
+      window.removeEventListener("focus", tick);
+    };
+  }, [checkAction, index, isAction]);
+
   const pauseAndExit = useCallback(() => {
     void onEvent({ type: "pause", stepId: step.id });
     onExit("paused");
@@ -230,10 +347,17 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
 
   const goNext = useCallback(async () => {
     if (busyRef.current) return;
+    if (isAction && actionState !== "verified") {
+      // Nothing to advance: ask the server whether the member has done it yet.
+      void checkAction();
+      return;
+    }
     busyRef.current = true;
     setSaving(true);
     try {
-      const seen = await onEvent({ type: "step_seen", stepId: step.id });
+      // A verified action was already recorded by the server when it confirmed
+      // the evidence; sending `step_seen` for it would be refused.
+      const seen = isAction ? true : await onEvent({ type: "step_seen", stepId: step.id });
       if (!isLast) {
         setIndex((i) => Math.min(i + 1, tour.steps.length - 1));
         return;
@@ -245,7 +369,7 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
       busyRef.current = false;
       setSaving(false);
     }
-  }, [isLast, onEvent, onExit, step.id, tour.steps.length]);
+  }, [actionState, checkAction, isAction, isLast, onEvent, onExit, step.id, tour.steps.length]);
 
   const goBack = useCallback(() => {
     if (busyRef.current) return;
@@ -301,16 +425,24 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [goBack, goNext, index, pauseAndExit]);
 
-  const pointing = isSpotlight && !missing && box !== null;
+  const pointing = highlighted && !missing && box !== null;
   const cutout = pointing ? spotlightBox(box, viewport) : null;
-  const position = placePopover(cutout, popoverSize, viewport);
+  const position = isAction
+    ? {
+        // Docked, so the form above stays reachable and the ring is visible.
+        top: Math.max(8, viewport.height - popoverSize.height - 16),
+        left: Math.max(8, Math.min(viewport.width - popoverSize.width - 8, (viewport.width - popoverSize.width) / 2)),
+      }
+    : placePopover(cutout, popoverSize, viewport);
   const total = tour.steps.length;
   const motion = "transition-[top,left,width,height] duration-200 motion-reduce:transition-none";
 
   return (
     <div data-tour-overlay="" className="contents">
-      {/* Blocks clicks on the page behind: a tour explains, it never operates. */}
-      <div aria-hidden="true" className="fixed inset-0 z-[70]" />
+      {/* Blocks clicks on the page behind: a tour explains, it never operates.
+          An `action` step is the one exception — the member has to use the
+          real form, so nothing stands between them and the page. */}
+      {isAction ? null : <div aria-hidden="true" className="fixed inset-0 z-[70]" />}
       {cutout ? (
         <div
           aria-hidden="true"
@@ -323,7 +455,7 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
             boxShadow: "0 0 0 9999px rgb(0 0 0 / 0.6)",
           }}
         />
-      ) : (
+      ) : isAction ? null : (
         <div aria-hidden="true" className="pointer-events-none fixed inset-0 z-[70] bg-black/60" />
       )}
       <div
@@ -356,6 +488,34 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
         <p id={bodyId} className="mt-1.5 leading-6 text-foreground/80">
           {step.body}
         </p>
+        {isAction && verifier ? (
+          <p className="mt-2 rounded-lg bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
+            {verifier.promise}
+          </p>
+        ) : null}
+        {isAction ? (
+          <p
+            role="status"
+            aria-live="polite"
+            className={`mt-2 rounded-lg px-3 py-2 text-xs leading-5 ${
+              actionState === "verified"
+                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                : "bg-muted text-muted-foreground"
+            }`}
+          >
+            {actionState === "verified"
+              ? evidenceBeforeTour
+                ? "تأیید شد — شما این کار را پیش‌تر هم انجام داده بودید."
+                : "تأیید شد ✓"
+              : actionState === "checking"
+                ? "در حال بررسی…"
+                : actionState === "error"
+                  ? "بررسی ممکن نشد؛ اتصال را ببینید و دوباره تلاش کنید."
+                  : actionState === "pending"
+                    ? "هنوز تأیید نشده؛ کار را روی همین صفحه انجام دهید و «بررسی» را بزنید."
+                    : "منتظر انجام کار…"}
+          </p>
+        ) : null}
         {isSpotlight && missing ? (
           <p role="status" className="mt-2 rounded-lg bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
             این بخش اکنون روی صفحه نیست (شاید برای نقش یا وضعیت فعلی شما نمایش داده نمی‌شود). می‌توانید از این مرحله بگذرید.
@@ -385,15 +545,33 @@ export function TourOverlay({ tour, startIndex, onEvent, onExit, returnFocus }: 
                 قبلی
               </Button>
             ) : null}
+            {isAction ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void checkAction()}
+                disabled={actionState === "checking" || actionState === "verified"}
+                className="min-h-9"
+              >
+                بررسی
+              </Button>
+            ) : null}
             <Button
               type="button"
               size="sm"
               onClick={() => void goNext()}
-              disabled={saving}
+              disabled={saving || (isAction && actionState !== "verified")}
               className="min-h-9 font-semibold"
             >
-              {isLast ? "پایان" : "بعدی"}
-              {isLast ? null : <ArrowLeftIcon className="size-3.5" aria-hidden="true" />}
+              {isAction && actionState !== "verified"
+                ? "انجام دادم"
+                : isLast
+                  ? "پایان"
+                  : "بعدی"}
+              {isLast || (isAction && actionState !== "verified") ? null : (
+                <ArrowLeftIcon className="size-3.5" aria-hidden="true" />
+              )}
             </Button>
           </div>
         </div>

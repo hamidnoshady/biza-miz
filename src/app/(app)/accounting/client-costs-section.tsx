@@ -47,6 +47,7 @@
  * authorization, and neither is a hidden control.
  */
 
+import { SupplierPartyPicker } from "./supplier-party-picker";
 import { VendorPaymentControls } from "./vendor-payment-controls";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -90,6 +91,8 @@ type CostWire = {
   projectId: string | null;
   projectName: string | null;
   vendorName: string;
+  vendorPartyId?: string | null;
+  vendorPartyName?: string | null;
   description: string;
   amountRial: number;
   spentOn: string;
@@ -125,6 +128,7 @@ type Draft = {
   clientName: string;
   projectId: string;
   vendorName: string;
+  vendorPartyId: string;
   description: string;
   amountRial: string;
   spentOn: string;
@@ -139,6 +143,7 @@ const EMPTY_DRAFT: Draft = {
   clientName: "",
   projectId: "",
   vendorName: "",
+  vendorPartyId: "",
   description: "",
   amountRial: "",
   spentOn: "",
@@ -163,6 +168,7 @@ export function ClientCostsSection({
   canRecharge,
   canSetPolicy,
   canSettle = false,
+  canChooseVendor = false,
 }: {
   /** `finance.expenses_manage` — record a cost. */
   canRecord: boolean;
@@ -171,6 +177,7 @@ export function ClientCostsSection({
   /** `finance.expenses_manage` — choose the business's presentation policy. */
   canSetPolicy: boolean;
   canSettle?: boolean;
+  canChooseVendor?: boolean;
 }) {
   const money = useMoney();
 
@@ -338,6 +345,7 @@ export function ClientCostsSection({
           // reject, while absence is how the form says «follow the policy».
           ...(draft.projectId ? { projectId: draft.projectId } : {}),
           ...(draft.vendorName.trim() ? { vendorName: draft.vendorName.trim() } : {}),
+          ...(draft.vendorPartyId ? { vendorPartyId: draft.vendorPartyId } : {}),
           description: draft.description.trim(),
           amountRial: money.fromInput(amount),
           spentOn: draft.spentOn,
@@ -564,7 +572,7 @@ export function ClientCostsSection({
                       <div className="min-w-0">
                         <div className="truncate">{row.description}</div>
                         {row.vendorName ? (
-                          <div className="truncate text-xs text-muted-foreground">{row.vendorName}</div>
+                          <div className="truncate text-xs text-muted-foreground">{row.vendorName}{row.vendorPartyId ? " — پیوند به شخص" : " — نام متنی"}</div>
                         ) : null}
                       </div>
                     </td>
@@ -707,9 +715,14 @@ export function ClientCostsSection({
               </Field>
             </div>
 
+            {canChooseVendor ? <Field label="پیوند به تأمین‌کنندهٔ ثبت‌شده" as="div" hint="اختیاری؛ هویت از دفتر اشخاص انتخاب می‌شود، نه از تشابه نام.">
+              <SupplierPartyPicker value={draft.vendorPartyId} name={draft.vendorName}
+                onPick={(id, name) => set({ vendorPartyId: id, vendorName: name })} />
+            </Field> : null}
             <Field label="فروشنده / تأمین‌کننده" as="div" hint="اختیاری — کسی که پول به او پرداخت شد.">
               <input
                 value={draft.vendorName}
+                disabled={Boolean(draft.vendorPartyId)}
                 onChange={(event) => set({ vendorName: event.target.value })}
                 className={inputClass}
                 placeholder="مثلاً رسانهٔ آفتاب"

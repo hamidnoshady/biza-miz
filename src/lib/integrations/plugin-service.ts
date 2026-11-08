@@ -1,3 +1,4 @@
+import { cataloguePluginReviewSchema } from "./catalogue-plugin-review";
 /**
  * The app's half of the WordPress plugin link: authenticating the plugin,
  * accepting the events it pushes, and handing it the work it should apply.
@@ -540,6 +541,7 @@ export async function pluginHandshake(
           "price",
           "product_update",
           "product_publish",
+          "catalogue_product_review",
           "taxonomy_ensure",
           "order_status",
           "refund_create",
@@ -920,11 +922,14 @@ export async function pluginAckJobs(
         const { rows } = await query<{ entity_type: string; remote_id: string; payload: Record<string, unknown> }>(
           `UPDATE integration_outbox_events
               SET status = 'sent', sent_at = now(), last_error = NULL,
-                  payload = CASE WHEN entity_type='product_publish' THEN jsonb_set(payload,'{__ackRemoteId}',to_jsonb($4::text)) ELSE payload END,
+                  payload = CASE WHEN entity_type='product_publish' THEN payload || jsonb_build_object('__ackRemoteId',$4::text)
+                    || CASE WHEN payload->>'__catalogueMetadataOnly'='true' AND $5::jsonb ? 'taxonomy'
+                      THEN jsonb_build_object('__catalogueTaxonomyAck',$5::jsonb->'taxonomy') ELSE '{}'::jsonb END
+                    ELSE payload END,
                   leased_until = NULL, lease_token = NULL, updated_at = now()
             WHERE id = $1 AND connection_id = $2 AND ${ackFenceSql("$3")}
           RETURNING entity_type, remote_id, payload`,
-          [result.id, connection.id, leaseToken, typeof result.result?.remoteId === "number" || typeof result.result?.remoteId === "string" ? String(result.result.remoteId) : ""],
+          [result.id, connection.id, leaseToken, typeof result.result?.remoteId === "number" || typeof result.result?.remoteId === "string" ? String(result.result.remoteId) : "", JSON.stringify(result.result ?? {})],
         );
         if (rows.length === 0) {
           stale += await auditStaleAck(connection, result);
@@ -942,6 +947,11 @@ export async function pluginAckJobs(
         // acked payload (not current local state) means a value changed
         // mid-flight is not falsely recorded as delivered.
         await acknowledgePushedEvent(connection, rows[0]);
+        if (rows[0].entity_type === "catalogue_product_review") {
+          const discovery = cataloguePluginReviewSchema.parse(result.result);
+          await query(`UPDATE integration_outbox_events SET payload=payload || jsonb_build_object('discovery',$3::jsonb)
+            WHERE id=$1 AND connection_id=$2`, [result.id, connection.id, JSON.stringify(discovery)]);
+        }
         if (rows[0].entity_type === "product_publish") await acknowledgeProductPublication(connection, rows[0]);
         if (rows[0].entity_type === "taxonomy_ensure") await acknowledgeTaxonomyEnsure(connection.business_id, connection.id, rows[0].payload, result.result);
         });

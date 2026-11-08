@@ -9,6 +9,12 @@
  *             `src/lib/tour-baseline.ts` — real guidance, but the editorial
  *             backlog for a step-by-step walkthrough.
  *
+ * The report covers the code catalogue and every registered page. Published
+ * tours authored in the console (migration 0288) are included when a caller
+ * passes them in (`tourCoverage(tours, regions, published)`); this CLI is
+ * deliberately offline, so it reports the code catalogue and the baselines,
+ * and the console shows the published ones beside them.
+ *
  * It also prints contract problems (an anchor nobody registers, a region for a
  * page that does not exist, an authored tour attached to an unregistered page,
  * a duplicate id). `--check` exits non-zero when there is one, so a workflow

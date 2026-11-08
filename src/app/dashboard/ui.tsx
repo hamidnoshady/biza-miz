@@ -2,6 +2,7 @@
 
 /** Small shared UI pieces for dashboard pages (menu management, POS). */
 import { CircleAlertIcon, InfoIcon } from "lucide-react";
+import { narrowSupportingTextClass } from "./typography";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
@@ -348,6 +349,7 @@ export async function api<T = Record<string, unknown>>(
 
 /** Persian messages for the API's error codes. */
 const ERROR_MESSAGES: Record<string, string> = {
+  invalid_vendor: "تأمین‌کننده باید شخص فعال همین کسب‌وکار با نقش تأمین‌کننده باشد؛ انتخاب را دوباره بررسی کنید.",
     // The fixed-asset register's domain errors live in their own dictionary
     // (fixed-assets-errors.ts) — spread here so every screen shares them.
     ...FIXED_ASSET_ERROR_TRANSLATIONS,
@@ -1206,7 +1208,7 @@ export function Field({
     <Tag className="mb-4 block">
       <span className="mb-1 block text-sm font-medium text-foreground">{label}</span>
       {children}
-      {hint ? <span className="mt-1 block text-xs text-muted-foreground">{hint}</span> : null}
+      {hint ? <span className={`mt-1 block text-xs text-muted-foreground ${narrowSupportingTextClass}`}>{hint}</span> : null}
     </Tag>
   );
 }

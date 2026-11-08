@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
 import * as auth from "@/lib/auth";
 import * as service from "@/lib/marketing-operations-service";
-import { POST } from "./route";
+import { GET, POST } from "./route";
 
 vi.mock("@/lib/auth", () => ({
   withTenantScope: (handler: unknown) => handler,
@@ -28,5 +28,17 @@ describe("target creation guard", () => {
     const response = await POST(request({ locationId: id, siteLabel: "Site", businessId: "other", actorId: "other" }));
     expect(response.status).toBe(201);
     expect(service.createTarget).toHaveBeenCalledWith("business", "actor", [id], { locationId: id, siteLabel: "Site", partyId: null, city: "", neighborhood: "" });
+  });
+});
+
+describe("target list status", () => {
+  it("defaults to active, accepts archived, and rejects unknown statuses", async () => {
+    vi.mocked(auth.requirePermission).mockResolvedValue({ session: { businessId: "business" }, membership: {}, error: null } as never);
+    vi.mocked(service.listTargets).mockResolvedValue({ targets: [], hasMore: false });
+    expect((await GET(new NextRequest("http://localhost/api/growth/marketing-targets"))).status).toBe(200);
+    expect(service.listTargets).toHaveBeenLastCalledWith("business", [id], "", 1, "active");
+    expect((await GET(new NextRequest("http://localhost/api/growth/marketing-targets?status=archived"))).status).toBe(200);
+    expect(service.listTargets).toHaveBeenLastCalledWith("business", [id], "", 1, "archived");
+    expect((await GET(new NextRequest("http://localhost/api/growth/marketing-targets?status=deleted"))).status).toBe(400);
   });
 });

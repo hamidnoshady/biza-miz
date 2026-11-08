@@ -177,6 +177,13 @@ export const EXEMPT_TABLES = new Set([
   "knowledge_tags",
   "knowledge_articles",
   "knowledge_article_tags",
+  // Migration 0288 — the authored guided-tour catalogue (issue #972), the same
+  // shape again: one published set of tours teaches every business, so there is
+  // no business_id to scope by. Member progress is NOT here: it is per member
+  // and per business in tour_member_progress (migration 0259), which is
+  // RLS-protected and deliberately absent from this list.
+  "knowledge_tours",
+  "knowledge_tour_revisions",
   // Migration 0132 — the super-admin console's whole-system backup: its config,
   // its run history, the hashed tokens that let another server pull artifacts,
   // the peers this install may restore from, and the restore log. All of it

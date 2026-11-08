@@ -36,6 +36,7 @@
  * Client-safe: pure data, no database and no DOM.
  */
 import { KNOWLEDGE_PAGES, knowledgePage, type KnowledgePage } from "./knowledge-base";
+import { mergePublishedTours } from "./tour-studio";
 import {
   TOUR_ANCHORS,
   tourById,
@@ -173,12 +174,19 @@ export function baselineTourForPage(
  * What the «آموزش» button's page lookup starts from: the authored catalogue
  * when the page has one, otherwise its single baseline tour.
  *
- * Callers still narrow the result per viewer with `tourForViewer`; this only
- * decides *which* catalogue owns the page, so a member is never offered a
- * baseline "alongside" an authored tour.
+ * `published` is the super-admin's published catalogue (migration 0288). A
+ * published tour replaces a code tour with the same id and otherwise joins the
+ * page's catalogue, so an authored tour can be edited without a deployment —
+ * and the page still falls back to its baseline only when *nothing* authored
+ * exists. Callers still narrow the result per viewer with `tourForViewer`; this
+ * only decides which catalogue owns the page.
  */
-export function pageTourCandidates(pageKey: string): TourDefinition[] {
-  const authored = toursForPage(pageKey);
+export function pageTourCandidates(
+  pageKey: string,
+  published: readonly TourDefinition[] = [],
+): TourDefinition[] {
+  const publishedForPage = published.filter((tour) => tour.pageKey === pageKey);
+  const authored = mergePublishedTours(toursForPage(pageKey), publishedForPage);
   if (authored.length > 0) return authored;
   const page = knowledgePage(pageKey);
   return page ? [baselineTourForPage(page)] : [];
@@ -194,11 +202,18 @@ export function baselinePageForId(id: string): KnowledgePage | undefined {
 }
 
 /**
- * The tour a client named, authored first and baseline second. A baseline id
- * for a page that has authored tours is unknown: the authored catalogue owns
- * that page, exactly as `pageTourCandidates` decides for the list.
+ * The tour a client named: published catalogue first (it may intentionally
+ * replace a code tour with the same id), then the code catalogue, then the
+ * page's baseline. A baseline id for a page that has authored tours is unknown:
+ * the authored catalogue owns that page, exactly as `pageTourCandidates`
+ * decides for the list.
  */
-export function tourDefinitionById(id: string): TourDefinition | undefined {
+export function tourDefinitionById(
+  id: string,
+  published: readonly TourDefinition[] = [],
+): TourDefinition | undefined {
+  const studio = published.find((tour) => tour.id === id);
+  if (studio) return studio;
   const authored = tourById(id);
   if (authored) return authored;
   if (!isBaselineTourId(id)) return undefined;
