@@ -86,3 +86,12 @@ describe("platform backup routes and their capabilities", () => {
     }
   });
 });
+
+describe("the cloud retry route (issue #1296)", () => {
+  it("gates a retry with backup.run, and never with a restore capability", () => {
+    const retry = route("retry/route.ts");
+    expect(retry).toContain('requirePlatformCapability("backup.run")');
+    expect(retry).not.toContain("backup.restore");
+    expect(retry).not.toContain("backup.configure");
+  });
+});
