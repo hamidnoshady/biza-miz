@@ -649,7 +649,18 @@ jobs:
       - name: Cheque register E2E (paging under moving data, keyboard, phone frame)
         # Registers its own 220 receivables through the API, on this job's
         # fresh database, so it never touches the visual-regression fixture.
-        run: npm run test:e2e:cheques
+        # Surface diagnostics as annotations as well as logs: some CI clients
+        # cannot reach GitHub's redirected log download endpoint.
+        run: |
+          set -o pipefail
+          if npm run test:e2e:cheques 2>&1 | tee cheque-e2e.log; then
+            exit 0
+          else
+            tail -n 40 cheque-e2e.log | while IFS= read -r line; do
+              printf '::error::%s\n' "${line//%/%25}"
+            done
+            exit 1
+          fi
       - name: Commission multi-user lifecycle E2E (Rial)
         env:
           COMMISSION_E2E_SEED: '1'

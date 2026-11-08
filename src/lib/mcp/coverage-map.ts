@@ -69,6 +69,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
   },
   // ============================ Accounting (ledger + banking) ============================
   {
+    id: "accounting.historical-invoices",
+    module: "Accounting",
+    entity: "Historical external sales invoice archive",
+    routes: ["accounting/historical-invoices"],
+    note: "Read-only, branch-scoped source evidence is separate from posted sales and the official ledger; no MCP tool is exposed yet.",
+    status: "route-only (by design)",
+    test: "integration/historical-invoice-archive.integration.test.ts",
+  },
+  {
     id: "accounting.shareholders",
     module: "Accounting",
     entity: "Shareholder ownership, capital, distributions & GL reconciliation",
