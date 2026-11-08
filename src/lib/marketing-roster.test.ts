@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRosterInput } from "./marketing-roster";
+import { parseRosterChange, parseRosterInput } from "./marketing-roster";
 import { effectivePermissions, PERMISSIONS } from "./permissions";
 import { canOpenGrowth, canViewGrowthSection, growthApiPermission } from "./growth-access";
 
@@ -17,11 +17,17 @@ describe("marketing roster foundation", () => {
       { locationId: branch, kind: "other", name: "x" },
     ]) expect(parseRosterInput(input)).toBeNull();
   });
+  it("validates lifecycle changes and bounded optimistic revisions", () => {
+    expect(parseRosterChange({ action: "rename", name: "  Partner  ", expectedRevision: 0 })).toEqual({ action: "rename", name: "Partner", expectedRevision: 0 });
+    expect(parseRosterChange({ action: "deactivate", expectedRevision: 2 })).toEqual({ action: "deactivate", expectedRevision: 2 });
+    for (const value of [{ action: "rename", name: " ", expectedRevision: 0 }, { action: "rename", name: "x".repeat(151), expectedRevision: 0 }, { action: "reactivate", expectedRevision: -1 }, { action: "reactivate", expectedRevision: 0.5 }, { action: "reactivate", expectedRevision: 2147483647 }, { action: "delete", expectedRevision: 0 }]) expect(parseRosterChange(value)).toBeNull();
+  });
   it("opens Growth on roster view alone but does not grant CRM, accounting or roster writes", () => {
     const permissions = new Set<string>([PERMISSIONS.marketersView]);
     expect(canOpenGrowth(permissions)).toBe(true);
     expect(canViewGrowthSection(permissions, "marketers")).toBe(true);
     expect(growthApiPermission("/api/growth/marketers", "POST")).toEqual([PERMISSIONS.marketersManage]);
+    expect(growthApiPermission("/api/growth/marketers/[id]", "PATCH")).toEqual([PERMISSIONS.marketersManage]);
     expect(permissions.has(PERMISSIONS.crmView)).toBe(false);
     expect(permissions.has(PERMISSIONS.commissionView)).toBe(false);
     expect(effectivePermissions("cashier", {}).has(PERMISSIONS.marketersView)).toBe(false);

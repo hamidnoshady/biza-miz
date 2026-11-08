@@ -35,3 +35,17 @@ export function parseTransition(raw: unknown): { expected: AssignmentStatus; nex
   if (!allowed[b.expected]?.includes(b.next)) return null;
   return { expected: b.expected as AssignmentStatus, next: b.next as AssignmentStatus };
 }
+
+export type TargetStatus = "active" | "archived";
+export type TargetChange =
+  | { action: "edit"; expectedRevision: number; siteLabel: string; city: string; neighborhood: string }
+  | { action: "archive" | "restore"; expectedRevision: number };
+export function parseTargetChange(raw: unknown): TargetChange | null {
+  const b = record(raw);
+  if (!b || typeof b.expectedRevision !== "number" || !Number.isSafeInteger(b.expectedRevision) || b.expectedRevision < 0 || b.expectedRevision > 2147483646) return null;
+  if (b.action === "archive" || b.action === "restore") return { action: b.action, expectedRevision: b.expectedRevision };
+  if (b.action !== "edit") return null;
+  const siteLabel = text(b.siteLabel, 150, true), city = text(b.city, 100), neighborhood = text(b.neighborhood, 100);
+  if (siteLabel === null || city === null || neighborhood === null) return null;
+  return { action: "edit", expectedRevision: b.expectedRevision, siteLabel, city, neighborhood };
+}
