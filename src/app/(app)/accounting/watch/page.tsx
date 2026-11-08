@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { buttonVariants } from "@/components/ui/button";
 import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
@@ -18,7 +20,11 @@ export default async function WatchPage() {
       <PageHeader
         title="ساعت"
         description="مدل‌ها و دستگاه‌های سریال‌دار، فروش با گارانتی، و تیکت‌های تعمیر."
-        actions={<KnowledgeHelpButton section="watch" />}
+        actions={<>
+          {member.permissions.has("data.import") && member.permissions.has("inventory.adjust") ?
+            <Link className={buttonVariants({ variant: "outline" })} href="/settings/transfer?import=catalogue">ورود از اکسل</Link> : null}
+          <KnowledgeHelpButton section="watch" />
+        </>}
       />
       <WatchManager />
     </PageShell>

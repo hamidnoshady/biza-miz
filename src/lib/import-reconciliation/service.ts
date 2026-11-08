@@ -547,6 +547,8 @@ interface CatalogueRow extends Row {
   is_active: boolean;
   barcode: string | null;
   price: string | null;
+  parent_item_id?: string | null;
+  variant_options?: Record<string, string> | null;
 }
 
 function toCanonicalProduct(row: CatalogueRow, barcodes: readonly string[]): CanonicalProduct {
@@ -562,9 +564,11 @@ function toCanonicalProduct(row: CatalogueRow, barcodes: readonly string[]): Can
     unit: row.unit,
     tracking: (row.tracking as CanonicalProduct["tracking"] | null) ?? null,
     isActive: row.is_active,
+    variantOptions: row.variant_options ?? undefined,
     fields: {
       name: row.name,
       sku: row.sku,
+      parentItemId: row.parent_item_id ?? null,
       ...(row.unit != null ? { unit: row.unit } : {}),
       ...(row.price != null ? { price: row.price } : {}),
     },
@@ -618,7 +622,8 @@ export async function loadProductContext(
   const hasItems = table === "items";
   const select = hasItems
     ? `SELECT i.id::text AS id, i.location_id::text AS location_id, i.name, i.sku, i.kind, i.unit, i.tracking,
-              i.is_active, i.barcode, NULL::text AS price
+              i.is_active, i.barcode, NULL::text AS price, i.parent_item_id,
+              (SELECT jsonb_object_agg(a.name, a.value) FROM item_variant_attributes a WHERE a.item_id=i.id) AS variant_options
          FROM items i`
     : `SELECT m.id::text AS id, m.location_id::text AS location_id, m.name, m.sku, NULL::text AS kind,
               NULL::text AS unit, NULL::text AS tracking, m.is_active, NULL::text AS barcode,
@@ -1091,6 +1096,7 @@ export interface ApplyOptions {
   batchSize?: number;
   /** Apply even though the source or canonical state could not be re-read. */
   allowUnverified?: boolean;
+  maxPreviewAgeMs?: number;
   /** Stop after this many batches (lets a worker resume later). */
   maxBatches?: number;
 }
@@ -1107,7 +1113,7 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
 
   // Re-validate before the first write: permissions are the caller's, but the
   // preview itself must still be true.
-  const check = await revalidateRun(businessId, runId, options.current);
+  const check = await revalidateRun(businessId, runId, options.current, { maxAgeMs: options.maxPreviewAgeMs });
   if (check.stale) throw new ReconciliationError("preview_stale", { reasons: check.reasons });
   if (check.unverified && !options.allowUnverified) throw new ReconciliationError("preview_unverified");
 

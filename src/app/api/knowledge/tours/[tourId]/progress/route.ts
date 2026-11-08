@@ -9,8 +9,10 @@ import { eligibleTourById, recordTourEvent } from "@/lib/tours-service";
  * The body names an event (`start | step_seen | pause | complete | reset`)
  * and, for the two step events, a step id of the CURRENT revision. There is
  * deliberately no field in which a client could claim a business action
- * succeeded: the only steps that exist are explanations, and `step_seen`
- * means the member pressed Next. Eligibility is re-checked on every write, so
+ * succeeded: `step_seen` means the member pressed Next, and it is REFUSED for
+ * an `action` step (`requires_evidence`). Those complete only through
+ * `POST …/verify`, which asks the server to look up the domain evidence
+ * (`tour_action_evidence`) for the step's verifier. Eligibility is re-checked on every write, so
  * a permission removed mid-tour stops the writes. Events are monotone unions
  * (see `applyTourEvent`), so a retry or a second device is harmless; only
  * `reset` removes anything, and only the caller's own row.
@@ -42,7 +44,11 @@ export const POST = withTenantScope(
 
     const result = await recordTourEvent(guard.session.businessId, guard.session.sub, tour, event);
     if (!result.ok) {
-      return NextResponse.json({ error: result.error }, { status: result.error === "unknown_step" ? 400 : 409 });
+      // `requires_evidence` is a client mistake (it tried to mark an `action`
+      // step as merely seen); `steps_unseen` is a state conflict. Neither is a
+      // 500, and neither records anything.
+      const status = result.error === "steps_unseen" ? 409 : 400;
+      return NextResponse.json({ error: result.error }, { status });
     }
     return NextResponse.json({ progress: tourProgressView(tour, result.progress) });
   },

@@ -6,6 +6,7 @@ import { PanelLeftCloseIcon, PanelLeftOpenIcon, SparklesIcon } from "lucide-reac
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { AiChatHub, type AiChatHubProps } from "@/app/dashboard/ai/ai-chat-hub";
+import { isSiteLocalRoute } from "@/lib/site-routes";
 import { AiGuidedTourOverlay } from "./ai-guided-tour-overlay";
 
 interface Props {
@@ -13,12 +14,16 @@ interface Props {
   account: string;
   enabled: boolean;
   aiProps: AiChatHubProps;
+  hybridSite?: boolean;
 }
 
 /** One chat workspace, two presentations: full home / persistent physical-left sidebar. */
-export function TenantAssistantFrame({ children, account, enabled, aiProps }: Props) {
+export function TenantAssistantFrame({ children, account, enabled, aiProps, hybridSite = false }: Props) {
   const pathname = usePathname();
   const home = pathname === "/dashboard";
+  // On routes rendered by CloudPane, the guest owns both the full home and
+  // its compact assistant. The desktop must leave the pane's slot visible.
+  const showAssistant = enabled && (!hybridSite || isSiteLocalRoute(pathname));
   const [open, setOpen] = useState(true);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [wide, setWide] = useState(true);
@@ -83,9 +88,9 @@ export function TenantAssistantFrame({ children, account, enabled, aiProps }: Pr
     <>
       {/* The existing route content stays mounted; only the dashboard's empty
           placeholder is hidden while the shared full-page assistant is shown. */}
-      <div className={home && enabled ? "hidden" : "contents"}>{children}</div>
-      {enabled ? <AiGuidedTourOverlay /> : null}
-      {enabled ? (
+      <div className={home && showAssistant ? "hidden" : "contents"}>{children}</div>
+      {showAssistant ? <AiGuidedTourOverlay /> : null}
+      {showAssistant ? (
         home ? (
           <div className="flex min-h-0 min-w-0 flex-1">
             <AiChatHub {...aiProps} />

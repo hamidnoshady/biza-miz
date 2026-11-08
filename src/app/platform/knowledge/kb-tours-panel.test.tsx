@@ -256,3 +256,47 @@ describe("Tour Studio — saving and publishing", () => {
     expect(JSON.parse(posted![1]!.body as string)).toEqual({ action: "rollback", toVersion: 2 });
   });
 });
+
+describe("Tour Studio — authoring a verified action step", () => {
+  it("adds an action step with a verifier and sends it to the server", async () => {
+    await renderPanel();
+    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
+    fireEvent.change(screen.getByPlaceholderText("studio.accounting.orders"), {
+      target: { value: "studio.task" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^کار واقعی$/ }));
+
+    // The verifier picker offers the reviewed keys, not free text.
+    const verifier = screen.getByLabelText("تأییدکنندهٔ کار") as unknown as HTMLSelectElement;
+    expect(Array.from(verifier.options).map((option) => option.value)).toEqual(
+      expect.arrayContaining(["product.created", "party.created", "order.created"]),
+    );
+    fireEvent.change(verifier, { target: { value: "party.created" } });
+
+    // The promises of the chosen verifier are shown to the editor.
+    expect(screen.getByText(/وقتی طرف حساب در سرور ثبت شود/)).toBeTruthy();
+    expect(screen.getByText("POST /api/parties")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس/ }));
+    await waitFor(() => expect(screen.getByText("پیش‌نویس ذخیره شد.")).toBeTruthy());
+    const posted = apiMock.mock.calls.find(([, init]) => init?.method === "POST");
+    const body = JSON.parse(posted![1]!.body as string);
+    expect(body.steps).toHaveLength(2);
+    expect(body.steps[1]).toMatchObject({ kind: "action", verifier: "party.created" });
+  });
+
+  it("keeps an explanation's verifier out of the payload", async () => {
+    await renderPanel();
+    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس/ }));
+    await waitFor(() => expect(screen.getByText("پیش‌نویس ذخیره شد.")).toBeTruthy());
+    const posted = apiMock.mock.calls.find(([, init]) => init?.method === "POST");
+    const step = JSON.parse(posted![1]!.body as string).steps[0];
+    expect(step.kind).toBe("explain");
+    expect(step.verifier).toBeUndefined();
+  });
+});

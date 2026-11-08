@@ -574,3 +574,117 @@ describe("a preview-only run, an empty catalogue and a connection-backed source"
     expect(row.rows[0].retired_at).not.toBeNull();
   });
 });
+
+describe("XLSX catalogue workflow", () => {
+  const columns = ["sku", "title", "price", "موجودی", "drive", "case_dimension", "band_color", "parent_sku", "parent_title", "option"];
+  const sheet = (rows: string[][]) => ({
+    name: "Catalogue", columns, rows: rows.map((values, index) => ({
+      number: index + 2,
+      cells: values.map((value, col) => col === 2 || col === 3
+        ? { text: value, issue: "formula" as const }
+        : { text: value }),
+    })),
+  });
+  const stageInput = (data: ReturnType<typeof sheet>, axis = "") => ({
+    sheet: data, mapping: { sku: 0, title: 1, price: 2, quantity: 3, drive: 4, case_dimension: 5, band_color: 6,
+      parent_sku: 7, parent_title: 8, option: 9 },
+    fileName: "fixture.xlsx", sourceName: "fixtures", fingerprint: randomUUID(), omax: true, axis, duplicateRows: [],
+  });
+
+  it("reviews and reapplies a serialized watch model without stock, price or phantom variants", async () => {
+    const catalogue = await import("../src/lib/data-transfer/catalogue-service");
+    const gate = await import("../src/lib/data-transfer/catalogue-gate");
+    const watch = await seedBusiness("watch", "Watch fixture");
+    const owner = { businessId: watch.id, locationId: watch.locationId, target: "watch" as const, actor };
+    const input = stageInput(sheet([["W-10", "Model", "EXTERNAL_PRICE", "EXTERNAL_QTY", "اتوماتیک (Hand Winding)", "42 × 29 mm", "Silver"]]));
+    await asBusiness(owner.businessId, async () => {
+      const runId = await catalogue.stageCatalogue(owner, input);
+      expect(await countItems(watch.locationId)).toBe(0);
+      await expect(dbLib.withTenantTransaction(watch.id, client => gate.gateWooCatalogueCreate(client, watch.id, watch.locationId, "w-۱۰")))
+        .rejects.toThrow("catalogue_reconciliation_required");
+      await expect(catalogue.catalogueSummary({ ...owner, locationId: retail.locationId }, runId)).rejects.toThrow("run_not_found");
+      expect((await catalogue.applyCatalogue(owner, runId, true)).run.status).toBe("applied");
+      const second = await catalogue.stageCatalogue(owner, input);
+      expect((await catalogue.catalogueItems(owner, second))[0].outcome).toBe("already_linked");
+      expect((await catalogue.applyCatalogue(owner, second, true)).run.status).toBe("applied");
+    });
+    const result = await db.query(`SELECT i.kind,i.tracking,i.publish_status,a.movement,a.case_dimensions_mm,a.bracelet_color,
+       s.unit_price,s.quantity FROM items i JOIN watch_item_attributes a ON a.item_id=i.id
+       LEFT JOIN item_stock s ON s.item_id=i.id WHERE i.location_id=$1`, [watch.locationId]);
+    expect(result.rows).toEqual([{ kind: "simple", tracking: "serial", publish_status: "draft", movement: null,
+      case_dimensions_mm: [42, 29], bracelet_color: "نقره ای", unit_price: null, quantity: null }]);
+  });
+
+  it("creates an explicit retail family atomically and rejects a changed local preview", async () => {
+    const catalogue = await import("../src/lib/data-transfer/catalogue-service");
+    const business = await seedBusiness("cosmetics", "Retail fixture");
+    const owner = { businessId: business.id, locationId: business.locationId, target: "retail" as const, actor };
+    await db.query("INSERT INTO item_attribute_definitions (location_id,name,options) VALUES ($1,'Color',ARRAY['Blue','Red'])", [business.locationId]);
+    const rows = sheet([
+      ["C-1", "Blue model", "", "", "", "", "", "F-1", "Family", "Blue"],
+      ["C-2", "Red model", "", "", "", "", "", "F-1", "Family", "Red"],
+    ]);
+    await asBusiness(owner.businessId, async () => {
+      const runId = await catalogue.stageCatalogue(owner, stageInput(rows, "Color"));
+      expect((await catalogue.applyCatalogue(owner, runId, true)).run.status).toBe("applied");
+      expect(await countItems(business.locationId)).toBe(3);
+      const retryId = await catalogue.stageCatalogue(owner, stageInput(rows, "Color"));
+      expect((await catalogue.catalogueItems(owner, retryId))[0].outcome).toBe("already_linked");
+      await addItem(business.locationId, "Concurrent SKU", "NEW-1");
+      await expect(catalogue.applyCatalogue(owner, retryId, true)).rejects.toThrow("preview_stale");
+      expect((await catalogue.catalogueSummary(owner, retryId)).run.status).toBe("stale");
+    });
+  });
+  it("waits for live connector discovery and records the Woo link only after the fenced ACK", async () => {
+    const catalogue = await import("../src/lib/data-transfer/catalogue-service");
+    const { previewCatalogueWoo, queueCatalogueWoo, catalogueWooStatus } = await import("../src/lib/data-transfer/catalogue-woo");
+    const { getConnection } = await import("../src/lib/integrations/connections-service");
+    const { pluginAckJobs } = await import("../src/lib/integrations/plugin-service");
+    const business = await seedBusiness("watch", "Plugin fixture");
+    const owner = { businessId: business.id, locationId: business.locationId, target: "watch" as const, actor };
+    const { rows: [store] } = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections (business_id,location_id,name,provider,base_url,link_mode,status,plugin_capabilities,link_token_hash,link_token_ciphertext)
+       VALUES ($1,$2,'Fixture','woocommerce','https://example.invalid','plugin','active',$3::jsonb,repeat('a',64),'test-only') RETURNING id`,
+      [business.id, business.locationId, JSON.stringify({ protocolVersion: 3, jobTypes: ["catalogue_product_review", "product_publish"] })],
+    );
+    await asBusiness(business.id, async () => {
+      const connection = (await getConnection(business.id, store.id))!;
+      const runId = await catalogue.stageCatalogue(owner, stageInput(sheet([["W-11", "Local title"]])));
+      const [item] = await catalogue.catalogueItems(owner, runId);
+      await expect(previewCatalogueWoo(owner, runId, item.id, connection)).rejects.toThrow("catalogue_woo_discovery_pending");
+
+      const lease = randomUUID();
+      const { rows: [probe] } = await db.query<{ id: string }>(
+        `UPDATE integration_outbox_events SET status='processing', lease_token=$2, leased_until=now()+interval '5 minutes'
+         WHERE connection_id=$1 AND entity_type='catalogue_product_review' RETURNING id`, [store.id, lease],
+      );
+      await pluginAckJobs(connection, [{ id: probe.id, status: "done", leaseToken: lease, result: {
+        matches: [{ id: 59, sku: "W-11", name: "Store-owned title", type: "simple", parent: null, options: [], categories: [] }],
+        variations: [], attributes: [], brands: [], categories: [],
+      } }]);
+      const preview = await previewCatalogueWoo(owner, runId, item.id, connection);
+      expect(preview).toMatchObject({ action: "link", discovery: "live", remote: { id: "59", name: "Store-owned title" } });
+      const approval = { token: preview.token, createMissing: false, acceptMirror: false };
+      await expect(queueCatalogueWoo(owner, runId, item.id, connection, approval)).rejects.toThrow("catalogue_local_apply_required");
+      expect((await catalogue.applyCatalogue(owner, runId, true)).run.status).toBe("applied");
+      await queueCatalogueWoo(owner, runId, item.id, connection, approval);
+      expect((await catalogueWooStatus(owner, runId, store.id))[0]).toMatchObject({ status: "pending", remote: null });
+      expect((await db.query("SELECT 1 FROM integration_mappings WHERE connection_id=$1", [store.id])).rowCount).toBe(0);
+      const { rows: [delivery] } = await db.query<{ id: string; payload: Record<string, unknown> }>(
+        `UPDATE integration_outbox_events SET status='processing',lease_token=$2,leased_until=now()+interval '5 minutes'
+         WHERE connection_id=$1 AND entity_type='product_publish' RETURNING id,payload`, [store.id, lease],
+      );
+      expect(delivery.payload).toMatchObject({ __linkOnly: true, __targetRemoteId: "59", sku: "W-11" });
+      expect(delivery.payload).not.toHaveProperty("name");
+      await pluginAckJobs(connection, [{ id: delivery.id, status: "done", leaseToken: randomUUID(), result: { remoteId: 59 } }]);
+      expect((await catalogueWooStatus(owner, runId, store.id))[0].status).toBe("processing");
+      await pluginAckJobs(connection, [{ id: delivery.id, status: "done", leaseToken: lease, result: { remoteId: 59 } }]);
+      expect((await catalogueWooStatus(owner, runId, store.id))[0]).toMatchObject({ status: "sent", remote: "59" });
+      const { rows: [linked] } = await db.query(
+        `SELECT last_pushed_payload FROM integration_mappings WHERE connection_id=$1 AND remote_id='59'`, [store.id],
+      );
+      expect(linked.last_pushed_payload).toMatchObject({ catalogueMetadataOnly: true, pricePushPaused: true, stockPushPaused: true });
+    });
+  });
+
+});

@@ -1,4 +1,4 @@
-import { NotificationBell } from "@/components/notifications/notification-bell";
+import { NotificationPushBinding } from "@/components/notifications/notification-bell";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { endedSupportSessionClaims, getSession } from "@/lib/auth";
@@ -214,7 +214,7 @@ export async function WorkspaceShell({
           neither (see the component's own header comment).
         */}
         <NativeDeviceRegistrar businessId={session.businessId} />
-        <NotificationBell key={`${session.businessId}:${session.sub}`} identity={`${session.businessId}:${session.sub}`} />
+        <NotificationPushBinding identity={`${session.businessId}:${session.sub}`} />
         {/*
           Issue #909 §13 — the one place that reacts to api()'s
           `biza:session-expired` event with an actual expired-session path
@@ -273,9 +273,11 @@ export async function WorkspaceShell({
           industry={industry}
           workspaceSections={workspaceSections}
           deploymentProfile={deployment.profile}
+          notificationBranch={session.locationId ?? null}
+          siteInbox={runtimeRole === "site"}
           account={`${session.businessId}:${session.sub}`}
         /></div>}
-        <TenantAssistantFrame account={`${session.businessId}:${session.sub}`} enabled={aiEnabled} aiProps={aiChatProps}>
+        <TenantAssistantFrame account={`${session.businessId}:${session.sub}`} enabled={aiEnabled} aiProps={aiChatProps} hybridSite={hybridSite}>
         <DashboardMain
           hybridSite={hybridSite}
           showBackupHealth={runtimeRole === "site" && permissions.has(PERMISSIONS.backupManage)}

@@ -4,6 +4,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { type CartItemInput } from "@/lib/order-cart";
 import { createOrder } from "@/lib/order-mutations";
+import { recordTourEvidence } from "@/lib/tour-evidence-service";
 import { listOrders, listSettledOrdersInWindow } from "@/lib/order-read-service";
 import { branchClosedOrdersWindow, type ClosedOrdersWindow } from "@/lib/shift-service";
 import { listRecentShiftOptions } from "@/lib/shift-orders-service";
@@ -186,6 +187,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
 
+  // Issue #972 — the guided task "take one order" is proven by this write.
+  await recordTourEvidence({
+    businessId: session.businessId,
+    userId: session.sub,
+    verifier: "order.created",
+    entityId: result.data.id,
+  });
   broadcast(location.id, { type: "order.created", orderId: result.data.id });
   return NextResponse.json({ ok: true, ...result.data });
 });
