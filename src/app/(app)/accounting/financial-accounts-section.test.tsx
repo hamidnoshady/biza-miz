@@ -146,10 +146,10 @@ function stubFetch(options: {
   return fetchMock;
 }
 
-function renderSection(canManage = true) {
+function renderSection(canManage = true, initialKind: "all" | "bank" = "all") {
   return render(
     <MoneyProvider unit="rial">
-      <FinancialAccountsSection busy={false} refreshKey={0} canManage={canManage} />
+      <FinancialAccountsSection busy={false} refreshKey={0} canManage={canManage} initialKind={initialKind} />
     </MoneyProvider>,
   );
 }
@@ -186,6 +186,14 @@ describe("the register", () => {
     // produces, so the assertion cannot pass on a hand-typed look-alike.
     expect(screen.getAllByText(formatMoneyText("56000000", "rial")).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/1110/).length).toBeGreaterThan(0);
+  });
+
+  it("opens on the bank filter when arriving from the sidebar deep link", async () => {
+    stubFetch();
+    renderSection(true, "bank");
+    await waitForRegister();
+    await waitFor(() => expect(registerCalls.length).toBeGreaterThan(0));
+    expect(new URL(registerCalls[0], "http://t").searchParams.get("kind")).toBe("bank");
   });
 
   it("carries the kind filter and the branch filter to the API", async () => {

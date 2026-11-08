@@ -52,15 +52,14 @@ export interface WorkspaceNavEntry {
 }
 
 /**
- * A named block of the menu: a heading over its rows. A group with no label is
- * one ordinary link standing in the column where a group used to be — the
- * «فضای کار حسابداری» workspace door, which wears its words on the row the way
- * «فروش و فاکتور» does rather than on a heading above it.
+ * A named block of the menu: a heading over its rows. The Accounting
+ * operations group places the ledger workspace and bank-account register under
+ * one heading, using the same shared row and heading styling as every group.
  */
 export interface WorkspaceNavGroup {
   /** The group's own id, stable across renders. */
   key: string;
-  /** Absent for the single-link workspace door — the row *is* the label. */
+  /** The optional shared-sidebar heading above this group's links. */
   label?: string;
   /** One line under the heading, for the groups whose contents are not obvious. */
   description?: string;
@@ -268,17 +267,21 @@ export function accountingWorkspaceGroups({
     });
   }
 
-  // 4. «فضای کار حسابداری» — one ordinary link, in the same menu position the
-  // long ledger group used to occupy. No disclosure, no chevron, no nested
-  // panel: the row is drawn like every other menu link and opens the workspace
-  // page (`/accounting/ledger`), which lists the permitted tools under the
-  // accountant's own divisions. It appears only for a member the same section
-  // gate lets in (`accountingSectionsFor` → the `ledger.view` door).
-  const ledgerWorkspace = sectionEntry("ledger");
-  if (ledgerWorkspace.length > 0) {
+  // 4. Group the bookkeeping workspace and bank accounts beneath the same
+  // «عملیات حسابداری» heading used by the other sidebar sections. These stay
+  // ordinary links (no disclosure); both inherit the ledger.view section gate.
+  const ledgerOperations = [
+    ...sectionEntry("ledger"),
+    ...sectionEntry("financial-accounts", "حساب بانکی").map((entry) => ({
+      ...entry,
+      href: `${entry.href}?kind=bank`,
+    })),
+  ];
+  if (ledgerOperations.length > 0) {
     groups.push({
       key: LEDGER_WORKSPACE_GROUP_KEY,
-      entries: ledgerWorkspace,
+      label: "عملیات حسابداری",
+      entries: ledgerOperations,
     });
   }
 
@@ -387,7 +390,9 @@ export function workspaceEntryIsActive(
   search: string,
 ): boolean {
   if (entry.section === "ledger") {
-    return isLedgerWorkspacePathname(pathname);
+    // The bank-account register has its own sidebar row now, even though it
+    // remains reachable from the ledger workspace's tool list.
+    return isLedgerWorkspacePathname(pathname) && !isAccountingSectionPathname(pathname, "financial-accounts");
   }
   if (entry.section) {
     if (!isAccountingSectionPathname(pathname, entry.section)) return false;

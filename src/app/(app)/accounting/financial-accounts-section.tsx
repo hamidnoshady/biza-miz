@@ -63,6 +63,7 @@ import {
   FINANCIAL_ACCOUNT_KINDS,
   financialAccountDisplayLabel,
   financialAccountScopeLabel,
+  isFinancialAccountKind,
   isZeroBalance,
   type FinancialAccountKind,
   type FinancialAccountRecord,
@@ -240,10 +241,15 @@ export function FinancialAccountsSection({
   busy,
   refreshKey,
   canManage,
+  initialKind,
+  onKindChange,
 }: {
   busy: boolean;
   refreshKey: number;
   canManage: boolean;
+  /** Sidebar's «حساب بانکی» deep link opens the bank filter. */
+  initialKind?: string | null;
+  onKindChange?: (kind: KindTab) => void;
 }) {
   const money = useMoney();
   const [data, setData] = useState<ListResponse | null>(null);
@@ -252,7 +258,14 @@ export function FinancialAccountsSection({
   const [baseCurrency, setBaseCurrency] = useState("IRR");
   const [enabledCurrencies, setEnabledCurrencies] = useState<string[]>([]);
 
-  const [kind, setKind] = useState<KindTab>("all");
+  const [kind, setKind] = useState<KindTab>(() => isFinancialAccountKind(initialKind) ? initialKind : "all");
+  useEffect(() => {
+    setKind(isFinancialAccountKind(initialKind) ? initialKind : "all");
+  }, [initialKind]);
+  function selectKind(next: KindTab) {
+    setKind(next);
+    onKindChange?.(next);
+  }
   const [status, setStatus] = useState<StatusFilter>("active");
   const [search, setSearch] = useState("");
   const [locationId, setLocationId] = useState("");
@@ -618,14 +631,14 @@ export function FinancialAccountsSection({
       >
         <div className="space-y-3">
           <FilterChipRow label="نوع حساب" className="flex-nowrap overflow-x-auto pb-1">
-            <FilterChip selected={kind === "all"} onClick={() => setKind("all")}>
+            <FilterChip selected={kind === "all"} onClick={() => selectKind("all")}>
               همه
             </FilterChip>
             {FINANCIAL_ACCOUNT_KINDS.map((candidate) => (
               <FilterChip
                 key={candidate}
                 selected={kind === candidate}
-                onClick={() => setKind(candidate)}
+                onClick={() => selectKind(candidate)}
               >
                 {FINANCIAL_ACCOUNT_KIND_META[candidate].plural}
               </FilterChip>
