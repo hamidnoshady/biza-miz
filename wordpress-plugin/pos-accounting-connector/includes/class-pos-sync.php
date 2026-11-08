@@ -1831,6 +1831,7 @@ class POS_Connector_Sync {
 				'price',
 				'product_update',
 				'product_publish',
+				'catalogue_product_review',
 				'order_status',
 				'refund_create',
 				'catalogue_export',
@@ -2320,6 +2321,158 @@ class POS_Connector_Sync {
 		return array( 'attributeId' => (int) $attribute_id, 'taxonomy' => $taxonomy, 'terms' => (object) $terms );
 	}
 
+	private static function catalogue_review_term( $term ) {
+		return array( 'id' => (int) $term->term_id, 'name' => $term->name, 'slug' => $term->slug );
+	}
+
+	private static function catalogue_review_terms( $taxonomy, $name ) {
+		if ( '' === $name || ! taxonomy_exists( $taxonomy ) ) {
+			return array();
+		}
+		$terms = get_terms( array( 'taxonomy' => $taxonomy, 'hide_empty' => false, 'name' => $name, 'number' => 20 ) );
+		if ( is_wp_error( $terms ) ) {
+			throw new Exception( 'catalogue_terms_unavailable' );
+		}
+		return array_map( array( __CLASS__, 'catalogue_review_term' ), $terms );
+	}
+
+	private static function catalogue_review_product( $product ) {
+		$options = array();
+		if ( $product->is_type( 'variation' ) ) {
+			foreach ( $product->get_attributes() as $name => $option ) {
+				$term = taxonomy_exists( $name ) ? get_term_by( 'slug', (string) $option, $name ) : false;
+				$options[] = array( 'name' => wc_attribute_label( $name, $product ), 'option' => $term ? $term->name : (string) $option );
+			}
+		}
+		$categories = array();
+		foreach ( array_slice( $product->get_category_ids(), 0, 100 ) as $category_id ) {
+			$category = get_term( $category_id, 'product_cat' );
+			if ( $category && ! is_wp_error( $category ) ) {
+				$categories[] = self::catalogue_review_term( $category );
+			}
+		}
+		return array(
+			'id' => (int) $product->get_id(),
+			'name' => mb_substr( (string) $product->get_name(), 0, 300 ),
+			'sku' => (string) $product->get_sku(),
+			'type' => $product->get_type(),
+			'parent' => $product->get_parent_id() ? (int) $product->get_parent_id() : null,
+			'options' => $options,
+			'categories' => $categories,
+		);
+	}
+
+	private static function review_catalogue_product( array $payload ) {
+		global $wpdb;
+		$sku = (string) ( $payload['sku'] ?? '' );
+		if ( '' === $sku || strlen( $sku ) > 480 ) {
+			throw new Exception( 'catalogue_missing_sku' );
+		}
+		// Include variations and detect legacy duplicate SKUs instead of taking
+		// the first result from WooCommerce's single-id convenience lookup.
+		$ids = $wpdb->get_col( $wpdb->prepare(
+			"SELECT product_id FROM {$wpdb->wc_product_meta_lookup} WHERE sku = %s ORDER BY product_id LIMIT 10",
+			$sku
+		) );
+		$matches = array();
+		$variations = array();
+		foreach ( $ids as $id ) {
+			$product = wc_get_product( (int) $id );
+			if ( ! $product || 'trash' === $product->get_status() ) {
+				continue;
+			}
+			$matches[] = self::catalogue_review_product( $product );
+			if ( $product->is_type( 'variable' ) && count( $ids ) === 1 ) {
+				foreach ( array_slice( $product->get_children(), 0, 101 ) as $child_id ) {
+					$child = wc_get_product( $child_id );
+					if ( $child ) {
+						$variations[] = self::catalogue_review_product( $child );
+					}
+				}
+			}
+		}
+		$attributes = array();
+		foreach ( array_slice( (array) ( $payload['specs'] ?? array() ), 0, 9 ) as $spec ) {
+			$slug = (string) ( $spec['slug'] ?? '' );
+			$attribute_id = wc_attribute_taxonomy_id_by_name( $slug );
+			if ( $attribute_id ) {
+				$attribute = wc_get_attribute( $attribute_id );
+				$attributes[] = array(
+					'id' => (int) $attribute_id, 'name' => $attribute->name, 'slug' => $attribute->slug,
+					'terms' => self::catalogue_review_terms( $attribute->slug, (string) $spec['value'] ),
+				);
+			}
+		}
+		return array(
+			'matches' => $matches, 'variations' => $variations, 'attributes' => $attributes,
+			'categories' => self::catalogue_review_terms( 'product_cat', (string) ( $payload['category'] ?? '' ) ),
+			'brands' => self::catalogue_review_terms( 'product_brand', (string) ( $payload['brand'] ?? '' ) ),
+		);
+	}
+
+	private static function catalogue_publish_taxonomies( array &$payload ) {
+		$create = ! empty( $payload['__catalogueAllowCreate'] );
+		$ack = array( 'category' => null, 'brand' => null, 'terms' => array() );
+		foreach ( array( 'Category' => 'product_cat', 'Brand' => 'product_brand' ) as $key => $taxonomy ) {
+			$wanted = $payload[ '__catalogue' . $key ] ?? null;
+			if ( ! $wanted ) {
+				continue;
+			}
+			$term = ! empty( $wanted['id'] ) ? get_term( (int) $wanted['id'], $taxonomy ) : get_term_by( 'slug', $wanted['slug'], $taxonomy );
+			if ( ! $term || is_wp_error( $term ) ) {
+				if ( ! $create || ! empty( $wanted['id'] ) || 'Category' !== $key ) {
+					throw new Exception( 'publication_review:taxonomy_changed' );
+				}
+				$created = wp_insert_term( $wanted['name'], $taxonomy, array( 'slug' => $wanted['slug'] ) );
+				if ( is_wp_error( $created ) ) {
+					throw new Exception( 'publication_review:taxonomy_changed' );
+				}
+				$term = get_term( (int) $created['term_id'], $taxonomy );
+			}
+			if ( ! $term || is_wp_error( $term ) || $term->slug !== $wanted['slug'] || $term->name !== $wanted['name'] ) {
+				throw new Exception( 'publication_review:taxonomy_changed' );
+			}
+			$payload[ 'Category' === $key ? 'categories' : 'brands' ] = array( array( 'id' => (int) $term->term_id ) );
+			$ack[ strtolower( $key ) ] = self::catalogue_review_term( $term );
+		}
+
+		foreach ( (array) ( $payload['__catalogueAttributes'] ?? array() ) as $spec ) {
+			$id = ! empty( $spec['attributeId'] ) ? (int) $spec['attributeId'] : wc_attribute_taxonomy_id_by_name( $spec['slug'] );
+			$attribute = $id ? wc_get_attribute( $id ) : null;
+			if ( ! empty( $spec['attributeId'] ) && ! $attribute ) {
+				throw new Exception( 'publication_review:attribute_changed' );
+			}
+			$wanted = $spec['term'] ?? null;
+			if ( $wanted ) {
+				$term = get_term( (int) $wanted['id'], $attribute->slug );
+				if ( ! $term || is_wp_error( $term ) || $term->slug !== $wanted['slug'] || $term->name !== $wanted['name'] ) {
+					throw new Exception( 'publication_review:attribute_term_changed' );
+				}
+				$term_data = self::catalogue_review_term( $term );
+				$taxonomy = $attribute->slug;
+			} else {
+				if ( ! $create ) {
+					throw new Exception( 'publication_review:attribute_term_missing' );
+				}
+				$ensured = self::ensure_reviewed_attribute( array(
+					'slug' => $attribute ? preg_replace( '/^pa_/', '', $attribute->slug ) : $spec['slug'],
+					'name' => $spec['field'],
+					'terms' => array( array( 'local' => 'value', 'name' => $spec['value'], 'slug' => $spec['termSlug'] ) ),
+				) );
+				$id = $ensured['attributeId'];
+				$taxonomy = $ensured['taxonomy'];
+				$term_data = (array) $ensured['terms'];
+				$term_data = $term_data['value'];
+				if ( $term_data['name'] !== $spec['value'] ) {
+					throw new Exception( 'publication_review:attribute_term_changed' );
+				}
+			}
+			$payload['attributes'][] = array( 'id' => $id, 'visible' => true, 'variation' => false, 'options' => array( $term_data['name'] ) );
+			$ack['terms'][] = array_merge( $term_data, array( 'field' => $spec['field'], 'local' => $spec['value'], 'attributeId' => $id, 'taxonomy' => $taxonomy ) );
+		}
+		return $ack;
+	}
+
 	private static function publish_product( array $payload ) {
 		global $wpdb;
 		$operation = isset( $payload['__operationId'] ) ? (string) $payload['__operationId'] : '';
@@ -2341,7 +2494,11 @@ class POS_Connector_Sync {
 					if ( ! $product || $product->get_meta( '_bizamiz_publication_id', true ) !== $operation || (int) $product->get_parent_id() !== $parent || $product->get_type() !== ( $payload['__wooType'] ?? '' ) ) {
 						throw new Exception( 'publication_review:sku_already_exists' );
 					}
-					return array( 'remoteId' => (int) $existing );
+					$result = array( 'remoteId' => (int) $existing );
+					if ( ! empty( $payload['__catalogueMetadataOnly'] ) && ! $parent ) {
+						$result['taxonomy'] = self::catalogue_publish_taxonomies( $payload );
+					}
+					return $result;
 				}
 			} else {
 				$product = self::product_for_job( $target, $parent );
@@ -2353,11 +2510,18 @@ class POS_Connector_Sync {
 					if ( $product->get_sku() !== $sku ) {
 						throw new Exception( 'publication_review:link_sku_mismatch' );
 					}
+					if ( isset( $payload['__catalogueVariationOptions'] ) &&
+						self::catalogue_review_product( $product )['options'] !== $payload['__catalogueVariationOptions'] ) {
+						throw new Exception( 'publication_review:variation_options_changed' );
+					}
 					return array( 'remoteId' => $target );
 				}
 			}
+			$catalogue_ack = ! empty( $payload['__catalogueMetadataOnly'] ) && ! $target && ! $parent
+				? self::catalogue_publish_taxonomies( $payload )
+				: null;
 			$request = new WP_REST_Request( $target > 0 ? 'PUT' : 'POST' );
-			foreach ( array( 'name', 'sku', 'status', 'description', 'short_description', 'attributes', 'type', 'regular_price' ) as $key ) {
+			foreach ( array( 'name', 'sku', 'status', 'description', 'short_description', 'attributes', 'type', 'regular_price', 'categories', 'brands' ) as $key ) {
 				if ( array_key_exists( $key, $payload ) ) {
 					$request->set_param( $key, $payload[ $key ] );
 				}
@@ -2383,7 +2547,7 @@ class POS_Connector_Sync {
 			if ( empty( $data['id'] ) ) {
 				throw new Exception( 'publication_invalid_remote_ack' );
 			}
-			return array( 'remoteId' => (int) $data['id'] );
+			return array_merge( array( 'remoteId' => (int) $data['id'] ), $catalogue_ack ? array( 'taxonomy' => $catalogue_ack ) : array() );
 		} finally {
 			$wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
 		}
@@ -2453,6 +2617,9 @@ class POS_Connector_Sync {
 				}
 				$product->save();
 				return;
+
+			case 'catalogue_product_review':
+				return self::review_catalogue_product( $payload );
 
 			case 'product_publish':
 				return self::publish_product( $payload );
