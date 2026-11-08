@@ -124,6 +124,7 @@ export const AGENCY_REIMBURSABLE_COST_ERROR_CODES = [
   "settlement_not_found",
   "settlement_not_posted",
   "settlement_already_reversed",
+  "invalid_vendor",
 ] as const;
 
 export type AgencyReimbursableCostErrorCode = (typeof AGENCY_REIMBURSABLE_COST_ERROR_CODES)[number];
@@ -143,6 +144,8 @@ export interface AgencyReimbursableCost {
   projectId: string | null;
   projectName: string | null;
   vendorName: string;
+  vendorPartyId: string | null;
+  vendorPartyName: string | null;
   description: string;
   amountRial: number;
   spentOn: string;
@@ -198,7 +201,7 @@ export interface AgencyReimbursableCostFilters {
   limit?: number;
 }
 
-const COST_COLUMNS = `c.id, c.cost_number, c.party_id, c.project_id, c.vendor_name,
+const COST_COLUMNS = `c.id, c.cost_number, c.party_id, c.project_id, c.vendor_name, c.vendor_party_id,
        c.description, c.amount_rial, c.spent_on, c.presentation, c.settled_by,
        c.note, c.entry_id, c.created_by, c.created_by_name, c.created_at, c.updated_at,
        c.recharged_order_id, c.recharged_by, c.recharged_by_name, c.settlement_id`;
@@ -208,6 +211,7 @@ const COST_COLUMNS = `c.id, c.cost_number, c.party_id, c.project_id, c.vendor_na
 // cross-tenant read.
 const COST_JOINS = `FROM agency_reimbursable_costs c
        JOIN parties p ON p.id = c.party_id AND p.business_id = c.business_id
+  LEFT JOIN parties vp ON vp.id = c.vendor_party_id AND vp.business_id = c.business_id
   LEFT JOIN ai_projects pr ON pr.id = c.project_id AND pr.business_id = c.business_id
   LEFT JOIN orders ro ON ro.id = c.recharged_order_id
   LEFT JOIN agency_vendor_settlements vs ON vs.id = c.settlement_id AND vs.business_id = c.business_id`;
@@ -216,7 +220,7 @@ const COST_JOINS = `FROM agency_reimbursable_costs c
 // invoice flips the order and writes a reversing entry without touching this register,
 // so a stored flag would disagree with the ledger the first time somebody voided one.
 const COST_JOINED_COLUMNS = `p.name AS client_name, pr.name AS project_name, ro.status AS recharged_order_status,
-       vs.settlement_number, vs.reversed_at AS settlement_reversed_at`;
+       vs.settlement_number, vs.reversed_at AS settlement_reversed_at, vp.name AS vendor_party_name`;
 
 type CostRow = Record<string, unknown> & {
   id: string;
@@ -226,6 +230,8 @@ type CostRow = Record<string, unknown> & {
   project_id: string | null;
   project_name: string | null;
   vendor_name: string;
+  vendor_party_id: string | null;
+  vendor_party_name: string | null;
   description: string;
   amount_rial: string | number;
   spent_on: Date | string;
@@ -271,6 +277,8 @@ function toCost(row: CostRow): AgencyReimbursableCost {
     projectId: row.project_id,
     projectName: row.project_name,
     vendorName: row.vendor_name ?? "",
+    vendorPartyId: row.vendor_party_id,
+    vendorPartyName: row.vendor_party_name ?? null,
     description: row.description,
     // bigint arrives as a string.
     amountRial: Number(row.amount_rial),
@@ -454,6 +462,7 @@ export interface ReimbursableCostInput {
   partyId?: unknown;
   projectId?: unknown;
   vendorName?: unknown;
+  vendorPartyId?: unknown;
   description?: unknown;
   amountRial?: unknown;
   spentOn?: unknown;
@@ -466,6 +475,23 @@ function normalizeVendorName(input: ReimbursableCostInput): string {
   const text = normalizeAgencyCostOptionalText(input.vendorName, AGENCY_COST_VENDOR_NAME_LIMIT);
   if (text.tooLong) throw new AgencyReimbursableCostError("text_too_long");
   return text.value;
+}
+
+/** Canonical supplier lookup; never infer a party from a name. */
+async function resolveVendor(businessId: string, input: ReimbursableCostInput): Promise<{ id: string | null; name: string }> {
+  const raw = input.vendorPartyId;
+  if (raw === undefined || raw === null || raw === "") return { id: null, name: normalizeVendorName(input) };
+  if (typeof raw !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) {
+    throw new AgencyReimbursableCostError("invalid_vendor");
+  }
+  const { rows } = await query<{ id: string; name: string }>(
+    `SELECT id, name FROM parties WHERE business_id=$1 AND id=$2
+       AND is_active AND merged_into_id IS NULL AND 'supplier'=ANY(roles) FOR SHARE`, [businessId, raw],
+  );
+  if (!rows[0]) throw new AgencyReimbursableCostError("invalid_vendor");
+  const name = normalizeAgencyCostOptionalText(rows[0].name, AGENCY_COST_VENDOR_NAME_LIMIT);
+  if (name.tooLong || !name.value) throw new AgencyReimbursableCostError("invalid_vendor");
+  return { id: rows[0].id, name: name.value };
 }
 
 /**
@@ -534,6 +560,7 @@ export async function createAgencyReimbursableCost(
     // the advisory lock itself, so two costs recorded at once cannot be handed the
     // same one. The shared formatter pads to three digits — the same reason a
     // campaign is `CA-001` and not `CA-0001`.
+    const vendor = await resolveVendor(businessId, input);
     const costNumber = await nextBusinessRegisterNumber(
       "agency_reimbursable_costs",
       businessId,
@@ -543,12 +570,12 @@ export async function createAgencyReimbursableCost(
     const { rows } = await query<{ id: string }>(
       `INSERT INTO agency_reimbursable_costs
          (business_id, cost_number, party_id, project_id, vendor_name, description,
-          amount_rial, spent_on, presentation, settled_by, note, created_by, created_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          amount_rial, spent_on, presentation, settled_by, note, created_by, created_by_name, vendor_party_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING id`,
       [
-        businessId, costNumber, partyId, projectId, normalizeVendorName(input), description.value,
-        amount, spentOn, presentation, settledBy, note.value, actor.userId, actor.name,
+        businessId, costNumber, partyId, projectId, vendor.name, description.value,
+        amount, spentOn, presentation, settledBy, note.value, actor.userId, actor.name, vendor.id,
       ],
     );
     const inserted = rows[0];
@@ -563,6 +590,7 @@ export async function createAgencyReimbursableCost(
         settledBy,
         spentOn,
         projectId,
+        vendorPartyId: vendor.id,
       },
       sourceType: "agency_reimbursable_cost",
       sourceId: inserted.id,
@@ -628,7 +656,15 @@ export async function updateAgencyReimbursableCost(
     if (!description.present) throw new AgencyReimbursableCostError("description_required");
     add("description", description.value);
   }
-  if (input.vendorName !== undefined) add("vendor_name", normalizeVendorName(input));
+  if (input.vendorPartyId !== undefined) {
+    if (existing.posted) throw new AgencyReimbursableCostError("cost_posted");
+    const vendor = await resolveVendor(businessId, input);
+    add("vendor_party_id", vendor.id);
+    add("vendor_name", vendor.name);
+  } else if (input.vendorName !== undefined) {
+    if (existing.vendorPartyId) throw new AgencyReimbursableCostError("invalid_vendor");
+    add("vendor_name", normalizeVendorName(input));
+  }
   if (input.note !== undefined) {
     const note = normalizeAgencyCostOptionalText(input.note, AGENCY_COST_NOTE_LIMIT);
     if (note.tooLong) throw new AgencyReimbursableCostError("text_too_long");
@@ -1059,10 +1095,10 @@ export async function settleAgencyVendorCosts(
     // Lock in stable order *before* reading settlement state. Two concurrent
     // payments must not both observe the same unpaid cost and move cash twice.
     const { rows } = await client.query<{
-      id: string; amount_rial: string; vendor_name: string; settled_by: string;
+      id: string; amount_rial: string; vendor_name: string; vendor_party_id: string | null; settled_by: string;
       entry_id: string | null; project_id: string | null; settlement_id: string | null;
     }>(
-      `SELECT id, amount_rial::text, vendor_name, settled_by, entry_id, project_id, settlement_id
+      `SELECT id, amount_rial::text, vendor_name, vendor_party_id, settled_by, entry_id, project_id, settlement_id
          FROM agency_reimbursable_costs
         WHERE business_id = $1 AND id = ANY($2::uuid[])
         ORDER BY id FOR UPDATE`, [businessId, costIds],
@@ -1079,26 +1115,29 @@ export async function settleAgencyVendorCosts(
         if (!existing.rows[0]?.reversed_at) throw new AgencyReimbursableCostError("cost_already_settled");
       }
     }
-    // No fuzzy matching of payees: identical text is required until the quote
-    // workflow supplies a canonical vendor identity. Blank payees are refused.
-    const vendorName = rows[0].vendor_name.trim();
-    if (!vendorName || rows.some((row) => row.vendor_name.trim() !== vendorName)) {
+    // Linked documents group by identity, not snapshot spelling. Legacy text
+    // costs retain exact-name matching and never mix with linked documents.
+    const vendorPartyId = rows[0].vendor_party_id;
+    let vendorName = rows[0].vendor_name.trim();
+    if (rows.some(row => row.vendor_party_id !== vendorPartyId) ||
+        (!vendorPartyId && (!vendorName || rows.some(row => row.vendor_name.trim() !== vendorName)))) {
       throw new AgencyReimbursableCostError("costs_from_different_vendors");
     }
+    if (vendorPartyId) vendorName = (await resolveVendor(businessId, { vendorPartyId })).name;
     const total = rows.reduce((sum, row) => sum + BigInt(row.amount_rial), 0n);
     if (total > BigInt(Number.MAX_SAFE_INTEGER)) throw new AgencyReimbursableCostError("invalid_amount");
     const settlementNumber = await nextBusinessRegisterNumber("agency_vendor_settlements", businessId, SETTLEMENT_NUMBER_PREFIX);
     const { rows: inserted } = await client.query<{ id: string }>(
       `INSERT INTO agency_vendor_settlements
-        (business_id, location_id, settlement_number, vendor_name, method, amount_rial, paid_on, note, created_by, created_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-      [businessId, locationId, settlementNumber, vendorName, input.method, total.toString(), paidOn, note.value, actor.userId, actor.name],
+        (business_id, location_id, settlement_number, vendor_name, method, amount_rial, paid_on, note, created_by, created_by_name, vendor_party_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      [businessId, locationId, settlementNumber, vendorName, input.method, total.toString(), paidOn, note.value, actor.userId, actor.name, vendorPartyId],
     );
     const id = inserted[0].id;
     const projects = new Set(rows.map((row) => row.project_id));
     const { entryId } = await emitDomainEvent(client, {
       businessId, locationId, eventType: "agency.vendor_settlement",
-      payload: { amount: total.toString(), method: input.method, paidOn, projectId: projects.size === 1 ? rows[0].project_id : null },
+      payload: { amount: total.toString(), method: input.method, paidOn, vendorPartyId, projectId: projects.size === 1 ? rows[0].project_id : null },
       sourceType: "agency_vendor_settlement", sourceId: id, createdBy: actor.userId,
     });
     // A queued event is not a payment. Roll back the entire act rather than
