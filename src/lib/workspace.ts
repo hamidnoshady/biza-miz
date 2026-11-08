@@ -326,6 +326,7 @@ export async function resolveWorkspaceSubject(
     // above. Both registers are project-scoped on purpose: the number series is
     // per project (`nextRegisterNumber`), §D's campaign P&L has a key to hang
     // off, and a comment on either lands in the right project's feed.
+    vendor_purchase: `SELECT project_id, created_by FROM agency_vendor_purchases WHERE id=$1 AND business_id=$2`,
     billing_milestone: `SELECT project_id, created_by FROM agency_billing_milestones
                  WHERE id = $1 AND business_id = $2`,
     change_request: `SELECT project_id, created_by FROM agency_change_requests
@@ -2631,6 +2632,9 @@ export async function requestApproval(
   },
 ): Promise<WorkspaceApproval> {
   const subjectType = assertEnum(input.subjectType ?? "", APPROVAL_SUBJECTS, "invalid_approval_subject");
+  // Purchase submission freezes its quote in the same transaction as queueing.
+  // A generic request (including AI) must not create a detached approval.
+  if (subjectType === "vendor_purchase") throw new WorkspaceError("invalid_approval_subject");
   const subjectId = input.subjectId?.trim();
   if (!subjectId) throw new WorkspaceError("subject_required");
   const subject = await resolveWorkspaceSubject(owner, subjectType, subjectId, "contribute");
@@ -2769,6 +2773,15 @@ export async function decideApproval(
   const approval = await getApproval(owner, id);
   if (!approval) throw new WorkspaceError("approval_not_found");
   if (approval.status !== "pending") return null;
+  // Direct callers (including the existing approved AI action) must propagate
+  // through the same purchase service as the queue route, never decide only
+  // the approval row and strand the frozen purchase in submitted state.
+  if (approval.subjectType === "vendor_purchase") {
+    const { decideVendorPurchaseApproval } = await import("./agency-vendor-purchase-service");
+    const result = await decideVendorPurchaseApproval(owner, id, decision, note);
+    return result.applied ? getApproval(owner, id) : null;
+  }
+
 
   let canManageSubject = false;
   if (!approval.approverUserId && decision !== "cancelled") {

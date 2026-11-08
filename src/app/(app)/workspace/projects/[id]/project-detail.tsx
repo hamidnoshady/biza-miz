@@ -81,6 +81,7 @@ import { AecProcurementTab } from "./procurement-panel";
 import { AecReportsTab } from "./reports-panel";
 import { AecVariationsTab } from "./variations-panel";
 import { AecCertificatesTab } from "./certificates-panel";
+import { AgencyVendorPurchases } from "./agency-vendor-purchases";
 import { AgencyBillingCard } from "./agency-billing-panel";
 import { AecCommercialCard } from "./commercial-panel";
 
@@ -157,7 +158,7 @@ interface Health {
  * on the *manage* project capability and their approvals on
  * `workspace.approve`, which is what the AEC routes themselves require.
  */
-export function ProjectDetail({ projectId }: { projectId: string }) {
+export function ProjectDetail({ projectId, canRecordVendorCost = false, canPickVendor = false }: { projectId: string; canRecordVendorCost?: boolean; canPickVendor?: boolean }) {
   const money = useMoney();
   const lookups = useWorkspaceLookups();
   const [project, setProject] = useState<ProjectDetail | null>(null);
@@ -521,6 +522,8 @@ export function ProjectDetail({ projectId }: { projectId: string }) {
               advertising agency, which is also what stops a project page of any
               other trade from calling `/api/agency/**` and rendering an
               `industry_mismatch` banner for a request it had to make. */}
+          {lookups.agencyCommercial ? <AgencyVendorPurchases projectId={projectId}
+            canManage={canManageProject && canPickVendor} canBook={canManageProject && canRecordVendorCost} /> : null}
           {lookups.agencyCommercial ? (
             <AgencyBillingCard
               projectId={projectId}

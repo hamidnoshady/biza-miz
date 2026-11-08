@@ -878,6 +878,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/agency-reimbursable-costs.integration.test.ts",
   },
   {
+    id: "agency.vendor_purchases", module: "Accounting", entity: "Agency supplier quotes and approved project purchases",
+    routes: ["agency/vendor-purchases"],
+    ops: { lifecycle: ["workspace.approval.decide"] },
+    note: "#1128 §D: canonical supplier quote → shared Workspace approval → explicit expense posting. Approving commits but posts no expense. Booking requires workspace.manage and finance.expenses_manage plus project-manager capability; creates exactly one payable cost via the existing domain-event engine, inheriting the business presentation policy. The existing approval-gated decision tool uses the same register service; quote submission is register-only and no create/book/payment tool is added.",
+    test: "integration/agency-vendor-purchases.integration.test.ts",
+  },
+  {
     id: "agency.vendor_settlements",
     module: "Accounting",
     entity: "Agency vendor payments and exact journal reversals",
