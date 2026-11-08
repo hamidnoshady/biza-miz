@@ -66,9 +66,14 @@ type ArticleRow = {
   cover_image_url?: string;
   sort_order: number;
   version?: number;
-  published_at?: string | null;
-  created_at?: string;
-  updated_at: string;
+  /**
+   * `timestamptz` columns come back from the driver as `Date`, not as the
+   * `string` every payload type declares — the widened type here is what makes
+   * `kbTimestamp` mandatory rather than optional.
+   */
+  published_at?: Date | string | null;
+  created_at?: Date | string;
+  updated_at: Date | string;
 };
 
 type TagRow = {
@@ -136,6 +141,26 @@ function mapTag(row: TagRow): KbTagRecord {
   };
 }
 
+/**
+ * A `timestamptz` column as the ISO string every knowledge payload declares.
+ *
+ * `pg` hands back a real `Date` for `timestamptz`, while `KbArticleListItem`,
+ * `KbArticleDetail` and `KbArticleRecord` all type these fields as `string` —
+ * the wire format, and what the screens parse with `formatJalali`. Leaving the
+ * driver's value in place looked harmless because JSON-encoding a `Date` also
+ * produces an ISO string, but the catalogue sorts its rows *before* they are
+ * encoded (`b.updatedAt.localeCompare(a.updatedAt)`), and a `Date` has no
+ * `localeCompare`. Two published articles that tied on `sort_order` — which is
+ * the default `0` for anything the console adds without ordering it — threw
+ * `b.updatedAt.localeCompare is not a function` out of the catalogue, so
+ * «مرکز آموزش» answered 500 and the page showed «بارگذاری مرکز آموزش ممکن نشد».
+ */
+function kbTimestamp(value: Date | string | null | undefined): string {
+  if (value == null) return "";
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
+
 function mapArticleListItem(
   row: ArticleRow,
   tagRefs: KbTagRef[],
@@ -151,7 +176,7 @@ function mapArticleListItem(
     hasVideo: Boolean(row.video_url),
     hasCover: Boolean(row.cover_image_url),
     sortOrder: row.sort_order,
-    updatedAt: row.updated_at,
+    updatedAt: kbTimestamp(row.updated_at),
   };
 }
 
@@ -358,7 +383,7 @@ export async function getKbArticleBySlug(slug: string): Promise<KbArticleDetail 
     videoUrl: row.video_url ?? "",
     videoKind,
     coverImageUrl: row.cover_image_url ?? "",
-    publishedAt: row.published_at ?? null,
+    publishedAt: row.published_at ? kbTimestamp(row.published_at) : null,
     related: relatedRows.map((r) =>
       mapArticleListItem(r, relatedTagsByArticle.get(r.id) ?? []),
     ),
@@ -429,7 +454,7 @@ export async function searchKbArticles(rawQuery: string, limit = 20): Promise<Kb
       snippet: kbSnippet(snippetSource, q),
       categoryTitle: row.category_title,
       tags,
-      updatedAt: row.updated_at,
+      updatedAt: kbTimestamp(row.updated_at),
     };
   });
 }
@@ -870,9 +895,9 @@ function mapArticleRecord(row: ArticleRow & { tag_ids: string[] | null }): KbArt
     version: Number(row.version ?? 1),
     tagIds: rawIds.map(String),
     tagRefs: [],
-    publishedAt: row.published_at ?? null,
-    createdAt: row.created_at ?? row.updated_at,
-    updatedAt: row.updated_at,
+    publishedAt: row.published_at ? kbTimestamp(row.published_at) : null,
+    createdAt: kbTimestamp(row.created_at ?? row.updated_at),
+    updatedAt: kbTimestamp(row.updated_at),
   };
 }
 
