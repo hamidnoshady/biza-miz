@@ -194,6 +194,12 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'torob_shop_products.created_by': 'channel publication config',
   'tenant_roles.updated_by': 'role configuration',
   'tour_member_progress.user_id': 'personal learning progress (guided tours)',
+  // Issue #972 phase 2 — one row per member and verifier counting business
+  // actions the member performed. It is credited by the member's own request
+  // and scoped to them; the action itself is attributable where it happened
+  // (orders.opened_by, journal_entries.created_by, audit_log, …), and the row
+  // cascades away with the member or the business.
+  'tour_action_evidence.user_id': 'personal learning evidence (guided tours)',
   'trusted_devices.user_id': 'sign-in security',
   'telegram_identity_links.platform_user_id': 'global account-link security; not business activity',
   'telegram_link_challenges.platform_user_id': 'short-lived account-link authentication state',

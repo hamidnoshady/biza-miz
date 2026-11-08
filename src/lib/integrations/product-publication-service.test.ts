@@ -4,7 +4,10 @@ import type { WooCommerceClient } from "./woocommerce-client";
 import { query } from "../db";
 import { acknowledgeProductPublication, applyProductPublication, previewProductPublication, queueProductPublication } from "./product-publication-service";
 const mocks = vi.hoisted(() => ({ getConnection: vi.fn(), price: vi.fn(), attributes: vi.fn() }));
-vi.mock("../db", () => ({ query: vi.fn(), withTenantTransaction: vi.fn(async (_id: string, fn: () => Promise<unknown>) => fn()) }));
+vi.mock("../db", () => {
+  const query = vi.fn();
+  return { query, withTenantTransaction: vi.fn(async (_id: string, fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query })) };
+});
 vi.mock("./connections-service", () => ({ getConnection: mocks.getConnection }));
 vi.mock("./woo-price-source-service", () => ({ resolveMappedWooPrice: mocks.price }));
 vi.mock("./product-attribute-mappings-service", () => ({ buildMappedWooAttributes: mocks.attributes }));
@@ -48,7 +51,7 @@ describe("publication gateway", () => {
   });
   it("ACK maps the parent before queuing children with its real remote identity", async () => {
     const payload = { __ackRemoteId: "99", __localId: "parent", __wooType: "variable", __operationId: "op", __children: [{ __localId: "child", sku: "blue" }] };
-    vi.mocked(query).mockResolvedValueOnce({ rows: [{ payload }] } as never);
+    vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 1 } as never).mockResolvedValueOnce({ rows: [{ payload }] } as never);
     await acknowledgeProductPublication(connection, { remote_id: "op", payload });
     const calls = vi.mocked(query).mock.calls;
     const mappingIndex = calls.findIndex(([sql]) => sql.includes("INSERT INTO integration_mappings"));

@@ -7,11 +7,9 @@ shared capability — not a Holoo merge, not a WooCommerce special case — buil
 the Data Transfer engine ([data-transfer-engine.md](data-transfer-engine.md)) and
 `integration_mappings`.
 
-> **Status: foundation slice.** The shared engine, its tables, the service, the
-> product domain end to end, and the tests are in. Wiring each existing importer
-> through it, the review wizard, and the remaining domains are listed under
-> [What is not built yet](#what-is-not-built-yet). Nothing here changes the
-> behaviour of an existing importer until it is wired in.
+> The shared engine powers the [reviewed XLSX product catalogue](xlsx-product-catalogue.md)
+> for Watch and retail. The remaining importers and provider onboarding work
+> are listed under [What is not built yet](#what-is-not-built-yet).
 
 ## The contract
 
@@ -107,10 +105,7 @@ acceptance matrix:
    instead of applying them; buffer live events while a run is open), Woo
    `syncProducts`, Holoo `import-plan`/`import-service`, and the Data Transfer
    `import-service` for populated entities.
-2. **Review wizard** under Settings → Data Transfer and the reusable Initial
-   Reconciliation step in provider onboarding (RTL/mobile), plus the routes and
-   permission gate in front of this service. Decisions here record the actor; the
-   route enforces who may decide.
+2. **Initial Reconciliation in provider onboarding** and review panels for additional import domains.
 3. **DB loaders and apply handlers for party, financial-document and inventory**
    (the resolvers and planners exist and are unit-tested; party loading needs the
    encrypted-field blind indexes, inventory needs the stock/lot/serial readers),

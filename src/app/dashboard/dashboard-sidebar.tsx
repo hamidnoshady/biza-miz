@@ -85,6 +85,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { NotificationBell } from "@/components/notifications/notification-bell";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { BiometricSettingsButton } from "./biometric-settings";
 import { BranchSwitcher } from "./branch-switcher";
@@ -204,6 +205,8 @@ interface SidebarProps {
   /** Permission-filtered contextual Workspace entries from the server shell. */
   workspaceSections: readonly WorkspaceSidebarSection[];
   deploymentProfile: DeploymentProfile;
+  notificationBranch?: string | null;
+  siteInbox?: boolean;
   /** `businessId:memberId` — keys client caches so one member never sees another's. */
   account: string;
 }
@@ -330,7 +333,13 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
   );
 }
 
-function SidebarBrand({ title, subtitle, account }: { title: string; subtitle: string; account: string }) {
+function SidebarBrand({ title, subtitle, account, inbox }: {
+  title: string;
+  subtitle: string;
+  account: string;
+  inbox: React.ReactNode;
+}) {
+  const { isMobile } = useSidebar();
   return (
     <SidebarHeader className="border-border/80 bg-card p-4 group-data-[state=collapsed]/sidebar:px-2">
       {/*
@@ -372,8 +381,11 @@ function SidebarBrand({ title, subtitle, account }: { title: string; subtitle: s
         to be useful, and the branch colour still shows on the mobile header
         and on the POS/overview page headers.
       */}
-      <div className="mt-3 group-data-[state=collapsed]/sidebar:hidden">
-        <BranchSwitcher compact quietLoading account={account} />
+      <div className="mt-3 flex items-center justify-between gap-2 group-data-[state=collapsed]/sidebar:justify-center">
+        <div className="min-w-0 group-data-[state=collapsed]/sidebar:hidden">
+          <BranchSwitcher compact quietLoading account={account} />
+        </div>
+        {!isMobile ? inbox : null}
       </div>
     </SidebarHeader>
   );
@@ -649,7 +661,9 @@ function MobileDashboardHeader({
   pathname,
   deploymentProfile,
   fallbackLabel,
+  inbox,
 }: {
+  inbox: React.ReactNode;
   /** Already flattened and contextual to the route currently open. */
   navItems: readonly { label: string; href: string }[];
   pathname: string;
@@ -662,6 +676,7 @@ function MobileDashboardHeader({
   fallbackLabel?: string;
 }) {
   const search = useSearchParams();
+  const { isMobile } = useSidebar();
   // The longest matching href wins, so a detail page keeps its owning section
   // label instead of falling back to the platform home.
   const active = bestNavMatch([...navItems], (href) => isActive(pathname, href, search));
@@ -681,6 +696,7 @@ function MobileDashboardHeader({
           active branch was invisible on every screen until the drawer was
           opened — the one place a mis-set branch does the most damage. */}
       <BranchSwitcher compact quietLoading />
+      {isMobile ? inbox : null}
       <CreditBadge />
       <div className="max-w-36"><DeploymentStatusIndicator profile={deploymentProfile} /></div>
     </header>
@@ -974,6 +990,8 @@ export function DashboardSidebar({
   brandSubtitle,
   workspaceSections,
   deploymentProfile,
+  notificationBranch,
+  siteInbox,
   account,
 }: SidebarProps) {
   const pathname = usePathname();
@@ -1092,6 +1110,7 @@ export function DashboardSidebar({
   }, [tabletMode]);
 
   const resetWidth = useCallback(() => setSidebarWidth(SIDEBAR_DEFAULT_WIDTH), []);
+  const inbox = <NotificationBell identity={`${account}:${notificationBranch ?? ""}`} local={siteInbox} />;
 
   return (
     <SidebarProvider open={mode === "expanded"} onOpenChange={setExpanded}>
@@ -1101,6 +1120,7 @@ export function DashboardSidebar({
         pathname={pathname}
         deploymentProfile={deploymentProfile}
         fallbackLabel={appShell?.shell.label}
+        inbox={inbox}
       />
       <Sidebar
         data-ai-guide="primary-navigation"
@@ -1112,7 +1132,7 @@ export function DashboardSidebar({
             : undefined
         }
       >
-        <SidebarBrand title={brandTitle} subtitle={brandSubtitle} account={account} />
+        <SidebarBrand title={brandTitle} subtitle={brandSubtitle} account={account} inbox={inbox} />
         {workspaceRoute ? (
           <WorkspaceNavigation pathname={pathname} sections={workspaceSections} />
         ) : appShell ? (

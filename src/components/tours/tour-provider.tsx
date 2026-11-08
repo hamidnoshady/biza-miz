@@ -13,7 +13,12 @@
  *  - progress events, sent in order through one queue so a `complete` can
  *    never overtake the `step_seen` before it;
  *  - ending the tour (paused) when the member leaves the tour's route, so a
- *    spotlight never hangs over a page it was not written for.
+ *    spotlight never hangs over a page it was not written for — and, when the
+ *    step they were on was a verified action, asking the server to confirm it
+ *    first, because the action itself (saving a product, submitting an order)
+ *    is what navigates away;
+ *  - the verify call an `action` step needs (`POST …/verify`), which the server
+ *    answers from the domain evidence it recorded when the action succeeded.
  *
  * Progress writes are best-effort: a failed save never blocks the walk-through
  * and a tour is only reported finished when the server accepted `complete`.
@@ -33,7 +38,7 @@ import { usePathname } from "next/navigation";
 import { toast } from "sonner";
 import { api } from "@/app/dashboard/ui";
 import type { TourPlayback, TourProgressEvent, TourProgressView } from "@/lib/tours";
-import type { TourExit } from "./tour-overlay";
+import type { TourActionCheck, TourExit } from "./tour-overlay";
 
 const TourOverlay = dynamic(() => import("./tour-overlay").then((m) => m.TourOverlay), {
   ssr: false,
@@ -77,6 +82,7 @@ export function TourProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [active, setActive] = useState<ActiveTour | null>(null);
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const stepRef = useRef<string | null>(null);
   const activeRef = useRef<ActiveTour | null>(null);
   activeRef.current = active;
 
@@ -97,6 +103,43 @@ export function TourProvider({ children }: { children: ReactNode }) {
     queueRef.current = run;
     return run;
   }, []);
+
+  /**
+   * Asks the server whether the member has done an `action` step's work yet.
+   * The body is the step id alone: the answer is the server's (it looks up
+   * `tour_action_evidence`), not the page's, and a 409 simply means "not yet".
+   */
+  const verifyStep = useCallback(
+    (stepId: string): Promise<TourActionCheck> => {
+      const current = activeRef.current;
+      if (!current) return Promise.resolve({ status: "error" });
+      const run = queueRef.current.then(async (): Promise<TourActionCheck> => {
+        try {
+          const { ok, status, data } = await api<{
+            evidenceAt?: string;
+            evidenceBeforeTour?: boolean;
+          }>(`/api/knowledge/tours/${encodeURIComponent(current.tour.id)}/verify`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ stepId }),
+          });
+          if (ok) {
+            return {
+              status: "verified",
+              evidenceAt: data.evidenceAt ?? null,
+              beforeTour: data.evidenceBeforeTour === true,
+            };
+          }
+          return { status: status === 409 ? "pending" : "error" };
+        } catch {
+          return { status: "error" };
+        }
+      });
+      queueRef.current = run;
+      return run;
+    },
+    [],
+  );
 
   const startTour = useCallback(
     async (tourId: string, options: StartTourOptions = {}): Promise<boolean> => {
@@ -143,9 +186,20 @@ export function TourProvider({ children }: { children: ReactNode }) {
     const route = current.tour.route;
     const here = (pathname ?? "").replace(/\/+$/, "") || "/";
     if (here === route) return;
+    // The action the member was asked for is often what navigates away (saving
+    // a product closes the form). Claim nothing: send the verify and let the
+    // server decide — a step the member did not do simply stays unseen.
+    const stepId = stepRef.current;
+    const step = stepId ? current.tour.steps.find((entry) => entry.id === stepId) : undefined;
+    if (stepId && step?.kind === "action") {
+      void verifyStep(stepId).then((result) => {
+        if (result.status === "verified") toast.success("مرحلهٔ انجام‌شده ثبت شد.");
+      });
+    }
+    stepRef.current = null;
     setActive(null);
     toast.info("تور متوقف شد؛ از دکمهٔ آموزش همان صفحه می‌توانید ادامه دهید.");
-  }, [pathname]);
+  }, [pathname, verifyStep]);
 
   const runtime = useMemo<TourRuntime>(() => ({ startTour }), [startTour]);
 
@@ -158,6 +212,10 @@ export function TourProvider({ children }: { children: ReactNode }) {
           tour={active.tour}
           startIndex={active.startIndex}
           onEvent={handleEvent}
+          onVerify={verifyStep}
+          onStepChange={(stepId) => {
+            stepRef.current = stepId;
+          }}
           onExit={handleExit}
           returnFocus={active.returnFocus}
         />

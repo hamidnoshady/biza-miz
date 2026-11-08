@@ -7,6 +7,7 @@ import { createProductRecord, ProductAttributeValidationError } from "@/lib/prod
 import { parseProductCreateInput } from "@/lib/product-input";
 import { PRODUCT_CREATE_REQUEST_MAX_BYTES, readBoundedJson } from "@/lib/product-attributes";
 import { resolveActiveLocation } from "@/lib/setup-state";
+import { recordTourEvidence } from "@/lib/tour-evidence-service";
 
 /**
  * Creates one simple product or one complete variant family.
@@ -46,6 +47,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       businessId: session.businessId,
       userId: session.sub,
       recommendation: parsed.data.priceRecommendation,
+    });
+    // Issue #972 — a guided task that asked for "create a product" is proven by
+    // this write, not by a click in the tour. Best-effort: never fails the save.
+    await recordTourEvidence({
+      businessId: session.businessId,
+      userId: session.sub,
+      verifier: "product.created",
+      entityId: created.item.id,
     });
     return NextResponse.json({ ok: true, ...created }, { status: 201 });
   } catch (creationError) {

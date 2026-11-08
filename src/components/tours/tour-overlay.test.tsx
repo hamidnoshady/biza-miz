@@ -225,3 +225,123 @@ describe("TourOverlay", () => {
     expect(document.activeElement).toBe(trigger);
   });
 });
+
+describe("verified action steps", () => {
+  const taskTour: TourPlayback = {
+    id: "test.task",
+    version: 1,
+    route: "/crm/directory",
+    title: "اولین مشتری را ثبت کنید",
+    steps: [
+      { id: "how-it-works", kind: "explain", title: "خودتان انجام می‌دهید", body: "شروع" },
+      {
+        id: "register",
+        kind: "action",
+        verifier: "party.created",
+        anchor: "parties.add",
+        title: "مشتری را ثبت کنید",
+        body: "دکمهٔ افزودن",
+      },
+    ],
+  };
+
+  function setupAction(onVerify: (stepId: string) => Promise<"verified" | "pending" | "error">) {
+    const events: TourProgressEvent[] = [];
+    const onEvent = vi.fn(async (event: TourProgressEvent) => {
+      events.push(event);
+      return true;
+    });
+    const onExit = vi.fn();
+    const verify = vi.fn(async (stepId: string) => {
+      const status = await onVerify(stepId);
+      return status === "verified"
+        ? ({ status, evidenceAt: "2026-11-01T00:04:00.000Z", beforeTour: false } as const)
+        : ({ status } as const);
+    });
+    mountAnchor("parties.add");
+    const utils = render(
+      <TourOverlay
+        tour={taskTour}
+        startIndex={1}
+        onEvent={onEvent}
+        onVerify={verify}
+        onExit={onExit}
+      />,
+    );
+    return { events, onEvent, onExit, verify, ...utils };
+  }
+
+  it("leaves the page usable and never posts `step_seen` for an action step", async () => {
+    const { events, verify } = setupAction(async () => "pending");
+    // No full-screen click blocker while the member has work to do.
+    expect(document.querySelector('[data-tour-overlay] > div[aria-hidden="true"].fixed.inset-0')).toBeNull();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "انجام دادم" }));
+    });
+    expect(verify).toHaveBeenCalledWith("register");
+    expect(events.filter((event) => event.type === "step_seen")).toEqual([]);
+  });
+
+  it("says it is waiting, then confirms when the server finds the evidence", async () => {
+    let answer: "pending" | "verified" = "pending";
+    const { verify } = setupAction(async () => answer);
+    expect(await screen.findByText(/هنوز تأیید نشده/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "انجام دادم" })).toHaveProperty("disabled", true);
+
+    answer = "verified";
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "بررسی" }));
+    });
+    expect(await screen.findByText("تأیید شد ✓")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "پایان" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(verify.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("confirms the last step and then finishes the tour with `complete`", async () => {
+    const { events, onExit } = setupAction(async () => "verified");
+    expect(await screen.findByText("تأیید شد ✓")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "پایان" }));
+    });
+    // The server already recorded the verified step; only the completion is sent.
+    expect(events).toEqual([{ type: "complete" }]);
+    expect(onExit).toHaveBeenCalledWith("completed");
+  });
+
+  it("tells the member when they had already done this before the tour", async () => {
+    mountAnchor("parties.add");
+    const onEvent = vi.fn(async () => true);
+    render(
+      <TourOverlay
+        tour={taskTour}
+        startIndex={1}
+        onEvent={onEvent}
+        onVerify={async () => ({ status: "verified", evidenceAt: "2025-01-01T00:00:00.000Z", beforeTour: true })}
+        onExit={() => {}}
+      />,
+    );
+    expect(await screen.findByText(/پیش‌تر هم انجام داده بودید/)).toBeTruthy();
+  });
+
+  it("never lets a tour that cannot verify pretend the step is done", async () => {
+    const events: TourProgressEvent[] = [];
+    mountAnchor("parties.add");
+    render(
+      <TourOverlay
+        tour={taskTour}
+        startIndex={1}
+        onEvent={async (event) => {
+          events.push(event);
+          return true;
+        }}
+        onExit={() => {}}
+      />,
+    );
+    // Without a verifier the step degrades to an explanation: Next records it
+    // as seen rather than offering a confirmation that cannot be checked.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "پایان" }));
+    });
+    expect(events).toEqual([{ type: "step_seen", stepId: "register" }, { type: "complete" }]);
+  });
+});

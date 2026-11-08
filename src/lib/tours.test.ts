@@ -197,6 +197,92 @@ describe("tour progress", () => {
     expect(tourProgressView(tour, null).status).toBe("not_started");
   });
 
+  describe("verified action steps", () => {
+    const withAction: TourDefinition = {
+      ...tour,
+      id: "test.task",
+      steps: [
+        { id: "a", kind: "explain", title: "الف", body: "." },
+        {
+          id: "do-it",
+          kind: "action",
+          verifier: "product.created",
+          anchor: TOUR_ANCHORS.productNewSave,
+          title: "ثبت کنید",
+          body: ".",
+        },
+        { id: "c", kind: "explain", title: "ج", body: "." },
+      ],
+    };
+
+    it("refuses to mark an action step seen by pressing Next", () => {
+      expect(applyTourEvent(withAction, null, { type: "step_seen", stepId: "do-it" }, T1)).toEqual({
+        ok: false,
+        error: "requires_evidence",
+      });
+    });
+
+    it("accepts the verified event the server raises, and only for an action step", () => {
+      const progress = run([{ type: "verified", stepId: "do-it" }], null, withAction)!;
+      expect(progress.seenStepIds).toEqual(["do-it"]);
+      expect(applyTourEvent(withAction, progress, { type: "verified", stepId: "a" }, T1)).toEqual({
+        ok: false,
+        error: "not_verifiable",
+      });
+    });
+
+    it("cannot be completed while the action step is unverified", () => {
+      const partial = run([{ type: "step_seen", stepId: "a" }, { type: "step_seen", stepId: "c" }], null, withAction)!;
+      expect(applyTourEvent(withAction, partial, { type: "complete" }, T1)).toEqual({
+        ok: false,
+        error: "steps_unseen",
+      });
+      const done = run([{ type: "verified", stepId: "do-it" }, { type: "complete" }], partial, withAction)!;
+      expect(tourProgressView(withAction, done)).toMatchObject({ status: "completed", percent: 100 });
+    });
+
+    it("resumes at the action step rather than past it", () => {
+      const progress = run([{ type: "step_seen", stepId: "a" }], null, withAction)!;
+      expect(tourProgressView(withAction, progress).resumeStepId).toBe("do-it");
+    });
+
+    it("is rejected by the catalogue validator when it names no known verifier", () => {
+      const broken: TourDefinition = {
+        ...withAction,
+        steps: [
+          { id: "a", kind: "explain", title: "الف", body: "." },
+          // A key that is not in TOUR_VERIFIERS would make the step unfinishable.
+          { id: "x", kind: "action", verifier: "nothing.implemented" as never, title: "x", body: "." },
+        ],
+      };
+      expect(validateTours([broken])).toEqual(["test.task/x: action step needs a registered verifier"]);
+    });
+
+    it("is rejected when a step that asks for nothing real names a verifier", () => {
+      const broken: TourDefinition = {
+        ...withAction,
+        steps: [
+          { id: "a", kind: "explain", title: "الف", body: ".", verifier: "product.created" },
+        ],
+      };
+      expect(validateTours([broken])).toEqual(["test.task/a: only an action step may name a verifier"]);
+    });
+
+    it("ships one task tour, wired to a real success endpoint and the page's own permission", () => {
+      const task = tourById("crm.directory.first-customer")!;
+      expect(task.route).toBe("/crm/directory");
+      expect(task.eligibility.permissions).toEqual([PERMISSIONS.partiesManage]);
+      const action = task.steps.filter((step) => step.kind === "action");
+      expect(action).toHaveLength(1);
+      expect(action[0].verifier).toBe("party.created");
+      // The step points at the button the member must press, and that anchor
+      // exists in the shared party directory rather than in a tour-only shell.
+      expect(action[0].anchor).toBe(TOUR_ANCHORS.partiesAdd);
+      // The member is told, in the first step, that nothing will be done for them.
+      expect(task.steps[0].kind).toBe("explain");
+    });
+  });
+
   describe("when the tour is revised", () => {
     const completed = run([
       { type: "step_seen", stepId: "a" },

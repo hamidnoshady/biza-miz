@@ -1,3 +1,4 @@
+import { gateWooCatalogueCreate } from "../data-transfer/catalogue-gate";
 /**
  * Phase 23 (issue #118) — Wave 3: pull products and customers from a
  * WooCommerce store into the local menu/customer directory, remembering each
@@ -339,7 +340,18 @@ async function upsertRetailProduct(
   };
 
   const existing = await localIdForRemote(businessId, connection.id, "product", remoteId);
-  if (existing) return applyUpdate(existing);
+  if (existing) {
+    const { rows } = await query(
+      `SELECT 1 FROM integration_mappings WHERE business_id=$1 AND connection_id=$2 AND entity_type='product'
+       AND remote_id=$3 AND last_pushed_payload->>'catalogueMetadataOnly'='true'`,
+      [businessId, connection.id, remoteId],
+    );
+    if (rows.length) {
+      await recordProductShape(connection, product);
+      return "updated";
+    }
+    return applyUpdate(existing);
+  }
 
   // Every create below runs under the identity lock (audit F13): a second
   // delivery of the same new product waits, finds the first one's mapping and
@@ -356,7 +368,7 @@ async function upsertRetailProduct(
   if (publication) {
     // The signed product echo is itself remote evidence. Without its stable
     // operation marker, wait for the delivery ACK instead of cloning a SKU.
-    if (publicationId !== publication.payload.__operationId) throw new Error("publication_awaiting_ack");
+    if (publication.payload.__catalogueMetadataOnly || publicationId !== publication.payload.__operationId) throw new Error("publication_awaiting_ack");
     if (publication.payload.sku !== product.sku || publication.payload.__wooType !== inferWooProductType(product) ||
       String(publication.payload.__parentRemoteId ?? "") !== String(product.parent_id || "")) throw new Error("publication_echo_mismatch");
     const linked = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async client => {
@@ -369,6 +381,7 @@ async function upsertRetailProduct(
   }
   if (shape.container) {
     const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
+      await gateWooCatalogueCreate(client, businessId, locationId, product.sku);
       const { rows } = await client.query<{ id: string }>(
         `INSERT INTO items (location_id, name, sku, kind, tracking)
          VALUES ($1, $2, $3, 'variant_parent', 'none') RETURNING id`,
@@ -395,6 +408,7 @@ async function upsertRetailProduct(
   // Item + stock + attributes + mapping in one transaction, so a retry after a
   // partial failure cannot orphan a stock row or duplicate a variant.
   const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
+    await gateWooCatalogueCreate(client, businessId, locationId, product.sku);
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO items (location_id, parent_item_id, name, sku, kind, tracking)
        VALUES ($1, $2, $3, $4, $5, 'none') RETURNING id`,
@@ -476,6 +490,7 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
   const primary = images[0] ?? null;
   const meta: Record<string, unknown> = {
     wooType: inferWooProductType(product),
+    remoteSku: product.sku ?? null,
     remoteParentId: product.parent_id ? String(product.parent_id) : null,
     remoteStatus: typeof product.status === "string" && product.status ? product.status : null,
     remoteManageStock: Boolean(product.manage_stock),
