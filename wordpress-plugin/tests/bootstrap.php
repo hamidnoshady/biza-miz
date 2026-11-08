@@ -15,6 +15,10 @@ tests_add_filter( 'muplugins_loaded', static function () {
 	$includes = dirname( __DIR__ ) . '/pos-accounting-connector/includes/';
 	require_once $includes . 'class-pos-log.php';
 	require_once $includes . 'class-pos-queue.php';
+	// The media snapshot persists where it stopped through the export cursor
+	// (#1206 PERF-05), and the plugin's own loader includes this before the
+	// sync class. Without it the snapshot walk is a fatal, not a test failure.
+	require_once $includes . 'class-pos-export-cursor.php';
 	require_once $includes . 'class-pos-sync.php';
 } );
 require $tests_dir . '/includes/bootstrap.php';

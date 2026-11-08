@@ -86,6 +86,7 @@ export const REIMBURSABLE_COST_ERROR_STATUS: Record<AgencyReimbursableCostErrorC
   settlement_not_found: 404,
   settlement_not_posted: 409,
   settlement_already_reversed: 409,
+  invalid_vendor: 400,
 };
 
 /** The SQLSTATE on an error, read off the shape rather than by importing `pg`. */

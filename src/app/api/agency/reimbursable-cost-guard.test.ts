@@ -83,6 +83,7 @@ const EXPECTED_STATUS: Record<AgencyReimbursableCostErrorCode, number> = {
   settlement_not_found: 404,
   settlement_not_posted: 409,
   settlement_already_reversed: 409,
+  invalid_vendor: 400,
 };
 
 describe("reimbursable-cost-guard", () => {
@@ -234,6 +235,15 @@ describe("readRechargeBody — the recharge's request shape", () => {
       expect(source).toContain("withTenantScope");
       expect(source).toContain("requirePermission(PERMISSIONS.financePayablesManage)");
       expect(source).not.toContain("requirePermission(PERMISSIONS.financeExpensesManage)");
+    }
+  });
+
+  it("requires directory-read authority when assigning canonical vendor identities", () => {
+    for (const path of ["src/app/api/agency/reimbursable-costs/route.ts", "src/app/api/agency/reimbursable-costs/[id]/route.ts"]) {
+      const source = readFileSync(path, "utf8");
+      expect(source).toContain("requirePermission(PERMISSIONS.financeExpensesManage)");
+      expect(source).toContain("requirePermission(PERMISSIONS.partiesView)");
+      expect(source).toContain("body.vendorPartyId");
     }
   });
 

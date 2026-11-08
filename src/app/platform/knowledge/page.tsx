@@ -4,11 +4,14 @@
  * The knowledge base console — where the super-admin team authors everything
  * «مرکز آموزش» shows.
  *
- * Three tabs, one capability (`knowledge.manage` for writes; any admin reads):
+ * Four tabs, one capability (`knowledge.manage` for writes; any admin reads):
  *
  *  - «مقالات»      the guides themselves: markdown body with live preview,
  *                  video/cover, sections-taught, tags, publish state
  *                  (migration 0131);
+ *  - «تورهای تعاملی» the authored guided tours behind each page's «آموزش»
+ *                  button: steps, anchors, eligibility, publish and rollback
+ *                  (issue #972, migration 0288);
  *  - «دسته‌بندی‌ها» the category builder — the nested side-menu tree members
  *                  browse by;
  *  - «برچسب‌ها»    cross-cutting tags for filtering;
@@ -22,6 +25,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   BookOpenIcon,
   FolderTreeIcon,
+  GraduationCapIcon,
   NewspaperIcon,
   TagIcon,
 } from "lucide-react";
@@ -29,12 +33,14 @@ import { api, useCan } from "../ui";
 import { ArticlesPanel } from "./kb-articles-panel";
 import { CategoriesPanel } from "./kb-categories-panel";
 import { TagsPanel } from "./kb-tags-panel";
+import { ToursPanel } from "./kb-tours-panel";
 import type { ConsoleCategory, ConsoleTag } from "./kb-types";
 
-type Tab = "articles" | "categories" | "tags";
+type Tab = "articles" | "tours" | "categories" | "tags";
 
 const TABS: { key: Tab; label: string; icon: typeof NewspaperIcon }[] = [
   { key: "articles", label: "مقالات", icon: NewspaperIcon },
+  { key: "tours", label: "تورهای تعاملی", icon: GraduationCapIcon },
   { key: "categories", label: "دسته‌بندی‌ها", icon: FolderTreeIcon },
   { key: "tags", label: "برچسب‌ها", icon: TagIcon },
 ];
@@ -68,7 +74,7 @@ export default function KnowledgePage() {
         <div className="min-w-0">
           <h1 className="text-xl font-bold">پایگاه دانش</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            محتوای «مرکز آموزش» کاربران را اینجا بسازید: مقاله، دسته و برچسب.
+            محتوای «مرکز آموزش» کاربران را اینجا بسازید: مقاله، تور تعاملی، دسته و برچسب.
             صفحه‌های مقصد هر راهنما را در همان فرم ایجاد یا ویرایش مقاله انتخاب کنید.
             {canManage ? "" : " (فقط مشاهده — تغییر در اختیار مهندس و مدیر ارشد است.)"}
           </p>
@@ -101,6 +107,8 @@ export default function KnowledgePage() {
 
       {tab === "articles" ? (
         <ArticlesPanel categories={categories} tags={tags} onChanged={loadTaxonomy} />
+      ) : tab === "tours" ? (
+        <ToursPanel />
       ) : tab === "categories" ? (
         <CategoriesPanel />
       ) : (

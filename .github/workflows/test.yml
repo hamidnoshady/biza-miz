@@ -74,7 +74,8 @@ permissions:
 
 defaults:
   run:
-    # Windows PowerShell 5.1 — always present on Windows, unlike `pwsh`.
+    # Windows-specific jobs still use Windows PowerShell 5.1; portable checks
+    # override the shell to Bash on Ubuntu.
     shell: powershell
 
 env:
@@ -96,7 +97,10 @@ env:
 jobs:
   lint:
     name: ESLint (noninteractive)
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -108,7 +112,10 @@ jobs:
 
   typecheck:
     name: type check
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     # A clean full-program `tsc --noEmit` exceeds the shared 3072 MB workflow
     # cap after the knowledge/notifications/warehouse merges grew the tree:
     # it dies with `FATAL ERROR: Ineffective mark-compacts near heap limit`,
@@ -146,14 +153,14 @@ jobs:
       # exit-code gate. `--pretty false` keeps diagnostics one-per-line.
       - name: Type check
         id: typecheck
-        shell: cmd
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: |
+          set +e
           node node_modules/typescript/lib/tsc.js --noEmit --extendedDiagnostics --pretty false > tsc-output.log 2>&1
-          set TSC_EXIT=%ERRORLEVEL%
-          type tsc-output.log
-          exit /b %TSC_EXIT%
+          status=$?
+          cat tsc-output.log
+          exit "$status"
       # tsc has no problem matcher here and the job-log endpoint is
       # unreachable from some debugging environments, so a red type check was
       # previously opaque ("Process completed with exit code 1" was all that
@@ -163,15 +170,18 @@ jobs:
       - name: Surface tsc diagnostics on failure
         if: failure() && steps.typecheck.outcome == 'failure'
         run: |
-          if (Test-Path tsc-output.log) {
-            Get-Content tsc-output.log -TotalCount 80 | ForEach-Object {
-              Write-Host ("::error::" + ($_ -replace '%', '%25'))
-            }
-          }
+          if [[ -f tsc-output.log ]]; then
+            head -n 80 tsc-output.log | while IFS= read -r line; do
+              printf '::error::%s\n' "${line//%/%25}"
+            done
+          fi
 
   unit-tests:
     name: unit tests
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -185,7 +195,10 @@ jobs:
 
   build:
     name: production build
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     # The web bundle now includes the archive generator, QR verifier and media
     # protection paths. Give Next's single-process webpack build the full
     # runner headroom; the lower 6144 MB workflow default remains appropriate
@@ -206,7 +219,7 @@ jobs:
           key: nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', 'next.config.ts', 'tsconfig.json', 'package.json') }}
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
-      - run: ./scripts/ci-next-build.ps1
+      - run: bash ./scripts/ci-next-build.sh
 
   # The ~250-file database suite is strictly serial (`fileParallelism: false`,
   # one worker, see vitest.db.config.ts), and on a single Windows runner it
@@ -389,7 +402,15 @@ jobs:
   # auto-accepted to make a red run go green.
   visual-regression:
     name: visual regression
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`. This job installs the Chromium that
+    # `playwright` (1.56.0) pins, and Playwright builds support per Ubuntu
+    # release: on 26.04 it aborts with "Playwright does not support chromium on
+    # ubuntu26.04-x64" before it downloads anything, so the whole job dies at
+    # the install step. `ubuntu-latest` rolled from 24.04 to 26.04 on
+    # 2026-11-07 and turned every run red without a code change. A pinned
+    # image also keeps the *rasterisation* stable: the baselines under
+    # docs/design/visual are recorded against one OS and font stack.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -536,7 +557,13 @@ jobs:
   # unrelated, already-tracked baseline-image diff in that job.
   media-e2e-tests:
     name: media E2E tests
-    runs-on: ubuntu-latest
+    # Pinned for the same reason as `visual-regression`: this job's first real
+    # step is `npx playwright install --with-deps chromium`, and Playwright
+    # 1.56.0 refuses to install on ubuntu-26.04 ("Playwright does not support
+    # chromium on ubuntu26.04-x64"), which is where `ubuntu-latest` moved on
+    # 2026-11-07. Keep the two jobs on the same image — they both drive the
+    # browser suite.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -707,7 +734,10 @@ jobs:
   # (issue #755 §22).
   required:
     name: all checks passed
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     needs: [lint, typecheck, unit-tests, build, integration-tests, api-guard-tests, data-transfer-tests, design-checks, visual-regression, media-e2e-tests]
     if: always()
     steps:
@@ -717,9 +747,14 @@ jobs:
           # `skipped` in the log instead of only changing a boolean.
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          Write-Host "job results: $env:RESULTS"
-          $bad = @($env:RESULTS -split '\s+' | Where-Object { $_ -in @('failure', 'cancelled', 'skipped') })
-          if ($bad.Count -gt 0) {
-            Write-Host "::error::One or more required checks failed, were cancelled, or did not run: $($bad -join ', ')"
+          echo "job results: $RESULTS"
+          if [[ -z "${RESULTS//[[:space:]]/}" ]]; then
+            echo "::error::No required check results were reported"
             exit 1
-          }
+          fi
+          for result in $RESULTS; do
+            if [[ "$result" != "success" ]]; then
+              echo "::error::Required check did not succeed: $result"
+              exit 1
+            fi
+          done
