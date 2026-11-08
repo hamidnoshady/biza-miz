@@ -25,6 +25,7 @@ import {
   ArrowDownIcon,
   HistoryIcon,
   LayoutGridIcon,
+  Maximize2Icon,
   PanelLeftOpenIcon,
   Settings2Icon,
   SparklesIcon,
@@ -695,6 +696,18 @@ export function AiChatHub({
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5">
+            {compact ? (
+              <Button
+                type="button"
+                size="icon-sm"
+                variant="ghost"
+                onClick={() => router.push("/dashboard")}
+                aria-label="باز کردن صفحهٔ دستیار"
+                title="باز کردن صفحهٔ دستیار"
+              >
+                <Maximize2Icon className="size-4" aria-hidden="true" />
+              </Button>
+            ) : null}
             {!compact ? <Button
               type="button"
               variant={widgetsSheetOpen ? "secondary" : "outline"}
@@ -827,8 +840,9 @@ export function AiChatHub({
           ref={scrollRef}
           onScroll={onThreadScroll}
           className={cn(
-            "ai-chat-scroll relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3 sm:px-6",
-            isWelcome ? "py-3 sm:py-5" : "pt-4 pb-2",
+            "ai-chat-scroll relative flex min-h-0 flex-1 flex-col overflow-y-auto px-3",
+            compact ? "py-2.5" : "sm:px-6",
+            !compact && (isWelcome ? "py-3 sm:py-5" : "pt-4 pb-2"),
           )}
         >
           {loadingConversation ? (
@@ -837,6 +851,10 @@ export function AiChatHub({
               className="mx-auto w-full max-w-3xl py-6"
               label="در حال بازکردن مکالمه"
             />
+          ) : isWelcome && compact ? (
+            <p className="mt-auto text-sm font-medium text-foreground">
+              چطور می‌توانم کمکتان کنم؟
+            </p>
           ) : isWelcome ? (
             <div
               ref={heroRef}
@@ -905,12 +923,13 @@ export function AiChatHub({
             className={cn(
               "mx-auto w-full max-w-3xl shrink-0",
               isWelcome
-                ? "mt-4 sm:mt-5"
+                ? compact ? "mt-2" : "mt-4 sm:mt-5"
                 : "sticky bottom-0 z-10 mt-auto border-t border-border/70 bg-background/95 pb-2 pt-2.5 backdrop-blur",
             )}
           >
             <ChatComposer
               mode="dashboard"
+              compact={compact}
               inputRef={composerInputRef}
               input={input}
               setInput={setInput}
@@ -957,7 +976,7 @@ export function AiChatHub({
               aria-label="پیشنهادهای شروع گفتگو"
               className="mx-auto mb-auto mt-3 w-full max-w-3xl shrink-0 sm:mt-4"
             >
-              <div className="grid w-full gap-2.5 sm:grid-cols-3">
+              <div className={cn("grid w-full", compact ? "grid-cols-1 gap-1.5" : "gap-2.5 sm:grid-cols-3")}>
                 {suggestions.slice(0, 3).map((suggestion) => (
                   <button
                     key={suggestion}
@@ -965,7 +984,8 @@ export function AiChatHub({
                     onClick={() => handleStarterSelect(suggestion)}
                     className={cn(
                       cardClass,
-                      "flex min-h-16 items-start gap-2.5 p-3 text-start text-xs leading-5 text-foreground/85 transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:text-[13px]",
+                      "flex gap-2.5 text-start text-xs leading-5 text-foreground/85 transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      compact ? "items-center p-2" : "min-h-16 items-start p-3 sm:text-[13px]",
                     )}
                   >
                     <span className="mt-0.5 grid size-6 shrink-0 place-items-center rounded-lg bg-amber-100/80 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
