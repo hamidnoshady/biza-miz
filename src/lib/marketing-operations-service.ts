@@ -1,5 +1,5 @@
 import { query, withTenantTransaction } from "./db";
-import { parseTransition, type AssignmentInput, type AssignmentStatus, type TargetInput } from "./marketing-operations";
+import { parseTransition, type AssignmentInput, type AssignmentStatus, type TargetInput, type TargetChange, type TargetStatus } from "./marketing-operations";
 import { branchScopeSql } from "./location-access";
 
 function escaped(search: string) { return search.replace(/[\\%_]/g, "\\$&"); }
@@ -10,13 +10,13 @@ async function audit(businessId: string, locationId: string, actorId: string, ac
 export async function targetLocations(businessId: string, locations: string[]) {
   return (await query<{ id: string; name: string }>(`SELECT id, name FROM locations WHERE business_id=$1 AND id=ANY($2::uuid[]) AND is_active ORDER BY name, id`, [businessId, locations])).rows;
 }
-export async function listTargets(businessId: string, locations: string[], search: string, page: number) {
-  const { rows } = await query<{ id: string; site_label: string; city: string; neighborhood: string; location_name: string; party_linked: boolean }>(
-    `SELECT t.id, t.site_label, t.city, t.neighborhood, l.name AS location_name, (t.party_id IS NOT NULL) AS party_linked
+export async function listTargets(businessId: string, locations: string[], search: string, page: number, status: TargetStatus = "active") {
+  const { rows } = await query<{ id: string; site_label: string; city: string; neighborhood: string; location_name: string; party_linked: boolean; status: TargetStatus; revision: number }>(
+    `SELECT t.id, t.site_label, t.city, t.neighborhood, l.name AS location_name, (t.party_id IS NOT NULL) AS party_linked, t.status, t.revision
        FROM marketing_targets t JOIN locations l ON l.business_id=t.business_id AND l.id=t.location_id
-      WHERE t.business_id=$1 AND t.location_id=ANY($2::uuid[]) AND t.status='active'
+      WHERE t.business_id=$1 AND t.location_id=ANY($2::uuid[]) AND t.status=$5
         AND (t.site_label ILIKE '%' || $3 || '%' ESCAPE '\\' OR t.city ILIKE '%' || $3 || '%' ESCAPE '\\')
-      ORDER BY t.created_at DESC, t.id DESC LIMIT 21 OFFSET $4`, [businessId, locations, escaped(search), (page-1)*20]);
+      ORDER BY t.created_at DESC, t.id DESC LIMIT 21 OFFSET $4`, [businessId, locations, escaped(search), (page-1)*20, status]);
   return { targets: rows.slice(0,20), hasMore: rows.length > 20 };
 }
 export async function createTarget(businessId: string, actor: string, locations: string[], input: TargetInput) {
@@ -33,6 +33,35 @@ export async function createTarget(businessId: string, actor: string, locations:
     return rows[0];
   });
 }
+/** Edit a site or change its lifecycle; the CRM party and branch never change here. */
+export async function changeTarget(businessId: string, actor: string, locations: string[], id: string, change: TargetChange) {
+  return withTenantTransaction(businessId, async () => {
+    const { rows } = await query<{ location_id: string; status: TargetStatus; revision: number; site_label: string; city: string; neighborhood: string }>(
+      `SELECT t.location_id, t.status, t.revision, t.site_label, t.city, t.neighborhood FROM marketing_targets t
+        JOIN locations l ON l.business_id=t.business_id AND l.id=t.location_id
+        WHERE t.business_id=$1 AND t.id=$2 AND t.location_id=ANY($3::uuid[]) AND l.is_active
+        FOR UPDATE OF t FOR SHARE OF l`, [businessId,id,locations]);
+    const target = rows[0];
+    if (!target) return "not_found" as const;
+    if (target.revision !== change.expectedRevision) return "conflict" as const;
+    if ((change.action === "archive" && target.status !== "active") || (change.action === "restore" && target.status !== "archived") || (change.action === "edit" && target.status !== "active")) return "conflict" as const;
+    if (change.action === "archive") {
+      // Creation takes FOR SHARE on this target before inserting; locking the
+      // target first makes the open-work check serialize with assignment creation.
+      const open = await query(`SELECT 1 FROM marketing_assignments WHERE business_id=$1 AND target_id=$2 AND status IN ('planned','in_progress') LIMIT 1`, [businessId,id]);
+      if (open.rowCount) return "open_assignments" as const;
+    }
+    const nextStatus = change.action === "archive" ? "archived" : change.action === "restore" ? "active" : target.status;
+    const siteLabel = change.action === "edit" ? change.siteLabel : target.site_label;
+    const city = change.action === "edit" ? change.city : target.city;
+    const neighborhood = change.action === "edit" ? change.neighborhood : target.neighborhood;
+    await query(`UPDATE marketing_targets SET site_label=$3, city=$4, neighborhood=$5, status=$6, revision=revision+1, updated_at=now() WHERE business_id=$1 AND id=$2`,
+      [businessId,id,siteLabel,city,neighborhood,nextStatus]);
+    await audit(businessId,target.location_id,actor,"growth.marketing_target_changed","marketing_target",id,{ action: change.action, from: { status: target.status, siteLabel: target.site_label, city: target.city, neighborhood: target.neighborhood }, to: { status: nextStatus, siteLabel, city, neighborhood }, revision: target.revision+1 });
+    return "updated" as const;
+  });
+}
+
 export async function listAssignments(businessId: string, locations: string[], search: string, page: number) {
   const { rows } = await query<{ id: string; title: string; status: AssignmentStatus; due_date: string | null; target: string; agent: string; location_name: string }>(
     `SELECT x.id, x.title, x.status, x.due_date::text AS due_date, t.site_label AS target,
@@ -46,14 +75,14 @@ export async function listAssignments(businessId: string, locations: string[], s
       ORDER BY x.created_at DESC, x.id DESC LIMIT 21 OFFSET $4`, [businessId, locations, escaped(search), (page-1)*20]);
   return { assignments: rows.slice(0,20), hasMore: rows.length > 20 };
 }
-export async function assignmentOptions(businessId: string, locations: string[], branchId: string | null) {
+export async function assignmentOptions(businessId: string, locations: string[], branchId: string | null, targetSearch = "", targetPage = 1, agentSearch = "", agentPage = 1) {
   const selected = branchId && locations.includes(branchId) ? [branchId] : [];
   const [branches, targets, agents] = await Promise.all([
     targetLocations(businessId, locations),
-    query<{ id: string; location_id: string; site_label: string }>(`SELECT id, location_id, site_label FROM marketing_targets WHERE business_id=$1 AND location_id=ANY($2::uuid[]) AND status='active' ORDER BY site_label, id LIMIT 500`,[businessId,selected]),
-    query<{ id: string; location_id: string; name: string }>(`SELECT a.id, a.location_id, CASE WHEN a.user_id IS NULL THEN a.display_name ELSE u.full_name END AS name FROM marketing_agents a LEFT JOIN users u ON u.id=a.user_id AND u.business_id=a.business_id WHERE a.business_id=$1 AND a.location_id=ANY($2::uuid[]) AND a.status='active' AND (a.user_id IS NULL OR (u.is_active AND (u.membership_status IS NULL OR u.membership_status='active') AND ${branchScopeSql({ alias: "u", locationParam: "a.location_id" })})) ORDER BY name, a.id LIMIT 500`,[businessId,selected]),
+    query<{ id: string; location_id: string; site_label: string }>(`SELECT id, location_id, site_label FROM marketing_targets WHERE business_id=$1 AND location_id=ANY($2::uuid[]) AND status='active' AND site_label ILIKE '%' || $3 || '%' ESCAPE '\\' ORDER BY site_label, id LIMIT 21 OFFSET $4`,[businessId,selected,escaped(targetSearch),(targetPage-1)*20]),
+    query<{ id: string; location_id: string; name: string }>(`SELECT a.id, a.location_id, CASE WHEN a.user_id IS NULL THEN a.display_name ELSE u.full_name END AS name FROM marketing_agents a LEFT JOIN users u ON u.id=a.user_id AND u.business_id=a.business_id WHERE a.business_id=$1 AND a.location_id=ANY($2::uuid[]) AND a.status='active' AND (a.user_id IS NULL OR (u.is_active AND (u.membership_status IS NULL OR u.membership_status='active') AND ${branchScopeSql({ alias: "u", locationParam: "a.location_id" })})) AND (CASE WHEN a.user_id IS NULL THEN a.display_name ELSE u.full_name END) ILIKE '%' || $3 || '%' ESCAPE '\\' ORDER BY name, a.id LIMIT 21 OFFSET $4`,[businessId,selected,escaped(agentSearch),(agentPage-1)*20]),
   ]);
-  return { locations: branches, targets: targets.rows, agents: agents.rows };
+  return { locations: branches, targets: targets.rows.slice(0,20), targetHasMore: targets.rows.length > 20, agents: agents.rows.slice(0,20), agentHasMore: agents.rows.length > 20 };
 }
 export async function createAssignment(businessId: string, actor: string, locations: string[], input: AssignmentInput) {
   if (!locations.includes(input.locationId)) return null;
@@ -79,6 +108,45 @@ export async function transitionAssignment(businessId: string, actor: string, lo
     if (!rows[0]) return "not_found" as const;
     if (rows[0].status !== expected) return "conflict" as const;
     await query(`UPDATE marketing_assignments SET status=$3, updated_at=now() WHERE business_id=$1 AND id=$2`,[businessId,id,next]);
+    await audit(businessId,rows[0].location_id,actor,"growth.marketing_assignment_status_changed","marketing_assignment",id,{ from: expected, to: next });
+    return "updated" as const;
+  });
+}
+
+/** Own work only: identity is resolved by the authenticated membership, not the request. */
+export async function listOwnAssignments(businessId: string, actor: string, locations: string[], search: string, page: number) {
+  const { rows } = await query<{ id: string; title: string; status: AssignmentStatus; due_date: string | null; target: string; location_name: string }>(
+    `SELECT x.id, x.title, x.status, x.due_date::text AS due_date, t.site_label AS target, l.name AS location_name
+       FROM marketing_assignments x
+       JOIN marketing_agents a ON a.business_id=x.business_id AND a.location_id=x.location_id AND a.id=x.agent_id
+       JOIN users u ON u.business_id=a.business_id AND u.id=a.user_id
+       JOIN marketing_targets t ON t.business_id=x.business_id AND t.location_id=x.location_id AND t.id=x.target_id
+       JOIN locations l ON l.business_id=x.business_id AND l.id=x.location_id
+      WHERE x.business_id=$1 AND x.location_id=ANY($2::uuid[]) AND u.id=$3
+        AND a.status='active' AND u.is_active AND (u.membership_status IS NULL OR u.membership_status='active')
+        AND l.is_active AND ${branchScopeSql({ alias: "u", locationParam: "x.location_id" })}
+        AND x.title ILIKE '%' || $4 || '%' ESCAPE '\\'
+      ORDER BY x.created_at DESC, x.id DESC LIMIT 21 OFFSET $5`,
+    [businessId, locations, actor, escaped(search), (page-1)*20]);
+  return { assignments: rows.slice(0,20), hasMore: rows.length > 20 };
+}
+
+/** An employee may start/complete their own work; cancellation stays manager-owned. */
+export async function transitionOwnAssignment(businessId: string, actor: string, locations: string[], id: string, expected: AssignmentStatus, next: AssignmentStatus) {
+  if (!parseTransition({ expected, next }) || next === "canceled") return "invalid" as const;
+  return withTenantTransaction(businessId, async () => {
+    const { rows } = await query<{ location_id: string; status: AssignmentStatus }>(
+      `SELECT x.location_id, x.status FROM marketing_assignments x
+       JOIN marketing_agents a ON a.business_id=x.business_id AND a.location_id=x.location_id AND a.id=x.agent_id
+       JOIN users u ON u.business_id=a.business_id AND u.id=a.user_id
+       JOIN locations l ON l.business_id=x.business_id AND l.id=x.location_id
+       WHERE x.business_id=$1 AND x.id=$2 AND x.location_id=ANY($3::uuid[]) AND u.id=$4
+         AND a.status='active' AND u.is_active AND (u.membership_status IS NULL OR u.membership_status='active')
+         AND l.is_active AND ${branchScopeSql({ alias: "u", locationParam: "x.location_id" })}
+       FOR UPDATE OF x FOR SHARE OF a, u, l`, [businessId,id,locations,actor]);
+    if (!rows[0]) return "not_found" as const;
+    if (rows[0].status !== expected) return "conflict" as const;
+    await query(`UPDATE marketing_assignments SET status=$3, updated_at=now() WHERE business_id=$1 AND id=$2`, [businessId,id,next]);
     await audit(businessId,rows[0].location_id,actor,"growth.marketing_assignment_status_changed","marketing_assignment",id,{ from: expected, to: next });
     return "updated" as const;
   });
