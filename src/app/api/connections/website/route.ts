@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { connectWebsite, disconnectWebsite, getWebsiteConnection } from "@/lib/website/connection-service";
+import { connectWebsite, disconnectWebsite, getWebsiteConnection, getWebsiteConnectionRow, listWebsiteConnectionRows, summarize } from "@/lib/website/connection-service";
 import { summarizeWebsiteQueue } from "@/lib/website/catalog-service";
 import { WEBSITE_ADAPTER_KEYS } from "@/lib/website/adapter";
+import { isUuid } from "@/lib/menu-validation";
 
 /**
  * Phase 38 (issue #379) — the platform-site connection and the POS→site
@@ -17,17 +18,23 @@ import { WEBSITE_ADAPTER_KEYS } from "@/lib/website/adapter";
  * GET returns the masked summary and the queue counts. The API key is never
  * in any response — `WebsiteConnectionSummary` has no field for it.
  */
-export const GET = withTenantScope(async () => {
+export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.cmsView);
   if (error) return error;
 
+  const requested = request.nextUrl.searchParams.get("connectionId");
+  if (requested && !isUuid(requested)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  const connectionId = requested ?? undefined;
+  if (connectionId && !(await getWebsiteConnectionRow(session.businessId, connectionId))) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
   const enabled = true;
-
-  const [connection, queue] = await Promise.all([
-    getWebsiteConnection(session.businessId),
-    summarizeWebsiteQueue(session.businessId),
+  const [connection, connections, queue] = await Promise.all([
+    connectionId ? getWebsiteConnectionRow(session.businessId, connectionId).then((row) => row ? summarize(row) : null) : getWebsiteConnection(session.businessId),
+    listWebsiteConnectionRows(session.businessId),
+    summarizeWebsiteQueue(session.businessId, connectionId),
   ]);
-  const response = NextResponse.json({ enabled, connection, queue });
+  const response = NextResponse.json({ enabled, connection, connections: connections.map(summarize), queue });
   response.headers.set("Cache-Control", "no-store");
   return response;
 });
@@ -82,10 +89,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 });
 
 /** Remove this app's stored key. The site and its content stay. */
-export const DELETE = withTenantScope(async () => {
+export const DELETE = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.cmsConfigure);
   if (error) return error;
 
-  await disconnectWebsite(session.businessId);
+  const connectionId = request.nextUrl.searchParams.get("connectionId");
+  if (connectionId && !isUuid(connectionId)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  await disconnectWebsite(session.businessId, connectionId ?? undefined);
   return NextResponse.json({ connection: null });
 });

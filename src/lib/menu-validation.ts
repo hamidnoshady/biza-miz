@@ -137,6 +137,7 @@ export function parseOptionalMargin(value: unknown): ParseResult<number | null |
 
 export interface CategoryCreateInput {
   name: string;
+  description?: string | null;
   /** Absent → the business's default tax rate (resolved by the service). */
   taxRate?: number;
   sortOrder?: number;
@@ -145,6 +146,7 @@ export interface CategoryCreateInput {
 
 export interface CategoryPatchInput {
   name?: string;
+  description?: string | null;
   taxRate?: number;
   sortOrder?: number;
   isActive?: boolean;
@@ -156,6 +158,11 @@ export function validateCategoryCreate(body: unknown): ParseResult<CategoryCreat
   const name = parseName(raw.name, 120);
   if (!name.ok) return name;
   const value: CategoryCreateInput = { name: name.value };
+  if (raw.description !== undefined && raw.description !== null) {
+    const description = parseOptionalText(raw.description, MENU_DESCRIPTION_MAX_LENGTH);
+    if (!description.ok) return description;
+    value.description = description.value;
+  }
   if (raw.taxRate !== undefined && raw.taxRate !== null) {
     const taxRate = parsePercent(raw.taxRate);
     if (!taxRate.ok) return taxRate;
@@ -183,6 +190,12 @@ export function validateCategoryPatch(body: unknown): ParseResult<CategoryPatchI
     const name = parseName(raw.name, 120);
     if (!name.ok) return name;
     value.name = name.value;
+    fields++;
+  }
+  if (raw.description !== undefined) {
+    const description = parseOptionalText(raw.description, MENU_DESCRIPTION_MAX_LENGTH);
+    if (!description.ok) return description;
+    value.description = description.value;
     fields++;
   }
   if (raw.taxRate !== undefined) {

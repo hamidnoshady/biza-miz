@@ -34,9 +34,14 @@ const productsAdapter: EntityAdapter = {
       where.push(`m.id = ANY($${params.length}::uuid[])`);
     }
     if (options.filters.syncEnabledOnly === true) where.push("m.sync_enabled");
+    if (typeof options.filters.connectionId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.filters.connectionId)) {
+      params.push(options.filters.connectionId);
+      where.push(`m.connection_id = $${params.length}::uuid`);
+    }
     params.push(options.limit);
     const { rows } = await query<Record<string, unknown>>(
-      `SELECT m.id, m.local_kind AS "localKind", m.remote_id AS "remoteId",
+      `SELECT m.id, m.connection_id AS "connectionId", c.site_domain AS "siteDomain",
+              m.local_kind AS "localKind", m.remote_id AS "remoteId",
               m.sync_enabled AS "syncEnabled",
               m.last_pushed_price_rial AS "lastPushedPriceRial",
               m.last_pushed_stock AS "lastPushedStock",
@@ -45,6 +50,7 @@ const productsAdapter: EntityAdapter = {
          FROM website_product_map m
          LEFT JOIN menu_items mi ON m.local_kind = 'menu_item' AND mi.id = m.local_id
          LEFT JOIN items it ON m.local_kind = 'item' AND it.id = m.local_id
+         LEFT JOIN eshobe_cms_connections c ON c.id = m.connection_id AND c.business_id = m.business_id
         WHERE ${where.join(" AND ")}
         ORDER BY coalesce(mi.name, it.name)
         LIMIT $${params.length}`,
@@ -61,10 +67,28 @@ const productsAdapter: EntityAdapter = {
   async write(context, values, options) {
     const remoteId = text(values.remoteId);
     if (!remoteId) throw new RowRejection("شناسهٔ سایت الزامی است.");
+    const requestedConnection = text(values.connectionId);
+    if (requestedConnection && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestedConnection)) {
+      throw new RowRejection("شناسهٔ اتصال سایت معتبر نیست.");
+    }
+    const connections = await query<{ id: string }>(
+      `SELECT id FROM eshobe_cms_connections
+        WHERE business_id = $1 AND ($2::uuid IS NULL OR id = $2)
+        ORDER BY created_at, id`,
+      [context.businessId, requestedConnection ?? null],
+    );
+    if (requestedConnection && connections.rows.length !== 1) {
+      throw new RowRejection("اتصال سایت یافت نشد.");
+    }
+    if (!requestedConnection && connections.rows.length !== 1) {
+      return { status: "skipped", reason: "برای چند سایت، شناسهٔ اتصال را در ردیف وارد کنید." };
+    }
+    const connectionId = connections.rows[0]?.id;
+    if (!connectionId) return { status: "skipped", reason: "اتصال سایت یافت نشد." };
     const { rows } = await query<{ id: string }>(
       `SELECT id FROM website_product_map
-        WHERE business_id = $1 AND remote_id = $2 LIMIT 1`,
-      [context.businessId, remoteId],
+        WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3 LIMIT 1`,
+      [context.businessId, connectionId, remoteId],
     );
     const existing = rows[0];
     if (!existing) {

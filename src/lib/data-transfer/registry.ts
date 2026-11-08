@@ -1326,6 +1326,8 @@ const WEBSITE_PRODUCTS: EntityDefinition = {
       ],
       exportDefault: true,
     },
+    { key: "connectionId", label: "شناسهٔ اتصال سایت", type: "text", exportDefault: true },
+    { key: "siteDomain", label: "دامنهٔ سایت", type: "text", readOnly: true, exportDefault: true },
     { key: "remoteId", label: "شناسهٔ سایت", type: "text", aliases: ["remote id"], exportDefault: true },
     {
       key: "syncEnabled",
@@ -1338,7 +1340,7 @@ const WEBSITE_PRODUCTS: EntityDefinition = {
     { key: "lastPushedStock", label: "آخرین موجودی ارسالی", type: "number", readOnly: true, exportDefault: true },
     { key: "lastPushedAt", label: "آخرین ارسال", type: "date", readOnly: true, exportDefault: true },
   ],
-  duplicateRules: [{ key: "remote_id", label: "شناسهٔ سایت", fields: ["remoteId"] }],
+  duplicateRules: [{ key: "connection_remote_id", label: "اتصال و شناسهٔ سایت", fields: ["connectionId", "remoteId"] }],
 };
 
 const WEBSITE_PAGES: EntityDefinition = {

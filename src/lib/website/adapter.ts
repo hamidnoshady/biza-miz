@@ -67,6 +67,8 @@ export interface WebsiteMedia {
 }
 
 export interface MediaUpload {
+  /** Stable source identity; adapters recover an interrupted upload by it. */
+  sourceId?: string;
   filename: string;
   mimeType: string;
   bytes: Uint8Array;
@@ -83,28 +85,92 @@ export interface PostDraft {
   featuredImageId?: string;
 }
 
+export const WEBSITE_MENU_TAXONOMY_KEY = "biza_menu_categories";
+export const WEBSITE_SOURCE_SYSTEM = "biza_miz";
+
+export interface RemoteMenuCategory {
+  id: string;
+  sourceId: string;
+  name: string;
+  description: string | null;
+  sortOrder: number;
+}
+
+export interface MenuCategoryInput {
+  remoteId?: string;
+  taxonomyId: string;
+  sourceId: string;
+  name: string;
+  description?: string | null;
+  sortOrder: number;
+}
+
+export interface MenuModifierOption {
+  /** Present on a remote embedded row; omitted when first projected. */
+  remoteId?: string;
+  sourceId: string;
+  label: string;
+  /** Integer Rial; discounts are negative. */
+  priceDeltaRial: number;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+export interface MenuModifierGroup {
+  remoteId?: string;
+  sourceId: string;
+  label: string;
+  minSelect: number;
+  maxSelect: number;
+  isActive: boolean;
+  /** The attachment's order on this item, not the group's global order. */
+  sortOrder: number;
+  options: MenuModifierOption[];
+}
+
+export interface ProductAvailability {
+  published: boolean;
+  available: boolean;
+}
+
 export interface RemoteProduct {
   id: string;
   title: string;
   sku: string | null;
+  summary?: string | null;
   /** Integer Rial — converted by the adapter from the site's own unit. */
   priceRial: number;
   /** `null` when the site does not track stock for this product. */
   stock: number | null;
   status: PostStatus;
+  sourceId?: string | null;
+  imageId?: string | null;
+  categoryTermId?: string | null;
+  menuOrder?: number | null;
+  available?: boolean | null;
+  modifierGroups?: MenuModifierGroup[];
   updatedAt: string;
 }
 
 export interface RemoteProductInput {
-  /** When set, update this remote product; otherwise create one. */
+  /** When set, update this remote product; otherwise recover/create by sourceId. */
   remoteId?: string;
   title: string;
   sku?: string;
   summary?: string;
   /** Integer Rial. */
   priceRial: number;
-  /** Omit to leave the site's stock tracking alone. */
-  stock?: number;
+  /** Stable Accounting identity. Required for an idempotent create. */
+  sourceId?: string;
+  /** Omit to leave stock alone; null explicitly means unknown/untracked. */
+  stock?: number | null;
+  imageId?: string | null;
+  categoryTermId?: string | null;
+  menuOrder?: number;
+  published?: boolean;
+  available?: boolean;
+  inventoryManagedExternally?: boolean;
+  modifierGroups?: MenuModifierGroup[];
 }
 
 export interface ConnectionTest {
@@ -131,7 +197,11 @@ export interface WebsiteAdapter {
 
   listProducts(q: { limit: number; cursor?: string }): Promise<Page<RemoteProduct>>;
   upsertProduct(input: RemoteProductInput): Promise<RemoteProduct>;
-  setProductStock(remoteId: string, quantity: number): Promise<void>;
+  /** The dedicated product-menu taxonomy, never site navigation. */
+  upsertMenuTaxonomy(input: { remoteId?: string }): Promise<{ id: string }>;
+  upsertMenuCategory(input: MenuCategoryInput): Promise<RemoteMenuCategory>;
+  setProductAvailability(remoteId: string, input: ProductAvailability): Promise<void>;
+  setProductStock(remoteId: string, quantity: number | null): Promise<void>;
   setProductPrice(remoteId: string, priceRial: number): Promise<void>;
 }
 

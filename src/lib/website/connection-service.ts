@@ -89,12 +89,25 @@ export function summarize(row: WebsiteConnectionRow): WebsiteConnectionSummary {
   };
 }
 
-export async function getWebsiteConnectionRow(businessId: string): Promise<WebsiteConnectionRow | null> {
+export async function getWebsiteConnectionRow(businessId: string, connectionId?: string): Promise<WebsiteConnectionRow | null> {
   const { rows } = await query<WebsiteConnectionRow>(
-    `SELECT ${COLUMNS} FROM eshobe_cms_connections WHERE business_id = $1`,
-    [businessId],
+    `SELECT ${COLUMNS} FROM eshobe_cms_connections
+      WHERE business_id = $1 AND ($2::uuid IS NULL OR id = $2)
+      ORDER BY created_at, id LIMIT 1`,
+    [businessId, connectionId ?? null],
   );
   return rows[0] ?? null;
+}
+
+/** The original manager uses the first row; menu sync visits every active site. */
+export async function listWebsiteConnectionRows(businessId: string, activeOnly = false): Promise<WebsiteConnectionRow[]> {
+  const { rows } = await query<WebsiteConnectionRow>(
+    `SELECT ${COLUMNS} FROM eshobe_cms_connections
+      WHERE business_id = $1 AND ($2 = false OR status = 'active')
+      ORDER BY created_at, id`,
+    [businessId, activeOnly],
+  );
+  return rows;
 }
 
 export async function getWebsiteConnection(businessId: string): Promise<WebsiteConnectionSummary | null> {
@@ -108,14 +121,16 @@ export async function getWebsiteConnection(businessId: string): Promise<WebsiteC
 
 /**
  * Test seam: the mock adapter must survive across calls within one process
- * (its state is in memory), so the factory keeps one instance per business.
+ * (its state is in memory), so the factory keeps one instance per connection
+ * (and a legacy per-business instance for the connect probe).
  */
 const mockInstances = new Map<string, MockWebsiteAdapter>();
-export function mockAdapterFor(businessId: string): MockWebsiteAdapter {
-  let instance = mockInstances.get(businessId);
+export function mockAdapterFor(businessId: string, connectionId?: string): MockWebsiteAdapter {
+  const key = connectionId ? `${businessId}:${connectionId}` : businessId;
+  let instance = mockInstances.get(key);
   if (!instance) {
-    instance = new MockWebsiteAdapter();
-    mockInstances.set(businessId, instance);
+    instance = new MockWebsiteAdapter(connectionId ? { siteUrl: `https://${connectionId}.example.test` } : {});
+    mockInstances.set(key, instance);
   }
   return instance;
 }
@@ -125,7 +140,7 @@ export function resetMockAdapters(): void {
 }
 
 export function adapterFromRow(row: WebsiteConnectionRow): WebsiteAdapter {
-  if (row.adapter_key === "mock") return mockAdapterFor(row.business_id);
+  if (row.adapter_key === "mock") return mockAdapterFor(row.business_id, row.id);
   const key = resolveEncryptionKey(process.env);
   const config: CmsConfig = {
     baseUrl: row.base_url,
@@ -144,8 +159,8 @@ export class WebsiteNotConnectedError extends Error {
 }
 
 /** The adapter for a business, or `WebsiteNotConnectedError`. */
-export async function adapterForBusiness(businessId: string): Promise<{ adapter: WebsiteAdapter; row: WebsiteConnectionRow }> {
-  const row = await getWebsiteConnectionRow(businessId);
+export async function adapterForBusiness(businessId: string, connectionId?: string): Promise<{ adapter: WebsiteAdapter; row: WebsiteConnectionRow }> {
+  const row = await getWebsiteConnectionRow(businessId, connectionId);
   if (!row || row.status !== "active") throw new WebsiteNotConnectedError();
   return { adapter: adapterFromRow(row), row };
 }
@@ -198,7 +213,7 @@ export async function connectWebsite(businessId: string, input: ConnectWebsiteIn
   // For Payload the descriptor's id is what revalidation tags key on; the
   // adapter's test already checked the domain matched. Read it once more here
   // so the stored row names the site.
-  let siteId = "mock";
+  let siteId = `mock:${domain || "default"}`;
   if (input.adapterKey === "payload") {
     const { fetchSiteDescriptor } = await import("../cms/client");
     try {
@@ -216,7 +231,7 @@ export async function connectWebsite(businessId: string, input: ConnectWebsiteIn
        (business_id, adapter_key, site_id, site_domain, base_url, key_name, api_key_ciphertext,
         site_currency, status, last_checked_at, last_error)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', now(), NULL)
-     ON CONFLICT (business_id) DO UPDATE SET
+     ON CONFLICT (business_id, base_url, site_id) DO UPDATE SET
        push_prices = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.push_prices ELSE false END,
        push_stock = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.push_stock ELSE false END,
        product_scope = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.product_scope ELSE 'selected' END,
@@ -240,8 +255,16 @@ export async function connectWebsite(businessId: string, input: ConnectWebsiteIn
       currency,
     ],
   );
-  const row = (await getWebsiteConnectionRow(businessId))!;
-  return { ok: true, connection: summarize(row), siteName: test.siteName ?? null };
+  const row = await getWebsiteConnectionRow(businessId);
+  // The insert above may have added a second site; return the row for THIS
+  // probe, not the original manager's first connection.
+  const { rows: saved } = await query<{ id: string }>(
+    `SELECT id FROM eshobe_cms_connections WHERE business_id = $1 AND base_url = $2 AND site_id = $3`,
+    [businessId, input.adapterKey === "mock" ? baseUrl || "https://mock.local" : baseUrl, siteId],
+  );
+  const connected = saved[0] ? await getWebsiteConnectionRow(businessId, saved[0].id) : row;
+  if (!connected) return { ok: false, error: "connection_failed" };
+  return { ok: true, connection: summarize(connected), siteName: test.siteName ?? null };
 }
 
 /** Re-run the connection test on the stored credential and record the result. */
@@ -256,19 +279,29 @@ export async function testWebsiteConnection(businessId: string): Promise<{ ok: b
   return result;
 }
 
-export async function recordWebsiteError(businessId: string, error: string | null): Promise<void> {
+export async function recordWebsiteError(businessId: string, error: string | null, connectionId?: string): Promise<void> {
   await query(
-    `UPDATE eshobe_cms_connections SET last_checked_at = now(), last_error = $2, updated_at = now() WHERE business_id = $1`,
-    [businessId, error],
+    `UPDATE eshobe_cms_connections SET last_checked_at = now(), last_error = $2, updated_at = now()
+      WHERE business_id = $1 AND ($3::uuid IS NULL OR id = $3)`,
+    [businessId, error, connectionId ?? null],
   );
 }
 
-export async function disconnectWebsite(businessId: string): Promise<void> {
-  await query(`DELETE FROM eshobe_cms_connections WHERE business_id = $1`, [businessId]);
-  mockInstances.delete(businessId);
+export async function disconnectWebsite(businessId: string, connectionId?: string): Promise<void> {
+  const row = await getWebsiteConnectionRow(businessId, connectionId);
+  if (!row) return;
+  // Keep the connection identity and its remote maps. Reconnecting the same
+  // site reactivates this row instead of orphaning published products or
+  // forgetting which remote ids belong to this business.
+  await query(
+    `UPDATE eshobe_cms_connections SET status = 'disabled', updated_at = now()
+      WHERE business_id = $1 AND id = $2`,
+    [businessId, row.id],
+  );
 }
 
 export interface WebsiteSyncSettingsInput {
+  connectionId?: string;
   pushPrices?: boolean;
   pushStock?: boolean;
   productScope?: "selected" | "all";
@@ -280,6 +313,12 @@ export async function updateWebsiteSyncSettings(
   input: WebsiteSyncSettingsInput,
 ): Promise<WebsiteConnectionSummary | null> {
   if (input.productScope !== undefined && !["selected", "all"].includes(input.productScope)) return null;
+  const row = await getWebsiteConnectionRow(businessId, input.connectionId);
+  if (!row || row.status !== "active") return null;
+  if (input.syncLocationId) {
+    const owned = await query(`SELECT 1 FROM locations WHERE id = $1 AND business_id = $2`, [input.syncLocationId, businessId]);
+    if (!owned.rowCount) return null;
+  }
   await query(
     `UPDATE eshobe_cms_connections
         SET push_prices = COALESCE($2, push_prices),
@@ -287,7 +326,7 @@ export async function updateWebsiteSyncSettings(
             product_scope = COALESCE($4, product_scope),
             sync_location_id = CASE WHEN $6 THEN $5 ELSE sync_location_id END,
             updated_at = now()
-      WHERE business_id = $1`,
+      WHERE business_id = $1 AND id = $7`,
     [
       businessId,
       input.pushPrices ?? null,
@@ -295,7 +334,9 @@ export async function updateWebsiteSyncSettings(
       input.productScope ?? null,
       input.syncLocationId ?? null,
       input.syncLocationId !== undefined,
+      row.id,
     ],
   );
-  return getWebsiteConnection(businessId);
+  const updated = await getWebsiteConnectionRow(businessId, row.id);
+  return updated ? summarize(updated) : null;
 }

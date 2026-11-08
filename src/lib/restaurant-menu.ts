@@ -18,6 +18,7 @@
 export interface RestaurantMenuCategory {
   id: string;
   name: string;
+  description?: string | null;
   taxRate: number;
   isActive: boolean;
   sortOrder: number;
@@ -92,6 +93,7 @@ export interface MenuTreePayload {
   categories: Array<{
     id: string;
     name: string;
+    description?: string | null;
     tax_rate: string | number;
     sort_order: number;
     is_active: boolean;
@@ -152,6 +154,7 @@ export function toRestaurantMenu(payload: MenuTreePayload): RestaurantMenuData {
     categories: (payload.categories ?? []).map((c) => ({
       id: c.id,
       name: c.name,
+      description: c.description ?? null,
       taxRate: toNumber(c.tax_rate),
       isActive: c.is_active,
       sortOrder: c.sort_order,

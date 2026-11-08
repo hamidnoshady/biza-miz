@@ -40,8 +40,10 @@ import {
   type CmsConfig,
   type FetchLike,
 } from "../../cms/client";
-import type { CmsMedia, CmsPost, CmsProduct, PayloadList } from "../../cms/types";
+import type { CmsMedia, CmsPost, CmsProduct, CmsProductWrite, CmsProductModifierGroup, CmsTaxonomyDefinition, CmsTaxonomyTerm, PayloadList } from "../../cms/types";
 import {
+  WEBSITE_MENU_TAXONOMY_KEY,
+  WEBSITE_SOURCE_SYSTEM,
   WebsiteAdapterError,
   slugify,
   type ConnectionTest,
@@ -54,6 +56,10 @@ import {
   type WebsiteAdapter,
   type WebsiteMedia,
   type MediaUpload,
+  type MenuCategoryInput,
+  type MenuModifierGroup,
+  type ProductAvailability,
+  type RemoteMenuCategory,
 } from "../adapter";
 import { lexicalToMarkdown, markdownToLexical } from "./payload-content";
 
@@ -89,6 +95,25 @@ export function rialToSiteAmount(priceRial: number, currency: SiteCurrency): num
     default:
       throw new WebsiteAdapterError("unsupported", `currency ${currency} cannot be expressed in Rial`);
   }
+}
+
+/** Modifier deltas may be negative; unlike a selling price they are signed. */
+export function rialToSiteDelta(deltaRial: number, currency: SiteCurrency): number {
+  if (!Number.isSafeInteger(deltaRial)) {
+    throw new WebsiteAdapterError("rejected", "modifier delta must be an integer Rial");
+  }
+  if (currency !== "IRR" && currency !== "IRT") {
+    throw new WebsiteAdapterError("unsupported", `currency ${currency} cannot be expressed in Rial`);
+  }
+  const amount = Math.sign(deltaRial) * Math.round(Math.abs(deltaRial) / (currency === "IRT" ? 10 : 1));
+  return amount === 0 ? 0 : amount;
+}
+export function siteDeltaToRial(amount: number, currency: SiteCurrency): number {
+  if (!Number.isFinite(amount)) return 0;
+  if (currency !== "IRR" && currency !== "IRT") {
+    throw new WebsiteAdapterError("unsupported", `currency ${currency} cannot be expressed in Rial`);
+  }
+  return Math.sign(amount) * Math.round(Math.abs(amount)) * (currency === "IRT" ? 10 : 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -139,8 +164,30 @@ export function mapPayloadProduct(doc: CmsProduct, ctx: PayloadMappingContext): 
     title: doc.title,
     sku: doc.sku ?? null,
     priceRial: siteAmountToRial(doc.price, ctx.currency),
-    stock: doc.trackInventory ? (doc.inventory ?? 0) : null,
+    stock: doc.trackInventory ? (doc.inventory ?? null) : null,
     status: doc._status === "published" ? "published" : "draft",
+    sourceId: doc.sourceId ?? null,
+    imageId: typeof doc.image === "string" ? doc.image : doc.image?.id ?? null,
+    categoryTermId: doc.terms?.[0] ? (typeof doc.terms[0] === "string" ? doc.terms[0] : doc.terms[0].id) : null,
+    menuOrder: doc.menuOrder ?? null,
+    available: doc.menuAvailable ?? null,
+    modifierGroups: (doc.modifierGroups ?? []).map((group) => ({
+      remoteId: group.id,
+      sourceId: group.sourceId,
+      label: group.label,
+      minSelect: group.minSelect,
+      maxSelect: group.maxSelect,
+      isActive: group.isActive,
+      sortOrder: group.sortOrder,
+      options: group.options.map((option) => ({
+        remoteId: option.id,
+        sourceId: option.sourceId,
+        label: option.label,
+        priceDeltaRial: siteDeltaToRial(option.priceDelta, ctx.currency),
+        isActive: option.isActive,
+        sortOrder: option.sortOrder,
+      })),
+    })),
     updatedAt: doc.updatedAt,
   };
 }
@@ -167,21 +214,43 @@ export function buildPostPatch(input: Partial<PostDraft>): Record<string, unknow
   };
 }
 
-export function buildProductBody(input: RemoteProductInput, currency: SiteCurrency): {
-  title: string;
-  price: number;
-  summary?: string;
-  sku?: string;
-  trackInventory?: boolean;
-  inventory?: number;
-} {
+export function buildProductBody(input: RemoteProductInput, currency: SiteCurrency): CmsProductWrite {
+  const modifierGroups: CmsProductModifierGroup[] | undefined = input.modifierGroups?.map((group) => ({
+    ...(group.remoteId ? { id: group.remoteId } : {}),
+    sourceId: group.sourceId,
+    label: group.label,
+    minSelect: group.minSelect,
+    maxSelect: group.maxSelect,
+    isActive: group.isActive,
+    sortOrder: group.sortOrder,
+    options: group.options.map((option) => ({
+      ...(option.remoteId ? { id: option.remoteId } : {}),
+      sourceId: option.sourceId,
+      label: option.label,
+      priceDelta: rialToSiteDelta(option.priceDeltaRial, currency),
+      isActive: option.isActive,
+      sortOrder: option.sortOrder,
+    })),
+  }));
   return {
     title: input.title,
     price: rialToSiteAmount(input.priceRial, currency),
     ...(input.summary !== undefined ? { summary: input.summary } : {}),
     ...(input.sku !== undefined ? { sku: input.sku } : {}),
-    ...(input.stock !== undefined ? { trackInventory: true, inventory: input.stock } : {}),
-  };
+    ...(input.sourceId ? {
+      sourceSystem: WEBSITE_SOURCE_SYSTEM,
+      sourceId: input.sourceId,
+      slug: `biza-${input.sourceId.replace(/[^a-zA-Z0-9-]+/g, "-")}`,
+    } : {}),
+    ...(input.imageId !== undefined ? { image: input.imageId } : {}),
+    ...(input.categoryTermId !== undefined ? { terms: input.categoryTermId ? [input.categoryTermId] : [] } : {}),
+    ...(input.menuOrder !== undefined ? { menuOrder: input.menuOrder } : {}),
+    ...(input.published !== undefined ? { _status: input.published ? "published" : "draft" } : {}),
+    ...(input.available !== undefined ? { menuAvailable: input.available } : {}),
+    ...(input.inventoryManagedExternally !== undefined ? { inventoryManagedExternally: input.inventoryManagedExternally } : {}),
+    ...(input.stock !== undefined ? { trackInventory: input.stock !== null, inventory: input.stock } : {}),
+    ...(modifierGroups !== undefined ? { modifierGroups } : {}),
+  } as CmsProductWrite;
 }
 
 /** Payload's page number ⇄ the adapter's opaque cursor. */
@@ -298,6 +367,24 @@ export class PayloadWebsiteAdapter implements WebsiteAdapter {
     }
   }
 
+  /** Recover a lost create response by stable identity, never by title/SKU. */
+  private async findBySource<T extends { id: string }>(path: string, sourceId: string, extra: Record<string, string> = {}): Promise<T | null> {
+    const list = await cmsRequest<PayloadList<T>>(this.config, {
+      path,
+      query: {
+        limit: 2, depth: 0,
+        "where[sourceSystem][equals]": WEBSITE_SOURCE_SYSTEM,
+        "where[sourceId][equals]": sourceId,
+        ...Object.fromEntries(Object.entries(extra).map(([key, value]) => [`where[${key}][equals]`, value])),
+      },
+      fetchImpl: this.fetchImpl,
+    });
+    if (list.totalDocs > 1 || list.docs.length > 1) {
+      throw new WebsiteAdapterError("rejected", `ambiguous remote source identity at ${path}`);
+    }
+    return list.docs[0] ?? null;
+  }
+
   private opts() {
     return { fetchImpl: this.fetchImpl };
   }
@@ -321,7 +408,15 @@ export class PayloadWebsiteAdapter implements WebsiteAdapter {
     if (!input.filename.trim() || !input.mimeType.startsWith("image/") || input.bytes.byteLength === 0) {
       throw new WebsiteAdapterError("rejected", "invalid image upload");
     }
+    if (input.sourceId) {
+      const existing = await this.findBySource<CmsMedia>("/api/media", input.sourceId);
+      if (existing) return mapPayloadMedia(existing, this.ctx.mediaOrigin);
+    }
     const form = new FormData();
+    if (input.sourceId) {
+      form.set("sourceSystem", WEBSITE_SOURCE_SYSTEM);
+      form.set("sourceId", input.sourceId);
+    }
     // Copy into a plain ArrayBuffer-backed view: a caller may give us a view of
     // a SharedArrayBuffer, which Blob deliberately refuses in Node's typings.
     const bytes = Uint8Array.from(input.bytes);
@@ -398,15 +493,120 @@ export class PayloadWebsiteAdapter implements WebsiteAdapter {
   }
 
   async upsertProduct(input: RemoteProductInput): Promise<RemoteProduct> {
-    const body = buildProductBody(input, this.currency);
-    const doc = await this.call(() =>
-      input.remoteId ? updateProduct(this.config, input.remoteId, body, this.opts()) : createProduct(this.config, body, this.opts()),
-    );
+    const doc = await this.call(async () => {
+      let remoteId = input.remoteId;
+      let existing: RemoteProduct | undefined;
+      if (!remoteId && input.sourceId) {
+        const found = await this.findBySource<CmsProduct>("/api/products", input.sourceId);
+        if (found) {
+          remoteId = found.id;
+          existing = mapPayloadProduct(found, this.ctx);
+        }
+      }
+      const body = buildProductBody(input, this.currency);
+      if (remoteId && input.modifierGroups) {
+        if (!existing) {
+          const current = await cmsRequest<CmsProduct>(this.config, {
+            path: `/api/products/${encodeURIComponent(remoteId)}`,
+            query: { depth: 0 },
+            fetchImpl: this.fetchImpl,
+          });
+          existing = mapPayloadProduct(current, this.ctx);
+        }
+        body.modifierGroups = input.modifierGroups.map((group) => {
+          const previous = existing?.modifierGroups?.find((g) => g.sourceId === group.sourceId);
+          const groupId = group.remoteId ?? previous?.remoteId;
+          return {
+            ...(groupId ? { id: groupId } : {}),
+            sourceId: group.sourceId,
+            label: group.label,
+            minSelect: group.minSelect,
+            maxSelect: group.maxSelect,
+            isActive: group.isActive,
+            sortOrder: group.sortOrder,
+            options: group.options.map((option) => {
+              const optionId = option.remoteId ?? previous?.options.find((o) => o.sourceId === option.sourceId)?.remoteId;
+              return {
+                ...(optionId ? { id: optionId } : {}),
+                sourceId: option.sourceId,
+                label: option.label,
+                priceDelta: rialToSiteDelta(option.priceDeltaRial, this.currency),
+                isActive: option.isActive,
+                sortOrder: option.sortOrder,
+              };
+            }),
+          };
+        });
+      }
+      return remoteId
+        ? updateProduct(this.config, remoteId, body, this.opts())
+        : createProduct(this.config, body, this.opts());
+    });
     return mapPayloadProduct(doc, this.ctx);
   }
 
-  async setProductStock(remoteId: string, quantity: number): Promise<void> {
-    await this.call(() => updateProduct(this.config, remoteId, { trackInventory: true, inventory: quantity }, this.opts()));
+  async upsertMenuTaxonomy(input: { remoteId?: string }): Promise<{ id: string }> {
+    if (input.remoteId) return { id: input.remoteId };
+    return this.call(async () => {
+      const list = await cmsRequest<PayloadList<CmsTaxonomyDefinition>>(this.config, {
+        path: "/api/taxonomy-definitions",
+        query: { limit: 2, depth: 0, "where[key][equals]": WEBSITE_MENU_TAXONOMY_KEY },
+        fetchImpl: this.fetchImpl,
+      });
+      if (list.totalDocs > 1 || list.docs.length > 1) {
+        throw new WebsiteAdapterError("rejected", "ambiguous menu taxonomy");
+      }
+      if (list.docs[0]) return { id: list.docs[0].id };
+      const doc = await cmsRequest<CmsTaxonomyDefinition>(this.config, {
+        method: "POST", path: "/api/taxonomy-definitions",
+        body: {
+          key: WEBSITE_MENU_TAXONOMY_KEY,
+          singularLabel: "دستهٔ منو", pluralLabel: "دسته‌های منو",
+          description: "دسته‌های منوی حسابداری بیزامیز", hierarchical: true, hasArchive: false,
+        },
+        fetchImpl: this.fetchImpl,
+      });
+      return { id: doc.id };
+    });
+  }
+
+  async upsertMenuCategory(input: MenuCategoryInput): Promise<RemoteMenuCategory> {
+    const body = {
+      taxonomy: input.taxonomyId,
+      sourceSystem: WEBSITE_SOURCE_SYSTEM,
+      sourceId: input.sourceId,
+      name: input.name,
+      slug: `biza-${input.sourceId.replace(/[^a-zA-Z0-9-]+/g, "-")}`,
+      description: input.description ?? "",
+      menuOrder: input.sortOrder,
+    };
+    const doc = await this.call(async () => {
+      let remoteId = input.remoteId;
+      if (!remoteId) {
+        remoteId = (await this.findBySource<CmsTaxonomyTerm>("/api/taxonomy-terms", input.sourceId, { taxonomy: input.taxonomyId }))?.id;
+      }
+      return cmsRequest<CmsTaxonomyTerm>(this.config, {
+        method: remoteId ? "PATCH" : "POST",
+        path: remoteId ? `/api/taxonomy-terms/${encodeURIComponent(remoteId)}` : "/api/taxonomy-terms",
+        body, fetchImpl: this.fetchImpl,
+      });
+    });
+    return { id: doc.id, sourceId: input.sourceId, name: doc.name, description: doc.description ?? null, sortOrder: doc.menuOrder };
+  }
+
+  async setProductAvailability(remoteId: string, input: ProductAvailability): Promise<void> {
+    await this.call(() => updateProduct(this.config, remoteId, {
+      _status: input.published ? "published" : "draft", menuAvailable: input.available,
+    }, this.opts()));
+  }
+
+  async setProductStock(remoteId: string, quantity: number | null): Promise<void> {
+    if (quantity !== null && (!Number.isSafeInteger(quantity) || quantity < 0)) {
+      throw new WebsiteAdapterError("rejected", "stock must be a non-negative integer or unknown");
+    }
+    await this.call(() => updateProduct(this.config, remoteId, {
+      trackInventory: quantity !== null, inventory: quantity, inventoryManagedExternally: true,
+    }, this.opts()));
   }
 
   async setProductPrice(remoteId: string, priceRial: number): Promise<void> {

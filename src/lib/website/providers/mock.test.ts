@@ -132,3 +132,50 @@ describe("slugify", () => {
     expect(slugify("***")).toBe("post");
   });
 });
+
+describe("ESH-145 — mock café-menu contract", () => {
+  const input = {
+    sourceId: "menu_item:item-1", title: "لاته", summary: "توضیح", sku: "LAT-1",
+    priceRial: 1_200_000, stock: 4, imageId: "media-1", categoryTermId: "term-1",
+    menuOrder: 2, published: true, available: true,
+    modifierGroups: [{
+      sourceId: "group-1", label: "شیر", minSelect: 1, maxSelect: 1, isActive: true, sortOrder: 0,
+      options: [{ sourceId: "option-1", label: "شیر بادام", priceDeltaRial: 250_000, isActive: true, sortOrder: 0 }],
+    }],
+  };
+
+  it("updates the same product and embedded option ids, and keeps two sites independent", async () => {
+    const a = new MockWebsiteAdapter();
+    const b = new MockWebsiteAdapter();
+    const first = await a.upsertProduct(input);
+    const second = await b.upsertProduct(input);
+    expect(second.sourceId).toBe(first.sourceId); // the same source is a distinct remote row per site
+    const updated = await a.upsertProduct({ ...input, remoteId: first.id, title: "لاته جدید" });
+    expect(updated.id).toBe(first.id);
+    expect(updated.modifierGroups?.[0].remoteId).toBe(first.modifierGroups?.[0].remoteId);
+    expect(updated.modifierGroups?.[0].options[0].remoteId).toBe(first.modifierGroups?.[0].options[0].remoteId);
+    expect(a.products).toHaveLength(1);
+    expect(b.products[0].title).toBe("لاته");
+  });
+
+  it("recovers a source identity after a lost response and withdraws without deleting", async () => {
+    const adapter = new MockWebsiteAdapter();
+    const first = await adapter.upsertProduct(input);
+    const recovered = await adapter.upsertProduct({ ...input, title: "نام تازه" });
+    expect(recovered.id).toBe(first.id);
+    await adapter.setProductAvailability(first.id, { published: false, available: false });
+    await adapter.setProductStock(first.id, null);
+    expect(adapter.products).toHaveLength(1);
+    expect(adapter.products[0]).toMatchObject({ status: "draft", available: false, stock: null });
+  });
+
+  it("keeps category and media identities stable across retries", async () => {
+    const adapter = new MockWebsiteAdapter();
+    const taxonomy = await adapter.upsertMenuTaxonomy({});
+    const category = { taxonomyId: taxonomy.id, sourceId: "category-1", name: "قهوه", description: "گرم", sortOrder: 1 };
+    const first = await adapter.upsertMenuCategory(category);
+    expect((await adapter.upsertMenuCategory({ ...category, name: "نوشیدنی" })).id).toBe(first.id);
+    const upload = { sourceId: "media:asset-1:hash", filename: "latte.png", mimeType: "image/png", bytes: new Uint8Array([1]) };
+    expect((await adapter.uploadMedia(upload)).id).toBe((await adapter.uploadMedia(upload)).id);
+  });
+});

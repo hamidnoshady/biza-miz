@@ -3,7 +3,7 @@
  * convention not unit-tested; the pure crypto lives in secrets.ts and the
  * pure config mapping below).
  *
- * One row per business: which CMS site this business owns, its domain, and
+ * One row per connected CMS site: the original manager uses the first row, and
  * the site API key that grants access to it. The key is encrypted at rest
  * through `src/lib/integrations/secrets.ts` (AES-256-GCM under
  * `INTEGRATIONS_ENCRYPTION_KEY` or `JWT_SECRET`) — same store the WooCommerce
@@ -70,7 +70,7 @@ export async function saveCmsConnection(input: SaveCmsConnectionInput): Promise<
     `INSERT INTO eshobe_cms_connections
        (business_id, site_id, site_domain, base_url, key_name, api_key_ciphertext, last_checked_at)
      VALUES ($1, $2, $3, $4, $5, $6, now())
-     ON CONFLICT (business_id) DO UPDATE SET
+     ON CONFLICT (business_id, base_url, site_id) DO UPDATE SET
        push_prices = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.push_prices ELSE false END,
        push_stock = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.push_stock ELSE false END,
        product_scope = CASE WHEN eshobe_cms_connections.site_id = EXCLUDED.site_id AND eshobe_cms_connections.base_url = EXCLUDED.base_url THEN eshobe_cms_connections.product_scope ELSE 'selected' END,
@@ -95,9 +95,9 @@ export async function saveCmsConnection(input: SaveCmsConnectionInput): Promise<
   );
 }
 
-export async function deleteCmsConnection(businessId: string): Promise<void> {
+export async function deleteCmsConnection(businessId: string, connectionId?: string): Promise<void> {
   const { disconnectWebsite } = await import("../website/connection-service");
-  await disconnectWebsite(businessId);
+  await disconnectWebsite(businessId, connectionId);
 }
 
 /**
@@ -105,10 +105,13 @@ export async function deleteCmsConnection(businessId: string): Promise<void> {
  * `site_domain` must follow — it is what every later call forwards as `Host`
  * (`cmsHeaders`) and what the DNS checklist's preview URL is built from.
  */
-export async function updateCmsConnectionDomain(businessId: string, domain: string): Promise<void> {
+export async function updateCmsConnectionDomain(businessId: string, domain: string, connectionId?: string): Promise<void> {
   await query(
-    `UPDATE eshobe_cms_connections SET site_domain = $2, updated_at = now() WHERE business_id = $1`,
-    [businessId, domain],
+    `UPDATE eshobe_cms_connections SET site_domain = $2, updated_at = now()
+      WHERE business_id = $1 AND id = COALESCE($3::uuid, (
+        SELECT id FROM eshobe_cms_connections WHERE business_id = $1 ORDER BY created_at, id LIMIT 1
+      ))`,
+    [businessId, domain, connectionId ?? null],
   );
 }
 
@@ -120,7 +123,7 @@ export async function updateCmsConnectionDomain(businessId: string, domain: stri
 export async function getCmsConfigForBusiness(businessId: string): Promise<CmsConfig> {
   const key = resolveEncryptionKey(process.env);
   const { rows } = await query<CmsConnectionRow>(
-    `SELECT ${ROW_COLUMNS} FROM eshobe_cms_connections WHERE business_id = $1 AND status = 'active'`,
+    `SELECT ${ROW_COLUMNS} FROM eshobe_cms_connections WHERE business_id = $1 AND status = 'active' ORDER BY created_at, id LIMIT 1`,
     [businessId],
   );
   const row = rows[0];

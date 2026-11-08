@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { PERMISSIONS } from "@/lib/permissions";
+import { isUuid } from "@/lib/menu-validation";
 import { updateWebsiteSyncSettings } from "@/lib/website/connection-service";
 
 /**
@@ -12,10 +13,14 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.cmsConfigure);
   if (error) return error;
 
-  let body: { pushPrices?: unknown; pushStock?: unknown; productScope?: unknown; syncLocationId?: unknown };
+  let body: { pushPrices?: unknown; pushStock?: unknown; productScope?: unknown; syncLocationId?: unknown; connectionId?: unknown };
   try {
     body = await request.json();
   } catch {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+
+  if (body.connectionId !== undefined && (typeof body.connectionId !== "string" || !isUuid(body.connectionId))) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
@@ -28,6 +33,7 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
   }
 
   const connection = await updateWebsiteSyncSettings(session.businessId, {
+    connectionId: typeof body.connectionId === "string" ? body.connectionId : undefined,
     pushPrices: typeof body.pushPrices === "boolean" ? body.pushPrices : undefined,
     pushStock: typeof body.pushStock === "boolean" ? body.pushStock : undefined,
     productScope: body.productScope === "all" || body.productScope === "selected" ? body.productScope : undefined,

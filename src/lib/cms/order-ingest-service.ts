@@ -47,14 +47,15 @@ function cmsProductId(order: CmsOrder): string | null {
 async function resolveWebsiteProductMap(
   client: PoolClient,
   businessId: string,
+  connectionId: string,
   remoteProductId: string | null,
 ): Promise<{ localKind: "item" | "menu_item"; localId: string } | null> {
   if (!remoteProductId) return null;
   const { rows } = await client.query<{ local_kind: "item" | "menu_item"; local_id: string }>(
     `SELECT local_kind, local_id FROM website_product_map
-      WHERE business_id = $1 AND remote_id = $2 AND sync_enabled = true
+      WHERE business_id = $1 AND connection_id = $2 AND remote_id = $3 AND sync_enabled = true
       LIMIT 1`,
-    [businessId, remoteProductId],
+    [businessId, connectionId, remoteProductId],
   );
   const row = rows[0];
   if (!row) return null;
@@ -262,7 +263,7 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
     // delivery order. Getting that wrong was why a CMS reversal later ran
     // through the F&B closed-order engine: the order it was handed had no
     // retail shape to recognise (issue #770).
-    const mapped = await resolveWebsiteProductMap(client, businessId, cmsProductId(order));
+    const mapped = await resolveWebsiteProductMap(client, businessId, connection.id, cmsProductId(order));
     const industry = await getBusinessIndustry(businessId);
     const orderType = mapped?.localKind === "item" ? "retail" : "delivery";
 

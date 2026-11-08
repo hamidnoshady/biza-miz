@@ -536,3 +536,9 @@ Refund/cancel-after-import is not part of Phase G; no `order.refunded` ingest ye
   applied unless the CMS answered 2xx.
 - Webhook verification failure returns 401 and purges nothing — an
   unauthenticated cache purge is a DoS button.
+
+## Café menu projection (ESH-145)
+
+The one-way Accounting → CMS café menu projection, its connection-scoped
+maps/outbox, companion #196 wire contract and withdrawal/retry rules are
+documented in [eshobe-cms-menu-projection.md](./eshobe-cms-menu-projection.md).
