@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { useGSAP } from "@gsap/react";
 import { LoadingSkeleton, cardClass } from "../page-chrome";
+import { supportingTextClass } from "../typography";
 import { useMoney } from "@/components/money/money-context";
 import { Button } from "@/components/ui/button";
 import {
@@ -874,7 +875,7 @@ export function AiChatHub({
               </h1>
               <p
                 data-hero
-                className="mt-1.5 max-w-xl text-xs leading-6 text-muted-foreground sm:text-sm"
+                className={cn("mt-1.5 max-w-xl text-muted-foreground", supportingTextClass)}
               >
                 پرسش خود را بنویسید، تصویر یا سند PDF پیوست کنید، یا یکی از پیشنهادهای زیر را انتخاب کنید.
               </p>
@@ -995,7 +996,7 @@ export function AiChatHub({
                   </button>
                 ))}
               </div>
-              <p className="mt-3 text-center text-[11px] leading-5 text-muted-foreground">
+              <p className={cn("mt-3 text-center text-muted-foreground", supportingTextClass)}>
                 پاسخ‌ها بر اساس داده‌های ثبت‌شده کسب‌وکار شما ارائه می‌شوند و هر تغییر فقط با تأیید شما اعمال خواهد شد.
               </p>
             </div>

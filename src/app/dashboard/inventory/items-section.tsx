@@ -10,6 +10,7 @@ import { useMoney } from "@/components/money/money-context";
 import { api, Field, inputClass } from "../ui";
 import type { InventoryItem, Runner } from "./inventory-manager";
 import { EmptyState, SectionCard } from "../page-chrome";
+import { supportingTextClass } from "../typography";
 import { MediaImageField, mediaFileUrl } from "../media/media-picker";
 
 export function ItemsSection({
@@ -194,7 +195,7 @@ export function ItemsSection({
                 disabled={!purchaseUnit.trim()}
                 aria-describedby="purchase-factor-help"
               />
-              <span id="purchase-factor-help" className="text-xs text-muted-foreground">
+              <span id="purchase-factor-help" className={`mt-1 block text-muted-foreground ${supportingTextClass}`}>
                 تعداد واحد پایه در یک واحد خرید
               </span>
             </Field>
