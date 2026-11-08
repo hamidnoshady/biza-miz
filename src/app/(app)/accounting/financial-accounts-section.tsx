@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { FilterChip, FilterChipRow, SearchField } from "@/app/dashboard/filters";
 import {
   EmptyState,
@@ -61,10 +62,12 @@ import { OverlayDialog, LedgerLoadFailed, fmtJalali } from "./ledger-ui";
 import {
   FINANCIAL_ACCOUNT_KIND_META,
   FINANCIAL_ACCOUNT_KINDS,
+  IRANIAN_BANKS,
   financialAccountDisplayLabel,
   financialAccountScopeLabel,
   isFinancialAccountKind,
   isZeroBalance,
+  iranianBankByCode,
   type FinancialAccountKind,
   type FinancialAccountRecord,
 } from "@/lib/financial-accounts";
@@ -74,6 +77,11 @@ import { journalMemoForDisplay } from "@/lib/journal-memo";
 
 type KindTab = "all" | FinancialAccountKind;
 type StatusFilter = "active" | "archived" | "all";
+
+const BANK_OPTIONS = [
+  ...IRANIAN_BANKS.map(({ code, name }) => ({ value: code, label: name })),
+  { value: "", label: "بانک دیگر یا نام قدیمی" },
+];
 
 interface ListResponse {
   accounts: FinancialAccountRecord[];
@@ -138,6 +146,7 @@ interface AccountForm {
   isDefault: boolean;
   description: string;
   notes: string;
+  bankCode: string;
   bankName: string;
   bankBranchName: string;
   accountNumber: string;
@@ -163,6 +172,7 @@ function blankForm(kind: FinancialAccountKind, currencyCode: string): AccountFor
     isDefault: false,
     description: "",
     notes: "",
+    bankCode: "",
     bankName: "",
     bankBranchName: "",
     accountNumber: "",
@@ -190,6 +200,7 @@ function formFromRecord(account: FinancialAccountRecord): AccountForm {
     isDefault: account.isDefault,
     description: account.description ?? "",
     notes: account.notes ?? "",
+    bankCode: iranianBankByCode(account.bankCode)?.code ?? "",
     bankName: account.bankName ?? "",
     bankBranchName: account.bankBranchName ?? "",
     accountNumber: account.accountNumber ?? "",
@@ -414,7 +425,8 @@ export function FinancialAccountsSection({
     };
     if (FINANCIAL_ACCOUNT_KIND_META[form.kind].bankMetadata) {
       Object.assign(payload, {
-        bankName: form.bankName.trim() || null,
+        bankCode: form.bankCode || null,
+        bankName: iranianBankByCode(form.bankCode)?.name ?? (form.bankName.trim() || null),
         bankBranchName: form.bankBranchName.trim() || null,
         accountNumber: form.accountNumber.trim() || null,
         cardNumber: form.cardNumber.trim() || null,
@@ -1091,13 +1103,23 @@ function AccountFormDialog({
       {meta.bankMetadata ? (
         <fieldset className="mt-4 grid gap-3 sm:grid-cols-2">
           <legend className="mb-1 text-sm font-medium text-foreground">اطلاعات بانکی</legend>
-          <Field label="نام بانک">
-            <input
-              className={inputClass}
-              value={form.bankName}
-              onChange={(event) => set("bankName", event.target.value)}
+          <Field label="بانک" as="div">
+            <SearchableSelect
+              ariaLabel="انتخاب بانک"
+              options={BANK_OPTIONS}
+              value={form.bankCode}
+              onChange={(code) => set("bankCode", code)}
             />
           </Field>
+          {!form.bankCode ? (
+            <Field label="نام بانک">
+              <input
+                className={inputClass}
+                value={form.bankName}
+                onChange={(event) => set("bankName", event.target.value)}
+              />
+            </Field>
+          ) : null}
           <Field label="نام شعبهٔ بانک">
             <input
               className={inputClass}

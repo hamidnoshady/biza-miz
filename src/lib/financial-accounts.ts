@@ -269,6 +269,7 @@ export interface FinancialAccountFieldsInput {
   isDefault?: unknown;
   description?: unknown;
   notes?: unknown;
+  bankCode?: unknown;
   bankName?: unknown;
   bankBranchName?: unknown;
   accountNumber?: unknown;
@@ -335,6 +336,59 @@ export function normalizeIdentifier(value: unknown): string | null {
 const IBAN_SHAPE = /^IR\d{24}$/;
 const CARD_SHAPE = /^\d{16}$/;
 
+// Institution names follow the Central Bank directory. Codes are stable app
+// identifiers independent of PAN prefixes and Sheba routing codes.
+// https://cbi.ir/BanksInstitutions/BankInstitute.aspx
+export const IRANIAN_BANKS = [
+  { code: "eghtesad-novin", name: "بانک اقتصادنوین" },
+  { code: "iran-zamin", name: "بانک ایران زمین" },
+  { code: "parsian", name: "بانک پارسیان" },
+  { code: "pasargad", name: "بانک پاسارگاد" },
+  { code: "post-bank", name: "پست بانک ایران" },
+  { code: "tejarat", name: "بانک تجارت" },
+  { code: "iran-venezuela", name: "بانک مشترک ایران و ونزوئلا" },
+  { code: "tosee-taavon", name: "بانک توسعه تعاون" },
+  { code: "tosee-saderat", name: "بانک توسعه صادرات ایران" },
+  { code: "middle-east", name: "بانک خاورمیانه" },
+  { code: "day", name: "بانک دی" },
+  { code: "refah", name: "بانک رفاه کارگران" },
+  { code: "saman", name: "بانک سامان" },
+  { code: "sepah", name: "بانک سپه" },
+  { code: "sarmayeh", name: "بانک سرمایه" },
+  { code: "sina", name: "بانک سینا" },
+  { code: "shahr", name: "بانک شهر" },
+  { code: "saderat", name: "بانک صادرات ایران" },
+  { code: "sanat-madan", name: "بانک صنعت و معدن" },
+  { code: "resalat", name: "بانک قرض‌الحسنه رسالت" },
+  { code: "mehr-iran", name: "بانک قرض‌الحسنه مهر ایران" },
+  { code: "karafarin", name: "بانک کارآفرین" },
+  { code: "keshavarzi", name: "بانک کشاورزی" },
+  { code: "gardeshgari", name: "بانک گردشگری" },
+  { code: "maskan", name: "بانک مسکن" },
+  { code: "mellat", name: "بانک ملت" },
+  { code: "melli", name: "بانک ملی ایران" },
+  { code: "melal", name: "مؤسسه اعتباری ملل" },
+] as const;
+
+export function iranianBankByCode(code: unknown) {
+  return IRANIAN_BANKS.find((bank) => bank.code === code);
+}
+
+function validIranianIban(iban: string): boolean {
+  // Move IR and the check digits to the end, then encode I = 18 and R = 27.
+  return IBAN_SHAPE.test(iban) && BigInt(iban.slice(4) + "1827" + iban.slice(2, 4)) % 97n === 1n;
+}
+
+function validCardNumber(card: string): boolean {
+  if (!CARD_SHAPE.test(card) || /^0+$/.test(card)) return false;
+  let sum = 0;
+  for (let index = 0; index < card.length; index++) {
+    const weighted = Number(card[index]) * (index % 2 === 0 ? 2 : 1);
+    sum += weighted > 9 ? weighted - 9 : weighted;
+  }
+  return sum % 10 === 0;
+}
+
 /**
  * Everything a create/update request must satisfy before the database sees it.
  *
@@ -346,7 +400,10 @@ const CARD_SHAPE = /^\d{16}$/;
  */
 export function financialAccountInputProblem(
   input: FinancialAccountFieldsInput,
-  options: { partial?: boolean } = {},
+  options: {
+    partial?: boolean;
+    previous?: Pick<FinancialAccountFieldsInput, "cardNumber" | "iban">;
+  } = {},
 ): FinancialAccountProblem | null {
   const partial = options.partial === true;
   const kindProvided = input.kind !== undefined && input.kind !== null;
@@ -394,15 +451,22 @@ export function financialAccountInputProblem(
     }
   }
 
-  const iban = normalizeIdentifier(input.iban);
-  if (iban && !IBAN_SHAPE.test(iban.toUpperCase())) return { code: "iban_invalid", field: "iban" };
+  if (input.bankCode !== undefined && input.bankCode !== null && !iranianBankByCode(input.bankCode)) {
+    return { code: "invalid_bank_code", field: "bankCode" };
+  }
+  const iban = normalizeIdentifier(input.iban)?.toUpperCase();
+  if (iban && iban !== normalizeIdentifier(options.previous?.iban)?.toUpperCase() && !validIranianIban(iban)) {
+    return { code: "iban_invalid", field: "iban" };
+  }
   const card = normalizeIdentifier(input.cardNumber);
-  if (card && !CARD_SHAPE.test(card)) return { code: "card_number_invalid", field: "cardNumber" };
+  if (card && card !== normalizeIdentifier(options.previous?.cardNumber) && !validCardNumber(card)) {
+    return { code: "card_number_invalid", field: "cardNumber" };
+  }
 
   if (kind && !FINANCIAL_ACCOUNT_KIND_META[kind].bankMetadata) {
     // The database refuses these too; saying it here is what puts the message on
     // the field rather than in a generic banner.
-    for (const field of ["bankName", "bankBranchName", "accountNumber", "cardNumber", "iban", "accountHolder"]) {
+    for (const field of ["bankCode", "bankName", "bankBranchName", "accountNumber", "cardNumber", "iban", "accountHolder"]) {
       const value = input[field as keyof FinancialAccountFieldsInput];
       if (value !== undefined && value !== null && value !== "") {
         return { code: "kind_metadata_mismatch", field };
@@ -477,6 +541,7 @@ export interface FinancialAccountRecord extends FinancialAccountSensitiveFields 
   isDefault: boolean;
   description: string | null;
   notes: string | null;
+  bankCode?: string | null;
   bankName: string | null;
   bankBranchName: string | null;
   pspProvider: string | null;

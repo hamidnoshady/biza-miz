@@ -250,12 +250,22 @@ describe("registering an account", () => {
 
     await user.type(screen.getByLabelText("نام حساب"), "صندوق شعبهٔ دو");
     await user.selectOptions(screen.getByLabelText(/سرفصل دفتر کل/), "gl-bank");
+    await user.click(screen.getByRole("button", { name: "انتخاب بانک" }));
+    await user.type(await screen.findByPlaceholderText("جستجو…"), "ملت");
+    await user.click(await screen.findByRole("option", { name: "بانک ملت" }));
     await user.click(screen.getByRole("button", { name: "ثبت حساب" }));
 
     await waitFor(() => expect(writes.length).toBe(1));
     expect(writes[0].startsWith("POST /api/ledger/financial-accounts ")).toBe(true);
     const body = JSON.parse(writes[0].slice(writes[0].indexOf("{")).trim());
-    expect(body).toMatchObject({ kind: "bank", name: "صندوق شعبهٔ دو", glAccountId: "gl-bank", isDefault: false });
+    expect(body).toMatchObject({
+      kind: "bank",
+      name: "صندوق شعبهٔ دو",
+      glAccountId: "gl-bank",
+      isDefault: false,
+      bankCode: "mellat",
+      bankName: "بانک ملت",
+    });
   });
 
   it("asks the eligibility route for the kind's own candidates, excluding the account being edited", async () => {
@@ -266,6 +276,7 @@ describe("registering an account", () => {
 
     await clickRowAction(user, "ویرایش");
     expect(await screen.findByRole("heading", { name: "ویرایش حساب مالی" })).toBeTruthy();
+    expect((screen.getByLabelText("نام بانک") as HTMLInputElement).value).toBe("ملت");
     const asked = vi
       .mocked(fetch)
       .mock.calls.map((call) => String(call[0]))
