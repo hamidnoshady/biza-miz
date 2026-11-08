@@ -165,10 +165,11 @@ always `rounded-xl`. Don't mix (no `rounded-md` buttons, no `rounded-3xl` cards)
 - Card/section title: `font-semibold text-stone-950` (base size).
 - **Amber eyebrow** above a card title: `text-xs font-semibold text-amber-700` — the small
   category line («عملیات هزینه», «سوابق عملیاتی») that introduces a card.
-- Body and actionable labels use `text-sm`. Supporting copy such as instructions, field hints
-  and recovery guidance uses `supportingTextClass` (`text-sm leading-relaxed wrap-anywhere`),
-  with `text-muted-foreground` on neutral surfaces. Use `text-xs` for brief secondary metadata
-  and category labels. Keep compact roles readable in both themes.
+- Body and actionable labels use `text-sm`. Use `supportingTextClass` (`text-sm leading-relaxed wrap-anywhere`)
+  for substantive instructions, with `text-muted-foreground` on neutral surfaces. Shared
+  descriptions, field hints and recovery guidance use `narrowSupportingTextClass` below
+  `sm` and retain the established desktop type scale. Use `text-xs` for brief secondary
+  metadata and category labels.
 - Table money/number cells: `font-medium` or `font-semibold`, Persian digits, unit spelled
   out («تومان» / «ریال»); time columns get `tabular-nums`.
 - **Persian digits are display-only** (`toPersianDigits` from `@/lib/digits`); money text via
@@ -218,7 +219,8 @@ for what it renders and for the few places a bespoke layout is warranted.
 ```
 
 Card header (from `SectionCard`): `px-4 py-4 sm:px-5`, title `font-semibold text-stone-950`,
-description `mt-1` with the supporting text role, hairline underneath
+description `mt-1 text-xs leading-5 text-muted-foreground` with the narrow supporting text override,
+hairline underneath
 (`border-b border-stone-200/80`); footer `bg-stone-50/60 text-xs text-stone-600`.
 An optional amber eyebrow sits above the title:
 `<p className="text-xs font-semibold text-amber-700">…</p>` then the `<h2>` with `mt-1`.
@@ -301,7 +303,7 @@ everywhere else the filled button is teal. Don't port the amber button to dashbo
 ```
 
 - Label above via `<Field>`: `text-sm font-medium text-foreground`, `mb-1`; optional hint
-  below in the supporting text role; optional marker `(اختیاری)` as
+  below `text-xs text-muted-foreground` with the narrow supporting text override; optional marker `(اختیاری)` as
   `<span className="font-normal text-muted-foreground">(اختیاری)</span>` inside the label.
 - Numeric inputs are `dir="ltr" inputMode="numeric"` with a Persian-digit placeholder «۰».
 - A `<select>` gets `inputClass` plus a chevron (`ChevronDownIcon size-4 text-muted-foreground`)
@@ -418,8 +420,9 @@ Simple (`EmptyState`): `rounded-xl border border-dashed border-stone-200 px-3 py
 text-center text-sm text-muted-foreground`. Rich (see
 [reservations.png](design/reference/archive-2026-09/reservations.png)): a centered column inside a dashed
 panel — an amber icon chip `grid size-12 place-items-center rounded-2xl bg-amber-100/70
-text-amber-700`, title `text-sm font-semibold text-stone-900`, one-line description
-the supporting text role. Both forms name what will exist here, in Persian,
+text-amber-700`, title `text-sm font-semibold text-stone-900`, and a description using
+`text-xs leading-6 text-muted-foreground` with the narrow supporting text override.
+Both forms name what will exist here, in Persian,
 with a leading verb («هنوز هزینه‌ای ثبت نشده است.»).
 
 ### Stat / KPI cards (dashboard)

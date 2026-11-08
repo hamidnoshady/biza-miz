@@ -101,7 +101,7 @@ describe("TabBar / TabPanel", () => {
 });
 
 describe("Persian supporting text in shared dashboard components", () => {
-  it("keeps descriptions and recovery instructions readable while allowing long text to wrap", () => {
+  it("keeps the desktop type scale and improves supporting text at narrow widths", () => {
     const pageDescription = "نمای کلی فروش و موجودی کسب‌وکار را در این صفحه ببینید.";
     const cardDescription = "برای ادامه، حساب بانکی و شیوهٔ پرداخت را انتخاب کنید.";
     const emptyDescription = "برای دیدن نتیجه، بازهٔ زمانی بزرگ‌تری انتخاب کنید.";
@@ -114,12 +114,17 @@ describe("Persian supporting text in shared dashboard components", () => {
       </main>,
     );
 
-    for (const copy of [pageDescription, cardDescription, emptyDescription]) {
+    for (const [copy, desktopSize, desktopLeading] of [
+      [pageDescription, "text-sm", "leading-6"],
+      [cardDescription, "text-xs", "leading-5"],
+      [emptyDescription, "text-xs", "leading-6"],
+    ]) {
       const classes = screen.getByText(copy).classList;
-      expect(classes).toContain("text-sm");
-      expect(classes).toContain("leading-relaxed");
-      expect(classes).toContain("wrap-anywhere");
-      expect(classes).not.toContain("text-xs");
+      expect(classes).toContain(desktopSize);
+      expect(classes).toContain(desktopLeading);
+      expect(classes).toContain("max-sm:text-sm");
+      expect(classes).toContain("max-sm:leading-relaxed");
+      expect(classes).toContain("max-sm:wrap-anywhere");
       expect(classes).not.toContain("truncate");
     }
   });

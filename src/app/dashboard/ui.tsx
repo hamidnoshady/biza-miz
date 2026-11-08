@@ -2,7 +2,7 @@
 
 /** Small shared UI pieces for dashboard pages (menu management, POS). */
 import { CircleAlertIcon, InfoIcon } from "lucide-react";
-import { supportingTextClass } from "@/app/dashboard/typography";
+import { narrowSupportingTextClass } from "./typography";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
@@ -1208,7 +1208,7 @@ export function Field({
     <Tag className="mb-4 block">
       <span className="mb-1 block text-sm font-medium text-foreground">{label}</span>
       {children}
-      {hint ? <span className={`mt-1 block text-muted-foreground ${supportingTextClass}`}>{hint}</span> : null}
+      {hint ? <span className={`mt-1 block text-xs text-muted-foreground ${narrowSupportingTextClass}`}>{hint}</span> : null}
     </Tag>
   );
 }

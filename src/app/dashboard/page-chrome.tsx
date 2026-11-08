@@ -24,7 +24,7 @@ import Link from "next/link";
 import { ArrowUpRightIcon } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { supportingTextClass } from "@/app/dashboard/typography";
+import { narrowSupportingTextClass } from "./typography";
 import { PAGE_HEADING_ID } from "@/components/navigation/page-heading-id";
 import { cardClass, overlayPanelClass, popoverPanelClass } from "./page-chrome-styles";
 import { TabBar, TabPanel } from "./tab-bar";
@@ -84,7 +84,7 @@ export function PageHeader({
           {title}
         </h1>
         {description ? (
-          <p className={cn("mt-2 max-w-3xl text-muted-foreground", supportingTextClass)}>{description}</p>
+          <p className={cn("mt-2 max-w-3xl text-sm leading-6 text-muted-foreground", narrowSupportingTextClass)}>{description}</p>
         ) : null}
       </div>
       {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
@@ -153,7 +153,7 @@ export function SectionCard({
               // <div> inside a <p> is invalid HTML — the parser hoists it out,
               // the server/client trees disagree and React throws the whole
               // section tree away as a hydration failure.
-              <div className={cn("mt-1 text-muted-foreground", supportingTextClass)}>{description}</div>
+              <div className={cn("mt-1 text-xs leading-5 text-muted-foreground", narrowSupportingTextClass)}>{description}</div>
             ) : null}
           </div>
           {actions ? (
@@ -218,7 +218,7 @@ export function DestinationCard({
           ) : null}
         </span>
         {description ? (
-          <span className={cn("mt-1 block text-muted-foreground", supportingTextClass)}>{description}</span>
+          <span className={cn("mt-1 block text-sm leading-6 text-muted-foreground", narrowSupportingTextClass)}>{description}</span>
         ) : null}
       </span>
     </Link>
@@ -268,8 +268,8 @@ export function EmptyState({
     return (
       <div
         className={cn(
-          "rounded-xl border border-dashed border-border px-3 py-6 text-center text-muted-foreground",
-          supportingTextClass,
+          "rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground",
+          narrowSupportingTextClass,
           className,
         )}
       >
@@ -295,7 +295,7 @@ export function EmptyState({
       ) : null}
       <p className={cn("text-sm font-bold text-foreground", Icon && "mt-4")}>{title}</p>
       {children ? (
-        <p className={cn("mt-2 max-w-72 text-muted-foreground", supportingTextClass)}>{children}</p>
+        <p className={cn("mt-2 max-w-72 text-xs leading-6 text-muted-foreground", narrowSupportingTextClass)}>{children}</p>
       ) : null}
       {action ? <div className="mt-4">{action}</div> : null}
     </div>
