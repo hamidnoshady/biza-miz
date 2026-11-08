@@ -40,6 +40,7 @@ import {
   classifyGlAccountForKind,
   eligibleGlAccountsForKind,
   financialAccountInputProblem,
+  iranianBankByCode,
   isFinancialAccountKind,
   isZeroBalance,
   normalizeIdentifier,
@@ -112,6 +113,7 @@ export interface FinancialAccountRecord {
   isDefault: boolean;
   description: string | null;
   notes: string | null;
+  bankCode: string | null;
   bankName: string | null;
   bankBranchName: string | null;
   accountNumber: string | null;
@@ -148,6 +150,7 @@ interface FinancialAccountRow extends Record<string, unknown> {
   is_default: boolean;
   description: string | null;
   notes: string | null;
+  bank_code: string | null;
   bank_name: string | null;
   bank_branch_name: string | null;
   account_number: string | null;
@@ -184,6 +187,7 @@ function toRecord(row: FinancialAccountRow): FinancialAccountRecord {
     isDefault: row.is_default,
     description: row.description,
     notes: row.notes,
+    bankCode: row.bank_code,
     bankName: row.bank_name,
     bankBranchName: row.bank_branch_name,
     accountNumber: row.account_number,
@@ -217,7 +221,7 @@ function toRecord(row: FinancialAccountRow): FinancialAccountRecord {
 const SELECT_COLUMNS = `
   fa.id, fa.kind, fa.code, fa.name, fa.gl_account_id, fa.currency_code, fa.location_id,
   fa.is_active, fa.is_default, fa.description, fa.notes,
-  fa.bank_name, fa.bank_branch_name, fa.account_number, fa.card_number, fa.iban,
+   fa.bank_code, fa.bank_name, fa.bank_branch_name, fa.account_number, fa.card_number, fa.iban,
   fa.account_holder, fa.settlement_reference,
   fa.psp_provider, fa.terminal_number, fa.merchant_number, fa.settlement_account_id,
   fa.settlement_delay_days, fa.created_at, fa.updated_at, fa.archived_at,
@@ -255,8 +259,10 @@ export interface FinancialAccountFilters {
   /** `active` (default), `archived`, or `all`. */
   status?: "active" | "archived" | "all";
   locationId?: string | null;
-  /** Free text over name, code, bank name and terminal number. */
+  /** Free text over the account and its GL display fields. */
   q?: string;
+  /** The caller has the same permission as for reading full identifiers. */
+  searchSensitiveIdentifiers?: boolean;
   /** Only the default account of each kind/scope. */
   defaultOnly?: boolean;
   /** Only accounts of these branches plus the business-wide ones. */
@@ -310,11 +316,14 @@ export async function listFinancialAccounts(
   if (term) {
     const pattern = `%${escapeLikePattern(term)}%`;
     const like = push(pattern);
-    const digits = normalizeIdentifier(term);
+    const identifier = filters.searchSensitiveIdentifiers ? normalizeIdentifier(term) : null;
+    const identifierLike = identifier ? push(`%${escapeLikePattern(identifier)}%`) : null;
     conditions.push(
       `(fa.name ILIKE ${like} OR fa.code ILIKE ${like} OR fa.bank_name ILIKE ${like}
-        OR fa.terminal_number ILIKE ${like} OR a.code ILIKE ${like} OR a.name ILIKE ${like}
-        ${digits ? `OR fa.account_number LIKE ${push(`%${digits}%`)} OR fa.card_number LIKE ${push(`%${digits}%`)} OR fa.iban ILIKE ${push(`%${digits.toUpperCase()}%`)} OR fa.merchant_number ILIKE ${push(`%${digits}%`)}` : ""})`,
+        OR fa.bank_code ILIKE ${like} OR a.code ILIKE ${like} OR a.name ILIKE ${like}
+        ${identifierLike ? `OR fa.account_number ILIKE ${identifierLike} OR fa.card_number ILIKE ${identifierLike}
+          OR fa.iban ILIKE ${identifierLike} OR fa.merchant_number ILIKE ${identifierLike}
+          OR fa.terminal_number ILIKE ${identifierLike}` : ""})`,
     );
   }
 
@@ -619,6 +628,7 @@ export async function createFinancialAccount(
     }
 
     let id: string;
+    const bank = iranianBankByCode(params.input.bankCode);
     try {
       const { rows } = await client.query<{ id: string }>(
         `INSERT INTO financial_accounts (
@@ -626,13 +636,13 @@ export async function createFinancialAccount(
             is_active, is_default, description, notes,
             bank_name, bank_branch_name, account_number, card_number, iban, account_holder, settlement_reference,
             psp_provider, terminal_number, merchant_number, settlement_account_id, settlement_delay_days,
-            created_by, updated_by
+            bank_code, created_by, updated_by
          ) VALUES (
             $1, $2, $3::financial_account_kind, $4, $5, $6, $7,
             true, $8, $9, $10,
             $11, $12, $13, $14, $15, $16, $17,
             $18, $19, $20, $21, $22,
-            $23, $23
+            $23, $24, $24
          ) RETURNING id`,
         [
           params.businessId,
@@ -645,7 +655,7 @@ export async function createFinancialAccount(
           isDefault,
           normalizeText(params.input.description),
           normalizeText(params.input.notes),
-          normalizeText(params.input.bankName),
+          bank?.name ?? normalizeText(params.input.bankName),
           normalizeText(params.input.bankBranchName),
           normalizeIdentifier(params.input.accountNumber),
           normalizeIdentifier(params.input.cardNumber),
@@ -657,6 +667,7 @@ export async function createFinancialAccount(
           normalizeIdentifier(params.input.merchantNumber),
           settlementAccountId,
           normalizeSettlementDelay(params.input.settlementDelayDays),
+          bank?.code ?? null,
           params.actorId,
         ],
       );
@@ -789,8 +800,6 @@ export async function updateFinancialAccount(
   params: UpdateFinancialAccountParams,
 ): Promise<FinancialAccountWriteResult> {
   if (!isUuid(params.accountId)) throw new FinancialAccountError("financial_account_not_found", 404);
-  const problem = financialAccountInputProblem(params.input, { partial: true });
-  if (problem) throw new FinancialAccountError(problem.code);
 
   const pool = getPool();
   const client = await pool.connect();
@@ -805,9 +814,13 @@ export async function updateFinancialAccount(
       currency_code: string;
       is_active: boolean;
       is_default: boolean;
+      bank_name: string | null;
+      card_number: string | null;
+      iban: string | null;
       has_transfers: boolean;
     }>(
       `SELECT fa.id, fa.kind, fa.location_id, fa.gl_account_id, fa.currency_code, fa.is_active, fa.is_default,
+              fa.bank_name, fa.card_number, fa.iban,
               EXISTS (SELECT 1 FROM financial_transfers t WHERE t.source_account_id = fa.id OR t.destination_account_id = fa.id) AS has_transfers
          FROM financial_accounts fa
         WHERE fa.business_id = $1 AND fa.id = $2
@@ -819,6 +832,11 @@ export async function updateFinancialAccount(
     if (existing.location_id && params.allowedLocationIds && !params.allowedLocationIds.includes(existing.location_id)) {
       throw new FinancialAccountError("no_branch_access", 403);
     }
+    const problem = financialAccountInputProblem(
+      { ...params.input, kind: params.input.kind ?? existing.kind },
+      { partial: true, previous: { cardNumber: existing.card_number, iban: existing.iban } },
+    );
+    if (problem) throw new FinancialAccountError(problem.code);
     if (params.input.locationId !== undefined && params.input.isDefault === undefined && existing.is_default) {
       // Moving a default account to another scope without re-declaring the
       // default flag would leave the old scope with no default and the new one
@@ -906,7 +924,17 @@ export async function updateFinancialAccount(
     const setIfPresent = (column: string, value: unknown, transform: (input: unknown) => string | null = normalizeText): void => {
       if (value !== undefined) set(column, transform(value));
     };
-    setIfPresent("bank_name", params.input.bankName);
+    const bank = iranianBankByCode(params.input.bankCode);
+    if (bank) {
+      set("bank_code", bank.code);
+      set("bank_name", bank.name);
+    } else {
+      setIfPresent("bank_name", params.input.bankName);
+      if (params.input.bankCode === null ||
+          (params.input.bankName !== undefined && normalizeText(params.input.bankName) !== existing.bank_name)) {
+        set("bank_code", null);
+      }
+    }
     setIfPresent("bank_branch_name", params.input.bankBranchName);
     setIfPresent("account_number", params.input.accountNumber, normalizeIdentifier);
     setIfPresent("card_number", params.input.cardNumber, normalizeIdentifier);

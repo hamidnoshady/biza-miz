@@ -142,28 +142,27 @@ describe("the Accounting workspace menu", () => {
     expect(agency?.entries[0].label).toBe("هزینه‌های کارفرما");
   });
 
-  it("keeps «فضای کار حسابداری» as ONE ordinary link in the same menu position", () => {
+  it("groups the workspace and bank accounts beneath «عملیات حسابداری»", () => {
     const groups = groupsFor("owner");
     const ledger = groups.find((group) => group.key === LEDGER_WORKSPACE_GROUP_KEY);
-    // One row, labelled exactly, at the workspace page's canonical href.
+    expect(ledger?.label).toBe("عملیات حسابداری");
+    expect(ledger?.description).toBeUndefined();
     expect(ledger?.entries).toEqual([
       {
         label: LEDGER_WORKSPACE_LABEL,
         href: "/accounting/ledger",
         section: "ledger",
       },
+      {
+        label: "حساب بانکی",
+        href: "/accounting/financial-accounts?kind=bank",
+        section: "financial-accounts",
+      },
     ]);
-    // An ordinary row: it carries no disclosure furniture at all — no
-    // collapsible marker, no sub-groups, no heading of its own. The words live
-    // on the row, like «فروش و فاکتور»'s.
-    expect(ledger?.label).toBeUndefined();
-    expect(ledger?.description).toBeUndefined();
-    // …in the same position it has always held: after the people directory,
-    // before «گزارش و تحلیل».
+    // Keep the group after the people directory and before reports.
     const keys = groups.map((group) => group.key);
     expect(keys.indexOf(LEDGER_WORKSPACE_GROUP_KEY)).toBeGreaterThan(keys.indexOf("people"));
     expect(keys.indexOf(LEDGER_WORKSPACE_GROUP_KEY)).toBeLessThan(keys.indexOf("reports"));
-    // A group, not the menu: there is strictly more in the menu than it.
     expect(groups.length).toBeGreaterThan(1);
   });
 
@@ -536,8 +535,8 @@ describe("which menu entry is the page you are on", () => {
     for (const key of LEDGER_WORKSPACE_SECTION_KEYS) {
       expect(
         workspaceEntryIsActive(workspace, accountingSectionHref(key), ""),
-        `the workspace row must light on ${key}`,
-      ).toBe(true);
+        `the workspace row must light on ${key} unless it has its own row`,
+      ).toBe(key !== "financial-accounts");
     }
     expect(isLedgerWorkspacePathname("/accounting/ledger")).toBe(true);
   });
@@ -593,7 +592,11 @@ describe("which menu entry is the page you are on", () => {
       const lit = entries.filter((candidate) =>
         workspaceEntryIsActive(candidate, accountingSectionHref(key), ""),
       );
-      expect(lit.map((item) => item.href)).toEqual([accountingSectionHref("ledger")]);
+      expect(lit.map((item) => item.href)).toEqual([
+        key === "financial-accounts"
+          ? "/accounting/financial-accounts?kind=bank"
+          : accountingSectionHref("ledger"),
+      ]);
     }
   });
 });

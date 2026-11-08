@@ -195,7 +195,7 @@ describe("what a form may store", () => {
       financialAccountInputProblem({
         ...base,
         accountNumber: "1234567890",
-        cardNumber: "6037991234567890",
+        cardNumber: "۶۰۳۷ ۹۹۱۲ ۳۴۵۶ ۷۸۹۳",
         iban: "IR820540102680020817909002",
       }),
     ).toBeNull();
@@ -218,7 +218,7 @@ describe("what a form may store", () => {
     expect(financialAccountInputProblem({ ...base, iban: "IR820540102680020817909002" })).toBeNull();
     expect(financialAccountInputProblem({ ...base, iban: "IR82-0540-1026-8002-0817-9090-02" })).toBeNull();
     expect(financialAccountInputProblem({ ...base, iban: "820540102680020817909002" })?.code).toBe("iban_invalid");
-    expect(financialAccountInputProblem({ ...base, cardNumber: "6037 9912 3456 7890" })).toBeNull();
+    expect(financialAccountInputProblem({ ...base, cardNumber: "6037 9912 3456 7893" })).toBeNull();
     expect(financialAccountInputProblem({ ...base, cardNumber: "60379912345678" })?.code).toBe(
       "card_number_invalid",
     );
@@ -227,6 +227,29 @@ describe("what a form may store", () => {
     expect(normalizeIdentifier("۶۰۳۷۹۹۱۲۳۴۵۶۷۸۹۰")).toBe("6037991234567890");
     expect(normalizeIdentifier("   ")).toBeNull();
     expect(normalizeIdentifier(42)).toBeNull();
+  });
+
+  it("rejects shaped identifiers with incorrect check digits", () => {
+    expect(financialAccountInputProblem({ ...base, iban: "IR820540102680020817909003" })?.code).toBe("iban_invalid");
+    expect(financialAccountInputProblem({ ...base, iban: "IR020120000000000000000060" })).toBeNull();
+    expect(financialAccountInputProblem({ ...base, iban: "IR990120000000000000000060" })?.code).toBe("iban_invalid");
+    expect(financialAccountInputProblem({ ...base, cardNumber: "6037991234567890" })?.code).toBe("card_number_invalid");
+    expect(financialAccountInputProblem({ ...base, cardNumber: "0000000000000000" })?.code).toBe("card_number_invalid");
+  });
+
+  it("preserves unchanged legacy identifiers but checks replacements", () => {
+    const previous = { cardNumber: "6037991234567890", iban: "IR820540102680020817909003" };
+    expect(financialAccountInputProblem(previous, { partial: true, previous })).toBeNull();
+    expect(
+      financialAccountInputProblem({ cardNumber: "6037991234567891" }, { partial: true, previous })?.code,
+    ).toBe("card_number_invalid");
+  });
+
+  it("validates the chosen catalogue code while accepting a legacy name", () => {
+    expect(financialAccountInputProblem({ ...base, bankCode: "mellat" })).toBeNull();
+    expect(financialAccountInputProblem({ ...base, bankCode: "unknown" })?.code).toBe("invalid_bank_code");
+    expect(financialAccountInputProblem({ ...base, bankName: "بانک قدیمی" })).toBeNull();
+    expect(financialAccountInputProblem({ ...base, kind: "cash", bankCode: "mellat" })?.code).toBe("kind_metadata_mismatch");
   });
 
   it("refuses bank metadata on a till and terminal metadata on a bank", () => {

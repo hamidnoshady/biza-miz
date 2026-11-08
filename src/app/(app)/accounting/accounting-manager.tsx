@@ -599,6 +599,13 @@ export function AccountingManager({
               busy={busy}
               refreshKey={refreshKey}
               canManage={canManageFinancialAccounts}
+              initialKind={searchParams.get("kind")}
+              onKindChange={(kind) => {
+                const url = new URL(window.location.href);
+                if (kind === "all") url.searchParams.delete("kind");
+                else url.searchParams.set("kind", kind);
+                window.history.replaceState(null, "", url);
+              }}
             />
           ) : null}
           {section === "transfers" ? (
