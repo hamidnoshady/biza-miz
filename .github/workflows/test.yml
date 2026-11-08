@@ -402,7 +402,14 @@ jobs:
   # auto-accepted to make a red run go green.
   visual-regression:
     name: visual regression
-    # Playwright 1.56 cannot install browser dependencies on Ubuntu 26.04.
+    # Pinned, not `ubuntu-latest`. This job installs the Chromium that
+    # `playwright` (1.56.0) pins, and Playwright builds support per Ubuntu
+    # release: on 26.04 it aborts with "Playwright does not support chromium on
+    # ubuntu26.04-x64" before it downloads anything, so the whole job dies at
+    # the install step. `ubuntu-latest` rolled from 24.04 to 26.04 on
+    # 2026-11-07 and turned every run red without a code change. A pinned
+    # image also keeps the *rasterisation* stable: the baselines under
+    # docs/design/visual are recorded against one OS and font stack.
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -550,7 +557,12 @@ jobs:
   # unrelated, already-tracked baseline-image diff in that job.
   media-e2e-tests:
     name: media E2E tests
-    # Playwright 1.56 cannot install browser dependencies on Ubuntu 26.04.
+    # Pinned for the same reason as `visual-regression`: this job's first real
+    # step is `npx playwright install --with-deps chromium`, and Playwright
+    # 1.56.0 refuses to install on ubuntu-26.04 ("Playwright does not support
+    # chromium on ubuntu26.04-x64"), which is where `ubuntu-latest` moved on
+    # 2026-11-07. Keep the two jobs on the same image — they both drive the
+    # browser suite.
     runs-on: ubuntu-24.04
     defaults:
       run:
