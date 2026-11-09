@@ -13,6 +13,9 @@ import {
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { isUuid } from "@/lib/uuid";
+import { paymentSourceKindForSettlement } from "@/lib/order-payment-routing";
+import type { PaymentSettlement } from "@/lib/payment-methods";
+import type { PoolClient } from "pg";
 
 function websiteRoutesOf(value: unknown): WebsitePaymentRoute[] | null {
   if (!Array.isArray(value) || value.length > 100) return null;
@@ -22,6 +25,7 @@ function websiteRoutesOf(value: unknown): WebsitePaymentRoute[] | null {
     if (!row || typeof row !== "object" || !isUuid(row.connectionId) || !isUuid(row.financialAccountId) ||
         (row.provider !== "cms" && row.provider !== "woocommerce") ||
         typeof row.gateway !== "string" || !/^[\w.-]{1,100}$/.test(row.gateway) ||
+        (row.provider === "cms" && row.gateway !== "default") ||
         (row.settlement !== "online" && row.settlement !== "card_to_card" && row.settlement !== "cash")) return null;
     const key = `${row.provider}:${row.connectionId}:${row.gateway}`;
     if (seen.has(key)) return null;
@@ -32,9 +36,26 @@ function websiteRoutesOf(value: unknown): WebsitePaymentRoute[] | null {
   return routes;
 }
 
+async function websiteConnections(client: PoolClient, businessId: string, locationId: string) {
+  const { rows } = await client.query<{ id: string; name: string; provider: WebsitePaymentRoute["provider"] }>(
+    `SELECT id, name, 'woocommerce' AS provider FROM integration_connections
+       WHERE business_id = $1 AND (location_id IS NULL OR location_id = $2)
+         AND status = 'active' AND sync_orders
+     UNION ALL
+     SELECT id, site_domain AS name, 'cms' AS provider FROM eshobe_cms_connections
+       WHERE business_id = $1 AND (sync_location_id IS NULL OR sync_location_id = $2) AND status = 'active'
+     ORDER BY name, id`,
+    [businessId, locationId],
+  );
+  return rows;
+}
+
 export const GET = withTenantScope(async (request: NextRequest) => {
   const forRefund = request.nextUrl.searchParams.get("refund") === "1";
-  const { session, error } = forRefund
+  const configure = request.nextUrl.searchParams.get("configure") === "1";
+  const { session, error } = configure
+    ? await requirePermission(PERMISSIONS.financeAccountsManage)
+    : forRefund
     ? await requirePermission(PERMISSIONS.paymentsRefund)
     : await requireAnyPermission(PERMISSIONS.paymentsTake, PERMISSIONS.financeAccountsManage);
   if (error) return error;
@@ -42,12 +63,24 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
   const client = await getPool().connect();
   try {
-    const mode = await readOrderPaymentRouting(client, session.businessId, location.id);
-    const sources = mode === "enabled" || (forRefund && mode === "disabled")
+    const mode = await readOrderPaymentRouting(client, session.businessId, location.id, false, forRefund || configure);
+    const sources = configure || mode === "enabled" || (forRefund && mode === "disabled")
       ? await orderPaymentSources(client, session.businessId, location.id) : [];
+    const visible = sources.map(({ id, name, kind }) => ({ id, name, kind }));
+    if (configure) {
+      const { rows: [setting] } = await client.query<{ value: { enabled?: boolean; websiteRoutes?: WebsitePaymentRoute[] } }>(
+        "SELECT value FROM settings WHERE business_id = $1 AND location_id = $2 AND key = $3",
+        [session.businessId, location.id, ORDER_PAYMENT_ROUTING_SETTING],
+      );
+      const connections = await websiteConnections(client, session.businessId, location.id);
+      return NextResponse.json({
+        mode, sources: visible, connections, enabled: setting?.value.enabled === true,
+        websiteRoutes: setting?.value.websiteRoutes ?? [],
+      });
+    }
     return NextResponse.json({
       mode,
-      sources: sources.map(({ id, name, kind }) => ({ id, name, kind })),
+      sources: visible,
     });
   } finally {
     client.release();
@@ -77,33 +110,42 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
       [location.id, session.businessId],
     );
     const { rows: [peer] } = await client.query<{ paired: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM site_devices
+      `SELECT (EXISTS (SELECT 1 FROM site_devices
           WHERE location_id = $1 AND business_id = $2 AND status IN ('pending','active')
-            AND revoked_at IS NULL) AS paired`,
+            AND revoked_at IS NULL) OR EXISTS (
+          SELECT 1 FROM server_sync_tokens WHERE business_id = $2
+        )) AS paired`,
       [location.id, session.businessId],
     );
     if (!branch || (enabled && (peer?.paired || deploymentRole() !== "central"))) {
       await client.query("ROLLBACK");
       return NextResponse.json({ error: "payment_routing_peer_unsupported" }, { status: 409 });
     }
-    if (enabled && (await orderPaymentSources(client, session.businessId, location.id)).length === 0) {
-      await client.query("ROLLBACK");
-      return NextResponse.json({ error: "payment_source_required" }, { status: 409 });
-    }
     const { rows: [prior] } = await client.query<{ routes: WebsitePaymentRoute[] | null }>(
       "SELECT value->'websiteRoutes' AS routes FROM settings WHERE business_id = $1 AND location_id = $2 AND key = $3",
       [session.businessId, location.id, ORDER_PAYMENT_ROUTING_SETTING],
     );
     const websiteRoutes = providedRoutes ?? prior?.routes ?? [];
-    if (enabled || providedRoutes) {
+    if (enabled) {
+      const connections = await websiteConnections(client, session.businessId, location.id);
       for (const route of websiteRoutes) {
-        const lookup = route.provider === "cms"
-          ? "SELECT id FROM eshobe_cms_connections WHERE business_id=$1 AND id=$2 AND (sync_location_id IS NULL OR sync_location_id=$3)"
-          : "SELECT id FROM integration_connections WHERE business_id=$1 AND id=$2 AND (location_id IS NULL OR location_id=$3)";
-        const { rows } = await client.query(lookup, [session.businessId, route.connectionId, location.id]);
-        if (!rows[0]) throw new OrderPaymentRoutingError("invalid_website_payment_routes");
+        if (!connections.some((connection) => connection.id === route.connectionId && connection.provider === route.provider)) {
+          throw new OrderPaymentRoutingError("invalid_website_payment_routes");
+        }
         await resolveExplicitOrderSource(client, session.businessId, location.id, route.settlement, route.financialAccountId);
       }
+      if (connections.some((connection) => !websiteRoutes.some((route) =>
+        route.provider === connection.provider && route.connectionId === connection.id))) {
+        throw new OrderPaymentRoutingError("website_payment_source_required");
+      }
+      const { rows: methods } = await client.query<{ settlement: PaymentSettlement }>(
+        "SELECT DISTINCT settlement FROM payment_methods WHERE business_id = $1 AND is_active", [session.businessId],
+      );
+      const kinds = new Set((await orderPaymentSources(client, session.businessId, location.id)).map((source) => source.kind));
+      if (methods.some(({ settlement }) => {
+        const kind = paymentSourceKindForSettlement(settlement);
+        return kind !== null && !kinds.has(kind);
+      })) throw new OrderPaymentRoutingError("payment_source_required");
     }
     const value = JSON.stringify({ enabled, approvalReference, actorId: session.sub, websiteRoutes });
     await client.query(

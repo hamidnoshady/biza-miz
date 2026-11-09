@@ -17,6 +17,8 @@ ALTER TABLE customer_returns
 
 CREATE FUNCTION check_payment_financial_account_snapshot() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+  settlement text;
 BEGIN
   IF TG_OP = 'UPDATE' AND (
     OLD.financial_account_id IS DISTINCT FROM NEW.financial_account_id OR
@@ -24,24 +26,35 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'payment_financial_account_immutable' USING ERRCODE = '23514';
   END IF;
-  IF NEW.financial_account_id IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM financial_accounts f
-    JOIN locations l ON l.business_id = f.business_id AND l.id = NEW.location_id
-    WHERE f.id = NEW.financial_account_id AND f.gl_account_id = NEW.financial_account_gl_id
-      AND (f.location_id IS NULL OR f.location_id = l.id)
-  ) THEN
-    RAISE EXCEPTION 'payment_financial_account_scope' USING ERRCODE = '23514';
+  IF NEW.financial_account_id IS NOT NULL THEN
+    IF TG_TABLE_NAME = 'customer_returns' THEN
+      settlement := NEW.refund_method::text;
+    ELSE
+      settlement := NEW.method::text;
+    END IF;
+    PERFORM 1 FROM financial_accounts f
+      JOIN locations l ON l.business_id = f.business_id AND l.id = NEW.location_id
+      JOIN orders o ON o.id = NEW.order_id AND o.location_id = l.id
+      WHERE f.id = NEW.financial_account_id AND f.gl_account_id = NEW.financial_account_gl_id
+        AND (f.location_id IS NULL OR f.location_id = l.id)
+        AND f.kind::text = CASE settlement
+          WHEN 'cash' THEN 'cash' WHEN 'card_to_card' THEN 'bank'
+          WHEN 'card' THEN 'pos_psp' WHEN 'online' THEN 'pos_psp' ELSE '' END
+      FOR SHARE OF f;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'payment_financial_account_scope' USING ERRCODE = '23514';
+    END IF;
   END IF;
   RETURN NEW;
 END;
 $$;
 
 CREATE TRIGGER payments_financial_account_snapshot_guard
-  BEFORE INSERT OR UPDATE OF financial_account_id, financial_account_gl_id, location_id ON payments
+  BEFORE INSERT OR UPDATE OF financial_account_id, financial_account_gl_id, location_id, order_id, method ON payments
   FOR EACH ROW EXECUTE FUNCTION check_payment_financial_account_snapshot();
 
 CREATE TRIGGER customer_return_financial_account_snapshot_guard
-  BEFORE INSERT OR UPDATE OF financial_account_id, financial_account_gl_id, location_id ON customer_returns
+  BEFORE INSERT OR UPDATE OF financial_account_id, financial_account_gl_id, location_id, order_id, refund_method ON customer_returns
   FOR EACH ROW EXECUTE FUNCTION check_payment_financial_account_snapshot();
 
 CREATE FUNCTION preserve_routed_financial_account_identity() RETURNS trigger

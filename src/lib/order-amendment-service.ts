@@ -68,6 +68,7 @@ import {
 import { recomputeOrderTotals } from "./order-totals";
 import type { DiscountInput } from "./orders";
 import type { OrderChannel } from "./ledger";
+import { tendersWithTip } from "./payment-methods";
 
 export class OrderAmendmentError extends Error {
   status: number;
@@ -197,12 +198,27 @@ async function livePostings(
   return rows;
 }
 
-async function paymentsOnOrder(client: PoolClient, orderId: string): Promise<PaymentRow[]> {
-  const { rows } = await client.query<{ method: AmendmentPaymentMethod; amount: string }>(
-    "SELECT method::text AS method, sum(amount)::text AS amount FROM payments WHERE order_id=$1 GROUP BY method",
+type AttributedPaymentRow = PaymentRow & {
+  financialAccountId?: string;
+  financialAccountGlId?: string;
+};
+
+async function paymentsOnOrder(client: PoolClient, orderId: string): Promise<AttributedPaymentRow[]> {
+  const { rows } = await client.query<{
+    method: AmendmentPaymentMethod; amount: string; financial_account_id: string | null; financial_account_gl_id: string | null;
+  }>(
+    `SELECT method::text AS method, sum(amount)::text AS amount, financial_account_id, financial_account_gl_id
+       FROM payments WHERE order_id=$1
+      GROUP BY method, financial_account_id, financial_account_gl_id HAVING SUM(amount) <> 0
+      ORDER BY MIN(settlement_seq), method, financial_account_id`,
     [orderId],
   );
-  return rows.map((row) => ({ method: row.method, amount: Number(row.amount) }));
+  return rows.map((row) => ({
+    method: row.method, amount: Number(row.amount),
+    ...(row.financial_account_id && row.financial_account_gl_id ? {
+      financialAccountId: row.financial_account_id, financialAccountGlId: row.financial_account_gl_id,
+    } : {}),
+  }));
 }
 
 /** SnapFood keeps a contract-specific slice of the bill; the ledger only ever sees the Rial amount. */
@@ -266,6 +282,7 @@ export async function amendClosedOrder(
   const previousTotal = Number(order.total);
   const previousTip = Number(order.tip_amount ?? 0);
   const paid = await paymentsOnOrder(client, params.orderId);
+  const hasAccountRouting = paid.some((row) => Boolean(row.financialAccountId));
   const postings = await livePostings(client, params.businessId, params.orderId);
   // The date the sale is on the books for. Everything this amendment posts —
   // reversal and replay alike — lands there, so the day's own reports change.
@@ -365,10 +382,14 @@ export async function amendClosedOrder(
     "UPDATE payments SET superseded_by_amendment_id=$2 WHERE order_id=$1 AND superseded_by_amendment_id IS NULL",
     [params.orderId, amendmentId],
   );
-  for (const row of planPaymentRows(paid, 0, settlementMethod)) {
+  const reversedPayments: AttributedPaymentRow[] = hasAccountRouting
+    ? paid.map((row) => ({ ...row, amount: -row.amount }))
+    : planPaymentRows(paid, 0, settlementMethod);
+  for (const row of reversedPayments) {
     await client.query(
-      `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, superseded_by_amendment_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, superseded_by_amendment_id,
+                              financial_account_id, financial_account_gl_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [
         params.locationId,
         params.orderId,
@@ -377,6 +398,8 @@ export async function amendClosedOrder(
         `order-amendment:${amendmentId}`,
         params.actorId,
         amendmentId,
+        row.financialAccountId ?? null,
+        row.financialAccountGlId ?? null,
       ],
     );
   }
@@ -521,6 +544,18 @@ export async function amendClosedOrder(
     replayedCost = consumed.totalCost;
 
     const amount = rialText(String(newTotal));
+    let newPayments: AttributedPaymentRow[] = planPaymentRows([], newTotal, settlementMethod);
+    if (hasAccountRouting) {
+      const oldTotal = paid.reduce((total, row) => total + row.amount, 0);
+      const changedMethod = params.input.paymentMethod && paid.some((row) => row.method !== params.input.paymentMethod);
+      if (changedMethod || paid.some((row) => row.amount <= 0) || (paid.length !== 1 && oldTotal !== newTotal)) {
+        throw new OrderAmendmentError("amendment_payment_sources_need_review");
+      }
+      newPayments = newTotal === 0 ? [] : paid.length === 1 ? [{ ...paid[0], amount: newTotal }] : paid;
+    }
+    const platformAmount = hasAccountRouting
+      ? rialText(String(newPayments.filter((row) => row.method === "snappfood").reduce((sum, row) => sum + row.amount, 0)))
+      : amount;
     await postExactOrderPaymentEntry(client, {
       businessId: params.businessId,
       locationId: params.locationId,
@@ -530,12 +565,22 @@ export async function amendClosedOrder(
       entryDate,
       createdBy: params.actorId,
       method: settlementMethod,
+      ...(hasAccountRouting ? {
+        tenders: tendersWithTip(
+          (newPayments.length > 0 ? newPayments : [{ ...paid[0], amount: 0 }])
+            .map(({ method, ...row }) => ({ ...row, settlement: method })),
+          newTip,
+        )
+          .map((row) => ({ ...row, amount: rialText(String(row.amount)) })),
+      } : {}),
       amount,
       tax: rialText(String(totals.tax)),
       inventoryEventId: replayEventId,
       orderChannel: order.type,
       tip: rialText(String(newTip)),
-      platformCommission: await platformCommissionFor(params.businessId, settlementMethod, amount),
+      platformCommission: await platformCommissionFor(
+        params.businessId, hasAccountRouting ? "snappfood" : settlementMethod, platformAmount,
+      ),
       dimensions: saleAttribution,
     });
     await postExactCogsEntry(client, {
@@ -552,10 +597,11 @@ export async function amendClosedOrder(
     });
     await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [replayEventId]);
 
-    for (const row of planPaymentRows([], newTotal, settlementMethod)) {
+    for (const [index, row] of newPayments.entries()) {
       await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, settlement_seq,
+                                financial_account_id, financial_account_gl_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [
           params.locationId,
           params.orderId,
@@ -563,6 +609,9 @@ export async function amendClosedOrder(
           row.amount,
           `order-amendment:${amendmentId}`,
           params.actorId,
+          index + 1,
+          row.financialAccountId ?? null,
+          row.financialAccountGlId ?? null,
         ],
       );
     }

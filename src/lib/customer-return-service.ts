@@ -221,10 +221,11 @@ export async function createCustomerReturn(
   params = { ...params, idempotencyKey, refundAmount, reason, lines };
   let source = params.sourceSnapshot;
   if (refund > 0n && !source && !params.legacyReplay && paymentSourceKindForSettlement(params.refundMethod)) {
+    const mode = await readOrderPaymentRouting(client, params.businessId, params.locationId, true, Boolean(params.financialAccountId));
     if (params.financialAccountId) {
+      if (mode === "peer_unsupported") throw new Error("payment_routing_peer_unsupported");
       source = await resolveExplicitOrderSource(client, params.businessId, params.locationId, params.refundMethod, params.financialAccountId);
     } else {
-      const mode = await readOrderPaymentRouting(client, params.businessId, params.locationId);
       const { rows: [payment] } = await client.query<{ routed: boolean }>(
         `SELECT EXISTS (
           SELECT 1 FROM payments WHERE order_id = $1 AND location_id = $2 AND financial_account_id IS NOT NULL

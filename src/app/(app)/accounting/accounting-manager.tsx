@@ -29,6 +29,7 @@ import { errorMessage } from "./accounting-errors";
 import { taxInvoiceCapabilitiesFor } from "./tax-invoice-capabilities";
 import styles from "./ledger-workspace.module.css";
 import { PspSettlementsSection } from "./psp-settlements-section";
+import { OrderPaymentRoutingSection } from "./order-payment-routing-section";
 
 /*
  * Each accounting section below is mutually exclusive at render time (the
@@ -601,6 +602,7 @@ export function AccountingManager({
             <Link href="/petty-cash" className="mb-3 inline-flex min-h-10 items-center rounded-lg border px-3 text-sm font-semibold">
               مدیریت تنخواه‌گردان
             </Link>
+            {canManageFinancialAccounts ? <OrderPaymentRoutingSection /> : null}
             <FinancialAccountsSection
               busy={busy}
               refreshKey={refreshKey}

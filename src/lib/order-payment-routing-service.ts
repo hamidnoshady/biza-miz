@@ -26,7 +26,7 @@ interface SourceRow {
 }
 
 export async function readOrderPaymentRouting(
-  client: QueryClient, businessId: string, locationId: string, lockBranch = false,
+  client: QueryClient, businessId: string, locationId: string, lockBranch = false, explicitSource = false,
 ): Promise<"disabled" | "enabled" | "peer_unsupported"> {
   if (lockBranch) {
     await client.query("SELECT id FROM locations WHERE business_id = $1 AND id = $2 FOR SHARE", [businessId, locationId]);
@@ -35,14 +35,17 @@ export async function readOrderPaymentRouting(
     `SELECT EXISTS (
        SELECT 1 FROM settings WHERE business_id = $1 AND location_id = $2 AND key = $3
          AND value->'enabled' = 'true'::jsonb
-     ) AS enabled, EXISTS (
+     ) AS enabled, (EXISTS (
        SELECT 1 FROM site_devices WHERE business_id = $1 AND location_id = $2
          AND status IN ('pending','active') AND revoked_at IS NULL
-     ) AS paired`,
+     ) OR EXISTS (
+       SELECT 1 FROM server_sync_tokens WHERE business_id = $1
+     )) AS paired`,
     [businessId, locationId, ORDER_PAYMENT_ROUTING_SETTING],
   );
-  if (!row?.enabled) return "disabled";
-  return deploymentRole() === "site" || row.paired ? "peer_unsupported" : "enabled";
+  if (!row?.enabled && !explicitSource) return "disabled";
+  if (deploymentRole() === "site" || row?.paired) return "peer_unsupported";
+  return row?.enabled ? "enabled" : "disabled";
 }
 
 export async function orderPaymentSources(
