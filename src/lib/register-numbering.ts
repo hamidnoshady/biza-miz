@@ -47,7 +47,8 @@ export type RegisterNumberedTable =
   | "agency_client_campaigns"
   | "agency_reimbursable_costs"
   // Issue #1128 §D — the payment that clears the vendor payable it created.
-  | "agency_vendor_settlements";
+  | "agency_vendor_settlements"
+  | "agency_vendor_purchases";
 
 export type RegisterNumberedColumn =
   | "variation_number"
@@ -62,9 +63,11 @@ export type RegisterNumberedColumn =
   | "campaign_number"
   // Issue #1128 §D — money spent on a client's behalf, awaiting its recharge.
   | "cost_number"
-  | "settlement_number";
+  | "settlement_number"
+  | "purchase_number";
 
 const NUMBER_COLUMN: Record<RegisterNumberedTable, RegisterNumberedColumn> = {
+  agency_vendor_purchases: "purchase_number",
   aec_variations: "variation_number",
   aec_payment_certificates: "certificate_number",
   aec_material_requests: "request_number",

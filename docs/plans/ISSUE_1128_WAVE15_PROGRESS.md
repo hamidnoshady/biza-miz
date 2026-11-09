@@ -114,3 +114,11 @@ rerun after that correction; CI review remains required.
 Remaining next step: quote → approved purchase → payable documents using this
 identity. Supplier-only merging remains outside the existing customer-merge endpoint.
 No procurement documents, automatic tools or fifth app are claimed by this slice.
+
+## Next continuation — vendor purchase chain (2026-10-26)
+
+The canonical quote → shared approval → explicit posted payable continuation is
+now documented in [Wave 16](ISSUE_1128_WAVE16_PROGRESS.md), including its member
+screen, authorization boundaries, verification and remaining acceptance gaps.
+The "remaining next step" above describes this older slice's boundary, not the
+latest implementation. Supplier-only merging still remains out of scope.
