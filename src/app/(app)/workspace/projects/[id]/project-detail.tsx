@@ -161,6 +161,7 @@ interface Health {
 export function ProjectDetail({ projectId, canRecordVendorCost = false, canPickVendor = false }: { projectId: string; canRecordVendorCost?: boolean; canPickVendor?: boolean }) {
   const money = useMoney();
   const lookups = useWorkspaceLookups();
+  const [agencyFinanceRevision, setAgencyFinanceRevision] = useState(0);
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [phases, setPhases] = useState<Phase[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
@@ -523,9 +524,10 @@ export function ProjectDetail({ projectId, canRecordVendorCost = false, canPickV
               other trade from calling `/api/agency/**` and rendering an
               `industry_mismatch` banner for a request it had to make. */}
           {lookups.agencyCommercial ? <AgencyVendorPurchases projectId={projectId}
-            canManage={canManageProject && canPickVendor} canBook={canManageProject && canRecordVendorCost} /> : null}
+            canManage={canManageProject && canPickVendor} canBook={canManageProject && canRecordVendorCost} onChanged={() => setAgencyFinanceRevision(v => v + 1)} /> : null}
           {lookups.agencyCommercial ? (
             <AgencyBillingCard
+              refreshRevision={agencyFinanceRevision}
               projectId={projectId}
               canManage={canManageProject}
               canApprove={canApprove}

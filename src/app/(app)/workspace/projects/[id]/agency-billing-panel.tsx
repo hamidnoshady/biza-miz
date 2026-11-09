@@ -122,10 +122,12 @@ export function AgencyBillingCard({
   projectId,
   canManage,
   canApprove,
+  refreshRevision = 0,
 }: {
   projectId: string;
   canManage: boolean;
   canApprove: boolean;
+  refreshRevision?: number;
 }) {
   const [payload, setPayload] = useState<CommercialPayload | null>(null);
   const [error, setError] = useState("");
@@ -159,8 +161,9 @@ export function AgencyBillingCard({
   const money = useMoney();
   const fail = useCallback((code: string | undefined) => setError(workspaceError(code)), []);
 
-  const load = useCallback(async () => {
-    const { ok, data } = await api<CommercialPayload>(`/api/agency/projects/${projectId}/commercial`);
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const { ok, data, aborted } = await api<CommercialPayload>(`/api/agency/projects/${projectId}/commercial`, { signal });
+    if (aborted || signal?.aborted) return;
     if (!ok) {
       fail((data as unknown as { error?: string }).error);
       setPayload(null);
@@ -170,8 +173,10 @@ export function AgencyBillingCard({
   }, [projectId, fail]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load, refreshRevision]);
 
   if (error && !payload) return <ErrorBox>{error}</ErrorBox>;
   if (!payload) {
@@ -472,6 +477,19 @@ export function AgencyBillingCard({
           </div>
 
           <div className="rounded-xl border border-border/70 p-3">
+            <p className="text-xs font-semibold">تعهد خرید — هنوز ثبت حسابداری نشده</p>
+            <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+              <Figure label="خریدهای تأییدشدهٔ ثبت‌نشده" value={money.formatText(report.commitments.approvedVendorPurchaseRial)}
+                hint="کل پروژه؛ بدون محدودیت ۲۰۰ ردیف فهرست خرید" />
+              <Figure label="تعداد خریدهای متعهدشده" value={n(report.commitments.approvedVendorPurchaseCount)} />
+            </dl>
+            <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+              فقط پیشنهادهای تأییدشده که هنوز هزینه نشده‌اند؛ با ثبت پرداختنی از این گروه خارج می‌شوند.
+              این مبلغ هزینهٔ قطعی نیست و از حاشیهٔ دفتر کل کسر نمی‌شود. نحوهٔ خالص یا ناخالص هنگام ثبت هزینه تعیین می‌شود.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-border/70 p-3">
             <p className="text-xs font-semibold">قطعی — از دفتر کل</p>
             <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
               آنچه ثبت شده است. درآمد و هزینه از اسناد حسابداری خوانده می‌شود و اینجا نگهداری نمی‌شود.
@@ -527,9 +545,9 @@ export function AgencyBillingCard({
         <div className="mt-4 rounded-xl border border-border/70 p-3">
           <p className="text-xs font-semibold">پول کارفرما — خارج از حاشیهٔ سود</p>
           <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-            رسانه و تولیدی که به نام کارفرما خریده‌ایم و از حساب ۱۲۷۰ می‌گذرد. این پول نه هزینهٔ
-            آژانس است نه درآمد آن، پس در حاشیهٔ بالا نیست. هزینه‌ای که به نام خود آژانس خریده
-            شود (ناخالص) در «هزینهٔ واقعی» شمرده شده است، نه اینجا.
+            هزینه‌های کارفرما با سیاست نمایش خالص از حساب ۱۲۷۰ می‌گذرند و در حاشیهٔ بالا نیستند.
+            هزینه با نمایش ناخالص در «هزینهٔ واقعی» شمرده می‌شود، نه اینجا؛ خالص یا ناخالص بودن
+            به‌تنهایی به معنی مالکیت آژانس یا کارفرما نیست.
           </p>
           <dl className="mt-3 grid gap-3 sm:grid-cols-3">
             <Figure
