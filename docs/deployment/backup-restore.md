@@ -327,6 +327,16 @@ shows (shortened) and the retry route writes to the audit log. Quote it in a
 support request: the artifact name is not enough, because the same artifact is
 attempted many times.
 
+**The audit log's «پشتیبان‌گیری» filter covers all three namespaces.** The console
+writes backup events under `platform_backup.*` (the whole install), `tenant_backup.*`
+(one business) and `backup.run_now` (the MCP tool), and the filter used to match only
+the last of those — an operator filtering to backups saw a single row and concluded
+nothing had been audited. A family is now a set of prefixes (`src/lib/audit-families.ts`),
+shared by the dropdown and the SQL, so the three cannot drift apart again. Two
+companions to the retry button are worth knowing by name in the log:
+`platform_backup.cloud.retry` (a manual retry, success or failure) and
+`platform_backup.restore.verify` (a drill). Both carry the attempt id when there is one.
+
 **Recovery of a stuck upload.** Every attempt takes a per-artifact advisory lock
 (`lock:backup:platform-cloud:<artifact>`), so the scheduler, a manual click and a
 second replica cannot upload the same key at once — the loser gets `upload_in_flight`
