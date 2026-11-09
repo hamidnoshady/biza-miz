@@ -499,6 +499,39 @@ export interface PlatformMcpTool {
   };
 }
 
+/**
+ * Issue #1296 — the managed per-business backup service, read for the health
+ * answer.
+ *
+ * Kept in this file rather than in `platform-backup-service.ts` because it is a
+ * *different system*: #903's fleet service has its own destination, its own
+ * custody and its own check. The one thing that must never happen is a caller
+ * reading its `lastCheckOk` as "the whole-platform backup is off-site" — so the
+ * shape says which system each field belongs to, and a failure to read it
+ * degrades to `null` rather than failing the platform half.
+ */
+async function tenantBackupServiceHealthSafe(): Promise<Record<string, unknown> | null> {
+  try {
+    const { readTenantBackupService, serviceConfigView } = await import("../tenant-backup-storage");
+    const view = serviceConfigView(await readTenantBackupService());
+    return {
+      system: "tenant_managed_backup",
+      issue: "#903",
+      configured: view.configured,
+      managedCloud: view.managedCloud,
+      hybridEnabled: view.hybridEnabled,
+      bucketConfigured: Boolean(view.bucket),
+      lastCheckedAt: view.lastCheckedAt,
+      lastCheckOk: view.lastCheckOk,
+      lastErrorCode: view.lastErrorCode,
+      kekAvailable: view.kekAvailable,
+      note: "Independent of the whole-platform disaster-recovery copy: same kind of storage, different system.",
+    };
+  } catch {
+    return null;
+  }
+}
+
 export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
   {
     name: "list_businesses",
@@ -1223,8 +1256,17 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
   },
   {
     name: "get_backup_health",
-    description: "Backup health rollup: last success, stale markers, storage stats, queue depth.",
+    description:
+      "Whole-platform disaster-recovery health, with the two halves kept apart (issue #1296): local captures on this server, and whether the NEWEST capture has a confirmed copy in the bucket. An older successful upload is reported as historical, not as current protection. The managed per-business backup service is NOT part of this answer — see get_tenant_backup_service_health.",
     capability: "backup.read",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_tenant_backup_service_health",
+    description:
+      "The separately-managed tenant backup service (issue #903): destination configured, key custody available, last check and its provider-neutral code. Never mixed with the whole-platform cloud status.",
+    capability: "tenant_backup.read",
     bridged: false,
     inputSchema: { type: "object", properties: {} },
   },
@@ -2040,7 +2082,32 @@ async function executePlatformTool(
         return { runs: await listPlatformBackupRuns(arg.limit) };
       }
       case "get_backup_health": {
-        return { health: await getPlatformBackupHealth() };
+        const health = await getPlatformBackupHealth();
+        // Issue #1296 — the answer is split by system, and the split is the
+        // contract: `platform` is the whole-deployment disaster-recovery copy
+        // (this server's disk + this server's bucket), `tenantManaged` is the
+        // fleet service from #903 with its own destination and its own checks.
+        // A caller must never read one as the other's health.
+        return {
+          health,
+          platform: {
+            local: {
+              lastSuccessAt: health.localLastSuccessAt,
+              lastError: health.localLastError,
+              artifactsOnDisk: health.artifactsOnDisk,
+              newestArtifact: health.newestArtifact,
+            },
+            cloud: health.cloud,
+            cloudReachable: health.cloudReachable,
+            alert: health.alert,
+          },
+          tenantManaged: await tenantBackupServiceHealthSafe(),
+          /** what `health.cloudLastSuccessAt` still means: the last upload that ever finished, for any artifact */
+          lastAnyCloudSuccessAt: health.cloudLastSuccessAt,
+        };
+      }
+      case "get_tenant_backup_service_health": {
+        return { service: await tenantBackupServiceHealthSafe() };
       }
       case "run_backup_now": {
         const result = await runPlatformBackupNow(connection.adminId);

@@ -38,6 +38,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { JalaliDatePicker } from "../jalali-date-picker";
 import { api } from "../ui";
 import { OrderDetailModal } from "./order-detail-modal";
+import { HistoricalInvoiceHistory } from "@/components/data-transfer/historical-invoice-history";
 
 type OrderStatus = "open" | "held" | "completed" | "voided";
 type OrderType = "dine_in" | "takeaway" | "delivery";
@@ -978,6 +979,7 @@ export function OrdersList({
         timeZone={timeZone}
         onChanged={() => void load()}
       />
+      <div className="mt-4"><HistoricalInvoiceHistory /></div>
     </PageShell>
   );
 }

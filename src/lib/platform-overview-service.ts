@@ -51,6 +51,18 @@ export interface PlatformOverview {
     status: "ok" | "warning" | "error" | "unknown";
     lastSuccessAt: string | null;
     reason: string | null;
+    /**
+     * Issue #1296 — the off-site half, kept as its own fact so the tile can say
+     * "local capture is fine, the newest one is not off-site yet" instead of one
+     * merged word. `null` when the backup subsystem could not answer at all.
+     */
+    cloud: {
+      state: string;
+      currentConfirmed: boolean;
+      latestConfirmedAt: string | null;
+      behindMs: number | null;
+      reachable: boolean;
+    } | null;
   };
   system: {
     /**
@@ -247,6 +259,16 @@ export async function getPlatformOverview(migrations: MigrationStatus): Promise<
       status: backupStatus,
       lastSuccessAt: backupHealth?.localLastSuccessAt ?? null,
       reason: backupHealth?.alert.reason ?? null,
+      cloud:
+        backupHealth && backupHealth.cloud
+          ? {
+              state: backupHealth.cloud.state,
+              currentConfirmed: backupHealth.cloud.currentConfirmed,
+              latestConfirmedAt: backupHealth.cloud.latestConfirmedAt,
+              behindMs: backupHealth.cloud.behindMs,
+              reachable: backupHealth.cloudReachable,
+            }
+          : null,
     },
     system: {
       pendingMigrations: migrations.pendingTotal,
