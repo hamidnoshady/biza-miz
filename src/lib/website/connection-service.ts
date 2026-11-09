@@ -273,8 +273,9 @@ export async function testWebsiteConnection(businessId: string): Promise<{ ok: b
   if (!row) return { ok: false, error: "not_connected" };
   const result = await adapterFromRow(row).testConnection();
   await query(
-    `UPDATE eshobe_cms_connections SET last_checked_at = now(), last_error = $2, updated_at = now() WHERE business_id = $1`,
-    [businessId, result.ok ? null : (result.error ?? "connection_failed")],
+    `UPDATE eshobe_cms_connections SET last_checked_at = now(), last_error = $2, updated_at = now()
+      WHERE business_id = $1 AND id = $3`,
+    [businessId, result.ok ? null : (result.error ?? "connection_failed"), row.id],
   );
   return result;
 }

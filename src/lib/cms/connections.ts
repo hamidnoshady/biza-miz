@@ -95,9 +95,20 @@ export async function saveCmsConnection(input: SaveCmsConnectionInput): Promise<
   );
 }
 
+/**
+ * Explicit stored-connection removal. The website manager's pause path is
+ * `disconnectWebsite` (soft-disable and keep remote identities); this legacy
+ * CMS lifecycle helper erases the credential row(s). Without a connection id
+ * it removes the business's CMS connections, matching the pre-multi-site
+ * delete contract. A later reconnect is still idempotent through remote
+ * source identities.
+ */
 export async function deleteCmsConnection(businessId: string, connectionId?: string): Promise<void> {
-  const { disconnectWebsite } = await import("../website/connection-service");
-  await disconnectWebsite(businessId, connectionId);
+  await query(
+    `DELETE FROM eshobe_cms_connections
+      WHERE business_id = $1 AND ($2::uuid IS NULL OR id = $2)`,
+    [businessId, connectionId ?? null],
+  );
 }
 
 /**

@@ -121,10 +121,10 @@ async function apiPaced(page, method, path, body) {
  * accounts. A chart that already has journal lines is left alone.
  */
 async function ensureChartOfAccounts(page) {
-  const current = JSON.parse((await api(page, "GET", "/api/setup/accounts")).text);
+  const current = JSON.parse((await apiPaced(page, "GET", "/api/setup/accounts")).text);
   const codes = new Set((current.existing ?? []).map((a) => a.code));
   if (codes.has("1241") && codes.has("1200")) return;
-  const posted = await api(page, "POST", "/api/setup/accounts", { accounts: current.template });
+  const posted = await apiPaced(page, "POST", "/api/setup/accounts", { accounts: current.template });
   if (posted.status >= 300) throw new Error(`provisioning the chart failed (${posted.status}): ${posted.text}`);
   console.log(`[e2e-cheques] chart of accounts provisioned from the template (${current.template.length} accounts)`);
 }
