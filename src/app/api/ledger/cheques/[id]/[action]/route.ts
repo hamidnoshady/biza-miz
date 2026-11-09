@@ -6,11 +6,13 @@ import { CHEQUE_ACTIONS, type ChequeAction } from "@/lib/cheques";
 import { chequeErrorResponse } from "../../errors";
 import { MalformedBodyError, readJsonObjectBody } from "../../body";
 import { idempotencyKeyOf } from "../../idempotency";
+import { branchAccessForSession } from "@/lib/automotive-access";
 
 interface ActionBody {
   occurredOn?: string;
   endorsedToSupplierId?: string;
   feeAmount?: number;
+  bankAccountId?: string;
   memo?: string;
   idempotencyKey?: string;
 }
@@ -47,6 +49,7 @@ export const POST = withTenantScope(
     }
 
     try {
+      const { allowedLocationIds } = await branchAccessForSession(session);
       const cheque = await transitionCheque({
         businessId: session.businessId,
         chequeId: id,
@@ -55,6 +58,8 @@ export const POST = withTenantScope(
         occurredOn: body.occurredOn ?? null,
         endorsedToSupplierId: body.endorsedToSupplierId ?? null,
         feeAmount: body.feeAmount ?? null,
+        bankAccountId: body.bankAccountId ?? null,
+        allowedLocationIds,
         memo: body.memo ?? null,
         createdBy: session.sub,
       });

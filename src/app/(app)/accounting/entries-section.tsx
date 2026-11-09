@@ -890,6 +890,11 @@ function JournalEntryDetail({
             <DataTableRow key={`${line.accountId}-${index}`}>
               <Td muted>
                 {line.accountCode} {line.accountName}
+                {line.financialAccount ? (
+                  <span className="block text-xs text-muted-foreground">
+                    {[line.financialAccount.name, line.financialAccount.bankName, line.financialAccount.terminalNumber].filter(Boolean).join(" · ")}
+                  </span>
+                ) : null}
                 {(line.dimensions ?? []).length > 0 ? (
                   <span className="mt-0.5 block text-xs text-muted-foreground">
                     {(line.dimensions ?? [])

@@ -12,6 +12,7 @@ import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { MAX_RECONCILIATION_LINE_BATCH } from "../src/lib/bank-reconciliation";
+import { parseStatementImport } from "../src/lib/reconciliation-statement-import";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -126,6 +127,145 @@ async function postCashEntry(entryDate: string, amount: number): Promise<string>
   ]);
   return lineRows[0].id;
 }
+
+describe("registered financial account statements", () => {
+  it("keeps full-window totals and exact running balances across pages and branch scopes", async () => {
+    const { financialAccountCard } = await import("../src/lib/financial-accounts-service");
+    const { rows: branches } = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name, timezone)
+       VALUES ($1, 'A', 'Asia/Tehran'), ($1, 'B', 'Asia/Tehran') RETURNING id`,
+      [biz.id],
+    );
+    const [a, b] = branches.map(({ id }) => id);
+    const { rows: [bank] } = await db.query<{ id: string }>(
+      `INSERT INTO financial_accounts (business_id, gl_account_id, kind, name, currency_code)
+       VALUES ($1, $2, 'bank', 'Mellat', 'IRR') RETURNING id`,
+      [biz.id, acct.bank],
+    );
+    const post = async (date: string, locationId: string, amounts: string[]) => {
+      const { rows: [entry] } = await db.query<{ id: string }>(
+        `INSERT INTO journal_entries (business_id, location_id, entry_date, memo, source_type)
+         VALUES ($1, $2, $3, 'Deposit', 'manual') RETURNING id`,
+        [biz.id, locationId, date],
+      );
+      for (const amount of amounts) {
+        await db.query(
+          `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+           VALUES ($1, $2, $4, 0), ($1, $3, 0, $4)`,
+          [entry.id, acct.bank, acct.revenue, amount],
+        );
+      }
+      return entry.id;
+    };
+    await post("2025-03-31", a, ["9007199254740993"]);
+    const first = await post("2025-04-10", a, ["200", "300"]);
+    const second = await post("2025-04-20", a, ["100"]);
+    await post("2025-04-15", b, ["900"]);
+    await post("2025-05-01", a, ["6000"]);
+    const filters = { from: "2025-04-01", to: "2025-04-30", allowedLocationIds: [a], limit: 1 };
+    const page = await financialAccountCard(biz.id, bank.id, filters);
+    expect(page).toMatchObject({
+      opening: "9007199254740993", totalDebit: "600", closing: "9007199254741593",
+      ledgerBalance: "9007199254741593", reconciliationDifference: "0", nextCursor: first,
+      rows: [{ entryId: first, debit: "500", balance: "9007199254741493", matchStatus: "unmatched" }],
+    });
+    const next = await financialAccountCard(biz.id, bank.id, { ...filters, cursor: page.nextCursor });
+    expect(next).toMatchObject({
+      closing: page.closing, nextCursor: null,
+      rows: [{ entryId: second, balance: "9007199254741593" }],
+    });
+    await expect(financialAccountCard(biz.id, bank.id, { ...filters, locationId: b }))
+      .rejects.toMatchObject({ status: 403 });
+  });
+
+  it("isolates registered bank reconciliations and keeps pooled history separate", async () => {
+    const old = await reconciliationService.createReconciliation({
+      businessId: biz.id, accountCode: "bank", statementDate: "2025-03-31",
+      statementBalance: 0, createdBy: user.id,
+    });
+    await reconciliationService.completeReconciliation({
+      businessId: biz.id, reconciliationId: old.id, actorId: user.id,
+    });
+    const { rows: [otherGl] } = await db.query<{ id: string }>(
+      "INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1111', 'Melli GL', 'asset') RETURNING id",
+      [biz.id],
+    );
+    const { rows: banks } = await db.query<{ id: string }>(
+      `INSERT INTO financial_accounts (business_id, gl_account_id, kind, name, currency_code)
+       VALUES ($1, $2, 'bank', 'Mellat', 'IRR'), ($1, $3, 'bank', 'Melli', 'IRR') RETURNING id`,
+      [biz.id, acct.bank, otherGl.id],
+    );
+    const [mellat, melli] = await Promise.all(banks.map(({ id }) => reconciliationService.createReconciliation({
+      businessId: biz.id, financialAccountId: id, statementDate: "2025-04-30",
+      statementBalance: 0, createdBy: user.id,
+    })));
+    expect(mellat).toMatchObject({ financialAccountId: banks[0].id, accountCode: null, accountName: "Mellat" });
+    expect((await reconciliationService.listReconciliations(biz.id, { financialAccountId: banks[1].id })).map((r) => r.id))
+      .toEqual([melli.id]);
+    expect((await reconciliationService.listReconciliations(biz.id, "bank")).map((r) => r.id)).toEqual([old.id]);
+    await expect(reconciliationService.getReconciliation(biz.id, mellat.id, { allowedLocationIds: [] }))
+      .rejects.toMatchObject({ status: 403 });
+  });
+
+  it("refuses completion when rounding a large cleared total would hide a rial", async () => {
+    await db.query(
+      `INSERT INTO bank_reconciliations (business_id, account_id, statement_date, statement_balance, status)
+       VALUES ($1, $2, '2025-03-31', '-9007199254740991', 'completed')`,
+      [biz.id, acct.bank],
+    );
+    const { rows: [entry] } = await db.query<{ id: string }>(
+      `INSERT INTO journal_entries (business_id, entry_date, memo, source_type)
+       VALUES ($1, '2025-04-10', 'Deposit', 'manual') RETURNING id`,
+      [biz.id],
+    );
+    const { rows: [line] } = await db.query<{ id: string }>(
+      `INSERT INTO journal_lines (entry_id, account_id, debit, credit)
+       VALUES ($1, $2, '9007199254740993', 0), ($1, $3, 0, '9007199254740993') RETURNING id`,
+      [entry.id, acct.bank, acct.revenue],
+    );
+    const period = await reconciliationService.createReconciliation({
+      businessId: biz.id, accountCode: "bank", statementDate: "2025-04-30",
+      statementBalance: 1, createdBy: user.id,
+    });
+    await reconciliationService.setLineCleared({
+      businessId: biz.id, reconciliationId: period.id, journalLineId: line.id, cleared: true,
+    });
+    expect(await reconciliationService.getReconciliation(biz.id, period.id)).toMatchObject({
+      computedBalance: 2, difference: -1,
+    });
+    await expect(reconciliationService.completeReconciliation({
+      businessId: biz.id, reconciliationId: period.id, actorId: user.id,
+    })).rejects.toThrow("balance_mismatch");
+  });
+});
+
+describe("statement matching preview", () => {
+  it("suggests only one-to-one matches and leaves claims unchanged", async () => {
+    const unique = await postCashEntry("2025-04-10", 1000);
+    await postCashEntry("2025-04-11", 500);
+    await postCashEntry("2025-04-11", 500);
+    await postCashEntry("2025-04-12", 700);
+    const alreadyChecked = await postCashEntry("2025-04-13", 900);
+    const period = await reconciliationService.createReconciliation({
+      businessId: biz.id, accountCode: "cash", statementDate: "2025-04-30",
+      statementBalance: 1000, createdBy: user.id,
+    });
+    await reconciliationService.setLineCleared({
+      businessId: biz.id, reconciliationId: period.id, journalLineId: alreadyChecked, cleared: true,
+    });
+    const imported = parseStatementImport([
+      "date,amount_rial", "2025-04-10,1000", "2025-04-11,500",
+      "2025-04-12,700", "2025-04-12,700", "2025-04-13,900",
+    ].join("\n"));
+    if (!imported.ok) throw new Error(imported.error);
+    const preview = await reconciliationService.previewStatementMatches(biz.id, period.id, imported.lines);
+    expect(preview.map(({ status, journalLineId }) => [status, journalLineId])).toEqual([
+      ["matched", unique], ["ambiguous", null], ["ambiguous", null], ["ambiguous", null], ["unmatched", null],
+    ]);
+    const detail = await reconciliationService.getReconciliation(biz.id, period.id);
+    expect(detail.lines.filter((line) => line.cleared).map((line) => line.journalLineId)).toEqual([alreadyChecked]);
+  });
+});
 
 describe("createReconciliation", () => {
   it("rejects a second in-progress reconciliation for the same account", async () => {

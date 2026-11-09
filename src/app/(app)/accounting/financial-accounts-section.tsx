@@ -19,6 +19,7 @@
  *    the screen says so rather than drawing a broken field.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useMoney } from "@/components/money/money-context";
 import {
   ArchiveIcon,
@@ -74,6 +75,15 @@ import {
 import { financialAccountErrorMessage } from "@/lib/financial-account-errors";
 import { toPersianDigits } from "@/lib/digits";
 import { journalMemoForDisplay } from "@/lib/journal-memo";
+import { ledgerSourceLabel } from "@/lib/ledger-source-labels";
+import {
+  FINANCIAL_STATEMENT_MATCH_LABELS,
+  MAX_FINANCIAL_STATEMENT_EXPORT_ENTRIES,
+  type FinancialStatementMatch,
+} from "@/lib/financial-statement";
+import { accountingSectionHref } from "./accounting-routes";
+import { ExpenseDetailPanel } from "./expense-detail-panel";
+import type { ExpenseDetailResponse } from "./expense-shared";
 
 type KindTab = "all" | FinancialAccountKind;
 type StatusFilter = "active" | "archived" | "all";
@@ -108,6 +118,10 @@ interface CardMovementRow {
   balance: string;
   counterparty: string;
   reversedAt?: string | null;
+  matchStatus?: FinancialStatementMatch;
+  fee?: string;
+  transferAmount?: string;
+  isPspSettlement?: boolean;
 }
 
 interface CardResponse {
@@ -118,9 +132,13 @@ interface CardResponse {
   rows: CardMovementRow[];
   totalDebit: string;
   totalCredit: string;
+  totalFees?: string;
   closing: string;
   reconciliationDifference: string;
   ledgerBalance: string;
+  pendingSettlementBalance?: string | null;
+  movementCount?: number;
+  nextCursor?: string | null;
 }
 
 interface ProjectOption {
@@ -300,6 +318,10 @@ export function FinancialAccountsSection({
   const [cardAccount, setCardAccount] = useState<FinancialAccountRecord | null>(null);
   const [card, setCard] = useState<CardResponse | null>(null);
   const [cardError, setCardError] = useState("");
+  const [cardCursors, setCardCursors] = useState<string[]>([]);
+  const [statementExpenseId, setStatementExpenseId] = useState<string | null>(null);
+  const [statementExpense, setStatementExpense] = useState<ExpenseDetailResponse | null>(null);
+  const exportTooLarge = (card?.movementCount ?? 0) > MAX_FINANCIAL_STATEMENT_EXPORT_ENTRIES;
   const [cardFrom, setCardFrom] = useState("");
   const [cardTo, setCardTo] = useState("");
   /*
@@ -377,36 +399,46 @@ export function FinancialAccountsSection({
       setCardAccount(account);
       setCard(null);
       setCardError("");
-    },
-    [],
-  );
-
-  const loadCard = useCallback(
-    (accountId: string, filters: { from: string; to: string; projectId: string; locationId: string }) => {
-      const params = new URLSearchParams();
-      if (filters.from) params.set("from", filters.from);
-      if (filters.to) params.set("to", filters.to);
-      if (filters.projectId) params.set("projectId", filters.projectId);
-      if (filters.locationId) params.set("locationId", filters.locationId);
-      api<CardResponse>(`/api/ledger/financial-accounts/${accountId}/card?${params.toString()}`).then(
-        ({ ok, data: body }) => {
-          if (ok) {
-            setCard(body);
-            setCardError("");
-          } else {
-            setCardError(messageFor(body, "بارگذاری صورت حساب ناموفق بود."));
-          }
-        },
-      );
+      setCardCursors([]);
     },
     [],
   );
 
   useEffect(() => {
-    if (cardAccount) {
-      loadCard(cardAccount.id, { from: cardFrom, to: cardTo, projectId: cardProjectId, locationId: cardLocationId });
-    }
-  }, [cardAccount, cardFrom, cardTo, cardProjectId, cardLocationId, loadCard]);
+    if (!cardAccount) return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({ limit: "100" });
+    if (cardFrom) params.set("from", cardFrom);
+    if (cardTo) params.set("to", cardTo);
+    if (cardProjectId) params.set("projectId", cardProjectId);
+    if (cardLocationId) params.set("locationId", cardLocationId);
+    const cursor = cardCursors.at(-1);
+    if (cursor) params.set("cursor", cursor);
+    setCard(null);
+    setCardError("");
+    api<CardResponse>(`/api/ledger/financial-accounts/${cardAccount.id}/card?${params}`, { signal: controller.signal })
+      .then(({ ok, data: body }) => {
+        if (controller.signal.aborted) return;
+        if (ok) setCard(body);
+        else setCardError(messageFor(body, "بارگذاری صورت حساب ناموفق بود."));
+      });
+    return () => controller.abort();
+  }, [cardAccount, cardFrom, cardTo, cardProjectId, cardLocationId, cardCursors]);
+
+  useEffect(() => {
+    if (!statementExpenseId) return;
+    const controller = new AbortController();
+    api<ExpenseDetailResponse>(`/api/ledger/expenses/${statementExpenseId}`, { signal: controller.signal })
+      .then(({ ok, data: body }) => {
+        if (controller.signal.aborted) return;
+        if (ok) setStatementExpense(body);
+        else {
+          setStatementExpenseId(null);
+          setCardError(messageFor(body, "بارگذاری مدرک هزینه ناموفق بود."));
+        }
+      });
+    return () => controller.abort();
+  }, [statementExpenseId]);
 
   async function save() {
     if (!form) return;
@@ -791,7 +823,7 @@ export function FinancialAccountsSection({
         </OverlayDialog>
       ) : null}
 
-      {cardAccount ? (
+      {cardAccount && !statementExpense ? (
         <OverlayDialog
           headingId="financial-account-card-heading"
           sheet
@@ -799,6 +831,7 @@ export function FinancialAccountsSection({
             setCardAccount(null);
             setCard(null);
             setCardError("");
+            setStatementExpenseId(null);
           }}
           className={`${overlayPanelClass} max-h-[92vh] w-full max-w-4xl overflow-y-auto p-4 sm:p-5`}
         >
@@ -818,12 +851,12 @@ export function FinancialAccountsSection({
             <div className="flex flex-wrap items-center gap-1.5">
               <SecondaryButton onClick={() => window.print()}>
                 <PrinterIcon className="size-4" aria-hidden="true" />
-                چاپ / PDF
+                {card?.nextCursor || cardCursors.length ? "چاپ این صفحه" : "چاپ / PDF"}
               </SecondaryButton>
-              <SecondaryButton onClick={() => window.open(cardExportUrl(cardAccount.id, "csv", cardFilters), "_blank")}>
+              <SecondaryButton disabled={!card || exportTooLarge} onClick={() => window.open(cardExportUrl(cardAccount.id, "csv", cardFilters), "_blank")}>
                 خروجی CSV
               </SecondaryButton>
-              <SecondaryButton onClick={() => window.open(cardExportUrl(cardAccount.id, "xlsx", cardFilters), "_blank")}>
+              <SecondaryButton disabled={!card || exportTooLarge} onClick={() => window.open(cardExportUrl(cardAccount.id, "xlsx", cardFilters), "_blank")}>
                 خروجی Excel
               </SecondaryButton>
             </div>
@@ -831,16 +864,16 @@ export function FinancialAccountsSection({
 
           <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="از تاریخ">
-              <JalaliDatePicker value={cardFrom} onChange={setCardFrom} ariaLabel="از تاریخ" />
+              <JalaliDatePicker value={cardFrom} onChange={(date) => { setCardFrom(date); setCardCursors([]); }} ariaLabel="از تاریخ" />
             </Field>
             <Field label="تا تاریخ">
-              <JalaliDatePicker value={cardTo} onChange={setCardTo} ariaLabel="تا تاریخ" />
+              <JalaliDatePicker value={cardTo} onChange={(date) => { setCardTo(date); setCardCursors([]); }} ariaLabel="تا تاریخ" />
             </Field>
             <Field label="شعبه">
               <select
                 className={inputClass}
                 value={cardLocationId}
-                onChange={(event) => setCardLocationId(event.target.value)}
+                onChange={(event) => { setCardLocationId(event.target.value); setCardCursors([]); }}
               >
                 <option value="">همهٔ شعبه‌ها</option>
                 {locations.map((location) => (
@@ -855,9 +888,9 @@ export function FinancialAccountsSection({
                 <select
                   className={inputClass}
                   value={cardProjectId}
-                  onChange={(event) => setCardProjectId(event.target.value)}
+                  onChange={(event) => { setCardProjectId(event.target.value); setCardCursors([]); }}
                 >
-                  <option value="">بدون پروژه</option>
+                  <option value="">همهٔ پروژه‌ها</option>
                   {projects.map((project) => (
                     <option key={project.id} value={project.id}>
                       {project.name}
@@ -869,6 +902,9 @@ export function FinancialAccountsSection({
           </div>
 
           <ErrorBox>{cardError}</ErrorBox>
+          {exportTooLarge ? (
+            <InfoBox>برای دریافت خروجی کامل، بازهٔ تاریخ را کوتاه‌تر کنید.</InfoBox>
+          ) : null}
 
           {!card && !cardError ? (
             <div className="mt-3">
@@ -883,6 +919,12 @@ export function FinancialAccountsSection({
                 <CardStat label="جمع بدهکار" value={money.formatText(card.totalDebit)} />
                 <CardStat label="جمع بستانکار" value={money.formatText(card.totalCredit)} />
                 <CardStat label="مانده پایان دوره" value={money.formatText(card.closing)} />
+                {card.totalFees !== undefined ? (
+                  <CardStat label="جمع کارمزد" value={money.formatText(card.totalFees)} />
+                ) : null}
+                {card.pendingSettlementBalance != null ? (
+                  <CardStat label="مانده در انتظار تسویه" value={money.formatText(card.pendingSettlementBalance)} />
+                ) : null}
               </dl>
               {!isZeroBalance(card.reconciliationDifference) ? (
                 <ErrorBox>
@@ -900,16 +942,40 @@ export function FinancialAccountsSection({
                 </EmptyState>
               ) : (
                 <DataCardTable
-                  columns={cardColumns(money, card.rows)}
+                  columns={cardColumns(money, setStatementExpenseId)}
                   rows={card.rows}
                   rowKey={(row) => row.entryId}
                   caption="گردش حساب مالی"
                   breakpoint="md"
                 />
               )}
+              {card.nextCursor || cardCursors.length ? (
+                <div className="flex flex-wrap gap-2">
+                  <SecondaryButton disabled={!cardCursors.length} onClick={() => setCardCursors((stack) => stack.slice(0, -1))}>
+                    صفحهٔ قبل
+                  </SecondaryButton>
+                  <SecondaryButton disabled={!card.nextCursor} onClick={() => {
+                    if (card.nextCursor) setCardCursors((stack) => [...stack, card.nextCursor!]);
+                  }}>
+                    صفحهٔ بعد
+                  </SecondaryButton>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </OverlayDialog>
+      ) : null}
+      {statementExpense ? (
+        <ExpenseDetailPanel
+          detail={statementExpense.expense}
+          journalLines={statementExpense.journalLines}
+          canManage={false}
+          canBrowseMedia={false}
+          busy={false}
+          run={async () => false}
+          onClose={() => { setStatementExpenseId(null); setStatementExpense(null); }}
+          onOpenExpense={setStatementExpenseId}
+        />
       ) : null}
     </div>
   );
@@ -926,9 +992,8 @@ function CardStat({ label, value }: { label: string; value: string }) {
 
 function cardColumns(
   money: ReturnType<typeof useMoney>,
-  rows: readonly CardMovementRow[],
+  openExpense: (id: string) => void,
 ): readonly DataCardTableColumn<CardMovementRow>[] {
-  void rows;
   return [
     {
       key: "date",
@@ -943,19 +1008,27 @@ function cardColumns(
         <div className="min-w-0">
           <div className="truncate"><bdi>{journalMemoForDisplay(row.memo, row.sourceType) ?? "—"}</bdi></div>
           <div className="text-xs text-muted-foreground">{row.counterparty || "—"}</div>
+          {row.journalSourceId && row.sourceType ? (
+            <StatementSource row={row} openExpense={openExpense} />
+          ) : null}
+          {row.transferAmount && row.transferAmount !== "0" ? (
+            <div className="text-xs text-muted-foreground">
+              مبلغ انتقال / تسویه {money.formatText(row.transferAmount)} {money.unitLabel}
+            </div>
+          ) : null}
         </div>
       ),
     },
     {
       key: "debit",
-      header: "بدهکار",
+      header: "دریافت",
       align: "end",
       numeric: true,
       cell: (row) => (row.debit === "0" ? "—" : money.formatText(row.debit)),
     },
     {
       key: "credit",
-      header: "بستانکار",
+      header: "پرداخت",
       align: "end",
       numeric: true,
       cell: (row) => (row.credit === "0" ? "—" : money.formatText(row.credit)),
@@ -972,17 +1045,42 @@ function cardColumns(
       ),
     },
     {
+      key: "fee",
+      header: "کارمزد",
+      align: "end",
+      numeric: true,
+      cell: (row) => !row.fee || row.fee === "0" ? "—" : money.formatText(row.fee),
+    },
+    {
+      key: "match",
+      header: "تطبیق",
+      cell: (row) => row.matchStatus ? FINANCIAL_STATEMENT_MATCH_LABELS[row.matchStatus] : "—",
+    },
+    {
       key: "entry",
       header: "سند",
       muted: true,
-      desktopOnly: true,
       cell: (row) => (
-        <span className="font-mono text-xs" dir="ltr">
-          {row.entryId.slice(0, 8)}
-        </span>
+        <Link href={`${accountingSectionHref("entries")}?entryId=${encodeURIComponent(row.entryId)}`}
+          className="text-xs text-primary underline-offset-4 hover:underline">
+          مشاهدهٔ سند
+        </Link>
       ),
     },
   ];
+}
+
+function StatementSource({ row, openExpense }: { row: CardMovementRow; openExpense: (id: string) => void }) {
+  const id = row.journalSourceId!;
+  const label = row.isPspSettlement ? "تسویه پایانه" : ledgerSourceLabel(row.sourceType);
+  const linkClass = "text-xs text-primary underline-offset-4 hover:underline";
+  if (row.sourceType === "order" || row.sourceType === "retail_invoice") {
+    return <Link href={`/accounting/orders?order=${encodeURIComponent(id)}`} className={linkClass}>{label}</Link>;
+  }
+  if (row.sourceType === "expense") {
+    return <button type="button" className={linkClass} onClick={() => openExpense(id)}>{label}</button>;
+  }
+  return <span className="text-xs text-muted-foreground">{label}</span>;
 }
 
 function AccountFormDialog({

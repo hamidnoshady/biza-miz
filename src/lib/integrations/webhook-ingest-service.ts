@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
 import { notifyPaymentReceived } from "../kavenegar/lookup-triggers";
+import { readOrderPaymentRouting, routeWebsitePayment, type OrderPaymentSourceSnapshot } from "../order-payment-routing-service";
 import { WELL_KNOWN_CODES } from "../coa-template";
 import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
 import { deductForOrder } from "../inventory-service";
@@ -817,11 +818,15 @@ async function ingestFnBOrder(connection: ConnectionRow, order: WooOrder): Promi
       );
     }
 
+    const paymentSource = total > 0n
+      ? await routeWebsitePayment(client, businessId, locationId, "woocommerce", connection.id, order.payment_method)
+      : null;
     if (total > 0n) {
       await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference)
-         VALUES ($1, $2, 'online', $3, $4)`,
-        [locationId, orderId, total.toString(), order.number ?? remoteId],
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, financial_account_id, financial_account_gl_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [locationId, orderId, paymentSource?.settlement ?? "online", total.toString(), order.number ?? remoteId,
+          paymentSource?.financialAccountId ?? null, paymentSource?.financialAccountGlId ?? null],
       );
     }
 
@@ -867,7 +872,7 @@ async function ingestFnBOrder(connection: ConnectionRow, order: WooOrder): Promi
     }
 
     const accounts = await accountIdsByCode(client, businessId, [
-      WELL_KNOWN_CODES.bankClearing,
+      ...(paymentSource ? [] : [WELL_KNOWN_CODES.bankClearing]),
       WELL_KNOWN_CODES.deliveryRevenue,
       WELL_KNOWN_CODES.vatPayable,
     ]);
@@ -881,7 +886,8 @@ async function ingestFnBOrder(connection: ConnectionRow, order: WooOrder): Promi
       postingKind: "revenue",
       inventoryEventId,
       lines: [
-        { accountId: accounts.get(WELL_KNOWN_CODES.bankClearing)!, debit: total.toString() as RialText, credit: zero },
+        { accountId: paymentSource?.financialAccountGlId ?? accounts.get(WELL_KNOWN_CODES.bankClearing)!,
+          financialAccountId: paymentSource?.financialAccountId, debit: total.toString() as RialText, credit: zero },
         { accountId: accounts.get(WELL_KNOWN_CODES.deliveryRevenue)!, debit: zero, credit: net.toString() as RialText },
         ...(tax > 0n
           ? [{ accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: zero, credit: tax.toString() as RialText }]
@@ -1120,11 +1126,15 @@ async function ingestRetailOrder(
       }
     }
 
+    const paymentSource = total > 0n
+      ? await routeWebsitePayment(client, businessId, locationId, "woocommerce", connection.id, order.payment_method)
+      : null;
     if (total > 0n) {
       await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_at)
-         VALUES ($1, $2, 'online', $3, $4, $5)`,
-        [locationId, orderId, total.toString(), order.number ?? remoteId, chronology.occurredAt],
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_at, financial_account_id, financial_account_gl_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [locationId, orderId, paymentSource?.settlement ?? "online", total.toString(), order.number ?? remoteId, chronology.occurredAt,
+          paymentSource?.financialAccountId ?? null, paymentSource?.financialAccountGlId ?? null],
       );
     }
 
@@ -1159,7 +1169,7 @@ async function ingestRetailOrder(
     }
 
     const accounts = await accountIdsByCode(client, businessId, [
-      WELL_KNOWN_CODES.bankClearing,
+      ...(paymentSource ? [] : [WELL_KNOWN_CODES.bankClearing]),
       codes.revenue,
       WELL_KNOWN_CODES.vatPayable,
     ]);
@@ -1173,7 +1183,8 @@ async function ingestRetailOrder(
       entryDate: chronology.entryDate,
       postingKind: "revenue",
       lines: [
-        { accountId: accounts.get(WELL_KNOWN_CODES.bankClearing)!, debit: total.toString() as RialText, credit: zero },
+        { accountId: paymentSource?.financialAccountGlId ?? accounts.get(WELL_KNOWN_CODES.bankClearing)!,
+          financialAccountId: paymentSource?.financialAccountId, debit: total.toString() as RialText, credit: zero },
         { accountId: accounts.get(codes.revenue)!, debit: zero, credit: net.toString() as RialText },
         ...(tax > 0n
           ? [{ accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: zero, credit: tax.toString() as RialText }]
@@ -1394,6 +1405,29 @@ async function ingestRefund(
   } finally {
     client.release();
   }
+}
+
+async function originalWooPaymentSource(
+  client: import("pg").PoolClient,
+  meta: RefundMeta,
+  orderId: string | null,
+): Promise<(OrderPaymentSourceSnapshot & { method: "online" | "card_to_card" | "cash" }) | null> {
+  if (!orderId) {
+    if (await readOrderPaymentRouting(client, meta.businessId, meta.locationId, true) !== "disabled") {
+      throw new Error("refund_order_not_imported");
+    }
+    return null;
+  }
+  const { rows } = await client.query<{ id: string; gl_id: string; method: "online" | "card_to_card" | "cash" }>(
+    `SELECT DISTINCT p.financial_account_id AS id, p.financial_account_gl_id AS gl_id, p.method
+       FROM payments p JOIN locations l ON l.id = p.location_id
+      WHERE p.order_id = $1 AND p.location_id = $2 AND l.business_id = $3
+        AND p.amount > 0 AND p.financial_account_id IS NOT NULL AND p.superseded_by_amendment_id IS NULL`,
+    [orderId, meta.locationId, meta.businessId],
+  );
+  if (rows.length > 1) throw new Error("refund_payment_source_required");
+  const source = rows[0];
+  return source ? { financialAccountId: source.id, financialAccountGlId: source.gl_id, method: source.method } : null;
 }
 
 interface RefundMeta {
@@ -1663,11 +1697,12 @@ async function ingestRetailRefund(
   // evidence that a gateway returned money to the customer.
   if (meta.stockOnly) return;
 
+  const paymentSource = await originalWooPaymentSource(client, meta, orderId);
   // Post the money side.
   const accounts = await accountIdsByCode(client, meta.businessId, [
     WELL_KNOWN_CODES.salesReturns,
     WELL_KNOWN_CODES.vatPayable,
-    WELL_KNOWN_CODES.bankClearing,
+    ...(paymentSource ? [] : [WELL_KNOWN_CODES.bankClearing]),
   ]);
   await postExactJournalEntry(client, {
     businessId: meta.businessId,
@@ -1682,7 +1717,8 @@ async function ingestRetailRefund(
       ...(meta.tax > 0n
         ? [{ accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: meta.tax.toString() as RialText, credit: zero }]
         : []),
-      { accountId: accounts.get(WELL_KNOWN_CODES.bankClearing)!, debit: zero, credit: meta.amount.toString() as RialText },
+      { accountId: paymentSource?.financialAccountGlId ?? accounts.get(WELL_KNOWN_CODES.bankClearing)!,
+        financialAccountId: paymentSource?.financialAccountId, debit: zero, credit: meta.amount.toString() as RialText },
     ],
   });
 }
@@ -1711,6 +1747,7 @@ async function ingestFnBRefund(
     [meta.businessId, connection.id, String(refund.parent_id)],
   );
   const orderId = orderRows[0]?.id ?? null;
+  const paymentSource = await originalWooPaymentSource(client, meta, orderId);
   const returnLines = orderId ? await buildRefundReturnLines(client, meta.businessId, connection, orderId, refund) : [];
 
   if (orderId && returnLines.length > 0) {
@@ -1718,7 +1755,8 @@ async function ingestFnBRefund(
       businessId: meta.businessId,
       locationId: meta.locationId,
       orderId,
-      refundMethod: "online",
+      refundMethod: paymentSource?.method ?? "online",
+      ...(paymentSource ? { sourceSnapshot: paymentSource } : { legacyReplay: true }),
       refundAmount: meta.amount.toString() as RialText,
       reason: refund.reason?.trim() || "WooCommerce refund",
       idempotencyKey: `woo-refund:${connection.id}:${meta.remoteId}`,
@@ -1729,7 +1767,7 @@ async function ingestFnBRefund(
     const accounts = await accountIdsByCode(client, meta.businessId, [
       WELL_KNOWN_CODES.salesReturns,
       WELL_KNOWN_CODES.vatPayable,
-      WELL_KNOWN_CODES.bankClearing,
+      ...(paymentSource ? [] : [WELL_KNOWN_CODES.bankClearing]),
     ]);
     await postExactJournalEntry(client, {
       businessId: meta.businessId,
@@ -1744,7 +1782,8 @@ async function ingestFnBRefund(
         ...(meta.tax > 0n
           ? [{ accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: meta.tax.toString() as RialText, credit: zero }]
           : []),
-        { accountId: accounts.get(WELL_KNOWN_CODES.bankClearing)!, debit: zero, credit: meta.amount.toString() as RialText },
+        { accountId: paymentSource?.financialAccountGlId ?? accounts.get(WELL_KNOWN_CODES.bankClearing)!,
+        financialAccountId: paymentSource?.financialAccountId, debit: zero, credit: meta.amount.toString() as RialText },
       ],
     });
   }

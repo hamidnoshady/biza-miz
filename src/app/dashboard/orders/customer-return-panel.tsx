@@ -5,6 +5,8 @@ import { RefreshCwIcon, RotateCcwIcon } from "lucide-react";
 import { toast } from "sonner";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { useMoney } from "@/components/money/money-context";
+import { paymentSourceKindForSettlement } from "@/lib/order-payment-routing";
+import type { FinancialAccountKind } from "@/lib/financial-accounts";
 import { toPersianDigits } from "@/lib/digits";
 import { normalizePosSearchText } from "@/lib/pos-selection";
 import { LoadingSkeleton } from "../page-chrome";
@@ -98,6 +100,19 @@ export function CustomerReturnPanel({
   onChanged?: () => void;
 }) {
   const money = useMoney();
+  const [financialAccountId, setFinancialAccountId] = useState("");
+  const [refundSources, setRefundSources] = useState<{
+    mode: "enabled" | "disabled" | "peer_unsupported";
+    sources: { id: string; name: string; kind: FinancialAccountKind }[];
+  } | null>(null);
+  useEffect(() => {
+    if (!canRefund) return;
+    let active = true;
+    void api<NonNullable<typeof refundSources>>("/api/ledger/order-payment-sources?refund=1").then(({ ok, data }) => {
+      if (active && ok && data) setRefundSources(data);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [canRefund, order.id]);
   const [history, setHistory] = useState<ReturnHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -137,6 +152,7 @@ export function CustomerReturnPanel({
     setDispositionDraft({});
     setRefundAmountInput("0");
     setRefundMethod("cash");
+    setFinancialAccountId("");
     setReason("");
     setConfirming(false);
     intentKey.current = null;
@@ -180,6 +196,9 @@ export function CustomerReturnPanel({
   const remainingRefund = history?.refundCapacity.remainingRefundRial ?? "0";
   const refundExceedsCapacity = refundAmountRial !== null && BigInt(refundAmountRial) > BigInt(remainingRefund);
   const refundIsNegative = refundAmountRial !== null && BigInt(refundAmountRial) < 0n;
+  const sourceKind = paymentSourceKindForSettlement(refundMethod);
+  const refundHasMoney = refundAmountRial !== null && BigInt(refundAmountRial) > 0n;
+  const sourceRequired = refundHasMoney && Boolean(sourceKind) && refundSources?.mode === "enabled";
   const quantityInvalid = eligibleItems.some((item) => {
     const raw = quantityDraft[item.id]?.trim();
     if (!raw) return false;
@@ -189,7 +208,8 @@ export function CustomerReturnPanel({
   });
   const canStartReturn = canRefund && order.status === "completed" && Boolean(history) &&
     selectedLines.length > 0 && reason.trim().length > 0 && reason.trim().length <= 500 &&
-    refundAmountRial !== null && !refundIsNegative && !refundExceedsCapacity && !quantityInvalid && !saving && !loading;
+    refundAmountRial !== null && !refundIsNegative && !refundExceedsCapacity && !quantityInvalid && !saving && !loading &&
+    (!sourceRequired || Boolean(financialAccountId));
 
   function idempotencyKeyFor(signature: string): string {
     if (intentKey.current?.signature === signature) return intentKey.current.key;
@@ -208,6 +228,7 @@ export function CustomerReturnPanel({
     const signature = JSON.stringify({
       orderId: order.id,
       refundMethod,
+      financialAccountId: refundHasMoney ? financialAccountId : "",
       refundAmountRial,
       reason: reason.trim(),
       lines: [...lines].sort((left, right) => left.orderItemId.localeCompare(right.orderItemId)),
@@ -222,6 +243,7 @@ export function CustomerReturnPanel({
           method: "POST",
           body: JSON.stringify({
             refundMethod,
+            ...(refundHasMoney && financialAccountId ? { financialAccountId } : {}),
             refundAmountRial,
             reason: reason.trim(),
             idempotencyKey,
@@ -369,13 +391,28 @@ export function CustomerReturnPanel({
               </label>
               <label className="block">
                 <span className="mb-1 block text-xs font-medium text-muted-foreground">روش پرداخت برگشت</span>
-                <select className={OPS_INPUT} value={refundMethod} onChange={(event) => setRefundMethod(event.target.value as typeof refundMethod)} disabled={saving}>
+                <select className={OPS_INPUT} value={refundMethod} onChange={(event) => {
+                  setRefundMethod(event.target.value as typeof refundMethod);
+                  setFinancialAccountId("");
+                }} disabled={saving}>
                   <option value="cash">نقدی</option>
                   <option value="card">کارت‌خوان</option>
                   <option value="card_to_card">کارت‌به‌کارت</option>
                   <option value="online">پرداخت آنلاین</option>
                 </select>
               </label>
+              {refundHasMoney && sourceKind && (sourceRequired || Boolean(refundSources?.sources.length)) ? (
+                <label className="block">
+                  <span className="mb-1 block text-xs font-medium text-muted-foreground">حساب پرداخت برگشت وجه</span>
+                  <select className={OPS_INPUT} value={financialAccountId}
+                    onChange={(event) => setFinancialAccountId(event.target.value)} disabled={saving}>
+                    <option value="">انتخاب کنید</option>
+                    {refundSources?.sources.filter((source) => source.kind === sourceKind).map((source) => (
+                      <option key={source.id} value={source.id}>{source.name}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
             </div>
             <label className="block">
               <span className="mb-1 block text-xs font-medium text-muted-foreground">دلیل برگشت (الزامی)</span>

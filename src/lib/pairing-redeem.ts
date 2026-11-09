@@ -32,6 +32,7 @@ const STATUS_BY_ERROR: Record<string, number> = {
   code_expired: 410,
   code_already_redeemed: 409,
   code_revoked: 410,
+  pairing_payment_routing_unsupported: 409,
   pairing_session_unavailable: 409,
   // The desktop is too old for this chart. Not a retry-later condition: it
   // needs an update, and the code it holds is still valid for that update.
@@ -71,7 +72,7 @@ export async function handlePairingRedeem(
   const deviceName =
     typeof body.deviceName === "string"
       ? body.deviceName
-      : "Windows Bizamiz";
+      : "Windows Business Suite";
   const installationId =
     typeof body.installationId === "string" ? body.installationId : null;
   const maxSnapshotVersion =

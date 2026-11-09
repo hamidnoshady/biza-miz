@@ -9,6 +9,8 @@ import type { LineDimensions } from "./accounting-dimensions";
 
 export interface JournalLine {
   accountId: string;
+  /** Registered account explicitly used by this money leg, when known. */
+  financialAccountId?: string | null;
   debit: Rial;
   credit: Rial;
   /**

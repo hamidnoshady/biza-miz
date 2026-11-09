@@ -40,6 +40,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { parsePspSettlement } from "../src/lib/psp-settlements";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -290,6 +291,101 @@ async function twoAccounts() {
   const bank = await registerAccount({ kind: "bank", name: "Main bank", gl_account_id: gl.bank });
   return { cash, bank };
 }
+
+describe("PSP settlement movements", () => {
+  async function fixture() {
+    const { bank } = await twoAccounts();
+    const terminal = await registerAccount({
+      kind: "pos_psp", name: "Terminal 1", gl_account_id: gl.clearing, location_id: branch.a,
+      settlement_account_id: bank, psp_provider: "PSP", terminal_number: "0001", merchant_number: "0002",
+    });
+    await postManualEntry({ accountId: gl.clearing, debit: "1000000", credit: "0" });
+    const settle = (overrides: Record<string, unknown> = {}, allowedLocationIds = [branch.a]) => {
+      const { input, ...pspSettlement } = parsePspSettlement({
+        terminalAccountId: terminal, bankAccountId: bank, batchReference: "batch-001", movementReference: "credit-001",
+        batchGrossAmount: "1000000", netAmount: "595000", feeAmount: "5000", feeAccountId: gl.fee,
+        settledOn: "2025-04-16", expectedOn: "2025-04-11", ...overrides,
+      })!;
+      return transfersService.createFinancialTransfer({
+        businessId: biz.id, actorId: user.id, locationId: allowedLocationIds[0], allowedLocationIds, input,
+      }, { pspSettlement });
+    };
+    return { bank, terminal, settle };
+  }
+
+  it("leaves an unsettled sale in clearing and posts each confirmed credit only once", async () => {
+    const { settle } = await fixture();
+    expect(await accountsService.financialAccountBalanceAsOf(biz.id, gl.bank)).toBe("0");
+    const posted = await Promise.all([settle(), settle()]);
+    expect(posted.map(({ duplicate }) => duplicate).sort()).toEqual([false, true]);
+    expect(posted[0].transfer.id).toBe(posted[1].transfer.id);
+    const entryId = posted[0].transfer.journalEntryId;
+    const { rows } = await db.query(
+      "SELECT account_id, debit::text, credit::text FROM journal_lines WHERE entry_id = $1", [entryId],
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows).toEqual(expect.arrayContaining([
+      { account_id: gl.clearing, debit: "0", credit: "600000" },
+      { account_id: gl.bank, debit: "595000", credit: "0" },
+      { account_id: gl.fee, debit: "5000", credit: "0" },
+    ]));
+    expect(await accountsService.financialAccountBalanceAsOf(biz.id, gl.clearing)).toBe("400000");
+    await expect(settle({ netAmount: "590000" })).rejects.toThrow("idempotency_conflict");
+    await expect(settle({ batchReference: "batch-002" })).rejects.toThrow("idempotency_conflict");
+    await expect(settle({}, [branch.b])).rejects.toMatchObject({ status: 403 });
+
+    const { listPspSettlements } = await import("../src/lib/psp-settlements-posting");
+    expect((await listPspSettlements(biz.id, [branch.a], 1, null)).movements[0]).toMatchObject({
+      remainingAmount: "400000", journalEntryId: entryId, expectedOn: "2025-04-11", settledOn: "2025-04-16",
+    });
+    expect((await listPspSettlements(biz.id, [branch.b], 1, null)).movements).toEqual([]);
+
+    const final = { movementReference: "credit-002", netAmount: "400000", feeAmount: "0", feeAccountId: null };
+    await expect(settle({ ...final, batchGrossAmount: "1100000" })).rejects.toThrow("psp_batch_conflict");
+    await expect(settle({ ...final, netAmount: "400001" })).rejects.toThrow("psp_batch_amount_exceeded");
+    await settle(final);
+    expect(await accountsService.financialAccountBalanceAsOf(biz.id, gl.clearing)).toBe("0");
+    expect(await accountsService.financialAccountBalanceAsOf(biz.id, gl.bank)).toBe("995000");
+    expect((await listPspSettlements(biz.id, [branch.a], 1, null)).movements[0].remainingAmount).toBe("0");
+  });
+
+  it("requires the linked bank, actual clearing funds, and an open fiscal period", async () => {
+    const { settle, terminal, bank } = await fixture();
+    const wrongBank = await registerAccount({ gl_account_id: gl.bank2 });
+    await expect(settle({ bankAccountId: wrongBank })).rejects.toThrow("psp_settlement_bank_mismatch");
+    await expect(settle({ settledOn: "2025-04-09" })).rejects.toThrow("psp_insufficient_clearing");
+    await expect(createTransfer({ sourceAccountId: terminal, destinationAccountId: bank }))
+      .rejects.toThrow("psp_settlement_workflow_required");
+    await fiscalService.createFiscalYear(biz.id, 1404);
+    const [year] = await fiscalService.listFiscalYears(biz.id);
+    const [period] = await fiscalService.listPeriods(biz.id, year.id);
+    await fiscalService.setPeriodStatus(biz.id, period.id, "soft_closed", user.id);
+    await fiscalService.setPeriodStatus(biz.id, period.id, "locked", user.id);
+    await expect(settle()).rejects.toThrow("fiscal_period_locked");
+    expect((await db.query("SELECT id FROM financial_transfers WHERE business_id = $1", [biz.id])).rows).toEqual([]);
+    expect(await accountsService.financialAccountBalanceAsOf(biz.id, gl.bank)).toBe("0");
+  });
+
+  it("mirrors a reversal, reopens its batch balance, and returns the reversed original on retry", async () => {
+    const { settle } = await fixture();
+    const original = await settle();
+    const reversal = {
+      businessId: biz.id, actorId: user.id, transferId: original.transfer.id, reason: "Wrong statement credit",
+      reversalDate: "2025-04-17", idempotencyKey: "psp-reversal-test", allowedLocationIds: [branch.a],
+    };
+    await expect(transfersService.reverseFinancialTransfer({ ...reversal, reversalDate: "2025-04-15" }))
+      .rejects.toThrow("psp_reversal_before_settlement");
+    const first = await transfersService.reverseFinancialTransfer(reversal);
+    const retry = await transfersService.reverseFinancialTransfer(reversal);
+    expect(retry).toMatchObject({ duplicate: true, reversalEntryId: first.reversalEntryId });
+    await expect(transfersService.reverseFinancialTransfer({ ...reversal, reason: "Different credit" }))
+      .rejects.toThrow("idempotency_conflict");
+    expect(await settle()).toMatchObject({ duplicate: true, transfer: { id: original.transfer.id, status: "reversed" } });
+    expect(await accountsService.financialAccountBalanceAsOf(biz.id, gl.clearing)).toBe("1000000");
+    expect(await accountsService.financialAccountBalanceAsOf(biz.id, gl.bank)).toBe("0");
+    expect(await accountsService.financialAccountBalanceAsOf(biz.id, gl.fee)).toBe("0");
+  });
+});
 
 describe("§1 the schema", () => {
   it("declares the four kinds the issue names", async () => {

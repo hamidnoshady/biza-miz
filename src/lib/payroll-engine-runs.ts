@@ -1128,7 +1128,7 @@ export async function payEngineRun(params: {
         createdBy: params.actorId,
         lines: [
           { accountId: accounts.get(WELL_KNOWN_CODES.salariesPayable)!, debit: asRial(net), credit: asRial(0n) },
-          { accountId: payout.accountId, debit: asRial(0n), credit: asRial(net) },
+          { accountId: payout.accountId, financialAccountId: payout.financialAccountId, debit: asRial(0n), credit: asRial(net) },
         ],
       });
     }

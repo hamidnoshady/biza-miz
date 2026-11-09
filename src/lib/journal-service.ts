@@ -36,6 +36,7 @@ export interface JournalLineRecord {
   accountId: string;
   accountCode: string;
   accountName: string;
+  financialAccount?: { id: string; name: string; bankName: string | null; terminalNumber: string | null } | null;
   /** Exact Rial, as a decimal string — `journal_lines.debit` is BIGINT. */
   debit: string;
   credit: string;
@@ -147,6 +148,10 @@ interface LineRow extends Record<string, unknown> {
   foreign_debit: string;
   foreign_credit: string;
   party_id: string | null;
+  financial_account_id: string | null;
+  financial_account_name: string | null;
+  bank_name: string | null;
+  terminal_number: string | null;
   cc_id: string | null;
   cc_code: string | null;
   cc_name: string | null;
@@ -309,12 +314,14 @@ async function attachLines(entries: EntryRow[]): Promise<JournalEntryRecord[]> {
             jl.debit::text AS debit, jl.credit::text AS credit,
             jl.foreign_debit::text AS foreign_debit, jl.foreign_credit::text AS foreign_credit,
             jl.party_id,
+            jl.financial_account_id, fa.name AS financial_account_name, fa.bank_name, fa.terminal_number,
             cc.id AS cc_id, cc.code AS cc_code, cc.name AS cc_name, cc.is_active AS cc_active,
             pc.id AS pc_id, pc.code AS pc_code, pc.name AS pc_name, pc.is_active AS pc_active,
             dp.id AS dp_id, dp.code AS dp_code, dp.name AS dp_name, dp.is_active AS dp_active,
             dt.id AS dt_id, dt.code AS dt_code, dt.name AS dt_name, dt.is_active AS dt_active
        FROM journal_lines jl
        JOIN accounts a ON a.id = jl.account_id
+       LEFT JOIN financial_accounts fa ON fa.id = jl.financial_account_id AND fa.business_id = a.business_id
        LEFT JOIN accounting_dimension_values cc ON cc.id = jl.cost_center_id
        LEFT JOIN accounting_dimension_values pc ON pc.id = jl.profit_center_id
        LEFT JOIN accounting_dimension_values dp ON dp.id = jl.department_id
@@ -330,6 +337,10 @@ async function attachLines(entries: EntryRow[]): Promise<JournalEntryRecord[]> {
       accountId: line.account_id,
       accountCode: line.account_code,
       accountName: line.account_name,
+      financialAccount: line.financial_account_id && line.financial_account_name ? {
+        id: line.financial_account_id, name: line.financial_account_name,
+        bankName: line.bank_name, terminalNumber: line.terminal_number,
+      } : null,
       debit: line.debit,
       credit: line.credit,
       foreignDebit: line.foreign_debit,

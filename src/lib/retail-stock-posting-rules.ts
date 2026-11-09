@@ -17,7 +17,7 @@ import type { PoolClient } from "pg";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { rialBigInt, type RialText } from "./inventory-exact";
 import type { Industry } from "./industries";
-import { accountIdsByCode } from "./ledger-service";
+import { accountIdsByCode, type ExactJournalLine } from "./ledger-service";
 import { registerPostingRule, type PostingResult } from "./posting-engine";
 
 const ZERO = "0" as RialText;
@@ -84,6 +84,7 @@ const PURCHASE_CREDIT_CODE: Record<string, string> = {
 
 interface PurchasePayload extends AmountPayload {
   settlementMethod?: string;
+  paymentAccount?: { accountId: string; financialAccountId: string };
   /** The supplier invoice's input VAT (Rial text) — debits 1220 on top of the goods. */
   vatAmount?: RialText;
 }
@@ -96,13 +97,12 @@ registerPostingRule("retail.purchase_received", async (event, client): Promise<P
 
   const inventoryCode = await inventoryCodeForBusiness(client, event.businessId);
   const creditCode = PURCHASE_CREDIT_CODE[payload.settlementMethod ?? "credit"] ?? WELL_KNOWN_CODES.accountsPayable;
-  const accounts = await accountIdsByCode(
-    client,
-    event.businessId,
-    vat > 0n ? [inventoryCode, creditCode, WELL_KNOWN_CODES.vatReceivable] : [inventoryCode, creditCode],
-  );
+  const codes = [inventoryCode];
+  if (!payload.paymentAccount) codes.push(creditCode);
+  if (vat > 0n) codes.push(WELL_KNOWN_CODES.vatReceivable);
+  const accounts = await accountIdsByCode(client, event.businessId, codes);
 
-  const lines = [];
+  const lines: ExactJournalLine[] = [];
   if (rialBigInt(payload.amount) > 0n) {
     lines.push({ accountId: accounts.get(inventoryCode)!, debit: payload.amount, credit: ZERO });
   }
@@ -110,7 +110,8 @@ registerPostingRule("retail.purchase_received", async (event, client): Promise<P
     lines.push({ accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: payload.vatAmount!, credit: ZERO });
   }
   lines.push({
-    accountId: accounts.get(creditCode)!,
+    accountId: payload.paymentAccount?.accountId ?? accounts.get(creditCode)!,
+    financialAccountId: payload.paymentAccount?.financialAccountId,
     debit: ZERO,
     credit: (rialBigInt(payload.amount) + vat).toString() as RialText,
   });

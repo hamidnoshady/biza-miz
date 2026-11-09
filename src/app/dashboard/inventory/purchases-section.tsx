@@ -12,6 +12,8 @@ import { JalaliDatePicker } from "../jalali-date-picker";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { PurchasePaymentAccountSelect } from "@/app/dashboard/purchase-payment-account-select";
+import { JournalPeekDialog } from "@/app/(app)/accounting/journal-peek-dialog";
 import type { InventoryItem, Runner, Supplier } from "./inventory-manager";
 import {
   InvoiceOcrPanel,
@@ -77,7 +79,7 @@ interface PurchaseDetailItem {
 }
 
 interface PurchaseDetail {
-  purchase: Purchase & { created_by_name?: string | null };
+  purchase: Purchase & { created_by_name?: string | null; financial_account_name?: string | null; journal_entry_id?: string | null };
   items: PurchaseDetailItem[];
 }
 
@@ -201,6 +203,7 @@ export function PurchasesSection({
   // The business's own VAT rate (its «تنظیمات مالیات»), which proposes the VAT; 0 until loaded or when unset.
   const [vatPercent, setVatPercent] = useState(0);
   const [settlementByPurchase, setSettlementByPurchase] = useState<Record<string, string>>({});
+  const [accountByPurchase, setAccountByPurchase] = useState<Record<string, string>>({});
   const [supplierByPurchase, setSupplierByPurchase] = useState<Record<string, string>>({});
 
   // Filters. ISO date strings compare lexicographically, so an inverted range
@@ -242,6 +245,7 @@ export function PurchasesSection({
   // Expanded row detail, keyed by purchase id. `null` = loading.
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PurchaseDetail | null>(null);
+  const [journalEntryId, setJournalEntryId] = useState<string | null>(null);
   // Issue #915 — a failed detail fetch must surface a retry, not an endless
   // skeleton (detail stays null forever otherwise).
   const [detailError, setDetailError] = useState("");
@@ -596,7 +600,8 @@ export function PurchasesSection({
       () =>
         api(`/api/inventory/purchases/${id}`, {
           method: "PATCH",
-          body: JSON.stringify({ status, settlementMethod, supplierId: supplierByPurchase[id] || undefined }),
+          body: JSON.stringify({ status, settlementMethod, supplierId: supplierByPurchase[id] || undefined,
+            financialAccountId: status === "received" && settlementMethod !== "credit" ? accountByPurchase[id] || undefined : undefined }),
         }),
       setLocalError,
     );
@@ -811,6 +816,7 @@ export function PurchasesSection({
       ) : null}
 
       <ErrorBox>{localError}</ErrorBox>
+      {journalEntryId ? <JournalPeekDialog entryId={journalEntryId} title="سند خرید" onClose={() => setJournalEntryId(null)} /> : null}
 
       {canManage ? (
       <div id="purchase-draft-form">
@@ -1001,13 +1007,20 @@ export function PurchasesSection({
                           <span>روش تسویه</span>
                           <SearchableSelect
                             value={settlementByPurchase[p.id] ?? "credit"}
-                            onChange={(value) => setSettlementByPurchase((prev) => ({ ...prev, [p.id]: value }))}
+                            onChange={(value) => {
+                              setSettlementByPurchase((prev) => ({ ...prev, [p.id]: value }));
+                              setAccountByPurchase((prev) => ({ ...prev, [p.id]: "" }));
+                            }}
                             options={Object.entries(SETTLEMENT_LABELS).map(([key, label]) => ({
                               value: key,
                               label,
                             }))}
                           />
                         </label>
+                        {(settlementByPurchase[p.id] ?? "credit") !== "credit" ? (
+                          <PurchasePaymentAccountSelect method={settlementByPurchase[p.id]} value={accountByPurchase[p.id] ?? ""}
+                            onChange={(value) => setAccountByPurchase((prev) => ({ ...prev, [p.id]: value }))} />
+                        ) : null}
                         {!p.supplier_name && (settlementByPurchase[p.id] ?? "credit") === "credit" ? (
                           <div className="col-span-2 grid min-w-0 gap-1 text-xs font-medium lg:col-span-1 lg:w-44">
                             <span>تأمین‌کنندهٔ خرید نسیه</span>
@@ -1158,6 +1171,12 @@ export function PurchasesSection({
                             <dt className="text-muted-foreground">تسویه</dt>
                             <dd className="mt-0.5">
                               {p.status === "received" && p.settlement_method ? (SETTLEMENT_LABELS[p.settlement_method] ?? "—") : "—"}
+                              {detail?.purchase.financial_account_name ? ` · ${detail.purchase.financial_account_name}` : ""}
+                              {detail?.purchase.journal_entry_id ? (
+                                <Button variant="link" size="sm" onClick={() => setJournalEntryId(detail.purchase.journal_entry_id ?? null)}>
+                                  مشاهده سند حسابداری
+                                </Button>
+                              ) : null}
                             </dd>
                           </div>
                           <div>

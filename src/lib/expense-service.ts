@@ -34,6 +34,8 @@
  * `integration/f11-payables.integration.test.ts`.
  */
 import { getPool, query } from "./db";
+import { lockFinancialTransfers } from "./financial-transfers-service";
+import { resolvePaymentFinancialAccountId } from "./payment-financial-account";
 import {
   expenseDateViolation,
   EXPENSE_LIST_DEFAULT_LIMIT,
@@ -194,6 +196,7 @@ export interface Expense {
   accountCode: string;
   accountName: string;
   paymentAccountId: string;
+  financialAccountId?: string | null;
   paymentAccountCode: string;
   paymentAccountName: string;
   /** The gross money that left the payment account. */
@@ -255,6 +258,7 @@ interface ExpenseRow extends Record<string, unknown> {
   account_code: string;
   account_name: string;
   payment_account_id: string;
+  financial_account_id: string | null;
   payment_account_code: string;
   payment_account_name: string;
   amount: string;
@@ -300,6 +304,7 @@ function toExpense(r: ExpenseRow): Expense {
     accountCode: r.account_code,
     accountName: r.account_name,
     paymentAccountId: r.payment_account_id,
+    financialAccountId: r.financial_account_id,
     paymentAccountCode: r.payment_account_code,
     paymentAccountName: r.payment_account_name,
     amount,
@@ -336,7 +341,7 @@ const SELECT_EXPENSE = `
          e.reversed_at::text AS reversed_at, e.reverses_expense_id, e.receipt_asset_id, e.receipt_file_name,
          e.settlement, e.supplier_id, COALESCE(sp.name, s.name) AS supplier_name, e.due_date::text AS due_date,
          e.account_id, a.code AS account_code, a.name AS account_name,
-         e.payment_account_id, p.code AS payment_account_code, p.name AS payment_account_name,
+         e.payment_account_id, e.financial_account_id, p.code AS payment_account_code, p.name AS payment_account_name,
          e.location_id, l.name AS location_name,
          e.party_id, pt.name AS party_name,
          e.cost_center_id, e.profit_center_id, e.department_id, e.detail_dimension_id,
@@ -553,7 +558,10 @@ export interface RecordExpenseParams {
  * and a permission checked only on one of those four is a second, unguarded
  * door.
  */
-export async function recordExpense(params: RecordExpenseParams): Promise<Expense> {
+export async function recordExpense(
+  params: RecordExpenseParams,
+  workflow?: { client: PoolClient; pettyCashAccountId: string },
+): Promise<Expense> {
   if (!Number.isSafeInteger(params.amount) || params.amount <= 0 || params.amount > MAX_EXPENSE_AMOUNT_RIAL) {
     throw new ExpenseError("invalid_amount");
   }
@@ -693,9 +701,10 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
 
   let expenseId = "";
   let reference = "";
-  const client = await getPool().connect();
+  const client = workflow?.client ?? await getPool().connect();
   try {
-    await client.query("BEGIN");
+    if (!workflow) await client.query("BEGIN");
+    if (!onCredit) await lockFinancialTransfers(client, businessId);
 
     // The credited account: the chosen cash/bank account, or — owed — the A/P
     // control account a credit purchase credits too, so an owed expense is never
@@ -713,13 +722,26 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
       creditAccountId = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
     }
 
+    const financialAccountId = onCredit ? null : await resolvePaymentFinancialAccountId(client, {
+      businessId, locationId, accountId: creditAccountId, explicit: true,
+      expectedFinancialAccountId: workflow?.pettyCashAccountId,
+      invalid: () => new ExpenseError("invalid_payment_account"),
+    });
+    if (financialAccountId) {
+      const managed = await client.query(
+        "SELECT 1 FROM petty_cash_funds WHERE business_id = $1 AND account_id = $2",
+        [businessId, financialAccountId],
+      );
+      if (Boolean(managed.rows.length) !== Boolean(workflow)) throw new ExpenseError("petty_cash_workflow_required", 409);
+    }
+
     reference = await nextReference(client, businessId, postingDate);
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO expenses (business_id, location_id, account_id, payment_account_id, amount, vat_amount,
                              expense_date, vendor, party_id, memo, created_by, receipt_asset_id,
                              receipt_file_name, reference, settlement, supplier_id, due_date,
-                             cost_center_id, profit_center_id, department_id, detail_dimension_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING id`,
+                             cost_center_id, profit_center_id, department_id, detail_dimension_id, financial_account_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) RETURNING id`,
       [
         businessId,
         locationId,
@@ -742,13 +764,14 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
         dimensionColumnValues(expenseDimensions).profit_center_id,
         dimensionColumnValues(expenseDimensions).department_id,
         dimensionColumnValues(expenseDimensions).detail_dimension_id,
+        financialAccountId,
       ],
     );
     expenseId = rows[0].id;
 
     const lines: PostJournalEntryInput["lines"] = [
       { accountId: params.accountId, debit: expenseNet, credit: 0, dimensions: expenseDimensions },
-      { accountId: creditAccountId, debit: 0, credit: params.amount },
+      { accountId: creditAccountId, financialAccountId, debit: 0, credit: params.amount },
     ];
     if (vatAmount > 0 && vatAccountId) {
       lines.splice(1, 0, { accountId: vatAccountId, debit: vatAmount, credit: 0 });
@@ -765,12 +788,16 @@ export async function recordExpense(params: RecordExpenseParams): Promise<Expens
       lines,
     });
 
+    if (workflow) {
+      const { rows: expenseRows } = await client.query<ExpenseRow>(`${SELECT_EXPENSE} WHERE e.business_id = $1 AND e.id = $2`, [businessId, expenseId]);
+      return toExpense(expenseRows[0]);
+    }
     await client.query("COMMIT");
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (!workflow) await client.query("ROLLBACK");
     throw err;
   } finally {
-    client.release();
+    if (!workflow) client.release();
   }
 
   const { rows: expenseRows } = await query<ExpenseRow>(`${SELECT_EXPENSE} WHERE e.id = $1`, [expenseId]);
@@ -821,6 +848,14 @@ export async function reverseExpense(params: {
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    if (original.settlement !== "credit") {
+      await lockFinancialTransfers(client, params.businessId);
+      const managed = await client.query(
+        `SELECT 1 FROM petty_cash_funds f JOIN financial_accounts a ON a.id = f.account_id AND a.business_id = f.business_id
+          WHERE f.business_id = $1 AND a.gl_account_id = $2`, [params.businessId, original.payment_account_id],
+      );
+      if (managed.rows.length) throw new ExpenseError("petty_cash_workflow_required", 409);
+    }
 
     // `FOR UPDATE` on the original, so two accountants pressing «برگشت» at the
     // same moment cannot both get past the `reversed_at IS NULL` guard above.
@@ -846,8 +881,8 @@ export async function reverseExpense(params: {
       `INSERT INTO expenses (business_id, location_id, account_id, payment_account_id, amount, vat_amount,
                              expense_date, vendor, party_id, memo, created_by, reference, reverses_expense_id,
                              settlement, supplier_id, due_date,
-                             cost_center_id, profit_center_id, department_id, detail_dimension_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id`,
+                             cost_center_id, profit_center_id, department_id, detail_dimension_id, financial_account_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING id`,
       [
         params.businessId,
         original.location_id,
@@ -873,6 +908,7 @@ export async function reverseExpense(params: {
         original.profit_center_id,
         original.department_id,
         original.detail_dimension_id,
+        original.financial_account_id,
       ],
     );
     reversalId = inserted[0].id;
@@ -930,6 +966,7 @@ async function mirroredLines(
   if (entryId) {
     const { rows } = await client.query<{
       account_id: string;
+      financial_account_id: string | null;
       debit: string;
       credit: string;
       cost_center_id: string | null;
@@ -937,7 +974,7 @@ async function mirroredLines(
       department_id: string | null;
       detail_dimension_id: string | null;
     }>(
-      `SELECT account_id, debit::text AS debit, credit::text AS credit,
+      `SELECT account_id, financial_account_id, debit::text AS debit, credit::text AS credit,
               cost_center_id, profit_center_id, department_id, detail_dimension_id
          FROM journal_lines WHERE entry_id = $1 ORDER BY id`,
       [entryId],
@@ -945,6 +982,7 @@ async function mirroredLines(
     if (rows.length > 0) {
       return rows.map((line) => ({
         accountId: line.account_id,
+        financialAccountId: line.financial_account_id,
         // `postJournalEntry` takes JS numbers; every journal amount in this
         // platform is an integer Rial that fits in one, and the BIGINT columns
         // come back as strings only to keep the read exact.

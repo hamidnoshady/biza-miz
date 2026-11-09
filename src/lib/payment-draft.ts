@@ -19,6 +19,7 @@ export interface PaymentDraftRow {
   /** As typed, in the business's display unit. Empty while the cashier is still typing. */
   amount: string;
   reference: string;
+  financialAccountId?: string;
 }
 
 export interface PaymentDraft {
@@ -182,6 +183,7 @@ export function draftRequiresCustomer(
 
 export interface PaymentDraftBody {
   methodId: string;
+  financialAccountId?: string;
   /** Absent means "take whatever is left" — see TenderInput.amount in payment-methods.ts. */
   amount?: Rial;
   reference?: string;
@@ -216,7 +218,8 @@ export function paymentDraftBody(
     ? draft.rows
     : // One implicit row for the chosen way. Its amount is decided below by
       // the mode, not by whatever text the collapsed box still holds.
-      [{ ...newDraftRow(draft.methodId), reference: draft.rows[0]?.reference ?? "" }];
+      [{ ...newDraftRow(draft.methodId), reference: draft.rows[0]?.reference ?? "",
+        financialAccountId: draft.rows[0]?.financialAccountId }];
   if (rows.length === 0) return { ok: false, error: "no_payment" };
 
   const body: PaymentDraftBody[] = [];
@@ -226,6 +229,7 @@ export function paymentDraftBody(
     if (method.requiresReference && !row.reference.trim()) {
       return { ok: false, error: "payment_reference_required" };
     }
+    const financialSource = row.financialAccountId ? { financialAccountId: row.financialAccountId } : {};
     if (!draft.split) {
       // The empty open box is the ordinary whole-bill sale — no amount sent.
       // But text that IS there must be a usable amount (issue #913 item 7):
@@ -239,6 +243,7 @@ export function paymentDraftBody(
         if (received === null) return { ok: false, error: "invalid_received_amount" };
         body.push({
           methodId: method.id,
+          ...financialSource,
           amount: received,
           reference: row.reference.trim() || undefined,
         });
@@ -246,6 +251,7 @@ export function paymentDraftBody(
       }
       body.push({
         methodId: method.id,
+        ...financialSource,
         amount: undefined,
         reference: row.reference.trim() || undefined,
       });
@@ -261,6 +267,7 @@ export function paymentDraftBody(
     const isLast = row === rows[rows.length - 1];
     body.push({
       methodId: method.id,
+      ...financialSource,
       amount: isLast ? undefined : amount,
       reference: row.reference.trim() || undefined,
     });

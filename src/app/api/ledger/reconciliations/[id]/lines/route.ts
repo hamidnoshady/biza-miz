@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { financialReportAccess } from "@/lib/financial-report-access";
 import { parseLineClearanceRequest } from "@/lib/bank-reconciliation";
 import { ReconciliationError, setLineCleared, setLinesCleared } from "@/lib/reconciliation-service";
 
@@ -36,10 +37,12 @@ export const PATCH = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
   try {
+    const access = await financialReportAccess(session);
     // The batch form is used only when the caller actually sent a list, so a
     // single-line PATCH keeps going through the exact path it always did.
     if (parsed.value.kind === "batch") {
       const { changed } = await setLinesCleared({
+        ...access,
         businessId: session.businessId,
         reconciliationId: id,
         journalLineIds: parsed.value.journalLineIds,
@@ -49,6 +52,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
     }
 
     await setLineCleared({
+      ...access,
       businessId: session.businessId,
       reconciliationId: id,
       journalLineId: parsed.value.journalLineId,

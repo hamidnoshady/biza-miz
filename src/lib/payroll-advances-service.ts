@@ -177,10 +177,10 @@ export async function recordAdvance(params: {
     const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.staffAdvances]);
 
     const { rows } = await client.query<{ id: string; advance_date: string }>(
-      `INSERT INTO payroll_advances (business_id, location_id, user_id, amount, method, advance_date, note, created_by)
-       VALUES ($1, NULL, $2, $3, $4, COALESCE($5::date, CURRENT_DATE), $6, $7)
+      `INSERT INTO payroll_advances (business_id, location_id, user_id, amount, method, advance_date, note, created_by, financial_account_id)
+       VALUES ($1, NULL, $2, $3, $4, COALESCE($5::date, CURRENT_DATE), $6, $7, $8)
        RETURNING id, advance_date::text AS advance_date`,
-      [params.businessId, params.userId, amount.toString(), payout.method, date.value, note, params.createdBy],
+      [params.businessId, params.userId, amount.toString(), payout.method, date.value, note, params.createdBy, payout.financialAccountId],
     );
 
     await postExactJournalEntry(client, {
@@ -193,7 +193,7 @@ export async function recordAdvance(params: {
       createdBy: params.createdBy,
       lines: [
         { accountId: accounts.get(WELL_KNOWN_CODES.staffAdvances)!, debit: asRial(amount), credit: "0" as RialText },
-        { accountId: payout.accountId, debit: "0" as RialText, credit: asRial(amount) },
+        { accountId: payout.accountId, financialAccountId: payout.financialAccountId, debit: "0" as RialText, credit: asRial(amount) },
       ],
     });
     return rows[0].id;

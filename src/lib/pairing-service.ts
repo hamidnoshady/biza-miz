@@ -38,6 +38,7 @@ import {
 } from "./integrations/secrets";
 import { REPLICATION_DOMAIN_CONTRACT } from "./data-ownership";
 import { buildIamSnapshot } from "./iam/service";
+import { ORDER_PAYMENT_ROUTING_SETTING } from "./order-payment-routing-service";
 
 export interface PairingCodeSummary {
   id: string;
@@ -224,6 +225,7 @@ export type RedeemResult =
         | "code_expired"
         | "code_already_redeemed"
         | "code_revoked"
+        | "pairing_payment_routing_unsupported"
         | "pairing_session_unavailable"
         | typeof PAIRING_REQUIRES_NEWER_CLIENT;
     };
@@ -351,13 +353,13 @@ async function saveBuiltSnapshot(
 export async function redeemPairingCode(
   rawCode: string,
   clientIp: string | null,
-  deviceName = "Windows Bizamiz",
+  deviceName = "Windows Business Suite",
   installationId?: string | null,
   options: RedeemOptions = {},
 ): Promise<RedeemResult> {
   return withoutTenantScope("pairing-redeem", async () => {
     const cleanDeviceName =
-      deviceName.trim().slice(0, 120) || "Windows Bizamiz";
+      deviceName.trim().slice(0, 120) || "Windows Business Suite";
     const stableInstallationId = canonicalInstallationId(
       installationId,
       clientIp,
@@ -434,6 +436,21 @@ export async function redeemPairingCode(
         if (state !== "valid") {
           await client.query("ROLLBACK");
           return { ok: false, error: state === "code_pending_activation" ? "pairing_session_unavailable" : state };
+        }
+
+        // Cutover takes the same branch lock and checks for pending devices
+        // after acquiring it. Read the flag in a separate statement so its
+        // snapshot cannot predate a cutover that held the lock first.
+        await client.query("SELECT id FROM locations WHERE business_id = $1 AND id = $2 FOR UPDATE",
+          [code.business_id, code.location_id]);
+        const { rows: [routing] } = await client.query<{ enabled: boolean }>(
+          `SELECT EXISTS (SELECT 1 FROM settings WHERE business_id = $1 AND location_id = $2
+             AND key = $3 AND value->'enabled' = 'true'::jsonb) AS enabled`,
+          [code.business_id, code.location_id, ORDER_PAYMENT_ROUTING_SETTING],
+        );
+        if (routing.enabled) {
+          await client.query("ROLLBACK");
+          return { ok: false, error: "pairing_payment_routing_unsupported" };
         }
 
         const syncToken = generateSyncToken();

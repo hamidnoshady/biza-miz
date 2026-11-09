@@ -42,6 +42,7 @@ import { getPool, query } from "./db";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { isUuid } from "./uuid";
 import { accountIdsByCode, postJournalEntry } from "./ledger-service";
+import { resolvePaymentFinancialAccountId } from "./payment-financial-account";
 import {
   canonicalBankName,
   canonicalSerialNumber,
@@ -591,6 +592,8 @@ export interface ChequeEvent {
   event: string;
   occurredOn: string;
   entryId: string | null;
+  financialAccountId: string | null;
+  financialAccountName: string | null;
   endorsedToSupplierId: string | null;
   memo: string | null;
   createdAt: string;
@@ -618,13 +621,18 @@ export async function getChequeHistory(businessId: string, chequeId: string): Pr
     event: string;
     occurred_on: string;
     entry_id: string | null;
+    financial_account_id: string | null;
+    financial_account_name: string | null;
     endorsed_to_supplier_id: string | null;
     memo: string | null;
     created_at: string;
   }>(
-    `SELECT id, event, occurred_on::text AS occurred_on, entry_id, endorsed_to_supplier_id, memo, created_at
-       FROM cheque_events WHERE business_id = $1 AND cheque_id = $2
-      ORDER BY occurred_on, created_at, id`,
+    `SELECT e.id, e.event, e.occurred_on::text AS occurred_on, e.entry_id, e.endorsed_to_supplier_id, e.memo, e.created_at,
+            e.financial_account_id, fa.name AS financial_account_name
+       FROM cheque_events e
+       LEFT JOIN financial_accounts fa ON fa.id = e.financial_account_id AND fa.business_id = e.business_id
+      WHERE e.business_id = $1 AND e.cheque_id = $2
+      ORDER BY e.occurred_on, e.created_at, e.id`,
     [businessId, chequeId],
   );
   return rows.map((r) => ({
@@ -632,6 +640,8 @@ export async function getChequeHistory(businessId: string, chequeId: string): Pr
     event: r.event,
     occurredOn: r.occurred_on,
     entryId: r.entry_id,
+    financialAccountId: r.financial_account_id,
+    financialAccountName: r.financial_account_name,
     endorsedToSupplierId: r.endorsed_to_supplier_id,
     memo: r.memo,
     createdAt: r.created_at,
@@ -1211,6 +1221,7 @@ async function recordChequeEvent(
     event: string;
     occurredOn: string;
     entryId: string | null;
+    financialAccountId?: string | null;
     endorsedToSupplierId?: string | null;
     memo: string | null;
     idempotencyKey?: string | null;
@@ -1222,8 +1233,8 @@ async function recordChequeEvent(
 ): Promise<void> {
   await client.query(
     `INSERT INTO cheque_events (business_id, cheque_id, event, occurred_on, entry_id, endorsed_to_supplier_id,
-                                memo, created_by, idempotency_key, idempotency_fingerprint, idempotency_result)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
+                                memo, created_by, idempotency_key, idempotency_fingerprint, idempotency_result, financial_account_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)`,
     [
       params.businessId,
       params.chequeId,
@@ -1238,6 +1249,7 @@ async function recordChequeEvent(
       params.idempotencyKey && params.idempotencyResult
         ? JSON.stringify(params.idempotencyResult)
         : null,
+      params.financialAccountId ?? null,
     ],
   );
 }
@@ -1363,6 +1375,9 @@ export interface TransitionChequeParams {
   endorsedToSupplierId?: string | null;
   /** Optional on `bounce`: the bank's returned-cheque charge, posted to 5860. */
   feeAmount?: number | null;
+  /** A registered bank account for the transition's money leg. */
+  bankAccountId?: string | null;
+  allowedLocationIds?: readonly string[];
   memo?: string | null;
   createdBy: string | null;
 }
@@ -1393,6 +1408,8 @@ export interface TransitionChequeParams {
 export async function transitionCheque(params: TransitionChequeParams): Promise<Cheque> {
   if (!isUuid(params.chequeId)) throw new ChequeError("cheque_not_found", 404);
   if (!CHEQUE_ACTIONS.includes(params.action)) throw new ChequeError("invalid_action");
+  const bankAccountId = params.bankAccountId ?? null;
+  if (bankAccountId !== null && !isUuid(bankAccountId)) throw new ChequeError("invalid_cheque_bank_account");
   const idempotencyKey = optionalText(params.idempotencyKey);
   // Bound to the cheque, the step, the date and the fee: a retry of "bounce
   // this cheque with a ۳۰٬۰۰۰ ریال charge" is that request again, and a
@@ -1404,6 +1421,7 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
     optionalIsoDate(params.occurredOn, "invalid_occurred_on"),
     params.feeAmount ?? null,
     optionalText(params.endorsedToSupplierId, "supplier_not_found"),
+    ...(bankAccountId ? [bankAccountId] : []),
   ]);
 
   const client = await getPool().connect();
@@ -1416,6 +1434,9 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
     );
     const cheque = current[0];
     if (!cheque) throw new ChequeError("cheque_not_found", 404);
+    if (cheque.location_id !== null && params.allowedLocationIds && !params.allowedLocationIds.includes(cheque.location_id)) {
+      throw new ChequeError("cheque_not_found", 404);
+    }
 
     // A replayed step is answered from history, under the same row lock that
     // serialises a real one — so a retry after a lost response returns the
@@ -1478,11 +1499,33 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
     const memo = optionalText(params.memo);
     const amount = Number(cheque.amount);
     const postings = linesFor(cheque.direction, cheque.status, params.action, amount, feeAmount);
+    const bankCode = WELL_KNOWN_CODES.bank;
+    const postsToBank = postings.some((posting) => posting.debitCode === bankCode || posting.creditCode === bankCode);
+    const invalidBank = () => new ChequeError("invalid_cheque_bank_account");
+    if (bankAccountId && !postsToBank) throw invalidBank();
 
     let entryId: string | null = null;
+    let financialAccountId: string | null = null;
     if (postings.length > 0) {
       const codes = [...new Set(postings.flatMap((p) => [p.debitCode, p.creditCode]))];
-      const accounts = await accountIdsByCode(client, params.businessId, codes);
+      const accounts = await accountIdsByCode(client, params.businessId, bankAccountId ? codes.filter((code) => code !== bankCode) : codes);
+      if (postsToBank) {
+        if (bankAccountId) {
+          const { rows: [bank] } = await client.query<{ gl_account_id: string }>(
+            `SELECT fa.gl_account_id FROM financial_accounts fa
+               JOIN accounts a ON a.id = fa.gl_account_id AND a.business_id = fa.business_id AND a.is_active
+              WHERE fa.business_id = $1 AND fa.id = $2 FOR SHARE OF a`,
+            [params.businessId, bankAccountId],
+          );
+          if (!bank) throw invalidBank();
+          accounts.set(bankCode, bank.gl_account_id);
+        }
+        financialAccountId = await resolvePaymentFinancialAccountId(client, {
+          businessId: params.businessId, locationId: cheque.location_id, accountId: accounts.get(bankCode)!,
+          explicit: bankAccountId !== null, expectedFinancialAccountId: bankAccountId,
+          fallbackKind: "bank", requireRegisteredChoice: true, allowedKinds: ["bank"], invalid: invalidBank,
+        });
+      }
       entryId = await postJournalEntry(client, {
         businessId: params.businessId,
         // The cheque's own branch, never the operator's current one.
@@ -1494,8 +1537,8 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
         createdBy: params.createdBy,
         postingKind: `cheque_${EVENT_FOR_ACTION[params.action]}`,
         lines: postings.flatMap((posting) => [
-          { accountId: accounts.get(posting.debitCode)!, debit: posting.amount, credit: 0 },
-          { accountId: accounts.get(posting.creditCode)!, debit: 0, credit: posting.amount },
+          { accountId: accounts.get(posting.debitCode)!, financialAccountId: posting.debitCode === bankCode ? financialAccountId : null, debit: posting.amount, credit: 0 },
+          { accountId: accounts.get(posting.creditCode)!, financialAccountId: posting.creditCode === bankCode ? financialAccountId : null, debit: 0, credit: posting.amount },
         ]),
       });
     }
@@ -1515,6 +1558,7 @@ export async function transitionCheque(params: TransitionChequeParams): Promise<
       // possible journal entry on the same Tehran calendar date.
       occurredOn,
       entryId,
+      financialAccountId,
       endorsedToSupplierId: params.action === "endorse" ? endorsedToSupplierId : null,
       memo,
       idempotencyKey,

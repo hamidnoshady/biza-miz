@@ -34,6 +34,7 @@ export interface JournalLineView {
   accountId: string;
   accountCode: string;
   accountName: string;
+  financialAccount?: { name: string; bankName: string | null; terminalNumber: string | null } | null;
   /** Exact Rial as a decimal string — never converted through `Number`. */
   debit: string;
   credit: string;

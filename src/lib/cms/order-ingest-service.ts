@@ -21,6 +21,7 @@ import {
   type Industry,
 } from "../industries";
 import type { RialText } from "../inventory-exact";
+import { routeWebsitePayment, type OrderPaymentSourceSnapshot } from "../order-payment-routing-service";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
 import { sellOnlineRetailLine } from "../retail-online-sale-service";
@@ -312,11 +313,15 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
       );
     }
 
+    const paymentSource = total > 0n
+      ? await routeWebsitePayment(client, businessId, locationId, "cms", connection.id, "default")
+      : null;
     if (total > 0n) {
       await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_at)
-         VALUES ($1, $2, 'online', $3, $4, $5)`,
-        [locationId, orderId, total.toString(), order.reference, chronology.occurredAt],
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_at, financial_account_id, financial_account_gl_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [locationId, orderId, paymentSource?.settlement ?? "online", total.toString(), order.reference,
+          chronology.occurredAt, paymentSource?.financialAccountId ?? null, paymentSource?.financialAccountGlId ?? null],
       );
     }
 
@@ -403,6 +408,7 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
       industry,
       inventoryEventId,
       chronology.entryDate,
+      paymentSource,
     );
 
     if (mapped?.localKind === "item" || orderType === "retail") {
@@ -467,13 +473,14 @@ async function postRevenueEntry(
   industry: Industry | null,
   inventoryEventId: string | null,
   entryDate: string,
+  paymentSource: OrderPaymentSourceSnapshot | null,
 ): Promise<void> {
   const retailRevenue =
     isRetailCatalogueIndustry(industry)
       ? RETAIL_ACCOUNT_CODES[industry]?.revenue ?? WELL_KNOWN_CODES.deliveryRevenue
       : WELL_KNOWN_CODES.deliveryRevenue;
   const accounts = await accountIdsByCode(client, businessId, [
-    WELL_KNOWN_CODES.bankClearing,
+    ...(paymentSource ? [] : [WELL_KNOWN_CODES.bankClearing]),
     retailRevenue,
     ...(tax > 0n ? [WELL_KNOWN_CODES.vatPayable] : []),
   ]);
@@ -488,7 +495,8 @@ async function postRevenueEntry(
     postingKind: "revenue",
     inventoryEventId,
     lines: [
-      { accountId: accounts.get(WELL_KNOWN_CODES.bankClearing)!, debit: total.toString() as RialText, credit: zero },
+      { accountId: paymentSource?.financialAccountGlId ?? accounts.get(WELL_KNOWN_CODES.bankClearing)!,
+        financialAccountId: paymentSource?.financialAccountId, debit: total.toString() as RialText, credit: zero },
       { accountId: accounts.get(retailRevenue)!, debit: zero, credit: net.toString() as RialText },
       ...(tax > 0n
         ? [{ accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!, debit: zero, credit: tax.toString() as RialText }]

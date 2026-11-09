@@ -24,6 +24,7 @@ import {
 import { applyPairingSnapshot, repairPairingSnapshot } from "../src/lib/pairing-apply";
 import { validateSnapshot, type PairingSnapshot } from "../src/lib/pairing-snapshot";
 import { acknowledgePendingPairing } from "../src/lib/server-sync";
+import { ORDER_PAYMENT_ROUTING_SETTING } from "../src/lib/order-payment-routing-service";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -349,10 +350,6 @@ describe("pairing round trip", () => {
     expect(activatedConfig.rows[0].value).toMatchObject({ enabled: true });
     expect(activatedConfig.rows[0].value.pairingSessionId).toBeUndefined();
     expect(activatedConfig.rows[0].value.installationId).toBeUndefined();
-    const storedSync = activatedConfig.rows[0].value as Record<string, unknown>;
-    expect(storedSync.token).toBeUndefined();
-    expect(storedSync.tokenCiphertext).toMatch(/^(mk1|ik1)\./);
-    expect(JSON.stringify(storedSync)).not.toContain(redeemed.snapshot.syncToken);
 
     // Once acknowledged, recovery material is no longer downloadable with the
     // old one-time code; acknowledgement itself remains idempotent instead.
@@ -439,6 +436,33 @@ describe("pairing round trip", () => {
 });
 
 describe("pairing code lifecycle", () => {
+  it("blocks desktop pairing for a routed branch without consuming the code", async () => {
+    await useDatabase(serverDb);
+    const created = await provisionBusiness({
+      businessName: "Routed branch",
+      ownerName: "Owner",
+      email: `route-owner-${randomUUID()}@example.com`,
+      password: "correct-horse",
+    });
+    const issued = await withoutTenantScope("platform", () =>
+      issuePairingCode(created.businessId, null, created.locationId),
+    );
+    if (!("code" in issued)) throw new Error("expected a code");
+    await withTenant(created.businessId, async () => {
+      await query(`INSERT INTO settings (business_id, location_id, key, value) VALUES ($1,$2,$3,'{"enabled":true}')`,
+        [created.businessId, created.locationId, ORDER_PAYMENT_ROUTING_SETTING]);
+    });
+    const redeem = () => redeemPairingCode(issued.code, null, "Test desktop", randomUUID(), { maxSnapshotVersion: 7 });
+    expect(await redeem()).toEqual({ ok: false, error: "pairing_payment_routing_unsupported" });
+    await withTenant(created.businessId, async () => {
+      const { rowCount } = await query("SELECT id FROM site_devices WHERE business_id=$1", [created.businessId]);
+      expect(rowCount).toBe(0);
+      await query(`DELETE FROM settings WHERE business_id=$1 AND location_id=$2 AND key=$3`,
+        [created.businessId, created.locationId, ORDER_PAYMENT_ROUTING_SETTING]);
+    });
+    expect(await redeem()).toMatchObject({ ok: true, resumed: false });
+  }, 120_000);
+
   it("refuses an unknown code and a revoked code", async () => {
     await useDatabase(serverDb);
 

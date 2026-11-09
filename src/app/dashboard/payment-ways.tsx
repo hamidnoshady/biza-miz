@@ -31,6 +31,8 @@ import {
   type PaymentDraft,
 } from "@/lib/payment-draft";
 import type { PaymentMethodView, PaymentSettlement } from "@/lib/payment-methods";
+import type { FinancialAccountKind } from "@/lib/financial-accounts";
+import { paymentSourceKindForSettlement } from "@/lib/order-payment-routing";
 import { toPersianDigits } from "@/lib/digits";
 import { api } from "./ui";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -138,6 +140,7 @@ export interface PaymentWaysProps {
    */
   customer?: { id: string; name: string } | null;
   onChooseCustomer?: () => void;
+  routeOrderPayment?: boolean;
 }
 
 export function PaymentWays({
@@ -152,6 +155,7 @@ export function PaymentWays({
   idPrefix = "pay",
   customer = null,
   onChooseCustomer,
+  routeOrderPayment = false,
 }: PaymentWaysProps) {
   const money = useMoney();
   const remaining = draftRemaining(draft, due, money.unit);
@@ -163,6 +167,18 @@ export function PaymentWays({
   const difference = draftDifference(receivedRial ?? due, due);
   const needsCustomer = draftRequiresCustomer(draft, methods, due) && !customer;
   const selectedMethod = methods.find((method) => method.id === draft.methodId) ?? null;
+  const [routing, setRouting] = useState<{
+    mode: "disabled" | "enabled" | "peer_unsupported";
+    sources: { id: string; name: string; kind: FinancialAccountKind }[];
+  } | null>(null);
+  useEffect(() => {
+    if (!routeOrderPayment) return;
+    let active = true;
+    void api<NonNullable<typeof routing>>("/api/ledger/order-payment-sources").then(({ ok, data }) => {
+      if (active && ok && data) setRouting(data);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [routeOrderPayment]);
 
   /**
    * Tapping a way while splitting *adds* it, pre-filled with whatever is still
@@ -229,12 +245,34 @@ export function PaymentWays({
     });
   }
 
-  function patchRow(key: string, patch: { amount?: string; reference?: string }) {
+  function patchRow(key: string, patch: { amount?: string; reference?: string; financialAccountId?: string }) {
     onChange({ ...draft, rows: draft.rows.map((row) => (row.key === key ? { ...row, ...patch } : row)) });
   }
 
   function removeRow(key: string) {
     onChange({ ...draft, rows: draft.rows.filter((row) => row.key !== key) });
+  }
+
+  function sourcePicker(settlement: PaymentSettlement | undefined, row: PaymentDraft["rows"][number] | undefined) {
+    if (!routeOrderPayment || routing?.mode !== "enabled" || !settlement || !row) return null;
+    const kind = paymentSourceKindForSettlement(settlement);
+    if (!kind) return null;
+    return (
+      <label className="mt-2 block space-y-1 text-xs font-medium">
+        <span>{kind === "pos_psp" ? "پایانه یا درگاه دریافت وجه" : "حساب دریافت وجه"}</span>
+        <select
+          className={AMOUNT_INPUT}
+          value={row.financialAccountId ?? ""}
+          disabled={disabled}
+          onChange={(event) => patchRow(row.key, { financialAccountId: event.target.value })}
+        >
+          <option value="">انتخاب کنید</option>
+          {routing.sources.filter((source) => source.kind === kind).map((source) => (
+            <option key={source.id} value={source.id}>{source.name}</option>
+          ))}
+        </select>
+      </label>
+    );
   }
 
   return (
@@ -447,6 +485,12 @@ export function PaymentWays({
         </div>
       ) : null}
 
+      {!draft.split ? sourcePicker(selectedMethod?.settlement, draft.rows[0]) : null}
+      {routeOrderPayment && routing?.mode === "peer_unsupported" ? (
+        <p className="mt-2 text-xs text-destructive" role="alert">
+          ثبت پرداخت با حساب مشخص برای دستگاه همگام‌شده هنوز فعال نیست.
+        </p>
+      ) : null}
       {draft.split ? (
         <div className="mt-3 space-y-2 rounded-xl border border-border/80 bg-muted p-2">
           {draft.rows.length === 0 ? (
@@ -494,6 +538,7 @@ export function PaymentWays({
                     aria-label={`شمارهٔ پیگیری ${method.name}`}
                   />
                 ) : null}
+                {sourcePicker(method?.settlement, row)}
               </div>
             );
           })}

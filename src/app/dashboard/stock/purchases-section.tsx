@@ -21,6 +21,8 @@ import Decimal from "decimal.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { PurchasePaymentAccountSelect } from "@/app/dashboard/purchase-payment-account-select";
+import { JournalPeekDialog } from "@/app/(app)/accounting/journal-peek-dialog";
 import { formatPersianNumber, formatQuantity, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { useMoney } from "@/components/money/money-context";
@@ -88,6 +90,8 @@ interface PurchaseDetail {
     total: string;
     vatAmount: string;
     settlementMethod: string;
+    financialAccountName?: string | null;
+    journalEntryId?: string | null;
     supplierInvoiceNumber: string | null;
     supplierInvoiceDate: string | null;
     paymentTermsDays: number | null;
@@ -365,6 +369,7 @@ function PurchaseHistory({
   // paint itself into a newer row's panel (issue #915).
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PurchaseDetail | null>(null);
+  const [journalEntryId, setJournalEntryId] = useState<string | null>(null);
   const [detailError, setDetailError] = useState("");
   const detailRequestRef = useRef(0);
 
@@ -571,7 +576,10 @@ function PurchaseHistory({
                         <dl className="mt-2 grid grid-cols-2 gap-2 border-t border-border pt-2 sm:grid-cols-4">
                           <div>
                             <dt className="text-muted-foreground">تسویه</dt>
-                            <dd className="mt-0.5">{SETTLEMENT_LABELS[detail.purchase.settlementMethod] ?? "—"}</dd>
+                            <dd className="mt-0.5">
+                              {SETTLEMENT_LABELS[detail.purchase.settlementMethod] ?? "—"}
+                              {detail.purchase.financialAccountName ? ` · ${detail.purchase.financialAccountName}` : ""}
+                            </dd>
                           </div>
                           <div>
                             <dt className="text-muted-foreground">شمارهٔ فاکتور</dt>
@@ -610,6 +618,11 @@ function PurchaseHistory({
                             return/credit note, never edited; what it offers is a
                             print-ready copy (purchase-receipt-print.ts). */}
                         <div className="mt-2 border-t border-border pt-2">
+                          {detail.purchase.journalEntryId ? (
+                            <Button type="button" variant="link" size="sm" onClick={() => setJournalEntryId(detail.purchase.journalEntryId ?? null)}>
+                              مشاهده سند حسابداری
+                            </Button>
+                          ) : null}
                           <Button type="button" variant="outline" size="sm" onClick={() => printReceipt(detail)}>
                             چاپ رسید
                           </Button>
@@ -638,6 +651,7 @@ function PurchaseHistory({
           </Button>
         </div>
       ) : null}
+      {journalEntryId ? <JournalPeekDialog entryId={journalEntryId} title="سند خرید" onClose={() => setJournalEntryId(null)} /> : null}
     </SectionCard>
   );
 }
@@ -658,6 +672,7 @@ function PurchaseForm({
   const money = useMoney();
   const [supplierId, setSupplierId] = useState("");
   const [settlementMethod, setSettlementMethod] = useState<"credit" | "cash" | "bank">("credit");
+  const [financialAccountId, setFinancialAccountId] = useState("");
   // Audit F11 parity with F&B — the supplier's invoice block.
   const [invoiceDraft, setInvoiceDraft] = useState<SupplierInvoiceDraft>(EMPTY_SUPPLIER_INVOICE_DRAFT);
   const [itemId, setItemId] = useState("");
@@ -811,6 +826,7 @@ function PurchaseForm({
       const payload = {
         supplierId: supplierId || null,
         settlementMethod,
+        ...(financialAccountId && settlementMethod !== "credit" ? { financialAccountId } : {}),
         invoice: supplierInvoicePayload(invoiceDraft, vatRial),
         lines,
       };
@@ -833,6 +849,7 @@ function PurchaseForm({
         setLines([]);
         setSupplierId("");
         setSettlementMethod("credit");
+        setFinancialAccountId("");
         setInvoiceDraft(EMPTY_SUPPLIER_INVOICE_DRAFT);
         onDone(SETTLEMENT_DONE_MESSAGES[settlementMethod]);
       }
@@ -887,10 +904,13 @@ function PurchaseForm({
           <Field label="روش تسویه">
             <SearchableSelect
               value={settlementMethod}
-              onChange={(v) => setSettlementMethod(v as typeof settlementMethod)}
+              onChange={(v) => { setSettlementMethod(v as typeof settlementMethod); setFinancialAccountId(""); }}
               options={Object.entries(SETTLEMENT_LABELS).map(([value, label]) => ({ value, label }))}
             />
           </Field>
+          {settlementMethod !== "credit" ? (
+            <PurchasePaymentAccountSelect method={settlementMethod} value={financialAccountId} onChange={setFinancialAccountId} />
+          ) : null}
           <Field label="کالا">
             <SearchableSelect
               value={itemId}

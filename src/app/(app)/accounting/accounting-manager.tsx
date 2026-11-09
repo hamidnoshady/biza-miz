@@ -2,6 +2,7 @@
 
 import { SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 
 import { useCallback, useEffect, useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -27,6 +28,7 @@ import { useNavigationPending } from "@/components/navigation/navigation-pending
 import { errorMessage } from "./accounting-errors";
 import { taxInvoiceCapabilitiesFor } from "./tax-invoice-capabilities";
 import styles from "./ledger-workspace.module.css";
+import { PspSettlementsSection } from "./psp-settlements-section";
 
 /*
  * Each accounting section below is mutually exclusive at render time (the
@@ -595,6 +597,10 @@ export function AccountingManager({
             canReverseReceipts={canApproveLedger}
           /> : null}
           {section === "financial-accounts" ? (
+            <>
+            <Link href="/petty-cash" className="mb-3 inline-flex min-h-10 items-center rounded-lg border px-3 text-sm font-semibold">
+              مدیریت تنخواه‌گردان
+            </Link>
             <FinancialAccountsSection
               busy={busy}
               refreshKey={refreshKey}
@@ -607,8 +613,11 @@ export function AccountingManager({
                 window.history.replaceState(null, "", url);
               }}
             />
+            </>
           ) : null}
           {section === "transfers" ? (
+            <>
+            <PspSettlementsSection canManage={canManageTransfers} />
             <TransfersSection
               busy={busy}
               run={run}
@@ -616,6 +625,7 @@ export function AccountingManager({
               canManage={canManageTransfers}
               canBrowseMedia={canBrowseMedia}
             />
+            </>
           ) : null}
           {section === "installments" ? <InstallmentsSection /> : null}
           {section === "cheques" ? (

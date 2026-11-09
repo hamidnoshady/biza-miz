@@ -76,6 +76,12 @@ describe("the account card as a file", () => {
           debit: "0",
           credit: "400000",
           balance: "5600000",
+          sourceType: "financial_transfer",
+          journalSourceId: "transfer-2",
+          isPspSettlement: true,
+          transferAmount: "390000",
+          fee: "10000",
+          matchStatus: "matched",
         },
       ],
       "toman",
@@ -83,17 +89,26 @@ describe("the account card as a file", () => {
     expect(movements.columns.map((column) => column.key)).toEqual([
       "entryDate",
       "entryId",
+      "sourceType",
+      "sourceId",
       "memo",
       "counterparty",
       "debit",
       "credit",
       "balance",
+      "fee",
+      "transferAmount",
+      "matchStatus",
     ]);
     expect(movements.rows[0].entryDate).toBe("۱۴۰۵/۰۱/۱۳");
     expect(movements.rows[0].debit).toBe(100000);
     expect(movements.rows[1].memo).toBe("");
     expect(movements.rows[1].credit).toBe(40000);
     expect(movements.rows[1].balance).toBe(560000);
+    expect(movements.rows[1]).toMatchObject({
+      sourceType: "تسویه پایانه", sourceId: "transfer-2", fee: 1000,
+      transferAmount: 39000, matchStatus: "تطبیق‌شده",
+    });
   });
 
   it("writes the displayed شرح of a historical system movement (issue #1060)", () => {

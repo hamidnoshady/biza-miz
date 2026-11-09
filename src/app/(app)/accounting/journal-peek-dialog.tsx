@@ -32,7 +32,9 @@ export function JournalPeekDialog({ entryId, title, onClose }: { entryId: string
     createdByName: string | null;
     reversesEntryId: string | null;
     reversedAt: string | null;
-    lines: { id: string; accountCode: string; accountName: string; debit: number; credit: number }[];
+    lines: { id: string; accountCode: string; accountName: string; debit: number; credit: number;
+      financialAccount?: { name: string; bankName: string | null; terminalNumber: string | null } | null;
+    }[];
   } | null>(null);
   const [error, setError] = useState("");
 
@@ -112,6 +114,11 @@ export function JournalPeekDialog({ entryId, title, onClose }: { entryId: string
                       {line.accountCode}
                     </span>{" "}
                     <span className="font-medium">{line.accountName}</span>
+                    {line.financialAccount ? (
+                      <span className="block text-xs text-muted-foreground">
+                        {[line.financialAccount.name, line.financialAccount.bankName, line.financialAccount.terminalNumber].filter(Boolean).join(" · ")}
+                      </span>
+                    ) : null}
                   </Td>
                   <Td numeric nowrap>
                     {line.debit > 0 ? money.format(line.debit) : "—"}

@@ -84,6 +84,7 @@ import {
   MAX_RECONCILIATION_LINES_PAGE,
 } from "@/lib/bank-reconciliation";
 import { FilterChip, SearchField } from "@/app/dashboard/filters";
+import { ReconciliationStatementPreview } from "./reconciliation-statement-preview";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "@/app/dashboard/data-table";
 
 type AccountCode = "cash" | "bank" | "bankClearing";
@@ -102,7 +103,7 @@ const ACCOUNTS: { code: AccountCode; label: string; hint: string; icon: typeof B
 
 interface ReconciliationSummary {
   id: string;
-  accountCode: AccountCode;
+  accountCode: AccountCode | null;
   statementDate: string;
   statementBalance: number;
   status: "in_progress" | "completed";
@@ -187,7 +188,20 @@ export function ReconciliationSection({
 }) {
   const money = useMoney();
   const manageable = canManage !== false;
-  const [accountCode, setAccountCode] = useState<AccountCode>("cash");
+  const [accountCode, setAccountCode] = useState<string>("cash");
+  const [accountChoices, setAccountChoices] = useState<{
+    accounts: { id: string; name: string; kind: string; glAccountCode: string; isActive: boolean }[];
+    legacyAvailable: boolean;
+  } | null>(null);
+  useEffect(() => {
+    let active = true;
+    void api<NonNullable<typeof accountChoices>>("/api/ledger/reconciliations?accounts=1").then(({ ok, data }) => {
+      if (!active || !ok || !data || !Array.isArray(data.accounts)) return;
+      setAccountChoices(data);
+      if (!data.legacyAvailable) setAccountCode(data.accounts[0] ? `fa:${data.accounts[0].id}` : "");
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
   const [history, setHistory] = useState<ReconciliationSummary[] | null>(null);
   const [detail, setDetail] = useState<ReconciliationDetail | null>(null);
   /** Pages fetched by «نمایش بیشتر», appended to the first page's lines. */
@@ -217,7 +231,7 @@ export function ReconciliationSection({
    * — not a stale read of `accountCode` from the effect's own prior closure —
    * is what makes that distinction reliably.
    */
-  const accountCodeRef = useRef<AccountCode | null>(null);
+  const accountCodeRef = useRef<string | null>(null);
   const hasLoadedHistoryRef = useRef(false);
   const [historyRefreshFailed, setHistoryRefreshFailed] = useState(false);
   const [detailFailed, setDetailFailed] = useState(false);
@@ -232,7 +246,13 @@ export function ReconciliationSection({
   const [historyDetail, setHistoryDetail] = useState<Record<string, ReconciliationDetail>>({});
   const [historyFailed, setHistoryFailed] = useState(false);
 
-  const activeAccount = ACCOUNTS.find((a) => a.code === accountCode)!;
+  const selectedFinancialAccount = accountCode.startsWith("fa:")
+    ? accountChoices?.accounts.find(({ id }) => id === accountCode.slice(3))
+    : undefined;
+  const activeAccount = selectedFinancialAccount
+    ? { label: selectedFinancialAccount.name, hint: selectedFinancialAccount.glAccountCode }
+    : ACCOUNTS.find((a) => a.code === accountCode) ?? { label: "", hint: "" };
+  const allowNegative = selectedFinancialAccount ? selectedFinancialAccount.kind === "bank" : accountCode === "bank";
 
   // A search is typed, not chosen: wait for the pause rather than sending a
   // request per keystroke, each of which would repaint the whole table.
@@ -262,7 +282,9 @@ export function ReconciliationSection({
       hasLoadedHistoryRef.current = false;
     }
     api<{ reconciliations: ReconciliationSummary[] }>(
-      `/api/ledger/reconciliations?accountCode=${accountCode}`,
+      `/api/ledger/reconciliations?${accountCode.startsWith("fa:")
+        ? `financialAccountId=${encodeURIComponent(accountCode.slice(3))}`
+        : `accountCode=${encodeURIComponent(accountCode)}`}`,
     ).then(({ ok, data }) => {
       // A stale response from the account we just switched away from must not
       // land on top of the new one — switching quickly between the three tabs
@@ -390,7 +412,10 @@ export function ReconciliationSection({
     const ok = await run(() =>
       api("/api/ledger/reconciliations", {
         method: "POST",
-        body: JSON.stringify({ accountCode, statementDate, statementBalance: rial }),
+        body: JSON.stringify({
+          ...(selectedFinancialAccount ? { financialAccountId: selectedFinancialAccount.id } : { accountCode }),
+          statementDate, statementBalance: rial,
+        }),
       }),
     );
     if (ok) {
@@ -602,7 +627,7 @@ export function ReconciliationSection({
             aria-label="حساب قابل تطبیق"
             className="-mx-4 mt-4 flex snap-x gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:grid sm:grid-cols-3 sm:overflow-visible sm:px-0 sm:pb-0"
           >
-            {ACCOUNTS.map((a) => {
+            {accountChoices?.legacyAvailable !== false ? ACCOUNTS.map((a) => {
               const isActive = accountCode === a.code;
               const Icon = a.icon;
               return (
@@ -617,7 +642,13 @@ export function ReconciliationSection({
                   <span className="whitespace-nowrap">{a.label}</span>
                 </FilterChip>
               );
-            })}
+            }) : null}
+            {accountChoices?.accounts.map((account) => (
+              <FilterChip key={account.id} selected={accountCode === `fa:${account.id}`}
+                onClick={() => setAccountCode(`fa:${account.id}`)}>
+                {account.name}
+              </FilterChip>
+            ))}
           </div>
           {/* The account's ledger code, which was only ever in a `title` — invisible on a touch screen. */}
           <p className="mt-2 text-xs text-muted-foreground">{activeAccount.hint}</p>
@@ -691,13 +722,13 @@ export function ReconciliationSection({
                       className={inputClass}
                       dir="ltr"
                       inputMode="numeric"
-                      allowNegative={accountCode === "bank"}
+                      allowNegative={allowNegative}
                       value={statementBalance}
                       onChange={(e) => setStatementBalance(e.target.value)}
                       placeholder="۰"
                     />
                     <span className="mt-1.5 block text-xs text-muted-foreground">
-                      {accountCode === "bank"
+                      {allowNegative
                         ? "مانده پایانی صورتحساب، نه گردش دوره. برای حساب بدهکار، مقدار منفی وارد کنید."
                         : "مانده پایانی صورتحساب، نه گردش دوره."}
                     </span>
@@ -736,6 +767,11 @@ export function ReconciliationSection({
                   </span>
                 </span>
               </div>
+
+              {manageable ? (
+                <ReconciliationStatementPreview key={detail.id} reconciliationId={detail.id}
+                  disabled={busy} onApplied={() => setRefreshKey((current) => current + 1)} />
+              ) : null}
 
               <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-xl border border-border/80 bg-muted/60 p-3">

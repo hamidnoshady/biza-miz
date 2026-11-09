@@ -140,6 +140,7 @@ import {
 import { api } from "@/app/dashboard/ui";
 import { JournalPeekDialog } from "./journal-peek-dialog";
 import { accountingCustomerHref, accountingSupplierHref } from "./accounting-routes";
+import type { PaymentSourceOption } from "@/lib/financial-payment-sources";
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -224,6 +225,7 @@ interface ChequeEvent {
   event: string;
   occurredOn: string;
   entryId: string | null;
+  financialAccountName?: string | null;
   endorsedToSupplierId: string | null;
   memo: string | null;
   createdAt: string;
@@ -378,6 +380,7 @@ function errorMessage(code: string | undefined): string {
     invalid_amount: "مبلغ معتبر نیست.",
     invalid_direction: "نوع چک معتبر نیست.",
     invalid_action: "این عملیات روی چک تعریف نشده است.",
+    invalid_cheque_bank_account: "حساب بانکی معتبر این شعبه را انتخاب کنید.",
     invalid_cheque_transition:
       "این تغییر وضعیت ممکن نیست؛ چک قبلاً تغییر کرده است.",
     cheque_not_found: "چک پیدا نشد.",
@@ -836,6 +839,7 @@ export function ChequesSection({
       body.occurredOn ?? null,
       body.feeAmount ?? null,
       body.endorsedToSupplierId ?? null,
+      ...(body.bankAccountId ? [body.bankAccountId] : []),
     ]);
     let idempotencyKey: string;
     try {
@@ -2372,6 +2376,9 @@ function ChequeDetailDialog({
                           </span>
                         )}
                       </div>
+                      {e.financialAccountName ? (
+                        <p className="mt-1 text-xs text-muted-foreground">حساب بانکی: {e.financialAccountName}</p>
+                      ) : null}
                       {e.memo ? (
                         <p className="mt-1 text-xs leading-5 text-muted-foreground">
                           {e.memo}
@@ -3033,10 +3040,29 @@ function ChequeActionDialog({
   // The bank's returned-cheque charge, posted to «۵۸۶۰ هزینه چک برگشتی و جرایم
   // بانکی» alongside the bounce itself. Optional: not every bounce is charged.
   const [feeAmount, setFeeAmount] = useState("");
+  const [bankAccountId, setBankAccountId] = useState("");
+  const [bankOptions, setBankOptions] = useState<PaymentSourceOption[] | null>(null);
+  const [bankLoadFailed, setBankLoadFailed] = useState(false);
+  const [bankLoadAttempt, setBankLoadAttempt] = useState(0);
 
   const isEndorse = action === "endorse";
   const isBounce = action === "bounce";
   const isDestructive = action === "bounce" || action === "cancel";
+  const postsToBank = action === "present" || action === "settle" ||
+    (action === "clear" && cheque.direction === "receivable" && cheque.status !== "endorsed") ||
+    (isBounce && Number(feeAmount) > 0);
+  const chequeLocationId = cheque.locationId ?? "";
+  useEffect(() => {
+    if (!postsToBank) return;
+    let current = true;
+    const params = new URLSearchParams({ role: "bank", locationId: chequeLocationId });
+    void api<{ options?: PaymentSourceOption[] }>(`/api/ledger/financial-accounts/payment-sources?${params}`).then(({ ok, data }) => {
+      if (!current) return;
+      if (ok) setBankOptions(data.options ?? []);
+      else setBankLoadFailed(true);
+    });
+    return () => { current = false; };
+  }, [bankLoadAttempt, chequeLocationId, postsToBank]);
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -3126,6 +3152,28 @@ function ChequeActionDialog({
             </Field>
           ) : null}
 
+          {postsToBank && (bankLoadFailed || !bankOptions || bankOptions.length > 0) ? (
+            <Field>
+              <FieldLabel>حساب بانکی</FieldLabel>
+              {bankLoadFailed ? (
+                <Button variant="outline" onClick={() => { setBankLoadFailed(false); setBankLoadAttempt((attempt) => attempt + 1); }}>
+                  بارگذاری دوباره حساب‌ها
+                </Button>
+              ) : bankOptions ? (
+                <SearchableSelect
+                  value={bankAccountId}
+                  onChange={setBankAccountId}
+                  options={bankOptions.flatMap((option) => option.financialAccountId ? [{
+                    value: option.financialAccountId,
+                    label: `${option.financialAccountName ?? option.accountName} (${option.accountCode})`,
+                  }] : [])}
+                  placeholder="انتخاب حساب بانکی"
+                  ariaLabel="حساب بانکی"
+                />
+              ) : <Skeleton className="h-10 w-full" />}
+            </Field>
+          ) : null}
+
           <Field>
             <FieldLabel htmlFor="amemo">یادداشت (اختیاری)</FieldLabel>
             <Input
@@ -3152,7 +3200,7 @@ function ChequeActionDialog({
         <DialogFooter className="gap-2 sm:justify-start">
           <Button
             variant={isDestructive ? "destructive" : "default"}
-            disabled={busy}
+            disabled={busy || (postsToBank && (bankLoadFailed || bankOptions === null || (bankOptions.length > 0 && !bankAccountId)))}
             onClick={() => {
               if (isEndorse && !supplierId) {
                 onError("انتخاب تأمین‌کننده الزامی است.");
@@ -3162,6 +3210,7 @@ function ChequeActionDialog({
               onConfirm({
                 occurredOn: occurredOn || undefined,
                 memo: memo.trim() || undefined,
+                ...(postsToBank && bankAccountId ? { bankAccountId } : {}),
                 ...(isEndorse ? { endorsedToSupplierId: supplierId } : {}),
                 ...(isBounce && Number(feeAmount) > 0
                   ? { feeAmount: Number(feeAmount) }

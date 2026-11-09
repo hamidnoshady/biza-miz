@@ -689,7 +689,7 @@ export async function payInstallmentItem(params: {
     // explicit "clearing" method (1120). The old bank->clearing mapping is gone.
     // Throws PayablesInputError for a foreign/inactive/wrong-kind account,
     // which the route answers as a 400.
-    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId, effectiveLocationId);
     const cashAccount = cash.accountId;
     const storedCashAccountId = cash.chosen ? cash.accountId : null;
     // Do not require the opposite subledger account: a receivable settlement
@@ -723,10 +723,10 @@ export async function payInstallmentItem(params: {
       const { rows } = await client.query<{ id: string; receipt_date: string }>(
         `INSERT INTO ar_receipts
            (business_id, location_id, customer_id, receipt_date, method, cash_account_id, voucher_number, amount, memo, created_by,
-            idempotency_key, request_fingerprint)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id, receipt_date::text AS receipt_date`,
+            idempotency_key, request_fingerprint, financial_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id, receipt_date::text AS receipt_date`,
         [params.businessId, effectiveLocationId, plan.party_id, paymentDate, params.method, storedCashAccountId, voucherRows[0].voucher_number, amount, memo, params.createdBy,
-          installmentReceiptId, receiptFingerprint],
+          installmentReceiptId, receiptFingerprint, cash.financialAccountId],
       );
       await postJournalEntry(client, {
         businessId: params.businessId,
@@ -738,7 +738,7 @@ export async function payInstallmentItem(params: {
         createdBy: params.createdBy,
         postingKind: "ar_receipt",
         lines: [
-          { accountId: cashAccount, debit: amount, credit: 0 },
+          { accountId: cashAccount, financialAccountId: cash.financialAccountId, debit: amount, credit: 0 },
           { accountId: arAccount, debit: 0, credit: amount },
         ],
       });
@@ -767,11 +767,11 @@ export async function payInstallmentItem(params: {
       const { rows } = await client.query<{ id: string; payment_date: string }>(
         `INSERT INTO ap_payments
            (business_id, location_id, supplier_id, payment_date, method, cash_account_id, amount, memo,
-            client_request_id, request_fingerprint, voucher_number, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            client_request_id, request_fingerprint, voucher_number, created_by, financial_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING id, payment_date::text AS payment_date`,
         [params.businessId, effectiveLocationId, payableSupplierId, paymentDate, params.method, storedCashAccountId, amount, memo,
-          installmentRequestId, requestFingerprint, voucherRows[0].voucher_number, params.createdBy],
+          installmentRequestId, requestFingerprint, voucherRows[0].voucher_number, params.createdBy, cash.financialAccountId],
       );
       await postJournalEntry(client, {
         businessId: params.businessId,
@@ -784,7 +784,7 @@ export async function payInstallmentItem(params: {
         postingKind: "ap_payment",
         lines: [
           { accountId: apAccount, debit: amount, credit: 0 },
-          { accountId: cashAccount, debit: 0, credit: amount },
+          { accountId: cashAccount, financialAccountId: cash.financialAccountId, debit: 0, credit: amount },
         ],
       });
       await client.query(

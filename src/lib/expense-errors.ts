@@ -22,6 +22,7 @@
 
 /** Codes `recordExpense()` / `reverseExpense()` can throw, with their Persian text. */
 export const EXPENSE_ERROR_MESSAGES = {
+  petty_cash_workflow_required: "ثبت یا اصلاح این هزینه باید از مسیر تنخواه‌گردان انجام شود.",
   invalid_amount:
     "مبلغ هزینه باید عدد صحیحِ ریال و بزرگ‌تر از صفر باشد؛ مبلغ کسری ثبت نمی‌شود.",
   memo_required: "شرح هزینه الزامی است.",
@@ -67,6 +68,7 @@ export const EXPENSE_UI_ERROR_MESSAGES: Record<string, string> = Object.fromEntr
  * party into a 400 or a reversed expense into a 500.
  */
 const EXPENSE_ERROR_STATUS: Record<ExpenseErrorCode, number> = {
+  petty_cash_workflow_required: 409,
   invalid_amount: 400,
   memo_required: 400,
   unknown_account: 400,

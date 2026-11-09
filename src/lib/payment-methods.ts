@@ -223,6 +223,7 @@ export function validatePaymentMethodInput(input: PaymentMethodInput): Validatio
 export interface TenderInput {
   /** `payment_methods.id`; absent only on the legacy single-method body. */
   methodId?: string | null;
+  financialAccountId?: string | null;
   /** The settlement the way resolves to — filled in server-side from `methodId`. */
   settlement?: PaymentSettlement;
   /**
@@ -242,6 +243,7 @@ export interface TenderInput {
 
 export interface ResolvedTender {
   methodId: string | null;
+  financialAccountId?: string;
   settlement: PaymentSettlement;
   amount: Rial;
   reference: string | null;
@@ -342,6 +344,7 @@ export function validateTenders(
     if (tender.settlement === "credit" && !options.hasCustomer) return { ok: false, error: "customer_required" };
     resolved.push({
       methodId: tender.methodId ?? null,
+      ...(tender.financialAccountId ? { financialAccountId: tender.financialAccountId } : {}),
       settlement: tender.settlement,
       amount,
       reference: tender.reference?.trim() || null,

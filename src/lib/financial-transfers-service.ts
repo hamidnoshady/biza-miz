@@ -51,6 +51,7 @@ import {
   amountToRialText,
   buildTransferLines,
   isTransferFeePayer,
+  TRANSFER_DESCRIPTION_MAX,
   transferNumberFor,
   transferPostingProblem,
   transferRequestProblem,
@@ -62,6 +63,8 @@ import {
 import { previousDay, type FinancialAccountRecord } from "./financial-accounts-service";
 import { FINANCIAL_ACCOUNT_KIND_META } from "./financial-accounts";
 import { FINANCIAL_ACCOUNT_ERROR_MESSAGES } from "./financial-account-errors";
+import { PSP_SETTLEMENT_KEY_PREFIX, type PspSettlementMetadata } from "./psp-settlements";
+import { pspSettlementPostingProblem } from "./psp-settlements-posting";
 
 export class FinancialTransferError extends Error {
   status: number;
@@ -90,7 +93,7 @@ function constraintName(err: unknown): string {
  * see "no transfer with this key yet" and both proceed. The lock is per tenant
  * and per document kind, takes no table lock, and is released by the commit.
  */
-async function lockTransfers(client: PoolClient, businessId: string): Promise<void> {
+export async function lockFinancialTransfers(client: PoolClient, businessId: string): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`financial-transfers:${businessId}`]);
 }
 
@@ -113,6 +116,8 @@ function requestHash(input: {
   projectId: string | null;
   attachmentAssetId: string | null;
   reversalOf?: string | null;
+  pspSettlement?: PspSettlementMetadata & { description: string | null };
+  pettyCashAccountId?: string;
 }): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
@@ -150,15 +155,18 @@ interface TransferRow extends Record<string, unknown> {
   created_at: string;
   source_account_name: string | null;
   source_account_kind: string | null;
+  source_location_id: string | null;
   source_gl_account_id: string | null;
   destination_account_name: string | null;
   destination_account_kind: string | null;
+  destination_location_id: string | null;
   destination_gl_account_id: string | null;
   fee_account_code: string | null;
   fee_account_name: string | null;
   location_id: string | null;
   location_name: string | null;
   idempotency_key: string | null;
+  psp_batch_reference: string | null;
 }
 
 export interface FinancialTransferRecord {
@@ -262,6 +270,7 @@ const SELECT_TRANSFER = `
          t.reversed_at::text AS reversed_at,
          sa.name AS source_account_name, sa.kind::text AS source_account_kind,
          da.name AS destination_account_name, da.kind::text AS destination_account_kind,
+         sa.location_id AS source_location_id, da.location_id AS destination_location_id,
          ga.code AS fee_account_code, ga.name AS fee_account_name,
          p.name AS project_name,
          l.name AS location_name,
@@ -370,11 +379,10 @@ export async function listFinancialTransfers(
   if (filters.projectId) conditions.push(`t.project_id = ${push(filters.projectId)}`);
   if (filters.restrictToLocationIds) {
     const ids = filters.restrictToLocationIds.filter((id) => isUuid(id));
-    conditions.push(
-      ids.length > 0
-        ? `(t.location_id IS NULL OR t.location_id = ANY(${push(ids)}::uuid[]))`
-        : "t.location_id IS NULL",
-    );
+    const locationParam = push(ids);
+    for (const alias of ["t", "sa", "da"]) {
+      conditions.push(`(${alias}.location_id IS NULL OR ${alias}.location_id = ANY(${locationParam}::uuid[]))`);
+    }
   }
   const term = filters.q?.trim();
   if (term) {
@@ -435,15 +443,20 @@ export interface TransferDetail extends FinancialTransferRecord {
 export async function getFinancialTransfer(
   businessId: string,
   transferId: string,
+  { source = { query }, allowedLocationIds }: {
+    source?: Queryable;
+    allowedLocationIds?: readonly string[] | null;
+  } = {},
 ): Promise<TransferDetail | null> {
   if (!isUuid(transferId)) return null;
-  const { rows } = await query<TransferRow>(
+  const { rows } = await source.query<TransferRow>(
     `${SELECT_TRANSFER} WHERE t.business_id = $1 AND t.id = $2`,
     [businessId, transferId],
   );
   const row = rows[0];
   if (!row) return null;
-  const { rows: lines } = await query<{
+  assertTransferRowAccess(row, allowedLocationIds);
+  const { rows: lines } = await source.query<{
     account_id: string;
     account_code: string;
     account_name: string;
@@ -499,8 +512,9 @@ async function loadAccountForWrite(
     currency_code: string;
     location_id: string | null;
     is_active: boolean;
+    settlement_account_id: string | null;
   }>(
-    `SELECT id, kind::text AS kind, name, gl_account_id, currency_code, location_id, is_active
+    `SELECT id, kind::text AS kind, name, gl_account_id, currency_code, location_id, is_active, settlement_account_id
        FROM financial_accounts
       WHERE business_id = $1 AND id = $2
       FOR UPDATE`,
@@ -542,7 +556,7 @@ async function loadAccountForWrite(
     pspProvider: null,
     terminalNumber: null,
     merchantNumber: null,
-    settlementAccountId: null,
+    settlementAccountId: row.settlement_account_id,
     settlementAccountName: null,
     settlementDelayDays: null,
     balance: "0",
@@ -571,13 +585,17 @@ async function assertFeeAccount(
   feeAccountId: string,
 ): Promise<void> {
   if (!isUuid(feeAccountId)) throw new FinancialTransferError("invalid_gl_account");
-  const { rows } = await client.query<{ id: string; type: string; is_active: boolean }>(
-    "SELECT id, type::text AS type, is_active FROM accounts WHERE business_id = $1 AND id = $2",
+  const { rows } = await client.query<{ id: string; type: string; is_active: boolean; has_children: boolean }>(
+    `SELECT a.id, a.type::text AS type, a.is_active,
+            EXISTS (SELECT 1 FROM accounts child WHERE child.parent_id = a.id) AS has_children
+       FROM accounts a WHERE a.business_id = $1 AND a.id = $2`,
     [businessId, feeAccountId],
   );
   const row = rows[0];
   if (!row) throw new FinancialTransferError("fee_account_not_found", 404);
-  if (row.type !== "expense" || !row.is_active) throw new FinancialTransferError("fee_account_invalid", 409);
+  if (row.type !== "expense" || !row.is_active || row.has_children) {
+    throw new FinancialTransferError("fee_account_invalid", 409);
+  }
 }
 
 async function assertProject(client: PoolClient, businessId: string, projectId: string): Promise<void> {
@@ -711,14 +729,49 @@ export interface TransferWriteResult {
   duplicate: boolean;
 }
 
+interface TransferWorkflow {
+  /** An existing transaction, which owns rollback and commit. Acquire the transfer lock before fund/account locks. */
+  client?: PoolClient;
+  pettyCashAccountId?: string;
+  pspSettlement?: PspSettlementMetadata;
+}
+
+async function assertPettyCashWorkflow(
+  client: PoolClient,
+  businessId: string,
+  sourceAccountId: string,
+  destinationAccountId: string,
+  allowedAccountId?: string,
+): Promise<void> {
+  const { rows } = await client.query<{ account_id: string }>(
+    `SELECT account_id FROM petty_cash_funds WHERE business_id = $1 AND account_id = ANY($2::uuid[])`,
+    [businessId, [sourceAccountId, destinationAccountId]],
+  );
+  if (rows.some((row) => row.account_id !== allowedAccountId) ||
+      (allowedAccountId && !rows.some((row) => row.account_id === allowedAccountId))) {
+    throw new FinancialTransferError("petty_cash_workflow_required", 409);
+  }
+}
+
+function assertTransferRowAccess(row: TransferRow, allowedLocationIds?: readonly string[] | null): void {
+  if (allowedLocationIds && [row.location_id, row.source_location_id, row.destination_location_id]
+    .some((locationId) => locationId && !allowedLocationIds.includes(locationId))) {
+    throw new FinancialTransferError("no_branch_access", 403);
+  }
+}
+
 /** Create and post one transfer. */
-export async function createFinancialTransfer(params: CreateTransferParams): Promise<TransferWriteResult> {
+export async function createFinancialTransfer(params: CreateTransferParams, workflow: TransferWorkflow = {}): Promise<TransferWriteResult> {
   const problem = transferRequestProblem(params.input);
   if (problem) throw new FinancialTransferError(problem.code);
   const idempotencyKey =
     (typeof params.input.idempotencyKey === "string" && params.input.idempotencyKey.trim()
       ? params.input.idempotencyKey.trim()
       : params.headerIdempotencyKey?.trim()) || null;
+  const { pspSettlement, pettyCashAccountId } = workflow;
+  if (Boolean(idempotencyKey?.startsWith(PSP_SETTLEMENT_KEY_PREFIX)) !== Boolean(pspSettlement)) {
+    throw new FinancialTransferError("invalid_idempotency_key");
+  }
   const transferDate = String(params.input.transferDate);
   const amount = amountToRialText(params.input.amount, "amount")!;
   const feeAmount =
@@ -734,13 +787,15 @@ export async function createFinancialTransfer(params: CreateTransferParams): Pro
     typeof params.input.attachmentAssetId === "string" && params.input.attachmentAssetId
       ? params.input.attachmentAssetId
       : null;
-  const locationId = params.locationId?.trim() ? params.locationId.trim() : null;
+  let locationId = params.locationId?.trim() ? params.locationId.trim() : null;
   if (locationId && !isUuid(locationId)) throw new FinancialTransferError("invalid_location");
   if (locationId && params.allowedLocationIds && !params.allowedLocationIds.includes(locationId)) {
     throw new FinancialTransferError("no_branch_access", 403);
   }
   const today = await businessToday(params.businessId);
   if (transferDate > today) throw new FinancialTransferError("transfer_date_in_future");
+  const description = typeof params.input.description === "string" && params.input.description.trim()
+    ? params.input.description.trim() : null;
 
   const hash = requestHash({
     transferDate,
@@ -752,21 +807,26 @@ export async function createFinancialTransfer(params: CreateTransferParams): Pro
     feePayer,
     projectId,
     attachmentAssetId,
+    ...(pspSettlement ? { pspSettlement: { ...pspSettlement, description } } : {}),
+    ...(pettyCashAccountId ? { pettyCashAccountId } : {}),
   });
 
   const pool = getPool();
-  const client = await pool.connect();
+  const client = workflow.client ?? await pool.connect();
+  const ownsTransaction = !workflow.client;
   try {
-    await client.query("BEGIN");
-    await lockTransfers(client, params.businessId);
+    if (ownsTransaction) await client.query("BEGIN");
+    await lockFinancialTransfers(client, params.businessId);
 
     if (idempotencyKey) {
       const existing = await findByKey(client, params.businessId, idempotencyKey);
       if (existing) {
-        if (existing.idempotency_hash && existing.idempotency_hash !== hash) {
+        assertTransferRowAccess(existing, params.allowedLocationIds);
+        if (Boolean(existing.psp_batch_reference) !== Boolean(pspSettlement) ||
+            (existing.idempotency_hash && existing.idempotency_hash !== hash)) {
           throw new FinancialTransferError("idempotency_conflict", 409);
         }
-        await client.query("COMMIT");
+        if (ownsTransaction) await client.query("COMMIT");
         return { transfer: toRecord(existing), duplicate: true };
       }
     }
@@ -780,6 +840,14 @@ export async function createFinancialTransfer(params: CreateTransferParams): Pro
     );
     assertBranchAccess(source, params.allowedLocationIds, "source");
     assertBranchAccess(destination, params.allowedLocationIds, "destination");
+    if (pettyCashAccountId || source.kind === "petty_cash" || destination.kind === "petty_cash") {
+      await assertPettyCashWorkflow(client, params.businessId, source.id, destination.id, pettyCashAccountId);
+    }
+    if (!pspSettlement && ((source.kind === "pos_psp" && source.settlementAccountId) ||
+        (destination.kind === "pos_psp" && destination.settlementAccountId))) {
+      throw new FinancialTransferError("psp_settlement_workflow_required", 409);
+    }
+    if (pspSettlement) locationId = source.locationId ?? destination.locationId ?? locationId;
     // The requirement the issue states outright: two accounts that resolve to
     // the same GL identity cannot be transferred between, because the entry
     // would cancel itself out and the register would record a movement that
@@ -816,6 +884,13 @@ export async function createFinancialTransfer(params: CreateTransferParams): Pro
         [params.businessId],
       )
     ).rows[0]?.base_currency_code ?? "IRR";
+
+    if (pspSettlement) {
+      const pspProblem = await pspSettlementPostingProblem(client, {
+        businessId: params.businessId, source, destination, baseCurrency, locationId, transferDate, amount, settlement: pspSettlement,
+      });
+      if (pspProblem) throw new FinancialTransferError(pspProblem, 409);
+    }
 
     const isForeign = currencyCode !== baseCurrency;
     let lines: ExactJournalLine[];
@@ -889,12 +964,13 @@ export async function createFinancialTransfer(params: CreateTransferParams): Pro
             id, business_id, location_id, transfer_number, sequence_no, transfer_date,
             source_account_id, destination_account_id, amount, fee_amount, fee_account_id, fee_payer,
             currency_code, reference_number, description, project_id, attachment_asset_id,
-            status, posting_mode, journal_entry_id, idempotency_key, idempotency_hash, created_by
+            status, posting_mode, journal_entry_id, idempotency_key, idempotency_hash, created_by,
+            psp_batch_reference, psp_movement_reference, psp_batch_gross_amount, psp_expected_on
          ) VALUES (
             $1, $2, $3, $4, $5, $6::date,
             $7, $8, $9, $10, $11, $12,
             $13, $14, $15, $16, $17,
-            'posted', 'transfer', $18, $19, $20, $21
+            'posted', 'transfer', $18, $19, $20, $21, $22, $23, $24, $25::date
          )`,
         [
           transferId,
@@ -913,25 +989,31 @@ export async function createFinancialTransfer(params: CreateTransferParams): Pro
           typeof params.input.referenceNumber === "string" && params.input.referenceNumber.trim()
             ? params.input.referenceNumber.trim()
             : null,
-          typeof params.input.description === "string" && params.input.description.trim()
-            ? params.input.description.trim()
-            : null,
+          description,
           projectId,
           attachmentAssetId,
           entryId,
           idempotencyKey,
           idempotencyKey ? hash : null,
           params.actorId,
+          pspSettlement?.batchReference ?? null,
+          pspSettlement?.movementReference ?? null,
+          pspSettlement?.batchGrossAmount ?? null,
+          pspSettlement?.expectedOn ?? null,
         ],
       );
     } catch (err) {
       if (sqlState(err) === UNIQUE_VIOLATION) {
         const constraint = constraintName(err);
-        if (constraint.includes("idempotency")) {
+        if (constraint.includes("idempotency") && ownsTransaction) {
           // The loser of a race: the winner's document is the answer.
           await client.query("ROLLBACK");
           const winner = await findByKey(pool as unknown as Queryable, params.businessId, idempotencyKey!);
-          if (winner) return { transfer: toRecord(winner), duplicate: true };
+          if (winner) {
+            assertTransferRowAccess(winner, params.allowedLocationIds);
+            if (winner.idempotency_hash !== hash) throw new FinancialTransferError("idempotency_conflict", 409);
+            return { transfer: toRecord(winner), duplicate: true };
+          }
           throw new FinancialTransferError("transfer_reversal_conflict", 409);
         }
         if (constraint.includes("number") || constraint.includes("sequence")) {
@@ -963,18 +1045,19 @@ export async function createFinancialTransfer(params: CreateTransferParams): Pro
         feePayer,
         currencyCode,
         journalEntryId: entryId,
+        ...(pspSettlement ? { pspSettlement } : {}),
       },
     });
 
-    await client.query("COMMIT");
-    const transfer = await getFinancialTransfer(params.businessId, transferId);
+    const transfer = await getFinancialTransfer(params.businessId, transferId, { source: client });
     if (!transfer) throw new FinancialTransferError("transfer_not_found", 404);
+    if (ownsTransaction) await client.query("COMMIT");
     return { transfer, duplicate: false };
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
-    client.release();
+    if (ownsTransaction) client.release();
   }
 }
 
@@ -1066,7 +1149,7 @@ export async function reverseFinancialTransfer(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await lockTransfers(client, params.businessId);
+    await lockFinancialTransfers(client, params.businessId);
 
     const { rows } = await client.query<TransferRow>(
       `${SELECT_TRANSFER} WHERE t.business_id = $1 AND t.id = $2 FOR UPDATE OF t`,
@@ -1075,8 +1158,18 @@ export async function reverseFinancialTransfer(
     const original = rows[0];
     if (!original) throw new FinancialTransferError("transfer_not_found", 404);
     if (original.posting_mode === "reversal") throw new FinancialTransferError("transfer_not_reversible", 409);
+    assertTransferRowAccess(original, params.allowedLocationIds);
+    if (original.source_account_kind === "petty_cash" || original.destination_account_kind === "petty_cash") {
+      await assertPettyCashWorkflow(client, params.businessId, original.source_account_id, original.destination_account_id);
+    }
+    if (original.psp_batch_reference && reversalDate < original.transfer_date) {
+      throw new FinancialTransferError("psp_reversal_before_settlement", 409);
+    }
 
     const idempotencyKey = params.idempotencyKey?.trim() || null;
+    if (idempotencyKey?.startsWith(PSP_SETTLEMENT_KEY_PREFIX)) {
+      throw new FinancialTransferError("invalid_idempotency_key");
+    }
     if (original.status === "reversed") {
       const { rows: existingRows } = await client.query<TransferRow>(
         `${SELECT_TRANSFER} WHERE t.reverses_transfer_id = $1`,
@@ -1084,6 +1177,10 @@ export async function reverseFinancialTransfer(
       );
       const existing = existingRows[0];
       if (existing && idempotencyKey && existing.idempotency_key === idempotencyKey) {
+        if (original.psp_batch_reference && ((reversalDateInput && existing.transfer_date !== reversalDateInput) ||
+            existing.reversal_reason !== reason)) {
+          throw new FinancialTransferError("idempotency_conflict", 409);
+        }
         await client.query("COMMIT");
         return {
           transfer: toRecord(existing),
@@ -1093,12 +1190,6 @@ export async function reverseFinancialTransfer(
       }
       throw new FinancialTransferError("transfer_already_reversed", 409);
     }
-    assertBranchAccess(
-      { locationId: original.location_id } as FinancialAccountRecord,
-      params.allowedLocationIds,
-      "source",
-    );
-
     const { rows: entryRows } = await client.query<{
       id: string;
       currency_code: string | null;
@@ -1234,7 +1325,7 @@ export async function reverseFinancialTransfer(
         original.fee_payer,
         original.currency_code,
         original.reference_number,
-        `برگشت ${original.transfer_number}: ${reason}`,
+        `برگشت ${original.transfer_number}: ${reason}`.slice(0, TRANSFER_DESCRIPTION_MAX),
         original.project_id,
         reversalEntryId,
         original.id,

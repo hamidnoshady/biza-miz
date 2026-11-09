@@ -64,6 +64,7 @@ export async function accountIdsByCode(
 
 export interface ExactJournalLine {
   accountId: string;
+  financialAccountId?: string | null;
   debit: RialText;
   credit: RialText;
   /** Optional accounting dimensions (issue #868). See `PostJournalEntryInput.dimensionMirror`. */
@@ -313,6 +314,7 @@ async function purchaseSettlementLines(
   settlementMethod: SettlementMethod,
   goods: RialText,
   vat: RialText | undefined,
+  paymentAccount?: { accountId: string; financialAccountId: string } | null,
 ): Promise<ExactJournalLine[]> {
   const creditCode =
     settlementMethod === "cash"
@@ -322,17 +324,16 @@ async function purchaseSettlementLines(
         : WELL_KNOWN_CODES.accountsPayable;
   const vatValue = vat ? rialBigInt(vat) : 0n;
   if (vatValue < 0n) throw new Error("invalid_purchase_vat");
-  const accounts = await accountIdsByCode(
-    client,
-    businessId,
-    vatValue > 0n ? [creditCode, WELL_KNOWN_CODES.vatReceivable] : [creditCode],
-  );
+  const codes: string[] = paymentAccount ? [] : [creditCode];
+  if (vatValue > 0n) codes.push(WELL_KNOWN_CODES.vatReceivable);
+  const accounts = codes.length > 0 ? await accountIdsByCode(client, businessId, codes) : new Map<string, string>();
   const lines: ExactJournalLine[] = [];
   if (vatValue > 0n) {
     lines.push({ accountId: accounts.get(WELL_KNOWN_CODES.vatReceivable)!, debit: vat!, credit: "0" as RialText });
   }
   lines.push({
-    accountId: accounts.get(creditCode)!,
+    accountId: paymentAccount?.accountId ?? accounts.get(creditCode)!,
+    financialAccountId: paymentAccount?.financialAccountId,
     debit: "0" as RialText,
     credit: (rialBigInt(goods) + vatValue).toString() as RialText,
   });
@@ -351,6 +352,7 @@ export async function postExactPurchaseEntry(
     inventoryEventId: string;
     /** Audit F11 — the supplier invoice's VAT (input VAT), on top of `total`. */
     vat?: RialText;
+    paymentAccount?: { accountId: string; financialAccountId: string } | null;
     /**
      * Issue #868 — explicit attribution (a replay that carries the original's).
      * With none, the supplier's mapping rules decide; with no rule, the entry
@@ -361,9 +363,6 @@ export async function postExactPurchaseEntry(
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
     WELL_KNOWN_CODES.inventory,
-    WELL_KNOWN_CODES.accountsPayable,
-    WELL_KNOWN_CODES.cash,
-    WELL_KNOWN_CODES.bankClearing,
   ]);
   const attribution = await operationalAttribution(client, {
     businessId: params.businessId,
@@ -372,7 +371,7 @@ export async function postExactPurchaseEntry(
     explicit: params.dimensions ?? null,
     refs: { supplierRef: await purchaseSupplierRef(client, params.purchaseId) },
   });
-  const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat);
+  const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat, params.paymentAccount);
   return postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
@@ -414,15 +413,13 @@ export async function postPeriodicPurchaseEntry(
     settlementMethod: SettlementMethod;
     /** Audit F11 — the supplier invoice's VAT (input VAT), on top of `total`. */
     vat?: RialText;
+    paymentAccount?: { accountId: string; financialAccountId: string } | null;
     /** Issue #868 — explicit attribution; see `postExactPurchaseEntry`. */
     dimensions?: LineDimensions | null;
   },
 ): Promise<string | null> {
   const accounts = await accountIdsByCode(client, params.businessId, [
     WELL_KNOWN_CODES.periodicPurchases,
-    WELL_KNOWN_CODES.accountsPayable,
-    WELL_KNOWN_CODES.cash,
-    WELL_KNOWN_CODES.bankClearing,
   ]);
   const attribution = await operationalAttribution(client, {
     businessId: params.businessId,
@@ -431,7 +428,7 @@ export async function postPeriodicPurchaseEntry(
     explicit: params.dimensions ?? null,
     refs: { supplierRef: await purchaseSupplierRef(client, params.purchaseId) },
   });
-  const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat);
+  const settlementLines = await purchaseSettlementLines(client, params.businessId, params.settlementMethod, params.total, params.vat, params.paymentAccount);
   return postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
@@ -751,17 +748,24 @@ const SETTLEMENT_DEBIT_CODES: Record<string, string | undefined> = {
  * groups by account. Insertion order is kept so the receipt and the entry list
  * the tenders in the order the cashier took them.
  */
-function mergeTendersBySettlement(
-  tenders: readonly { settlement: string; amount: bigint }[],
-): { settlement: string; amount: bigint }[] {
-  const merged: { settlement: string; amount: bigint }[] = [];
+interface LedgerTender {
+  settlement: string;
+  amount: bigint;
+  financialAccountId?: string;
+  financialAccountGlId?: string;
+}
+
+function mergeTendersByAccount(tenders: readonly LedgerTender[]): LedgerTender[] {
+  const merged = new Map<string, LedgerTender>();
   for (const tender of tenders) {
-    const code = SETTLEMENT_DEBIT_CODES[tender.settlement];
-    const existing = merged.find((other) => code !== undefined && SETTLEMENT_DEBIT_CODES[other.settlement] === code);
+    const code = tender.financialAccountGlId
+      ? `id:${tender.financialAccountGlId}`
+      : `code:${SETTLEMENT_DEBIT_CODES[tender.settlement] ?? tender.settlement}`;
+    const existing = merged.get(code);
     if (existing) existing.amount += tender.amount;
-    else merged.push({ ...tender });
+    else merged.set(code, { ...tender });
   }
-  return merged;
+  return [...merged.values()];
 }
 
 export async function postExactOrderPaymentEntry(
@@ -784,7 +788,7 @@ export async function postExactOrderPaymentEntry(
      * proof the money arrived, so a split that doesn't cover the bill is a
      * caller bug, not something to post half of.
      */
-    tenders?: readonly { settlement: string; amount: RialText }[];
+    tenders?: readonly (Omit<LedgerTender, "amount"> & { amount: RialText })[];
     amount: RialText;
     tax: RialText;
     inventoryEventId: string;
@@ -861,9 +865,9 @@ export async function postExactOrderPaymentEntry(
   const tenders =
     totalCollected === 0n && balanceDue === 0n
       ? []
-      : mergeTendersBySettlement(
+      : mergeTendersByAccount(
           params.tenders?.length
-            ? params.tenders.map((tender) => ({ settlement: tender.settlement, amount: rialBigInt(tender.amount) }))
+            ? params.tenders.map((tender) => ({ ...tender, amount: rialBigInt(tender.amount) }))
             : [{ settlement: params.method ?? "", amount: totalCollected }],
         );
   for (const tender of tenders) {
@@ -944,7 +948,8 @@ export async function postExactOrderPaymentEntry(
     inventoryEventId: params.inventoryEventId,
     lines: [
       ...tenders.map((tender) => ({
-        accountId: accounts.get(SETTLEMENT_DEBIT_CODES[tender.settlement]!)!,
+        accountId: tender.financialAccountGlId ?? accounts.get(SETTLEMENT_DEBIT_CODES[tender.settlement]!)!,
+        financialAccountId: tender.financialAccountId,
         // SnapFood never hands over the commission slice — the receivable is
         // net of it, and the expense line below is the other half of that.
         debit: (tender.settlement === "snappfood" ? tender.amount - commission : tender.amount).toString() as RialText,
@@ -1005,8 +1010,6 @@ export async function postExactMirrorEntry(
     locationId: string | null;
     /** the entry being undone */
     originalEntryId: string;
-    /** Original document's project, preserved by project-scoped callers. */
-    projectId?: string | null;
     /** identity of the reversal itself */
     sourceType: string;
     sourceId: string;
@@ -1029,9 +1032,10 @@ export async function postExactMirrorEntry(
     department_id: string | null;
     detail_dimension_id: string | null;
     party_id: string | null;
+    financial_account_id: string | null;
   }>(
     `SELECT account_id, debit::text, credit::text,
-            cost_center_id, profit_center_id, department_id, detail_dimension_id, party_id
+            cost_center_id, profit_center_id, department_id, detail_dimension_id, party_id, financial_account_id
        FROM journal_lines WHERE entry_id=$1 ORDER BY id`,
     [params.originalEntryId],
   );
@@ -1051,7 +1055,6 @@ export async function postExactMirrorEntry(
     inventoryEventId: params.inventoryEventId ?? null,
     journalIdempotencyKey: params.idempotencyKey ?? null,
     dimensionMirror: true,
-    projectId: params.projectId ?? null,
     lines: lines.map((line) => ({
       accountId: line.account_id,
       debit: line.credit as RialText,
@@ -1063,6 +1066,7 @@ export async function postExactMirrorEntry(
         detail: line.detail_dimension_id ?? undefined,
       },
       partyId: line.party_id,
+      financialAccountId: line.financial_account_id,
     })),
   });
   if (entryId) {
@@ -1256,6 +1260,8 @@ export async function postExactCustomerRefundEntry(
   params: {
     businessId:string; locationId:string; customerReturnId:string; createdBy:string|null;
     inventoryEventId:string; paymentMethod:string; amount:RialText; tax:RialText;
+    financialAccountId?: string;
+    financialAccountGlId?: string;
     /** The sale being returned — its posted revenue attribution is mirrored (issue #868). */
     orderId?: string | null;
     /** Issue #868 — explicit attribution; wins over the mirrored original. */
@@ -1290,7 +1296,8 @@ export async function postExactCustomerRefundEntry(
       // the VAT and settlement legs stay unattributed.
       {accountId:accounts.get(WELL_KNOWN_CODES.salesReturns)!,debit:net.toString() as RialText,credit:zero,dimensions:attribution},
       {accountId:accounts.get(WELL_KNOWN_CODES.vatPayable)!,debit:params.tax,credit:zero},
-      {accountId:accounts.get(refundAccount)!,debit:zero,credit:params.amount},
+      {accountId:params.financialAccountGlId ?? accounts.get(refundAccount)!,financialAccountId:params.financialAccountId,
+        debit:zero,credit:params.amount},
     ]});
 }
 
@@ -1356,6 +1363,7 @@ async function insertJournalLines(
   entryId: string,
   lines: ReadonlyArray<{
     accountId: string;
+    financialAccountId?: string | null;
     debit: RialText | number;
     credit: RialText | number;
     dimensions?: LineDimensions | null;
@@ -1377,8 +1385,8 @@ async function insertJournalLines(
     await client.query(
       `INSERT INTO journal_lines
          (entry_id, account_id, debit, credit, cost_center_id, profit_center_id, department_id, detail_dimension_id,
-          foreign_debit, foreign_credit, party_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          foreign_debit, foreign_credit, party_id, financial_account_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         entryId,
         line.accountId,
@@ -1391,6 +1399,7 @@ async function insertJournalLines(
         line.foreignDebit ?? 0,
         line.foreignCredit ?? 0,
         line.partyId ?? null,
+        line.financialAccountId ?? null,
       ],
     );
   }

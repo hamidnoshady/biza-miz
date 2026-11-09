@@ -30,6 +30,10 @@ import { WELL_KNOWN_CODES } from "./coa-template";
 import { systemJournalMemo } from "./journal-memo";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import type { Role } from "./auth-edge";
+import {
+  readOrderPaymentRouting, resolveExplicitOrderSource, type OrderPaymentSourceSnapshot,
+} from "./order-payment-routing-service";
+import { paymentSourceKindForSettlement } from "./order-payment-routing";
 
 export type ReturnLine = NormalizedCustomerReturnLine;
 
@@ -38,6 +42,10 @@ interface CreateCustomerReturnParams {
   locationId: string;
   orderId: string;
   refundMethod: CustomerReturnRefundMethod;
+  financialAccountId?: string | null;
+  /** Only supplied by the versioned replay handler, after validating the envelope. */
+  sourceSnapshot?: OrderPaymentSourceSnapshot;
+  legacyReplay?: boolean;
   refundAmount: RialText;
   reason: string;
   idempotencyKey: string;
@@ -59,10 +67,11 @@ async function findDuplicateReturn(
     location_id: string;
     order_id: string;
     refund_method: string;
+    financial_account_id: string | null;
     refund_amount_rial: string;
     reason: string;
   }>(
-    `SELECT id, location_id, order_id, refund_method, refund_amount_rial::text, reason
+    `SELECT id, location_id, order_id, refund_method, financial_account_id, refund_amount_rial::text, reason
        FROM customer_returns WHERE business_id=$1 AND idempotency_key=$2`,
     [params.businessId, params.idempotencyKey],
   );
@@ -73,6 +82,7 @@ async function findDuplicateReturn(
     existing.location_id === params.locationId &&
     existing.order_id === params.orderId &&
     existing.refund_method === params.refundMethod &&
+    existing.financial_account_id === (params.sourceSnapshot?.financialAccountId ?? params.financialAccountId ?? null) &&
     BigInt(existing.refund_amount_rial) === BigInt(refundAmount) &&
     existing.reason === reason;
   if (!matchesHeader) throw new Error("idempotency_key_conflict");
@@ -209,14 +219,33 @@ export async function createCustomerReturn(
   }
 
   params = { ...params, idempotencyKey, refundAmount, reason, lines };
-
+  let source = params.sourceSnapshot;
+  if (refund > 0n && !source && !params.legacyReplay && paymentSourceKindForSettlement(params.refundMethod)) {
+    if (params.financialAccountId) {
+      source = await resolveExplicitOrderSource(client, params.businessId, params.locationId, params.refundMethod, params.financialAccountId);
+    } else {
+      const mode = await readOrderPaymentRouting(client, params.businessId, params.locationId);
+      const { rows: [payment] } = await client.query<{ routed: boolean }>(
+        `SELECT EXISTS (
+          SELECT 1 FROM payments WHERE order_id = $1 AND location_id = $2 AND financial_account_id IS NOT NULL
+        ) AS routed`,
+        [params.orderId, params.locationId],
+      );
+      if (mode !== "disabled" || payment?.routed) throw new Error("refund_payment_source_required");
+    }
+  }
+  if ((params.financialAccountId || source) && (refund <= 0n || !paymentSourceKindForSettlement(params.refundMethod))) {
+    throw new Error("invalid_payment_source");
+  }
 
   const { rows: headers } = await client.query<{ id: string }>(
     `INSERT INTO customer_returns
-       (business_id,location_id,order_id,refund_method,refund_amount_rial,reason,created_by,idempotency_key)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+       (business_id,location_id,order_id,refund_method,refund_amount_rial,reason,created_by,idempotency_key,
+        financial_account_id,financial_account_gl_id)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
     [params.businessId, params.locationId, params.orderId, params.refundMethod, params.refundAmount,
-      params.reason.trim(), params.createdBy, params.idempotencyKey],
+      params.reason.trim(), params.createdBy, params.idempotencyKey,
+      source?.financialAccountId ?? null, source?.financialAccountGlId ?? null],
   );
   const returnId = headers[0].id;
   const { rows: events } = await client.query<{ id: string }>(
@@ -348,8 +377,10 @@ export async function createCustomerReturn(
   }
   if (refund > 0n) {
     await client.query(
-      "INSERT INTO payments(location_id,order_id,method,amount,reference,received_by) VALUES($1,$2,$3,-$4::bigint,$5,$6)",
-      [params.locationId, params.orderId, params.refundMethod, refundAmount, `customer-return:${returnId}`, params.createdBy],
+      `INSERT INTO payments(location_id,order_id,method,amount,reference,received_by,financial_account_id,financial_account_gl_id)
+       VALUES($1,$2,$3,-$4::bigint,$5,$6,$7,$8)`,
+      [params.locationId, params.orderId, params.refundMethod, refundAmount, `customer-return:${returnId}`, params.createdBy,
+        source?.financialAccountId ?? null, source?.financialAccountGlId ?? null],
     );
     const tax = BigInt(orders[0].total) === 0n
       ? 0n
@@ -359,6 +390,7 @@ export async function createCustomerReturn(
       createdBy: params.createdBy, inventoryEventId: events[0].id, paymentMethod: params.refundMethod,
       amount: refundAmount, tax: rialText(tax.toString()),
       orderId: params.orderId, dimensions: returnAttribution,
+      ...source,
     });
   }
   if (recovered > 0n) {
@@ -389,9 +421,11 @@ export async function createCustomerReturn(
     locationId: params.locationId,
     clientEventId: params.sync.clientEventId ?? idempotencyKey,
     eventType: "order.customer_return.created",
+    schemaVersion: source ? 2 : 1,
     payload: {
       orderId: params.orderId, refundMethod: params.refundMethod,
       refundAmount: refundAmount, reason, lines,
+      ...source,
     },
     actorUserId: params.createdBy,
     actorRole: params.sync.actorRole,

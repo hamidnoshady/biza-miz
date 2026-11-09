@@ -49,4 +49,11 @@ describe("handlePairingRedeem — the declared snapshot capability", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ error: "pairing_requires_newer_client" });
   });
+
+  it("reports the branch payment routing conflict as a pairing refusal", async () => {
+    redeemPairingCode.mockResolvedValueOnce({ ok: false, error: "pairing_payment_routing_unsupported" });
+    const response = await handlePairingRedeem(request({ code: "ABCD-EFGH-JKLM" }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "pairing_payment_routing_unsupported" });
+  });
 });

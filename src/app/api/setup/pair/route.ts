@@ -34,6 +34,7 @@ const PASSTHROUGH_ERRORS = new Set([
   "code_expired",
   "code_already_redeemed",
   "code_revoked",
+  "pairing_payment_routing_unsupported",
   "pairing_session_unavailable",
 ]);
 
@@ -109,7 +110,7 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify({
           code,
           deviceName:
-            process.env.DESKTOP_DEVICE_NAME || "Windows Bizamiz",
+            process.env.DESKTOP_DEVICE_NAME || "Windows Business Suite",
           installationId,
           ...DESKTOP_REDEEM_CAPABILITY,
         }),

@@ -26,24 +26,34 @@ import {
   type VoucherMethod,
 } from "./payables-input";
 import { isUuid } from "./uuid";
+import { resolvePaymentFinancialAccountId } from "./payment-financial-account";
 
 export async function resolveVoucherCashAccount(
   client: PoolClient,
   businessId: string,
   method: VoucherMethod,
   cashAccountId: string | null | undefined,
-): Promise<{ accountId: string; chosen: boolean }> {
+  locationId: string | null = null,
+  externalLegacy = false,
+): Promise<{ accountId: string; chosen: boolean; financialAccountId: string | null }> {
   if (cashAccountId !== undefined && cashAccountId !== null && typeof cashAccountId !== "string") {
     throw new PayablesInputError("invalid_cash_account");
   }
   const chosen = cashAccountId?.trim() || null;
+  const resolve = (accountId: string, explicit: boolean) => resolvePaymentFinancialAccountId(client, {
+    businessId, locationId, accountId, explicit,
+    invalid: () => new PayablesInputError("invalid_cash_account"),
+    fallbackKind: !externalLegacy && method === "bank" ? "bank" : undefined,
+    allowedKinds: method === "bank" ? ["bank"] : method === "cash" ? ["cash", "petty_cash"] : ["pos_psp"],
+  });
   if (!chosen) {
     // `accountIdsByCode` throws `MissingLedgerAccountError` naming the code
     // when the business customized its chart out from under the posting, so
     // the voucher rolls back cleanly instead of posting to a guessed account.
     const code = voucherDefaultAccountCode(method);
     const accounts = await accountIdsByCode(client, businessId, [code]);
-    return { accountId: accounts.get(code)!, chosen: false };
+    const accountId = accounts.get(code)!;
+    return { accountId, chosen: false, financialAccountId: await resolve(accountId, false) };
   }
   if (!isUuid(chosen)) throw new PayablesInputError("invalid_cash_account");
 
@@ -58,7 +68,7 @@ export async function resolveVoucherCashAccount(
   const accountMethod = voucherMethodForRole(roles.get(chosen));
   if (!accountMethod) throw new PayablesInputError("invalid_cash_account");
   if (accountMethod !== method) throw new PayablesInputError("cash_account_method_mismatch");
-  return { accountId: chosen, chosen: true };
+  return { accountId: chosen, chosen: true, financialAccountId: await resolve(chosen, true) };
 }
 
 /** The account half of a voucher read row: the named choice, or the posted original. */

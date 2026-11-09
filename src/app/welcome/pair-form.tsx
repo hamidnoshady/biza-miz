@@ -11,6 +11,8 @@ import { toLatinDigits } from "@/lib/digits";
 
 /** Every failure this flow can produce, in the owner's language. */
 const ERROR_MESSAGES: Record<string, string> = {
+  pairing_payment_routing_unsupported:
+    "این شعبه از مسیردهی پرداخت آنلاین استفاده می‌کند و فعلاً امکان اتصال نسخهٔ دسکتاپ را ندارد.",
   code_not_found:
     "این کد در سرور بالا پیدا نشد. مطمئن شوید کد را از همان حساب ابری کپی کرده‌اید.",
   code_expired: "این کد منقضی شده است. در پنل ابری یک کد تازه بسازید.",

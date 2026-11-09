@@ -22,16 +22,15 @@ import {
   settlementDifference,
   tendersWithTip,
   validateTenders,
-  type ResolvedTender,
 } from "@/lib/payment-methods";
 import { listPaymentMethods } from "@/lib/payment-methods-service";
 import { enqueueHolooSaleForOrder } from "@/lib/integrations/holoo/outbox-producer";
 import { emitDomainEvent } from "@/lib/posting-engine";
-import { notifyPaymentReceived } from "@/lib/kavenegar/lookup-triggers";
 import { earnPoints } from "@/lib/loyalty-service";
 import { releaseTableAfterOrderSettled } from "@/lib/table-session-service";
 import { appendSyncOutboxEvent } from "@/lib/sync-outbox";
 import { markScoringDirtyIn } from "@/lib/crm-scoring-freshness";
+import { OrderPaymentRoutingError, routeOrderTenders, type RoutedOrderTender } from "@/lib/order-payment-routing-service";
 
 interface PayTenderBody {
   /** `payment_methods.id` — the way the cashier tapped. */
@@ -40,6 +39,7 @@ interface PayTenderBody {
   method?: string;
   amount?: number;
   reference?: string;
+  financialAccountId?: string;
 }
 
 interface PayBody {
@@ -61,6 +61,7 @@ interface PayBody {
   /** The single-way form, still sent by the amendment screen and by older clients. */
   method?: string;
   methodId?: string;
+  financialAccountId?: string;
   reference?: string;
   customerId?: string;
   /** A tip collected alongside the bill (issue #160 §4), in whole Rial — added on top of the order total, never part of revenue. */
@@ -123,7 +124,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
 
   const rawTenders: PayTenderBody[] = body.payments?.length
     ? body.payments
-    : [{ methodId: body.methodId, method: body.method, reference: body.reference }];
+    : [{ methodId: body.methodId, method: body.method, reference: body.reference, financialAccountId: body.financialAccountId }];
   if (!Array.isArray(rawTenders) || rawTenders.length === 0) {
     return NextResponse.json({ error: "no_payment" }, { status: 400 });
   }
@@ -150,7 +151,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
 
   const client = await getPool().connect();
   let total = "0" as RialText;
-  let paid: ResolvedTender[] = [];
+  let paid: RoutedOrderTender[] = [];
   // The settle-with-difference balances (manual «مبلغ دریافتی»), surfaced in
   // the response so the receipt and the till can restate what became debt or
   // credit. Both zero for the ordinary, exact checkout.
@@ -197,7 +198,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     const inventoryEventId = eventRows[0].id;
     total = rialText(order.total);
     const due = Number(rialBigInt(total));
-    let tenders: ResolvedTender[] = [];
+    let tenders: RoutedOrderTender[] = [];
     if (due > 0) {
       const validated = validateTenders(
         ways.map((way, index) => ({
@@ -205,6 +206,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
           settlement: way.settlement,
           amount: rawTenders[index].amount,
           reference: rawTenders[index].reference,
+          financialAccountId: rawTenders[index].financialAccountId,
         })),
         // A difference is settled onto the customer's account, so the
         // customer requirement is enforced inside the same validation that
@@ -215,7 +217,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
         await client.query("ROLLBACK");
         return NextResponse.json({ error: validated.error }, { status: 400 });
       }
-      tenders = validated.value;
+      tenders = await routeOrderTenders(client, session.businessId, location.id, validated.value);
       const difference = settlementDifference(tenders, due);
       balanceDue = difference.balanceDue;
       customerCredit = difference.customerCredit;
@@ -223,9 +225,11 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     paid = tenders;
     for (const [index, tender] of tenders.entries()) {
       await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, payment_method_id, settlement_seq)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [location.id, id, tender.settlement, String(tender.amount), tender.reference, session.sub, tender.methodId, index + 1],
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, payment_method_id,
+                               settlement_seq, financial_account_id, financial_account_gl_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [location.id, id, tender.settlement, String(tender.amount), tender.reference, session.sub, tender.methodId, index + 1,
+          tender.financialAccountId ?? null, tender.financialAccountGlId ?? null],
       );
     }
     // An underpayment's remainder is recorded like any نسیه slice: a credit
@@ -296,6 +300,10 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       tenders: tendersWithTip(tenders, tipAmount).map((tender) => ({
         settlement: tender.settlement,
         amount: rialText(String(tender.amount)),
+        ...(tender.financialAccountGlId ? {
+          financialAccountId: tender.financialAccountId,
+          financialAccountGlId: tender.financialAccountGlId,
+        } : {}),
       })),
       amount: total,
       tax: rialText(order.tax),
@@ -351,7 +359,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       locationId: location.id,
       clientEventId: `order-payment:${id}`,
       eventType: "order.payment.completed",
-      schemaVersion: 2,
+      schemaVersion: paid.some((tender) => tender.financialAccountId) ? 3 : 2,
       payload: {
         orderId: id,
         tenders: paid.map((tender) => ({
@@ -359,6 +367,10 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
           settlement: tender.settlement,
           amount: tender.amount,
           reference: tender.reference,
+          ...(tender.financialAccountId ? {
+            financialAccountId: tender.financialAccountId,
+            financialAccountGlId: tender.financialAccountGlId,
+          } : {}),
         })),
         customerId,
         tipAmount,
@@ -374,24 +386,15 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     if (err instanceof MissingLedgerAccountError) {
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }
+    if (err instanceof OrderPaymentRoutingError) {
+      return NextResponse.json({ error: err.code }, { status: err.status });
+    }
     const failure = paymentFailureFor(err);
     if (failure) return NextResponse.json({ error: failure.error }, { status: failure.status });
     throw err;
   } finally {
     client.release();
   }
-
-  // Issue #902 §5 — the customer's receipt, if this business turned that
-  // trigger on. Deliberately after COMMIT and not awaited: the bill is paid,
-  // and a provider round trip must not sit between the cashier and the next
-  // customer. The send log's fact key (`payment:<orderId>`) is what makes a
-  // replayed settlement one receipt rather than two.
-  void notifyPaymentReceived({
-    businessId: session.businessId,
-    locationId: location.id,
-    orderId: id,
-    amountRial: Number(rialBigInt(total)),
-  });
 
   broadcast(location.id, { type: "order.updated", orderId: id });
   if (releasedSession) {
@@ -410,6 +413,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       method: tender.settlement,
       amount: tender.amount,
       reference: tender.reference,
+      ...(tender.financialAccountId ? { financialAccountId: tender.financialAccountId } : {}),
     })),
     tipAmount,
     balanceDue,

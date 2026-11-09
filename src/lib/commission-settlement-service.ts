@@ -298,6 +298,7 @@ type PayoutRowDb = {
   reverses_payout_id: string | null;
   amount: string;
   payment_account_id: string;
+  financial_account_id: string | null;
   payment_method: "cash" | "bank";
   paid_date: string;
   memo: string | null;
@@ -1869,15 +1870,15 @@ export async function recordCommissionPayout(
       postingKind: "commission_payout",
       lines: [
         { accountId: accounts.get(WELL_KNOWN_CODES.salariesPayable)!, debit: asRial(plan.total), credit: "0" as RialText },
-        { accountId: account.accountId, debit: "0" as RialText, credit: asRial(plan.total) },
+        { accountId: account.accountId, financialAccountId: account.financialAccountId, debit: "0" as RialText, credit: asRial(plan.total) },
       ],
     });
 
     await client.query(
       `INSERT INTO commission_settlement_payouts
          (id, business_id, run_id, kind, amount, payment_account_id, payment_method, paid_date, memo,
-          idempotency_key, request_hash, entry_id, created_by)
-       VALUES ($1, $2, $3, 'payout', $4, $5, $6, $7::date, $8, $9, $10, $11, $12)`,
+          idempotency_key, request_hash, entry_id, created_by, financial_account_id)
+       VALUES ($1, $2, $3, 'payout', $4, $5, $6, $7::date, $8, $9, $10, $11, $12, $13)`,
       [
         payoutId,
         businessId,
@@ -1891,6 +1892,7 @@ export async function recordCommissionPayout(
         requestHash,
         entryId,
         actor.userId,
+        account.financialAccountId,
       ],
     );
     for (const item of plan.items) {
@@ -1975,7 +1977,7 @@ export async function reverseCommissionPayout(
   if (!isUuid(payoutId)) throw new CommissionSettlementError("payout_not_found", 404);
   return inTransaction(async (client) => {
     const { rows } = await client.query<PayoutRowDb>(
-      `SELECT id, run_id, kind, reverses_payout_id, amount::text AS amount, payment_account_id, payment_method,
+      `SELECT id, run_id, kind, reverses_payout_id, amount::text AS amount, payment_account_id, payment_method, financial_account_id,
               paid_date::text AS paid_date, memo, entry_id, ${isoTs("created_at")} AS created_at
          FROM commission_settlement_payouts WHERE business_id = $1 AND id = $2`,
       [businessId, payoutId],
@@ -2016,8 +2018,8 @@ export async function reverseCommissionPayout(
     await client.query(
       `INSERT INTO commission_settlement_payouts
          (id, business_id, run_id, kind, reverses_payout_id, amount, payment_account_id, payment_method, paid_date,
-          memo, entry_id, created_by)
-       VALUES ($1, $2, $3, 'reversal', $4, $5, $6, $7, $8::date, $9, $10, $11)`,
+          memo, entry_id, created_by, financial_account_id)
+       VALUES ($1, $2, $3, 'reversal', $4, $5, $6, $7, $8::date, $9, $10, $11, $12)`,
       [
         reversalId,
         businessId,
@@ -2030,6 +2032,7 @@ export async function reverseCommissionPayout(
         note,
         entryId,
         actor.userId,
+        payout.financial_account_id,
       ],
     );
     await client.query(
