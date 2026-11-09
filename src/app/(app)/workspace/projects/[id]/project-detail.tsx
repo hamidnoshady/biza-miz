@@ -524,7 +524,7 @@ export function ProjectDetail({ projectId, canRecordVendorCost = false, canPickV
               other trade from calling `/api/agency/**` and rendering an
               `industry_mismatch` banner for a request it had to make. */}
           {lookups.agencyCommercial ? <AgencyVendorPurchases projectId={projectId}
-            canManage={canManageProject && canPickVendor} canBook={canManageProject && canRecordVendorCost} onChanged={() => setAgencyFinanceRevision(v => v + 1)} /> : null}
+            canManage={canManageProject && canPickVendor} canBook={canManageProject && canRecordVendorCost} canCancel={canManageProject && canApprove} onChanged={() => setAgencyFinanceRevision(v => v + 1)} /> : null}
           {lookups.agencyCommercial ? (
             <AgencyBillingCard
               refreshRevision={agencyFinanceRevision}

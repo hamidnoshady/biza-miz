@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
-import { bookVendorPurchase, submitVendorPurchase } from "@/lib/agency-vendor-purchase-service";
+import { bookVendorPurchase, cancelVendorPurchase, submitVendorPurchase } from "@/lib/agency-vendor-purchase-service";
 import { PERMISSIONS, agencyOwner, handleAgencyError, readBody } from "../../guard";
 import { vendorPurchaseErrorResponse } from "../../vendor-purchase-guard";
 
@@ -14,6 +14,12 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     if (body.action === "submit") {
       await submitVendorPurchase(owner, id);
       return NextResponse.json({ submitted: true });
+    }
+    if (body.action === "cancel") {
+      const approval = await requirePermission(PERMISSIONS.workspaceApprove);
+      if (approval.error) return approval.error;
+      await cancelVendorPurchase(owner, id, body.reason);
+      return NextResponse.json({ cancelled: true });
     }
     if (body.action === "book") {
       const finance = await requirePermission(PERMISSIONS.financeExpensesManage);
