@@ -17,8 +17,8 @@ import { VENDOR_PURCHASE_STATUS_LABELS, type VendorPurchaseStatus } from "@/lib/
 type Purchase = { client_name: string; vendor_name: string; id: string; purchase_number: string; description: string; quote_reference: string;
   amount_rial: string; quoted_on: string; status: VendorPurchaseStatus; cost_id: string | null };
 
-export function AgencyVendorPurchases({ projectId, canManage, canBook }: {
-  projectId: string; canManage: boolean; canBook: boolean;
+export function AgencyVendorPurchases({ projectId, canManage, canBook, onChanged }: {
+  projectId: string; canManage: boolean; canBook: boolean; onChanged?: () => void;
 }) {
   const money = useMoney();
   const [rows, setRows] = useState<Purchase[] | null>(null);
@@ -51,6 +51,7 @@ export function AgencyVendorPurchases({ projectId, canManage, canBook }: {
           ? "سند حسابداری ثبت نشد؛ خرید همچنان تأییدشده است و هزینه‌ای ایجاد نشد."
           : "عملیات انجام نشد؛ وضعیت تأیید، مجوز پروژه، تاریخ و اطلاعات اشخاص را بررسی کنید."); return;
       }
+      onChanged?.();
       await load();
       return true;
     } catch { setError("ارتباط قطع شد؛ پیش از تلاش دوباره وضعیت خرید را تازه کنید."); }
@@ -64,7 +65,7 @@ export function AgencyVendorPurchases({ projectId, canManage, canBook }: {
       <p className="text-sm text-muted-foreground">پیشنهاد و تأیید خرید، هزینهٔ ثبت‌شده نیستند. تأیید در صف مشترک و به‌دست شخص دیگری انجام می‌شود؛ ثبت پرداختنی عمل حسابداری جداگانه است.</p>
       <p className="text-sm">تعهد تأییدشدهٔ ثبت‌نشده در همین فهرست (حداکثر ۲۰۰ ردیف): {toPersianDigits(money.format(committed, { withUnit: true }))}</p>
       <Link href="/workspace/approvals" className="text-sm text-primary underline">صف تأییدهای مشترک</Link>
-      <SecondaryButton disabled={busy} onClick={() => void load()}>تازه‌کردن فهرست</SecondaryButton>
+      <SecondaryButton disabled={busy} onClick={() => { onChanged?.(); void load(); }}>تازه‌کردن فهرست</SecondaryButton>
       <DataTable caption="خریدهای فروشندهٔ پروژه">
         <DataTableHead><Th>شماره</Th><Th>مرجع پیشنهاد</Th><Th>کارفرما (نام فعلی)</Th><Th>تأمین‌کننده (نام فعلی)</Th><Th>شرح</Th><Th>مبلغ</Th><Th>تاریخ</Th><Th>وضعیت</Th><Th>عملیات</Th></DataTableHead>
         <DataTableBody>{(rows ?? []).map(row => <DataTableRow key={row.id} id={`vendor-purchase-${row.id}`}>

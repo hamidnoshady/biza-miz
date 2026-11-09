@@ -492,20 +492,28 @@ async function loadPostedFigures(
   businessId: string,
   projectId: string,
 ): Promise<{
+  approvedVendorPurchaseRial: string;
+  approvedVendorPurchaseCount: number;
   entries: number;
   revenueRial: number;
   actualCostRial: number;
   passThroughSpentRial: number;
   passThroughRechargedRial: number;
 }> {
+  // One statement snapshot for ledger facts AND commitments. Separate queries
+  // could straddle a booking commit and either count a purchase twice or miss it.
+  // Aggregate separately before combining: joining purchases to journal lines
+  // would multiply both amounts. Never derive this from the paginated register.
   const { rows } = await query<{
+    approved_purchase_rial: string;
+    approved_purchase_count: string;
     entries: string;
     revenue_rial: string;
     cost_rial: string;
     spent_rial: string;
     recharged_rial: string;
   }>(
-    `SELECT count(DISTINCT e.id)::text AS entries,
+    `WITH ledger AS (SELECT count(DISTINCT e.id)::text AS entries,
             COALESCE(sum(CASE WHEN a.type = 'revenue' THEN l.credit - l.debit ELSE 0 END), 0) AS revenue_rial,
             COALESCE(sum(CASE WHEN a.type = 'expense' THEN l.debit - l.credit ELSE 0 END), 0) AS cost_rial,
             -- Pass-through is read by *code* where revenue and cost are read by type,
@@ -520,10 +528,19 @@ async function loadPostedFigures(
        FROM journal_entries e
        JOIN journal_lines l ON l.entry_id = e.id
        JOIN accounts a ON a.id = l.account_id
-      WHERE e.business_id = $1 AND e.project_id = $2`,
+      WHERE e.business_id = $1 AND e.project_id = $2)
+     SELECT ledger.*, purchases.approved_purchase_rial, purchases.approved_purchase_count
+       FROM ledger CROSS JOIN (
+         SELECT COALESCE(sum(amount_rial), 0)::text AS approved_purchase_rial,
+                count(*)::text AS approved_purchase_count
+           FROM agency_vendor_purchases
+          WHERE business_id=$1 AND project_id=$2 AND status='approved' AND cost_id IS NULL
+       ) purchases`,
     [businessId, projectId, WELL_KNOWN_CODES.agencyReimbursableClientCost],
   );
   return {
+    approvedVendorPurchaseRial: rows[0]?.approved_purchase_rial ?? "0",
+    approvedVendorPurchaseCount: Number(rows[0]?.approved_purchase_count ?? "0"),
     passThroughSpentRial: money(rows[0]?.spent_rial),
     passThroughRechargedRial: money(rows[0]?.recharged_rial),
     // Whether the ledger holds anything at all on this project. Without it the
@@ -775,6 +792,10 @@ export async function loadAgencyCommercial(
   };
 
   const report: AgencyCommercialReport = {
+    commitments: {
+      approvedVendorPurchaseRial: postedLedger.approvedVendorPurchaseRial,
+      approvedVendorPurchaseCount: postedLedger.approvedVendorPurchaseCount,
+    },
     booked,
     posted,
     ...commercialMargin(posted.revenueRial, posted.actualCostRial),

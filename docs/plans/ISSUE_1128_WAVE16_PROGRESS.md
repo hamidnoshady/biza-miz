@@ -116,3 +116,11 @@ The #1110 eligibility matrix is still absent and that issue is OPEN; #1128 P0 it
 5 cannot be marked implemented by this work. GitHub #1128 was already CLOSED when
 checked during this session; that administrative state is not evidence that its
 remaining acceptance criteria have passed. This continuation does not reopen it.
+
+## Follow-up — whole-project commitment aggregate
+
+[Wave 17](ISSUE_1128_WAVE17_PROGRESS.md) adds the previously missing full-project
+approved/unbooked purchase aggregate to the existing P&L. It is no longer limited
+to the purchase register's 200 displayed rows, and shares a statement snapshot
+with posted cost facts. This resolves that specific aggregate gap above, not the
+remaining time, forecast, expense-ownership or other agency acceptance work.
