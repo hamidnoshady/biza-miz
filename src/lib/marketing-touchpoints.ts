@@ -16,3 +16,13 @@ export function parseTouchInput(raw: unknown): TouchInput | null {
 export function canRevealMarketingLead(permissions: ReadonlySet<string>): boolean {
   return permissions.has(PERMISSIONS.crmView) && permissions.has(PERMISSIONS.crmManage);
 }
+
+/** The CRM projection is available only to readers entitled to both domains. */
+export function canViewMarketingLeadHistory(permissions: ReadonlySet<string>): boolean {
+  return permissions.has(PERMISSIONS.marketingAttributionView) && canRevealMarketingLead(permissions);
+}
+
+/** The self queue grants neither CRM access nor team-wide touch management. */
+export function canRecordOwnMarketingTouch(permissions: ReadonlySet<string>): boolean {
+  return permissions.has(PERMISSIONS.marketingAssignmentsSelf) && canRevealMarketingLead(permissions);
+}

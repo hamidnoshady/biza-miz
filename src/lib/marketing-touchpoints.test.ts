@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CRM_SOURCES } from "./crm-sources";
-import { canRevealMarketingLead, parseTouchInput } from "./marketing-touchpoints";
+import { canRevealMarketingLead, canViewMarketingLeadHistory, canRecordOwnMarketingTouch, parseTouchInput } from "./marketing-touchpoints";
 import { PERMISSIONS, effectivePermissions } from "./permissions";
 import { canOpenGrowth, growthApiPermission } from "./growth-access";
 const id = "123e4567-e89b-42d3-a456-426614174000";
@@ -16,6 +16,19 @@ describe("marketing touchpoint contracts", () => {
     const migration = readFileSync(join(process.cwd(), "migrations/0286_marketing_lead_touches.sql"), "utf8");
     const values = migration.match(/source IN \(([^)]+)\)/)?.[1].match(/'([^']+)'/g)?.map((s) => s.slice(1, -1));
     expect(values).toEqual([...CRM_SOURCES]);
+  });
+  it("requires all CRM and Growth permissions for the lead projection", () => {
+    const keys = [PERMISSIONS.marketingAttributionView, PERMISSIONS.crmView, PERMISSIONS.crmManage];
+    expect(canViewMarketingLeadHistory(new Set(keys))).toBe(true);
+    for (const missing of keys) expect(canViewMarketingLeadHistory(new Set(keys.filter((key) => key !== missing)))).toBe(false);
+    expect(growthApiPermission("/api/growth/marketing-touchpoints/by-lead", "GET")).toEqual(keys);
+  });
+  it("requires all three self-service permissions without granting team access", () => {
+    const keys = [PERMISSIONS.marketingAssignmentsSelf, PERMISSIONS.crmView, PERMISSIONS.crmManage];
+    expect(canRecordOwnMarketingTouch(new Set(keys))).toBe(true);
+    for (const missing of keys) expect(canRecordOwnMarketingTouch(new Set(keys.filter((key) => key !== missing)))).toBe(false);
+    expect(growthApiPermission("/api/growth/my-marketing-touchpoints", "POST")).toEqual(keys);
+    expect(growthApiPermission("/api/growth/my-marketing-touchpoints", "GET")).toEqual(keys);
   });
   it("separates lead details and recording from attribution view", () => {
     expect(canOpenGrowth(new Set([PERMISSIONS.marketingAttributionView]))).toBe(true);

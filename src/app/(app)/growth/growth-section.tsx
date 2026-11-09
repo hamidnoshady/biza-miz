@@ -32,6 +32,7 @@ import { MarketingAssignmentsSection } from "./marketing-assignments-section";
 import { MyMarketingAssignmentsSection } from "./my-marketing-assignments-section";
 import { MarketersSection } from "./marketers-section";
 import { PERMISSIONS } from "@/lib/permissions";
+import { canRecordOwnMarketingTouch } from "@/lib/marketing-touchpoints";
 import { TorobSection } from "./torob-section";
 import { growthSectionHref, type GrowthSectionKey } from "./growth-routes";
 import { canViewGrowthSection, growthAbilities } from "@/lib/growth-access";
@@ -65,7 +66,7 @@ export function GrowthSection({
     customers: () => <GrowthCustomersSection selectedCustomerId={selectedCustomerId} />,
     marketers: () => <MarketersSection canManage={permissionSet.has(PERMISSIONS.marketersManage)} />,
     "marketing-targets": () => <MarketingTargetsSection canManage={permissionSet.has(PERMISSIONS.marketingTargetsManage)} canCreate={permissionSet.has(PERMISSIONS.marketingTargetsManage) && permissionSet.has(PERMISSIONS.partiesView)} />,
-    "my-marketing-assignments": () => <MyMarketingAssignmentsSection />,
+    "my-marketing-assignments": () => <MyMarketingAssignmentsSection canRecordTouch={canRecordOwnMarketingTouch(permissionSet)} />,
     "marketing-assignments": () => <MarketingAssignmentsSection canManage={permissionSet.has(PERMISSIONS.marketingAssignmentsManage)} />,
     "marketing-touchpoints": () => <MarketingTouchpointsSection canManage={permissionSet.has(PERMISSIONS.marketingAttributionManage) && permissionSet.has(PERMISSIONS.crmView) && permissionSet.has(PERMISSIONS.crmManage) && permissionSet.has(PERMISSIONS.marketingAssignmentsView)} />,
     campaigns: () => <CampaignsSection canManage={abilities.manageCampaigns} />,

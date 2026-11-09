@@ -51,6 +51,9 @@ function stubFetch() {
     vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       calls.push(url);
+      if (url.includes("/api/growth/marketing-touchpoints/by-lead")) {
+        return jsonResponse({ touches: [{ id: "t", title: "ماموریت تست", target: "مقصد تست", agent: "بازاریاب تست", location_name: "شعبه تست", location_timezone: "Asia/Tehran", channel: "phone", source: "phone", recorded_at: "2026-11-05T10:00:00Z" }], hasMore: false });
+      }
       if (url.includes("/api/crm/leads/") && url.includes("/convert")) {
         return jsonResponse({ duplicates: [] });
       }
@@ -88,6 +91,21 @@ describe("LeadsSection", () => {
     expect(cardsList?.textContent).toContain("سارا احمدی");
   });
 
+  it("keeps the Growth projection behind its explicit permission and loads it only on request", async () => {
+    const calls = stubFetch(); const user = userEvent.setup();
+    const view = render(<LeadsSection canViewMarketingHistory={false} />);
+    await screen.findByRole("table", { name: "فهرست سرنخ‌ها" });
+    expect(screen.queryByRole("button", { name: "تعاملات بازاریابی" })).toBeNull();
+    expect(calls.some((url) => url.includes("/api/growth/marketing-touchpoints/by-lead"))).toBe(false);
+    view.rerender(<LeadsSection canViewMarketingHistory />);
+    const table = screen.getByRole("table", { name: "فهرست سرنخ‌ها" });
+    await user.click(within(table).getByRole("button", { name: "تعاملات بازاریابی" }));
+    expect(await screen.findByText("ماموریت تست")).toBeTruthy();
+    expect(screen.getByText(/مدرک ملاقات، رضایت، تبدیل یا فروش نیستند/)).toBeTruthy();
+    expect(calls.some((url) => url.includes("leadId=lead-1&page=1"))).toBe(true);
+    await user.click(screen.getByRole("button", { name: "بستن تعاملات" }));
+    expect(screen.queryByText("ماموریت تست")).toBeNull();
+  });
   it("still opens the edit dialog from the row's action column after the conversion", async () => {
     stubFetch();
     const user = userEvent.setup();

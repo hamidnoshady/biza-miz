@@ -22,6 +22,7 @@
 
 import { useRouter } from "next/navigation";
 import type { Permission } from "@/lib/permissions";
+import { canViewMarketingLeadHistory } from "@/lib/marketing-touchpoints";
 import {
   canConfigureCrmSection,
   canDeleteCrmSection,
@@ -74,7 +75,7 @@ export function CrmSection({
       />
     );
   if (section === "directory") return <DirectorySection role={role} permissions={permissions} />;
-  if (section === "leads") return <LeadsSection canManage={canWriteCrmSection(held, "leads")} />;
+  if (section === "leads") return <LeadsSection canManage={canWriteCrmSection(held, "leads")} canViewMarketingHistory={canViewMarketingLeadHistory(held)} />;
   if (section === "segments") return <SegmentsSection />;
   if (section === "deals") return <DealsSection canManage={canWriteCrmSection(held, "deals")} />;
   if (section === "briefs")

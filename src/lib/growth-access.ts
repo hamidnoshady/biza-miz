@@ -97,11 +97,13 @@ export type HttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
  * This inventory does not encode AND/OR; the guard and its tests decide that.
  */
 export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<HttpMethod, Permission | readonly Permission[]>>>> = {
+  "/api/growth/marketing-touchpoints/by-lead": { GET: [PERMISSIONS.marketingAttributionView, PERMISSIONS.crmView, PERMISSIONS.crmManage] },
   "/api/growth/marketing-touchpoints": { GET: PERMISSIONS.marketingAttributionView, POST: [PERMISSIONS.marketingAttributionManage, PERMISSIONS.crmView, PERMISSIONS.crmManage, PERMISSIONS.marketingAssignmentsView] },
   "/api/growth/marketing-touchpoints/options": { GET: [PERMISSIONS.marketingAttributionManage, PERMISSIONS.crmView, PERMISSIONS.crmManage, PERMISSIONS.marketingAssignmentsView] },
   "/api/growth/marketing-targets/locations": { GET: PERMISSIONS.marketingTargetsManage },
   "/api/growth/marketing-targets/[id]": { PATCH: PERMISSIONS.marketingTargetsManage },
   "/api/growth/marketing-targets": { GET: PERMISSIONS.marketingTargetsView, POST: [PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView] },
+  "/api/growth/my-marketing-touchpoints": { GET: [PERMISSIONS.marketingAssignmentsSelf, PERMISSIONS.crmView, PERMISSIONS.crmManage], POST: [PERMISSIONS.marketingAssignmentsSelf, PERMISSIONS.crmView, PERMISSIONS.crmManage] },
   "/api/growth/my-marketing-assignments": { GET: PERMISSIONS.marketingAssignmentsSelf },
   "/api/growth/my-marketing-assignments/[id]": { PATCH: PERMISSIONS.marketingAssignmentsSelf },
   "/api/growth/marketing-assignments": { GET: PERMISSIONS.marketingAssignmentsView, POST: PERMISSIONS.marketingAssignmentsManage },
