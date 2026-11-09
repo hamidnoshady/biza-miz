@@ -106,7 +106,17 @@ import {
 } from "./restore-engine";
 import { runPgDump } from "./pg-tools";
 import { secureUnlink } from "./secure-temp";
-import { s3Delete, s3GetToFile, s3List, s3PutFile, type S3Config } from "./s3-lite";
+import {
+  describeTransportFailure,
+  s3Delete,
+  s3GetToFile,
+  s3Head,
+  s3List,
+  s3PutFile,
+  S3RequestError,
+  s3UploadTimeoutMs,
+  type S3Config,
+} from "./s3-lite";
 import { encryptFileToFile, fileHasBackupMagic, sha256File } from "./backup-streams";
 import { LOCK_KEYS, withDistributedLock } from "./db-locks";
 import {
@@ -116,6 +126,19 @@ import {
   type RestorePhase,
 } from "./restore-journal";
 import { fetchWithOutboundPolicy, type OutboundPolicy } from "./outbound-policy";
+import {
+  artifactNameFromKey,
+  assessCloudProtection,
+  capturedAtFromName,
+  cloudLeaseMs,
+  CLOUD_RETRY_BASE_MS,
+  planCloudUpload,
+  type CloudAttempt,
+  type CloudConfirmation,
+  type CloudObjectRef,
+  type CloudProtection,
+  type LocalArtifactRef,
+} from "./platform-backup-cloud";
 
 /** The manifest lists at most this many artifacts; retention bounds the real number. */
 const SERVE_ARTIFACT_LIMIT = 100;
@@ -295,11 +318,20 @@ async function startRun(
   artifact: string | null,
   manifest: Record<string, unknown> | null,
   platformAdminId: string | null,
+  attempt: { number?: number; leaseMs?: number } = {},
 ): Promise<string> {
   const { rows } = await query<{ id: string }>(
-    `INSERT INTO platform_backup_runs (kind, trigger, artifact, manifest, created_by)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [kind, trigger, artifact, manifest ? JSON.stringify(manifest) : null, platformAdminId],
+    `INSERT INTO platform_backup_runs (kind, trigger, artifact, manifest, created_by, attempt, lease_expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [
+      kind,
+      trigger,
+      artifact,
+      manifest ? JSON.stringify(manifest) : null,
+      platformAdminId,
+      Math.max(1, Math.min(1000, attempt.number ?? 1)),
+      attempt.leaseMs ? new Date(Date.now() + attempt.leaseMs) : null,
+    ],
   );
   return rows[0].id;
 }
@@ -391,6 +423,20 @@ export async function listPlatformBackupRuns(limit = BACKUP_RUNS_SHOWN): Promise
   return rows.map(rowToRun);
 }
 
+async function newestRunOfKind(kind: RunKind): Promise<{
+  status: "running" | "success" | "failed";
+  at: string;
+  error: string | null;
+} | null> {
+  const { rows } = await query<{ status: "running" | "success" | "failed"; started_at: Date; error: string | null }>(
+    `SELECT status, started_at, error FROM platform_backup_runs
+      WHERE kind = $1 ORDER BY started_at DESC LIMIT 1`,
+    [kind],
+  );
+  const row = rows[0];
+  return row ? { status: row.status, at: row.started_at.toISOString(), error: row.error } : null;
+}
+
 async function latestRun(kind: RunKind, onlyErrors: boolean) {
   const { rows } = await query<{ status: string; error: string | null; finished_at: Date | null; started_at: Date }>(
     onlyErrors
@@ -410,6 +456,108 @@ async function latestRun(kind: RunKind, onlyErrors: boolean) {
   };
 }
 
+/**
+ * The most recent cloud attempt for one artifact, with the lease and deadline
+ * the classification needs (issue #1296). `attempts` counts the attempts that
+ * have finished or were reclaimed — a `running` row is not one of those.
+ */
+async function latestCloudAttemptFor(
+  artifact: string,
+  now: Date = new Date(),
+): Promise<{ last: CloudAttempt | null; attempts: number; lastError: string | null; lastRetryable: boolean | null }> {
+  const { rows } = await query<{
+    id: string;
+    status: "running" | "success" | "failed";
+    started_at: Date;
+    finished_at: Date | null;
+    lease_expires_at: Date | null;
+    error: string | null;
+    attempt: number | null;
+    diagnostics: unknown;
+  }>(
+    `SELECT id, status, started_at, finished_at, lease_expires_at, error, attempt, diagnostics
+       FROM platform_backup_runs
+      WHERE kind = 'cloud' AND artifact = $1
+      ORDER BY started_at DESC
+      LIMIT 5`,
+    [artifact],
+  );
+  if (rows.length === 0) return { last: null, attempts: 0, lastError: null, lastRetryable: null };
+  const newest = rows[0];
+  const last: CloudAttempt = {
+    id: newest.id,
+    status: newest.status,
+    startedAt: newest.started_at,
+    leaseExpiresAt: newest.lease_expires_at,
+    // Rows inserted from migration 0288 on carry a lease that already covers
+    // their own transfer budget (`cloudLeaseMs`); the classification falls back
+    // to `startedAt + CLOUD_LEASE_MS` for a legacy `running` row, which is what
+    // makes the orphan left by an earlier build reclaimable at all.
+    hardDeadlineAt: null,
+  };
+  // Attempts that are evidence of work having *happened*: every row that is no
+  // longer running. Counted in SQL rather than over the five rows above — the
+  // retry ladder is bounded by this number, and a `LIMIT 5` window would cap it
+  // at five forever, so a spent ladder could never be recognised as spent
+  // (issue #1296: "retries exhaust and turn terminal", not "retry invisibly").
+  const counted = await query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM platform_backup_runs
+      WHERE kind = 'cloud' AND artifact = $1 AND status <> 'running'`,
+    [artifact],
+  );
+  // Whether the last failure was transient: read back from the redacted
+  // diagnostics the upload wrote. A row that predates that column has `null`
+  // here, and the caller then decides on the attempt count alone.
+  const diagnostics =
+    newest.diagnostics && typeof newest.diagnostics === "object"
+      ? (newest.diagnostics as { retryable?: unknown })
+      : null;
+  const lastRetryable = typeof diagnostics?.retryable === "boolean" ? diagnostics.retryable : null;
+  return { last, attempts: Number(counted.rows[0]?.n ?? 0), lastError: newest.error, lastRetryable };
+}
+
+const CLOUD_ATTEMPT_SELECT = `SELECT r.id,
+                                    coalesce(r.cloud_key, '') AS cloud_key,
+                                    r.cloud_verified_key,
+                                    r.cloud_verified_at,
+                                    r.cloud_verified_size,
+                                    r.cloud_verified_sha256,
+                                    r.cloud_verify_mode
+                               FROM platform_backup_runs r`;
+
+/**
+ * The confirmed remote objects this install knows about, per plain artifact
+ * name. A confirmation only counts while the provider still lists the object —
+ * `assessCloudProtection` drops the rest — so retention deleting an object
+ * cannot keep the console green.
+ */
+export async function listCloudConfirmations(): Promise<CloudConfirmation[]> {
+  const { rows } = await query<{
+    artifact: string | null;
+    cloud_verified_key: string | null;
+    cloud_verified_at: Date | null;
+    cloud_verified_size: string | null;
+    cloud_verified_sha256: string | null;
+    cloud_verify_mode: "size" | "sha256" | null;
+  }>(
+    `SELECT artifact, cloud_verified_key, cloud_verified_at, cloud_verified_size,
+            cloud_verified_sha256, cloud_verify_mode
+       FROM platform_backup_runs
+      WHERE kind = 'local' AND artifact IS NOT NULL AND cloud_verified_at IS NOT NULL
+      ORDER BY cloud_verified_at DESC
+      LIMIT 200`,
+  );
+  return rows
+    .filter((row) => row.artifact)
+    .map((row) => ({
+      artifact: row.artifact!,
+      confirmedAt: row.cloud_verified_at ? row.cloud_verified_at.toISOString() : null,
+      verifyMode: row.cloud_verify_mode,
+      sizeBytes: row.cloud_verified_size === null ? null : Number(row.cloud_verified_size),
+      sha256: row.cloud_verified_sha256,
+    }));
+}
+
 export interface PlatformBackupHealth {
   enabled: boolean;
   cloudEnabled: boolean;
@@ -421,25 +569,117 @@ export interface PlatformBackupHealth {
   timezone: string;
   localLastSuccessAt: string | null;
   localLastError: string | null;
+  /**
+   * The last time an upload *finished successfully*, for any artifact. Kept for
+   * backward compatibility and explicitly NOT what says the newest backup is
+   * off-site — `cloud.state`, `cloud.currentConfirmed` and
+   * `cloud.latestConfirmedArtifact` are (issue #1296).
+   */
   cloudLastSuccessAt: string | null;
   cloudLastError: string | null;
+  /**
+   * Issue #1296 — the same history field, read the same way, for the *local*
+   * half: the newest capture's own failure, or `null` if the newest recorded
+   * local run did not fail. `localLastError` above is "the last run that is not
+   * running", which is right for the alert but says nothing after a successful
+   * capture; the console wants "did the most recent attempt fail?" next to
+   * "when did we last succeed?".
+   */
+  localAttempt: { status: "running" | "success" | "failed"; at: string; error: string | null } | null;
   alert: BackupAlert;
   /** How many restorable artifacts are on disk right now, and the newest one. */
   artifactsOnDisk: number;
   newestArtifact: string | null;
+  /** Issue #1296 — does the newest local capture have a confirmed remote copy? */
+  cloud: CloudProtection;
+  /** Whether the bucket could be listed. `false` means `cloud` could not be proven. */
+  cloudReachable: boolean;
 }
 
-/** The console's health line for the whole-system backup. */
+/**
+ * Whole-platform disaster-recovery health.
+ *
+ * Local and cloud are computed separately and never merged: the local half is
+ * the run history on this disk, the cloud half is "the newest artifact we hold
+ * has a confirmed object in the bucket" — which is a different question from
+ * "some upload succeeded once", and the difference is exactly what #1296 was
+ * filed about.
+ */
 export async function getPlatformBackupHealth(): Promise<PlatformBackupHealth> {
   const config = await getPlatformBackupConfig();
-  const [localSuccess, localLast, cloudSuccess, cloudLast] = await Promise.all([
+  const [localSuccess, localLast, localAttempt, cloudSuccess, cloudLast, artifacts] = await Promise.all([
     latestRun("local", false),
     latestRun("local", true),
+    newestRunOfKind("local"),
     latestRun("cloud", false),
     latestRun("cloud", true),
+    listPlatformLocalArtifacts(config),
   ]);
-  const artifacts = await listPlatformLocalArtifacts(config);
-  const restorable = artifacts.filter((a) => a.exists);
+
+  // Two different "newest" answers, and the difference is the point: the newest
+  // capture the *history* records, and the newest artifact whose file is still
+  // on disk. A missing file is reported as such rather than silently replaced,
+  // and never retried as a transient upload failure.
+  const newestRecorded = newestArtifact(artifacts);
+  const newestLocal = newestArtifact(artifacts.filter((a) => a.exists));
+  const localArtifact: LocalArtifactRef | null = newestLocal
+    ? {
+        artifact: newestLocal.artifact,
+        sizeBytes: newestLocal.sizeBytes,
+        capturedAt: newestLocal.createdAt ?? capturedAtFromName(newestLocal.artifact),
+      }
+    : null;
+  const recordedArtifact: LocalArtifactRef | null = newestRecorded
+    ? {
+        artifact: newestRecorded.artifact,
+        sizeBytes: newestRecorded.sizeBytes,
+        capturedAt: newestRecorded.createdAt ?? capturedAtFromName(newestRecorded.artifact),
+      }
+    : null;
+
+  let cloudObjects: CloudObjectRef[] = [];
+  let cloudReachable = false;
+  if (config.cloud.enabled) {
+    const listed = await listCloudObjectsBestEffort(config);
+    if (listed) {
+      cloudObjects = listed;
+      cloudReachable = true;
+    }
+  }
+  const attemptArtifact = localArtifact?.artifact ?? recordedArtifact?.artifact ?? null;
+  const [confirmations, attempt] = await Promise.all([
+    config.cloud.enabled ? listCloudConfirmations() : Promise.resolve([] as CloudConfirmation[]),
+    attemptArtifact
+      ? latestCloudAttemptFor(attemptArtifact)
+      : Promise.resolve({ last: null, attempts: 0, lastError: null, lastRetryable: null }),
+  ]);
+
+  const cloud = assessCloudProtection({
+    cloudEnabled: config.cloud.enabled,
+    currentArtifact: localArtifact,
+    localArtifactExists: newestRecorded?.exists ?? null,
+    newestRecorded: recordedArtifact,
+    cloudObjects,
+    confirmations,
+    lastAttempt: attempt.last,
+    lastError: attempt.lastError,
+    lastRetryable: attempt.lastRetryable,
+    attempts: attempt.attempts,
+    rpoMs: platformRpoMs(config),
+  });
+
+  // The alert's "cloud is fine" answer is only ever the *current* artifact's
+  // confirmed copy; the reason code keeps the old vocabulary (a consumer of
+  // `alert.reason` must not have to learn new strings), but which code it is
+  // now depends on today's artifact, not on September's upload.
+  const cloudAlertReason = !config.cloud.enabled
+    ? null
+    : (cloud.currentConfirmed && !cloud.localArtifactMissing) || cloud.state === "no_local_artifact"
+      ? null
+      : cloud.state === "failed" || cloud.state === "unavailable"
+        ? "cloud_failed"
+        : "cloud_stale";
+
   return {
     enabled: config.enabled,
     cloudEnabled: config.cloud.enabled,
@@ -450,17 +690,55 @@ export async function getPlatformBackupHealth(): Promise<PlatformBackupHealth> {
     timezone: config.timezone,
     localLastSuccessAt: localSuccess.lastSuccessAt,
     localLastError: localLast.lastError,
+    localAttempt,
     cloudLastSuccessAt: cloudSuccess.lastSuccessAt,
     cloudLastError: cloudLast.lastError,
+    // #1296: an old successful upload must not keep the line green. The alert
+    // gets the *current* artifact's cloud state, so "cloud is stale" means "the
+    // newest capture is not off-site", not "we have not uploaded lately".
     alert: platformBackupAlert(config, {
       localLastSuccessAt: localSuccess.lastSuccessAt,
       localLastError: localLast.lastError,
-      cloudLastSuccessAt: cloudSuccess.lastSuccessAt,
-      cloudLastError: cloudLast.lastError,
+      cloudLastSuccessAt: cloud.currentConfirmed ? (cloud.latestConfirmedAt ?? cloudSuccess.lastSuccessAt) : null,
+      cloudLastError: cloudAlertReason === "cloud_stale" ? null : (attempt.lastError ?? cloudLast.lastError),
+      // `cloud_stale` when the newest capture has no confirmed copy and the RPO
+      // has passed with no failure to blame; `cloud_failed` when the attempt
+      // itself has been failing. Both mean "the newest backup is not off-site".
+      cloudStaleOverride: cloudAlertReason,
     }),
-    artifactsOnDisk: restorable.length,
-    newestArtifact: newestArtifact(restorable)?.artifact ?? null,
+    artifactsOnDisk: artifacts.filter((a) => a.exists).length,
+    newestArtifact: newestLocal?.artifact ?? null,
+    cloud,
+    cloudReachable,
   };
+}
+
+/**
+ * The bucket's objects, or `null` when it cannot be listed. Deliberately not the
+ * console's list: that one degrades to an empty array for display, which would
+ * read as "the bucket is empty" here — the opposite of the truth.
+ */
+async function listCloudObjectsBestEffort(config: PlatformBackupConfig): Promise<CloudObjectRef[] | null> {
+  const s3 = s3ConfigOf(config);
+  if (!s3.endpoint || !s3.bucket || !s3.accessKeyId || !s3.secretAccessKey) return null;
+  try {
+    const objects = await s3List(s3, config.cloud.prefix);
+    return objects
+      .filter((object) => isServeableArtifactName(artifactNameFromKey(object.key)))
+      .map((object) => ({ artifact: artifactNameFromKey(object.key), sizeBytes: object.size }));
+  } catch (err) {
+    console.error("platform backup: cloud listing failed:", errText(err));
+    return null;
+  }
+}
+
+/**
+ * How long a newest-local capture may go without a confirmed remote copy before
+ * the console alerts. Tied to the capture cadence (two intervals) with a floor,
+ * because a one-hour schedule should not alert about a 59-minute-old upload.
+ */
+export function platformRpoMs(config: Pick<PlatformBackupConfig, "intervalHours">): number {
+  return Math.max(6 * 60 * 60 * 1000, Math.max(1, config.intervalHours) * 2 * 60 * 60 * 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -751,30 +1029,310 @@ async function pruneDirectory(dir: string, keep: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export type PlatformCloudResult =
-  | { status: "ok"; key: string; sizeBytes: number }
+  | { status: "ok"; key: string; sizeBytes: number; verifyMode: "size" | "sha256"; attempt: number }
   | { status: "disabled" }
-  | { status: "failed"; error: string };
+  | { status: "busy"; error: "upload_in_flight"; retryAt: string | null }
+  | { status: "failed"; error: string; retryable: boolean; attempt: number; diagnostics: CloudDiagnostics };
 
-/** Encrypt (if the local copy is not already) and upload one artifact to the bucket. */
+/** The redacted, structured answer to "why did it fail?" (issue #1296). */
+export interface CloudDiagnostics {
+  /** short provider-neutral stage code the attempt reached */
+  phase: string | null;
+  /** HTTP status from the provider, or null for a transport failure */
+  providerStatus: number | null;
+  /** provider `<Code>` or transport code (e.g. `SignatureDoesNotMatch`, `ECONNRESET`) */
+  code: string | null;
+  /** the outermost error class only (`TypeError`, `S3RequestError`, …) */
+  errorClass: string | null;
+  /** whether the failure was classified as transient when it happened */
+  retryable: boolean;
+  /** attempts spent on this artifact so far */
+  attempts: number;
+  /** bytes the upload meant to send */
+  expectedBytes: number | null;
+  elapsedMs: number;
+  /** the classifier's answer for the *next* attempt, when it ran to exhaustion */
+  retryAfterMs: number | null;
+}
+
+/**
+ * Issue #1296 — write the confirmation columns for one local artifact.
+ *
+ * The confirmation is only ever recorded after the provider *showed us* the
+ * object (a listing or a HEAD), never after a `200` on the PUT alone: a `200`
+ * on a streamed body is a claim about the request, not about the object that is
+ * now readable, and the whole point of this column is to survive that
+ * distinction.
+ */
+async function recordCloudConfirmation(input: {
+  artifact: string;
+  key: string;
+  verifyMode: "size" | "sha256";
+  sizeBytes: number;
+  sha256: string | null;
+  localRunId: string | null;
+}): Promise<void> {
+  if (input.localRunId) {
+    await query(
+      `UPDATE platform_backup_runs
+          SET cloud_verified_key = $2, cloud_verified_at = now(), cloud_verify_mode = $3,
+              cloud_verified_size = $4, cloud_verified_sha256 = $5
+        WHERE id = $1`,
+      [input.localRunId, input.key, input.verifyMode, input.sizeBytes, input.sha256],
+    );
+    return;
+  }
+  // No local run row (an artifact copied into the directory, or one recorded
+  // before this install's history): match on the artifact name instead.
+  await query(
+    `UPDATE platform_backup_runs
+        SET cloud_verified_key = $2, cloud_verified_at = now(), cloud_verify_mode = $3,
+            cloud_verified_size = $4, cloud_verified_sha256 = $5
+      WHERE id = (
+        SELECT id FROM platform_backup_runs
+         WHERE kind = 'local' AND status = 'success' AND artifact = $1
+         ORDER BY started_at DESC LIMIT 1
+      )`,
+    [input.artifact, input.key, input.verifyMode, input.sizeBytes, input.sha256],
+  );
+}
+
+/** The local run row an artifact belongs to, for the confirmation write. */
+async function localRunIdFor(artifact: string): Promise<string | null> {
+  const { rows } = await query<{ id: string }>(
+    `SELECT id FROM platform_backup_runs
+      WHERE kind = 'local' AND status = 'success' AND artifact = $1
+      ORDER BY started_at DESC LIMIT 1`,
+    [artifact],
+  );
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Prove the object is really there, and that it is the object we meant to send.
+ *
+ * A HEAD after the upload is the cheap proof (one signed request, no download):
+ * existence plus the exact size. Only when the caller asked for `sha256` — the
+ * restore drill's path, or an operator pressing "verify now" — is the object
+ * downloaded and hashed, because that costs a full round trip of the artifact's
+ * bytes. The ETag is never consulted: providers disagree about what it hashes.
+ */
+export async function verifyCloudObject(input: {
+  config?: PlatformBackupConfig;
+  key: string;
+  expected: { sizeBytes: number | null; sha256: string | null };
+  mode?: "size" | "sha256";
+}): Promise<{ ok: true; mode: "size" | "sha256"; sizeBytes: number; sha256: string | null } | { ok: false; error: string }> {
+  const config = input.config ?? (await getPlatformBackupConfig());
+  const s3 = s3ConfigOf(config);
+  const mode = input.mode ?? "size";
+  try {
+    const head = await s3Head(s3, input.key);
+    if (!head) return { ok: false, error: "object_not_found" };
+    const expectedSize = input.expected.sizeBytes;
+    if (expectedSize !== null && head.size !== expectedSize) {
+      return { ok: false, error: `object_size_mismatch:${head.size}/${expectedSize}` };
+    }
+    if (mode === "size") return { ok: true, mode: "size", sizeBytes: head.size, sha256: null };
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "platform-verify-"));
+    const target = path.join(dir, "object.bin");
+    try {
+      const downloaded = await s3GetToFile(s3, input.key, target, { maxBytes: resolveMaxDownloadBytes() });
+      if (head.size !== downloaded.sizeBytes) {
+        return { ok: false, error: `object_size_changed:${downloaded.sizeBytes}/${head.size}` };
+      }
+      if (input.expected.sha256 && downloaded.sha256 !== input.expected.sha256) {
+        return { ok: false, error: "object_sha256_mismatch" };
+      }
+      return { ok: true, mode: "sha256", sizeBytes: downloaded.sizeBytes, sha256: downloaded.sha256 };
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  } catch (err) {
+    return { ok: false, error: errText(err).slice(0, 300) };
+  }
+}
+
+function cloudDiagnosticsOf(
+  err: unknown,
+  input: { phase: string | null; attempts: number; expectedBytes: number | null; startedAt: number; retryable: boolean; retryAfterMs: number | null },
+): CloudDiagnostics {
+  const typed = err instanceof S3RequestError ? err : null;
+  const transport = typed ? describeTransportFailure(typed.cause ?? err) : describeTransportFailure(err);
+  return {
+    phase: input.phase,
+    providerStatus: typed?.status ?? null,
+    code: typed?.providerCode ?? transport.code,
+    errorClass: typed?.name ?? transport.name,
+    retryable: typed ? typed.retryable : input.retryable,
+    attempts: input.attempts,
+    expectedBytes: input.expectedBytes,
+    elapsedMs: Math.max(0, Date.now() - input.startedAt),
+    retryAfterMs: input.retryAfterMs,
+  };
+}
+
+/** A one-line, secret-free summary for the run row and the audit log. */
+function summarizeCloudFailure(err: unknown, diagnostics: CloudDiagnostics): string {
+  const message = errText(err).slice(0, 300);
+  const extra = [
+    diagnostics.code ? `code=${diagnostics.code}` : null,
+    diagnostics.providerStatus !== null ? `http=${diagnostics.providerStatus}` : null,
+    diagnostics.phase ? `phase=${diagnostics.phase}` : null,
+    `attempts=${diagnostics.attempts}`,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return extra ? `${message} [${extra}]` : message;
+}
+
+/**
+ * Encrypt (if the local copy is not already) and upload one artifact to the
+ * bucket, then prove the object is there.
+ *
+ * Issue #1296 changes four things about this path, and nothing about where the
+ * bytes go:
+ *
+ *   1. **One uploader per artifact, cluster-wide.** A named advisory lock
+ *      (`LOCK_KEYS.platformCloudUpload`) is held for the whole transfer, so a
+ *      catch-up, a manual click and a second replica cannot race the same key.
+ *      `busy` is a first-class answer — it means "someone is doing it", which is
+ *      the truth, and the console shows it as "uploading" rather than failed.
+ *   2. **A lease.** The run row carries `lease_expires_at` (transfer budget +
+ *      grace) from the moment it starts, so a worker that dies mid-upload is
+ *      recoverable in bounded time instead of until an operator notices.
+ *   3. **Bounded retries with diagnostics.** `s3PutFile`'s own ladder is used
+ *      with a bigger budget and an `onAttemptFailed` hook that records the
+ *      stage, the classification and the delay — all redacted.
+ *   4. **Proof.** After the PUT the object is verified (size by default) and the
+ *      confirmation is written onto the local artifact's row, which is what the
+ *      console and the MCP contract read as "off-site".
+ */
 export async function runPlatformCloudUpload(
   artifact: string,
   trigger: RunTrigger,
   platformAdminId: string | null = null,
+  options: { verify?: "size" | "sha256" } = {},
 ): Promise<PlatformCloudResult> {
   const config = await getPlatformBackupConfig();
   if (!config.cloud.enabled) return { status: "disabled" };
-  if (!isServeableArtifactName(artifact)) return { status: "failed", error: "unsafe_artifact_name" };
+  if (!isServeableArtifactName(artifact)) {
+    return {
+      status: "failed",
+      error: "unsafe_artifact_name",
+      retryable: false,
+      attempt: 1,
+      diagnostics: {
+        phase: "preparing",
+        providerStatus: null,
+        code: "unsafe_artifact_name",
+        errorClass: "Refusal",
+        retryable: false,
+        attempts: 1,
+        expectedBytes: null,
+        elapsedMs: 0,
+        retryAfterMs: null,
+      },
+    };
+  }
 
+  const lock = await withDistributedLock(LOCK_KEYS.platformCloudUpload(artifact), () =>
+    runPlatformCloudUploadLocked(artifact, trigger, platformAdminId, config, options),
+  );
+  if (!lock.ok) {
+    if (lock.reason === "busy") return { status: "busy", error: "upload_in_flight", retryAt: null };
+    return {
+      status: "failed",
+      error: `cloud_lock_unavailable:${lock.error ?? "database_unreachable"}`,
+      retryable: true,
+      attempt: 1,
+      diagnostics: {
+        phase: "lock",
+        providerStatus: null,
+        code: "cloud_lock_unavailable",
+        errorClass: "LockUnavailable",
+        retryable: true,
+        attempts: 0,
+        expectedBytes: null,
+        elapsedMs: 0,
+        retryAfterMs: CLOUD_RETRY_BASE_MS,
+      },
+    };
+  }
+  return lock.value;
+}
+
+async function runPlatformCloudUploadLocked(
+  artifact: string,
+  trigger: RunTrigger,
+  platformAdminId: string | null,
+  config: PlatformBackupConfig,
+  options: { verify?: "size" | "sha256" },
+): Promise<PlatformCloudResult> {
+  const startedAt = Date.now();
+  const before = await latestCloudAttemptFor(artifact);
+  const attemptNumber = Math.max(1, before.attempts + 1);
   const key = platformCloudKeyFor(config.cloud.prefix, artifact);
-  const runId = await startRun("cloud", trigger, artifact, null, platformAdminId);
   const transient: string[] = [];
+  let phase: string | null = "preparing";
+  let expectedBytes: number | null = null;
+  let retryable = false;
+  let retryAfterMs: number | null = null;
+  let lastTransportCode: string | null = null;
+
+  // The lease is taken before the row is inserted: the deadline has to cover the
+  // whole attempt (hash + encrypt + transfer + verify) or a live attempt could
+  // be reclaimed while it is still working.
+  const sourcePath = path.join(platformBackupDir(config.directory), artifact);
+  let sourceSize = 0;
   try {
-    const sourcePath = path.join(platformBackupDir(config.directory), artifact);
+    sourceSize = (await fs.stat(sourcePath)).size;
+  } catch {
+    sourceSize = 0;
+  }
+  const leaseMs = cloudLeaseMs(s3UploadTimeoutMs(sourceSize));
+  const runId = await startRun("cloud", trigger, artifact, null, platformAdminId, {
+    number: attemptNumber,
+    leaseMs,
+  });
+
+  const finishFailed = async (err: unknown): Promise<PlatformCloudResult> => {
+    const diagnostics = cloudDiagnosticsOf(err, {
+      phase,
+      attempts: attemptNumber,
+      expectedBytes,
+      startedAt,
+      retryable,
+      retryAfterMs,
+    });
+    const summary = summarizeCloudFailure(err, diagnostics);
+    await query(
+      `UPDATE platform_backup_runs
+          SET status = 'failed', error = $2, finished_at = now(),
+              attempt_phase = $3, diagnostics = $4, lease_expires_at = NULL
+        WHERE id = $1`,
+      [runId, summary.slice(0, 1000), phase, JSON.stringify(diagnostics)],
+    );
+    return {
+      status: "failed",
+      error: summary,
+      retryable: diagnostics.retryable,
+      attempt: attemptNumber,
+      diagnostics,
+    };
+  };
+
+  try {
     if (!isPlainArtifactName(artifact)) throw new Error("unsafe_artifact_name");
     let uploadPath = sourcePath;
+    // The exact bytes we are about to send, and their hash — computed before the
+    // request, so a truncated body cannot even be signed (and a retry re-reads
+    // the same file, never a half-consumed stream).
+    phase = "hashing";
     let payloadHash = await sha256File(sourcePath);
     let sizeBytes = (await fs.stat(sourcePath)).size;
     if (!(await fileHasBackupMagic(sourcePath))) {
+      phase = "encrypting";
       const passphrase = platformBackupPassphrase(config);
       // An artifact written in plaintext must never reach the bucket in that
       // state: the provider would hold the whole ledger behind a key of "".
@@ -786,33 +1344,121 @@ export async function runPlatformCloudUpload(
       payloadHash = streamed.sha256;
       sizeBytes = streamed.sizeBytes;
     }
+    expectedBytes = sizeBytes;
     const s3 = s3ConfigOf(config);
+    phase = "uploading";
     // Streamed (issue #807) — a full-database artifact is never buffered.
-    await s3PutFile(s3, key, uploadPath, { payloadHash, sizeBytes });
+    await s3PutFile(s3, key, uploadPath, {
+      payloadHash,
+      sizeBytes,
+      retry: {
+        // More than the default three: a 319 MB upload that fails on a flaky
+        // link should not need six scheduled ticks to get through.
+        attempts: CLOUD_UPLOAD_ATTEMPTS,
+        baseDelayMs: CLOUD_UPLOAD_RETRY_BASE_MS,
+        onAttemptFailed: (info) => {
+          lastTransportCode = info.code;
+          retryable = info.retryable;
+          retryAfterMs = info.delayMs;
+          // Best-effort, redacted: keeps the lease observable while a slow
+          // transfer is retried, and records that the ladder is running.
+          void query(
+            `UPDATE platform_backup_runs SET diagnostics = $2::jsonb WHERE id = $1`,
+            [
+              runId,
+              JSON.stringify({
+                phase: "uploading",
+                code: info.code,
+                providerStatus: info.status,
+                attempt: info.attempt,
+                retryable: info.retryable,
+                delayMs: info.delayMs,
+                expectedBytes,
+              }),
+            ],
+          ).catch(() => undefined);
+        },
+      },
+    });
 
+    // The PUT said 200; the bucket is asked to show us the object. A `200` on a
+    // streamed body is a claim about the request, and #1296 exists because that
+    // claim was treated as proof.
+    phase = "verifying";
+    const verify = await verifyCloudObject({
+      config,
+      key,
+      expected: { sizeBytes, sha256: payloadHash },
+      mode: options.verify ?? "size",
+    });
+    if (!verify.ok) throw new Error(`verify_failed:${verify.error}`);
+
+    await recordCloudConfirmation({
+      artifact,
+      key,
+      verifyMode: verify.mode,
+      sizeBytes: verify.sizeBytes,
+      sha256: verify.sha256 ?? payloadHash,
+      localRunId: await localRunIdFor(artifact),
+    });
+    await query(`UPDATE platform_backup_runs SET cloud_key = $2 WHERE id = $1`, [runId, key]);
+
+    phase = "pruning";
     try {
       const objects = await s3List(s3, config.cloud.prefix);
       for (const stale of selectPrunable(objects.map((o) => o.key), config.cloud.retention)) {
         await s3Delete(s3, stale);
       }
     } catch (err) {
+      // Retention is housekeeping: a failed prune must not fail a confirmed
+      // upload, and it must not erase the confirmation either.
       console.error("platform backup: cloud prune failed:", errText(err));
     }
 
-    await finishRun(runId, { status: "success", sizeBytes, sha256: payloadHash });
-    return { status: "ok", key, sizeBytes };
+    await query(
+      `UPDATE platform_backup_runs
+          SET status = 'success', size_bytes = $2, sha256 = $3, finished_at = now(),
+              attempt_phase = $4, lease_expires_at = NULL
+        WHERE id = $1`,
+      [runId, verify.sizeBytes, payloadHash, phase],
+    );
+    return {
+      status: "ok",
+      key,
+      sizeBytes: verify.sizeBytes,
+      verifyMode: verify.mode,
+      attempt: attemptNumber,
+    };
   } catch (err) {
-    await finishRun(runId, { status: "failed", error: errText(err) });
-    return { status: "failed", error: errText(err) };
+    // A transport failure that the ladder could not get past leaves a code we
+    // can report; anything else keeps the classifier's own verdict.
+    if (err instanceof S3RequestError) {
+      retryable = err.retryable;
+      lastTransportCode = err.providerCode;
+    }
+    void lastTransportCode;
+    return await finishFailed(err);
   } finally {
     await Promise.all(transient.map((file) => secureUnlink(file)));
   }
 }
 
+/** Upload attempts per artifact, inside one `runPlatformCloudUpload` call. */
+const CLOUD_UPLOAD_ATTEMPTS = 5;
+/** First delay inside that ladder (250 ms is for a 26-byte probe, not 300 MB). */
+const CLOUD_UPLOAD_RETRY_BASE_MS = 2_000;
+
 /**
  * If the newest successful local artifact never made it to the bucket, nudge it
- * again — with the same backoff the tenant pipeline uses, so an offline server
- * is not hammering a dead uplink every tick.
+ * again — with bounded backoff, and with stale-lease recovery (issue #1296).
+ *
+ * The old version returned as soon as the newest cloud row said `running`, with
+ * no age check: one worker that died mid-upload disabled catch-up for that
+ * artifact permanently, and nothing said so. The decision now comes from
+ * `planCloudUpload`, so an expired lease is reclaimed (the row is closed as
+ * failed with an honest reason, then a fresh attempt starts under the
+ * per-artifact lock) and a spent retry ladder falls back to one slow attempt a
+ * day instead of silence.
  */
 async function maybeCatchUpCloud(config: PlatformBackupConfig): Promise<void> {
   if (!config.cloud.enabled) return;
@@ -824,17 +1470,155 @@ async function maybeCatchUpCloud(config: PlatformBackupConfig): Promise<void> {
   const artifact = rows[0]?.artifact;
   if (!artifact) return;
 
-  const { rows: cloudRows } = await query<{ status: string; started_at: Date }>(
-    `SELECT status, started_at FROM platform_backup_runs
-      WHERE kind = 'cloud' AND artifact = $1
-      ORDER BY started_at DESC LIMIT 1`,
+  // Issue #1296 defect 4: a file that is gone is not a transient upload
+  // failure. Retrying it every tick produced a tight `ENOENT` loop that blamed
+  // the bucket and kept the console red for something no retry can fix. The
+  // absence is recorded once, the row stays as history, and the next capture is
+  // what gets mirrored.
+  const sourcePath = path.join(platformBackupDir(config.directory), artifact);
+  const exists = await fs
+    .stat(sourcePath)
+    .then((stat) => stat.isFile() && stat.size > 0)
+    .catch(() => false);
+  if (!exists) {
+    const marked = await markLocalArtifactMissing(artifact);
+    if (marked === "newly_marked") {
+      console.error(`platform backup: local artifact ${artifact} is missing; not retrying its upload`);
+    }
+    return;
+  }
+
+  const { last, attempts } = await latestCloudAttemptFor(artifact);
+  const plan = planCloudUpload({ lastAttempt: last, attempts });
+  if (plan.decision === "wait") return;
+
+  if (plan.reclaimRunId) {
+    // Close the abandoned attempt first, so the history says what happened and
+    // the new attempt is not recorded as a second concurrent `running` row.
+    await query(
+      `UPDATE platform_backup_runs
+          SET status = 'failed', finished_at = now(), lease_expires_at = NULL,
+              error = 'lease_expired: upload abandoned without a heartbeat; reclaimed for a fresh attempt'
+        WHERE id = $1 AND status = 'running'`,
+      [plan.reclaimRunId],
+    );
+    // No platform admin exists on this path (it is the scheduler), and
+    // `platform_audit_log.platform_admin_id` is NOT NULL by design. The run row
+    // *is* the audit trail here: it keeps the original attempt, the reclaimed
+    // row and the reason, so the console's history shows the takeover.
+    console.info(
+      `platform backup: reclaimed abandoned cloud upload ${plan.reclaimRunId} for ${artifact} (attempt ${plan.attempt})`,
+    );
+  }
+
+  const result = await runPlatformCloudUpload(artifact, "scheduled");
+  if (result.status === "failed" && !result.retryable) {
+    // A deterministic refusal (bad signature, wrong bucket, missing passphrase)
+    // is not something the scheduler can fix by trying again; logging it once
+    // per tick would bury the console line in noise. The run row already says
+    // what it was.
+    console.error(
+      `platform backup: cloud upload refused for ${artifact}: ${result.error} (code=${result.diagnostics.code ?? "unknown"})`,
+    );
+  } else if (result.status === "busy") {
+    // Another instance is uploading the same artifact; that is the wanted state.
+    console.info(`platform backup: cloud upload for ${artifact} already in flight on another worker`);
+  }
+}
+
+/**
+ * Record — once — that a recorded artifact's file is not on disk any more.
+ *
+ * Deliberately a one-way note, not a deletion: the run row, its manifest and the
+ * confirmed remote copy all stay, so an operator can still restore the object
+ * from the bucket. "We had it, then we did not" is the difference between
+ * finding a copy and giving up (the same reasoning the status route documents).
+ */
+export async function markLocalArtifactMissing(artifact: string): Promise<"newly_marked" | "already_marked" | "unknown_artifact"> {
+  const { rowCount } = await query(
+    `UPDATE platform_backup_runs
+        SET local_missing_since = now()
+      WHERE kind = 'local' AND status = 'success' AND artifact = $1 AND local_missing_since IS NULL`,
     [artifact],
   );
-  const last = cloudRows[0];
-  if (last?.status === "success" || last?.status === "running") return;
-  if (last && Date.now() - last.started_at.getTime() < CLOUD_RETRY_MS) return;
+  if ((rowCount ?? 0) > 0) return "newly_marked";
+  const { rows } = await query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM platform_backup_runs
+      WHERE kind = 'local' AND status = 'success' AND artifact = $1`,
+    [artifact],
+  );
+  return Number(rows[0]?.n ?? 0) > 0 ? "already_marked" : "unknown_artifact";
+}
 
-  await runPlatformCloudUpload(artifact, "scheduled");
+/** Artifacts whose local file is known to be gone (the console's honest list). */
+export async function listMissingLocalArtifacts(): Promise<string[]> {
+  const { rows } = await query<{ artifact: string }>(
+    `SELECT DISTINCT ON (artifact) artifact
+       FROM platform_backup_runs
+      WHERE kind = 'local' AND artifact IS NOT NULL AND local_missing_since IS NOT NULL
+      ORDER BY artifact, started_at DESC
+      LIMIT 100`,
+  );
+  return rows.map((row) => row.artifact);
+}
+
+/**
+ * «تلاش دوباره» — upload the newest local artifact now, ignoring the backoff.
+ *
+ * This is the operator's explicit "upload it again" (issue #1296 P1: "actionable
+ * retry without obscuring technical diagnostics"). It still takes the
+ * per-artifact lock and still records an attempt, so pressing it twice cannot
+ * start two uploads; the only thing it skips is the scheduler's wait.
+ */
+export async function retryPlatformCloudUpload(
+  platformAdminId: string | null = null,
+  options: { artifact?: string | null; verify?: "size" | "sha256" } = {},
+): Promise<PlatformCloudResult> {
+  const config = await getPlatformBackupConfig();
+  if (!config.cloud.enabled) return { status: "disabled" };
+  const artifact = options.artifact?.trim();
+  const targeted = artifact && isServeableArtifactName(artifact) ? artifact : null;
+  if (artifact && !targeted) {
+    return {
+      status: "failed",
+      error: "unsafe_artifact_name",
+      retryable: false,
+      attempt: 1,
+      diagnostics: {
+        phase: "preparing",
+        providerStatus: null,
+        code: "unsafe_artifact_name",
+        errorClass: "Refusal",
+        retryable: false,
+        attempts: 1,
+        expectedBytes: null,
+        elapsedMs: 0,
+        retryAfterMs: null,
+      },
+    };
+  }
+  if (targeted) return runPlatformCloudUpload(targeted, "manual", platformAdminId, options);
+  const newest = newestArtifact((await listPlatformLocalArtifacts(config)).filter((a) => a.exists));
+  if (!newest) {
+    return {
+      status: "failed",
+      error: "no_local_artifact",
+      retryable: false,
+      attempt: 1,
+      diagnostics: {
+        phase: "preparing",
+        providerStatus: null,
+        code: "no_local_artifact",
+        errorClass: "Refusal",
+        retryable: false,
+        attempts: 1,
+        expectedBytes: null,
+        elapsedMs: 0,
+        retryAfterMs: null,
+      },
+    };
+  }
+  return runPlatformCloudUpload(newest.artifact, "manual", platformAdminId, options);
 }
 
 /**
@@ -845,6 +1629,9 @@ export async function runPlatformBackupNow(
   platformAdminId: string | null = null,
 ): Promise<{ local: PlatformBackupResult; cloud: PlatformCloudResult }> {
   const local = await runPlatformLocalBackup("manual", platformAdminId);
+  // No successful local run means there is no artifact to mirror: `disabled`
+  // is the honest cloud answer for that case (it is also what the route already
+  // shows), and the local result carries the actual failure.
   const cloud: PlatformCloudResult =
     local.status === "ok"
       ? await runPlatformCloudUpload(local.artifact, "manual", platformAdminId)
@@ -877,7 +1664,13 @@ export async function runPlatformBackupTick(): Promise<void> {
     if (due || retry) {
       const local = await runPlatformLocalBackup("scheduled");
       if (local.status === "ok" && config.cloud.enabled) {
-        await runPlatformCloudUpload(local.artifact, "scheduled");
+        const uploaded = await runPlatformCloudUpload(local.artifact, "scheduled");
+        if (uploaded.status === "failed" || uploaded.status === "busy") {
+          console.error(
+            `platform backup: upload of ${local.artifact} did not complete (${uploaded.status}` +
+              `${uploaded.status === "failed" ? `, code=${uploaded.diagnostics.code ?? "unknown"}, retryable=${uploaded.retryable}` : ""})`,
+          );
+        }
       }
       return;
     }

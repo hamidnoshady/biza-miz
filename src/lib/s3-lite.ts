@@ -297,24 +297,78 @@ const RETRYABLE_TRANSPORT_CODES = new Set([
   "EHOSTUNREACH",
   "ENETUNREACH",
   "EAI_AGAIN",
+  "ECONNABORTED",
+  "ECONNREFUSED",
   "UND_ERR_SOCKET",
+  "UND_ERR_CLOSED",
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_HEADERS_TIMEOUT",
   "UND_ERR_BODY_TIMEOUT",
   "TimeoutError",
 ]);
 
+/**
+ * Issue #1296 — the shape that made a 319 MB platform upload unrecoverable.
+ *
+ * Undici reports most outbound failures as one `TypeError: fetch failed` whose
+ * *own* `code` is undefined; the real reason is one or two levels down in
+ * `cause` (and, for a TLS failure, in `cause.cause`). `transportCodeOf` used to
+ * look exactly one level deep and give up, so the whole chain collapsed to the
+ * generic label `NetworkError`, which was then marked non-retryable — a
+ * transient reset skipped the bounded retries entirely. This walks the chain,
+ * keeps the first recognised code, and never copies a message, an endpoint or a
+ * header into the diagnostic.
+ */
 function transportCodeOf(error: unknown): string | null {
-  if (!error || typeof error !== "object") return null;
-  const candidate = error as { code?: unknown; name?: unknown; cause?: unknown };
-  if (typeof candidate.code === "string") return candidate.code;
-  if (candidate.name === "TimeoutError" || candidate.name === "AbortError") return "TimeoutError";
-  if (candidate.cause && typeof candidate.cause === "object") {
-    const cause = candidate.cause as { code?: unknown; name?: unknown };
-    if (typeof cause.code === "string") return cause.code;
-    if (cause.name === "TimeoutError") return "TimeoutError";
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const candidate = current as { code?: unknown; name?: unknown; cause?: unknown; errors?: unknown };
+    if (typeof candidate.code === "string" && candidate.code.length > 0) return candidate.code;
+    if (candidate.name === "TimeoutError") return "TimeoutError";
+    // `AbortError` is this client's own timeout (AbortSignal.timeout aborts with
+    // exactly that name) — classified as a timeout, not as a caller's abort.
+    if (candidate.name === "AbortError") return "TimeoutError";
+    // `AggregateError` from a happy-eyeballs connect: the first inner code that
+    // names a real transport failure is the useful one.
+    if (Array.isArray(candidate.errors)) {
+      for (const inner of candidate.errors) {
+        const code = transportCodeOf(inner);
+        if (code !== null && code !== "TimeoutError") return code;
+      }
+    }
+    current = candidate.cause;
   }
   return null;
+}
+
+/**
+ * A redacted, structured description of why one attempt failed (issue #1296).
+ * Every field is a class or a number: no messages, no keys, no endpoints, no
+ * signing material — safe for a run row, an audit entry and the console.
+ */
+export function describeTransportFailure(error: unknown): {
+  code: string | null;
+  name: string;
+  depth: number;
+} {
+  const chain: Array<{ name: string; code: string | null }> = [];
+  let current: unknown = error;
+  while (current && typeof current === "object" && chain.length < 4) {
+    const candidate = current as { name?: unknown; code?: unknown; cause?: unknown };
+    chain.push({
+      name: typeof candidate.name === "string" ? candidate.name : "Error",
+      code: typeof candidate.code === "string" ? candidate.code : null,
+    });
+    current = candidate.cause;
+  }
+  const code = transportCodeOf(error);
+  return {
+    code,
+    // The outermost class is what an operator can look up ("fetch failed"),
+    // while `code` is what says whether retrying can help.
+    name: chain[0]?.name ?? "Error",
+    depth: Math.max(0, chain.findIndex((entry) => entry.code !== null)) + 1 || chain.length,
+  };
 }
 
 /** The provider's `<Code>…</Code>` from an S3 XML error body, when present. */
@@ -367,7 +421,12 @@ function toTransportError(
 ): S3RequestError {
   const code = transportCodeOf(error);
   const isTimeout = code === "TimeoutError";
-  const retryable = code !== null && RETRYABLE_TRANSPORT_CODES.has(code);
+  // Issue #1296: a transport failure with *no* extracted code (a bare
+  // `TypeError: fetch failed` whose cause chain names nothing Node recognises) is
+  // still a network failure, and a network failure may be transient. It is
+  // retried under the same bounded ladder; only a recognised deterministic code
+  // (a hostname that does not resolve, a TLS verification failure) skips it.
+  const retryable = code === null || RETRYABLE_TRANSPORT_CODES.has(code);
   const label = isTimeout ? "timeout" : (code ?? "NetworkError");
   return new S3RequestError({
     message: `${input.what}: ${label}`,
@@ -387,6 +446,22 @@ export interface S3RetryOptions {
   baseDelayMs?: number;
   /** Injected in tests so a retry does not cost real time. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Issue #1296 — redacted, per-attempt diagnostics. A caller with a run row
+   * (the platform upload) records attempt number, classification, whether the
+   * failure was retried and the delay; nothing here can carry a key, a body or
+   * a signed URL.
+   */
+  onAttemptFailed?: (info: {
+    attempt: number;
+    /** transport code or HTTP status class, never a message */
+    code: string | null;
+    status: number | null;
+    retryable: boolean;
+    delayMs: number | null;
+  }) => void;
+  /** Jitter source; injected in tests so delays are deterministic. */
+  random?: () => number;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -409,6 +484,7 @@ export async function withS3Retry<T>(
   const attempts = Math.max(1, options.attempts ?? 3);
   const baseDelay = Math.max(0, options.baseDelayMs ?? 250);
   const sleep = options.sleep ?? defaultSleep;
+  const random = options.random ?? Math.random;
   let lastError: S3RequestError | null = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
@@ -416,8 +492,21 @@ export async function withS3Retry<T>(
     } catch (error) {
       const classified = classify(error);
       lastError = classified;
-      if (!classified.retryable || attempt >= attempts) throw classified;
-      await sleep(baseDelay * 2 ** (attempt - 1));
+      const willRetry = classified.retryable && attempt < attempts;
+      // ±20 % jitter: instances that all lost the same uplink must not come
+      // back in lockstep on the next attempt either.
+      const delayMs = willRetry
+        ? Math.max(0, Math.round(baseDelay * 2 ** (attempt - 1) * (1 + (random() * 2 - 1) * 0.2)))
+        : null;
+      options.onAttemptFailed?.({
+        attempt,
+        code: classified.providerCode,
+        status: classified.status,
+        retryable: classified.retryable,
+        delayMs,
+      });
+      if (!willRetry) throw classified;
+      await sleep(delayMs ?? 0);
     }
   }
   throw lastError ?? new Error("s3_retry_exhausted");
