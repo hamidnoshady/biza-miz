@@ -138,6 +138,7 @@ async function seedShop(name: string): Promise<Shop> {
 }
 
 async function connectMock(shop: Shop, switches: { pushPrices?: boolean; pushStock?: boolean } = {}) {
+  let connectionId = "";
   await dbLib.withTenant(shop.businessId, async () => {
     const result = await connection.connectWebsite(shop.businessId, {
       adapterKey: "mock",
@@ -146,13 +147,15 @@ async function connectMock(shop: Shop, switches: { pushPrices?: boolean; pushSto
       apiKey: "",
     });
     if (!result.ok) throw new Error(result.error);
+    connectionId = result.connection.id;
     await connection.updateWebsiteSyncSettings(shop.businessId, {
+      connectionId,
       pushPrices: switches.pushPrices ?? true,
       pushStock: switches.pushStock ?? true,
       syncLocationId: shop.locationId,
     });
   });
-  return connection.mockAdapterFor(shop.businessId);
+  return connection.mockAdapterFor(shop.businessId, connectionId);
 }
 
 async function outboxRows(businessId: string) {
@@ -394,6 +397,38 @@ describe("Phase 38w — one-way website sync", () => {
     );
     expect(later.rows[0]).toMatchObject({ attempts: 1, status: "failed" });
     expect(new Date(later.rows[0].next_attempt_at).getTime()).toBe(new Date(first.rows[0].next_attempt_at).getTime());
-    expect(mock.calls.filter((c) => c.method === "upsertProduct")).toHaveLength(1);
+    // The complete projection reaches the site's taxonomy/category step before
+    // the product write; either way exactly one remote attempt was made.
+    expect(mock.calls.filter((c) => c.method === "upsertMenuTaxonomy" || c.method === "upsertProduct")).toHaveLength(1);
+  });
+
+  it("reclaims a stale processing lease without creating a second remote product", async () => {
+    const shop = await seedShop("Stale");
+    const mock = await connectMock(shop);
+    await dbLib.withTenant(shop.businessId, async () => {
+      await sync.setProductSync(shop.businessId, "menu_item", shop.menuItemId, true);
+    });
+    await db.query(
+      `UPDATE website_outbox SET status = 'processing', updated_at = now() - interval '6 minutes' WHERE business_id = $1`,
+      [shop.businessId],
+    );
+    const result = await dbLib.withTenant(shop.businessId, () => sync.syncWebsiteForBusiness(shop.businessId));
+    expect(result).toMatchObject({ sent: 1, failed: 0 });
+    expect((await mock.listProducts({ limit: 10 })).items).toHaveLength(1);
+    expect((await outboxRows(shop.businessId)).map((row) => row.status)).toEqual(["sent"]);
+  });
+
+  it("does not queue price/stock against a product that has no remote id yet", async () => {
+    const shop = await seedShop("Unmapped");
+    await connectMock(shop);
+    await dbLib.withTenant(shop.businessId, async () => {
+      await sync.setProductSync(shop.businessId, "menu_item", shop.menuItemId, true);
+    });
+    await db.query(`UPDATE menu_items SET price = 600000 WHERE id = $1`, [shop.menuItemId]);
+    await db.query(
+      `UPDATE stock_movements SET quantity = 8 WHERE location_id = $1 AND inventory_item_id = $2`,
+      [shop.locationId, shop.inventoryItemId],
+    );
+    expect((await outboxRows(shop.businessId)).map((row) => row.kind)).toEqual(["product.upsert"]);
   });
 });

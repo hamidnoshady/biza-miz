@@ -34,6 +34,7 @@ import type {
   CmsPage,
   CmsPost,
   CmsProduct,
+  CmsProductWrite,
   IssuedApiKey,
   PayloadList,
   ProvisionSiteInput,
@@ -310,16 +311,7 @@ export function fetchOrderById(
 
 export function createProduct(
   config: CmsConfig,
-  input: {
-    title: string;
-    price: number;
-    summary?: string;
-    image?: string;
-    sku?: string;
-    trackInventory?: boolean;
-    inventory?: number;
-    compareAtPrice?: number;
-  },
+  input: CmsProductWrite,
   opts?: { fetchImpl?: FetchLike },
 ): Promise<CmsProduct> {
   return cmsRequest<CmsProduct>(config, {
@@ -333,21 +325,12 @@ export function createProduct(
 export function updateProduct(
   config: CmsConfig,
   id: string,
-  patch: Partial<{
-    title: string;
-    price: number;
-    summary: string;
-    image: string;
-    sku: string;
-    trackInventory: boolean;
-    inventory: number;
-    compareAtPrice: number;
-  }>,
+  patch: Partial<CmsProductWrite>,
   opts?: { fetchImpl?: FetchLike },
 ): Promise<CmsProduct> {
   return cmsRequest<CmsProduct>(config, {
     method: "PATCH",
-    path: `/api/products/${id}`,
+    path: `/api/products/${encodeURIComponent(id)}`,
     body: patch,
     fetchImpl: opts?.fetchImpl,
   });

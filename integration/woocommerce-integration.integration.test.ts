@@ -669,8 +669,13 @@ it("uses a common masked CMS lifecycle without treating adapter/currency setting
   expect(JSON.stringify(summary)).not.toContain("eshobe_live_");
   const masked = await dbLib!.withTenant(biz.id, () => cms.listCmsConnections(biz.id));
   expect(JSON.stringify(masked)).not.toContain("eshobe_live_");
-  await save("eshobe_live_other_site", randomUUID());
-  expect((await dbLib!.withTenant(biz.id, () => website.getWebsiteConnection(biz.id)))?.pushStock).toBe(false);
+  const otherSiteId = randomUUID();
+  await save("eshobe_live_other_site", otherSiteId);
+  // Multi-site connections are independent: the legacy unscoped summary still
+  // names the original site, while the newly saved site has its own defaults.
+  const siteRows = await dbLib!.withTenant(biz.id, () => website.listWebsiteConnectionRows(biz.id));
+  expect(siteRows.find((row) => row.site_id === siteId)?.push_stock).toBe(true);
+  expect(siteRows.find((row) => row.site_id === otherSiteId)?.push_stock).toBe(false);
   await dbLib!.withTenant(biz.id, () => cms.deleteCmsConnection(biz.id));
   expect(await dbLib!.withTenant(biz.id, () => website.getWebsiteConnection(biz.id))).toBeNull();
   expect(await dbLib!.withTenant(biz.id, () => cms.listCmsConnections(biz.id))).toEqual([]);

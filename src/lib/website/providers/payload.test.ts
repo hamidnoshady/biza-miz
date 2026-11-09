@@ -213,7 +213,7 @@ describe("Phase 38 Wave 2 — Payload adapter against recorded fixtures (no live
     expect(seen[0].method).toBe("PATCH");
     expect(seen[0].body).toEqual({ price: 95_000 });
     await adapter.setProductStock("pr1", 7);
-    expect(seen[1].body).toEqual({ trackInventory: true, inventory: 7 });
+    expect(seen[1].body).toEqual({ trackInventory: true, inventory: 7, inventoryManagedExternally: true });
   });
 
   it("opens the circuit after repeated network failures and fails fast until it half-closes", async () => {
@@ -248,5 +248,120 @@ describe("Phase 38 Wave 2 — Payload adapter against recorded fixtures (no live
       await expect(adapter.listProducts({ limit: 1 })).rejects.toMatchObject({ code: "rejected" });
     }
     expect(attempts).toBe(BREAKER_FAILURES + 2);
+  });
+});
+
+describe("ESH-145 — Payload café-menu contract", () => {
+  const menuInput = {
+    sourceId: "menu_item:item-1",
+    title: "لاته",
+    summary: "با شیر تازه",
+    sku: "LAT-1",
+    priceRial: 1_200_000,
+    stock: null,
+    imageId: "media-1",
+    categoryTermId: "term-1",
+    menuOrder: 4,
+    published: true,
+    available: false,
+    inventoryManagedExternally: true,
+    modifierGroups: [{
+      sourceId: "group-1", label: "افزودنی", minSelect: 0, maxSelect: 1,
+      isActive: true, sortOrder: 2,
+      options: [{ sourceId: "option-1", label: "شات اضافه", priceDeltaRial: -15_000, isActive: true, sortOrder: 1 }],
+    }],
+  };
+
+  it("projects add-ons separately from variations, with signed minor-unit deltas and explicit availability", () => {
+    const body = buildProductBody(menuInput, "IRT");
+    expect(body).toMatchObject({
+      sourceSystem: "biza_miz", sourceId: "menu_item:item-1", terms: ["term-1"],
+      menuOrder: 4, menuAvailable: false, _status: "published",
+      trackInventory: false, inventory: null, inventoryManagedExternally: true,
+    });
+    expect(body.modifierGroups?.[0].options[0].priceDelta).toBe(-1_500);
+    expect(body).not.toHaveProperty("variations");
+    const mapped = mapPayloadProduct({ ...productDoc, ...body, id: "remote-1" } as CmsProduct, ctx);
+    expect(mapped.modifierGroups?.[0].options[0].priceDeltaRial).toBe(-15_000);
+    expect(mapped).toMatchObject({ available: false, stock: null, categoryTermId: "term-1", imageId: "media-1" });
+  });
+
+  it("recovers a product after a lost create response by source identity, never by name or SKU", async () => {
+    let stored: CmsProduct | null = null;
+    const seen: { method: string; url: string }[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = init.method ?? "GET";
+      seen.push({ method, url });
+      if (method === "POST") {
+        stored = { ...productDoc, ...(JSON.parse(String(init.body)) as object), id: "remote-1" } as CmsProduct;
+        throw new Error("response lost after commit");
+      }
+      if (method === "GET") {
+        expect(new URL(url).searchParams.get("where[sourceId][equals]")).toBe("menu_item:item-1");
+        return new Response(JSON.stringify({ docs: stored ? [stored] : [], totalDocs: stored ? 1 : 0, hasNextPage: false, nextPage: null }));
+      }
+      stored = { ...stored!, ...(JSON.parse(String(init.body)) as object) } as CmsProduct;
+      return new Response(JSON.stringify(stored));
+    };
+    const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
+    await expect(adapter.upsertProduct(menuInput)).rejects.toMatchObject({ code: "unreachable" });
+    resetBreakers();
+    const recovered = await adapter.upsertProduct({ ...menuInput, title: "لاته جدید" });
+    expect(recovered.id).toBe("remote-1");
+    expect(seen.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(seen.filter((call) => call.method === "PATCH")).toHaveLength(1);
+  });
+
+  it("recovers unchanged media by source identity instead of uploading it twice", async () => {
+    let stored: { id: string; filename: string; sourceId: string } | null = null;
+    let posts = 0;
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = init.method ?? "GET";
+      if (method === "POST") {
+        posts += 1;
+        stored = { id: "media-1", filename: "latte.png", sourceId: "media:asset-1:hash" };
+        throw new Error("response lost after upload");
+      }
+      expect(new URL(url).searchParams.get("where[sourceId][equals]")).toBe("media:asset-1:hash");
+      return new Response(JSON.stringify({ docs: stored ? [stored] : [], totalDocs: stored ? 1 : 0 }));
+    };
+    const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
+    const upload = { sourceId: "media:asset-1:hash", filename: "latte.png", mimeType: "image/png", bytes: new Uint8Array([1]) };
+    await expect(adapter.uploadMedia(upload)).rejects.toMatchObject({ code: "unreachable" });
+    resetBreakers();
+    expect((await adapter.uploadMedia(upload)).id).toBe("media-1");
+    expect(posts).toBe(1);
+  });
+
+  it("uses taxonomy definitions/terms and the dedicated menu taxonomy key", async () => {
+    const seen: { url: string; method: string; body: unknown }[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      const method = init.method ?? "GET";
+      const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+      seen.push({ url, method, body });
+      if (new URL(url).pathname === "/api/taxonomy-definitions") {
+        return new Response(JSON.stringify(method === "GET"
+          ? { docs: [], totalDocs: 0 }
+          : { id: "taxonomy-1", key: "biza_menu_categories" }));
+      }
+      if (method === "GET") return new Response(JSON.stringify({ docs: [], totalDocs: 0 }));
+      return new Response(JSON.stringify({ id: "term-1", name: body.name, description: body.description, menuOrder: body.menuOrder }));
+    };
+    const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
+    expect((await adapter.upsertMenuTaxonomy({})).id).toBe("taxonomy-1");
+    const term = await adapter.upsertMenuCategory({ taxonomyId: "taxonomy-1", sourceId: "category-1", name: "قهوه", description: "گرم", sortOrder: 2 });
+    expect(term.id).toBe("term-1");
+    expect(seen[0].url).toContain("where%5Bkey%5D%5Bequals%5D=biza_menu_categories");
+    expect(seen[3].body).toMatchObject({ taxonomy: "taxonomy-1", sourceSystem: "biza_miz", sourceId: "category-1", menuOrder: 2 });
+  });
+
+  it("withdraws without deleting, and clears unknown stock without fabricating a count", async () => {
+    const { fetchImpl, seen } = fakeFetch({ "/api/products/pr1": { body: productDoc } });
+    const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
+    await adapter.setProductAvailability("pr1", { published: false, available: false });
+    await adapter.setProductStock("pr1", null);
+    expect(seen[0].body).toEqual({ _status: "draft", menuAvailable: false });
+    expect(seen[1].body).toEqual({ trackInventory: false, inventory: null, inventoryManagedExternally: true });
+    expect(seen.every((call) => call.method === "PATCH")).toBe(true);
   });
 });

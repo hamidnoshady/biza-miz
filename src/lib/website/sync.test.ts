@@ -6,10 +6,12 @@ const both = { pushPrices: true, pushStock: true, productScope: "selected" as co
 const mapped = { remoteId: "r1", syncEnabled: true, lastPushedPriceRial: 100_000, lastPushedStock: 5 };
 
 describe("Phase 38 Wave 3 — planProductEvents", () => {
-  it("never sends an unmarked product, whatever changed", () => {
+  it("never creates an unmarked product, but withdraws one already published", () => {
     const unmarked = { ...mapped, syncEnabled: false };
     expect(productInScope(unmarked, both)).toBe(false);
-    expect(planProductEvents(unmarked, { priceRial: 999, stock: 0 }, both)).toEqual([]);
+    expect(planProductEvents({ ...unmarked, remoteId: null }, { priceRial: 999, stock: 0 }, both)).toEqual([]);
+    expect(planProductEvents(unmarked, { priceRial: 999, stock: 0 }, both)).toEqual(["product.upsert"]);
+    expect(planProductEvents({ ...unmarked, lastPushedPublished: false }, { priceRial: 999, stock: 0 }, both)).toEqual([]);
   });
 
   it("sends every mapped product when the scope is 'all'", () => {
@@ -35,8 +37,31 @@ describe("Phase 38 Wave 3 — planProductEvents", () => {
     expect(planProductEvents(mapped, changed, { ...both, pushPrices: false, pushStock: false })).toEqual([]);
   });
 
-  it("does not queue a stock event when the app cannot say the stock", () => {
-    expect(planProductEvents(mapped, { priceRial: 100_000, stock: null }, both)).toEqual([]);
+  it("clears a previously pushed count when stock becomes unknown, without inventing a number", () => {
+    expect(planProductEvents(mapped, { priceRial: 100_000, stock: null }, both)).toEqual(["stock.set"]);
+    expect(planProductEvents({ ...mapped, lastPushedStock: null }, { priceRial: 100_000, stock: null }, both)).toEqual([]);
+  });
+});
+
+describe("ESH-145 — complete menu diff", () => {
+  const complete = { ...mapped, lastPushedContentHash: "same", lastPushedPublished: true };
+  const desired = { priceRial: 100_000, stock: 5, contentHash: "same", published: true, available: true };
+
+  it("coalesces category/media/modifier/availability changes into the content upsert", () => {
+    expect(planProductEvents(complete, { ...desired, contentHash: "changed" }, both)).toEqual(["product.upsert"]);
+    expect(planProductEvents(complete, { ...desired, contentHash: "changed", priceRial: 120_000, stock: 4 }, both))
+      .toEqual(["product.upsert", "price.set", "stock.set"]);
+  });
+
+  it("does not let a price/stock-only tick resend unchanged menu content", () => {
+    expect(planProductEvents(complete, desired, both)).toEqual([]);
+    expect(planProductEvents(complete, { ...desired, stock: 0 }, both)).toEqual(["stock.set"]);
+  });
+
+  it("keeps unknown stock unknown and clears a stale remote count", () => {
+    expect(planProductEvents(complete, { ...desired, stock: null }, both)).toEqual(["stock.set"]);
+    expect(planProductEvents({ ...complete, lastPushedStock: null }, { ...desired, stock: null }, both)).toEqual([]);
+    expect(planProductEvents(complete, { ...desired, stock: null }, { ...both, pushStock: false })).toEqual([]);
   });
 });
 
@@ -63,5 +88,6 @@ describe("sellableFromIngredients", () => {
     expect(sellableFromIngredients([])).toBeNull();
     expect(sellableFromIngredients([{ onHand: 10, perUnit: 3 }, { onHand: 100, perUnit: 2 }])).toBe(3);
     expect(sellableFromIngredients([{ onHand: -4, perUnit: 1 }])).toBe(0);
+    expect(sellableFromIngredients([{ onHand: 10, perUnit: 0 }])).toBeNull();
   });
 });

@@ -30,7 +30,7 @@ export async function getMenuTree(locationId: string) {
   const [{ rows: categories }, { rows: items }, { rows: modifierGroups }, { rows: modifiers }, { rows: links }] =
     await Promise.all([
       query(
-        "SELECT id, name, tax_rate, sort_order, is_active FROM menu_categories WHERE location_id = $1 ORDER BY sort_order, name",
+        "SELECT id, name, description, tax_rate, sort_order, is_active FROM menu_categories WHERE location_id = $1 ORDER BY sort_order, name",
         [locationId],
       ),
       query(
@@ -309,15 +309,16 @@ export async function createCategory(
 
   try {
     const { rows } = await query<{ id: string }>(
-      `INSERT INTO menu_categories (location_id, name, tax_rate, sort_order, is_active)
-       SELECT $1, $2, $3,
-              COALESCE($4::int, (SELECT COALESCE(MAX(mc.sort_order) + 1, 0)
+      `INSERT INTO menu_categories (location_id, name, description, tax_rate, sort_order, is_active)
+       SELECT $1, $2, $3, $4,
+              COALESCE($5::int, (SELECT COALESCE(MAX(mc.sort_order) + 1, 0)
                                    FROM menu_categories mc WHERE mc.location_id = $1)),
-              $5
+              $6
        RETURNING id`,
       [
         locationId,
         input.name,
+        input.description ?? null,
         input.taxRate ?? defaultTaxRate,
         input.sortOrder ?? null,
         input.isActive ?? true,
@@ -362,6 +363,7 @@ export async function updateCategory(
     values.push(value);
   };
   if (input.name !== undefined) set("name", input.name);
+  if (input.description !== undefined) set("description", input.description);
   // Only fields actually present are written, so patching a name can never
   // silently reset a category-specific tax rate back to the default.
   if (input.taxRate !== undefined) set("tax_rate", input.taxRate);
