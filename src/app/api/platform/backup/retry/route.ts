@@ -53,6 +53,9 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
       status: result.status,
       // Diagnostics only: a code, a status class and a stage. No endpoint, no
       // key, no object URL.
+      // The attempt row, so the audit entry points at the exact attempt whose
+      // diagnostics it summarises.
+      runId: result.status === "failed" ? result.diagnostics.runId : null,
       code: result.status === "failed" ? (result.diagnostics.code ?? null) : null,
       providerStatus: result.status === "failed" ? result.diagnostics.providerStatus : null,
       phase: result.status === "failed" ? result.diagnostics.phase : null,

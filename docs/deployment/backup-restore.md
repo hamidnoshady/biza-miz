@@ -287,7 +287,7 @@ States the off-site card can show:
 
 | State | Meaning | What to do |
 |---|---|---|
-| `current` | the newest capture has a confirmed object in the bucket | nothing |
+| `current` | the newest capture has a confirmed object in the bucket | nothing (optionally «تأیید دوباره با هش») |
 | `uploading` | an attempt holds a live lease on another worker | wait; the card names the timeout |
 | `pending` | a retry is scheduled (backoff, or the newest capture's file is gone) | wait, or press «تلاش دوبارهٔ ارسال» |
 | `failed` | a deterministic refusal (403/signature), or the retry ladder is spent | fix the destination or the credentials, then retry |
@@ -302,6 +302,30 @@ failed` / `NetworkError` (what the live 2026-11-07 incident saw) is classified f
 its whole cause chain and treated as transient; a 403, a bad signature or a 400
 fails fast. No signed URL, header, key or passphrase is ever stored — the message
 is built from names and numbers only.
+
+**Two proofs, and how to ask for the stronger one.** Every upload ends with a
+`HEAD` and an exact byte count — cheap, and enough to know the object is there at
+the size we sent. That is `cloud_verify_mode = 'size'`. For an artifact of a few
+hundred megabytes a size match is not a *content* match, so the console and the API
+also offer **«تأیید دوباره با هش»**: the object is downloaded again and its SHA-256
+compared with the artifact on disk (`POST /api/platform/backup/retry` with
+`{"verify":"sha256"}`). It costs one full round trip of the artifact, which is why
+it is a deliberate action and not the default — but it is the only proof that a
+large upload arrived intact, and it is what a restore drill should end with.
+
+**An artifact with no run row still counts.** A file copied in from a USB stick, or
+one that survived a machine rebuild, is a real backup (`listPlatformLocalArtifacts`
+already lists it). When such a file uploads and the provider proves the object, a
+`manual` identity row is written for it with `identityBackfilled: true` in the
+manifest, so the proof has somewhere to live — and the history says plainly that no
+dump ran for that row. Without it the console would report "never off-site" about a
+copy that is demonstrably off-site.
+
+**Every diagnostic carries its attempt id.** `CloudDiagnostics.runId` is the
+`platform_backup_runs` row of the attempt that failed — the same id the console
+shows (shortened) and the retry route writes to the audit log. Quote it in a
+support request: the artifact name is not enough, because the same artifact is
+attempted many times.
 
 **Recovery of a stuck upload.** Every attempt takes a per-artifact advisory lock
 (`lock:backup:platform-cloud:<artifact>`), so the scheduler, a manual click and a
