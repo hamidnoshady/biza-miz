@@ -71,6 +71,14 @@ interface SystemStatus {
     alertLevel: "ok" | "warning" | "error";
     artifacts: number;
     servingEnabled: boolean;
+    /** issue #1296 — the off-site half, shown as its own chip */
+    cloud?: {
+      state: string;
+      currentConfirmed: boolean;
+      latestConfirmedAt: string | null;
+      behindMs: number | null;
+      reachable: boolean;
+    };
   } | null;
   counts?: { businesses: number; platformUsers: number; platformAdmins: number };
 }
@@ -330,6 +338,21 @@ export default function SystemPage() {
             </span>
             <span className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground sm:gap-3">
               <span>{formatPersianNumber(platformBackup.artifacts)} نسخه روی دیسک</span>
+              {platformBackup.cloud ? (
+                <span
+                  className={
+                    platformBackup.cloud.currentConfirmed
+                      ? "text-emerald-700 dark:text-emerald-300"
+                      : "text-red-700 dark:text-red-300"
+                  }
+                >
+                  {platformBackup.cloud.currentConfirmed
+                    ? `بیرون از سرور تأیید شد: ${fmtDate(platformBackup.cloud.latestConfirmedAt)}`
+                    : platformBackup.cloud.reachable
+                      ? "نسخهٔ تازه بیرون از سرور تأیید نشده است"
+                      : "انبار ابری در دسترس نیست"}
+                </span>
+              ) : null}
               {platformBackup.servingEnabled ? <span className="text-amber-700/80 dark:text-amber-300/80">ارسال به سرور دیگر روشن</span> : null}
               <span className="whitespace-nowrap">{fmtDate(platformBackup.ranAt)}</span>
             </span>
