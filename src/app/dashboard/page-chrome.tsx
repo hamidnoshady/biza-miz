@@ -24,6 +24,7 @@ import Link from "next/link";
 import { ArrowUpRightIcon } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { narrowSupportingTextClass } from "./typography";
 import { PAGE_HEADING_ID } from "@/components/navigation/page-heading-id";
 import { cardClass, overlayPanelClass, popoverPanelClass } from "./page-chrome-styles";
 import { TabBar, TabPanel } from "./tab-bar";
@@ -83,7 +84,7 @@ export function PageHeader({
           {title}
         </h1>
         {description ? (
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
+          <p className={cn("mt-2 max-w-3xl text-sm leading-6 text-muted-foreground", narrowSupportingTextClass)}>{description}</p>
         ) : null}
       </div>
       {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
@@ -152,7 +153,7 @@ export function SectionCard({
               // <div> inside a <p> is invalid HTML — the parser hoists it out,
               // the server/client trees disagree and React throws the whole
               // section tree away as a hydration failure.
-              <div className="mt-1 text-xs leading-5 text-muted-foreground">{description}</div>
+              <div className={cn("mt-1 text-xs leading-5 text-muted-foreground", narrowSupportingTextClass)}>{description}</div>
             ) : null}
           </div>
           {actions ? (
@@ -217,7 +218,7 @@ export function DestinationCard({
           ) : null}
         </span>
         {description ? (
-          <span className="mt-1 block text-sm leading-6 text-muted-foreground">{description}</span>
+          <span className={cn("mt-1 block text-sm leading-6 text-muted-foreground", narrowSupportingTextClass)}>{description}</span>
         ) : null}
       </span>
     </Link>
@@ -268,6 +269,7 @@ export function EmptyState({
       <div
         className={cn(
           "rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground",
+          narrowSupportingTextClass,
           className,
         )}
       >
@@ -293,7 +295,7 @@ export function EmptyState({
       ) : null}
       <p className={cn("text-sm font-bold text-foreground", Icon && "mt-4")}>{title}</p>
       {children ? (
-        <p className="mt-2 max-w-72 text-xs leading-6 text-muted-foreground">{children}</p>
+        <p className={cn("mt-2 max-w-72 text-xs leading-6 text-muted-foreground", narrowSupportingTextClass)}>{children}</p>
       ) : null}
       {action ? <div className="mt-4">{action}</div> : null}
     </div>

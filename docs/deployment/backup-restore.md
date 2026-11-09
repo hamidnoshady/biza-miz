@@ -255,6 +255,85 @@ queued, and the database is never dumped twice at once. The same mechanism guard
 whole-platform restores and per-site physical restores, so two console tabs (or
 two Node processes) can never drop and recreate the same database concurrently.
 
+### The off-site copy, and what "protected" means (issue #1296)
+
+A local artifact is not a recovery point until it exists somewhere else. The
+console therefore treats the bucket as a *claim to be checked*, not a request that
+was sent:
+
+* After every upload the object is verified — a `HEAD` for existence plus the
+  exact byte count, and, on request (`sha256` mode, the restore drill and the
+  «تأیید دوباره» path), a full re-download whose hash must match the artifact's
+  own sha256. The provider's `ETag` is never used as a checksum: AWS, Arvan and
+  MinIO disagree about what it hashes. A `200` on the `PUT` alone is **not** proof.
+* The confirmation is written onto the *local* run row (`cloud_verified_key`,
+  `cloud_verified_at`, `cloud_verified_size`, `cloud_verified_sha256`,
+  `cloud_verify_mode`), because that row is the artifact's identity. One capture,
+  at most one confirmed remote copy.
+* Health compares the **newest capture** with what the bucket still lists. A
+  successful upload in September is history: it appears under "historical copies"
+  and can never make the line green while this morning's artifact is local-only.
+  Retention deleting a confirmed object also stops counting it — a confirmation is
+  only worth what the provider will still serve.
+* The console shows three separate cards (whole-system local, whole-system
+  off-site, the separately-managed per-business backup service of #903), because
+  the three have different destinations, different keys and different failures.
+  The MCP tools `get_backup_health` and `get_tenant_backup_service_health` keep the
+  same split; `get_backup_health` returns `platform.local`, `platform.cloud`,
+  `platform.cloudReachable` and keeps the legacy `cloudLastSuccessAt` as
+  "the last upload that ever finished, for any artifact".
+
+States the off-site card can show:
+
+| State | Meaning | What to do |
+|---|---|---|
+| `current` | the newest capture has a confirmed object in the bucket | nothing |
+| `uploading` | an attempt holds a live lease on another worker | wait; the card names the timeout |
+| `pending` | a retry is scheduled (backoff, or the newest capture's file is gone) | wait, or press «تلاش دوبارهٔ ارسال» |
+| `failed` | a deterministic refusal (403/signature), or the retry ladder is spent | fix the destination or the credentials, then retry |
+| `unavailable` | the artifact to protect has no file on disk | restore the file, or take a new capture; retrying the upload cannot help |
+| `no_local_artifact` | nothing has been captured yet | run a backup |
+| `disabled` | no bucket configured | configure one on the settings card |
+
+Failures are recorded as redacted structured diagnostics — stage, HTTP status,
+provider `<Code>` or transport code, attempt number, expected bytes, elapsed time,
+whether the failure was transient, and the next delay. A bare `TypeError: fetch
+failed` / `NetworkError` (what the live 2026-11-07 incident saw) is classified from
+its whole cause chain and treated as transient; a 403, a bad signature or a 400
+fails fast. No signed URL, header, key or passphrase is ever stored — the message
+is built from names and numbers only.
+
+**Recovery of a stuck upload.** Every attempt takes a per-artifact advisory lock
+(`lock:backup:platform-cloud:<artifact>`), so the scheduler, a manual click and a
+second replica cannot upload the same key at once — the loser gets `upload_in_flight`
+and the console shows it as "uploading", not as a failure. The attempt row carries a
+lease (`lease_expires_at`, the transfer's own size-derived timeout plus two
+minutes). A `running` row past its lease is an orphan: the tick closes it as
+`failed` with `lease_expired: … reclaimed for a fresh attempt` and starts a new one,
+preserving the old row as history. There is no permanent suppression — once the
+backoff ladder (8 attempts, 10 min doubling to 6 h) is spent, one slow attempt per
+day continues, and the manual retry always bypasses the wait.
+
+**A file that is gone is not a network failure.** If the newest recorded capture's
+file is missing from disk (retention, a moved volume, a restored machine), it is
+marked once (`local_missing_since`) and the upload is not retried: no retry can
+recreate bytes. It shows as `unavailable`/`pending` with the artifact named, its run
+row and manifest stay as history, and any object it already has in the bucket — and
+any older artifact, local or remote — is left exactly where it is.
+
+**Alerting.** `platform_backup_alert` turns red when the newest capture has no
+confirmed off-site copy past the RPO window (two schedule intervals, at least six
+hours) or when an upload is failing; a red line means "the thing you would restore
+from is on one disk right now". It is the same `alert` the system page and the MCP
+health tool read.
+
+**Deliberately not done:** no multipart/resume. The artifact is uploaded as a single
+streamed, signed `PUT` of a local file whose sha256 is computed before the request,
+so a truncated body cannot even be signed and every retry reopens the file from
+byte zero. Nothing observed in the incident needed chunking, and the failure modes
+that were observed — an unclassified transport error and an unbounded `running`
+row — are fixed by classification and leases.
+
 ### Giving another server the address
 
 Two switches and a key, all in «دسترسی سرور دیگر به این نسخه‌ها»:

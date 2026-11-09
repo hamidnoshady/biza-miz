@@ -531,6 +531,7 @@ async function loadAccountForWrite(
     isDefault: false,
     description: null,
     notes: null,
+    bankCode: null,
     bankName: null,
     bankBranchName: null,
     accountNumber: null,

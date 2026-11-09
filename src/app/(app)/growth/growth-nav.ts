@@ -57,6 +57,7 @@ export const GROWTH_NAV_ITEMS: readonly GrowthNavItem[] = [
   },
   { key: "marketing-targets", label: "مقصدهای بازاریابی", description: "محل‌های هدف و ارتباط با اشخاص", icon: UsersIcon },
   { key: "marketing-assignments", label: "ماموریت‌های بازاریابی", description: "وظایف بازاریابان", icon: UsersIcon },
+  { key: "my-marketing-assignments", label: "ماموریت‌های من", description: "وظایف بازاریابی منتسب به من", icon: UsersIcon },
   { key: "marketing-touchpoints", label: "تعاملات بازاریابی", description: "ثبت تعاملات مرتبط با سرنخ‌های CRM", icon: MessageCircleIcon },
   {
     key: "campaigns",

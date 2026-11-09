@@ -108,6 +108,31 @@ describe("AccountingAppNav — «فضای کار حسابداری» is one ordin
     expect(icon?.getAttribute("class")).toContain("size-5");
   });
 
+  it("shows «عملیات حسابداری» with a bank-register link in the shared sidebar style", () => {
+    renderNav();
+    const header = screen.getByText("عملیات حسابداری");
+    expect(header.tagName).toBe("P");
+    const bank = screen.getByRole("link", { name: "حساب بانکی" });
+    expect(bank.getAttribute("href")).toBe("/accounting/financial-accounts?kind=bank");
+    expect(bank.closest("[data-slot='sidebar-menu-button']")?.className).toContain("rounded-xl");
+    expect(bank.querySelector("svg")?.getAttribute("class")).toContain("size-5");
+  });
+
+  it("selects only the bank row on its register, and keeps permissions and mobile navigation", () => {
+    const onNavigate = vi.fn();
+    renderNav({ pathname: "/accounting/financial-accounts", onNavigate });
+    const bank = screen.getByRole("link", { name: "حساب بانکی" });
+    const workspace = screen.getByRole("link", { name: "فضای کار حسابداری" });
+    expect(bank.getAttribute("aria-current")).toBe("page");
+    expect(workspace.getAttribute("aria-current")).toBeNull();
+    fireEvent.click(bank);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    cleanup();
+    renderNav({ role: "cashier" });
+    expect(screen.queryByText("عملیات حسابداری")).toBeNull();
+    expect(screen.queryByRole("link", { name: "حساب بانکی" })).toBeNull();
+  });
+
   it("has no disclosure button, chevron or nested sidebar panel", () => {
     const { container } = renderNav();
     // Nothing in the menu is a button at all: every row is a real link. The

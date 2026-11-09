@@ -131,6 +131,13 @@ describe("dependencies", () => {
     }
   });
 
+  it("keeps own-marketer access separate from team-wide and CRM permissions", () => {
+    const implied = impliedPermissions([PERMISSIONS.marketingAssignmentsSelf]);
+    for (const key of [PERMISSIONS.marketingAssignmentsView, PERMISSIONS.marketingAssignmentsManage, PERMISSIONS.crmView, PERMISSIONS.crmManage, PERMISSIONS.partiesView, PERMISSIONS.commissionView]) {
+      expect(implied).not.toContain(key);
+    }
+  });
+
   it("resolves a chain transitively", () => {
     // amend_closed → void, and discount → create → menu.view.
     expect(impliedPermissions([PERMISSIONS.cmsPublish])).toEqual(

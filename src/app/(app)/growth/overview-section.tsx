@@ -61,6 +61,7 @@ import {
   SectionCardSkeleton,
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
+import { supportingTextClass } from "@/app/dashboard/typography";
 import { api } from "@/app/dashboard/ui";
 import type { GrowthSectionKey } from "./growth-routes";
 
@@ -255,7 +256,7 @@ export function OverviewSection({
                     </StatusBadge>
                     <span className="min-w-0 break-words">{recommendation.title}</span>
                   </p>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">{recommendation.detail}</p>
+                  <p className={`mt-1 text-muted-foreground ${supportingTextClass}`}>{recommendation.detail}</p>
                 </div>
                 <Button
                   variant="outline"

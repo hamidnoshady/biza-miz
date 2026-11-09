@@ -22,6 +22,8 @@ export interface HistoricalInvoiceRow {
   invoiceNumber?: string;
   invoiceDate?: string;
   externalCustomerCode?: string;
+  sourceCustomerName?: string;
+  sourceCustomerPhone?: string;
   sourceBranch?: string;
   currency?: string;
   total?: string;
@@ -30,6 +32,8 @@ export interface HistoricalInvoiceRow {
   invoiceDiscount?: string;
   invoiceTax?: string;
   status?: string;
+  paymentDetails?: string;
+  reference?: string;
   lineName?: string;
   lineSku?: string;
   lineBarcode?: string;
@@ -71,7 +75,7 @@ export interface HistoricalPreviewDocument {
   warnings: string[];
 }
 
-const HEADER_FIELDS = ["invoiceNumber", "invoiceDate", "externalCustomerCode", "sourceBranch", "currency", "total", "paid", "balance", "invoiceDiscount", "invoiceTax", "status"] as const;
+const HEADER_FIELDS = ["invoiceNumber", "invoiceDate", "externalCustomerCode", "sourceCustomerName", "sourceCustomerPhone", "sourceBranch", "currency", "total", "paid", "balance", "invoiceDiscount", "invoiceTax", "status", "paymentDetails", "reference"] as const;
 const LINE_FIELDS = ["lineName", "lineSku", "lineBarcode", "quantity", "unitPrice", "lineDiscount", "lineTax"] as const;
 const text = (value: string | undefined) => (value ?? "").trim();
 

@@ -180,6 +180,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/growth/marketers", "بازاریابان"],
     ["/growth/marketing-targets", "مقصدهای بازاریابی"],
     ["/growth/marketing-assignments", "ماموریت‌های بازاریابی"],
+    ["/growth/my-marketing-assignments", "ماموریت‌های بازاریابی من"],
     ["/growth/marketing-touchpoints", "تعامل‌های بازاریابی"],
     ["/growth/campaigns", "کمپین‌ها"],
     ["/growth/messaging", "پیام‌رسانی"],

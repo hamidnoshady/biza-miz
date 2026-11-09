@@ -45,15 +45,17 @@ export const GET = withTenantScope(async (request: NextRequest) => {
      * would refuse.
      */
     const access = await branchAccessForSession(session);
+    const canViewSensitive = await canViewSensitiveFinancialDetails(session);
     const result = await listFinancialAccounts(session.businessId, {
       kind: kind ? (kind as FinancialAccountKind) : undefined,
       status: status ? (status as "active" | "archived" | "all") : undefined,
       locationId: search.get("locationId"),
       defaultOnly: search.get("defaultOnly") === "1",
       q: search.get("q") ?? undefined,
+      searchSensitiveIdentifiers: canViewSensitive,
       restrictToLocationIds: access.allowedLocationIds,
     });
-    return NextResponse.json(withListVisibility(await canViewSensitiveFinancialDetails(session), result));
+    return NextResponse.json(withListVisibility(canViewSensitive, result));
   } catch (err) {
     return financialErrorResponse(err);
   }
@@ -69,6 +71,7 @@ interface FinancialAccountBody {
   isDefault?: unknown;
   description?: unknown;
   notes?: unknown;
+  bankCode?: unknown;
   bankName?: unknown;
   bankBranchName?: unknown;
   accountNumber?: unknown;

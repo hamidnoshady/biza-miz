@@ -22,8 +22,10 @@
  * only way to clear it.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   Check,
+  CloudUpload,
   Copy,
   Database,
   Download,
@@ -59,6 +61,40 @@ import {
   useCan,
 } from "../ui";
 
+/**
+ * The cloud half's answer to "is the newest capture off-site?" (issue #1296).
+ * Mirrors `CloudProtection` in `src/lib/platform-backup-cloud.ts` — a type of its
+ * own here because that module lives in `node:crypto` territory and a client
+ * component may not import it.
+ */
+interface CloudProtection {
+  state:
+    | "disabled"
+    | "no_local_artifact"
+    | "uploading"
+    | "pending"
+    | "failed"
+    | "unavailable"
+    | "current";
+  currentArtifact: string | null;
+  currentCapturedAt: string | null;
+  currentSizeBytes: number | null;
+  currentConfirmed: boolean;
+  latestConfirmedArtifact: string | null;
+  latestConfirmedAt: string | null;
+  latestConfirmedSizeBytes: number | null;
+  latestVerifyMode: "size" | "sha256" | null;
+  behindMs: number | null;
+  historical: { artifact: string; sizeBytes: number | null; capturedAt: string | null }[];
+  lastFailure: { at: string; message: string | null } | null;
+  localArtifactMissing: boolean;
+  missingArtifact: string | null;
+  nextAttemptAt: string | null;
+  attempts: number;
+  retryExhausted: boolean;
+  rpoBreached: boolean;
+}
+
 interface Health {
   enabled: boolean;
   cloudEnabled: boolean;
@@ -70,9 +106,14 @@ interface Health {
   localLastError: string | null;
   cloudLastSuccessAt: string | null;
   cloudLastError: string | null;
+  /** issue #1296 — the newest local run, whatever its status */
+  localAttempt?: { status: "running" | "success" | "failed"; at: string; error: string | null } | null;
   alert: BackupAlert;
   artifactsOnDisk: number;
   newestArtifact: string | null;
+  /** issue #1296 — absent only when talking to a server older than the fix */
+  cloud?: CloudProtection;
+  cloudReachable?: boolean;
 }
 
 interface Config {
@@ -362,6 +403,46 @@ export function BackupManager() {
     );
   }
 
+  /**
+   * «تلاش دوبارهٔ ارسال» (issue #1296) — asks the server to upload the newest
+   * local artifact now, bypassing the scheduler's backoff. The server still takes
+   * its per-artifact lock, so a double click cannot start two uploads; it answers
+   * `upload_in_flight` instead, which is shown as the state rather than as a
+   * failure.
+   */
+  async function retryCloud() {
+    setBusy("retry-cloud");
+    setNote(null);
+    const res = await api<{
+      result?: {
+        status: string;
+        error?: string;
+        retryable?: boolean;
+        diagnostics?: { code?: string | null; providerStatus?: number | null; phase?: string | null };
+      };
+    }>("/api/platform/backup/retry", { method: "POST" });
+    await load();
+    setBusy(null);
+    const result = res.data?.result;
+    if (res.ok && result?.status === "ok") {
+      setNote("نسخهٔ تازه در انبار تأیید شد.");
+      return;
+    }
+    if (result?.status === "busy") {
+      setNote("یک ارسال دیگر همین حالا در حال اجراست؛ نتیجه در کارت بالا دیده می‌شود.");
+      return;
+    }
+    const diag = result?.diagnostics;
+    const tail = diag
+      ? ` (کد ${diag.code ?? "نامشخص"}${diag.providerStatus ? ` · HTTP ${toPersianDigits(diag.providerStatus)}` : ""}${diag.phase ? ` · مرحله ${diag.phase}` : ""})`
+      : "";
+    setNote(
+      result?.retryable
+        ? `ارسال ناموفق بود؛ خطا موقتی تشخیص داده شد و دوباره تلاش می‌شود${tail}`
+        : `ارسال ناموفق بود و تکرار خودکار کمکی نمی‌کند؛ مقصد را بررسی کنید${tail}`,
+    );
+  }
+
   async function saveConfig(patch: Record<string, unknown>, key: string) {
     setBusy(key);
     const res = await api("/api/platform/backup/config", { method: "PUT", body: JSON.stringify(patch) });
@@ -413,7 +494,13 @@ export function BackupManager() {
         </Card>
       ) : (
         <>
-          <HealthCard health={health} config={config} />
+          <HealthCard
+            health={health}
+            config={config}
+            canRun={canRun}
+            busy={busy}
+            onRetryCloud={() => void retryCloud()}
+          />
 
           {canConfigure ? (
             <ConfigCard
@@ -467,56 +554,181 @@ export function BackupManager() {
 // ۱ — health
 // ---------------------------------------------------------------------------
 
-function HealthCard({ health, config }: { health: Health; config: Config }) {
+/**
+ * The health row, in the order the issue asks for: (a) whole-platform local,
+ * (b) whole-platform cloud, (c) the separately-managed tenant backups, then the
+ * schedule and the peer-serving line.
+ *
+ * Cards (a) and (b) are separate on purpose (issue #1296 P1). They used to be
+ * one line whose cloud half meant "some upload succeeded once", so a 2.84 MB
+ * September object kept a green console while this morning's 319 MB artifact
+ * was sitting on one disk. The cloud card now answers a narrower question —
+ * does the *newest* capture have a confirmed copy in the bucket — and shows the
+ * historical copies underneath, labelled as historical.
+ */
+function HealthCard({
+  health,
+  config,
+  canRun,
+  busy,
+  onRetryCloud,
+}: {
+  health: Health;
+  config: Config;
+  canRun: boolean;
+  busy: string | null;
+  onRetryCloud: () => void;
+}) {
   const level = health.alert.level;
-  const tone = level === "error" ? "bad" : level === "warning" ? "warn" : "ok";
+  // Issue #1296 — the cards each carry *their own* verdict. The page-level alert
+  // can be red because the cloud half is (that is the point of the override),
+  // and it must not paint the local card red when the local capture is fine.
+  const localFailed = health.localAttempt?.status === "failed" || Boolean(health.localLastError);
+  const localTone = localFailed ? "bad" : level === "ok" ? "ok" : "warn";
+  const cloud = health.cloud;
+  const cloudTone =
+    cloud?.state === "current" ? "ok" : cloud?.state === "disabled" || cloud?.state === "no_local_artifact" ? "neutral" : cloud?.state === "uploading" ? "warn" : "bad";
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="space-y-3">
+      {/*
+        The retry button appears only where pressing it can change something
+        (issue #1296 P1): not while an upload is already in flight (that would
+        just answer `upload_in_flight`), and not when the artifact's file is gone
+        — no retry recreates bytes that are not on disk. Both cases get their own
+        sentence in `cloudHint` instead.
+      */}
+      {cloud &&
+      canRun &&
+      cloud.state !== "current" &&
+      cloud.state !== "disabled" &&
+      cloud.state !== "uploading" &&
+      cloud.state !== "unavailable" ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm">
+          <span>
+            نسخهٔ تازهٔ این سرور بیرون از آن تأیید نشده است. تلاش دوباره همین حالا انجام می‌شود و
+            خطای فنی در تاریخچه می‌ماند.
+          </span>
+          <Button onClick={onRetryCloud} disabled={busy !== null} variant="ghost">
+            {busy === "retry-cloud" ? (
+              <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <RefreshCw className="me-1.5 h-4 w-4" />
+            )}
+            تلاش دوبارهٔ ارسال
+          </Button>
+        </div>
+      ) : null}
+      {cloud && (cloud.state === "unavailable" || cloud.state === "uploading") ? (
+        <div className="rounded-xl border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          {cloud.state === "uploading"
+            ? "ارسال این نسخه همین حالا در جریان است؛ تا پایان آن تلاش دوباره سودی ندارد."
+            : cloudHint(cloud)}
+        </div>
+      ) : null}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <StatCard
-        label="وضعیت پشتیبان‌گیری کل سیستم"
-        value={ALERT_LABELS[health.alert.reason] ?? ALERT_LABELS[level] ?? "—"}
-        tone={tone}
+        label="پشتیبان کامل سیستم — روی همین سرور"
+        value={
+          localFailed
+            ? ALERT_LABELS.local_failed
+            : health.alert.level === "warning" && !health.enabled
+              ? ALERT_LABELS.disabled
+              : ALERT_LABELS.ok
+        }
+        tone={localTone}
         hint={
-          level === "ok"
-            ? `آخرین نسخه: ${fmtDate(health.localLastSuccessAt)}`
-            : health.localLastError
-              ? health.localLastError.slice(0, 120)
-              : undefined
+          localFailed
+            ? (health.localAttempt?.error ?? health.localLastError ?? "آخرین اجرا ناموفق بود").slice(0, 120)
+            : `آخرین نسخه: ${fmtDate(health.localLastSuccessAt)}`
         }
         icon={<Database className="h-4 w-4" />}
       />
       <StatCard
-        label="زمان‌بندی"
-        value={health.enabled ? `هر ${toPersianDigits(health.intervalHours)} ساعت` : "غیرفعال"}
-        tone={health.enabled ? "neutral" : "warn"}
-        hint={
-          health.enabled
-            ? `ساعت ${toPersianDigits(health.anchorTime)} — ${health.timezone} · نگهداری ${toPersianDigits(
-                config.localRetention,
-              )} نسخه`
-            : "برای فعال‌سازی به بخش تنظیمات بروید"
-        }
+        label="پشتیبان کامل سیستم — نسخهٔ بیرون از سرور"
+        value={cloud ? CLOUD_STATE_LABELS[cloud.state] ?? "—" : "نامشخص"}
+        tone={cloudTone}
+        hint={cloudHint(cloud)}
+        icon={<CloudUpload className="h-4 w-4" />}
+      />
+      <StatCard
+        label="پشتیبان کسب‌وکارها (سرویس جدا)"
+        value="مدیریت مستقل"
+        tone="neutral"
+        hint="مسیر و سلامت مستقل خود را دارد؛ با پشتیبان کامل سیستم یکی نیست"
+        icon={<ShieldAlert className="h-4 w-4" />}
       />
       <StatCard
         label="نسخه‌های قابل بازیابی روی دیسک"
         value={toPersianDigits(health.artifactsOnDisk)}
-        hint={health.newestArtifact ? `تازه‌ترین: ${health.newestArtifact}` : "هنوز نسخه‌ای روی دیسک نیست"}
-      />
-      <StatCard
-        label="ارسال به سرور دیگر"
-        value={health.servingEnabled ? "فعال" : "خاموش"}
-        tone={health.servingEnabled ? "warn" : "neutral"}
         hint={
-          health.cloudEnabled
-            ? "فضای ابری هم روشن است"
-            : health.servingEnabled
-              ? "هر سروری که کلید درست را داشته باشد می‌تواند بردارد"
-              : "تا روشن نشود، هیچ آدرسی پاسخ نمی‌دهد"
+          health.newestArtifact
+            ? `تازه‌ترین: ${health.newestArtifact}`
+            : "هنوز نسخه‌ای روی دیسک نیست"
         }
-        icon={<ShieldAlert className="h-4 w-4" />}
       />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        پشتیبان کسب‌وکارها سرویس مستقل خود را دارد:{" "}
+        <Link href="/platform/backup/service" className="text-sky-700 hover:underline dark:text-sky-300">
+          تنظیمات و سلامت نسخهٔ پشتیبان مدیریت‌شدهٔ کسب‌وکارها
+        </Link>{" "}
+        — مقصد و خطاهای آن با ارسال پشتیبان کامل سیستم یکی نیست.
+      </p>
     </div>
   );
+}
+
+const CLOUD_STATE_LABELS: Record<string, string> = {
+  current: "نسخهٔ روز بیرون از سرور تأیید شد",
+  uploading: "در حال ارسال",
+  pending: "در انتظار ارسال",
+  failed: "ارسال ناموفق",
+  unavailable: "فایل محلی در دسترس نیست",
+  no_local_artifact: "نسخه‌ای برای ارسال نیست",
+  disabled: "ارسال ابری خاموش است",
+};
+
+/**
+ * The proof the issue asks for, in one sentence: what the bucket holds for the
+ * current artifact, how far behind it is, and — when it is behind — that the
+ * older object is historical rather than "the latest protected copy".
+ */
+function cloudHint(cloud?: CloudProtection): string {
+  if (!cloud) return "وضعیت نسخهٔ بیرون از سرور گزارش نشده است (سرور قدیمی‌تر).";
+  const parts: string[] = [];
+  if (cloud.state === "disabled") return "برای فعال‌سازی، مقصد ابری را در تنظیمات روشن کنید.";
+  if (cloud.state === "no_local_artifact") return "هنوز نسخهٔ محلی برای ارسال وجود ندارد.";
+  if (cloud.currentConfirmed) {
+    parts.push(`تأیید در انبار: ${fmtDate(cloud.latestConfirmedAt)}`);
+    if (cloud.currentSizeBytes !== null) parts.push(`حجم ${bytes(cloud.currentSizeBytes)}`);
+    if (cloud.latestVerifyMode === "sha256") parts.push("هش کامل بررسی شد");
+    return parts.join(" · ");
+  }
+  if (cloud.localArtifactMissing && cloud.missingArtifact) {
+    return `فایل ${cloud.missingArtifact} روی دیسک نیست؛ ارسال دوباره آن را برنمی‌گرداند.`;
+  }
+  parts.push("نسخهٔ تازه هنوز بیرون از سرور تأیید نشده");
+  if (cloud.latestConfirmedAt) {
+    parts.push(`آخرین تأیید: ${fmtDate(cloud.latestConfirmedAt)}`);
+    const behind = describeBehindMs(cloud.behindMs);
+    if (behind) parts.push(`${behind} عقب‌تر`);
+    if (cloud.latestConfirmedSizeBytes !== null) parts.push(`نسخهٔ قدیمی ${bytes(cloud.latestConfirmedSizeBytes)}`);
+  } else {
+    parts.push("هیچ نسخه‌ای تأیید نشده");
+  }
+  if (cloud.attempts > 0) parts.push(`تلاش‌های ناموفق: ${toPersianDigits(cloud.attempts)}`);
+  if (cloud.nextAttemptAt) parts.push(`تلاش بعدی: ${fmtDate(cloud.nextAttemptAt)}`);
+  return parts.join(" · ");
+}
+
+/** «۲ روز» / «۵ ساعت» — the same scale whether it is shown in a card or a row. */
+function describeBehindMs(behindMs: number | null): string | null {
+  if (behindMs === null || !Number.isFinite(behindMs)) return null;
+  const minutes = Math.round(behindMs / 60_000);
+  if (minutes < 120) return `${toPersianDigits(Math.max(0, minutes))} دقیقه`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${toPersianDigits(hours)} ساعت`;
+  return `${toPersianDigits(Math.round(hours / 24))} روز`;
 }
 
 // ---------------------------------------------------------------------------

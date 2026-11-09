@@ -486,6 +486,7 @@ export const PERMISSIONS = {
   marketingTargetsManage: "marketing_targets.manage",
   marketingAssignmentsView: "marketing_assignments.view",
   marketingAssignmentsManage: "marketing_assignments.manage",
+  marketingAssignmentsSelf: "marketing_assignments.self",
   marketingAttributionView: "marketing_attribution.view",
   marketingAttributionManage: "marketing_attribution.manage",
   campaignsView: "campaigns.view",
@@ -696,7 +697,7 @@ const {
   websiteView, websiteManage, websiteSettingsManage,
   cmsView, cmsContentManage, cmsPublish, cmsConfigure,
   woocommerceView, woocommerceManage, woocommerceSync, woocommerceConfigure,
-  growthView, marketersView, marketersManage, marketingTargetsView, marketingTargetsManage, marketingAssignmentsView, marketingAssignmentsManage, marketingAttributionView, marketingAttributionManage, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
+  growthView, marketersView, marketersManage, marketingTargetsView, marketingTargetsManage, marketingAssignmentsView, marketingAssignmentsManage, marketingAssignmentsSelf, marketingAttributionView, marketingAttributionManage, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
   storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
   commissionView, commissionManage, commissionCalculate, commissionApprove, commissionPayout, commissionReverse,
   marketingConfigure, torobView, torobManage, torobConfigure,
@@ -782,7 +783,7 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // Issue #764 split the old loyalty.manage / growth.view into graded
     // capabilities; the manager keeps every one of them, so nothing they did
     // before is lost.
-    growthView, marketersView, marketersManage, marketingTargetsView, marketingTargetsManage, marketingAssignmentsView, marketingAssignmentsManage, marketingAttributionView, marketingAttributionManage, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
+    growthView, marketersView, marketersManage, marketingTargetsView, marketingTargetsManage, marketingAssignmentsView, marketingAssignmentsManage, marketingAssignmentsSelf, marketingAttributionView, marketingAttributionManage, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
     storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
     commissionView, commissionManage,
     // #869: a manager may build a settlement run, but approving and paying it

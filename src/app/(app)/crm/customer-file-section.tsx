@@ -53,6 +53,7 @@ import { api, ErrorBox, errorMessage, Field, inputClass } from "@/app/dashboard/
 import { crmCustomerHref, crmSectionHref } from "./crm-routes";
 import { CustomerRelationshipsCard } from "./customer-relationships-card";
 import { CustomerOrganizationCard } from "./customer-organization-card";
+import { HistoricalInvoiceHistory } from "@/components/data-transfer/historical-invoice-history";
 import { CrmCardHeading } from "./crm-card-heading";
 
 interface Note {
@@ -514,6 +515,8 @@ export function CustomerFileSection({ customerId, permissions }: { customerId: s
         // A merged file is a tombstone; its links belong to the winner.
         canManage={(permissionSet.has("crm.manage") || permissionSet.has("parties.manage")) && !isMerged}
       />
+
+      <HistoricalInvoiceHistory customerId={customerId} />
 
       <SectionCard
         title="تاریخچهٔ ارتباط"

@@ -36,6 +36,7 @@ import {
   ClockIcon,
 } from "lucide-react";
 import { api } from "@/app/dashboard/ui";
+import { supportingTextClass } from "@/app/dashboard/typography";
 import { cardClass, EmptyState, SectionCard, SectionCardSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -133,7 +134,9 @@ function SyncRow({ label, value }: { label: string; value: string | null }) {
   return (
     <div className="flex items-center justify-between gap-3 py-1.5 text-xs">
       <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium text-foreground/80">{value ? formatJalali(value, { withTime: true }) : "—"}</span>
+      <bdi dir="ltr" className="text-end font-medium tabular-nums text-foreground/80">
+        {value ? formatJalali(value, { withTime: true }) : "—"}
+      </bdi>
     </div>
   );
 }
@@ -377,9 +380,9 @@ export function WpOverviewSection() {
           <p
             role={visibleNotice.tone === "danger" ? "alert" : "status"}
             aria-live="polite"
-            className={`mt-3 flex flex-wrap items-start justify-between gap-2 rounded-lg px-3 py-2 text-xs ${NOTICE_CLASS[visibleNotice.tone]}`}
+            className={`mt-3 flex flex-wrap items-start justify-between gap-2 rounded-lg px-3 py-2 ${supportingTextClass} ${NOTICE_CLASS[visibleNotice.tone]}`}
           >
-            <span>{visibleNotice.message}</span>
+            <span className="min-w-0">{visibleNotice.message}</span>
             {visibleNotice.retryKind && syncAvailability(selected, can, visibleNotice.retryKind).enabled ? (
               <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void runSync(visibleNotice.retryKind!)}>
                 همگام‌سازی {SYNC_LABELS[visibleNotice.retryKind]} به‌تنهایی
@@ -394,9 +397,9 @@ export function WpOverviewSection() {
           </p>
         ) : null}
         {health?.explanation ? (
-          <p className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:bg-amber-500/10 dark:text-amber-200">
+          <p className={`mt-3 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-amber-900 dark:bg-amber-500/10 dark:text-amber-200 ${supportingTextClass}`}>
             <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
-            <span>
+            <span className="min-w-0">
               {health.explanation}{" "}
               <Link className="underline underline-offset-2" href="/settings/connections?tab=woocommerce">
                 تنظیمات اتصال
@@ -409,9 +412,9 @@ export function WpOverviewSection() {
           </p>
         ) : null}
         {selected?.lastError ? (
-          <p className="mt-3 flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-500/10 dark:text-red-300">
+          <p className={`mt-3 flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2 text-red-700 dark:bg-red-500/10 dark:text-red-300 ${supportingTextClass}`}>
             <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
-            آخرین خطا: {selected.lastError}
+            <span className="min-w-0">آخرین خطا: <bdi>{selected.lastError}</bdi></span>
           </p>
         ) : null}
         <PluginWaitNote connections={connections} selectedId={selectedId} />
@@ -504,7 +507,7 @@ function SyncLimits({ selected, can }: { selected: WpManagerConnection; can: (ab
   // Four identical reasons (no permission, paused) collapse to one sentence.
   const unique = Array.from(new Set(reasons.map((item) => item.availability.reason)));
   return (
-    <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground" aria-label="محدودیت‌های همگام‌سازی">
+    <ul className={`mt-2 space-y-0.5 text-muted-foreground ${supportingTextClass}`} aria-label="محدودیت‌های همگام‌سازی">
       {unique.map((reason) => (
         <li key={reason}>
           {reasons.length < 4 || unique.length > 1

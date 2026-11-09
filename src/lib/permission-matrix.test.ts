@@ -82,7 +82,7 @@ describe("built-in role presets", () => {
       "loyalty.manage", "loyalty.redeem", "loyalty.view",
       "marketers.manage", "marketers.view",
       "marketing.configure",
-      "marketing_assignments.manage", "marketing_assignments.view",
+      "marketing_assignments.manage", "marketing_assignments.self", "marketing_assignments.view",
       "marketing_attribution.manage", "marketing_attribution.view",
       "marketing_targets.manage", "marketing_targets.view",
       "media.manage", "media.view",

@@ -11,7 +11,7 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { TabBar, TabPanel } from "./page-chrome";
+import { EmptyState, PageHeader, SectionCard, TabBar, TabPanel } from "./page-chrome";
 
 afterEach(() => {
   cleanup();
@@ -97,5 +97,35 @@ describe("TabBar / TabPanel", () => {
     tabs = screen.getAllByRole("tab");
     fireEvent.keyDown(tabs[2], { key: "Home" });
     expect(onChange).toHaveBeenLastCalledWith("a");
+  });
+});
+
+describe("Persian supporting text in shared dashboard components", () => {
+  it("keeps the desktop type scale and improves supporting text at narrow widths", () => {
+    const pageDescription = "نمای کلی فروش و موجودی کسب‌وکار را در این صفحه ببینید.";
+    const cardDescription = "برای ادامه، حساب بانکی و شیوهٔ پرداخت را انتخاب کنید.";
+    const emptyDescription = "برای دیدن نتیجه، بازهٔ زمانی بزرگ‌تری انتخاب کنید.";
+
+    render(
+      <main lang="fa" dir="rtl">
+        <PageHeader title="گزارش‌ها" description={pageDescription} />
+        <SectionCard title="تنظیمات پرداخت" description={cardDescription} />
+        <EmptyState title="نتیجه‌ای پیدا نشد">{emptyDescription}</EmptyState>
+      </main>,
+    );
+
+    for (const [copy, desktopSize, desktopLeading] of [
+      [pageDescription, "text-sm", "leading-6"],
+      [cardDescription, "text-xs", "leading-5"],
+      [emptyDescription, "text-xs", "leading-6"],
+    ]) {
+      const classes = screen.getByText(copy).classList;
+      expect(classes).toContain(desktopSize);
+      expect(classes).toContain(desktopLeading);
+      expect(classes).toContain("max-sm:text-sm");
+      expect(classes).toContain("max-sm:leading-relaxed");
+      expect(classes).toContain("max-sm:wrap-anywhere");
+      expect(classes).not.toContain("truncate");
+    }
   });
 });

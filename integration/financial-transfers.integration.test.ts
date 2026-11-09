@@ -470,6 +470,52 @@ describe("§2 GL eligibility", () => {
   });
 });
 
+describe("Iranian bank registration", () => {
+  it("persists the chosen bank and limits identifier lookup to authorized callers", async () => {
+    const { account } = await accountsService.createFinancialAccount({
+      businessId: biz.id,
+      actorId: user.id,
+      locationId: null,
+      input: {
+        kind: "bank",
+        name: "Operating account",
+        glAccountId: gl.bank,
+        bankCode: "mellat",
+        cardNumber: "۶۰۳۷ ۹۹۱۲ ۳۴۵۶ ۷۸۹۳",
+      },
+    });
+    expect(account).toMatchObject({
+      bankCode: "mellat",
+      bankName: "بانک ملت",
+      cardNumber: "6037991234567893",
+      balance: "0",
+    });
+    const q = "6037991234567893";
+    expect((await accountsService.listFinancialAccounts(biz.id, { q })).accounts).toEqual([]);
+    expect(
+      (await accountsService.listFinancialAccounts(biz.id, { q, searchSensitiveIdentifiers: true })).accounts
+        .map(({ id }) => id),
+    ).toEqual([account.id]);
+  });
+
+  it("keeps existing names and identifiers editable while rejecting an invalid replacement", async () => {
+    const accountId = await registerAccount();
+    await db.query("UPDATE financial_accounts SET bank_name = $2, card_number = $3 WHERE id = $1", [
+      accountId, "بانک قدیمی", "6037991234567890",
+    ]);
+    const edit = { businessId: biz.id, actorId: user.id, accountId };
+    const { account } = await accountsService.updateFinancialAccount({
+      ...edit,
+      input: { name: "Renamed", bankName: "بانک قدیمی", cardNumber: "6037991234567890" },
+    });
+    expect(account).toMatchObject({ name: "Renamed", bankCode: null, bankName: "بانک قدیمی", glAccountId: gl.bank });
+    await expect(accountsService.updateFinancialAccount({
+      ...edit,
+      input: { cardNumber: "6037991234567891" },
+    })).rejects.toThrow("card_number_invalid");
+  });
+});
+
 describe("§3 balances come from the ledger", () => {
   it("reads a container's balance as the sum of its GL account's lines", async () => {
     const bank = await registerAccount();

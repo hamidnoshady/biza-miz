@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  describeTransportFailure,
   parseListObjectsXml,
   presignS3Get,
   s3CopyObject,
@@ -275,5 +276,170 @@ describe("virtual-host addressing", () => {
   it("keeps legacy signatures when path-style is explicitly enabled", () => {
     const input = { method: "PUT" as const, key: "media/tenant/file.png", payloadHash: sha256Hex("png"), now };
     expect(signS3Request({ ...config, forcePathStyle: true }, input)).toEqual(signS3Request(config, input));
+  });
+});
+
+describe("transport failure classification (issue #1296)", () => {
+  const tmpRoot = mkdtempSync(path.join(os.tmpdir(), "s3lite-classify-"));
+  const bodyPath = path.join(tmpRoot, "artifact.bin");
+  const body = Buffer.from("encrypted-dump-bytes");
+  writeFileSync(bodyPath, body);
+
+  const cases: Array<{ name: string; error: unknown; code: string | null; label?: string; retryable: boolean }> = [
+    {
+      // The production failure: Undici's own class carries no code; the reason
+      // is one level down. This used to collapse to the label "NetworkError"
+      // and be marked non-retryable, so the bounded retries never ran.
+      name: "bare `TypeError: fetch failed` with a reset underneath",
+      error: new TypeError("fetch failed", { cause: Object.assign(new Error("socket"), { code: "ECONNRESET" }) }),
+      code: "ECONNRESET",
+      retryable: true,
+    },
+    {
+      name: "`fetch failed` with nothing recognised underneath",
+      error: new TypeError("fetch failed", { cause: new Error("other side closed") }),
+      code: null,
+      retryable: true,
+    },
+    {
+      name: "`fetch failed` whose cause is itself a wrapper (TLS)",
+      error: new TypeError("fetch failed", {
+        cause: Object.assign(new Error("tls"), { cause: Object.assign(new Error("x"), { code: "ECONNRESET" }) }),
+      }),
+      code: "ECONNRESET",
+      retryable: true,
+    },
+    {
+      name: "undici headers timeout",
+      error: Object.assign(new Error("timeout"), { code: "UND_ERR_HEADERS_TIMEOUT" }),
+      code: "UND_ERR_HEADERS_TIMEOUT",
+      retryable: true,
+    },
+    {
+      name: "the client's own AbortSignal.timeout firing",
+      error: Object.assign(new Error("aborted"), { name: "AbortError" }),
+      code: "TimeoutError",
+      // a timeout keeps the human label the tenant UI already shows
+      label: "timeout",
+      retryable: true,
+    },
+    {
+      // A typo'd host is deterministic at this layer; the bounded ladder is for
+      // failures that can succeed unchanged, and this one cannot until the
+      // destination is fixed.
+      name: "an unknown hostname",
+      error: Object.assign(new Error("dns"), { code: "ENOTFOUND" }),
+      code: "ENOTFOUND",
+      retryable: false,
+    },
+    {
+      name: "a happy-eyeballs AggregateError",
+      error: new AggregateError([
+        Object.assign(new Error("net"), { code: "ENETUNREACH" }),
+        Object.assign(new Error("other"), { code: "EHOSTUNREACH" }),
+      ]),
+      code: "ENETUNREACH",
+      retryable: true,
+    },
+  ];
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  for (const entry of cases) {
+    it(`classifies ${entry.name} as ${entry.label ?? entry.code ?? "NetworkError"} (retryable=${entry.retryable})`, async () => {
+      const reported: Array<{ attempt: number; code: string | null; retryable: boolean; delayMs: number | null }> = [];
+      const sleeps: number[] = [];
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        throw entry.error;
+      }));
+      await expect(
+        s3PutFile(config, "platform-backups/x.dump.enc", bodyPath, {
+          payloadHash: sha256Hex(body),
+          sizeBytes: body.byteLength,
+          retry: {
+            attempts: 3,
+            baseDelayMs: 10,
+            sleep: async (ms) => {
+              sleeps.push(ms);
+            },
+            random: () => 0.5,
+            onAttemptFailed: (info) => reported.push(info),
+          },
+        }),
+      ).rejects.toMatchObject({
+        name: "S3RequestError",
+        providerCode: entry.label ?? entry.code ?? "NetworkError",
+        status: null,
+        retryable: entry.retryable,
+      });
+      // A retryable failure walks the whole ladder with a growing delay; a
+      // deterministic one stops after the first attempt.
+      expect(reported).toHaveLength(entry.retryable ? 3 : 1);
+      expect(reported.every((info) => info.code === (entry.label ?? entry.code ?? "NetworkError"))).toBe(true);
+      expect(sleeps).toHaveLength(entry.retryable ? 2 : 0);
+      if (entry.retryable) expect(sleeps[1]).toBeGreaterThan(sleeps[0]);
+    });
+  }
+
+  it("describes the chain without leaking a message", () => {
+    const description = describeTransportFailure(
+      new TypeError("fetch failed: connect to https://user:secret@host refused", {
+        cause: Object.assign(new Error("boom"), { code: "ECONNREFUSED" }),
+      }),
+    );
+    expect(description).toEqual({ code: "ECONNREFUSED", name: "TypeError", depth: 2 });
+    expect(JSON.stringify(description)).not.toContain("secret");
+  });
+
+  it("fails fast on a deterministic provider rejection while retrying a 503", async () => {
+    const forbidden = vi.fn(async () =>
+      new Response("<Error><Code>SignatureDoesNotMatch</Code></Error>", { status: 403 }),
+    );
+    vi.stubGlobal("fetch", forbidden);
+    await expect(
+      s3PutFile(config, "platform-backups/x.dump.enc", bodyPath, {
+        payloadHash: sha256Hex(body),
+        sizeBytes: body.byteLength,
+        retry: { attempts: 4, sleep: async () => {} },
+      }),
+    ).rejects.toMatchObject({ status: 403, providerCode: "SignatureDoesNotMatch", retryable: false });
+    expect(forbidden).toHaveBeenCalledTimes(1);
+
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      if (calls < 3) return new Response("<Error><Code>SlowDown</Code></Error>", { status: 503 });
+      return new Response("", { status: 200 });
+    }));
+    await expect(
+      s3PutFile(config, "platform-backups/x.dump.enc", bodyPath, {
+        payloadHash: sha256Hex(body),
+        sizeBytes: body.byteLength,
+        retry: { attempts: 4, sleep: async () => {} },
+      }),
+    ).resolves.toBeUndefined();
+    expect(calls).toBe(3);
+  });
+
+  it("reopens the file for every attempt instead of re-sending a consumed stream", async () => {
+    const seen: number[] = [];
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      const bodyInit = init?.body as unknown as { getReader?: () => unknown } | undefined;
+      // The body must be a fresh stream each time, not a spent one.
+      expect(typeof bodyInit?.getReader).toBe("function");
+      if (calls === 1) throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
+      seen.push(calls);
+      return new Response("", { status: 200 });
+    }));
+    await s3PutFile(config, "platform-backups/x.dump.enc", bodyPath, {
+      payloadHash: sha256Hex(body),
+      sizeBytes: body.byteLength,
+      retry: { attempts: 2, sleep: async () => {} },
+    });
+    expect(seen).toEqual([2]);
   });
 });

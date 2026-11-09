@@ -64,7 +64,8 @@ export const FINANCIAL_ACCOUNT_ERROR_MESSAGES: Record<string, string> = {
   cardNumber_invalid: "شمارهٔ کارت باید ۱۶ رقم باشد.",
   cardNumber_not_allowed_for_kind: "برای این نوع حساب، شمارهٔ کارت معنا ندارد.",
   iban_too_long: "شبا بیش از حد طولانی است.",
-  iban_invalid: "شبا باید با IR شروع شود و ۲۴ رقم داشته باشد.",
+  iban_invalid: "شمارهٔ شبا معتبر نیست. پیشوند IR و ۲۴ رقم شبا را بررسی کنید.",
+  invalid_bank_code: "بانک را از فهرست انتخاب کنید یا نام آن را دستی وارد کنید.",
   iban_not_allowed_for_kind: "برای این نوع حساب، شبا معنا ندارد.",
   accountHolder_too_long: "نام صاحب حساب بیش از حد طولانی است.",
   accountHolder_not_allowed_for_kind: "برای این نوع حساب، نام صاحب حساب معنا ندارد.",
@@ -138,7 +139,7 @@ export const FINANCIAL_ACCOUNT_ERROR_MESSAGES: Record<string, string> = {
   // --- codes the service raises directly (constraints, guards, races) -----
   // Each of these is a real refusal the API returns, so each has to have words
   // here rather than surfacing as the generic «خطای غیرمنتظره».
-  card_number_invalid: "شمارهٔ کارت معتبر نیست؛ ۱۶ رقم کارت را بدون خط تیره وارد کنید.",
+  card_number_invalid: "شمارهٔ کارت معتبر نیست. هر ۱۶ رقم کارت را بررسی کنید.",
   default_scope_change_requires_flag:
     "برای بردن پیش‌فرض از یک شعبه به شعبهٔ دیگر تأیید دوباره لازم است؛ ابتدا پیش‌فرض فعلی را بردارید یا با تأیید همان شعبه را پیش‌فرض کنید.",
   financial_account_archive_via_endpoint:

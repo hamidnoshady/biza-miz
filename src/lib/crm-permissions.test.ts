@@ -129,6 +129,8 @@ const ROUTES: RouteAccess[] = [
   { route: "customers/[id]/consent/route.ts", method: "GET", section: "consent", action: "read" },
   { route: "customers/[id]/consent/route.ts", method: "POST", section: "consent", action: "write" },
   { route: "customers/[id]/file/route.ts", method: "GET", section: "persons", action: "read" },
+  { route: "customers/[id]/historical-invoices/route.ts", method: "GET", section: "persons", action: "read" },
+  { route: "customers/[id]/historical-invoices/[invoiceId]/route.ts", method: "GET", section: "persons", action: "read" },
   { route: "customers/[id]/notes/route.ts", method: "GET", section: "persons", action: "read" },
   { route: "customers/[id]/notes/route.ts", method: "POST", section: "persons", action: "write" },
   { route: "customers/[id]/notes/route.ts", method: "PATCH", section: "persons", action: "write" },
