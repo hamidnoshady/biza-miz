@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1244**. Rows: tenant **112**, platform **23**.
+Route files scanned: **1248**. Rows: tenant **113**, platform **23**.
 
 ## Summary of remaining gaps
 
@@ -40,11 +40,12 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 62 · partial: 2 · MCP gap: 14 · backend gap: 0 · n/a (infra): 13 · duplicate surface: 1 · route-only (by design): 20
+Counts — covered: 62 · partial: 2 · MCP gap: 14 · backend gap: 0 · n/a (infra): 13 · duplicate surface: 1 · route-only (by design): 21
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | Integrations | Telegram identity exchange and webhook ingress<br>_authentication and delivery infrastructure only; no business operation or MCP tool surface_ | — | (route only) | — | — | — | — | — | — | — | n/a (infra) |
+| Accounting | Historical external sales invoice archive<br>_Read-only, branch-scoped source evidence is separate from posted sales and the official ledger; no MCP tool is exposed yet._ | (route only) | — | — | — | — | orders.view | — | — | integration/historical-invoice-archive.integration.test.ts | route-only (by design) |
 | Accounting | Shareholder ownership, capital, distributions & GL reconciliation<br>_cloud-authoritative legal ownership and financial facts; sensitive Party data and legally consequential posting remain in the permissioned human UI, with mirror journals for corrections_ | (route only) | (route only) | (route only) | (route only) | — | ledger.post, shareholders.capital_post, shareholders.capital_reverse, shareholders.distributions_approve, shareholders.distributions_manage, shareholders.distributions_pay, shareholders.distributions_reverse, shareholders.manage | — | — | integration/shareholder-accounting.integration.test.ts | route-only (by design) |
 | Accounting | Chart of accounts<br>_account history rides list_audit_log {entity: account} — same service, stricter gate is the audit screen's own teamManage_ | get_account_statement, list_accounts | account.create | account.disable, account.update | account.delete | — | accounts.edit, ledger.view | connection mode | get_account_statement, list_accounts, account.create, account.disable, account.update, account.delete | integration/chart-of-accounts.integration.test.ts | covered |
 | Accounting | Journal entries<br>_manual drafts are intentionally one lane — humans and the assistant both draft through the same parseManualDraftPayload pipeline (journal.manual.propose); reversal makes a new mirrored entry, never an edit_ | list_journal_entries, list_manual_journal_drafts | journal.manual.propose | — | journal.draft.approve, journal.draft.reject, journal.entry.reverse | — | ledger.approve, ledger.propose, ledger.view | connection mode; step-up (always approve) | list_journal_entries, list_manual_journal_drafts, journal.manual.propose, journal.draft.approve, journal.draft.reject, journal.entry.reverse | integration/ledger-reports.integration.test.ts | covered |

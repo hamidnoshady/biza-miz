@@ -33,6 +33,7 @@ import {
 } from "lucide-react";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { FilterChip, FilterChipRow, SearchField } from "@/app/dashboard/filters";
 import {
   EmptyState,
@@ -61,9 +62,12 @@ import { OverlayDialog, LedgerLoadFailed, fmtJalali } from "./ledger-ui";
 import {
   FINANCIAL_ACCOUNT_KIND_META,
   FINANCIAL_ACCOUNT_KINDS,
+  IRANIAN_BANKS,
   financialAccountDisplayLabel,
   financialAccountScopeLabel,
+  isFinancialAccountKind,
   isZeroBalance,
+  iranianBankByCode,
   type FinancialAccountKind,
   type FinancialAccountRecord,
 } from "@/lib/financial-accounts";
@@ -73,6 +77,11 @@ import { journalMemoForDisplay } from "@/lib/journal-memo";
 
 type KindTab = "all" | FinancialAccountKind;
 type StatusFilter = "active" | "archived" | "all";
+
+const BANK_OPTIONS = [
+  ...IRANIAN_BANKS.map(({ code, name }) => ({ value: code, label: name })),
+  { value: "", label: "بانک دیگر یا نام قدیمی" },
+];
 
 interface ListResponse {
   accounts: FinancialAccountRecord[];
@@ -137,6 +146,7 @@ interface AccountForm {
   isDefault: boolean;
   description: string;
   notes: string;
+  bankCode: string;
   bankName: string;
   bankBranchName: string;
   accountNumber: string;
@@ -162,6 +172,7 @@ function blankForm(kind: FinancialAccountKind, currencyCode: string): AccountFor
     isDefault: false,
     description: "",
     notes: "",
+    bankCode: "",
     bankName: "",
     bankBranchName: "",
     accountNumber: "",
@@ -189,6 +200,7 @@ function formFromRecord(account: FinancialAccountRecord): AccountForm {
     isDefault: account.isDefault,
     description: account.description ?? "",
     notes: account.notes ?? "",
+    bankCode: iranianBankByCode(account.bankCode)?.code ?? "",
     bankName: account.bankName ?? "",
     bankBranchName: account.bankBranchName ?? "",
     accountNumber: account.accountNumber ?? "",
@@ -240,10 +252,15 @@ export function FinancialAccountsSection({
   busy,
   refreshKey,
   canManage,
+  initialKind,
+  onKindChange,
 }: {
   busy: boolean;
   refreshKey: number;
   canManage: boolean;
+  /** Sidebar's «حساب بانکی» deep link opens the bank filter. */
+  initialKind?: string | null;
+  onKindChange?: (kind: KindTab) => void;
 }) {
   const money = useMoney();
   const [data, setData] = useState<ListResponse | null>(null);
@@ -252,7 +269,14 @@ export function FinancialAccountsSection({
   const [baseCurrency, setBaseCurrency] = useState("IRR");
   const [enabledCurrencies, setEnabledCurrencies] = useState<string[]>([]);
 
-  const [kind, setKind] = useState<KindTab>("all");
+  const [kind, setKind] = useState<KindTab>(() => isFinancialAccountKind(initialKind) ? initialKind : "all");
+  useEffect(() => {
+    setKind(isFinancialAccountKind(initialKind) ? initialKind : "all");
+  }, [initialKind]);
+  function selectKind(next: KindTab) {
+    setKind(next);
+    onKindChange?.(next);
+  }
   const [status, setStatus] = useState<StatusFilter>("active");
   const [search, setSearch] = useState("");
   const [locationId, setLocationId] = useState("");
@@ -401,7 +425,8 @@ export function FinancialAccountsSection({
     };
     if (FINANCIAL_ACCOUNT_KIND_META[form.kind].bankMetadata) {
       Object.assign(payload, {
-        bankName: form.bankName.trim() || null,
+        bankCode: form.bankCode || null,
+        bankName: iranianBankByCode(form.bankCode)?.name ?? (form.bankName.trim() || null),
         bankBranchName: form.bankBranchName.trim() || null,
         accountNumber: form.accountNumber.trim() || null,
         cardNumber: form.cardNumber.trim() || null,
@@ -618,14 +643,14 @@ export function FinancialAccountsSection({
       >
         <div className="space-y-3">
           <FilterChipRow label="نوع حساب" className="flex-nowrap overflow-x-auto pb-1">
-            <FilterChip selected={kind === "all"} onClick={() => setKind("all")}>
+            <FilterChip selected={kind === "all"} onClick={() => selectKind("all")}>
               همه
             </FilterChip>
             {FINANCIAL_ACCOUNT_KINDS.map((candidate) => (
               <FilterChip
                 key={candidate}
                 selected={kind === candidate}
-                onClick={() => setKind(candidate)}
+                onClick={() => selectKind(candidate)}
               >
                 {FINANCIAL_ACCOUNT_KIND_META[candidate].plural}
               </FilterChip>
@@ -1078,13 +1103,23 @@ function AccountFormDialog({
       {meta.bankMetadata ? (
         <fieldset className="mt-4 grid gap-3 sm:grid-cols-2">
           <legend className="mb-1 text-sm font-medium text-foreground">اطلاعات بانکی</legend>
-          <Field label="نام بانک">
-            <input
-              className={inputClass}
-              value={form.bankName}
-              onChange={(event) => set("bankName", event.target.value)}
+          <Field label="بانک" as="div">
+            <SearchableSelect
+              ariaLabel="انتخاب بانک"
+              options={BANK_OPTIONS}
+              value={form.bankCode}
+              onChange={(code) => set("bankCode", code)}
             />
           </Field>
+          {!form.bankCode ? (
+            <Field label="نام بانک">
+              <input
+                className={inputClass}
+                value={form.bankName}
+                onChange={(event) => set("bankName", event.target.value)}
+              />
+            </Field>
+          ) : null}
           <Field label="نام شعبهٔ بانک">
             <input
               className={inputClass}

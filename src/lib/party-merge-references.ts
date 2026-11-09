@@ -175,6 +175,13 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
     preview: true,
     previewLabel: "مقصد بازاریابی",
   },
+  {
+    table: "historical_sales_invoices",
+    column: "party_id",
+    scope: "business",
+    disposition: "historical",
+    reason: "The archived source evidence preserves its originally reviewed party; customer history follows the CRM merge chain without rewriting this immutable attribution.",
+  },
   // -- Accounting-owned operational data ------------------------------------
   {
     table: "orders",
