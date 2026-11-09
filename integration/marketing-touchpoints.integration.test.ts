@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import type { TouchInput } from "../src/lib/marketing-touchpoints";
 const root = process.env.DATABASE_URL;
 if (!root) throw new Error("DATABASE_URL is required for database integration tests");
 const database = `marketing_touch_${randomUUID().replaceAll("-", "")}`;
@@ -160,7 +161,7 @@ describe("marketer touches", () => {
     const own = await business(); const other = await business();
     const peer = (await db.query<{ id: string }>(`INSERT INTO users (business_id,full_name,role,password_hash,location_id,location_scope) VALUES ($1,'Peer','cashier','x',$2,'home') RETURNING id`,[own.business,own.location])).rows[0].id;
     const input = { assignmentId: own.assignment, leadId: own.lead, channel: "phone" as const, source: "phone" as const, idempotencyKey: randomUUID() };
-    const call = (actor = own.user, locations = [own.location], value = input) => dbLib.withTenant(own.business, () => touch.recordOwnMarketingTouch(own.business,actor,locations,value));
+    const call = (actor = own.user, locations = [own.location], value: TouchInput = input) => dbLib.withTenant(own.business, () => touch.recordOwnMarketingTouch(own.business,actor,locations,value));
     expect(await call(peer)).toEqual({ kind: "not_found" });
     expect(await call(own.user,[])).toEqual({ kind: "not_found" });
     expect(await call(own.user,[own.location],{...input, assignmentId: other.assignment})).toEqual({ kind: "not_found" });
