@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAnyPermission, requirePermission, withTenantScope } from "@/lib/auth";
 import { getPool } from "@/lib/db";
+import { configuredLegacySyncToken } from "@/lib/server-sync-config";
 import { deploymentRole } from "@/lib/deployment-role";
 import {
   ORDER_PAYMENT_ROUTING_SETTING,
@@ -117,7 +118,7 @@ export const PUT = withTenantScope(async (request: NextRequest) => {
         )) AS paired`,
       [location.id, session.businessId],
     );
-    if (!branch || (enabled && (peer?.paired || deploymentRole() !== "central"))) {
+    if (!branch || (enabled && (peer?.paired || configuredLegacySyncToken() || deploymentRole() !== "central"))) {
       await client.query("ROLLBACK");
       return NextResponse.json({ error: "payment_routing_peer_unsupported" }, { status: 409 });
     }

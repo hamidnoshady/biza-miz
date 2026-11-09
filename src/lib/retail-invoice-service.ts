@@ -48,6 +48,8 @@ import { getItem } from "./items-service";
 import { accrueCommissionForLine } from "./commission-service";
 import { earnPoints } from "./loyalty-service";
 import { evaluatePromotions, type AppliedPromotion, type PromotionItem } from "./promotions";
+import { routeOrderTenders } from "./order-payment-routing-service";
+import type { PaymentSettlement } from "./payment-methods";
 import { normalizeClientRequestId, retailInvoiceRequestFingerprint } from "./checkout-idempotency";
 import { listPromotions } from "./promotions-service";
 import { rialBigInt, rialText, type RialText } from "./inventory-exact";
@@ -177,6 +179,8 @@ export interface CreateRetailInvoiceTenderInput extends RetailTenderInput {
   /** Named payment way and optional operator-entered reference, retained for history — per slice. */
   paymentMethodId?: string | null;
   reference?: string | null;
+  financialAccountId?: string;
+  settlement?: PaymentSettlement;
 }
 
 export interface CreateRetailInvoiceInput {
@@ -430,7 +434,6 @@ export async function createRetailInvoice(
   if (input.tenders.some((t) => t.method === "credit") && !input.customerId) {
     throw new RetailInvoiceError("برای فروش نسیه، انتخاب مشتری الزامی است.");
   }
-  let tenderQueue: RetailTenderQueueEntry[];
   if (input.tenders.length === 0) {
     // The only zero-cash checkout is a vehicle fully covered by its already-
     // received reservation deposit and/or an applied trade-in allowance.
@@ -438,13 +441,6 @@ export async function createRetailInvoice(
     // refuses if any amount remains due.
     if (input.lines.some((line) => line.kind !== "vehicle")) {
       throw new RetailInvoiceError("حداقل یک روش پرداخت لازم است.");
-    }
-    tenderQueue = [];
-  } else {
-    try {
-      tenderQueue = buildTenderQueue(input.tenders);
-    } catch (err) {
-      throw new RetailInvoiceError(err instanceof Error ? err.message : "پرداخت نامعتبر است.");
     }
   }
   const allowed = LINE_KINDS_BY_INDUSTRY[input.industry];
@@ -486,6 +482,21 @@ export async function createRetailInvoice(
       }
       const replay = await readRetailInvoiceByOrderId(client, input.locationId, prior.id);
       if (replay) return replay;
+    }
+  }
+
+  const routedTenders = await routeOrderTenders(client, input.businessId, input.locationId,
+    input.tenders.map((tender) => ({
+      ...tender,
+      settlement: tender.settlement ?? (tender.method === "bank" ? "card" : tender.method),
+    })),
+  );
+  let tenderQueue: RetailTenderQueueEntry[] = [];
+  if (routedTenders.length) {
+    try {
+      tenderQueue = buildTenderQueue(routedTenders);
+    } catch (err) {
+      throw new RetailInvoiceError(err instanceof Error ? err.message : "پرداخت نامعتبر است.");
     }
   }
 
@@ -750,23 +761,24 @@ export async function createRetailInvoice(
   for (let i = 0; i < input.tenders.length; i++) {
     const amount = resolvedTenders[i].amount;
     if (rialBigInt(amount) <= 0n) continue;
-    const tender = input.tenders[i];
+    const tender = routedTenders[i];
     settlementSeq += 1;
     await client.query(
-      `INSERT INTO payments (location_id, order_id, method, amount, reference, payment_method_id, received_by, settlement_seq)
-       VALUES ($1, $2, $3::payment_method, $4, $5, $6, $7, $8)`,
+      `INSERT INTO payments (
+         location_id, order_id, method, amount, reference, payment_method_id, received_by, settlement_seq,
+         financial_account_id, financial_account_gl_id
+       ) VALUES ($1, $2, $3::payment_method, $4, $5, $6, $7, $8, $9, $10)`,
       [
         input.locationId,
         orderId,
-        // The ledger's SettlementMethod and the payment_method enum overlap on
-        // every value the retail screen offers ('cash', 'card', 'credit');
-        // 'bank' is the ledger's name for what the till calls a card payment.
-        tender.method === "bank" ? "card" : tender.method,
+        tender.settlement,
         rialBigInt(amount).toString(),
         tender.reference?.trim() || null,
         tender.paymentMethodId ?? null,
         input.createdBy ?? null,
         settlementSeq,
+        tender.financialAccountId ?? null,
+        tender.financialAccountGlId ?? null,
       ],
     );
   }

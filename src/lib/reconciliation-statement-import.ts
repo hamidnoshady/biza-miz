@@ -5,11 +5,11 @@ import { isValidIsoDate } from "./iso-date";
 export const MAX_STATEMENT_IMPORT_BYTES = 64 * 1024;
 export const MAX_STATEMENT_IMPORT_ROWS = 500;
 
-export interface ImportedStatementLine {
+export type ImportedStatementLine = {
   rowNumber: number;
   date: string;
   amountRial: string;
-}
+};
 
 export type StatementMatchPreviewLine = ImportedStatementLine & {
   status: "matched" | "ambiguous" | "unmatched";

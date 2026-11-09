@@ -5,6 +5,7 @@ import type { FinancialAccountKind } from "./financial-accounts";
 import { paymentSourceKindForSettlement } from "./order-payment-routing";
 import type { ResolvedTender } from "./payment-methods";
 import type { PaymentSettlement } from "./payment-methods";
+import { configuredLegacySyncToken } from "./server-sync-config";
 import { isUuid } from "./uuid";
 
 export const ORDER_PAYMENT_ROUTING_SETTING = "ledger.order_payment_routing.v1";
@@ -23,6 +24,7 @@ interface SourceRow {
   name: string;
   kind: FinancialAccountKind;
   gl_account_id: string;
+  gl_account_code: string;
 }
 
 export async function readOrderPaymentRouting(
@@ -44,7 +46,7 @@ export async function readOrderPaymentRouting(
     [businessId, locationId, ORDER_PAYMENT_ROUTING_SETTING],
   );
   if (!row?.enabled && !explicitSource) return "disabled";
-  if (deploymentRole() === "site" || row?.paired) return "peer_unsupported";
+  if (deploymentRole() === "site" || row?.paired || configuredLegacySyncToken()) return "peer_unsupported";
   return row?.enabled ? "enabled" : "disabled";
 }
 
@@ -52,7 +54,7 @@ export async function orderPaymentSources(
   client: QueryClient, businessId: string, locationId: string, ids?: readonly string[],
 ): Promise<SourceRow[]> {
   const { rows } = await client.query<SourceRow>(
-    `SELECT f.id, f.name, f.kind, f.gl_account_id
+    `SELECT f.id, f.name, f.kind, f.gl_account_id, a.code AS gl_account_code
        FROM financial_accounts f
        JOIN businesses b ON b.id = f.business_id
        JOIN accounts a ON a.business_id = f.business_id AND a.id = f.gl_account_id
@@ -132,9 +134,9 @@ export async function resolveExplicitOrderSource(
   return { financialAccountId: source.id, financialAccountGlId: source.gl_account_id };
 }
 
-export async function routeOrderTenders(
-  client: QueryClient, businessId: string, locationId: string, tenders: readonly ResolvedTender[],
-): Promise<RoutedOrderTender[]> {
+export async function routeOrderTenders<T extends Pick<ResolvedTender, "settlement" | "financialAccountId">>(
+  client: QueryClient, businessId: string, locationId: string, tenders: readonly T[],
+): Promise<(T & { financialAccountGlId?: string; financialAccountGlCode?: string })[]> {
   const mode = await readOrderPaymentRouting(client, businessId, locationId, true);
   if (mode === "peer_unsupported") throw new OrderPaymentRoutingError("payment_routing_peer_unsupported");
   const ids = tenders.flatMap((tender) => tender.financialAccountId ? [tender.financialAccountId] : []);
@@ -151,6 +153,6 @@ export async function routeOrderTenders(
     if (kind && !tender.financialAccountId) throw new OrderPaymentRoutingError("payment_source_required");
     const source = sources.get(tender.financialAccountId ?? "");
     if (!source || source.kind !== kind) throw new OrderPaymentRoutingError("invalid_payment_source");
-    return { ...tender, financialAccountGlId: source.gl_account_id };
+    return { ...tender, financialAccountGlId: source.gl_account_id, financialAccountGlCode: source.gl_account_code };
   });
 }

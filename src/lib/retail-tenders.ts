@@ -31,12 +31,14 @@ export interface RetailTenderInput {
   method: SettlementMethod;
   /** Omit for "whatever the invoice comes to" — at most one per invoice. */
   amount?: RialText;
+  financialAccountGlCode?: string;
 }
 
 /** One slice, fully resolved to a concrete Rial amount. */
 export interface RetailTender {
   method: SettlementMethod;
   amount: RialText;
+  financialAccountGlCode?: string;
 }
 
 /** The running queue `drawTenders` consumes from, one invoice line at a time. */
@@ -44,6 +46,7 @@ export interface RetailTenderQueueEntry {
   method: SettlementMethod;
   /** `null` marks the (at most one) open tender — unlimited until the invoice is fully priced. */
   remaining: bigint | null;
+  financialAccountGlCode?: string;
 }
 
 export const MAX_RETAIL_TENDERS = 10;
@@ -75,16 +78,17 @@ export function buildTenderQueue(tenders: readonly RetailTenderInput[]): RetailT
       throw new RetailTenderError("مبلغ پرداختی باید مثبت باشد.");
     }
   }
-  return [
-    ...bounded.map((t) => ({ method: t.method, remaining: rialBigInt(t.amount as RialText) })),
-    ...open.map((t) => ({ method: t.method, remaining: null as bigint | null })),
-  ];
+  return [...bounded, ...open].map(({ method, amount, financialAccountGlCode }) => ({
+    method,
+    remaining: amount == null ? null : rialBigInt(amount),
+    ...(financialAccountGlCode ? { financialAccountGlCode } : {}),
+  }));
 }
 
 /**
  * Draws exactly `amount` off the front of the queue for one invoice line,
  * across as many tenders as it takes, and returns what was drawn grouped by
- * method. Mutates `queue` in place — the next line continues where this one
+ * method and ledger account. Mutates `queue` in place — the next line continues where this one
  * left off, which is what keeps one invoice's tenders from being spent
  * twice across its lines. Throws if the bounded tenders run out before the
  * line is covered (and there is no open tender left to fall back on).
@@ -92,22 +96,21 @@ export function buildTenderQueue(tenders: readonly RetailTenderInput[]): RetailT
 export function drawTenders(queue: RetailTenderQueueEntry[], amount: RialText): RetailTender[] {
   let need = rialBigInt(amount);
   if (need < 0n) throw new RetailTenderError("مبلغ نامعتبر است.");
-  const drawn = new Map<SettlementMethod, bigint>();
+  const drawn = new Map<string, { method: SettlementMethod; financialAccountGlCode?: string; total: bigint }>();
   while (need > 0n) {
     const head = queue[0];
     if (!head) throw new RetailTenderError(MISMATCH_MESSAGE);
-    if (head.remaining === null) {
-      drawn.set(head.method, (drawn.get(head.method) ?? 0n) + need);
-      need = 0n;
-      break;
-    }
-    const take = head.remaining < need ? head.remaining : need;
-    drawn.set(head.method, (drawn.get(head.method) ?? 0n) + take);
-    head.remaining -= take;
+    const { method, financialAccountGlCode, remaining } = head;
+    const take = remaining !== null && remaining < need ? remaining : need;
+    const key = JSON.stringify([method, financialAccountGlCode]);
+    const group = drawn.get(key) ?? { method, ...(financialAccountGlCode ? { financialAccountGlCode } : {}), total: 0n };
+    group.total += take;
+    drawn.set(key, group);
     need -= take;
+    if (remaining !== null) head.remaining = remaining - take;
     if (head.remaining === 0n) queue.shift();
   }
-  return [...drawn].map(([method, amt]) => ({ method, amount: rialText(amt.toString()) }));
+  return [...drawn.values()].map(({ total, ...tender }) => ({ ...tender, amount: rialText(total.toString()) }));
 }
 
 /** Whatever a bounded tender never got drawn — nonzero means the slices added up to more than the invoice. */
@@ -153,7 +156,7 @@ export function groupTendersByCode(
 ): { code: string; amount: RialText }[] {
   const totals = new Map<string, bigint>();
   for (const t of tenders) {
-    const code = codeFor(t.method);
+    const code = t.financialAccountGlCode ?? codeFor(t.method);
     totals.set(code, (totals.get(code) ?? 0n) + rialBigInt(t.amount));
   }
   return [...totals].map(([code, amount]) => ({ code, amount: rialText(amount.toString()) }));

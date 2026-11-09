@@ -143,6 +143,22 @@ export interface PaymentWaysProps {
   routeOrderPayment?: boolean;
 }
 
+export function useOrderPaymentSources(enabled = true) {
+  const [routing, setRouting] = useState<{
+    mode: "disabled" | "enabled" | "peer_unsupported";
+    sources: { id: string; name: string; kind: FinancialAccountKind }[];
+  } | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let active = true;
+    void api<NonNullable<typeof routing>>("/api/ledger/order-payment-sources").then(({ ok, data }) => {
+      if (active && ok && data) setRouting(data);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [enabled]);
+  return routing;
+}
+
 export function PaymentWays({
   methods,
   draft,
@@ -167,18 +183,7 @@ export function PaymentWays({
   const difference = draftDifference(receivedRial ?? due, due);
   const needsCustomer = draftRequiresCustomer(draft, methods, due) && !customer;
   const selectedMethod = methods.find((method) => method.id === draft.methodId) ?? null;
-  const [routing, setRouting] = useState<{
-    mode: "disabled" | "enabled" | "peer_unsupported";
-    sources: { id: string; name: string; kind: FinancialAccountKind }[];
-  } | null>(null);
-  useEffect(() => {
-    if (!routeOrderPayment) return;
-    let active = true;
-    void api<NonNullable<typeof routing>>("/api/ledger/order-payment-sources").then(({ ok, data }) => {
-      if (active && ok && data) setRouting(data);
-    }).catch(() => {});
-    return () => { active = false; };
-  }, [routeOrderPayment]);
+  const routing = useOrderPaymentSources(routeOrderPayment);
 
   /**
    * Tapping a way while splitting *adds* it, pre-filled with whatever is still

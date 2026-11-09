@@ -14,13 +14,11 @@
  *   3. A split that doesn't add up to the invoice (either direction) is
  *      refused before anything commits.
  *   4. Voiding a split-payment invoice reverses every tender it produced
- *      (retail-invoice-void-service.ts's `planPaymentRows` nets by method
- *      across however many rows there are — this is what actually exercises
- *      that with more than one method on the books).
+ *      across methods and preserves distinct sources for same-method tenders.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { rialText } from "../src/lib/inventory-exact";
 
@@ -128,6 +126,7 @@ async function seedBusiness(industry: string) {
   await db.query("DELETE FROM items");
   await db.query("DELETE FROM gold_prices");
   await db.query("DELETE FROM parties");
+  await db.query("DELETE FROM financial_accounts");
   await db.query("DELETE FROM accounts");
   await db.query("DELETE FROM businesses");
   await db.query("COMMIT");
@@ -377,6 +376,73 @@ describe("split payment — accessories", () => {
     expect(stock?.quantity).toBe("10.000000000"); // untouched
   });
 
+  it("routes two card tenders and keeps their exact account snapshots on void", async () => {
+    vi.stubEnv("DEPLOYMENT_ROLE", "central");
+    vi.stubEnv("ALLOW_LEGACY_SYNC_TOKEN", "0");
+    try {
+      const { rows: [bankGl] } = await db.query<{ id: string }>(
+        "INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1110', 'Bank', 'asset') RETURNING id",
+        [biz.id],
+      );
+      const { rows: [bank] } = await db.query<{ id: string }>(
+        `INSERT INTO financial_accounts (business_id, kind, name, gl_account_id, currency_code)
+         VALUES ($1, 'bank', 'Bank', $2, 'IRR') RETURNING id`,
+        [biz.id, bankGl.id],
+      );
+      const terminals: { id: string; glId: string }[] = [];
+      for (const code of ["11201", "11202"]) {
+        const { rows: [gl] } = await db.query<{ id: string }>(
+          "INSERT INTO accounts (business_id, code, name, type) VALUES ($1, $2, $2, 'asset') RETURNING id",
+          [biz.id, code],
+        );
+        const { rows: [terminal] } = await db.query<{ id: string }>(
+          `INSERT INTO financial_accounts (business_id, location_id, kind, name, gl_account_id, currency_code,
+                                           psp_provider, terminal_number, merchant_number, settlement_account_id)
+           VALUES ($1, $2, 'pos_psp', $3, $4, 'IRR', 'PSP', $3, 'merchant', $5) RETURNING id`,
+          [biz.id, biz.locationId, code, gl.id, bank.id],
+        );
+        terminals.push({ id: terminal.id, glId: gl.id });
+      }
+      await db.query(
+        `INSERT INTO settings (business_id, location_id, key, value)
+         VALUES ($1, $2, 'ledger.order_payment_routing.v1', '{"enabled":true}')`,
+        [biz.id, biz.locationId],
+      );
+      const item = await makeAccessory("Retail split routing", "10", 20_000, 100_000);
+      const created = await invoice({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        industry: "accessories",
+        tenders: [
+          { method: "bank", amount: rialText("40000"), financialAccountId: terminals[0].id },
+          { method: "bank", financialAccountId: terminals[1].id },
+        ],
+        lines: [{ kind: "accessory", itemId: item.id, quantity: "1", vatPercent: 9 }],
+      });
+      expect(await debitsFor("accessory.sale_revenue", "accessory_sale", item.id)).toEqual(
+        expect.arrayContaining([
+          { accountId: terminals[0].glId, debit: "40000" },
+          { accountId: terminals[1].glId, debit: "69000" },
+        ]),
+      );
+
+      await voidInvoice(created.orderId);
+      const { rows } = await db.query(
+        `SELECT amount::text, financial_account_id, financial_account_gl_id
+           FROM payments WHERE order_id = $1 ORDER BY amount`,
+        [created.orderId],
+      );
+      expect(rows).toEqual([
+        { amount: "-69000", financial_account_id: terminals[1].id, financial_account_gl_id: terminals[1].glId },
+        { amount: "-40000", financial_account_id: terminals[0].id, financial_account_gl_id: terminals[0].glId },
+        { amount: "40000", financial_account_id: terminals[0].id, financial_account_gl_id: terminals[0].glId },
+        { amount: "69000", financial_account_id: terminals[1].id, financial_account_gl_id: terminals[1].glId },
+      ]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reverses every tender on void, netted by method across however many payments rows exist", async () => {
     const customerId = await createCustomer();
     const a = await makeAccessory("سنجاق بدلیجات", "10", 20_000, 100_000); // 109,000
@@ -396,8 +462,7 @@ describe("split payment — accessories", () => {
     await voidInvoice(created.orderId);
 
     const rows = await paymentsFor(created.orderId);
-    // Three original slices plus their exact negatives (netByMethod nets per
-    // method, so one reversal row per method actually used).
+    // Three original slices plus their exact negatives.
     expect(rows.filter((r) => r.amount > 0)).toEqual([
       { method: "cash", amount: 50_000 },
       { method: "card", amount: 30_000 },

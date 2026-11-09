@@ -158,6 +158,22 @@ describe("resolveTenderAmounts", () => {
 });
 
 describe("groupTendersByCode", () => {
+  it("posts two terminals separately across a shared retail invoice queue", () => {
+    const queue = buildTenderQueue([
+      { method: "bank", amount: r(40), financialAccountGlCode: "terminal-a" },
+      { method: "bank", financialAccountGlCode: "terminal-b" },
+    ]);
+    const ledgerCode = () => "legacy-clearing";
+    expect(groupTendersByCode(drawTenders(queue, r(70)), ledgerCode)).toEqual([
+      { code: "terminal-a", amount: r(40) },
+      { code: "terminal-b", amount: r(30) },
+    ]);
+    expect(groupTendersByCode(drawTenders(queue, r(20)), ledgerCode)).toEqual([
+      { code: "terminal-b", amount: r(20) },
+    ]);
+    assertTendersExhausted(queue);
+  });
+
   it("sums two tenders that resolve to the same account", () => {
     const grouped = groupTendersByCode(
       [

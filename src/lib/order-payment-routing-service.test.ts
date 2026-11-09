@@ -20,8 +20,8 @@ function testClient(options: { enabled?: boolean; paired?: boolean } = {}) {
       settlement: "online", financialAccountId: terminal,
     }] }] };
     if (sql.includes("FROM financial_accounts f")) return { rows: [
-      { id: terminal, name: "First terminal", kind: "pos_psp", gl_account_id: firstGl },
-      { id: secondTerminal, name: "Second terminal", kind: "pos_psp", gl_account_id: secondGl },
+      { id: terminal, name: "First terminal", kind: "pos_psp", gl_account_id: firstGl, gl_account_code: "11201" },
+      { id: secondTerminal, name: "Second terminal", kind: "pos_psp", gl_account_id: secondGl, gl_account_code: "11202" },
     ] };
     if (sql.includes("FROM accounts WHERE")) return { rows: [
       { id: firstGl, code: "11201", type: "asset", parentId: null },
@@ -39,8 +39,8 @@ describe("account-specific payment routing", () => {
       { methodId: null, settlement: "card", reference: null, amount: 400, financialAccountId: terminal },
       { methodId: null, settlement: "card", reference: null, amount: 600, financialAccountId: secondTerminal },
     ]);
-    expect(routed.map(({ amount, financialAccountGlId }) => [amount, financialAccountGlId]))
-      .toEqual([[400, firstGl], [600, secondGl]]);
+    expect(routed.map(({ amount, financialAccountGlId, financialAccountGlCode }) => [amount, financialAccountGlId, financialAccountGlCode]))
+      .toEqual([[400, firstGl, "11201"], [600, secondGl, "11202"]]);
   });
 
   it("requires the verified gateway and leaves an unactivated branch on its legacy route", async () => {
@@ -51,6 +51,17 @@ describe("account-specific payment routing", () => {
       .rejects.toThrow("website_payment_source_required");
     await expect(routeWebsitePayment(testClient({ enabled: false }).client, tenant, branch, "woocommerce", connection, "other-gateway"))
       .resolves.toBeNull();
+  });
+
+  it("blocks shared legacy sync even when there is no registered peer", async () => {
+    vi.stubEnv("ALLOW_LEGACY_SYNC_TOKEN", "1");
+    vi.stubEnv("REMOTE_SYNC_TOKEN", "legacy-test-token");
+    try {
+      await expect(routeWebsitePayment(testClient().client, tenant, branch, "woocommerce", connection, "confirmed-gateway"))
+        .rejects.toThrow("payment_routing_peer_unsupported");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("blocks the new posting contract for paired branches", async () => {

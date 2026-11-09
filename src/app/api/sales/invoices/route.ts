@@ -20,6 +20,7 @@ import type { SettlementMethod } from "@/lib/ledger";
 import { rialText } from "@/lib/inventory-exact";
 import { enqueueHolooSaleForOrder } from "@/lib/integrations/holoo/outbox-producer";
 import { ledgerSettlementFor, type PaymentSettlement } from "@/lib/payment-methods";
+import { OrderPaymentRoutingError } from "@/lib/order-payment-routing-service";
 import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { holdsPermission } from "@/app/api/automotive/guard";
@@ -39,6 +40,7 @@ interface RawTenderBody {
   amount?: number;
   paymentMethodId?: string | null;
   reference?: string | null;
+  financialAccountId?: string;
 }
 
 function normalizedInvoiceSearch(value: string): string {
@@ -177,6 +179,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     // this check a caller could display one way, post another, and lose the
     // audit trail — checked per slice, since each can name its own way.
     let requiresReference = false;
+    let settlement: PaymentSettlement = method === "bank" ? "card" : method;
     if (paymentMethodId) {
       const { rows: paymentWays } = await query<{
         settlement: string;
@@ -193,16 +196,22 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         return NextResponse.json({ error: "invalid_payment_method" }, { status: 400 });
       }
       requiresReference = paymentWay.requires_reference;
+      settlement = paymentWay.settlement as PaymentSettlement;
     }
     if (requiresReference && !reference) {
       return NextResponse.json({ error: "payment_reference_required" }, { status: 400 });
     }
 
+    const financialAccountId = typeof raw.financialAccountId === "string" ? raw.financialAccountId.trim() : "";
+    if (raw.financialAccountId !== undefined && !financialAccountId) {
+      return NextResponse.json({ error: "invalid_payment_source" }, { status: 400 });
+    }
     tenders.push({
       method,
       amount: amountOmitted ? undefined : rialText(String(raw.amount)),
       paymentMethodId,
       reference: reference || null,
+      ...(financialAccountId ? { financialAccountId, settlement } : {}),
     });
   }
 
@@ -283,6 +292,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ invoice });
   } catch (err) {
     await client.query("ROLLBACK");
+    if (err instanceof OrderPaymentRoutingError) {
+      return NextResponse.json({ error: err.code }, { status: err.status });
+    }
     if (err instanceof RetailRequestConflictError) {
       // Same key, different payload (issue #913 item 2) — loud refusal.
       return NextResponse.json({ error: "request_conflict" }, { status: 409 });

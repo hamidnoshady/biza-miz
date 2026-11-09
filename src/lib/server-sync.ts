@@ -32,7 +32,7 @@ import {
   type SyncEventResult,
   type SyncEventType,
 } from "./sync-events";
-import type { ServerSyncConfig } from "./server-sync-config";
+import { configuredLegacySyncToken, type ServerSyncConfig } from "./server-sync-config";
 import { runIamSyncAttempt } from "./iam/sync";
 import {
   clearOperationalSyncBlock,
@@ -104,8 +104,7 @@ export function legacySyncTokenAllowed(): boolean {
 }
 
 export function legacySyncToken(): string | null {
-  if (!legacySyncTokenAllowed()) return null;
-  return process.env.REMOTE_SYNC_TOKEN?.trim() || null;
+  return configuredLegacySyncToken();
 }
 
 export async function getServerSyncConfig(
