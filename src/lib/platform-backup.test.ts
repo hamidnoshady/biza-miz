@@ -918,6 +918,28 @@ describe("platformBackupAlert", () => {
     ).toEqual({ level: "error", reason: "local_stale" });
     expect(platformBackupAlert(config({ enabled: true }), base)).toEqual({ level: "ok", reason: "ok" });
   });
+
+  it("ignores a historical cloud success once the newest capture is unmirrored (issue #1296)", () => {
+    const cloudOn = config({ enabled: true, cloud: { ...DEFAULT_PLATFORM_BACKUP_CONFIG.cloud, enabled: true } });
+    // The production shape: local is healthy, an upload succeeded in September,
+    // and today's artifact has no confirmed copy.
+    expect(
+      platformBackupAlert(cloudOn, { ...base, cloudStaleOverride: "cloud_stale" }),
+    ).toEqual({ level: "error", reason: "cloud_stale" });
+    expect(
+      platformBackupAlert(cloudOn, { ...base, cloudStaleOverride: "cloud_failed" }),
+    ).toEqual({ level: "error", reason: "cloud_failed" });
+    // The override is never allowed to mask a local problem, which is the bigger one.
+    expect(
+      platformBackupAlert(cloudOn, { ...base, localLastError: "pg_dump exited with 2", cloudStaleOverride: "cloud_stale" }),
+    ).toEqual({ level: "error", reason: "local_failed" });
+    // `null` means "the newest capture is confirmed off-site": the old fields
+    // answer as before, which is what keeps older callers meaningful.
+    expect(platformBackupAlert(cloudOn, { ...base, cloudStaleOverride: null })).toEqual({
+      level: "ok",
+      reason: "ok",
+    });
+  });
 });
 
 describe("encryption is never silently downgraded (audit F03)", () => {

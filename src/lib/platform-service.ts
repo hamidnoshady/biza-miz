@@ -3278,6 +3278,19 @@ export interface PlatformBackupLine {
   alertLevel: "ok" | "warning" | "error";
   artifacts: number;
   servingEnabled: boolean;
+  /**
+   * Issue #1296 — whether the newest capture has a confirmed off-site copy. The
+   * line above is the *local* half's status; without this the system page could
+   * only say "backup succeeded" while the bucket held a two-month-old object.
+   * Absent on an older server (the health call is best-effort).
+   */
+  cloud?: {
+    state: string;
+    currentConfirmed: boolean;
+    latestConfirmedAt: string | null;
+    behindMs: number | null;
+    reachable: boolean;
+  };
 }
 
 /**
@@ -3345,6 +3358,17 @@ export async function systemStatus(migrations: MigrationStatus): Promise<SystemS
           alertLevel: backupHealth.alert.level,
           artifacts: backupHealth.artifactsOnDisk,
           servingEnabled: backupHealth.servingEnabled,
+          ...(backupHealth.cloud
+            ? {
+                cloud: {
+                  state: backupHealth.cloud.state,
+                  currentConfirmed: backupHealth.cloud.currentConfirmed,
+                  latestConfirmedAt: backupHealth.cloud.latestConfirmedAt,
+                  behindMs: backupHealth.cloud.behindMs,
+                  reachable: backupHealth.cloudReachable,
+                },
+              }
+            : {}),
         }
       : null,
     counts: {

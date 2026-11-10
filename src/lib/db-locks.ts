@@ -29,6 +29,12 @@ import { getPool, query } from "./db";
 export const LOCK_KEYS = {
   /** one whole-platform backup at a time, cluster-wide */
   platformBackup: "backup:platform",
+  /**
+   * Issue #1296 — one *upload* of one platform artifact, cluster-wide. The
+   * catch-up tick, the console's button and a second replica must not race the
+   * same object key; a `busy` answer is the honest one.
+   */
+  platformCloudUpload: (artifact: string) => `backup:platform-cloud:${artifact}`,
   /** one whole-platform restore at a time, cluster-wide */
   platformRestore: "restore:platform",
   /** a site's physical tenant dump (per business) */

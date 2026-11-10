@@ -383,13 +383,40 @@ export function platformBackupAlert(config: PlatformBackupConfig, input: {
   localLastError: string | null;
   cloudLastSuccessAt: string | null;
   cloudLastError: string | null;
+  /**
+   * Issue #1296 — the caller's verdict on the *newest* artifact's off-site copy
+   * (`assessCloudProtection`). When present it wins over the two "last cloud
+   * success/error" fields, because those describe history: a successful upload
+   * in September must not answer for this morning's 319 MB artifact. `null`
+   * means "the newest capture is confirmed off-site (or there is nothing to
+   * mirror)", and the shared computation decides as before.
+   */
+  cloudStaleOverride?: "cloud_failed" | "cloud_stale" | null;
 }): BackupAlert {
-  return computeBackupAlert({
+  const { cloudStaleOverride, ...rest } = input;
+  // A caller that does not report the newest artifact's state keeps the exact
+  // behaviour it had before #1296 (and the tenant-style vocabulary tests pin it).
+  if (cloudStaleOverride === undefined) {
+    return computeBackupAlert({
+      enabled: config.enabled,
+      cloudEnabled: config.cloud.enabled,
+      intervalHours: config.intervalHours,
+      ...rest,
+    });
+  }
+  const base = computeBackupAlert({
     enabled: config.enabled,
     cloudEnabled: config.cloud.enabled,
     intervalHours: config.intervalHours,
-    ...input,
+    ...rest,
+    // A local problem is the bigger one and already answered; the override only
+    // ever *adds* a cloud verdict to an otherwise-clean line.
+    cloudLastSuccessAt: cloudStaleOverride ? null : rest.cloudLastSuccessAt,
+    cloudLastError:
+      cloudStaleOverride === "cloud_failed" ? (rest.cloudLastError ?? "cloud_failed") : null,
   });
+  if (base.reason !== "ok" || !cloudStaleOverride) return base;
+  return { level: "error", reason: cloudStaleOverride };
 }
 
 // ---------------------------------------------------------------------------
