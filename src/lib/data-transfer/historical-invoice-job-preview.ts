@@ -62,13 +62,17 @@ export async function previewHistoricalImportJob(input: {
   if (input.calendar !== "jalali" && input.calendar !== "gregorian") throw new HistoricalJobPreviewError("invalid_calendar");
   const sampleLimit = Number.isFinite(input.sampleLimit) ? Math.min(Math.max(Math.trunc(input.sampleLimit!), 0), 200) : 100;
   return withTenantTransaction(input.businessId, async (client) => {
-    const job = await client.query<{ source_columns: unknown; status: string }>(
-      `SELECT source_columns, status FROM data_import_jobs
+    const job = await client.query<{ source_columns: unknown; status: string; options: { historicalInvoice?: { sourceKey?: string; provider?: string; currency?: string; calendar?: string } } }>(
+      `SELECT source_columns, status, options FROM data_import_jobs
         WHERE id = $1 AND business_id = $2 AND location_id = $3 AND entity_key = 'accounting.historical_invoices'`,
       [input.jobId, input.businessId, input.locationId],
     );
     if (!job.rowCount) throw new HistoricalJobPreviewError("job_not_found");
     if (!["pending", "ready"].includes(job.rows[0].status)) throw new HistoricalJobPreviewError("job_not_editable");
+    const source = job.rows[0].options?.historicalInvoice;
+    if (!source || source.sourceKey !== sourceKey || source.provider !== provider || source.currency !== input.currency || source.calendar !== input.calendar) {
+      throw new HistoricalJobPreviewError("job_source_changed");
+    }
     const rawColumns = job.rows[0].source_columns;
     if (!Array.isArray(rawColumns) || !rawColumns.every((value) => typeof value === "string")) throw new HistoricalJobPreviewError("invalid_source_columns");
     const staged = await client.query<{ row_number: number; raw: Record<string, string> }>(
