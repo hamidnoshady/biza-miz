@@ -10,6 +10,7 @@ import {
 import { applyPurchaseReceiptCosting } from "./purchase-receipt-costing";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import type { Role } from "./auth-edge";
+import { resolvePurchasePaymentAccount } from "./payment-financial-account";
 
 export const PURCHASE_SETTLEMENT_METHODS = ["cash", "bank", "credit"] as const;
 export type PurchaseSettlementMethod = (typeof PURCHASE_SETTLEMENT_METHODS)[number];
@@ -25,6 +26,8 @@ export async function receivePurchaseInTransaction(
     locationId: string;
     purchaseId: string;
     settlementMethod: PurchaseSettlementMethod;
+    financialAccountId?: string | null;
+    enforcePaymentAccountChoice?: boolean;
     supplierId?: string | null;
     createdBy: string | null;
     sync?: { actorRole: Role; clientEventId?: string };
@@ -34,15 +37,17 @@ export async function receivePurchaseInTransaction(
     id: string;
     status: string;
     total: string;
+    financial_account_id: string | null;
     supplier_id: string | null;
     vat_amount: string;
   }>(
-    "SELECT id,status::text,total::text,supplier_id,vat_amount::text FROM purchases WHERE id=$1 AND location_id=$2 FOR UPDATE",
+    "SELECT id,status::text,total::text,supplier_id,vat_amount::text,financial_account_id FROM purchases WHERE id=$1 AND location_id=$2 FOR UPDATE",
     [params.purchaseId, params.locationId],
   );
   const purchase = locked[0];
   if (!purchase) throw new Error("purchase_not_found");
   if (purchase.status === "received") {
+    if (params.financialAccountId && params.financialAccountId !== purchase.financial_account_id) throw new Error("invalid_purchase_payment_account");
     const prior = await client.query<{ id: string }>(
       "SELECT id FROM inventory_events WHERE business_id=$1 AND source_type='purchase' AND source_id=$2 ORDER BY occurred_at LIMIT 1",
       [params.businessId, params.purchaseId],
@@ -50,6 +55,10 @@ export async function receivePurchaseInTransaction(
     return { id: params.purchaseId, inventoryEventId: prior.rows[0]?.id ?? null, duplicate: true };
   }
   if (purchase.status !== "draft" && purchase.status !== "ordered") throw new Error("invalid_transition");
+
+  const paymentAccount = await resolvePurchasePaymentAccount(client, {
+    ...params, enforceChoice: params.enforcePaymentAccountChoice, invalid: () => new Error("invalid_purchase_payment_account"),
+  });
 
   const supplierId = params.supplierId?.trim() || purchase.supplier_id;
   if (params.settlementMethod === "credit" && !supplierId) throw new Error("supplier_required");
@@ -59,7 +68,8 @@ export async function receivePurchaseInTransaction(
       locationId: params.locationId,
       clientEventId: params.sync.clientEventId ?? `purchase:receive:${params.purchaseId}`,
       eventType: "inventory.purchase.received",
-      payload: { purchaseId: params.purchaseId, settlementMethod: params.settlementMethod, supplierId },
+      payload: { purchaseId: params.purchaseId, settlementMethod: params.settlementMethod, supplierId,
+        ...(paymentAccount ? { financialAccountId: paymentAccount.financialAccountId } : {}) },
       actorUserId: params.createdBy,
       actorRole: params.sync.actorRole,
     });
@@ -82,8 +92,8 @@ export async function receivePurchaseInTransaction(
 
   if ((await getInventorySystem(params.businessId, client)) === "periodic") {
     await client.query(
-      "UPDATE purchases SET status='received',received_at=now(),settlement_method=$2 WHERE id=$1",
-      [params.purchaseId, params.settlementMethod],
+      "UPDATE purchases SET status='received',received_at=now(),settlement_method=$2,financial_account_id=$3 WHERE id=$1",
+      [params.purchaseId, params.settlementMethod, paymentAccount?.financialAccountId ?? null],
     );
     await postPeriodicPurchaseEntry(client, {
       businessId: params.businessId,
@@ -92,6 +102,7 @@ export async function receivePurchaseInTransaction(
       createdBy: params.createdBy,
       total: rialText(totals.rows[0].total),
       settlementMethod: params.settlementMethod,
+      paymentAccount,
       vat,
     });
     await enqueueHolooPurchase(client, params.businessId, params.purchaseId, "purchase");
@@ -131,8 +142,8 @@ export async function receivePurchaseInTransaction(
   });
   if (costing.receiptValue !== rialText(purchase.total)) throw new Error("purchase_total_mismatch");
   await client.query(
-    "UPDATE purchases SET status='received',received_at=now(),settlement_method=$2 WHERE id=$1",
-    [params.purchaseId, params.settlementMethod],
+    "UPDATE purchases SET status='received',received_at=now(),settlement_method=$2,financial_account_id=$3 WHERE id=$1",
+    [params.purchaseId, params.settlementMethod, paymentAccount?.financialAccountId ?? null],
   );
   await postExactPurchaseEntry(client, {
     businessId: params.businessId,
@@ -141,6 +152,7 @@ export async function receivePurchaseInTransaction(
     createdBy: params.createdBy,
     total: costing.receiptValue,
     settlementMethod: params.settlementMethod,
+    paymentAccount,
     inventoryEventId,
     vat,
   });

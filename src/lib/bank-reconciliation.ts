@@ -24,6 +24,7 @@
  */
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { isValidIsoDate } from "./iso-date";
+import { isUuid } from "./uuid";
 
 /**
  * The settlement accounts «تطبیق بانکی و صندوق» can reconcile.
@@ -47,18 +48,6 @@ export const RECONCILABLE_ACCOUNT_CODES: Record<ReconcilableAccount, string> = {
   bank: WELL_KNOWN_CODES.bank,
   bankClearing: WELL_KNOWN_CODES.bankClearing,
 };
-
-/*
- * Known limitation, deliberately not solved here (issue #830, item 13): these
- * are the three *global* well-known settlement accounts, so a business with two
- * bank accounts, several card terminals or a till per branch still reconciles
- * them as one. Making the set configurable means a per-business mapping of
- * settlement accounts (and terminals) rather than three constants, plus a
- * screen to maintain it and a migration for the businesses already reconciling
- * — a feature, not a constant swap. What this file guarantees meanwhile is
- * that there is exactly one list, so widening it is a one-file change and every
- * consumer (service, routes, screen, accounting audit, assistant) follows.
- */
 
 /** Is this one of the three keys, as opposed to a string somebody sent us? */
 export function isReconcilableAccount(value: unknown): value is ReconcilableAccount {
@@ -210,11 +199,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export interface CreateReconciliationRequest {
-  accountCode: ReconcilableAccount;
+/** Legacy pooled GL selectors remain available for historical reconciliation. */
+export type ReconciliationAccountSelector =
+  | { accountCode: ReconcilableAccount; financialAccountId?: never }
+  | { financialAccountId: string; accountCode?: never };
+
+export function parseReconciliationAccountSelector(
+  accountCode: unknown,
+  financialAccountId: unknown,
+): ReconciliationAccountSelector | null {
+  if (financialAccountId != null) {
+    return accountCode == null && typeof financialAccountId === "string" && isUuid(financialAccountId)
+      ? { financialAccountId }
+      : null;
+  }
+  return isReconcilableAccount(accountCode) ? { accountCode } : null;
+}
+
+export type CreateReconciliationRequest = ReconciliationAccountSelector & {
   statementDate: string;
   statementBalance: number;
-}
+};
 
 /**
  * `POST /api/ledger/reconciliations`.
@@ -229,7 +234,8 @@ export function parseCreateReconciliationRequest(
   options: { todayIso: string },
 ): ParsedRequest<CreateReconciliationRequest> {
   if (!isRecord(body)) return { ok: false, error: "bad_request" };
-  if (!isReconcilableAccount(body.accountCode)) return { ok: false, error: "invalid_account" };
+  const selector = parseReconciliationAccountSelector(body.accountCode, body.financialAccountId);
+  if (!selector) return { ok: false, error: "invalid_account" };
 
   if (typeof body.statementDate !== "string" || body.statementDate.trim() === "") {
     return { ok: false, error: "statement_date_required" };
@@ -246,7 +252,7 @@ export function parseCreateReconciliationRequest(
 
   return {
     ok: true,
-    value: { accountCode: body.accountCode, statementDate, statementBalance: body.statementBalance },
+    value: { ...selector, statementDate, statementBalance: body.statementBalance },
   };
 }
 

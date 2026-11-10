@@ -3,6 +3,8 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { SETTING_KEYS, getSetting } from "@/lib/settings";
 import { isUuid } from "@/lib/uuid";
+import { financialReportAccess } from "@/lib/financial-report-access";
+import { MAX_FINANCIAL_STATEMENT_EXPORT_ENTRIES } from "@/lib/financial-statement";
 import { rowsToCsv } from "@/lib/report-export";
 import { sheetsToXlsxBuffer } from "@/lib/data-transfer/codecs";
 import type { MoneyUnit } from "@/lib/money";
@@ -43,20 +45,28 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   if (format !== null && format !== "csv" && format !== "xlsx") {
     return NextResponse.json({ error: "invalid_format" }, { status: 400 });
   }
-  const limit = limitFromSearch(search.get("limit"), 500, 2000);
+  const limit = format ? MAX_FINANCIAL_STATEMENT_EXPORT_ENTRIES : limitFromSearch(search.get("limit"), 500, 2000);
   if (limit === null) return NextResponse.json({ error: "invalid_limit" }, { status: 400 });
 
   try {
     const card = await financialAccountCard(session.businessId, id, {
+      ...await financialReportAccess(session),
       from: search.get("from"),
       to: search.get("to"),
       projectId: search.get("projectId"),
       locationId: search.get("locationId"),
       includeReversed: search.get("includeReversed") !== "0",
+      cursor: format ? undefined : search.get("cursor"),
       limit,
     });
 
     if (format) {
+      if (card.nextCursor) {
+        return NextResponse.json({
+          error: "statement_export_limit",
+          message: "برای دریافت خروجی کامل، بازهٔ تاریخ را کوتاه‌تر کنید.",
+        }, { status: 422 });
+      }
       const prefs = await getSetting<{ currencyDisplay?: MoneyUnit }>(
         session.businessId,
         SETTING_KEYS.businessPrefs,
@@ -124,9 +134,11 @@ function cardExportMeta(card: FinancialAccountCardResult) {
     opening: card.opening,
     totalDebit: card.totalDebit,
     totalCredit: card.totalCredit,
+    totalFees: card.totalFees,
     closing: card.closing,
     ledgerBalance: card.ledgerBalance,
     reconciliationDifference: card.reconciliationDifference,
+    pendingSettlementBalance: card.pendingSettlementBalance,
   };
 }
 

@@ -168,6 +168,36 @@ export function internalBaseOrigin(env?: Record<string, string | undefined>): st
   return `http://127.0.0.1:${port}`;
 }
 
+/**
+ * A positive integer limit from the environment, clamped to something sane.
+ *
+ * The four ceilings in `src/middleware.ts` are product decisions, so they are
+ * constants — but one of them, the per-business API ceiling, is also a fact
+ * about how much traffic a *job* sends. CI's media E2E job runs four browser
+ * suites against one seeded business inside the same minute; the cheque suite's
+ * seeding alone is ~170 authenticated requests a minute, so the bucket was
+ * regularly dry before that suite made its first call and the run failed with
+ * `429 {"error":"rate_limited"}` — a test-harness fact reported as a product
+ * failure, twice.
+ *
+ * So the constant is tunable through the env, and only through the env: a
+ * missing, zero, negative, fractional or unparseable value returns the
+ * fallback rather than disabling the limit (which an API-quota knob must never
+ * do by accident). `env` is injectable for the same reason `internalBaseOrigin`
+ * takes one — the test can exercise every branch without touching the process
+ * environment middleware reads at module load.
+ */
+export function positiveIntFromEnv(
+  name: string,
+  fallback: number,
+  env?: Record<string, string | undefined>,
+): number {
+  const source = env ?? process.env;
+  const raw = Number(source[name]);
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return Math.floor(raw);
+}
+
 export async function checkRateLimit(
   _store: Map<string, RateLimitEntry> | null,
   key: string,

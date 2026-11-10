@@ -18,6 +18,25 @@ import {
   STATEMENT_DATE_MAX_YEAR,
   STATEMENT_DATE_MIN_YEAR,
 } from "./bank-reconciliation";
+import { parseStatementImport } from "./reconciliation-statement-import";
+
+describe("statement import CSV", () => {
+  it("keeps exact signed Rial values and preserves the source row number", () => {
+    expect(parseStatementImport("date,amount_rial\r\n\r\n۲۰۲۵-۰۴-۱۰,-٩٠٠٧١٩٩٢٥٤٧٤٠٩٩٣")).toEqual({
+      ok: true,
+      lines: [{ rowNumber: 3, date: "2025-04-10", amountRial: "-9007199254740993" }],
+    });
+  });
+
+  it("rejects unknown layouts, invalid dates, and amounts outside the ledger range", () => {
+    expect(parseStatementImport("amount_rial,date\n20,2025-04-10")).toMatchObject({ error: "invalid_statement_header" });
+    for (const row of ["2025-02-31,20", "2025-04-10,9223372036854775808", '2025-04-10,"20']) {
+      expect(parseStatementImport(`date,amount_rial\n${row}`)).toEqual({
+        ok: false, error: "invalid_statement_row", rowNumber: 2,
+      });
+    }
+  });
+});
 
 describe("lineDelta", () => {
   it("treats a debit as an increase and a credit as a decrease (every reconcilable account is an asset)", () => {
@@ -134,6 +153,15 @@ describe("parseCreateReconciliationRequest", () => {
   it("accepts a well-formed request and trims the date", () => {
     const parsed = parseCreateReconciliationRequest({ ...valid, statementDate: " 2026-09-30 " }, today);
     expect(parsed).toEqual({ ok: true, value: valid });
+  });
+
+  it("accepts an exact financial account and rejects conflicting or malformed selectors", () => {
+    const financialAccountId = "95b93266-d182-455c-b2c8-e1f52bcbfe92";
+    const exact = { statementDate: valid.statementDate, statementBalance: valid.statementBalance, financialAccountId };
+    expect(parseCreateReconciliationRequest(exact, today)).toEqual({ ok: true, value: exact });
+    for (const body of [{ ...exact, accountCode: "bank" }, { ...exact, financialAccountId: "bank" }]) {
+      expect(parseCreateReconciliationRequest(body, today)).toEqual({ ok: false, error: "invalid_account" });
+    }
   });
 
   it("answers a numeric statementDate instead of letting it reach .trim()", () => {

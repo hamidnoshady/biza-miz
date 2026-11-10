@@ -222,6 +222,19 @@ export const SYNC_EVENT_REGISTRY = [
     ],
   },
   {
+    type: "order.payment.completed",
+    schemaVersion: 3,
+    handler: "order.payment.completed.v3",
+    permission: PAYMENT_PERMISSION,
+    effectClass: "payment",
+    locationRule: "event_location",
+    dependencyErrors: [
+      "order_not_found", "order_not_open", "customer_not_found", "customer_required",
+      "payment_financial_account_scope",
+    ],
+    payloadFields: ["orderId", "tenders", "customerId", "tipAmount", "businessDate", "entryDate"],
+  },
+  {
     type: "order.customer_return.created",
     schemaVersion: 1,
     handler: "order.customer_return.created",
@@ -240,6 +253,16 @@ export const SYNC_EVENT_REGISTRY = [
       "reason",
       "lines",
     ],
+  },
+  {
+    type: "order.customer_return.created",
+    schemaVersion: 2,
+    handler: "order.customer_return.created.v2",
+    permission: REFUND_PERMISSION,
+    effectClass: "refund",
+    locationRule: "event_location",
+    dependencyErrors: ["completed_order_not_found", "order_item_not_found", "historical_cogs_unavailable", "payment_financial_account_scope"],
+    payloadFields: ["orderId", "refundMethod", "refundAmount", "reason", "lines", "financialAccountId", "financialAccountGlId"],
   },
   // The cloud owns the ledger (Phase 45; the one authority model, shared with
   // data-ownership.ts and replication-catalogue.ts). A site reversing a manual

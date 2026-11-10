@@ -17,11 +17,20 @@
  *      sat on one disk. The health line is asserted per artifact, including the
  *      historical object and the case where retention deleted a confirmed copy.
  *
- * The artifacts here are small (the `pg_dump` stub produces a text archive), but
- * they travel the same code: hash → encrypt-if-needed → streamed signed PUT →
- * HEAD/size proof (or a full re-download and hash) → confirmation on the local
- * run row → restore drill into a scratch database. Nothing in this file talks to
- * a real bucket, and no production database is touched.
+ * Most artifacts here come from the `pg_dump` stub and are small, but they travel
+ * the same code: hash → encrypt-if-needed → streamed signed PUT → HEAD/size proof
+ * (or a full re-download and hash) → confirmation on the local run row. Two
+ * groups deliberately step outside that:
+ *
+ *   • the *restore drill* deletes the local file and restores from the bucket
+ *     into a scratch database, because "the object is there" is not the same
+ *     claim as "the object is a recovery point";
+ *   • the *large artifact* is a real 64 MiB file, because the incident was about
+ *     a 319 MB body and a ~120 KB fixture cannot show that the streaming path and
+ *     its size-derived timeout behave at that scale.
+ *
+ * Nothing in this file talks to a real bucket, and no production database is
+ * touched.
  */
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
@@ -395,14 +404,18 @@ describe("failure classification, retries and redaction", () => {
     expect(result.diagnostics.phase).toBe("uploading");
     expect(result.diagnostics.attempts).toBe(1);
     expect(result.diagnostics.expectedBytes).toBeGreaterThan(0);
+    // The attempt's own row id is the handle support quotes; it must be there and
+    // must be the row the failure was written to.
+    expect(result.diagnostics.runId).toMatch(/^[0-9a-f-]{36}$/);
 
-    const rows = await scratch.query<{ status: string; error: string; diagnostics: unknown; attempt_phase: string }>(
-      `SELECT status, error, diagnostics, attempt_phase FROM platform_backup_runs
+    const rows = await scratch.query<{ id: string; status: string; error: string; diagnostics: unknown; attempt_phase: string }>(
+      `SELECT id, status, error, diagnostics, attempt_phase FROM platform_backup_runs
         WHERE kind = 'cloud' AND artifact = $1 ORDER BY started_at DESC LIMIT 1`,
       [run.artifact],
     );
     expect(rows.rows[0].status).toBe("failed");
     expect(rows.rows[0].attempt_phase).toBe("uploading");
+    expect((rows.rows[0] as { id: string }).id).toBe(result.diagnostics.runId);
     const diag = rows.rows[0].diagnostics as Record<string, unknown>;
     expect(diag.providerStatus).toBe(403);
     expect(diag.code).toBe("SignatureDoesNotMatch");
@@ -749,7 +762,302 @@ describe("the historical object, the missing file, and the separate health lines
     expect(health.cloudReachable).toBe(false);
     expect(health.cloud.state).not.toBe("current");
     expect(health.alert.level).toBe("error");
+    // Back on the *same* port. `listen(0)` would hand out a fresh one and leave
+    // the configured endpoint pointing at a dead address — every later test in
+    // this file would then hang against it.
     s3Server = createServer(serveS3);
-    await new Promise<void>((resolve) => s3Server.listen(0, "127.0.0.1", resolve));
+    const port = Number(new URL(endpoint).port);
+    await new Promise<void>((resolve) => {
+      s3Server.listen(port, "127.0.0.1", resolve);
+    });
+  }, 60_000);
+});
+
+/**
+ * Issue #1296 P1 — "verify … a non-production restore drill" against the copy
+ * that is actually off-site. Every other test in this file stops at "the bucket
+ * holds the right bytes"; this one does the only thing that makes that claim mean
+ * something: deletes the local file, restores *from the object*, into a scratch
+ * database, and checks the rows came back.
+ *
+ * It is deliberately the harshest version of the drill — the source of truth is
+ * gone from this server, so a passing run proves the bucket alone is a recovery
+ * point. It writes to no production database: the restore engine builds
+ * `<name>_restore_verify` and drops it (asserted), exactly as it does for a local
+ * artifact in platform-system-backup.integration.test.ts.
+ */
+describe("a restore drill from the off-site copy", () => {
+  it("restores from the bucket with the local file deleted, into a scratch database", async () => {
+    await prepare();
+    const run = await captureAndConfigure();
+    const uploaded = await svc.runPlatformCloudUpload(run.artifact, "manual", null);
+    expect(uploaded.status === "ok" ? "ok" : JSON.stringify(uploaded)).toBe("ok");
+    if (uploaded.status !== "ok") return;
+
+    // The one-machine failure this drill exists for: the artifact is only in the
+    // bucket now. If the restore below passes, the off-site copy is a real
+    // recovery point and not merely a 200 we once received.
+    await fs.rm(path.join(svc.platformBackupDir(), run.artifact), { force: true });
+    await expect(fs.stat(path.join(svc.platformBackupDir(), run.artifact))).rejects.toThrow();
+
+    const live = await scratch.query<{ n: number }>("SELECT count(*)::int AS n FROM businesses");
+
+    const res = await svc.restorePlatformFromPlan(
+      {
+        ok: true,
+        source: "cloud",
+        artifact: run.artifact,
+        mode: "verify",
+        objectKey: uploaded.key,
+        peerId: null,
+        url: null,
+        // The stored passphrase is used when this is empty; passing it explicitly
+        // proves the *object's* envelope is openable with the configured secret
+        // and that nothing depended on the local file or sidecar.
+        passphrase: "",
+      },
+      null,
+    );
+    expect(res.status === "verified" ? "verified" : JSON.stringify(res)).toBe("verified");
+    if (res.status !== "verified") return;
+
+    // The rows really came out of the bucket's object, and the scratch database
+    // was dropped afterwards rather than left on the cluster.
+    expect(res.summary.migrations).toBeGreaterThan(0);
+    const businesses = res.summary.tables.find((t) => t.name === "businesses");
+    expect(businesses?.rows).toBe(live.rows[0].n);
+
+    const maintenance = new Client({ connectionString: urlFor("postgres") });
+    await maintenance.connect();
+    let leftovers: string[] = [];
+    try {
+      const q = await maintenance.query<{ datname: string }>(
+        "SELECT datname FROM pg_database WHERE datname LIKE $1",
+        [`${databaseName}%`],
+      );
+      leftovers = q.rows.map((r) => r.datname).filter((name) => name !== databaseName);
+    } finally {
+      await maintenance.end();
+    }
+    expect(leftovers).toEqual([]);
+
+    // …and the drill is recorded as a cloud-sourced verify, so an operator can
+    // show an auditor which copy was proved and when.
+    const restoreLog = await svc.listPlatformRestoreRuns(5);
+    expect(restoreLog[0]?.status).toBe("success");
+    expect(restoreLog[0]?.mode).toBe("verify");
+    expect(restoreLog[0]?.source).toBe("cloud");
+    expect(restoreLog[0]?.objectKey).toBe(uploaded.key);
+  });
+
+  it("refuses a bucket object that is not the bytes we confirmed, instead of restoring it", async () => {
+    await prepare();
+    const run = await captureAndConfigure();
+    const uploaded = await svc.runPlatformCloudUpload(run.artifact, "manual", null);
+    if (uploaded.status !== "ok") throw new Error("upload failed");
+    // Something upstream rewrote the object after our confirmation (a bad
+    // multipart join, an operator, another tool). A drill must fail, not restore
+    // whatever happens to be at the key.
+    bucket.set(uploaded.key, Buffer.from("POSBKP1\0tampered", "latin1"));
+
+    const res = await svc.restorePlatformFromPlan(
+      {
+        ok: true,
+        source: "cloud",
+        artifact: run.artifact,
+        mode: "verify",
+        objectKey: uploaded.key,
+        peerId: null,
+        url: null,
+        passphrase: "",
+      },
+      null,
+    );
+    expect(res.status).toBe("failed");
+    if (res.status !== "failed") return;
+    // Named, not generic: the operator has to know whether to re-upload or to
+    // re-provision the bucket.
+    expect(res.error).toMatch(/passphrase_required|decrypt|truncated|corrupt|invalid|bad_magic|checksum/i);
+    const log = await svc.listPlatformRestoreRuns(3);
+    expect(log[0]?.status).toBe("failed");
+  });
+});
+
+/**
+ * Issue #1296's first acceptance criterion is about *size*: the artifact that
+ * failed was 319 067 831 bytes. Everything else in this file runs on a stub dump
+ * of ~120 KB, which cannot show that the streaming path, the size-derived
+ * timeout, or the lease arithmetic behave at the scale the incident actually hit.
+ *
+ * The file below is written directly (a deterministic 64 MiB body, gzip-skipped)
+ * rather than through `pg_dump`, because the thing being proved is the transfer
+ * and the proof-after-transfer, not the dump. 64 MiB is the largest artifact this
+ * sandbox can stream a few times in a test without turning CI red for the wrong
+ * reason; the bytes:timeout ratio it exercises is the same one that produced a
+ * 320 s budget for the live upload.
+ */
+describe("a large artifact at the scale of the incident", () => {
+  const LARGE_MIB = 64;
+
+  it("streams 64 MiB, proves it by size and by sha256, and stays within one lease", async () => {
+    await prepare();
+    await setConfig({ enabled: true, encryptLocal: true, passphrase: "correct horse battery", localRetention: 5 });
+    await setConfig({ cloud: cloudConfig() });
+
+    // Artifact-shaped name so every guard in the path accepts it; the body is
+    // filler that the upload path treats exactly like a real ciphertext.
+    const artifact = "pos-backup-20261107-060247-7e2e5bb6.dump.enc";
+    const largePath = path.join(svc.platformBackupDir(), artifact);
+    // The body starts with the backup envelope's magic, exactly as a real
+    // `.dump.enc` does. That matters twice: the uploader must recognise an
+    // already-encrypted artifact and stream it verbatim (a plaintext body would
+    // be encrypted first, adding the ~52-byte envelope and making this test
+    // measure the wrong thing), and it is the same first-bytes check that keeps
+    // a plaintext dump out of the bucket.
+    const CHUNK = 1024 * 1024;
+    const handle = await fs.open(largePath, "w");
+    try {
+      let written = 0;
+      for (let i = 0; i < LARGE_MIB; i += 1) {
+        const chunk = Buffer.alloc(CHUNK, 0x5a);
+        if (i === 0) Buffer.from("POSBKP1\0", "latin1").copy(chunk, 0);
+        await handle.write(chunk);
+        written += CHUNK;
+      }
+      expect(written).toBe(LARGE_MIB * 1024 * 1024);
+    } finally {
+      await handle.close();
+    }
+    const bytes = await fs.stat(largePath);
+    expect(bytes.size).toBe(LARGE_MIB * 1024 * 1024);
+    const localHash = await (async () => {
+      const hash = createHash("sha256");
+      const h = await fs.open(largePath, "r");
+      const buf = Buffer.alloc(1024 * 1024);
+      try {
+        for (;;) {
+          const { bytesRead } = await h.read(buf, 0, buf.length, null);
+          if (bytesRead === 0) break;
+          hash.update(buf.subarray(0, bytesRead));
+        }
+      } finally {
+        await h.close();
+      }
+      return hash.digest("hex");
+    })();
+
+    const startedAt = Date.now();
+    const result = await svc.runPlatformCloudUpload(artifact, "manual", null, { verify: "sha256" });
+    const elapsed = Date.now() - startedAt;
+
+    expect(result.status === "ok" ? "ok" : JSON.stringify(result)).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.sizeBytes).toBe(bytes.size);
+    expect(result.verifyMode).toBe("sha256");
+
+    // The bucket holds every byte, and the confirmation on the local row carries
+    // the *whole-file* hash — the claim that matters when the artifact is
+    // hundreds of megabytes and a size check alone would pass on a bad join.
+    const stored = bucket.get(result.key);
+    expect(stored?.byteLength).toBe(bytes.size);
+    expect(sha(stored!)).toBe(localHash);
+    const row = await scratch.query<{ cloud_verified_size: string; cloud_verified_sha256: string; lease_expires_at: Date | null }>(
+      `SELECT cloud_verified_size, cloud_verified_sha256, lease_expires_at FROM platform_backup_runs
+        WHERE kind = 'local' AND artifact = $1`,
+      [artifact],
+    );
+    expect(Number(row.rows[0].cloud_verified_size)).toBe(bytes.size);
+    expect(row.rows[0].cloud_verified_sha256).toBe(localHash);
+    // The lease is released when the attempt finishes: a successful row must not
+    // leave a future lease that would make the next tick think work is in flight.
+    expect(row.rows[0].lease_expires_at).toBeNull();
+
+    // And the tenant-wide claim the issue asks for: the 64 MiB capture is the
+    // *current confirmed* one, not merely "an upload succeeded".
+    const health = await svc.getPlatformBackupHealth();
+    expect(health.cloud.state).toBe("current");
+    expect(health.cloud.currentArtifact).toBe(artifact);
+    expect(health.cloud.currentSizeBytes).toBe(bytes.size);
+    expect(health.cloud.latestVerifyMode).toBe("sha256");
+
+    // A generous ceiling: this is a loopback mock. What it catches is a path that
+    // silently buffers or re-reads the file many times, not network slowness.
+    expect(elapsed).toBeLessThan(120_000);
+  }, 180_000);
+});
+
+/**
+ * The identity gap the large-artifact test uncovered: an artifact can be on disk
+ * with no run row — copied in from a USB stick, restored after a rebuild, or
+ * written before `platform_backup_runs` existed. `listPlatformLocalArtifacts`
+ * already calls such a file a real backup, so an upload that the provider proved
+ * must be recorded *somewhere*, or the console reports "never off-site" about a
+ * copy that is demonstrably off-site.
+ */
+describe("an artifact with no run row still earns its confirmation", () => {
+  it("backfills an identity row for a verified upload, and says it is a backfill", async () => {
+    await prepare();
+    await setConfig({ enabled: true, encryptLocal: true, passphrase: "correct horse battery", localRetention: 5 });
+    await setConfig({ cloud: cloudConfig() });
+
+    // Put a valid encrypted artifact straight into the directory: no run, no
+    // sidecar, nothing but bytes — exactly what an operator's USB restore leaves.
+    const artifact = "pos-backup-20261001-030000-abcdef01.dump.enc";
+    const body = Buffer.concat([Buffer.from("POSBKP1\0", "latin1"), Buffer.alloc(4096, 9)]);
+    await fs.writeFile(path.join(svc.platformBackupDir(), artifact), body);
+
+    const before = await svc.getPlatformBackupHealth();
+    expect(before.cloud.state).not.toBe("current");
+
+    const uploaded = await svc.runPlatformCloudUpload(artifact, "manual", null);
+    expect(uploaded.status === "ok" ? "ok" : JSON.stringify(uploaded)).toBe("ok");
+
+    const rows = await scratch.query<{
+      kind: string;
+      trigger: string;
+      status: string;
+      size_bytes: string;
+      sha256: string;
+      manifest: Record<string, unknown>;
+      cloud_verified_at: Date | null;
+      cloud_verified_size: string | null;
+    }>(
+      `SELECT kind, trigger, status, size_bytes, sha256, manifest, cloud_verified_at, cloud_verified_size
+         FROM platform_backup_runs WHERE artifact = $1 ORDER BY started_at DESC`,
+      [artifact],
+    );
+    const local = rows.rows.find((r) => r.kind === "local");
+    expect(local?.status).toBe("success");
+    expect(local?.trigger).toBe("manual");
+    expect(Number(local?.size_bytes)).toBe(body.byteLength);
+    expect(local?.sha256).toBe(sha(body));
+    // Honest history: the row exists so the proof has a home, and it says so
+    // rather than claiming a dump ran when none did.
+    expect(local?.manifest.identityBackfilled).toBe(true);
+    expect(local?.cloud_verified_at).toBeInstanceOf(Date);
+    expect(Number(local?.cloud_verified_size)).toBe(body.byteLength);
+
+    const after = await svc.getPlatformBackupHealth();
+    expect(after.cloud.state).toBe("current");
+    expect(after.cloud.currentConfirmed).toBe(true);
+    expect(after.cloud.currentArtifact).toBe(artifact);
+  });
+
+  it("reuses the existing row instead of inventing a second identity", async () => {
+    await prepare();
+    await setConfig({ enabled: true, encryptLocal: true, passphrase: "correct horse battery", localRetention: 5 });
+    await setConfig({ cloud: cloudConfig() });
+    const run = await captureAndConfigure();
+    expect((await svc.runPlatformCloudUpload(run.artifact, "manual", null)).status).toBe("ok");
+    // A second verified upload of the same artifact (an operator pressing the
+    // button again) must land on the same local row, not a duplicate.
+    expect((await svc.runPlatformCloudUpload(run.artifact, "manual", null, { verify: "sha256" })).status).toBe("ok");
+    const rows = await scratch.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM platform_backup_runs WHERE kind = 'local' AND artifact = $1`,
+      [run.artifact],
+    );
+    expect(Number(rows.rows[0].n)).toBe(1);
+    const confirmations = await svc.listCloudConfirmations();
+    expect(confirmations.filter((c) => c.artifact === run.artifact)).toHaveLength(1);
   });
 });

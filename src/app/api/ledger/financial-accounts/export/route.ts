@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { SETTING_KEYS, getSetting } from "@/lib/settings";
 import { rowsToCsv, rowsToXlsxBuffer } from "@/lib/report-export";
 import { businessXlsxBranding } from "@/lib/report-export-branding";
+import { financialReportAccess } from "@/lib/financial-report-access";
 import type { MoneyUnit } from "@/lib/money";
 import { isFinancialAccountKind, type FinancialAccountKind } from "@/lib/financial-accounts";
 import { financialAccountBalanceSummary } from "@/lib/financial-accounts-service";
@@ -33,8 +34,13 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "invalid_kind" }, { status: 400 });
   }
   const asOf = search.get("asOf");
+  const status = search.get("status") ?? "active";
+  if (status !== "active" && status !== "archived" && status !== "all") {
+    return NextResponse.json({ error: "invalid_status" }, { status: 400 });
+  }
 
   try {
+    const { allowedLocationIds } = await financialReportAccess(session);
     const prefs = await getSetting<{ currencyDisplay?: MoneyUnit }>(
       session.businessId,
       SETTING_KEYS.businessPrefs,
@@ -42,8 +48,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const unit: MoneyUnit = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
     const summary = await financialAccountBalanceSummary(session.businessId, {
       kind: kind ? (kind as FinancialAccountKind) : undefined,
-      status: (search.get("status") as "active" | "archived" | "all" | null) ?? "active",
+      status,
       locationId: search.get("locationId"),
+      restrictToLocationIds: allowedLocationIds ?? undefined,
+      postingLocationIds: allowedLocationIds,
+      balanceAsOf: asOf,
     });
     const table = balanceSummaryTable(
       summary.accounts.map((account) => ({

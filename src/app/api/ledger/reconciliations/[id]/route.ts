@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
+import { financialReportAccess } from "@/lib/financial-report-access";
 import {
   discardReconciliation,
   getReconciliation,
@@ -53,6 +54,7 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   try {
     return NextResponse.json(
       await getReconciliation(session.businessId, id, {
+        ...await financialReportAccess(session),
         limit: rawLimit ? Number(rawLimit) : undefined,
         cursor: params.get("cursor"),
         clearedOnly: rawCleared === "true",
@@ -76,7 +78,7 @@ export const DELETE = withTenantScope(async (_request: NextRequest, ctx: Ctx) =>
 
   const { id } = await ctx.params;
   try {
-    await discardReconciliation({ businessId: session.businessId, reconciliationId: id });
+    await discardReconciliation({ businessId: session.businessId, reconciliationId: id, ...await financialReportAccess(session) });
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof ReconciliationError) return NextResponse.json({ error: err.message }, { status: err.status });

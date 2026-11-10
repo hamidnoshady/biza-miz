@@ -15,10 +15,11 @@ import { toPersianDigits } from "@/lib/digits";
 import { VENDOR_PURCHASE_STATUS_LABELS, type VendorPurchaseStatus } from "@/lib/agency-vendor-purchase";
 
 type Purchase = { client_name: string; vendor_name: string; id: string; purchase_number: string; description: string; quote_reference: string;
-  amount_rial: string; quoted_on: string; status: VendorPurchaseStatus; cost_id: string | null };
+  amount_rial: string; quoted_on: string; status: VendorPurchaseStatus; cost_id: string | null;
+  cancellation_reason: string; cancelled_by_name: string; cancelled_at: string | null };
 
-export function AgencyVendorPurchases({ projectId, canManage, canBook, onChanged }: {
-  projectId: string; canManage: boolean; canBook: boolean; onChanged?: () => void;
+export function AgencyVendorPurchases({ projectId, canManage, canBook, canCancel = false, onChanged }: {
+  projectId: string; canManage: boolean; canBook: boolean; canCancel?: boolean; onChanged?: () => void;
 }) {
   const money = useMoney();
   const [rows, setRows] = useState<Purchase[] | null>(null);
@@ -31,12 +32,15 @@ export function AgencyVendorPurchases({ projectId, canManage, canBook, onChanged
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState("");
   const [spentOn, setSpentOn] = useState("");
+  const [cancelling, setCancelling] = useState<Purchase | null>(null);
+  const [cancellationReason, setCancellationReason] = useState("");
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
       const result = await api<{ purchases?: Purchase[] }>(`/api/agency/vendor-purchases?projectId=${projectId}`, { signal });
       if (result.aborted) return;
       if (!result.ok || !result.data.purchases) { setError("خواندن خریدهای فروشنده ممکن نشد."); return; }
       setRows(result.data.purchases);
+      setCancelling(current => current && result.data.purchases?.some(row => row.id === current.id && row.status === "approved") ? current : null);
     } catch { if (!signal?.aborted) setError("ارتباط با فهرست خریدها برقرار نشد."); }
   }, [projectId]);
   useEffect(() => { const c = new AbortController(); void load(c.signal); return () => c.abort(); }, [load]);
@@ -58,26 +62,43 @@ export function AgencyVendorPurchases({ projectId, canManage, canBook, onChanged
     finally { setBusy(false); }
   }
   if (rows === null && !error) return <SectionCardSkeleton />;
-  const committed = (rows ?? []).filter(r => r.status === "approved").reduce((sum,r) => sum + Number(r.amount_rial),0);
+  const committed = (rows ?? []).filter(r => r.status === "approved").reduce((sum,r) => sum + BigInt(r.amount_rial),0n);
   return <SectionCard title="پیشنهاد فروشنده و خرید تأییدشده">
     <div className="space-y-4">
       {error ? <ErrorBox>{error}</ErrorBox> : null}
       <p className="text-sm text-muted-foreground">پیشنهاد و تأیید خرید، هزینهٔ ثبت‌شده نیستند. تأیید در صف مشترک و به‌دست شخص دیگری انجام می‌شود؛ ثبت پرداختنی عمل حسابداری جداگانه است.</p>
-      <p className="text-sm">تعهد تأییدشدهٔ ثبت‌نشده در همین فهرست (حداکثر ۲۰۰ ردیف): {toPersianDigits(money.format(committed, { withUnit: true }))}</p>
+      <p className="text-sm">تعهد تأییدشدهٔ ثبت‌نشده در همین فهرست (حداکثر ۲۰۰ ردیف): {toPersianDigits(money.formatText(committed.toString(), { withUnit: true }))}</p>
       <Link href="/workspace/approvals" className="text-sm text-primary underline">صف تأییدهای مشترک</Link>
       <SecondaryButton disabled={busy} onClick={() => { onChanged?.(); void load(); }}>تازه‌کردن فهرست</SecondaryButton>
       <DataTable caption="خریدهای فروشندهٔ پروژه">
         <DataTableHead><Th>شماره</Th><Th>مرجع پیشنهاد</Th><Th>کارفرما (نام فعلی)</Th><Th>تأمین‌کننده (نام فعلی)</Th><Th>شرح</Th><Th>مبلغ</Th><Th>تاریخ</Th><Th>وضعیت</Th><Th>عملیات</Th></DataTableHead>
         <DataTableBody>{(rows ?? []).map(row => <DataTableRow key={row.id} id={`vendor-purchase-${row.id}`}>
           <Td>{toPersianDigits(row.purchase_number)}</Td><Td>{row.quote_reference}</Td><Td>{row.client_name}</Td><Td>{row.vendor_name}</Td><Td>{row.description}</Td>
-          <Td>{toPersianDigits(money.format(Number(row.amount_rial), { withUnit: true }))}</Td><Td>{formatJalali(row.quoted_on)}</Td>
-          <Td>{VENDOR_PURCHASE_STATUS_LABELS[row.status]}</Td><Td>
+          <Td>{toPersianDigits(money.formatText(row.amount_rial, { withUnit: true }))}</Td><Td>{formatJalali(row.quoted_on)}</Td>
+          <Td>{VENDOR_PURCHASE_STATUS_LABELS[row.status]}
+            {row.status === "cancelled" ? <p className="mt-1 text-xs text-muted-foreground">
+              علت لغو: {row.cancellation_reason} — {row.cancelled_by_name || "عضو"}
+              {row.cancelled_at ? ` — ${formatJalali(row.cancelled_at)}` : ""}
+            </p> : null}
+          </Td><Td>
             {canManage && row.status === "draft" ? <PrimaryButton disabled={busy} onClick={() => void write(`/api/agency/vendor-purchases/${row.id}`, { action: "submit" })}>ارسال برای تأیید خرید</PrimaryButton> : null}
             {canBook && row.status === "approved" ? <PrimaryButton disabled={busy || !spentOn} onClick={() => void write(`/api/agency/vendor-purchases/${row.id}`, { action: "book", spentOn })}>ثبت هزینه در پرداختنی</PrimaryButton> : null}
+            {canCancel && row.status === "approved" ? <SecondaryButton disabled={busy} onClick={() => { setCancelling(row); setCancellationReason(""); }}>لغو خرید تأییدشده</SecondaryButton> : null}
             {row.status === "booked" ? <span className="text-xs">هزینه به دفتر و فهرست هزینه‌های کارفرما منتقل شد</span> : null}
           </Td>
         </DataTableRow>)}</DataTableBody>
       </DataTable>
+      {canCancel && cancelling ? <form className="rounded-xl border border-border p-3" onSubmit={async e => {
+        e.preventDefault();
+        if (!cancellationReason.trim()) return;
+        const done = await write(`/api/agency/vendor-purchases/${cancelling.id}`, { action: "cancel", reason: cancellationReason });
+        if (done) { setCancelling(null); setCancellationReason(""); }
+      }}>
+        <p className="mb-3 text-sm">لغو {toPersianDigits(cancelling.purchase_number)} — {cancelling.description}. این کار تعهد ثبت‌نشده را لغو می‌کند؛ سند حسابداری را برگشت نمی‌دهد و تأیید قبلی را پاک نمی‌کند.</p>
+        <Field label="دلیل لغو خرید"><textarea className={inputClass} value={cancellationReason} maxLength={500} onChange={e => setCancellationReason(e.target.value)} /></Field>
+        <PrimaryButton disabled={busy || !cancellationReason.trim()}>تأیید لغو خرید ثبت‌نشده</PrimaryButton>
+        <SecondaryButton disabled={busy} onClick={() => setCancelling(null)}>انصراف از لغو</SecondaryButton>
+      </form> : null}
       {canBook ? <Field label="تاریخ وقوع هزینه برای ثبت پرداختنی" as="div"><JalaliDatePicker ariaLabel="تاریخ وقوع هزینه برای ثبت پرداختنی" value={spentOn} onChange={setSpentOn} /></Field> : null}
       {canManage ? <form className="space-y-3" onSubmit={async e => {
         e.preventDefault();

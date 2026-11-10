@@ -162,7 +162,8 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'aec_estimate_versions', columns: ["approved_by", "created_by", "reviewed_by", "submitted_by"] },
   { table: 'aec_estimates', columns: ["created_by"] },
   { table: 'aec_transmittals', columns: ["created_by", "issued_by"] },
-  { table: 'agency_vendor_purchases', columns: ["created_by"] },
+  { table: 'agency_campaign_reports', columns: ["created_by"] },
+  { table: 'agency_vendor_purchases', columns: ["created_by", "cancelled_by"] },
   { table: 'ap_payments', columns: ["created_by", "reversed_by"] },
   { table: 'ar_receipts', columns: ["created_by", "reversed_by"] },
   { table: 'automotive_vehicle_attributes', columns: ["created_by", "price_changed_by", "sold_by"] },
@@ -231,6 +232,8 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'payroll_engine_runs', columns: ["approved_by", "cancelled_by", "closed_by", "created_by", "paid_by", "posted_by", "reviewed_by"] },
   { table: 'payroll_runs', columns: ["voided_by"] },
   { table: 'periodic_closings', columns: ["created_by"] },
+  { table: 'petty_cash_funds', columns: ["created_by"] },
+  { table: 'petty_cash_operations', columns: ["actor_id", "decided_by"] },
   // Print-only Woo actions still carry staff accountability after recipient snapshots expire.
   { table: 'print_jobs', columns: ["initiated_by"], scope: { kind: 'location' } },
   { table: 'product_price_history', columns: ["actor_id"] },

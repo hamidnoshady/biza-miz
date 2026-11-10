@@ -1,5 +1,7 @@
 "use client";
 
+import { CampaignReports } from "./campaign-reports";
+
 /**
  * CRM → کمپین‌های کارفرما — the campaign as it ran, for a client (issue #1128 §A + §C).
  *
@@ -582,6 +584,7 @@ export function ClientCampaignsSection({
         }
       >
         <div className="space-y-4">
+          <InfoBox>شاخص‌های فهرست، محاسبات ارقام کلیِ دستی هستند و تأیید مستقل یا بازهٔ گزارش ندارند. برای گزارش دوره‌ای با منبع، محدودیت انتساب و تاریخچهٔ اصلاحات، پروندهٔ کمپین را باز کنید.</InfoBox>
           <div className="flex flex-wrap items-end gap-3">
             <div className="min-w-56 flex-1">
             <Field label="جستجو">
@@ -1021,6 +1024,8 @@ export function ClientCampaignsSection({
                 aria-label="یادداشت داخلی"
               />
             </Field>
+
+            {editing?.campaign ? <CampaignReports key={editing.campaign.id} campaignId={editing.campaign.id}/> : null}
 
             {/* The note fields stay open on a closed campaign, because
                 after-the-fact knowledge belongs on the record. */}

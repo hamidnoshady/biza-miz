@@ -14,6 +14,7 @@ import { PayrollError } from "./payroll-errors";
 import { clientRunner, poolRunner, type Runner } from "./payroll-db";
 import { isRialPayoutCurrency, usablePaymentAccounts, type ChartAccountRow } from "./payroll-payment-accounts";
 import type { PayrollPaymentAccount } from "./payroll-types";
+import { resolvePaymentFinancialAccountId } from "./payment-financial-account";
 
 async function loadChart(run: Runner, businessId: string): Promise<ChartAccountRow[]> {
   const { rows } = await run<{ id: string; code: string; name: string; parent_id: string | null; type: ChartAccountRow["type"]; currency_code: string | null }>(
@@ -43,6 +44,7 @@ async function lockRialPayoutAccount(client: PoolClient, businessId: string, acc
 export interface PayoutChoice {
   method: "cash" | "bank";
   paymentAccountId: string | null;
+  locationId?: string | null;
 }
 
 /**
@@ -59,17 +61,25 @@ export async function resolvePayoutAccount(
   client: PoolClient,
   businessId: string,
   choice: PayoutChoice,
-): Promise<{ accountId: string; method: "cash" | "bank" }> {
+): Promise<{ accountId: string; method: "cash" | "bank"; financialAccountId: string | null }> {
+  const resolve = (accountId: string, method: "cash" | "bank", explicit: boolean) =>
+    resolvePaymentFinancialAccountId(client, {
+      businessId, locationId: choice.locationId ?? null, accountId, explicit,
+      invalid: () => new PayrollError("invalid_payment_account"),
+      fallbackKind: method === "bank" ? "bank" : undefined,
+      allowedKinds: method === "bank" ? ["bank"] : ["cash", "petty_cash"],
+    });
   if (choice.paymentAccountId) {
     const allowed = usablePaymentAccounts(await loadChart(clientRunner(client), businessId));
     const chosen = allowed.find((account) => account.id === choice.paymentAccountId);
     if (!chosen) throw new PayrollError("invalid_payment_account");
     await lockRialPayoutAccount(client, businessId, chosen.id);
-    return { accountId: chosen.id, method: chosen.role === "bank" ? "bank" : "cash" };
+    const method = chosen.role === "bank" ? "bank" : "cash";
+    return { accountId: chosen.id, method, financialAccountId: await resolve(chosen.id, method, true) };
   }
   const code = choice.method === "cash" ? WELL_KNOWN_CODES.cash : WELL_KNOWN_CODES.bank;
   const accounts = await accountIdsByCode(client, businessId, [code]);
   const accountId = accounts.get(code)!;
   await lockRialPayoutAccount(client, businessId, accountId);
-  return { accountId, method: choice.method };
+  return { accountId, method: choice.method, financialAccountId: await resolve(accountId, choice.method, false) };
 }

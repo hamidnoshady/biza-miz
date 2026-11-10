@@ -498,6 +498,15 @@ describe("whole-project vendor commitments", () => {
     expect(after.commitments.approvedVendorPurchaseRial).toBe("0");
     expect(after.posted.actualCostRial).toBe(5000000);
   },180000);
+  it("removes a cancelled purchase from commitments without creating an expense, pass-through spend or margin",async()=>{
+    const f=await fixture();const [id]=await purchaseBatch(f,1,"5000000");await purchaseBatch(f,1,"2000000");
+    const purchases=await import("../src/lib/agency-vendor-purchase-service");
+    await purchases.cancelVendorPurchase(f.owner,id,"فروشنده انصراف داد");
+    const report=await pnl(f);
+    expect(report.commitments).toEqual({approvedVendorPurchaseRial:"2000000",approvedVendorPurchaseCount:1});
+    expect(report.posted.actualCostRial).toBeNull();expect(report.passThrough.spentRial).toBeNull();
+    expect(report.grossMarginRial).toBeNull();
+  },180000);
   it("keeps an aggregate above safe JavaScript integers exact as decimal rial text", async () => {
     const f=await fixture();await purchaseBatch(f,1,"9000000000000000");await purchaseBatch(f,1,"8999999999999999");
     expect((await pnl(f)).commitments).toEqual({approvedVendorPurchaseRial:"17999999999999999",approvedVendorPurchaseCount:2});

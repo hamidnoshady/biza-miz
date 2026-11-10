@@ -606,8 +606,17 @@ jobs:
       - name: Build
         run: bash ./scripts/ci-next-build.sh
       - name: Start the production server
+        # BUSINESS_API_LIMIT: this job drives four browser suites against one
+        # seeded business inside the same minute — CRM Today, media, the
+        # WordPress browser flow, then the cheque register, whose seeding alone
+        # is ~170 authenticated requests a minute. At the product default of
+        # 300/min the cheque suite's *first* call came back
+        # `429 {"error":"rate_limited"}` and the run failed as if the product
+        # were broken. Raising the ceiling is the honest fix here: the limit is
+        # per business by design, and this job is one business by construction.
         run: |
           BIND_ADDR=127.0.0.1 PORT=3000 DEPLOYMENT_ROLE=central \
+          BUSINESS_API_LIMIT=3000 \
           DATABASE_URL=postgres://pos_app:ci-only-app-role-password@127.0.0.1:55433/pos \
           npm run start > server.log 2>&1 &
           for i in $(seq 1 60); do
@@ -656,9 +665,17 @@ jobs:
           if npm run test:e2e:cheques 2>&1 | tee cheque-e2e.log; then
             exit 0
           else
-            tail -n 40 cheque-e2e.log | while IFS= read -r line; do
+            # GitHub keeps only the first ten annotations of a step. `tail -40`
+            # spent all ten on the seeding headers, so a red run said
+            # "seeding 220 receivables" and never named the failing expectation
+            # or the thrown error — which is why two runs of this step had to be
+            # diagnosed from their durations. Annotate only the lines that say
+            # something failed, and keep the list short enough to survive the cap.
+            grep -aE '✗|expectation\(s\) failed|^  - |\[e2e-cheques\] Error:' cheque-e2e.log | tail -n 8 | while IFS= read -r line; do
               printf '::error::%s\n' "${line//%/%25}"
             done
+            # …and always leave the last few lines in the plain log as a backstop.
+            tail -n 5 cheque-e2e.log
             exit 1
           fi
       - name: Commission multi-user lifecycle E2E (Rial)

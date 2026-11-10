@@ -194,6 +194,33 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/financial-accounts.integration.test.ts",
   },
   {
+    id: "accounting.order-payment-sources",
+    module: "Accounting",
+    entity: "Order payment routing",
+    routes: ["ledger/order-payment-sources"],
+    note: "Branch activation and verified website routes require in-app review.",
+    status: "route-only (by design)",
+    test: "src/lib/order-payment-routing-service.test.ts",
+  },
+  {
+    id: "accounting.petty-cash",
+    module: "Accounting",
+    entity: "Petty cash funds and operations",
+    routes: ["ledger/petty-cash"],
+    note: "Custodian receipts and approval decisions stay in the permissioned app.",
+    status: "route-only (by design)",
+    test: "integration/petty-cash.integration.test.ts",
+  },
+  {
+    id: "accounting.psp-settlements",
+    module: "Accounting",
+    entity: "PSP settlement batches",
+    routes: ["ledger/psp-settlements"],
+    note: "Confirmed settlement movements post through the permissioned app.",
+    status: "route-only (by design)",
+    test: "integration/financial-transfers.integration.test.ts",
+  },
+  {
     id: "accounting.financial-transfers",
     module: "Accounting",
     entity: "Internal transfers",
@@ -563,8 +590,8 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     // crm.client_proposals either: a campaign runs *after* the offer is accepted and
     // is its own entity with its own chain, and neither row's prefix reaches these
     // files.
-    note: "issue #1128 §A + §C: the campaign as it ran for one client, downstream of the brief, the proposal, the contract and the project, so it may point at any of the four. Distinct from `growth_campaigns`, which has no client and cannot be given one honestly — its trigger vocabulary is exactly `pos_sale_settled` and its reward is `cashback`, so its party is the shopper earning money back. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and here, unlike the brief's `confirm` and the proposal's `accept`, no column *has* to stay a gap: `complete` and `cancel` record a member's own claim that a campaign finished, not a client's attestation, so §F's draft-and-approve rule does not bite. What a future tool must keep instead is four things about the figures. `metrics_source` has exactly two values, `manual` and `imported`, and that is the documentation: there is no ad-platform integration, so §C's «no fake campaign performance» is satisfied by having no third value to claim one. Attribution figures are a member's claim and `metrics_note` is where the method is recorded, because §C asks for *defensible* attribution and a number with no stated method is not defensible. Every ratio this row derives — CPL, CPA, ROAS, click-through — is `null` when its denominator is zero rather than zero, since a CPL of 0 on a lead-less campaign reads as the cheapest leads ever bought. And nothing here posts: media spend is §D's business and becomes real money there, so this record only reports what was spent",
-    test: "integration/agency-client-campaigns.integration.test.ts",
+    note: "issue #1128 §A + §C: the campaign as it ran for one client, downstream of the brief, the proposal, the contract and the project, so it may point at any of the four. Distinct from `growth_campaigns`, which has no client and cannot be given one honestly — its trigger vocabulary is exactly `pos_sale_settled` and its reward is `cashback`, so its party is the shopper earning money back. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — and here, unlike the brief's `confirm` and the proposal's `accept`, no column *has* to stay a gap: `complete` and `cancel` record a member's own claim that a campaign finished, not a client's attestation, so §F's draft-and-approve rule does not bite. What a future tool must keep instead is four things about the figures. `metrics_source` has exactly two values, `manual` and `imported`, and that is the documentation: there is no ad-platform integration, so §C's «no fake campaign performance» is satisfied by having no third value to claim one. Attribution figures are a member's claim and `metrics_note` is where the method is recorded, because §C asks for *defensible* attribution and a number with no stated method is not defensible. Every ratio this row derives — CPL, CPA, ROAS, click-through — is `null` when its denominator is zero rather than zero, since a CPL of 0 on a lead-less campaign reads as the cheapest leads ever bought. And nothing here posts: media spend is §D's business and becomes real money there, so this record only reports what was spent. Period reports under [id]/reports add immutable evidence snapshots and corrections with manual reconciliation attestation; unconfirmed attribution suppresses CPL/CPA/ROAS and explicit zero revenue remains zero. They require CRM authority plus Workspace permission and project role when linked, preserve reported client/project scope, never post ledger entries and expose no automatic reporting/attestation tool.",
+    test: "integration/agency-client-campaigns.integration.test.ts + integration/agency-campaign-reports.integration.test.ts",
   },
   {
     id: "crm.segments-views",
@@ -890,7 +917,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "agency.vendor_purchases", module: "Accounting", entity: "Agency supplier quotes and approved project purchases",
     routes: ["agency/vendor-purchases"],
     ops: { lifecycle: ["workspace.approval.decide"] },
-    note: "#1128 §D: canonical supplier quote → shared Workspace approval → explicit expense posting. Approving commits but posts no expense. Booking requires workspace.manage and finance.expenses_manage plus project-manager capability; creates exactly one payable cost via the existing domain-event engine, inheriting the business presentation policy. The existing approval-gated decision tool uses the same register service; quote submission is register-only and no create/book/payment tool is added.",
+    note: "#1128 §D: canonical supplier quote → shared Workspace approval → explicit expense posting. Approving commits but posts no expense. Booking requires workspace.manage and finance.expenses_manage plus project-manager capability; creates exactly one payable cost via the existing domain-event engine, inheriting the business presentation policy. The existing approval-gated decision tool uses the same register service; quote submission is register-only and no create/book/payment tool is added. Approved/unbooked cancellation requires workspace.manage plus workspace.approve and project-management capability, records immutable reason/actor/time, preserves the original approval and never reverses a ledger entry; no cancellation tool is exposed.",
     test: "integration/agency-vendor-purchases.integration.test.ts",
   },
   {
