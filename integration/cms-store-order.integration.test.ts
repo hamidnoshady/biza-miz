@@ -161,9 +161,9 @@ describe("CMS store order ingest", () => {
     );
     const productRemote = `prod-${randomUUID()}`;
     await db.query(
-      `INSERT INTO website_product_map (business_id, local_kind, local_id, remote_id, sync_enabled)
-       VALUES ($1, 'menu_item', $2, $3, true)`,
-      [biz.id, menu.rows[0].id, productRemote],
+      `INSERT INTO website_product_map (business_id, connection_id, local_kind, local_id, remote_id, sync_enabled)
+       VALUES ($1, $4, 'menu_item', $2, $3, true)`,
+      [biz.id, menu.rows[0].id, productRemote, biz.connectionId],
     );
 
     const order = paidOrder(`ord-${randomUUID()}`);

@@ -1,3 +1,5 @@
+import { decideVendorPurchaseApproval } from "@/lib/agency-vendor-purchase-service";
+import { vendorPurchaseErrorResponse } from "../../../agency/vendor-purchase-guard";
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { decideEstimateApproval } from "@/lib/aec-boq-service";
@@ -123,6 +125,11 @@ export const POST = withTenantScope(
         }
         return NextResponse.json({ approval: null, certificateId: result.certificateId });
       }
+      if (subjectType === "vendor_purchase") {
+        const result = await decideVendorPurchaseApproval(owner, id, decision, note);
+        if (!result.applied) return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
+        return NextResponse.json({ approval: null, purchaseId: result.purchaseId });
+      }
       if (subjectType === "billing_milestone") {
         const result = await decideMilestoneApproval(owner, id, decision, note);
         if (!result.applied) {
@@ -143,6 +150,8 @@ export const POST = withTenantScope(
       if (!approval) return NextResponse.json({ error: "approval_not_pending" }, { status: 409 });
       return NextResponse.json({ approval });
     } catch (err) {
+      const vendorError = vendorPurchaseErrorResponse(err);
+      if (vendorError) return vendorError;
       // The AEC subjects decide through their own modules, whose refusals are
       // `AecError`s; `handleAecError` maps those and falls through to the
       // workspace guard for everything else, so one catch covers both.

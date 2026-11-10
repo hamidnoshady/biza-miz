@@ -851,6 +851,20 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
       FROM agency_vendor_settlements c WHERE c.business_id=$1 AND c.vendor_party_id=$2`,
   },
 
+  {
+    table: "agency_vendor_purchases", column: "party_id", scope: "business", disposition: "move",
+    reason: "Purchase attribution follows the canonical party through an audited merge; approved amounts remain frozen.",
+    preview: true, previewLabel: "خریدهای فروشندهٔ آژانس",
+    preMoveSql: `INSERT INTO crm_party_attribution_moves (business_id,table_name,row_id,old_party_id,new_party_id,actor_id)
+      SELECT $1,'agency_vendor_purchases',id,party_id,$3,$4 FROM agency_vendor_purchases WHERE business_id=$1 AND party_id=$2`,
+  },
+  {
+    table: "agency_vendor_purchases", column: "vendor_party_id", scope: "business", disposition: "move",
+    reason: "Purchase attribution follows the canonical party through an audited merge; approved amounts remain frozen.",
+    preview: true, previewLabel: "خریدهای فروشندهٔ آژانس",
+    preMoveSql: `INSERT INTO crm_party_attribution_moves (business_id,table_name,row_id,old_party_id,new_party_id,actor_id)
+      SELECT $1,'agency_vendor_purchases',id,vendor_party_id,$3,$4 FROM agency_vendor_purchases WHERE business_id=$1 AND vendor_party_id=$2`,
+  },
   // -- AEC (issue #799 Wave 2) ----------------------------------------------
   // Migration 0194's three party columns. All four are `move`: they name a live
   // counterparty on a project that is still running, and the migration's own

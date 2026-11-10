@@ -417,6 +417,7 @@ export const APPROVAL_SUBJECTS = [
   // invoice and agreeing more money must not inherit the `workspace.manage`
   // right that writes a schedule, so both are filed where `workspace.approve`
   // already is instead of in a billing approval store of their own.
+  "vendor_purchase",
   "billing_milestone",
   "change_request",
 ] as const;
@@ -441,6 +442,7 @@ export const APPROVAL_SUBJECT_LABELS: Record<WorkspaceApprovalSubject, string> =
   // «صورت‌وضعیت»: a progress claim certified by a supervisor and an agency's
   // billing milestone are different documents, and the queue is where an
   // approver reads the difference.
+  vendor_purchase: "خرید فروشندهٔ آژانس",
   billing_milestone: "مرحلهٔ پرداخت",
   change_request: "درخواست تغییر",
 };

@@ -980,7 +980,17 @@ export interface AgencyHoursFigures {
   revenuePerContractedHourRial: number | null;
 }
 
+/** Approved, unbooked client-funded purchase totals over the whole project.
+ * Quote totals have no expense presentation until booking, so these are neither
+ * posted expenses nor a deduction from the posted gross margin. */
+export interface AgencyPurchaseCommitments {
+  /** Exact decimal string: aggregate purchase totals can exceed safe JS integers. */
+  approvedVendorPurchaseRial: string;
+  approvedVendorPurchaseCount: number;
+}
+
 export interface AgencyCommercialReport {
+  commitments: AgencyPurchaseCommitments;
   booked: AgencyCommercialBooked;
   posted: AgencyCommercialPosted;
   /** Posted revenue minus posted cost; null until the ledger knows both. */

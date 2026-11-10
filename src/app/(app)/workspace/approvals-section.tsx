@@ -11,6 +11,7 @@
  * enforces the same rule again (`approvalDecisionError`).
  */
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2Icon, CheckIcon, StampIcon } from "lucide-react";
 import {
@@ -98,6 +99,10 @@ function SubjectLabel({
   const kind = row.subjectType;
   // An explicit button, not a row click: this row also holds the decision
   // buttons, and one press must do one thing (#761 §23).
+  if (kind === "vendor_purchase" && row.projectId) {
+    return <Link className="font-medium underline underline-offset-4"
+      href={`/workspace/projects/${row.projectId}?tab=finance#vendor-purchase-${row.subjectId}`}>{label}</Link>;
+  }
   if (!openableSubject(kind)) return <span className="font-medium">{label}</span>;
   return (
     <button
@@ -241,7 +246,6 @@ export function ApprovalsSection({
         ) : (
           <DataTable caption="فهرست درخواست‌های تأیید" frame={false} tableClassName={stackedTableClass}>
             <DataTableHead>
-              <tr>
                 <Th>موضوع</Th>
                 <Th>نوع</Th>
                 <Th>پروژه</Th>
@@ -249,7 +253,6 @@ export function ApprovalsSection({
                 <Th>مهلت</Th>
                 <Th>وضعیت</Th>
                 <Th>اقدام</Th>
-              </tr>
             </DataTableHead>
             <DataTableBody>
               {approvals.map((row) => (

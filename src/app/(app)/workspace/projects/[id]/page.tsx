@@ -41,7 +41,7 @@ export default async function WorkspaceProjectPage({
         actions={<KnowledgeHelpButton section="projects" />}
       />
       <WorkspaceCommandBar permissions={[...member.permissions]} projectId={id} />
-      <ProjectDetail projectId={id} />
+      <ProjectDetail projectId={id} canRecordVendorCost={member.permissions.has(PERMISSIONS.financeExpensesManage)} canPickVendor={member.permissions.has(PERMISSIONS.partiesView)} />
     </PageShell>
   );
 }
