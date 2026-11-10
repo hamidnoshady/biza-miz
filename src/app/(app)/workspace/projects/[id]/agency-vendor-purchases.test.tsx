@@ -29,12 +29,14 @@ describe("project vendor purchase card",()=>{
     expect(screen.queryByRole("button",{name:"تأیید خرید"})).toBeNull();
   });
   it("requires an explicit occurrence date and sends only book, never approve or a presentation guess",async()=>{
-    const writes=stub([row()]);render(<AgencyVendorPurchases projectId="project" canManage={false} canBook/>);
+    const onChanged=vi.fn();
+    const writes=stub([row()]);render(<AgencyVendorPurchases projectId="project" canManage={false} canBook onChanged={onChanged}/>);
     const button=await screen.findByRole("button",{name:"ثبت هزینه در پرداختنی"});
     expect((button as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(screen.getByLabelText("تاریخ وقوع هزینه برای ثبت پرداختنی"),{target:{value:"2026-10-06"}});
     await userEvent.click(button);
     await waitFor(()=>expect(writes).toEqual([{ url:"/api/agency/vendor-purchases/p1",body:{action:"book",spentOn:"2026-10-06"} }]));
+    expect(onChanged).toHaveBeenCalledTimes(1);
   });
   it("creates a project-bound canonical quote in rial using the business's display unit",async()=>{
     const writes=stub();render(<AgencyVendorPurchases projectId="project" canManage canBook={false}/>);

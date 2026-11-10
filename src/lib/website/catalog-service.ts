@@ -36,7 +36,7 @@ export interface WebsiteCatalogRow {
  * never a variant parent (it has no price of its own, so it is not a product
  * on a site either).
  */
-export async function listWebsiteCatalog(businessId: string, locationId: string): Promise<WebsiteCatalogRow[]> {
+export async function listWebsiteCatalog(businessId: string, locationId: string, connectionId?: string): Promise<WebsiteCatalogRow[]> {
   const { rows } = await query<{
     local_kind: LocalProductKind;
     local_id: string;
@@ -65,8 +65,11 @@ export async function listWebsiteCatalog(businessId: string, locationId: string)
        FROM local l
        LEFT JOIN website_product_map m
          ON m.business_id = $1 AND m.local_kind = l.local_kind AND m.local_id = l.local_id
+        AND m.connection_id = COALESCE($3::uuid, (
+          SELECT id FROM eshobe_cms_connections WHERE business_id = $1 AND status = 'active' ORDER BY created_at, id LIMIT 1
+        ))
       ORDER BY (m.sync_enabled IS TRUE) DESC, l.local_kind, l.sort_order, l.sort_name`,
-    [businessId, locationId],
+    [businessId, locationId, connectionId ?? null],
   );
   return rows.map((r) => ({
     localKind: r.local_kind,
@@ -84,6 +87,8 @@ export async function listWebsiteCatalog(businessId: string, locationId: string)
 
 export interface WebsiteOutboxView {
   id: string;
+  connectionId: string | null;
+  siteDomain: string | null;
   kind: WebsiteOutboxKind;
   localKind: LocalProductKind;
   localId: string;
@@ -107,6 +112,7 @@ export async function listWebsiteOutbox(
   businessId: string,
   status: "open" | "sent" | "all" = "open",
   limit = 100,
+  connectionId?: string,
 ): Promise<WebsiteOutboxView[]> {
   const where =
     status === "open"
@@ -116,6 +122,8 @@ export async function listWebsiteOutbox(
         : "";
   const { rows } = await query<{
     id: string;
+    connection_id: string | null;
+    site_domain: string | null;
     kind: WebsiteOutboxKind;
     local_kind: LocalProductKind;
     local_id: string;
@@ -127,20 +135,23 @@ export async function listWebsiteOutbox(
     sent_at: string | null;
     updated_at: string;
   }>(
-    `SELECT o.id, o.kind, o.local_kind, o.local_id, o.status, o.attempts, o.next_attempt_at, o.error, o.sent_at, o.updated_at,
+    `SELECT o.id, o.connection_id, c.site_domain, o.kind, o.local_kind, o.local_id, o.status, o.attempts, o.next_attempt_at, o.error, o.sent_at, o.updated_at,
             CASE o.local_kind
               WHEN 'menu_item' THEN (SELECT name FROM menu_items WHERE id = o.local_id)
               ELSE (SELECT name FROM items WHERE id = o.local_id)
             END AS product_name
        FROM website_outbox o
-      WHERE o.business_id = $1 ${where}
+       LEFT JOIN eshobe_cms_connections c ON c.id = o.connection_id AND c.business_id = o.business_id
+      WHERE o.business_id = $1 AND ($3::uuid IS NULL OR o.connection_id = $3) ${where}
       ORDER BY CASE o.status WHEN 'dead' THEN 0 WHEN 'failed' THEN 1 WHEN 'processing' THEN 2 WHEN 'pending' THEN 3 ELSE 4 END,
                o.updated_at DESC
       LIMIT $2`,
-    [businessId, limit],
+    [businessId, limit, connectionId ?? null],
   );
   return rows.map((r) => ({
     id: r.id,
+    connectionId: r.connection_id,
+    siteDomain: r.site_domain,
     kind: r.kind,
     localKind: r.local_kind,
     localId: r.local_id,
@@ -154,14 +165,14 @@ export async function listWebsiteOutbox(
   }));
 }
 
-export async function summarizeWebsiteQueue(businessId: string): Promise<WebsiteQueueSummary> {
+export async function summarizeWebsiteQueue(businessId: string, connectionId?: string): Promise<WebsiteQueueSummary> {
   const { rows } = await query<{ pending: string; failed: string; dead: string; sent24h: string }>(
     `SELECT COUNT(*) FILTER (WHERE status IN ('pending', 'processing'))::text AS pending,
             COUNT(*) FILTER (WHERE status = 'failed')::text AS failed,
             COUNT(*) FILTER (WHERE status = 'dead')::text AS dead,
             COUNT(*) FILTER (WHERE status = 'sent' AND sent_at > now() - interval '24 hours')::text AS sent24h
-       FROM website_outbox WHERE business_id = $1`,
-    [businessId],
+       FROM website_outbox WHERE business_id = $1 AND ($2::uuid IS NULL OR connection_id = $2)`,
+    [businessId, connectionId ?? null],
   );
   const r = rows[0];
   return { pending: Number(r?.pending ?? 0), failed: Number(r?.failed ?? 0), dead: Number(r?.dead ?? 0), sent24h: Number(r?.sent24h ?? 0) };

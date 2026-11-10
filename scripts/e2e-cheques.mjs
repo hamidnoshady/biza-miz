@@ -132,7 +132,10 @@ async function apiPaced(page, method, path, body, deadline = Date.now() + 90_000
  */
 async function ensureChartOfAccounts(page) {
   // Paced: this runs right after the media steps, which have already spent part
-  // of the same business's 300-a-minute budget.
+  // of the same business's 300-a-minute budget. `main` fixed the same 429 here
+  // (30e6d6e6) the minimal way; this keeps the pacing and adds the distinction
+  // between "bucket still spent" and a real refusal, which is what made the two
+  // red runs hard to read.
   const read = await apiPaced(page, "GET", "/api/setup/accounts");
   if (read.status === 429) {
     throw new Error(

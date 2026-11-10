@@ -453,9 +453,9 @@ describe("Eshobe CMS batch sales and reversals", () => {
       }),
     );
     await db.query(
-      `INSERT INTO website_product_map (business_id, local_kind, local_id, remote_id, sync_enabled)
-       VALUES ($1, 'item', $2, $3, true)`,
-      [biz.id, item.id, "cms-prod-1"],
+      `INSERT INTO website_product_map (business_id, connection_id, local_kind, local_id, remote_id, sync_enabled)
+       VALUES ($1, $4, 'item', $2, $3, true)`,
+      [biz.id, item.id, "cms-prod-1", biz.cmsConnectionId],
     );
 
     const order = cmsOrder(`ord-${randomUUID()}`, "cms-prod-1", 2, 50_000, "paid");

@@ -111,25 +111,33 @@ export function CmsSyncSettings() {
   const [loading, setLoading] = useState(true);
   const [enabled, setEnabled] = useState(true);
   const [connection, setConnection] = useState<ConnectionSummary | null>(null);
+  const [connections, setConnections] = useState<ConnectionSummary[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [queue, setQueue] = useState<QueueSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   /** Bumped when something outside the queue's own controls may have changed it. */
   const [queueRefresh, setQueueRefresh] = useState(0);
 
   const load = useCallback(async () => {
-    const res = await api<{ enabled: boolean; connection: ConnectionSummary | null; queue: QueueSummary | null }>(
-      "/api/connections/website",
+    const res = await api<{ enabled: boolean; connection: ConnectionSummary | null; connections?: ConnectionSummary[]; queue: QueueSummary | null }>(
+      selectedId ? `/api/connections/website?connectionId=${selectedId}` : "/api/connections/website",
     );
     if (!res.ok) {
       setError(errorMessageOrRaw((res.data as { error?: string }).error));
       setLoading(false);
       return;
     }
+    const sites = res.data.connections ?? (res.data.connection ? [res.data.connection] : []);
+    setConnections(sites);
+    const current = selectedId
+      ? res.data.connection
+      : sites.find((site) => site.status === "active") ?? res.data.connection;
     setEnabled(res.data.enabled);
-    setConnection(res.data.connection);
+    setConnection(current);
+    if (!selectedId && current) setSelectedId(current.id);
     setQueue(res.data.queue);
     setLoading(false);
-  }, []);
+  }, [selectedId]);
 
   useEffect(() => {
     void load();
@@ -164,9 +172,23 @@ export function CmsSyncSettings() {
         </SectionCard>
       ) : (
         <>
+          {connections.length > 1 ? (
+            <SectionCard title="سایت مقصد" description="هر سایت علامت‌ها و صف مستقل خودش را دارد.">
+              <select
+                className={`${inputClass} max-w-sm`}
+                aria-label="انتخاب سایت"
+                value={selectedId ?? connection.id}
+                onChange={(e) => setSelectedId(e.target.value)}
+              >
+                {connections.map((site) => (
+                  <option key={site.id} value={site.id}>{site.siteDomain || site.baseUrl}{site.status === "active" ? "" : " (غیرفعال)"}</option>
+                ))}
+              </select>
+            </SectionCard>
+          ) : null}
           <SyncSettingsCard connection={connection} onChange={load} />
-          <ProductsCard onChange={refreshAfterMark} />
-          <QueueCard summary={queue} onChange={load} refreshKey={queueRefresh} />
+          <ProductsCard connectionId={connection.id} onChange={refreshAfterMark} />
+          <QueueCard connectionId={connection.id} summary={queue} onChange={load} refreshKey={queueRefresh} />
         </>
       )}
     </div>
@@ -184,7 +206,7 @@ function SyncSettingsCard({ connection, onChange }: { connection: ConnectionSumm
   async function patch(body: Record<string, unknown>) {
     setBusy(true);
     setError(null);
-    const res = await api("/api/connections/website/settings", { method: "PATCH", body: JSON.stringify(body) });
+    const res = await api("/api/connections/website/settings", { method: "PATCH", body: JSON.stringify({ ...body, connectionId: connection.id }) });
     setBusy(false);
     if (!res.ok) {
       // The switch is controlled by the reloaded connection, so it snaps back
@@ -242,7 +264,7 @@ function SyncSettingsCard({ connection, onChange }: { connection: ConnectionSumm
 // Products
 // ---------------------------------------------------------------------------
 
-function ProductsCard({ onChange }: { onChange: () => Promise<void> }) {
+function ProductsCard({ connectionId, onChange }: { connectionId: string; onChange: () => Promise<void> }) {
   const money = useMoney();
   const [rows, setRows] = useState<CatalogRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -250,14 +272,14 @@ function ProductsCard({ onChange }: { onChange: () => Promise<void> }) {
   const [filter, setFilter] = useState("");
 
   const load = useCallback(async () => {
-    const res = await api<{ products: CatalogRow[] }>("/api/connections/website/products");
+    const res = await api<{ products: CatalogRow[] }>(`/api/connections/website/products?connectionId=${connectionId}`);
     if (!res.ok) {
       setError(errorMessageOrRaw((res.data as { error?: string }).error));
       setRows([]);
       return;
     }
     setRows(res.data.products);
-  }, []);
+  }, [connectionId]);
 
   useEffect(() => {
     void load();
@@ -267,7 +289,7 @@ function ProductsCard({ onChange }: { onChange: () => Promise<void> }) {
     setBusyId(row.localId);
     const res = await api("/api/connections/website/products", {
       method: "POST",
-      body: JSON.stringify({ localKind: row.localKind, localId: row.localId, enabled }),
+      body: JSON.stringify({ localKind: row.localKind, localId: row.localId, enabled, connectionId }),
     });
     setBusyId(null);
     if (!res.ok) setError(errorMessageOrRaw((res.data as { error?: string }).error));
@@ -361,10 +383,12 @@ function ProductsCard({ onChange }: { onChange: () => Promise<void> }) {
 // ---------------------------------------------------------------------------
 
 function QueueCard({
+  connectionId,
   summary,
   onChange,
   refreshKey,
 }: {
+  connectionId: string;
   summary: QueueSummary | null;
   onChange: () => Promise<void>;
   /** Changes when something outside this card (a product mark) touched the queue. */
@@ -377,9 +401,9 @@ function QueueCard({
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const res = await api<{ rows: QueueRow[] }>(`/api/connections/website/queue?status=${view}`);
+    const res = await api<{ rows: QueueRow[] }>(`/api/connections/website/queue?status=${view}&connectionId=${connectionId}`);
     setRows(res.ok ? res.data.rows : []);
-  }, [view]);
+  }, [view, connectionId]);
 
   useEffect(() => {
     void load();
@@ -398,7 +422,7 @@ function QueueCard({
     setBusy("sync");
     setSyncResult(null);
     setError(null);
-    const res = await api<{ queued: number; sent: number; failed: number }>("/api/connections/website/sync", { method: "POST" });
+    const res = await api<{ queued: number; sent: number; failed: number }>(`/api/connections/website/sync?connectionId=${connectionId}`, { method: "POST" });
     setBusy(null);
     if (res.ok) {
       setSyncResult(

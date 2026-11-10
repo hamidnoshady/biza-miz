@@ -9,6 +9,7 @@
  * the same shape as the WooCommerce outbox by decision, not a second policy.
  */
 import { backoffDelayMs, isDeadAfterAttempts, OUTBOX_MAX_ATTEMPTS } from "../integrations/retry";
+import type { MenuCategoryInput, MenuModifierGroup } from "./adapter";
 
 export const WEBSITE_OUTBOX_KINDS = ["product.upsert", "stock.set", "price.set"] as const;
 export type WebsiteOutboxKind = (typeof WEBSITE_OUTBOX_KINDS)[number];
@@ -34,6 +35,20 @@ export interface ProductMapState {
   syncEnabled: boolean;
   lastPushedPriceRial: number | null;
   lastPushedStock: number | null;
+  lastPushedContentHash?: string | null;
+  /** Undefined only for a legacy map; treat it as published so it can be withdrawn. */
+  lastPushedPublished?: boolean | null;
+}
+
+export interface WebsiteLocalProduct {
+  name: string;
+  sku: string | null;
+  description: string | null;
+  imageMediaId?: string | null;
+  imageUrl?: string | null;
+  sortOrder?: number;
+  category?: Omit<MenuCategoryInput, "taxonomyId" | "remoteId"> | null;
+  modifierGroups?: MenuModifierGroup[];
 }
 
 export interface DesiredProductState {
@@ -41,6 +56,10 @@ export interface DesiredProductState {
   priceRial: number | null;
   /** `null` when the app itself cannot say (F&B item with no recipe). */
   stock: number | null;
+  /** Fingerprint of everything product.upsert owns (not price/stock). */
+  contentHash?: string | null;
+  published?: boolean;
+  available?: boolean;
 }
 
 export interface SyncSwitches {
@@ -67,13 +86,23 @@ export function planProductEvents(
   desired: DesiredProductState,
   switches: SyncSwitches,
 ): WebsiteOutboxKind[] {
-  if (!productInScope(map, switches)) return [];
+  // Opting out is itself a durable change: withdraw an already published
+  // product before applying the scope gate. An unmarked row with no remote id
+  // has nothing to withdraw.
+  if (!productInScope(map, switches)) {
+    return map.remoteId && map.lastPushedPublished !== false ? ["product.upsert"] : [];
+  }
   if (!map.remoteId) return ["product.upsert"];
   const events: WebsiteOutboxKind[] = [];
+  if (desired.contentHash != null && desired.contentHash !== map.lastPushedContentHash) {
+    events.push("product.upsert");
+  }
   if (switches.pushPrices && desired.priceRial !== null && desired.priceRial !== map.lastPushedPriceRial) {
     events.push("price.set");
   }
-  if (switches.pushStock && desired.stock !== null && desired.stock !== map.lastPushedStock) {
+  // null is an explicit unknown: clear a previously pushed count, never
+  // fabricate zero or unlimited stock for an item whose recipe disappeared.
+  if (switches.pushStock && desired.stock !== map.lastPushedStock) {
     events.push("stock.set");
   }
   return events;
@@ -103,5 +132,5 @@ export function sellableFromIngredients(rows: { onHand: number; perUnit: number 
     const sellable = Math.floor(row.onHand / row.perUnit);
     if (sellable < min) min = sellable;
   }
-  return min === Number.POSITIVE_INFINITY ? 0 : Math.max(0, min);
+  return min === Number.POSITIVE_INFINITY ? null : Math.max(0, min);
 }
