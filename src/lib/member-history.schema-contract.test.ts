@@ -194,6 +194,7 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'torob_shop_products.created_by': 'channel publication config',
   'tenant_roles.updated_by': 'role configuration',
   'tour_member_progress.user_id': 'personal learning progress (guided tours)',
+  'learning_path_progress.user_id': 'personal learning progress (learning paths)',
   // Issue #972 phase 2 — one row per member and verifier counting business
   // actions the member performed. It is credited by the member's own request
   // and scoped to them; the action itself is attributable where it happened

@@ -131,6 +131,8 @@ export function lexicalToPlainText(root: LexicalRoot | null | undefined): string
 
 export interface CmsMedia {
   id: string;
+  sourceSystem?: string | null;
+  sourceId?: string | null;
   alt?: string | null;
   url?: string | null;
   thumbnailURL?: string | null;
@@ -178,8 +180,76 @@ export interface CmsCategory {
   createdAt: string;
 }
 
+export interface CmsTaxonomyDefinition {
+  id: string;
+  key: string;
+  singularLabel: string;
+  pluralLabel: string;
+  description?: string | null;
+  hierarchical: boolean;
+  hasArchive: boolean;
+}
+
+export interface CmsTaxonomyTerm {
+  id: string;
+  taxonomy: string | { id: string };
+  sourceSystem?: string | null;
+  sourceId?: string | null;
+  name: string;
+  slug: string;
+  description?: string | null;
+  menuOrder: number;
+}
+
+/** POS-managed café fields are delivered by eshobe-cms#196 (ESH-149). */
+export interface CmsProductModifierOption {
+  id?: string;
+  sourceId: string;
+  label: string;
+  priceDelta: number;
+  isActive: boolean;
+  sortOrder: number;
+}
+export interface CmsProductModifierGroup {
+  id?: string;
+  sourceId: string;
+  label: string;
+  minSelect: number;
+  maxSelect: number;
+  isActive: boolean;
+  sortOrder: number;
+  options: CmsProductModifierOption[];
+}
+
+export interface CmsProductWrite {
+  title: string;
+  slug?: string;
+  price: number;
+  summary?: string | null;
+  image?: string | null;
+  sku?: string | null;
+  trackInventory?: boolean;
+  inventory?: number | null;
+  compareAtPrice?: number;
+  sourceSystem?: string;
+  sourceId?: string;
+  terms?: string[];
+  menuOrder?: number;
+  menuAvailable?: boolean;
+  inventoryManagedExternally?: boolean;
+  modifierGroups?: CmsProductModifierGroup[];
+  _status?: "draft" | "published";
+}
+
 export interface CmsProduct {
   id: string;
+  sourceSystem?: string | null;
+  sourceId?: string | null;
+  terms?: (string | { id: string })[] | null;
+  menuOrder?: number | null;
+  menuAvailable?: boolean | null;
+  inventoryManagedExternally?: boolean | null;
+  modifierGroups?: CmsProductModifierGroup[] | null;
   title: string;
   summary?: string | null;
   image?: string | CmsMedia | null;

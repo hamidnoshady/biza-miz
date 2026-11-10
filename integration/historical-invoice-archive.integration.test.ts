@@ -178,6 +178,55 @@ describe("historical invoice archive", () => {
     await expect(archive.archiveHistoricalInvoice(params())).rejects.toMatchObject({ code: "customer_binding_changed" });
     await owner.query(`UPDATE source_identities SET verified = true WHERE business_id = $1 AND source_key = 'old-shop-1'`, [a.businessId]);
   });
+  it("stages exact flat-file evidence atomically for no-write preview", async () => {
+    const staging = await import("../src/lib/data-transfer/historical-invoice-staging");
+    const csv = `externalInvoiceId,invoiceDate,externalCustomerCode,total,invoiceNumber\nnew-001,1403/01/01,customer-1,9007199254740993,00001\n`;
+    const input = { businessId: a.businessId, locationId: a.locationId, actor: { userId: a.actorId, name: "owner" }, fileName: "old.csv", format: "csv" as const, buffer: new TextEncoder().encode(csv).buffer as ArrayBuffer, sourceKey: "old-shop-1", provider: "generic", currency: "rial" as const, calendar: "jalali" as const };
+    const protectedTables = ["historical_sales_invoices", "source_identities", "orders", "order_items", "payments", "journal_entries", "stock_movements", "parties"];
+    const counts = async () => {
+      const result: number[] = [];
+      for (const table of protectedTables) result.push((await owner.query(`SELECT count(*)::int AS n FROM ${table}`)).rows[0].n);
+      return result;
+    };
+    const before = await counts();
+    const initialJobs = (await owner.query(`SELECT count(*)::int AS n FROM data_import_jobs`)).rows[0].n;
+    await expect(staging.stageHistoricalInvoiceFile({ ...input, actor: { ...input.actor, userId: b.actorId } })).rejects.toMatchObject({ code: "actor_not_active" });
+    await expect(staging.stageHistoricalInvoiceFile({ ...input, locationId: b.locationId })).rejects.toMatchObject({ code: "location_not_found" });
+    await expect(staging.stageHistoricalInvoiceFile({ ...input, format: "json", buffer: new TextEncoder().encode('[{"total":"1","total":"2"}]').buffer as ArrayBuffer })).rejects.toMatchObject({ code: "duplicate_source_columns" });
+    const ExcelJS = (await import("exceljs")).default;
+    const workbook = new ExcelJS.Workbook();
+    workbook.addWorksheet("headers").addRows([["id"], ["1"]]);
+    workbook.addWorksheet("lines").addRows([["id"], ["1"]]);
+    const workbookBytes = await workbook.xlsx.writeBuffer();
+    await expect(staging.stageHistoricalInvoiceFile({ ...input, format: "xlsx", buffer: Uint8Array.from(workbookBytes as unknown as Uint8Array).buffer })).rejects.toMatchObject({ code: "multi_sheet_not_supported" });
+    expect((await owner.query(`SELECT count(*)::int AS n FROM data_import_jobs`)).rows[0].n).toBe(initialJobs);
+    const staged = await staging.stageHistoricalInvoiceFile(input);
+    expect(staged.rowCount).toBe(1);
+    const job = await owner.query(`SELECT status, options, total_rows FROM data_import_jobs WHERE id = $1`, [staged.jobId]);
+    expect(job.rows[0]).toMatchObject({ status: "pending", total_rows: 1, options: { historicalInvoice: { sourceKey: "old-shop-1", currency: "rial" } } });
+    expect(job.rows[0].options.historicalInvoice.fileSha256).toMatch(/^[0-9a-f]{64}$/);
+    const raw = await owner.query(`SELECT row_number, raw FROM data_import_rows WHERE job_id = $1`, [staged.jobId]);
+    expect(raw.rows[0]).toMatchObject({ row_number: 2, raw: { total: "9007199254740993", invoiceNumber: "00001" } });
+    const preview = await previewService.previewHistoricalImportJob({ ...previewParams(), jobId: staged.jobId, currency: "rial", mapping: { columns: staged.columns.map((field, column) => ({ field, column })) } });
+    expect(preview).toMatchObject({ totalInvoices: 1, toCreate: 1, crossSourceChecked: false, reconciliation: { totalRial: "9007199254740993" } });
+    await expect(previewService.previewHistoricalImportJob({ ...previewParams(), jobId: staged.jobId, currency: "toman", mapping: { columns: staged.columns.map((field, column) => ({ field, column })) } })).rejects.toMatchObject({ code: "job_source_changed" });
+    expect(await counts()).toEqual(before);
+  });
+  it("stages and previews 2,000 invoice documents without writing the archive", async () => {
+    const staging = await import("../src/lib/data-transfer/historical-invoice-staging");
+    const header = "externalInvoiceId,invoiceDate,externalCustomerCode,total";
+    const body = Array.from({ length: 2000 }, (_, i) => `batch-${i},1403/01/01,customer-1,10`).join("\n");
+    const staged = await staging.stageHistoricalInvoiceFile({
+      businessId: a.businessId, locationId: a.locationId, actor: { userId: a.actorId, name: "owner" },
+      fileName: "batch.csv", format: "csv", buffer: new TextEncoder().encode(`${header}\n${body}`).buffer as ArrayBuffer,
+      sourceKey: "old-shop-1", provider: "generic", currency: "rial", calendar: "jalali",
+    });
+    const preview = await previewService.previewHistoricalImportJob({ ...previewParams(), jobId: staged.jobId, currency: "rial", mapping: { columns: staged.columns.map((field, column) => ({ field, column })) } });
+    expect(staged.rowCount).toBe(2000);
+    expect(preview).toMatchObject({ totalInvoices: 2000, toCreate: 2000, invalid: 0, truncated: true, reconciliation: { totalRial: "20000" } });
+    expect((await owner.query(`SELECT count(*)::int AS n FROM data_import_rows WHERE job_id = $1`, [staged.jobId])).rows[0].n).toBe(2000);
+    expect((await owner.query(`SELECT count(*)::int AS n FROM historical_sales_invoices WHERE import_job_id = $1`, [staged.jobId])).rows[0].n).toBe(0);
+  });
   it("preserves original attribution while following the audited customer merge chain", async () => {
     const original = await archive.listHistoricalInvoices({ businessId: a.businessId, locationId: a.locationId, partyId: a.partyId });
     const winner = (await owner.query<{ id: string }>(`INSERT INTO parties (business_id, name, role) VALUES ($1, 'winner', 'customer') RETURNING id`, [a.businessId])).rows[0].id;

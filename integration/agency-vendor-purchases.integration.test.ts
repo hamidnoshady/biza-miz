@@ -263,4 +263,64 @@ describe("agency vendor purchase chain", () => {
     await purchases.decideVendorPurchaseApproval(await reviewer(a),await approval(a,q.id),"rejected");
     await expect(purchases.bookVendorPurchase(owner(a),q.id,"2026-10-06")).rejects.toThrow("invalid_purchase_state");
   });
+  it("cancels an approved unbooked purchase with immutable attribution while preserving the original approval and zero accounting facts",async()=>{
+    const a=await agency(),q=await quote(a);await approve(a,q.id);
+    const approved=(await db.query(`SELECT id FROM workspace_approvals WHERE subject_id=$1 AND status='approved'`,[q.id])).rows[0].id;
+    await purchases.cancelVendorPurchase(owner(a),q.id,"  فروشنده از همکاری منصرف شد  ");
+    const cancelled=(await purchases.listVendorPurchases(owner(a),a.projectId))[0];
+    expect(cancelled).toMatchObject({status:"cancelled",cost_id:null,cancellation_reason:"فروشنده از همکاری منصرف شد",cancelled_by:a.actor.userId,cancelled_by_name:a.actor.name});
+    expect(cancelled.cancelled_at).toBeTruthy();
+    expect((await db.query(`SELECT status FROM workspace_approvals WHERE id=$1`,[approved])).rows[0].status).toBe("approved");
+    expect((await db.query(`SELECT count(*)::int AS n FROM agency_reimbursable_costs WHERE business_id=$1`,[a.businessId])).rows[0].n).toBe(0);
+    expect((await db.query(`SELECT count(*)::int AS n FROM domain_events WHERE business_id=$1 AND source_type='agency_reimbursable_cost'`,[a.businessId])).rows[0].n).toBe(0);
+    expect(await balance(a,"2140")).toBe(0);
+    await expect(purchases.bookVendorPurchase(owner(a),q.id,"2026-10-06")).rejects.toThrow("invalid_purchase_state");
+    await expect(purchases.cancelVendorPurchase(owner(a),q.id,"تغییر دلیل")).rejects.toThrow("invalid_purchase_state");
+    await expect(db.query(`UPDATE agency_vendor_purchases SET cancellation_reason='rewrite' WHERE id=$1`,[q.id])).rejects.toThrow("history is immutable");
+    await expect(db.query(`UPDATE agency_vendor_purchases SET status='approved' WHERE id=$1`,[q.id])).rejects.toThrow("transition");
+    await expect(db.query(`UPDATE agency_vendor_purchases SET amount_rial=1 WHERE id=$1`,[q.id])).rejects.toThrow("frozen");
+  });
+  it("does not cancel a draft, a pending quote or a posted payable and never reverses its ledger facts",async()=>{
+    const a=await agency(),q=await quote(a);
+    await expect(purchases.cancelVendorPurchase(owner(a),q.id,"انصراف")).rejects.toThrow("invalid_purchase_state");
+    await purchases.submitVendorPurchase(owner(a),q.id);
+    await expect(purchases.cancelVendorPurchase(owner(a),q.id,"انصراف")).rejects.toThrow("invalid_purchase_state");
+    await purchases.decideVendorPurchaseApproval(await reviewer(a),await approval(a,q.id),"approved");
+    const booked=await purchases.bookVendorPurchase(owner(a),q.id,"2026-10-06");
+    await expect(purchases.cancelVendorPurchase(owner(a),q.id,"انصراف")).rejects.toThrow("invalid_purchase_state");
+    expect((await purchases.listVendorPurchases(owner(a),a.projectId))[0]).toMatchObject({status:"booked",cost_id:booked.costId,cancelled_at:null});
+    expect(await balance(a,"2140")).toBe(5000000);
+  });
+  it("requires a valid reason and project-management capability, and refuses foreign tenant IDs",async()=>{
+    const a=await agency(),b=await agency(),q=await quote(a);await approve(a,q.id);
+    for(const reason of ["", "  ", null, 42, "x".repeat(501)]) await expect(purchases.cancelVendorPurchase(owner(a),q.id,reason)).rejects.toThrow("invalid_purchase");
+    await expect(purchases.cancelVendorPurchase(await reviewer(a,"viewer"),q.id,"انصراف")).rejects.toThrow("insufficient_project_role");
+    await expect(purchases.cancelVendorPurchase(owner(b),q.id,"انصراف")).rejects.toThrow("purchase_not_found");
+    await expect(purchases.cancelVendorPurchase({...owner(a),actorUserId:b.actor.userId},q.id,"انصراف")).rejects.toThrow("project_not_found");
+    expect((await purchases.listVendorPurchases(owner(a),a.projectId))[0].status).toBe("approved");
+  });
+  it("can retire a historical approved commitment even after its supplier is archived",async()=>{
+    const a=await agency(),q=await quote(a);await approve(a,q.id);
+    await db.query(`UPDATE parties SET is_active=false WHERE id=$1`,[q.vendor_party_id]);
+    await purchases.cancelVendorPurchase(owner(a),q.id,"فروشنده دیگر فعال نیست");
+    expect((await purchases.listVendorPurchases(owner(a),a.projectId))[0].status).toBe("cancelled");
+  });
+  it("serializes cancellation against booking so only one wins, without a cancelled expense or a lost commitment",async()=>{
+    const a=await agency(),q=await quote(a);await approve(a,q.id);
+    const results=await Promise.allSettled([purchases.cancelVendorPurchase(owner(a),q.id,"انصراف"),purchases.bookVendorPurchase(owner(a),q.id,"2026-10-06")]);
+    expect(results.filter(r=>r.status==="fulfilled")).toHaveLength(1);
+    const row=(await purchases.listVendorPurchases(owner(a),a.projectId))[0];
+    expect(["cancelled","booked"]).toContain(row.status);
+    const costs=(await db.query(`SELECT count(*)::int AS n FROM agency_reimbursable_costs WHERE business_id=$1`,[a.businessId])).rows[0].n;
+    expect(costs).toBe(row.status==="booked"?1:0);
+    expect(await balance(a,"2140")).toBe(row.status==="booked"?5000000:0);
+    expect(row.cost_id===null).toBe(row.status==="cancelled");
+  });
+  it("records a single cancellation and keeps its first reason during concurrent retries",async()=>{
+    const a=await agency(),q=await quote(a);await approve(a,q.id);
+    const result=await Promise.allSettled([1,2].map(()=>purchases.cancelVendorPurchase(owner(a),q.id,"انصراف")));
+    expect(result.filter(r=>r.status==="fulfilled")).toHaveLength(1);
+    expect((await db.query(`SELECT count(*)::int AS n FROM workspace_activity WHERE business_id=$1 AND subject_id=$2 AND action='لغو خرید تأییدشده پیش از ثبت حسابداری'`,[a.businessId,q.id])).rows[0].n).toBe(1);
+  });
+
 });

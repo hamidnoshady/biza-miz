@@ -219,6 +219,28 @@ async function pnl(f: Fixture) {
   return summary.report;
 }
 
+/** Seed state-valid purchase documents at scale; booking still uses the real engine. */
+async function purchaseBatch(f: Fixture, count: number, amount: string, status = "approved") {
+  const vendor = (await db.query(`INSERT INTO parties (business_id,name,role) VALUES ($1,'رسانه','supplier') RETURNING id`,[f.businessId])).rows[0].id;
+  const prefix = randomUUID().slice(0,8);
+  const rows = (await db.query<{id:string}>(`INSERT INTO agency_vendor_purchases
+    (business_id,project_id,party_id,vendor_party_id,purchase_number,quote_reference,description,amount_rial,quoted_on,created_by)
+    SELECT $1,$2,$3,$4,'VP-' || $7 || '-' || g,'Q-' || g,'رسانه',$5,'2026-10-01',$6
+      FROM generate_series(1,$8::int) g RETURNING id`,
+    [f.businessId,f.projectId,f.clientId,vendor,amount,f.owner.actorUserId,prefix,count])).rows;
+  const ids=rows.map(r=>r.id);
+  if(status !== "draft") {
+    await db.query(`UPDATE agency_vendor_purchases SET status='submitted' WHERE id=ANY($1::uuid[])`,[ids]);
+    const reviewer=(await db.query(`INSERT INTO users (business_id,role,full_name,email,password_hash)
+      VALUES ($1,'manager','بازبین',$2,'x') RETURNING id`,[f.businessId,`${randomUUID()}@example.test`])).rows[0].id;
+    await db.query(`INSERT INTO workspace_approvals (business_id,project_id,subject_type,subject_id,title,status,requested_by,decided_by,decided_at)
+      SELECT $1,$2,'vendor_purchase',id,'خرید',$4,$3,$5,now() FROM agency_vendor_purchases WHERE id=ANY($6::uuid[])`,
+      [f.businessId,f.projectId,f.owner.actorUserId,status === "submitted" ? "pending" : status,reviewer,ids]);
+    if(status !== "submitted") await db.query(`UPDATE agency_vendor_purchases SET status=$2 WHERE id=ANY($1::uuid[])`,[ids,status]);
+  }
+  return ids;
+}
+
 /** A milestone carrying contracted hours, the only hours this product records. */
 async function addMilestone(f: Fixture, title: string, hours: number | null, amountRial: number) {
   const n = (
@@ -261,6 +283,7 @@ describe("§D's project P&L (issue #1128, wave 13)", () => {
       receivableRial: null,
       actualCostRial: null,
     });
+    expect(report.commitments).toEqual({approvedVendorPurchaseRial:"0",approvedVendorPurchaseCount:0});
     expect(report.grossMarginRial).toBeNull();
     expect(report.grossMarginPercent).toBeNull();
     expect(report.passThrough).toEqual({ spentRial: null, rechargedRial: null, unrechargedRial: null });
@@ -412,4 +435,93 @@ describe("§D's project P&L (issue #1128, wave 13)", () => {
     expect(theirs.posted.revenueRial).toBeNull();
     expect(theirs.passThrough).toEqual({ spentRial: null, rechargedRial: null, unrechargedRial: null });
   }, 180_000);
+});
+
+describe("whole-project vendor commitments", () => {
+  it("aggregates beyond the 200-row register without multiplying ledger facts or including unapproved quotes", async () => {
+    const f=await fixture();
+    await purchaseBatch(f,201,"11");
+    for(const status of ["draft","submitted","rejected"]) await purchaseBatch(f,1,"999999",status);
+    await billServiceRevenue(f,10000000);
+    await recordCost(f,{presentation:"net"});
+    await recordCost(f,{presentation:"gross",amountRial:2000000});
+    const report=await pnl(f);
+    expect(report.commitments).toEqual({approvedVendorPurchaseRial:"2211",approvedVendorPurchaseCount:201});
+    expect(report.posted.revenueRial).toBe(10000000);
+    expect(report.posted.actualCostRial).toBe(2000000);
+    expect(report.passThrough.spentRial).toBe(5000000);
+    expect(report.grossMarginRial).toBe(8000000);
+    const purchases=await import("../src/lib/agency-vendor-purchase-service");
+    expect(await purchases.listVendorPurchases(f.owner,f.projectId)).toHaveLength(200);
+  },180000);
+  it("moves a booked net purchase out of commitments and into pass-through, never margin", async () => {
+    const f=await fixture();const [id]=await purchaseBatch(f,1,"5000000");
+    const before=await pnl(f);
+    expect(before.commitments.approvedVendorPurchaseRial).toBe("5000000");
+    expect(before.posted.actualCostRial).toBeNull();expect(before.grossMarginRial).toBeNull();
+    const purchases=await import("../src/lib/agency-vendor-purchase-service");
+    await purchases.bookVendorPurchase(f.owner,id,"2026-11-01");
+    const after=await pnl(f);
+    expect(after.commitments).toEqual({approvedVendorPurchaseRial:"0",approvedVendorPurchaseCount:0});
+    expect(after.passThrough.spentRial).toBe(5000000);expect(after.posted.actualCostRial).toBe(0);
+    expect(after.grossMarginRial).toBe(0);
+  },180000);
+  it("moves a gross purchase into actual expense once while leaving other commitments outside margin", async () => {
+    const f=await fixture();const [id]=await purchaseBatch(f,1,"5000000");
+    await purchaseBatch(f,1,"2000000");await billServiceRevenue(f,10000000);
+    await costs.saveAgencyCostPolicy({businessId:f.businessId,locationId:f.locationId,userId:f.owner.actorUserId},{presentation:"gross"});
+    const purchases=await import("../src/lib/agency-vendor-purchase-service");
+    await purchases.bookVendorPurchase(f.owner,id,"2026-11-01");
+    const report=await pnl(f);
+    expect(report.commitments).toEqual({approvedVendorPurchaseRial:"2000000",approvedVendorPurchaseCount:1});
+    expect(report.posted.actualCostRial).toBe(5000000);expect(report.passThrough.spentRial).toBe(0);
+    expect(report.grossMarginRial).toBe(5000000);
+  },180000);
+  it("sees the old commitment before a booking commits and posted cost after it, never a half-booked state", async () => {
+    const f=await fixture();const [id]=await purchaseBatch(f,1,"5000000");
+    await costs.saveAgencyCostPolicy({businessId:f.businessId,locationId:f.locationId,userId:f.owner.actorUserId},{presentation:"gross"});
+    const purchases=await import("../src/lib/agency-vendor-purchase-service");
+    let ready!:()=>void,release!:()=>void;
+    const reached=new Promise<void>(resolve=>{ready=resolve;});
+    const hold=new Promise<void>(resolve=>{release=resolve;});
+    const transaction=dbLib.withTenantTransaction(f.businessId,async()=>{
+      await purchases.bookVendorPurchase(f.owner,id,"2026-11-01");ready();await hold;
+    });
+    await Promise.race([reached,transaction]);
+    try {
+      const before=await pnl(f);
+      expect(before.commitments.approvedVendorPurchaseRial).toBe("5000000");
+      expect(before.posted.actualCostRial).toBeNull();
+    } finally { release(); }
+    await transaction;
+    const after=await pnl(f);
+    expect(after.commitments.approvedVendorPurchaseRial).toBe("0");
+    expect(after.posted.actualCostRial).toBe(5000000);
+  },180000);
+  it("removes a cancelled purchase from commitments without creating an expense, pass-through spend or margin",async()=>{
+    const f=await fixture();const [id]=await purchaseBatch(f,1,"5000000");await purchaseBatch(f,1,"2000000");
+    const purchases=await import("../src/lib/agency-vendor-purchase-service");
+    await purchases.cancelVendorPurchase(f.owner,id,"فروشنده انصراف داد");
+    const report=await pnl(f);
+    expect(report.commitments).toEqual({approvedVendorPurchaseRial:"2000000",approvedVendorPurchaseCount:1});
+    expect(report.posted.actualCostRial).toBeNull();expect(report.passThrough.spentRial).toBeNull();
+    expect(report.grossMarginRial).toBeNull();
+  },180000);
+  it("keeps an aggregate above safe JavaScript integers exact as decimal rial text", async () => {
+    const f=await fixture();await purchaseBatch(f,1,"9000000000000000");await purchaseBatch(f,1,"8999999999999999");
+    expect((await pnl(f)).commitments).toEqual({approvedVendorPurchaseRial:"17999999999999999",approvedVendorPurchaseCount:2});
+  },180000);
+  it("separates projects/clients in one tenant, foreign tenants and non-members", async () => {
+    const f=await fixture(),foreign=await fixture();
+    const projectId=(await db.query(`INSERT INTO ai_projects (business_id,name,created_by,owner_user_id)
+      VALUES ($1,'کارفرمای دیگر',$2::text,$2::uuid) RETURNING id`,[f.businessId,f.owner.actorUserId])).rows[0].id;
+    const clientId=(await db.query(`INSERT INTO parties (business_id,name,role) VALUES ($1,'مشتری دیگر','customer') RETURNING id`,[f.businessId])).rows[0].id;
+    const other={...f,projectId,clientId};
+    await purchaseBatch(f,1,"1000");await purchaseBatch(other,1,"2000");await purchaseBatch(foreign,1,"3000");
+    expect((await pnl(f)).commitments.approvedVendorPurchaseRial).toBe("1000");
+    expect((await pnl(other)).commitments.approvedVendorPurchaseRial).toBe("2000");
+    expect((await pnl(foreign)).commitments.approvedVendorPurchaseRial).toBe("3000");
+    await expect(commercial.loadAgencyCommercial(foreign.owner,f.projectId)).rejects.toThrow("project_not_found");
+    await expect(commercial.loadAgencyCommercial({...f.owner,actorUserId:foreign.owner.actorUserId},f.projectId)).rejects.toThrow("project_not_found");
+  },180000);
 });

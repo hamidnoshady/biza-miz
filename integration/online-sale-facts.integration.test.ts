@@ -551,9 +551,9 @@ describe("online sale facts — CMS and affinity", () => {
     const created = await itemsService.createItem({ locationId: biz.locationId, name: "ژل", kind: "simple", tracking: "none" });
     await db.query("INSERT INTO item_stock (item_id, quantity) VALUES ($1, 3) ON CONFLICT (item_id) DO UPDATE SET quantity = 3", [created.id]);
     await db.query(
-      `INSERT INTO website_product_map (business_id, local_kind, local_id, remote_id, sync_enabled)
-       VALUES ($1, 'item', $2, 'cms-fact-1', true)`,
-      [biz.id, created.id],
+      `INSERT INTO website_product_map (business_id, connection_id, local_kind, local_id, remote_id, sync_enabled)
+       VALUES ($1, $3, 'item', $2, 'cms-fact-1', true)`,
+      [biz.id, created.id, biz.cmsConnectionId],
     );
     const order = { ...cmsOrder(`ord-${randomUUID()}`, "cms-fact-1", 1, 50_000, "paid"), createdAt: "2026-04-02T08:00:00.000Z", updatedAt: "2026-04-02T08:10:00.000Z" };
     const res = await cmsIngest.handleCmsStoreOrderWebhook({ siteId: biz.siteId, deliveryId: `del-${randomUUID()}`, event: "order.paid", order });

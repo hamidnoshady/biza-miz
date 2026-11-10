@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { VENDOR_PURCHASE_STATUSES, VENDOR_PURCHASE_STATUS_LABELS, VENDOR_PURCHASE_ERROR_STATUS, VendorPurchaseError, canTransitionVendorPurchase } from "./agency-vendor-purchase";
 
 describe("vendor purchase vocabulary", () => {
-  const allowed = new Set(["draft:submitted","submitted:draft","submitted:approved","submitted:rejected","approved:booked"]);
+  const allowed = new Set(["draft:submitted","submitted:draft","submitted:approved","submitted:rejected","approved:booked","approved:cancelled"]);
   for (const from of VENDOR_PURCHASE_STATUSES) for (const to of VENDOR_PURCHASE_STATUSES) {
     it(`${from} → ${to}: ${allowed.has(`${from}:${to}`) ? "allowed" : "refused"}`, () => {
       expect(canTransitionVendorPurchase(from,to)).toBe(allowed.has(`${from}:${to}`));
