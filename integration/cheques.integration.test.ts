@@ -336,6 +336,37 @@ describe("cheque attribution in the party subledgers", () => {
 });
 
 describe("the ordinary life of a cheque we took", () => {
+  it("clears to the selected registered bank and preserves the choice on retries", async () => {
+    const { rows: [gl] } = await db.query<{ id: string }>(
+      `INSERT INTO accounts (business_id, code, name, type, parent_id)
+       SELECT $1, '1117', 'Selected bank GL', 'asset', id FROM accounts
+        WHERE business_id = $1 AND code = '1110' RETURNING id`, [biz.id],
+    );
+    const { rows: [bank] } = await db.query<{ id: string }>(
+      `INSERT INTO financial_accounts (business_id, location_id, kind, name, gl_account_id, currency_code)
+       VALUES ($1, $2, 'bank', 'Selected bank', $3, 'IRR') RETURNING id`, [biz.id, biz.locationId, gl.id],
+    );
+    const cheque = await receivable();
+    await cheques.transitionCheque({ businessId: biz.id, chequeId: cheque.id, action: "deposit", occurredOn: "2026-03-10", createdBy: null });
+    const clearing = {
+      businessId: biz.id, chequeId: cheque.id, action: "clear" as const,
+      occurredOn: "2026-03-12", createdBy: null, idempotencyKey: randomUUID(),
+    };
+    await expect(cheques.transitionCheque(clearing)).rejects.toThrow("invalid_cheque_bank_account");
+    const selected = { ...clearing, bankAccountId: bank.id };
+    await cheques.transitionCheque(selected);
+    await cheques.transitionCheque(selected);
+    await expect(cheques.transitionCheque(clearing)).rejects.toThrow("idempotency_key_conflict");
+    const history = await cheques.getChequeHistory(biz.id, cheque.id);
+    const event = history.find((e) => e.event === "cleared");
+    expect(event).toMatchObject({ financialAccountId: bank.id, financialAccountName: "Selected bank" });
+    const { rows } = await db.query(
+      `SELECT account_id, financial_account_id, debit::text FROM journal_lines WHERE entry_id = $1 AND debit > 0`,
+      [event?.entryId],
+    );
+    expect(rows).toEqual([{ account_id: gl.id, financial_account_id: bank.id, debit: "5000000" }]);
+  });
+
   it("banks it, then clears it into the bank account", async () => {
     const cheque = await receivable();
     await cheques.transitionCheque({

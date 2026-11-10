@@ -54,7 +54,9 @@ import { HoldToConfirmButton } from "../hold-to-confirm-button";
 import { CustomerPicker, type PickerCustomer } from "../customer-picker";
 import { kickDrawer, printSaleReceipt } from "@/lib/printing/client";
 import { api, ErrorBox, errorMessage, Field, inputClass } from "../ui";
-import { usePaymentMethods } from "../payment-ways";
+import { useOrderPaymentSources, usePaymentMethods } from "../payment-ways";
+import { paymentSourceKindForSettlement } from "@/lib/order-payment-routing";
+import type { PaymentSettlement } from "@/lib/payment-methods";
 import { PageHeader, PageShell, TabBar, TabPanel, cardClass } from "../page-chrome";
 import { KnowledgeHelpButton } from "../knowledge-help";
 import { toast } from "sonner";
@@ -148,6 +150,7 @@ function newKey(): string {
 
 /** One slice of a split retail payment, as the screen holds it. Blank `amount` means «باقی‌مانده». */
 interface TenderRow {
+  financialAccountId?: string;
   key: string;
   wayId: string;
   amount: string;
@@ -229,6 +232,8 @@ export function RetailInvoiceScreen({
   // to run without a real selection.
   const paymentMethod = selectedWay ? ledgerSettlementFor(selectedWay.settlement) : null;
   const [paymentReference, setPaymentReference] = useState("");
+  const [financialAccountId, setFinancialAccountId] = useState("");
+  const routing = useOrderPaymentSources();
   // Roving focus for the `role="radiogroup"` below — see radio-keys.ts (the
   // same helper business-settings.tsx's currency choice and the branch-colour
   // picker already use). Without it every way is its own Tab stop and the
@@ -350,7 +355,7 @@ export function RetailInvoiceScreen({
     setTenderRows((rows) => (rows.length <= 2 ? rows : rows.filter((row) => row.key !== key)));
   }
 
-  function patchTenderRow(key: string, patch: Partial<Pick<TenderRow, "wayId" | "amount" | "reference">>) {
+  function patchTenderRow(key: string, patch: Partial<Pick<TenderRow, "wayId" | "amount" | "reference" | "financialAccountId">>) {
     setTenderRows((rows) => rows.map((row) => (row.key === key ? { ...row, ...patch } : row)));
   }
 
@@ -364,15 +369,49 @@ export function RetailInvoiceScreen({
     setLines((current) => current.filter((l) => l.key !== key));
   }
 
+  function selectPaymentWay(id: string) {
+    setPaymentWayId(id);
+    setFinancialAccountId("");
+  }
+
+  function sourcePicker(settlement: PaymentSettlement | undefined, value: string, onChange: (id: string) => void) {
+    if (routing?.mode !== "enabled" || !settlement) return null;
+    const kind = paymentSourceKindForSettlement(settlement);
+    if (!kind) return null;
+    return (
+      <Field label={kind === "pos_psp" ? "پایانه یا درگاه دریافت وجه" : "حساب دریافت وجه"}>
+        <select className={inputClass} value={value} onChange={(event) => onChange(event.target.value)}>
+          <option value="">انتخاب کنید</option>
+          {routing.sources.filter((source) => source.kind === kind).map((source) => (
+            <option key={source.id} value={source.id}>{source.name}</option>
+          ))}
+        </select>
+      </Field>
+    );
+  }
+
+  function checkPaymentSource(settlement: PaymentSettlement, sourceId: string) {
+    if (routing?.mode !== "enabled") return true;
+    const kind = paymentSourceKindForSettlement(settlement);
+    if (!kind || routing.sources.some((source) => source.kind === kind && source.id === sourceId)) return true;
+    setError("برای این روش پرداخت، حساب دریافت وجه را انتخاب کنید.");
+    return false;
+  }
+
   async function submit() {
     if (lines.length === 0) return;
+    if (routing?.mode === "peer_unsupported") {
+      setError(errorMessage("payment_routing_peer_unsupported"));
+      return;
+    }
 
-    let tendersBody: { method: string; amount?: number; paymentMethodId: string; reference: string | null }[];
+    let tendersBody: { method: string; amount?: number; paymentMethodId: string; reference: string | null; financialAccountId?: string }[];
     if (!splitPayment) {
       if (!selectedWay || !paymentMethod) {
         setError("روش پرداخت را انتخاب کنید.");
         return;
       }
+      if (!checkPaymentSource(selectedWay.settlement, financialAccountId)) return;
       if (selectedWay.requiresReference && !paymentReference.trim()) {
         setError("برای این روش پرداخت، واردکردن شماره پیگیری الزامی است.");
         return;
@@ -380,7 +419,8 @@ export function RetailInvoiceScreen({
       // No amount: the whole invoice, whatever the server's own total comes
       // to — exactly what this screen has always sent for a single-way sale.
       tendersBody = [
-        { method: paymentMethod, paymentMethodId: selectedWay.id, reference: paymentReference.trim() || null },
+        { method: paymentMethod, paymentMethodId: selectedWay.id, reference: paymentReference.trim() || null,
+          financialAccountId: routing?.mode === "enabled" ? financialAccountId || undefined : undefined },
       ];
     } else {
       if (tenderRows.length < 2) {
@@ -391,7 +431,7 @@ export function RetailInvoiceScreen({
         setError("فقط یکی از روش‌های پرداخت می‌تواند بدون مبلغ (باقی‌مانده) باشد.");
         return;
       }
-      const built: { method: string; amount?: number; paymentMethodId: string; reference: string | null }[] = [];
+      const built: { method: string; amount?: number; paymentMethodId: string; reference: string | null; financialAccountId?: string }[] = [];
       for (const row of tenderRows) {
         const way = tenderRowWay(row);
         const method = way ? ledgerSettlementFor(way.settlement) : null;
@@ -399,6 +439,7 @@ export function RetailInvoiceScreen({
           setError("روش پرداخت را برای همهٔ ردیف‌ها انتخاب کنید.");
           return;
         }
+        if (!checkPaymentSource(way.settlement, row.financialAccountId ?? "")) return;
         if (way.requiresReference && !row.reference.trim()) {
           setError("برای این روش پرداخت، واردکردن شماره پیگیری الزامی است.");
           return;
@@ -413,7 +454,8 @@ export function RetailInvoiceScreen({
           }
           amount = parsed;
         }
-        built.push({ method, paymentMethodId: way.id, reference: row.reference.trim() || null, amount });
+        built.push({ method, paymentMethodId: way.id, reference: row.reference.trim() || null, amount,
+          financialAccountId: routing?.mode === "enabled" ? row.financialAccountId || undefined : undefined });
       }
       tendersBody = built;
     }
@@ -454,6 +496,7 @@ export function RetailInvoiceScreen({
       setLines([]);
       setCustomer(null);
       setPaymentReference("");
+      setFinancialAccountId("");
       stopSplit();
       setNote("");
       void load();
@@ -767,13 +810,13 @@ export function RetailInvoiceScreen({
                             role="radio"
                             aria-checked={active}
                             tabIndex={active ? 0 : -1}
-                            onClick={() => setPaymentWayId(way.id)}
+                            onClick={() => selectPaymentWay(way.id)}
                             onKeyDown={(event) => {
                               const move = radioMoveForKey(event.key, true);
                               const target = move && radioTargetIndex(move, index, settlementWays.length);
                               if (target === null || target === undefined) return;
                               event.preventDefault();
-                              setPaymentWayId(settlementWays[target].id);
+                              selectPaymentWay(settlementWays[target].id);
                               paymentWayButtonsRef.current[target]?.focus();
                             }}
                             className={`min-h-11 flex-1 rounded-xl border px-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 ${
@@ -788,6 +831,7 @@ export function RetailInvoiceScreen({
                       })}
                     </div>
                   )}
+                  {sourcePicker(selectedWay?.settlement, financialAccountId, setFinancialAccountId)}
                   {selectedWay?.requiresReference ? (
                     <Field label="شماره پیگیری" hint="برای ثبت این روش پرداخت الزامی است.">
                       <input
@@ -812,7 +856,7 @@ export function RetailInvoiceScreen({
                             className={inputClass + " min-w-0 flex-1"}
                             value={row.wayId}
                             aria-label={`روش پرداخت ردیف ${index + 1}`}
-                            onChange={(event) => patchTenderRow(row.key, { wayId: event.target.value })}
+                            onChange={(event) => patchTenderRow(row.key, { wayId: event.target.value, financialAccountId: undefined })}
                           >
                             <option value="">انتخاب روش…</option>
                             {settlementWays.map((option) => (
@@ -840,6 +884,8 @@ export function RetailInvoiceScreen({
                             <XIcon aria-hidden="true" className="size-4" />
                           </button>
                         </div>
+                        {sourcePicker(way?.settlement, row.financialAccountId ?? "",
+                          (id) => patchTenderRow(row.key, { financialAccountId: id }))}
                         {way?.requiresReference ? (
                           <input
                             className={inputClass + " mt-2"}

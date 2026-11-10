@@ -44,6 +44,9 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     total: string;
     vat_amount: string;
     settlement_method: string;
+    financial_account_id: string | null;
+    financial_account_name: string | null;
+    journal_entry_id: string | null;
     supplier_invoice_number: string | null;
     supplier_invoice_date: string | null;
     payment_terms_days: number | null;
@@ -54,13 +57,17 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
     `SELECT p.id, p.supplier_id, s.name AS supplier_name, p.status::text AS status,
             p.location_id, l.name AS location_name, p.note,
             p.total::text AS total, p.vat_amount::text AS vat_amount,
-            p.settlement_method, p.supplier_invoice_number,
+            p.settlement_method, p.supplier_invoice_number, p.financial_account_id, fa.name AS financial_account_name,
+            (SELECT je.id FROM journal_entries je WHERE je.business_id = p.business_id AND je.source_type = 'item_purchase'
+               AND je.source_id = p.id AND je.posting_kind = 'retail_purchase'
+             ORDER BY je.posted_at, je.id LIMIT 1) AS journal_entry_id,
             p.supplier_invoice_date::text AS supplier_invoice_date,
             p.payment_terms_days, p.payment_due_date::text AS payment_due_date,
             p.received_at, u.full_name AS created_by_name
        FROM item_purchases p
        JOIN locations l ON l.id = p.location_id
        LEFT JOIN suppliers s ON s.id = p.supplier_id
+       LEFT JOIN financial_accounts fa ON fa.id = p.financial_account_id AND fa.business_id = p.business_id
        LEFT JOIN users u ON u.id = p.created_by
       WHERE p.id = $2 AND p.business_id = $1`,
     [session.businessId, id],
@@ -139,6 +146,8 @@ export const GET = withTenantScope(async (_request: NextRequest, context: Contex
       // The history detail's camelCase half.
       vatAmount: purchase.vat_amount,
       settlementMethod: purchase.settlement_method,
+      financialAccountName: purchase.financial_account_name ?? null,
+      journalEntryId: purchase.journal_entry_id ?? null,
       supplierInvoiceNumber: purchase.supplier_invoice_number,
       supplierInvoiceDate: purchase.supplier_invoice_date,
       paymentTermsDays: purchase.payment_terms_days,

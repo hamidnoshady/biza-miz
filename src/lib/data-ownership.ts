@@ -197,7 +197,9 @@ export const DATA_OWNERSHIP_REGISTRY = {
     events: [
       event("order.payment.completed", 1, "compatibility_receive_only"),
       event("order.payment.completed", 2),
+      event("order.payment.completed", 3),
       event("order.customer_return.created", 1),
+      event("order.customer_return.created", 2),
     ],
   }),
   shifts: replicated({

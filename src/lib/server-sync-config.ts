@@ -5,6 +5,11 @@
  */
 import { isLegacySyncToken, parseSyncToken } from "./sync-token";
 
+export function configuredLegacySyncToken(): string | null {
+  if (process.env.ALLOW_LEGACY_SYNC_TOKEN !== "1") return null;
+  return process.env.REMOTE_SYNC_TOKEN?.trim() || null;
+}
+
 export interface ServerSyncConfig {
   /** Full URL of the remote server, e.g. https://pos.eshobe.com */
   remoteUrl: string;

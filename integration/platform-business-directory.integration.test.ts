@@ -290,6 +290,51 @@ describe("queryAudit", () => {
     const clamped = await platformService.queryAudit({ pageSize: 100_000 });
     expect(clamped.pageSize).toBeLessThanOrEqual(100);
   });
+
+  it("filters a family across every namespace it covers (issue #1296 follow-up)", async () => {
+    // The «پشتیبان‌گیری» family used to be `LIKE 'backup%'`, which matched none
+    // of `platform_backup.*` or `tenant_backup.*` — an operator filtering to
+    // backups saw an empty log. Seed one row per namespace and prove the family
+    // returns all three, while an unrelated family still returns none of them.
+    await db.query(`DELETE FROM platform_audit_log WHERE action LIKE '%_backup.%' OR action = 'backup.run_now'`);
+    const rows = [
+      "platform_backup.cloud.retry",
+      "platform_backup.run",
+      "tenant_backup.run",
+      "tenant_backup.artifact.download",
+      "backup.run_now",
+      "platform_cms.config.update",
+    ];
+    for (const action of rows) {
+      await db.query(`INSERT INTO platform_audit_log (action, entity, payload) VALUES ($1, 'x', '{}')`, [
+        action,
+      ]);
+    }
+
+    const backup = await platformService.queryAudit({ actionFamily: "backup" });
+    const actions = backup.entries.map((entry) => entry.action).sort();
+    expect(actions).toEqual([
+      "backup.run_now",
+      "platform_backup.cloud.retry",
+      "platform_backup.run",
+      "tenant_backup.artifact.download",
+      "tenant_backup.run",
+    ]);
+
+    // The CMS family is a different namespace and must not leak into it — and
+    // must find its own row, which the `cms` value never did.
+    const cms = await platformService.queryAudit({ actionFamily: "cms" });
+    expect(cms.entries.map((entry) => entry.action)).toEqual(["platform_cms.config.update"]);
+
+    // A value that is not a registered family is still a literal prefix.
+    const literal = await platformService.queryAudit({ actionFamily: "platform_mcp" });
+    expect(literal.total).toBe(0);
+    const exact = await platformService.queryAudit({ actionFamily: "platform_backup.run" });
+    expect(exact.entries.map((entry) => entry.action)).toEqual(["platform_backup.run"]);
+
+    await db.query(`DELETE FROM platform_audit_log WHERE action LIKE '%_backup.%' OR action = 'backup.run_now'`);
+    await db.query(`DELETE FROM platform_audit_log WHERE action = 'platform_cms.config.update'`);
+  });
 });
 
 describe("queryBugReports", () => {

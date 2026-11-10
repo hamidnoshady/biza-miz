@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
+import { branchAccessForSession } from "@/lib/automotive-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getFinancialTransfer } from "@/lib/financial-transfers-service";
 import { financialErrorResponse } from "../../financial/support";
@@ -22,7 +23,8 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
 
   const { id } = await ctx.params;
   try {
-    const transfer = await getFinancialTransfer(session.businessId, id);
+    const access = await branchAccessForSession(session);
+    const transfer = await getFinancialTransfer(session.businessId, id, { allowedLocationIds: access.allowedLocationIds });
     if (!transfer) return NextResponse.json({ error: "transfer_not_found" }, { status: 404 });
     return NextResponse.json({ transfer });
   } catch (err) {

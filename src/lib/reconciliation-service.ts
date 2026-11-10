@@ -42,9 +42,6 @@ import { isUuid } from "./uuid";
 import { todayIsoDate } from "./jalali";
 import { journalMemoSearchAliases } from "./journal-memo";
 import {
-  canComplete,
-  computedBalanceOf,
-  differenceOf,
   isPlausibleStatementDate,
   isStatementDateInFuture,
   MAX_RECONCILIATION_LINE_BATCH,
@@ -52,8 +49,11 @@ import {
   RECONCILABLE_ACCOUNTS,
   RECONCILABLE_ACCOUNT_CODES,
   type ReconcilableAccount,
+  type ReconciliationAccountSelector,
 } from "./bank-reconciliation";
 import { decodeReconciliationCursor, encodeReconciliationCursor } from "./bank-reconciliation-cursor";
+import type { FinancialAccountKind } from "./financial-accounts";
+import type { ImportedStatementLine, StatementMatchPreviewLine } from "./reconciliation-statement-import";
 
 // Re-exported so the API routes, the assistant's own «تطبیق نشده» tool and the
 // accounting audit keep importing the reconcilable set from the service, while
@@ -82,18 +82,103 @@ export class ReconciliationError extends Error {
 /** Postgres' unique-violation code — see `createReconciliation`'s catch. */
 const UNIQUE_VIOLATION = "23505";
 
-async function resolveAccountId(businessId: string, accountCode: ReconcilableAccount): Promise<string> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id FROM accounts WHERE business_id = $1 AND code = $2`,
-    [businessId, RECONCILABLE_ACCOUNT_CODES[accountCode]],
+export interface ReconciliationAccess {
+  /** null denotes access to the entire ledger, including business-wide accounts. */
+  allowedLocationIds?: readonly string[] | null;
+}
+
+type ReconciliationAccountRow = {
+  account_id: string;
+  account_code: string;
+  ledger_account_name: string;
+  financial_account_id: string | null;
+  financial_account_name: string | null;
+  kind: FinancialAccountKind | null;
+  is_active: boolean;
+  location_id: string | null;
+};
+
+async function assertAccountAccess(
+  businessId: string,
+  account: { account_id: string; location_id: string | null },
+  allowedLocationIds?: readonly string[] | null,
+): Promise<void> {
+  if (allowedLocationIds == null) return;
+  // A reconciliation is for the *entire* GL account. Filtering its journal
+  // candidates would break the balance proof and could lock hidden postings.
+  if (!account.location_id || !allowedLocationIds.includes(account.location_id)) {
+    throw new ReconciliationError("no_branch_access", 403);
+  }
+  const { rows } = await query(
+    `SELECT 1 FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+      WHERE jl.account_id = $1 AND je.business_id = $2
+        AND (je.location_id IS NULL OR NOT (je.location_id = ANY($3::uuid[]))) LIMIT 1`,
+    [account.account_id, businessId, allowedLocationIds],
   );
-  if (!rows[0]) throw new ReconciliationError("ledger_account_missing", 409);
-  return rows[0].id;
+  if (rows.length) throw new ReconciliationError("no_branch_access", 403);
+}
+
+async function resolveAccount(
+  businessId: string,
+  selector: ReconciliationAccountSelector,
+  access: ReconciliationAccess,
+  lock = false,
+): Promise<ReconciliationAccountRow> {
+  const { rows } = selector.financialAccountId
+    ? await query<ReconciliationAccountRow>(
+        `SELECT a.id AS account_id, a.code AS account_code, a.name AS ledger_account_name, fa.id AS financial_account_id,
+                fa.name AS financial_account_name, fa.kind, fa.is_active, fa.location_id
+           FROM financial_accounts fa
+           JOIN accounts a ON a.id = fa.gl_account_id AND a.business_id = fa.business_id
+          WHERE fa.business_id = $1 AND fa.id = $2 ${lock ? "FOR SHARE OF fa" : ""}`,
+        [businessId, selector.financialAccountId],
+      )
+    : await query<ReconciliationAccountRow>(
+        `SELECT id AS account_id, code AS account_code, name AS ledger_account_name, NULL AS financial_account_id,
+                NULL AS financial_account_name, NULL AS kind, true AS is_active, NULL AS location_id
+           FROM accounts WHERE business_id = $1 AND code = $2`,
+        [businessId, RECONCILABLE_ACCOUNT_CODES[selector.accountCode!]],
+      );
+  const account = rows[0];
+  if (!account) {
+    throw selector.financialAccountId
+      ? new ReconciliationError("financial_account_not_found", 404)
+      : new ReconciliationError("ledger_account_missing", 409);
+  }
+  await assertAccountAccess(businessId, account, access.allowedLocationIds);
+  return account;
+}
+
+export async function listReconciliationAccounts(businessId: string, access: ReconciliationAccess) {
+  const { rows } = await query<{
+    id: string;
+    name: string;
+    kind: FinancialAccountKind;
+    glAccountCode: string;
+    isActive: boolean;
+  }>(
+    `SELECT fa.id, fa.name, fa.kind, a.code AS "glAccountCode", fa.is_active AS "isActive"
+       FROM financial_accounts fa
+       JOIN accounts a ON a.id = fa.gl_account_id AND a.business_id = fa.business_id
+      WHERE fa.business_id = $1
+        AND ($2::uuid[] IS NULL OR (
+          fa.location_id = ANY($2::uuid[]) AND NOT EXISTS (
+            SELECT 1 FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+             WHERE jl.account_id = fa.gl_account_id AND je.business_id = fa.business_id
+               AND (je.location_id IS NULL OR NOT (je.location_id = ANY($2::uuid[])))
+          )
+        ))
+      ORDER BY fa.is_active DESC, fa.kind, fa.name, fa.id`,
+    [businessId, access.allowedLocationIds ?? null],
+  );
+  return { accounts: rows, legacyAvailable: access.allowedLocationIds == null };
 }
 
 export interface ReconciliationSummary {
   id: string;
-  accountCode: ReconcilableAccount;
+  accountCode: ReconcilableAccount | null;
+  financialAccountId: string | null;
+  accountName: string;
   statementDate: string;
   statementBalance: number;
   status: "in_progress" | "completed";
@@ -112,6 +197,10 @@ export interface ReconciliationSummary {
 interface ReconciliationRow extends Record<string, unknown> {
   id: string;
   account_code: string;
+  financial_account_id: string | null;
+  financial_account_name: string | null;
+  ledger_account_name: string;
+  location_id: string | null;
   statement_date: string;
   statement_balance: string;
   status: "in_progress" | "completed";
@@ -122,7 +211,9 @@ interface ReconciliationRow extends Record<string, unknown> {
 }
 
 const RECONCILIATION_COLUMNS = `
-       r.id, a.code AS account_code, r.statement_date::text AS statement_date,
+       r.id, a.code AS account_code, a.name AS ledger_account_name,
+       r.financial_account_id, fa.name AS financial_account_name, fa.location_id,
+       r.statement_date::text AS statement_date,
        r.statement_balance::text AS statement_balance, r.status,
        r.completed_at::text AS completed_at,
        completer.full_name AS completed_by_name,
@@ -131,13 +222,16 @@ const RECONCILIATION_COLUMNS = `
 
 const RECONCILIATION_JOINS = `
   JOIN accounts a ON a.id = r.account_id
+  LEFT JOIN financial_accounts fa ON fa.id = r.financial_account_id AND fa.business_id = r.business_id
   LEFT JOIN users completer ON completer.id = r.completed_by
   LEFT JOIN users creator ON creator.id = r.created_by`;
 
 function toSummary(r: ReconciliationRow): ReconciliationSummary {
   return {
     id: r.id,
-    accountCode: ACCOUNT_KEYS_BY_CODE.get(r.account_code) ?? "cash",
+    accountCode: r.financial_account_id ? null : ACCOUNT_KEYS_BY_CODE.get(r.account_code) ?? null,
+    financialAccountId: r.financial_account_id,
+    accountName: r.financial_account_name ?? r.ledger_account_name,
     statementDate: r.statement_date,
     statementBalance: Number(r.statement_balance),
     status: r.status,
@@ -151,15 +245,19 @@ function toSummary(r: ReconciliationRow): ReconciliationSummary {
 /** Every reconciliation for one account, newest first. */
 export async function listReconciliations(
   businessId: string,
-  accountCode: ReconcilableAccount,
+  selector: ReconciliationAccountSelector | ReconcilableAccount,
+  access: ReconciliationAccess = {},
 ): Promise<ReconciliationSummary[]> {
-  const accountId = await resolveAccountId(businessId, accountCode);
+  const account = await resolveAccount(
+    businessId, typeof selector === "string" ? { accountCode: selector } : selector, access,
+  );
   const { rows } = await query<ReconciliationRow>(
     `SELECT ${RECONCILIATION_COLUMNS}
        FROM bank_reconciliations r ${RECONCILIATION_JOINS}
       WHERE r.business_id = $1 AND r.account_id = $2
+        AND r.financial_account_id IS NOT DISTINCT FROM $3::uuid
       ORDER BY r.statement_date DESC, r.created_at DESC`,
-    [businessId, accountId],
+    [businessId, account.account_id, account.financial_account_id],
   );
   return rows.map(toSummary);
 }
@@ -185,7 +283,7 @@ async function openingBalance(
   accountId: string,
   excludeId: string,
   statementDate: string,
-): Promise<number> {
+): Promise<bigint> {
   const { rows } = await query<{ statement_balance: string }>(
     `SELECT statement_balance::text AS statement_balance FROM bank_reconciliations
       WHERE business_id = $1 AND account_id = $2 AND status = 'completed' AND id <> $3
@@ -193,7 +291,7 @@ async function openingBalance(
       ORDER BY statement_date DESC, completed_at DESC LIMIT 1`,
     [businessId, accountId, excludeId, statementDate],
   );
-  return rows[0] ? Number(rows[0].statement_balance) : 0;
+  return BigInt(rows[0]?.statement_balance ?? "0");
 }
 
 export interface ReconciliationLine {
@@ -327,7 +425,7 @@ async function candidateTotals(
   accountId: string,
   reconciliationId: string,
   statementDate: string,
-): Promise<{ candidateCount: number; clearedCount: number; clearedTotal: number }> {
+): Promise<{ candidateCount: number; clearedCount: number; clearedTotal: bigint }> {
   const { rows } = await query<{
     candidate_count: string;
     cleared_count: string;
@@ -344,7 +442,7 @@ async function candidateTotals(
   return {
     candidateCount: Number(row?.candidate_count ?? 0),
     clearedCount: Number(row?.cleared_count ?? 0),
-    clearedTotal: Number(row?.cleared_total ?? 0),
+    clearedTotal: BigInt(row?.cleared_total ?? "0"),
   };
 }
 
@@ -438,11 +536,11 @@ async function candidateMatchedCount(
   return Number(rows[0]?.matched ?? 0);
 }
 
-export async function getReconciliation(
+async function loadReconciliation(
   businessId: string,
   id: string,
-  options: ReconciliationListOptions = {},
-): Promise<ReconciliationDetail> {
+  access: ReconciliationAccess,
+) {
   // `WHERE id = $1` against a uuid column raises a syntax error rather than
   // returning no rows, which surfaced as a 500 and «خطای غیرمنتظره» instead of
   // an honest «تطبیق پیدا نشد» — see `isUuid`.
@@ -456,6 +554,56 @@ export async function getReconciliation(
   );
   const row = rows[0];
   if (!row) throw new ReconciliationError("reconciliation_not_found", 404);
+  await assertAccountAccess(businessId, row, access.allowedLocationIds);
+  return row;
+}
+
+/** Suggest only one-to-one exact matches against currently unchecked GL lines. */
+export async function previewStatementMatches(
+  businessId: string,
+  id: string,
+  lines: readonly ImportedStatementLine[],
+  access: ReconciliationAccess = {},
+): Promise<StatementMatchPreviewLine[]> {
+  const reconciliation = await loadReconciliation(businessId, id, access);
+  if (reconciliation.status !== "in_progress") throw new ReconciliationError("reconciliation_completed", 409);
+  const { rows } = await query<StatementMatchPreviewLine>(
+    `WITH input AS (
+       SELECT row_number, date, amount, count(*) OVER (PARTITION BY date, amount) AS input_count
+         FROM unnest($4::integer[], $5::date[], $6::bigint[]) AS i(row_number, date, amount)
+     ), keys AS (
+       SELECT DISTINCT date, amount FROM input
+     ), possible AS (
+       SELECT k.date, k.amount, count(*) AS candidate_count,
+              min(jl.id)::text AS line_id, min(je.id::text) AS entry_id
+         FROM keys k
+         JOIN journal_entries je ON je.entry_date = k.date AND je.business_id = $1
+         JOIN journal_lines jl ON jl.entry_id = je.id AND jl.account_id = $2
+           AND jl.debit - jl.credit = k.amount
+        WHERE je.entry_date <= $3
+          AND NOT EXISTS (SELECT 1 FROM bank_reconciliation_lines x WHERE x.journal_line_id = jl.id)
+        GROUP BY k.date, k.amount
+     )
+     SELECT i.row_number AS "rowNumber", i.date::text AS date, i.amount::text AS "amountRial",
+            CASE WHEN p.candidate_count IS NULL THEN 'unmatched'
+                 WHEN p.candidate_count = 1 AND i.input_count = 1 THEN 'matched'
+                 ELSE 'ambiguous' END AS status,
+            CASE WHEN p.candidate_count = 1 AND i.input_count = 1 THEN p.line_id END AS "journalLineId",
+            CASE WHEN p.candidate_count = 1 AND i.input_count = 1 THEN p.entry_id END AS "entryId"
+       FROM input i LEFT JOIN possible p USING (date, amount)
+      ORDER BY i.row_number`,
+    [businessId, reconciliation.account_id, reconciliation.statement_date,
+      lines.map((line) => line.rowNumber), lines.map((line) => line.date), lines.map((line) => line.amountRial)],
+  );
+  return rows;
+}
+
+export async function getReconciliation(
+  businessId: string,
+  id: string,
+  options: ReconciliationListOptions & ReconciliationAccess = {},
+): Promise<ReconciliationDetail> {
+  const row = await loadReconciliation(businessId, id, options);
 
   const limit = pageLimit(options);
   const filtered = Boolean(options.search?.trim()) || Boolean(options.clearedOnly);
@@ -470,17 +618,18 @@ export async function getReconciliation(
       : Promise.resolve(null),
   ]);
 
-  // One definition of the sign and the arithmetic, shared with the screen
-  // (`bank-reconciliation.ts`) so the two cannot disagree about «مغایرت».
-  const computedBalance = computedBalanceOf(opening, totals.clearedTotal);
+  // Work in exact Rial before converting to the existing numeric response.
+  // In particular, an intermediate total can exceed 2^53 even when the final
+  // difference and statement balance are both small.
+  const computedBalance = opening + totals.clearedTotal;
   const summary = toSummary(row);
 
   return {
     ...summary,
-    openingBalance: opening,
-    clearedTotal: totals.clearedTotal,
-    computedBalance,
-    difference: differenceOf(summary.statementBalance, computedBalance),
+    openingBalance: Number(opening),
+    clearedTotal: Number(totals.clearedTotal),
+    computedBalance: Number(computedBalance),
+    difference: Number(BigInt(row.statement_balance) - computedBalance),
     candidateCount: totals.candidateCount,
     clearedCount: totals.clearedCount,
     matchedCount: matched ?? totals.candidateCount,
@@ -491,24 +640,14 @@ export async function getReconciliation(
   };
 }
 
-export async function createReconciliation(params: {
+export async function createReconciliation(params: ReconciliationAccountSelector & ReconciliationAccess & {
   businessId: string;
-  accountCode: ReconcilableAccount;
   statementDate: string;
   statementBalance: number;
   createdBy: string | null;
 }): Promise<ReconciliationSummary> {
   if (!Number.isSafeInteger(params.statementBalance)) {
     throw new ReconciliationError("invalid_amount");
-  }
-  // A negative closing balance is refused per account rather than outright.
-  // A till and a card-reader float are physical holdings: they cannot contain
-  // less than nothing, so a minus there is a typo or a sign flip (entering the
-  // period's movement instead of its closing balance), and it would otherwise
-  // be accepted and then never reconcile. A *bank* account genuinely can be
-  // overdrawn, so ۱۱۱۰ keeps the minus.
-  if (params.statementBalance < 0 && params.accountCode !== "bank") {
-    throw new ReconciliationError("negative_statement_balance");
   }
   // The wire format is ISO/Gregorian (the screen's JalaliDatePicker converts at
   // the boundary). Validated here rather than left to the `date` column, which
@@ -528,10 +667,21 @@ export async function createReconciliation(params: {
   if (isStatementDateInFuture(statementDate, todayIsoDate())) {
     throw new ReconciliationError("statement_date_in_future");
   }
-  const accountId = await resolveAccountId(params.businessId, params.accountCode);
-
   try {
     return await withTenantTransaction(params.businessId, async () => {
+      const account = await resolveAccount(params.businessId, params, params, true);
+      const accountId = account.account_id;
+      if (!account.is_active) throw new ReconciliationError("financial_account_inactive", 409);
+      if (params.statementBalance < 0 && account.kind !== "bank" && params.accountCode !== "bank") {
+        throw new ReconciliationError("negative_statement_balance");
+      }
+      if (!account.financial_account_id) {
+        const { rows } = await query(
+          "SELECT 1 FROM financial_accounts WHERE business_id = $1 AND gl_account_id = $2",
+          [params.businessId, accountId],
+        );
+        if (rows.length) throw new ReconciliationError("registered_financial_account_required", 409);
+      }
       // The pre-check below is a `SELECT … FOR UPDATE` over rows that may not
       // exist yet, and a lock on nothing locks nothing: two simultaneous
       // requests both saw "no open reconciliation", both inserted, and the
@@ -573,17 +723,17 @@ export async function createReconciliation(params: {
         completed_at: string | null;
         created_by: string | null;
       }>(
-        `INSERT INTO bank_reconciliations (business_id, account_id, statement_date, statement_balance, created_by)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO bank_reconciliations (business_id, account_id, statement_date, statement_balance, created_by, financial_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, statement_date::text AS statement_date,
                    statement_balance::text AS statement_balance, status,
                    completed_at::text AS completed_at, created_by::text AS created_by`,
-        [params.businessId, accountId, statementDate, params.statementBalance, params.createdBy],
+        [params.businessId, accountId, statementDate, params.statementBalance, params.createdBy, account.financial_account_id],
       );
       const inserted = rows[0];
       return toSummary({
         id: inserted.id,
-        account_code: RECONCILABLE_ACCOUNT_CODES[params.accountCode],
+        ...account,
         statement_date: inserted.statement_date,
         statement_balance: inserted.statement_balance,
         status: inserted.status,
@@ -621,7 +771,7 @@ function isUniqueViolation(err: unknown): boolean {
  * out of it, and the balance the completion had just verified stopped being
  * the balance the lines produced.
  */
-async function applyLineClearance(params: {
+async function applyLineClearance(params: ReconciliationAccess & {
   businessId: string;
   reconciliationId: string;
   journalLineIds: readonly string[];
@@ -641,15 +791,19 @@ async function applyLineClearance(params: {
     // Locked, so a completion cannot land between this check and the writes.
     const { rows } = await query<{
       account_id: string;
+      location_id: string | null;
       status: string;
       statement_date: string;
     }>(
-      `SELECT account_id::text AS account_id, status, statement_date::text AS statement_date
-         FROM bank_reconciliations WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      `SELECT r.account_id::text AS account_id, fa.location_id, r.status, r.statement_date::text AS statement_date
+         FROM bank_reconciliations r
+         LEFT JOIN financial_accounts fa ON fa.id = r.financial_account_id AND fa.business_id = r.business_id
+        WHERE r.id = $1 AND r.business_id = $2 FOR UPDATE OF r`,
       [params.reconciliationId, params.businessId],
     );
     const reconciliation = rows[0];
     if (!reconciliation) throw new ReconciliationError("reconciliation_not_found", 404);
+    await assertAccountAccess(params.businessId, reconciliation, params.allowedLocationIds);
     if (reconciliation.status !== "in_progress") throw new ReconciliationError("reconciliation_completed", 409);
 
     // One round-trip proving every id is a real, in-window line on this
@@ -707,17 +861,15 @@ async function applyLineClearance(params: {
  * double-click, an offline retry), and every refusal the batch makes it makes
  * too. `changed` is dropped — a single-line caller has nothing to count.
  */
-export async function setLineCleared(params: {
+export async function setLineCleared(params: ReconciliationAccess & {
   businessId: string;
   reconciliationId: string;
   journalLineId: string;
   cleared: boolean;
 }): Promise<void> {
   await applyLineClearance({
-    businessId: params.businessId,
-    reconciliationId: params.reconciliationId,
+    ...params,
     journalLineIds: [params.journalLineId],
-    cleared: params.cleared,
   });
 }
 
@@ -741,7 +893,7 @@ export async function setLineCleared(params: {
  * rather than the size of the request: re-ticking already-ticked lines is a
  * no-op, not an error.
  */
-export async function setLinesCleared(params: {
+export async function setLinesCleared(params: ReconciliationAccess & {
   businessId: string;
   reconciliationId: string;
   journalLineIds: readonly string[];
@@ -758,10 +910,8 @@ export async function setLinesCleared(params: {
   const ids = [...new Set(params.journalLineIds)];
 
   return applyLineClearance({
-    businessId: params.businessId,
-    reconciliationId: params.reconciliationId,
+    ...params,
     journalLineIds: ids,
-    cleared: params.cleared,
   });
 }
 
@@ -779,7 +929,7 @@ export async function setLinesCleared(params: {
  * winner and one honest «این تطبیق قبلاً قفل شده» — the audit trail then names
  * whoever finished first, not whoever finished last.
  */
-export async function completeReconciliation(params: {
+export async function completeReconciliation(params: ReconciliationAccess & {
   businessId: string;
   reconciliationId: string;
   actorId: string;
@@ -791,17 +941,21 @@ export async function completeReconciliation(params: {
   await withTenantTransaction(params.businessId, async () => {
     const { rows } = await query<{
       account_id: string;
+      location_id: string | null;
       status: string;
       statement_date: string;
       statement_balance: string;
     }>(
-      `SELECT account_id::text AS account_id, status, statement_date::text AS statement_date,
-              statement_balance::text AS statement_balance
-         FROM bank_reconciliations WHERE id = $1 AND business_id = $2 FOR UPDATE`,
+      `SELECT r.account_id::text AS account_id, fa.location_id, r.status, r.statement_date::text AS statement_date,
+              r.statement_balance::text AS statement_balance
+         FROM bank_reconciliations r
+         LEFT JOIN financial_accounts fa ON fa.id = r.financial_account_id AND fa.business_id = r.business_id
+        WHERE r.id = $1 AND r.business_id = $2 FOR UPDATE OF r`,
       [params.reconciliationId, params.businessId],
     );
     const row = rows[0];
     if (!row) throw new ReconciliationError("reconciliation_not_found", 404);
+    await assertAccountAccess(params.businessId, row, params.allowedLocationIds);
     if (row.status !== "in_progress") throw new ReconciliationError("reconciliation_completed", 409);
 
     // Both halves of the arithmetic are read on this transaction's connection,
@@ -827,15 +981,8 @@ export async function completeReconciliation(params: {
           AND je.business_id = $3 AND je.entry_date <= $4::date`,
       [params.reconciliationId, row.account_id, params.businessId, row.statement_date],
     );
-    const clearedTotal = Number(clearedRows[0]?.cleared_total ?? 0);
-    const difference = differenceOf(
-      Number(row.statement_balance),
-      computedBalanceOf(opening, clearedTotal),
-    );
-
-    // `canComplete` is the same predicate the screen reads, so "ready to lock"
-    // means one thing on both sides of the wire.
-    if (!canComplete({ status: row.status, difference })) {
+    const clearedTotal = BigInt(clearedRows[0]?.cleared_total ?? "0");
+    if (BigInt(row.statement_balance) !== opening + clearedTotal) {
       throw new ReconciliationError("balance_mismatch", 409);
     }
 
@@ -847,7 +994,7 @@ export async function completeReconciliation(params: {
     if (!rowCount) throw new ReconciliationError("reconciliation_completed", 409);
   });
 
-  return getReconciliation(params.businessId, params.reconciliationId);
+  return getReconciliation(params.businessId, params.reconciliationId, params);
 }
 
 /**
@@ -866,7 +1013,7 @@ export async function completeReconciliation(params: {
  * `bank_reconciliation_lines` merely releases this reconciliation's own
  * claims, returning those lines to the candidate pool for the next attempt).
  */
-export async function discardReconciliation(params: {
+export async function discardReconciliation(params: ReconciliationAccess & {
   businessId: string;
   reconciliationId: string;
 }): Promise<void> {
@@ -874,23 +1021,20 @@ export async function discardReconciliation(params: {
     throw new ReconciliationError("reconciliation_not_found", 404);
   }
 
-  // One statement: the status test rides along in the WHERE clause so a
-  // completed reconciliation can never be deleted by a request that raced a
-  // completion between the read and the write.
-  const { rows } = await query<{ status: string }>(
-    `DELETE FROM bank_reconciliations
-      WHERE id = $1 AND business_id = $2 AND status = 'in_progress'
-      RETURNING status`,
-    [params.reconciliationId, params.businessId],
-  );
-  if (rows[0]) return;
-
-  // Nothing was deleted: say which of the two reasons it was.
-  const { rows: existing } = await query<{ status: string }>(
-    `SELECT status FROM bank_reconciliations WHERE id = $1 AND business_id = $2`,
-    [params.reconciliationId, params.businessId],
-  );
-  throw existing[0]
-    ? new ReconciliationError("reconciliation_completed", 409)
-    : new ReconciliationError("reconciliation_not_found", 404);
+  await withTenantTransaction(params.businessId, async () => {
+    const { rows } = await query<{ status: string; account_id: string; location_id: string | null }>(
+      `SELECT r.status, r.account_id, fa.location_id FROM bank_reconciliations r
+         LEFT JOIN financial_accounts fa ON fa.id = r.financial_account_id AND fa.business_id = r.business_id
+        WHERE r.id = $1 AND r.business_id = $2 FOR UPDATE OF r`,
+      [params.reconciliationId, params.businessId],
+    );
+    const row = rows[0];
+    if (!row) throw new ReconciliationError("reconciliation_not_found", 404);
+    await assertAccountAccess(params.businessId, row, params.allowedLocationIds);
+    if (row.status !== "in_progress") throw new ReconciliationError("reconciliation_completed", 409);
+    await query(
+      "DELETE FROM bank_reconciliations WHERE id = $1 AND business_id = $2",
+      [params.reconciliationId, params.businessId],
+    );
+  });
 }

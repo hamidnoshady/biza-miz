@@ -26,6 +26,7 @@ function errorStatus(code: string): number {
     "bad_request",
     "invalid_order_id",
     "invalid_refund_method",
+    "invalid_payment_source",
     "invalid_rial",
     "rial_out_of_range",
     "invalid_idempotency_key",
@@ -46,6 +47,8 @@ function errorStatus(code: string): number {
     "invalid_return_cost_basis",
     "idempotency_key_conflict",
     "duplicate_return_line_conflict",
+    "refund_payment_source_required",
+    "payment_routing_peer_unsupported",
   ].includes(code)) return 409;
   return 0;
 }
@@ -85,11 +88,15 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   if (!isRecord(rawBody)) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  if (Object.keys(rawBody).some((key) => !["refundMethod", "refundAmountRial", "idempotencyKey", "reason", "lines"].includes(key))) {
+  if (Object.keys(rawBody).some((key) => !["refundMethod", "refundAmountRial", "idempotencyKey", "reason", "lines", "financialAccountId"].includes(key))) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
   const refundMethod = rawBody.refundMethod === undefined ? "cash" : rawBody.refundMethod;
+  const financialAccountId = rawBody.financialAccountId ?? null;
+  if (financialAccountId !== null && !isUuid(financialAccountId)) {
+    return NextResponse.json({ error: "invalid_payment_source" }, { status: 400 });
+  }
   if (!isCustomerReturnRefundMethod(refundMethod)) {
     return NextResponse.json({ error: "invalid_refund_method" }, { status: 400 });
   }
@@ -120,6 +127,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       locationId: location.id,
       orderId: id,
       refundMethod,
+      financialAccountId,
       refundAmount,
       reason,
       idempotencyKey: rawBody.idempotencyKey,

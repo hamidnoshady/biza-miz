@@ -281,7 +281,7 @@ describe("POST /api/ledger/expenses — the amount is forwarded, not repaired", 
     for (const amount of [true, null, "1500.50", "abc", ""]) {
       await POST(postRequest({ accountId: "a", paymentAccountId: "b", amount, memo: "x" }));
     }
-    const calls = vi.mocked(expenseService.recordExpense).mock.calls as [{ amount: number }][];
+    const calls = vi.mocked(expenseService.recordExpense).mock.calls;
     expect(calls).toHaveLength(5);
     // Every one of them is a refusal the service can name, not a value invented
     // out of the caller's `true`, `null` or half-typed amount.

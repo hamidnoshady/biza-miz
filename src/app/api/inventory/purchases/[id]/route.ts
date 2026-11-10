@@ -36,10 +36,15 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
   const { rows: header } = await query(
-    `SELECT p.*, s.name AS supplier_name FROM purchases p
+    `SELECT p.*, s.name AS supplier_name, fa.name AS financial_account_name,
+            (SELECT je.id FROM journal_entries je WHERE je.business_id = $3 AND je.source_type = 'purchase'
+               AND je.source_id = p.id AND je.posting_kind IN ('receipt', 'periodic_purchase')
+             ORDER BY je.posted_at, je.id LIMIT 1) AS journal_entry_id
+       FROM purchases p
        LEFT JOIN suppliers s ON s.id = p.supplier_id AND s.location_id = p.location_id
+       LEFT JOIN financial_accounts fa ON fa.id = p.financial_account_id AND fa.business_id = $3
       WHERE p.id = $1 AND p.location_id = $2`,
-    [id, location.id],
+    [id, location.id, session.businessId],
   );
   if (!header[0]) return NextResponse.json({ error: "not_found" }, { status: 404 });
   // Issue #915 — each line's returnable lot is resolved from ITS OWN receipt
@@ -226,7 +231,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
-  let body: { status?: string; settlementMethod?: string; supplierId?: string };
+  let body: { status?: string; settlementMethod?: string; supplierId?: string; financialAccountId?: string };
   try {
     body = await request.json();
   } catch {
@@ -272,6 +277,8 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
         locationId: location.id,
         purchaseId: id,
         settlementMethod,
+        financialAccountId: body.financialAccountId,
+        enforcePaymentAccountChoice: true,
         supplierId,
         createdBy: session.sub,
         sync: { actorRole: session.role },
@@ -285,7 +292,7 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       return NextResponse.json({ error: "ledger_account_missing", code: err.code }, { status: 409 });
     }
     const code = err instanceof Error ? err.message : "apply_failed";
-    const status = code.endsWith("_not_found") ? 404 : code === "supplier_required" ? 400 : 409;
+    const status = code.endsWith("_not_found") ? 404 : code === "supplier_required" || code === "invalid_purchase_payment_account" ? 400 : 409;
     return NextResponse.json({ error: code }, { status });
   } finally {
     client.release();

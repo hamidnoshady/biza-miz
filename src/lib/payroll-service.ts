@@ -1517,8 +1517,10 @@ export async function payPayroll(params: {
     const net = BigInt(run.net_amount);
     const commission = BigInt(run.commission_total);
     const payable = net + commission;
+    let financialAccountId: string | null = null;
     if (payable > 0n) {
-      const payout = await resolvePayoutAccount(client, params.businessId, { method, paymentAccountId });
+      const payout = await resolvePayoutAccount(client, params.businessId, { method, paymentAccountId, locationId: run.location_id });
+      financialAccountId = payout.financialAccountId;
       const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.salariesPayable]);
 
       await postExactJournalEntry(client, {
@@ -1534,12 +1536,12 @@ export async function payPayroll(params: {
         createdBy: params.actorId,
         lines: [
           { accountId: accounts.get(WELL_KNOWN_CODES.salariesPayable)!, debit: asRial(payable), credit: "0" as RialText },
-          { accountId: payout.accountId, debit: "0" as RialText, credit: asRial(payable) },
+          { accountId: payout.accountId, financialAccountId, debit: "0" as RialText, credit: asRial(payable) },
         ],
       });
     }
 
-    await client.query(`UPDATE payroll_runs SET status = 'paid', paid_date = $2::date WHERE id = $1`, [run.id, paidDate]);
+    await client.query(`UPDATE payroll_runs SET status = 'paid', paid_date = $2::date, financial_account_id = $3 WHERE id = $1`, [run.id, paidDate, financialAccountId]);
   });
 
   return mustGetRun(params.businessId, params.runId);

@@ -258,6 +258,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     idempotencyKey?: string | null;
     /** How the goods were paid: credit (default — AP), cash or bank. */
     settlementMethod?: string | null;
+    financialAccountId?: string | null;
     /** The supplier invoice block (see parseSupplierInvoice). */
     invoice?: unknown;
     lines?: {
@@ -313,6 +314,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!RETAIL_PURCHASE_SETTLEMENT_METHODS.includes(settlementMethod)) {
     return NextResponse.json({ error: "invalid_settlement_method" }, { status: 400 });
   }
+  const financialAccountId = body.financialAccountId ?? null;
+  if (financialAccountId !== null && !isUuid(financialAccountId)) {
+    return NextResponse.json({ error: "invalid_purchase_payment_account" }, { status: 400 });
+  }
   let invoice: SupplierInvoiceInput | null = null;
   try {
     if (body.invoice !== undefined && body.invoice !== null) invoice = parseSupplierInvoice(body.invoice);
@@ -329,6 +334,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     supplierId,
     note: body.note ?? null,
     settlementMethod,
+    ...(financialAccountId ? { financialAccountId } : {}),
     invoice: invoice as unknown as Record<string, unknown> | null,
     lines: body.lines,
   });
@@ -345,6 +351,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       idempotencyKey: idempotencyKey || null,
       requestHash,
       settlementMethod,
+      financialAccountId,
+      enforcePaymentAccountChoice: true,
       invoice,
       lines: body.lines as never[],
     });

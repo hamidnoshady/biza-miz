@@ -26,6 +26,8 @@
  */
 import { formatJalali } from "./jalali";
 import { journalMemoForDisplay } from "./journal-memo";
+import { ledgerSourceLabel } from "./ledger-source-labels";
+import { FINANCIAL_STATEMENT_MATCH_LABELS, type FinancialStatementMatch } from "./financial-statement";
 import { moneyColumnLabel, type ReportTable } from "./report-export";
 import type { MoneyUnit } from "./money";
 import {
@@ -68,6 +70,11 @@ export interface AccountCardExportRow {
    * row builders keep compiling; without it the raw memo is exported.
    */
   sourceType?: string | null;
+  journalSourceId?: string | null;
+  matchStatus?: FinancialStatementMatch;
+  fee?: string;
+  transferAmount?: string;
+  isPspSettlement?: boolean;
   counterparty: string;
   /** Exact Rial, as decimal text. */
   debit: string;
@@ -87,9 +94,11 @@ export interface AccountCardExportMeta {
   opening: string;
   totalDebit: string;
   totalCredit: string;
+  totalFees?: string;
   closing: string;
   ledgerBalance: string;
   reconciliationDifference: string;
+  pendingSettlementBalance?: string | null;
 }
 
 /**
@@ -123,8 +132,14 @@ export function accountCardTables(
       { label: moneyColumnLabel("مانده ابتدای دوره", unit), value: moneyCell(meta.opening, unit) },
       { label: moneyColumnLabel("جمع بدهکار", unit), value: moneyCell(meta.totalDebit, unit) },
       { label: moneyColumnLabel("جمع بستانکار", unit), value: moneyCell(meta.totalCredit, unit) },
+      ...(meta.totalFees !== undefined ? [
+        { label: moneyColumnLabel("جمع کارمزد", unit), value: moneyCell(meta.totalFees, unit) },
+      ] : []),
       { label: moneyColumnLabel("مانده پایان دوره", unit), value: moneyCell(meta.closing, unit) },
       { label: moneyColumnLabel("مانده دفتر کل", unit), value: moneyCell(meta.ledgerBalance, unit) },
+      ...(meta.pendingSettlementBalance != null ? [
+        { label: moneyColumnLabel("مانده در انتظار تسویه", unit), value: moneyCell(meta.pendingSettlementBalance, unit) },
+      ] : []),
       {
         label: moneyColumnLabel("مغایرت با دفتر کل", unit),
         value: moneyCell(meta.reconciliationDifference, unit),
@@ -135,20 +150,30 @@ export function accountCardTables(
     columns: [
       { key: "entryDate", label: "تاریخ" },
       { key: "entryId", label: "شماره سند" },
+      { key: "sourceType", label: "نوع مدرک" },
+      { key: "sourceId", label: "شناسه مدرک" },
       { key: "memo", label: "شرح" },
       { key: "counterparty", label: "طرف مقابل" },
       { key: "debit", label: moneyColumnLabel("بدهکار", unit) },
       { key: "credit", label: moneyColumnLabel("بستانکار", unit) },
       { key: "balance", label: moneyColumnLabel("مانده", unit) },
+      { key: "fee", label: moneyColumnLabel("کارمزد", unit) },
+      { key: "transferAmount", label: moneyColumnLabel("انتقال / تسویه", unit) },
+      { key: "matchStatus", label: "وضعیت تطبیق" },
     ],
     rows: rows.map((row) => ({
       entryDate: shamsi(row.entryDate),
       entryId: row.entryId,
+      sourceType: row.isPspSettlement ? "تسویه پایانه" : row.sourceType ? ledgerSourceLabel(row.sourceType) : "",
+      sourceId: row.journalSourceId ?? "",
       memo: journalMemoForDisplay(row.memo, row.sourceType) ?? "",
       counterparty: row.counterparty,
       debit: moneyCell(row.debit, unit),
       credit: moneyCell(row.credit, unit),
       balance: moneyCell(row.balance, unit),
+      fee: moneyCell(row.fee ?? "0", unit),
+      transferAmount: moneyCell(row.transferAmount ?? "0", unit),
+      matchStatus: row.matchStatus ? FINANCIAL_STATEMENT_MATCH_LABELS[row.matchStatus] : "",
     })),
   };
   return { header, movements };

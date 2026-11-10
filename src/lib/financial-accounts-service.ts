@@ -48,7 +48,7 @@ import {
   type FinancialAccountKind,
 } from "./financial-accounts";
 import { balanceFromLines, type AccountCardMovement } from "./financial-accounts";
-import { accountCardFromMovements, type AccountCard } from "./financial-accounts";
+import { MAX_FINANCIAL_STATEMENT_EXPORT_ENTRIES, type FinancialStatementMatch } from "./financial-statement";
 
 export class FinancialAccountError extends Error {
   status: number;
@@ -232,7 +232,7 @@ const SELECT_COLUMNS = `
   COALESCE(tc.transfer_count, 0)::text AS transfer_count
 `;
 
-const SELECT_JOINS = `
+const selectJoins = (postedScope = "") => `
   JOIN accounts a ON a.id = fa.gl_account_id
   LEFT JOIN locations l ON l.id = fa.location_id
   LEFT JOIN financial_accounts sa ON sa.id = fa.settlement_account_id
@@ -240,7 +240,7 @@ const SELECT_JOINS = `
     SELECT jl.account_id, SUM(jl.debit - jl.credit) AS balance
       FROM journal_lines jl
       JOIN journal_entries e ON e.id = jl.entry_id
-     WHERE e.business_id = $1
+     WHERE e.business_id = $1 ${postedScope}
      GROUP BY jl.account_id
   ) bal ON bal.account_id = fa.gl_account_id
   LEFT JOIN (
@@ -267,6 +267,9 @@ export interface FinancialAccountFilters {
   defaultOnly?: boolean;
   /** Only accounts of these branches plus the business-wide ones. */
   restrictToLocationIds?: readonly string[];
+  /** Scope of ledger postings used by a statement or export. */
+  postingLocationIds?: readonly string[] | null;
+  balanceAsOf?: string | null;
 }
 
 export interface FinancialAccountListResult {
@@ -288,6 +291,9 @@ export async function listFinancialAccounts(
   }
   if (filters.locationId != null && filters.locationId !== "" && !isUuid(filters.locationId)) {
     throw new FinancialAccountError("invalid_location");
+  }
+  if (filters.balanceAsOf && !isValidIsoDate(filters.balanceAsOf)) {
+    throw new FinancialAccountError("invalid_transfer_date");
   }
   const conditions: string[] = ["fa.business_id = $1"];
   const params: unknown[] = [businessId];
@@ -327,10 +333,14 @@ export async function listFinancialAccounts(
     );
   }
 
+  const postingScope = [
+    filters.balanceAsOf && `AND e.entry_date <= ${push(filters.balanceAsOf)}::date`,
+    filters.postingLocationIds && `AND e.location_id = ANY(${push(filters.postingLocationIds)}::uuid[])`,
+  ].filter(Boolean).join(" ");
   const { rows } = await query<FinancialAccountRow>(
     `SELECT ${SELECT_COLUMNS}
        FROM financial_accounts fa
-       ${SELECT_JOINS}
+       ${selectJoins(postingScope)}
       WHERE ${conditions.join(" AND ")}
       ORDER BY fa.kind, a.code, fa.name`,
     params,
@@ -366,7 +376,7 @@ export async function getFinancialAccount(
   const { rows } = await query<FinancialAccountRow>(
     `SELECT ${SELECT_COLUMNS}
        FROM financial_accounts fa
-       ${SELECT_JOINS}
+       ${selectJoins()}
       WHERE fa.business_id = $1 AND fa.id = $2`,
     [businessId, accountId],
   );
@@ -1183,8 +1193,11 @@ export async function financialAccountBalanceAsOf(
 }
 
 export interface FinancialAccountMovementRow extends AccountCardMovement {
-  /** The account code/name on the other side of the entry, for the card's own column. */
   counterparty: string;
+  matchStatus: FinancialStatementMatch;
+  fee: string;
+  transferAmount: string;
+  isPspSettlement: boolean;
 }
 
 export interface FinancialAccountCardResult {
@@ -1195,10 +1208,14 @@ export interface FinancialAccountCardResult {
   rows: FinancialAccountMovementRow[];
   totalDebit: string;
   totalCredit: string;
+  totalFees: string;
   closing: string;
   reconciliationDifference: string;
-  /** The ledger's own all-time balance for the account, for the card's header. */
+  /** All postings through the end date, with the same project and branch scope. */
   ledgerBalance: string;
+  pendingSettlementBalance: string | null;
+  movementCount: number;
+  nextCursor: string | null;
 }
 
 export interface FinancialAccountCardFilters {
@@ -1206,163 +1223,148 @@ export interface FinancialAccountCardFilters {
   to?: string | null;
   projectId?: string | null;
   locationId?: string | null;
-  /** Include entries that were later reversed (default true — they are history). */
+  allowedLocationIds?: readonly string[] | null;
   includeReversed?: boolean;
   limit?: number;
+  cursor?: string | null;
 }
 
 /**
- * The account card (صورت حساب): opening balance, every movement, closing.
- *
- * Every figure is a BigInt sum of `journal_lines` for the linked GL account over
- * the requested window, and the closing balance is checked against the ledger's
- * own figure for the same window — `reconciliationDifference` is what the screen
- * shows if the two ever disagree. There is no stored balance to disagree *with*,
- * which is the point.
+ * A single ledger snapshot for the report header, full-window running balances,
+ * and one page of entries. Scope and history filters apply to opening, closing,
+ * and movements equally, including when more than one line touches the same GL.
  */
 export async function financialAccountCard(
   businessId: string,
   accountId: string,
   filters: FinancialAccountCardFilters = {},
 ): Promise<FinancialAccountCardResult> {
+  const from = filters.from || null;
+  const to = filters.to || null;
+  const projectId = filters.projectId || null;
+  const locationId = filters.locationId || null;
+  const cursor = filters.cursor || null;
+  const allowed = filters.allowedLocationIds ?? null;
+  if ((from && !isValidIsoDate(from)) || (to && !isValidIsoDate(to)) || (from && to && from > to)) {
+    throw new FinancialAccountError("invalid_transfer_date");
+  }
+  if (projectId && !isUuid(projectId)) throw new FinancialAccountError("invalid_project");
+  if (locationId && !isUuid(locationId)) throw new FinancialAccountError("invalid_location");
+  if (cursor && !isUuid(cursor)) throw new FinancialAccountError("bad_request");
+  const limit = filters.limit ?? 500;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_FINANCIAL_STATEMENT_EXPORT_ENTRIES) {
+    throw new FinancialAccountError("invalid_limit");
+  }
   const account = await getFinancialAccount(businessId, accountId);
   if (!account) throw new FinancialAccountError("financial_account_not_found", 404);
-  const from = filters.from ?? null;
-  const to = filters.to ?? null;
-  for (const value of [from, to]) {
-    if (value !== null && value !== "" && !isValidIsoDate(value)) throw new FinancialAccountError("invalid_transfer_date");
+  if (allowed && ((account.locationId && !allowed.includes(account.locationId)) ||
+                  (locationId && !allowed.includes(locationId)))) {
+    throw new FinancialAccountError("no_branch_access", 403);
   }
-  if (filters.projectId != null && filters.projectId !== "" && !isUuid(filters.projectId)) {
-    throw new FinancialAccountError("invalid_project");
-  }
-  if (filters.locationId != null && filters.locationId !== "" && !isUuid(filters.locationId)) {
-    throw new FinancialAccountError("invalid_location");
-  }
-  const limit = Math.min(Math.max(Number(filters.limit ?? 500), 1), 2000);
 
-  // 1. Opening: everything strictly before the window's first day.
-  const opening = from
-    ? await financialAccountBalanceAsOf(businessId, account.glAccountId, previousDay(from))
-    : "0";
-
-  // 2. The entries of the window that touch this account, with all their lines,
-  //    so the card can name the counterpart of each movement (a transfer's other
-  //    side, the expense it paid, the sale it collected) instead of showing a
-  //    bare debit.
-  const { rows: entryRows } = await query<{
-    entry_id: string;
-    entry_date: string;
-    memo: string | null;
-    source_type: string | null;
-    source_id: string | null;
-    reversed_at: string | null;
-    line_id: string;
-    account_id: string;
-    account_code: string;
-    account_name: string;
+  const { rows: [statement] } = await query<{
+    opening: string;
     debit: string;
     credit: string;
+    fees: string;
+    ledger_balance: string;
+    full_scoped_balance: string;
+    movement_count: string;
+    cursor_exists: boolean;
+    rows: FinancialAccountMovementRow[];
   }>(
-    `SELECT e.id AS entry_id, e.entry_date::text AS entry_date, e.memo, e.source_type, e.source_id::text AS source_id,
-            e.reversed_at::text AS reversed_at,
-            jl.id::text AS line_id, jl.account_id, a.code AS account_code, a.name AS account_name,
-            jl.debit::text AS debit, jl.credit::text AS credit
-       FROM journal_lines jl
-       JOIN journal_entries e ON e.id = jl.entry_id
-       JOIN accounts a ON a.id = jl.account_id
-      WHERE e.business_id = $1
-        AND e.id IN (
-          SELECT e2.id FROM journal_entries e2
-            JOIN journal_lines l2 ON l2.entry_id = e2.id
-           WHERE e2.business_id = $1 AND l2.account_id = $2
-             AND ($3::date IS NULL OR e2.entry_date >= $3::date)
-             AND ($4::date IS NULL OR e2.entry_date <= $4::date)
-             AND ($5::uuid IS NULL OR e2.project_id = $5::uuid)
-             AND ($6::uuid IS NULL OR e2.location_id = $6::uuid)
-             AND ($7::boolean OR e2.reversed_at IS NULL)
-           ORDER BY e2.entry_date DESC, e2.posted_at DESC
-           LIMIT $8
-        )
-      ORDER BY e.entry_date, e.posted_at, jl.id`,
-    [
-      businessId,
-      account.glAccountId,
-      from,
-      to,
-      filters.projectId ?? null,
-      filters.locationId ?? null,
-      filters.includeReversed === false ? false : true,
-      limit,
-    ],
+    `WITH scoped_entries AS (
+       SELECT je.id, je.entry_date, je.posted_at, je.memo, je.source_type, je.source_id,
+              je.reversed_at,
+              SUM(jl.debit) AS debit, SUM(jl.credit) AS credit,
+              CASE WHEN bool_and(COALESCE(br.status = 'completed', false)) THEN 'matched'
+                   WHEN bool_or(br.id IS NOT NULL) THEN 'pending'
+                   ELSE 'unmatched' END AS match_status
+         FROM journal_entries je
+         JOIN journal_lines jl ON jl.entry_id = je.id AND jl.account_id = $2
+         LEFT JOIN bank_reconciliation_lines brl ON brl.journal_line_id = jl.id
+         LEFT JOIN bank_reconciliations br ON br.id = brl.reconciliation_id AND br.business_id = je.business_id
+        WHERE je.business_id = $1
+          AND ($8::uuid[] IS NULL OR je.location_id = ANY($8::uuid[]))
+        GROUP BY je.id
+     ), filtered AS (
+       SELECT se.* FROM scoped_entries se
+       JOIN journal_entries je ON je.id = se.id
+       WHERE ($4::date IS NULL OR se.entry_date <= $4::date)
+         AND ($5::uuid IS NULL OR je.project_id = $5::uuid)
+         AND ($6::uuid IS NULL OR je.location_id = $6::uuid)
+         AND ($7::boolean OR (je.reversed_at IS NULL AND je.reverses_entry_id IS NULL))
+     ), movements AS (
+       SELECT f.*,
+              COALESCE(t.psp_batch_reference IS NOT NULL, false) AS is_psp_settlement,
+              COALESCE(t.amount, 0) * CASE WHEN t.reversal_entry_id = f.id THEN -1 ELSE 1 END AS transfer_amount,
+              CASE WHEN (t.fee_payer = 'source' AND t.source_account_id = $11)
+                          OR (t.fee_payer = 'destination' AND t.destination_account_id = $11)
+                   THEN t.fee_amount * CASE WHEN t.reversal_entry_id = f.id THEN -1 ELSE 1 END
+                   ELSE 0 END AS fee
+         FROM filtered f
+         LEFT JOIN financial_transfers t ON t.business_id = $1 AND f.source_type = 'financial_transfer'
+           AND t.id = f.source_id AND (t.journal_entry_id = f.id OR t.reversal_entry_id = f.id)
+        WHERE $3::date IS NULL OR f.entry_date >= $3::date
+     ), balances AS (
+       SELECT COALESCE(SUM(debit - credit) FILTER (WHERE entry_date < $3::date), 0) AS opening,
+              COALESCE(SUM(debit - credit), 0) AS ledger_balance FROM filtered
+     ), movement_totals AS (
+       SELECT COALESCE(SUM(debit), 0)::text AS debit, COALESCE(SUM(credit), 0)::text AS credit,
+              COALESCE(SUM(fee), 0)::text AS fees, COUNT(*)::text AS movement_count
+         FROM movements
+     ), ordered AS (
+       SELECT m.*, SUM(debit - credit) OVER (ORDER BY entry_date, posted_at, id) AS running
+         FROM movements m
+     ), page AS (
+       SELECT o.* FROM ordered o
+       WHERE $9::uuid IS NULL OR (o.entry_date, o.posted_at, o.id) >
+         (SELECT a.entry_date, a.posted_at, a.id FROM ordered a WHERE a.id = $9::uuid)
+       ORDER BY o.entry_date, o.posted_at, o.id
+       LIMIT $10
+     )
+     SELECT b.opening::text, b.ledger_balance::text,
+            COALESCE((SELECT SUM(debit - credit) FROM scoped_entries), 0)::text AS full_scoped_balance,
+            mt.debit, mt.credit, mt.fees, mt.movement_count,
+            ($9::uuid IS NULL OR EXISTS (SELECT 1 FROM ordered WHERE id = $9::uuid)) AS cursor_exists,
+            COALESCE((
+              SELECT jsonb_agg(jsonb_build_object(
+                'entryId', p.id, 'entryDate', p.entry_date::text, 'memo', p.memo,
+                'sourceType', p.source_type, 'journalSourceId', p.source_id, 'reversedAt', p.reversed_at::text,
+                'debit', p.debit::text, 'credit', p.credit::text, 'balance', (b.opening + p.running)::text,
+                'matchStatus', p.match_status, 'transferAmount', p.transfer_amount::text,
+                'isPspSettlement', p.is_psp_settlement, 'fee', p.fee::text,
+                'counterparty', COALESCE((
+                  SELECT string_agg(DISTINCT a.name || ' (' || a.code || ')', '، ' ORDER BY a.name || ' (' || a.code || ')')
+                    FROM journal_lines cp JOIN accounts a ON a.id = cp.account_id AND a.business_id = $1
+                   WHERE cp.entry_id = p.id AND cp.account_id <> $2
+                ), '')
+              ) ORDER BY p.entry_date, p.posted_at, p.id)
+              FROM page p
+            ), '[]'::jsonb) AS rows
+     FROM balances b CROSS JOIN movement_totals mt`,
+    [businessId, account.glAccountId, from, to, projectId, locationId, filters.includeReversed !== false,
+      allowed, cursor, limit + 1, account.id],
   );
 
-  interface EntryBucket {
-    entryId: string;
-    entryDate: string;
-    memo: string | null;
-    sourceType: string | null;
-    sourceId: string | null;
-    reversedAt: string | null;
-    own: { debit: string; credit: string } | null;
-    counterparties: Set<string>;
-    sortKey: string;
-  }
-  const buckets = new Map<string, EntryBucket>();
-  for (const row of entryRows) {
-    let bucket = buckets.get(row.entry_id);
-    if (!bucket) {
-      bucket = {
-        entryId: row.entry_id,
-        entryDate: row.entry_date,
-        memo: row.memo,
-        sourceType: row.source_type,
-        sourceId: row.source_id,
-        reversedAt: row.reversed_at,
-        own: null,
-        counterparties: new Set<string>(),
-        sortKey: row.entry_date,
-      };
-      buckets.set(row.entry_id, bucket);
-    }
-    if (row.account_id === account.glAccountId) {
-      bucket.own = { debit: row.debit, credit: row.credit };
-    } else {
-      bucket.counterparties.add(`${row.account_name} (${row.account_code})`);
-    }
-  }
-
-  const movements = [...buckets.values()]
-    .filter((bucket) => bucket.own !== null)
-    .map((bucket) => ({
-      entryId: bucket.entryId,
-      entryDate: bucket.entryDate,
-      memo: bucket.memo,
-      sourceType: bucket.sourceType,
-      journalSourceId: bucket.sourceId,
-      debit: bucket.own!.debit,
-      credit: bucket.own!.credit,
-      counterparty: [...bucket.counterparties].join("، "),
-      reversedAt: bucket.reversedAt,
-    }));
-
-  const card = accountCardFromMovements(opening, movements);
-  const rows: FinancialAccountMovementRow[] = card.rows.map((row, index) => ({
-    ...row,
-    counterparty: movements[index].counterparty,
-  }));
-  const ledgerBalance = await financialAccountBalanceAsOf(businessId, account.glAccountId, null);
-
+  if (!statement.cursor_exists) throw new FinancialAccountError("bad_request");
+  const rows = statement.rows.slice(0, limit);
+  const closing = BigInt(statement.opening) + BigInt(statement.debit) - BigInt(statement.credit);
   return {
-    account,
+    account: { ...account, balance: statement.full_scoped_balance },
     from,
     to,
-    opening: card.opening,
+    opening: statement.opening,
     rows,
-    totalDebit: card.totalDebit,
-    totalCredit: card.totalCredit,
-    closing: card.closing,
-    reconciliationDifference: card.reconciliationDifference,
-    ledgerBalance,
+    totalDebit: statement.debit,
+    totalCredit: statement.credit,
+    totalFees: statement.fees,
+    closing: closing.toString(),
+    reconciliationDifference: (closing - BigInt(statement.ledger_balance)).toString(),
+    ledgerBalance: statement.ledger_balance,
+    pendingSettlementBalance: account.kind === "pos_psp" ? statement.ledger_balance : null,
+    movementCount: Number(statement.movement_count),
+    nextCursor: statement.rows.length > limit ? rows[rows.length - 1].entryId : null,
   };
 }
 

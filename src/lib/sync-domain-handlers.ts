@@ -16,7 +16,10 @@ import {
   completeSplitOrderPayment,
   PAYMENT_METHODS,
 } from "./payment-service";
-import { PAYMENT_SETTLEMENTS, type ResolvedTender } from "./payment-methods";
+import { PAYMENT_SETTLEMENTS } from "./payment-methods";
+import { paymentSourceKindForSettlement } from "./order-payment-routing";
+import type { RoutedOrderTender } from "./order-payment-routing-service";
+import { isUuid } from "./uuid";
 import type { Rial } from "./money";
 import { createDraftPurchaseInTransaction } from "./purchase-service";
 import {
@@ -241,19 +244,31 @@ export async function applySyncDomainHandler(
         result: { amount: result.amount, duplicate: Boolean(result.duplicate) },
       };
     }
-    case "order.payment.completed.v2": {
-      const tenders: ResolvedTender[] = array(payload, "tenders", true).map(
-        (tender) => ({
+    case "order.payment.completed.v2":
+    case "order.payment.completed.v3": {
+      const tenders: RoutedOrderTender[] = array(payload, "tenders", true).map((tender) => {
+        const settlement = enumValue(tender.settlement, PAYMENT_SETTLEMENTS, "invalid_settlement");
+        const resolved: RoutedOrderTender = {
           methodId: optionalString(tender, "methodId"),
-          settlement: enumValue(
-            tender.settlement,
-            PAYMENT_SETTLEMENTS,
-            "invalid_settlement",
-          ),
+          settlement,
           amount: exactInteger(tender.amount, "invalid_amount") as Rial,
           reference: optionalString(tender, "reference"),
-        }),
-      );
+        };
+        if (context.definition.handler === "order.payment.completed.v3") {
+          const financialAccountId = optionalString(tender, "financialAccountId");
+          const financialAccountGlId = optionalString(tender, "financialAccountGlId");
+          const kind = paymentSourceKindForSettlement(settlement);
+          if (kind ? !financialAccountId || !financialAccountGlId ||
+              !isUuid(financialAccountId) || !isUuid(financialAccountGlId) : financialAccountId || financialAccountGlId) {
+            throw new Error("invalid_payment_source");
+          }
+          if (financialAccountId && financialAccountGlId) {
+            resolved.financialAccountId = financialAccountId;
+            resolved.financialAccountGlId = financialAccountGlId;
+          }
+        }
+        return resolved;
+      });
       const result = await completeSplitOrderPayment({
         client,
         businessId,
@@ -336,17 +351,26 @@ export async function applySyncDomainHandler(
         throw error;
       }
     }
-    case "order.customer_return.created": {
+    case "order.customer_return.created":
+    case "order.customer_return.created.v2": {
       const refundMethod = enumValue(
         payload.refundMethod,
         ["cash", "card", "card_to_card", "online"] as const,
         "invalid_refundMethod",
       );
+      const routed = context.definition.handler === "order.customer_return.created.v2";
+      const financialAccountId = routed ? requiredString(payload, "financialAccountId") : null;
+      const financialAccountGlId = routed ? requiredString(payload, "financialAccountGlId") : null;
+      if (routed && (!isUuid(financialAccountId) || !isUuid(financialAccountGlId))) {
+        throw new SyncPayloadError("invalid_payment_source");
+      }
       const result = await createCustomerReturn(client, {
         businessId,
         locationId,
         orderId: requiredString(payload, "orderId"),
         refundMethod,
+        legacyReplay: !routed,
+        ...(financialAccountId && financialAccountGlId ? { sourceSnapshot: { financialAccountId, financialAccountGlId } } : {}),
         refundAmount: rialText(requiredString(payload, "refundAmount")),
         reason: requiredString(payload, "reason"),
         idempotencyKey: clientEventId,
@@ -409,6 +433,7 @@ export async function applySyncDomainHandler(
         businessId,
         locationId,
         purchaseId: requiredString(payload, "purchaseId"),
+        financialAccountId: optionalString(payload, "financialAccountId"),
         settlementMethod: enumValue(
           payload.settlementMethod,
           PURCHASE_SETTLEMENT_METHODS,

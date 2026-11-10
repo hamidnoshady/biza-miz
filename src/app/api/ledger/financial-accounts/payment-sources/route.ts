@@ -7,6 +7,8 @@ import { isUuid } from "@/lib/uuid";
 import { loadFinancialAccountsForPayments } from "@/lib/financial-accounts-service";
 import { paymentSourceOptions } from "@/lib/financial-payment-sources";
 import { financialErrorResponse } from "../../financial/support";
+import { branchAccessForSession } from "@/lib/automotive-access";
+import { financialAccountDisplayLabel } from "@/lib/financial-accounts";
 
 /**
  * The payment-source contract (issue #862, §7).
@@ -30,20 +32,25 @@ import { financialErrorResponse } from "../../financial/support";
  * GL account annotated instead.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
+  const search = new URL(request.url).searchParams;
+  const role = search.get("role");
+  const { session, error } = await requirePermission(role === "bank" ? PERMISSIONS.financeChequesManage : role === "purchase" ? PERMISSIONS.purchasesManage : PERMISSIONS.ledgerView);
   if (error) return error;
 
-  const search = new URL(request.url).searchParams;
-  const locationId = search.get("locationId");
-  if (locationId && !isUuid(locationId)) {
+  const requestedLocation = search.get("locationId");
+  if (requestedLocation && !isUuid(requestedLocation)) {
     return NextResponse.json({ error: "invalid_location" }, { status: 400 });
   }
-  const role = search.get("role");
-  if (role !== null && role !== "expense" && role !== "any") {
+  if (role !== null && role !== "expense" && role !== "any" && role !== "bank" && role !== "purchase") {
     return NextResponse.json({ error: "invalid_role" }, { status: 400 });
   }
 
   try {
+    const access = await branchAccessForSession(session);
+    const locationId = requestedLocation === null ? access.activeLocationId : requestedLocation || null;
+    if (locationId && !access.allowedLocationIds.includes(locationId)) {
+      return NextResponse.json({ error: "location_not_found" }, { status: 404 });
+    }
     const { rows } = await query<{
       id: string;
       code: string;
@@ -65,14 +72,17 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const candidates = rows.filter((row) => {
       if (row.type !== "asset") return false;
       const classified: AccountRole | null = roles.get(row.id) ?? null;
+      if (role === "bank") return classified === "bank";
+      if (role === "purchase") return classified === "bank" || classified === "cash";
       return useExpenseRule
         ? classified != null && EXPENSE_PAYMENT_SOURCE_ROLES.has(classified)
         : true;
     });
 
     const { accounts } = await loadFinancialAccountsForPayments(session.businessId);
+    const inaccessibleGlIds = new Set(accounts.filter((account) => account.locationId && account.locationId !== locationId).map((account) => account.glAccountId));
     const options = paymentSourceOptions({
-      accounts: candidates.map((row) => ({
+      accounts: candidates.filter((row) => !inaccessibleGlIds.has(row.id)).map((row) => ({
         id: row.id,
         code: row.code,
         name: row.name,
@@ -81,7 +91,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       })),
       financialAccounts: accounts.map((account) => ({
         id: account.id,
-        name: account.name,
+        name: financialAccountDisplayLabel(account),
         kind: account.kind,
         glAccountId: account.glAccountId,
         currencyCode: account.currencyCode,
@@ -94,7 +104,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       })),
       locationId,
     });
-    return NextResponse.json({ options });
+    const registeredOnly = role === "bank" || role === "purchase";
+    const eligibleOptions = registeredOnly ? options.filter((option) => option.currencyCode === "IRR" &&
+      (option.kind === "bank" || (role === "purchase" && option.kind === "cash"))) : options;
+    return NextResponse.json({ options: eligibleOptions });
   } catch (err) {
     return financialErrorResponse(err);
   }

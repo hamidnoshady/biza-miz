@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1253**. Rows: tenant **115**, platform **23**.
+Route files scanned: **1257**. Rows: tenant **118**, platform **23**.
 
 ## Summary of remaining gaps
 
@@ -41,7 +41,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 21
+Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 24
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -61,7 +61,10 @@ Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (in
 | Accounting | Receivables (receipts, aging, customers) | get_ar_aging, list_receipts | ar.receipt.record | — | (route only) | — | finance.receivables_manage, ledger.approve, ledger.view | step-up (always approve) | get_ar_aging, list_receipts, ar.receipt.record | integration/expense.integration.test.ts | partial |
 | Accounting | Payables (payments, aging, suppliers) | get_ap_upcoming, list_payments | ap.payment.record | — | ap.payment.reverse | — | finance.payables_manage, ledger.approve, ledger.view | step-up (always approve) | get_ap_upcoming, list_payments, ap.payment.record, ap.payment.reverse | integration/expense.integration.test.ts | covered |
 | Accounting | Cheques (receivable/payable) | list_cheques | cheque.create | — | cheque.transition | — | finance.cheques_manage, ledger.view | connection mode; step-up (always approve) | list_cheques, cheque.create, cheque.transition | — | covered |
-| Accounting | Financial accounts (bank/cash/petty/POS)<br>_master data for the business's own money containers, each linked to exactly one postable GL account; balances are sums over journal_lines, never stored. Route-only by design: registering a container or moving money between two of them is an in-app act with a journal preview and a confirmation, and an assistant moving money is a follow-up decision, not an oversight_ | (route only) | (route only) | (route only) | (route only) | — | finance.accounts_manage, ledger.view | — | — | integration/financial-accounts.integration.test.ts | route-only (by design) |
+| Accounting | Financial accounts (bank/cash/petty/POS)<br>_master data for the business's own money containers, each linked to exactly one postable GL account; balances are sums over journal_lines, never stored. Route-only by design: registering a container or moving money between two of them is an in-app act with a journal preview and a confirmation, and an assistant moving money is a follow-up decision, not an oversight_ | (route only) | (route only) | (route only) | (route only) | — | finance.accounts_manage, finance.cheques_manage, ledger.view, purchases.manage | — | — | integration/financial-accounts.integration.test.ts | route-only (by design) |
+| Accounting | Order payment routing<br>_Branch activation and verified website routes require in-app review._ | (route only) | — | (route only) | — | — | finance.accounts_manage, payments.refund, payments.take | — | — | src/lib/order-payment-routing-service.test.ts | route-only (by design) |
+| Accounting | Petty cash funds and operations<br>_Custodian receipts and approval decisions stay in the permissioned app._ | (route only) | (route only) | — | — | — | finance.accounts_manage, finance.expenses_manage, finance.transfers_manage, ledger.approve, ledger.view | — | — | integration/petty-cash.integration.test.ts | route-only (by design) |
+| Accounting | PSP settlement batches<br>_Confirmed settlement movements post through the permissioned app._ | (route only) | (route only) | — | — | — | finance.transfers_manage, ledger.view | — | — | integration/financial-transfers.integration.test.ts | route-only (by design) |
 | Accounting | Internal transfers<br>_one document per movement, posting through the ordinary journal path in the same transaction; append-only (a correction is a reversal, never an edit). Route-only by design for the same reason as the accounts above_ | (route only) | (route only) | — | (route only) | — | finance.transfers_manage, ledger.view | — | — | integration/financial-transfers.integration.test.ts | route-only (by design) |
 | Accounting | Expenses | get_expense, list_expenses | expense.categorize | — | expense.reverse | — | finance.expenses_manage, ledger.view | step-up (always approve) | get_expense, list_expenses, expense.categorize, expense.reverse | integration/expense.integration.test.ts | covered |
 | Accounting | Fixed assets (register, depreciate, dispose, transfer) | list_fixed_assets | fixed-asset.create | fixed-asset.set_acquisition | fixed-asset.depreciate, fixed-asset.dispose | — | finance.assets_manage, ledger.view | connection mode; step-up (always approve) | list_fixed_assets, fixed-asset.create, fixed-asset.set_acquisition, fixed-asset.depreciate, fixed-asset.dispose | integration/fixed-assets.integration.test.ts | covered |
