@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { PEER_ADDRESS_HEADER, clientIpFrom, internalBaseOrigin, normalizePeerAddress } from "./rate-limit";
+import {
+  PEER_ADDRESS_HEADER,
+  clientIpFrom,
+  internalBaseOrigin,
+  normalizePeerAddress,
+  positiveIntFromEnv,
+} from "./rate-limit";
 
 describe("internalBaseOrigin", () => {
   const savedPort = process.env.PORT;
@@ -155,5 +161,34 @@ describe("rate-limit normalizePeerAddress", () => {
     for (const value of [undefined, null, "", "  ", "evil.example", "1.2.3.4, 5.6.7.8", "1.2.3.4\r\nx: y"]) {
       expect(normalizePeerAddress(value), JSON.stringify(value)).toBeNull();
     }
+  });
+});
+
+describe("positiveIntFromEnv", () => {
+  // The per-business API ceiling is a constant in middleware, but a CI job that
+  // drives four browser suites against one seeded business cannot live with the
+  // product default — and the way that failed was
+  // `429 {"error":"rate_limited"}` on a suite's *first* request, reported as a
+  // product failure. The knob exists for that; these tests pin the two halves
+  // that matter: an absent/garbage value never disables the limit, and a
+  // legitimate value is honoured.
+  it("falls back when absent, empty or unparseable", () => {
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, {})).toBe(300);
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "" })).toBe(300);
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "lots" })).toBe(300);
+  });
+
+  it("never lets a bad value disable the limit", () => {
+    // Zero and negatives are how a quota knob gets silently switched off.
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "0" })).toBe(300);
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "-5" })).toBe(300);
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "NaN" })).toBe(300);
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "Infinity" })).toBe(300);
+  });
+
+  it("honours a real value, floored", () => {
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "3000" })).toBe(3000);
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "12.9" })).toBe(12);
+    expect(positiveIntFromEnv("BUSINESS_API_LIMIT", 300, { BUSINESS_API_LIMIT: "1" })).toBe(1);
   });
 });

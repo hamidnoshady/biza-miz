@@ -604,7 +604,12 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
       properties: {
         businessId: { type: "string", description: "Filter to one tenant's rows." },
         adminId: { type: "string", description: "Filter to one platform admin." },
-        actionFamily: { type: "string", description: "Prefix match, e.g. 'platform_mcp'." },
+        actionFamily: {
+          type: "string",
+          description:
+            "Prefix match, e.g. 'platform_mcp'. The console's families expand to several prefixes " +
+            "('backup' covers platform_backup, tenant_backup and backup; 'cms' covers platform_cms).",
+        },
         entity: { type: "string" },
         search: { type: "string" },
         createdFrom: { type: "string" },

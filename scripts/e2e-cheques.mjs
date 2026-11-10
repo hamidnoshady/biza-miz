@@ -99,16 +99,26 @@ async function api(page, method, path, body) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * The API allows a business 300 requests a minute, and this job's media tests
- * spend part of that budget on the same business before this script starts.
- * A 429 is therefore waited out for the `Retry-After` the server gives, and
- * retried a bounded number of times — a real refusal still fails the run.
+ * The API allows one business 300 requests a minute (middleware
+ * `businessLimits`, keyed by business — not by IP or by route), and every
+ * request this script makes spends from that same bucket as the media E2E
+ * steps that run before it in this job. So *every* call goes through here: a
+ * 429 is waited out for the `Retry-After` the server gives and retried until
+ * `deadline`. A refusal that outlives the deadline is a real one and still
+ * fails the run.
+ *
+ * This was learned the hard way — `ensureChartOfAccounts` used the bare `api()`
+ * and threw `provisioning the chart failed (429)` on CI, where the media tests
+ * had already spent most of the minute's budget. A 429 on the *first* call of
+ * the run says nothing about the product, so it must not read as a failure.
  */
-async function apiPaced(page, method, path, body) {
+async function apiPaced(page, method, path, body, deadline = Date.now() + 90_000) {
   let response = await api(page, method, path, body);
-  for (let attempt = 1; response.status === 429 && attempt <= 4; attempt += 1) {
+  while (response.status === 429 && Date.now() < deadline) {
     const seconds = Number(response.retryAfter ?? 5);
-    await sleep((Number.isFinite(seconds) ? seconds : 5) * 1000 + 250);
+    // A `Retry-After` of zero or junk would spin; never sleep less than 250ms.
+    const waitMs = Math.max(250, (Number.isFinite(seconds) ? seconds : 5) * 1000 + 250);
+    await sleep(Math.min(waitMs, Math.max(0, deadline - Date.now())));
     response = await api(page, method, path, body);
   }
   return response;
@@ -121,11 +131,29 @@ async function apiPaced(page, method, path, body) {
  * accounts. A chart that already has journal lines is left alone.
  */
 async function ensureChartOfAccounts(page) {
-  const current = JSON.parse((await apiPaced(page, "GET", "/api/setup/accounts")).text);
+  // Paced: this runs right after the media steps, which have already spent part
+  // of the same business's 300-a-minute budget. `main` fixed the same 429 here
+  // (30e6d6e6) the minimal way; this keeps the pacing and adds the distinction
+  // between "bucket still spent" and a real refusal, which is what made the two
+  // red runs hard to read.
+  const read = await apiPaced(page, "GET", "/api/setup/accounts");
+  if (read.status === 429) {
+    throw new Error(
+      `reading the chart was rate-limited for 90s (429): the business's request bucket is still ` +
+        `spent by the steps before this one — raise BUSINESS_API_LIMIT for the job or run this step first`,
+    );
+  }
+  if (read.status >= 300) throw new Error(`reading the chart failed (${read.status}): ${read.text}`);
+  const current = JSON.parse(read.text);
   const codes = new Set((current.existing ?? []).map((a) => a.code));
   if (codes.has("1241") && codes.has("1200")) return;
   const posted = await apiPaced(page, "POST", "/api/setup/accounts", { accounts: current.template });
-  if (posted.status >= 300) throw new Error(`provisioning the chart failed (${posted.status}): ${posted.text}`);
+  if (posted.status >= 300) {
+    throw new Error(
+      `provisioning the chart failed (${posted.status}): ${posted.text}` +
+        (posted.status === 429 ? " — request bucket still spent, see ensureChartOfAccounts" : ""),
+    );
+  }
   console.log(`[e2e-cheques] chart of accounts provisioned from the template (${current.template.length} accounts)`);
 }
 
@@ -158,14 +186,16 @@ async function seedCheques(page) {
     );
     await sleep(1000);
   }
-  const list = JSON.parse((await api(page, "GET", "/api/ledger/cheques?direction=receivable&limit=1")).text);
+  const list = JSON.parse(
+    (await apiPaced(page, "GET", "/api/ledger/cheques?direction=receivable&limit=1")).text,
+  );
   if (list.total < TOTAL) throw new Error(`register holds ${list.total}, expected at least ${TOTAL}`);
 }
 
 /** A status change on a row the reader has already passed — the moving-data case. */
 async function bounceBySerial(page, serial) {
   const list = JSON.parse(
-    (await api(page, "GET", `/api/ledger/cheques?direction=receivable&q=${serial}&limit=5`)).text,
+    (await apiPaced(page, "GET", `/api/ledger/cheques?direction=receivable&q=${serial}&limit=5`)).text,
   );
   const cheque = list.cheques.find((c) => c.serialNumber === serial);
   if (!cheque) throw new Error(`no cheque ${serial}`);

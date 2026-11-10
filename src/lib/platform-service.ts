@@ -15,6 +15,7 @@
  */
 import { getPool, query, withoutTenantScope, withoutTenantScopeTransaction, withTenant } from "./db";
 import { getPlatformBackupHealth } from "./platform-backup-service";
+import { expandAuditActionFamily } from "./audit-families";
 import type { MigrationStatus } from "./migration-status-service";
 import type { PoolClient } from "pg";
 import { disableFeatures, seedChartOfAccounts } from "./business-provisioning";
@@ -3175,7 +3176,17 @@ export async function queryAudit(q: AuditQuery = {}): Promise<AuditListResult> {
 
     if (q.businessId) where.push(`al.business_id = ${bind(q.businessId)}::uuid`);
     if (q.adminId) where.push(`al.platform_admin_id = ${bind(q.adminId)}::uuid`);
-    if (q.actionFamily) where.push(`al.action LIKE ${bind(`${q.actionFamily}%`)}`);
+    if (q.actionFamily) {
+      // A family is a *set* of prefixes, not one: «پشتیبان‌گیری» covers
+      // `platform_backup.*`, `tenant_backup.*` and `backup.*`, and a raw
+      // `LIKE 'backup%'` showed one row out of twenty-eight. Values that are
+      // not registered families stay literal prefixes (`platform_mcp`, or an
+      // exact `business.suspended`), so existing deep links and MCP callers
+      // keep their behaviour.
+      const prefixes = expandAuditActionFamily(q.actionFamily);
+      const like = prefixes.map((prefix) => `al.action LIKE ${bind(`${prefix}%`)}`);
+      where.push(like.length === 1 ? like[0]! : `(${like.join(" OR ")})`);
+    }
     if (q.entity) where.push(`al.entity = ${bind(q.entity)}`);
     if (q.createdFrom) where.push(`al.created_at >= ${bind(q.createdFrom)}`);
     if (q.createdTo) where.push(`al.created_at <= ${bind(`${q.createdTo}T23:59:59.999Z`)}`);
