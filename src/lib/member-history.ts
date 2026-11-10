@@ -162,6 +162,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'aec_estimate_versions', columns: ["approved_by", "created_by", "reviewed_by", "submitted_by"] },
   { table: 'aec_estimates', columns: ["created_by"] },
   { table: 'aec_transmittals', columns: ["created_by", "issued_by"] },
+  { table: 'agency_campaign_reports', columns: ["created_by"] },
   { table: 'agency_vendor_purchases', columns: ["created_by", "cancelled_by"] },
   { table: 'ap_payments', columns: ["created_by", "reversed_by"] },
   { table: 'ar_receipts', columns: ["created_by", "reversed_by"] },
