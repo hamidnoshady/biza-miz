@@ -1140,6 +1140,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/tours.integration.test.ts",
   },
   {
+    id: "knowledge.learning-paths",
+    module: "Knowledge base",
+    entity: "Learning paths — curated step sequences and the member's completion progress (issue #972 item 3)",
+    routes: ["knowledge/learning-paths"],
+    note: "a member's own completion state for curated learning steps; a path's tour steps are confirmed through tour progress, article and page steps through the member's own mark-complete event — no business data moves, so an AI client has nothing to operate",
+    status: "n/a (infra)",
+    test: "src/app/api/knowledge/learning-paths/route.test.ts",
+  },
+  {
     id: "reports.reports",
     module: "Reports",
     entity: "Reports (standard, saved, export, query, drill-down, views)",
