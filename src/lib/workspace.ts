@@ -983,7 +983,7 @@ export async function deletePhase(projectId: string, phaseId: string): Promise<W
  */
 export async function listTemplates(
   businessId: string,
-  options: { profile?: WorkspaceOperatingProfile | null } = {},
+  options: { profile?: WorkspaceOperatingProfile | null; additionalProfiles?: readonly WorkspaceOperatingProfile[] } = {},
 ): Promise<WorkspaceTemplateChoice[]> {
   const industry = await getBusinessIndustry(businessId);
   const { rows } = await query<{
@@ -1009,6 +1009,7 @@ export async function listTemplates(
     [...BUILTIN_TEMPLATES.filter((t) => !overridden.has(t.key)), ...custom],
     industry,
     options.profile ?? null,
+    options.additionalProfiles ?? [],
   );
 }
 
