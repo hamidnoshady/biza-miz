@@ -238,6 +238,8 @@ describe("customer return under سیستم ادواری", () => {
     const journalLineInserts: Call[] = [];
     const { client, calls } = scriptedClient((sql, params) => {
       if (sql.includes("pg_advisory_xact_lock")) return [];
+      if (sql.includes("FROM locations") && sql.includes("FOR SHARE")) return [{ id: params[1] }];
+      if (sql.includes("AS enabled") && sql.includes("AS paired")) return [{ enabled: false, paired: false }];
       if (sql.includes("FROM customer_returns WHERE business_id=$1 AND idempotency_key=$2")) return []; // no duplicate
       if (sql.includes("AS net_non_credit_tender")) return [{ previously_refunded: "0", net_non_credit_tender: "10000" }];
       if (sql.includes("FROM order_items WHERE order_id=$1 AND id=ANY")) return [{ id: "44444444-4444-4444-8444-444444444444", quantity: "1" }];

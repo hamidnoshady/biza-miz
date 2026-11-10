@@ -1375,8 +1375,8 @@ export function PosScreen({
             the panel's real edge so neither looks clipped mid-scroll.
           */}
           <div
-            data-tour-id="pos.categories"
             className="-mx-2 mt-2 flex min-h-11 flex-nowrap gap-1.5 overflow-x-auto px-2 pb-0.5 [scrollbar-width:none] md:-mx-0 md:mt-3 md:min-h-14 md:gap-2 md:px-0 md:pb-1 [&::-webkit-scrollbar]:hidden"
+            data-tour-id="pos.categories"
             aria-label="دسته‌های فعال"
           >
             {/*
@@ -2259,6 +2259,7 @@ export function PosScreen({
                     <CustomerBalanceBadge customer={customer} />
                   </div>
                   <PaymentWays
+                    routeOrderPayment
                     methods={paymentMethods}
                     loaded={paymentMethodsLoaded}
                     loadError={paymentMethodsError}

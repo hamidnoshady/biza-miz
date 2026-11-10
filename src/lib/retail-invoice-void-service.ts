@@ -86,7 +86,6 @@ import { postExactMirrorEntry } from "./ledger-service";
 import { snapshotOrder } from "./order-amendment-service";
 import { restoreOrderItemBatchStock } from "./retail-batch-inventory";
 import { recomputeLastSoldAt } from "./retail-stock-service";
-import { planPaymentRows, type AmendmentPaymentMethod, type PaymentRow } from "./order-amendments";
 import type { RetailInvoiceLineSnapshotStored } from "./retail-invoice/types";
 
 export class RetailInvoiceVoidError extends Error {
@@ -472,31 +471,22 @@ export async function voidRetailInvoice(
   // insert offsetting negatives, exactly the shape `payments` already
   // documents ("negative = refund") and the F&B amendment engine already
   // uses — this table has no F&B-only assumption in it.
-  const { rows: paidRows } = await client.query<{ method: AmendmentPaymentMethod; amount: string }>(
-    `SELECT method::text AS method, sum(amount)::text AS amount FROM payments
-      WHERE order_id = $1 AND superseded_by_amendment_id IS NULL GROUP BY method`,
-    [params.orderId],
-  );
-  const paid: PaymentRow[] = paidRows.map((r) => ({ method: r.method, amount: Number(r.amount) }));
   await client.query(
-    "UPDATE payments SET superseded_by_amendment_id = $2 WHERE order_id = $1 AND superseded_by_amendment_id IS NULL",
-    [params.orderId, amendmentId],
+    `WITH originals AS (
+       UPDATE payments SET superseded_by_amendment_id = $2
+        WHERE order_id = $1 AND superseded_by_amendment_id IS NULL
+        RETURNING method, amount, financial_account_id, financial_account_gl_id
+     )
+     INSERT INTO payments (
+       location_id, order_id, method, amount, reference, received_by, superseded_by_amendment_id,
+       financial_account_id, financial_account_gl_id
+     )
+     SELECT $3, $1, method, -sum(amount), $4, $5, $2, financial_account_id, financial_account_gl_id
+       FROM originals
+      GROUP BY method, financial_account_id, financial_account_gl_id
+     HAVING sum(amount) <> 0`,
+    [params.orderId, amendmentId, params.locationId, `retail-invoice-void:${amendmentId}`, params.actorId],
   );
-  for (const row of planPaymentRows(paid, 0, null)) {
-    await client.query(
-      `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, superseded_by_amendment_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [
-        params.locationId,
-        params.orderId,
-        row.method,
-        row.amount,
-        `retail-invoice-void:${amendmentId}`,
-        params.actorId,
-        amendmentId,
-      ],
-    );
-  }
 
   await client.query(
     `UPDATE orders SET status = 'voided', voided_reason = $2, amended_at = now(), amended_by = $3 WHERE id = $1`,

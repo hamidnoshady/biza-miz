@@ -891,7 +891,7 @@ export async function payBill(params: {
 
     const accounts = await accountIdsByCode(client, params.businessId, [WELL_KNOWN_CODES.accountsPayable]);
     const apAccount = accounts.get(WELL_KNOWN_CODES.accountsPayable)!;
-    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, requestedCashAccountId);
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, requestedCashAccountId, params.locationId, params.skipHolooPush);
     // Throws PayablesInputError (invalid_cash_account /
     // cash_account_method_mismatch), which the route answers as a 400.
     const cashAccountId = cash.accountId;
@@ -914,8 +914,8 @@ export async function payBill(params: {
       `INSERT INTO ap_payments
          (business_id, location_id, supplier_id, payment_date, method, amount, memo,
           client_request_id, request_fingerprint, created_by, cash_account_id, bank_reference,
-          voucher_number)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          voucher_number, financial_account_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (business_id, client_request_id) WHERE client_request_id IS NOT NULL DO NOTHING
        RETURNING id, supplier_id, payment_date::text AS payment_date,
                  method, amount::text AS amount, memo, cash_account_id, bank_reference,
@@ -935,6 +935,7 @@ export async function payBill(params: {
         cash.chosen ? cash.accountId : null,
         bankReference,
         voucherNumber,
+        cash.financialAccountId,
       ],
     );
 
@@ -984,7 +985,7 @@ export async function payBill(params: {
       postingKind: "ap_payment",
       lines: [
         { accountId: apAccount, debit: params.amount, credit: 0 },
-        { accountId: cashAccountId, debit: 0, credit: params.amount },
+        { accountId: cashAccountId, financialAccountId: cash.financialAccountId, debit: 0, credit: params.amount },
       ],
     });
 
@@ -1087,8 +1088,8 @@ export async function reverseApPayment(params: {
     const apAccount = accountRows[0]?.id;
     if (!apAccount) throw new MissingLedgerAccountError(WELL_KNOWN_CODES.accountsPayable);
 
-    const { rows: lines } = await client.query<{ account_id: string; debit: string; credit: string }>(
-      `SELECT jl.account_id, jl.debit::text AS debit, jl.credit::text AS credit
+    const { rows: lines } = await client.query<{ account_id: string; financial_account_id: string | null; debit: string; credit: string }>(
+      `SELECT jl.account_id, jl.financial_account_id, jl.debit::text AS debit, jl.credit::text AS credit
          FROM journal_lines jl
         WHERE jl.entry_id = $1
         ORDER BY jl.id`,
@@ -1117,6 +1118,7 @@ export async function reverseApPayment(params: {
       postingKind: "ap_payment_reversal",
       lines: lines.map((line) => ({
         accountId: line.account_id,
+        financialAccountId: line.financial_account_id,
         debit: Number(line.credit),
         credit: Number(line.debit),
       })),
@@ -1154,6 +1156,7 @@ export interface ApPaymentDetail extends ApPayment {
   createdAt: string;
   /** The named cash/bank/clearing account; null = the method's default took it. */
   cashAccount: { code: string; name: string } | null;
+  financialAccount: { id: string; name: string } | null;
   entryId: string | null;
   reversalDate: string | null;
   reversedByName: string | null;
@@ -1178,6 +1181,8 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
     bank_reference: string | null;
     cash_account_code: string | null;
     cash_account_name: string | null;
+    financial_account_id: string | null;
+    financial_account_name: string | null;
     posted_account_code: string | null;
     posted_account_name: string | null;
     voucher_number: string | null;
@@ -1196,6 +1201,7 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
             p.location_id, l.name AS location_name,
             p.payment_date::text AS payment_date, p.method, p.amount::text AS amount, p.memo,
             p.cash_account_id, p.bank_reference,
+            p.financial_account_id, fa.name AS financial_account_name,
             ca.code AS cash_account_code, ca.name AS cash_account_name,
             ${VOUCHER_POSTED_ACCOUNT_SELECT},
             p.voucher_number::text AS voucher_number,
@@ -1209,6 +1215,7 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
        LEFT JOIN parties pa ON pa.id = s.party_id
        LEFT JOIN locations l ON l.id = p.location_id
        LEFT JOIN accounts ca ON ca.id = p.cash_account_id
+       LEFT JOIN financial_accounts fa ON fa.id = p.financial_account_id AND fa.business_id = p.business_id
        LEFT JOIN users u ON u.id = p.created_by
        LEFT JOIN users ru ON ru.id = p.reversed_by
        LEFT JOIN journal_entries je
@@ -1235,6 +1242,7 @@ export async function getPaymentDetail(businessId: string, paymentId: string): P
     memo: row.memo,
     cashAccountId: row.cash_account_id,
     bankReference: row.bank_reference,
+    financialAccount: row.financial_account_id && row.financial_account_name ? { id: row.financial_account_id, name: row.financial_account_name } : null,
     cashAccount: resolveVoucherPostedAccount(
       row.cash_account_code ? { code: row.cash_account_code, name: row.cash_account_name ?? "" } : null,
       row.posted_account_code ? { code: row.posted_account_code, name: row.posted_account_name ?? "" } : null,

@@ -34,6 +34,7 @@ const PASSTHROUGH_ERRORS = new Set([
   "code_expired",
   "code_already_redeemed",
   "code_revoked",
+  "pairing_payment_routing_unsupported",
   "pairing_session_unavailable",
 ]);
 

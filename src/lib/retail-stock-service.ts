@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 import { queryReportPage } from "./report-page-query";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
+import { resolvePurchasePaymentAccount } from "./payment-financial-account";
 import { getStock, receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
 import { RetailReturnError } from "./retail-return-errors";
@@ -174,6 +175,8 @@ export async function receiveItemPurchase(
      * credit side of the receipt's posting.
      */
     settlementMethod?: RetailPurchaseSettlementMethod | null;
+    financialAccountId?: string | null;
+    enforcePaymentAccountChoice?: boolean;
     /** Issue #915 — the supplier's invoice block (number, date, VAT, terms/due date). */
     invoice?: SupplierInvoiceInput | null;
     lines: PurchaseLine[];
@@ -199,7 +202,13 @@ export async function receiveItemPurchase(
     }
   }
 
-  // The supplier must be this branch's own, active supplier — an FK alone
+  const paymentAccount = await resolvePurchasePaymentAccount(client, {
+    businessId: input.businessId, locationId: input.locationId, settlementMethod,
+    financialAccountId: input.financialAccountId, enforceChoice: input.enforcePaymentAccountChoice,
+    invalid: () => new RetailStockError("حساب پرداخت معتبر این شعبه را انتخاب کنید."),
+  });
+
+  // The supplier must be this branch's own, active supplier - an FK alone
   // accepts any suppliers row in the database, including another branch's
   // or a deactivated one (issue #915).
   if (input.supplierId) {
@@ -231,8 +240,8 @@ export async function receiveItemPurchase(
       `INSERT INTO item_purchases
          (business_id, location_id, supplier_id, note, created_by, idempotency_key, request_hash,
           settlement_method, supplier_invoice_number, supplier_invoice_date, vat_amount,
-          payment_terms_days, payment_due_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $11, $12, $13::date) RETURNING id`,
+          payment_terms_days, payment_due_date, financial_account_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $11, $12, $13::date, $14) RETURNING id`,
       [
         input.businessId,
         input.locationId,
@@ -247,6 +256,7 @@ export async function receiveItemPurchase(
         invoice?.vatAmount ?? 0,
         invoice?.paymentTermsDays ?? null,
         paymentDueDate,
+        paymentAccount?.financialAccountId ?? null,
       ],
     ));
   } catch (err) {
@@ -394,6 +404,7 @@ export async function receiveItemPurchase(
       // mean what every historical event meant: credit AP, no VAT.
       settlementMethod,
       vatAmount: rialText(String(invoice?.vatAmount ?? 0)),
+      ...(paymentAccount ? { paymentAccount } : {}),
     },
     sourceType: "item_purchase",
     sourceId: purchaseId,

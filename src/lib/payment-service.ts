@@ -18,8 +18,8 @@ import {
   platformCommissionBase,
   settlementDifference,
   tendersWithTip,
-  type ResolvedTender,
 } from "./payment-methods";
+import type { RoutedOrderTender } from "./order-payment-routing-service";
 
 export const PAYMENT_METHODS = [
   "cash",
@@ -220,7 +220,7 @@ export interface CompleteSplitOrderPaymentInput {
   businessId: string;
   locationId: string;
   orderId: string;
-  tenders: ResolvedTender[];
+  tenders: RoutedOrderTender[];
   customerId: string | null;
   tipAmount: number;
   businessDate?: string;
@@ -273,9 +273,12 @@ export async function completeSplitOrderPayment(input: CompleteSplitOrderPayment
   const inventoryEventId = event.rows[0].id;
   for (const [index, tender] of tenders.entries()) {
     await client.query(
-      `INSERT INTO payments(location_id,order_id,method,amount,reference,received_by,payment_method_id,settlement_seq,received_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,coalesce($9::timestamptz,now()))`,
-      [locationId, orderId, tender.settlement, String(tender.amount), tender.reference, receivedBy, tender.methodId && knownMethods.has(tender.methodId) ? tender.methodId : null, index + 1, settledAt],
+      `INSERT INTO payments(location_id,order_id,method,amount,reference,received_by,payment_method_id,settlement_seq,received_at,
+                             financial_account_id,financial_account_gl_id)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,coalesce($9::timestamptz,now()),$10,$11)`,
+      [locationId, orderId, tender.settlement, String(tender.amount), tender.reference, receivedBy,
+        tender.methodId && knownMethods.has(tender.methodId) ? tender.methodId : null, index + 1, settledAt,
+        tender.financialAccountId ?? null, tender.financialAccountGlId ?? null],
     );
   }
   if (difference.balanceDue > 0) {
@@ -309,7 +312,8 @@ export async function completeSplitOrderPayment(input: CompleteSplitOrderPayment
   }
   await postExactOrderPaymentEntry(client, {
     businessId, locationId, orderId, createdBy: receivedBy,
-    tenders: tendersWithTip(tenders, tipAmount).map((tender) => ({ settlement: tender.settlement, amount: rialText(String(tender.amount)) })),
+    tenders: tendersWithTip(tenders, tipAmount).map(({ settlement, amount, financialAccountId, financialAccountGlId }) =>
+      ({ settlement, amount: rialText(String(amount)), financialAccountId, financialAccountGlId })),
     amount, tax: rialText(locked.order.tax), inventoryEventId, orderChannel: locked.order.type,
     tip: rialText(String(tipAmount)), platformCommission,
     balanceDue: rialText(String(difference.balanceDue)), customerCredit: rialText(String(difference.customerCredit)),
