@@ -29,6 +29,10 @@ vi.mock("@/lib/cheques-service", async (importOriginal) => {
   return { ...actual, transitionCheque: vi.fn() };
 });
 
+vi.mock("@/lib/automotive-access", () => ({
+  branchAccessForSession: async () => ({ activeLocationId: "branch-1", allowedLocationIds: ["branch-1"] }),
+}));
+
 const SESSION = { businessId: "biz-1", sub: "user-1", role: "owner" };
 const CHEQUE_ID = "33333333-3333-4333-8333-333333333333";
 
@@ -51,6 +55,13 @@ beforeEach(() => {
 });
 
 describe("POST /api/ledger/cheques/[id]/[action]", () => {
+  it("passes the chosen bank and the operator's allowed branches", async () => {
+    const bankAccountId = "44444444-4444-4444-8444-444444444444";
+    await POST(request(JSON.stringify({ bankAccountId })), context());
+    expect(chequeService.transitionCheque).toHaveBeenCalledWith(expect.objectContaining({
+      bankAccountId, allowedLocationIds: ["branch-1"],
+    }));
+  });
   it("asks for finance.cheques_manage", async () => {
     await POST(request(), context());
     expect(vi.mocked(auth.requirePermission).mock.calls[0][0]).toBe("finance.cheques_manage");

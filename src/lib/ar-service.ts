@@ -1094,15 +1094,15 @@ export async function receivePayment(params: {
     const arAccount = accounts.get(WELL_KNOWN_CODES.accountsReceivable)!;
     // Throws PayablesInputError (invalid_cash_account /
     // cash_account_method_mismatch), which the route answers as a 400.
-    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId);
+    const cash = await resolveVoucherCashAccount(client, params.businessId, params.method, params.cashAccountId, params.locationId, params.skipHolooPush);
     const cashAccountId = cash.accountId;
 
     const voucherNumber = await nextReceiptVoucherNumber(client, params.businessId);
 
     const { rows } = await client.query<ReceiptDbRow>(
       `INSERT INTO ar_receipts (business_id, location_id, customer_id, receipt_date, method, amount, memo, created_by,
-                               idempotency_key, request_fingerprint, cash_account_id, bank_reference, voucher_number)
-       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                               idempotency_key, request_fingerprint, cash_account_id, bank_reference, voucher_number, financial_account_id)
+       VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
        RETURNING ${RECEIPT_RETURNING}`,
       [
@@ -1119,6 +1119,7 @@ export async function receivePayment(params: {
         cash.chosen ? cash.accountId : null,
         bankReference,
         voucherNumber,
+        cash.financialAccountId,
       ],
     );
 
@@ -1149,7 +1150,7 @@ export async function receivePayment(params: {
       createdBy: params.createdBy,
       postingKind: "ar_receipt",
       lines: [
-        { accountId: cashAccountId, debit: params.amount, credit: 0 },
+        { accountId: cashAccountId, financialAccountId: cash.financialAccountId, debit: params.amount, credit: 0 },
         { accountId: arAccount, debit: 0, credit: params.amount },
       ],
     });
@@ -1177,6 +1178,7 @@ export interface ArReceiptDetail extends ArReceipt {
   createdAt: string;
   /** The named cash/bank/clearing account; null = the method's default took it. */
   cashAccount: { code: string; name: string } | null;
+  financialAccount: { id: string; name: string } | null;
   /** The live journal entry this voucher posted (null for legacy rows predating the posting). */
   entryId: string | null;
   reversalDate: string | null;
@@ -1201,6 +1203,8 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
     bank_reference: string | null;
     cash_account_code: string | null;
     cash_account_name: string | null;
+    financial_account_id: string | null;
+    financial_account_name: string | null;
     posted_account_code: string | null;
     posted_account_name: string | null;
     idempotency_key: string | null;
@@ -1218,6 +1222,7 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
             r.location_id, l.name AS location_name,
             r.receipt_date::text AS receipt_date, r.method, r.amount::text AS amount, r.memo,
             r.cash_account_id, r.bank_reference,
+            r.financial_account_id, fa.name AS financial_account_name,
             ca.code AS cash_account_code, ca.name AS cash_account_name,
             ${VOUCHER_POSTED_ACCOUNT_SELECT},
             r.idempotency_key, r.voucher_number::text AS voucher_number,
@@ -1230,6 +1235,7 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
        LEFT JOIN parties p ON p.id = r.customer_id
        LEFT JOIN locations l ON l.id = r.location_id
        LEFT JOIN accounts ca ON ca.id = r.cash_account_id
+       LEFT JOIN financial_accounts fa ON fa.id = r.financial_account_id AND fa.business_id = r.business_id
        LEFT JOIN users u ON u.id = r.created_by
        LEFT JOIN users ru ON ru.id = r.reversed_by
        LEFT JOIN journal_entries je
@@ -1255,6 +1261,7 @@ export async function getReceiptDetail(businessId: string, receiptId: string): P
     memo: row.memo,
     cashAccountId: row.cash_account_id,
     bankReference: row.bank_reference,
+    financialAccount: row.financial_account_id && row.financial_account_name ? { id: row.financial_account_id, name: row.financial_account_name } : null,
     cashAccount: resolveVoucherPostedAccount(
       row.cash_account_code ? { code: row.cash_account_code, name: row.cash_account_name ?? "" } : null,
       row.posted_account_code ? { code: row.posted_account_code, name: row.posted_account_name ?? "" } : null,

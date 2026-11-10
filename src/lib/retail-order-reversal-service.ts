@@ -22,8 +22,8 @@
  * What it *shares* is deliberately shared: `postExactMirrorEntry` (the
  * debit/credit swap every reversal in this codebase posts), `snapshotOrder`
  * and the `order_amendments` audit table (so a reversed retail order appears
- * in the same bookkeeping as any other amendment), `planPaymentRows` (the
- * supersede-and-offset payment shape), and the canonical batch engine
+ * in the same bookkeeping as any other amendment), the
+ * supersede-and-offset payment shape, and the canonical batch engine
  * (`restoreOrderItemBatchStock`) for putting stock back into the exact lots
  * the sale consumed.
  *
@@ -39,7 +39,6 @@ import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { postExactMirrorEntry } from "./ledger-service";
 import { snapshotOrder } from "./order-amendment-service";
-import { planPaymentRows, type AmendmentPaymentMethod, type PaymentRow } from "./order-amendments";
 import { restoreOrderItemBatchStock } from "./retail-batch-inventory";
 import { recomputeLastSoldAt } from "./retail-stock-service";
 import { planOnlineLineReturn } from "./online-sale-policy";
@@ -304,31 +303,22 @@ export async function reverseRetailImportedOrder(
   }
 
   // ---- supersede the payment footprint (supersede + offsetting negatives) ----
-  const { rows: paidRows } = await client.query<{ method: AmendmentPaymentMethod; amount: string }>(
-    `SELECT method::text AS method, sum(amount)::text AS amount FROM payments
-      WHERE order_id = $1 AND superseded_by_amendment_id IS NULL GROUP BY method`,
-    [input.orderId],
-  );
-  const paid: PaymentRow[] = paidRows.map((r) => ({ method: r.method, amount: Number(r.amount) }));
   await client.query(
-    "UPDATE payments SET superseded_by_amendment_id = $2 WHERE order_id = $1 AND superseded_by_amendment_id IS NULL",
-    [input.orderId, amendmentId],
+    `WITH originals AS (
+       UPDATE payments SET superseded_by_amendment_id = $2
+        WHERE order_id = $1 AND superseded_by_amendment_id IS NULL
+        RETURNING method, amount, financial_account_id, financial_account_gl_id
+     )
+     INSERT INTO payments (
+       location_id, order_id, method, amount, reference, received_by, superseded_by_amendment_id,
+       financial_account_id, financial_account_gl_id
+     )
+     SELECT $3, $1, method, -sum(amount), $4, $5, $2, financial_account_id, financial_account_gl_id
+       FROM originals
+      GROUP BY method, financial_account_id, financial_account_gl_id
+     HAVING sum(amount) <> 0`,
+    [input.orderId, amendmentId, input.locationId, `retail-order-reversal:${amendmentId}`, input.actorId],
   );
-  for (const row of planPaymentRows(paid, 0, null)) {
-    await client.query(
-      `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, superseded_by_amendment_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [
-        input.locationId,
-        input.orderId,
-        row.method,
-        row.amount,
-        `retail-order-reversal:${amendmentId}`,
-        input.actorId,
-        amendmentId,
-      ],
-    );
-  }
 
   await client.query(
     `UPDATE orders SET status = 'voided', voided_reason = $2, amended_at = now(), amended_by = $3 WHERE id = $1`,

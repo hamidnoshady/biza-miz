@@ -1665,6 +1665,7 @@ export function OrderDetailModal({
 
                         <div className="mb-3">
                           <PaymentWays
+                            routeOrderPayment
                             methods={paymentMethods}
                             loaded={paymentMethodsLoaded}
                             loadError={paymentMethodsError}

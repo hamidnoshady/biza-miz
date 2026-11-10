@@ -1016,6 +1016,7 @@ interface VoucherDetail {
   createdAt: string;
   bankReference: string | null;
   cashAccount: { code: string; name: string } | null;
+  financialAccount?: { id: string; name: string } | null;
   entryId: string | null;
   reversedAt: string | null;
   reversalEntryId: string | null;
@@ -1147,6 +1148,7 @@ function VoucherDetailDialog({
                   {detail.cashAccount
                     ? `${toPersianDigits(detail.cashAccount.code)} ${detail.cashAccount.name}`
                     : "—"}
+                  {detail.financialAccount ? ` · ${detail.financialAccount.name}` : ""}
                 </dd>
               </div>
               {detail.entryId ? (

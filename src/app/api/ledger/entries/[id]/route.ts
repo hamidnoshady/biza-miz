@@ -26,6 +26,10 @@ interface LineRow extends Record<string, unknown> {
   account_id: string;
   account_code: string;
   account_name: string;
+  financial_account_id: string | null;
+  financial_account_name: string | null;
+  bank_name: string | null;
+  terminal_number: string | null;
   debit: string;
   credit: string;
 }
@@ -60,9 +64,11 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
 
   const { rows: lines } = await query<LineRow>(
     `SELECT jl.id, jl.account_id, a.code AS account_code, a.name AS account_name,
+            jl.financial_account_id, fa.name AS financial_account_name, fa.bank_name, fa.terminal_number,
             jl.debit::text AS debit, jl.credit::text AS credit
        FROM journal_lines jl
        JOIN accounts a ON a.id = jl.account_id
+       LEFT JOIN financial_accounts fa ON fa.id = jl.financial_account_id AND fa.business_id = a.business_id
       WHERE jl.entry_id = $1
       ORDER BY jl.id`,
     [id],
@@ -86,6 +92,10 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
         accountId: l.account_id,
         accountCode: l.account_code,
         accountName: l.account_name,
+        financialAccount: l.financial_account_id && l.financial_account_name ? {
+          id: l.financial_account_id, name: l.financial_account_name,
+          bankName: l.bank_name, terminalNumber: l.terminal_number,
+        } : null,
         debit: Number(l.debit),
         credit: Number(l.credit),
       })),
