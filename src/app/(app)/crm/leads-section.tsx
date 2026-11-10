@@ -70,6 +70,7 @@ import { formatPhoneDisplay } from "@/lib/phone";
 import { crmCustomerHref } from "./crm-routes";
 import { CrmTodayQueues } from "./today-queues";
 import { SavedViewsBar } from "./saved-views-bar";
+import { LeadMarketingHistory } from "./lead-marketing-history";
 
 interface Lead {
   id: string;
@@ -129,7 +130,7 @@ const STATUS_FILTERS = [
 
 const PAGE_SIZE = 25;
 
-export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
+export function LeadsSection({ canManage = false, canViewMarketingHistory = false }: { canManage?: boolean; canViewMarketingHistory?: boolean }) {
   const [leads, setLeads] = useState<Lead[] | null>(null);
   const [total, setTotal] = useState(0);
   const [status, setStatus] = useState<string>("open");
@@ -140,6 +141,7 @@ export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
 
+  const [historyLead, setHistoryLead] = useState<Lead | null>(null);
   const [editing, setEditing] = useState<Lead | null>(null);
   const [creating, setCreating] = useState(false);
   const [converting, setConverting] = useState<Lead | null>(null);
@@ -300,8 +302,9 @@ export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
     {
       key: "action",
       header: "اقدام",
-      cell: (lead) =>
-        lead.convertedPartyId ? (
+      cell: (lead) => <div className="flex flex-wrap gap-2">
+        {canViewMarketingHistory ? <Button type="button" variant="outline" size="sm" onClick={() => setHistoryLead(lead)}>تعاملات بازاریابی</Button> : null}
+        {lead.convertedPartyId ? (
           <Link
             className="text-sm underline underline-offset-4"
             href={crmCustomerHref(lead.convertedPartyId)}
@@ -318,7 +321,8 @@ export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
               تبدیل
             </Button>
           </div>
-        ),
+        )}
+      </div>,
     },
   ];
 
@@ -326,6 +330,7 @@ export function LeadsSection({ canManage = false }: { canManage?: boolean }) {
     <div className="min-w-0 space-y-4">
       <ErrorBox>{error}</ErrorBox>
       {info ? <InfoBox>{info}</InfoBox> : null}
+      {canViewMarketingHistory && historyLead ? <LeadMarketingHistory key={historyLead.id} lead={historyLead} onClose={() => setHistoryLead(null)} /> : null}
 
       {/* New enquiries nobody has picked up yet — the queue a lead list exists
           for, so it leads the list rather than hiding in the home page. */}
