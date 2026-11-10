@@ -260,7 +260,7 @@ describe("every tenant table is protected", () => {
     ).toEqual([]);
 
     const byName = new Map(rows.map((row) => [row.relname, row]));
-    for (const table of ["platform_audit_log", "platform_cms_sites"]) {
+    for (const table of ["platform_audit_log", "platform_cms_sites", "platform_demo_sessions"]) {
       expect(
         byName.get(table),
         `${table} must remain in the business_id coverage check`,
@@ -339,6 +339,7 @@ describe("every tenant table is protected", () => {
     expect([...EXEMPT_TABLES].filter((t) => t.startsWith("platform_")).sort()).toEqual([
       "platform_admins",
       "platform_ai_gateway",
+      "platform_demo_sessions",
       // Issue #812 — the Superadmin AI control plane's global half. The runtime
       // mode → LiteLLM alias map is a platform catalogue every business reads the
       // same published rows of, so it carries no business_id. Its tenant-facing

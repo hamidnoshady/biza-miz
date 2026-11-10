@@ -372,7 +372,7 @@ export async function getBusiness(businessId: string): Promise<BusinessSummary |
               (SELECT max(o.opened_at) FROM orders o JOIN locations l ON l.id = o.location_id
                 WHERE l.business_id = b.id) AS last_activity_at
          FROM businesses b
-        WHERE b.id = $1`,
+        WHERE b.id = $1 AND b.ownership_kind <> 'demo'`,
       [businessId],
     );
     return rows[0] ? toSummary(rows[0]) : null;
@@ -404,7 +404,7 @@ export async function setBusinessStatus(
                                   WHEN $2 = 'active' THEN NULL
                                   ELSE archived_at END,
               updated_at = now()
-        WHERE id = $1
+        WHERE id = $1 AND ownership_kind <> 'demo'
           AND ($3::text IS NULL OR status::text = $3)
         RETURNING id`,
       [businessId, status, options.expectFrom ?? null],
@@ -462,7 +462,7 @@ export async function renameBusinessSubdomain(
       await client.query("BEGIN");
 
       const { rows } = await client.query<{ subdomain: string }>(
-        `SELECT subdomain::text AS subdomain FROM businesses WHERE id = $1 FOR UPDATE`,
+        `SELECT subdomain::text AS subdomain FROM businesses WHERE id = $1 AND ownership_kind <> 'demo' FOR UPDATE`,
         [businessId],
       );
       const previous = rows[0]?.subdomain;
@@ -532,7 +532,7 @@ export async function updateBusiness(
     query<{ id: string }>(
       `UPDATE businesses
           SET ${assignments.join(", ")}
-        WHERE id = $1
+        WHERE id = $1 AND ownership_kind <> 'demo'
         RETURNING id`,
       params,
     ),
@@ -656,7 +656,7 @@ export async function changeBusinessIndustry(
     try {
       await client.query("BEGIN");
       const { rows: previous } = await client.query<{ industry: Industry }>(
-        `SELECT industry FROM businesses WHERE id = $1 FOR UPDATE`,
+        `SELECT industry FROM businesses WHERE id = $1 AND ownership_kind <> 'demo' FOR UPDATE`,
         [businessId],
       );
       if (!previous[0]) {
@@ -1391,7 +1391,7 @@ export async function resetBusiness(businessId: string): Promise<void> {
         [businessId],
       );
       const guarded = guardRows[0];
-      if (!guarded) throw new ResetBusinessNotPossibleError();
+      if (!guarded || guarded.ownership_kind === "demo") throw new ResetBusinessNotPossibleError();
       if (guarded.ownership_kind === "platform_internal") {
         throw new ProtectedInternalBusinessError();
       }
@@ -1542,7 +1542,7 @@ export async function hardDeleteBusiness(
         `SELECT id, ownership_kind FROM businesses WHERE id = $1 FOR UPDATE`,
         [businessId],
       );
-      if (!rows[0]) throw new BusinessNotFoundError();
+      if (!rows[0] || rows[0].ownership_kind === "demo") throw new BusinessNotFoundError();
       if (rows[0].ownership_kind === "platform_internal") {
         throw new ProtectedInternalBusinessError();
       }
@@ -1934,7 +1934,7 @@ export async function startImpersonation(params: {
       ]);
 
       const { rows: bizRows } = await client.query<{ status: BusinessStatus; support_access_policy: string }>(
-        `SELECT status::text AS status, support_access_policy FROM businesses WHERE id = $1`,
+        `SELECT status::text AS status, support_access_policy FROM businesses WHERE id = $1 AND ownership_kind <> 'demo'`,
         [params.businessId],
       );
       if (!bizRows[0]) throw new BusinessNotImpersonableError("business_not_found");

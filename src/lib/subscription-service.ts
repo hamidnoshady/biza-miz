@@ -218,7 +218,7 @@ export async function changeBusinessPlan(input: {
     await client.query("BEGIN");
     // Lock the business row so two concurrent plan changes serialize.
     const { rows: bizRows } = await client.query<{ id: string; plan: string }>(
-      `SELECT id, plan FROM businesses WHERE id = $1 FOR UPDATE`,
+      `SELECT id, plan FROM businesses WHERE id = $1 AND ownership_kind <> 'demo' FOR UPDATE`,
       [input.businessId],
     );
     if (!bizRows[0]) throw new SubscriptionError("business_not_found");
@@ -836,7 +836,7 @@ export async function renewBusinessSubscription(
     `SELECT ownership_kind FROM businesses WHERE id = $1`,
     [businessId],
   );
-  if (lifecycleRows[0]?.ownership_kind === "platform_internal") return { status: "nothing_due" };
+  if (lifecycleRows[0]?.ownership_kind !== "customer") return { status: "nothing_due" };
   const subscription = await getBusinessSubscription(businessId);
   if (!subscription) return { status: "nothing_due" };
   if (subscription.status === "cancelled" || subscription.status === "expired") {
