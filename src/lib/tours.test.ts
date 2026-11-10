@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { INDUSTRIES, type Industry } from "./industries";
+import { INDUSTRIES, isRetailCatalogueIndustry, type Industry } from "./industries";
 import { hasCapability, hasModule } from "./industry-profile";
 import { KNOWLEDGE_PAGES } from "./knowledge-base";
 import { ALL_PERMISSIONS, PERMISSIONS } from "./permissions";
@@ -459,7 +459,10 @@ describe("tour coverage of the nine article pages", () => {
     for (const industry of INDUSTRIES) {
       const inWorkspace = (PRODUCT_WORKSPACE_INDUSTRIES as readonly string[]).includes(industry);
       for (const page of pages) {
-        expect(idsFor(page, viewer(industry)).length, `${industry} ${page}`).toBe(inWorkspace ? 1 : 0);
+        const eligible = page.endsWith("/barcode-templates")
+          ? isRetailCatalogueIndustry(industry) && hasCapability(industry, "barcode")
+          : inWorkspace;
+        expect(idsFor(page, viewer(industry)).length, `${industry} ${page}`).toBe(eligible ? 1 : 0);
         expect(idsFor(page, viewer(industry, noPermission)), `${industry} ${page}`).toEqual([]);
       }
     }
@@ -467,6 +470,19 @@ describe("tour coverage of the nine article pages", () => {
     const viewOnly = new Set<string>([PERMISSIONS.inventoryView]);
     expect(idsFor("page:/accounting/products/new", viewer("cosmetics", viewOnly))).toEqual([]);
     expect(idsFor("page:/accounting/products/prices", viewer("cosmetics", viewOnly)).length).toBe(1);
+  });
+
+  it("offers a read-only label tour without referring to weight-template controls", () => {
+    const page = "page:/accounting/products/barcode-templates";
+    const reader = new Set<string>([PERMISSIONS.inventoryView]);
+    const tour = toursForViewer(page, viewer("cosmetics", reader))[0];
+    expect(tour.steps.map((step) => step.id)).toEqual(["label-welcome", "label-gallery"]);
+    expect(JSON.stringify(tour.steps)).not.toContain("الگوی بارکد وزنی");
+    expect(toursForViewer(page, viewer("jewelry", reader))).toHaveLength(1);
+    expect(toursForViewer(page, viewer("watch", reader))).toHaveLength(1);
+    expect(toursForViewer(page, viewer("automotive", reader))).toHaveLength(0);
+    expect(toursForViewer(page, viewer("automotive", new Set([PERMISSIONS.vehiclesView])))).toHaveLength(1);
+    expect(toursForViewer(page, viewer("food_service", reader))).toHaveLength(0);
   });
 
   it("filters the steps a member's permissions do not reach out of THEIR tour", () => {

@@ -3,7 +3,8 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { createItem, listWeightItems, setWeightAttributes } from "@/lib/items-service";
+import { listWeightItems } from "@/lib/items-service";
+import { createJewelryPiece } from "@/lib/specialist-product-creation";
 import { validateWeightAttributes } from "@/lib/gold";
 import { recordItemEvent } from "@/lib/item-audit-service";
 
@@ -54,9 +55,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     netWeight: body.netWeight ?? "",
     unitCostPerGram: body.unitCostPerGram ?? null,
   };
-  // Validated up front so a bad weight/purity never leaves behind an item
-  // with no weight attributes -- the two writes below aren't wrapped in a
-  // transaction, so this is what keeps them from disagreeing.
+  // Keep the existing validation response; the native creation service also
+  // wraps the item and required weight facts in a single transaction.
   const weightErrors = validateWeightAttributes(weightInput);
   if (weightErrors.length > 0) {
     return NextResponse.json({ error: "invalid_weight_attributes", message: weightErrors.join("؛ ") }, { status: 400 });
@@ -65,13 +65,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
-  const item = await createItem({
+  const item = await createJewelryPiece({
+    businessId: session.businessId,
     locationId: location.id,
+    userId: session.sub,
     name,
     sku: body.sku ?? null,
-    tracking: "weight",
+    weight: weightInput,
   });
-  await setWeightAttributes(item.id, weightInput);
   await recordItemEvent({
     businessId: session.businessId,
     locationId: location.id,

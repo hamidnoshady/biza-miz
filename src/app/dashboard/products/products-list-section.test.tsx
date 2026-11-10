@@ -74,10 +74,10 @@ function wooLink(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderSection() {
+function renderSection(permissions = { canEditStock: true, canEditMeta: true, canManageStore: true }) {
   return render(
     <MoneyProvider unit="rial">
-      <ProductsListSection apiBase="/api/products" />
+      <ProductsListSection apiBase="/api/products" {...permissions} />
     </MoneyProvider>,
   );
 }
@@ -119,6 +119,31 @@ function fetchDouble(
 }
 
 describe("ProductsListSection", () => {
+  it("keeps catalogue details readable but hides all mutation controls from a viewer", async () => {
+    vi.stubGlobal("fetch", fetchDouble({ duplicateSkus: ["SKU-1"] }));
+    const user = userEvent.setup();
+    renderSection({ canEditStock: false, canEditMeta: false, canManageStore: false });
+    await screen.findByText("پیراهن آبی");
+    await screen.findByText("احتمال تکراری");
+    expect(screen.queryByRole("button", { name: /انتشار در فروشگاه|بررسی محصول تکراری|به‌روزرسانی دستی/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: /جزئیات/ }));
+    expect(screen.getAllByText("SKU-1").length).toBeGreaterThan(0);
+    for (const name of ["ویرایش", "ورود کالا / قیمت", "توضیحات و انتشار", "بررسی محصول تکراری"]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+  });
+
+  it("exposes stock and metadata actions only when their respective permissions are present", async () => {
+    vi.stubGlobal("fetch", fetchDouble());
+    const user = userEvent.setup();
+    renderSection({ canEditStock: true, canEditMeta: false, canManageStore: false });
+    await screen.findByText("پیراهن آبی");
+    await user.click(screen.getByRole("button", { name: /جزئیات/ }));
+    expect(screen.getByRole("button", { name: "ورود کالا / قیمت" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "ویرایش" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "توضیحات و انتشار" })).toBeNull();
+  });
+
   it("keeps the row visible, with a Retry, when the refresh after a save fails (issue #909 §6)", async () => {
     let itemsAttempt = 0;
     vi.stubGlobal(

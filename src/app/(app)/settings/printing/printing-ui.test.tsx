@@ -700,3 +700,56 @@ describe("Add-printer wizard — hardware only", () => {
     expect(screen.getByText(/بازکردن کشوی پول/)).toBeTruthy();
   });
 });
+
+describe("product label gallery", () => {
+  it("uses the existing eligible label catalogue, not receipt templates or print controls without permission", async () => {
+    routeApi(JEWELRY_BUILT_INS, "jewelry");
+    render(<PrintingManager labelsOnly canPrint={false} />);
+    await screen.findByText("قالب‌های آماده");
+    expect(bodyText()).toContain("برچسب");
+    expect(bodyText()).not.toContain("فیش فروش ۸۰ میلی‌متری");
+    expect(screen.queryByRole("button", { name: "چاپ نمونه" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "چاپگرها" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "قالب جدید" }));
+    await screen.findByText("طراحی قالب");
+    expect(bodyText()).toContain("برچسب");
+    expect(screen.queryByRole("button", { name: "چاپ نمونه" })).toBeNull();
+  });
+
+  it("does not offer a misleading test print of an unsaved design", async () => {
+    routeApi(JEWELRY_BUILT_INS, "jewelry");
+    render(<PrintingManager labelsOnly />);
+    await screen.findByText("قالب‌های آماده");
+    expect(screen.getAllByRole("button", { name: "چاپ نمونه" }).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "قالب جدید" }));
+    await screen.findByText("طراحی قالب");
+    expect(screen.queryByRole("button", { name: "چاپ نمونه" })).toBeNull();
+  });
+
+  it("selects a product label using the existing label rule without changing receipts", async () => {
+    routeApi(JEWELRY_BUILT_INS, "jewelry");
+    render(<PrintingManager labelsOnly />);
+    await screen.findByText("قالب‌های آماده");
+    const card = [...document.querySelectorAll<HTMLElement>("article")].find((item) => item.textContent?.includes("تگ جواهر ۵۷×۴۰"));
+    expect(card).toBeTruthy();
+    await waitFor(() => expect((within(card!).getByRole("button", { name: "انتخاب قالب" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(card!).getByRole("button", { name: "انتخاب قالب" }));
+    await waitFor(() => expect(putBodyOf("label")).toMatchObject({ templateKey: "label57x40-jewelry-tag" }));
+    expect(apiMock.mock.calls.some(([url, init]) => url === "/api/settings/print-rules" && (init as { method?: string })?.method === "PUT" && JSON.parse(String((init as { body?: string }).body)).documentType === "receipt")).toBe(false);
+  });
+
+  it("offers a retry when saved templates fail instead of reporting an empty catalogue", async () => {
+    routeApi(JEWELRY_BUILT_INS, "jewelry");
+    const old = apiMock.getMockImplementation()!;
+    let failures = 0;
+    apiMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url === "/api/settings/print-templates" && failures++ === 0) return { ok: false, data: { error: "network_error" } };
+      return old(url, init);
+    });
+    render(<PrintingManager labelsOnly />);
+    const retry = await screen.findByRole("button", { name: "تلاش دوباره" });
+    expect(screen.queryByText("قالب‌های آماده")).toBeNull();
+    fireEvent.click(retry);
+    await screen.findByText("قالب‌های آماده");
+  });
+});

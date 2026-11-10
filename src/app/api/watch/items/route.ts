@@ -3,12 +3,12 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireIndustryForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { createItem, listItems } from "@/lib/items-service";
+import { listItems } from "@/lib/items-service";
 import {
   listWatchAttributes,
-  upsertWatchAttributes,
   type WatchItemAttributesInput,
 } from "@/lib/watch-attributes-service";
+import { createWatchModel } from "@/lib/specialist-product-creation";
 
 /** The watch catalogue: one `tracking: 'serial'` item per model; its physical units live under /api/watch/units. */
 export const GET = withTenantScope(async () => {
@@ -58,17 +58,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
 
   try {
-    const item = await createItem({
+    const item = await createWatchModel({
+      businessId: session.businessId,
       locationId: location.id,
+      userId: session.sub,
       name,
       sku: body.sku?.trim() || null,
-      tracking: "serial",
-      serviceIntervalMonths:
-        body.serviceIntervalMonths == null ? null : Number(body.serviceIntervalMonths),
+      serviceIntervalMonths: body.serviceIntervalMonths == null ? null : Number(body.serviceIntervalMonths),
+      attributes: body.attributes ?? null,
     });
-    // Phase 6 (issue #795): the structured attributes ride the same create.
-    const attributes = body.attributes ? await upsertWatchAttributes(item.id, body.attributes) : null;
-    return NextResponse.json({ ok: true, item: { ...item, attributes } });
+    return NextResponse.json({ ok: true, item });
   } catch (err) {
     return NextResponse.json({ error: "validation_failed", message: (err as Error).message }, { status: 400 });
   }

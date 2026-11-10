@@ -41,6 +41,8 @@ export function IndustryManagerShell<K extends string>({
   activeTab,
   onTabChange,
   error,
+  mobileOpen,
+  onMobileOpenChange,
   children,
 }: {
   idPrefix: string;
@@ -49,12 +51,14 @@ export function IndustryManagerShell<K extends string>({
   activeTab: K;
   onTabChange: (tab: K) => void;
   error: string;
+  mobileOpen?: boolean;
+  onMobileOpenChange?: (open: boolean) => void;
   children: ReactNode;
 }) {
   return (
     <div className="min-w-0 space-y-4 sm:space-y-5">
       <ErrorBox>{error}</ErrorBox>
-      <SectionNav idPrefix={idPrefix} label={navLabel} sections={tabs} active={activeTab} onChange={onTabChange}>
+      <SectionNav idPrefix={idPrefix} label={navLabel} sections={tabs} active={activeTab} onChange={onTabChange} open={mobileOpen} onOpenChange={onMobileOpenChange}>
         {children}
       </SectionNav>
     </div>
