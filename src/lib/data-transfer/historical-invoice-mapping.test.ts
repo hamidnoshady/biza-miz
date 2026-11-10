@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mapHistoricalInvoiceRows } from "./historical-invoice-mapping";
+import { mapHistoricalInvoiceRows, mapHistoricalInvoiceHeaderRows, mapHistoricalInvoiceLineRows } from "./historical-invoice-mapping";
 import type { ImportMapping } from "./types";
 
 const columns = ["id", "date", "customer", "total", "product", "quantity", "price"];
@@ -37,4 +37,17 @@ describe("historical invoice mapping", () => {
     const bad = [{ rowNumber: 2, raw: { ...rows[0].raw, total: 9007199254740993 as unknown as string } }];
     expect(() => mapHistoricalInvoiceRows(columns, bad, mapping)).toThrow("invalid_source_value");
   });
+  it("keeps separately mapped header and line fields from crossing sheets", () => {
+    const header = { columns: mapping.columns.slice(0, 4) };
+    const line = { columns: [
+      { field: "externalInvoiceId", column: 0 }, { field: "lineName", column: 4 },
+      { field: "quantity", column: 5 }, { field: "unitPrice", column: 6 },
+    ] };
+    expect(mapHistoricalInvoiceHeaderRows(columns, [rows[0]], header)[0]).toMatchObject({ total: "9007199254740993" });
+    expect(mapHistoricalInvoiceLineRows(columns, [rows[0]], line)[0]).toMatchObject({ lineName: "A", unitPrice: "9007199254740993" });
+    expect(() => mapHistoricalInvoiceHeaderRows(columns, rows, mapping)).toThrow("invalid_mapping_field");
+    expect(() => mapHistoricalInvoiceLineRows(columns, rows, { columns: [...line.columns, { field: "total", column: 3 }] })).toThrow("invalid_mapping_field");
+    expect(() => mapHistoricalInvoiceLineRows(columns, rows, { columns: line.columns.filter((v) => v.field !== "lineName") })).toThrow("missing_required_fields");
+  });
+
 });

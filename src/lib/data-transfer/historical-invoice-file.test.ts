@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { parseHistoricalInvoiceFile } from "./historical-invoice-file";
 
 const bytes = (text: string): ArrayBuffer => new TextEncoder().encode(text).buffer as ArrayBuffer;
@@ -52,10 +53,66 @@ describe("historical invoice file parsing", () => {
     expect(result[0].rows[0]).toEqual({ rowNumber: 2, raw: { id: "00001", total: "999999999999999999" } });
     expect(result[1].rows[0].raw.name).toBe("کالا");
   });
+  it("rejects blank XLSX headers rather than losing or mislabelling evidence", async () => {
+    await expect(parseHistoricalInvoiceFile(await workbook([[["id", null, "total"], ["1", "hidden", "2"]]]), "xlsx"))
+      .rejects.toMatchObject({ code: "invalid_headers" });
+  });
   it("rejects XLSX numbers, dates, formulas and errors instead of rounding them", async () => {
     for (const value of [9007199254740992, 10, 1.5, new Date("2024-01-01"), { formula: "1+1", result: 2 }, { error: "#N/A" }]) {
       await expect(parseHistoricalInvoiceFile(await workbook([[["id"], [value]]]), "xlsx")).rejects.toMatchObject({ code: "xlsx_cells_must_be_text" });
     }
+  });
+  it("bounds expanded XLSX data, even if the compressed upload is small", async () => {
+    const zip = new JSZip();
+    zip.file("large.xml", "0".repeat(32 * 1024 * 1024 + 1));
+    const compressed = await zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    expect(compressed.byteLength).toBeLessThan(100_000);
+    await expect(parseHistoricalInvoiceFile(Uint8Array.from(compressed).buffer, "xlsx")).rejects.toMatchObject({ code: "xlsx_expanded_too_large" });
+    // A forged central-directory size must not bypass the actual output bound.
+    const forged = Buffer.from(compressed);
+    const central = forged.lastIndexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    expect(central).toBeGreaterThan(0);
+    forged.writeUInt32LE(1, central + 24);
+    await expect(parseHistoricalInvoiceFile(Uint8Array.from(forged).buffer, "xlsx")).rejects.toBeInstanceOf(Error);
+  });
+  it("rejects damaged data, duplicate and ambiguous archive names before ExcelJS", async () => {
+    const zip = new JSZip();
+    zip.file("a.xml", "abc", { createFolders: false });
+    zip.file("b.xml", "def", { createFolders: false });
+    const bytes = Buffer.from(await zip.generateAsync({ type: "uint8array", compression: "STORE" }));
+    const damaged = Buffer.from(bytes);
+    const local = damaged.indexOf(Buffer.from("abc"));
+    expect(local).toBeGreaterThan(0);
+    damaged[local] ^= 1;
+    await expect(parseHistoricalInvoiceFile(Uint8Array.from(damaged).buffer, "xlsx")).rejects.toMatchObject({ code: "invalid_xlsx_archive" });
+    const duplicate = Buffer.from(bytes);
+    const centralName = duplicate.lastIndexOf(Buffer.from("b.xml"));
+    expect(centralName).toBeGreaterThan(0);
+    duplicate[centralName] = 0x61;
+    await expect(parseHistoricalInvoiceFile(Uint8Array.from(duplicate).buffer, "xlsx")).rejects.toMatchObject({ code: "invalid_xlsx_archive" });
+    const ambiguous = new JSZip();
+    ambiguous.file("xl/./workbook.xml", "x", { createFolders: false });
+    await expect(parseHistoricalInvoiceFile(Uint8Array.from(await ambiguous.generateAsync({ type: "uint8array" })).buffer, "xlsx")).rejects.toMatchObject({ code: "invalid_xlsx_archive" });
+  });
+  it("rejects XLSX archives with too many entries", async () => {
+    const zip = new JSZip();
+    for (let i = 0; i <= 1000; i++) zip.file(`f${i}.xml`, "", { createFolders: false });
+    await expect(parseHistoricalInvoiceFile(Uint8Array.from(await zip.generateAsync({ type: "uint8array" })).buffer, "xlsx"))
+      .rejects.toMatchObject({ code: "invalid_xlsx_archive" });
+  });
+  it("bounds materialized sparse CSV cells before building row objects", async () => {
+    const header = Array.from({ length: 512 }, (_, i) => `c${i}`).join(",");
+    const payload = `${header}\n${"value\n".repeat(1954)}`;
+    await expect(parseHistoricalInvoiceFile(bytes(payload), "csv")).rejects.toMatchObject({ code: "too_many_cells" });
+    const wide = Object.fromEntries(Array.from({ length: 512 }, (_, i) => [`c${i}`, "x"]));
+    const json = JSON.stringify([wide, ...Array.from({ length: 1953 }, () => ({ c0: "x" }))]);
+    await expect(parseHistoricalInvoiceFile(bytes(json), "json")).rejects.toMatchObject({ code: "too_many_cells" });
+  });
+  it("bounds staging amplification from repeated long column names", async () => {
+    const payload = `${"h".repeat(100_000)}\n${"value\n".repeat(336)}`;
+    await expect(parseHistoricalInvoiceFile(bytes(payload), "csv")).rejects.toMatchObject({ code: "staged_data_too_large" });
+    const escaped = `${"\\".repeat(100_000)}\n${"value\n".repeat(168)}`;
+    await expect(parseHistoricalInvoiceFile(bytes(escaped), "csv")).rejects.toMatchObject({ code: "staged_data_too_large" });
   });
   it("rejects oversized files and invalid UTF-8", async () => {
     await expect(parseHistoricalInvoiceFile(new ArrayBuffer(20 * 1024 * 1024 + 1), "csv")).rejects.toMatchObject({ code: "file_too_large" });

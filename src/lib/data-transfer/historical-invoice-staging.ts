@@ -1,5 +1,5 @@
 /**
- * Internal, transactional staging for flat historical invoice files. No route,
+ * Internal, transactional staging for historical invoice files. No route,
  * queue registration, approval or archive write is provided here. A caller
  * must check Data Transfer and accounting/CRM permissions, service activation,
  * and access to the selected branch before invoking this function.
@@ -25,7 +25,9 @@ export async function stageHistoricalInvoiceFile(input: {
   provider: string;
   currency: HistoricalCurrency;
   calendar: HistoricalCalendar;
-}): Promise<{ jobId: string; columns: string[]; rowCount: number }> {
+  /** Explicitly chosen worksheet names; omitting this accepts a single flat sheet only. */
+  sheets?: { headers: string; lines: string };
+}): Promise<{ jobId: string; columns: string[]; lineColumns?: string[]; rowCount: number }> {
   const sourceKey = input.sourceKey.trim(), provider = input.provider.trim();
   if (!sourceKey || sourceKey.length > 200 || provider.length > 200) throw new HistoricalStagingError("invalid_source");
   if (input.currency !== "rial" && input.currency !== "toman") throw new HistoricalStagingError("invalid_currency");
@@ -35,10 +37,24 @@ export async function stageHistoricalInvoiceFile(input: {
   if (input.buffer.byteLength > 20 * 1024 * 1024) throw new HistoricalStagingError("file_too_large");
   const bytes = input.buffer.slice(0);
   const sheets = await parseHistoricalInvoiceFile(bytes, input.format);
-  // Never silently discard a second sheet. Relational header/line staging
-  // requires its own reviewed join and is not implemented by this service.
-  if (sheets.length !== 1) throw new HistoricalStagingError("multi_sheet_not_supported");
-  const source = sheets[0];
+  // Never guess the roles of two sheets or silently discard extra sheets.
+  let source = sheets[0];
+  let lines: typeof source | undefined;
+  if (input.sheets) {
+    if (input.format !== "xlsx" || sheets.length !== 2 || input.sheets.headers === input.sheets.lines) {
+      throw new HistoricalStagingError("invalid_sheet_selection");
+    }
+    const headerSheet = sheets.find((s) => s.name === input.sheets!.headers);
+    lines = sheets.find((s) => s.name === input.sheets!.lines);
+    if (!headerSheet || !lines) throw new HistoricalStagingError("invalid_sheet_selection");
+    source = headerSheet;
+  } else if (sheets.length !== 1) throw new HistoricalStagingError("multi_sheet_not_supported");
+  const stagedRows = lines
+    ? [
+        ...source.rows.map((row) => ({ kind: "header", sheet: source.name, sourceRowNumber: row.rowNumber, cells: row.raw })),
+        ...lines.rows.map((row) => ({ kind: "line", sheet: lines!.name, sourceRowNumber: row.rowNumber, cells: row.raw })),
+      ].map((raw, index) => ({ row_number: index + 1, raw }))
+    : source.rows.map((row) => ({ row_number: row.rowNumber, raw: row.raw }));
   const fingerprint = createHash("sha256").update(new Uint8Array(bytes)).digest("hex");
   return withTenantTransaction(input.businessId, async (client) => {
     const actor = await client.query(`SELECT id FROM users WHERE id = $1 AND business_id = $2 AND is_active FOR SHARE`, [input.actor.userId, input.businessId]);
@@ -51,12 +67,13 @@ export async function stageHistoricalInvoiceFile(input: {
        VALUES ($1,$2,'accounting.historical_invoices','pending',$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9,$10,$11) RETURNING id`,
       [input.businessId, input.locationId, input.fileName.slice(0, 300), input.format, bytes.byteLength,
         JSON.stringify(source.columns), JSON.stringify({ columns: [] }),
-        JSON.stringify({ historicalInvoice: { sourceKey, provider, currency: input.currency, calendar: input.calendar, sourceSheet: source.name, fileSha256: fingerprint } }),
-        source.rows.length, input.actor.userId, input.actor.name.slice(0, 300)],
+        JSON.stringify({ historicalInvoice: { sourceKey, provider, currency: input.currency, calendar: input.calendar, sourceSheet: source.name, fileSha256: fingerprint,
+          ...(lines ? { structure: "header_lines", lineSheet: lines.name, lineColumns: lines.columns } : {}) } }),
+        stagedRows.length, input.actor.userId, input.actor.name.slice(0, 300)],
     );
     const jobId = inserted.rows[0].id;
-    for (let i = 0; i < source.rows.length; i += 500) {
-      const chunk = source.rows.slice(i, i + 500).map((row) => ({ row_number: row.rowNumber, raw: row.raw }));
+    for (let i = 0; i < stagedRows.length; i += 500) {
+      const chunk = stagedRows.slice(i, i + 500);
       await client.query(
         `INSERT INTO data_import_rows (job_id, row_number, status, raw)
          SELECT $1, r.row_number, 'warning', r.raw FROM jsonb_to_recordset($2::jsonb) AS r(row_number integer, raw jsonb)`,
@@ -66,8 +83,8 @@ export async function stageHistoricalInvoiceFile(input: {
     await client.query(
       `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
        VALUES ($1,$2,'historical_invoice.staged','accounting.historical_invoices',$3,$4::jsonb)`,
-      [input.businessId, input.actor.userId, jobId, JSON.stringify({ sourceKey, provider, fileSha256: fingerprint, rowCount: source.rows.length })],
+      [input.businessId, input.actor.userId, jobId, JSON.stringify({ sourceKey, provider, fileSha256: fingerprint, rowCount: stagedRows.length, structure: lines ? "header_lines" : "flat" })],
     );
-    return { jobId, columns: source.columns, rowCount: source.rows.length };
+    return { jobId, columns: source.columns, ...(lines ? { lineColumns: lines.columns } : {}), rowCount: stagedRows.length };
   });
 }

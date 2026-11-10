@@ -9,6 +9,7 @@ import type { PoolClient } from "pg";
 import { withTenantTransaction } from "../db";
 import { linkSourceIdentity } from "../import-reconciliation/service";
 import { previewHistoricalInvoices, type HistoricalCalendar, type HistoricalCurrency, type HistoricalInvoiceRow } from "./historical-invoice-preview";
+import { loadHistoricalStagedRows, type HistoricalStagedInput } from "./historical-invoice-staged-rows";
 
 export class HistoricalArchiveError extends Error {
   constructor(readonly code: string, readonly details: unknown = null) {
@@ -65,33 +66,139 @@ export async function bindHistoricalCustomer(input: {
   return withTenantTransaction(input.businessId, async (client) => {
     await lockSource(client, input.businessId, sourceKey);
     await assertActor(client, input.businessId, input.actor.userId);
-    const party = await client.query(
-      `SELECT id FROM parties WHERE business_id = $1 AND id = $2
-        AND 'customer' = ANY(roles) AND merged_into_id IS NULL FOR SHARE`,
-      [input.businessId, input.partyId],
+    return bindCustomerInTransaction(client, { ...input, sourceKey, provider, externalCustomerCode: code });
+  });
+}
+
+/** The source advisory lock and actor check are held by the caller. */
+async function bindCustomerInTransaction(client: PoolClient, input: {
+  businessId: string; sourceKey: string; provider: string; externalCustomerCode: string; partyId: string; actor: HistoricalArchiveActor;
+}): Promise<"created" | "unchanged"> {
+  const { sourceKey, provider, externalCustomerCode: code } = input;
+  const party = await client.query(
+    `SELECT id FROM parties WHERE business_id = $1 AND id = $2
+      AND 'customer' = ANY(roles) AND is_active AND merged_into_id IS NULL FOR SHARE`,
+    [input.businessId, input.partyId],
+  );
+  if (!party.rowCount) throw new HistoricalArchiveError("customer_not_found");
+  const existing = await client.query<{ verified: boolean; canonical_type: string; canonical_id: string; provider: string }>(
+    `SELECT verified, canonical_type, canonical_id, provider FROM source_identities
+      WHERE business_id = $1 AND source_key = $2 AND domain = 'party'
+        AND external_type = $3 AND external_id = $4 AND retired_at IS NULL FOR UPDATE`,
+    [input.businessId, sourceKey, SOURCE_TYPE, code],
+  );
+  if (existing.rows[0] && (!existing.rows[0].verified || existing.rows[0].provider !== provider || existing.rows[0].canonical_type !== "parties" || existing.rows[0].canonical_id !== input.partyId)) {
+    throw new HistoricalArchiveError("customer_identity_conflict");
+  }
+  const result = await linkSourceIdentity(client, {
+    businessId: input.businessId, domain: "party", sourceKey, provider,
+    externalType: SOURCE_TYPE, externalId: code, canonicalType: "parties",
+    canonicalId: input.partyId, linkedBy: input.actor.userId,
+  });
+  if (result === "created") {
+    await client.query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, 'historical_invoice.customer_linked', 'party', $3, $4::jsonb)`,
+      [input.businessId, input.actor.userId, input.partyId, JSON.stringify({ sourceKey, externalCustomerCode: code, provider, actorName: input.actor.name })],
     );
-    if (!party.rowCount) throw new HistoricalArchiveError("customer_not_found");
-    const existing = await client.query<{ verified: boolean; canonical_type: string; canonical_id: string }>(
-      `SELECT verified, canonical_type, canonical_id FROM source_identities
-        WHERE business_id = $1 AND source_key = $2 AND domain = 'party'
-          AND external_type = $3 AND external_id = $4 AND retired_at IS NULL FOR UPDATE`,
-      [input.businessId, sourceKey, SOURCE_TYPE, code],
+  }
+  return result;
+}
+
+export interface HistoricalCustomerReview {
+  externalCustomerCode: string;
+  targetCustomer: { partyId: string; name: string };
+  /** Representative evidence; truncation is explicit. */
+  rows: HistoricalInvoiceRow[];
+  matchingRows: number;
+  truncated: boolean;
+  sourceNames: string[];
+  sourcePhones: string[];
+  evidenceTruncated: boolean;
+  /** Existing mapping is shown, never silently replaced. */
+  existingIdentity: { canonicalId: string; canonicalType: string; provider: string; verified: boolean } | null;
+  reviewToken: string;
+}
+
+/** Build a customer-link review from the selected job's current mapped evidence. */
+async function customerReviewInTransaction(client: PoolClient, input: HistoricalStagedInput & { externalCustomerCode: string; partyId: string }, lock: boolean): Promise<HistoricalCustomerReview> {
+  const code = bounded(input.externalCustomerCode, 300, "customer_code_required");
+  const sourceKey = bounded(input.sourceKey, 200, "source_required");
+  const provider = input.provider.trim();
+  const staged = await loadHistoricalStagedRows(client, { ...input, sourceKey, provider }, lock);
+  const headers = staged.source.structure === "header_lines" ? staged.headerRows : staged.mapped;
+  const ids = new Set(headers.filter((row) => (row.externalCustomerCode ?? "").trim() === code)
+    .map((row) => row.externalInvoiceId.trim()).filter(Boolean));
+  // Repeated flat rows may leave the customer code blank; include their other
+  // customer hints, and refuse a document that carries two different codes.
+  const rows = headers.filter((row) => (row.externalCustomerCode ?? "").trim() === code ||
+    (row.externalInvoiceId.trim() && ids.has(row.externalInvoiceId.trim())));
+  if (!rows.length) throw new HistoricalArchiveError("customer_code_not_in_job");
+  if (rows.some((row) => (row.externalCustomerCode ?? "").trim() && (row.externalCustomerCode ?? "").trim() !== code)) {
+    throw new HistoricalArchiveError("customer_code_conflict");
+  }
+  const target = await client.query<{ id: string; name: string; updated_at: Date | string }>(
+    `SELECT id, name, updated_at FROM parties WHERE business_id = $1 AND id = $2
+      AND 'customer' = ANY(roles) AND is_active AND merged_into_id IS NULL
+      AND (location_id IS NULL OR location_id = $3) ${lock ? "FOR SHARE" : ""}`,
+    [input.businessId, input.partyId, input.locationId],
+  );
+  if (!target.rowCount) throw new HistoricalArchiveError("customer_not_found");
+  const targetCustomer = { partyId: target.rows[0].id, name: target.rows[0].name };
+  const names = [...new Set(rows.map((r) => r.sourceCustomerName?.trim()).filter((v): v is string => Boolean(v)))];
+  const phones = [...new Set(rows.map((r) => r.sourceCustomerPhone?.trim()).filter((v): v is string => Boolean(v)))];
+  const existing = await client.query<{ canonical_id: string; canonical_type: string; provider: string; verified: boolean }>(
+    `SELECT canonical_id, canonical_type, provider, verified FROM source_identities
+      WHERE business_id = $1 AND source_key = $2 AND domain = 'party' AND external_type = $3
+        AND external_id = $4 AND retired_at IS NULL ${lock ? "FOR SHARE" : ""}`,
+    [input.businessId, sourceKey, SOURCE_TYPE, code],
+  );
+  const identity = existing.rows[0] ? {
+    canonicalId: existing.rows[0].canonical_id, canonicalType: existing.rows[0].canonical_type,
+    provider: existing.rows[0].provider, verified: existing.rows[0].verified,
+  } : null;
+  // The token covers every matching mapped row, not just the displayed sample.
+  // It is a stale-review detector, NOT an authorization credential.
+  const reviewToken = createHash("sha256").update(JSON.stringify({
+    businessId: input.businessId, locationId: input.locationId, jobId: input.jobId,
+    sourceKey, provider, currency: input.currency, calendar: input.calendar, code,
+    mapping: input.mapping, lineMapping: input.lineMapping ?? null, identity, targetCustomer,
+    targetUpdatedAt: target.rows[0].updated_at, rows,
+  })).digest("hex");
+  return { externalCustomerCode: code, targetCustomer, rows: rows.slice(0, 20), matchingRows: rows.length,
+    truncated: rows.length > 20, sourceNames: names.slice(0, 20), sourcePhones: phones.slice(0, 20),
+    evidenceTruncated: names.length > 20 || phones.length > 20, existingIdentity: identity, reviewToken };
+}
+
+/** The caller must authorize Data Transfer, CRM, Accounting and branch access. */
+export async function previewHistoricalCustomerReview(input: HistoricalStagedInput & { externalCustomerCode: string; partyId: string }): Promise<HistoricalCustomerReview> {
+  return withTenantTransaction(input.businessId, (client) => customerReviewInTransaction(client, input, false));
+}
+
+/**
+ * Atomically re-check what the operator saw and bind only to an existing
+ * customer. This is a customer identity decision, not invoice approval or import.
+ * The caller MUST check current permissions and app/branch access beforehand.
+ */
+export async function confirmHistoricalCustomerReview(input: HistoricalStagedInput & {
+  externalCustomerCode: string; partyId: string; actor: HistoricalArchiveActor; reviewToken: string; confirmed: true;
+}): Promise<"created" | "unchanged"> {
+  if (input.confirmed !== true || !/^[a-f0-9]{64}$/.test(input.reviewToken)) throw new HistoricalArchiveError("review_confirmation_required");
+  const sourceKey = bounded(input.sourceKey, 200, "source_required"), provider = input.provider.trim();
+  return withTenantTransaction(input.businessId, async (client) => {
+    await lockSource(client, input.businessId, sourceKey);
+    await assertActor(client, input.businessId, input.actor.userId);
+    const review = await customerReviewInTransaction(client, { ...input, sourceKey, provider }, true);
+    if (review.reviewToken !== input.reviewToken) throw new HistoricalArchiveError("customer_review_stale");
+    if (review.evidenceTruncated) throw new HistoricalArchiveError("customer_review_evidence_truncated");
+    const result = await bindCustomerInTransaction(client, { ...input, sourceKey, provider, externalCustomerCode: review.externalCustomerCode });
+    await client.query(
+      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, 'historical_invoice.customer_reviewed', 'party', $3, $4::jsonb)`,
+      [input.businessId, input.actor.userId, input.partyId, JSON.stringify({ sourceKey, provider, jobId: input.jobId,
+        externalCustomerCode: review.externalCustomerCode, reviewToken: review.reviewToken,
+        mapping: input.mapping, lineMapping: input.lineMapping ?? null, matchingRows: review.matchingRows, result })],
     );
-    if (existing.rows[0] && (!existing.rows[0].verified || existing.rows[0].canonical_type !== "parties" || existing.rows[0].canonical_id !== input.partyId)) {
-      throw new HistoricalArchiveError("customer_identity_conflict");
-    }
-    const result = await linkSourceIdentity(client, {
-      businessId: input.businessId, domain: "party", sourceKey, provider,
-      externalType: SOURCE_TYPE, externalId: code, canonicalType: "parties",
-      canonicalId: input.partyId, linkedBy: input.actor.userId,
-    });
-    if (result === "created") {
-      await client.query(
-        `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
-         VALUES ($1, $2, 'historical_invoice.customer_linked', 'party', $3, $4::jsonb)`,
-        [input.businessId, input.actor.userId, input.partyId, JSON.stringify({ sourceKey, externalCustomerCode: code, provider, actorName: input.actor.name })],
-      );
-    }
     return result;
   });
 }
@@ -99,7 +206,7 @@ export async function bindHistoricalCustomer(input: {
 /** Stable fingerprint of mapped evidence; row numbers are file-position metadata. */
 function normalizedEvidence(row: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(row)
-    .filter(([key, value]) => key !== "rowNumber" && value !== undefined && value !== "")
+    .filter(([key, value]) => !["rowNumber", "sourceSheet", "sourceRowNumber"].includes(key) && value !== undefined && value !== "")
     .sort(([a], [b]) => a.localeCompare(b)));
 }
 
@@ -141,13 +248,16 @@ export async function archiveHistoricalInvoice(input: {
   return withTenantTransaction(input.businessId, async (client) => {
     await lockSource(client, input.businessId, sourceKey);
     await assertActor(client, input.businessId, input.actor.userId);
-    const job = await client.query<{ options: { historicalInvoice?: { sourceKey?: string; provider?: string; currency?: string; calendar?: string } } }>(
+    const job = await client.query<{ options: { historicalInvoice?: { sourceKey?: string; provider?: string; currency?: string; calendar?: string; structure?: string } } }>(
       `SELECT options FROM data_import_jobs WHERE id = $1 AND business_id = $2
         AND location_id = $3 AND entity_key = $4 AND status = 'running' AND created_by = $5 FOR SHARE`,
       [input.jobId, input.businessId, input.locationId, ENTITY_KEY, input.actor.userId],
     );
     if (!job.rowCount) throw new HistoricalArchiveError("job_not_running_or_authorized");
     const approved = job.rows[0].options?.historicalInvoice;
+    // Relational staging needs a document-aware executor with full source-row
+    // revalidation. This writer only knows the flat mapped-row representation.
+    if (approved?.structure !== undefined && approved.structure !== "flat") throw new HistoricalArchiveError("unsupported_staged_structure");
     if (!approved || approved.sourceKey !== sourceKey || approved.provider !== provider || approved.currency !== input.currency || approved.calendar !== input.calendar) {
       throw new HistoricalArchiveError("job_source_changed");
     }
@@ -168,10 +278,11 @@ export async function archiveHistoricalInvoice(input: {
       `SELECT s.canonical_id FROM source_identities s JOIN parties p
         ON p.id::text = s.canonical_id AND p.business_id = s.business_id
        WHERE s.business_id = $1 AND s.source_key = $2 AND s.domain = 'party'
-         AND s.external_type = $3 AND s.external_id = $4 AND s.verified AND s.retired_at IS NULL
-         AND s.canonical_type = 'parties' AND 'customer' = ANY(p.roles) AND p.merged_into_id IS NULL
+         AND s.external_type = $3 AND s.external_id = $4 AND s.provider = $5 AND s.verified AND s.retired_at IS NULL
+         AND s.canonical_type = 'parties' AND 'customer' = ANY(p.roles) AND p.is_active AND p.merged_into_id IS NULL
+         AND (p.location_id IS NULL OR p.location_id = $6)
        FOR SHARE OF s, p`,
-      [input.businessId, sourceKey, SOURCE_TYPE, code],
+      [input.businessId, sourceKey, SOURCE_TYPE, code, provider, input.locationId],
     );
     const partyId = identities.rows[0]?.canonical_id;
     if (!partyId || partyId !== input.expectedPartyId) throw new HistoricalArchiveError("customer_binding_changed");
