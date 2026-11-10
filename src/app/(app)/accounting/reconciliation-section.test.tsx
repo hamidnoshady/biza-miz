@@ -86,7 +86,10 @@ const runner = vi.fn(async (fn: () => Promise<{ ok: boolean; data: { error?: str
 
 function stubFetch(onPatch?: (body: unknown) => void) {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-    if (url.startsWith("/api/ledger/reconciliations?")) {
+    if (url === "/api/ledger/reconciliations?accounts=1") {
+      return { ok: true, status: 200, json: async () => ({ accounts: [], legacyAvailable: true }) };
+    }
+    if (url.startsWith("/api/ledger/reconciliations?accountCode=")) {
       return { ok: true, status: 200, json: async () => ({ reconciliations: [OPEN_RECONCILIATION] }) };
     }
     if (url.includes("/lines")) {
@@ -194,7 +197,10 @@ describe("ReconciliationSection — an account with no open period", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        if (url.startsWith("/api/ledger/reconciliations?")) {
+        if (url === "/api/ledger/reconciliations?accounts=1") {
+          return { ok: true, status: 200, json: async () => ({ accounts: [], legacyAvailable: true }) };
+        }
+        if (url.startsWith("/api/ledger/reconciliations?accountCode=")) {
           return { ok: true, status: 200, json: async () => ({ reconciliations: [] }) };
         }
         throw new Error(`unexpected fetch ${url}`);
@@ -224,7 +230,10 @@ describe("ReconciliationSection — issue #909: a same-account refresh never bla
     let historyCallCount = 0;
     let resolveSecondHistory!: (value: { ok: boolean; status: number; json: () => Promise<unknown> }) => void;
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.startsWith("/api/ledger/reconciliations?")) {
+      if (url === "/api/ledger/reconciliations?accounts=1") {
+        return { ok: true, status: 200, json: async () => ({ accounts: [], legacyAvailable: true }) };
+      }
+      if (url.startsWith("/api/ledger/reconciliations?accountCode=")) {
         historyCallCount += 1;
         if (historyCallCount === 1) {
           return { ok: true, status: 200, json: async () => ({ reconciliations: [OPEN_RECONCILIATION] }) };
@@ -264,7 +273,10 @@ describe("ReconciliationSection — issue #909: a same-account refresh never bla
   it("shows a stale-data banner, not a full failure screen, when the same-account resync itself fails", async () => {
     let historyCallCount = 0;
     const fetchMock = vi.fn(async (url: string) => {
-      if (url.startsWith("/api/ledger/reconciliations?")) {
+      if (url === "/api/ledger/reconciliations?accounts=1") {
+        return { ok: true, status: 200, json: async () => ({ accounts: [], legacyAvailable: true }) };
+      }
+      if (url.startsWith("/api/ledger/reconciliations?accountCode=")) {
         historyCallCount += 1;
         if (historyCallCount === 1) {
           return { ok: true, status: 200, json: async () => ({ reconciliations: [OPEN_RECONCILIATION] }) };

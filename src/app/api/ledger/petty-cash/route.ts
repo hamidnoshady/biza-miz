@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { requireMember, withTenantScope } from "@/lib/auth";
+import { requireMember, requirePermission, withTenantScope } from "@/lib/auth";
 import { branchAccessForSession } from "@/lib/automotive-access";
 import { ExpenseError } from "@/lib/expense-service";
 import { PERMISSIONS } from "@/lib/permissions";
@@ -131,7 +131,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     const uploadFund = request.nextUrl.searchParams.get("uploadReceipt");
     if (uploadFund) return await uploadReceipt(request, access, uploadFund);
     const body = await readJsonObjectBody(request);
-    if (body.action === "configure") return NextResponse.json({ fund: await configurePettyCashFund(access, body) }, { status: 201 });
+    if (body.action === "configure") {
+      const guard = await requirePermission(PERMISSIONS.financeAccountsManage);
+      if (guard.error) return guard.error;
+      return NextResponse.json({ fund: await configurePettyCashFund(access, body) }, { status: 201 });
+    }
     if (typeof body.fundId !== "string") throw new PettyCashError("petty_cash_fund_not_found", 404);
     const key = body.idempotencyKey ?? request.headers.get("idempotency-key");
     const operation = body.action === "approve" || body.action === "reject"

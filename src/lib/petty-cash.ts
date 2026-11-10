@@ -1,4 +1,6 @@
-export const PETTY_CASH_APPROVER_ROLES = ["owner", "admin", "manager", "accountant"] as const;
+import { PASSWORD_ROLES } from "./roles";
+
+export const PETTY_CASH_APPROVER_ROLES = PASSWORD_ROLES;
 export type PettyCashApproverRole = (typeof PETTY_CASH_APPROVER_ROLES)[number];
 export type PettyCashPolicy = "fixed" | "variable";
 export type PettyCashOperationKind = "fund" | "submit" | "replenish" | "reconcile" | "close";

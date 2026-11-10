@@ -1008,6 +1008,7 @@ export async function postExactMirrorEntry(
   params: {
     businessId: string;
     locationId: string | null;
+    projectId?: string | null;
     /** the entry being undone */
     originalEntryId: string;
     /** identity of the reversal itself */
@@ -1046,6 +1047,7 @@ export async function postExactMirrorEntry(
   const entryId = await postExactJournalEntry(client, {
     businessId: params.businessId,
     locationId: params.locationId,
+    projectId: params.projectId ?? null,
     entryDate: params.entryDate ?? null,
     memo: params.memo,
     sourceType: params.sourceType,

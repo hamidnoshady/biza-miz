@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import { SectionCard } from "@/app/dashboard/page-chrome";
+import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, errorMessageOrRaw, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import type { FinancialAccountKind } from "@/lib/financial-accounts";
 import { paymentSourceKindForSettlement } from "@/lib/order-payment-routing";
@@ -134,7 +134,7 @@ export function OrderPaymentRoutingSection() {
           </Field>
           <div className="max-w-xs"><PrimaryButton type="submit" disabled={saving || !approvalReference.trim()}>ذخیره مسیر پرداخت</PrimaryButton></div>
         </form>
-      ) : null}
+      ) : error ? null : <LoadingSkeleton rows={3} label="در حال بارگذاری مسیرهای پرداخت" />}
     </SectionCard>
   );
 }

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import type { PaymentSourceOption } from "@/lib/financial-payment-sources";
+import { LoadingSkeleton } from "./page-chrome";
 import { api } from "./ui";
 
 export function PurchasePaymentAccountSelect({ method, value, onChange }: {
@@ -23,7 +24,7 @@ export function PurchasePaymentAccountSelect({ method, value, onChange }: {
   }, []);
 
   if (failed) return <p role="alert" className="text-xs text-muted-foreground">بارگذاری حساب‌های پرداخت ناموفق بود.</p>;
-  if (!options) return <p role="status" className="text-xs text-muted-foreground">در حال بارگذاری حساب‌های پرداخت…</p>;
+  if (!options) return <LoadingSkeleton rows={1} compact label="در حال بارگذاری حساب‌های پرداخت" />;
   const choices = options.flatMap((option) => option.kind === method && option.financialAccountId ? [{
     value: option.financialAccountId,
     label: `${option.financialAccountName ?? option.accountName} (${option.accountCode})`,

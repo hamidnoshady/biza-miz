@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
-import { SectionCard } from "@/app/dashboard/page-chrome";
+import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, errorMessage, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { useMoney } from "@/components/money/money-context";
 import type { FinancialAccountRecord } from "@/lib/financial-accounts";
@@ -30,6 +30,7 @@ const SETTLEMENT_ERRORS: Record<string, string> = {
 
 export function PspSettlementsSection({ canManage }: { canManage: boolean }) {
   const money = useMoney();
+  const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<PspSettlementMovement[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [terminals, setTerminals] = useState<FinancialAccountRecord[]>([]);
@@ -47,7 +48,9 @@ export function PspSettlementsSection({ canManage }: { canManage: boolean }) {
     setCursor(data.nextCursor);
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh().catch(() => setError(errorMessage("load_failed"))).finally(() => setLoading(false));
+  }, [refresh]);
   useEffect(() => {
     if (!canManage) return;
     void api<{ accounts: FinancialAccountRecord[] }>("/api/ledger/financial-accounts?kind=pos_psp&status=active").then(({ ok, data }) => {
@@ -118,6 +121,7 @@ export function PspSettlementsSection({ canManage }: { canManage: boolean }) {
           <div><PrimaryButton type="submit" disabled={saving || !terminal || !settledOn}>ثبت واریز تأییدشده</PrimaryButton></div>
         </form>
       ) : null}
+      {loading ? <LoadingSkeleton rows={3} label="در حال بارگذاری تسویه‌ها" /> : (
       <ul className="divide-y divide-border">
         {rows.map((row) => (
           <li key={row.transferId} className="py-2 text-sm">
@@ -135,6 +139,7 @@ export function PspSettlementsSection({ canManage }: { canManage: boolean }) {
           </li>
         ))}
       </ul>
+      )}
       {cursor ? <SecondaryButton onClick={() => void refresh(cursor)}>نمایش بیشتر</SecondaryButton> : null}
     </SectionCard>
   );

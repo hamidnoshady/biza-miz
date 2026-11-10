@@ -429,7 +429,7 @@ describe("split payment — accessories", () => {
       await voidInvoice(created.orderId);
       const { rows } = await db.query(
         `SELECT amount::text, financial_account_id, financial_account_gl_id
-           FROM payments WHERE order_id = $1 ORDER BY amount`,
+           FROM payments WHERE order_id = $1 ORDER BY payments.amount`,
         [created.orderId],
       );
       expect(rows).toEqual([
