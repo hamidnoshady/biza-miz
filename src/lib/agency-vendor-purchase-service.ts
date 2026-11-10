@@ -24,8 +24,9 @@ export type VendorPurchase = {
   id: string; purchase_number: string; project_id: string; party_id: string; vendor_party_id: string;
   quote_reference: string; description: string; amount_rial: string; quoted_on: string;
   status: VendorPurchaseStatus; cost_id: string | null; created_by: string;
+  cancelled_at: string | null; cancelled_by: string | null; cancelled_by_name: string; cancellation_reason: string;
 };
-const columns = "id, purchase_number, project_id, party_id, vendor_party_id, quote_reference, description, amount_rial::text, quoted_on::text, status, cost_id, created_by";
+const columns = "id, purchase_number, project_id, party_id, vendor_party_id, quote_reference, description, amount_rial::text, quoted_on::text, status, cost_id, created_by, cancelled_at::text, cancelled_by, cancelled_by_name, cancellation_reason";
 
 export async function listVendorPurchases(owner: WorkspaceOwner, projectId: string): Promise<(VendorPurchase & {client_name: string; vendor_name: string})[]> {
   await agency(owner.businessId);
@@ -127,5 +128,23 @@ export async function bookVendorPurchase(owner: WorkspaceOwner, id: string, spen
     await query(`UPDATE agency_vendor_purchases SET status='booked',cost_id=$3 WHERE business_id=$1 AND id=$2`, [owner.businessId, row.id, cost.id]);
     await activity(owner,row,"ثبت هزینه در پرداختنی");
     return { costId: cost.id };
+  });
+}
+
+/** Retire an unbooked commitment, not a reversal of an accounting fact.
+ * The route additionally requires workspace.approve, independently of manage.
+ * The source lock is the SAME one booking takes: cancellation can never race a
+ * successful posting into a cancelled purchase with an expense/payable attached. */
+export async function cancelVendorPurchase(owner: WorkspaceOwner, id: string, reason: unknown): Promise<void> {
+  await agency(owner.businessId);
+  const note = text(reason, 500);
+  await withTenantTransaction(owner.businessId, async () => {
+    const row = await lockedPurchase(owner, id);
+    await requireProjectCapability(owner, row.project_id, "manage");
+    if (row.status !== "approved" || row.cost_id) throw new VendorPurchaseError("invalid_purchase_state");
+    await query(`UPDATE agency_vendor_purchases SET status='cancelled',cancelled_at=now(),cancelled_by=$3,
+      cancelled_by_name=$4,cancellation_reason=$5 WHERE business_id=$1 AND id=$2`,
+      [owner.businessId,id,owner.actorUserId,(owner.actorName ?? "").slice(0,200),note]);
+    await activity(owner,row,"لغو خرید تأییدشده پیش از ثبت حسابداری");
   });
 }

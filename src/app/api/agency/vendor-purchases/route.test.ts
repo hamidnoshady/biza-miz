@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
 import { VendorPurchaseError } from "@/lib/agency-vendor-purchase";
 
-const mock = vi.hoisted(() => ({ agencyOwner: vi.fn(), requirePermission: vi.fn(), list: vi.fn(), create: vi.fn(), submit: vi.fn(), book: vi.fn() }));
+const mock = vi.hoisted(() => ({ agencyOwner: vi.fn(), requirePermission: vi.fn(), list: vi.fn(), create: vi.fn(), submit: vi.fn(), cancel: vi.fn(), book: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ withTenantScope: (fn: unknown) => fn, requirePermission: mock.requirePermission }));
 vi.mock("../guard", async () => {
   const { PERMISSIONS } = await import("@/lib/permissions");
@@ -15,7 +15,7 @@ vi.mock("../guard", async () => {
 }); });
 vi.mock("@/lib/agency-vendor-purchase-service", () => ({
   listVendorPurchases: mock.list, createVendorPurchase: mock.create,
-  submitVendorPurchase: mock.submit, bookVendorPurchase: mock.book,
+  cancelVendorPurchase: mock.cancel, submitVendorPurchase: mock.submit, bookVendorPurchase: mock.book,
 }));
 import { GET, POST } from "./route";
 import { POST as action } from "./[id]/route";
@@ -27,7 +27,7 @@ beforeEach(() => {
   mock.agencyOwner.mockResolvedValue({ owner, error: null });
   mock.requirePermission.mockResolvedValue({ error: null });
   mock.list.mockResolvedValue([]); mock.create.mockResolvedValue({ id: "new" });
-  mock.submit.mockResolvedValue(undefined); mock.book.mockResolvedValue({ costId: "cost" });
+  mock.cancel.mockResolvedValue(undefined); mock.submit.mockResolvedValue(undefined); mock.book.mockResolvedValue({ costId: "cost" });
 });
 describe("agency vendor purchase API boundaries", () => {
   it("passes only the authorized owner and the requested project to reads", async () => {
@@ -68,6 +68,23 @@ describe("agency vendor purchase API boundaries", () => {
     expect((await action(request({ action: "book", spentOn: "2026-10-06" }),context)).status).toBe(200);
     expect(mock.book).toHaveBeenCalledWith(owner,"purchase","2026-10-06");
     expect((await action(request({ action: "approve" }),context)).status).toBe(400);
+  });
+  it("requires workspace.approve independently of workspace.manage to cancel an unbooked purchase", async () => {
+    mock.requirePermission.mockResolvedValue({error:NextResponse.json({error:"forbidden"},{status:403})});
+    expect((await action(request({action:"cancel",reason:"تغییر برنامه"}),context)).status).toBe(403);
+    expect(mock.requirePermission).toHaveBeenCalledWith(PERMISSIONS.workspaceApprove);
+    expect(mock.cancel).not.toHaveBeenCalled();
+  });
+  it("cancels through its register without requiring finance authority or touching the booking service", async () => {
+    expect((await action(request({action:"cancel",reason:"تغییر برنامه"}),context)).status).toBe(200);
+    expect(mock.cancel).toHaveBeenCalledWith(owner,"purchase","تغییر برنامه");
+    expect(mock.agencyOwner).toHaveBeenCalledWith(PERMISSIONS.workspaceManage,expect.anything());
+    expect(mock.requirePermission).toHaveBeenCalledWith(PERMISSIONS.workspaceApprove);
+    expect(mock.book).not.toHaveBeenCalled();
+  });
+  it("reports a stale/booked cancellation as a conflict, not success", async () => {
+    mock.cancel.mockRejectedValue(new VendorPurchaseError("invalid_purchase_state"));
+    expect((await action(request({action:"cancel",reason:"تغییر"}),context)).status).toBe(409);
   });
   it("maps source-state conflicts rather than reporting success", async () => {
     mock.book.mockRejectedValue(new VendorPurchaseError("invalid_purchase_state"));

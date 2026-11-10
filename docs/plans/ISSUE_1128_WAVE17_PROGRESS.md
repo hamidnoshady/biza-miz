@@ -83,3 +83,11 @@ The #1110 eligibility matrix remains absent. Do not mark that requirement comple
 or treat #1128's pre-existing closed status as proof that every acceptance item
 has shipped. The next work should retain the four-app architecture and existing
 server authorization/posting engines, without fabricated performance metrics.
+
+## Follow-up — retiring abandoned commitments
+
+[Wave 18](ISSUE_1128_WAVE18_PROGRESS.md) adds explicit reasoned cancellation of an
+approved, unbooked purchase. This resolves the cancellation gap above while
+preserving the original approval, quote facts and all posted accounting facts.
+It does not introduce general approved-quote amendments or complete the other
+agency acceptance items.
