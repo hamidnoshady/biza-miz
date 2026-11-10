@@ -20,6 +20,8 @@ const mocks = vi.hoisted(() => ({
   pathViewer: vi.fn(),
   loadPathProgress: vi.fn(),
   publishedForPage: vi.fn(),
+  findActiveDeviceId: vi.fn(),
+  verifyTrustedDevice: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -45,6 +47,15 @@ vi.mock("@/lib/learning-paths-service", () => ({
   loadLearningPathProgress: mocks.loadPathProgress,
 }));
 
+vi.mock("@/lib/device-service", () => ({
+  findActiveDeviceId: mocks.findActiveDeviceId,
+}));
+
+vi.mock("@/lib/trusted-device", () => ({
+  readTrustedDeviceToken: vi.fn(() => null),
+  verifyTrustedDevice: mocks.verifyTrustedDevice,
+}));
+
 import { GET as getProgress } from "./route";
 
 const T0 = "2026-11-01T10:00:00.000Z";
@@ -63,7 +74,8 @@ const DENIED = {
   error: new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }),
 };
 
-const req = (url: string) => new NextRequest(`https://biz.example.test${url}`);
+const req = (url: string, headers?: Record<string, string>) =>
+  new NextRequest(`https://biz.example.test${url}`, { headers });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -81,6 +93,8 @@ beforeEach(() => {
   });
   mocks.loadPathProgress.mockResolvedValue(new Map());
   mocks.publishedForPage.mockResolvedValue([]);
+  mocks.findActiveDeviceId.mockResolvedValue(null);
+  mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "missing" });
 });
 
 describe("aggregation", () => {
@@ -122,7 +136,6 @@ describe("aggregation", () => {
     const res = await getProgress(req("/api/knowledge/learning-progress"));
     const data = await res.json();
     expect(data.platform.completed).toBeGreaterThanOrEqual(1);
-    
   });
 
   it("groups apps in the expected order", async () => {
@@ -192,5 +205,46 @@ describe("aggregation", () => {
       a.sections.flatMap((s: any) => s.pages.flatMap((p: any) => p.tours.map((t: any) => t.id))),
     );
     expect(allTourIds).not.toContain("crm.directory.first-customer");
+  });
+});
+
+describe("device consistency", () => {
+  it("reports no device when no token is sent", async () => {
+    mocks.findActiveDeviceId.mockResolvedValue(null);
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "missing" });
+
+    const res = await getProgress(req("/api/knowledge/learning-progress"));
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.currentDevice).toEqual({
+      id: null,
+      paired: false,
+      trusted: false,
+    });
+  });
+
+  it("reports paired device when token resolves", async () => {
+    mocks.findActiveDeviceId.mockResolvedValue("dev-pos-1");
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "missing" });
+
+    const res = await getProgress(
+      req("/api/knowledge/learning-progress", { "x-pos-device-token": "posdev_abc" }),
+    );
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.currentDevice.id).toBe("dev-pos-1");
+    expect(data.currentDevice.paired).toBe(true);
+    expect(data.currentDevice.trusted).toBe(false);
+    expect(mocks.findActiveDeviceId).toHaveBeenCalledWith("posdev_abc", "biz-1");
+  });
+
+  it("reports trusted device when cookie is valid", async () => {
+    mocks.findActiveDeviceId.mockResolvedValue(null);
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, reason: undefined });
+
+    const res = await getProgress(req("/api/knowledge/learning-progress"));
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.currentDevice.trusted).toBe(true);
   });
 });

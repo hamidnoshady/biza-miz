@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { DEVICE_TOKEN_HEADER } from "@/lib/device-token";
+import { findActiveDeviceId } from "@/lib/device-service";
+import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-device";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { KNOWLEDGE_PAGES } from "@/lib/knowledge-base";
 import { pageTourCandidates } from "@/lib/tour-baseline";
@@ -64,6 +67,30 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const businessId = guard.session.businessId;
   const userId = guard.session.sub;
   const permissions = guard.membership.permissions;
+
+  // ------------------------------------------------------------------
+  // Device context for login/device consistency: which device this request
+  // is on, whether it is paired, and whether it holds a valid trust cookie.
+  // Progress itself is keyed on (business, user) so it is identical across
+  // every device — this block only tells the client *which* device it is on.
+  // ------------------------------------------------------------------
+  const deviceToken = request.headers.get(DEVICE_TOKEN_HEADER) ?? null;
+  const currentDeviceId = await findActiveDeviceId(deviceToken, businessId);
+  const currentDevicePaired = currentDeviceId !== null;
+
+  let currentDeviceTrusted = false;
+  try {
+    const trustedToken = readTrustedDeviceToken(request);
+    const decision = await verifyTrustedDevice({
+      businessId,
+      userId,
+      token: trustedToken,
+    });
+    currentDeviceTrusted = decision.trusted;
+  } catch {
+    // Trust lookup must never block progress: a transient failure just means
+    // the client doesn't see a trust flag for this device.
+  }
 
   // ------------------------------------------------------------------
   // 1. Gather every tour the member could be offered across all pages.
@@ -361,5 +388,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     apps,
     nextLesson,
     resumeLastTour: resumeLast,
+    currentDevice: {
+      id: currentDeviceId,
+      paired: currentDevicePaired,
+      trusted: currentDeviceTrusted,
+    },
   });
 });
