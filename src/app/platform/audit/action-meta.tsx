@@ -162,6 +162,10 @@ export const ACTION_META: Record<string, ActionMeta> = {
   // written by the route the console's own retry button calls.
   "platform_backup.run": { label: "پشتیبان‌گیری کل سیستم", tone: "info", icon: DatabaseBackup },
   "platform_backup.cloud.retry": { label: "تلاش دوبارهٔ ارسال به فضای ابری", tone: "warning", icon: RefreshCw },
+  // The read-only sibling, written by the MCP `verify_backup_cloud_object` tool:
+  // it proves the object without uploading anything, so it is informational
+  // rather than a warning like a retry.
+  "platform_backup.cloud.verify": { label: "راستی‌آزمایی نسخهٔ ابری", tone: "info", icon: ShieldCheck },
   "platform_backup.config.update": { label: "تغییر تنظیمات پشتیبان‌گیری", tone: "warning", icon: SlidersHorizontal },
   "platform_backup.peer.save": { label: "افزودن سرور همتا", tone: "info", icon: Server },
   "platform_backup.peer.update": { label: "ویرایش سرور همتا", tone: "info", icon: Server },
