@@ -1541,6 +1541,7 @@ async function assertPhaseInProject(projectId: string, phaseId: string | null): 
 }
 
 export async function deleteWorkspaceTask(businessId: string, taskId: string): Promise<boolean> {
+  try {
   const { rowCount } = await query(
     `DELETE FROM ai_project_tasks t
       USING ai_projects p
@@ -1548,6 +1549,13 @@ export async function deleteWorkspaceTask(businessId: string, taskId: string): P
     [taskId, businessId],
   );
   return (rowCount ?? 0) > 0;
+  } catch (err) {
+    const refusal = err as {code?:string;constraint?:string};
+    if (refusal.code === "23503" && refusal.constraint === "agency_task_time_task_id_fkey") {
+      throw new WorkspaceError("task_has_time_history");
+    }
+    throw err;
+  }
 }
 
 /* --- checklist --------------------------------------------------------- */
