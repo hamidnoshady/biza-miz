@@ -1,6 +1,6 @@
 # Issue #1128 — current remaining-work tracker
 
-Updated 2026-10-26 after Wave 21. This supersedes historical «not built yet»
+Updated 2026-10-26 after Wave 22. This supersedes historical «not built yet»
 statements in the original plan where later merged waves shipped those features.
 It is an implementation queue, not a claim that the epic checklist is complete.
 
@@ -27,6 +27,10 @@ corrections/voids, retry safety, daily capacity checks and whole-project active
 minute totals. See `ISSUE_1128_WAVE21_PROGRESS.md`; these are not approved payroll,
 billable hours or ledger labor costs.
 
+Wave 22 adds manager-authorized planned task/member interval reservations,
+append-only rescheduling/cancellation and serialized cross-project overlap checks.
+See `ISSUE_1128_WAVE22_PROGRESS.md` for capacity, timezone and pagination limits.
+
 ## Ordered work still open
 
 1. **Campaign operations and attribution**
@@ -43,9 +47,13 @@ billable hours or ledger labor costs.
    - **Delivered in Wave 21:** actual task-time self-declarations, own correction/
      void history and concurrent per-worker daily capacity checks over existing
      members/tasks with tenant/project separation.
-   - Resource scheduling/reservations, interval overlap detection, approval and
-     deliberate billing/cost-allocation policies remain open. The manual register
-     does not approve, bill or price labor.
+   - **Delivered in Wave 22:** manager-authorized planned task/member reservations,
+     cross-project half-open interval conflict checks, rescheduling/cancellation
+     history and release after offboarding, without disclosing hidden projects.
+   - Working-hours/leave calendars, contractual capacity/utilization, actual interval
+     tracking/non-overlap verification, actual-time approval and deliberate billing/
+     cost-allocation policies remain open. Neither register approves, bills or
+     prices labor; planned reservations are separate from actual duration entries.
    - Campaign dimensions on existing accounting flows and defensible campaign P&L
      tied to the ledger; preserve whole-project exact aggregates. Missing hours,
      revenue or allocation are unknown, not zero or an invented margin.
