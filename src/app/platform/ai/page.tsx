@@ -406,15 +406,18 @@ export default function PlatformAiPage() {
     setBusy("");
     if (!result.ok) {
       const message = result.data.error ? errorMessage(result.data.error) : "انجام عملیات ممکن نشد.";
-      setError(result.data.detail ? `${message} — ${result.data.detail}` : message);
-      if (result.data.status && !result.data.status.ok) {
+      setError(result.data.status && !result.data.status.ok
+        ? gatewayErrorFa(result.data.status.error)
+        : result.data.detail ? message + " — " + result.data.detail : message);
+      return false;
+    }
+    // Business verification is independent from global gateway diagnostics.
+    // The API returns 200 even when the completion probe itself fails.
+    if (result.data.status && !result.data.status.ok) {
       setError(gatewayErrorFa(result.data.status.error));
       await load();
       return false;
     }
-      return false;
-    }
-    if (result.data.status) setData((current) => (current ? { ...current, status: result.data.status ?? null } : current));
     if (result.data.gateway?.syncError) {
       setError(result.data.gateway.syncError);
       await load();
