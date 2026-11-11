@@ -73,6 +73,7 @@ export function TemplateGallery({
   onSelect,
   onNew,
   busy,
+  canPrint = true,
 }: {
   saved: SavedTemplateRow[];
   builtIns: PrintTemplate[];
@@ -86,6 +87,7 @@ export function TemplateGallery({
   onSelect: (template: PrintTemplate) => Promise<void>;
   onNew: () => void;
   busy: boolean;
+  canPrint?: boolean;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [resolved, setResolved] = useState<Record<string, ResolvedTemplateView>>({});
@@ -183,10 +185,10 @@ export function TemplateGallery({
                           <CopyIcon aria-hidden="true" />
                           کپی و ویرایش
                         </Button>
-                        <Button type="button" variant="outline" size="sm" onClick={() => onPrint(template)} disabled={busy}>
+                        {canPrint ? <Button type="button" variant="outline" size="sm" onClick={() => onPrint(template)} disabled={busy}>
                           <PrinterIcon aria-hidden="true" />
                           چاپ نمونه
-                        </Button>
+                        </Button> : null}
                       </TemplateCard>
                     ))}
                   </div>
@@ -223,10 +225,10 @@ export function TemplateGallery({
                   <PencilIcon aria-hidden="true" />
                   ویرایش
                 </Button>
-                <Button type="button" variant="outline" size="sm" onClick={() => onPrint(template)} disabled={busy}>
+                {canPrint ? <Button type="button" variant="outline" size="sm" onClick={() => onPrint(template)} disabled={busy}>
                   <PrinterIcon aria-hidden="true" />
                   چاپ نمونه
-                </Button>
+                </Button> : null}
                 <Button type="button" variant="ghost" size="sm" onClick={() => onDelete(template)} disabled={busy}>
                   <Trash2Icon aria-hidden="true" />
                   حذف

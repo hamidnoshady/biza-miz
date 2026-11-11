@@ -13,6 +13,12 @@ import type { HistoricalRawRow } from "./historical-invoice-mapping";
 const MAX_BYTES = 20 * 1024 * 1024;
 const MAX_ROWS = 50_000;
 const MAX_COLUMNS = 512;
+// Each staged record materializes one entry per header, even for short/sparse
+// rows. Bound the product, not just input bytes and the two dimensions.
+const MAX_MATERIALIZED_CELLS = 1_000_000;
+// Limit the JSON representation staged in PostgreSQL as well: long column
+// names are repeated for every row and can amplify even a tiny sparse input.
+const MAX_STAGED_JSON_CHARS = 32 * 1024 * 1024;
 const MAX_CELL = 100_000;
 const MAX_SHEETS = 10;
 
@@ -28,14 +34,30 @@ export interface HistoricalFileSheet {
 
 type SourceRow = { rowNumber: number; cells: string[] };
 
-function sheet(name: string, source: SourceRow[]): HistoricalFileSheet {
+function sheet(name: string, source: SourceRow[], budget = { cells: 0, chars: 0 }): HistoricalFileSheet {
   if (!source.length) throw new HistoricalFileError("empty_file");
-  const columns = source[0].cells.map((cell) => cell.trim());
+  const columns = Array.from(source[0].cells, (cell) => (cell ?? "").trim());
   if (!columns.length || columns.length > MAX_COLUMNS || columns.some((v) => !v || v.length > MAX_CELL)) {
     throw new HistoricalFileError("invalid_headers");
   }
   if (new Set(columns).size !== columns.length) throw new HistoricalFileError("duplicate_source_columns");
   if (source.length - 1 > MAX_ROWS) throw new HistoricalFileError("too_many_rows");
+  const materializedCells = (source.length - 1) * columns.length;
+  if (budget.cells + materializedCells > MAX_MATERIALIZED_CELLS) throw new HistoricalFileError("too_many_cells");
+  // Per row, JSON keys, colons, commas, braces, and an empty string value
+  // for each column. Count encoded lengths, including escaping, before
+  // materializing rows or sending them to the database.
+  const emptyRowSize = 2 + columns.reduce((sum, key) => sum + JSON.stringify(key).length + 4, 0);
+  let stagedSize = budget.chars + emptyRowSize * (source.length - 1);
+  if (stagedSize > MAX_STAGED_JSON_CHARS) throw new HistoricalFileError("staged_data_too_large");
+  for (const { cells } of source.slice(1)) {
+    for (const value of cells) {
+      if (value) stagedSize += JSON.stringify(value).length - 2;
+      if (stagedSize > MAX_STAGED_JSON_CHARS) throw new HistoricalFileError("staged_data_too_large");
+    }
+  }
+  budget.cells += materializedCells;
+  budget.chars = stagedSize;
   const rows = source.slice(1).map(({ rowNumber, cells }) => {
     if (cells.length > columns.length) throw new HistoricalFileError("row_wider_than_header");
     const raw: Record<string, string> = Object.create(null) as Record<string, string>;
@@ -56,15 +78,20 @@ function csvRows(input: string): SourceRow[] {
   const sep = detectDelimiter(text);
   const rows: SourceRow[] = [];
   let cells: string[] = [], cell = "", line = 1, start = 1;
+  let parsedCells = 0;
   let quoted = false, closed = false;
   const pushCell = () => {
     if (cell.length > MAX_CELL) throw new HistoricalFileError("cell_too_long");
     cells.push(cell); cell = ""; closed = false;
+    if (++parsedCells > MAX_MATERIALIZED_CELLS + MAX_COLUMNS) throw new HistoricalFileError("too_many_cells");
     if (cells.length > MAX_COLUMNS) throw new HistoricalFileError("too_many_columns");
   };
   const pushRow = () => {
     pushCell();
-    if (cells.some((v) => v.trim())) rows.push({ rowNumber: start, cells });
+    if (cells.some((v) => v.trim())) {
+      if (rows.length && rows.length * rows[0].cells.length > MAX_MATERIALIZED_CELLS) throw new HistoricalFileError("too_many_cells");
+      rows.push({ rowNumber: start, cells });
+    }
     if (rows.length > MAX_ROWS + 1) throw new HistoricalFileError("too_many_rows");
     cells = [];
   };
@@ -99,7 +126,7 @@ function csvRows(input: string): SourceRow[] {
 
 /** Strict JSON parser: detects duplicate keys and retains numeric literals as text. */
 function jsonValue(text: string): unknown {
-  let i = 0;
+  let i = 0, parsedProperties = 0;
   const ws = () => { while (i < text.length && /[\x20\t\r\n]/.test(text[i])) i++; };
   const string = (): string => {
     if (text[i] !== '"') throw new HistoricalFileError("invalid_json");
@@ -134,6 +161,7 @@ function jsonValue(text: string): unknown {
       while (true) {
         ws(); const key = string();
         if (Object.hasOwn(object, key)) throw new HistoricalFileError("duplicate_source_columns");
+        if (++parsedProperties > MAX_MATERIALIZED_CELLS + MAX_COLUMNS) throw new HistoricalFileError("too_many_cells");
         if (Object.keys(object).length >= MAX_COLUMNS) throw new HistoricalFileError("too_many_columns");
         ws(); if (text[i++] !== ":") throw new HistoricalFileError("invalid_json");
         object[key] = parse(depth + 1);
@@ -174,6 +202,7 @@ function jsonRows(input: string): SourceRow[] {
       }
     }
   }
+  if (data.length * columns.length > MAX_MATERIALIZED_CELLS) throw new HistoricalFileError("too_many_cells");
   return [{ rowNumber: 1, cells: columns }, ...data.map((item, index) => ({
     rowNumber: index + 2,
     cells: columns.map((key) => ((item as Record<string, string | null>)[key] ?? "")),
@@ -181,13 +210,16 @@ function jsonRows(input: string): SourceRow[] {
 }
 
 async function xlsxSheets(buffer: ArrayBuffer): Promise<HistoricalFileSheet[]> {
+  const { boundedHistoricalWorkbook } = await import("./historical-invoice-xlsx");
+  const safeBuffer = await boundedHistoricalWorkbook(buffer);
   const ExcelJS = (await import("exceljs")).default;
   const workbook = new ExcelJS.Workbook();
-  try { await workbook.xlsx.load(buffer); }
+  try { await workbook.xlsx.load(safeBuffer); }
   catch { throw new HistoricalFileError("invalid_xlsx"); }
   if (workbook.worksheets.length > MAX_SHEETS) throw new HistoricalFileError("too_many_sheets");
   const sheets: HistoricalFileSheet[] = [];
   let totalRows = 0;
+  const budget = { cells: 0, chars: 0 };
   for (const worksheet of workbook.worksheets) {
     const source: SourceRow[] = [];
     worksheet.eachRow((row, rowNumber) => {
@@ -203,7 +235,7 @@ async function xlsxSheets(buffer: ArrayBuffer): Promise<HistoricalFileSheet[]> {
       if (source.length > MAX_ROWS + 1) throw new HistoricalFileError("too_many_rows");
     });
     if (source.length) {
-      const result = sheet(worksheet.name, source);
+      const result = sheet(worksheet.name, source, budget);
       totalRows += result.rows.length;
       if (totalRows > MAX_ROWS) throw new HistoricalFileError("too_many_rows");
       sheets.push(result);

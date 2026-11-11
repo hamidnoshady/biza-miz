@@ -28,7 +28,7 @@ describe("marketer lifecycle API", () => {
   });
   it("does not disclose cross-scope records and surfaces each conflict", async () => {
     vi.mocked(auth.requirePermission).mockResolvedValue({ session: { businessId: "business", sub: "actor" }, membership: {}, error: null } as never);
-    for (const [value, status] of [["not_found", 404], ["conflict", 409], ["open_assignments", 409], ["ineligible_user", 409]] as const) {
+    for (const [value, status] of [["not_found", 404], ["conflict", 409], ["open_assignments", 409], ["ineligible_user", 409], ["supervisor_cycle", 409], ["invalid_supervisor", 409], ["supervisor_has_reports", 409]] as const) {
       vi.mocked(roster.changeMarketer).mockResolvedValue(value);
       const result = await PATCH(request({ action: "deactivate", expectedRevision: 0 }), context);
       expect(result.status).toBe(status); expect(await result.json()).toEqual({ error: value });

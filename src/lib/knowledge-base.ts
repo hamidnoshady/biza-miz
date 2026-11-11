@@ -122,7 +122,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/accounting/products/prices", "به‌روزرسانی قیمت‌ها"],
     ["/accounting/products/attributes", "ویژگی‌های محصول"],
     ["/accounting/products/reports", "گزارش‌های کالا"],
-    ["/accounting/products/barcode-templates", "الگوهای بارکد"],
+    ["/accounting/products/barcode-templates", "بارکد و برچسب محصولات"],
   ]),
   ...pageGroup("حسابداری", [
     ["/accounting/overview", "داشبورد حسابداری"],

@@ -132,6 +132,105 @@ describe("marketing roster persistence", () => {
       } finally { await db.query(`DROP TRIGGER reject_roster_change_audit ON audit_log`); await db.query(`DROP FUNCTION reject_roster_change_audit()`); }
     });
   });
+  it("maintains audited branch-scoped supervisor links without cycles or privilege grants", async () => {
+    const own = await business(); const other = await business();
+    const employee = async (name: string, branch = own.branch) => {
+      const user = (await db.query<{id:string}>(`INSERT INTO users (business_id,full_name,role,password_hash,location_id,location_scope) VALUES ($1,$2,'cashier','x',$3,'home') RETURNING id`,[own.id,name,branch])).rows[0].id;
+      const agent = (await db.query<{id:string}>(`INSERT INTO marketing_agents (business_id,location_id,user_id,display_name,kind) VALUES ($1,$2,$3,$4,'employee') RETURNING id`,[own.id,branch,user,name])).rows[0].id;
+      return {user,agent};
+    };
+    const first = await employee("First"); const second = await employee("Second"); const third = await employee("Third");
+    const branch2 = (await db.query<{id:string}>(`INSERT INTO locations (business_id,name) VALUES ($1,'Other') RETURNING id`,[own.id])).rows[0].id;
+    const otherBranch = await employee("Other branch",branch2);
+    const external = (await db.query<{id:string}>(`INSERT INTO marketing_agents (business_id,location_id,display_name,kind) VALUES ($1,$2,'External','affiliate') RETURNING id`,[own.id,own.branch])).rows[0].id;
+    const foreign = (await db.query<{id:string}>(`INSERT INTO marketing_agents (business_id,location_id,user_id,display_name,kind) VALUES ($1,$2,$3,'Foreign','employee') RETURNING id`,[other.id,other.branch,other.user])).rows[0].id;
+    const change = (id: string, supervisorId: string | null, revision = 0, locations = [own.branch]) => dbLib.withTenant(own.id, () => roster.changeMarketer(own.id,own.user,locations,id,{action:"supervisor",supervisorId,expectedRevision:revision}));
+    expect(await change(first.agent,first.agent)).toBe("invalid_supervisor");
+    expect(await change(first.agent,external)).toBe("invalid_supervisor");
+    expect(await change(first.agent,otherBranch.agent)).toBe("invalid_supervisor");
+    expect(await change(first.agent,foreign)).toBe("invalid_supervisor");
+    expect(await change(first.agent,second.agent,0,[])).toBe("not_found");
+    expect((await dbLib.withTenant(own.id, () => roster.listSupervisorCandidates(own.id,[],own.branch,"",1))).supervisors).toHaveLength(0);
+    expect((await dbLib.withTenant(own.id, () => roster.listSupervisorCandidates(own.id,[own.branch],branch2,"",1))).supervisors).toHaveLength(0);
+    expect((await dbLib.withTenant(own.id, () => roster.listSupervisorCandidates(own.id,[own.branch],own.branch,"%",1))).supervisors).toHaveLength(0);
+    expect((await dbLib.withTenant(own.id, () => roster.listSupervisorCandidates(own.id,[own.branch],own.branch,"Sec",1))).supervisors).toEqual([{id:second.agent,name:"Second"}]);
+    await db.query(`UPDATE users SET is_active=false WHERE id=$1`,[first.user]);
+    expect(await change(first.agent,second.agent)).toBe("ineligible_user");
+    await db.query(`UPDATE users SET is_active=true, location_scope='none' WHERE id=$1`,[first.user]);
+    expect(await change(first.agent,second.agent)).toBe("ineligible_user");
+    await db.query(`UPDATE users SET location_scope='home' WHERE id=$1`,[first.user]);
+    await db.query(`UPDATE users SET location_scope='none' WHERE id=$1`,[second.user]);
+    expect(await change(first.agent,second.agent)).toBe("invalid_supervisor");
+    await db.query(`UPDATE users SET location_scope='home' WHERE id=$1`,[second.user]);
+    expect(await change(first.agent,second.agent)).toBe("updated");
+    expect(await change(second.agent,third.agent)).toBe("updated");
+    expect(await change(third.agent,first.agent)).toBe("supervisor_cycle");
+    expect(await change(first.agent,third.agent,0)).toBe("conflict");
+    expect(await dbLib.withTenant(own.id, () => roster.changeMarketer(own.id,own.user,[own.branch],second.agent,{action:"deactivate",expectedRevision:1}))).toBe("supervisor_has_reports");
+    const listed = await dbLib.withTenant(own.id, () => roster.listMarketers(own.id,[own.branch],"First",1));
+    expect(listed.marketers[0]).toMatchObject({supervisor_id:second.agent,supervisor_name:"Second",supervisor_eligible:true});
+    await db.query(`UPDATE users SET is_active=false WHERE id=$1`,[second.user]);
+    const stale = await dbLib.withTenant(own.id, () => roster.listMarketers(own.id,[own.branch],"First",1));
+    expect(stale.marketers[0].supervisor_eligible).toBe(false);
+    await db.query(`UPDATE users SET is_active=true WHERE id=$1`,[second.user]);
+    expect(await change(first.agent,null,1)).toBe("updated");
+    expect(await dbLib.withTenant(own.id, () => roster.changeMarketer(own.id,own.user,[own.branch],second.agent,{action:"deactivate",expectedRevision:1}))).toBe("updated");
+    expect(await change(first.agent,second.agent,2)).toBe("invalid_supervisor");
+    await expect(db.query(`UPDATE marketing_agents SET supervisor_agent_id=$2 WHERE id=$1`,[first.agent,otherBranch.agent])).rejects.toMatchObject({code:"23503"});
+    await expect(db.query(`UPDATE marketing_agents SET supervisor_agent_id=id WHERE id=$1`,[first.agent])).rejects.toMatchObject({code:"23514"});
+    const audits = (await db.query(`SELECT payload FROM audit_log WHERE business_id=$1 AND action='growth.marketer_supervisor_changed'`,[own.id])).rows;
+    expect(audits).toHaveLength(3);
+    expect(audits.map((r) => r.payload)).toContainEqual({from:null,to:second.agent,revision:1});
+    // Whole-tenant reset/hard-delete removes all roster rows in one statement.
+    await db.query(`BEGIN`);
+    try { expect((await db.query(`DELETE FROM marketing_agents WHERE business_id=$1`,[own.id])).rowCount).toBe(5); }
+    finally { await db.query(`ROLLBACK`); }
+  });
+  it("paginates eligible supervisors and filters literal search characters", async () => {
+    const own = await business();
+    await db.query(`WITH inserted AS (
+      INSERT INTO users (business_id,full_name,role,password_hash,location_id,location_scope)
+      SELECT $1,'Supervisor ' || lpad(n::text,2,'0'),'cashier','x',$2,'home' FROM generate_series(1,25) n
+      RETURNING id,full_name)
+      INSERT INTO marketing_agents (business_id,location_id,user_id,display_name,kind)
+      SELECT $1,$2,id,full_name,'employee' FROM inserted`,[own.id,own.branch]);
+    const list = (term: string, page: number) => dbLib.withTenant(own.id, () => roster.listSupervisorCandidates(own.id,[own.branch],own.branch,term,page));
+    const first = await list("Supervisor",1); const second = await list("Supervisor",2);
+    expect(first.supervisors).toHaveLength(20); expect(first.hasMore).toBe(true);
+    expect(second.supervisors).toHaveLength(5); expect(second.hasMore).toBe(false);
+    expect(new Set([...first.supervisors,...second.supervisors].map((item) => item.id)).size).toBe(25);
+    expect((await list("%",1)).supervisors).toHaveLength(0);
+    expect((await list("_",1)).supervisors).toHaveLength(0);
+    await db.query(`UPDATE locations SET is_active=false WHERE id=$1`,[own.branch]);
+    expect((await list("Supervisor",1)).supervisors).toHaveLength(0);
+  });
+  it("serializes competing hierarchy changes and rolls back when auditing fails", async () => {
+    const own = await business();
+    const agent = async (n: string) => {
+      const user = (await db.query<{id:string}>(`INSERT INTO users (business_id,full_name,role,password_hash,location_id,location_scope) VALUES ($1,$2,'cashier','x',$3,'home') RETURNING id`,[own.id,n,own.branch])).rows[0].id;
+      return (await db.query<{id:string}>(`INSERT INTO marketing_agents (business_id,location_id,user_id,display_name,kind) VALUES ($1,$2,$3,$4,'employee') RETURNING id`,[own.id,own.branch,user,n])).rows[0].id;
+    };
+    const first = await agent("First race"); const second = await agent("Second race");
+    const change = (id: string, supervisorId: string) => dbLib.withTenant(own.id, () => roster.changeMarketer(own.id,own.user,[own.branch],id,{action:"supervisor",supervisorId,expectedRevision:0}));
+    const results = await Promise.all([change(first,second),change(second,first)]);
+    expect(results.sort()).toEqual(["supervisor_cycle","updated"]);
+    const rows = (await db.query<{id:string;supervisor_agent_id:string|null}>(`SELECT id,supervisor_agent_id FROM marketing_agents WHERE business_id=$1`,[own.id])).rows;
+    expect(rows.filter((row) => row.supervisor_agent_id)).toHaveLength(1);
+    const third = await agent("Rollback"); const fourth = await agent("Supervisor race");
+    const [linked, deactivated] = await Promise.all([
+      change(third,fourth),
+      dbLib.withTenant(own.id, () => roster.changeMarketer(own.id,own.user,[own.branch],fourth,{action:"deactivate",expectedRevision:0})),
+    ]);
+    expect([linked,deactivated]).toSatisfy((pair: string[]) => (pair[0] === "updated" && pair[1] === "supervisor_has_reports") || (pair[0] === "invalid_supervisor" && pair[1] === "updated"));
+    if (linked === "updated") expect(await dbLib.withTenant(own.id, () => roster.changeMarketer(own.id,own.user,[own.branch],third,{action:"supervisor",supervisorId:null,expectedRevision:1}))).toBe("updated");
+    const rollbackAgent = await agent("Audit rollback");
+    await db.query(`CREATE FUNCTION reject_supervisor_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='growth.marketer_supervisor_changed' THEN RAISE EXCEPTION 'audit unavailable'; END IF; RETURN NEW; END $$`);
+    await db.query(`CREATE TRIGGER reject_supervisor_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_supervisor_audit()`);
+    try {
+      await expect(change(rollbackAgent,second)).rejects.toThrow("audit unavailable");
+      expect((await db.query(`SELECT supervisor_agent_id,revision FROM marketing_agents WHERE id=$1`,[rollbackAgent])).rows[0]).toEqual({supervisor_agent_id:null,revision:0});
+    } finally { await db.query(`DROP TRIGGER reject_supervisor_audit ON audit_log`); await db.query(`DROP FUNCTION reject_supervisor_audit()`); }
+  });
   it("enforces forced tenant RLS for a non-bypass role", async () => {
     const role = `marketing_test_${randomUUID().replaceAll("-", "")}`;
     await db.query(`CREATE ROLE "${role}" NOLOGIN NOSUPERUSER NOBYPASSRLS`);

@@ -19,6 +19,10 @@ describe("marketing roster foundation", () => {
   });
   it("validates lifecycle changes and bounded optimistic revisions", () => {
     expect(parseRosterChange({ action: "rename", name: "  Partner  ", expectedRevision: 0 })).toEqual({ action: "rename", name: "Partner", expectedRevision: 0 });
+    expect(parseRosterChange({ action: "supervisor", supervisorId: user, expectedRevision: 2 })).toEqual({ action: "supervisor", supervisorId: user, expectedRevision: 2 });
+    expect(parseRosterChange({ action: "supervisor", supervisorId: null, expectedRevision: 2 })).toEqual({ action: "supervisor", supervisorId: null, expectedRevision: 2 });
+    expect(parseRosterChange({ action: "supervisor", expectedRevision: 0 })).toBeNull();
+    expect(parseRosterChange({ action: "supervisor", supervisorId: "bad", expectedRevision: 0 })).toBeNull();
     expect(parseRosterChange({ action: "deactivate", expectedRevision: 2 })).toEqual({ action: "deactivate", expectedRevision: 2 });
     for (const value of [{ action: "rename", name: " ", expectedRevision: 0 }, { action: "rename", name: "x".repeat(151), expectedRevision: 0 }, { action: "reactivate", expectedRevision: -1 }, { action: "reactivate", expectedRevision: 0.5 }, { action: "reactivate", expectedRevision: 2147483647 }, { action: "delete", expectedRevision: 0 }]) expect(parseRosterChange(value)).toBeNull();
   });
@@ -27,6 +31,7 @@ describe("marketing roster foundation", () => {
     expect(canOpenGrowth(permissions)).toBe(true);
     expect(canViewGrowthSection(permissions, "marketers")).toBe(true);
     expect(growthApiPermission("/api/growth/marketers", "POST")).toEqual([PERMISSIONS.marketersManage]);
+    expect(growthApiPermission("/api/growth/marketers/supervisors", "GET")).toEqual([PERMISSIONS.marketersManage]);
     expect(growthApiPermission("/api/growth/marketers/[id]", "PATCH")).toEqual([PERMISSIONS.marketersManage]);
     expect(permissions.has(PERMISSIONS.crmView)).toBe(false);
     expect(permissions.has(PERMISSIONS.commissionView)).toBe(false);

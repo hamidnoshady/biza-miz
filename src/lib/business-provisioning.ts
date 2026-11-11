@@ -14,7 +14,7 @@
 import bcrypt from "bcryptjs";
 import { BCRYPT_COST } from "@/lib/password-hashing";
 import type { PoolClient } from "pg";
-import { getPool, withoutTenantScope } from "./db";
+import { getPool, pinToClient, withTenant, withoutTenantScope } from "./db";
 import {
   SLUG_FALLBACK,
   slugifyBusinessName,
@@ -31,7 +31,7 @@ import {
   type AccountType,
   type TemplateAccount,
 } from "./coa-template";
-import { ENABLED_INDUSTRIES, INDUSTRIES, type Industry } from "./industries";
+import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, type Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
 import { lockChartOfAccounts, recordAccountAudit } from "./accounts-service";
 import { attachmentLevel, type AttachableParent } from "./account-hierarchy";
@@ -45,7 +45,10 @@ import { CURRENT_KEY_VERSION, generateDek, wrapDek } from "./business-keys";
 import { getMasterKey } from "./master-key";
 import { totpQrDataUrl } from "./totp-qr";
 import { createOwnerActivation } from "./owner-activation";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { demoStartProof, demoTokenHash, requireDemoDeployment } from "./demo-session-credentials";
+import { assertDemoDatabase } from "./demo-database";
+import { findLiveDemoSession, type DemoSession } from "./demo-sessions";
 
 /**
  * Platform-created non-F&B tenants retain the console's ready-to-enter path.
@@ -396,302 +399,96 @@ export function validateProvisionBody(
 export async function provisionBusiness(
   input: ProvisionBusinessInput,
 ): Promise<ProvisionedBusiness> {
-  const businessName = input.businessName.trim();
-  const locationName = input.locationName?.trim() || DEFAULT_LOCATION_NAME;
-  const ownerName = input.ownerName.trim();
-  const email = input.email.trim().toLowerCase();
-  // Normalised here rather than trusted from the caller. `users.phone_e164` is
-  // an E.164 column (it is the address an SMS one-time code is sent to), and
-  // the owner-activation flow reads it back to bind the second factor — so a
-  // caller that skipped `validateProvisionBody` would otherwise store a form
-  // -shaped `0912…` in a column everything downstream treats as `+98912…`.
+  // Keep ordinary validation ahead of the first database connection.
   const ownerPhone = input.ownerPhone ? phoneE164(input.ownerPhone) : null;
-  // Checked before the transaction opens: an activation that could never be
-  // redeemed must not create a business. See OwnerPhoneRequiredError.
   if (input.ownerActivation && !ownerPhone) throw new OwnerPhoneRequiredError();
+  return inProvisioningTransaction((client) => insertBusiness(client, input, ownerPhone));
+}
 
+export interface DemoTemplate {
+  industry: Industry;
+  version: string;
+  seed: (tenant: ProvisionedBusiness) => Promise<void>;
+}
+
+export interface StartedDemoSession extends DemoSession {
+  token: string;
+}
+
+/** Called by the dedicated Demo start flow with a trusted, versioned template. */
+export async function provisionDemoSession(
+  startKey: string,
+  template: DemoTemplate,
+): Promise<StartedDemoSession> {
+  const config = requireDemoDeployment();
+  const proof = demoStartProof(startKey, config);
+  if (!proof) throw new Error("invalid_demo_start_key");
+  if (!ENABLED_INDUSTRIES.includes(template.industry)
+      || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(template.version)) {
+    throw new Error("invalid_demo_template");
+  }
+  const hash = demoTokenHash(proof.secret);
+  return inProvisioningTransaction(async (client) => {
+    await assertDemoDatabase(client, config);
+    // A retry waits for the winner's transaction and then reads its result.
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      `demo-start:${hash.toString("hex")}`,
+    ]);
+    const existing = await findLiveDemoSession(client, hash);
+    if (existing) {
+      if (existing.industry !== template.industry) throw new Error("demo_start_industry_mismatch");
+      return { ...existing, token: `${existing.businessId}.${proof.secret}` };
+    }
+    const { rows: starts } = await client.query<{ allowed: boolean }>(
+      `SELECT $1::timestamptz > clock_timestamp()
+              AND NOT EXISTS (SELECT 1 FROM platform_demo_sessions WHERE token_hash = $2) AS allowed`,
+      [proof.startBefore, hash],
+    );
+    if (!starts[0].allowed) throw new Error("demo_start_key_unavailable");
+
+    const label = `demo-${randomUUID()}`;
+    const tenant = await insertBusiness(client, {
+      businessName: `نمونه ${INDUSTRY_LABELS[template.industry]}`,
+      subdomain: label,
+      ownerName: "کاربر آزمایشی",
+      email: `${label}@example.invalid`,
+      industry: template.industry,
+    }, null, true);
+
+    // Seed through the same pinned transaction, with RLS back on. Only the
+    // canonical tenant creation and session registry need platform scope.
+    await client.query("SELECT set_config('app.business_id', $1, true), set_config('app.rls_bypass', '', true)", [
+      tenant.businessId,
+    ]);
+    await withTenant(tenant.businessId, () => pinToClient(client, () => template.seed(tenant)), {
+      locationId: tenant.locationId,
+      userId: tenant.userId,
+    });
+    await client.query("SELECT set_config('app.business_id', '', true), set_config('app.rls_bypass', 'on', true)");
+
+    await client.query(
+      `INSERT INTO platform_demo_sessions
+         (business_id, user_id, location_id, platform_user_id, token_hash, industry,
+          template_version, created_at, expires_at, provisioning_state)
+       SELECT $1, $2, $3, $4, $5, $6, $7, started_at, started_at + interval '60 minutes', 'ready'
+         FROM (SELECT clock_timestamp() AS started_at) stamp`,
+      [tenant.businessId, tenant.userId, tenant.locationId, tenant.platformUserId, hash,
+        template.industry, template.version],
+    );
+    const session = await findLiveDemoSession(client, hash, tenant.businessId);
+    if (!session) throw new Error("demo_session_binding_failed");
+    return { ...session, token: `${session.businessId}.${proof.secret}` };
+  });
+}
+
+async function inProvisioningTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
   return withoutTenantScope("platform", async () => {
     const client = await getPool().connect();
     try {
       await client.query("BEGIN");
-
-      // Serialises slug allocation and the identity upsert against a
-      // concurrent signup for the same email — neither is protected by a row
-      // lock, because in both cases the row may not exist yet.
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('business_provisioning'))");
-
-      const { rows: slugRows } = await client.query<{ slug: string; subdomain: string }>(
-        "SELECT slug::text AS slug, subdomain::text AS subdomain FROM businesses",
-      );
-      const slug = uniqueSlug(
-        slugifyBusinessName(businessName),
-        slugRows.map((r) => r.slug),
-      );
-
-      // The public host, allocated in the same advisory-locked transaction as
-      // the slug so two concurrent signups can't claim one origin.
-      //
-      // A requested label is taken exactly as typed and refused if it is
-      // spoken for; only the derived fallback is allowed to settle a collision
-      // by suffixing. The namespace checked is the subdomain column plus the
-      // alias table, never the slug column: the two are independent the moment
-      // anyone renames a subdomain, and handing out a name an alias still
-      // redirects would hijack the old address of another business.
-      const requested = input.subdomain?.trim().toLowerCase();
-      const { rows: aliasRows } = await client.query<{ alias: string }>(
-        "SELECT alias::text AS alias FROM business_subdomain_aliases",
-      );
-      const takenHosts = [...slugRows.map((r) => r.subdomain), ...aliasRows.map((r) => r.alias)];
-
-      let subdomain: string;
-      if (requested) {
-        if (takenHosts.some((h) => h.toLowerCase() === requested)) throw new SubdomainTakenError();
-        subdomain = requested;
-      } else {
-        subdomain = uniqueSlug(subdomainFromBusinessName(businessName) || SLUG_FALLBACK, takenHosts);
-      }
-
-      const { rows: existingIdentity } = await client.query<{
-        id: string;
-        password_hash: string;
-        is_active: boolean;
-      }>("SELECT id, password_hash, is_active FROM platform_users WHERE email = $1", [email]);
-
-      const ownerIdentityCreated = existingIdentity.length === 0;
-      let platformUserId: string;
-      if (existingIdentity[0]) {
-        const identity = existingIdentity[0];
-        if (!identity.is_active) throw new EmailPasswordMismatchError();
-        if (input.ownershipKind === "platform_internal") {
-          // The platform-company member mapping is the authorization proof.
-          // Never ask an infrastructure operator for a tenant password and
-          // never manufacture an impersonation grant for permanent access.
-          platformUserId = identity.id;
-        } else if (input.ownerActivation) {
-          // Nobody types their password for an inbound business, so this is not
-          // an authentication but a confirmation. It still refuses to attach a
-          // business to somebody's account silently.
-          if (!input.confirmExistingOwner) throw new ExistingOwnerConfirmationRequiredError();
-          platformUserId = identity.id;
-        } else {
-          // The password-choosing paths are a person adding a business to their
-          // own account, and still have to prove that is who they are.
-          if (!(await bcrypt.compare(input.password ?? "", identity.password_hash))) {
-            throw new EmailPasswordMismatchError();
-          }
-          platformUserId = identity.id;
-        }
-      } else {
-        // On the activation path nobody ever knows this password — not the
-        // operator, not this code. It is 32 random bytes, replaced by the owner
-        // at the activation link, and any comparison against it fails closed.
-        const secret = input.ownerActivation || input.ownershipKind === "platform_internal"
-          ? randomBytes(32).toString("hex")
-          : (input.password ?? "");
-        const { rows } = await client.query<{ id: string }>(
-          `INSERT INTO platform_users (email, password_hash, full_name)
-           VALUES ($1, $2, $3) RETURNING id`,
-          [email, await bcrypt.hash(secret, BCRYPT_COST), ownerName],
-        );
-        platformUserId = rows[0].id;
-      }
-
-      const { rows: bizRows } = await client.query<{ id: string }>(
-        `INSERT INTO businesses (id, name, slug, subdomain, timezone, industry, ownership_kind)
-         VALUES (COALESCE($7::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6) RETURNING id`,
-        [
-          businessName,
-          slug,
-          subdomain,
-          input.timezone ?? "Asia/Tehran",
-          input.industry ?? "food_service",
-          input.ownershipKind ?? "customer",
-          input.canonicalBusinessId ?? null,
-        ],
-      );
-      const businessId = bizRows[0].id;
-
-      const { rows: locRows } = await client.query<{ id: string }>(
-        `INSERT INTO locations (id, business_id, name, address, phone, timezone)
-         VALUES (COALESCE($6::uuid, gen_random_uuid()), $1, $2, $3, $4, $5) RETURNING id`,
-        [
-          businessId,
-          locationName,
-          input.address?.trim() || null,
-          input.phone?.trim() || null,
-          input.timezone ?? "Asia/Tehran",
-          input.canonicalLocationId ?? null,
-        ],
-      );
-      const locationId = locRows[0].id;
-
-      // location_id stays NULL: an owner reaches every branch of their
-      // business, and pinning them to the first one would be wrong the moment
-      // a second branch exists.
-      //
-      // Phase 42 — the owner's login phone rides along when one was given
-      // (it is the same `ownerPhone` the connected path enrols SMS 2FA
-      // against), stored unverified like every provisioned number: the owner
-      // proves it with an OTP at their first door login or from the security
-      // center, and only then does it open the phone login.
-      const { rows: userRows } = await client.query<{ id: string }>(
-        `INSERT INTO users (business_id, platform_user_id, role, full_name, email, phone_e164, location_id)
-         VALUES ($1, $2, 'owner', $3, $4, $5, NULL) RETURNING id`,
-        [businessId, platformUserId, ownerName, email, ownerPhone],
-      );
-      const userId = userRows[0].id;
-
-      await client.query(
-        `INSERT INTO user_locations (user_id, location_id) VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, locationId],
-      );
-
-      if (input.seedChartOfAccounts) {
-        await seedChartOfAccounts(client, businessId, input.industry ?? "food_service");
-      }
-
-      // The payment ways the till offers (migration 0091), in the same
-      // transaction as the business itself: a shop that exists but cannot say
-      // «نقدی» cannot take money. Seeded rather than implied so the owner can
-      // rename and reorder them from day one.
-      await seedPaymentMethods(client, businessId, input.industry ?? "food_service");
-
-      // Phase 25 — features this trade has no use for start off, in the same
-      // transaction that creates the business so there is never a window where
-      // a jewellery shop looks like a café. They remain individually flippable
-      // from the platform console: an industry default, not a prohibition.
-      await disableFeatures(
-        client,
-        businessId,
-        industryProfile(input.industry ?? "food_service").defaultDisabledFeatures,
-      );
-
-      let totpSecret: string | undefined;
-      let totpUrl: string | undefined;
-      let totpQr: string | null | undefined;
-
-      // Phase 42 — the phone-OTP login policy starts *enforced* for a
-      // business created after this feature, stamped in the same transaction:
-      // a brand-new business has no legacy staff to protect, and every member
-      // it ever gains verifies a number at their first door login anyway.
-      // (Migration 0139 gave the businesses already running on an install
-      // their 14-day window instead; SMS-less installs stay unenforced at
-      // runtime until a Kavenegar key exists — see phone-otp-policy.ts.)
-      await client.query(
-        `INSERT INTO settings (business_id, location_id, key, value)
-         VALUES ($1, NULL, $2, $3)`,
-        [
-          businessId,
-          SETTING_KEYS.phoneOtpPolicy,
-          JSON.stringify({ enforcedAt: new Date().toISOString() }),
-        ],
-      );
-
-      // Issue #755 §14 — on the activation path the second factor and the
-      // recovery codes are minted when the *owner* redeems their link
-      // (owner-activation.ts), in their own browser, and shown only to them.
-      // Creating them here is what used to force the operator to hold the
-      // owner's credentials.
-      let recoveryCodes: string[] | undefined;
-      let ownerActivation: { token: string; expiresAt: Date } | undefined;
-      if (!input.ownerActivation && input.ownershipKind !== "platform_internal") {
-        if (input.deploymentMode === "local") {
-          await client.query(
-            `INSERT INTO settings (business_id, location_id, key, value)
-             VALUES ($1, NULL, $2, $3)`,
-            [businessId, SETTING_KEYS.deploymentProfile, JSON.stringify({ profile: "local", pairedAt: null })],
-          );
-          await disableFeatures(client, businessId, LOCAL_DISABLED_FEATURES);
-
-          totpSecret = generateSecret();
-          totpUrl = generateURI({
-            label: email,
-            // Phase 42 — the business's own name, so the entry in the
-            // authenticator app is tellable apart from every other business
-            // this person holds an entry for (see mfa-enrol.ts's TOTP_ISSUER).
-            issuer: businessName,
-            secret: totpSecret,
-            strategy: "totp"
-          });
-          totpQr = await totpQrDataUrl(totpUrl);
-          await provisionMfaEnrolment(client, "platform_user", platformUserId, "totp", true, null, Buffer.from(totpSecret || ""));
-        } else {
-          await provisionMfaEnrolment(client, "platform_user", platformUserId, "sms_otp", true, ownerPhone, null);
-        }
-
-        // Both paths get recovery codes, in the same transaction as the
-        // enrolment they back: a rolled-back provision must not leave live codes
-        // for a business that was never created. They are the only way back in
-        // for an Owner whose phone (or authenticator) is gone, so an enrolment
-        // without them is the lockout this wave exists to prevent.
-        recoveryCodes = await issueRecoveryCodes("platform_user", platformUserId, client);
-      } else if (input.deploymentMode === "local") {
-        // The local deployment profile is a property of the install, not of the
-        // credentials, so it is still stamped here; only the enrolment moves to
-        // the owner's activation.
-        await client.query(
-          `INSERT INTO settings (business_id, location_id, key, value)
-           VALUES ($1, NULL, $2, $3)`,
-          [businessId, SETTING_KEYS.deploymentProfile, JSON.stringify({ profile: "local", pairedAt: null })],
-        );
-        await disableFeatures(client, businessId, LOCAL_DISABLED_FEATURES);
-      }
-
-      // Issue #808 §4 — a provisioned-ready business is formally finished
-      // before its owner ever logs in. Same canonical transition
-      // /api/setup/complete performs; written inside this transaction so a
-      // rolled-back provision cannot leave a stray completion marker.
-      if (input.completeSetup) {
-        await markSetupComplete(businessId, client);
-      }
-
-      // Phase 24 Wave 3 — mint the business's data-encryption key inside the
-      // same transaction as the business, so the very first customer written
-      // is written encrypted and there is never a window where a business
-      // exists without a key. Wrapped under the install's KEK; a no-op on an
-      // install that has not configured one.
-      const kek = getMasterKey();
-      if (kek) {
-        await client.query(
-          `INSERT INTO business_encryption_keys (business_id, key_version, wrapped_dek)
-           VALUES ($1, $2, $3) ON CONFLICT (business_id) DO NOTHING`,
-          [businessId, CURRENT_KEY_VERSION, wrapDek(generateDek(), kek)],
-        );
-      }
-
-      // The owner's activation link, inside the same transaction as the
-      // business: a rolled-back provision must not leave a live link, and a
-      // committed one must never be missing the only way in.
-      //
-      // Not issued when the email already had a login: that person's credentials
-      // are theirs already, the operator learns nothing about them, and asking
-      // them to "activate" an account they have used for years would be a lie.
-      if (input.ownerActivation && ownerIdentityCreated) {
-        ownerActivation = await createOwnerActivation(client, {
-          businessId,
-          platformUserId,
-          userId,
-          email,
-          createdBy: input.createdBy ?? null,
-        });
-      }
-
+      const result = await work(client);
       await client.query("COMMIT");
-      return {
-        businessId,
-        businessSlug: slug,
-        businessSubdomain: subdomain,
-        locationId,
-        userId,
-        platformUserId,
-        ownerIdentityCreated,
-        ownerActivation,
-        totpSecret,
-        totpUrl,
-        totpQr,
-        recoveryCodes,
-      };
+      return result;
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
@@ -699,6 +496,296 @@ export async function provisionBusiness(
       client.release();
     }
   });
+}
+
+async function insertBusiness(
+  client: PoolClient,
+  input: ProvisionBusinessInput,
+  ownerPhone: string | null,
+  demo = false,
+): Promise<ProvisionedBusiness> {
+  const businessName = input.businessName.trim();
+  const locationName = input.locationName?.trim() || DEFAULT_LOCATION_NAME;
+  const ownerName = input.ownerName.trim();
+  const email = input.email.trim().toLowerCase();
+  // Serialises slug allocation and the identity upsert against a
+  // concurrent signup for the same email — neither is protected by a row
+  // lock, because in both cases the row may not exist yet.
+  if (!demo) await client.query("SELECT pg_advisory_xact_lock(hashtext('business_provisioning'))");
+
+  const { rows: slugRows } = await client.query<{ slug: string; subdomain: string }>(
+    "SELECT slug::text AS slug, subdomain::text AS subdomain FROM businesses",
+  );
+  const slug = demo && input.subdomain
+    ? input.subdomain
+    : uniqueSlug(slugifyBusinessName(businessName), slugRows.map((r) => r.slug));
+
+  // The public host, allocated in the same advisory-locked transaction as
+  // the slug so two concurrent signups can't claim one origin.
+  //
+  // A requested label is taken exactly as typed and refused if it is
+  // spoken for; only the derived fallback is allowed to settle a collision
+  // by suffixing. The namespace checked is the subdomain column plus the
+  // alias table, never the slug column: the two are independent the moment
+  // anyone renames a subdomain, and handing out a name an alias still
+  // redirects would hijack the old address of another business.
+  const requested = input.subdomain?.trim().toLowerCase();
+  const { rows: aliasRows } = await client.query<{ alias: string }>(
+    "SELECT alias::text AS alias FROM business_subdomain_aliases",
+  );
+  const takenHosts = [...slugRows.map((r) => r.subdomain), ...aliasRows.map((r) => r.alias)];
+
+  let subdomain: string;
+  if (requested) {
+    if (takenHosts.some((h) => h.toLowerCase() === requested)) throw new SubdomainTakenError();
+    subdomain = requested;
+  } else {
+    subdomain = uniqueSlug(subdomainFromBusinessName(businessName) || SLUG_FALLBACK, takenHosts);
+  }
+
+  const { rows: existingIdentity } = await client.query<{
+    id: string;
+    password_hash: string;
+    is_active: boolean;
+  }>("SELECT id, password_hash, is_active FROM platform_users WHERE email = $1", [email]);
+
+  const ownerIdentityCreated = existingIdentity.length === 0;
+  let platformUserId: string;
+  if (existingIdentity[0]) {
+    const identity = existingIdentity[0];
+    if (demo || !identity.is_active) throw new EmailPasswordMismatchError();
+    if (input.ownershipKind === "platform_internal") {
+      // The platform-company member mapping is the authorization proof.
+      // Never ask an infrastructure operator for a tenant password and
+      // never manufacture an impersonation grant for permanent access.
+      platformUserId = identity.id;
+    } else if (input.ownerActivation) {
+      // Nobody types their password for an inbound business, so this is not
+      // an authentication but a confirmation. It still refuses to attach a
+      // business to somebody's account silently.
+      if (!input.confirmExistingOwner) throw new ExistingOwnerConfirmationRequiredError();
+      platformUserId = identity.id;
+    } else {
+      // The password-choosing paths are a person adding a business to their
+      // own account, and still have to prove that is who they are.
+      if (!(await bcrypt.compare(input.password ?? "", identity.password_hash))) {
+        throw new EmailPasswordMismatchError();
+      }
+      platformUserId = identity.id;
+    }
+  } else {
+    // On the activation path nobody ever knows this password — not the
+    // operator, not this code. It is 32 random bytes, replaced by the owner
+    // at the activation link, and any comparison against it fails closed.
+    const secret = input.ownerActivation || input.ownershipKind === "platform_internal"
+      ? randomBytes(32).toString("hex")
+      : (input.password ?? "");
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO platform_users (email, password_hash, full_name, is_active)
+       VALUES ($1, $2, $3, $4) RETURNING id`,
+      [email, demo ? "demo-login-disabled" : await bcrypt.hash(secret, BCRYPT_COST), ownerName, !demo],
+    );
+    platformUserId = rows[0].id;
+  }
+
+  const { rows: bizRows } = await client.query<{ id: string }>(
+    `INSERT INTO businesses (id, name, slug, subdomain, timezone, industry, ownership_kind)
+     VALUES (COALESCE($7::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6) RETURNING id`,
+    [
+      businessName,
+      slug,
+      subdomain,
+      input.timezone ?? "Asia/Tehran",
+      input.industry ?? "food_service",
+      demo ? "demo" : input.ownershipKind ?? "customer",
+      input.canonicalBusinessId ?? null,
+    ],
+  );
+  const businessId = bizRows[0].id;
+
+  const { rows: locRows } = await client.query<{ id: string }>(
+    `INSERT INTO locations (id, business_id, name, address, phone, timezone)
+     VALUES (COALESCE($6::uuid, gen_random_uuid()), $1, $2, $3, $4, $5) RETURNING id`,
+    [
+      businessId,
+      locationName,
+      input.address?.trim() || null,
+      input.phone?.trim() || null,
+      input.timezone ?? "Asia/Tehran",
+      input.canonicalLocationId ?? null,
+    ],
+  );
+  const locationId = locRows[0].id;
+
+  // Ordinary owners are unpinned. The temporary visitor starts on the
+  // assigned branch, matching the membership's default home scope.
+  //
+  // Phase 42 — the owner's login phone rides along when one was given
+  // (it is the same `ownerPhone` the connected path enrols SMS 2FA
+  // against), stored unverified like every provisioned number: the owner
+  // proves it with an OTP at their first door login or from the security
+  // center, and only then does it open the phone login.
+  const { rows: userRows } = await client.query<{ id: string }>(
+    `INSERT INTO users (business_id, platform_user_id, role, full_name, email, phone_e164, location_id)
+     VALUES ($1, $2, 'owner', $3, $4, $5, $6) RETURNING id`,
+    [businessId, platformUserId, ownerName, email, ownerPhone, demo ? locationId : null],
+  );
+  const userId = userRows[0].id;
+
+  await client.query(
+    `INSERT INTO user_locations (user_id, location_id) VALUES ($1, $2)
+     ON CONFLICT DO NOTHING`,
+    [userId, locationId],
+  );
+
+  if (input.seedChartOfAccounts) {
+    await seedChartOfAccounts(client, businessId, input.industry ?? "food_service");
+  }
+
+  // The payment ways the till offers (migration 0091), in the same
+  // transaction as the business itself: a shop that exists but cannot say
+  // «نقدی» cannot take money. Seeded rather than implied so the owner can
+  // rename and reorder them from day one.
+  await seedPaymentMethods(client, businessId, input.industry ?? "food_service");
+
+  // Phase 25 — features this trade has no use for start off, in the same
+  // transaction that creates the business so there is never a window where
+  // a jewellery shop looks like a café. They remain individually flippable
+  // from the platform console: an industry default, not a prohibition.
+  await disableFeatures(client, businessId, [
+    ...industryProfile(input.industry ?? "food_service").defaultDisabledFeatures,
+    // ESH-147 — `dine_in` (table service, printed table QRs) is F&B's by
+    // default, not everybody's: the flag itself defaults to on for the
+    // businesses that already ran on `reservations`, so a retail or services
+    // business has to be told it is off in the same transaction that creates
+    // it. Migration 0298 mirrors the existing rows.
+    ...((input.industry ?? "food_service") === "food_service" ? [] : ["dine_in"]),
+  ]);
+
+  let totpSecret: string | undefined;
+  let totpUrl: string | undefined;
+  let totpQr: string | null | undefined;
+
+  // Phase 42 — the phone-OTP login policy starts *enforced* for a
+  // business created after this feature, stamped in the same transaction:
+  // a brand-new business has no legacy staff to protect, and every member
+  // it ever gains verifies a number at their first door login anyway.
+  // (Migration 0139 gave the businesses already running on an install
+  // their 14-day window instead; SMS-less installs stay unenforced at
+  // runtime until a Kavenegar key exists — see phone-otp-policy.ts.)
+  await client.query(
+    `INSERT INTO settings (business_id, location_id, key, value)
+     VALUES ($1, NULL, $2, $3)`,
+    [
+      businessId,
+      SETTING_KEYS.phoneOtpPolicy,
+      JSON.stringify({ enforcedAt: new Date().toISOString() }),
+    ],
+  );
+
+  // Issue #755 §14 — on the activation path the second factor and the
+  // recovery codes are minted when the *owner* redeems their link
+  // (owner-activation.ts), in their own browser, and shown only to them.
+  // Creating them here is what used to force the operator to hold the
+  // owner's credentials.
+  let recoveryCodes: string[] | undefined;
+  let ownerActivation: { token: string; expiresAt: Date } | undefined;
+  if (!demo && !input.ownerActivation && input.ownershipKind !== "platform_internal") {
+    if (input.deploymentMode === "local") {
+      await client.query(
+        `INSERT INTO settings (business_id, location_id, key, value)
+         VALUES ($1, NULL, $2, $3)`,
+        [businessId, SETTING_KEYS.deploymentProfile, JSON.stringify({ profile: "local", pairedAt: null })],
+      );
+      await disableFeatures(client, businessId, LOCAL_DISABLED_FEATURES);
+
+      totpSecret = generateSecret();
+      totpUrl = generateURI({
+        label: email,
+        // Phase 42 — the business's own name, so the entry in the
+        // authenticator app is tellable apart from every other business
+        // this person holds an entry for (see mfa-enrol.ts's TOTP_ISSUER).
+        issuer: businessName,
+        secret: totpSecret,
+        strategy: "totp"
+      });
+      totpQr = await totpQrDataUrl(totpUrl);
+      await provisionMfaEnrolment(client, "platform_user", platformUserId, "totp", true, null, Buffer.from(totpSecret || ""));
+    } else {
+      await provisionMfaEnrolment(client, "platform_user", platformUserId, "sms_otp", true, ownerPhone, null);
+    }
+
+    // Both paths get recovery codes, in the same transaction as the
+    // enrolment they back: a rolled-back provision must not leave live codes
+    // for a business that was never created. They are the only way back in
+    // for an Owner whose phone (or authenticator) is gone, so an enrolment
+    // without them is the lockout this wave exists to prevent.
+    recoveryCodes = await issueRecoveryCodes("platform_user", platformUserId, client);
+  } else if (input.deploymentMode === "local") {
+    // The local deployment profile is a property of the install, not of the
+    // credentials, so it is still stamped here; only the enrolment moves to
+    // the owner's activation.
+    await client.query(
+      `INSERT INTO settings (business_id, location_id, key, value)
+       VALUES ($1, NULL, $2, $3)`,
+      [businessId, SETTING_KEYS.deploymentProfile, JSON.stringify({ profile: "local", pairedAt: null })],
+    );
+    await disableFeatures(client, businessId, LOCAL_DISABLED_FEATURES);
+  }
+
+  // Issue #808 §4 — a provisioned-ready business is formally finished
+  // before its owner ever logs in. Same canonical transition
+  // /api/setup/complete performs; written inside this transaction so a
+  // rolled-back provision cannot leave a stray completion marker.
+  if (input.completeSetup) {
+    await markSetupComplete(businessId, client);
+  }
+
+  // Phase 24 Wave 3 — mint the business's data-encryption key inside the
+  // same transaction as the business, so the very first customer written
+  // is written encrypted and there is never a window where a business
+  // exists without a key. Wrapped under the install's KEK; a no-op on an
+  // install that has not configured one.
+  const kek = getMasterKey();
+  if (kek) {
+    await client.query(
+      `INSERT INTO business_encryption_keys (business_id, key_version, wrapped_dek)
+       VALUES ($1, $2, $3) ON CONFLICT (business_id) DO NOTHING`,
+      [businessId, CURRENT_KEY_VERSION, wrapDek(generateDek(), kek)],
+    );
+  }
+
+  // The owner's activation link, inside the same transaction as the
+  // business: a rolled-back provision must not leave a live link, and a
+  // committed one must never be missing the only way in.
+  //
+  // Not issued when the email already had a login: that person's credentials
+  // are theirs already, the operator learns nothing about them, and asking
+  // them to "activate" an account they have used for years would be a lie.
+  if (input.ownerActivation && ownerIdentityCreated) {
+    ownerActivation = await createOwnerActivation(client, {
+      businessId,
+      platformUserId,
+      userId,
+      email,
+      createdBy: input.createdBy ?? null,
+    });
+  }
+
+  return {
+    businessId,
+    businessSlug: slug,
+    businessSubdomain: subdomain,
+    locationId,
+    userId,
+    platformUserId,
+    ownerIdentityCreated,
+    ownerActivation,
+    totpSecret,
+    totpUrl,
+    totpQr,
+    recoveryCodes,
+  };
 }
 
 /**

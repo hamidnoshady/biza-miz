@@ -1,19 +1,25 @@
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
-import { BarcodeTemplatesSection } from "@/app/dashboard/products/barcode-templates-section";
-import { requireProductWorkspace } from "@/app/dashboard/products/workspace-context";
+import { LegacyWeightPatterns } from "@/app/dashboard/products/legacy-weight-patterns";
+import { ReadOnlyLabelGallery } from "@/app/dashboard/products/label-template-gallery";
+import { PrintingManager } from "@/app/(app)/settings/printing/printing-manager";
+import { requireRetailLabels } from "@/app/dashboard/products/workspace-context";
 
-/** «الگوی بارکد وزنی» — weight barcode patterns with a live label preview. */
+/** Label designs share the existing print catalogue and branch print rules. */
 export default async function BarcodeTemplatesPage() {
-  await requireProductWorkspace();
+  const { industry, canManage, canPrint, canViewLegacyWeight, canEditLegacyWeight } = await requireRetailLabels();
   return (
     <PageShell>
       <PageHeader
-        title="تنظیمات الگو بارکد زنی"
-        description="الگوهای بارکد وزنی EAN-13: پیش‌شمارهٔ ثابت و واحد سنجش وزن، با پیش‌نمایش زندهٔ برچسب."
+        title="بارکد و برچسب محصولات"
+        description="قالب‌های برچسب متناسب با کسب‌وکار، اندازهٔ کاغذ و پیش‌نمایش چاپ."
         actions={<KnowledgeHelpButton section="pos" />}
       />
-      <BarcodeTemplatesSection />
+      {canManage && canPrint ? <p className="text-sm text-muted-foreground">چاپ نمونه برای بررسی مسیر و اندازهٔ چاپ از داده‌های آزمایشی عمومی استفاده می‌کند؛ داده‌های صنفی در پیش‌نمایش فرضی هستند.</p> : null}
+      <div data-tour-id="barcode-templates.list">
+        {canManage ? <PrintingManager labelsOnly canPrint={canPrint} /> : <ReadOnlyLabelGallery industry={industry} />}
+      </div>
+      {canViewLegacyWeight ? <LegacyWeightPatterns canEdit={canEditLegacyWeight} /> : null}
     </PageShell>
   );
 }

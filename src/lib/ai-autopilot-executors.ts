@@ -6679,7 +6679,10 @@ const productAttributeDelete: AutopilotExecutor = async (ctx) => {
 const barcodeTemplateDelete: AutopilotExecutor = async (ctx) => {
   const id = str(ctx.payload.id) ?? str(ctx.payload.templateId);
   if (!id) return fail("missing_fields");
-  const deleted = await deleteWeightBarcodeTemplate(id);
+  const branch = await chosenLocation(ctx.businessId, str(ctx.payload.locationId));
+  if ("error" in branch) return fail(branch.error);
+  if (!branch.locationId) return fail("invalid_location");
+  const deleted = await deleteWeightBarcodeTemplate(id, branch.locationId);
   if (!deleted) return fail("template_not_found");
   return { ok: true, result: { ok: true } };
 };

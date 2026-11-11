@@ -1140,10 +1140,10 @@ async function tickBusiness(businessId: string): Promise<void> {
   }
 }
 
-/** Every business id on this install — the one query that spans tenants. */
+/** Tenant ids eligible for ordinary backup scheduling. */
 async function listBusinessIds(): Promise<string[]> {
   const rows = await withoutTenantScope("backup", async () => {
-    const result = await query<{ id: string }>(`SELECT id FROM businesses`, []);
+    const result = await query<{ id: string }>(`SELECT id FROM businesses WHERE ownership_kind <> 'demo'`, []);
     return result.rows;
   });
   return rows.map((r) => r.id);

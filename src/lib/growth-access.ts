@@ -111,6 +111,7 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   "/api/growth/marketing-assignments/[id]": { PATCH: PERMISSIONS.marketingAssignmentsManage },
   "/api/growth/marketers/[id]": { PATCH: PERMISSIONS.marketersManage },
   "/api/growth/marketers": { GET: PERMISSIONS.marketersView, POST: PERMISSIONS.marketersManage },
+  "/api/growth/marketers/supervisors": { GET: PERMISSIONS.marketersManage },
   "/api/growth/marketers/candidates": { GET: PERMISSIONS.marketersManage },
   "/api/growth/overview": { GET: PERMISSIONS.growthView },
   "/api/growth/customers": { GET: PERMISSIONS.growthView },

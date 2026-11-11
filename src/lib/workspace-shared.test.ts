@@ -403,6 +403,16 @@ describe("templates", () => {
     ).toBe(true);
   });
 
+  it("combines agency specialties as a stable union of recommendations, never eligible keys",()=>{
+    const primary=templatesForIndustry(BUILTIN_TEMPLATES,"advertising_agency","outdoor_print");
+    const secondary=templatesForIndustry(BUILTIN_TEMPLATES,"advertising_agency","content_video");
+    const combined=templatesForIndustry(BUILTIN_TEMPLATES,"advertising_agency","outdoor_print",["content_video","content_video"]);
+    expect(combined.map(t=>t.key).sort()).toEqual(primary.map(t=>t.key).sort());
+    expect(combined.filter(t=>t.recommended).map(t=>t.key).sort()).toEqual([...new Set([...primary,...secondary].filter(t=>t.recommended).map(t=>t.key))].sort());
+    expect(combined.map(t=>t.key)).toEqual(templatesForIndustry(BUILTIN_TEMPLATES,"advertising_agency","outdoor_print",["content_video"]).map(t=>t.key));
+    expect(templatesForIndustry(BUILTIN_TEMPLATES,"food_service",null,["media_buying"]).every(t=>!t.recommended)).toBe(true);
+  });
+
   it("does not let one industry's presets badge another industry's blueprints", () => {
     // The profile vocabularies are disjoint (#1128's eight, #799's eight), so a
     // crossed wire must badge nothing rather than something arbitrary.

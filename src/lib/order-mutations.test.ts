@@ -43,11 +43,14 @@ beforeEach(() => {
 });
 
 describe("createOrder table-service entitlement", () => {
-  it("rejects direct and offline-replay dine-in creation when reservations are disabled", async () => {
+  it("rejects direct and offline-replay dine-in creation when the dine_in entitlement is off", async () => {
     const result = await createOrder(input);
 
     expect(result).toEqual({ ok: false, error: "feature_disabled", status: 403 });
-    expect(mocks.isFeatureEnabled).toHaveBeenCalledWith("business-1", "reservations");
+    // ESH-147 — table service is its own entitlement, not `reservations`: a
+    // café that takes walk-ins but no bookings must still be able to serve.
+    expect(mocks.isFeatureEnabled).toHaveBeenCalledWith("business-1", "dine_in");
+    expect(mocks.isFeatureEnabled).not.toHaveBeenCalledWith("business-1", "reservations");
     // The refusal happens before opening a transaction or resolving catalogue
     // items, so no direct caller can bypass the UI's hidden table affordance.
     expect(mocks.getPool).not.toHaveBeenCalled();
@@ -56,13 +59,13 @@ describe("createOrder table-service entitlement", () => {
   it("does not gate takeaway and keeps the existing delivery flag independent", async () => {
     mocks.isFeatureEnabled.mockResolvedValue(true);
     await createOrder({ ...input, type: "takeaway" });
-    expect(mocks.isFeatureEnabled).not.toHaveBeenCalledWith("business-1", "reservations");
+    expect(mocks.isFeatureEnabled).not.toHaveBeenCalledWith("business-1", "dine_in");
 
     vi.clearAllMocks();
     mocks.businessIdForLocation.mockResolvedValue("business-1");
     mocks.isFeatureEnabled.mockResolvedValue(true);
     await createOrder({ ...input, type: "delivery", delivery: { address: "تهران" } });
     expect(mocks.isFeatureEnabled).toHaveBeenCalledWith("business-1", "delivery");
-    expect(mocks.isFeatureEnabled).not.toHaveBeenCalledWith("business-1", "reservations");
+    expect(mocks.isFeatureEnabled).not.toHaveBeenCalledWith("business-1", "dine_in");
   });
 });

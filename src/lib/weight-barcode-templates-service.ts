@@ -67,7 +67,7 @@ export async function createWeightBarcodeTemplate(input: {
   }
 }
 
-export async function deleteWeightBarcodeTemplate(id: string): Promise<boolean> {
-  const { rowCount } = await query(`DELETE FROM weight_barcode_templates WHERE id = $1`, [id]);
+export async function deleteWeightBarcodeTemplate(id: string, locationId: string): Promise<boolean> {
+  const { rowCount } = await query(`DELETE FROM weight_barcode_templates WHERE id = $1 AND location_id = $2`, [id, locationId]);
   return (rowCount ?? 0) > 0;
 }

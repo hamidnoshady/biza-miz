@@ -327,6 +327,34 @@ shows (shortened) and the retry route writes to the audit log. Quote it in a
 support request: the artifact name is not enough, because the same artifact is
 attempted many times.
 
+**The large-artifact path is exercised at 320 MB on demand.** CI runs the
+incident-scale test at 64 MiB (streaming 320 MB several times would dominate the
+job), but the criterion in issue #1296 names a 319 MB artifact, so the size is a
+dial:
+
+```bash
+LARGE_ARTIFACT_MIB=320 npm run test:db -- integration/platform-backup-cloud.integration.test.ts
+```
+
+That is the identical code path — the size-derived 320 s upload timeout, the lease
+arithmetic fed by it, the streaming digest and the post-upload proof — at the real
+scale. It runs against the test harness's stub bucket, so it proves the *engine*
+handles the bytes; proving the *deployment* still needs one run against the real
+bucket in a non-production environment, which is an operator action, not a CI one.
+
+**Proving the copy without re-uploading it.** The console's «تأیید دوباره با هش»
+is a *retry*: it checks the object and, if anything is off, sends the artifact
+again. The MCP tool `verify_backup_cloud_object` (`backup.verify`) is the
+read-only half — it resolves the artifact (defaulting to the newest capture still
+on disk), derives the same object key the uploader uses, and answers `verified`,
+`missing` (no object at that key) or `mismatch` (bytes that are not ours), with
+the key and endpoint redacted from the reply. `verify:"size"` is one HEAD;
+`verify:"sha256"` downloads the object and compares digests. It writes no run row
+and no confirmation, because a glance is not an attempt — the call itself is
+audited as `platform_backup.cloud.verify`. Uploading stays console-only on
+purpose: `backup.run` may start a transfer and costs real egress, so an assistant
+holding `backup.verify` can prove protection but can never cause a copy.
+
 **The audit log's «پشتیبان‌گیری» filter covers all three namespaces.** The console
 writes backup events under `platform_backup.*` (the whole install), `tenant_backup.*`
 (one business) and `backup.run_now` (the MCP tool), and the filter used to match only

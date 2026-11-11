@@ -40,7 +40,7 @@ import { getSetting, SETTING_KEYS, setSetting } from "./settings";
 /** What a caller gets back: the resolved profile and whether it was chosen. */
 export interface AgencyBusinessProfileState {
   operatingProfile: AgencyOperatingProfile;
-  /** Additional shapes the agency works in. Labels only — never a gate. */
+  /** Additional shapes the agency works in. Ordering/labels only — never a gate. */
   specialties: AgencyOperatingProfile[];
   /** False until the business saves a choice; the default is assumed meanwhile. */
   stored: boolean;
@@ -83,6 +83,13 @@ export async function readAgencyOperatingProfile(
 ): Promise<AgencyOperatingProfile | null> {
   if ((await getBusinessIndustry(businessId)) !== AGENCY_INDUSTRY) return null;
   return (await readAgencyProfile(businessId)).operatingProfile;
+}
+
+/** Combined stored specialties only order/label choices; never widen authority. */
+export async function readAgencyOperatingProfiles(businessId: string): Promise<AgencyOperatingProfile[]> {
+  if ((await getBusinessIndustry(businessId)) !== AGENCY_INDUSTRY) return [];
+  const state = await readAgencyProfile(businessId);
+  return [state.operatingProfile, ...state.specialties];
 }
 
 /** The GET half for the settings form: refuses a business of another industry. */

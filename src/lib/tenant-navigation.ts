@@ -3,7 +3,7 @@
  * A single source of truth: features/role/industry filtering happens here.
  */
 import type { Role } from "@/lib/auth-edge";
-import { isProductWorkspaceIndustry, PRODUCT_WORKSPACE_SECTIONS } from "@/lib/product-workspace";
+import { catalogueAdapterFor, isProductWorkspaceIndustry, PRODUCT_WORKSPACE_SECTIONS } from "@/lib/product-workspace";
 import { ACCOUNTING_SECTIONS } from "@/app/(app)/accounting/accounting-nav";
 import { PARTY_DIRECTORY_NAV_VIEWS, partyDirectoryHref } from "@/lib/party-directory";
 import { accountingSectionHref } from "@/app/(app)/accounting/accounting-routes";
@@ -13,8 +13,8 @@ import { REPORTS_TABS, reportsTabHref } from "@/app/dashboard/reports/reports-na
 import { REPORT_CAPABILITY_PERMISSIONS } from "@/lib/report-permissions";
 import { isLockableFeature } from "@/lib/features";
 import { INDUSTRY_LABELS, type Industry } from "@/lib/industries";
-import { hasModule, labelFor } from "@/lib/industry-profile";
-import { POS_REQUIRED_PERMISSIONS, type Permission } from "@/lib/permissions";
+import { hasCapability, hasModule, labelFor } from "@/lib/industry-profile";
+import { PERMISSIONS, POS_REQUIRED_PERMISSIONS, type Permission } from "@/lib/permissions";
 import { GROWTH_APP_PERMISSIONS } from "@/lib/growth-access";
 import type { NavItem } from "@/app/dashboard/dashboard-sidebar";
 import type { ResolvedSettingsTab } from "@/lib/settings-tabs";
@@ -25,6 +25,7 @@ interface NavContext {
 }
 
 export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
+  const catalogueAdapter = catalogueAdapterFor(industry);
   return [
     {
       label: labelFor(industry, "saleDocumentPlural"),
@@ -108,7 +109,9 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       href: ACCOUNTING_WORKSPACE_HREFS.inventory,
       roles: ["owner", "manager"],
     },
-    { label: "میزها", module: "tables", href: ACCOUNTING_WORKSPACE_HREFS.floor, roles: ["owner", "manager", "cashier", "waiter"], flag: "reservations" },
+    // ESH-147 — the floor is table service, not booking: a café with a QR per
+    // table but no reservations must still see it. Any-of, like the API gate.
+    { label: "میزها", module: "tables", href: ACCOUNTING_WORKSPACE_HREFS.floor, roles: ["owner", "manager", "cashier", "waiter"], flags: ["dine_in", "reservations"] },
     { label: "میزهای من", module: "waiter", href: "/accounting/waiter", roles: ["cashier", "waiter"], flag: "reservations" },
     { label: "آشپزخانه", module: "kitchen", href: ACCOUNTING_WORKSPACE_HREFS.kitchen, roles: ["owner", "manager", "kitchen"] },
     { label: "رزروها", module: "reservations", href: ACCOUNTING_WORKSPACE_HREFS.reservations, roles: ["owner", "manager", "cashier", "waiter"], flag: "reservations" },
@@ -138,7 +141,7 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
     },
     // Phase 42 — the retail trade-goods trades manage their catalogue in the
     // shared products workspace: a collapsible sidebar group — افزودن محصول،
-    // لیست محصولات، لیست قیمت، ویژگی محصول، الگوی بارکد وزنی and the trade's
+    // لیست محصولات، لیست قیمت، ویژگی محصول، بارکد و برچسب محصولات and the trade's
     // own گزارش‌ها — instead of five flat trade entries. The old trade pages
     // forward into the workspace; cosmetics alone keeps its own entry for the
     // sections only it has (بچ‌ها و انقضا، برند و ماتریس).
@@ -149,14 +152,37 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
             module: industry,
             iconKey: ACCOUNTING_WORKSPACE_HREFS.products,
             roles: ["owner", "manager"],
-            children: PRODUCT_WORKSPACE_SECTIONS.map((section) => ({
+            children: PRODUCT_WORKSPACE_SECTIONS.filter((section) => section.key !== "barcodes" || hasCapability(industry, "barcode")).map((section) => ({
               label: section.label,
               module: industry,
               href: section.href,
               roles: ["owner", "manager"],
+              ...(section.key === "new" ? { requiredAnyPermission: ["inventory.adjust" as const] } : {}),
             })),
           },
         ]
+      : []),
+    // Only implemented specialist sections are shown; the page and API guards
+    // retain their native permissions. Other sections remain hidden for now.
+    ...(catalogueAdapter?.kind === "specialist"
+      ? [{
+          label: "محصولات",
+          module: "stock" as const,
+          iconKey: ACCOUNTING_WORKSPACE_HREFS.products,
+          roles: ["owner", "manager"] as Role[],
+          requiredAnyPermission: [catalogueAdapter.readPermission],
+          children: PRODUCT_WORKSPACE_SECTIONS
+            .filter((section) => section.key === "list" || (section.key === "new" && industry === "automotive") || (section.key === "prices" && industry === "jewelry") || (section.key === "reports" && industry === "watch") || (section.key === "barcodes" && hasCapability(industry, "barcode")))
+            .map((section) => ({
+              label: section.label,
+              module: "stock" as const,
+              href: section.href,
+              roles: ["owner", "manager"] as Role[],
+              requiredAnyPermission: [catalogueAdapter.readPermission],
+              ...(section.key === "new" ? { requiredAllPermissions: [PERMISSIONS.vehiclesCreate] } : {}),
+              ...(section.key === "reports" ? { requiredAllPermissions: [PERMISSIONS.reportsView] } : {}),
+            })),
+        }]
       : []),
     ...(industry === "cosmetics"
       ? [{ label: INDUSTRY_LABELS.cosmetics, module: "cosmetics" as const, href: ACCOUNTING_WORKSPACE_HREFS.cosmetics, roles: ["owner", "manager"] }]
@@ -319,7 +345,13 @@ function canSee(
   // case the entry stays and is marked with a padlock instead (see
   // LOCKABLE_FEATURES in features.ts). Its page renders a read-only preview
   // rather than redirecting, so the link goes somewhere real either way.
-  if (item.flag && !features[item.flag] && !isLockableFeature(item.flag)) return false;
+  const gateFlags = item.flags ?? (item.flag ? [item.flag] : []);
+  if (
+    gateFlags.length > 0 &&
+    !gateFlags.some((flag) => features[flag] || isLockableFeature(flag))
+  ) {
+    return false;
+  }
   // `waiter` is intentionally identity-shaped: this is the shared-terminal,
   // assigned-table board, not a general business capability. Every ordinary
   // application door is permission-derived, regardless of the preset's name.
