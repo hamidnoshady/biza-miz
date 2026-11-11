@@ -496,7 +496,7 @@ export default function PlatformAiPage() {
       <header>
         <h1 className="text-xl font-bold">تنظیمات هوش مصنوعی (LiteLLM)</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          این صفحه فقط اتصال فنی LiteLLM و چرخهٔ عمر کلیدهای مجازی کسب‌وکارها را مدیریت می‌کند. مدل‌ها، ارائه‌دهنده‌ها، مسیر‌یابی و fallback در LiteLLM تنظیم می‌شوند؛ قیمت، اعتبار و درآمد در بخش Plan/Billing است.
+          این صفحه فقط اتصال فنی LiteLLM و چرخهٔ عمر کلیدهای مجازی کسب‌وکارها را مدیریت می‌کند. مدل‌ها، ارائه‌دهنده‌ها، مسیریابی و مسیرهای جایگزین در LiteLLM تنظیم می‌شوند؛ قیمت، اعتبار و درآمد در بخش Plan/Billing است.
         </p>
       </header>
 
@@ -524,7 +524,7 @@ export default function PlatformAiPage() {
             </dd>
           </div>
           <div className="sm:col-span-3">
-            <dt className="text-muted-foreground">Base URL</dt>
+            <dt className="text-muted-foreground">نشانی پایه (Base URL)</dt>
             <dd className="mt-1 font-medium" dir="ltr">{draft?.baseUrl ?? data?.platformBaseUrl ?? "—"}</dd>
           </div>
         </dl>
@@ -542,7 +542,7 @@ export default function PlatformAiPage() {
                     <strong>{PROBE_STAGE_FA[stage.key] ?? stage.label}</strong>
                     <span className={stage.ok ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}>{stageText(stage)}</span>
                     {stage.status ? <span dir="ltr">HTTP {stage.status}</span> : null}
-                    {stage.model ? <span dir="ltr">Model: {stage.model}</span> : null}
+                    {stage.model ? <span>مدل: <span dir="ltr" className="inline-block">{stage.model}</span></span> : null}
                   </div>
                   {stage.message ? <p className="mt-1 text-xs text-muted-foreground">{stage.ok ? stage.message : gatewayErrorFa(stage.message)}</p> : null}
                   {stage.detail ? <details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">جزئیات فنی</summary><p className="mt-1 break-all" dir="ltr">{stage.detail}</p></details> : null}
@@ -559,7 +559,7 @@ export default function PlatformAiPage() {
               <input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />
               فعال
             </label>
-            <Field label="Base URL">
+            <Field label="نشانی پایه (Base URL)">
               <input className={inputClass} dir="ltr" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} />
             </Field>
             <Field
