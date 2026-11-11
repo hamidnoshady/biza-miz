@@ -2,8 +2,12 @@ import { isUuid } from "./uuid";
 
 export const ASSIGNMENT_STATUSES = ["planned", "in_progress", "completed", "canceled"] as const;
 export type AssignmentStatus = (typeof ASSIGNMENT_STATUSES)[number];
+export const ASSIGNMENT_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
+export type AssignmentPriority = (typeof ASSIGNMENT_PRIORITIES)[number];
+export function isAssignmentPriority(value: unknown): value is AssignmentPriority { return typeof value === "string" && ASSIGNMENT_PRIORITIES.includes(value as AssignmentPriority); }
+export const ASSIGNMENT_PRIORITY_LABELS: Record<AssignmentPriority, string> = { low: "کم", normal: "عادی", high: "زیاد", urgent: "فوری" };
 export type TargetInput = { locationId: string; partyId: string | null; siteLabel: string; city: string; neighborhood: string };
-export type AssignmentInput = { locationId: string; targetId: string; agentId: string; title: string; dueDate: string | null };
+export type AssignmentInput = { locationId: string; targetId: string; agentId: string; title: string; dueDate: string | null; priority?: AssignmentPriority };
 function record(raw: unknown): Record<string, unknown> | null {
   return raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
 }
@@ -26,8 +30,15 @@ export function parseTargetInput(raw: unknown): TargetInput | null {
 export function parseAssignmentInput(raw: unknown): AssignmentInput | null {
   const b = record(raw); if (!b || !isUuid(b.locationId) || !isUuid(b.agentId) || !isUuid(b.targetId)) return null;
   const title = text(b.title, 150, true);
-  if (title === null || (b.dueDate != null && b.dueDate !== "" && !validDate(b.dueDate))) return null;
-  return { locationId: b.locationId, agentId: b.agentId, targetId: b.targetId, title, dueDate: b.dueDate ? b.dueDate as string : null };
+  const priority = b.priority === undefined ? "normal" : b.priority;
+  if (title === null || (b.dueDate != null && b.dueDate !== "" && !validDate(b.dueDate)) || !isAssignmentPriority(priority)) return null;
+  return { locationId: b.locationId, agentId: b.agentId, targetId: b.targetId, title, dueDate: b.dueDate ? b.dueDate as string : null, priority };
+}
+export type PriorityChange = { action: "priority"; expectedRevision: number; priority: AssignmentPriority };
+export function parsePriorityChange(raw: unknown): PriorityChange | null {
+  const b = record(raw);
+  if (!b || b.action !== "priority" || typeof b.expectedRevision !== "number" || !Number.isSafeInteger(b.expectedRevision) || b.expectedRevision < 0 || b.expectedRevision > 2147483646 || !isAssignmentPriority(b.priority)) return null;
+  return { action: "priority", expectedRevision: b.expectedRevision, priority: b.priority };
 }
 export function parseTransition(raw: unknown): { expected: AssignmentStatus; next: AssignmentStatus } | null {
   const b = record(raw); if (!b || typeof b.expected !== "string" || typeof b.next !== "string") return null;
