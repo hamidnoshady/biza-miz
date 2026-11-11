@@ -114,6 +114,13 @@ describe("historical invoice file parsing", () => {
     const escaped = `${"\\".repeat(100_000)}\n${"value\n".repeat(168)}`;
     await expect(parseHistoricalInvoiceFile(bytes(escaped), "csv")).rejects.toMatchObject({ code: "staged_data_too_large" });
   });
+  it("rejects text PostgreSQL cannot store without corrupting Unicode", async () => {
+    await expect(parseHistoricalInvoiceFile(bytes("id\n\u0000"), "csv")).rejects.toMatchObject({ code: "invalid_text" });
+    await expect(parseHistoricalInvoiceFile(bytes('[{"id":"\\u0000"}]'), "json")).rejects.toMatchObject({ code: "invalid_text" });
+    await expect(parseHistoricalInvoiceFile(bytes('[{"id":"\\ud800"}]'), "json")).rejects.toMatchObject({ code: "invalid_text" });
+    const parsed = await parseHistoricalInvoiceFile(bytes('[{"id":"\\ud83d\\ude00"}]'), "json");
+    expect(parsed[0].rows[0].raw.id).toBe("😀");
+  });
   it("rejects oversized files and invalid UTF-8", async () => {
     await expect(parseHistoricalInvoiceFile(new ArrayBuffer(20 * 1024 * 1024 + 1), "csv")).rejects.toMatchObject({ code: "file_too_large" });
     await expect(parseHistoricalInvoiceFile(new Uint8Array([0xff]).buffer, "csv")).rejects.toMatchObject({ code: "invalid_utf8" });

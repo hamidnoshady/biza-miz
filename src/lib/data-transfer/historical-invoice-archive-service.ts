@@ -107,7 +107,7 @@ async function bindCustomerInTransaction(client: PoolClient, input: {
 
 export interface HistoricalCustomerReview {
   externalCustomerCode: string;
-  targetCustomer: { partyId: string; name: string };
+  targetCustomer: { partyId: string; name: string; phoneLast4: string | null };
   /** Representative evidence; truncation is explicit. */
   rows: HistoricalInvoiceRow[];
   matchingRows: number;
@@ -137,14 +137,14 @@ async function customerReviewInTransaction(client: PoolClient, input: Historical
   if (rows.some((row) => (row.externalCustomerCode ?? "").trim() && (row.externalCustomerCode ?? "").trim() !== code)) {
     throw new HistoricalArchiveError("customer_code_conflict");
   }
-  const target = await client.query<{ id: string; name: string; updated_at: Date | string }>(
-    `SELECT id, name, updated_at FROM parties WHERE business_id = $1 AND id = $2
+  const target = await client.query<{ id: string; name: string; phone_last4: string | null; updated_at: Date | string }>(
+    `SELECT id, name, phone_last4, updated_at FROM parties WHERE business_id = $1 AND id = $2
       AND 'customer' = ANY(roles) AND is_active AND merged_into_id IS NULL
       AND (location_id IS NULL OR location_id = $3) ${lock ? "FOR SHARE" : ""}`,
     [input.businessId, input.partyId, input.locationId],
   );
   if (!target.rowCount) throw new HistoricalArchiveError("customer_not_found");
-  const targetCustomer = { partyId: target.rows[0].id, name: target.rows[0].name };
+  const targetCustomer = { partyId: target.rows[0].id, name: target.rows[0].name, phoneLast4: target.rows[0].phone_last4 };
   const names = [...new Set(rows.map((r) => r.sourceCustomerName?.trim()).filter((v): v is string => Boolean(v)))];
   const phones = [...new Set(rows.map((r) => r.sourceCustomerPhone?.trim()).filter((v): v is string => Boolean(v)))];
   const existing = await client.query<{ canonical_id: string; canonical_type: string; provider: string; verified: boolean }>(

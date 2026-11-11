@@ -12,13 +12,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { SectionCard, TabBar, type Tab } from "@/app/dashboard/page-chrome";
-import { ErrorBox, api } from "@/app/dashboard/ui";
+import { ErrorBox, SecondaryButton, api } from "@/app/dashboard/ui";
 import { DataTransferSkeleton, useDataCatalogue } from "./data-transfer-ui";
 import { ExportSection } from "./export-section";
 import { HistorySection } from "./history-section";
 import { ImportSection } from "./import-section";
 import { CatalogueSection } from "./catalogue-section";
 import { HolooTransferSection } from "./holoo-transfer-section";
+import { HistoricalInvoiceSection } from "./historical-invoice-section";
 
 type PanelKey = "import" | "export" | "history" | "holoo" | "catalogue";
 
@@ -29,6 +30,7 @@ export function DataTransferSettings() {
   const [revision, setRevision] = useState(0);
   const bump = useCallback(() => setRevision((current) => current + 1), []);
   const [panel, setPanel] = useState<PanelKey>("import");
+  const [historical, setHistorical] = useState(false);
   const [holooPermitted, setHolooPermitted] = useState(false);
   const [cataloguePermitted, setCataloguePermitted] = useState(false);
 
@@ -83,7 +85,14 @@ export function DataTransferSettings() {
         />
       </SectionCard>
 
-      {active === "import" ? <ImportSection entities={entities} onJobQueued={bump} /> : null}
+      {active === "import" ? <>
+        <SectionCard title="انتخاب نوع ورود">
+          <SecondaryButton onClick={() => setHistorical((current) => !current)}>
+            {historical ? "بازگشت به ورود اطلاعات دیگر" : "حسابداری: فاکتورهای فروش قبلی"}
+          </SecondaryButton>
+        </SectionCard>
+        {historical ? <HistoricalInvoiceSection /> : <ImportSection entities={entities} onJobQueued={bump} />}
+      </> : null}
       {active === "catalogue" ? <CatalogueSection /> : null}
       {active === "export" ? <ExportSection entities={entities} onExported={bump} /> : null}
       {active === "history" ? (
