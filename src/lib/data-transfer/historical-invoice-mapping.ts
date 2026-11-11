@@ -14,6 +14,8 @@ export const HISTORICAL_INVOICE_FIELDS = [
 
 const REQUIRED_FIELDS = ["externalInvoiceId", "invoiceDate", "externalCustomerCode", "total"] as const;
 const fields = new Set<string>(HISTORICAL_INVOICE_FIELDS);
+const lineFields = new Set<string>(["externalInvoiceId", "lineName", "lineSku", "lineBarcode", "quantity", "unitPrice", "lineDiscount", "lineTax"]);
+const headerFields = new Set<string>(HISTORICAL_INVOICE_FIELDS.filter((field) => field === "externalInvoiceId" || !lineFields.has(field)));
 
 export class HistoricalMappingError extends Error {
   constructor(readonly code: string) {
@@ -38,13 +40,33 @@ export function mapHistoricalInvoiceRows(
   rows: readonly HistoricalRawRow[],
   mapping: ImportMapping,
 ): HistoricalInvoiceRow[] {
+  return mapRows(columns, rows, mapping, fields, REQUIRED_FIELDS);
+}
+
+/** Header and line sheets have different fields; a line cannot overwrite a header. */
+export function mapHistoricalInvoiceHeaderRows(columns: readonly string[], rows: readonly HistoricalRawRow[], mapping: ImportMapping): HistoricalInvoiceRow[] {
+  return mapRows(columns, rows, mapping, headerFields, REQUIRED_FIELDS);
+}
+
+export function mapHistoricalInvoiceLineRows(columns: readonly string[], rows: readonly HistoricalRawRow[], mapping: ImportMapping): HistoricalInvoiceRow[] {
+  const mapped = mapRows(columns, rows, mapping, lineFields, ["externalInvoiceId", "quantity", "unitPrice"]);
+  if (!mapping.columns.some((entry) => ["lineName", "lineSku", "lineBarcode"].includes(entry.field))) {
+    throw new HistoricalMappingError("missing_required_fields");
+  }
+  return mapped;
+}
+
+function mapRows(
+  columns: readonly string[], rows: readonly HistoricalRawRow[], mapping: ImportMapping,
+  allowed: ReadonlySet<string>, required: readonly string[],
+): HistoricalInvoiceRow[] {
   if (!mapping || !Array.isArray(mapping.columns)) throw new HistoricalMappingError("invalid_mapping");
   const rawKeys = columns.map((column, index) => column || `ستون ${index + 1}`);
   if (new Set(rawKeys).size !== rawKeys.length) throw new HistoricalMappingError("duplicate_source_columns");
   const usedFields = new Set<string>();
   const usedColumns = new Set<number>();
   for (const entry of mapping.columns as ColumnMapping[]) {
-    if (!entry || !fields.has(entry.field) || usedFields.has(entry.field)) throw new HistoricalMappingError("invalid_mapping_field");
+    if (!entry || !allowed.has(entry.field) || usedFields.has(entry.field)) throw new HistoricalMappingError("invalid_mapping_field");
     if (!Number.isInteger(entry.column) || entry.column < 0 || entry.column >= columns.length || usedColumns.has(entry.column)) {
       throw new HistoricalMappingError("invalid_mapping_column");
     }
@@ -54,7 +76,7 @@ export function mapHistoricalInvoiceRows(
     usedFields.add(entry.field);
     usedColumns.add(entry.column);
   }
-  if (REQUIRED_FIELDS.some((field) => !usedFields.has(field))) throw new HistoricalMappingError("missing_required_fields");
+  if (required.some((field) => !usedFields.has(field))) throw new HistoricalMappingError("missing_required_fields");
   return rows.map(({ rowNumber, raw }) => {
     if (!Number.isSafeInteger(rowNumber) || rowNumber < 1 || !raw || typeof raw !== "object" || Array.isArray(raw)) {
       throw new HistoricalMappingError("invalid_source_row");

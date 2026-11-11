@@ -33,7 +33,7 @@
  *
  * Client-safe: imports types only, plus the industry list.
  */
-import { INDUSTRIES, hasSellableCatalogue, type Industry } from "./industries";
+import { INDUSTRIES, hasSellableCatalogue, isRetailCatalogueIndustry, type Industry } from "./industries";
 import { hasCapability, hasModule, industryProfile } from "./industry-profile";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
 import { PERMISSIONS, type Permission } from "./permissions";
@@ -1058,51 +1058,31 @@ export const TOURS: readonly TourDefinition[] = [
   },
   {
     id: "accounting.products.barcode-templates",
-    version: 1,
+    version: 2,
     pageKey: "page:/accounting/products/barcode-templates",
     route: "/accounting/products/barcode-templates",
-    title: "آشنایی با الگوی بارکد وزنی",
-    description: "با پیش‌شماره، واحد وزن و پیش‌نمایش برچسب بارکد وزنی آشنا شوید.",
-    eligibility: { permissions: [PERMISSIONS.inventoryView], industries: PRODUCT_WORKSPACE_INDUSTRIES },
+    title: "آشنایی با بارکد و برچسب محصولات",
+    description: "قالب‌های برچسب سازگار با کسب‌وکار و پیش‌نمایش چاپ را ببینید.",
+    eligibility: {
+      industries: BARCODE_INDUSTRIES.filter(isRetailCatalogueIndustry),
+      anyOf: [
+        { industries: ["automotive"], permissions: [PERMISSIONS.vehiclesView] },
+        { industries: BARCODE_INDUSTRIES.filter((industry) => industry !== "automotive"), permissions: [PERMISSIONS.inventoryView] },
+      ],
+    },
     steps: [
       {
-        id: "welcome",
+        id: "label-welcome",
         kind: "explain",
-        title: "الگوی بارکد وزنی",
-        body:
-          "برای کالاهایی که با ترازو وزن و بارکد می‌شوند، الگوی بارکد EAN-13 تعریف می‌کنید. این تور الگویی را ثبت یا حذف نمی‌کند.",
+        title: "بارکد و برچسب محصولات",
+        body: "قالب‌ها و اندازهٔ کاغذ از سامانهٔ چاپ مشترک استفاده می‌کنند. این تور قالبی را انتخاب یا چاپ نمی‌کند.",
       },
       {
-        id: "preview",
-        kind: "spotlight",
-        anchor: TOUR_ANCHORS.barcodePreview,
-        title: "پیش‌نمایش برچسب",
-        body:
-          "نمونهٔ زندهٔ الگوی فعال: پیش‌شماره (دو رقم)، کد کالا (پنج رقم)، مقدار وزن (پنج رقم) و رقم کنترل.",
-      },
-      {
-        id: "templates",
+        id: "label-gallery",
         kind: "spotlight",
         anchor: TOUR_ANCHORS.barcodeTemplates,
-        title: "الگوهای ثبت‌شده",
-        body:
-          "هر الگو یک پیش‌شمارهٔ ثابت بین ۲۰ تا ۲۹ و یک واحد وزن دارد و هر پیش‌شماره فقط یک بار ثبت می‌شود. الگوی ثبت‌شده ویرایش نمی‌شود؛ اگر لازم شد آن را با دکمهٔ حذف بردارید و الگوی تازه بسازید.",
-      },
-      {
-        id: "add",
-        kind: "spotlight",
-        anchor: TOUR_ANCHORS.barcodeAdd,
-        title: "افزودن الگو",
-        body:
-          "«افزودن الگو» یک کارت پیش‌نویس تازه می‌گذارد که پیش‌شماره و واحد وزنش را انتخاب می‌کنید. تا ثبت نکنید چیزی ذخیره نمی‌شود.",
-      },
-      {
-        id: "save",
-        kind: "spotlight",
-        anchor: TOUR_ANCHORS.barcodeSave,
-        title: "ثبت الگو",
-        body:
-          "«ثبت الگو» همهٔ پیش‌نویس‌ها را ذخیره می‌کند؛ اگر پیش‌شماره‌ای تکراری باشد پیام می‌گیرید. این تور آن را نمی‌زند.",
+        title: "قالب‌ها و پیش‌نمایش",
+        body: "قالب‌های مناسب این صنف را با داده‌های نمونه ببینید. مدیریت و انتخاب قالب به دسترسی تنظیمات نیاز دارد.",
       },
     ],
   },

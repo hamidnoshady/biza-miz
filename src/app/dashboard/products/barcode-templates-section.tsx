@@ -8,7 +8,7 @@
  * (weight-barcode.ts). Existing patterns can be removed; «افزودن الگو» opens
  * a draft card and «ثبت الگو» saves the drafts.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toPersianDigits } from "@/lib/digits";
@@ -30,16 +30,21 @@ interface DraftTemplate {
 
 const PREFIX_OPTIONS = ["20", "21", "22", "23", "24", "25", "26", "27", "28", "29"];
 
-export function BarcodeTemplatesSection() {
+export function BarcodeTemplatesSection({ canEdit }: { canEdit: boolean }) {
   const [templates, setTemplates] = useState<WeightBarcodeTemplate[] | null>(null);
   const [drafts, setDrafts] = useState<DraftTemplate[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [loadError, setLoadError] = useState(false);
+  const nextDraftKey = useRef(0);
+  const busyRef = useRef(false);
 
   const load = () => {
+    setLoadError(false);
     api<{ templates: WeightBarcodeTemplate[] }>("/api/products/barcode-templates").then(({ ok, data }) => {
-      if (ok) setTemplates(data.templates);
+      if (ok && Array.isArray(data.templates)) setTemplates(data.templates);
+      else setLoadError(true);
     });
   };
   useEffect(load, []);
@@ -50,35 +55,51 @@ export function BarcodeTemplatesSection() {
       ? { prefix: templates[0].prefix, weightUnit: templates[0].weightUnit }
       : { prefix: "20", weightUnit: "grams" as WeightUnit };
   const sample = sampleWeightBarcode(previewSource.prefix, previewSource.weightUnit);
+  const usedPrefixes = new Set([...(templates ?? []).map((template) => template.prefix), ...drafts.map((draft) => draft.prefix)]);
+  const nextPrefix = PREFIX_OPTIONS.find((prefix) => !usedPrefixes.has(prefix));
 
   async function saveDrafts() {
-    if (drafts.length === 0) return;
+    if (!canEdit || busyRef.current || drafts.length === 0) return;
+    busyRef.current = true;
     setBusy(true);
     setError("");
     setNotice("");
+    const saved = new Set<number>();
     let failed = false;
     for (const draft of drafts) {
       const { ok, data } = await api("/api/products/barcode-templates", {
         method: "POST",
         body: JSON.stringify({ prefix: draft.prefix, weightUnit: draft.weightUnit }),
       });
-      if (!ok) {
+      if (ok) saved.add(draft.key);
+      else {
         failed = true;
-        setError(data.error === "duplicate_prefix" ? `پیش‌شمارهٔ ${toPersianDigits(draft.prefix)} قبلاً ثبت شده است.` : "ثبت نشد؛ دوباره تلاش کنید.");
+        setError(data.error === "duplicate_prefix"
+          ? `پیش‌شمارهٔ ${toPersianDigits(draft.prefix)} قبلاً ثبت شده است؛ الگوهای باقی‌مانده را بررسی کنید.`
+          : "ثبت بعضی الگوها تأیید نشد؛ فهرست را بررسی و پیش‌نویس‌های باقی‌مانده را بازبینی کنید.");
       }
     }
-    setBusy(false);
-    if (failed) return;
-    setDrafts([]);
-    setNotice("الگوها ثبت شد.");
+    setDrafts((current) => current.filter((draft) => !saved.has(draft.key)));
+    if (saved.size > 0) {
+      setNotice(failed ? `${toPersianDigits(saved.size)} الگو ثبت شد؛ بقیه در پیش‌نویس مانده‌اند.` : "الگوها ثبت شد.");
+    }
+    // A failed response can still mean the server committed; re-read rather
+    // than claiming failure or blindly recreating an already-saved prefix.
     load();
+    busyRef.current = false;
+    setBusy(false);
   }
 
   async function remove(template: WeightBarcodeTemplate) {
+    if (!canEdit || busyRef.current || !window.confirm("این الگو حذف شود؟")) return;
+    busyRef.current = true;
+    setBusy(true);
     setError("");
     const { ok } = await api(`/api/products/barcode-templates/${template.id}`, { method: "DELETE" });
-    if (!ok) setError("حذف نشد؛ دوباره تلاش کنید.");
+    if (!ok) setError("حذف تأیید نشد؛ فهرست را بررسی کنید.");
     load();
+    busyRef.current = false;
+    setBusy(false);
   }
 
   return (
@@ -104,14 +125,15 @@ export function BarcodeTemplatesSection() {
       </SectionCard>
       </div>
 
-      {templates === null ? <SectionCardSkeleton rows={3} /> : null}
+      {loadError ? <div role="alert"><p>خواندن الگوها ناموفق بود.</p><Button type="button" variant="outline" onClick={load}>تلاش دوباره</Button></div> : null}
+      {templates === null && !loadError ? <SectionCardSkeleton rows={3} /> : null}
 
       <div data-tour-id="barcode-templates.list" className="grid min-w-0 gap-4 xl:grid-cols-2">
         {(templates ?? []).map((template, index) => (
           <section key={template.id} className={`${cardClass} min-w-0 p-4 sm:p-5`}>
             <div className="flex items-center justify-between gap-2">
               <h2 className="font-semibold text-foreground">الگوی شمارهٔ {toPersianDigits(index + 1)}</h2>
-              <Button
+              {canEdit ? <Button
                 type="button"
                 variant="ghost"
                 size="sm"
@@ -121,7 +143,7 @@ export function BarcodeTemplatesSection() {
                 onClick={() => remove(template)}
               >
                 <Trash2Icon aria-hidden="true" className="size-4" />
-              </Button>
+              </Button> : null}
             </div>
             <div className="mt-4 grid min-w-0 gap-4 sm:grid-cols-2">
               <Field label="پیش شماره (کد ثابت الگو)">
@@ -153,6 +175,7 @@ export function BarcodeTemplatesSection() {
                 size="sm"
                 className="size-8 p-0 text-rose-600 dark:text-rose-400"
                 aria-label="حذف پیش‌نویس الگو"
+                disabled={busy}
                 onClick={() => setDrafts((current) => current.filter((d) => d.key !== draft.key))}
               >
                 <Trash2Icon aria-hidden="true" className="size-4" />
@@ -163,6 +186,7 @@ export function BarcodeTemplatesSection() {
                 <select
                   className={inputClass}
                   value={draft.prefix}
+                  disabled={busy}
                   onChange={(event) =>
                     setDrafts((current) =>
                       current.map((d) => (d.key === draft.key ? { ...d, prefix: event.target.value } : d)),
@@ -180,6 +204,7 @@ export function BarcodeTemplatesSection() {
                 <select
                   className={inputClass}
                   value={draft.weightUnit}
+                  disabled={busy}
                   onChange={(event) =>
                     setDrafts((current) =>
                       current.map((d) =>
@@ -204,18 +229,18 @@ export function BarcodeTemplatesSection() {
       </div>
 
       {templates !== null && templates.length === 0 && drafts.length === 0 ? (
-        <EmptyState>الگویی ثبت نشده؛ با «افزودن الگو» اولین الگوی بارکد وزنی را بسازید.</EmptyState>
+        <EmptyState>{canEdit ? "الگویی ثبت نشده؛ با «افزودن الگو» اولین الگوی بارکد وزنی را بسازید." : "الگویی ثبت نشده است."}</EmptyState>
       ) : null}
 
-      <button
+      {canEdit ? <><button
         type="button"
+        disabled={busy || loadError || templates === null || !nextPrefix}
         data-tour-id="barcode-templates.add"
-        onClick={() =>
-          setDrafts((current) => [
-            ...current,
-            { key: Date.now(), prefix: PREFIX_OPTIONS[current.length % PREFIX_OPTIONS.length] ?? "20", weightUnit: "grams" },
-          ])
-        }
+        onClick={() => {
+          if (!nextPrefix) return;
+          const key = ++nextDraftKey.current;
+          setDrafts((current) => [...current, { key, prefix: nextPrefix, weightUnit: "grams" }]);
+        }}
         className="flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border text-sm font-medium text-foreground/70 transition-colors hover:border-amber-300 dark:hover:border-amber-500/40 hover:bg-amber-50 dark:hover:bg-amber-500/10 hover:text-amber-700 dark:hover:text-amber-300"
       >
         <PlusIcon aria-hidden="true" className="size-4" />
@@ -224,8 +249,8 @@ export function BarcodeTemplatesSection() {
 
       <Button type="button" data-tour-id="barcode-templates.save" size="lg" className="w-full font-semibold" disabled={busy || drafts.length === 0} onClick={saveDrafts}>
         ثبت الگو
-      </Button>
-      {notice ? <p className="text-xs text-emerald-600 dark:text-emerald-400">{notice}</p> : null}
+      </Button></> : null}
+      {notice ? <p role="status" className="text-xs text-emerald-600 dark:text-emerald-400">{notice}</p> : null}
     </div>
   );
 }

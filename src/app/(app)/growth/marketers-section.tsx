@@ -5,10 +5,11 @@ import { Button } from "@/components/ui/button";
 import { EmptyState, SectionCard, SectionCardSkeleton } from "@/app/dashboard/page-chrome";
 import { DataTable, DataTableHead, DataTableBody, DataTableRow, Th, Td } from "@/app/dashboard/data-table";
 import { api, ErrorBox, Field, inputClass } from "@/app/dashboard/ui";
+import { MarketerSupervisorForm } from "./marketer-supervisor-form";
 import type { MarketerKind } from "@/lib/marketing-roster";
 
 const KIND: Record<MarketerKind, string> = { employee: "کارمند", contractor: "پیمانکار", affiliate: "همکار ارجاعی", agency: "آژانس" };
-type Row = { id: string; name: string; kind: MarketerKind; status: "active" | "inactive"; location_name: string; user_active: boolean | null; revision: number };
+type Row = { id: string; name: string; kind: MarketerKind; status: "active" | "inactive"; location_name: string; location_id: string; user_active: boolean | null; revision: number; supervisor_id: string | null; supervisor_name: string | null; supervisor_eligible: boolean | null };
 type List = { marketers: Row[]; hasMore: boolean };
 type Candidates = { locations: { id: string; name: string }[]; users: { id: string; full_name: string; location_id: string }[] };
 
@@ -26,6 +27,7 @@ export function MarketersSection({ canManage }: { canManage: boolean }) {
   const [kind, setKind] = useState<MarketerKind>("employee");
   const [userId, setUserId] = useState("");
   const [name, setName] = useState("");
+  const [supervisorEdit, setSupervisorEdit] = useState<Row | null>(null);
   const [editing, setEditing] = useState<Row | null>(null);
   const [editName, setEditName] = useState("");
   const [pending, setPending] = useState<Row | null>(null);
@@ -63,10 +65,10 @@ export function MarketersSection({ canManage }: { canManage: boolean }) {
     });
     setBusy(false);
     if (!result.ok) {
-      setError(result.data?.error === "open_assignments" ? "بازاریاب ماموریت باز دارد؛ ابتدا ماموریت‌ها را تکمیل یا لغو کنید." : result.data?.error === "ineligible_user" ? "عضو مرتبط فعال نیست یا دیگر به این شعبه دسترسی ندارد." : "تغییر ممکن نشد؛ دسترسی یا نسخهٔ بازاریاب ممکن است تغییر کرده باشد. فهرست را دوباره دریافت کنید.");
+      setError(result.data?.error === "open_assignments" ? "بازاریاب ماموریت باز دارد؛ ابتدا ماموریت‌ها را تکمیل یا لغو کنید." : result.data?.error === "supervisor_has_reports" ? "این سرپرست زیردست دارد؛ ابتدا سرپرست آن‌ها را تغییر دهید." : result.data?.error === "supervisor_cycle" ? "این انتخاب باعث ایجاد چرخه در سلسله‌مراتب می‌شود." : result.data?.error === "invalid_supervisor" ? "سرپرست انتخابی فعال و مجاز در این شعبه نیست." : result.data?.error === "ineligible_user" ? "عضو مرتبط فعال نیست یا دیگر به این شعبه دسترسی ندارد." : "تغییر ممکن نشد؛ دسترسی یا نسخهٔ بازاریاب ممکن است تغییر کرده باشد. فهرست را دوباره دریافت کنید.");
       return;
     }
-    setEditing(null); setPending(null); await load();
+    setEditing(null); setPending(null); setSupervisorEdit(null); await load();
   }
 
   return <div className="space-y-4">
@@ -80,11 +82,12 @@ export function MarketersSection({ canManage }: { canManage: boolean }) {
       {!data && !error ? <SectionCardSkeleton /> : null}
       {data && data.marketers.length === 0 ? <EmptyState>بازاریابی یافت نشد.</EmptyState> : null}
       {data && data.marketers.length > 0 ? <DataTable caption="فهرست بازاریابان">
-        <DataTableHead><Th>نام</Th><Th>نوع همکاری</Th><Th>شعبه</Th><Th>وضعیت</Th>{canManage ? <Th>عملیات</Th> : null}</DataTableHead>
-        <DataTableBody>{data.marketers.map((row) => <DataTableRow key={row.id}><Td>{row.name}</Td><Td>{KIND[row.kind]}</Td><Td>{row.location_name}</Td><Td>{row.status === "active" ? "فعال" : "غیرفعال"}{row.user_active === false ? " (عضو غیرفعال)" : ""}</Td>{canManage ? <Td>{row.kind !== "employee" && row.status === "active" ? <Button type="button" variant="outline" disabled={busy} onClick={() => { setPending(null); setEditing(row); setEditName(row.name); }}>ویرایش نام</Button> : null}<Button type="button" variant="outline" disabled={busy} onClick={() => { setEditing(null); setPending(row); }}>{row.status === "active" ? "غیرفعال‌سازی" : "فعال‌سازی"}</Button></Td> : null}</DataTableRow>)}</DataTableBody>
+        <DataTableHead><Th>نام</Th><Th>نوع همکاری</Th><Th>شعبه</Th><Th>سرپرست</Th><Th>وضعیت</Th>{canManage ? <Th>عملیات</Th> : null}</DataTableHead>
+        <DataTableBody>{data.marketers.map((row) => <DataTableRow key={row.id}><Td>{row.name}</Td><Td>{KIND[row.kind]}</Td><Td>{row.location_name}</Td><Td>{row.supervisor_name ?? "—"}{row.supervisor_eligible === false ? " (غیرفعال یا فاقد دسترسی)" : ""}</Td><Td>{row.status === "active" ? "فعال" : "غیرفعال"}{row.user_active === false ? " (عضو غیرفعال)" : ""}</Td>{canManage ? <Td><Button type="button" variant="outline" disabled={busy} onClick={() => { setEditing(null); setPending(null); setSupervisorEdit(row); }}>تغییر سرپرست</Button>{row.kind !== "employee" && row.status === "active" ? <Button type="button" variant="outline" disabled={busy} onClick={() => { setPending(null); setSupervisorEdit(null); setEditing(row); setEditName(row.name); }}>ویرایش نام</Button> : null}<Button type="button" variant="outline" disabled={busy} onClick={() => { setEditing(null); setSupervisorEdit(null); setPending(row); }}>{row.status === "active" ? "غیرفعال‌سازی" : "فعال‌سازی"}</Button></Td> : null}</DataTableRow>)}</DataTableBody>
       </DataTable> : null}
       {data ? <div className="flex gap-2"><Button type="button" variant="outline" disabled={page === 1} onClick={() => setPage(page - 1)}>صفحه قبل</Button><Button type="button" variant="outline" disabled={!data.hasMore} onClick={() => setPage(page + 1)}>صفحه بعد</Button></div> : null}
     </SectionCard>
+    {canManage && supervisorEdit ? <MarketerSupervisorForm key={supervisorEdit.id} marketer={supervisorEdit} busy={busy} onCancel={() => setSupervisorEdit(null)} onSave={(supervisorId) => void change(supervisorEdit, { action: "supervisor", supervisorId })} /> : null}
     {canManage && editing ? <SectionCard title="ویرایش نام همکار خارجی" description="نام اعضای تیم از فهرست مشترک کاربران دریافت می‌شود.">
       <form onSubmit={(e) => { e.preventDefault(); void change(editing, { action: "rename", name: editName }); }}>
         <Field label="نام همکار برای ویرایش"><input className={inputClass} required maxLength={150} value={editName} onChange={(e) => setEditName(e.target.value)} /></Field>

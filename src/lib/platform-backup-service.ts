@@ -1036,6 +1036,13 @@ export type PlatformCloudResult =
 
 /** The redacted, structured answer to "why did it fail?" (issue #1296). */
 export interface CloudDiagnostics {
+  /**
+   * The `platform_backup_runs` row this attempt belongs to — the handle an
+   * operator quotes and a support engineer searches for. The artifact name alone
+   * is not it: the same artifact is attempted many times, and the question is
+   * always "which attempt?".
+   */
+  runId: string | null;
   /** short provider-neutral stage code the attempt reached */
   phase: string | null;
   /** HTTP status from the provider, or null for a transport failure */
@@ -1097,6 +1104,53 @@ async function recordCloudConfirmation(input: {
   );
 }
 
+/**
+ * The identity a confirmed artifact hangs off, created on demand.
+ *
+ * An artifact does not have to have been produced by *this* install: a directory
+ * restored from a USB stick, a file copied in after a rebuild, or history that
+ * predates `platform_backup_runs` all put a perfectly restorable artifact on disk
+ * with no row behind it. `listPlatformLocalArtifacts` already treats such a file
+ * as a real backup — but without a row there is nowhere to record that its upload
+ * was *proved*, so the console would report it as never off-site even after a
+ * successful, verified upload. That is the same class of lie #1296 was filed
+ * about, just pointing the other way.
+ *
+ * The inserted row is marked `manual` and says in its manifest that it is an
+ * identity backfill, so history never claims a dump ran when one did not.
+ */
+async function ensureLocalIdentityFor(
+  artifact: string,
+  proof: { sizeBytes: number; sha256: string },
+): Promise<string | null> {
+  const existing = await localRunIdFor(artifact);
+  if (existing) return existing;
+  const { rows } = await query<{ id: string }>(
+    `INSERT INTO platform_backup_runs (kind, trigger, status, artifact, size_bytes, sha256, manifest, finished_at)
+     SELECT 'local', 'manual', 'success', $1, $2, $3, $4::jsonb, now()
+      WHERE NOT EXISTS (
+        SELECT 1 FROM platform_backup_runs
+         WHERE kind = 'local' AND status = 'success' AND artifact = $1
+      )
+     RETURNING id`,
+    [
+      artifact,
+      proof.sizeBytes,
+      proof.sha256,
+      JSON.stringify({
+        artifact,
+        sizeBytes: proof.sizeBytes,
+        sha256: proof.sha256,
+        identityBackfilled: true,
+        note: "issue #1296 — recorded when a verified upload needed a row to attach its proof to; no local dump ran for this row",
+      }),
+    ],
+  );
+  // `WHERE NOT EXISTS` can lose a race to a concurrent insert; re-read so both
+  // callers end up pointing at the same winning row.
+  return rows[0]?.id ?? (await localRunIdFor(artifact));
+}
+
 /** The local run row an artifact belongs to, for the confirmation write. */
 async function localRunIdFor(artifact: string): Promise<string | null> {
   const { rows } = await query<{ id: string }>(
@@ -1155,11 +1209,20 @@ export async function verifyCloudObject(input: {
 
 function cloudDiagnosticsOf(
   err: unknown,
-  input: { phase: string | null; attempts: number; expectedBytes: number | null; startedAt: number; retryable: boolean; retryAfterMs: number | null },
+  input: {
+    runId: string | null;
+    phase: string | null;
+    attempts: number;
+    expectedBytes: number | null;
+    startedAt: number;
+    retryable: boolean;
+    retryAfterMs: number | null;
+  },
 ): CloudDiagnostics {
   const typed = err instanceof S3RequestError ? err : null;
   const transport = typed ? describeTransportFailure(typed.cause ?? err) : describeTransportFailure(err);
   return {
+    runId: input.runId,
     phase: input.phase,
     providerStatus: typed?.status ?? null,
     code: typed?.providerCode ?? transport.code,
@@ -1223,6 +1286,7 @@ export async function runPlatformCloudUpload(
       retryable: false,
       attempt: 1,
       diagnostics: {
+        runId: null,
         phase: "preparing",
         providerStatus: null,
         code: "unsafe_artifact_name",
@@ -1247,6 +1311,7 @@ export async function runPlatformCloudUpload(
       retryable: true,
       attempt: 1,
       diagnostics: {
+        runId: null,
         phase: "lock",
         providerStatus: null,
         code: "cloud_lock_unavailable",
@@ -1298,6 +1363,7 @@ async function runPlatformCloudUploadLocked(
 
   const finishFailed = async (err: unknown): Promise<PlatformCloudResult> => {
     const diagnostics = cloudDiagnosticsOf(err, {
+      runId,
       phase,
       attempts: attemptNumber,
       expectedBytes,
@@ -1399,7 +1465,7 @@ async function runPlatformCloudUploadLocked(
       verifyMode: verify.mode,
       sizeBytes: verify.sizeBytes,
       sha256: verify.sha256 ?? payloadHash,
-      localRunId: await localRunIdFor(artifact),
+      localRunId: await ensureLocalIdentityFor(artifact, { sizeBytes: verify.sizeBytes, sha256: verify.sha256 ?? payloadHash }),
     });
     await query(`UPDATE platform_backup_runs SET cloud_key = $2 WHERE id = $1`, [runId, key]);
 
@@ -1563,6 +1629,111 @@ export async function listMissingLocalArtifacts(): Promise<string[]> {
 }
 
 /**
+ * Prove the off-site copy of an artifact — the read-only half of issue #1296.
+ *
+ * The console has always had «تأیید دوباره با هش», but the check lived inside
+ * the upload path, so the only way to ask "is the object still there, and is it
+ * still ours?" was to press a button that also *uploads*. That is the wrong
+ * shape for an MCP tool: an assistant should be able to verify without spending
+ * egress or starting a transfer, and an operator verifying a month-old artifact
+ * should not re-send it.
+ *
+ * So this resolves the artifact (defaulting to the newest capture that still
+ * exists on disk), derives the same object key the uploader uses, and delegates
+ * to `verifyCloudObject`. It writes nothing: no run row, no confirmation, no
+ * `cloud_verified_at`. The proof it returns is an observation, and the record of
+ * that observation belongs to whoever asked (the MCP call is audited; the
+ * console's verify button records a real confirmation because it is a retry).
+ *
+ * `mode: "sha256"` downloads the object and compares digests against the local
+ * artifact; `"size"` is one HEAD. Both are redacted — the key never appears in
+ * the answer, because an object key plus a bucket name is a useful thing to
+ * have if you are not the operator.
+ */
+export async function verifyPlatformCloudObject(options: {
+  artifact?: string | null;
+  mode?: "size" | "sha256";
+} = {}): Promise<
+  | {
+      status: "verified" | "missing" | "mismatch" | "unavailable";
+      artifact: string | null;
+      verifyMode: "size" | "sha256";
+      sizeBytes: number | null;
+      sha256: string | null;
+      /** provider-neutral reason, redacted; null when verified */
+      reason: string | null;
+      verifiedAt: string;
+    }
+> {
+  const config = await getPlatformBackupConfig();
+  const now = new Date().toISOString();
+  const mode = options.mode ?? "size";
+  const requested = options.artifact?.trim() || null;
+  const unavailable = (reason: string) =>
+    ({ status: "unavailable" as const, artifact: requested, verifyMode: mode, sizeBytes: null, sha256: null, reason, verifiedAt: now });
+  if (!config.cloud.enabled) return unavailable("cloud_disabled");
+
+  // Which artifact? The named one, or the newest capture whose file is still on
+  // disk — the same "newest" the health line reports, so a caller that just read
+  // health is verifying the artifact it was told about.
+  let artifact = requested;
+  let expectedSize: number | null = null;
+  let expectedSha: string | null = null;
+  {
+    const artifacts = await listPlatformLocalArtifacts(config);
+    const row = artifact
+      ? artifacts.find((a) => a.artifact === artifact)
+      : newestArtifact(artifacts.filter((a) => a.exists));
+    if (artifact && !row) return unavailable("artifact_not_found");
+    if (!row) return unavailable("no_local_artifact");
+    artifact = row.artifact;
+    expectedSize = row.sizeBytes ?? null;
+    expectedSha = row.sha256 ?? null;
+  }
+
+  // A file that is gone cannot be compared: its bytes are the only source of the
+  // digest, so hashing would compare the object with nothing.
+  if (mode === "sha256" && expectedSha === null) {
+    const artifacts = await listPlatformLocalArtifacts(config);
+    const row = artifacts.find((a) => a.artifact === artifact);
+    if (!row?.exists) return unavailable("local_artifact_missing");
+  }
+
+  const key = platformCloudKeyFor(config.cloud.prefix, artifact!);
+  const result = await verifyCloudObject({
+    config,
+    key,
+    expected: { sizeBytes: expectedSize, sha256: expectedSha },
+    mode,
+  });
+
+  if (result.ok) {
+    return {
+      status: "verified",
+      artifact,
+      verifyMode: result.mode,
+      sizeBytes: result.sizeBytes,
+      sha256: result.sha256,
+      reason: null,
+      verifiedAt: now,
+    };
+  }
+
+  // A missing object is a different answer from a corrupt one: "no copy" is a
+  // failed upload, "wrong bytes" is an incident.
+  const status = result.error === "object_not_found" ? "missing" : "mismatch";
+  return {
+    status,
+    artifact,
+    verifyMode: mode,
+    sizeBytes: null,
+    sha256: null,
+    reason: result.error,
+    verifiedAt: now,
+  };
+}
+
+/**
  * «تلاش دوباره» — upload the newest local artifact now, ignoring the backoff.
  *
  * This is the operator's explicit "upload it again" (issue #1296 P1: "actionable
@@ -1585,6 +1756,7 @@ export async function retryPlatformCloudUpload(
       retryable: false,
       attempt: 1,
       diagnostics: {
+        runId: null,
         phase: "preparing",
         providerStatus: null,
         code: "unsafe_artifact_name",
@@ -1606,6 +1778,7 @@ export async function retryPlatformCloudUpload(
       retryable: false,
       attempt: 1,
       diagnostics: {
+        runId: null,
         phase: "preparing",
         providerStatus: null,
         code: "no_local_artifact",

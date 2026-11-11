@@ -152,6 +152,7 @@ import {
   listPlatformBackupRuns,
   getPlatformBackupHealth,
   runPlatformBackupNow,
+  verifyPlatformCloudObject,
 } from "../platform-backup-service";
 import { platformAudit } from "../platform-auth";
 import { isPlatformMcpAccessToken } from "./platform-oauth";
@@ -397,6 +398,10 @@ interface PlatformToolInput {
   offset?: number;
   // Batch BK — the security/support surface (ticket + report + audit ids and
   // filters); support triage fields mirror the console's PATCH lanes.
+  // Issue #1296 follow-up — `verify_backup_cloud_object` asks about one
+  // artifact and how hard to look, so the input carries both.
+  artifact?: string;
+  verify?: string;
   ticketId?: string;
   reportId?: string;
   body?: string;
@@ -604,7 +609,12 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
       properties: {
         businessId: { type: "string", description: "Filter to one tenant's rows." },
         adminId: { type: "string", description: "Filter to one platform admin." },
-        actionFamily: { type: "string", description: "Prefix match, e.g. 'platform_mcp'." },
+        actionFamily: {
+          type: "string",
+          description:
+            "Prefix match, e.g. 'platform_mcp'. The console's families expand to several prefixes " +
+            "('backup' covers platform_backup, tenant_backup and backup; 'cms' covers platform_cms).",
+        },
         entity: { type: "string" },
         search: { type: "string" },
         createdFrom: { type: "string" },
@@ -1277,6 +1287,29 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
     bridged: false,
     stepUp: true,
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "verify_backup_cloud_object",
+    description:
+      "Prove the off-site copy actually exists and matches, without uploading anything (issue #1296). Defaults to the newest capture and a HEAD (existence + exact size); pass verify:'sha256' to download the object and compare its digest. Read-only: it never starts an upload and never touches the provider's key or URL in its answer — the console's «تأیید دوباره با هش» is this same call. The retry/upload path stays console-only on purpose: an upload spends real egress and is an operator decision.",
+    capability: "backup.verify",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        artifact: {
+          type: "string",
+          description:
+            "Artifact file name to verify, e.g. pos-backup-20261107-060247-7e2e5bb6.dump.enc. Omit for the newest capture.",
+        },
+        verify: {
+          type: "string",
+          enum: ["size", "sha256"],
+          description:
+            "size (default): one HEAD — existence and exact byte count. sha256: also download the object and compare its digest with the local artifact (a full round trip of its bytes).",
+        },
+      },
+    },
   },
   {
     name: "get_system_status",
@@ -2117,6 +2150,27 @@ async function executePlatformTool(
           cloud: result.cloud.status,
         });
         return { ok: true, result };
+      }
+      case "verify_backup_cloud_object": {
+        // Read-only on purpose: this is the console's «تأیید دوباره با هش»
+        // without the upload half. `retry` stays console-only because it spends
+        // real egress, and an assistant that could start uploads on a schedule
+        // would be a billing and rate-limit problem before it was a feature.
+        const mode = arg.verify === "sha256" ? "sha256" : "size";
+        const proof = await verifyPlatformCloudObject({
+          artifact: typeof arg.artifact === "string" ? arg.artifact : null,
+          mode,
+        });
+        await platformAuditSafe(connection, "platform", tool.name, proof.status, {
+          action: "platform_backup.cloud.verify",
+          artifact: proof.artifact,
+          verifyMode: proof.verifyMode,
+          status: proof.status,
+          // A provider-neutral reason, already redacted by the service; null when
+          // the object was proven. Never the key, never the endpoint.
+          reason: proof.reason,
+        });
+        return proof;
       }
       case "get_system_status": {
         const migrations = await getMigrationStatus();

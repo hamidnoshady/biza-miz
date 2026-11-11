@@ -287,7 +287,7 @@ States the off-site card can show:
 
 | State | Meaning | What to do |
 |---|---|---|
-| `current` | the newest capture has a confirmed object in the bucket | nothing |
+| `current` | the newest capture has a confirmed object in the bucket | nothing (optionally «تأیید دوباره با هش») |
 | `uploading` | an attempt holds a live lease on another worker | wait; the card names the timeout |
 | `pending` | a retry is scheduled (backoff, or the newest capture's file is gone) | wait, or press «تلاش دوبارهٔ ارسال» |
 | `failed` | a deterministic refusal (403/signature), or the retry ladder is spent | fix the destination or the credentials, then retry |
@@ -302,6 +302,68 @@ failed` / `NetworkError` (what the live 2026-11-07 incident saw) is classified f
 its whole cause chain and treated as transient; a 403, a bad signature or a 400
 fails fast. No signed URL, header, key or passphrase is ever stored — the message
 is built from names and numbers only.
+
+**Two proofs, and how to ask for the stronger one.** Every upload ends with a
+`HEAD` and an exact byte count — cheap, and enough to know the object is there at
+the size we sent. That is `cloud_verify_mode = 'size'`. For an artifact of a few
+hundred megabytes a size match is not a *content* match, so the console and the API
+also offer **«تأیید دوباره با هش»**: the object is downloaded again and its SHA-256
+compared with the artifact on disk (`POST /api/platform/backup/retry` with
+`{"verify":"sha256"}`). It costs one full round trip of the artifact, which is why
+it is a deliberate action and not the default — but it is the only proof that a
+large upload arrived intact, and it is what a restore drill should end with.
+
+**An artifact with no run row still counts.** A file copied in from a USB stick, or
+one that survived a machine rebuild, is a real backup (`listPlatformLocalArtifacts`
+already lists it). When such a file uploads and the provider proves the object, a
+`manual` identity row is written for it with `identityBackfilled: true` in the
+manifest, so the proof has somewhere to live — and the history says plainly that no
+dump ran for that row. Without it the console would report "never off-site" about a
+copy that is demonstrably off-site.
+
+**Every diagnostic carries its attempt id.** `CloudDiagnostics.runId` is the
+`platform_backup_runs` row of the attempt that failed — the same id the console
+shows (shortened) and the retry route writes to the audit log. Quote it in a
+support request: the artifact name is not enough, because the same artifact is
+attempted many times.
+
+**The large-artifact path is exercised at 320 MB on demand.** CI runs the
+incident-scale test at 64 MiB (streaming 320 MB several times would dominate the
+job), but the criterion in issue #1296 names a 319 MB artifact, so the size is a
+dial:
+
+```bash
+LARGE_ARTIFACT_MIB=320 npm run test:db -- integration/platform-backup-cloud.integration.test.ts
+```
+
+That is the identical code path — the size-derived 320 s upload timeout, the lease
+arithmetic fed by it, the streaming digest and the post-upload proof — at the real
+scale. It runs against the test harness's stub bucket, so it proves the *engine*
+handles the bytes; proving the *deployment* still needs one run against the real
+bucket in a non-production environment, which is an operator action, not a CI one.
+
+**Proving the copy without re-uploading it.** The console's «تأیید دوباره با هش»
+is a *retry*: it checks the object and, if anything is off, sends the artifact
+again. The MCP tool `verify_backup_cloud_object` (`backup.verify`) is the
+read-only half — it resolves the artifact (defaulting to the newest capture still
+on disk), derives the same object key the uploader uses, and answers `verified`,
+`missing` (no object at that key) or `mismatch` (bytes that are not ours), with
+the key and endpoint redacted from the reply. `verify:"size"` is one HEAD;
+`verify:"sha256"` downloads the object and compares digests. It writes no run row
+and no confirmation, because a glance is not an attempt — the call itself is
+audited as `platform_backup.cloud.verify`. Uploading stays console-only on
+purpose: `backup.run` may start a transfer and costs real egress, so an assistant
+holding `backup.verify` can prove protection but can never cause a copy.
+
+**The audit log's «پشتیبان‌گیری» filter covers all three namespaces.** The console
+writes backup events under `platform_backup.*` (the whole install), `tenant_backup.*`
+(one business) and `backup.run_now` (the MCP tool), and the filter used to match only
+the last of those — an operator filtering to backups saw a single row and concluded
+nothing had been audited. A family is now a set of prefixes (`src/lib/audit-families.ts`),
+shared by the dropdown and the SQL, so the three cannot drift apart again. Two
+companions to the retry button are worth knowing by name in the log:
+`platform_backup.cloud.retry` (a manual retry, success or failure) and
+`platform_backup.restore.verify` (a drill). Both carry the attempt id when there is one.
 
 **Recovery of a stuck upload.** Every attempt takes a per-artifact advisory lock
 (`lock:backup:platform-cloud:<artifact>`), so the scheduler, a manual click and a

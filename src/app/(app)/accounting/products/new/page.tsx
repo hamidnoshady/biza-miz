@@ -1,10 +1,12 @@
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
+import { AutomotiveWorkspace } from "@/app/dashboard/automotive/automotive-workspace";
 import { ProductAddSection } from "@/app/dashboard/products/product-add-section";
-import { requireProductWorkspace } from "@/app/dashboard/products/workspace-context";
+import { automotiveCreateEntry, requireProductWorkspace } from "@/app/dashboard/products/workspace-context";
 
 /** «افزودن محصول» — the tabbed product form with drafts and variant rows. */
 export default async function ProductAddPage() {
+  if (await automotiveCreateEntry()) return <AutomotiveWorkspace initialSection="acquire" />;
   const { draftScope } = await requireProductWorkspace({ edit: true });
   return (
     <PageShell>

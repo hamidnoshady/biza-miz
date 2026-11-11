@@ -41,8 +41,11 @@ export interface HistoricalInvoiceRow {
   unitPrice?: string;
   lineDiscount?: string;
   lineTax?: string;
-  /** Spreadsheet row number for review. */
+  /** Unique staging row number. For a flat file this is the spreadsheet row. */
   rowNumber: number;
+  /** Original workbook coordinates for separately staged sheets. */
+  sourceSheet?: string;
+  sourceRowNumber?: number;
 }
 
 export interface VerifiedCustomerBinding {
@@ -117,13 +120,22 @@ export function previewHistoricalInvoices(
   rows: readonly HistoricalInvoiceRow[],
   options: HistoricalPreviewOptions,
 ): HistoricalPreviewDocument[] {
+  return previewHistoricalInvoiceRows(rows, options);
+}
+
+function previewHistoricalInvoiceRows(
+  rows: readonly HistoricalInvoiceRow[], options: HistoricalPreviewOptions, firstExplicitLine = rows.length,
+): HistoricalPreviewDocument[] {
   const groups = new Map<string, HistoricalInvoiceRow[]>();
+  const explicitLines = new WeakSet<HistoricalInvoiceRow>();
   rows.forEach((row, index) => {
     const id = text(row.externalInvoiceId);
     // Prefixes prevent a real external ID from colliding with the missing-ID key.
     const key = id ? `id:${id}` : `missing:${index}`;
     const group = groups.get(key) ?? [];
-    group.push({ ...row });
+    const copy = { ...row };
+    if (index >= firstExplicitLine) explicitLines.add(copy);
+    group.push(copy);
     groups.set(key, group);
   });
   const archived = new Set(options.archivedExternalIds);
@@ -176,22 +188,23 @@ export function previewHistoricalInvoices(
     if (paid !== null && balance !== null && new Exact(paid).gt(0) && new Exact(balance).gt(0)) {
       warnings.push("پرداخت جزئی فقط به‌عنوان سابقه نمایش داده می‌شود و بدهی یا پرداختی در دفتر ثبت نمی‌کند.");
     }
-    const lines = group.filter((row) => LINE_FIELDS.some((field) => text(row[field])));
+    const lines = group.filter((row) => explicitLines.has(row) || LINE_FIELDS.some((field) => text(row[field])));
     let lineSum = new Exact(0);
     for (const row of lines) {
+      const rowLabel = row.sourceSheet && row.sourceRowNumber ? `${row.sourceRowNumber} (برگهٔ ${row.sourceSheet})` : String(row.rowNumber);
       const quantityText = decimalText(text(row.quantity));
-      const price = readMoney(text(row.unitPrice), `قیمت ردیف ${row.rowNumber}`, true);
-      const lineDiscount = readMoney(text(row.lineDiscount), `تخفیف ردیف ${row.rowNumber}`);
-      const lineTax = readMoney(text(row.lineTax), `مالیات ردیف ${row.rowNumber}`);
-      if (!text(row.lineName) && !text(row.lineSku) && !text(row.lineBarcode)) errors.push(`مشخصات کالا در ردیف ${row.rowNumber} خالی است.`);
+      const price = readMoney(text(row.unitPrice), `قیمت ردیف ${rowLabel}`, true);
+      const lineDiscount = readMoney(text(row.lineDiscount), `تخفیف ردیف ${rowLabel}`);
+      const lineTax = readMoney(text(row.lineTax), `مالیات ردیف ${rowLabel}`);
+      if (!text(row.lineName) && !text(row.lineSku) && !text(row.lineBarcode)) errors.push(`مشخصات کالا در ردیف ${rowLabel} خالی است.`);
       if (!quantityText || new Exact(quantityText).lte(0)) {
-        errors.push(`تعداد ردیف ${row.rowNumber} باید عددی مثبت باشد؛ مرجوعی نیاز به بررسی دارد.`);
+        errors.push(`تعداد ردیف ${rowLabel} باید عددی مثبت باشد؛ مرجوعی نیاز به بررسی دارد.`);
         continue;
       }
       if (price === null) continue;
       const lineTotal = new Exact(quantityText).mul(price).minus(lineDiscount ?? "0").plus(lineTax ?? "0");
       if (lineTotal.lt(0) || !lineTotal.isInteger() || lineTotal.gt(MAX_RIAL)) {
-        errors.push(`مبلغ ردیف ${row.rowNumber} نامعتبر یا دارای کسر ریال است.`);
+        errors.push(`مبلغ ردیف ${rowLabel} نامعتبر یا دارای کسر ریال است.`);
       } else lineSum = lineSum.plus(lineTotal);
     }
     if (lines.length && total !== null && !lineSum.minus(discount ?? "0").plus(tax ?? "0").eq(total)) {
@@ -211,7 +224,7 @@ export function previewHistoricalInvoices(
 
 /** A line sheet contains only line fields and the source document ID. */
 export type HistoricalInvoiceLineRow = Pick<HistoricalInvoiceRow,
-  "rowNumber" | "externalInvoiceId" | (typeof LINE_FIELDS)[number]>;
+  "rowNumber" | "sourceSheet" | "sourceRowNumber" | "externalInvoiceId" | (typeof LINE_FIELDS)[number]>;
 
 /**
  * Join separately mapped sheets by stable ID. An orphan is reported, never
@@ -235,7 +248,7 @@ export function previewHistoricalInvoiceSheets(
     if (!id || !headerCounts.has(id)) orphanLines.push({ ...line });
     else joined.push({ ...line });
   }
-  const documents = previewHistoricalInvoices(joined, options);
+  const documents = previewHistoricalInvoiceRows(joined, options, headers.length);
   for (const document of documents) {
     if ((headerCounts.get(document.externalInvoiceId) ?? 0) > 1) {
       document.errors.push("شناسهٔ فاکتور در برگهٔ سربرگ تکرار شده است؛ نیاز به بررسی دارد.");

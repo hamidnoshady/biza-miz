@@ -183,6 +183,7 @@ async function fetchVehiclePages(
 }
 
 export function AutomotiveManager({
+  initialSection = "overview",
   canSeeCost,
   canCreateVehicle,
   canEditCost,
@@ -203,6 +204,7 @@ export function AutomotiveManager({
   canManageMedia,
   defaultVatPercent,
 }: {
+  initialSection?: "overview" | "stock" | "acquire";
   canSeeCost: boolean;
   canCreateVehicle: boolean;
   canEditCost: boolean;
@@ -223,7 +225,8 @@ export function AutomotiveManager({
   canManageMedia: boolean;
   defaultVatPercent: number;
 }) {
-  const [section, setSection] = useState<SectionKey>("overview");
+  const [section, setSection] = useState<SectionKey>(initialSection === "acquire" && !canCreateVehicle ? "stock" : initialSection);
+  const [mobileOpen, setMobileOpen] = useState(initialSection !== "overview");
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [overview, setOverview] = useState<OverviewDto | null>(null);
@@ -384,6 +387,8 @@ export function AutomotiveManager({
       tabs={visibleTabs}
       activeTab={section}
       onTabChange={setSection}
+      mobileOpen={mobileOpen}
+      onMobileOpenChange={setMobileOpen}
       error={shellError}
     >
       {section === "overview" ? (

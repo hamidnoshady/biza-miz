@@ -49,8 +49,8 @@ interface Editing {
   id?: string;
 }
 
-export function PrintingManager() {
-  const [tab, setTab] = useState<Tab>("printers");
+export function PrintingManager({ labelsOnly = false, canPrint = true }: { labelsOnly?: boolean; canPrint?: boolean } = {}) {
+  const [tab, setTab] = useState<Tab>(labelsOnly ? "templates" : "printers");
   const [editing, setEditing] = useState<Editing | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -60,8 +60,8 @@ export function PrintingManager() {
   const identity = usePrintIdentity();
   const money = useMoney();
   const editorDocumentTypes = useMemo(
-    () => availableDocumentTypes([...saved.builtIns, ...saved.templates]),
-    [saved.builtIns, saved.templates],
+    () => availableDocumentTypes([...saved.builtIns, ...saved.templates].filter((template) => !labelsOnly || template.docType === "label")),
+    [saved.builtIns, saved.templates, labelsOnly],
   );
 
   // The preview document: the sample sale, wearing this business's identity
@@ -155,10 +155,10 @@ export function PrintingManager() {
             <h2 className="mt-0.5 truncate font-semibold text-foreground">{editing.template.name || "قالب بدون نام"}</h2>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" onClick={() => void printSample(editing.template)}>
+            {canPrint && !labelsOnly ? <Button type="button" variant="outline" onClick={() => void printSample(editing.template)}>
               <PrinterIcon aria-hidden="true" />
               چاپ نمونه
-            </Button>
+            </Button> : null}
           </div>
         </div>
         <TemplateDesigner
@@ -180,20 +180,22 @@ export function PrintingManager() {
       <ErrorBox>{error || (saved.error ? "فهرست قالب‌های مجاز خوانده نشد؛ پس از بررسی دسترسی دوباره تلاش کنید." : "")}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
 
-      <TabBar idPrefix="printing" label="بخش‌های چاپ" tabs={TABS} active={tab} onChange={setTab} />
+      {!labelsOnly ? <TabBar idPrefix="printing" label="بخش‌های چاپ" tabs={TABS} active={tab} onChange={setTab} /> : null}
+      {saved.error ? <Button type="button" variant="outline" onClick={() => void saved.reload()}>تلاش دوباره</Button> : null}
 
       {tab === "templates" ? (
         saved.loading ? (
           <LoadingSkeleton rows={4} />
-        ) : (
+        ) : saved.error ? null : (
           <TemplateGallery
-            saved={saved.templates}
-            builtIns={saved.builtIns}
-            unavailableTemplates={saved.unavailableTemplates}
+            saved={saved.templates.filter((template) => !labelsOnly || template.docType === "label")}
+            builtIns={saved.builtIns.filter((template) => !labelsOnly || template.docType === "label")}
+            unavailableTemplates={saved.unavailableTemplates.filter((template) => !labelsOnly || template.docType === "label")}
             industry={saved.industry}
             data={sample}
             busy={saving}
-            onNew={() => setEditing({ template: starterTemplate("thermal80", "receipt") })}
+            canPrint={canPrint}
+            onNew={() => setEditing({ template: labelsOnly ? starterTemplate("label57x40", "label") : starterTemplate("thermal80", "receipt") })}
             onDuplicate={(template) =>
               setEditing({
                 template: {

@@ -73,6 +73,14 @@ describe("historical invoice dry-run", () => {
     expect(fraction.outcome).toBe("invalid");
     expect(fraction.errors.join()).toContain("کسر ریال");
   });
+  it("does not misclassify a blank mapped line as a summary-only invoice", () => {
+    const result = previewHistoricalInvoiceSheets([base], [
+      { rowNumber: 3, sourceSheet: "Lines", sourceRowNumber: 2, externalInvoiceId: "id-1" },
+    ], options);
+    expect(result.documents[0].outcome).toBe("invalid");
+    expect(result.documents[0].summaryOnly).toBe(false);
+    expect(result.documents[0].errors.join(" ")).toContain("ردیف 2 (برگهٔ Lines)");
+  });
   it("joins two sheets only by ID and reports orphan lines and duplicate headers", () => {
     const result = previewHistoricalInvoiceSheets([base], [
       { rowNumber: 2, externalInvoiceId: "id-1", lineName: "A", quantity: "1", unitPrice: "100" },

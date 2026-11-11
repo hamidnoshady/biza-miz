@@ -32,6 +32,7 @@ let watchReturns: typeof import("../src/lib/watch-return-service");
 let watchReservations: typeof import("../src/lib/watch-reservation-service");
 let watchTransfers: typeof import("../src/lib/watch-transfer-service");
 let watchAttributes: typeof import("../src/lib/watch-attributes-service");
+let specialistCreation: typeof import("../src/lib/specialist-product-creation");
 let serialDetail: typeof import("../src/lib/watch-serial-detail");
 
 const biz = { id: "", locationId: "" };
@@ -83,6 +84,7 @@ beforeAll(async () => {
   watchReservations = await import("../src/lib/watch-reservation-service");
   watchTransfers = await import("../src/lib/watch-transfer-service");
   watchAttributes = await import("../src/lib/watch-attributes-service");
+  specialistCreation = await import("../src/lib/specialist-product-creation");
   serialDetail = await import("../src/lib/watch-serial-detail");
 
   db = new Client({ connectionString: urlFor(databaseName) });
@@ -2548,5 +2550,33 @@ describe("Issue #795 Phase 6 — serial unit detail aggregation", () => {
     });
 
     expect(await serialDetail.serialUnitDetail(randomUUID())).toBeNull();
+  });
+});
+
+
+describe("atomic specialist product creation", () => {
+  it("rolls back the watch model when technical attribute validation fails", async () => {
+    await expect(specialistCreation.createWatchModel({ businessId: biz.id, locationId: biz.locationId, name: "Atomic watch", sku: "ATOMIC-W", serviceIntervalMonths: null, attributes: { movement: "invalid" } })).rejects.toThrow();
+    const rows = await db.query("SELECT id FROM items WHERE location_id = $1 AND sku = $2", [biz.locationId, "ATOMIC-W"]);
+    expect(rows.rows).toHaveLength(0);
+  });
+  it("commits the watch model and its attributes together", async () => {
+    const item = await specialistCreation.createWatchModel({ businessId: biz.id, locationId: biz.locationId, name: "Atomic watch", sku: "ATOMIC-W", serviceIntervalMonths: 12, attributes: { movement: "quartz" } });
+    expect(item.attributes?.movement).toBe("quartz");
+    expect((await watchAttributes.getWatchAttributes(item.id))?.movement).toBe("quartz");
+  });
+  it("commits a piece and its weight facts together", async () => {
+    const item = await specialistCreation.createJewelryPiece({ businessId: biz.id, locationId: biz.locationId, name: "Atomic gold", sku: "ATOMIC-J", weight: { purity: "18", grossWeight: "3.5", netWeight: "3.2" } });
+    const attributes = await itemsService.getWeightAttributes(item.id);
+    expect(attributes).toMatchObject({ purity: "18", grossWeight: "3.500000000", netWeight: "3.200000000" });
+  });
+  it("also rolls back a piece on a database error after validation succeeds", async () => {
+    await expect(specialistCreation.createJewelryPiece({ businessId: biz.id, locationId: biz.locationId, name: "Overflow gold", sku: "OVERFLOW-J", weight: { purity: "18", grossWeight: "100000000000000000000", netWeight: "1" } })).rejects.toThrow();
+    expect((await db.query("SELECT id FROM items WHERE location_id = $1 AND sku = $2", [biz.locationId, "OVERFLOW-J"])).rows).toHaveLength(0);
+  });
+  it("rolls back a piece when its weight facts fail validation", async () => {
+    await expect(specialistCreation.createJewelryPiece({ businessId: biz.id, locationId: biz.locationId, name: "Atomic gold", sku: "ATOMIC-J", weight: { purity: "18", grossWeight: "1", netWeight: "3" } })).rejects.toThrow();
+    const rows = await db.query("SELECT id FROM items WHERE location_id = $1 AND sku = $2", [biz.locationId, "ATOMIC-J"]);
+    expect(rows.rows).toHaveLength(0);
   });
 });

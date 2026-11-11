@@ -115,7 +115,7 @@ app.prepare().then(async () => {
     CENTRAL_SYNC_MAINTENANCE_INTERVAL_MS,
   } = await import("./src/lib/server-sync");
   const { runCloudExceptionRelayTick, CLOUD_EXCEPTION_RELAY_INTERVAL_MS } = await import("./src/lib/cloud-exception-relay");
-  const { assertRlsEffective, closeDatabasePool } = await import("./src/lib/db");
+  const { assertRlsEffective, closeDatabasePool, getPool } = await import("./src/lib/db");
   const { deploymentRole, describeDeploymentRole } = await import("./src/lib/deployment-role");
   const { runWebsiteBillingTick, WEBSITE_BILLING_TICK_INTERVAL_MS } = await import("./src/lib/website/billing-service");
   const {
@@ -201,6 +201,11 @@ app.prepare().then(async () => {
   // which superusers and BYPASSRLS roles ignore outright — silently, with no
   // error to notice. Refuse to serve production traffic in that state; in
   // development this only warns (see assertRlsEffective).
+  const { isDemoDeployment, requireDemoDeployment } = await import("./src/lib/demo-session-credentials");
+  if (isDemoDeployment()) {
+    const { assertDemoDatabase } = await import("./src/lib/demo-database");
+    await assertDemoDatabase(getPool(), requireDemoDeployment());
+  }
   await assertRlsEffective();
 
   // Keep every scheduled job handle so a deploy can stop future work before

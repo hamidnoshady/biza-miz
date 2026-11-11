@@ -49,3 +49,24 @@ describe("marketer lifecycle UI", () => {
     expect(await screen.findByText(/عضو مرتبط فعال نیست/)).toBeTruthy();
   });
 });
+
+it("allows only managers to select or clear an organizational supervisor", async () => {
+  const subject = { ...partner, location_id: "branch", supervisor_id: "old", supervisor_name: "Old manager", supervisor_eligible: false };
+  vi.mocked(api).mockImplementation(async (url, options) => {
+    if (options?.method === "PATCH") return ok({ ok: true });
+    if (url.includes("/supervisors")) return ok({ supervisors: [{ id: "new", name: "New manager" }], hasMore: false });
+    if (url.includes("/candidates")) return ok({ locations: [], users: [] });
+    return ok({ marketers: [subject], hasMore: false });
+  });
+  const user = userEvent.setup(); const view = render(<MarketersSection canManage={false} />);
+  await screen.findByText(/Old manager/); expect(screen.queryByRole("button", { name: "تغییر سرپرست" })).toBeNull();
+  view.rerender(<MarketersSection canManage />);
+  await user.click(screen.getByRole("button", { name: "تغییر سرپرست" }));
+  expect(screen.getByText(/این رابطه هیچ دسترسی/)).toBeTruthy();
+  await user.selectOptions(await screen.findByLabelText("انتخاب سرپرست"), "new");
+  await user.click(screen.getByRole("button", { name: "ذخیره سرپرست" }));
+  await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url, options]) => url === "/api/growth/marketers/ext" && options?.method === "PATCH" && JSON.parse(String(options.body)).supervisorId === "new" && JSON.parse(String(options.body)).expectedRevision === 3)).toBe(true));
+  await user.click(await screen.findByRole("button", { name: "تغییر سرپرست" }));
+  await user.click(screen.getByRole("button", { name: "حذف سرپرست" }));
+  await waitFor(() => expect(vi.mocked(api).mock.calls.some(([, options]) => options?.method === "PATCH" && JSON.parse(String(options.body)).supervisorId === null)).toBe(true));
+});

@@ -24,7 +24,7 @@ manager has both explicitly. Other presets receive neither. The permissions do
 not grant CRM or Accounting capabilities. Deploy migration 0284 with the normal
 migration runner; existing data is not backfilled.
 
-Not yet delivered: team hierarchy, territories, prospect
+Not yet delivered: team-based visibility and approval hierarchy, territories, prospect
 locations with precise geolocation, goals, CRM attribution, visits and GPS, offline
 sync, mapping/reporting, external contributor access, online conversion tracking,
 and marketing reward settlement. Basic prospect sites and assignments are described in `marketing-operations.md`. Those remaining workflows require their own access, privacy and
@@ -45,4 +45,31 @@ intervention. Revisions detect stale writes, and each change and its audit entry
 commit together. The list displays the current external name, not a historical
 name snapshot. Migration 0290 adds the revision with an initial value of zero.
 This does not implement teams, reassignment, external login, visit evidence or
-compensation.
+compensation; see the incremental supervisor links below.
+
+## Organizational supervisor links (incremental)
+
+Migration `0297` adds an optional direct supervisor on each roster record.
+A `marketers.manage` user may set or clear this relation from the roster; the
+picker searches and pages only active employee marketers in the same actionable
+active branch, and the server independently validates their active membership
+and branch access. A staff marketer receiving a new link must also be an active
+member with branch access; clearing a link remains possible when they are ineligible. External collaborators may be supervised but cannot be a
+supervisor in this increment. The tenant/branch-composite foreign key prevents
+cross-scope references. A transaction-level per-tenant graph mutex, cycle check,
+optimistic roster revision and atomic audit keep concurrent changes consistent.
+Deactivating a supervisor is blocked until all directly supervised roster
+records, including inactive ones, are reassigned or cleared. Clearing an inactive
+marketer's own link remains possible. When a linked supervisor's user is later
+suspended or loses branch access outside Growth, the relationship is retained
+and shown as ineligible; it does not independently modify membership state.
+
+These are current operational reporting links, not a team object, a full
+historical org chart, a territory assignment, an approval chain, or a permission
+grant. Audit records capture the old and new IDs, but are not a complete
+point-in-time hierarchy product. Reporting to a supervisor never grants access to
+subordinates' assignments, CRM, Accounting, rewards or sensitive data. Offset
+picker pages can shift during concurrent changes, and selection is revalidated on
+save. Existing roster records start with no supervisor. Team-scoped visibility,
+reassignment, effective-dated structures, Hybrid site restrictions, GPS, offline
+sync, online attribution and financial workflows remain separate work under #900.

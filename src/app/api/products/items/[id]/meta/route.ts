@@ -21,6 +21,8 @@ export const PATCH = withTenantScope(
   async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
     const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
     if (error) return error;
+    const inventory = await requirePermission(PERMISSIONS.inventoryAdjust);
+    if (inventory.error) return inventory.error;
     const industryError = await requireProductWorkspaceForApi(session);
     if (industryError) return industryError;
 
