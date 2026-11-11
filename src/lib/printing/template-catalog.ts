@@ -29,6 +29,7 @@ import { purposeForDocument, type PrinterPurpose } from "./routing";
 // hand-maintained list that drifts when an industry or capability is added.
 const POS_INDUSTRIES: readonly Industry[] = INDUSTRIES.filter((industry) => hasModule(industry, "pos"));
 const BARCODE_INDUSTRIES: readonly Industry[] = INDUSTRIES.filter((industry) => hasCapability(industry, "barcode"));
+const JEWELRY_INDUSTRIES: readonly Industry[] = INDUSTRIES.filter((industry) => hasModule(industry, "jewelry"));
 const REPAIR_INDUSTRIES: readonly Industry[] = INDUSTRIES.filter((industry) => hasCapability(industry, "repairs"));
 const SERIALIZED_RETAIL_INDUSTRIES: readonly Industry[] = INDUSTRIES.filter(
   (industry) => hasCapability(industry, "repairs") || hasModule(industry, "automotive"),
@@ -118,7 +119,8 @@ const SPECIAL_POLICY: Partial<Record<string, Partial<Pick<
     sampleKind: "retail",
   },
   "label57x40-jewelry-tag": {
-    allowedIndustries: REPAIR_INDUSTRIES,
+    allowedIndustries: JEWELRY_INDUSTRIES,
+    requiredModules: ["jewelry"],
     requiredCapabilities: ["barcode"],
     sampleKind: "jewelry",
   },

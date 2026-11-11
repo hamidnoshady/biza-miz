@@ -12,6 +12,8 @@ import {
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.menuView);
   if (error) return error;
+  const inventory = await requirePermission(PERMISSIONS.inventoryView);
+  if (inventory.error) return inventory.error;
   const industryError = await requireProductWorkspaceForApi(session);
   if (industryError) return industryError;
 
@@ -26,6 +28,8 @@ export const GET = withTenantScope(async () => {
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.menuEdit);
   if (error) return error;
+  const inventory = await requirePermission(PERMISSIONS.inventoryAdjust);
+  if (inventory.error) return inventory.error;
   const industryError = await requireProductWorkspaceForApi(session);
   if (industryError) return industryError;
 

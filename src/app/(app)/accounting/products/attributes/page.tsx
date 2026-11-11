@@ -6,7 +6,7 @@ import { requireProductWorkspace } from "@/app/dashboard/products/workspace-cont
 
 /** «ویژگی محصول» — the attribute master: cards, add and edit. */
 export default async function AttributesPage() {
-  const { canEdit } = await requireProductWorkspace();
+  const { canEdit, canManageStore } = await requireProductWorkspace();
   return (
     <PageShell>
       <PageHeader
@@ -17,7 +17,7 @@ export default async function AttributesPage() {
         actions={<KnowledgeHelpButton section="pos" />}
       />
       <AttributesSection canEdit={canEdit} />
-      {canEdit ? <WooAttributeMapping /> : null}
+      {canManageStore ? <WooAttributeMapping /> : null}
     </PageShell>
   );
 }

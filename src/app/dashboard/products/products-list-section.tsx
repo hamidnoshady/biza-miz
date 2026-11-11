@@ -111,7 +111,12 @@ function displayLinkTime(value: string | null): string {
   return Number.isNaN(date.getTime()) ? "—" : formatJalali(date, { withTime: true, timeZone: "Asia/Tehran" });
 }
 
-export function ProductsListSection({ apiBase }: { apiBase: string }) {
+export function ProductsListSection({ apiBase, canEditStock, canEditMeta, canManageStore }: {
+  apiBase: string;
+  canEditStock: boolean;
+  canEditMeta: boolean;
+  canManageStore: boolean;
+}) {
   const [items, setItems] = useState<VariantSummary[] | null>(null);
   // A failed read used to leave the skeleton on screen forever with no way
   // out; keep the failure explicit so the card can offer a retry instead.
@@ -538,6 +543,9 @@ export function ProductsListSection({ apiBase }: { apiBase: string }) {
                   item={item}
                   index={safePage * pageSize + index + 1}
                   apiBase={apiBase}
+                  canEditStock={canEditStock}
+                  canEditMeta={canEditMeta}
+                  canManageStore={canManageStore}
                   wooLinks={wooLinksByLocalId.get(item.id) ?? []}
                   wooLinksState={wooLinksState}
                   duplicate={isDuplicate(item)}
@@ -631,6 +639,9 @@ function ProductRow({
   item,
   index,
   apiBase,
+  canEditStock,
+  canEditMeta,
+  canManageStore,
   wooLinks,
   wooLinksState,
   duplicate,
@@ -646,6 +657,9 @@ function ProductRow({
   item: VariantSummary;
   index: number;
   apiBase: string;
+  canEditStock: boolean;
+  canEditMeta: boolean;
+  canManageStore: boolean;
   wooLinks: ProductWooLink[];
   wooLinksState: ProductWooLinkLoadState;
   /** The row's SKU is flagged as a probable duplicate. */
@@ -805,15 +819,15 @@ function ProductRow({
             linked duplicate, the review that must not be lost behind it).
           */}
           <div className="flex flex-wrap items-center gap-1.5">
-            <ProductStoreActionButton
+            {canManageStore && wooLinksState === "ready" && duplicateState === "ready" ? <ProductStoreActionButton
               links={wooLinks}
               duplicate={duplicate}
               open={panel === "store"}
               controls={`store-panel-${item.id}`}
               onToggle={() => onTogglePanel("store")}
               onReviewDuplicate={() => onTogglePanel("duplicate")}
-            />
-            {action.kind === "manual_update" && duplicate && duplicateState === "ready" ? (
+            /> : null}
+            {canManageStore && action.kind === "manual_update" && duplicate && duplicateState === "ready" ? (
               <Button
                 type="button"
                 variant="outline"
@@ -899,6 +913,9 @@ function ProductRow({
                 onRetryWooLinks={onRetryWooLinks}
                 duplicate={duplicate}
                 busy={busy}
+                canEditStock={canEditStock}
+                canEditMeta={canEditMeta}
+                canManageStore={canManageStore}
                 onOpenPanel={onTogglePanel}
               />
             </PanelShell>
@@ -997,6 +1014,9 @@ function ProductDetailsPanel({
   onRetryWooLinks,
   duplicate,
   busy,
+  canEditStock,
+  canEditMeta,
+  canManageStore,
   onOpenPanel,
 }: {
   item: VariantSummary;
@@ -1005,6 +1025,9 @@ function ProductDetailsPanel({
   onRetryWooLinks: () => void;
   duplicate: boolean;
   busy: boolean;
+  canEditStock: boolean;
+  canEditMeta: boolean;
+  canManageStore: boolean;
   onOpenPanel: (kind: ProductPanelKind) => void;
 }) {
   const money = useMoney();
@@ -1037,7 +1060,7 @@ function ProductDetailsPanel({
           <div className="space-y-1">
             <StatusBadge tone="neutral">بدون پیوند ووکامرس</StatusBadge>
             <p className="text-xs text-muted-foreground">
-              این ردیف محلی است؛ برای ارسال به فروشگاه از «انتشار در فروشگاه» استفاده کنید.
+              {canManageStore ? "این ردیف محلی است؛ برای ارسال به فروشگاه از «انتشار در فروشگاه» استفاده کنید." : "این ردیف محلی است و به فروشگاه پیوند ندارد."}
             </p>
           </div>
         ) : (
@@ -1077,7 +1100,7 @@ function ProductDetailsPanel({
 
       <div className="mt-4 flex flex-wrap gap-1.5">
         {/* §B's missing contextual action: the product's own identity fields. */}
-        <Button
+        {canEditMeta ? <Button
           type="button"
           variant="outline"
           size="sm"
@@ -1087,8 +1110,8 @@ function ProductDetailsPanel({
           aria-controls={`edit-panel-${item.id}`}
         >
           ویرایش
-        </Button>
-        {!isFamily ? (
+        </Button> : null}
+        {canEditStock && !isFamily ? (
           <Button
             type="button"
             variant="outline"
@@ -1101,7 +1124,7 @@ function ProductDetailsPanel({
             ورود کالا / قیمت
           </Button>
         ) : null}
-        <Button
+        {canEditMeta ? <Button
           type="button"
           variant="outline"
           size="sm"
@@ -1111,8 +1134,8 @@ function ProductDetailsPanel({
           aria-controls={`content-panel-${item.id}`}
         >
           توضیحات و انتشار
-        </Button>
-        {duplicate ? (
+        </Button> : null}
+        {canManageStore && duplicate ? (
           <Button
             type="button"
             variant="outline"

@@ -1,0 +1,128 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { automotiveCreateEntry, specialistCatalogueForPage, specialistSectionForPage, requireProductWorkspace, requireRetailLabels } from "./workspace-context";
+import { getSession } from "@/lib/auth";
+import { memberAccessFor } from "@/lib/member-access";
+import { getBusinessIndustry } from "@/lib/industry-guard";
+import { PERMISSIONS } from "@/lib/permissions";
+
+vi.mock("next/navigation", () => ({ redirect: (href: string) => { throw new Error(`redirect:${href}`); } }));
+vi.mock("@/lib/auth", () => ({ getSession: vi.fn() }));
+vi.mock("@/lib/member-access", () => ({ memberAccessFor: vi.fn() }));
+vi.mock("@/lib/industry-guard", () => ({ getBusinessIndustry: vi.fn() }));
+
+describe("specialist catalogue entry", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(getSession).mockResolvedValue({ businessId: "business" } as never);
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "owner", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.vehiclesView]) });
+  });
+  it.each(["jewelry", "watch", "automotive"] as const)("returns the native %s adapter for the shared list", async (industry) => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue(industry);
+    await expect(specialistCatalogueForPage()).resolves.toEqual({ industry, canEdit: false });
+  });
+  it("gates specialist price and reports by the respective native API permissions", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("jewelry");
+    await expect(specialistSectionForPage("prices")).resolves.toEqual({ industry: "jewelry", canEdit: false });
+    vi.mocked(getBusinessIndustry).mockResolvedValue("watch");
+    await expect(specialistSectionForPage("reports")).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.reportsView]) });
+    await expect(specialistSectionForPage("reports")).resolves.toEqual({ industry: "watch", canEdit: false });
+    await expect(specialistSectionForPage("prices")).resolves.toBeNull();
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: false, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.reportsView]) });
+    await expect(specialistSectionForPage("reports")).rejects.toThrow("redirect:/accounting/overview");
+  });
+  it("requires both native vehicle permissions for the shared creation route", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("automotive");
+    for (const permissions of [[], [PERMISSIONS.vehiclesView], [PERMISSIONS.vehiclesCreate]]) {
+      vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set(permissions) });
+      await expect(automotiveCreateEntry()).rejects.toThrow("redirect:/accounting/overview");
+    }
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.vehiclesView, PERMISSIONS.vehiclesCreate]) });
+    await expect(automotiveCreateEntry()).resolves.toBe(true);
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: false, permissions: new Set([PERMISSIONS.vehiclesView, PERMISSIONS.vehiclesCreate]) });
+    await expect(automotiveCreateEntry()).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(getBusinessIndustry).mockResolvedValue("cosmetics");
+    await expect(automotiveCreateEntry()).resolves.toBe(false);
+  });
+  it("checks the vehicle permission rather than inventory permission", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("automotive");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "owner", isActive: true, permissions: new Set([PERMISSIONS.inventoryView]) });
+    await expect(specialistCatalogueForPage()).rejects.toThrow("redirect:/accounting/overview");
+  });
+  it("rejects inactive members and unauthenticated users", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("watch");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "owner", isActive: false, permissions: new Set([PERMISSIONS.inventoryView]) });
+    await expect(specialistCatalogueForPage()).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(getSession).mockResolvedValue(null);
+    await expect(specialistCatalogueForPage()).rejects.toThrow("redirect:/login");
+  });
+  it("leaves other industries for the existing page guard", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("food_service");
+    await expect(specialistCatalogueForPage()).resolves.toBeNull();
+    vi.mocked(getBusinessIndustry).mockResolvedValue("accessories");
+    await expect(specialistCatalogueForPage()).resolves.toBeNull();
+  });
+});
+
+
+describe("variant workspace permission flags", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(getSession).mockResolvedValue({ businessId: "business", locationId: "branch" } as never);
+    vi.mocked(getBusinessIndustry).mockResolvedValue("accessories");
+  });
+
+  it("does not infer edit access from inventory.view or integration access", async () => {
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.integrationsManage]) });
+    const context = await requireProductWorkspace();
+    expect(context).toMatchObject({ canEdit: false, canEditMeta: false, canManageStore: false });
+    await expect(requireProductWorkspace({ edit: true })).rejects.toThrow("redirect:/accounting/overview");
+  });
+
+  it("requires each native permission in addition to inventory.adjust", async () => {
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.inventoryAdjust]) });
+    expect(await requireProductWorkspace()).toMatchObject({ canEdit: true, canEditMeta: false, canManageStore: false });
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.inventoryAdjust, PERMISSIONS.menuEdit, PERMISSIONS.integrationsManage]) });
+    expect(await requireProductWorkspace()).toMatchObject({ canEdit: true, canEditMeta: true, canManageStore: true });
+  });
+});
+
+
+describe("retail label gallery gate", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(getSession).mockResolvedValue({ businessId: "business" } as never);
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.vehiclesView]) });
+  });
+  it.each(["jewelry", "watch", "accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery", "automotive"] as const)("admits %s with its native read permission", async (industry) => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue(industry);
+    expect(await requireRetailLabels()).toEqual({ industry, canManage: false, canPrint: false, canViewLegacyWeight: false, canEditLegacyWeight: false });
+  });
+  it.each(["food_service", "service_saas", "architecture_construction", "advertising_agency"] as const)("excludes %s", async (industry) => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue(industry);
+    await expect(requireRetailLabels()).rejects.toThrow("redirect:/accounting/overview");
+  });
+  it("requires vehicles.view for automotive and separately resolves settings and printing permissions", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("automotive");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.settingsManage, PERMISSIONS.printingExecute]) });
+    await expect(requireRetailLabels()).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.vehiclesView, PERMISSIONS.settingsManage]) });
+    expect(await requireRetailLabels()).toEqual({ industry: "automotive", canManage: true, canPrint: false, canViewLegacyWeight: false, canEditLegacyWeight: false });
+  });
+  it("exposes legacy patterns only to variant users with the weight API read permissions", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("cosmetics");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.menuView, PERMISSIONS.inventoryAdjust]) });
+    expect(await requireRetailLabels()).toMatchObject({ canViewLegacyWeight: true, canEditLegacyWeight: false });
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.menuView, PERMISSIONS.inventoryAdjust, PERMISSIONS.menuEdit]) });
+    expect(await requireRetailLabels()).toMatchObject({ canViewLegacyWeight: true, canEditLegacyWeight: true });
+    vi.mocked(getBusinessIndustry).mockResolvedValue("jewelry");
+    expect(await requireRetailLabels()).toMatchObject({ canViewLegacyWeight: false, canEditLegacyWeight: false });
+  });
+  it("rejects suspended and unauthenticated members", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("watch");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: false, permissions: new Set([PERMISSIONS.inventoryView]) });
+    await expect(requireRetailLabels()).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(getSession).mockResolvedValue(null);
+    await expect(requireRetailLabels()).rejects.toThrow("redirect:/login");
+  });
+});

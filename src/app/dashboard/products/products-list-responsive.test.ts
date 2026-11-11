@@ -77,7 +77,7 @@ describe("the products screen on a phone and a desktop", () => {
     // The primary store action and the «جزئیات» disclosure share one wrapping
     // cell: on a narrow window they stack instead of widening the table.
     expect(section).toMatch(
-      /<div className="flex flex-wrap items-center gap-1\.5">\s*<ProductStoreActionButton/,
+      /<div className="flex flex-wrap items-center gap-1\.5">\s*\{canManageStore && wooLinksState === "ready" && duplicateState === "ready" \? <ProductStoreActionButton/,
     );
     expect(section).toContain('className="min-h-8 whitespace-nowrap px-2 text-xs"');
   });

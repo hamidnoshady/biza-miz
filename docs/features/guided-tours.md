@@ -68,7 +68,7 @@ set or feature state).
 | `/accounting/products/prices` | `accounting.products.prices` | `inventory.view`; the edit steps need `inventory.adjust` |
 | `/accounting/products/attributes` | `accounting.products.attributes` | `inventory.view`; the edit steps need `inventory.adjust` |
 | `/accounting/products/reports` | `accounting.products.reports` | `inventory.view` |
-| `/accounting/products/barcode-templates` | `accounting.products.barcode-templates` | `inventory.view` |
+| `/accounting/products/barcode-templates` | `accounting.products.barcode-templates` | `inventory.view` (retail), `vehicles.view` (automotive) |
 
 The products pages are for the trades that have the products workspace. The
 trade groups for the till and the inventory are derived from the industry

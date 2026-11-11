@@ -64,6 +64,14 @@ describe("printing template catalog — business-type policy", () => {
     expect(keys).not.toContain("thermal80-kitchen");
   });
 
+  it("does not offer jewelry tags to watch or other non-jewelry industries", () => {
+    for (const industry of ["watch", "automotive", "accessories", "cosmetics"] as const) {
+      expect(availableKeys({ industry, wooEnabled: false }), industry).not.toContain("label57x40-jewelry-tag");
+    }
+    const saved = { ...BUILT_IN_TEMPLATES.find((template) => template.key === "label57x40-jewelry-tag")!, key: "saved", sourceKey: "label57x40-jewelry-tag" };
+    expect(isTemplateAvailable(saved, { industry: "watch", wooEnabled: false })).toBe(false);
+  });
+
   it("keeps a copied industry-specific layout restricted after it is saved", () => {
     const copy = {
       ...BUILT_IN_TEMPLATES.find((template) => template.key === "a4-invoice-jewelry")!,

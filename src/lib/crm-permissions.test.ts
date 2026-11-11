@@ -89,6 +89,7 @@ const ROUTES: RouteAccess[] = [
     note: "Moving a brief along its chain is the same power as drafting one: `confirm` records the *client's* decision and the member is only the scribe, so unlike §D's change requests there is no separate approve tier and no money moves",
   },
   { route: "client-campaigns/route.ts", method: "GET", section: "client-campaigns", action: "read" },
+  { route: "client-campaigns/calendar/route.ts", method: "GET", section: "client-campaigns", action: "read", note: "Calendar filters linked-project authority before pagination." },
   { route: "client-campaigns/route.ts", method: "POST", section: "client-campaigns", action: "write" },
   { route: "client-campaigns/[id]/route.ts", method: "GET", section: "client-campaigns", action: "read" },
   { route: "client-campaigns/[id]/reports/route.ts", method: "GET", section: "client-campaigns", action: "read", note: "Linked campaign evidence also checks Workspace service/permission and project role." },
