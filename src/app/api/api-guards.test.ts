@@ -31,6 +31,14 @@ function routeKey(file: string): string {
 
 /** Routes that are deliberately session-less, and why. Anything else must guard. */
 const PUBLIC_ROUTES: Record<string, string> = {
+  // ESH-147 — a customer's phone opening the QR printed on a physical table
+  // has no session by definition; the opaque token in the path is the
+  // credential. It resolves ONE tenant-owned table by hash and answers only a
+  // display name plus the CMS site id the caller already knows — never a
+  // uuid — and middleware rate-limits it per IP.
+  "public/table-qr/[token]":
+    "printed-table QR resolution — the opaque token names the tenant, the answer carries no ids, " +
+    "and the path is rate-limited per IP in middleware",
   "integrations/tax-invoices/webhook/[businessId]": "TSP server ingress authenticated by tenant-bound, timestamped HMAC-SHA256 over bounded raw bytes; replay writes one append-only event, no session",
   "auth/login": "credential exchange — necessarily runs without a session",
   "telegram/session":

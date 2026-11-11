@@ -108,7 +108,9 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
       href: ACCOUNTING_WORKSPACE_HREFS.inventory,
       roles: ["owner", "manager"],
     },
-    { label: "میزها", module: "tables", href: ACCOUNTING_WORKSPACE_HREFS.floor, roles: ["owner", "manager", "cashier", "waiter"], flag: "reservations" },
+    // ESH-147 — the floor is table service, not booking: a café with a QR per
+    // table but no reservations must still see it. Any-of, like the API gate.
+    { label: "میزها", module: "tables", href: ACCOUNTING_WORKSPACE_HREFS.floor, roles: ["owner", "manager", "cashier", "waiter"], flags: ["dine_in", "reservations"] },
     { label: "میزهای من", module: "waiter", href: "/accounting/waiter", roles: ["cashier", "waiter"], flag: "reservations" },
     { label: "آشپزخانه", module: "kitchen", href: ACCOUNTING_WORKSPACE_HREFS.kitchen, roles: ["owner", "manager", "kitchen"] },
     { label: "رزروها", module: "reservations", href: ACCOUNTING_WORKSPACE_HREFS.reservations, roles: ["owner", "manager", "cashier", "waiter"], flag: "reservations" },
@@ -319,7 +321,13 @@ function canSee(
   // case the entry stays and is marked with a padlock instead (see
   // LOCKABLE_FEATURES in features.ts). Its page renders a read-only preview
   // rather than redirecting, so the link goes somewhere real either way.
-  if (item.flag && !features[item.flag] && !isLockableFeature(item.flag)) return false;
+  const gateFlags = item.flags ?? (item.flag ? [item.flag] : []);
+  if (
+    gateFlags.length > 0 &&
+    !gateFlags.some((flag) => features[flag] || isLockableFeature(flag))
+  ) {
+    return false;
+  }
   // `waiter` is intentionally identity-shaped: this is the shared-terminal,
   // assigned-table board, not a general business capability. Every ordinary
   // application door is permission-derived, regardless of the preset's name.

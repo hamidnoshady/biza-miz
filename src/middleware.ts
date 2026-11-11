@@ -229,6 +229,11 @@ const PUBLIC_PATHS = [
   // Public website forms authenticate with a site-scoped bearer credential;
   // no tenant session exists in the visitor's browser.
   "/api/website/leads",
+  // ESH-147 — a customer's phone opening the QR printed on a physical table
+  // has no session by definition; the opaque token in the path is the
+  // credential. The handler returns a display name and the CMS site id only,
+  // never a uuid, and the path has its own per-IP bucket below.
+  "/api/public/table-qr",
   // Issue #908 — the public contract-signing page. The caller is an external
   // signatory who has no Bizamiz account by definition (that is the point of
   // the flow), so no session can exist. The credential is the per-recipient
@@ -668,6 +673,7 @@ const businessLimits = new Map<string, RateLimitEntry>();
 const syncTokenLimits = new Map<string, RateLimitEntry>();
 const apiKeyLimits = new Map<string, RateLimitEntry>();
 const authIpLimits = new Map<string, RateLimitEntry>();
+const tableQrLimits = new Map<string, RateLimitEntry>();
 const telegramWebhookIpLimits = new Map<string, RateLimitEntry>();
 const rosterIpLimits = new Map<string, RateLimitEntry>();
 const mcpLimits = new Map<string, RateLimitEntry>();
@@ -680,6 +686,16 @@ const API_KEY_LIMIT = 120;
 const API_KEY_WINDOW_MS = 60_000;
 const AUTH_IP_LIMIT = 20;
 const AUTH_IP_WINDOW_MS = 60_000;
+
+/**
+ * ESH-147 — a scanned table QR. One scan is one GET; a shared café Wi-Fi means
+ * many guests can share an IP, and a menu page may re-resolve on navigation.
+ * The bucket therefore has to be generous enough for a busy table (120/min),
+ * while still bounding an enumerating client. Namespaced separately from the
+ * other IP buckets because the durable counter keys on the string, not the Map.
+ */
+const TABLE_QR_IP_LIMIT = 120;
+const TABLE_QR_IP_WINDOW_MS = 60_000;
 // Telegram may deliver updates concurrently from a small set of source IPs;
 // keep a dedicated generous ceiling so it cannot be starved by browser logins.
 const TELEGRAM_WEBHOOK_IP_LIMIT = 1_200;
@@ -911,6 +927,14 @@ export function isPeerBackupPath(pathname: string): boolean {
   );
 }
 
+/** ESH-147 — the public table-QR resolve path (prefix, so `/…/<token>` is covered). */
+export function isTableQrResolvePath(pathname: string): boolean {
+  return (
+    pathname === "/api/public/table-qr" ||
+    pathname.startsWith("/api/public/table-qr/")
+  );
+}
+
 /** All public API routes share one per-key bucket; this must stay prefix-based, not an exact route list. */
 function isPublicApiPath(pathname: string): boolean {
   return pathname === "/api/v1" || pathname.startsWith("/api/v1/");
@@ -941,6 +965,17 @@ async function handleRateLimits(
       `ip:${clientIp(request)}`,
       AUTH_IP_LIMIT,
       AUTH_IP_WINDOW_MS,
+      now,
+    );
+    if (!result.allowed) return rateLimited(result.retryAfterMs);
+  }
+
+  if (isTableQrResolvePath(pathname)) {
+    const result = await checkRateLimit(
+      tableQrLimits,
+      `table-qr-ip:${clientIp(request)}`,
+      TABLE_QR_IP_LIMIT,
+      TABLE_QR_IP_WINDOW_MS,
       now,
     );
     if (!result.allowed) return rateLimited(result.retryAfterMs);

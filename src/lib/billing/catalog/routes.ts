@@ -136,6 +136,11 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   // does; sending an invitation SMS is charged by the messaging wallet, never
   // twice here.
   sign: keys("operations.shared"),
+  // ESH-147 — the printed table QR's public resolve endpoint. A customer's
+  // scan reads the tenant's own table/branch names and nothing billable; the
+  // staff QR routes live under `tables` above. Classified as a shared
+  // operations surface so the segment is never unclassified, never metered.
+  public: keys("operations.shared"),
 };
 
 function keys(...capabilityKeys: string[]): RouteClass {
