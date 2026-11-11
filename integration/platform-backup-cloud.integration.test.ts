@@ -897,9 +897,24 @@ describe("a restore drill from the off-site copy", () => {
  * 320 s budget for the live upload.
  */
 describe("a large artifact at the scale of the incident", () => {
-  const LARGE_MIB = 64;
+  /**
+   * Issue #1296's acceptance criterion names a 319 MB artifact. CI runs the
+   * default 64 MiB because streaming 320 MB several times would dominate the
+   * job; but the *criterion* is about size, so the size is a dial rather than a
+   * constant:
+   *
+   *     LARGE_ARTIFACT_MIB=320 npm run test:db -- \
+   *       integration/platform-backup-cloud.integration.test.ts
+   *
+   * runs the identical code path — the real 320 s size-derived timeout, the
+   * lease arithmetic it feeds, the streaming hash and the post-upload proof — at
+   * the scale the incident actually hit. That is the command to run on a host
+   * with real object storage before calling the criterion met; it cannot be
+   * satisfied by a mock alone.
+   */
+  const LARGE_MIB = Math.max(1, Number(process.env.LARGE_ARTIFACT_MIB) || 64);
 
-  it("streams 64 MiB, proves it by size and by sha256, and stays within one lease", async () => {
+  it(`streams ${LARGE_MIB} MiB, proves it by size and by sha256, and stays within one lease`, async () => {
     await prepare();
     await setConfig({ enabled: true, encryptLocal: true, passphrase: "correct horse battery", localRetention: 5 });
     await setConfig({ cloud: cloudConfig() });
@@ -1059,5 +1074,103 @@ describe("an artifact with no run row still earns its confirmation", () => {
     expect(Number(rows.rows[0].n)).toBe(1);
     const confirmations = await svc.listCloudConfirmations();
     expect(confirmations.filter((c) => c.artifact === run.artifact)).toHaveLength(1);
+  });
+});
+
+describe("proving the off-site copy without uploading (issue #1296 follow-up)", () => {
+  /**
+   * The console's only way to ask "is the object still there, and is it still
+   * ours?" used to be the retry button, which also *uploads*. That is the wrong
+   * shape for an MCP tool: an assistant should be able to verify without
+   * spending egress, and an operator checking a month-old artifact should not
+   * re-send it. `verifyPlatformCloudObject` is the read-only half, and these
+   * tests pin the three answers that matter — verified, missing, corrupt.
+   */
+  it("proves the newest capture by HEAD and by sha256, and writes no new row", async () => {
+    await prepare();
+    const run = await captureAndConfigure();
+    expect((await svc.runPlatformCloudUpload(run.artifact, "manual", null)).status).toBe("ok");
+
+    const countRuns = async () => {
+      const { rows } = await scratch.query<{ n: string }>("SELECT count(*)::text AS n FROM platform_backup_runs");
+      return Number(rows[0]!.n);
+    };
+    const before = await countRuns();
+
+    const bySize = await svc.verifyPlatformCloudObject({ mode: "size" });
+    expect(bySize.status).toBe("verified");
+    expect(bySize.artifact).toBe(run.artifact);
+    expect(bySize.verifyMode).toBe("size");
+    expect(bySize.sizeBytes).toBeGreaterThan(0);
+    expect(bySize.sha256).toBeNull();
+    expect(bySize.reason).toBeNull();
+
+    // sha256 downloads the object and compares it with the local file.
+    const byHash = await svc.verifyPlatformCloudObject({ mode: "sha256" });
+    expect(byHash.status).toBe("verified");
+    expect(byHash.verifyMode).toBe("sha256");
+    expect(byHash.sha256).toMatch(/^[0-9a-f]{64}$/);
+    // …and it is the same digest the upload recorded, so the two proofs agree.
+    const localPath = path.join(process.env.PLATFORM_BACKUP_DIR!, run.artifact);
+    const local = sha(await fs.readFile(localPath));
+    expect(byHash.sha256).toBe(local);
+
+    // Neither call may change the history: verification is an observation, and a
+    // row per glance would drown the attempts that matter.
+    expect(await countRuns()).toBe(before);
+  });
+
+  it("separates a missing object from a corrupt one", async () => {
+    await prepare();
+    const run = await captureAndConfigure();
+    expect((await svc.runPlatformCloudUpload(run.artifact, "manual", null)).status).toBe("ok");
+
+    // Overwrite the object with different bytes of a different length: the HEAD
+    // still finds it, so this is a mismatch, not a disappearance.
+    const key = objectKeyFor(run.artifact);
+    bucket.set(key, Buffer.from("not the artifact you uploaded"));
+
+    const corrupt = await svc.verifyPlatformCloudObject({ artifact: run.artifact, mode: "sha256" });
+    expect(corrupt.status).toBe("mismatch");
+    expect(corrupt.reason).toBeTruthy();
+    // Still redacted: no key, no endpoint, no credentials in the answer.
+    const serialized = JSON.stringify(corrupt);
+    expect(serialized).not.toContain("test-secret");
+    expect(serialized).not.toContain("127.0.0.1");
+
+    // Delete it outright: "no copy" is a different, less alarming answer.
+    bucket.delete(key);
+    const missing = await svc.verifyPlatformCloudObject({ artifact: run.artifact, mode: "size" });
+    expect(missing.status).toBe("missing");
+    expect(missing.reason).toBe("object_not_found");
+  });
+
+  it("says so plainly when the platform has no cloud destination or no artifact", async () => {
+    await prepare();
+    const noArtifact = await svc.verifyPlatformCloudObject({});
+    expect(noArtifact.status).toBe("unavailable");
+    expect(noArtifact.reason).toBe("no_local_artifact");
+
+    await captureAndConfigure();
+    const unknown = await svc.verifyPlatformCloudObject({ artifact: "pos-backup-19990101-000000-deadbeef.dump.enc" });
+    expect(unknown.status).toBe("unavailable");
+    expect(unknown.reason).toBe("artifact_not_found");
+  });
+
+  it("is exposed as a read-only MCP tool under backup.verify, not backup.run", async () => {
+    const mcp = await import("../src/lib/mcp/platform-mcp");
+    const tools = new Map(mcp.PLATFORM_MCP_TOOLS.map((t) => [t.name, t]));
+    const tool = tools.get("verify_backup_cloud_object");
+    expect(tool).toBeDefined();
+    // The capability is the distinction that matters: `backup.run` may start a
+    // transfer, `backup.verify` may only look.
+    expect(tool!.capability).toBe("backup.verify");
+    expect(tool!.bridged).toBe(false);
+    // Not a step-up: looking at bytes we already own is not a destructive act.
+    expect(tool!.stepUp).toBeFalsy();
+    expect(tool!.inputSchema.properties.verify?.enum).toEqual(["size", "sha256"]);
+    // The description has to say the retry stays console-side, or someone will
+    // read this tool as "retry from the assistant".
+    expect(tool!.description).toContain("never starts an upload");
   });
 });
