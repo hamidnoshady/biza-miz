@@ -754,45 +754,60 @@ export default function PlatformAiPage() {
           </Field>
         </div>
 
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-right text-xs text-muted-foreground">
+        <div className="mt-3 hidden overflow-x-auto md:block">
+          <table className="w-full table-fixed text-right text-sm">
+            <thead className="text-xs text-muted-foreground">
               <tr className="border-b border-border">
-                <th className="py-2 pr-1">کسب‌وکار</th>
-                <th className="py-2">AI entitlement</th>
-                <th className="py-2">Key status</th>
-                <th className="py-2">Key alias</th>
-                <th className="py-2">Last synced</th>
-                <th className="py-2">Runtime readiness</th>
-                <th className="py-2">Technical error</th>
+                <th className="w-[28%] py-3 pr-2">کسب‌وکار و شناسه کلید</th>
+                <th className="w-[12%] py-3">دسترسی</th>
+                <th className="w-[22%] py-3">وضعیت کلید</th>
+                <th className="w-[25%] py-3">آمادگی و خطا</th>
+                <th className="w-[13%] py-3">مدیریت</th>
               </tr>
             </thead>
             <tbody>
               {keyRows.map(({ business, key, readiness }) => (
-                <tr key={business.businessId} className="border-b border-border">
-                  <td className="py-2 pr-1 font-medium text-foreground">
-                    {business.businessName}
-                    {readiness?.hasBranchOverride ? <span className="mr-1 text-xs text-muted-foreground">(شعبه‌ای)</span> : null}
+                <tr key={business.businessId} className="border-b border-border align-top">
+                  <td className="py-3 pr-2">
+                    <p className="font-medium text-foreground">{business.businessName}</p>
+                    {readiness?.hasBranchOverride ? <p className="text-xs text-muted-foreground">دارای کلید اختصاصی شعبه</p> : null}
+                    {key?.keyAlias ? <code dir="ltr" className="mt-1 block max-w-full truncate text-xs text-muted-foreground" title={key.keyAlias}>{key.keyAlias}</code> : null}
                   </td>
-                  <td className="py-2">{business.aiEntitled ? "فعال" : "غیرفعال"}</td>
-                  <td className="py-2">
-                    {key?.credentialState === "undecryptable"
-                      ? "نیازمند بازیابی"
-                      : key?.hasVirtualKey
-                        ? (key.syncError ? "خطای همگام‌سازی" : "صادر شده")
-                        : "صادر نشده"}
+                  <td className="py-3">{business.aiEntitled ? "فعال" : "غیرفعال"}</td>
+                  <td className="py-3">
+                    <p>{key?.credentialState === "undecryptable" ? "نیازمند بازیابی اعتبارنامه" : key?.syncError ? "خطای همگام‌سازی" : key?.hasVirtualKey ? "صادر شده (اعتبار نامشخص)" : "صادر نشده"}</p>
+                    {key?.syncedAt ? <p className="mt-1 text-xs text-muted-foreground">آخرین همگام‌سازی: {fmtDate(key.syncedAt)}</p> : null}
                   </td>
-                  <td className="py-2" dir="ltr">{key?.keyAlias ?? "—"}</td>
-                  <td className="py-2">{fmtDate(key?.syncedAt ?? null)}</td>
-                  <td className="py-2">{readiness ? FLEET_STATUS_FA[readiness.status] ?? readinessText(readiness) : "—"}</td>
-                  <td className="py-2 text-xs text-rose-700 dark:text-rose-300">{key?.syncError ?? "—"}</td>
+                  <td className="py-3">
+                    <p>{readiness ? FLEET_STATUS_FA[readiness.status] ?? readinessText(readiness) : "—"}</p>
+                    {key?.syncError ? <details className="mt-1 text-xs text-rose-700 dark:text-rose-300"><summary className="cursor-pointer">نمایش خطا</summary><p>{gatewayErrorFa(key.syncError)}</p><p dir="ltr" className="mt-1 break-all text-muted-foreground">{key.syncError}</p></details> : null}
+                  </td>
+                  <td className="py-3">
+                    <Button variant="ghost" disabled={Boolean(busy)} onClick={() => { setSelectedBusinessId(business.businessId); setSelectedLocationId(""); }}>مدیریت</Button>
+                  </td>
                 </tr>
               ))}
-              {keyRows.length === 0 ? (
-                <tr><td colSpan={7} className="py-6 text-center text-muted-foreground">نتیجه‌ای یافت نشد.</td></tr>
-              ) : null}
+              {keyRows.length === 0 ? <tr><td colSpan={5} className="py-6 text-center text-muted-foreground">کسب‌وکاری با این فیلتر یافت نشد.</td></tr> : null}
             </tbody>
           </table>
+        </div>
+        <div className="mt-3 grid gap-3 md:hidden">
+          {keyRows.map(({ business, key, readiness }) => (
+            <div key={business.businessId} className="rounded-lg border border-border p-3 text-sm">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-semibold">{business.businessName}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">دسترسی: {business.aiEntitled ? "فعال" : "غیرفعال"}</p>
+                </div>
+                <Button variant="ghost" disabled={Boolean(busy)} onClick={() => { setSelectedBusinessId(business.businessId); setSelectedLocationId(""); }}>مدیریت</Button>
+              </div>
+              <p className="mt-2">وضعیت کلید: {key?.credentialState === "undecryptable" ? "نیازمند بازیابی" : key?.syncError ? "خطای همگام‌سازی" : key?.hasVirtualKey ? "صادر شده (اعتبار نامشخص)" : "صادر نشده"}</p>
+              <p>آمادگی سرویس: {readiness ? FLEET_STATUS_FA[readiness.status] ?? readinessText(readiness) : "—"}</p>
+              {key?.keyAlias ? <code dir="ltr" className="mt-2 block truncate text-xs text-muted-foreground" title={key.keyAlias}>{key.keyAlias}</code> : null}
+              {key?.syncError ? <details className="mt-2 text-xs"><summary className="cursor-pointer text-rose-700 dark:text-rose-300">نمایش خطا</summary><p>{gatewayErrorFa(key.syncError)}</p><p dir="ltr" className="mt-1 break-all text-muted-foreground">{key.syncError}</p></details> : null}
+            </div>
+          ))}
+          {keyRows.length === 0 ? <p className="py-6 text-center text-sm text-muted-foreground">کسب‌وکاری با این فیلتر یافت نشد.</p> : null}
         </div>
 
         {data?.pagination && data.pagination.totalPages > 1 ? (
