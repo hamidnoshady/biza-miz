@@ -4,6 +4,7 @@ vi.mock("./db", () => ({ query: vi.fn() }));
 
 import { query } from "./db";
 import { updatePlatformAiMode } from "./ai-control-plane";
+import { getPlatformAiMode } from "./ai-runtime-modes";
 
 const databaseRow = {
   mode_key: "auto",
@@ -56,5 +57,13 @@ describe("Superadmin mode overrides — null restores gateway defaults", () => {
   it("allows valid boundary values", async () => {
     await updatePlatformAiMode({ mode: "auto", temperature: 0, maxOutputTokens: 200000, updatedBy: "admin@example.test" });
     expect(vi.mocked(query).mock.calls[0]?.[1]).toEqual(["auto", "admin@example.test", 0, 200000]);
+  });
+});
+
+describe("tenant mode settings read from PostgreSQL", () => {
+  it("converts a numeric temperature to a number and preserves SQL NULL", async () => {
+    vi.mocked(query).mockResolvedValueOnce({ rows: [{ ...databaseRow, temperature: "0.25" }] } as never);
+    expect((await getPlatformAiMode("auto")).temperature).toBe(0.25);
+    expect((await getPlatformAiMode("auto")).temperature).toBeNull();
   });
 });

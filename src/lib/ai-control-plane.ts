@@ -77,14 +77,14 @@ export async function updatePlatformAiMode(input: UpdateModeInput): Promise<Plat
   if (input.temperature !== undefined) {
     if (input.temperature !== null && (!Number.isFinite(input.temperature) || input.temperature < 0 || input.temperature > 2)) return null;
     params.push(input.temperature === null ? null : Math.round(input.temperature * 100) / 100);
-    sets.push(`temperature = ${params.length}`);
+    sets.push(`temperature = $${params.length}`);
   }
   if (input.maxOutputTokens !== undefined) {
     if (input.maxOutputTokens !== null && (!Number.isInteger(input.maxOutputTokens) || input.maxOutputTokens < 1 || input.maxOutputTokens > 200_000)) {
       return null;
     }
     params.push(input.maxOutputTokens);
-    sets.push(`max_output_tokens = ${params.length}`);
+    sets.push(`max_output_tokens = $${params.length}`);
   }
 
   const { rows } = await query<Record<string, unknown>>(
