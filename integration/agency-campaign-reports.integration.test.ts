@@ -395,6 +395,156 @@ describe("period client campaign reports", () => {
       await reports.createCampaignReport(actor(a), id, input()),
     ).toHaveProperty("id");
   });
+  it("calendar filters project authority before paging and keeps unlinked CRM scheduling usable", async () => {
+    const a = await agency(),
+      b = await agency();
+    const id = await campaign(a);
+    await campaign(b);
+    const { listCampaignCalendar } =
+      await import("../src/lib/agency-campaign-calendar-service");
+    const window = {
+      start: "2026-10-01",
+      end: "2026-10-31",
+      offset: 0,
+      partyId: null,
+    };
+    expect(
+      (await listCampaignCalendar(actor(a), window)).events.map((e) => e.id),
+    ).toEqual([id]);
+    expect(
+      (
+        await listCampaignCalendar(
+          { ...actor(a), workspaceAllowed: false },
+          window,
+        )
+      ).events,
+    ).toEqual([]);
+    expect(
+      (
+        await listCampaignCalendar(
+          { ...actor(a), actorUserId: b.actor.userId },
+          window,
+        )
+      ).events,
+    ).toEqual([]);
+    const override = {
+      ...actor(a),
+      actorUserId: b.actor.userId,
+      access: {
+        override: "read" as const,
+        canViewFinancials: true,
+        canManageContracts: false,
+        canManage: false,
+        canApprove: false,
+        canIssueDocuments: false,
+        canViewMedia: false,
+      },
+    };
+    expect((await listCampaignCalendar(override, window)).events).toHaveLength(
+      1,
+    );
+    expect(
+      (
+        await listCampaignCalendar(
+          { ...override, workspaceAllowed: false },
+          window,
+        )
+      ).events,
+    ).toEqual([]);
+    await db.query(
+      `UPDATE agency_client_campaigns SET project_id=NULL,end_date=NULL WHERE id=$1`,
+      [id],
+    );
+    expect(
+      (
+        await listCampaignCalendar(
+          { ...actor(a), workspaceAllowed: false },
+          window,
+        )
+      ).events[0].end,
+    ).toBeNull();
+    expect(
+      (
+        await listCampaignCalendar(actor(a), {
+          ...window,
+          start: "2026-09-01",
+          end: "2026-09-30",
+        })
+      ).events,
+    ).toEqual([]);
+    expect(
+      (await listCampaignCalendar(actor(a), { ...window, partyId: b.clientId }))
+        .events,
+    ).toEqual([]);
+  });
+  it("calendar returns all authorized pages beyond legacy list limits without hidden rows consuming a page", async () => {
+    const a = await agency();
+    const { listCampaignCalendar } =
+      await import("../src/lib/agency-campaign-calendar-service");
+    await db.query(
+      `INSERT INTO agency_client_campaigns(business_id,party_id,campaign_number,title,start_date)
+      SELECT $1,$2,'CA-cal-'||n,'Scheduled','2026-10-01'::date FROM generate_series(1,105) n`,
+      [a.businessId, a.clientId],
+    );
+    const window = {
+      start: "2026-10-01",
+      end: "2026-10-31",
+      offset: 0,
+      partyId: null,
+    };
+    const first = await listCampaignCalendar(
+      { ...actor(a), workspaceAllowed: false },
+      window,
+    );
+    expect(first.events).toHaveLength(100);
+    expect(first.nextOffset).toBe(100);
+    const second = await listCampaignCalendar(
+      { ...actor(a), workspaceAllowed: false },
+      { ...window, offset: first.nextOffset! },
+    );
+    expect(second.events).toHaveLength(5);
+    expect(second.nextOffset).toBeNull();
+    expect(
+      new Set([...first.events, ...second.events].map((e) => e.id)).size,
+    ).toBe(105);
+    const visible = second.events[0].id;
+    await db.query(
+      `UPDATE agency_client_campaigns SET project_id=$2 WHERE business_id=$1 AND id<>$3`,
+      [a.businessId, a.projectId, visible],
+    );
+    const filtered = await listCampaignCalendar(
+      { ...actor(a), workspaceAllowed: false },
+      window,
+    );
+    expect(filtered.events.map((e) => e.id)).toEqual([visible]);
+    expect(filtered.nextOffset).toBeNull();
+  });
+  it("combined stored specialties reorder real blueprint choices without widening the catalogue", async () => {
+    const a = await agency();
+    const { saveBusinessAgencyProfile, readAgencyOperatingProfiles } =
+      await import("../src/lib/agency-service");
+    const { listTemplates } = await import("../src/lib/workspace");
+    const before = await listTemplates(a.businessId);
+    await saveBusinessAgencyProfile(
+      { businessId: a.businessId, userId: a.actor.userId },
+      { operatingProfile: "outdoor_print", specialties: ["content_video"] },
+    );
+    const profiles = await readAgencyOperatingProfiles(a.businessId);
+    expect(profiles).toEqual(["outdoor_print", "content_video"]);
+    const after = await listTemplates(a.businessId, {
+      profile: profiles[0],
+      additionalProfiles: profiles.slice(1),
+    });
+    expect(after.map((t) => t.key).sort()).toEqual(
+      before.map((t) => t.key).sort(),
+    );
+    expect(
+      after.find((t) => t.key === "agency_video_production")?.recommended,
+    ).toBe(true);
+    expect(
+      after.find((t) => t.key === "agency_outdoor_print")?.recommended,
+    ).toBe(true);
+  });
   it("enforces table RLS even when a report ID is known", async () => {
     const a = await agency(),
       b = await agency(),
