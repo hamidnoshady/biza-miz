@@ -2,7 +2,7 @@
 
 > Current status (2026-10-26): later waves supersede the historical scope notes below.
 > See [remaining work](ISSUE_1128_REMAINING_WORK.md) and
-> [Wave 20 agenda/import/presets](ISSUE_1128_WAVE20_PROGRESS.md); the epic remains open.
+> [Wave 21 actual task time](ISSUE_1128_WAVE21_PROGRESS.md); the epic remains open.
 
 **Status of this change:** Waves 1, 2 and 3, plus three merges of `main`. The first gave wave 2
 something to bill with. The second (#1171 and a desktop bump) and the third (#1174, one
