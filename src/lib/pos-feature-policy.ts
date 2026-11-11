@@ -27,10 +27,14 @@ export function tableServiceEnabled(
   businessInfoLoaded: boolean,
   features?: Record<string, boolean>,
 ): boolean {
-  // Before the first response, don't render table service or fetch tables. If
-  // an older server has no `features` field, retain the historical enabled
-  // behavior once that response has arrived.
-  return businessInfoLoaded && features?.reservations !== false;
+  // Before the first response, don't render table service or fetch tables.
+  if (!businessInfoLoaded) return false;
+  // ESH-147 — table service has its own entitlement. An explicit `dine_in`
+  // answer wins, so a café with `reservations: false` and `dine_in: true` gets
+  // its table tab. An older server that has no `dine_in` key keeps the
+  // historical `reservations` behavior, and no `features` at all stays on.
+  if (typeof features?.dine_in === "boolean") return features.dine_in;
+  return features?.reservations !== false;
 }
 
 export function orderTypeForEntitlements(

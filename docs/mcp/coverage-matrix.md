@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1264**. Rows: tenant **118**, platform **23**.
+Route files scanned: **1268**. Rows: tenant **119**, platform **23**.
 
 ## Summary of remaining gaps
 
@@ -41,7 +41,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 24
+Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 25
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -106,6 +106,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (in
 | Website / CMS | Posts & products (publish, update)<br>_batch BD: the content-record verbs close the row; the deletes step up (public-surface data records) and the publish buttons stay off-MCP per the standing rule in tools.ts_ | list_website_posts, list_website_products | website.post.draft, website.product.create | website.post.update, website.product.update, website.product.upsert | website.post.delete, website.product.delete | — | cms.content_manage, cms.publish | connection mode; step-up (always approve) | list_website_posts, list_website_products, website.post.draft, website.product.create, website.post.update, website.product.update, website.product.upsert, website.post.delete, website.product.delete | integration/website.integration.test.ts | covered |
 | Website / CMS | Website overview & state | get_website_status | — | — | — | — | cms.view | — | get_website_status | integration/website.integration.test.ts | covered |
 | Website / CMS | Order events, revalidate, public website connector endpoints (leads, managers, billing) | (route only) | (route only) | — | (route only) | — | billing.manage, website.view | — | — | — | n/a (infra) |
+| Website / CMS | Printed table QR identity (scan → the table that printed it)<br>_ESH-147: the scan is a customer's phone with no session; it resolves one opaque table token to a display name and the CMS site id, so there is no tenant operation an assistant could perform on it. The staff generate/rotate/revoke/print routes are part of the `tables` row above_ | (route only) | — | — | — | — | — | — | — | integration/table-qr-identity.integration.test.ts | route-only (by design) |
 | Website / CMS | Drafts, pages, website media<br>_batch BD: alt-text edit and media delete close the row (media delete steps up; force/ in-use envelope kept). Page/draft publish stays a human-confirmed action off-MCP — the same rule website.post.publish already documents in tools.ts; media upload is bytes-in-flight, not a JSON envelope_ | list_cms_media, list_cms_pages, list_website_posts | website.post.draft | website.media.update, website.post.update | website.media.delete | — | cms.content_manage, cms.publish, cms.view | connection mode; step-up (always approve) | list_cms_media, list_cms_pages, list_website_posts, website.post.draft, website.media.update, website.post.update, website.media.delete | integration/website-sync.integration.test.ts | covered |
 | Website / CMS | Connection, setup/build, design, domain/DNS, CDN<br>_batch BC: the secretless ops are live (setup answers, theme tokens, CDN purge). Credential paths (connect/disconnect keys, sync-switch toggles), the domain PURCHASE flow (wallet spend), and the publish-family buttons (site build/deploy, page-publish) stay route-only: secrets never cross the chat channel and publishing a public surface stays a human-confirmed action off-MCP, the same rule website.post.publish documents in tools.ts_ | get_website_cdn, get_website_dns, get_website_status | website.design.theme.save | website.domain.set, website.setup.save | website.cdn.purge | — | cms.configure, cms.view | connection mode | get_website_cdn, get_website_dns, get_website_status, website.design.theme.save, website.domain.set, website.setup.save, website.cdn.purge | integration/website-sync.integration.test.ts | route-only (by design) |
 | Website / CMS | Website orders<br>_orders are read on the connected site itself — this lane owns only the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock_ | — | — | website.order.status | — | — | cms.content_manage | step-up (always approve) | website.order.status | integration/website-sync.integration.test.ts | covered |

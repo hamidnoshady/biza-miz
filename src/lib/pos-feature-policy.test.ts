@@ -31,6 +31,16 @@ describe("POS feature policy", () => {
     expect(tableServiceEnabled(true, {})).toBe(true);
   });
 
+  it("lets an explicit dine_in entitlement decide, so a café without reservations still serves tables", () => {
+    // ESH-147 — the gap this separates: table service is not booking.
+    expect(tableServiceEnabled(true, { reservations: false, dine_in: true })).toBe(true);
+    expect(tableServiceEnabled(true, { reservations: true, dine_in: false })).toBe(false);
+    expect(tableServiceEnabled(true, { reservations: true, dine_in: true })).toBe(true);
+    expect(tableServiceEnabled(true, { reservations: false, dine_in: false })).toBe(false);
+    // An older server that predates the flag keeps the old answer.
+    expect(tableServiceEnabled(true, { reservations: false })).toBe(false);
+  });
+
   it("falls back to takeaway when table service or delivery is disabled", () => {
     expect(
       orderTypeForEntitlements("dine_in", {
