@@ -86,13 +86,47 @@ function installApiStub() {
   return fetchMock;
 }
 
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
 afterEach(() => {
   cleanup();
+  if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+  else Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
 describe("automotive CRM manager permissions", () => {
+  it("opens the native stock board from the shared catalogue and protects the acquisition tab", async () => {
+    installApiStub();
+    const { unmount } = render(<AutomotiveManager {...readOnlyProps} initialSection="stock" />);
+    expect(await screen.findByLabelText("جست‌وجوی خودرو")).toBeTruthy();
+    expect(screen.queryByRole("tab", { name: "خرید خودرو" })).toBeNull();
+    unmount();
+    render(<AutomotiveManager {...readOnlyProps} initialSection="acquire" />);
+    expect(await screen.findByLabelText("جست‌وجوی خودرو")).toBeTruthy();
+  });
+
+  it("opens stock and acquisition deep links on mobile while keeping the overview as a menu", async () => {
+    installApiStub();
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scroll });
+    const user = userEvent.setup();
+    const { unmount, container } = render(<AutomotiveManager {...readOnlyProps} initialSection="stock" />);
+    const stock = container.querySelector("#automotive-panel-stock")!;
+    const content = stock.parentElement?.parentElement;
+    expect(content?.className).not.toContain("hidden md:block");
+    await user.click(screen.getByText("بازگشت").closest("button")!);
+    expect(content?.className).toContain("hidden md:block");
+    unmount();
+    const acquireView = render(<AutomotiveManager {...readOnlyProps} canCreateVehicle initialSection="acquire" />);
+    const acquire = acquireView.container.querySelector("#automotive-panel-acquire")!;
+    expect(acquire.parentElement?.parentElement?.className).not.toContain("hidden md:block");
+    acquireView.unmount();
+    const overviewView = render(<AutomotiveManager {...readOnlyProps} />);
+    const overviewPanel = overviewView.container.querySelector("#automotive-panel-overview")!;
+    expect(overviewPanel.parentElement?.parentElement?.className).toContain("hidden md:block");
+  });
+
   it("shows canonical CRM data read-only to a vehicle viewer without crm.manage", async () => {
     const fetchMock = installApiStub();
     const user = userEvent.setup();
