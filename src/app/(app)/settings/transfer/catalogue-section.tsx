@@ -309,7 +309,7 @@ export function CatalogueSection() {
                     {row.values.brand} · {brandSourceLabels[row.brandSource]}
                   </StatusBadge>
                 ) : (
-                  <StatusBadge tone="warn">بدون برند</StatusBadge>
+                  <StatusBadge tone="active">بدون برند</StatusBadge>
                 )}
                 {entry ? <StatusBadge>{(entry.snapshot as CatalogueRecord).familyParentRow
                   ? `تنوعِ ردیف ${toPersianDigits((entry.snapshot as CatalogueRecord).familyParentRow!)}`

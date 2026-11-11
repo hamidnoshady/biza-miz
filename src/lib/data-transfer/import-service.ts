@@ -752,7 +752,7 @@ export async function stageImportJobToReconciliation(
       name,
       phone,
       email,
-      role: job.entityKey === "crm.companies" ? "other" : "customer",
+      role: "customer",
       fields: m,
     };
   });

@@ -37,7 +37,7 @@ const commandSchema = z.discriminatedUnion("action", [
     itemId: z.number().int().positive().safe(),
     decision: z.enum(["link", "create_separate", "choose_authority", "skip", "keep_for_review"]),
     canonicalId: z.string().uuid().optional(),
-    authorityOverrides: z.record(z.enum(["canonical", "source"])).optional(),
+    authorityOverrides: z.record(z.string(), z.enum(["canonical", "source"])).optional(),
     reason: z.string().trim().max(500).optional(),
   }),
   z.object({ action: z.literal("approve_safe") }),
@@ -150,13 +150,13 @@ export const POST = withTenantScope(
           return NextResponse.json({ ok: true, approvedCount: approved, ...(await getRunSummary(owner.businessId, id)) });
         }
         case "cutover": {
-          const run = await setRunCutoverPolicy(
+          await setRunCutoverPolicy(
             owner.businessId,
             id,
             { cutoverAuthority: cmd.cutoverAuthority, cutoverAt: cmd.cutoverAt },
             actor,
           );
-          return NextResponse.json({ ok: true, run, ...(await getRunSummary(owner.businessId, id)) });
+          return NextResponse.json({ ok: true, ...(await getRunSummary(owner.businessId, id)) });
         }
         case "apply": {
           const location = summary.run.locationId ?? (await resolveActiveLocation(owner.session))?.id ?? null;

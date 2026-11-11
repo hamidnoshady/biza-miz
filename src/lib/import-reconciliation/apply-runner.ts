@@ -22,10 +22,10 @@ import {
   partyCanonicalToken,
   productCanonicalToken,
   type ApplyHandler,
-  type RunRecord,
+  type ReconciliationRun,
 } from "./service";
 
-async function currentTokenForRun(run: RunRecord): Promise<string> {
+async function currentTokenForRun(run: ReconciliationRun): Promise<string> {
   return withTenantTransaction(run.businessId, async (client) => {
     switch (run.domain) {
       case "product":

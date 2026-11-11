@@ -210,7 +210,7 @@ export async function stageHolooBaseToReconciliation(input: {
   locationId?: string | null;
 }) {
   const actor = { userId: input.actorUserId ?? null, name: (input.actorName ?? "").trim() || "سامانه" };
-  const runs: Array<{ domain: ReconciliationDomain; runId: string; gate: unknown; summary: unknown }> = [];
+  const runs: Array<{ domain: ReconciliationDomain; runId: string; run: unknown; gate: unknown; counts: unknown }> = [];
 
   if (input.scopes.includes("goods") && input.base.goods.length > 0) {
     const incoming: IncomingProduct[] = input.base.goods.map((g) => ({
@@ -298,7 +298,18 @@ export async function stageHolooBaseToReconciliation(input: {
 
   if (input.scopes.includes("journal") && (input.journals?.length ?? 0) > 0) {
     const incoming: IncomingFinancialDocument[] = (input.journals ?? []).map((v) => {
-      const total = v.lines.reduce((acc, l) => acc + (l.debitRial ?? 0n), 0n);
+      const total = v.lines.reduce((acc, l) => {
+        const raw = l.debitRial;
+        const debit =
+          typeof raw === "bigint"
+            ? raw
+            : typeof raw === "number"
+              ? BigInt(Math.trunc(raw))
+              : typeof raw === "string" && /^\d+$/.test(raw.trim())
+                ? BigInt(raw.trim())
+                : 0n;
+        return acc + debit;
+      }, 0n);
       return {
         domain: "financial_document",
         externalId: v.remoteId,

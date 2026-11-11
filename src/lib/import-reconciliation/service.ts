@@ -80,6 +80,7 @@ import {
   RECONCILIATION_IMPORT_MODES,
   RECONCILIATION_SOURCE_KINDS,
   type FieldConflict,
+  type CutoverAuthority,
   type IncomingFinancialDocument,
   type IncomingInventory,
   type IncomingParty,
@@ -115,7 +116,7 @@ export interface Actor {
 // Row shapes
 // ---------------------------------------------------------------------------
 
-export type CutoverAuthority = "books" | "source" | "two_way" | "archive_only";
+export type { CutoverAuthority };
 
 export interface ReconciliationRun {
   id: string;
@@ -158,7 +159,7 @@ export interface StagedItem {
   canonicalId: string | null;
   candidates: Array<{ id: string; label: string }>;
   evidence: Array<{ kind: string; value: string; weak: boolean }>;
-  conflicts: unknown[];
+  conflicts: FieldConflict[];
   notes: string[];
   historical: boolean;
   status: ReconciliationItemStatus;
@@ -215,7 +216,7 @@ function mapItem(r: Row): StagedItem {
     canonicalId: (r.canonical_id as string | null) ?? null,
     candidates: (r.candidates as StagedItem["candidates"]) ?? [],
     evidence: (r.evidence as StagedItem["evidence"]) ?? [],
-    conflicts: (r.conflicts as unknown[]) ?? [],
+    conflicts: (r.conflicts as FieldConflict[]) ?? [],
     notes: (r.notes as string[]) ?? [],
     historical: Boolean(r.historical),
     status: r.status as ReconciliationItemStatus,
@@ -1006,7 +1007,7 @@ export async function loadPartyContext(
 
   const phones = [...new Set(records.map((r) => normalizePhoneKey(r.phone)).filter((p): p is string => p != null))];
   for (const phone of phones) {
-    const keys = phoneMatchKeys(run.businessId, phone);
+    const keys = await phoneMatchKeys(run.businessId, phone);
     if (!keys) continue;
     const { rows } = await client.query<PartyDbRow>(
       `${selectSql}

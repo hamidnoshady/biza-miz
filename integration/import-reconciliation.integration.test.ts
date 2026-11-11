@@ -1067,7 +1067,7 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
         entityKey: "inventory.items",
         fileName: "items.csv",
         format: "csv",
-        buffer: csvBuf,
+        buffer: csvBuf.buffer.slice(csvBuf.byteOffset, csvBuf.byteOffset + csvBuf.byteLength),
         actorUserId: null,
         actorName: actor.name,
         mapping: {
@@ -1161,7 +1161,7 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
           locationId: biz.locationId,
           scopes: ["goods"],
           base: holooBase as never,
-          profile: { key: "holoo-v1", version: 1, verifiedAt: new Date().toISOString() },
+          profile: { key: "holoo-v1", version: 1 },
           source: "xlsx",
           actorUserId: actor.userId ?? "00000000-0000-0000-0000-000000000000",
           actorName: actor.name,

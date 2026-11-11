@@ -1,4 +1,4 @@
--- 0297_import_reconciliation_extensions.sql — issue #1118 completion:
+-- 0299_import_reconciliation_extensions.sql — issue #1118 completion:
 --
 -- 1. Cutover authority/time boundary and field-authority policy snapshot on
 --    reconciliation runs so migrations record who owns books vs inventory
