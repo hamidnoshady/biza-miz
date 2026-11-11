@@ -57,6 +57,24 @@ describe("issue #812 §3/§7 — a mode's alias decides the model", () => {
     expect(applyRuntimeModeAlias(branchOverridden, { model_alias: "pos-instant" }).model).toBe("pos-instant");
   });
 
+  it("applies mode temperature and token limits on tenant requests", () => {
+    const config = { ...BASE, temperature: 0.9, maxOutputTokens: 2048 };
+    const mode = { model_alias: "pos-thinking", temperature: 0.2, max_output_tokens: 4096 };
+    const result = applyRuntimeModeAlias(config, mode);
+    expect(result).toMatchObject({ model: "pos-thinking", temperature: 0.2, maxOutputTokens: 4096 });
+    expect(config).toMatchObject({ model: "gpt-4o-mini", temperature: 0.9, maxOutputTokens: 2048 });
+  });
+
+  it("inherits defaults when per-mode temperature and token overrides are cleared", () => {
+    const config = { ...BASE, temperature: 0.7, maxOutputTokens: 1024 };
+    const result = applyRuntimeModeAlias(config, {
+      model_alias: "",
+      temperature: null,
+      max_output_tokens: null,
+    });
+    expect(result).toEqual(config);
+  });
+
   it("leaves the rest of the config untouched", () => {
     const config = { ...BASE, maxOutputTokens: 4096, enabled: true };
     const out = applyRuntimeModeAlias(config, { model_alias: "pos-auto" });
