@@ -22,6 +22,8 @@
  * different ways. Only the execution stays here.
  */
 import "dotenv/config";
+import { assertDemoDatabase } from "../src/lib/demo-database";
+import { isDemoDeployment, requireDemoDeployment } from "../src/lib/demo-session-credentials";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -245,6 +247,7 @@ export async function runMigrations(options: MigrationRunOptions): Promise<Migra
     throw new Error("ai_gateway_secret_cutover_flags_conflict");
   }
 
+  const demo = isDemoDeployment() ? requireDemoDeployment() : null;
   const client = new Client({ connectionString: options.databaseUrl });
   let lockAcquired = false;
   let adoptedChecksums = 0;
@@ -254,6 +257,7 @@ export async function runMigrations(options: MigrationRunOptions): Promise<Migra
 
   await client.connect();
   try {
+    if (demo) await assertDemoDatabase(client, demo, "migration");
     await client.query("SELECT pg_advisory_lock($1::bigint)", [MIGRATION_ADVISORY_LOCK_ID]);
     lockAcquired = true;
     await client.query(
