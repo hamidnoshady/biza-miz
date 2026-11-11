@@ -6,7 +6,7 @@ import { SearchField } from "@/app/dashboard/filters";
 import { ErrorBox, Field, InfoBox, PrimaryButton, SecondaryButton, api, inputClass } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
 import { RECONCILIATION_OUTCOME_LABELS, RECONCILIATION_RUN_STATUS_LABELS } from "@/lib/import-reconciliation/types";
-import type { CatalogueField, CatalogueMapping, CatalogueRow } from "@/lib/data-transfer/catalogue-profile";
+import type { BrandSource, CatalogueField, CatalogueMapping, CatalogueRow } from "@/lib/data-transfer/catalogue-profile";
 import type { CatalogueRecord } from "@/lib/data-transfer/catalogue-plan";
 import type { catalogueItems, catalogueRuns, catalogueSummary } from "@/lib/data-transfer/catalogue-service";
 import type { catalogueWooStatus, previewCatalogueWoo } from "@/lib/data-transfer/catalogue-woo";
@@ -21,9 +21,15 @@ const labels: Record<CatalogueField, string> = {
 };
 const issueLabels: Record<string, string> = {
   formula: "فرمول قابل تأیید نیست", error: "خطای اکسل", unsafe_number: "عدد خارج از محدوده",
-  invalid_identity: "شناسه یا نام نامعتبر", movement_review: "نوع موتور مبهم است و ثبت نمی‌شود",
+  invalid_identity: "شناسه یا نام نامعتبر", invalid_brand: "نام برند نامعتبر است و ثبت نمی‌شود",
+  movement_review: "نوع موتور مبهم است و ثبت نمی‌شود",
   dimension_review: "ابعاد نامعتبر است و ثبت نمی‌شود", missing: "بدون مقدار",
   metadata_only: "خارج از ورود اطلاعات این مرحله",
+};
+const brandSourceLabels: Record<BrandSource, string> = {
+  excel: "از ستون اکسل",
+  fallback: "برند جایگزین کاربر",
+  none: "بدون برند",
 };
 const statusLabels: Record<string, string> = {
   proposed: "پیشنهاد", approved: "تأیید شد", held: "نیازمند بررسی", skipped: "رد شد",
@@ -37,6 +43,8 @@ const errors: Record<string, string> = {
   catalogue_sheet_limit: "برگه باید حداکثر هزار ردیف داده و صد ستون داشته باشد.",
   catalogue_mapping_required: "ستون‌های شناسه کالا و نام محصول را مشخص کنید.",
   catalogue_mapping_invalid: "برای هر فیلد یک ستون یکتا انتخاب کنید.",
+  catalogue_brand_required: "ستون برند انتخاب نشده است؛ پیش از پیش‌نمایش، نام برند پیش‌فرض را وارد کنید.",
+  catalogue_brand_invalid: "نام برند جایگزین نباید خالی یا طولانی‌تر از صد نویسه باشد.",
   catalogue_variant_group_invalid: "گروه تنوع به والد مشخص، محور معتبر و حداقل دو گزینهٔ یکتا نیاز دارد.",
   active_run_exists: "برای این منبع بررسی فعالی وجود دارد. آن را از فهرست بررسی‌ها باز کنید.",
   preview_stale: "داده‌های شعبه تغییر کرده یا مهلت بررسی گذشته است. بررسی را لغو و دوباره پیش‌نمایش بگیرید.",
@@ -54,7 +62,16 @@ type RunDetails = Awaited<ReturnType<typeof catalogueSummary>> & { items: Awaite
 type LocalItem = RunDetails["items"][number];
 type WooPreview = Awaited<ReturnType<typeof previewCatalogueWoo>>;
 type Deliveries = Awaited<ReturnType<typeof catalogueWooStatus>>;
-type DryRun = { rows: CatalogueRow[]; totals: { rows: number; distinctSkus: number; repeated: number } };
+type BrandTotals = {
+  rows: number;
+  distinctSkus: number;
+  repeated: number;
+  blankBrandRows?: number;
+  excelBrandRows?: number;
+  fallbackBrandRows?: number;
+  unbrandedRows?: number;
+};
+type DryRun = { rows: CatalogueRow[]; totals: BrandTotals };
 type Overview = { runs: RunList; stores: { id: string; name: string }[]; target: "watch" | "retail"; localOnly: boolean };
 
 async function request<T>(path = "", body?: Record<string, unknown> | FormData): Promise<T> {
@@ -77,7 +94,14 @@ function RowEvidence({ row }: { row: CatalogueRow }) {
           const warning = row.issues.find(issue => issue.field === field);
           const normalized = field === "drive" ? row.movement : field === "case_dimension" ? row.dimensions?.join(" × ") : row.values[field];
           return <div key={field} className="min-w-0">
-            <dt className="font-medium">{labels[field]}</dt>
+            <dt className="font-medium">
+              {labels[field]}
+              {field === "brand" ? (
+                <span className="ms-1 text-xs font-normal text-muted-foreground">
+                  ({brandSourceLabels[row.brandSource]})
+                </span>
+              ) : null}
+            </dt>
             {value ? <dd className="break-words" dir="auto">{value}</dd> : null}
             {warning ? <dd className="text-muted-foreground">{issueLabels[warning.code]}</dd> : null}
             {!warning && normalized && normalized !== value ? <dd dir="auto">{normalized}</dd> : null}
@@ -93,7 +117,7 @@ export function CatalogueSection() {
   const [file, setFile] = useState<File | null>(null);
   const [columns, setColumns] = useState<string[]>([]);
   const [mapping, setMapping] = useState<CatalogueMapping>({});
-  const [omax, setOmax] = useState(false);
+  const [fallbackBrand, setFallbackBrand] = useState("");
   const [axis, setAxis] = useState("");
   const [source, setSource] = useState("catalogue");
   const [dry, setDry] = useState<DryRun | null>(null);
@@ -133,7 +157,15 @@ export function CatalogueSection() {
   function upload(action: "analyse" | "preview" | "stage") {
     const body = new FormData();
     if (file) body.append("file", file);
-    body.append("options", JSON.stringify({ action, mapping, omax, axis, sourceName: source, duplicateRows: Object.values(chosen) }));
+    const trimmedFallback = fallbackBrand.trim();
+    body.append("options", JSON.stringify({
+      action,
+      mapping,
+      ...(trimmedFallback ? { fallbackBrand: trimmedFallback } : {}),
+      axis,
+      sourceName: source,
+      duplicateRows: Object.values(chosen),
+    }));
     return body;
   }
 
@@ -165,11 +197,14 @@ export function CatalogueSection() {
   const visibleRows = (run
     ? run.items.map(entry => ({ row: (entry.snapshot as CatalogueRecord).catalogue, entry }))
     : (dry?.rows ?? []).map(row => ({ row, entry: null })))
-    .filter(({ row }) => `${row.number} ${row.sku ?? ""} ${row.title}`.toLowerCase().includes(search.trim().toLowerCase()));
-  const totals = (run?.run.evidence.totals as DryRun["totals"] | undefined) ?? dry?.totals;
+    .filter(({ row }) => `${row.number} ${row.sku ?? ""} ${row.title} ${row.values.brand ?? ""}`.toLowerCase().includes(search.trim().toLowerCase()));
+  const totals = (run?.run.evidence.totals as BrandTotals | undefined) ?? dry?.totals;
   const activeRun = run && ["staged", "in_review", "applying", "partially_applied"].includes(run.run.status);
   const canReview = activeRun && run.run.status !== "applying";
   const saved = overview?.runs.filter(entry => entry.evidence.columns && JSON.stringify(entry.evidence.columns) === JSON.stringify(columns)) ?? [];
+  const hasBrandColumn = mapping.brand !== undefined;
+  const trimmedFallback = fallbackBrand.trim();
+  const brandMissing = !hasBrandColumn && !trimmedFallback;
 
   if (!overview && !error) return <LoadingSkeleton />;
 
@@ -222,10 +257,26 @@ export function CatalogueSection() {
           {overview?.target === "retail" && mapping.option !== undefined ? <Field label="نام محور تنوعِ تعریف‌شده در شعبه">
             <input className={inputClass} value={axis} maxLength={100} disabled={busy} onChange={e => setAxis(e.target.value)} />
           </Field> : null}
-          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={omax} disabled={busy} onChange={e => { setOmax(e.target.checked); setDry(null); }} /> ثبت Omax به‌عنوان برند تأییدشده</label>
+          <Field
+            label={hasBrandColumn ? "برند جایگزین برای ردیف‌های خالی (اختیاری)" : "نام برند پیش‌فرض (الزامی)"}
+            hint={
+              hasBrandColumn
+                ? "فقط برای ردیف‌هایی استفاده می‌شود که ستون برند آن‌ها در فایل خالی است؛ برندهای ثبت‌شده در اکسل تغییر نمی‌کنند."
+                : "چون ستون برند در فایل مشخص نشده است، نام برند همهٔ ردیف‌های این فایل را وارد کنید."
+            }
+          >
+            <input
+              className={inputClass}
+              value={fallbackBrand}
+              maxLength={100}
+              disabled={busy}
+              placeholder={hasBrandColumn ? "مثلاً برند پیش‌فرض برای سلول‌های خالی" : "مثلاً Casio یا برند فایل"}
+              onChange={e => { setFallbackBrand(e.target.value); setDry(null); }}
+            />
+          </Field>
         </div>
         <div className="mt-4">
-          <PrimaryButton disabled={busy || mapping.sku === undefined || mapping.title === undefined} onClick={() => void perform(async () => {
+          <PrimaryButton disabled={busy || mapping.sku === undefined || mapping.title === undefined || brandMissing} onClick={() => void perform(async () => {
             setDry(await request<DryRun>("", upload("preview"))); setPage(0); setSearch("");
           })}>پیش‌نمایش ردیف‌ها</PrimaryButton>
         </div>
@@ -233,14 +284,33 @@ export function CatalogueSection() {
 
       {(dry || run) ? <SectionCard title={run ? "بررسی و نتیجهٔ تطبیق شعبه" : "بررسی ردیف‌های اکسل"}>
         <div className="space-y-3">
-          {totals ? <p>{toPersianDigits(totals.rows)} ردیف · {toPersianDigits(totals.distinctSkus)} شناسهٔ یکتا · {toPersianDigits(totals.repeated)} تکرار</p> : null}
+          {totals ? (
+            <p>
+              {toPersianDigits(totals.rows)} ردیف · {toPersianDigits(totals.distinctSkus)} شناسهٔ یکتا · {toPersianDigits(totals.repeated)} تکرار
+              {typeof totals.excelBrandRows === "number" ? <> · {toPersianDigits(totals.excelBrandRows)} برند از اکسل</> : null}
+              {typeof totals.fallbackBrandRows === "number" && totals.fallbackBrandRows > 0 ? <> · {toPersianDigits(totals.fallbackBrandRows)} برند جایگزین</> : null}
+              {typeof totals.unbrandedRows === "number" && totals.unbrandedRows > 0 ? <> · {toPersianDigits(totals.unbrandedRows)} ردیف بدون برند</> : null}
+            </p>
+          ) : null}
+          {!run && totals?.blankBrandRows && totals.blankBrandRows > 0 && !trimmedFallback ? (
+            <InfoBox>
+              در {toPersianDigits(totals.blankBrandRows)} ردیف ستون برند خالی است. برای ثبت برند این ردیف‌ها می‌توانید برند جایگزین وارد کنید یا بدون برند ادامه دهید.
+            </InfoBox>
+          ) : null}
           {run ? <p aria-live="polite">{RECONCILIATION_RUN_STATUS_LABELS[run.run.status]} · {toPersianDigits(run.counts.applied)} اعمال‌شده · {toPersianDigits(run.counts.failed)} ناموفق</p> : null}
-          <SearchField label="جستجوی ردیف، شناسه یا عنوان" value={search} onChange={value => { setSearch(value); setPage(0); }} />
+          <SearchField label="جستجوی ردیف، شناسه، نام یا برند" value={search} onChange={value => { setSearch(value); setPage(0); }} />
           <ul className="divide-y divide-border">
             {visibleRows.slice(page * 15, page * 15 + 15).map(({ row, entry }) => <li key={row.number} className="space-y-2 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <strong>{toPersianDigits(row.number)} · <bdi>{row.sku || "بدون شناسه"}</bdi></strong>
                 <span className="break-words">{row.title}</span>
+                {row.values.brand ? (
+                  <StatusBadge tone="neutral">
+                    {row.values.brand} · {brandSourceLabels[row.brandSource]}
+                  </StatusBadge>
+                ) : (
+                  <StatusBadge tone="warn">بدون برند</StatusBadge>
+                )}
                 {entry ? <StatusBadge>{(entry.snapshot as CatalogueRecord).familyParentRow
                   ? `تنوعِ ردیف ${toPersianDigits((entry.snapshot as CatalogueRecord).familyParentRow!)}`
                   : `${RECONCILIATION_OUTCOME_LABELS[entry.outcome]} · ${statusLabels[entry.status]}`}</StatusBadge> : null}
@@ -257,7 +327,7 @@ export function CatalogueSection() {
             <SecondaryButton disabled={page === 0} onClick={() => setPage(page - 1)}>صفحهٔ قبل</SecondaryButton>
             <SecondaryButton disabled={(page + 1) * 15 >= visibleRows.length} onClick={() => setPage(page + 1)}>صفحهٔ بعد</SecondaryButton>
           </div>
-          {!run ? <PrimaryButton disabled={busy} onClick={() => void perform(async () => {
+          {!run ? <PrimaryButton disabled={busy || brandMissing} onClick={() => void perform(async () => {
             const { runId } = await request<{ runId: string }>("", upload("stage"));
             setOverview(await request<Overview>()); setPage(0); await loadRun(runId, 0);
           })}>آماده‌سازی بررسی شعبه</PrimaryButton> :

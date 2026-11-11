@@ -21,8 +21,18 @@
 
 import type { PoolClient } from "pg";
 import { withTenantTransaction } from "../db";
+import { isRetailCatalogueIndustry } from "../industries";
 import { upsertMappingOnClient } from "../integrations/mapping-service";
-import { DEFAULT_FIELD_AUTHORITY_POLICY, isProtectedClass, fieldClassFor, type FieldAuthorityOverrides, type FieldAuthorityPolicy } from "./field-authority";
+import { phoneMatchKeys, phoneMatchSql } from "../parties-service";
+import {
+  DEFAULT_FIELD_AUTHORITY_POLICY,
+  fieldClassFor,
+  isProtectedClass,
+  isRejectedRemoteEdit,
+  remoteEditFingerprint,
+  type FieldAuthorityOverrides,
+  type FieldAuthorityPolicy,
+} from "./field-authority";
 import {
   canTransitionRun,
   countOutcomes,
@@ -37,15 +47,44 @@ import {
   type ReconciliationCounts,
   type StaleCheck,
 } from "./lifecycle";
-import { identityKeysOf, planProducts, type PlannedItem } from "./plan";
-import { normalizeBarcodeKey, normalizeNameKey, normalizeSkuKey } from "./normalize";
-import type { CanonicalProduct, ProductContext } from "./resolvers";
+import {
+  identityKeysOf,
+  planFinancialDocuments,
+  planInventory,
+  planParties,
+  planProducts,
+  type PlannedItem,
+} from "./plan";
+import {
+  normalizeBarcodeKey,
+  normalizeEmailKey,
+  normalizeNameKey,
+  normalizePhoneKey,
+  normalizeReferenceKey,
+  normalizeSkuKey,
+} from "./normalize";
+import {
+  amountDateKey,
+  type CanonicalFinancialDocument,
+  type CanonicalParty,
+  type CanonicalProduct,
+  type CanonicalStock,
+  type FinancialDocumentContext,
+  type InventoryContext,
+  type PartyContext,
+  type ProductContext,
+} from "./resolvers";
 import {
   RECONCILIATION_DECISIONS,
   RECONCILIATION_DOMAINS,
   RECONCILIATION_IMPORT_MODES,
   RECONCILIATION_SOURCE_KINDS,
+  type FieldConflict,
+  type IncomingFinancialDocument,
+  type IncomingInventory,
+  type IncomingParty,
   type IncomingProduct,
+  type PartyRole,
   type ReconciliationDecision,
   type ReconciliationDomain,
   type ReconciliationEffect,
@@ -76,6 +115,8 @@ export interface Actor {
 // Row shapes
 // ---------------------------------------------------------------------------
 
+export type CutoverAuthority = "books" | "source" | "two_way" | "archive_only";
+
 export interface ReconciliationRun {
   id: string;
   businessId: string;
@@ -92,6 +133,9 @@ export interface ReconciliationRun {
   profileVersion: number | null;
   policyVersion: number;
   canonicalToken: string | null;
+  cutoverAuthority: CutoverAuthority | null;
+  cutoverAt: string | null;
+  policySnapshot: Record<string, unknown>;
   scope: Record<string, unknown>;
   cursor: Record<string, unknown>;
   evidence: Record<string, unknown>;
@@ -144,6 +188,9 @@ function mapRun(r: Row): ReconciliationRun {
     profileVersion: (r.profile_version as number | null) ?? null,
     policyVersion: Number(r.policy_version),
     canonicalToken: (r.canonical_token as string | null) ?? null,
+    cutoverAuthority: (r.cutover_authority as CutoverAuthority | null) ?? null,
+    cutoverAt: iso(r.cutover_at),
+    policySnapshot: (r.policy_snapshot as Record<string, unknown>) ?? {},
     scope: (r.scope as Record<string, unknown>) ?? {},
     cursor: (r.cursor as Record<string, unknown>) ?? {},
     evidence: (r.evidence as Record<string, unknown>) ?? {},
@@ -243,6 +290,9 @@ export interface OpenRunInput {
   profileKey?: string | null;
   profileVersion?: number | null;
   policyVersion?: number;
+  cutoverAuthority?: CutoverAuthority | null;
+  cutoverAt?: string | null;
+  policySnapshot?: Record<string, unknown>;
   scope?: Record<string, unknown>;
   /** Immutable source evidence: file name, size, hash, provider build. */
   evidence?: Record<string, unknown>;
@@ -276,8 +326,8 @@ export async function openRun(input: OpenRunInput): Promise<ReconciliationRun> {
       `INSERT INTO import_reconciliation_runs
          (business_id, location_id, domain, source_kind, provider, source_key, connection_id,
           import_mode, source_fingerprint, profile_key, profile_version, policy_version,
-          scope, evidence, created_by, created_by_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15::uuid, $16)
+          cutover_authority, cutover_at, policy_snapshot, scope, evidence, created_by, created_by_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::timestamptz, $15::jsonb, $16::jsonb, $17::jsonb, $18::uuid, $19)
        RETURNING *`,
       [
         input.businessId,
@@ -292,6 +342,9 @@ export async function openRun(input: OpenRunInput): Promise<ReconciliationRun> {
         input.profileKey ?? null,
         input.profileVersion ?? null,
         input.policyVersion ?? DEFAULT_FIELD_AUTHORITY_POLICY.version,
+        input.cutoverAuthority ?? null,
+        input.cutoverAt ?? null,
+        JSON.stringify(input.policySnapshot ?? {}),
         JSON.stringify(input.scope ?? {}),
         JSON.stringify(input.evidence ?? {}),
         input.actor.userId,
@@ -531,9 +584,167 @@ type CatalogueTable = "items" | "menu_items";
 
 async function catalogueTableFor(client: PoolClient, businessId: string): Promise<CatalogueTable> {
   const { rows } = await client.query<{ industry: string }>("SELECT industry FROM businesses WHERE id = $1", [businessId]);
-  // Same split the Woo/Holoo product writers use: F&B sells `menu_items`, every
-  // other trade with a sellable catalogue sells `items`.
-  return rows[0]?.industry === "food_service" ? "menu_items" : "items";
+  const industry = rows[0]?.industry;
+  if (industry === "food_service") return "menu_items";
+  if (isRetailCatalogueIndustry(industry)) return "items";
+  throw new ReconciliationError("industry_not_supported", { industry: industry ?? "unknown" });
+}
+
+// ---------------------------------------------------------------------------
+// Rejected remote edits (no endless conflict / outbound bounce)
+// ---------------------------------------------------------------------------
+
+async function loadRejectedEdits(
+  client: PoolClient,
+  businessId: string,
+  sourceKey: string,
+  domain: ReconciliationDomain,
+  externalIds: readonly string[],
+): Promise<Map<string, Set<string>>> {
+  const out = new Map<string, Set<string>>();
+  if (externalIds.length === 0) return out;
+  const { rows } = await client.query<{ external_id: string; fingerprint: string }>(
+    `SELECT external_id, fingerprint
+       FROM import_reconciliation_rejected_edits
+      WHERE business_id = $1 AND source_key = $2 AND domain = $3 AND external_id = ANY($4::text[])`,
+    [businessId, sourceKey, domain, externalIds],
+  );
+  for (const row of rows) {
+    const set = out.get(row.external_id) ?? new Set<string>();
+    set.add(row.fingerprint);
+    out.set(row.external_id, set);
+  }
+  return out;
+}
+
+function suppressRejectedConflicts(
+  planned: PlannedItem[],
+  rejectedByExternalId: ReadonlyMap<string, ReadonlySet<string>>,
+): PlannedItem[] {
+  if (rejectedByExternalId.size === 0) return planned;
+  return planned.map((item) => {
+    const rejected = rejectedByExternalId.get(item.externalKey);
+    if (!rejected || item.conflicts.length === 0) return item;
+    const keptConflicts = item.conflicts.filter((c) => !isRejectedRemoteEdit(rejected, c.field, c.incoming));
+    if (keptConflicts.length === item.conflicts.length) return item;
+    const stillNeedsReview = keptConflicts.some((c) => c.needsReview);
+    const outcome =
+      item.resolution.outcome === "field_conflict" && !stillNeedsReview
+        ? item.resolution.reasons.includes("verified_mapping")
+          ? "already_linked"
+          : "safe_match"
+        : item.resolution.outcome;
+    return {
+      ...item,
+      conflicts: keptConflicts,
+      resolution: { ...item.resolution, outcome },
+    };
+  });
+}
+
+export async function recordRejectedRemoteEdit(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    sourceKey: string;
+    domain: ReconciliationDomain;
+    externalType: string;
+    externalId: string;
+    field: string;
+    value: unknown;
+    reason?: string;
+    actor: Actor;
+  },
+): Promise<void> {
+  const fingerprint = remoteEditFingerprint(input.field, input.value);
+  await client.query(
+    `INSERT INTO import_reconciliation_rejected_edits
+       (business_id, source_key, domain, external_type, external_id, field, fingerprint, reason, rejected_by, rejected_by_name)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, $10)
+     ON CONFLICT (business_id, source_key, domain, external_type, external_id, field)
+     DO UPDATE SET fingerprint = EXCLUDED.fingerprint,
+                   reason = EXCLUDED.reason,
+                   rejected_by = EXCLUDED.rejected_by,
+                   rejected_by_name = EXCLUDED.rejected_by_name,
+                   updated_at = now()`,
+    [
+      input.businessId,
+      input.sourceKey,
+      input.domain,
+      input.externalType,
+      input.externalId,
+      input.field,
+      fingerprint,
+      (input.reason ?? "").trim(),
+      input.actor.userId,
+      input.actor.name,
+    ],
+  );
+}
+
+export async function isRemoteEditSuppressed(
+  businessId: string,
+  sourceKey: string,
+  domain: ReconciliationDomain,
+  externalType: string,
+  externalId: string,
+  field: string,
+  value: unknown,
+): Promise<boolean> {
+  const fingerprint = remoteEditFingerprint(field, value);
+  return withTenantTransaction(businessId, async (client) => {
+    const { rows } = await client.query<{ ok: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM import_reconciliation_rejected_edits
+          WHERE business_id = $1 AND source_key = $2 AND domain = $3
+            AND external_type = $4 AND external_id = $5 AND field = $6 AND fingerprint = $7
+       ) AS ok`,
+      [businessId, sourceKey, domain, externalType, externalId, field, fingerprint],
+    );
+    return Boolean(rows[0]?.ok);
+  });
+}
+
+export async function listRejectedRemoteEdits(
+  businessId: string,
+  filter: { sourceKey?: string; domain?: ReconciliationDomain; externalId?: string } = {},
+) {
+  return withTenantTransaction(businessId, async (client) => {
+    const { rows } = await client.query<{
+      id: string;
+      source_key: string;
+      domain: ReconciliationDomain;
+      external_type: string;
+      external_id: string;
+      field: string;
+      fingerprint: string;
+      reason: string;
+      rejected_by_name: string;
+      created_at: Date;
+    }>(
+      `SELECT id, source_key, domain, external_type, external_id, field, fingerprint, reason, rejected_by_name, created_at
+         FROM import_reconciliation_rejected_edits
+        WHERE business_id = $1
+          AND ($2::text IS NULL OR source_key = $2)
+          AND ($3::text IS NULL OR domain = $3)
+          AND ($4::text IS NULL OR external_id = $4)
+        ORDER BY updated_at DESC
+        LIMIT 500`,
+      [businessId, filter.sourceKey ?? null, filter.domain ?? null, filter.externalId ?? null],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      sourceKey: r.source_key,
+      domain: r.domain,
+      externalType: r.external_type,
+      externalId: r.external_id,
+      field: r.field,
+      fingerprint: r.fingerprint,
+      reason: r.reason,
+      rejectedByName: r.rejected_by_name,
+      createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+    }));
+  });
 }
 
 interface CatalogueRow extends Row {
@@ -711,7 +922,7 @@ export async function stageProducts(
     const run = await loadRun(client, businessId, runId);
     if (run.domain !== "product") throw new ReconciliationError("domain_mismatch");
     const { ctx } = await loadProductContext(client, run, records);
-    return planProducts(
+    const items = planProducts(
       records,
       ctx,
       {
@@ -720,8 +931,805 @@ export async function stageProducts(
       },
       options.wholeRun ?? records,
     );
+    const externalKeys = items.map((i) => i.externalKey);
+    const rejected = await loadRejectedEdits(client, businessId, run.sourceKey, "product", externalKeys);
+    return suppressRejectedConflicts(items, rejected);
   });
   return stagePlannedItems(businessId, runId, planned);
+}
+
+// ---------------------------------------------------------------------------
+// Party context, staging, discovery & apply handler
+// ---------------------------------------------------------------------------
+
+interface PartyDbRow extends Row {
+  id: string;
+  name: string;
+  phone: string | null;
+  phone_e164: string | null;
+  email: string | null;
+  national_id: string | null;
+  economic_code: string | null;
+  address: string | null;
+  notes: string | null;
+  roles: string[] | null;
+  role: string | null;
+  is_active: boolean;
+  merged_into_id: string | null;
+  verified_user_phone: string | null;
+}
+
+function normalizePartyRoles(row: PartyDbRow): PartyRole[] {
+  const raw = Array.isArray(row.roles) && row.roles.length > 0 ? row.roles : row.role ? [row.role] : [];
+  return raw.filter((r): r is PartyRole => r === "customer" || r === "supplier" || r === "employee");
+}
+
+export async function loadPartyContext(
+  client: PoolClient,
+  run: ReconciliationRun,
+  records: readonly IncomingParty[],
+): Promise<Omit<PartyContext, "incomingPhoneCounts">> {
+  const externalIds = records.map((r) => r.externalId).filter((id): id is string => id != null);
+  const mappings = new Map<string, string>();
+  if (externalIds.length > 0) {
+    const { rows } = await client.query<{ external_id: string; canonical_id: string }>(
+      `SELECT external_id, canonical_id FROM source_identities
+        WHERE business_id = $1 AND source_key = $2 AND domain = 'party'
+          AND canonical_type = 'parties' AND retired_at IS NULL AND verified
+          AND external_id = ANY($3::text[])`,
+      [run.businessId, run.sourceKey, externalIds],
+    );
+    for (const r of rows) mappings.set(r.external_id, r.canonical_id);
+    if (run.connectionId) {
+      const { rows: connRows } = await client.query<{ remote_id: string; local_id: string }>(
+        `SELECT remote_id, local_id::text AS local_id FROM integration_mappings
+          WHERE business_id = $1 AND connection_id = $2
+            AND entity_type IN ('customer', 'holoo_customer')
+            AND remote_id = ANY($3::text[])`,
+        [run.businessId, run.connectionId, externalIds],
+      );
+      for (const r of connRows) if (!mappings.has(r.remote_id)) mappings.set(r.remote_id, r.local_id);
+    }
+  }
+
+  const found = new Map<string, PartyDbRow>();
+  const selectSql = `SELECT p.id::text AS id, p.name, p.phone, p.phone_e164, p.email,
+                            p.national_id, p.economic_code, p.address, p.notes,
+                            p.roles, p.role, p.is_active, p.merged_into_id::text AS merged_into_id,
+                            CASE WHEN u.phone_verified_at IS NOT NULL THEN u.phone_e164 ELSE NULL END AS verified_user_phone
+                       FROM parties p
+                       LEFT JOIN users u ON u.id = p.employee_user_id AND u.business_id = p.business_id`;
+
+  const addRows = (rows: PartyDbRow[]) => {
+    for (const r of rows) found.set(r.id, r);
+  };
+
+  const phones = [...new Set(records.map((r) => normalizePhoneKey(r.phone)).filter((p): p is string => p != null))];
+  for (const phone of phones) {
+    const keys = phoneMatchKeys(run.businessId, phone);
+    if (!keys) continue;
+    const { rows } = await client.query<PartyDbRow>(
+      `${selectSql}
+        WHERE p.business_id = $1 AND p.merged_into_id IS NULL
+          AND ${phoneMatchSql("p", "$2", "$3")}`,
+      [run.businessId, keys.bidx, keys.e164],
+    );
+    addRows(rows);
+  }
+
+  const emails = [...new Set(records.map((r) => normalizeEmailKey(r.email)).filter((e): e is string => e != null))];
+  if (emails.length > 0) {
+    const { rows } = await client.query<PartyDbRow>(
+      `${selectSql}
+        WHERE p.business_id = $1 AND p.merged_into_id IS NULL
+          AND lower(p.email) = ANY($2::text[])`,
+      [run.businessId, emails],
+    );
+    addRows(rows);
+  }
+
+  const names = [
+    ...new Set(records.map((r) => normalizeNameKey(r.name)).filter((n): n is string => n != null)),
+  ];
+  if (names.length > 0) {
+    const { rows } = await client.query<PartyDbRow>(
+      `${selectSql}
+        WHERE p.business_id = $1 AND p.merged_into_id IS NULL
+          AND lower(btrim(p.name)) = ANY($2::text[])`,
+      [run.businessId, names],
+    );
+    addRows(rows);
+  }
+
+  const mappedTargets = [...new Set(mappings.values())].filter((id) => !found.has(id));
+  if (mappedTargets.length > 0) {
+    const { rows } = await client.query<PartyDbRow>(
+      `${selectSql} WHERE p.business_id = $1 AND p.id::text = ANY($2::text[])`,
+      [run.businessId, mappedTargets],
+    );
+    addRows(rows);
+  }
+
+  // Confirmed external identities with a normalised phone also attest that phone
+  // for this business when no OTP-linked user exists.
+  const verifiedByPartyId = new Map<string, Set<string>>();
+  if (found.size > 0) {
+    const { rows: extVerified } = await client.query<{ party_id: string; phone_e164: string | null }>(
+      `SELECT party_id::text AS party_id, remote_phone_e164 AS phone_e164
+         FROM crm_external_profiles
+        WHERE business_id = $1 AND party_id::text = ANY($2::text[])
+          AND status = 'confirmed' AND remote_phone_e164 IS NOT NULL`,
+      [run.businessId, [...found.keys()]],
+    );
+    for (const r of extVerified) {
+      if (!r.phone_e164) continue;
+      const set = verifiedByPartyId.get(r.party_id) ?? new Set<string>();
+      set.add(r.phone_e164);
+      verifiedByPartyId.set(r.party_id, set);
+    }
+  }
+
+  const canonicalById = new Map<string, CanonicalParty & { fields: Record<string, unknown> }>();
+  const candidatesByPhone = new Map<string, CanonicalParty[]>();
+  const candidatesByEmail = new Map<string, CanonicalParty[]>();
+  const candidatesByName = new Map<string, CanonicalParty[]>();
+  const push = (map: Map<string, CanonicalParty[]>, key: string | null, party: CanonicalParty) => {
+    if (!key) return;
+    const list = map.get(key) ?? [];
+    if (!list.some((p) => p.id === party.id)) list.push(party);
+    map.set(key, list);
+  };
+
+  for (const row of found.values()) {
+    const normPhone = normalizePhoneKey(row.phone_e164 ?? row.phone);
+    const normEmail = normalizeEmailKey(row.email);
+    const verifiedSet = new Set(verifiedByPartyId.get(row.id) ?? []);
+    if (row.verified_user_phone) {
+      const userPhone = normalizePhoneKey(row.verified_user_phone);
+      if (userPhone) verifiedSet.add(userPhone);
+    }
+    const party: CanonicalParty & { fields: Record<string, unknown> } = {
+      id: row.id,
+      name: row.name,
+      phones: normPhone ? [normPhone] : [],
+      verifiedPhones: normPhone && verifiedSet.has(normPhone) ? [normPhone] : [],
+      emails: normEmail ? [normEmail] : [],
+      roles: normalizePartyRoles(row),
+      isGuest: false,
+      isArchived: !row.is_active || row.merged_into_id != null,
+      fields: {
+        name: row.name,
+        phone: normPhone ?? row.phone ?? null,
+        email: row.email ?? null,
+        national_id: row.national_id ?? null,
+        economic_code: row.economic_code ?? null,
+        address: row.address ?? null,
+        notes: row.notes ?? null,
+      },
+    };
+    canonicalById.set(party.id, party);
+    if (normPhone) push(candidatesByPhone, normPhone, party);
+    if (normEmail) push(candidatesByEmail, normEmail, party);
+    push(candidatesByName, normalizeNameKey(row.name), party);
+  }
+
+  return { mappings, canonicalById, candidatesByPhone, candidatesByEmail, candidatesByName };
+}
+
+export async function partyCanonicalToken(client: PoolClient, run: ReconciliationRun): Promise<string> {
+  const { rows } = await client.query<{ token: string }>(
+    `SELECT md5(
+        (SELECT count(*)::text || ':' || COALESCE(max(updated_at)::text, '') FROM parties WHERE business_id = $1 AND merged_into_id IS NULL)
+        || '|' ||
+        (SELECT count(*)::text || ':' || COALESCE(max(updated_at)::text, '') FROM source_identities
+          WHERE business_id = $1 AND domain = 'party')
+     ) AS token`,
+    [run.businessId],
+  );
+  return rows[0].token;
+}
+
+export interface StagePartiesOptions {
+  policy?: FieldAuthorityPolicy;
+  wholeRun?: readonly IncomingParty[];
+}
+
+export async function stageParties(
+  businessId: string,
+  runId: string,
+  records: readonly IncomingParty[],
+  options: StagePartiesOptions = {},
+): Promise<StageResult> {
+  const planned = await withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId);
+    if (run.domain !== "party") throw new ReconciliationError("domain_mismatch");
+    const ctx = await loadPartyContext(client, run, records);
+    const items = planParties(
+      records,
+      ctx,
+      {
+        policy: options.policy ?? DEFAULT_FIELD_AUTHORITY_POLICY,
+        readCanonical: (id) => (ctx.canonicalById.get(id) as (CanonicalParty & { fields?: Record<string, unknown> }) | undefined)?.fields ?? null,
+      },
+      options.wholeRun ?? records,
+    );
+    const rejected = await loadRejectedEdits(client, businessId, run.sourceKey, "party", items.map((i) => i.externalKey));
+    return suppressRejectedConflicts(items, rejected);
+  });
+  return stagePlannedItems(businessId, runId, planned);
+}
+
+export async function completePartyDiscovery(businessId: string, runId: string, actor: Actor): Promise<DiscoveryResult> {
+  const { canonicalCount, canonicalToken } = await withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId);
+    if (run.domain !== "party") throw new ReconciliationError("domain_mismatch");
+    const { rows } = await client.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM parties WHERE business_id = $1 AND merged_into_id IS NULL AND is_active`,
+      [businessId],
+    );
+    return { canonicalCount: Number(rows[0].n), canonicalToken: await partyCanonicalToken(client, run) };
+  });
+  return completeDiscovery({ businessId, runId, canonicalCount, canonicalToken, actor });
+}
+
+export interface PartyHandlerOptions {
+  mappingEntityType?: "customer" | "holoo_customer";
+  onLink?: (ctx: ApplyContext) => Promise<void>;
+  create?: ApplyHandler["create"];
+}
+
+export function createPartyApplyHandler(options: PartyHandlerOptions = {}): ApplyHandler {
+  const mappingType = options.mappingEntityType ?? "customer";
+  async function recordIdentity(ctx: ApplyContext, canonicalId: string): Promise<void> {
+    if (ctx.item.externalKey.startsWith("row:")) return;
+    await linkSourceIdentity(ctx.client, {
+      businessId: ctx.run.businessId,
+      domain: "party",
+      sourceKey: ctx.run.sourceKey,
+      provider: ctx.run.provider,
+      externalType: ctx.item.externalType,
+      externalId: ctx.item.externalKey,
+      canonicalType: "parties",
+      canonicalId,
+      runId: ctx.run.id,
+      linkedBy: ctx.actor.userId,
+    });
+    if (!ctx.run.connectionId) return;
+    const { rows: existing } = await ctx.client.query<{ local_id: string }>(
+      `SELECT local_id::text AS local_id FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3 AND remote_id = $4`,
+      [ctx.run.businessId, ctx.run.connectionId, mappingType, ctx.item.externalKey],
+    );
+    if (existing[0] && existing[0].local_id !== canonicalId) {
+      throw new ReconciliationError("identity_already_linked", { linkedTo: existing[0].local_id });
+    }
+    if (!existing[0]) {
+      await upsertMappingOnClient(ctx.client, ctx.run.businessId, ctx.run.connectionId, mappingType, ctx.item.externalKey, canonicalId, null, false);
+    }
+  }
+
+  return {
+    domain: "party",
+    async link(ctx) {
+      const canonicalId = ctx.canonicalId as string;
+      const { rows } = await ctx.client.query(
+        `SELECT 1 FROM parties WHERE id::text = $1 AND business_id = $2 AND merged_into_id IS NULL`,
+        [canonicalId, ctx.run.businessId],
+      );
+      if (!rows[0]) throw new ReconciliationError("link_target_not_found", { canonicalId });
+      if (options.onLink) await options.onLink(ctx);
+      await recordIdentity(ctx, canonicalId);
+      return { canonicalId };
+    },
+    async create(ctx) {
+      if (!options.create) throw new ReconciliationError("create_not_supported");
+      const created = await options.create(ctx);
+      await recordIdentity(ctx, created.canonicalId);
+      return created;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Financial document context, staging, discovery & apply handler
+// ---------------------------------------------------------------------------
+
+export async function loadFinancialDocumentContext(
+  client: PoolClient,
+  run: ReconciliationRun,
+  records: readonly IncomingFinancialDocument[],
+  options: { bookCurrency?: string } = {},
+): Promise<FinancialDocumentContext> {
+  const externalIds = records.map((r) => r.externalId).filter((id): id is string => id != null);
+  const mappings = new Map<string, string>();
+  if (externalIds.length > 0) {
+    const { rows } = await client.query<{ external_id: string; canonical_id: string }>(
+      `SELECT external_id, canonical_id FROM source_identities
+        WHERE business_id = $1 AND source_key = $2 AND domain = 'financial_document'
+          AND retired_at IS NULL AND verified AND external_id = ANY($3::text[])`,
+      [run.businessId, run.sourceKey, externalIds],
+    );
+    for (const r of rows) mappings.set(r.external_id, r.canonical_id);
+    if (run.connectionId) {
+      const { rows: connRows } = await client.query<{ remote_id: string; local_id: string }>(
+        `SELECT remote_id, local_id::text AS local_id FROM integration_mappings
+          WHERE business_id = $1 AND connection_id = $2
+            AND entity_type IN ('order', 'holoo_invoice', 'holoo_journal', 'holoo_purchase')
+            AND remote_id = ANY($3::text[])`,
+        [run.businessId, run.connectionId, externalIds],
+      );
+      for (const r of connRows) if (!mappings.has(r.remote_id)) mappings.set(r.remote_id, r.local_id);
+    }
+  }
+
+  const canonicalById = new Map<string, CanonicalFinancialDocument>();
+  const candidatesByReference = new Map<string, CanonicalFinancialDocument[]>();
+  const candidatesByAmountDate = new Map<string, CanonicalFinancialDocument[]>();
+  const registerDoc = (doc: CanonicalFinancialDocument) => {
+    canonicalById.set(doc.id, doc);
+    for (const ref of doc.references) {
+      const key = normalizeReferenceKey(ref);
+      if (!key) continue;
+      const list = candidatesByReference.get(key) ?? [];
+      if (!list.some((d) => d.id === doc.id)) list.push(doc);
+      candidatesByReference.set(key, list);
+    }
+    const adKey = amountDateKey(doc.kind, doc.totalRial, doc.date);
+    const list = candidatesByAmountDate.get(adKey) ?? [];
+    if (!list.some((d) => d.id === doc.id)) list.push(doc);
+    candidatesByAmountDate.set(adKey, list);
+  };
+
+  const refs = [
+    ...new Set(records.flatMap((r) => r.references ?? []).map(normalizeReferenceKey).filter((k): k is string => k != null)),
+  ];
+  const dates = [...new Set(records.map((r) => r.date).filter((d): d is string => Boolean(d)))];
+  const mappedIds = [...new Set(mappings.values())];
+  const bookCurrency = options.bookCurrency ?? "IRR";
+
+  // 1. Orders (+ online_order_documents when online)
+  const { rows: orderRows } = await client.query<{
+    id: string;
+    order_number: string;
+    total: string;
+    date: string;
+    remote_id: string | null;
+    remote_number: string | null;
+    source_type: string | null;
+  }>(
+    `SELECT o.id::text AS id, o.order_number::text AS order_number, o.total::text AS total,
+            to_char((o.opened_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS date,
+            d.remote_id, d.remote_number, d.source_type
+       FROM orders o
+       JOIN locations l ON l.id = o.location_id
+       LEFT JOIN online_order_documents d ON d.order_id = o.id
+      WHERE l.business_id = $1
+        AND ($2::uuid IS NULL OR o.location_id = $2::uuid)
+        AND (
+          o.id::text = ANY($3::text[])
+          OR o.order_number::text = ANY($4::text[])
+          OR d.remote_id = ANY($4::text[])
+          OR d.remote_number = ANY($4::text[])
+          OR to_char((o.opened_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') = ANY($5::text[])
+        )
+      LIMIT 500`,
+    [run.businessId, run.locationId, mappedIds, refs, dates],
+  );
+  for (const r of orderRows) {
+    registerDoc({
+      id: r.id,
+      kind: r.source_type ? "order" : "invoice",
+      totalRial: r.total,
+      currency: bookCurrency,
+      date: r.date,
+      references: [r.order_number, r.remote_id, r.remote_number].filter((v): v is string => Boolean(v)),
+      origin: r.source_type ? "online" : "pos",
+    });
+  }
+
+  // 2. Historical sales invoices
+  const { rows: histRows } = await client.query<{
+    id: string;
+    external_id: string;
+    invoice_number: string;
+    total_rial: string;
+    date: string;
+  }>(
+    `SELECT id::text AS id, external_id, invoice_number, total_rial::text AS total_rial,
+            to_char(invoice_date, 'YYYY-MM-DD') AS date
+       FROM historical_sales_invoices
+      WHERE business_id = $1
+        AND ($2::uuid IS NULL OR location_id = $2::uuid)
+        AND (
+          id::text = ANY($3::text[])
+          OR external_id = ANY($4::text[])
+          OR invoice_number = ANY($4::text[])
+          OR to_char(invoice_date, 'YYYY-MM-DD') = ANY($5::text[])
+        )
+      LIMIT 500`,
+    [run.businessId, run.locationId, mappedIds, refs, dates],
+  );
+  for (const r of histRows) {
+    registerDoc({
+      id: r.id,
+      kind: "invoice",
+      totalRial: r.total_rial,
+      currency: bookCurrency,
+      date: r.date,
+      references: [r.external_id, r.invoice_number].filter(Boolean),
+      origin: "imported",
+    });
+  }
+
+  // 3. Journal entries (including manual entries!)
+  const { rows: jeRows } = await client.query<{
+    id: string;
+    date: string;
+    source_type: string | null;
+    voucher_number: string | null;
+    voucher_reference: string | null;
+    total_debit: string;
+  }>(
+    `SELECT je.id::text AS id, to_char(je.entry_date, 'YYYY-MM-DD') AS date,
+            je.source_type, je.voucher_number, je.voucher_reference,
+            COALESCE(SUM(jl.debit), 0)::text AS total_debit
+       FROM journal_entries je
+       LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+      WHERE je.business_id = $1
+        AND (
+          je.id::text = ANY($2::text[])
+          OR je.voucher_number = ANY($3::text[])
+          OR je.voucher_reference = ANY($3::text[])
+          OR to_char(je.entry_date, 'YYYY-MM-DD') = ANY($4::text[])
+        )
+      GROUP BY je.id
+      LIMIT 500`,
+    [run.businessId, mappedIds, refs, dates],
+  );
+  for (const r of jeRows) {
+    registerDoc({
+      id: r.id,
+      kind: "journal",
+      totalRial: r.total_debit,
+      currency: bookCurrency,
+      date: r.date,
+      references: [r.voucher_number, r.voucher_reference].filter((v): v is string => Boolean(v)),
+      origin: r.source_type === "manual" ? "manual" : r.source_type === "holoo_import" ? "imported" : "pos",
+    });
+  }
+
+  return { mappings, canonicalById, candidatesByReference, candidatesByAmountDate, bookCurrency };
+}
+
+export async function financialDocumentCanonicalToken(client: PoolClient, run: ReconciliationRun): Promise<string> {
+  const { rows } = await client.query<{ token: string }>(
+    `SELECT md5(
+        (SELECT count(*)::text || ':' || COALESCE(max(o.opened_at)::text, '')
+           FROM orders o JOIN locations l ON l.id = o.location_id
+          WHERE l.business_id = $1 AND ($2::uuid IS NULL OR o.location_id = $2::uuid))
+        || '|' ||
+        (SELECT count(*)::text || ':' || COALESCE(max(posted_at)::text, '')
+           FROM journal_entries WHERE business_id = $1)
+        || '|' ||
+        (SELECT count(*)::text || ':' || COALESCE(max(updated_at)::text, '')
+           FROM source_identities WHERE business_id = $1 AND domain = 'financial_document')
+     ) AS token`,
+    [run.businessId, run.locationId],
+  );
+  return rows[0].token;
+}
+
+export async function stageFinancialDocuments(
+  businessId: string,
+  runId: string,
+  records: readonly IncomingFinancialDocument[],
+  options: { bookCurrency?: string } = {},
+): Promise<StageResult> {
+  const planned = await withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId);
+    if (run.domain !== "financial_document") throw new ReconciliationError("domain_mismatch");
+    const ctx = await loadFinancialDocumentContext(client, run, records, options);
+    return planFinancialDocuments(records, ctx);
+  });
+  return stagePlannedItems(businessId, runId, planned);
+}
+
+export async function completeFinancialDocumentDiscovery(
+  businessId: string,
+  runId: string,
+  actor: Actor,
+): Promise<DiscoveryResult> {
+  const { canonicalCount, canonicalToken } = await withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId);
+    if (run.domain !== "financial_document") throw new ReconciliationError("domain_mismatch");
+    const { rows } = await client.query<{ n: string }>(
+      `SELECT (
+          (SELECT count(*) FROM orders o JOIN locations l ON l.id = o.location_id
+            WHERE l.business_id = $1 AND ($2::uuid IS NULL OR o.location_id = $2::uuid))
+          + (SELECT count(*) FROM historical_sales_invoices WHERE business_id = $1)
+          + (SELECT count(*) FROM journal_entries WHERE business_id = $1)
+        )::text AS n`,
+      [businessId, run.locationId],
+    );
+    return { canonicalCount: Number(rows[0].n), canonicalToken: await financialDocumentCanonicalToken(client, run) };
+  });
+  return completeDiscovery({ businessId, runId, canonicalCount, canonicalToken, actor });
+}
+
+export interface FinancialDocumentHandlerOptions {
+  canonicalType?: "orders" | "historical_sales_invoices" | "journal_entries";
+  mappingEntityType?: "order" | "holoo_invoice" | "holoo_journal" | "holoo_purchase";
+  create?: ApplyHandler["create"];
+}
+
+export function createFinancialDocumentApplyHandler(
+  options: FinancialDocumentHandlerOptions = {},
+): ApplyHandler {
+  const canonicalType = options.canonicalType ?? "orders";
+  async function recordIdentity(ctx: ApplyContext, targetTable: string, canonicalId: string): Promise<void> {
+    if (ctx.item.externalKey.startsWith("row:")) return;
+    await linkSourceIdentity(ctx.client, {
+      businessId: ctx.run.businessId,
+      domain: "financial_document",
+      sourceKey: ctx.run.sourceKey,
+      provider: ctx.run.provider,
+      externalType: ctx.item.externalType,
+      externalId: ctx.item.externalKey,
+      canonicalType: targetTable,
+      canonicalId,
+      runId: ctx.run.id,
+      linkedBy: ctx.actor.userId,
+    });
+    if (!ctx.run.connectionId || !options.mappingEntityType) return;
+    const { rows: existing } = await ctx.client.query<{ local_id: string }>(
+      `SELECT local_id::text AS local_id FROM integration_mappings
+        WHERE business_id = $1 AND connection_id = $2 AND entity_type = $3 AND remote_id = $4`,
+      [ctx.run.businessId, ctx.run.connectionId, options.mappingEntityType, ctx.item.externalKey],
+    );
+    if (existing[0] && existing[0].local_id !== canonicalId) {
+      throw new ReconciliationError("identity_already_linked", { linkedTo: existing[0].local_id });
+    }
+    if (!existing[0]) {
+      await upsertMappingOnClient(ctx.client, ctx.run.businessId, ctx.run.connectionId, options.mappingEntityType, ctx.item.externalKey, canonicalId, null, false);
+    }
+  }
+
+  return {
+    domain: "financial_document",
+    async link(ctx) {
+      const canonicalId = ctx.canonicalId as string;
+      const { rows: found } = await ctx.client.query<{ tbl: string }>(
+        `SELECT 'orders' AS tbl FROM orders o JOIN locations l ON l.id = o.location_id
+          WHERE o.id::text = $1 AND l.business_id = $2
+         UNION ALL
+         SELECT 'historical_sales_invoices' AS tbl FROM historical_sales_invoices
+          WHERE id::text = $1 AND business_id = $2
+         UNION ALL
+         SELECT 'journal_entries' AS tbl FROM journal_entries
+          WHERE id::text = $1 AND business_id = $2
+         LIMIT 1`,
+        [canonicalId, ctx.run.businessId],
+      );
+      if (!found[0]) throw new ReconciliationError("link_target_not_found", { canonicalId });
+      await recordIdentity(ctx, found[0].tbl, canonicalId);
+      return { canonicalId };
+    },
+    async create(ctx) {
+      if (!options.create) throw new ReconciliationError("create_not_supported");
+      const created = await options.create(ctx);
+      await recordIdentity(ctx, canonicalType, created.canonicalId);
+      return created;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Inventory context, staging, discovery & apply handler
+// ---------------------------------------------------------------------------
+
+export async function loadInventoryContext(
+  client: PoolClient,
+  run: ReconciliationRun,
+  records: readonly IncomingInventory[],
+): Promise<Omit<InventoryContext, "incomingSnapshotCounts">> {
+  if (!run.locationId) throw new ReconciliationError("location_required");
+  const productExternalIds = [...new Set(records.map((r) => r.productExternalId).filter((id): id is string => Boolean(id)))];
+  const productLinks = new Map<string, string>();
+  if (productExternalIds.length > 0) {
+    const { rows } = await client.query<{ external_id: string; canonical_id: string }>(
+      `SELECT external_id, canonical_id FROM source_identities
+        WHERE business_id = $1 AND source_key = $2 AND domain = 'product'
+          AND retired_at IS NULL AND verified AND external_id = ANY($3::text[])`,
+      [run.businessId, run.sourceKey, productExternalIds],
+    );
+    for (const r of rows) productLinks.set(r.external_id, r.canonical_id);
+    if (run.connectionId) {
+      const { rows: connRows } = await client.query<{ remote_id: string; local_id: string }>(
+        `SELECT remote_id, local_id::text AS local_id FROM integration_mappings
+          WHERE business_id = $1 AND connection_id = $2
+            AND entity_type IN ('product', 'holoo_goods')
+            AND remote_id = ANY($3::text[])`,
+        [run.businessId, run.connectionId, productExternalIds],
+      );
+      for (const r of connRows) if (!productLinks.has(r.remote_id)) productLinks.set(r.remote_id, r.local_id);
+    }
+  }
+
+  const productIds = [...new Set(productLinks.values())];
+  const stockByProduct = new Map<string, CanonicalStock>();
+  if (productIds.length > 0) {
+    const { rows: bizRows } = await client.query<{ industry: string }>(`SELECT industry FROM businesses WHERE id = $1`, [run.businessId]);
+    const industry = bizRows[0]?.industry;
+    if (isRetailCatalogueIndustry(industry)) {
+      const { rows } = await client.query<{
+        id: string;
+        kind: string;
+        tracking: CanonicalStock["tracking"];
+        quantity: string | null;
+      }>(
+        `SELECT i.id::text AS id, i.kind, i.tracking, s.quantity::text AS quantity
+           FROM items i
+           LEFT JOIN item_stock s ON s.item_id = i.id
+          WHERE i.location_id = $1 AND i.id::text = ANY($2::text[])`,
+        [run.locationId, productIds],
+      );
+      for (const r of rows) {
+        stockByProduct.set(r.id, {
+          productId: r.id,
+          managed: r.kind !== "variant_parent",
+          quantity: r.quantity,
+          tracking: r.tracking ?? "none",
+        });
+      }
+    } else if (industry === "food_service") {
+      const { rows } = await client.query<{ id: string; quantity: string | null }>(
+        `SELECT ii.id::text AS id,
+                (SELECT COALESCE(SUM(sm.quantity), 0)::text FROM stock_movements sm
+                  WHERE sm.inventory_item_id = ii.id AND sm.location_id = $1) AS quantity
+           FROM inventory_items ii
+          WHERE ii.location_id = $1 AND ii.id::text = ANY($2::text[])`,
+        [run.locationId, productIds],
+      );
+      for (const r of rows) {
+        stockByProduct.set(r.id, {
+          productId: r.id,
+          managed: true,
+          quantity: r.quantity,
+          tracking: "none",
+        });
+      }
+    }
+  }
+
+  const movementIds = records.filter((r) => r.kind === "movement" && r.externalId).map((r) => r.externalId as string);
+  const appliedMovementIds = new Set<string>();
+  if (movementIds.length > 0) {
+    const { rows } = await client.query<{ external_id: string }>(
+      `SELECT external_id FROM source_identities
+        WHERE business_id = $1 AND source_key = $2 AND domain = 'inventory'
+          AND external_type = 'movement' AND retired_at IS NULL AND external_id = ANY($3::text[])`,
+      [run.businessId, run.sourceKey, movementIds],
+    );
+    for (const r of rows) appliedMovementIds.add(r.external_id);
+  }
+
+  return { productLinks, stockByProduct, appliedMovementIds };
+}
+
+export async function inventoryCanonicalToken(client: PoolClient, run: ReconciliationRun): Promise<string> {
+  const { rows: bizRows } = await client.query<{ industry: string }>(`SELECT industry FROM businesses WHERE id = $1`, [run.businessId]);
+  const industry = bizRows[0]?.industry;
+  if (isRetailCatalogueIndustry(industry)) {
+    const { rows } = await client.query<{ token: string }>(
+      `SELECT md5(
+          (SELECT count(*)::text || ':' || COALESCE(max(s.updated_at)::text, '')
+             FROM item_stock s JOIN items i ON i.id = s.item_id WHERE i.location_id = $1)
+          || '|' ||
+          (SELECT count(*)::text || ':' || COALESCE(max(updated_at)::text, '')
+             FROM source_identities WHERE business_id = $2 AND domain = 'inventory')
+       ) AS token`,
+      [run.locationId, run.businessId],
+    );
+    return rows[0].token;
+  }
+  const { rows } = await client.query<{ token: string }>(
+    `SELECT md5(
+        (SELECT count(*)::text || ':' || COALESCE(max(created_at)::text, '')
+           FROM stock_movements WHERE location_id = $1)
+        || '|' ||
+        (SELECT count(*)::text || ':' || COALESCE(max(updated_at)::text, '')
+           FROM source_identities WHERE business_id = $2 AND domain = 'inventory')
+     ) AS token`,
+    [run.locationId, run.businessId],
+  );
+  return rows[0].token;
+}
+
+export async function stageInventory(
+  businessId: string,
+  runId: string,
+  records: readonly IncomingInventory[],
+  options: { wholeRun?: readonly IncomingInventory[] } = {},
+): Promise<StageResult> {
+  const planned = await withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId);
+    if (run.domain !== "inventory") throw new ReconciliationError("domain_mismatch");
+    const ctx = await loadInventoryContext(client, run, records);
+    return planInventory(records, ctx, undefined, options.wholeRun ?? records);
+  });
+  return stagePlannedItems(businessId, runId, planned);
+}
+
+export async function completeInventoryDiscovery(
+  businessId: string,
+  runId: string,
+  actor: Actor,
+): Promise<DiscoveryResult> {
+  const { canonicalCount, canonicalToken } = await withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId);
+    if (run.domain !== "inventory") throw new ReconciliationError("domain_mismatch");
+    const { rows: bizRows } = await client.query<{ industry: string }>(`SELECT industry FROM businesses WHERE id = $1`, [businessId]);
+    const isRetail = isRetailCatalogueIndustry(bizRows[0]?.industry);
+    const { rows } = isRetail
+      ? await client.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM item_stock s JOIN items i ON i.id = s.item_id
+            WHERE i.location_id = $1 AND s.quantity <> 0`,
+          [run.locationId],
+        )
+      : await client.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM stock_movements WHERE location_id = $1`,
+          [run.locationId],
+        );
+    return { canonicalCount: Number(rows[0].n), canonicalToken: await inventoryCanonicalToken(client, run) };
+  });
+  return completeDiscovery({ businessId, runId, canonicalCount, canonicalToken, actor });
+}
+
+export function createInventoryApplyHandler(options: {
+  link?: ApplyHandler["link"];
+  create?: ApplyHandler["create"];
+} = {}): ApplyHandler {
+  return {
+    domain: "inventory",
+    async link(ctx) {
+      if (options.link) return options.link(ctx);
+      if (!ctx.canonicalId) throw new ReconciliationError("link_target_missing");
+      if (!ctx.item.externalKey.startsWith("row:")) {
+        await linkSourceIdentity(ctx.client, {
+          businessId: ctx.run.businessId,
+          domain: "inventory",
+          sourceKey: ctx.run.sourceKey,
+          provider: ctx.run.provider,
+          externalType: ctx.item.externalType,
+          externalId: ctx.item.externalKey,
+          canonicalType: "items",
+          canonicalId: ctx.canonicalId,
+          runId: ctx.run.id,
+          linkedBy: ctx.actor.userId,
+        });
+      }
+      return { canonicalId: ctx.canonicalId };
+    },
+    async create(ctx) {
+      if (!options.create) throw new ReconciliationError("create_not_supported");
+      const created = await options.create(ctx);
+      if (!ctx.item.externalKey.startsWith("row:")) {
+        await linkSourceIdentity(ctx.client, {
+          businessId: ctx.run.businessId,
+          domain: "inventory",
+          sourceKey: ctx.run.sourceKey,
+          provider: ctx.run.provider,
+          externalType: ctx.item.externalType,
+          externalId: ctx.item.externalKey,
+          canonicalType: "items",
+          canonicalId: created.canonicalId,
+          runId: ctx.run.id,
+          linkedBy: ctx.actor.userId,
+        });
+      }
+      return created;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -816,6 +1824,77 @@ export interface RunSummary {
   run: ReconciliationRun;
   counts: ReconciliationCounts;
   progress: Progress;
+}
+
+export interface ListRunsFilter {
+  domain?: ReconciliationDomain;
+  connectionId?: string;
+  sourceKey?: string;
+  activeOnly?: boolean;
+  limit?: number;
+}
+
+export async function listRuns(businessId: string, filter: ListRunsFilter = {}): Promise<ReconciliationRun[]> {
+  return withTenantTransaction(businessId, async (client) => {
+    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+    const { rows } = await client.query(
+      `SELECT * FROM import_reconciliation_runs
+        WHERE business_id = $1
+          AND ($2::text IS NULL OR domain = $2)
+          AND ($3::uuid IS NULL OR connection_id = $3::uuid)
+          AND ($4::text IS NULL OR source_key = $4)
+          AND (NOT $5::boolean OR status IN ('discovering', 'staged', 'in_review', 'applying', 'stale'))
+        ORDER BY created_at DESC
+        LIMIT $6`,
+      [
+        businessId,
+        filter.domain ?? null,
+        filter.connectionId ?? null,
+        filter.sourceKey ?? null,
+        filter.activeOnly ?? false,
+        limit,
+      ],
+    );
+    return rows.map(mapRun);
+  });
+}
+
+export async function setRunCutoverPolicy(
+  businessId: string,
+  runId: string,
+  input: {
+    cutoverAuthority: CutoverAuthority;
+    cutoverAt?: string | null;
+    policySnapshot?: Record<string, unknown>;
+  },
+  actor: Actor,
+): Promise<ReconciliationRun> {
+  return withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId, true);
+    if (run.status === "applied" || run.status === "cancelled") {
+      throw new ReconciliationError("run_closed", { status: run.status });
+    }
+    await client.query(
+      `UPDATE import_reconciliation_runs
+          SET cutover_authority = $3,
+              cutover_at = $4::timestamptz,
+              policy_snapshot = COALESCE($5::jsonb, policy_snapshot),
+              updated_at = now()
+        WHERE id = $1 AND business_id = $2`,
+      [
+        runId,
+        businessId,
+        input.cutoverAuthority,
+        input.cutoverAt ?? new Date().toISOString(),
+        input.policySnapshot ? JSON.stringify(input.policySnapshot) : null,
+      ],
+    );
+    await audit(client, businessId, actor, "reconciliation.cutover.updated", runId, {
+      cutoverAuthority: input.cutoverAuthority,
+      cutoverAt: input.cutoverAt ?? null,
+    });
+    return loadRun(client, businessId, runId);
+  });
 }
 
 export async function getRunSummary(businessId: string, runId: string): Promise<RunSummary> {
@@ -944,6 +2023,24 @@ export async function decideItem(input: DecideInput): Promise<StagedItem> {
       [input.itemId, input.businessId, status, effect === "none" ? null : effect, canonicalId, decisionRows[0].id],
     );
     if (run.status === "staged") await setRunStatus(client, run, "in_review");
+    if (input.decision === "choose_authority" && input.authorityOverrides) {
+      const conflicts = item.conflicts as FieldConflict[];
+      for (const [field, owner] of Object.entries(input.authorityOverrides)) {
+        if (owner !== "canonical") continue;
+        const conflict = conflicts.find((c) => c.field === field);
+        await recordRejectedRemoteEdit(client, {
+          businessId: input.businessId,
+          sourceKey: run.sourceKey,
+          domain: run.domain,
+          externalType: item.externalType,
+          externalId: item.externalKey,
+          field,
+          value: conflict?.incoming ?? null,
+          reason,
+          actor: input.actor,
+        });
+      }
+    }
     await audit(client, input.businessId, input.actor, "reconciliation.decision", run.id, {
       itemId: input.itemId,
       decision: input.decision,
@@ -1073,6 +2170,8 @@ export interface ApplyContext {
   item: StagedItem;
   /** The canonical row to link to, when the effect is `link`. */
   canonicalId: string | null;
+  /** Per-record field authority overrides from the latest decision, if any. */
+  authorityOverrides: FieldAuthorityOverrides;
   /** Stable per item; a domain write that is not naturally idempotent keys on it. */
   idempotencyKey: string;
   actor: Actor;
@@ -1137,6 +2236,14 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
       );
       for (const row of rows) {
         const item = mapItem(row);
+        let authorityOverrides: FieldAuthorityOverrides = {};
+        if (row.last_decision_id) {
+          const { rows: dRows } = await client.query<{ authority_overrides: FieldAuthorityOverrides | null }>(
+            `SELECT authority_overrides FROM import_reconciliation_decisions WHERE id = $1::uuid AND business_id = $2`,
+            [row.last_decision_id, businessId],
+          );
+          authorityOverrides = dRows[0]?.authority_overrides ?? {};
+        }
         await client.query("SAVEPOINT reconciliation_item");
         try {
           const ctx: ApplyContext = {
@@ -1144,6 +2251,7 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
             run,
             item,
             canonicalId: item.canonicalId,
+            authorityOverrides,
             idempotencyKey: `${runId}:${item.id}`,
             actor,
           };

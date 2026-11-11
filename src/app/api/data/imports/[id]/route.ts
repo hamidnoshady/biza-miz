@@ -6,8 +6,11 @@ import {
   listImportRows,
   previewImportJob,
   queueImportJob,
+  reconciliationDomainForImportEntity,
   retryFailedRows,
+  stageImportJobToReconciliation,
 } from "@/lib/data-transfer/import-service";
+import { hasCanonicalOverlapForDomain } from "@/lib/import-reconciliation/entry-guards";
 import type { ImportMapping, ImportOptions } from "@/lib/data-transfer/types";
 import { dataOwner, entityAccess, handleDataError, PERMISSIONS, readBody } from "../../guard";
 
@@ -85,7 +88,34 @@ export const POST = withTenantScope(
       if (action === "retry") {
         return NextResponse.json({ job: await retryFailedRows(owner.businessId, id) });
       }
+      if (action === "reconcile") {
+        const staged = await stageImportJobToReconciliation(
+          owner.businessId,
+          id,
+          { userId: owner.actorUserId, name: owner.actorName },
+          owner.locationId,
+        );
+        return NextResponse.json({ ok: true, reconciliation: staged });
+      }
       if (action === "run") {
+        const domain = reconciliationDomainForImportEntity(job.entityKey);
+        if (
+          domain &&
+          !job.reconciliationRunId &&
+          body.skipReconciliation !== true &&
+          (await hasCanonicalOverlapForDomain(owner.businessId, domain, owner.locationId))
+        ) {
+          const staged = await stageImportJobToReconciliation(
+            owner.businessId,
+            id,
+            { userId: owner.actorUserId, name: owner.actorName },
+            owner.locationId,
+          );
+          return NextResponse.json(
+            { error: "reconciliation_required", runId: staged.runId, reconciliation: staged },
+            { status: 409 },
+          );
+        }
         // Queued, never run inline: a 50,000-row import must not hold an HTTP
         // request open, and the worker is what makes progress visible while
         // the operator carries on working.

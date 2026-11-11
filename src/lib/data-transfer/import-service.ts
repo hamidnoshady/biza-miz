@@ -56,6 +56,14 @@ import {
   validateSheet,
 } from "./mapping";
 import { recordDataTransferAudit } from "./audit";
+import {
+  completePartyDiscovery,
+  completeProductDiscovery,
+  openRun as openReconciliationRun,
+  stageParties as stageReconciliationParties,
+  stageProducts as stageReconciliationProducts,
+} from "../import-reconciliation/service";
+import type { IncomingParty, IncomingProduct } from "../import-reconciliation/types";
 import type {
   EntityDefinition,
   ImportFormat,
@@ -131,6 +139,7 @@ export interface ImportJob {
   failedRows: number;
   error: string | null;
   createdByName: string;
+  reconciliationRunId: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -157,6 +166,7 @@ interface JobRow extends Record<string, unknown> {
   failed_rows: number;
   error: string | null;
   created_by_name: string;
+  reconciliation_run_id: string | null;
   created_at: Date;
   started_at: Date | null;
   finished_at: Date | null;
@@ -204,6 +214,7 @@ function toJob(row: JobRow): ImportJob {
     failedRows: row.failed_rows,
     error: row.error,
     createdByName: row.created_by_name,
+    reconciliationRunId: row.reconciliation_run_id ?? null,
     createdAt: row.created_at.toISOString(),
     startedAt: row.started_at?.toISOString() ?? null,
     finishedAt: row.finished_at?.toISOString() ?? null,
@@ -227,7 +238,7 @@ function normaliseMapping(value: unknown): ImportMapping {
 const JOB_COLUMNS = `id, entity_key, status, file_name, file_format, file_size_bytes, provider_metadata,
   source_columns, mapping, options, total_rows, valid_rows, warning_rows, error_rows,
   created_rows, updated_rows, skipped_rows, failed_rows, error, created_by_name,
-  created_at, started_at, finished_at`;
+  reconciliation_run_id, created_at, started_at, finished_at`;
 
 /** The format a filename implies. Content sniffing would be worse: a `.csv` that is really XLSX is a user error worth naming. */
 export function formatForFileName(fileName: string): ImportFormat | null {
@@ -655,6 +666,101 @@ async function sheetForJob(job: ImportJob): Promise<ParsedSheet> {
   };
 }
 
+export function reconciliationDomainForImportEntity(entityKey: string): "product" | "party" | null {
+  if (entityKey === "pos.products" || entityKey === "inventory.items") return "product";
+  if (entityKey === "crm.customers" || entityKey === "crm.companies") return "party";
+  return null;
+}
+
+/**
+ * Stages a previewed Data Transfer job into an #1118 reconciliation run so
+ * overlapping products or parties go through match/conflict review before apply.
+ */
+export async function stageImportJobToReconciliation(
+  businessId: string,
+  jobId: string,
+  actor: { userId: string | null; name: string },
+  locationIdOverride?: string | null,
+) {
+  const job = await getImportJob(businessId, jobId);
+  if (!job) throw new ImportError("job_not_found");
+  const domain = reconciliationDomainForImportEntity(job.entityKey);
+  if (!domain) throw new ImportError("reconciliation_unsupported_entity");
+
+  const { rows: jobLocRows } = await query<{ location_id: string | null }>(
+    `SELECT location_id::text AS location_id FROM data_import_jobs WHERE business_id = $1 AND id = $2`,
+    [businessId, jobId],
+  );
+  const resolvedLocationId = locationIdOverride ?? jobLocRows[0]?.location_id ?? null;
+
+  const { rows } = await query<{ row_number: number; mapped: Record<string, unknown> }>(
+    `SELECT row_number, mapped FROM data_import_rows
+      WHERE job_id = $1 AND status IN ('valid', 'warning')
+      ORDER BY row_number`,
+    [jobId],
+  );
+
+  const run = await openReconciliationRun({
+    businessId,
+    locationId: resolvedLocationId,
+    domain,
+    sourceKind: "file",
+    provider: "data_transfer",
+    sourceKey: `job:${job.id}`,
+    importMode: "one_time",
+    sourceFingerprint: `import_job:${job.id}:${rows.length}`,
+    actor,
+  });
+
+  await query(
+    `UPDATE data_import_jobs SET reconciliation_run_id = $3, updated_at = now()
+      WHERE business_id = $1 AND id = $2`,
+    [businessId, job.id, run.id],
+  );
+
+  if (domain === "product") {
+    const incoming: IncomingProduct[] = rows.map((row) => {
+      const m = row.mapped ?? {};
+      const sku = typeof m.sku === "string" && m.sku.trim() ? m.sku.trim() : null;
+      const name = typeof m.name === "string" && m.name.trim() ? m.name.trim() : `ردیف ${row.row_number}`;
+      const price = m.price != null ? String(m.price) : undefined;
+      return {
+        domain: "product",
+        externalId: sku ?? `row:${row.row_number}`,
+        rowNumber: row.row_number,
+        name,
+        sku,
+        priceRial: price,
+        unit: typeof m.unit === "string" ? m.unit : undefined,
+        fields: m,
+      };
+    });
+    await stageReconciliationProducts(businessId, run.id, incoming);
+    const discovery = await completeProductDiscovery(businessId, run.id, actor);
+    return { runId: run.id, domain, ...discovery };
+  }
+
+  const incoming: IncomingParty[] = rows.map((row) => {
+    const m = row.mapped ?? {};
+    const name = typeof m.name === "string" && m.name.trim() ? m.name.trim() : `ردیف ${row.row_number}`;
+    const phone = typeof m.phone === "string" && m.phone.trim() ? m.phone.trim() : null;
+    const email = typeof m.email === "string" && m.email.trim() ? m.email.trim() : null;
+    return {
+      domain: "party",
+      externalId: phone ?? email ?? `row:${row.row_number}`,
+      rowNumber: row.row_number,
+      name,
+      phone,
+      email,
+      role: job.entityKey === "crm.companies" ? "other" : "customer",
+      fields: m,
+    };
+  });
+  await stageReconciliationParties(businessId, run.id, incoming);
+  const discovery = await completePartyDiscovery(businessId, run.id, actor);
+  return { runId: run.id, domain, ...discovery };
+}
+
 /** Queue a job for the background worker. */
 export async function queueImportJob(
   businessId: string,
@@ -664,6 +770,15 @@ export async function queueImportJob(
   if (!job) throw new ImportError("job_not_found");
   if (job.status === "running" || job.status === "queued") return job;
   if (job.status === "completed") throw new ImportError("already_completed");
+  if (job.reconciliationRunId) {
+    const { rows } = await query<{ status: string }>(
+      `SELECT status FROM import_reconciliation_runs WHERE business_id = $1 AND id = $2`,
+      [businessId, job.reconciliationRunId],
+    );
+    if (rows[0] && rows[0].status !== "applied") {
+      throw new ImportError("reconciliation_required");
+    }
+  }
   const entity = requireEntity(job.entityKey);
   await assertImportServiceOperational(businessId, entity);
   const missing = missingRequiredFields(entity, job.mapping);

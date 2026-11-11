@@ -28,6 +28,7 @@ import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
 import { WORDPRESS_PLUGIN_ZIP_URL } from "@/lib/integrations/wp-plugin-release";
 import { formatDateTime } from "./format";
 import { SyncSettingsSection } from "./woo-store-sections";
+import { ReconciliationWizard } from "@/app/(app)/settings/transfer/reconciliation-wizard";
 
 type LinkMode = "rest_api" | "plugin";
 
@@ -367,6 +368,8 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
   // they are «مدیریت وب‌سایت»'s sections now, so this panel links there
   // instead of rendering a second copy of them.
   const [syncFor, setSyncFor] = useState<string | null>(null);
+  const [reconcileFor, setReconcileFor] = useState<string | null>(null);
+  const [reconcileRunId, setReconcileRunId] = useState<string | null>(null);
   const locked = useFeatureLocked();
 
   const [form, setForm] = useState({
@@ -431,12 +434,19 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
   async function call<T extends Record<string, unknown>>(path: string, method = "POST", body?: unknown): Promise<T | null> {
     setBusy(path);
     setMessage(null);
-    const { ok, data } = await api<T & { error?: string; queued?: boolean }>(path, {
+    const { ok, data } = await api<T & { error?: string; queued?: boolean; runId?: string }>(path, {
       method,
       body: body ? JSON.stringify(body) : undefined,
     });
     setBusy(null);
     if (!ok) {
+      if (data.error === "reconciliation_required") {
+        const match = path.match(/\/connections\/([^/]+)\//);
+        if (match?.[1]) setReconcileFor(match[1]);
+        if (data.runId) setReconcileRunId(data.runId);
+        setMessage({ kind: "error", text: "پیش از همگام‌سازی، پروندهٔ تطبیق زیر را بازبینی و اعمال کنید." });
+        return null;
+      }
       setMessage({ kind: "error", text: errorMessageOrRaw(data.error) || "عملیات ناموفق بود." });
       await load();
       return null;
@@ -852,6 +862,28 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
                   >
                     مغایرت‌گیری
                   </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={async () => {
+                      if (reconcileFor === c.id) {
+                        setReconcileFor(null);
+                        return;
+                      }
+                      setReconcileFor(c.id);
+                      if (c.linkMode !== "plugin") {
+                        const res = await api<{ run?: { id: string } }>("/api/data/reconciliation", {
+                          method: "POST",
+                          body: JSON.stringify({ action: "stage_woo", connectionId: c.id }),
+                        });
+                        if (res.ok && res.data.run?.id) setReconcileRunId(res.data.run.id);
+                      }
+                    }}
+                    disabled={busy !== null}
+                  >
+                    تطبیق پیش از همگام‌سازی
+                  </Button>
                   {c.linkMode === "plugin" && canRotateTokens ? (
                     <Button
                       type="button"
@@ -935,6 +967,20 @@ export function WpConnectionPanel({ canRotateTokens = false }: { canRotateTokens
 
                 {syncFor === c.id ? (
                   <SyncSettingsSection connection={c} busy={busy !== null} call={call} />
+                ) : null}
+
+                {reconcileFor === c.id ? (
+                  <div className="mt-3">
+                    <ReconciliationWizard
+                      initialRunId={reconcileRunId}
+                      connectionId={c.id}
+                      onCompleted={() => {
+                        setReconcileFor(null);
+                        void load();
+                      }}
+                      onClose={() => setReconcileFor(null)}
+                    />
+                  </div>
                 ) : null}
 
                 {auditFor === c.id ? (

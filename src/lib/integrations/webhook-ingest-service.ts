@@ -59,6 +59,7 @@ import { parseTaxonomySnapshotEvent } from "./woo-taxonomy-snapshot";
 import type { WooCustomer, WooOrder, WooOrderLineItem, WooProduct, WooRefund } from "./woocommerce-client";
 import type { Industry } from "../industries";
 import { refundRestockIntent } from "./woo-refund-policy";
+import { shouldDeferWebhookForReconciliation } from "../import-reconciliation/entry-guards";
 
 const zero = "0" as RialText;
 
@@ -192,6 +193,23 @@ export async function applyIngestEvent(connection: ConnectionRow, event: Webhook
       businessId,
       connectionId: connection.id,
       action: "inbox.deferred_while_paused",
+      entityType: event.topic,
+      remoteId,
+    });
+    return { status: "deferred" };
+  }
+
+  if (await shouldDeferWebhookForReconciliation(businessId, connection.id, event.topic)) {
+    await query(
+      `UPDATE integration_webhook_events
+          SET status = 'deferred', error = NULL, processed_at = NULL
+        WHERE id = $1`,
+      [inboxId],
+    );
+    await writeIntegrationAudit({
+      businessId,
+      connectionId: connection.id,
+      action: "inbox.deferred_for_reconciliation",
       entityType: event.topic,
       remoteId,
     });

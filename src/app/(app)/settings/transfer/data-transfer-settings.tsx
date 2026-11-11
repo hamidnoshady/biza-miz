@@ -1,13 +1,11 @@
 "use client";
 
 /**
- * «ورود و خروج داده» — the settings tab the three sections hang off.
+ * «ورود و خروج داده» — the settings tab the sections hang off.
  *
- * One `TabBar` over import / export / history, which is the shape the rest of
- * the settings area uses for a section with a few distinct jobs. The entity
- * catalogue is fetched once here and handed down, so the three panels agree
- * about what this member may move — and so switching tabs does not re-fetch
- * the same list.
+ * One `TabBar` over import / export / history (plus the permitted Holoo tab).
+ * Product catalogue XLSX import lives as a selectable import type inside
+ * «ورود اطلاعات» rather than a separate tab.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -16,11 +14,11 @@ import { ErrorBox, api } from "@/app/dashboard/ui";
 import { DataTransferSkeleton, useDataCatalogue } from "./data-transfer-ui";
 import { ExportSection } from "./export-section";
 import { HistorySection } from "./history-section";
-import { ImportSection } from "./import-section";
-import { CatalogueSection } from "./catalogue-section";
+import { CATALOGUE_IMPORT_ENTITY_KEY, ImportSection } from "./import-section";
 import { HolooTransferSection } from "./holoo-transfer-section";
+import { ReconciliationWizard } from "./reconciliation-wizard";
 
-type PanelKey = "import" | "export" | "history" | "holoo" | "catalogue";
+type PanelKey = "import" | "reconciliation" | "export" | "history" | "holoo";
 
 export function DataTransferSettings() {
   const { entities, canImport, error } = useDataCatalogue();
@@ -31,16 +29,22 @@ export function DataTransferSettings() {
   const [panel, setPanel] = useState<PanelKey>("import");
   const [holooPermitted, setHolooPermitted] = useState(false);
   const [cataloguePermitted, setCataloguePermitted] = useState(false);
+  const [requestedImportKey, setRequestedImportKey] = useState("");
 
   useEffect(() => {
     if (!canImport) return;
     let mounted = true;
-    void api("/api/data/catalogue").then(result => {
+    void api("/api/data/catalogue").then((result) => {
       if (!mounted || !result.ok) return;
       setCataloguePermitted(true);
-      if (new URLSearchParams(window.location.search).get("import") === "catalogue") setPanel("catalogue");
+      if (new URLSearchParams(window.location.search).get("import") === "catalogue") {
+        setPanel("import");
+        setRequestedImportKey(CATALOGUE_IMPORT_ENTITY_KEY);
+      }
     });
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, [canImport]);
 
   useEffect(() => {
@@ -52,14 +56,16 @@ export function DataTransferSettings() {
     void api<Record<string, unknown>>("/api/data/providers/holoo").then((result) => {
       if (mounted) setHolooPermitted(result.ok);
     });
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, [entities]);
 
   const tabs: Tab<PanelKey>[] = [
     ...(canImport ? [{ key: "import" as const, label: "ورود اطلاعات" }] : []),
+    ...(canImport ? [{ key: "reconciliation" as const, label: "تطبیق پیش از اعمال" }] : []),
     { key: "export", label: "خروجی گرفتن" },
     { key: "history", label: "تاریخچه" },
-    ...(cataloguePermitted ? [{ key: "catalogue" as const, label: "کاتالوگ محصولات" }] : []),
     ...(holooPermitted ? [{ key: "holoo" as const, label: "انتقال هلو" }] : []),
   ];
   const active = tabs.some((tab) => tab.key === panel) ? panel : (tabs[0]?.key ?? "export");
@@ -83,8 +89,15 @@ export function DataTransferSettings() {
         />
       </SectionCard>
 
-      {active === "import" ? <ImportSection entities={entities} onJobQueued={bump} /> : null}
-      {active === "catalogue" ? <CatalogueSection /> : null}
+      {active === "import" ? (
+        <ImportSection
+          entities={entities}
+          cataloguePermitted={cataloguePermitted}
+          initialEntityKey={requestedImportKey}
+          onJobQueued={bump}
+        />
+      ) : null}
+      {active === "reconciliation" && canImport ? <ReconciliationWizard onCompleted={bump} /> : null}
       {active === "export" ? <ExportSection entities={entities} onExported={bump} /> : null}
       {active === "history" ? (
         <HistorySection canImport={canImport} revision={revision} />
