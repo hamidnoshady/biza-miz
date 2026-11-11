@@ -184,12 +184,18 @@ function readinessText(readiness: RuntimeReadiness | undefined): string {
   return readiness.ready ? "آماده" : (readiness.reason ? READINESS_REASON_FA[readiness.reason] ?? readiness.reason : "نیازمند تنظیم");
 }
 
-function gatewayErrorFa(message: string | null | undefined): string {
+function gatewayErrorFa(message: string | null | undefined, preserveLocalized = false): string {
   if (!message) return "آزمایش اتصال یا اعتبار کلید ناموفق بود.";
-  if (/invalid api key|authentication error|401/i.test(message)) return "کلید مجازی در LiteLLM معتبر نیست؛ اعتبار آن را بررسی و در صورت نیاز بازسازی کنید.";
+  if (preserveLocalized && /^\p{Script=Arabic}/u.test(message.trimStart())) return message;
+  if (/invalid api key|authentication error|401/i.test(message)) return "کلید استفاده‌شده در LiteLLM معتبر نیست. اعتبار آن را بررسی کنید.";
   if (/unreachable|timeout|timed out|ECONNREFUSED/i.test(message)) return "ارتباط با LiteLLM برقرار نشد؛ وضعیت سرویس را بررسی کنید.";
   if (/not found|404/i.test(message)) return "کلید یا مسیر موردنظر در LiteLLM پیدا نشد.";
   return "عملیات ناموفق بود؛ جزئیات فنی را بررسی کنید.";
+}
+
+function gatewayProbeErrorFa(status: GatewayStatus): string {
+  const failedStage = status.stages?.find((stage) => !stage.ok && !stage.skipped);
+  return failedStage?.message ? gatewayErrorFa(failedStage.message, true) : gatewayErrorFa(status.error);
 }
 
 const PROBE_STAGE_FA: Record<string, string> = {
@@ -407,14 +413,14 @@ export default function PlatformAiPage() {
     if (!result.ok) {
       const message = result.data.error ? errorMessage(result.data.error) : "انجام عملیات ممکن نشد.";
       setError(result.data.status && !result.data.status.ok
-        ? gatewayErrorFa(result.data.status.error)
+        ? gatewayProbeErrorFa(result.data.status)
         : result.data.detail ? message + " — " + result.data.detail : message);
       return false;
     }
     // Business verification is independent from global gateway diagnostics.
     // The API returns 200 even when the completion probe itself fails.
     if (result.data.status && !result.data.status.ok) {
-      setError(gatewayErrorFa(result.data.status.error));
+      setError(gatewayProbeErrorFa(result.data.status));
       await load();
       return false;
     }
@@ -532,7 +538,7 @@ export default function PlatformAiPage() {
         {status ? (
           <div className="mt-4 rounded-lg border border-border bg-card p-3 text-sm">
             <p className={status.ok ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}>
-              {status.ok ? "تست اتصال موفق بود" : gatewayErrorFa(status.error)}
+              {status.ok ? "تست اتصال موفق بود" : gatewayProbeErrorFa(status)}
               {status.latencyMs !== null ? ` · ${status.latencyMs}ms` : ""}
             </p>
             <div className="mt-3 grid gap-2">
@@ -544,7 +550,7 @@ export default function PlatformAiPage() {
                     {stage.status ? <span dir="ltr">HTTP {stage.status}</span> : null}
                     {stage.model ? <span>مدل: <span dir="ltr" className="inline-block">{stage.model}</span></span> : null}
                   </div>
-                  {stage.message ? <p className="mt-1 text-xs text-muted-foreground">{stage.ok ? stage.message : gatewayErrorFa(stage.message)}</p> : null}
+                  {stage.message ? <p className="mt-1 text-xs text-muted-foreground">{stage.ok ? stage.message : gatewayErrorFa(stage.message, true)}</p> : null}
                   {stage.detail ? <details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">جزئیات فنی</summary><p className="mt-1 break-all" dir="ltr">{stage.detail}</p></details> : null}
                 </div>
               ))}
