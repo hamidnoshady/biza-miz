@@ -276,6 +276,18 @@ export interface CmsOrder {
   total: number;
   currency: "EUR" | "IRR" | "IRT" | "USD";
   buyer: { name: string; phone: string; email?: string | null; note?: string | null };
+  /**
+   * ESH-150 (cms#197) — café/table-service fields, additive and optional so
+   * the existing single-product storefront payload is unchanged.
+   *
+   * `tableToken` is the opaque value printed on the physical table
+   * (`tqr_…`). It is resolved by `resolveTableQrTokenForOrder()` against the
+   * business that owns the signed CMS connection — never trusted as a table
+   * or location id, and never accepted from the browser in place of the
+   * token. Intake (#1304) refuses an order whose token does not resolve.
+   */
+  serviceMode?: "dine_in" | "takeaway" | null;
+  tableToken?: string | null;
   updatedAt: string;
   createdAt: string;
 }

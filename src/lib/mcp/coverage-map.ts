@@ -729,6 +729,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     status: "n/a (infra)",
   },
   {
+    id: "cms.table-qr",
+    module: "Website / CMS",
+    entity: "Printed table QR identity (scan → the table that printed it)",
+    routes: ["public/table-qr"],
+    status: "route-only (by design)",
+    note: "ESH-147: the scan is a customer's phone with no session; it resolves one opaque table token to a display name and the CMS site id, so there is no tenant operation an assistant could perform on it. The staff generate/rotate/revoke/print routes are part of the `tables` row above",
+    test: "integration/table-qr-identity.integration.test.ts",
+  },
+  {
     id: "cms.drafts-pages-media",
     module: "Website / CMS",
     entity: "Drafts, pages, website media",

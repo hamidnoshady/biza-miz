@@ -652,11 +652,15 @@ async function insertBusiness(
   // transaction that creates the business so there is never a window where
   // a jewellery shop looks like a café. They remain individually flippable
   // from the platform console: an industry default, not a prohibition.
-  await disableFeatures(
-    client,
-    businessId,
-    industryProfile(input.industry ?? "food_service").defaultDisabledFeatures,
-  );
+  await disableFeatures(client, businessId, [
+    ...industryProfile(input.industry ?? "food_service").defaultDisabledFeatures,
+    // ESH-147 — `dine_in` (table service, printed table QRs) is F&B's by
+    // default, not everybody's: the flag itself defaults to on for the
+    // businesses that already ran on `reservations`, so a retail or services
+    // business has to be told it is off in the same transaction that creates
+    // it. Migration 0298 mirrors the existing rows.
+    ...((input.industry ?? "food_service") === "food_service" ? [] : ["dine_in"]),
+  ]);
 
   let totpSecret: string | undefined;
   let totpUrl: string | undefined;
