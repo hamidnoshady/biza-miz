@@ -32,6 +32,7 @@ import {
   Loader2,
   RefreshCw,
   ShieldAlert,
+  ShieldCheck,
   Trash2,
   Unplug,
   Wand2,
@@ -410,22 +411,38 @@ export function BackupManager() {
    * `upload_in_flight` instead, which is shown as the state rather than as a
    * failure.
    */
-  async function retryCloud() {
-    setBusy("retry-cloud");
+  async function retryCloud(verify?: "sha256") {
+    // `verify` is the difference between the two things this button can mean
+    // (issue #1296):
+    //   • no mode  — «تلاش دوبارهٔ ارسال»: upload it (HEAD-sized proof), used when
+    //     the newest capture is not off-site at all.
+    //   • `sha256` — «تأیید دوباره با هش»: re-send *and* download the object back
+    //     to compare the whole hash. That is the only proof that a large artifact
+    //     arrived intact, and it used to be reachable only from the API.
+    const busyKey = verify === "sha256" ? "verify-cloud" : "retry-cloud";
+    setBusy(busyKey);
     setNote(null);
     const res = await api<{
       result?: {
         status: string;
         error?: string;
         retryable?: boolean;
-        diagnostics?: { code?: string | null; providerStatus?: number | null; phase?: string | null };
+        verifyMode?: "size" | "sha256";
+        diagnostics?: { runId?: string | null; code?: string | null; providerStatus?: number | null; phase?: string | null };
       };
-    }>("/api/platform/backup/retry", { method: "POST" });
+    }>("/api/platform/backup/retry", {
+      method: "POST",
+      body: JSON.stringify(verify ? { verify } : {}),
+    });
     await load();
     setBusy(null);
     const result = res.data?.result;
     if (res.ok && result?.status === "ok") {
-      setNote("نسخهٔ تازه در انبار تأیید شد.");
+      setNote(
+        result.verifyMode === "sha256"
+          ? "نسخه دوباره از انبار دانلود شد و هش کامل آن با نسخهٔ محلی یکی است."
+          : "نسخهٔ تازه در انبار تأیید شد.",
+      );
       return;
     }
     if (result?.status === "busy") {
@@ -433,8 +450,10 @@ export function BackupManager() {
       return;
     }
     const diag = result?.diagnostics;
+    // The attempt id is quoted because it is the one thing that lets support find
+    // *this* failure among many attempts at the same artifact.
     const tail = diag
-      ? ` (کد ${diag.code ?? "نامشخص"}${diag.providerStatus ? ` · HTTP ${toPersianDigits(diag.providerStatus)}` : ""}${diag.phase ? ` · مرحله ${diag.phase}` : ""})`
+      ? ` (کد ${diag.code ?? "نامشخص"}${diag.providerStatus ? ` · HTTP ${toPersianDigits(diag.providerStatus)}` : ""}${diag.phase ? ` · مرحله ${diag.phase}` : ""}${diag.runId ? ` · شناسهٔ تلاش ${diag.runId.slice(0, 8)}` : ""})`
       : "";
     setNote(
       result?.retryable
@@ -500,6 +519,7 @@ export function BackupManager() {
             canRun={canRun}
             busy={busy}
             onRetryCloud={() => void retryCloud()}
+            onVerifyCloud={() => void retryCloud("sha256")}
           />
 
           {canConfigure ? (
@@ -572,12 +592,14 @@ function HealthCard({
   canRun,
   busy,
   onRetryCloud,
+  onVerifyCloud,
 }: {
   health: Health;
   config: Config;
   canRun: boolean;
   busy: string | null;
   onRetryCloud: () => void;
+  onVerifyCloud: () => void;
 }) {
   const level = health.alert.level;
   // Issue #1296 — the cards each carry *their own* verdict. The page-level alert
@@ -608,13 +630,40 @@ function HealthCard({
             نسخهٔ تازهٔ این سرور بیرون از آن تأیید نشده است. تلاش دوباره همین حالا انجام می‌شود و
             خطای فنی در تاریخچه می‌ماند.
           </span>
-          <Button onClick={onRetryCloud} disabled={busy !== null} variant="ghost">
-            {busy === "retry-cloud" ? (
+          <span className="flex flex-wrap gap-2">
+            <Button onClick={onRetryCloud} disabled={busy !== null} variant="ghost">
+              {busy === "retry-cloud" ? (
+                <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" />
+              ) : (
+                <RefreshCw className="me-1.5 h-4 w-4" />
+              )}
+              تلاش دوبارهٔ ارسال
+            </Button>
+            <Button onClick={onVerifyCloud} disabled={busy !== null} variant="ghost">
+              {busy === "verify-cloud" ? (
+                <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" />
+              ) : (
+                <ShieldCheck className="me-1.5 h-4 w-4" />
+              )}
+              تأیید دوباره با هش
+            </Button>
+          </span>
+        </div>
+      ) : null}
+      {cloud && cloud.state === "current" && canRun ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm">
+          <span>
+            {cloud.latestVerifyMode === "sha256"
+              ? "این نسخه با دانلود دوباره و مقایسهٔ هش کامل تأیید شده است."
+              : "این نسخه با اندازهٔ فایل تأیید شده است. برای اثبات کامل، هش نسخهٔ ذخیره‌شده دوباره محاسبه می‌شود."}
+          </span>
+          <Button onClick={onVerifyCloud} disabled={busy !== null} variant="ghost">
+            {busy === "verify-cloud" ? (
               <Loader2 className="me-1.5 h-4 w-4 animate-spin motion-reduce:animate-none" />
             ) : (
-              <RefreshCw className="me-1.5 h-4 w-4" />
+              <ShieldCheck className="me-1.5 h-4 w-4" />
             )}
-            تلاش دوبارهٔ ارسال
+            تأیید دوباره با هش
           </Button>
         </div>
       ) : null}

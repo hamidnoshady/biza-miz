@@ -27,6 +27,8 @@ import { getPool, query } from "./db";
 
 /** The namespaces every caller must go through — no ad-hoc lock names. */
 export const LOCK_KEYS = {
+  /** Serialize edits to one tenant's marketer reporting graph. */
+  marketingHierarchy: (businessId: string) => `growth:marketing-hierarchy:${businessId}`,
   /** one whole-platform backup at a time, cluster-wide */
   platformBackup: "backup:platform",
   /**

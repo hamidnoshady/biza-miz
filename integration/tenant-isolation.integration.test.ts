@@ -260,7 +260,7 @@ describe("every tenant table is protected", () => {
     ).toEqual([]);
 
     const byName = new Map(rows.map((row) => [row.relname, row]));
-    for (const table of ["platform_audit_log", "platform_cms_sites"]) {
+    for (const table of ["platform_audit_log", "platform_cms_sites", "platform_demo_sessions"]) {
       expect(
         byName.get(table),
         `${table} must remain in the business_id coverage check`,
@@ -366,6 +366,7 @@ describe("every tenant table is protected", () => {
       "platform_cms_config",
       "platform_cms_sites",
       "platform_cms_sync_runs",
+      "platform_demo_sessions",
       // Migration 0227: singleton platform default; per-business layers are RLS-protected.
       "platform_desktop_update_policy",
       // Issue #883 wave 3 (migration 0219) — the console's `pospmcp_` MCP

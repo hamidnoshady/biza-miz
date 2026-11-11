@@ -18,6 +18,8 @@ import { query } from "./db";
  */
 export const EXEMPT_TABLES = new Set([
   "schema_migrations",
+  // Demo credentials and lifecycle state are platform-owned, with forced RLS.
+  "platform_demo_sessions",
   "feature_flags",
   // Migration 0128 — app availability's global half. Same reasoning as
   // feature_flags: a catalogue of deployment-wide states with no business_id.

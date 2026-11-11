@@ -70,7 +70,7 @@ beforeEach(() => {
   mocks.disableFeatures.mockResolvedValue(undefined);
   mocks.reconcilePaymentMethodsForIndustry.mockResolvedValue(undefined);
   mocks.clientQuery.mockImplementation(async (sql: string) => {
-    if (sql.includes("SELECT industry FROM businesses WHERE id = $1 FOR UPDATE")) {
+    if (sql.includes("SELECT industry FROM businesses WHERE id = $1")) {
       return { rows: [{ industry: mocks.previousIndustry }] };
     }
     if (sql.includes("AS has_business")) return { rows: [mocks.readinessRow] };
@@ -85,6 +85,16 @@ beforeEach(() => {
 });
 
 describe("changeBusinessIndustry setup lifecycle", () => {
+  it("excludes temporary demos from the ordinary industry transition", async () => {
+    mocks.clientQuery.mockResolvedValue({ rows: [] });
+    await expect(changeBusinessIndustry("demo-1", "watch")).resolves.toBeNull();
+    expect(mocks.clientQuery).toHaveBeenCalledWith(
+      expect.stringContaining("ownership_kind <> 'demo'"),
+      ["demo-1"],
+    );
+    expect(mocks.seedChartOfAccounts).not.toHaveBeenCalled();
+  });
+
   it("clears completedAt when a retail-to-F&B switch fails canonical readiness", async () => {
     const result = await changeBusinessIndustry("business-1", "food_service");
 

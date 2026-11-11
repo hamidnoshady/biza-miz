@@ -22,6 +22,7 @@ import {
   hashKey,
   sweepExpired,
   clientIpFrom,
+  positiveIntFromEnv,
   type RateLimitEntry,
 } from "@/lib/rate-limit";
 import { isInternalCall } from "@/lib/internal-auth";
@@ -678,7 +679,18 @@ const telegramWebhookIpLimits = new Map<string, RateLimitEntry>();
 const rosterIpLimits = new Map<string, RateLimitEntry>();
 const mcpLimits = new Map<string, RateLimitEntry>();
 
-const BUSINESS_API_LIMIT = 300;
+/**
+ * The tenant API ceiling: 300 requests a minute per business, by default.
+ *
+ * Tunable through the env, and only through the env (see `positiveIntFromEnv`),
+ * because it is the one limit that also describes how much traffic a *job*
+ * sends: the media E2E job runs four browser suites against one seeded business
+ * in the same minute, and the cheque suite's seeding alone is ~170 requests a
+ * minute. When the bucket ran dry there, the cheque script's first call got
+ * `429 {"error":"rate_limited"}` and the run failed as if the product were
+ * broken. The default stays 300 for every deployment — that job raises it.
+ */
+const BUSINESS_API_LIMIT = positiveIntFromEnv("BUSINESS_API_LIMIT", 300);
 const BUSINESS_API_WINDOW_MS = 60_000;
 const SYNC_TOKEN_LIMIT = 60;
 const SYNC_TOKEN_WINDOW_MS = 60_000;

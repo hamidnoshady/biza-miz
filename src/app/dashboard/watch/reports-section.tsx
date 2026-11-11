@@ -4,6 +4,7 @@ import {LoadingSkeleton, cardClass } from "@/app/dashboard/page-chrome";
 
 import { useCallback, useEffect, useState } from "react";
 import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
+import { Button } from "@/components/ui/button";
 import { useMoney } from "@/components/money/money-context";
 import { formatJalali } from "@/lib/jalali";
 import { REPAIR_STATUS_LABELS, type RepairStatus } from "./watch-manager";
@@ -58,14 +59,18 @@ interface ReportPayload {
 export function ReportsSection() {
   const money = useMoney();
   const [data, setData] = useState<ReportPayload | null>(null);
+  const [failed, setFailed] = useState(false);
 
   const load = useCallback(() => {
+    setFailed(false);
     api<ReportPayload>("/api/watch/reports").then(({ ok, data: payload }) => {
-      if (ok) setData(payload);
+      if (ok && payload.warranty && payload.repairs) setData(payload);
+      else setFailed(true);
     });
   }, []);
   useEffect(load, [load]);
 
+  if (failed) return <div role="alert" className="space-y-2 text-sm"><p>گزارش دریافت نشد؛ اتصال و دسترسی را بررسی کنید.</p><Button variant="outline" onClick={load}>تلاش دوباره</Button></div>;
   if (!data) return <LoadingSkeleton rows={3} />;
 
   return (

@@ -1,12 +1,20 @@
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
+import { JewelryPriceBoard } from "@/app/dashboard/products/jewelry-price-board";
 import { PriceListsSection } from "@/app/dashboard/products/price-lists-section";
 import { WooPriceSourceSettings } from "@/app/dashboard/products/woo-price-source-settings";
-import { requireProductWorkspace } from "@/app/dashboard/products/workspace-context";
+import { specialistSectionForPage, requireProductWorkspace } from "@/app/dashboard/products/workspace-context";
 
 /** «لیست قیمت» — the price-update matrix over sale/purchase and named lists. */
 export default async function PriceListsPage() {
-  const { apiBase, canEdit, draftScope } = await requireProductWorkspace();
+  const specialist = await specialistSectionForPage("prices");
+  if (specialist?.industry === "jewelry") return (
+    <PageShell>
+      <PageHeader title="نرخ طلا" description="آخرین نرخ هر عیار در سامانهٔ طلا و جواهر." actions={<KnowledgeHelpButton section="jewelry" />} />
+      <JewelryPriceBoard canEdit={specialist.canEdit} />
+    </PageShell>
+  );
+  const { apiBase, canEdit, canManageStore, draftScope } = await requireProductWorkspace();
   return (
     <PageShell>
       <PageHeader
@@ -15,7 +23,7 @@ export default async function PriceListsPage() {
         actions={<KnowledgeHelpButton section="pos" />}
       />
       <PriceListsSection apiBase={apiBase} canEdit={canEdit} draftScope={draftScope} />
-      {canEdit ? <WooPriceSourceSettings /> : null}
+      {canManageStore ? <WooPriceSourceSettings /> : null}
     </PageShell>
   );
 }
