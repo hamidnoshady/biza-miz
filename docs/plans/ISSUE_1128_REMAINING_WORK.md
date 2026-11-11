@@ -1,6 +1,6 @@
 # Issue #1128 — current remaining-work tracker
 
-Updated 2026-10-26 after Wave 20. This supersedes historical «not built yet»
+Updated 2026-10-26 after Wave 21. This supersedes historical «not built yet»
 statements in the original plan where later merged waves shipped those features.
 It is an implementation queue, not a claim that the epic checklist is complete.
 
@@ -22,6 +22,11 @@ Wave 20 adds a permission-filtered date-range campaign agenda, explicit browser-
 CSV mapping/preview into the existing report form, and combined-specialty blueprint
 recommendations. See `ISSUE_1128_WAVE20_PROGRESS.md` for limits and verification.
 
+Wave 21 adds manual actual task-time declarations with immutable own-entry
+corrections/voids, retry safety, daily capacity checks and whole-project active
+minute totals. See `ISSUE_1128_WAVE21_PROGRESS.md`; these are not approved payroll,
+billable hours or ledger labor costs.
+
 ## Ordered work still open
 
 1. **Campaign operations and attribution**
@@ -35,8 +40,12 @@ recommendations. See `ISSUE_1128_WAVE20_PROGRESS.md` for limits and verification
    - Complete campaign spend/lead/conversion reconciliation and authorized reporting
      surfaces; never sum overlapping period snapshots or call spend claims postings.
 2. **Time, resources and campaign-level profitability**
-   - Actual time/resource entries, correction/audit and scheduling over existing staff
-     identities and Workspace tasks, with project/client separation.
+   - **Delivered in Wave 21:** actual task-time self-declarations, own correction/
+     void history and concurrent per-worker daily capacity checks over existing
+     members/tasks with tenant/project separation.
+   - Resource scheduling/reservations, interval overlap detection, approval and
+     deliberate billing/cost-allocation policies remain open. The manual register
+     does not approve, bill or price labor.
    - Campaign dimensions on existing accounting flows and defensible campaign P&L
      tied to the ledger; preserve whole-project exact aggregates. Missing hours,
      revenue or allocation are unknown, not zero or an invented margin.
