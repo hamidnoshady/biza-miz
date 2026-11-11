@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, Button, Card, ErrorBox, Field, InfoBox, inputClass, useCan } from "../../ui";
 import { AiConsoleNav } from "../ai-console-nav";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import {
   AI_MODE_HINTS,
   AI_MODE_LABELS,
@@ -228,8 +229,8 @@ export default function PlatformAiModesPage() {
                 </div>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <Field label="دما" hint="بین ۰ و ۲؛ خالی = پیش‌فرض">
-                    <input
-                      type="number"
+                    <PersianNumberInput
+                      inputMode="decimal"
                       min="0"
                       max="2"
                       step="0.01"
@@ -242,8 +243,8 @@ export default function PlatformAiModesPage() {
                     />
                   </Field>
                   <Field label="حداکثر توکن خروجی" hint="عدد صحیح ۱ تا ۲۰۰٬۰۰۰؛ خالی = پیش‌فرض">
-                    <input
-                      type="number"
+                    <PersianNumberInput
+                      inputMode="numeric"
                       min="1"
                       max="200000"
                       step="1"
