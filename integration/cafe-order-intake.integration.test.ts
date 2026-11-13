@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import type { CmsOrder } from "../src/lib/cms/types";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -163,7 +164,7 @@ interface OrderOptions {
   id?: string;
 }
 
-function cmsOrder(tenant: Tenant, opts: OrderOptions = {}) {
+function cmsOrder(tenant: Tenant, opts: OrderOptions = {}): CmsOrder {
   const id = opts.id ?? `cms-${randomUUID()}`;
   const lines = opts.lines ?? [{ remoteProductId: tenant.latteRemoteId, quantity: 2 }];
   const total = lines.reduce((sum, line) => sum + (line.quantity ?? 1) * 850000, 0);
