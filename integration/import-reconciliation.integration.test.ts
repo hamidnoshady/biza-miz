@@ -1443,8 +1443,8 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
       [holooBiz.id],
     );
     const hConnRes = await db.query<{ id: string }>(
-      `INSERT INTO integration_connections (business_id, location_id, provider, status, base_url)
-       VALUES ($1, $2, 'holoo', 'connected', 'sql://holoo') RETURNING id`,
+      `INSERT INTO integration_connections (business_id, location_id, name, provider, base_url, currency_unit, status)
+       VALUES ($1, $2, 'Holoo Test', 'holoo', NULL, 'rial', 'active') RETURNING id`,
       [holooBiz.id, holooBiz.locationId],
     );
     const hConnId = hConnRes.rows[0].id;
