@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { automotiveCreateEntry, specialistCatalogueForPage, specialistSectionForPage, requireProductWorkspace, requireRetailLabels } from "./workspace-context";
+import { automotiveCreateEntry, automotiveProductSectionForPage, specialistCreateEntry, specialistCatalogueForPage, specialistSectionForPage, requireProductWorkspace, requireRetailLabels } from "./workspace-context";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { getBusinessIndustry } from "@/lib/industry-guard";
+import { resolveActiveLocation } from "@/lib/setup-state";
 import { PERMISSIONS } from "@/lib/permissions";
 
 vi.mock("next/navigation", () => ({ redirect: (href: string) => { throw new Error(`redirect:${href}`); } }));
 vi.mock("@/lib/auth", () => ({ getSession: vi.fn() }));
 vi.mock("@/lib/member-access", () => ({ memberAccessFor: vi.fn() }));
 vi.mock("@/lib/industry-guard", () => ({ getBusinessIndustry: vi.fn() }));
+vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: vi.fn() }));
 
 describe("specialist catalogue entry", () => {
   beforeEach(() => {
@@ -23,6 +25,10 @@ describe("specialist catalogue entry", () => {
   it("gates specialist price and reports by the respective native API permissions", async () => {
     vi.mocked(getBusinessIndustry).mockResolvedValue("jewelry");
     await expect(specialistSectionForPage("prices")).resolves.toEqual({ industry: "jewelry", canEdit: false });
+    await expect(specialistSectionForPage("reports")).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.reportsView]) });
+    await expect(specialistSectionForPage("reports")).resolves.toEqual({ industry: "jewelry", canEdit: false });
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "owner", isActive: true, permissions: new Set([PERMISSIONS.inventoryView]) });
     vi.mocked(getBusinessIndustry).mockResolvedValue("watch");
     await expect(specialistSectionForPage("reports")).rejects.toThrow("redirect:/accounting/overview");
     vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.reportsView]) });
@@ -43,6 +49,34 @@ describe("specialist catalogue entry", () => {
     await expect(automotiveCreateEntry()).rejects.toThrow("redirect:/accounting/overview");
     vi.mocked(getBusinessIndustry).mockResolvedValue("cosmetics");
     await expect(automotiveCreateEntry()).resolves.toBe(false);
+  });
+  it.each(["jewelry", "watch"] as const)("requires active inventory read/write and a resolved branch to create %s", async (industry) => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue(industry);
+    vi.mocked(getSession).mockResolvedValue({ businessId: "business", sub: "member" } as never);
+    vi.mocked(resolveActiveLocation).mockResolvedValue({ id: "branch", name: "شعبهٔ مرکزی" } as never);
+    for (const permissions of [[], [PERMISSIONS.inventoryView], [PERMISSIONS.inventoryAdjust]]) {
+      vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set(permissions) });
+      await expect(specialistCreateEntry()).rejects.toThrow("redirect:/accounting/overview");
+    }
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.inventoryAdjust]) });
+    await expect(specialistCreateEntry()).resolves.toEqual({ industry, draftScope: "business:member:branch", locationId: "branch", locationName: "شعبهٔ مرکزی" });
+    vi.mocked(resolveActiveLocation).mockResolvedValue(null);
+    await expect(specialistCreateEntry()).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: false, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.inventoryAdjust]) });
+    await expect(specialistCreateEntry()).rejects.toThrow("redirect:/accounting/overview");
+  });
+  it("gates automotive price and reports pages by their native permissions", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("automotive");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.vehiclesView]) });
+    await expect(automotiveProductSectionForPage("prices")).resolves.toEqual({ canEdit: false, canSeeCost: false });
+    await expect(automotiveProductSectionForPage("reports")).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.vehiclesView, PERMISSIONS.vehiclesPriceEdit, PERMISSIONS.reportsView]) });
+    await expect(automotiveProductSectionForPage("prices")).resolves.toEqual({ canEdit: true, canSeeCost: false });
+    await expect(automotiveProductSectionForPage("reports")).resolves.toEqual({ canEdit: true, canSeeCost: false });
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: false, permissions: new Set([PERMISSIONS.vehiclesView, PERMISSIONS.reportsView]) });
+    await expect(automotiveProductSectionForPage("prices")).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(getBusinessIndustry).mockResolvedValue("watch");
+    await expect(automotiveProductSectionForPage("prices")).resolves.toBeNull();
   });
   it("checks the vehicle permission rather than inventory permission", async () => {
     vi.mocked(getBusinessIndustry).mockResolvedValue("automotive");
