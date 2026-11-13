@@ -30,6 +30,22 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("historical invoice review", () => {
+  it("shows a loading state instead of an empty history while the request is pending", async () => {
+    let resolve!: (value: unknown) => void;
+    mocks.api.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    render(<HistoricalInvoiceSection />);
+    expect(screen.getByRole("status", { name: "در حال بارگذاری فایل‌های تاریخی" })).toBeTruthy();
+    expect(screen.queryByText("فایلی برای نمایش نیست.")).toBeNull();
+    resolve(successful({ jobs: [], hasMore: false }));
+    expect(await screen.findByText("فایلی برای نمایش نیست.")).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "در حال بارگذاری فایل‌های تاریخی" })).toBeNull();
+  });
+  it("reports a failed history request instead of saying it is empty", async () => {
+    mocks.api.mockResolvedValueOnce({ ok: false, status: 503, data: { error: "service_unavailable" }, aborted: false });
+    render(<HistoricalInvoiceSection />);
+    expect(await screen.findByText("بارگذاری فایل‌ها ممکن نشد.")).toBeTruthy();
+    expect(screen.queryByText("فایلی برای نمایش نیست.")).toBeNull();
+  });
   it("requires explicit mapping and customer review, and never offers invoice execution", async () => {
     render(<HistoricalInvoiceSection />);
     expect(screen.getByText(/اجرای ورود هنوز فعال نیست/)).toBeTruthy();

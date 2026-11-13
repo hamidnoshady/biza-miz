@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { SectionCard } from "@/app/dashboard/page-chrome";
+import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
 import { ErrorBox, Field, InfoBox, PrimaryButton, SecondaryButton, api, inputClass } from "@/app/dashboard/ui";
 import { HISTORICAL_INVOICE_FIELDS } from "@/lib/data-transfer/historical-invoice-mapping";
 import { toPersianDigits } from "@/lib/digits";
@@ -61,6 +61,7 @@ function request(body: unknown, contentType = "application/json") {
 
 export function HistoricalInvoiceSection() {
   const [history, setHistory] = useState<Summary[]>([]);
+  const [historyState, setHistoryState] = useState<"loading" | "ready" | "error">("loading");
   const [historyOffset, setHistoryOffset] = useState(0);
   const [historyMore, setHistoryMore] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
@@ -88,9 +89,16 @@ export function HistoricalInvoiceSection() {
     mapping, ...(job.structure === "header_lines" ? { lineMapping } : {}) } : null;
 
   async function loadHistory(nextOffset: number) {
-    const result = await request({ action: "list", limit: 20, offset: nextOffset });
-    if (!result.ok) { setError(message(result.data.error)); return; }
-    setHistory(result.data.jobs as Summary[]); setHistoryMore(result.data.hasMore === true); setHistoryOffset(nextOffset);
+    setHistoryState("loading");
+    try {
+      const result = await request({ action: "list", limit: 20, offset: nextOffset });
+      if (!result.ok) { setError(message(result.data.error)); setHistoryState("error"); return; }
+      setHistory(result.data.jobs as Summary[]); setHistoryMore(result.data.hasMore === true); setHistoryOffset(nextOffset);
+      setHistoryState("ready");
+    } catch {
+      setHistoryState("error");
+      setError(message(undefined));
+    }
   }
   useEffect(() => { void loadHistory(0); }, []);
   function resetReview() { setReview(null); setNotice(""); }
@@ -174,11 +182,11 @@ export function HistoricalInvoiceSection() {
       <PrimaryButton type="button" disabled={busy} onClick={() => void upload()}>ذخیرهٔ فایل برای بررسی</PrimaryButton>
     </SectionCard>
     <SectionCard title="فایل‌های ذخیره‌شده در این شعبه">
-      {history.length === 0 ? <p>فایلی برای نمایش نیست.</p> : <ul className="space-y-2">{history.map((item) => <li key={item.jobId}>
+      {historyState === "loading" ? <LoadingSkeleton rows={3} label="در حال بارگذاری فایل‌های تاریخی" /> : historyState === "error" ? <p>بارگذاری فایل‌ها ممکن نشد.</p> : history.length === 0 ? <p>فایلی برای نمایش نیست.</p> : <ul className="space-y-2">{history.map((item) => <li key={item.jobId}>
         <SecondaryButton disabled={busy} onClick={() => void openJob(item.jobId)}>{item.fileName} — {toPersianDigits(item.rowCount)} ردیف — {formatJalali(item.createdAt)}</SecondaryButton>
       </li>)}</ul>}
-      <div className="mt-4 flex gap-2"><SecondaryButton disabled={busy || historyOffset === 0} onClick={() => void loadHistory(Math.max(0, historyOffset - 20))}>قبلی</SecondaryButton>
-        <SecondaryButton disabled={busy || !historyMore} onClick={() => void loadHistory(historyOffset + 20)}>بعدی</SecondaryButton></div>
+      <div className="mt-4 flex gap-2"><SecondaryButton disabled={busy || historyState === "loading" || historyOffset === 0} onClick={() => void loadHistory(Math.max(0, historyOffset - 20))}>قبلی</SecondaryButton>
+        <SecondaryButton disabled={busy || historyState === "loading" || !historyMore} onClick={() => void loadHistory(historyOffset + 20)}>بعدی</SecondaryButton></div>
     </SectionCard>
     {job ? <SectionCard title={`نگاشت ستون‌ها: ${job.fileName}`} description="ستون‌ها را خودتان انتخاب کنید؛ نگاشت خودکار انجام نمی‌شود و پس از خروج باید دوباره انتخاب شود.">
       {mappingFields(job.structure === "header_lines" ? headerFields : HISTORICAL_INVOICE_FIELDS, job.columns, selected, setSelected)}
