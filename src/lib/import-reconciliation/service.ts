@@ -768,6 +768,7 @@ interface CatalogueRow extends Row {
   is_active: boolean;
   barcode: string | null;
   price: string | null;
+  avg_cost?: string | null;
   parent_item_id?: string | null;
   variant_options?: Record<string, string> | null;
 }
@@ -792,6 +793,7 @@ function toCanonicalProduct(row: CatalogueRow, barcodes: readonly string[]): Can
       parentItemId: row.parent_item_id ?? null,
       ...(row.unit != null ? { unit: row.unit } : {}),
       ...(row.price != null ? { price: row.price } : {}),
+      ...(row.avg_cost != null ? { average_cost: row.avg_cost } : {}),
     },
   };
 }
@@ -844,17 +846,17 @@ export async function loadProductContext(
   const select =
     table === "items"
       ? `SELECT i.id::text AS id, i.location_id::text AS location_id, i.name, i.sku, i.kind, i.unit, i.tracking,
-                i.is_active, i.barcode, NULL::text AS price, i.parent_item_id,
+                i.is_active, i.barcode, NULL::text AS price, NULL::text AS avg_cost, i.parent_item_id,
                 (SELECT jsonb_object_agg(a.name, a.value) FROM item_variant_attributes a WHERE a.item_id=i.id) AS variant_options
            FROM items i`
       : table === "inventory_items"
         ? `SELECT i.id::text AS id, i.location_id::text AS location_id, i.name, i.sku, NULL::text AS kind,
                   i.unit, NULL::text AS tracking, i.is_active, NULL::text AS barcode,
-                  NULL::text AS price
+                  NULL::text AS price, i.avg_cost::text AS avg_cost
              FROM inventory_items i`
         : `SELECT m.id::text AS id, m.location_id::text AS location_id, m.name, m.sku, NULL::text AS kind,
                   NULL::text AS unit, NULL::text AS tracking, m.is_active, NULL::text AS barcode,
-                  m.price::text AS price
+                  m.price::text AS price, NULL::text AS avg_cost
              FROM menu_items m`;
   const alias = table === "menu_items" ? "m" : "i";
 

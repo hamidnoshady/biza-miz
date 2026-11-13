@@ -734,6 +734,10 @@ export async function stageImportJobToReconciliation(
       const sku = typeof m.sku === "string" && m.sku.trim() ? m.sku.trim() : null;
       const name = typeof m.name === "string" && m.name.trim() ? m.name.trim() : `ردیف ${row.row_number}`;
       const price = m.price != null ? String(m.price) : undefined;
+      const fields: Record<string, unknown> = { ...m };
+      if (m.avgCost != null && fields.average_cost == null) {
+        fields.average_cost = String(m.avgCost);
+      }
       return {
         domain: "product",
         externalId: sku ?? `row:${row.row_number}`,
@@ -742,7 +746,7 @@ export async function stageImportJobToReconciliation(
         sku,
         priceRial: price,
         unit: typeof m.unit === "string" ? m.unit : undefined,
-        fields: m,
+        fields,
       };
     });
     await stageReconciliationProducts(businessId, run.id, incoming);
@@ -984,6 +988,8 @@ type ReconciledItemDecisionRow = {
 const RECONCILED_FIELD_ALIASES: Record<string, string[]> = {
   regular_price: ["price"],
   price: ["price"],
+  average_cost: ["avgCost"],
+  avgCost: ["avgCost"],
   display_name: ["name"],
   name: ["name"],
   sku: ["sku"],
@@ -1245,9 +1251,15 @@ async function executeReconciledImportRows(
           const sourceFields = Object.entries(overrides)
             .filter(([, owner]) => owner === "source")
             .map(([field]) => field);
-          const rejectedFields = rejectedByKey.get(rec.external_key) ?? new Set<string>();
+          const rejectedFields = new Set<string>(rejectedByKey.get(rec.external_key) ?? []);
+          for (const f of [...rejectedFields]) {
+            for (const alias of RECONCILED_FIELD_ALIASES[f] ?? []) rejectedFields.add(alias);
+          }
           for (const [field, owner] of Object.entries(overrides)) {
-            if (owner === "canonical") rejectedFields.add(field);
+            if (owner === "canonical") {
+              rejectedFields.add(field);
+              for (const alias of RECONCILED_FIELD_ALIASES[field] ?? []) rejectedFields.add(alias);
+            }
           }
 
           if (rec.outcome === "field_conflict" && sourceFields.length === 0) {

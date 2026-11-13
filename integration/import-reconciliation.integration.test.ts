@@ -1385,6 +1385,7 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
     const skipRow = foodItems.find((i) => i.externalKey === "RAW-SKIP-2")!;
     const milkRow = foodItems.find((i) => i.externalKey === "RAW-MILK-3")!;
     expect(coffee.canonicalId).toBeTruthy();
+    expect(coffee.outcome).toBe("field_conflict");
 
     await asBusiness(foodBiz.id, () =>
       svc.decideItem({

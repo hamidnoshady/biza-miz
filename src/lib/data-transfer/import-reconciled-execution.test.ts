@@ -107,7 +107,7 @@ describe("Data Transfer reconciliation scope and decision preservation", () => {
         };
       }
       if (sql.includes("FROM data_import_rows")) {
-        return { rows: [{ row_number: 1, mapped: { name: "آرد سفید", unit: "kg" } }] };
+        return { rows: [{ row_number: 1, mapped: { name: "آرد سفید", unit: "kg", avgCost: 500000 } }] };
       }
       return { rows: [] };
     });
@@ -122,6 +122,17 @@ describe("Data Transfer reconciliation scope and decision preservation", () => {
         domain: "product",
         scope: { entityKey: "inventory.items", canonicalTable: "inventory_items" },
       }),
+    );
+    expect(mockStageProducts).toHaveBeenCalledWith(
+      bizId,
+      runId,
+      [
+        expect.objectContaining({
+          name: "آرد سفید",
+          unit: "kg",
+          fields: expect.objectContaining({ average_cost: "500000" }),
+        }),
+      ],
     );
   });
 
