@@ -205,6 +205,8 @@ export interface AwaitingApprovalOrder {
   openedAt: string;
   cmsOrderId: string | null;
   itemCount: number;
+  /** True once a payment exists — rejecting such an order needs a refund. */
+  hasPayment: boolean;
 }
 
 /**
@@ -225,7 +227,8 @@ export async function listOrdersAwaitingApproval(
             o.note,
             o.opened_at AS "openedAt",
             o.cms_order_id AS "cmsOrderId",
-            (SELECT count(*)::int FROM order_items oi WHERE oi.order_id = o.id) AS "itemCount"
+            (SELECT count(*)::int FROM order_items oi WHERE oi.order_id = o.id) AS "itemCount",
+            EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id) AS "hasPayment"
        FROM orders o
        LEFT JOIN dining_tables dt ON dt.id = o.table_id
        LEFT JOIN parties c ON c.id = o.customer_id

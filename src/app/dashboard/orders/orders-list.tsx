@@ -205,6 +205,8 @@ interface AwaitingApprovalRow {
   openedAt: string;
   cmsOrderId: string | null;
   itemCount: number;
+  /** Paid already — rejecting it means a refund is owed. */
+  hasPayment: boolean;
 }
 
 export function OrdersList({
@@ -679,6 +681,11 @@ export function OrdersList({
                   </div>
                   {rejectingId === row.id ? (
                     <div className="mt-2 space-y-2">
+                      {row.hasPayment ? (
+                        <p className="rounded-xl border border-amber-500/25 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/60 dark:bg-amber-500/15 dark:text-amber-200">
+                          این سفارش پرداخت شده است؛ رد آن نیازمند بازپرداخت از مسیر بازپرداخت‌های صندوق است.
+                        </p>
+                      ) : null}
                       <label className="block text-xs text-muted-foreground">
                         دلیل رد (برای مشتری و گزارش ثبت می‌شود)
                         <textarea
