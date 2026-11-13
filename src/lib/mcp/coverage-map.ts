@@ -1170,10 +1170,10 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "knowledge.tours",
     module: "Knowledge base",
     entity: "Guided tours — lookup and the caller's own learning progress (issue #972)",
-    routes: ["knowledge/tours"],
-    note: "a member's own walk-through state on the page they are looking at, written only by the browser overlay; it moves no business data, so an AI client has nothing to operate",
+    routes: ["knowledge/tours", "knowledge/learning-progress"],
+    note: "a member's own walk-through state on the page they are looking at, written only by the browser overlay; aggregate tour + learning-path progress across apps plus current device pairing/trust state; it moves no business data, so an AI client has nothing to operate",
     status: "n/a (infra)",
-    test: "integration/tours.integration.test.ts",
+    test: "integration/tours.integration.test.ts + src/app/api/knowledge/learning-progress/route.test.ts",
   },
   {
     id: "knowledge.learning-paths",
