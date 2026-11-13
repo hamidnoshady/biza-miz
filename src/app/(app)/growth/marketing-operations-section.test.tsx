@@ -46,12 +46,58 @@ describe("marketing operations screens", () => {
     await waitFor(() => expect(vi.mocked(api).mock.calls.some(([, options]) => options?.method === "PATCH" && JSON.parse(String(options.body)).action === "restore")).toBe(true));
   });
   it("renders task dates in Jalali and offers no mutation actions to a reader", async () => {
-    vi.mocked(api).mockResolvedValue(ok({ assignments: [{ id: "a", title: "Call", target: "Shop", agent: "Marketer", location_name: "Main", status: "planned", due_date: "2026-11-05" }], hasMore: false }));
+    vi.mocked(api).mockResolvedValue(ok({ assignments: [{ id: "a", title: "Call", target: "Shop", agent: "Marketer", location_name: "Main", status: "planned", priority: "high", due_date: "2026-11-05" }], hasMore: false }));
     render(<MarketingAssignmentsSection canManage={false} />);
     expect(await screen.findByText("Call")).toBeTruthy();
     expect(screen.queryByText("2026-11-05")).toBeNull();
+    expect(screen.getByRole("cell", { name: "زیاد" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "تکمیل" })).toBeNull();
     expect(screen.queryByText("ثبت ماموریت")).toBeNull();
+  });
+  it("filters the manager list server-side and resets pagination", async () => {
+    vi.mocked(api).mockResolvedValue(ok({ assignments: [], hasMore: true }));
+    const user = userEvent.setup(); render(<MarketingAssignmentsSection canManage={false} />);
+    await screen.findByText("ماموریتی یافت نشد.");
+    await user.click(screen.getByRole("button", { name: "صفحه بعد" }));
+    await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("page=2"))).toBe(true));
+    await user.selectOptions(screen.getByLabelText("فیلتر اولویت"), "urgent");
+    await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("page=1&priority=urgent"))).toBe(true));
+  });
+  it("allows only managers to change the priority of an open assignment with its revision", async () => {
+    const row = { id: "a", title: "Call", target: "Site", agent: "Marketer", location_name: "Main", status: "planned", priority: "high", priority_revision: 3, due_date: null };
+    vi.mocked(api).mockImplementation(async (url, init) => {
+      if (init?.method === "PATCH") return ok({ ok: true });
+      if (String(url).includes("/options?")) return ok({ locations: [], targets: [], agents: [], targetHasMore: false, agentHasMore: false });
+      return ok({ assignments: [row], hasMore: false });
+    });
+    const user = userEvent.setup(); const view = render(<MarketingAssignmentsSection canManage={false} />);
+    await screen.findByText("Call"); expect(screen.queryByRole("button", { name: "تغییر اولویت" })).toBeNull();
+    view.rerender(<MarketingAssignmentsSection canManage />);
+    await user.click(screen.getByRole("button", { name: "تغییر اولویت" }));
+    await user.selectOptions(screen.getByLabelText("اولویت جدید"), "urgent");
+    await user.click(screen.getByRole("button", { name: "ذخیره اولویت" }));
+    await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url, init]) => url === "/api/growth/marketing-assignments/a" && init?.method === "PATCH" && JSON.stringify(JSON.parse(String(init.body))) === JSON.stringify({ action: "priority", expectedRevision: 3, priority: "urgent" }))).toBe(true));
+    await waitFor(() => expect(screen.queryByLabelText("اولویت جدید")).toBeNull());
+  });
+  it("submits the selected assignment priority", async () => {
+    vi.mocked(api).mockImplementation(async (url, init) => {
+      if (init?.method === "POST") return ok({ assignment: { id: "a" } });
+      if (String(url).includes("/options?")) {
+        const branch = new URL(String(url), "http://localhost").searchParams.get("location");
+        return ok({ locations: [{ id: "b", name: "Main" }], targets: branch ? [{ id: "t", location_id: "b", site_label: "Site" }] : [], agents: branch ? [{ id: "m", location_id: "b", name: "Marketer" }] : [], targetHasMore: false, agentHasMore: false });
+      }
+      return ok({ assignments: [], hasMore: false });
+    });
+    const user = userEvent.setup(); render(<MarketingAssignmentsSection canManage />);
+    await user.selectOptions(await screen.findByLabelText("شعبه"), "b");
+    await screen.findByRole("option", { name: "Site" });
+    await user.selectOptions(screen.getByLabelText("مقصد"), "t");
+    await user.selectOptions(screen.getByLabelText("بازاریاب"), "m");
+    await user.type(screen.getByLabelText("عنوان وظیفه"), "Visit");
+    await user.selectOptions(screen.getByLabelText("اولویت"), "urgent");
+    await user.click(screen.getByRole("button", { name: "ثبت ماموریت" }));
+    await waitFor(() => expect(vi.mocked(api).mock.calls.some(([, init]) => init?.method === "POST" && JSON.parse(String(init.body)).priority === "urgent")).toBe(true));
+    await waitFor(() => expect((screen.getByLabelText("اولویت") as HTMLSelectElement).value).toBe("normal"));
   });
   it("searches and pages assignment options independently in the chosen branch", async () => {
     vi.mocked(api).mockImplementation(async (url) => {

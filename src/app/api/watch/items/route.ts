@@ -41,6 +41,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   let body: {
     name?: string;
+    expectedLocationId?: string;
     sku?: string | null;
     serviceIntervalMonths?: number | null;
     attributes?: WatchItemAttributesInput | null;
@@ -56,6 +57,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ error: "no_location" }, { status: 409 });
+  // A draft opened in another branch must never silently create in the newly
+  // selected branch. Existing native clients may omit this optional check.
+  if (body.expectedLocationId != null && body.expectedLocationId !== location.id) {
+    return NextResponse.json({ error: "location_changed" }, { status: 409 });
+  }
 
   try {
     const item = await createWatchModel({
