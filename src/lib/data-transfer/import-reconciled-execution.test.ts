@@ -310,4 +310,68 @@ describe("Data Transfer reconciliation scope and decision preservation", () => {
     expect(queries.some((q) => q.includes("status IN ('pending', 'ready', 'queued', 'running')"))).toBe(true);
     expect(mockAdapterWrite).not.toHaveBeenCalled();
   });
+
+  it("never overwrites canonical fields on safe_match link even when duplicateStrategy is update without explicit source authority", async () => {
+    let rowFetchCount = 0;
+    mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM data_import_jobs") && sql.includes("WHERE business_id = $1 AND id = $2")) {
+        return {
+          rows: [
+            {
+              id: jobId,
+              business_id: bizId,
+              location_id: locId,
+              entity_key: "inventory.items",
+              status: "ready",
+              file_name: "safe-match.csv",
+              file_format: "csv",
+              file_size_bytes: 120,
+              provider_metadata: null,
+              source_columns: ["name", "sku", "unit"],
+              mapping: { columns: [] },
+              options: { duplicateStrategy: "update" },
+              total_rows: 1,
+              valid_rows: 1,
+              warning_rows: 0,
+              error_rows: 0,
+              created_rows: 0,
+              updated_rows: 0,
+              skipped_rows: 0,
+              failed_rows: 0,
+              duplicate_rows: 0,
+              error: null,
+              reconciliation_run_id: runId,
+              created_at: new Date(),
+              started_at: null,
+              finished_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("FROM import_reconciliation_runs")) {
+        return { rows: [{ status: "applied", source_key: `job:${jobId}`, domain: "product", location_id: locId }] };
+      }
+      if (sql.includes("FROM import_reconciliation_items i")) {
+        return {
+          rows: [
+            { row_number: 1, external_key: "SKU-1", outcome: "safe_match", status: "applied", effect: "link", resolved_canonical_id: canonicalInvId, authority_overrides: null },
+          ],
+        };
+      }
+      if (sql.includes("FROM import_reconciliation_rejected_edits")) return { rows: [] };
+      if (sql.includes("FROM data_import_rows") && sql.includes("status IN ('valid', 'warning')")) {
+        rowFetchCount += 1;
+        if (rowFetchCount > 1) return { rows: [] };
+        return {
+          rows: [{ id: "r1", row_number: 1, status: "valid", mapped: { name: "نام تغییریافته", sku: "SKU-1", unit: "kg" }, messages: [] }],
+        };
+      }
+      return { rows: [] };
+    });
+
+    const summary = await runImportJob(bizId, jobId, { locationId: locId, actorUserId: null, actorName: "اپراتور" });
+
+    expect(summary).toEqual({ created: 0, updated: 0, skipped: 1, failed: 0 });
+    expect(mockAdapterWrite).not.toHaveBeenCalled();
+  });
 });

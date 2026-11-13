@@ -1262,9 +1262,16 @@ async function executeReconciledImportRows(
             }
           }
 
-          if (rec.outcome === "field_conflict" && sourceFields.length === 0) {
+          if (sourceFields.length === 0) {
             result.skipped += 1;
-            messages.push({ field: null, severity: "warning", message: "در بازبینی تطبیق، مقادیر فعلی سیستم حفظ شدند." });
+            messages.push({
+              field: null,
+              severity: "warning",
+              message:
+                rec.outcome === "field_conflict"
+                  ? "در بازبینی تطبیق، مقادیر فعلی سیستم حفظ شدند."
+                  : "ردیف به رکورد موجود متصل شد و مقادیر فعلی سیستم حفظ شدند.",
+            });
             await query(
               `UPDATE data_import_rows SET status = 'skipped', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
               [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
@@ -1272,17 +1279,7 @@ async function executeReconciledImportRows(
             continue;
           }
 
-          if (sourceFields.length === 0 && writeOptions.duplicateStrategy !== "update") {
-            result.skipped += 1;
-            messages.push({ field: null, severity: "warning", message: "ردیف به رکورد موجود متصل شد و بدون تغییر باقی ماند." });
-            await query(
-              `UPDATE data_import_rows SET status = 'skipped', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
-              [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
-            );
-            continue;
-          }
-
-          const allowedFields = rec.outcome === "field_conflict" ? normalizeAllowedReconciledFields(sourceFields) : null;
+          const allowedFields = normalizeAllowedReconciledFields(sourceFields);
           const payload = await buildSafeReconciledLinkPayload(
             businessId,
             effectiveLocationId,
