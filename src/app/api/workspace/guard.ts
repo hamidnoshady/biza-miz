@@ -113,6 +113,8 @@ export async function workspaceOwner(
  * being silently dressed up as a 400.
  */
 const ERROR_STATUS: Record<string, number> = {
+  task_has_time_history: 409,
+  task_has_reservation_history: 409,
   project_not_found: 404,
   task_not_found: 404,
   contract_not_found: 404,

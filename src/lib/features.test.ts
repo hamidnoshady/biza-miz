@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   featureForApiPath,
   featureForPagePath,
+  featuresForApiPath,
+  featuresForPagePath,
   isLockableFeature,
 } from "./features";
 
@@ -21,10 +23,22 @@ describe("featureForApiPath", () => {
     expect(featureForApiPath("/api/telegram/session")).toBe("integrations");
   });
 
-  it("maps floor/table routes to reservations, matching the flag's own description", () => {
-    expect(featureForApiPath("/api/tables")).toBe("reservations");
-    expect(featureForApiPath("/api/table-sessions/abc")).toBe("reservations");
-    expect(featureForApiPath("/api/floor/sections")).toBe("reservations");
+  it("maps floor/table routes to dine-in or reservations (any-of, ESH-147)", () => {
+    // A café that prints a QR per table but takes no bookings reaches the same
+    // surface, so the pair is any-of rather than one flag.
+    expect(featuresForApiPath("/api/tables")).toEqual(["dine_in", "reservations"]);
+    expect(featuresForApiPath("/api/table-sessions/abc")).toEqual([
+      "dine_in",
+      "reservations",
+    ]);
+    expect(featuresForApiPath("/api/floor/sections")).toEqual([
+      "dine_in",
+      "reservations",
+    ]);
+    // Booking-only surfaces stay on `reservations` alone.
+    expect(featuresForApiPath("/api/reservations/today")).toEqual(["reservations"]);
+    // Ungated paths answer with no flags, which the request gate reads as open.
+    expect(featuresForApiPath("/api/locations/active")).toEqual([]);
   });
 
   it("leaves /api/locations ungated — core branch-resolution plumbing every session needs", () => {
@@ -47,7 +61,8 @@ describe("featureForPagePath", () => {
     // Inventory decides food-service inventory versus retail stock on the
     // server, so it intentionally has no generic page-prefix flag here.
     expect(featureForPagePath("/accounting/inventory")).toBeNull();
-    expect(featureForPagePath("/accounting/floor")).toBe("reservations");
+    expect(featureForPagePath("/accounting/floor")).toBe("dine_in");
+    expect(featuresForPagePath("/accounting/floor")).toEqual(["dine_in", "reservations"]);
     expect(featureForPagePath("/accounting/waiter")).toBe("reservations");
     expect(featureForPagePath("/settings/backup")).toBe("backup");
     // Branch management is deliberately ungated here: its settings tab

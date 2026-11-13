@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseTargetInput, parseTargetChange, parseAssignmentInput, parseTransition } from "./marketing-operations";
+import { parseTargetInput, parseTargetChange, parseAssignmentInput, parsePriorityChange, parseTransition } from "./marketing-operations";
 import { PERMISSIONS, effectivePermissions, type Permission } from "./permissions";
 import { canOpenGrowth, growthApiPermission } from "./growth-access";
 const id = "123e4567-e89b-42d3-a456-426614174000";
@@ -15,11 +15,19 @@ describe("marketing operations contracts", () => {
   });
   it("validates IDs, dates and the assignment lifecycle", () => {
     expect(parseAssignmentInput({ locationId: id, targetId: id, agentId: id, title: "Call", dueDate: "2028-02-29" })?.dueDate).toBe("2028-02-29");
+    const base = { locationId: id, targetId: id, agentId: id, title: "Call" };
+    expect(parseAssignmentInput(base)?.priority).toBe("normal");
+    for (const priority of ["low", "normal", "high", "urgent"]) expect(parseAssignmentInput({ ...base, priority })?.priority).toBe(priority);
+    for (const priority of [null, "", "HIGH", "critical", 1, {}]) expect(parseAssignmentInput({ ...base, priority })).toBeNull();
     expect(parseAssignmentInput({ locationId: id, targetId: id, agentId: id, title: "Call", dueDate: "2027-02-29" })).toBeNull();
     expect(parseAssignmentInput({ locationId: id, targetId: id, agentId: "no", title: "Call" })).toBeNull();
     expect(parseTransition({ expected: "planned", next: "in_progress" })).toEqual({ expected: "planned", next: "in_progress" });
     expect(parseTransition({ expected: "completed", next: "planned" })).toBeNull();
     expect(parseTransition({ expected: "planned", next: "planned" })).toBeNull();
+  });
+  it("validates priority revisions and rejects invalid changes", () => {
+    expect(parsePriorityChange({ action: "priority", expectedRevision: 2, priority: "high", businessId: "ignored" })).toEqual({ action: "priority", expectedRevision: 2, priority: "high" });
+    for (const body of [null, {}, { action: "priority", expectedRevision: -1, priority: "high" }, { action: "priority", expectedRevision: 1.5, priority: "high" }, { action: "priority", expectedRevision: 2147483647, priority: "high" }, { action: "priority", expectedRevision: 0, priority: "critical" }, { action: "other", expectedRevision: 0, priority: "high" }]) expect(parsePriorityChange(body)).toBeNull();
   });
   it("separates work permissions from directory and financial permissions", () => {
     expect(canOpenGrowth(new Set([PERMISSIONS.marketingAssignmentsView]))).toBe(true);

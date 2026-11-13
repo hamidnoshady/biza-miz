@@ -7,7 +7,7 @@ import { SpecialistCatalogue } from "./specialist-catalogue";
 const apiMock = vi.fn();
 vi.mock("../ui", async (original) => ({ ...await original<typeof import("../ui")>(), api: (...args: unknown[]) => apiMock(...args) }));
 const gold = { id: "gold-1", name: "انگشتر", sku: "JEW-1", isActive: true, purity: "18", netWeight: "3.2", grossWeight: "3.5", status: "in_stock", stoneCost: 0, consignorName: "امانت‌گذار" };
-const models = [{ id: "m1", name: "مدل آبی", sku: "W-1", isActive: true, attributes: { referenceNo: "R-77", caseMaterial: "استیل" } }, { id: "m2", name: "مدل قرمز", sku: "W-2", isActive: true, attributes: null }];
+const models = [{ id: "m1", name: "مدل آبی", sku: "W-1", isActive: true, attributes: { referenceNo: "R-77", caseMaterial: "استیل", movement: "quartz", caseDiameterMm: 40.5, caseDimensionsMm: [40.5, 12.2], waterResistanceM: 0, braceletColor: "آبی", gender: "unisex" } }, { id: "m2", name: "مدل قرمز", sku: "W-2", isActive: true, attributes: null }];
 const units = [{ id: "u1", itemId: "m1", itemName: "مدل آبی", serialNumber: "SN-22", status: "in_stock", unitCost: 0, warrantyMonths: 12, warrantyEnd: null }, { id: "u2", itemId: "m1", itemName: "مدل آبی", serialNumber: "SN-23", status: "sold", unitCost: null, warrantyMonths: 6, warrantyEnd: null }];
 function renderFor(industry: "watch" | "jewelry", canEdit = false) {
   return render(<MoneyProvider unit="rial"><SpecialistCatalogue industry={industry} canEdit={canEdit} /></MoneyProvider>);
@@ -40,6 +40,10 @@ describe("native specialist catalogue", () => {
     expect(within(details).getByText("SN-22")).toBeTruthy();
     expect(within(details).getByText("SN-23")).toBeTruthy();
     expect(details.textContent).toContain("استیل");
+    expect(details.textContent).toContain("کوارتز");
+    expect(details.textContent).toContain("ابعاد قاب: ۴۰٫۵ × ۱۲٫۲");
+    expect(details.textContent).toContain("مقاومت در برابر آب: ۰ متر");
+    expect(details.textContent).toContain("یونیسکس");
     expect(details.textContent).toContain("تعیین نشده");
     expect(screen.getByRole("link", { name: "مدیریت تخصصی ساعت" }).getAttribute("href")).toBe("/accounting/watch");
     expect(apiMock.mock.calls.map(([url]) => url).sort()).toEqual(["/api/watch/items", "/api/watch/units"]);

@@ -1,5 +1,5 @@
 import { query, withTenantTransaction } from "./db";
-import { parseTransition, type AssignmentInput, type AssignmentStatus, type TargetInput, type TargetChange, type TargetStatus } from "./marketing-operations";
+import { parseTransition, type AssignmentInput, type AssignmentStatus, type AssignmentPriority, type PriorityChange, type TargetInput, type TargetChange, type TargetStatus } from "./marketing-operations";
 import { branchScopeSql } from "./location-access";
 
 function escaped(search: string) { return search.replace(/[\\%_]/g, "\\$&"); }
@@ -62,9 +62,9 @@ export async function changeTarget(businessId: string, actor: string, locations:
   });
 }
 
-export async function listAssignments(businessId: string, locations: string[], search: string, page: number) {
-  const { rows } = await query<{ id: string; title: string; status: AssignmentStatus; due_date: string | null; target: string; agent: string; location_name: string }>(
-    `SELECT x.id, x.title, x.status, x.due_date::text AS due_date, t.site_label AS target,
+export async function listAssignments(businessId: string, locations: string[], search: string, page: number, priority: AssignmentPriority | null = null) {
+  const { rows } = await query<{ id: string; title: string; status: AssignmentStatus; priority: AssignmentPriority; priority_revision: number; due_date: string | null; target: string; agent: string; location_name: string }>(
+    `SELECT x.id, x.title, x.status, x.priority, x.priority_revision, x.due_date::text AS due_date, t.site_label AS target,
        CASE WHEN a.user_id IS NULL THEN a.display_name ELSE u.full_name END AS agent, l.name AS location_name
        FROM marketing_assignments x
        JOIN marketing_targets t ON t.id=x.target_id AND t.business_id=x.business_id AND t.location_id=x.location_id
@@ -72,7 +72,8 @@ export async function listAssignments(businessId: string, locations: string[], s
        LEFT JOIN users u ON u.id=a.user_id AND u.business_id=a.business_id
        JOIN locations l ON l.id=x.location_id AND l.business_id=x.business_id
       WHERE x.business_id=$1 AND x.location_id=ANY($2::uuid[]) AND x.title ILIKE '%' || $3 || '%' ESCAPE '\\'
-      ORDER BY x.created_at DESC, x.id DESC LIMIT 21 OFFSET $4`, [businessId, locations, escaped(search), (page-1)*20]);
+        AND ($5::text IS NULL OR x.priority=$5)
+      ORDER BY x.created_at DESC, x.id DESC LIMIT 21 OFFSET $4`, [businessId, locations, escaped(search), (page-1)*20, priority]);
   return { assignments: rows.slice(0,20), hasMore: rows.length > 20 };
 }
 export async function assignmentOptions(businessId: string, locations: string[], branchId: string | null, targetSearch = "", targetPage = 1, agentSearch = "", agentPage = 1) {
@@ -96,9 +97,25 @@ export async function createAssignment(businessId: string, actor: string, locati
       const user = await query(`SELECT u.id FROM users u WHERE u.business_id=$1 AND u.id=$2 AND u.is_active AND (u.membership_status IS NULL OR u.membership_status='active') AND ${branchScopeSql({ alias: "u", locationParam: "$3" })} FOR SHARE`, [businessId,agent.rows[0].user_id,input.locationId]);
       if (!user.rowCount) return null;
     }
-    const { rows } = await query<{ id: string }>(`INSERT INTO marketing_assignments (business_id,location_id,target_id,agent_id,title,due_date,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,[businessId,input.locationId,input.targetId,input.agentId,input.title,input.dueDate,actor]);
-    await audit(businessId,input.locationId,actor,"growth.marketing_assignment_created","marketing_assignment",rows[0].id,{ targetId: input.targetId, agentId: input.agentId });
+    const { rows } = await query<{ id: string }>(`INSERT INTO marketing_assignments (business_id,location_id,target_id,agent_id,title,due_date,created_by,priority) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,[businessId,input.locationId,input.targetId,input.agentId,input.title,input.dueDate,actor,input.priority ?? "normal"]);
+    await audit(businessId,input.locationId,actor,"growth.marketing_assignment_created","marketing_assignment",rows[0].id,{ targetId: input.targetId, agentId: input.agentId, priority: input.priority ?? "normal" });
     return rows[0];
+  });
+}
+/** Managers may reprioritize open work; a revision prevents stale and ABA updates. */
+export async function changeAssignmentPriority(businessId: string, actor: string, locations: string[], id: string, change: PriorityChange) {
+  return withTenantTransaction(businessId, async () => {
+    const { rows } = await query<{ location_id: string; status: AssignmentStatus; priority: AssignmentPriority; priority_revision: number }>(
+      `SELECT x.location_id, x.status, x.priority, x.priority_revision FROM marketing_assignments x
+       JOIN locations l ON l.business_id=x.business_id AND l.id=x.location_id
+       WHERE x.business_id=$1 AND x.id=$2 AND x.location_id=ANY($3::uuid[]) AND l.is_active
+       FOR UPDATE OF x FOR SHARE OF l`, [businessId,id,locations]);
+    const assignment = rows[0];
+    if (!assignment) return "not_found" as const;
+    if (assignment.priority_revision !== change.expectedRevision || !["planned", "in_progress"].includes(assignment.status) || assignment.priority === change.priority) return "conflict" as const;
+    await query(`UPDATE marketing_assignments SET priority=$3, priority_revision=priority_revision+1, updated_at=now() WHERE business_id=$1 AND id=$2`, [businessId,id,change.priority]);
+    await audit(businessId,assignment.location_id,actor,"growth.marketing_assignment_priority_changed","marketing_assignment",id,{ from: assignment.priority, to: change.priority, revision: assignment.priority_revision+1 });
+    return "updated" as const;
   });
 }
 export async function transitionAssignment(businessId: string, actor: string, locations: string[], id: string, expected: AssignmentStatus, next: AssignmentStatus) {
@@ -114,9 +131,9 @@ export async function transitionAssignment(businessId: string, actor: string, lo
 }
 
 /** Own work only: identity is resolved by the authenticated membership, not the request. */
-export async function listOwnAssignments(businessId: string, actor: string, locations: string[], search: string, page: number) {
-  const { rows } = await query<{ id: string; title: string; status: AssignmentStatus; due_date: string | null; target: string; location_name: string }>(
-    `SELECT x.id, x.title, x.status, x.due_date::text AS due_date, t.site_label AS target, l.name AS location_name
+export async function listOwnAssignments(businessId: string, actor: string, locations: string[], search: string, page: number, priority: AssignmentPriority | null = null) {
+  const { rows } = await query<{ id: string; title: string; status: AssignmentStatus; priority: AssignmentPriority; due_date: string | null; target: string; location_name: string }>(
+    `SELECT x.id, x.title, x.status, x.priority, x.due_date::text AS due_date, t.site_label AS target, l.name AS location_name
        FROM marketing_assignments x
        JOIN marketing_agents a ON a.business_id=x.business_id AND a.location_id=x.location_id AND a.id=x.agent_id
        JOIN users u ON u.business_id=a.business_id AND u.id=a.user_id
@@ -126,8 +143,9 @@ export async function listOwnAssignments(businessId: string, actor: string, loca
         AND a.status='active' AND u.is_active AND (u.membership_status IS NULL OR u.membership_status='active')
         AND l.is_active AND ${branchScopeSql({ alias: "u", locationParam: "x.location_id" })}
         AND x.title ILIKE '%' || $4 || '%' ESCAPE '\\'
+        AND ($6::text IS NULL OR x.priority=$6)
       ORDER BY x.created_at DESC, x.id DESC LIMIT 21 OFFSET $5`,
-    [businessId, locations, actor, escaped(search), (page-1)*20]);
+    [businessId, locations, actor, escaped(search), (page-1)*20, priority]);
   return { assignments: rows.slice(0,20), hasMore: rows.length > 20 };
 }
 

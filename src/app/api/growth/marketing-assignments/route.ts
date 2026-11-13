@@ -2,15 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { actionableLocationIds } from "@/lib/authorize";
 import { PERMISSIONS } from "@/lib/permissions";
-import { parseAssignmentInput } from "@/lib/marketing-operations";
+import { isAssignmentPriority, parseAssignmentInput } from "@/lib/marketing-operations";
 import { createAssignment, listAssignments } from "@/lib/marketing-operations-service";
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, membership, error } = await requirePermission(PERMISSIONS.marketingAssignmentsView);
   if (error) return error;
   const page = Number(request.nextUrl.searchParams.get("page") ?? 1);
   const q = (request.nextUrl.searchParams.get("q") ?? "").trim();
-  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || q.length > 150) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  return NextResponse.json(await listAssignments(session.businessId, await actionableLocationIds(membership), q, page));
+  const priority = request.nextUrl.searchParams.get("priority");
+  if (!Number.isSafeInteger(page) || page < 1 || page > 10000 || q.length > 150 || (priority !== null && !isAssignmentPriority(priority))) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  return NextResponse.json(await listAssignments(session.businessId, await actionableLocationIds(membership), q, page, priority));
 });
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, membership, error } = await requirePermission(PERMISSIONS.marketingAssignmentsManage);
