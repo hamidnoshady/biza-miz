@@ -264,10 +264,37 @@ export interface CmsProduct {
   _status?: "draft" | "published" | null;
 }
 
+/**
+ * One line of a multi-line café order (ESH-146 / ESH-150).
+ *
+ * `productId` is the CMS product id the site sold; the POS resolves it through
+ * `website_product_map` to a *local* menu item and prices the line from that
+ * item. `unitPrice`/`total` are the CMS's snapshots and are kept only for
+ * reconciliation — they never price the POS order, exactly like the legacy
+ * single-product fields.
+ */
+export interface CmsOrderItem {
+  lineId?: string | null;
+  productId: string;
+  title?: string | null;
+  quantity: number;
+  /** Minor units, the CMS's own snapshot at checkout. */
+  unitPrice?: number | null;
+  total?: number | null;
+  /** CMS modifier/option ids; mapped to `modifiers` rows by the intake. */
+  modifierIds?: string[] | null;
+  note?: string | null;
+}
+
 export interface CmsOrder {
   id: string;
   reference: string;
   status: "pending" | "paid" | "cancelled" | "refunded";
+  /**
+   * Legacy one-product shape. A café order carries `items` instead and leaves
+   * these three to the first line (the CMS does that mirroring, ESH-150), so
+   * existing single-product consumers keep working unchanged.
+   */
   product: string | CmsProduct;
   productTitle?: string | null;
   quantity: number;
@@ -288,6 +315,20 @@ export interface CmsOrder {
    */
   serviceMode?: "dine_in" | "takeaway" | null;
   tableToken?: string | null;
+  /**
+   * Multi-line café basket. Present on `order.submitted`; when it is absent the
+   * order is the legacy single-product storefront shape and keeps going through
+   * the Phase G paid import.
+   */
+  items?: CmsOrderItem[] | null;
+  /** How the customer chose to pay; `counter` orders arrive unpaid. */
+  paymentMethod?: "online" | "counter" | null;
+  /**
+   * CMS-side fulfilment state (ESH-150). The POS owns kitchen state, so this is
+   * read-only here — accepted/rejected decisions travel the other way, through
+   * the state outbox in migration 0299.
+   */
+  fulfillmentStatus?: "pending" | "preparing" | "ready" | "served" | "cancelled" | null;
   updatedAt: string;
   createdAt: string;
 }
