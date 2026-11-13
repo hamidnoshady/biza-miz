@@ -665,7 +665,8 @@ async function loadReconciliation(client: PoolClient, businessId: string): Promi
             COALESCE(SUM(jl.debit) FILTER (WHERE sa.id IS NOT NULL), 0)::text AS attributed_debit_rial,
             COALESCE(SUM(jl.credit) FILTER (WHERE sa.id IS NOT NULL), 0)::text AS attributed_credit_rial
        FROM accounts a
-       LEFT JOIN journal_entries je ON je.business_id = a.business_id
+       LEFT JOIN journal_entries je
+         ON je.business_id = a.business_id AND NOT is_carry_forward_snapshot(je)
        LEFT JOIN journal_lines jl ON jl.entry_id = je.id AND jl.account_id = a.id
        LEFT JOIN shareholder_accounts sa ON sa.business_id = a.business_id AND sa.party_id = jl.party_id
       WHERE a.business_id = $1 AND a.code = ANY($2::text[])
@@ -707,7 +708,8 @@ async function loadReconciliation(client: PoolClient, businessId: string): Promi
             a.code AS account_code, SUM(jl.debit)::text AS debit_rial, SUM(jl.credit)::text AS credit_rial
        FROM shareholder_accounts sa
        JOIN parties p ON p.id = sa.party_id AND p.business_id = sa.business_id
-       JOIN journal_entries je ON je.business_id = sa.business_id
+       JOIN journal_entries je
+         ON je.business_id = sa.business_id AND NOT is_carry_forward_snapshot(je)
        JOIN journal_lines jl ON jl.entry_id = je.id AND jl.party_id = sa.party_id
        JOIN accounts a ON a.id = jl.account_id AND a.business_id = sa.business_id
       WHERE sa.business_id = $1 AND a.code = ANY($2::text[])
@@ -1644,7 +1646,8 @@ export async function postShareholderDistribution(
     });
     const retainedBalance = await client.query<{ debit: string; credit: string }>(
       `SELECT COALESCE(SUM(jl.debit),0)::text AS debit, COALESCE(SUM(jl.credit),0)::text AS credit
-         FROM journal_lines jl JOIN journal_entries je ON je.id=jl.entry_id
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id=jl.entry_id AND NOT is_carry_forward_snapshot(je)
          JOIN accounts a ON a.id=jl.account_id
         WHERE je.business_id=$1 AND a.business_id=$1 AND a.code=$2`,
       [businessId, SHAREHOLDER_ACCOUNT_CODES.retainedEarnings],

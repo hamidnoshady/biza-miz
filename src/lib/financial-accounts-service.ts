@@ -31,6 +31,7 @@
  */
 import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
+import { notCarryForwardSnapshotSql } from "./carry-forward-exclusion";
 import { isUuid } from "./uuid";
 import { isValidIsoDate } from "./iso-date";
 import { toLatinDigits } from "./digits";
@@ -239,7 +240,7 @@ const selectJoins = (postedScope = "") => `
   LEFT JOIN (
     SELECT jl.account_id, SUM(jl.debit - jl.credit) AS balance
       FROM journal_lines jl
-      JOIN journal_entries e ON e.id = jl.entry_id
+      JOIN journal_entries e ON e.id = jl.entry_id AND ${notCarryForwardSnapshotSql("e")}
      WHERE e.business_id = $1 ${postedScope}
      GROUP BY jl.account_id
   ) bal ON bal.account_id = fa.gl_account_id
@@ -1032,7 +1033,7 @@ export async function archiveFinancialAccount(
               COALESCE((
                 SELECT SUM(jl.debit - jl.credit)
                   FROM journal_lines jl
-                  JOIN journal_entries e ON e.id = jl.entry_id
+                  JOIN journal_entries e ON e.id = jl.entry_id AND ${notCarryForwardSnapshotSql("e")}
                  WHERE jl.account_id = fa.gl_account_id AND e.business_id = fa.business_id
               ), 0)::text AS balance
          FROM financial_accounts fa
@@ -1184,7 +1185,7 @@ export async function financialAccountBalanceAsOf(
   const { rows } = await query<{ balance: string | null }>(
     `SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::text AS balance
        FROM journal_lines jl
-       JOIN journal_entries e ON e.id = jl.entry_id
+       JOIN journal_entries e ON e.id = jl.entry_id AND ${notCarryForwardSnapshotSql("e")}
       WHERE e.business_id = $1 AND jl.account_id = $2
         AND ($3::date IS NULL OR e.entry_date <= $3::date)`,
     [businessId, glAccountId, asOf],
@@ -1285,6 +1286,7 @@ export async function financialAccountCard(
          LEFT JOIN bank_reconciliation_lines brl ON brl.journal_line_id = jl.id
          LEFT JOIN bank_reconciliations br ON br.id = brl.reconciliation_id AND br.business_id = je.business_id
         WHERE je.business_id = $1
+          AND ${notCarryForwardSnapshotSql("je")}
           AND ($8::uuid[] IS NULL OR je.location_id = ANY($8::uuid[]))
         GROUP BY je.id
      ), filtered AS (
