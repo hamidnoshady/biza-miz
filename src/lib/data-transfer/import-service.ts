@@ -1399,7 +1399,7 @@ export async function finalizeReconciledImportJob(
   const { rows } = await query<{ id: string }>(
     `SELECT id FROM data_import_jobs
       WHERE business_id = $1 AND reconciliation_run_id = $2
-        AND status IN ('pending', 'queued', 'running')
+        AND status IN ('pending', 'ready', 'queued', 'running')
       LIMIT 1`,
     [businessId, runId],
   );

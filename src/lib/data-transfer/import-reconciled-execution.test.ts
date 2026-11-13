@@ -54,7 +54,7 @@ vi.mock("../import-reconciliation/service", () => ({
   completePartyDiscovery: vi.fn(),
 }));
 
-import { runImportJob, stageImportJobToReconciliation } from "./import-service";
+import { finalizeReconciledImportJob, runImportJob, stageImportJobToReconciliation } from "./import-service";
 
 const bizId = "11111111-1111-4111-8111-111111111111";
 const jobId = "22222222-2222-4222-8222-222222222222";
@@ -226,5 +226,77 @@ describe("Data Transfer reconciliation scope and decision preservation", () => {
     expect(rowStatusUpdates.find((u) => u.id === "r2")?.status).toBe("created");
     expect(rowStatusUpdates.find((u) => u.id === "r3")?.status).toBe("skipped");
     expect(rowStatusUpdates.find((u) => u.id === "r4")?.status).toBe("updated");
+  });
+
+  it("finalizes a 'ready' data_import_jobs row linked to a reconciliation run when apply finishes", async () => {
+    let rowFetchCount = 0;
+    const queries: string[] = [];
+    mockQuery.mockImplementation(async (sql: string) => {
+      queries.push(sql);
+      if (sql.includes("SELECT id FROM data_import_jobs") && sql.includes("status IN ('pending', 'ready', 'queued', 'running')")) {
+        return { rows: [{ id: jobId }] };
+      }
+      if (sql.includes("FROM data_import_jobs") && sql.includes("WHERE business_id = $1 AND id = $2")) {
+        return {
+          rows: [
+            {
+              id: jobId,
+              business_id: bizId,
+              location_id: locId,
+              entity_key: "inventory.items",
+              status: "ready",
+              file_name: "ready-materials.csv",
+              file_format: "csv",
+              file_size_bytes: 120,
+              provider_metadata: null,
+              source_columns: ["name", "unit"],
+              mapping: { columns: [] },
+              options: { duplicateStrategy: "skip" },
+              total_rows: 1,
+              valid_rows: 1,
+              warning_rows: 0,
+              error_rows: 0,
+              created_rows: 0,
+              updated_rows: 0,
+              skipped_rows: 0,
+              failed_rows: 0,
+              duplicate_rows: 0,
+              error: null,
+              reconciliation_run_id: runId,
+              created_at: new Date(),
+              started_at: null,
+              finished_at: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("FROM import_reconciliation_runs")) {
+        return { rows: [{ status: "applied", source_key: `job:${jobId}`, domain: "product", location_id: locId }] };
+      }
+      if (sql.includes("FROM import_reconciliation_items i")) {
+        return {
+          rows: [
+            { row_number: 1, external_key: "row:1", outcome: "create_new", status: "applied", effect: "create", resolved_canonical_id: createdInvId, authority_overrides: null },
+          ],
+        };
+      }
+      if (sql.includes("FROM import_reconciliation_rejected_edits")) return { rows: [] };
+      if (sql.includes("FROM data_import_rows") && sql.includes("status IN ('valid', 'warning')")) {
+        rowFetchCount += 1;
+        if (rowFetchCount > 1) return { rows: [] };
+        return { rows: [{ id: "r1", row_number: 1, status: "valid", mapped: { name: "نمک", unit: "kg" }, messages: [] }] };
+      }
+      return { rows: [] };
+    });
+
+    const summary = await finalizeReconciledImportJob(bizId, runId, {
+      locationId: locId,
+      actorUserId: null,
+      actorName: "اپراتور",
+    });
+
+    expect(summary).toEqual({ created: 1, updated: 0, skipped: 0, failed: 0 });
+    expect(queries.some((q) => q.includes("status IN ('pending', 'ready', 'queued', 'running')"))).toBe(true);
+    expect(mockAdapterWrite).not.toHaveBeenCalled();
   });
 });
