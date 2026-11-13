@@ -10,6 +10,7 @@
  */
 import { query } from "./db";
 import { businessToday } from "./business-day-service";
+import { notCarryForwardSnapshotSql } from "./carry-forward-exclusion";
 import { classifyAccounts, isClearing, type AccountRole } from "./account-classification";
 import { isValidIsoDate } from "./iso-date";
 import {
@@ -89,6 +90,7 @@ async function lifetimeAccountMovements(businessId: string, throughDate: string,
        LEFT JOIN journal_lines jl ON jl.account_id = a.id
        LEFT JOIN journal_entries je
          ON je.id = jl.entry_id AND je.business_id = $1 AND je.entry_date <= $2::date
+         AND ${notCarryForwardSnapshotSql("je")}
       WHERE a.business_id = $1
       GROUP BY a.id
      HAVING a.is_active OR COUNT(je.id) > 0
@@ -271,6 +273,7 @@ export async function getTrialBalance(
          LEFT JOIN journal_lines jl ON jl.account_id = a.id AND ${dimensionPredicate}
          LEFT JOIN journal_entries je
            ON je.id = jl.entry_id AND je.business_id = $1 AND je.entry_date <= $3::date
+           AND ${notCarryForwardSnapshotSql("je")}
         WHERE a.business_id = $1
         GROUP BY a.id, parent.code
        HAVING a.is_active OR COUNT(je.id) > 0

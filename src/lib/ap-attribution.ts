@@ -1,3 +1,5 @@
+import { notCarryForwardSnapshotSql } from "./carry-forward-exclusion";
+
 /**
  * The explicit source-attribution contract for every journal source that may
  * post to Accounts Payable (2100).
@@ -6,6 +8,9 @@
  * reused by A/P balances, statements and aging; the registry lets tests and the
  * unknown-bucket UI distinguish a deliberate control-account adjustment from
  * a future automatic source that was added without supplier attribution.
+ * The journal join carries the carry-forward exclusion (GH #1334): a
+ * fiscal-year snapshot's unattributed lines must not inflate control sums,
+ * aging or the per-supplier balances this relation feeds.
  */
 export const AP_SOURCE_ATTRIBUTION_CONTRACT = {
   purchase: { mode: "supplier", path: "purchases.supplier_id" },
@@ -104,7 +109,7 @@ export function apSupplierAttributionSql(supplierParameter?: "$3::uuid"): string
   `).join("UNION ALL");
   return `
   FROM journal_lines jl
-  JOIN journal_entries je ON je.id = jl.entry_id
+  JOIN journal_entries je ON je.id = jl.entry_id AND ${notCarryForwardSnapshotSql("je")}
   ${supplierParameter ? "JOIN" : "LEFT JOIN"} (${relation}) ap_source
     ON ap_source.source_type = je.source_type AND ap_source.source_id = je.source_id
   LEFT JOIN suppliers s ON s.id = ap_source.supplier_id

@@ -1551,6 +1551,9 @@ export async function deleteWorkspaceTask(businessId: string, taskId: string): P
   return (rowCount ?? 0) > 0;
   } catch (err) {
     const refusal = err as {code?:string;constraint?:string};
+    if (refusal.code === "23503" && refusal.constraint === "agency_resource_reservations_task_id_fkey") {
+      throw new WorkspaceError("task_has_reservation_history");
+    }
     if (refusal.code === "23503" && refusal.constraint === "agency_task_time_task_id_fkey") {
       throw new WorkspaceError("task_has_time_history");
     }
