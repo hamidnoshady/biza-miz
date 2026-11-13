@@ -198,4 +198,55 @@ describe("ReconciliationWizard UI (#1118)", () => {
     expect(screen.queryByText("ساعت مچی کلاسیک")).toBeNull();
     expect(screen.getByText("بند چرمی")).toBeTruthy();
   });
+
+  it("loads additional cursor pages when hasMore is true", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/data/reconciliation") {
+        return new Response(JSON.stringify({ runs: [runFixture("in_review")] }), { status: 200 });
+      }
+      if (url === `/api/data/reconciliation/${runId}`) {
+        return new Response(
+          JSON.stringify({
+            run: runFixture("in_review"),
+            counts: { ...countsFixture(1), read: 101 },
+            progress: { stage: "in_review", label: "آماده", fullyReconciled: false, remaining: 1 },
+            items: itemsFixture(true),
+            nextCursor: 2,
+            hasMore: true,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === `/api/data/reconciliation/${runId}?afterId=2&limit=100`) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                ...itemsFixture(false)[1],
+                id: 3,
+                externalKey: "w-101",
+                snapshot: { name: "کالای صفحهٔ دوم", sku: "W-101" },
+              },
+            ],
+            nextCursor: null,
+            hasMore: false,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ReconciliationWizard initialRunId={runId} />);
+
+    const loadMoreBtn = await screen.findByRole("button", { name: "بارگذاری ردیف‌های بیشتر" });
+    fireEvent.click(loadMoreBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("کالای صفحهٔ دوم")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "بارگذاری ردیف‌های بیشتر" })).toBeNull();
+    });
+  });
 });

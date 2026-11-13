@@ -126,6 +126,39 @@ export async function hasCanonicalOverlapForDomain(
   return rows[0]?.exists === true;
 }
 
+export async function hasCanonicalOverlapForImportEntity(
+  businessId: string,
+  entityKey: string,
+  locationId?: string | null,
+): Promise<boolean> {
+  if (entityKey === "inventory.items") {
+    const { rows: bizRows } = await query<{ industry: string }>(
+      `SELECT industry FROM businesses WHERE id = $1`,
+      [businessId],
+    );
+    if (bizRows[0]?.industry === "food_service") {
+      const { rows } = await query<{ exists: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM inventory_items ii
+            JOIN locations l ON l.id = ii.location_id
+           WHERE l.business_id = $1
+             AND ($2::uuid IS NULL OR ii.location_id = $2::uuid)
+         ) AS exists`,
+        [businessId, locationId ?? null],
+      );
+      return rows[0]?.exists === true;
+    }
+    return hasCanonicalOverlapForDomain(businessId, "product", locationId);
+  }
+  if (entityKey === "pos.products") {
+    return hasCanonicalOverlapForDomain(businessId, "product", locationId);
+  }
+  if (entityKey === "crm.customers" || entityKey === "crm.companies") {
+    return hasCanonicalOverlapForDomain(businessId, "party", locationId);
+  }
+  return false;
+}
+
 /**
  * Checks whether a product/customer/order webhook topic should be deferred
  * because an active reconciliation run is open for that connection & domain.

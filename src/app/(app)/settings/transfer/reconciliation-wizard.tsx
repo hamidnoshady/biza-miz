@@ -143,6 +143,9 @@ export function ReconciliationWizard({
   const [counts, setCounts] = useState<CountsView | null>(null);
   const [progress, setProgress] = useState<ProgressView | null>(null);
   const [items, setItems] = useState<ItemView[]>([]);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [filterOutcome, setFilterOutcome] = useState<string>("all");
   const [search, setSearch] = useState("");
   const [selectedCandidate, setSelectedCandidate] = useState<Record<number, string>>({});
@@ -179,6 +182,8 @@ export function ReconciliationWizard({
       counts: CountsView;
       progress: ProgressView;
       items: ItemView[];
+      nextCursor?: number | null;
+      hasMore?: boolean;
       error?: string;
     }>(`/api/data/reconciliation/${encodeURIComponent(id)}`);
     if (!res.ok) {
@@ -189,7 +194,60 @@ export function ReconciliationWizard({
     setCounts(res.data.counts);
     setProgress(res.data.progress);
     setItems(res.data.items ?? []);
+    setNextCursor(res.data.nextCursor ?? null);
+    setHasMore(Boolean(res.data.hasMore));
   }, []);
+
+  const loadMoreItems = useCallback(
+    async (loadAll = false) => {
+      if (!activeRunId || nextCursor == null || loadingMore) return;
+      setLoadingMore(true);
+      setError("");
+      let cursor: number | null = nextCursor;
+      let more = true;
+      const appended: ItemView[] = [];
+      try {
+        while (cursor != null && more) {
+          const limitParam = loadAll ? "499" : "100";
+          const res: {
+            ok: boolean;
+            data: {
+              items: ItemView[];
+              nextCursor?: number | null;
+              hasMore?: boolean;
+              error?: string;
+            };
+          } = await api<{
+            items: ItemView[];
+            nextCursor?: number | null;
+            hasMore?: boolean;
+            error?: string;
+          }>(
+            `/api/data/reconciliation/${encodeURIComponent(activeRunId)}?afterId=${encodeURIComponent(String(cursor))}&limit=${limitParam}`,
+          );
+          if (!res.ok) {
+            setError(ERROR_MESSAGES[res.data?.error ?? ""] ?? "خطا در بارگذاری ادامهٔ ردیف‌ها.");
+            break;
+          }
+          appended.push(...(res.data.items ?? []));
+          cursor = res.data.nextCursor ?? null;
+          more = Boolean(res.data.hasMore);
+          if (!loadAll) break;
+        }
+        if (appended.length > 0) {
+          setItems((prev) => {
+            const seen = new Set(prev.map((item) => item.id));
+            return [...prev, ...appended.filter((item) => !seen.has(item.id))];
+          });
+        }
+        setNextCursor(cursor);
+        setHasMore(more);
+      } finally {
+        setLoadingMore(false);
+      }
+    },
+    [activeRunId, loadingMore, nextCursor],
+  );
 
   useEffect(() => {
     void loadRuns();
@@ -203,6 +261,8 @@ export function ReconciliationWizard({
       setCounts(null);
       setProgress(null);
       setItems([]);
+      setNextCursor(null);
+      setHasMore(false);
     }
   }, [activeRunId, loadRunDetail]);
 
@@ -569,6 +629,29 @@ export function ReconciliationWizard({
                 })}
               </div>
             )}
+            {hasMore ? (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/30 p-3 text-xs">
+                <span className="text-muted-foreground">
+                  نمایش {toPersianDigits(items.length)} از {toPersianDigits(counts.read)} ردیف
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  <SecondaryButton
+                    type="button"
+                    disabled={loadingMore}
+                    onClick={() => void loadMoreItems(false)}
+                  >
+                    {loadingMore ? "در حال بارگذاری…" : "بارگذاری ردیف‌های بیشتر"}
+                  </SecondaryButton>
+                  <SecondaryButton
+                    type="button"
+                    disabled={loadingMore}
+                    onClick={() => void loadMoreItems(true)}
+                  >
+                    بارگذاری همهٔ ردیف‌ها
+                  </SecondaryButton>
+                </div>
+              </div>
+            ) : null}
           </SectionCard>
         </>
       ) : null}

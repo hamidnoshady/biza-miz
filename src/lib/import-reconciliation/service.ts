@@ -581,11 +581,20 @@ async function sweepCrossBatchDuplicates(
 // Product context (DB half of the product resolver)
 // ---------------------------------------------------------------------------
 
-type CatalogueTable = "items" | "menu_items";
+type CatalogueTable = "items" | "menu_items" | "inventory_items";
 
-async function catalogueTableFor(client: PoolClient, businessId: string): Promise<CatalogueTable> {
+async function catalogueTableFor(
+  client: PoolClient,
+  businessId: string,
+  run?: Pick<ReconciliationRun, "scope">,
+): Promise<CatalogueTable> {
   const { rows } = await client.query<{ industry: string }>("SELECT industry FROM businesses WHERE id = $1", [businessId]);
   const industry = rows[0]?.industry;
+  const scopeTable = run?.scope?.canonicalTable;
+  const scopeEntity = run?.scope?.entityKey;
+  if (industry === "food_service" && (scopeTable === "inventory_items" || scopeEntity === "inventory.items")) {
+    return "inventory_items";
+  }
   if (industry === "food_service") return "menu_items";
   if (isRetailCatalogueIndustry(industry)) return "items";
   throw new ReconciliationError("industry_not_supported", { industry: industry ?? "unknown" });
@@ -794,7 +803,7 @@ export async function loadProductContext(
   records: readonly IncomingProduct[],
 ): Promise<{ ctx: Omit<ProductContext, "incomingSkuCounts" | "incomingBarcodeCounts">; table: CatalogueTable }> {
   if (!run.locationId) throw new ReconciliationError("location_required");
-  const table = await catalogueTableFor(client, run.businessId);
+  const table = await catalogueTableFor(client, run.businessId, run);
   const locationId = run.locationId;
 
   // Verified mappings of THIS source: file/API identities and connection mappings.
@@ -832,16 +841,22 @@ export async function loadProductContext(
   ];
 
   const hasItems = table === "items";
-  const select = hasItems
-    ? `SELECT i.id::text AS id, i.location_id::text AS location_id, i.name, i.sku, i.kind, i.unit, i.tracking,
-              i.is_active, i.barcode, NULL::text AS price, i.parent_item_id,
-              (SELECT jsonb_object_agg(a.name, a.value) FROM item_variant_attributes a WHERE a.item_id=i.id) AS variant_options
-         FROM items i`
-    : `SELECT m.id::text AS id, m.location_id::text AS location_id, m.name, m.sku, NULL::text AS kind,
-              NULL::text AS unit, NULL::text AS tracking, m.is_active, NULL::text AS barcode,
-              m.price::text AS price
-         FROM menu_items m`;
-  const alias = hasItems ? "i" : "m";
+  const select =
+    table === "items"
+      ? `SELECT i.id::text AS id, i.location_id::text AS location_id, i.name, i.sku, i.kind, i.unit, i.tracking,
+                i.is_active, i.barcode, NULL::text AS price, i.parent_item_id,
+                (SELECT jsonb_object_agg(a.name, a.value) FROM item_variant_attributes a WHERE a.item_id=i.id) AS variant_options
+           FROM items i`
+      : table === "inventory_items"
+        ? `SELECT i.id::text AS id, i.location_id::text AS location_id, i.name, i.sku, NULL::text AS kind,
+                  i.unit, NULL::text AS tracking, i.is_active, NULL::text AS barcode,
+                  NULL::text AS price
+             FROM inventory_items i`
+        : `SELECT m.id::text AS id, m.location_id::text AS location_id, m.name, m.sku, NULL::text AS kind,
+                  NULL::text AS unit, NULL::text AS tracking, m.is_active, NULL::text AS barcode,
+                  m.price::text AS price
+             FROM menu_items m`;
+  const alias = table === "menu_items" ? "m" : "i";
 
   const found = new Map<string, CatalogueRow>();
   const collect = async (where: string, params: unknown[]) => {
@@ -893,10 +908,11 @@ export async function loadProductContext(
 
 /** A digest of the catalogue + identities a product preview was matched against. */
 export async function productCanonicalToken(client: PoolClient, run: ReconciliationRun): Promise<string> {
-  const table = await catalogueTableFor(client, run.businessId);
+  const table = await catalogueTableFor(client, run.businessId, run);
+  const timestampCol = table === "inventory_items" ? "created_at" : "updated_at";
   const { rows } = await client.query<{ token: string }>(
     `SELECT md5(
-        (SELECT count(*)::text || ':' || COALESCE(max(updated_at)::text, '') FROM ${table} WHERE location_id = $1)
+        (SELECT count(*)::text || ':' || COALESCE(max(${timestampCol})::text, '') FROM ${table} WHERE location_id = $1)
         || '|' ||
         (SELECT count(*)::text || ':' || COALESCE(max(updated_at)::text, '') FROM source_identities
           WHERE business_id = $2 AND domain = 'product')
@@ -1537,11 +1553,14 @@ export async function loadInventoryContext(
   const productExternalIds = [...new Set(records.map((r) => r.productExternalId).filter((id): id is string => Boolean(id)))];
   const productLinks = new Map<string, string>();
   if (productExternalIds.length > 0) {
+    const relatedSourceKeys = run.connectionId
+      ? [run.sourceKey, `holoo:${run.connectionId}:goods`, run.connectionId]
+      : [run.sourceKey];
     const { rows } = await client.query<{ external_id: string; canonical_id: string }>(
       `SELECT external_id, canonical_id FROM source_identities
-        WHERE business_id = $1 AND source_key = $2 AND domain = 'product'
+        WHERE business_id = $1 AND source_key = ANY($2::text[]) AND domain = 'product'
           AND retired_at IS NULL AND verified AND external_id = ANY($3::text[])`,
-      [run.businessId, run.sourceKey, productExternalIds],
+      [run.businessId, relatedSourceKeys, productExternalIds],
     );
     for (const r of rows) productLinks.set(r.external_id, r.canonical_id);
     if (run.connectionId) {
@@ -1687,14 +1706,25 @@ export async function completeInventoryDiscovery(
 }
 
 export function createInventoryApplyHandler(options: {
+  canonicalType?: "items" | "inventory_items";
   link?: ApplyHandler["link"];
   create?: ApplyHandler["create"];
 } = {}): ApplyHandler {
+  async function resolveCanonicalType(ctx: ApplyContext): Promise<"items" | "inventory_items"> {
+    if (options.canonicalType) return options.canonicalType;
+    const { rows } = await ctx.client.query<{ industry: string }>(
+      `SELECT industry FROM businesses WHERE id = $1`,
+      [ctx.run.businessId],
+    );
+    return rows[0]?.industry === "food_service" ? "inventory_items" : "items";
+  }
+
   return {
     domain: "inventory",
     async link(ctx) {
       if (options.link) return options.link(ctx);
       if (!ctx.canonicalId) throw new ReconciliationError("link_target_missing");
+      const canonicalType = await resolveCanonicalType(ctx);
       if (!ctx.item.externalKey.startsWith("row:")) {
         await linkSourceIdentity(ctx.client, {
           businessId: ctx.run.businessId,
@@ -1703,7 +1733,7 @@ export function createInventoryApplyHandler(options: {
           provider: ctx.run.provider,
           externalType: ctx.item.externalType,
           externalId: ctx.item.externalKey,
-          canonicalType: "items",
+          canonicalType,
           canonicalId: ctx.canonicalId,
           runId: ctx.run.id,
           linkedBy: ctx.actor.userId,
@@ -1714,6 +1744,7 @@ export function createInventoryApplyHandler(options: {
     async create(ctx) {
       if (!options.create) throw new ReconciliationError("create_not_supported");
       const created = await options.create(ctx);
+      const canonicalType = await resolveCanonicalType(ctx);
       if (!ctx.item.externalKey.startsWith("row:")) {
         await linkSourceIdentity(ctx.client, {
           businessId: ctx.run.businessId,
@@ -1722,7 +1753,7 @@ export function createInventoryApplyHandler(options: {
           provider: ctx.run.provider,
           externalType: ctx.item.externalType,
           externalId: ctx.item.externalKey,
-          canonicalType: "items",
+          canonicalType,
           canonicalId: created.canonicalId,
           runId: ctx.run.id,
           linkedBy: ctx.actor.userId,
@@ -1799,7 +1830,7 @@ export async function completeProductDiscovery(businessId: string, runId: string
   const { canonicalCount, canonicalToken } = await withTenantTransaction(businessId, async (client) => {
     const run = await loadRun(client, businessId, runId);
     if (run.domain !== "product") throw new ReconciliationError("domain_mismatch");
-    const table = await catalogueTableFor(client, businessId);
+    const table = await catalogueTableFor(client, businessId, run);
     const { rows } = await client.query<{ n: string }>(`SELECT count(*)::text AS n FROM ${table} WHERE location_id = $1`, [run.locationId]);
     return { canonicalCount: Number(rows[0].n), canonicalToken: await productCanonicalToken(client, run) };
   });
@@ -2404,7 +2435,7 @@ export function createProductApplyHandler(options: ProductHandlerOptions = {}): 
     domain: "product",
     async link(ctx) {
       const canonicalId = ctx.canonicalId as string;
-      const table = await catalogueTableFor(ctx.client, ctx.run.businessId);
+      const table = await catalogueTableFor(ctx.client, ctx.run.businessId, ctx.run);
       const { rows } = await ctx.client.query(`SELECT 1 FROM ${table} WHERE id::text = $1 AND location_id = $2`, [
         canonicalId,
         ctx.run.locationId,
@@ -2416,7 +2447,7 @@ export function createProductApplyHandler(options: ProductHandlerOptions = {}): 
     async create(ctx) {
       if (!options.create) throw new ReconciliationError("create_not_supported");
       const created = await options.create(ctx);
-      await recordIdentity(ctx, await catalogueTableFor(ctx.client, ctx.run.businessId), created.canonicalId);
+      await recordIdentity(ctx, await catalogueTableFor(ctx.client, ctx.run.businessId, ctx.run), created.canonicalId);
       return created;
     },
   };

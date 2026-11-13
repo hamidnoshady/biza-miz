@@ -66,9 +66,10 @@ async function authorizeRun(id: string) {
     throw err;
   }
   const industry = await getBusinessIndustry(owner.businessId);
+  const scopeEntity = typeof summary.run.scope?.entityKey === "string" ? summary.run.scope.entityKey : null;
   const access = await entityAccess(
     owner,
-    entityKeyForDomain(summary.run.domain, isRetailCatalogueIndustry(industry)),
+    scopeEntity ?? entityKeyForDomain(summary.run.domain, isRetailCatalogueIndustry(industry)),
     "import",
   );
   if (access.error) return { error: access.error };
@@ -77,6 +78,29 @@ async function authorizeRun(id: string) {
     if (ledger.error) return { error: ledger.error };
   }
   return { owner, summary };
+}
+
+async function listAllItems(
+  businessId: string,
+  runId: string,
+  filters: { outcome?: ReconciliationOutcome; status?: ReconciliationItemStatus; search?: string },
+) {
+  const BATCH = 500;
+  const all: Awaited<ReturnType<typeof listItems>> = [];
+  let afterId: number | undefined;
+  for (;;) {
+    const batch = await listItems(businessId, runId, {
+      ...filters,
+      ...(afterId !== undefined ? { afterId } : {}),
+      limit: BATCH,
+    });
+    all.push(...batch);
+    if (batch.length < BATCH) break;
+    const lastId = batch[batch.length - 1]?.id;
+    if (lastId == null || lastId === afterId) break;
+    afterId = lastId;
+  }
+  return all;
 }
 
 export const GET = withTenantScope(
@@ -89,29 +113,46 @@ export const GET = withTenantScope(
     const search = request.nextUrl.searchParams;
     const outcome = search.get("outcome") as ReconciliationOutcome | null;
     const status = search.get("status") as ReconciliationItemStatus | null;
+    const searchQuery = search.get("search")?.trim() || undefined;
     const report = search.get("report");
 
-    const items = await listItems(owner.businessId, id, {
-      ...(outcome ? { outcome } : {}),
-      ...(status ? { status } : {}),
-    });
-
-    if (report === "csv") {
+    if (report === "csv" || report === "json") {
+      const allItems = await listAllItems(owner.businessId, id, {
+        ...(outcome ? { outcome } : {}),
+        ...(status ? { status } : {}),
+        ...(searchQuery ? { search: searchQuery } : {}),
+      });
+      if (report === "csv") {
+        return fileResponse(
+          buildReconciliationReportCsv(summary, allItems),
+          "text/csv; charset=utf-8",
+          `reconciliation-${id.slice(0, 8)}.csv`,
+        );
+      }
       return fileResponse(
-        buildReconciliationReportCsv(summary, items),
-        "text/csv; charset=utf-8",
-        `reconciliation-${id.slice(0, 8)}.csv`,
-      );
-    }
-    if (report === "json") {
-      return fileResponse(
-        JSON.stringify(buildReconciliationRunReport(summary, items), null, 2),
+        JSON.stringify(buildReconciliationRunReport(summary, allItems), null, 2),
         "application/json; charset=utf-8",
         `reconciliation-${id.slice(0, 8)}.json`,
       );
     }
 
-    return NextResponse.json({ ...summary, items });
+    const rawLimit = Number(search.get("limit"));
+    const pageLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.trunc(rawLimit), 499) : 100;
+    const rawAfterId = Number(search.get("afterId"));
+    const afterId = Number.isSafeInteger(rawAfterId) && rawAfterId > 0 ? rawAfterId : undefined;
+
+    const rows = await listItems(owner.businessId, id, {
+      ...(outcome ? { outcome } : {}),
+      ...(status ? { status } : {}),
+      ...(searchQuery ? { search: searchQuery } : {}),
+      ...(afterId !== undefined ? { afterId } : {}),
+      limit: pageLimit + 1,
+    });
+    const hasMore = rows.length > pageLimit;
+    const items = hasMore ? rows.slice(0, pageLimit) : rows;
+    const nextCursor = hasMore ? (items[items.length - 1]?.id ?? null) : null;
+
+    return NextResponse.json({ ...summary, items, nextCursor, hasMore });
   },
 );
 

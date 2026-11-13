@@ -202,4 +202,69 @@ describe("/api/data/reconciliation routes (#1118)", () => {
     expect(applyRes.status).toBe(200);
     expect(mockApply).toHaveBeenCalledTimes(1);
   });
+
+  it("supports cursor pagination beyond 100 items and fetches all batches for CSV/JSON reports", async () => {
+    const pageOneRows = Array.from({ length: 3 }, (_, idx) => ({
+      id: idx + 1,
+      runId,
+      externalType: "product",
+      externalKey: `w-${idx + 1}`,
+      rowNumber: idx + 1,
+      snapshot: { name: `کالا ${idx + 1}` },
+      outcome: "create_new",
+      reasons: ["no_overlap"],
+      canonicalId: null,
+      candidates: [],
+      conflicts: [],
+      notes: [],
+      historical: false,
+      status: "proposed",
+      effect: null,
+      resolvedCanonicalId: null,
+      error: null,
+    }));
+    mockListItems.mockResolvedValueOnce(pageOneRows);
+    const pagedReq = new NextRequest(`http://localhost/api/data/reconciliation/${runId}?limit=2&afterId=10&search=کالا`);
+    const pagedRes = await getRunHandler(pagedReq, { params: Promise.resolve({ id: runId }) });
+    expect(pagedRes.status).toBe(200);
+    const pagedJson = (await pagedRes.json()) as { items: Array<{ id: number }>; nextCursor: number | null; hasMore: boolean };
+    expect(pagedJson.items).toHaveLength(2);
+    expect(pagedJson.nextCursor).toBe(2);
+    expect(pagedJson.hasMore).toBe(true);
+    expect(mockListItems).toHaveBeenCalledWith("biz-1", runId, {
+      search: "کالا",
+      afterId: 10,
+      limit: 3,
+    });
+
+    const firstBatch = Array.from({ length: 500 }, (_, idx) => ({
+      ...pageOneRows[0],
+      id: idx + 1,
+      externalKey: `full-${idx + 1}`,
+    }));
+    const secondBatch = [{ ...pageOneRows[0], id: 501, externalKey: "full-501" }];
+    mockListItems.mockResolvedValueOnce(firstBatch).mockResolvedValueOnce(secondBatch);
+    const jsonReportReq = new NextRequest(`http://localhost/api/data/reconciliation/${runId}?report=json`);
+    const jsonReportRes = await getRunHandler(jsonReportReq, { params: Promise.resolve({ id: runId }) });
+    expect(jsonReportRes.status).toBe(200);
+    const reportJson = JSON.parse(await jsonReportRes.text()) as { items: Array<{ externalKey: string }> };
+    expect(reportJson.items).toHaveLength(501);
+    expect(reportJson.items[500]?.externalKey).toBe("full-501");
+
+    mockGetBusinessIndustry.mockResolvedValueOnce("food_service");
+    mockGetRunSummary.mockResolvedValueOnce({
+      run: {
+        id: runId,
+        domain: "product",
+        locationId: "loc-1",
+        status: "in_review",
+        scope: { entityKey: "inventory.items", canonicalTable: "inventory_items" },
+      },
+      counts: {},
+      progress: {},
+    });
+    const invReq = new NextRequest(`http://localhost/api/data/reconciliation/${runId}`);
+    await getRunHandler(invReq, { params: Promise.resolve({ id: runId }) });
+    expect(mockEntityAccess).toHaveBeenLastCalledWith(owner, "inventory.items", "import");
+  });
 });

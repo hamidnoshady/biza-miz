@@ -53,6 +53,7 @@ import {
   completeProductDiscovery,
   getRunSummary as getReconciliationRunSummary,
   openRun as openReconciliationRun,
+  reopenStaleRun,
   stageProducts as stageReconciliationProducts,
 } from "../import-reconciliation/service";
 import type { IncomingProduct } from "../import-reconciliation/types";
@@ -914,6 +915,12 @@ export async function stageWooCatalogueToReconciliation(
 ) {
   const connection = await getConnection(businessId, connectionId);
   if (!connection) throw new Error("not_found");
+  const active = await findActiveRunForConnection(businessId, connectionId, "product");
+  if (active && active.status !== "discovering" && active.status !== "stale") {
+    const summary = await getReconciliationRunSummary(businessId, active.id);
+    return { runId: active.id, ...summary, reused: true };
+  }
+
   const client = wooClientFor(connection);
   const locationId = await resolveLocationId(businessId, connection.location_id);
 
@@ -935,26 +942,32 @@ export async function stageWooCatalogueToReconciliation(
   }
 
   const incoming = allProducts.map((p) => wooProductToIncoming(p, connection.currency_unit));
-  const active = await findActiveRunForConnection(businessId, connectionId, "product");
-  const run =
-    active
-      ? (await getReconciliationRunSummary(businessId, active.id)).run
-      : await openReconciliationRun({
-          businessId,
-          locationId,
-          domain: "product",
-          sourceKind: "provider",
-          provider: "woocommerce",
-          sourceKey: connectionId,
-          connectionId,
-          importMode: "live_link",
-          sourceFingerprint: `woo:${connectionId}:${incoming.length}`,
-          actor,
-        });
+  const sourceFingerprint = `woo:${connectionId}:${incoming.length}`;
+  let runId: string;
+  if (active?.status === "stale") {
+    const reopened = await reopenStaleRun(businessId, active.id, { sourceFingerprint }, actor);
+    runId = reopened.id;
+  } else if (active) {
+    runId = active.id;
+  } else {
+    const opened = await openReconciliationRun({
+      businessId,
+      locationId,
+      domain: "product",
+      sourceKind: "provider",
+      provider: "woocommerce",
+      sourceKey: connectionId,
+      connectionId,
+      importMode: "live_link",
+      sourceFingerprint,
+      actor,
+    });
+    runId = opened.id;
+  }
 
-  await stageReconciliationProducts(businessId, run.id, incoming);
-  const discovery = await completeProductDiscovery(businessId, run.id, actor);
-  return { runId: run.id, ...discovery };
+  await stageReconciliationProducts(businessId, runId, incoming);
+  const discovery = await completeProductDiscovery(businessId, runId, actor);
+  return { runId, ...discovery, reused: false };
 }
 
 export async function syncProducts(businessId: string, connectionId: string): Promise<CatalogueSyncOutcome> {

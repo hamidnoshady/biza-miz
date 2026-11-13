@@ -1330,4 +1330,190 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
       await guards.canPublishConnectionOutbound(biz.id, { id: conn.id, source_of_truth: "store" }),
     ).toEqual({ allowed: false, reason: "source_of_truth_store" });
   });
+
+  it("preserves reconciliation decisions on Data Transfer job completion, keeps food_service inventory.items on inventory_items, wires inventory/journal create writers, and reuses staged Woo runs", async () => {
+    const dtImport = await import("../src/lib/data-transfer/import-service");
+    const applyRunner = await import("../src/lib/import-reconciliation/apply-runner");
+    const guards = await import("../src/lib/import-reconciliation/entry-guards");
+    const holooSvc = await import("../src/lib/data-transfer/providers/holoo/service");
+
+    // 1. Food-service tenant: menu_items overlap must NOT trigger inventory.items overlap or create zero-priced menu_items
+    const foodBiz = await seedBusiness("food_service", "کافه تطبیق کامل");
+    await db.query(`INSERT INTO menu_items (location_id, name, sku, price) VALUES ($1, 'لاته', 'LATTE-1', 90000)`, [
+      foodBiz.locationId,
+    ]);
+    await db.query(
+      `INSERT INTO inventory_items (location_id, name, sku, unit) VALUES ($1, 'دانه قهوه', 'RAW-COFFEE-1', 'kg')`,
+      [foodBiz.locationId],
+    );
+    expect(await guards.hasCanonicalOverlapForImportEntity(foodBiz.id, "inventory.items", foodBiz.locationId)).toBe(true);
+
+    // Food-service raw-material import with 3 rows: 1 skip, 1 canonical-wins conflict (with duplicateStrategy=update), 1 create_new
+    const rawCsv = Buffer.from(
+      "name,sku,unit,avgCost\nدانه قهوه تغییریافته,RAW-COFFEE-1,g,500000\nشکر قهوه‌ای ردشده,RAW-SKIP-2,kg,80000\nشیر تازه جدید,RAW-MILK-3,l,45000\n",
+      "utf8",
+    );
+    const { job: foodJob } = await asBusiness(foodBiz.id, () =>
+      dtImport.createImportJob({
+        businessId: foodBiz.id,
+        locationId: foodBiz.locationId,
+        entityKey: "inventory.items",
+        fileName: "raw-materials.csv",
+        format: "csv",
+        buffer: rawCsv.buffer.slice(rawCsv.byteOffset, rawCsv.byteOffset + rawCsv.byteLength),
+        actorUserId: null,
+        actorName: actor.name,
+        mapping: {
+          columns: [
+            { column: 0, field: "name" },
+            { column: 1, field: "sku" },
+            { column: 2, field: "unit" },
+            { column: 3, field: "avgCost" },
+          ],
+        },
+        options: { duplicateStrategy: "update" },
+      }),
+    );
+    await asBusiness(foodBiz.id, () => dtImport.previewImportJob(foodBiz.id, foodJob.id, { mapping: foodJob.mapping }));
+    const stagedFood = await asBusiness(foodBiz.id, () =>
+      dtImport.stageImportJobToReconciliation(foodBiz.id, foodJob.id, actor, foodBiz.locationId),
+    );
+    expect(stagedFood.run.scope).toEqual({ entityKey: "inventory.items", canonicalTable: "inventory_items" });
+
+    const foodItems = await asBusiness(foodBiz.id, () => svc.listItems(foodBiz.id, stagedFood.runId));
+    const coffee = foodItems.find((i) => i.externalKey === "RAW-COFFEE-1")!;
+    const skipRow = foodItems.find((i) => i.externalKey === "RAW-SKIP-2")!;
+    const milkRow = foodItems.find((i) => i.externalKey === "RAW-MILK-3")!;
+    expect(coffee.canonicalId).toBeTruthy();
+
+    await asBusiness(foodBiz.id, () =>
+      svc.decideItem({
+        businessId: foodBiz.id,
+        runId: stagedFood.runId,
+        itemId: coffee.id,
+        decision: coffee.outcome === "field_conflict" ? "choose_authority" : "link",
+        ...(coffee.outcome === "field_conflict"
+          ? { authorityOverrides: Object.fromEntries(coffee.conflicts.map((c) => [c.field, "canonical"])) }
+          : { canonicalId: coffee.canonicalId! }),
+        actor,
+      }),
+    );
+    await asBusiness(foodBiz.id, () =>
+      svc.decideItem({ businessId: foodBiz.id, runId: stagedFood.runId, itemId: skipRow.id, decision: "skip", actor }),
+    );
+    await asBusiness(foodBiz.id, () =>
+      svc.decideItem({ businessId: foodBiz.id, runId: stagedFood.runId, itemId: milkRow.id, decision: "create_separate", actor }),
+    );
+
+    const appliedFood = await asBusiness(foodBiz.id, () =>
+      applyRunner.applyReconciliationRunWithDomainHandlers({
+        businessId: foodBiz.id,
+        runId: stagedFood.runId,
+        locationId: foodBiz.locationId,
+        actor,
+      }),
+    );
+    expect(appliedFood.summary.run.status).toBe("applied");
+    expect(appliedFood.crossCheck.ok).toBe(true);
+
+    // Must write into inventory_items (NOT menu_items!), skip RAW-SKIP-2, and keep canonical RAW-COFFEE-1 intact
+    const menuCount = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM menu_items WHERE location_id = $1`, [foodBiz.locationId]);
+    expect(Number(menuCount.rows[0].n)).toBe(1);
+    const invRows = await db.query<{ name: string; sku: string | null; unit: string }>(
+      `SELECT name, sku, unit FROM inventory_items WHERE location_id = $1 ORDER BY sku`,
+      [foodBiz.locationId],
+    );
+    expect(invRows.rows).toEqual([
+      { name: "دانه قهوه", sku: "RAW-COFFEE-1", unit: "kg" },
+      { name: "شیر تازه جدید", sku: "RAW-MILK-3", unit: "l" },
+    ]);
+    // Job completed from reconciliation decisions -> queueImportJob refuses re-running blindly
+    const finishedJob = await asBusiness(foodBiz.id, () => dtImport.getImportJob(foodBiz.id, foodJob.id));
+    expect(finishedJob?.status).toBe("completed");
+    expect(finishedJob?.createdRows).toBe(1);
+    expect(finishedJob?.skippedRows).toBe(2);
+    await expect(asBusiness(foodBiz.id, () => dtImport.queueImportJob(foodBiz.id, foodJob.id))).rejects.toThrow(
+      /already_completed/,
+    );
+
+    // 2. Holoo inventory & journal create writers succeed cleanly through applyReconciliationRunWithDomainHandlers
+    const holooBiz = await seedBusiness("cosmetics", "آرایشی هلو اسناد و موجودی");
+    await db.query(
+      `INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1100', 'صندوق', 'asset'), ($1, '4300', 'فروش', 'revenue')`,
+      [holooBiz.id],
+    );
+    const hConnRes = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections (business_id, location_id, provider, status, base_url)
+       VALUES ($1, $2, 'holoo', 'connected', 'sql://holoo') RETURNING id`,
+      [holooBiz.id, holooBiz.locationId],
+    );
+    const hConnId = hConnRes.rows[0].id;
+    const hGoodsId = await addItem(holooBiz.locationId, "عطر هلو", "HG-SKU-1");
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'holoo_goods', 'hg-1', $3)`,
+      [holooBiz.id, hConnId, hGoodsId],
+    );
+    const stagedHoloo = await asBusiness(holooBiz.id, () =>
+      holooSvc.stageHolooBaseToReconciliation({
+        businessId: holooBiz.id,
+        connectionId: hConnId,
+        actorUserId: null,
+        actorName: actor.name,
+        scopes: ["openingInventory", "journal", "journalLines"],
+        source: "xlsx",
+        locationId: holooBiz.locationId,
+        base: {
+          goods: [],
+          persons: [],
+          accounts: [],
+          openingInventory: [
+            { remoteId: "hs-1", goodsRemoteId: "hg-1", name: "عطر هلو", unit: "عدد", quantity: "12", unitCostRial: 150000n },
+          ],
+        },
+        journals: [
+          {
+            remoteId: "hv-1",
+            entryDate: "2026-11-01",
+            memo: "سند آزمایشی هلو",
+            lines: [
+              { accountCode: "1100", debitRial: 500000n, creditRial: 0n },
+              { accountCode: "4300", debitRial: 0n, creditRial: 500000n },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const invRun = stagedHoloo.runs.find((r) => r.domain === "inventory")!;
+    const jrnRun = stagedHoloo.runs.find((r) => r.domain === "financial_document")!;
+    await asBusiness(holooBiz.id, () => svc.approveSafeBatch(holooBiz.id, invRun.runId, actor));
+    await asBusiness(holooBiz.id, () => svc.approveSafeBatch(holooBiz.id, jrnRun.runId, actor));
+
+    const appliedInv = await asBusiness(holooBiz.id, () =>
+      applyRunner.applyReconciliationRunWithDomainHandlers({
+        businessId: holooBiz.id,
+        runId: invRun.runId,
+        locationId: holooBiz.locationId,
+        actor,
+      }),
+    );
+    expect(appliedInv.summary.run.status).toBe("applied");
+    expect(appliedInv.crossCheck.ok).toBe(true);
+    const stockCheck = await db.query<{ quantity: string }>(`SELECT quantity::text FROM item_stock WHERE item_id = $1`, [hGoodsId]);
+    expect(Number(stockCheck.rows[0]?.quantity)).toBe(12);
+
+    const appliedJrn = await asBusiness(holooBiz.id, () =>
+      applyRunner.applyReconciliationRunWithDomainHandlers({
+        businessId: holooBiz.id,
+        runId: jrnRun.runId,
+        locationId: holooBiz.locationId,
+        actor,
+      }),
+    );
+    expect(appliedJrn.summary.run.status).toBe("applied");
+    expect(appliedJrn.crossCheck.ok).toBe(true);
+    const jeCount = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM journal_entries WHERE business_id = $1`, [holooBiz.id]);
+    expect(Number(jeCount.rows[0].n)).toBe(1);
+  });
 });

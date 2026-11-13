@@ -277,6 +277,7 @@ export async function stageHolooBaseToReconciliation(input: {
         name: inv.name,
         unit: inv.unit ?? null,
         unitCostRial: inv.unitCostRial.toString(),
+        goodsRemoteId: inv.goodsRemoteId ?? null,
       },
     }));
     const run = await openReconciliationRun({
@@ -318,7 +319,18 @@ export async function stageHolooBaseToReconciliation(input: {
         totalRial: total.toString(),
         currency: "IRR",
         date: v.entryDate,
-        fields: { memo: v.memo ?? null },
+        fields: {
+          memo: v.memo ?? null,
+          lines: v.lines.map((line) => ({
+            accountCode: line.accountCode,
+            debitRial: line.debitRial != null ? line.debitRial.toString() : "0",
+            creditRial: line.creditRial != null ? line.creditRial.toString() : "0",
+            costCenterCode: line.costCenterCode ?? null,
+            profitCenterCode: line.profitCenterCode ?? null,
+            departmentCode: line.departmentCode ?? null,
+            detailCode: line.detailCode ?? null,
+          })),
+        },
       };
     });
     const run = await openReconciliationRun({

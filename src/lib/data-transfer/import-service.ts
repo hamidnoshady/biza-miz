@@ -40,7 +40,7 @@ import { SERVICE_STATES, SERVICE_STATE_META } from "../service-activation/catalo
 import { serviceGateBlocks } from "../service-activation/app-gate";
 import { DATA_ENTITIES, findEntity, requireEntity } from "./registry";
 import { ensureAdaptersRegistered } from "./entities";
-import { RowRejection, requireAdapter, type AdapterContext } from "./adapters";
+import { RowRejection, requireAdapter, type AdapterContext, type WriteOptions } from "./adapters";
 import {
   jsonToRows,
   parseCsv,
@@ -56,6 +56,7 @@ import {
   validateSheet,
 } from "./mapping";
 import { recordDataTransferAudit } from "./audit";
+import { isRetailCatalogueIndustry } from "../industries";
 import {
   completePartyDiscovery,
   completeProductDiscovery,
@@ -687,11 +688,19 @@ export async function stageImportJobToReconciliation(
   const domain = reconciliationDomainForImportEntity(job.entityKey);
   if (!domain) throw new ImportError("reconciliation_unsupported_entity");
 
-  const { rows: jobLocRows } = await query<{ location_id: string | null }>(
-    `SELECT location_id::text AS location_id FROM data_import_jobs WHERE business_id = $1 AND id = $2`,
+  const { rows: jobLocRows } = await query<{ location_id: string | null; industry: string | null }>(
+    `SELECT j.location_id::text AS location_id, b.industry
+       FROM data_import_jobs j
+       JOIN businesses b ON b.id = j.business_id
+      WHERE j.business_id = $1 AND j.id = $2`,
     [businessId, jobId],
   );
   const resolvedLocationId = locationIdOverride ?? jobLocRows[0]?.location_id ?? null;
+  const industry = jobLocRows[0]?.industry ?? null;
+  const scope: Record<string, unknown> =
+    job.entityKey === "inventory.items" && industry === "food_service"
+      ? { entityKey: job.entityKey, canonicalTable: "inventory_items" }
+      : { entityKey: job.entityKey };
 
   const { rows } = await query<{ row_number: number; mapped: Record<string, unknown> }>(
     `SELECT row_number, mapped FROM data_import_rows
@@ -709,6 +718,7 @@ export async function stageImportJobToReconciliation(
     sourceKey: `job:${job.id}`,
     importMode: "one_time",
     sourceFingerprint: `import_job:${job.id}:${rows.length}`,
+    scope,
     actor,
   });
 
@@ -866,6 +876,10 @@ export async function runImportJob(
 
   const result: ImportRunResult = { created: 0, updated: 0, skipped: 0, failed: 0 };
 
+  if (job.reconciliationRunId) {
+    return executeReconciledImportRows(businessId, job, entity, adapter, adapterContext, writeOptions);
+  }
+
   // Claimed in pages rather than all at once: a 50,000-row job would otherwise
   // hold every mapped record in memory for the whole run.
   const PAGE = 200;
@@ -955,6 +969,460 @@ export async function runImportJob(
   });
 
   return result;
+}
+
+type ReconciledItemDecisionRow = {
+  row_number: number | null;
+  external_key: string;
+  outcome: string;
+  status: string;
+  effect: string | null;
+  resolved_canonical_id: string | null;
+  authority_overrides: Record<string, "canonical" | "source"> | null;
+};
+
+const RECONCILED_FIELD_ALIASES: Record<string, string[]> = {
+  regular_price: ["price"],
+  price: ["price"],
+  display_name: ["name"],
+  name: ["name"],
+  sku: ["sku"],
+  unit: ["unit"],
+  phone: ["phone"],
+  email: ["email"],
+};
+
+function normalizeAllowedReconciledFields(sourceFields: string[]): Set<string> {
+  const allowed = new Set<string>();
+  for (const field of sourceFields) {
+    allowed.add(field);
+    for (const alias of RECONCILED_FIELD_ALIASES[field] ?? []) {
+      allowed.add(alias);
+    }
+  }
+  return allowed;
+}
+
+async function buildSafeReconciledLinkPayload(
+  businessId: string,
+  locationId: string | null,
+  entityKey: string,
+  canonicalId: string,
+  mapped: Record<string, unknown>,
+  allowedFields: Set<string> | null,
+  rejectedFields: Set<string>,
+): Promise<{ mode: "skip" } | { mode: "retail_item" } | { mode: "adapter"; mapped: Record<string, unknown> }> {
+  const domain = reconciliationDomainForImportEntity(entityKey);
+  if (domain === "product") {
+    const { rows: bizRows } = await query<{ industry: string }>(
+      `SELECT industry FROM businesses WHERE id = $1`,
+      [businessId],
+    );
+    const industry = bizRows[0]?.industry;
+    if (isRetailCatalogueIndustry(industry)) {
+      return { mode: "retail_item" };
+    }
+    const table = entityKey === "inventory.items" && industry === "food_service" ? "inventory_items" : "menu_items";
+    const { rows: canonicalRows } =
+      table === "inventory_items"
+        ? await query<{ name: string; sku: string | null; unit: string | null }>(
+            `SELECT name, sku, unit FROM inventory_items WHERE id::text = $1 AND ($2::uuid IS NULL OR location_id = $2::uuid) LIMIT 1`,
+            [canonicalId, locationId],
+          )
+        : await query<{ name: string; sku: string | null; unit: string | null }>(
+            `SELECT name, sku, NULL::text AS unit FROM menu_items WHERE id::text = $1 AND ($2::uuid IS NULL OR location_id = $2::uuid) LIMIT 1`,
+            [canonicalId, locationId],
+          );
+    if (!canonicalRows[0]) return { mode: "skip" };
+    if (allowedFields) {
+      const next: Record<string, unknown> = {
+        name: allowedFields.has("name") && !rejectedFields.has("name") ? mapped.name : canonicalRows[0].name,
+      };
+      if (allowedFields.has("sku") && !rejectedFields.has("sku")) {
+        next.sku = mapped.sku;
+      } else if (canonicalRows[0].sku) {
+        next.sku = canonicalRows[0].sku;
+      }
+      if (table === "inventory_items") {
+        next.unit =
+          allowedFields.has("unit") && !rejectedFields.has("unit")
+            ? mapped.unit
+            : canonicalRows[0].unit ?? "unit";
+      }
+      for (const [k, v] of Object.entries(mapped)) {
+        if (k === "name" || k === "sku" || (table === "inventory_items" && k === "unit")) continue;
+        if (allowedFields.has(k) && !rejectedFields.has(k)) next[k] = v;
+      }
+      return { mode: "adapter", mapped: next };
+    }
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(mapped)) {
+      if (!rejectedFields.has(k)) next[k] = v;
+    }
+    if (next.name == null) next.name = canonicalRows[0].name;
+    if (next.sku == null && canonicalRows[0].sku) next.sku = canonicalRows[0].sku;
+    if (table === "inventory_items" && next.unit == null) next.unit = canonicalRows[0].unit ?? "unit";
+    return { mode: "adapter", mapped: next };
+  }
+
+  const { rows: partyRows } = await query<{
+    name: string;
+    phone: string | null;
+    email: string | null;
+    national_id: string | null;
+    economic_code: string | null;
+  }>(
+    `SELECT name, phone, email, national_id, economic_code
+       FROM parties WHERE business_id = $1 AND id::text = $2 LIMIT 1`,
+    [businessId, canonicalId],
+  );
+  if (!partyRows[0]) return { mode: "skip" };
+  if (allowedFields) {
+    const next: Record<string, unknown> = {
+      name: allowedFields.has("name") && !rejectedFields.has("name") ? mapped.name : partyRows[0].name,
+    };
+    if (allowedFields.has("phone") && !rejectedFields.has("phone")) next.phone = mapped.phone;
+    else if (partyRows[0].phone) next.phone = partyRows[0].phone;
+    if (allowedFields.has("email") && !rejectedFields.has("email")) next.email = mapped.email;
+    else if (partyRows[0].email) next.email = partyRows[0].email;
+    for (const [k, v] of Object.entries(mapped)) {
+      if (k === "name" || k === "phone" || k === "email") continue;
+      if (allowedFields.has(k) && !rejectedFields.has(k)) next[k] = v;
+    }
+    return { mode: "adapter", mapped: next };
+  }
+  const next: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(mapped)) {
+    if (!rejectedFields.has(k)) next[k] = v;
+  }
+  if (next.name == null) next.name = partyRows[0].name;
+  return { mode: "adapter", mapped: next };
+}
+
+async function applyRetailReconciledSourceOverrides(
+  businessId: string,
+  locationId: string | null,
+  canonicalId: string,
+  mapped: Record<string, unknown>,
+  allowedFields: Set<string> | null,
+  rejectedFields: Set<string>,
+): Promise<boolean> {
+  const canApply = (field: string) =>
+    !rejectedFields.has(field) && (allowedFields === null || allowedFields.has(field));
+  let touched = false;
+  const sets: string[] = [];
+  const params: unknown[] = [canonicalId, locationId];
+  if (canApply("name") && typeof mapped.name === "string" && mapped.name.trim()) {
+    params.push(mapped.name.trim());
+    sets.push(`name = $${params.length}`);
+  }
+  if (canApply("sku") && typeof mapped.sku === "string") {
+    params.push(mapped.sku.trim() || null);
+    sets.push(`sku = $${params.length}`);
+  }
+  if (canApply("unit") && typeof mapped.unit === "string" && mapped.unit.trim()) {
+    params.push(mapped.unit.trim());
+    sets.push(`unit = $${params.length}`);
+  }
+  if (sets.length > 0) {
+    await query(
+      `UPDATE items i
+          SET ${sets.join(", ")}, updated_at = now()
+         FROM locations l
+        WHERE l.id = i.location_id AND l.business_id = $${params.length + 1}
+          AND i.id::text = $1 AND ($2::uuid IS NULL OR i.location_id = $2::uuid)`,
+      [...params, businessId],
+    );
+    touched = true;
+  }
+  const priceRaw = mapped.price;
+  if (canApply("price") && priceRaw != null && /^\d+$/.test(String(priceRaw).trim())) {
+    await query(
+      `INSERT INTO item_stock (item_id, quantity, unit_price)
+       VALUES ($1::uuid, 0, $2::bigint)
+       ON CONFLICT (item_id) DO UPDATE SET unit_price = EXCLUDED.unit_price`,
+      [canonicalId, String(priceRaw).trim()],
+    );
+    touched = true;
+  }
+  return touched;
+}
+
+async function executeReconciledImportRows(
+  businessId: string,
+  job: ImportJob,
+  entity: EntityDefinition,
+  adapter: ReturnType<typeof requireAdapter>,
+  adapterContext: AdapterContext,
+  writeOptions: WriteOptions,
+): Promise<ImportRunResult> {
+  const runId = job.reconciliationRunId;
+  if (!runId) return { created: 0, updated: 0, skipped: 0, failed: 0 };
+
+  const { rows: runRows } = await query<{ status: string; source_key: string; domain: string; location_id: string | null }>(
+    `SELECT status, source_key, domain, location_id::text AS location_id
+       FROM import_reconciliation_runs
+      WHERE business_id = $1 AND id = $2`,
+    [businessId, runId],
+  );
+  if (!runRows[0] || runRows[0].status !== "applied") {
+    throw new ImportError("reconciliation_required");
+  }
+  const effectiveLocationId = runRows[0].location_id ?? adapterContext.locationId;
+  const scopedContext: AdapterContext = { ...adapterContext, locationId: effectiveLocationId };
+
+  const { rows: recRows } = await query<ReconciledItemDecisionRow>(
+    `SELECT i.row_number, i.external_key, i.outcome, i.status, i.effect, i.resolved_canonical_id,
+            d.authority_overrides
+       FROM import_reconciliation_items i
+       LEFT JOIN import_reconciliation_decisions d
+         ON d.id = i.last_decision_id AND d.business_id = i.business_id
+      WHERE i.business_id = $1 AND i.run_id = $2`,
+    [businessId, runId],
+  );
+  const recByRowNumber = new Map<number, ReconciledItemDecisionRow>();
+  for (const r of recRows) {
+    if (r.row_number != null) recByRowNumber.set(r.row_number, r);
+  }
+
+  const { rows: rejectedRows } = await query<{ external_id: string; field: string }>(
+    `SELECT external_id, field
+       FROM import_reconciliation_rejected_edits
+      WHERE business_id = $1 AND source_key = $2 AND domain = $3`,
+    [businessId, runRows[0].source_key, runRows[0].domain],
+  );
+  const rejectedByKey = new Map<string, Set<string>>();
+  for (const r of rejectedRows) {
+    const set = rejectedByKey.get(r.external_id) ?? new Set<string>();
+    set.add(r.field);
+    rejectedByKey.set(r.external_id, set);
+  }
+
+  const result: ImportRunResult = { created: 0, updated: 0, skipped: 0, failed: 0 };
+  const PAGE = 200;
+  for (;;) {
+    const { rows } = await query<{
+      id: string;
+      row_number: number;
+      status: string;
+      mapped: Record<string, unknown>;
+      messages: RowMessage[];
+    }>(
+      `SELECT id, row_number, status, mapped, messages
+         FROM data_import_rows
+        WHERE job_id = $1 AND status IN ('valid', 'warning')
+        ORDER BY row_number
+        LIMIT ${PAGE}`,
+      [job.id],
+    );
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      const messages: RowMessage[] = Array.isArray(row.messages) ? [...row.messages] : [];
+      const rec = recByRowNumber.get(row.row_number);
+      try {
+        if (!rec || rec.status === "skipped" || rec.status === "held" || rec.effect === "skip") {
+          result.skipped += 1;
+          messages.push({ field: null, severity: "warning", message: "این سطر در بازبینی تطبیق نادیده گرفته شد." });
+          await query(
+            `UPDATE data_import_rows SET status = 'skipped', messages = $2::jsonb WHERE id = $1`,
+            [row.id, JSON.stringify(messages)],
+          );
+          continue;
+        }
+
+        if (rec.status === "applied" && rec.effect === "create") {
+          result.created += 1;
+          await query(
+            `UPDATE data_import_rows SET status = 'created', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
+            [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
+          );
+          continue;
+        }
+
+        if (rec.status === "applied" && (rec.effect === "link" || rec.effect === "none") && rec.resolved_canonical_id) {
+          const overrides = rec.authority_overrides ?? {};
+          const sourceFields = Object.entries(overrides)
+            .filter(([, owner]) => owner === "source")
+            .map(([field]) => field);
+          const rejectedFields = rejectedByKey.get(rec.external_key) ?? new Set<string>();
+          for (const [field, owner] of Object.entries(overrides)) {
+            if (owner === "canonical") rejectedFields.add(field);
+          }
+
+          if (rec.outcome === "field_conflict" && sourceFields.length === 0) {
+            result.skipped += 1;
+            messages.push({ field: null, severity: "warning", message: "در بازبینی تطبیق، مقادیر فعلی سیستم حفظ شدند." });
+            await query(
+              `UPDATE data_import_rows SET status = 'skipped', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
+              [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
+            );
+            continue;
+          }
+
+          if (sourceFields.length === 0 && writeOptions.duplicateStrategy !== "update") {
+            result.skipped += 1;
+            messages.push({ field: null, severity: "warning", message: "ردیف به رکورد موجود متصل شد و بدون تغییر باقی ماند." });
+            await query(
+              `UPDATE data_import_rows SET status = 'skipped', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
+              [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
+            );
+            continue;
+          }
+
+          const allowedFields = rec.outcome === "field_conflict" ? normalizeAllowedReconciledFields(sourceFields) : null;
+          const payload = await buildSafeReconciledLinkPayload(
+            businessId,
+            effectiveLocationId,
+            job.entityKey,
+            rec.resolved_canonical_id,
+            row.mapped ?? {},
+            allowedFields,
+            rejectedFields,
+          );
+          if (payload.mode === "skip") {
+            result.skipped += 1;
+            await query(
+              `UPDATE data_import_rows SET status = 'skipped', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
+              [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
+            );
+            continue;
+          }
+          if (payload.mode === "retail_item") {
+            const changed = await applyRetailReconciledSourceOverrides(
+              businessId,
+              effectiveLocationId,
+              rec.resolved_canonical_id,
+              row.mapped ?? {},
+              allowedFields,
+              rejectedFields,
+            );
+            if (changed) {
+              result.updated += 1;
+              await query(
+                `UPDATE data_import_rows SET status = 'updated', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
+                [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
+              );
+            } else {
+              result.skipped += 1;
+              await query(
+                `UPDATE data_import_rows SET status = 'skipped', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
+                [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
+              );
+            }
+            continue;
+          }
+
+          const outcome = await adapter.write!(
+            scopedContext,
+            payload.mapped,
+            { ...writeOptions, duplicateStrategy: "update" },
+          );
+          for (const warning of ("warnings" in outcome && outcome.warnings) || []) {
+            messages.push({ field: null, severity: "warning", message: warning });
+          }
+          if (outcome.status === "created") result.created += 1;
+          else if (outcome.status === "updated") result.updated += 1;
+          else if (outcome.status === "skipped") {
+            result.skipped += 1;
+            messages.push({ field: null, severity: "warning", message: outcome.reason });
+          } else {
+            result.failed += 1;
+            messages.push({ field: null, severity: "error", message: outcome.reason });
+          }
+          await query(
+            `UPDATE data_import_rows SET status = $2, messages = $3::jsonb, target_id = $4 WHERE id = $1`,
+            [row.id, outcome.status, JSON.stringify(messages), "id" in outcome ? (outcome.id ?? rec.resolved_canonical_id) : rec.resolved_canonical_id],
+          );
+          continue;
+        }
+
+        result.skipped += 1;
+        await query(
+          `UPDATE data_import_rows SET status = 'skipped', messages = $2::jsonb, target_id = $3 WHERE id = $1`,
+          [row.id, JSON.stringify(messages), rec.resolved_canonical_id],
+        );
+      } catch (error) {
+        result.failed += 1;
+        const message =
+          error instanceof RowRejection
+            ? error.reason
+            : `ثبت این سطر با خطا روبه‌رو شد: ${describeError(error)}`;
+        messages.push({ field: null, severity: "error", message });
+        await query(
+          `UPDATE data_import_rows SET status = 'failed', messages = $2::jsonb WHERE id = $1`,
+          [row.id, JSON.stringify(messages)],
+        );
+      }
+    }
+  }
+
+  await updateJob(businessId, job.id, {
+    status: "completed",
+    createdRows: result.created,
+    updatedRows: result.updated,
+    skippedRows: result.skipped,
+    failedRows: result.failed,
+    finishedAt: "now",
+  });
+
+  await recordDataTransferAudit({
+    businessId,
+    action: "data.import.completed",
+    entityKey: entity.key,
+    entityId: job.id,
+    actorUserId: scopedContext.actorUserId,
+    payload: {
+      fileName: job.fileName,
+      reconciliationRunId: runId,
+      created: result.created,
+      updated: result.updated,
+      skipped: result.skipped,
+      failed: result.failed,
+      consentGranted: false,
+    },
+  });
+
+  return result;
+}
+
+/**
+ * Complete a reconciliation-linked Data Transfer job from its applied
+ * reconciliation decisions without blindly re-running `adapter.write`.
+ */
+export async function finalizeReconciledImportJob(
+  businessId: string,
+  runId: string,
+  context: { locationId: string | null; actorUserId: string | null; actorName: string },
+): Promise<ImportRunResult | null> {
+  ensureAdaptersRegistered();
+  const { rows } = await query<{ id: string }>(
+    `SELECT id FROM data_import_jobs
+      WHERE business_id = $1 AND reconciliation_run_id = $2
+        AND status IN ('pending', 'queued', 'running')
+      LIMIT 1`,
+    [businessId, runId],
+  );
+  if (!rows[0]) return null;
+  const job = await getImportJob(businessId, rows[0].id);
+  if (!job) return null;
+  const entity = requireEntity(job.entityKey);
+  const adapter = requireAdapter(entity.key);
+  if (!adapter.write) throw new ImportError("entity_not_importable");
+
+  const adapterContext: AdapterContext = {
+    businessId,
+    locationId: context.locationId,
+    actorUserId: context.actorUserId,
+    actorName: context.actorName,
+    partyAudience: await partyWriteAudienceForActor(businessId, context.actorUserId),
+  };
+  const writeOptions = {
+    duplicateStrategy: job.options.duplicateStrategy ?? "skip",
+    duplicateRule: job.options.duplicateRule ?? entity.duplicateRules?.[0]?.key ?? null,
+    relationStrategy: job.options.relationStrategy ?? {},
+  };
+  return executeReconciledImportRows(businessId, job, entity, adapter, adapterContext, writeOptions);
 }
 
 function describeError(error: unknown): string {
