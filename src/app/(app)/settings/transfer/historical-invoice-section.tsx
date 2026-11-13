@@ -182,7 +182,7 @@ export function HistoricalInvoiceSection() {
       <PrimaryButton type="button" disabled={busy} onClick={() => void upload()}>ذخیرهٔ فایل برای بررسی</PrimaryButton>
     </SectionCard>
     <SectionCard title="فایل‌های ذخیره‌شده در این شعبه">
-      {historyState === "loading" ? <LoadingSkeleton rows={3} label="در حال بارگذاری فایل‌های تاریخی" /> : historyState === "error" ? <p>بارگذاری فایل‌ها ممکن نشد.</p> : history.length === 0 ? <p>فایلی برای نمایش نیست.</p> : <ul className="space-y-2">{history.map((item) => <li key={item.jobId}>
+      {historyState === "loading" ? <LoadingSkeleton rows={3} label="در حال بارگذاری فایل‌های تاریخی" /> : historyState === "error" ? <><p>بارگذاری فایل‌ها ممکن نشد.</p><SecondaryButton disabled={busy} onClick={() => { setError(""); void loadHistory(historyOffset); }}>تلاش دوباره برای تاریخچه</SecondaryButton></> : history.length === 0 ? <p>فایلی برای نمایش نیست.</p> : <ul className="space-y-2">{history.map((item) => <li key={item.jobId}>
         <SecondaryButton disabled={busy} onClick={() => void openJob(item.jobId)}>{item.fileName} — {toPersianDigits(item.rowCount)} ردیف — {formatJalali(item.createdAt)}</SecondaryButton>
       </li>)}</ul>}
       <div className="mt-4 flex gap-2"><SecondaryButton disabled={busy || historyState === "loading" || historyOffset === 0} onClick={() => void loadHistory(Math.max(0, historyOffset - 20))}>قبلی</SecondaryButton>

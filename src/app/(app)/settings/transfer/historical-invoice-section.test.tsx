@@ -45,6 +45,9 @@ describe("historical invoice review", () => {
     render(<HistoricalInvoiceSection />);
     expect(await screen.findByText("بارگذاری فایل‌ها ممکن نشد.")).toBeTruthy();
     expect(screen.queryByText("فایلی برای نمایش نیست.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "تلاش دوباره برای تاریخچه" }));
+    expect(await screen.findByRole("button", { name: /source.csv/ })).toBeTruthy();
+    expect(screen.queryByText("بارگذاری فایل‌ها ممکن نشد.")).toBeNull();
   });
   it("requires explicit mapping and customer review, and never offers invoice execution", async () => {
     render(<HistoricalInvoiceSection />);
