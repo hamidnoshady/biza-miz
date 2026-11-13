@@ -48,6 +48,7 @@ import {
 const ERROR_TRANSLATIONS: Record<string, string> = {
   project_not_found: "پروژه پیدا نشد.",
   task_not_found: "وظیفه پیدا نشد.",
+  task_has_reservation_history: "وظیفه سابقهٔ رزرو منابع دارد؛ برای حفظ تاریخچه قابل حذف نیست.",
   task_has_time_history: "وظیفه سابقهٔ کارکرد دارد؛ برای حفظ تاریخچه قابل حذف نیست.",
   contract_not_found: "قرارداد پیدا نشد.",
   document_not_found: "سند پیدا نشد.",

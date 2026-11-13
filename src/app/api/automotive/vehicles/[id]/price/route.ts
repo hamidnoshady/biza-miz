@@ -23,6 +23,10 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   if (branchError) return branchError;
   const locationId = access.activeLocationId!;
   const body = await readBody(request);
+  if (body.expectedLocationId !== undefined &&
+      (typeof body.expectedLocationId !== "string" || body.expectedLocationId !== locationId)) {
+    return NextResponse.json({ error: "branch_changed", message: "شعبهٔ فعال تغییر کرده است؛ دوباره خودرو را انتخاب کنید." }, { status: 409 });
+  }
 
   const parsePrice = (key: string, nullable: boolean): { valid: boolean; value: number | null | undefined } => {
     if (!Object.prototype.hasOwnProperty.call(body, key)) return { valid: true, value: undefined };
@@ -42,6 +46,12 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     ["wholesalePriceRial", wholesale], ["promotionalPriceRial", promotional],
   ] as const) {
     if (!parsed.valid) return NextResponse.json({ error: "invalid_price", field }, { status: 400 });
+  }
+
+  const expectedPriceRevision = body.expectedPriceRevision;
+  if (expectedPriceRevision !== undefined &&
+      (typeof expectedPriceRevision !== "string" || !/^(0|[1-9]\d{0,18})$/.test(expectedPriceRevision))) {
+    return NextResponse.json({ error: "invalid_price_revision" }, { status: 400 });
   }
 
   const wantsFloorChange = Object.prototype.hasOwnProperty.call(body, "minimumPriceRial");
@@ -78,6 +88,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       minimumPriceRial: minimum.value,
       wholesalePriceRial: wholesale.value,
       promotionalPriceRial: promotional.value,
+      expectedPriceRevision: expectedPriceRevision as string | undefined,
       reason: typeof body.reason === "string" ? body.reason : null,
       actorId: session.sub,
     });
