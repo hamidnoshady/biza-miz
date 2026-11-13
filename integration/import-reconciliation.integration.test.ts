@@ -1350,7 +1350,7 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
 
     // Food-service raw-material import with 3 rows: 1 skip, 1 canonical-wins conflict (with duplicateStrategy=update), 1 create_new
     const rawCsv = Buffer.from(
-      "name,sku,unit,avgCost\nدانه قهوه تغییریافته,RAW-COFFEE-1,g,500000\nشکر قهوه‌ای ردشده,RAW-SKIP-2,kg,80000\nشیر تازه جدید,RAW-MILK-3,l,45000\n",
+      "name,sku,unit,avgCost\nدانه قهوه تغییریافته,RAW-COFFEE-1,kg,500000\nشکر قهوه‌ای ردشده,RAW-SKIP-2,kg,80000\nشیر تازه جدید,RAW-MILK-3,l,45000\n",
       "utf8",
     );
     const { job: foodJob } = await asBusiness(foodBiz.id, () =>

@@ -1654,7 +1654,7 @@ export async function inventoryCanonicalToken(client: PoolClient, run: Reconcili
   }
   const { rows } = await client.query<{ token: string }>(
     `SELECT md5(
-        (SELECT count(*)::text || ':' || COALESCE(max(created_at)::text, '')
+        (SELECT count(*)::text || ':' || COALESCE(max(occurred_at)::text, '')
            FROM stock_movements WHERE location_id = $1)
         || '|' ||
         (SELECT count(*)::text || ':' || COALESCE(max(updated_at)::text, '')

@@ -302,7 +302,7 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
 
           if (snap.kind === "movement") {
             await ctx.client.query(
-              `INSERT INTO item_stock (item_id, quantity, unit_price)
+              `INSERT INTO item_stock (item_id, quantity, unit_cost)
                VALUES ($1::uuid, $2, $3)
                ON CONFLICT (item_id) DO UPDATE
                  SET quantity = item_stock.quantity + EXCLUDED.quantity`,
@@ -310,11 +310,11 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
             );
           } else {
             await ctx.client.query(
-              `INSERT INTO item_stock (item_id, quantity, unit_price)
+              `INSERT INTO item_stock (item_id, quantity, unit_cost)
                VALUES ($1::uuid, $2, $3)
                ON CONFLICT (item_id) DO UPDATE
                  SET quantity = EXCLUDED.quantity,
-                     unit_price = COALESCE(item_stock.unit_price, EXCLUDED.unit_price)`,
+                     unit_cost = COALESCE(item_stock.unit_cost, EXCLUDED.unit_cost)`,
               [targetItemId, qty.toString(), unitCostBig > 0n ? unitCostStr : null],
             );
           }
