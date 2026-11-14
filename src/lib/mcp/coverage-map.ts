@@ -1059,7 +1059,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       lifecycle: ["data.schedule.delete", "data.template.delete"],
       bulk: ["data.import.run"],
     },
-    note: "AP — executors re-run the route's two-key rule (engine key already the MCP capability; entity key + mapping-kind engine re-checked from the caller's membership). Export/import CREATE stay browser-bound on purpose (export streams a file download, import needs an uploaded file); Holoo provider lanes follow in their own batch; historical-invoice customer review and confirmation are route-only and do not execute imports",
+    note: "AP — executors re-run the route's two-key rule (engine key already the MCP capability; entity key + mapping-kind engine re-checked from the caller's membership). Export/import CREATE stay browser-bound on purpose (export streams a file download, import needs an uploaded file); Holoo provider lanes follow in their own batch; historical-invoice customer review and confirmation are route-only and do not execute imports; reconciliation review, cutover and apply are route-only",
     test: "integration/data-transfer.integration.test.ts",
   },
   {
