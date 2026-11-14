@@ -48,6 +48,15 @@ import { wooAmountToRial } from "./woo-money";
 import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "../product-content";
 import { effectivePushSwitches } from "./outbox-policy";
 import { writeIntegrationAudit } from "./audit";
+import { findActiveRunForConnection, hasCanonicalOverlapForDomain } from "../import-reconciliation/entry-guards";
+import {
+  completeProductDiscovery,
+  getRunSummary as getReconciliationRunSummary,
+  openRun as openReconciliationRun,
+  reopenStaleRun,
+  stageProducts as stageReconciliationProducts,
+} from "../import-reconciliation/service";
+import type { IncomingProduct } from "../import-reconciliation/types";
 import {
   externalCustomerResolution,
   markWooCustomerVerifiedAbsent,
@@ -863,9 +872,110 @@ export async function resolveOrderCustomerId(
  * a child first simply lost it until the next run. `planWooCatalogueWrite`
  * makes ordering a property of the whole page instead.
  */
+function wooProductToIncoming(
+  product: WooProduct,
+  currencyUnit: ConnectionRow["currency_unit"],
+): IncomingProduct {
+  const priceText = product.regular_price ?? product.price ?? "";
+  let priceRial: string | undefined;
+  if (priceText !== "") {
+    try {
+      priceRial = wooAmountToRial(priceText, currencyUnit).toString();
+    } catch {
+      priceRial = undefined;
+    }
+  }
+  return {
+    domain: "product",
+    externalId: String(product.id),
+    name: product.name || `#${product.id}`,
+    sku: product.sku || null,
+    priceRial,
+    stockQuantity: product.stock_quantity != null ? String(product.stock_quantity) : undefined,
+    unit: undefined,
+    brand: undefined,
+    fields: {
+      regular_price: product.regular_price ?? product.price ?? null,
+      stock_quantity: product.stock_quantity ?? null,
+      manage_stock: product.manage_stock ?? null,
+      status: product.status ?? null,
+      woo_type: inferWooProductType(product),
+    },
+  };
+}
+
+/**
+ * Stages a WooCommerce store's full catalogue into an #1118 product reconciliation
+ * run without modifying canonical tables.
+ */
+export async function stageWooCatalogueToReconciliation(
+  businessId: string,
+  connectionId: string,
+  actor: { userId: string | null; name: string },
+) {
+  const connection = await getConnection(businessId, connectionId);
+  if (!connection) throw new Error("not_found");
+  const active = await findActiveRunForConnection(businessId, connectionId, "product");
+  if (active && active.status !== "discovering" && active.status !== "stale") {
+    const summary = await getReconciliationRunSummary(businessId, active.id);
+    return { runId: active.id, ...summary, reused: true };
+  }
+
+  const client = wooClientFor(connection);
+  const locationId = await resolveLocationId(businessId, connection.location_id);
+
+  const parents: WooProduct[] = [];
+  let page = 1;
+  for (;;) {
+    const { items, totalPages } = await client.listProductsPage({ per_page: PER_PAGE, page });
+    parents.push(...items);
+    if (!totalPages || page >= totalPages || items.length === 0) break;
+    page += 1;
+  }
+
+  const allProducts: WooProduct[] = [...parents];
+  for (const parent of parents) {
+    if (!isSellableWooProduct(parent) && inferWooProductType(parent) === "variable") {
+      const children = await client.listVariations(parent.id);
+      allProducts.push(...children);
+    }
+  }
+
+  const incoming = allProducts.map((p) => wooProductToIncoming(p, connection.currency_unit));
+  const sourceFingerprint = `woo:${connectionId}:${incoming.length}`;
+  let runId: string;
+  if (active?.status === "stale") {
+    const reopened = await reopenStaleRun(businessId, active.id, { sourceFingerprint }, actor);
+    runId = reopened.id;
+  } else if (active) {
+    runId = active.id;
+  } else {
+    const opened = await openReconciliationRun({
+      businessId,
+      locationId,
+      domain: "product",
+      sourceKind: "provider",
+      provider: "woocommerce",
+      sourceKey: connectionId,
+      connectionId,
+      importMode: "live_link",
+      sourceFingerprint,
+      actor,
+    });
+    runId = opened.id;
+  }
+
+  await stageReconciliationProducts(businessId, runId, incoming);
+  const discovery = await completeProductDiscovery(businessId, runId, actor);
+  return { runId, ...discovery, reused: false };
+}
+
 export async function syncProducts(businessId: string, connectionId: string): Promise<CatalogueSyncOutcome> {
   const connection = await getConnection(businessId, connectionId);
   if (!connection) throw new Error("not_found");
+  if (await findActiveRunForConnection(businessId, connectionId, "product")) {
+    throw new Error("reconciliation_required");
+  }
   const client = wooClientFor(connection);
   const locationId = await resolveLocationId(businessId, connection.location_id);
 
@@ -924,6 +1034,53 @@ export async function syncProducts(businessId: string, connectionId: string): Pr
     parents.push(...items);
     if (!totalPages || page >= totalPages || items.length === 0) break;
     page += 1;
+  }
+
+  if (parents.length > 0 && (await hasCanonicalOverlapForDomain(businessId, "product", locationId))) {
+    const [{ rows: mappedRows }, { rows: appliedRuns }] = await Promise.all([
+      query<{ exists: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM integration_mappings
+            WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'product'
+         ) AS exists`,
+        [businessId, connectionId],
+      ),
+      query<{ exists: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM import_reconciliation_runs
+            WHERE business_id = $1 AND connection_id = $2 AND domain = 'product' AND status = 'applied'
+         ) AS exists`,
+        [businessId, connectionId],
+      ),
+    ]);
+    if (!mappedRows[0]?.exists && !appliedRuns[0]?.exists) {
+      const allIncoming: WooProduct[] = [...parents];
+      for (const parent of parents) {
+        if (!isSellableWooProduct(parent) && inferWooProductType(parent) === "variable") {
+          try {
+            allIncoming.push(...(await client.listVariations(parent.id)));
+          } catch {
+            // Best-effort variations during first-contact staging
+          }
+        }
+      }
+      const incoming = allIncoming.map((p) => wooProductToIncoming(p, connection.currency_unit));
+      const run = await openReconciliationRun({
+        businessId,
+        locationId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: connectionId,
+        connectionId,
+        importMode: "live_link",
+        sourceFingerprint: `woo:${connectionId}:${incoming.length}`,
+        actor: { userId: null, name: "سامانه" },
+      });
+      await stageReconciliationProducts(businessId, run.id, incoming);
+      await completeProductDiscovery(businessId, run.id, { userId: null, name: "سامانه" });
+      throw new Error("reconciliation_required");
+    }
   }
 
   const plan = planWooCatalogueWrite(parents);

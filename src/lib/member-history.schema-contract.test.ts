@@ -120,6 +120,7 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'iam_events.actor_user_id': 'IAM control plane log',
   'impersonation_grants.user_id': 'super-admin impersonation',
   'import_reconciliation_decisions.decided_by': 'import reconciliation tooling; every decision is also written to audit_log',
+  'import_reconciliation_rejected_edits.rejected_by': 'import reconciliation tooling; rejected_by_name snapshots the actor and decisions are audited',
   'import_reconciliation_runs.created_by': 'import reconciliation tooling; the run open is also written to audit_log',
   'install_pairing_codes.issued_by': 'installer pairing',
   'integration_connections.created_by': 'integration setup',

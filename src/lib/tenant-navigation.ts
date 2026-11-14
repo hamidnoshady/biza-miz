@@ -172,14 +172,14 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
           roles: ["owner", "manager"] as Role[],
           requiredAnyPermission: [catalogueAdapter.readPermission],
           children: PRODUCT_WORKSPACE_SECTIONS
-            .filter((section) => section.key === "list" || (section.key === "new" && industry === "automotive") || (section.key === "prices" && industry === "jewelry") || (section.key === "reports" && industry === "watch") || (section.key === "barcodes" && hasCapability(industry, "barcode")))
+            .filter((section) => section.key === "list" || section.key === "new" || (section.key === "prices" && (industry === "jewelry" || industry === "automotive")) || (section.key === "reports" && (industry === "watch" || industry === "jewelry" || industry === "automotive")) || (section.key === "barcodes" && hasCapability(industry, "barcode")))
             .map((section) => ({
               label: section.label,
               module: "stock" as const,
               href: section.href,
               roles: ["owner", "manager"] as Role[],
               requiredAnyPermission: [catalogueAdapter.readPermission],
-              ...(section.key === "new" ? { requiredAllPermissions: [PERMISSIONS.vehiclesCreate] } : {}),
+              ...(section.key === "new" ? { requiredAllPermissions: [industry === "automotive" ? PERMISSIONS.vehiclesCreate : PERMISSIONS.inventoryAdjust] } : {}),
               ...(section.key === "reports" ? { requiredAllPermissions: [PERMISSIONS.reportsView] } : {}),
             })),
         }]
