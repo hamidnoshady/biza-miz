@@ -4,6 +4,7 @@ import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { hasCapability } from "@/lib/industry-profile";
+import { resolveActiveLocation } from "@/lib/setup-state";
 import { isRetailCatalogueIndustry, type RetailCatalogueIndustry } from "@/lib/industries";
 import {
   catalogueAdapterFor,
@@ -70,10 +71,40 @@ export async function specialistSectionForPage(section: "prices" | "reports"): P
   const session = await getSession();
   if (!session) redirect("/login");
   const industry = await getBusinessIndustry(session.businessId);
-  if (!(section === "prices" && industry === "jewelry") && !(section === "reports" && industry === "watch")) return null;
+  if (!(section === "prices" && industry === "jewelry") && !(section === "reports" && (industry === "watch" || industry === "jewelry"))) return null;
   const access = await memberAccessFor(session);
   if (!access?.isActive || !access.permissions.has(PERMISSIONS.inventoryView) || (section === "reports" && !access.permissions.has(PERMISSIONS.reportsView))) redirect("/accounting/overview");
   return { industry: industry as "jewelry" | "watch", canEdit: access.permissions.has(PERMISSIONS.inventoryAdjust) };
+}
+
+/** Automotive prices and stock reporting use the dealership's permissions. */
+export async function automotiveProductSectionForPage(section: "prices" | "reports"): Promise<{ canEdit: boolean; canSeeCost: boolean } | null> {
+  const session = await getSession();
+  if (!session) redirect("/login");
+  const industry = await getBusinessIndustry(session.businessId);
+  if (industry !== "automotive") return null;
+  const access = await memberAccessFor(session);
+  if (!access?.isActive || !access.permissions.has(PERMISSIONS.vehiclesView) ||
+      (section === "reports" && !access.permissions.has(PERMISSIONS.reportsView))) redirect("/accounting/overview");
+  return { canEdit: access.permissions.has(PERMISSIONS.vehiclesPriceEdit), canSeeCost: access.permissions.has(PERMISSIONS.vehiclesCostView) };
+}
+
+/** New native weighted pieces and watch models use the same permission as their APIs. */
+export async function specialistCreateEntry(): Promise<{
+  industry: "jewelry" | "watch";
+  draftScope: string;
+  locationId: string;
+  locationName: string;
+} | null> {
+  const session = await getSession();
+  if (!session) redirect("/login");
+  const industry = await getBusinessIndustry(session.businessId);
+  if (industry !== "jewelry" && industry !== "watch") return null;
+  const access = await memberAccessFor(session);
+  if (!access?.isActive || !access.permissions.has(PERMISSIONS.inventoryView) || !access.permissions.has(PERMISSIONS.inventoryAdjust)) redirect("/accounting/overview");
+  const location = await resolveActiveLocation(session);
+  if (!location) redirect("/accounting/overview");
+  return { industry, draftScope: `${session.businessId}:${session.sub}:${location.id}`, locationId: location.id, locationName: location.name };
 }
 
 /** Vehicle creation has its own permission, not the variant inventory grant. */

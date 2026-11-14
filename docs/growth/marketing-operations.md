@@ -65,3 +65,18 @@ scope still require implementation before using this as a site-scoped boundary.
 ### مدیریت چرخهٔ مقصد
 
 کاربر دارای `marketing_targets.manage` می‌تواند عنوان، شهر و محلهٔ مقصد فعال را ویرایش کند یا مقصد را بایگانی و بازگردانی کند؛ شعبه و شخص CRM متصل از این مسیر تغییر نمی‌کنند. فهرست به‌صورت پیش‌فرض مقصدهای فعال را نشان می‌دهد و فیلتر بایگانی دارد. برای جلوگیری از ویرایش هم‌زمانِ قدیمی، هر تغییر نسخهٔ مشاهده‌شده را بررسی می‌کند. بایگانی با ماموریت برنامه‌ریزی‌شده یا در حال انجام مجاز نیست و با ساخت ماموریت هم‌زمان قفل‌گذاری می‌شود. تاریخچه حذف نمی‌شود، اما عنوان و مشخصات مقصد در نمایش‌های مرتبط اطلاعات جاری هستند نه تصویر ثابت تاریخی. تغییر و ثبت ممیزی در یک تراکنش انجام می‌شوند. این قابلیت بازدید یا شواهد مکانی تأییدشده ایجاد نمی‌کند.
+
+## Assignment priority
+
+A manager can choose low, normal, high or urgent priority when creating an
+assignment. Both the manager list and the employee's own queue display it under
+the existing assignment permissions and branch restrictions. Migration 0298
+sets existing assignments and older clients to normal; no inferred urgency or
+automatic prioritization is applied. A manager can also change the priority of
+planned or in-progress work. The server locks the assignment and active branch,
+checks the priority revision and writes the change and audit together; stale
+changes and changes to closed work are rejected. Employees cannot change priority
+through their own queue. Both assignment lists can filter by a single priority
+server-side; results retain their existing creation-time order and branch/self
+scope. Priority sorting, day planning and follow-up workflows are not yet implemented. It does not establish a verified visit or
+change any access, CRM or compensation rights.

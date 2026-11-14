@@ -729,6 +729,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     status: "n/a (infra)",
   },
   {
+    id: "cms.table-qr",
+    module: "Website / CMS",
+    entity: "Printed table QR identity (scan → the table that printed it)",
+    routes: ["public/table-qr"],
+    status: "route-only (by design)",
+    note: "ESH-147: the scan is a customer's phone with no session; it resolves one opaque table token to a display name and the CMS site id, so there is no tenant operation an assistant could perform on it. The staff generate/rotate/revoke/print routes are part of the `tables` row above",
+    test: "integration/table-qr-identity.integration.test.ts",
+  },
+  {
     id: "cms.drafts-pages-media",
     module: "Website / CMS",
     entity: "Drafts, pages, website media",
@@ -933,7 +942,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     module: "Workspace",
     entity: "Agency commercial registers (billing schedule & milestones, change requests)",
     routes: ["agency"],
-    note: "issue #1128 §D: one project's billing schedule, the milestones in it and the change requests that revise its value. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — exposing these as tools has to satisfy §F's rule that an assistant drafts and a human approves, and agreeing more money with a client is exactly the kind of act that rule exists for. Two things a future tool must keep: approving a milestone does NOT bill it (issuing the invoice is a separate act gated on the invoice screen's own permissions, paymentsTake + ordersCreate, as well as workspaceApprove), and an approved change request moves only the engagement's revised value, never the figure the client signed. Project P&L now includes whole-project approved/unbooked vendor commitments, read in the same statement snapshot as ledger facts and kept outside posted margin; commitment rial totals are exact decimal text, not paginated register sums. Manual actual task time is a separate append-only self-reported register with same-project task scope, immutable own-entry corrections/voids, retry IDs and a tenant-wide per-member daily capacity ceiling. It never posts payroll/costs, bills or approves hours; no AI time-attestation tool is exposed.",
+    note: "issue #1128 §D: one project's billing schedule, the milestones in it and the change requests that revise its value. No MCP verbs yet, so every column is a real gap rather than a deliberate exclusion — exposing these as tools has to satisfy §F's rule that an assistant drafts and a human approves, and agreeing more money with a client is exactly the kind of act that rule exists for. Two things a future tool must keep: approving a milestone does NOT bill it (issuing the invoice is a separate act gated on the invoice screen's own permissions, paymentsTake + ordersCreate, as well as workspaceApprove), and an approved change request moves only the engagement's revised value, never the figure the client signed. Project P&L now includes whole-project approved/unbooked vendor commitments, read in the same statement snapshot as ledger facts and kept outside posted margin; commitment rial totals are exact decimal text, not paginated register sums. Manual actual task time is a separate append-only self-reported register with same-project task scope, immutable own-entry corrections/voids, retry IDs and a tenant-wide per-member daily capacity ceiling. It never posts payroll/costs, bills or approves hours; no AI time-attestation tool is exposed. Planned resource reservations are separately manager-authorized, append-only task/member allocations with same-project active staff checks and serialized half-open interval conflict checks across all tenant projects; conflicts disclose no other project details. Rescheduling/cancellation retain history and never attest actual time, approve hours or post costs. No AI reservation-writing tool is added.",
     test: "src/lib/agency-commercial.test.ts",
   },
 
@@ -1050,7 +1059,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       lifecycle: ["data.schedule.delete", "data.template.delete"],
       bulk: ["data.import.run"],
     },
-    note: "AP — executors re-run the route's two-key rule (engine key already the MCP capability; entity key + mapping-kind engine re-checked from the caller's membership). Export/import CREATE stay browser-bound on purpose (export streams a file download, import needs an uploaded file); Holoo provider lanes follow in their own batch; historical-invoice staging, branch-scoped history, customer review and confirmation are route-only and do not execute imports; generic history excludes these jobs",
+    note: "AP — executors re-run the route's two-key rule (engine key already the MCP capability; entity key + mapping-kind engine re-checked from the caller's membership). Export/import CREATE stay browser-bound on purpose (export streams a file download, import needs an uploaded file); Holoo provider lanes follow in their own batch; historical-invoice staging, branch-scoped history, customer review and confirmation are route-only and do not execute imports; generic history excludes these jobs; reconciliation review, cutover and apply are route-only",
     test: "integration/data-transfer.integration.test.ts",
   },
   {
@@ -1161,10 +1170,10 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "knowledge.tours",
     module: "Knowledge base",
     entity: "Guided tours — lookup and the caller's own learning progress (issue #972)",
-    routes: ["knowledge/tours"],
-    note: "a member's own walk-through state on the page they are looking at, written only by the browser overlay; it moves no business data, so an AI client has nothing to operate",
+    routes: ["knowledge/tours", "knowledge/learning-progress"],
+    note: "a member's own walk-through state on the page they are looking at, written only by the browser overlay; aggregate tour + learning-path progress across apps plus current device pairing/trust state; it moves no business data, so an AI client has nothing to operate",
     status: "n/a (infra)",
-    test: "integration/tours.integration.test.ts",
+    test: "integration/tours.integration.test.ts + src/app/api/knowledge/learning-progress/route.test.ts",
   },
   {
     id: "knowledge.learning-paths",

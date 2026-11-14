@@ -164,6 +164,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'aec_transmittals', columns: ["created_by", "issued_by"] },
   { table: 'agency_campaign_reports', columns: ["created_by"] },
   { table: 'agency_task_time', columns: ["created_by"] },
+  { table: 'agency_resource_reservations', columns: ["created_by", "worker_id"] },
   { table: 'agency_vendor_purchases', columns: ["created_by", "cancelled_by"] },
   { table: 'ap_payments', columns: ["created_by", "reversed_by"] },
   { table: 'ar_receipts', columns: ["created_by", "reversed_by"] },

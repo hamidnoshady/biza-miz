@@ -102,6 +102,9 @@ export const POST = withTenantScope(async (_request: Request, context: { params:
     const message = (err as Error).message;
     if (message === "not_found") return NextResponse.json({ error: "not_found" }, { status: 404 });
     if (message === "no_location") return NextResponse.json({ ok: false, error: "no_location" }, { status: 409 });
+    if (message === "reconciliation_required") {
+      return NextResponse.json({ ok: false, error: "reconciliation_required" }, { status: 409 });
+    }
     // A stable code out, the raw detail in the server log: the store's own
     // error text can carry credentials-adjacent URLs or stack fragments.
     console.error("woo_product_sync_failed", { connectionId: id, error: message });

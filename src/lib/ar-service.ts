@@ -38,6 +38,7 @@ import { businessToday } from "./business-day-service";
 import { isUuid } from "./uuid";
 import { PARTY_ROLE_STORAGE } from "./parties";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { notCarryForwardSnapshotSql } from "./carry-forward-exclusion";
 import { isValidIsoDate } from "./iso-date";
 import { accountIdsByCode, MissingLedgerAccountError, postExactMirrorEntry, postJournalEntry } from "./ledger-service";
 import { ageOpenItems, agingBucketCaseSql, UNKNOWN_CUSTOMER_KEY, type AgingSummary } from "./aging";
@@ -305,7 +306,7 @@ export async function getArReconciliationSummary(businessId: string): Promise<Ar
      control AS (
        SELECT coalesce(sum(jl.debit - jl.credit), 0) AS balance
          FROM journal_lines jl
-         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN journal_entries je ON je.id = jl.entry_id AND ${notCarryForwardSnapshotSql("je")}
         WHERE je.business_id = $1 AND jl.account_id = $2
      )
      SELECT s.receivable::text AS receivable, s.advances::text AS advances, s.net::text AS net,
@@ -442,10 +443,11 @@ export async function wellKnownAccountBalance(
 ): Promise<number | null> {
   const { rows } = await query<{ type: string; debit: string; credit: string }>(
     `SELECT a.type::text,
-            coalesce(sum(jl.debit), 0)::text AS debit,
-            coalesce(sum(jl.credit), 0)::text AS credit
+            coalesce(sum(jl.debit) FILTER (WHERE je.id IS NOT NULL), 0)::text AS debit,
+            coalesce(sum(jl.credit) FILTER (WHERE je.id IS NOT NULL), 0)::text AS credit
        FROM accounts a
        LEFT JOIN journal_lines jl ON jl.account_id = a.id
+       LEFT JOIN journal_entries je ON je.id = jl.entry_id AND ${notCarryForwardSnapshotSql("je")}
       WHERE a.business_id = $1 AND a.code = $2
       GROUP BY a.type`,
     [businessId, accountCode],

@@ -69,20 +69,22 @@ export interface JournalImportPreview {
 async function accountIdForHolooCode(
   client: PoolClient,
   businessId: string,
-  connectionId: string,
+  connectionId: string | null,
   remoteCode: string,
 ): Promise<string | null> {
-  const mapped = await client.query<{ local_id: string }>(
-    `SELECT m.local_id
-       FROM integration_mappings m
-       JOIN accounts a ON a.id = m.local_id AND a.business_id = m.business_id
-      WHERE m.business_id = $1 AND m.connection_id = $2
-        AND m.entity_type = 'holoo_account' AND m.remote_id = $3
-        AND a.is_active
-      LIMIT 1`,
-    [businessId, connectionId, remoteCode],
-  );
-  if (mapped.rows[0]) return mapped.rows[0].local_id;
+  if (connectionId) {
+    const mapped = await client.query<{ local_id: string }>(
+      `SELECT m.local_id
+         FROM integration_mappings m
+         JOIN accounts a ON a.id = m.local_id AND a.business_id = m.business_id
+        WHERE m.business_id = $1 AND m.connection_id = $2
+          AND m.entity_type = 'holoo_account' AND m.remote_id = $3
+          AND a.is_active
+        LIMIT 1`,
+      [businessId, connectionId, remoteCode],
+    );
+    if (mapped.rows[0]) return mapped.rows[0].local_id;
+  }
   const fallback = await client.query<{ id: string }>(
     `SELECT id FROM accounts WHERE business_id = $1 AND code = $2 AND is_active LIMIT 1`,
     [businessId, remoteCode],
@@ -93,7 +95,7 @@ async function accountIdForHolooCode(
 async function resolveVoucherLines(
   client: PoolClient,
   businessId: string,
-  connectionId: string,
+  connectionId: string | null,
   voucher: NormalizedVoucher,
   unmappedAccounts: JournalImportPreview["unmappedAccounts"],
   unmappedDimensions: JournalImportPreview["unmappedDimensions"],
@@ -224,6 +226,65 @@ export async function previewJournalVouchers(
   } finally {
     client.release();
   }
+}
+
+/**
+ * Post one approved reconciliation voucher on an active tenant transaction
+ * client, preserving exact-Rial debit/credit balance, account mappings, and
+ * optional accounting dimensions.
+ */
+export async function postReconciledHolooVoucherOnClient(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    connectionId: string | null;
+    locationId: string | null;
+    voucher: HolooVoucher;
+    createdBy: string | null;
+    sourceType?: string;
+  },
+): Promise<{ entryId: string }> {
+  const { balanced, unbalanced } = planJournalImport([input.voucher]);
+  if (unbalanced.length > 0) {
+    throw new Error(`unbalanced_journal:${unbalanced[0].difference.toString()}`);
+  }
+  const normalized = balanced[0];
+  if (!normalized) {
+    throw new Error("empty_journal");
+  }
+  const unmappedAccounts: JournalImportPreview["unmappedAccounts"] = [];
+  const unmappedDimensions: JournalImportPreview["unmappedDimensions"] = [];
+  const lines = await resolveVoucherLines(
+    client,
+    input.businessId,
+    input.connectionId,
+    normalized,
+    unmappedAccounts,
+    unmappedDimensions,
+  );
+  if (unmappedAccounts.length > 0) {
+    throw new Error(`unmapped_account:${unmappedAccounts[0].accountCode}`);
+  }
+  if (unmappedDimensions.length > 0) {
+    throw new Error(`unmapped_dimension:${unmappedDimensions[0].kind}:${unmappedDimensions[0].code}`);
+  }
+  if (lines.length === 0) {
+    throw new Error("empty_journal");
+  }
+  const entryId = await postExactJournalEntry(client, {
+    businessId: input.businessId,
+    locationId: input.locationId,
+    entryDate: normalized.entryDate,
+    memo: normalized.memo,
+    sourceType: input.sourceType ?? HOLOO_IMPORT_SOURCE_TYPE,
+    sourceId: null,
+    lines,
+    createdBy: input.createdBy,
+  });
+  if (!entryId) {
+    throw new Error("journal_post_failed");
+  }
+  return { entryId };
 }
 
 /**

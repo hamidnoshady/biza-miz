@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { query, withTenantTransaction, type PoolClient } from "../db";
 import { createItem, updateItemMeta } from "../items-service";
 import { assignBarcode } from "../item-barcodes-service";
-import { createBrand, listBrands, updateItemProfile } from "../item-brands-service";
+import { ensureBranchBrand, updateItemProfile } from "../item-brands-service";
 import { createProductRecord } from "../product-creation-service";
 import { parseProductCreateInput } from "../product-input";
 import { upsertWatchAttributes } from "../watch-attributes-service";
@@ -17,7 +17,7 @@ import {
   type Actor, type ApplyContext, type ReconciliationRun, type StagedItem,
 } from "../import-reconciliation/service";
 import { catalogueRecords, type CatalogueRecord } from "./catalogue-plan";
-import { parseCatalogueRows, type CatalogueMapping, type CatalogueRow, type CatalogueSheet, type CatalogueTarget } from "./catalogue-profile";
+import { normalizeBrandFallback, parseCatalogueRows, type CatalogueMapping, type CatalogueRow, type CatalogueSheet, type CatalogueTarget } from "./catalogue-profile";
 
 import { CATALOGUE_PROFILE, lockCatalogueBranch } from "./catalogue-gate";
 const VERSION = 1;
@@ -101,9 +101,10 @@ async function familyLinks(client: PoolClient, run: ReconciliationRun, parent: C
 
 export async function stageCatalogue(owner: CatalogueOwner, input: {
   sheet: CatalogueSheet; mapping: CatalogueMapping; fileName: string; sourceName: string; fingerprint: string;
-  omax: boolean; duplicateRows: number[]; axis: string;
+  fallbackBrand?: string | null; duplicateRows: number[]; axis: string;
 }) {
-  const { rows, totals } = parseCatalogueRows(input.sheet, input.mapping, input.omax);
+  const fallbackBrand = normalizeBrandFallback(input.fallbackBrand);
+  const { rows, totals } = parseCatalogueRows(input.sheet, input.mapping, { fallbackBrand });
   const planned = catalogueRecords(rows, owner.target, new Set(input.duplicateRows), input.axis);
   return withTenantTransaction(owner.businessId, async client => {
     await lockCatalogueBranch(client, owner.locationId);
@@ -113,7 +114,7 @@ export async function stageCatalogue(owner: CatalogueOwner, input: {
       importMode: "one_time", sourceFingerprint: input.fingerprint,
       profileKey: CATALOGUE_PROFILE, profileVersion: VERSION, scope: { target: owner.target },
       evidence: { fileName: input.fileName, sheet: input.sheet.name, columns: input.sheet.columns, mapping: input.mapping,
-        sourceName: input.sourceName, omax: input.omax, axis: input.axis, totals },
+        sourceName: input.sourceName, fallbackBrand, axis: input.axis, totals },
     });
     const records = planned.map(entry => entry.record);
     const { ctx } = await loadProductContext(client, run, [...records, ...records.flatMap(childRecords)]);
@@ -150,12 +151,8 @@ export async function stageCatalogue(owner: CatalogueOwner, input: {
 
 async function applyProfile(ctx: ApplyContext, id: string, row: CatalogueRow) {
   const location = ctx.run.locationId!;
-  let brandId: string | null = null;
   const brand = row.values.brand;
-  if (brand) {
-    const existing = (await listBrands(location)).find(entry => attributeComparisonKey(entry.name) === attributeComparisonKey(brand));
-    brandId = (existing ?? await createBrand(location, { name: brand })).id;
-  }
+  const brandId = brand ? (await ensureBranchBrand(location, brand, ctx.client)).id : null;
   if (brandId || row.values.collection) {
     await updateItemProfile(id, { brandId, collection: row.values.collection }, ctx.client);
   }

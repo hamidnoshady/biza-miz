@@ -8,6 +8,7 @@
  * closed map by kind, never from the request.
  */
 import { query } from "./db";
+import { notCarryForwardSnapshotSql } from "./carry-forward-exclusion";
 import { isValidIsoDate } from "./iso-date";
 import { getBusinessIndustry } from "./industry-guard";
 import {
@@ -79,6 +80,7 @@ export async function getAccountDimensionMatrix(
               COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
+           AND ${notCarryForwardSnapshotSql("je")}
          JOIN accounts a ON a.id = jl.account_id AND a.business_id = $1
         WHERE je.entry_date >= $2::date AND je.entry_date <= $3::date
           AND ($4::text IS NULL OR a.type::text = $4::text)
@@ -151,6 +153,7 @@ export async function getProfitAndLossByDimension(
               COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
+           AND ${notCarryForwardSnapshotSql("je")}
          JOIN accounts a ON a.id = jl.account_id AND a.business_id = $1
         WHERE je.entry_date >= $2::date AND je.entry_date <= $3::date
           AND a.type::text IN ('revenue', 'expense')
@@ -213,6 +216,7 @@ export async function getDimensionRollup(
                      ELSE jl.credit - jl.debit END), 0)::text AS amount
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
+           AND ${notCarryForwardSnapshotSql("je")}
          JOIN accounts a ON a.id = jl.account_id AND a.business_id = $1
         WHERE je.entry_date >= $2::date AND je.entry_date <= $3::date
         GROUP BY jl.${column}`,

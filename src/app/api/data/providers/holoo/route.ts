@@ -15,7 +15,9 @@ import { finishProviderImportJob, markProviderImportJobRolledBack, startProvider
 import {
   applyHolooBaseMigration,
   HOLOO_WORKBOOK_SCOPES,
+  holooNeedsReconciliation,
   previewHolooBaseMigration,
+  stageHolooBaseToReconciliation,
   unresolvedHolooStockReferences,
   holooBaseInputFingerprint,
   validateHolooScopes,
@@ -199,7 +201,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ ok: true, runId, reverted: result.reverted });
   }
 
-  if (action !== "preview" && action !== "apply") return NextResponse.json({ error: "unknown_action" }, { status: 400 });
+  if (action !== "preview" && action !== "apply" && action !== "reconcile") {
+    return NextResponse.json({ error: "unknown_action" }, { status: 400 });
+  }
   const scopeInput = stringArray(body.scopes);
   const scopeValidation = validateHolooScopes(scopeInput);
   if (!scopeValidation.ok) return NextResponse.json({ error: scopeValidation.error }, { status: 400 });
@@ -261,9 +265,38 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         previewToken: issueHolooPreviewToken(tokenClaims),
       });
     }
+    if (action === "reconcile") {
+      const staged = await stageHolooBaseToReconciliation({
+        businessId: owner.businessId,
+        connectionId,
+        actorUserId: owner.actorUserId,
+        actorName: owner.actorName,
+        scopes: scopeValidation.scopes,
+        base,
+        source: "connected_sql",
+        locationId: targetLocationId,
+      });
+      return NextResponse.json({ ok: true, provider: "holoo", source: "connected_sql", ...staged });
+    }
     const previewToken = typeof body.previewToken === "string" ? body.previewToken : "";
     if (!verifyHolooPreviewToken(previewToken, tokenClaims)) {
       return NextResponse.json({ error: "preview_expired_or_changed" }, { status: 409 });
+    }
+    if (
+      body.skipReconciliation !== true &&
+      (await holooNeedsReconciliation(owner.businessId, connectionId, scopeValidation.scopes, targetLocationId))
+    ) {
+      const staged = await stageHolooBaseToReconciliation({
+        businessId: owner.businessId,
+        connectionId,
+        actorUserId: owner.actorUserId,
+        actorName: owner.actorName,
+        scopes: scopeValidation.scopes,
+        base,
+        source: "connected_sql",
+        locationId: targetLocationId,
+      });
+      return NextResponse.json({ error: "reconciliation_required", ...staged }, { status: 409 });
     }
     const unresolvedGoodsReferences = unresolvedHolooStockReferences({
       goods: scopeValidation.scopes.includes("goods") ? source.input.goods : [],
@@ -359,7 +392,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       );
     }
     const code = caught instanceof Error ? caught.message.split(":", 1)[0] : "holoo_transfer_failed";
-    const known = new Set(["holoo_connection_not_found", "unresolved_references", "holoo_source_too_large"]);
-    return NextResponse.json({ error: known.has(code) ? code : "holoo_transfer_failed" }, { status: 400 });
+    const known = new Set(["holoo_connection_not_found", "unresolved_references", "holoo_source_too_large", "reconciliation_required"]);
+    return NextResponse.json({ error: known.has(code) ? code : "holoo_transfer_failed" }, { status: code === "reconciliation_required" ? 409 : 400 });
   }
 });

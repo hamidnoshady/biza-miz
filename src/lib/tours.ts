@@ -530,6 +530,15 @@ export const TOURS: readonly TourDefinition[] = [
         body:
           "«دریافت وجه و تکمیل» سفارش را وارد مرحلهٔ پرداخت می‌کند که روش دریافت و انعام آنجا انتخاب می‌شود. «ثبت سفارش باز» سفارش را بدون دریافت وجه ثبت می‌کند. اگر میز یا آدرس لازم باشد، دکمه همان را از شما می‌خواهد. تور هیچ‌کدام را نمی‌زند.",
       },
+      {
+        id: "order-created",
+        kind: "action",
+        anchor: TOUR_ANCHORS.posInvoiceSubmit,
+        verifier: "order.created",
+        title: "سفارش را ثبت کنید",
+        body:
+          "دکمهٔ «دریافت وجه و تکمیل» یا «ثبت سفارش باز» را بزنید. وقتی سرور سفارش را تأیید کند، این مرحله خودکار کامل می‌شود. تور هرگز دکمهٔ ثبت را نمی‌زند.",
+      },
     ],
   },
   {
@@ -574,6 +583,15 @@ export const TOURS: readonly TourDefinition[] = [
         eligibility: { industries: BARCODE_INDUSTRIES },
       },
       ...INVOICE_TAIL_STEPS,
+      {
+        id: "order-created",
+        kind: "action",
+        anchor: TOUR_ANCHORS.posInvoiceSubmit,
+        verifier: "order.created",
+        title: "فاکتور را ثبت کنید",
+        body:
+          "دکمهٔ «ثبت فاکتور» را ۲ ثانیه نگه دارید و فاکتور را ثبت کنید. وقتی سرور ثبت فاکتور را تأیید کند، این مرحله خودکار کامل می‌شود. تور هرگز دکمهٔ ثبت را نمی‌زند.",
+      },
     ],
   },
   {
@@ -609,6 +627,15 @@ export const TOURS: readonly TourDefinition[] = [
           "شرح کار، تعداد، قیمت واحد، تخفیف، درصد مالیات و حساب درآمد را وارد کنید؛ پیش‌نمایش قیمت با همان محاسبه‌ای نشان داده می‌شود که هنگام ثبت به‌کار می‌رود. خدمت موجودی کالا ندارد.",
       },
       ...INVOICE_TAIL_STEPS,
+      {
+        id: "order-created",
+        kind: "action",
+        anchor: TOUR_ANCHORS.posInvoiceSubmit,
+        verifier: "order.created",
+        title: "صورتحساب را ثبت کنید",
+        body:
+          "دکمهٔ «ثبت فاکتور» را ۲ ثانیه نگه دارید و صورتحساب را ثبت کنید. وقتی سرور ثبت را تأیید کند، این مرحله خودکار کامل می‌شود. تور هرگز دکمهٔ ثبت را نمی‌زند.",
+      },
     ],
   },
   {
@@ -879,6 +906,15 @@ export const TOURS: readonly TourDefinition[] = [
         title: "ثبت محصول",
         body:
           "«ثبت محصول» فرم را ذخیره می‌کند و «ذخیره پیش‌نویس و فرم جدید» فرم را بدون ثبت کنار می‌گذارد. این تور هیچ‌کدام را نمی‌زند.",
+      },
+      {
+        id: "save-verified",
+        kind: "action",
+        anchor: TOUR_ANCHORS.productNewSave,
+        verifier: "product.created",
+        title: "محصول را ثبت کنید",
+        body:
+          "دکمهٔ «ثبت محصول» را بزنید و محصول را در آنبار ثبت کنید. وقتی سرور ثبت محصول را تأیید کند، این مرحله خودکار کامل می‌شود. تور هرگز دکمهٔ ثبت را نمی‌زند.",
       },
     ],
   },

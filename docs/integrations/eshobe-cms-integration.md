@@ -542,3 +542,29 @@ Refund/cancel-after-import is not part of Phase G; no `order.refunded` ingest ye
 The one-way Accounting → CMS café menu projection, its connection-scoped
 maps/outbox, companion #196 wire contract and withdrawal/retry rules are
 documented in [eshobe-cms-menu-projection.md](./eshobe-cms-menu-projection.md).
+
+## Table QR identity (ESH-147)
+
+A café prints one QR per physical table. The QR carries **no uuid** — only an
+opaque, rotatable token (`tqr_` + 192 random bits) in the site's menu URL
+(`https://<site-domain>/menu?tableToken=…`). Biza resolves that token to the one
+tenant/site/location/table that printed it, so the CMS checkout never has to
+choose a business or a table.
+
+| Piece | Where |
+|---|---|
+| Token store | `table_qr_tokens` (migration 0297) — SHA-256 lookup key, AES-GCM ciphertext for reprinting, `active`/`rotated`/`revoked`, one active row per table |
+| Staff generate / read / revoke | `GET/POST/DELETE /api/tables/[id]/qr` — `tables.manage` to read and download, `tables.edit` to generate/rotate/revoke; audited as `table.qr_generated`, `table.qr_rotated`, `table.qr_revoked` |
+| Staff rotate | `POST /api/tables/[id]/qr/rotate` — retires the old print in the same transaction |
+| Print | `GET /api/tables/[id]/qr/image` (`format=png` or `format=svg`, plus `download=1`) — the only place the raw token leaves the server, as pixels |
+| Public resolve | `GET /api/public/table-qr/[token]?siteId=…` — session-less, per-IP rate-limited in middleware, answers a display name + the CMS site id only |
+| Intake seam | `resolveTableQrTokenForOrder()` / `createDineInOrderFromTableQr()` in `src/lib/table-qr-service.ts` — ESH-150/cms#197 supplies `order.tableToken`; #1304 resolves it and calls the shared `createOrder()` |
+| Entitlement | `dine_in` (migration 0297), separate from `reservations`: table service works with reservations switched off, and `/api/tables`, `/api/floor` and `/accounting/floor` are gated on **either** |
+
+Refusals are deliberate and distinct: rotated/revoked prints are `410`, a
+cleaning or out-of-service table is `409`, a disabled `dine_in` entitlement is
+`403`, and unknown/malformed tokens (including another site's token) are the
+same `404` so the endpoint cannot be used to enumerate prints. A token resolves
+only inside the business that owns the signed CMS connection; a body-supplied
+`tableId` is never forwarded to `createOrder()`, and orders on the same table
+share the visit `table_sessions` row — paying one does not free the table.

@@ -348,6 +348,8 @@ export interface VehicleDetail {
   wholesalePriceRial: number | null;
   promotionalPriceRial: number | null;
   priceChangedAt: string | null;
+  /** Decimal bigint text, incremented whenever any native vehicle price changes. */
+  priceRevision: string;
   soldOrderId: string | null;
   soldCustomerId: string | null;
   soldOn: string | null;
@@ -407,6 +409,7 @@ interface VehicleRow {
   wholesale_price_rial: string | null;
   promotional_price_rial: string | null;
   price_changed_at: string | null;
+  price_revision: string;
   sold_order_id: string | null;
   sold_customer_id: string | null;
   sold_on: string | null;
@@ -430,7 +433,7 @@ const VEHICLE_SELECT = `
          v.asking_price_rial::text AS asking_price_rial, v.minimum_price_rial::text AS minimum_price_rial,
          v.wholesale_price_rial::text AS wholesale_price_rial,
          v.promotional_price_rial::text AS promotional_price_rial,
-         v.price_changed_at::text AS price_changed_at, v.sold_order_id, v.sold_customer_id,
+         v.price_changed_at::text AS price_changed_at, v.price_revision::text AS price_revision, v.sold_order_id, v.sold_customer_id,
          v.sold_on::text AS sold_on, v.sale_price_rial::text AS sale_price_rial,
          v.frozen_effective_cost_rial::text AS frozen_effective_cost_rial,
          v.created_at::text AS created_at, v.updated_at::text AS updated_at,
@@ -501,6 +504,7 @@ function mapVehicle(row: VehicleRow, costs: VehicleCostRow[] = []): VehicleDetai
     wholesalePriceRial: row.wholesale_price_rial == null ? null : Number(row.wholesale_price_rial),
     promotionalPriceRial: row.promotional_price_rial == null ? null : Number(row.promotional_price_rial),
     priceChangedAt: row.price_changed_at,
+    priceRevision: row.price_revision,
     soldOrderId: row.sold_order_id,
     soldCustomerId: row.sold_customer_id,
     soldOn: row.sold_on,
@@ -1088,6 +1092,8 @@ export interface UpdateVehiclePriceInput {
   minimumPriceRial?: number | null;
   wholesalePriceRial?: number | null;
   promotionalPriceRial?: number | null;
+  /** Optional compare-and-swap token from the native vehicle detail. */
+  expectedPriceRevision?: string;
   reason?: string | null;
   actorId?: string | null;
 }
@@ -1105,6 +1111,12 @@ export async function updateVehiclePrice(
   await lockVehicleAtBranch(client, input.businessId, input.serialId, input.locationId);
   const vehicle = await getVehicle(input.businessId, input.serialId, client, { locationId: input.locationId });
   if (!vehicle) throw new VehicleError("vehicle_not_found", "خودرو یافت نشد.", 404);
+  // Check the native price revision after locking the car, so a stale preview
+  // cannot overwrite a concurrent update, even when the numeric price returned
+  // to an earlier value. Legacy callers that omit the token keep their contract.
+  if (input.expectedPriceRevision !== undefined && input.expectedPriceRevision !== vehicle.priceRevision) {
+    throw new VehicleError("price_conflict", "قیمت خودرو از زمان بررسی تغییر کرده است؛ دوباره بارگذاری و بررسی کنید.", 409);
+  }
   if (vehicle.state === "archived") {
     throw new VehicleError("vehicle_archived", "خودروی بایگانی‌شده قابل قیمت‌گذاری نیست.", 409);
   }
@@ -1145,7 +1157,7 @@ export async function updateVehiclePrice(
     `UPDATE automotive_vehicle_attributes
         SET asking_price_rial = $2, minimum_price_rial = $3, wholesale_price_rial = $4,
             promotional_price_rial = $5, price_changed_at = now(), price_changed_by = $6,
-            updated_at = now()
+            price_revision = price_revision + 1, updated_at = now()
       WHERE business_id = $7 AND serial_id = $1 AND location_id = $8`,
     [input.serialId, askingPrice, minimumPrice, wholesale, promotional, input.actorId ?? null, input.businessId, input.locationId],
   );

@@ -81,6 +81,7 @@ import { AecProcurementTab } from "./procurement-panel";
 import { AecReportsTab } from "./reports-panel";
 import { AecVariationsTab } from "./variations-panel";
 import { AecCertificatesTab } from "./certificates-panel";
+import { AgencyReservationsPanel } from "./agency-reservations-panel";
 import { AgencyTimePanel } from "./agency-time-panel";
 import { AgencyVendorPurchases } from "./agency-vendor-purchases";
 import { AgencyBillingCard } from "./agency-billing-panel";
@@ -449,6 +450,7 @@ export function ProjectDetail({ projectId, canRecordVendorCost = false, canPickV
           />
           <CalendarSection lookups={lookups} canManage={canContribute} projectId={projectId} />
           {lookups.agencyCommercial ? <AgencyTimePanel key={projectId} projectId={projectId}/> : null}
+          {lookups.agencyCommercial ? <AgencyReservationsPanel key={projectId} projectId={projectId}/> : null}
           </div>
         ) : null}
 
