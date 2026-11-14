@@ -9,6 +9,8 @@ type Row = { id: string; site_label: string; city: string; neighborhood: string;
 type TargetList = { targets: Row[]; hasMore: boolean };
 type Locations = { locations: { id: string; name: string }[] };
 type Party = { id: string; displayName: string };
+type Duplicate = { id: string; site_label: string; city: string; neighborhood: string; status: "active" | "archived"; party_linked: boolean };
+type Review = { signature: string; candidates: Duplicate[]; hasMore: boolean; reviewToken: string };
 
 export function MarketingTargetsSection({ canManage, canCreate }: { canManage: boolean; canCreate: boolean }) {
   const [data, setData] = useState<TargetList | null>(null);
@@ -23,6 +25,9 @@ export function MarketingTargetsSection({ canManage, canCreate }: { canManage: b
   const [city, setCity] = useState(""); const [neighborhood, setNeighborhood] = useState("");
   const [partyQuery, setPartyQuery] = useState(""); const [parties, setParties] = useState<Party[]>([]); const [partySearched, setPartySearched] = useState(false);
   const [selected, setSelected] = useState<Party | null>(null); const [busy, setBusy] = useState(false);
+  const [review, setReview] = useState<Review | null>(null);
+  const payload = { locationId, siteLabel, city, neighborhood, partyId: selected?.id ?? null };
+  const signature = JSON.stringify(payload);
   const requestSequence = useRef(0); const partySequence = useRef(0);
   const load = useCallback(async () => {
     const seq = ++requestSequence.current; setData(null); setError("");
@@ -43,13 +48,21 @@ export function MarketingTargetsSection({ canManage, canCreate }: { canManage: b
     if (seq !== partySequence.current) return;
     if (!result.ok) setFormError("جست‌وجوی اشخاص ممکن نشد."); else { setParties(result.data.parties); setPartySearched(true); }
   }
-  async function submit(e: React.FormEvent) {
-    e.preventDefault(); setBusy(true); setFormError("");
-    const res = await api("/api/growth/marketing-targets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ locationId, siteLabel, city, neighborhood, partyId: selected?.id ?? null }) });
+  async function submitTarget(reviewToken?: string) {
+    if (reviewToken && (!review || review.signature !== signature)) { setReview(null); setFormError("اطلاعات تغییر کرده است؛ دوباره ثبت را شروع کنید."); return; }
+    const submittedSignature = signature;
+    setBusy(true); setFormError(""); setReview(null);
+    const res = await api<{ error?: string; candidates?: Duplicate[]; hasMore?: boolean; reviewToken?: string }>("/api/growth/marketing-targets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, ...(reviewToken ? { reviewToken } : {}) }) });
     setBusy(false);
-    if (!res.ok) { setFormError("ثبت مقصد ممکن نشد؛ شعبه و شخص انتخاب‌شده را بررسی کنید."); return; }
+    if (!res.ok) {
+      if (res.data?.error === "possible_duplicate_target" && Array.isArray(res.data.candidates) && typeof res.data.reviewToken === "string") {
+        setReview({ signature: submittedSignature, candidates: res.data.candidates, hasMore: Boolean(res.data.hasMore), reviewToken: res.data.reviewToken });
+      } else setFormError(res.data?.error === "target_review_changed" ? "نتیجهٔ بررسی تغییر کرده است؛ دوباره ثبت را شروع کنید." : "ثبت مقصد ممکن نشد؛ شعبه و شخص انتخاب‌شده را بررسی کنید.");
+      return;
+    }
     setSiteLabel(""); setCity(""); setNeighborhood(""); setSelected(null); setParties([]); setPartySearched(false); setPartyQuery(""); await load();
   }
+  function submit(e: React.FormEvent) { e.preventDefault(); void submitTarget(); }
   async function change(row: Row, payload: object) {
     setBusy(true); setError("");
     const res = await api<{ error?: string }>(`/api/growth/marketing-targets/${encodeURIComponent(row.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, expectedRevision: row.revision }) });
@@ -95,6 +108,12 @@ export function MarketingTargetsSection({ canManage, canCreate }: { canManage: b
         {partySearched && parties.length === 0 ? <p role="status">شخصی یافت نشد.</p> : null}
         {parties.length > 0 ? <Field label="انتخاب شخص"><select className={inputClass} value={selected?.id ?? ""} onChange={(e) => setSelected(parties.find((p) => p.id === e.target.value) ?? null)}><option value="">بدون شخص مرتبط</option>{parties.map((p) => <option key={p.id} value={p.id}>{p.displayName}</option>)}</select></Field> : null}
         {selected ? <p>شخص انتخاب‌شده: {selected.displayName}</p> : null}
+        {review && review.signature === signature ? <div role="status">
+          <p>مقصدهای هم‌نام در این شعبه یافت شد. هم‌نامی لزوماً به معنی تکراری بودن نیست؛ پیش از ادامه بررسی کنید.</p>
+          <ul>{review.candidates.map((candidate) => <li key={candidate.id}>{candidate.site_label} — {candidate.city || "—"} — {candidate.neighborhood || "—"} — {candidate.status === "active" ? "فعال" : "بایگانی‌شده"} — {candidate.party_linked ? "شخص متصل" : "بدون شخص"}</li>)}</ul>
+          {review.hasMore ? <p>موارد بیشتری وجود دارد که در این فهرست نمایش داده نشده‌اند.</p> : null}
+          <Button type="button" variant="outline" disabled={busy} onClick={() => void submitTarget(review.reviewToken)}>بررسی کردم، ثبت مقصد جدید</Button>
+        </div> : null}
         <Button type="submit" disabled={busy}>{busy ? "در حال ثبت…" : "ثبت مقصد"}</Button>
       </form>}
     </SectionCard> : null}

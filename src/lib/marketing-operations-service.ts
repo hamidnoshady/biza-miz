@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { query, withTenantTransaction } from "./db";
-import { parseTransition, type AssignmentInput, type AssignmentStatus, type AssignmentPriority, type PriorityChange, type TargetInput, type TargetChange, type TargetStatus } from "./marketing-operations";
+import { LOCK_KEYS, lockIdsFor } from "./db-locks";
+import { parseTransition, type AssignmentInput, type AssignmentStatus, type AssignmentPriority, type AssignmentPlanFilter, type PriorityChange, type TargetInput, type TargetChange, type TargetStatus } from "./marketing-operations";
 import { branchScopeSql } from "./location-access";
 
 function escaped(search: string) { return search.replace(/[\\%_]/g, "\\$&"); }
@@ -19,23 +21,47 @@ export async function listTargets(businessId: string, locations: string[], searc
       ORDER BY t.created_at DESC, t.id DESC LIMIT 21 OFFSET $4`, [businessId, locations, escaped(search), (page-1)*20, status]);
   return { targets: rows.slice(0,20), hasMore: rows.length > 20 };
 }
+type DuplicateCandidate = { id: string; site_label: string; city: string; neighborhood: string; status: TargetStatus; revision: number; party_linked: boolean };
+/** An informational, branch-scoped review; this is not a CRM identity match. */
+export class DuplicateTargetReview extends Error {
+  constructor(public candidates: DuplicateCandidate[], public hasMore: boolean, public reviewToken: string) {
+    super("possible_duplicate_target");
+  }
+}
+export class TargetReviewChanged extends Error { constructor() { super("target_review_changed"); } }
+async function lockTargetReview(businessId: string) {
+  const lock = lockIdsFor(LOCK_KEYS.marketingTargetReview(businessId));
+  await query(`SELECT pg_advisory_xact_lock($1,$2)`, [lock.classId,lock.objectId]);
+}
 export async function createTarget(businessId: string, actor: string, locations: string[], input: TargetInput) {
   if (!locations.includes(input.locationId)) return null;
   return withTenantTransaction(businessId, async () => {
+    await lockTargetReview(businessId);
     const location = await query(`SELECT id FROM locations WHERE business_id=$1 AND id=$2 AND is_active FOR SHARE`, [businessId, input.locationId]);
     if (!location.rowCount) return null;
     if (input.partyId) {
       const party = await query(`SELECT id FROM parties WHERE business_id=$1 AND id=$2 AND is_active AND merged_into_id IS NULL FOR SHARE`, [businessId, input.partyId]);
       if (!party.rowCount) return null;
     }
+    // Only exact, case-insensitive labels in the same internal branch are
+    // considered. Archived sites also need review; location/party details do
+    // not prove identity. The bounded snapshot is rechecked on confirmation.
+    const matches = await query<DuplicateCandidate>(`SELECT id, site_label, city, neighborhood, status, revision, (party_id IS NOT NULL) AS party_linked
+      FROM marketing_targets WHERE business_id=$1 AND location_id=$2 AND lower(btrim(site_label))=lower(btrim($3))
+      ORDER BY id LIMIT 21 FOR SHARE`, [businessId,input.locationId,input.siteLabel]);
+    const candidates = matches.rows.slice(0,20), hasMore = matches.rows.length > 20;
+    const token = createHash("sha256").update(JSON.stringify({ businessId, actor, locationId: input.locationId, partyId: input.partyId, siteLabel: input.siteLabel, city: input.city, neighborhood: input.neighborhood, matches: matches.rows })).digest("hex");
+    if (!matches.rows.length && input.reviewToken) throw new TargetReviewChanged();
+    if (matches.rows.length && input.reviewToken !== token) throw new DuplicateTargetReview(candidates, hasMore, token);
     const { rows } = await query<{ id: string }>(`INSERT INTO marketing_targets (business_id, location_id, party_id, site_label, city, neighborhood, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [businessId,input.locationId,input.partyId,input.siteLabel,input.city,input.neighborhood,actor]);
-    await audit(businessId,input.locationId,actor,"growth.marketing_target_created","marketing_target",rows[0].id,{ partyId: input.partyId });
+    await audit(businessId,input.locationId,actor,"growth.marketing_target_created","marketing_target",rows[0].id,{ partyId: input.partyId, ...(matches.rows.length ? { duplicateReview: { candidates: candidates.map(({ id, revision }) => ({ id, revision })), hasMore } } : {}) });
     return rows[0];
   });
 }
 /** Edit a site or change its lifecycle; the CRM party and branch never change here. */
 export async function changeTarget(businessId: string, actor: string, locations: string[], id: string, change: TargetChange) {
   return withTenantTransaction(businessId, async () => {
+    await lockTargetReview(businessId);
     const { rows } = await query<{ location_id: string; status: TargetStatus; revision: number; site_label: string; city: string; neighborhood: string }>(
       `SELECT t.location_id, t.status, t.revision, t.site_label, t.city, t.neighborhood FROM marketing_targets t
         JOIN locations l ON l.business_id=t.business_id AND l.id=t.location_id
@@ -62,7 +88,8 @@ export async function changeTarget(businessId: string, actor: string, locations:
   });
 }
 
-export async function listAssignments(businessId: string, locations: string[], search: string, page: number, priority: AssignmentPriority | null = null) {
+export async function listAssignments(businessId: string, locations: string[], search: string, page: number, priority: AssignmentPriority | null = null, plan?: AssignmentPlanFilter) {
+  const order = plan?.sort === "due_asc" ? "x.due_date ASC NULLS LAST, x.created_at DESC, x.id DESC" : "x.created_at DESC, x.id DESC";
   const { rows } = await query<{ id: string; title: string; status: AssignmentStatus; priority: AssignmentPriority; priority_revision: number; due_date: string | null; target: string; agent: string; location_name: string }>(
     `SELECT x.id, x.title, x.status, x.priority, x.priority_revision, x.due_date::text AS due_date, t.site_label AS target,
        CASE WHEN a.user_id IS NULL THEN a.display_name ELSE u.full_name END AS agent, l.name AS location_name
@@ -73,7 +100,10 @@ export async function listAssignments(businessId: string, locations: string[], s
        JOIN locations l ON l.id=x.location_id AND l.business_id=x.business_id
       WHERE x.business_id=$1 AND x.location_id=ANY($2::uuid[]) AND x.title ILIKE '%' || $3 || '%' ESCAPE '\\'
         AND ($5::text IS NULL OR x.priority=$5)
-      ORDER BY x.created_at DESC, x.id DESC LIMIT 21 OFFSET $4`, [businessId, locations, escaped(search), (page-1)*20, priority]);
+        AND ($6::text IS NULL OR x.status=$6)
+        AND ($7::date IS NULL OR x.due_date >= $7::date)
+        AND ($8::date IS NULL OR x.due_date <= $8::date)
+      ORDER BY ${order} LIMIT 21 OFFSET $4`, [businessId, locations, escaped(search), (page-1)*20, priority, plan?.status ?? null, plan?.dueFrom ?? null, plan?.dueTo ?? null]);
   return { assignments: rows.slice(0,20), hasMore: rows.length > 20 };
 }
 export async function assignmentOptions(businessId: string, locations: string[], branchId: string | null, targetSearch = "", targetPage = 1, agentSearch = "", agentPage = 1) {
@@ -131,7 +161,8 @@ export async function transitionAssignment(businessId: string, actor: string, lo
 }
 
 /** Own work only: identity is resolved by the authenticated membership, not the request. */
-export async function listOwnAssignments(businessId: string, actor: string, locations: string[], search: string, page: number, priority: AssignmentPriority | null = null) {
+export async function listOwnAssignments(businessId: string, actor: string, locations: string[], search: string, page: number, priority: AssignmentPriority | null = null, plan?: AssignmentPlanFilter) {
+  const order = plan?.sort === "due_asc" ? "x.due_date ASC NULLS LAST, x.created_at DESC, x.id DESC" : "x.created_at DESC, x.id DESC";
   const { rows } = await query<{ id: string; title: string; status: AssignmentStatus; priority: AssignmentPriority; due_date: string | null; target: string; location_name: string }>(
     `SELECT x.id, x.title, x.status, x.priority, x.due_date::text AS due_date, t.site_label AS target, l.name AS location_name
        FROM marketing_assignments x
@@ -144,8 +175,11 @@ export async function listOwnAssignments(businessId: string, actor: string, loca
         AND l.is_active AND ${branchScopeSql({ alias: "u", locationParam: "x.location_id" })}
         AND x.title ILIKE '%' || $4 || '%' ESCAPE '\\'
         AND ($6::text IS NULL OR x.priority=$6)
-      ORDER BY x.created_at DESC, x.id DESC LIMIT 21 OFFSET $5`,
-    [businessId, locations, actor, escaped(search), (page-1)*20, priority]);
+        AND ($7::text IS NULL OR x.status=$7)
+        AND ($8::date IS NULL OR x.due_date >= $8::date)
+        AND ($9::date IS NULL OR x.due_date <= $9::date)
+      ORDER BY ${order} LIMIT 21 OFFSET $5`,
+    [businessId, locations, actor, escaped(search), (page-1)*20, priority, plan?.status ?? null, plan?.dueFrom ?? null, plan?.dueTo ?? null]);
   return { assignments: rows.slice(0,20), hasMore: rows.length > 20 };
 }
 
