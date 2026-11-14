@@ -27,8 +27,9 @@ describe("/platform/ai ownership boundary", () => {
 
   it("separates configuration readiness from live probe state and preserves the last probe", () => {
     const page = readFileSync("src/app/platform/ai/page.tsx", "utf8");
-    expect(page).toContain("Gateway configuration:");
-    expect(page).toContain("Gateway connection:");
+    expect(page).toContain("وضعیت اجرای پلتفرم");
+    expect(page).toContain("readinessText(data?.runtimeReadiness)");
+    expect(page).toContain('status.ok ? "تست اتصال موفق بود" : gatewayProbeErrorFa(status)');
     expect(page).toContain("status: result.data.status ?? current.status");
   });
 
