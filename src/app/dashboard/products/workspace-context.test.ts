@@ -130,7 +130,7 @@ describe("retail label gallery gate", () => {
   });
   it.each(["jewelry", "watch", "accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery", "automotive"] as const)("admits %s with its native read permission", async (industry) => {
     vi.mocked(getBusinessIndustry).mockResolvedValue(industry);
-    expect(await requireRetailLabels()).toEqual({ industry, canManage: false, canPrint: false, canViewLegacyWeight: false, canEditLegacyWeight: false });
+    expect(await requireRetailLabels()).toEqual({ industry, canManage: false, canPrint: false, canAssignBarcode: false, locationId: null, canViewLegacyWeight: false, canEditLegacyWeight: false });
   });
   it.each(["food_service", "service_saas", "architecture_construction", "advertising_agency"] as const)("excludes %s", async (industry) => {
     vi.mocked(getBusinessIndustry).mockResolvedValue(industry);
@@ -141,7 +141,19 @@ describe("retail label gallery gate", () => {
     vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.settingsManage, PERMISSIONS.printingExecute]) });
     await expect(requireRetailLabels()).rejects.toThrow("redirect:/accounting/overview");
     vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.vehiclesView, PERMISSIONS.settingsManage]) });
-    expect(await requireRetailLabels()).toEqual({ industry: "automotive", canManage: true, canPrint: false, canViewLegacyWeight: false, canEditLegacyWeight: false });
+    expect(await requireRetailLabels()).toEqual({ industry: "automotive", canManage: true, canPrint: false, canAssignBarcode: false, locationId: null, canViewLegacyWeight: false, canEditLegacyWeight: false });
+  });
+  it("resolves printing permission independently of catalogue read and settings", async () => {
+    vi.mocked(getBusinessIndustry).mockResolvedValue("watch");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.printingExecute]) });
+    expect(await requireRetailLabels()).toMatchObject({ canPrint: true, canManage: false });
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.settingsManage]) });
+    expect(await requireRetailLabels()).toMatchObject({ canPrint: false, canManage: true });
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.printingExecute]) });
+    await expect(requireRetailLabels()).rejects.toThrow("redirect:/accounting/overview");
+    vi.mocked(memberAccessFor).mockResolvedValue({ role: "manager", isActive: true, permissions: new Set([PERMISSIONS.inventoryView, PERMISSIONS.inventoryAdjust]) });
+    vi.mocked(resolveActiveLocation).mockResolvedValue({ id: "branch" } as never);
+    expect(await requireRetailLabels()).toMatchObject({ canPrint: false, canAssignBarcode: true, locationId: "branch" });
   });
   it("exposes legacy patterns only to variant users with the weight API read permissions", async () => {
     vi.mocked(getBusinessIndustry).mockResolvedValue("cosmetics");

@@ -18,6 +18,7 @@ import type { Industry } from "../industries";
 import type { LabelData, LabelField, LabelItem, LabelTrade } from "../label-template";
 import { labelFieldsForTrade } from "../label-template";
 import { formatMoney, type MoneyUnit } from "../money";
+import { formatPersianNumericText, toPersianDigits } from "../digits";
 import { query } from "../db";
 import { loadPrintIdentity } from "./identity";
 
@@ -65,10 +66,18 @@ export async function getLabelPrintData(input: LabelPrintInput): Promise<LabelPr
   if (!barcode) return null;
 
   const { business, currencyUnit } = await loadPrintIdentity(input.businessId, input.locationId);
-  const fields =
-    item.source === "inventory"
-      ? unitFields(item.unit)
-      : tradeFields(item, await itemLabelFacts(item.id), currencyUnit, await industryOf(input.businessId));
+  let fields: LabelField[];
+  if (item.source === "inventory") fields = unitFields(item.unit);
+  else {
+    const industry = await industryOf(input.businessId);
+    const [common, specialist] = await Promise.all([
+      // Variant stock prices are not the jewelry piece's calculated sale price
+      // or an individual watch unit's negotiated price. Do not print them.
+      industry === "jewelry" || industry === "watch" ? Promise.resolve({}) : itemLabelFacts(item.id),
+      specialistLabelFacts(item.id, input.locationId, industry),
+    ]);
+    fields = tradeFields(item, { ...common, ...specialist }, currencyUnit, industry);
+  }
 
   return {
     label: {
@@ -138,6 +147,36 @@ async function itemLabelFacts(itemId: string): Promise<Omit<LabelItem, "name">> 
     shade: attributes[0]?.value ?? null,
     expiryDate: batches[0]?.expiry_date ?? null,
   };
+}
+
+/**
+ * Only model/piece facts tied to the same branch and item may reach paper.
+ * An item barcode may also match a watch serial in the POS lookup. Here the
+ * label describes the model only; never pick an arbitrary serial for it.
+ */
+async function specialistLabelFacts(itemId: string, locationId: string, industry: Industry | null): Promise<Partial<LabelItem>> {
+  if (industry === "jewelry") {
+    const { rows } = await query<{ purity: string; net_weight: string }>(
+      `SELECT w.purity, w.net_weight::text AS net_weight
+         FROM item_weight_attributes w JOIN items i ON i.id = w.item_id
+        WHERE i.id = $1 AND i.location_id = $2 AND i.tracking = 'weight'`,
+      [itemId, locationId],
+    );
+    const row = rows[0];
+    if (!row) return {};
+    // Preserve the database's complete numeric precision; never round a gold weight on a label.
+    const weight = row.net_weight.includes(".") ? row.net_weight.replace(/0+$/, "").replace(/\.$/, "") : row.net_weight;
+    return { purity: toPersianDigits(row.purity), weight: `${formatPersianNumericText(weight)} گرم خالص` };
+  }
+  if (industry === "watch") {
+    const { rows } = await query<{ reference_no: string | null }>(
+      `SELECT a.reference_no FROM watch_item_attributes a JOIN items i ON i.id = a.item_id
+        WHERE i.id = $1 AND i.location_id = $2 AND i.tracking = 'serial'`,
+      [itemId, locationId],
+    );
+    return { model: rows[0]?.reference_no ?? null };
+  }
+  return {};
 }
 
 async function industryOf(businessId: string): Promise<Industry | null> {
