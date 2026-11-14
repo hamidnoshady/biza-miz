@@ -1059,7 +1059,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
       lifecycle: ["data.schedule.delete", "data.template.delete"],
       bulk: ["data.import.run"],
     },
-    note: "AP — executors re-run the route's two-key rule (engine key already the MCP capability; entity key + mapping-kind engine re-checked from the caller's membership). Export/import CREATE stay browser-bound on purpose (export streams a file download, import needs an uploaded file); Holoo provider lanes follow in their own batch; historical-invoice customer review and confirmation are route-only and do not execute imports",
+    note: "AP — executors re-run the route's two-key rule (engine key already the MCP capability; entity key + mapping-kind engine re-checked from the caller's membership). Export/import CREATE stay browser-bound on purpose (export streams a file download, import needs an uploaded file); Holoo provider lanes follow in their own batch; historical-invoice customer review and confirmation are route-only and do not execute imports; reconciliation review, cutover and apply are route-only",
     test: "integration/data-transfer.integration.test.ts",
   },
   {
@@ -1170,10 +1170,10 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "knowledge.tours",
     module: "Knowledge base",
     entity: "Guided tours — lookup and the caller's own learning progress (issue #972)",
-    routes: ["knowledge/tours"],
-    note: "a member's own walk-through state on the page they are looking at, written only by the browser overlay; it moves no business data, so an AI client has nothing to operate",
+    routes: ["knowledge/tours", "knowledge/learning-progress"],
+    note: "a member's own walk-through state on the page they are looking at, written only by the browser overlay; aggregate tour + learning-path progress across apps plus current device pairing/trust state; it moves no business data, so an AI client has nothing to operate",
     status: "n/a (infra)",
-    test: "integration/tours.integration.test.ts",
+    test: "integration/tours.integration.test.ts + src/app/api/knowledge/learning-progress/route.test.ts",
   },
   {
     id: "knowledge.learning-paths",

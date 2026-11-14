@@ -25,7 +25,7 @@ export default async function ProductsListPage() {
         description="نمایش و مدیریت محصولات، موجودی، قیمت و اطلاعات فروش."
         actions={<>
           {canEdit && canImport ?
-            <Link className={buttonVariants({ variant: "outline" })} href="/settings/transfer?import=catalogue">ورود از اکسل</Link> : null}
+            <Link className={buttonVariants({ variant: "outline" })} href="/settings/data-transfer?import=catalogue">ورود از اکسل</Link> : null}
           <KnowledgeHelpButton section="pos" />
         </>}
       />

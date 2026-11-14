@@ -585,10 +585,10 @@ describe("XLSX catalogue workflow", () => {
         : { text: value }),
     })),
   });
-  const stageInput = (data: ReturnType<typeof sheet>, axis = "") => ({
+  const stageInput = (data: ReturnType<typeof sheet>, axis = "", fallbackBrand: string | null = "FixtureBrand") => ({
     sheet: data, mapping: { sku: 0, title: 1, price: 2, quantity: 3, drive: 4, case_dimension: 5, band_color: 6,
       parent_sku: 7, parent_title: 8, option: 9 },
-    fileName: "fixture.xlsx", sourceName: "fixtures", fingerprint: randomUUID(), omax: true, axis, duplicateRows: [],
+    fileName: "fixture.xlsx", sourceName: "fixtures", fingerprint: randomUUID(), fallbackBrand, axis, duplicateRows: [],
   });
 
   it("reviews and reapplies a serialized watch model without stock, price or phantom variants", async () => {
@@ -687,4 +687,833 @@ describe("XLSX catalogue workflow", () => {
     });
   });
 
+  it("handles workbook brands, blank-row fallback, branch isolation, and concurrent brand creation safely (#1335)", async () => {
+    const catalogue = await import("../src/lib/data-transfer/catalogue-service");
+    const { ensureBranchBrand } = await import("../src/lib/item-brands-service");
+    const branchA = await seedBusiness("cosmetics", "Brand Branch A");
+    const branchB = await seedBusiness("cosmetics", "Brand Branch B");
+
+    // Pre-create a brand with the same name in another branch/tenant AND one in branch A.
+    const foreignBrand = await db.query<{ id: string }>(
+      `INSERT INTO item_brands (location_id, name) VALUES ($1, 'Casio') RETURNING id`,
+      [branchB.locationId],
+    );
+    const localExistingBrand = await db.query<{ id: string }>(
+      `INSERT INTO item_brands (location_id, name) VALUES ($1, 'Seiko') RETURNING id`,
+      [branchA.locationId],
+    );
+
+    const cols = ["sku", "title", "brand"];
+    const makeSheet = (rows: string[][]) => ({
+      name: "Catalogue",
+      columns: cols,
+      rows: rows.map((values, idx) => ({ number: idx + 2, cells: values.map((text) => ({ text })) })),
+    });
+    const mapping = { sku: 0, title: 1, brand: 2 };
+    const ownerA = { businessId: branchA.id, locationId: branchA.locationId, target: "retail" as const, actor };
+
+    await asBusiness(branchA.id, async () => {
+      const runId = await catalogue.stageCatalogue(ownerA, {
+        sheet: makeSheet([
+          ["B-1", "Item One", "casio"],
+          ["B-2", "Item Two", "SEIKO"],
+          ["B-3", "Item Three", ""],
+          ["B-4", "Item Four", "Citizen"],
+        ]),
+        mapping,
+        fileName: "brands.xlsx",
+        sourceName: "brand-source",
+        fingerprint: randomUUID(),
+        fallbackBrand: "FallbackBrand",
+        duplicateRows: [],
+        axis: "",
+      });
+      const summary = await catalogue.applyCatalogue(ownerA, runId, true);
+      expect(summary.run.status).toBe("applied");
+
+      const items = await db.query<{ sku: string; brand_id: string; brand_name: string }>(
+        `SELECT i.sku, i.brand_id::text, b.name AS brand_name
+           FROM items i
+           JOIN item_brands b ON b.id = i.brand_id
+          WHERE i.location_id = $1
+          ORDER BY i.sku`,
+        [branchA.locationId],
+      );
+      expect(items.rows.map((r) => [r.sku, r.brand_name])).toEqual([
+        ["B-1", "casio"],
+        ["B-2", "Seiko"], // reused existing normalized branch brand!
+        ["B-3", "FallbackBrand"], // blank row got fallback; populated rows kept theirs
+        ["B-4", "Citizen"],
+      ]);
+      // Branch A reused its own Seiko brand, and created its own Casio brand (never branch B's!).
+      expect(items.rows[1].brand_id).toBe(localExistingBrand.rows[0].id);
+      expect(items.rows[0].brand_id).not.toBe(foreignBrand.rows[0].id);
+
+      // Concurrent ensureBranchBrand calls for the same brand name converge cleanly without 23505.
+      const concurrent = await Promise.all([
+        ensureBranchBrand(branchA.locationId, "Omega"),
+        ensureBranchBrand(branchA.locationId, "Omega"),
+        ensureBranchBrand(branchA.locationId, "omega"),
+      ]);
+      expect(new Set(concurrent.map((b) => b.id)).size).toBe(1);
+    });
+  });
+
+});
+
+describe("party, financial document, inventory, rejected remote edits & cutover (#1118)", () => {
+  it("stages parties against encrypted/normalised phones without merging unverified phones or transferring consent", async () => {
+    const { createParty } = await import("../src/lib/parties-service");
+    const biz = await seedBusiness("cosmetics", "Party Rec Biz");
+    const existingCustomer = await asBusiness(biz.id, () =>
+      createParty(biz.id, {
+        displayName: "سارا محمدی",
+        role: "Customer",
+        roles: ["Customer"],
+        phone: "09121112233",
+        email: "sara@example.com",
+      }, { locationId: biz.locationId }),
+    );
+    const supplier = await asBusiness(biz.id, () =>
+      createParty(biz.id, {
+        displayName: "پخش آفتاب",
+        role: "Supplier",
+        roles: ["Supplier"],
+        phone: "09129998877",
+      }, { locationId: biz.locationId }),
+    );
+
+    const run = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "party",
+        sourceKind: "file",
+        provider: "csv",
+        sourceKey: "customers.csv",
+        importMode: "one_time",
+        sourceFingerprint: "party-fp-1",
+        actor,
+      }),
+    );
+
+    await asBusiness(biz.id, () =>
+      svc.stageParties(biz.id, run.id, [
+        {
+          domain: "party",
+          externalId: "C-1",
+          name: "سارا محمدی",
+          phone: "۰۹۱۲۱۱۱۲۲۳۳",
+          role: "customer",
+          consent: { sms: true, marketing: true },
+        },
+        {
+          domain: "party",
+          externalId: "C-2",
+          name: "پخش آفتاب",
+          phone: "09129998877",
+          role: "customer",
+        },
+        {
+          domain: "party",
+          externalId: "C-3",
+          name: "مشتری تازه",
+          phone: "09123334455",
+          role: "customer",
+        },
+      ]),
+    );
+
+    const discovery = await asBusiness(biz.id, () => svc.completePartyDiscovery(biz.id, run.id, actor));
+    expect(discovery.gate.path).toBe("staged");
+
+    const items = await asBusiness(biz.id, () => svc.listItems(biz.id, run.id));
+    const byKey = Object.fromEntries(items.map((i) => [i.externalKey, i]));
+    // Unverified phone is NEVER auto-linked; surfaces candidate for human confirmation + consent warning.
+    expect(byKey["C-1"].outcome).toBe("ambiguous");
+    expect(byKey["C-1"].reasons).toContain("phone_match_unverified");
+    expect(byKey["C-1"].candidates.map((c) => c.id)).toEqual([existingCustomer.id]);
+    expect(byKey["C-1"].notes).toContain("consent_not_transferred");
+
+    // Supplier phone arriving as customer flags role_mismatch.
+    expect(byKey["C-2"].outcome).toBe("ambiguous");
+    expect(byKey["C-2"].reasons).toContain("role_mismatch");
+    expect(byKey["C-2"].candidates.map((c) => c.id)).toEqual([supplier.id]);
+
+    expect(byKey["C-3"].outcome).toBe("create_new");
+
+    await asBusiness(biz.id, () =>
+      svc.decideItem({
+        businessId: biz.id,
+        runId: run.id,
+        itemId: byKey["C-1"].id,
+        decision: "link",
+        canonicalId: existingCustomer.id,
+        reason: "تأیید مشتری تکراری",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () =>
+      svc.decideItem({ businessId: biz.id, runId: run.id, itemId: byKey["C-2"].id, decision: "skip", actor }),
+    );
+    await asBusiness(biz.id, () => svc.approveSafeBatch(biz.id, run.id, actor));
+
+    const runRow = (await asBusiness(biz.id, () => svc.getRunSummary(biz.id, run.id))).run;
+    const handler = svc.createPartyApplyHandler({
+      async create(ctx) {
+        const snap = ctx.item.snapshot as { name: string; phone?: string };
+        const created = await createParty(biz.id, {
+          displayName: snap.name,
+          role: "Customer",
+          roles: ["Customer"],
+          phone: snap.phone ?? null,
+        }, { locationId: biz.locationId });
+        return { canonicalId: created.id };
+      },
+    });
+    const current = {
+      sourceFingerprint: runRow.sourceFingerprint,
+      policyVersion: runRow.policyVersion,
+      canonicalToken: await asBusiness(biz.id, () =>
+        dbLib.withTenantTransaction(biz.id, (client) => svc.partyCanonicalToken(client, runRow)),
+      ),
+    };
+    const applied = await asBusiness(biz.id, () => svc.applyRun({ businessId: biz.id, runId: run.id, handler, current, actor }));
+    expect(applied.run.status).toBe("applied");
+    const cross = await asBusiness(biz.id, () => svc.crossCheckRun(biz.id, run.id));
+    expect(cross).toEqual({ ok: true, problems: [] });
+
+    // Consent remains false on both linked and created parties.
+    const consentRows = await db.query<{ sms_consent: boolean; marketing_consent: boolean }>(
+      `SELECT sms_consent, marketing_consent FROM parties WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(consentRows.rows.every((r) => !r.sms_consent && !r.marketing_consent)).toBe(true);
+  });
+
+  it("matches financial documents conservatively, prevents double-posting, and records cutover & rejected remote edits", async () => {
+    const biz = await seedBusiness("cosmetics", "Fin Inv Rec Biz");
+    // Seed a manual order and an item with stock.
+    const order = await db.query<{ id: string }>(
+      `INSERT INTO orders (location_id, order_number, type, status, total, opened_at)
+       VALUES ($1, 501, 'takeaway', 'completed', 250000, '2026-10-01T10:00:00Z') RETURNING id`,
+      [biz.locationId],
+    );
+    const itemId = await addItem(biz.locationId, "کرم صورت", "SK-10");
+    await db.query(`INSERT INTO item_stock (item_id, quantity, unit_price) VALUES ($1, 10, 50000)`, [itemId]);
+
+    // 1. Financial documents: amount+date alone never auto-links; matching reference is historical_match.
+    const finRun = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "financial_document",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: "woo-fin",
+        importMode: "backfill",
+        sourceFingerprint: "fin-1",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () =>
+      svc.setRunCutoverPolicy(biz.id, finRun.id, { cutoverAuthority: "books", cutoverAt: "2026-10-01T00:00:00Z" }, actor),
+    );
+    await asBusiness(biz.id, () =>
+      svc.stageFinancialDocuments(biz.id, finRun.id, [
+        { domain: "financial_document", externalId: "o-1", kind: "invoice", references: ["501"], totalRial: "250000", currency: "IRR", date: "2026-10-01" },
+        { domain: "financial_document", externalId: "o-2", kind: "invoice", references: ["WEB-999"], totalRial: "250000", currency: "IRR", date: "2026-10-01" },
+      ]),
+    );
+    await asBusiness(biz.id, () => svc.completeFinancialDocumentDiscovery(biz.id, finRun.id, actor));
+    const finItems = await asBusiness(biz.id, () => svc.listItems(biz.id, finRun.id));
+    const byFin = Object.fromEntries(finItems.map((i) => [i.externalKey, i]));
+    expect(byFin["o-1"]).toMatchObject({ outcome: "historical_match", canonicalId: order.rows[0].id, status: "applied" });
+    expect(byFin["o-2"]).toMatchObject({ outcome: "ambiguous", reasons: ["amount_date_only"] });
+
+    // 2. Inventory: snapshot conflict + online_order skipped (never double-relieves).
+    const prodIdentityRun = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: "woo-inv",
+        importMode: "live_link",
+        sourceFingerprint: "prod-inv",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () => svc.stageProducts(biz.id, prodIdentityRun.id, [
+      product("w-10", "کرم صورت", "SK-10", { fields: { stock_quantity: 8 } }),
+    ]));
+    await asBusiness(biz.id, () => svc.completeProductDiscovery(biz.id, prodIdentityRun.id, actor));
+    const stagedProd = (await asBusiness(biz.id, () => svc.listItems(biz.id, prodIdentityRun.id)))[0];
+    // Reject the incoming stock change in favor of canonical: persists in rejected_edits!
+    await asBusiness(biz.id, () =>
+      svc.decideItem({
+        businessId: biz.id,
+        runId: prodIdentityRun.id,
+        itemId: stagedProd.id,
+        decision: "choose_authority",
+        authorityOverrides: { stock_quantity: "canonical" },
+        reason: "موجودی انبار رسمی مرجع است",
+        actor,
+      }),
+    );
+    const prodRunRow = (await asBusiness(biz.id, () => svc.getRunSummary(biz.id, prodIdentityRun.id))).run;
+    const prodToken = await asBusiness(biz.id, () =>
+      dbLib.withTenantTransaction(biz.id, (c) => svc.productCanonicalToken(c, prodRunRow)),
+    );
+    await asBusiness(biz.id, () =>
+      svc.applyRun({
+        businessId: biz.id,
+        runId: prodIdentityRun.id,
+        handler: svc.createProductApplyHandler(),
+        current: {
+          sourceFingerprint: prodRunRow.sourceFingerprint,
+          policyVersion: prodRunRow.policyVersion,
+          canonicalToken: prodToken,
+        },
+        actor,
+      }),
+    );
+    expect(await svc.isRemoteEditSuppressed(biz.id, "woo-inv", "product", "product", "w-10", "stock_quantity", 8)).toBe(true);
+    expect(await svc.isRemoteEditSuppressed(biz.id, "woo-inv", "product", "product", "w-10", "stock_quantity", 7)).toBe(false);
+
+    // Subsequent product run does NOT re-flag the same rejected value (8)!
+    const prodRun2 = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: "woo-inv",
+        importMode: "live_link",
+        sourceFingerprint: "prod-inv-2",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () => svc.stageProducts(biz.id, prodRun2.id, [
+      product("w-10", "کرم صورت", "SK-10", { fields: { stock_quantity: 8 } }),
+    ]));
+    expect((await asBusiness(biz.id, () => svc.listItems(biz.id, prodRun2.id)))[0].outcome).toBe("already_linked");
+
+    // Inventory domain staging: snapshot conflict vs online_order movement skipped.
+    const invRun = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "inventory",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: "woo-inv",
+        importMode: "live_link",
+        sourceFingerprint: "inv-1",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () =>
+      svc.stageInventory(biz.id, invRun.id, [
+        { domain: "inventory", externalId: "snap-1", kind: "snapshot", productExternalId: "w-10", quantity: "8" },
+        { domain: "inventory", externalId: "mov-1", kind: "movement", productExternalId: "w-10", quantity: "-1", cause: "online_order" },
+      ]),
+    );
+    await asBusiness(biz.id, () => svc.completeInventoryDiscovery(biz.id, invRun.id, actor));
+    const invItems = await asBusiness(biz.id, () => svc.listItems(biz.id, invRun.id));
+    expect(invItems.find((i) => i.externalKey === "snap-1")?.outcome).toBe("field_conflict");
+    expect(invItems.find((i) => i.externalKey === "mov-1")?.outcome).toBe("skipped");
+  });
+
+  it("gates Data Transfer, Holoo, and WooCommerce product sync via staged reconciliation runs and applies via domain handlers", async () => {
+    const biz = await seedBusiness("cosmetics", "Entry Gate Biz");
+    const existingItemId = await addItem(biz.locationId, "عطر رز", "SKU-ROSE-1");
+    await db.query(`INSERT INTO item_stock (item_id, quantity, unit_price) VALUES ($1, 5, 100000)`, [existingItemId]);
+
+    const wooConnRes = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections
+         (business_id, location_id, name, provider, base_url,
+          consumer_key_ciphertext, consumer_secret_ciphertext, webhook_secret_ciphertext,
+          currency_unit, link_mode, status)
+       VALUES ($1, $2, 'Woo Gate', 'woocommerce', 'https://shop.example.com', 'enc-k', 'enc-s', 'enc-w', 'toman', 'rest_api', 'active')
+       RETURNING id`,
+      [biz.id, biz.locationId],
+    );
+    const wooConnId = wooConnRes.rows[0].id;
+    const holooConnRes = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections (business_id, location_id, name, provider, base_url, currency_unit, status)
+       VALUES ($1, $2, 'Holoo Gate', 'holoo', NULL, 'rial', 'active')
+       RETURNING id`,
+      [biz.id, biz.locationId],
+    );
+    const holooConnId = holooConnRes.rows[0].id;
+
+    const dtImport = await import("../src/lib/data-transfer/import-service");
+    const holooSvc = await import("../src/lib/data-transfer/providers/holoo/service");
+    const wooSync = await import("../src/lib/integrations/sync-service");
+    const applyRunner = await import("../src/lib/import-reconciliation/apply-runner");
+
+    // 1. Data Transfer CSV upload with overlapping item + brand-new item -> staged reconciliation run
+    const csvBuf = Buffer.from(
+      "name,sku,unit,avgCost\nعطر رز,SKU-ROSE-1,عدد,100000\nعطر یاس,SKU-JAS-2,عدد,120000\n",
+      "utf8",
+    );
+    const { job } = await asBusiness(biz.id, () =>
+      dtImport.createImportJob({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        entityKey: "inventory.items",
+        fileName: "items.csv",
+        format: "csv",
+        buffer: csvBuf.buffer.slice(csvBuf.byteOffset, csvBuf.byteOffset + csvBuf.byteLength),
+        actorUserId: null,
+        actorName: actor.name,
+        mapping: {
+          columns: [
+            { column: 0, field: "name" },
+            { column: 1, field: "sku" },
+            { column: 2, field: "unit" },
+            { column: 3, field: "avgCost" },
+          ],
+        },
+      }),
+    );
+
+    await asBusiness(biz.id, () =>
+      dtImport.previewImportJob(biz.id, job.id, { mapping: job.mapping }),
+    );
+    const stagedDt = await asBusiness(biz.id, () =>
+      dtImport.stageImportJobToReconciliation(biz.id, job.id, actor),
+    );
+    expect(stagedDt.domain).toBe("product");
+    expect(stagedDt.counts.newRecords).toBeGreaterThanOrEqual(1);
+
+    // Queueing the Data Transfer job directly while its linked reconciliation run is active is refused
+    await expect(
+      asBusiness(biz.id, () => dtImport.queueImportJob(biz.id, job.id)),
+    ).rejects.toThrow(/reconciliation_required/);
+
+    // Approve safe batch & apply via domain-aware runner -> creates SKU-JAS-2 with item_stock row
+    await asBusiness(biz.id, () => svc.approveSafeBatch(biz.id, stagedDt.runId, actor));
+    const dtItems = await asBusiness(biz.id, () => svc.listItems(biz.id, stagedDt.runId));
+    const roseItem = dtItems.find((i) => (i.snapshot as { sku?: string })?.sku === "SKU-ROSE-1");
+    if (roseItem && roseItem.status === "proposed") {
+      await asBusiness(biz.id, () =>
+        svc.decideItem({
+          businessId: biz.id,
+          runId: stagedDt.runId,
+          itemId: roseItem.id,
+          decision: roseItem.outcome === "field_conflict" ? "choose_authority" : "link",
+          ...(roseItem.outcome === "field_conflict"
+            ? { authorityOverrides: Object.fromEntries(roseItem.conflicts.map((c) => [c.field, "canonical"])) }
+            : { canonicalId: roseItem.canonicalId ?? existingItemId }),
+          actor,
+        }),
+      );
+    }
+
+    const appliedDt = await asBusiness(biz.id, () =>
+      applyRunner.applyReconciliationRunWithDomainHandlers({
+        businessId: biz.id,
+        runId: stagedDt.runId,
+        locationId: biz.locationId,
+        actor,
+      }),
+    );
+    expect(appliedDt.summary.run.status).toBe("applied");
+    expect(appliedDt.crossCheck.ok).toBe(true);
+    expect(await countItems(biz.locationId)).toBe(2);
+
+    // 2. Holoo entry gate detects canonical overlap and blocks blind apply while a staged run is active
+    const holooBase = {
+      goods: [{ remoteId: "hg-1", name: "ادکلن", sku: "SKU-H1", unit: "عدد", priceRial: 350000n, costRial: 200000n }],
+      persons: [],
+      accounts: [],
+      openingInventory: [],
+    };
+    expect(
+      await asBusiness(biz.id, () =>
+        holooSvc.holooNeedsReconciliation(biz.id, holooConnId, ["goods"], biz.locationId),
+      ),
+    ).toBe(true);
+    const holooStaged = await asBusiness(biz.id, () =>
+      holooSvc.stageHolooBaseToReconciliation({
+        businessId: biz.id,
+        connectionId: holooConnId,
+        locationId: biz.locationId,
+        scopes: ["goods"],
+        base: holooBase as never,
+        source: "xlsx",
+        actorUserId: actor.userId,
+        actorName: actor.name,
+      }),
+    );
+    expect(holooStaged.runs).toHaveLength(1);
+    expect(holooStaged.runs[0].domain).toBe("product");
+
+    await expect(
+      asBusiness(biz.id, () =>
+        holooSvc.applyHolooBaseMigration({
+          businessId: biz.id,
+          connectionId: holooConnId,
+          locationId: biz.locationId,
+          scopes: ["goods"],
+          base: holooBase as never,
+          profile: { key: "holoo-v1", version: 1 },
+          source: "xlsx",
+          actorUserId: actor.userId ?? "00000000-0000-0000-0000-000000000000",
+          actorName: actor.name,
+        }),
+      ),
+    ).rejects.toThrow(/reconciliation_required/);
+
+    // 3. WooCommerce syncProducts is blocked immediately when an active product run exists on the connection
+    const activeWooRun = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: wooConnId,
+        connectionId: wooConnId,
+        importMode: "live_link",
+        sourceFingerprint: "woo-gate-1",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () => svc.stageProducts(biz.id, activeWooRun.id, [product("501", "محصول تست", "SKU-W501")]));
+    await asBusiness(biz.id, () => svc.completeProductDiscovery(biz.id, activeWooRun.id, actor));
+
+    await expect(asBusiness(biz.id, () => wooSync.syncProducts(biz.id, wooConnId))).rejects.toThrow(/reconciliation_required/);
+    await asBusiness(biz.id, () => svc.cancelRun(biz.id, activeWooRun.id, actor));
+  });
+
+  it("defers webhooks during active runs, gates first-contact plugin links, and suppresses rejected edits outbound", async () => {
+    const biz = await seedBusiness("cosmetics", "Webhook Outbox Guard Biz");
+    const itemId = await addItem(biz.locationId, "ژل شستشو", "SKU-GEL-1");
+    await db.query(`INSERT INTO item_stock (item_id, quantity, unit_price) VALUES ($1, 12, 250000)`, [itemId]);
+
+    const connRes = await db.query<{
+      id: string;
+      business_id: string;
+      location_id: string;
+      name: string;
+      provider: string;
+      status: string;
+      link_mode: string;
+      currency_unit: string;
+      source_of_truth: string;
+    }>(
+      `INSERT INTO integration_connections
+         (business_id, location_id, name, provider, base_url,
+          link_token_hash, link_token_ciphertext,
+          currency_unit, link_mode, status, source_of_truth)
+       VALUES ($1, $2, 'Woo Guard', 'woocommerce', 'https://guard.example.com', $3, 'enc-tok', 'rial', 'plugin', 'active', 'pos')
+       RETURNING id, business_id, location_id, name, provider, status, link_mode, currency_unit, source_of_truth`,
+      [biz.id, biz.locationId, `hash-${randomUUID()}`],
+    );
+    const conn = connRes.rows[0];
+    const guards = await import("../src/lib/import-reconciliation/entry-guards");
+    const ingestSvc = await import("../src/lib/integrations/webhook-ingest-service");
+    const reportMod = await import("../src/lib/import-reconciliation/report");
+
+    // 1. First-contact gate creates staged product run when business already has canonical items
+    const gate = await asBusiness(biz.id, () =>
+      guards.ensureFirstContactReconciliationGate(biz.id, conn.id, biz.locationId),
+    );
+    expect(gate.gatedDomains).toContain("product");
+
+    // 2. Inbound webhook on product.updated while product run is active -> deferred in inbox without mutating item!
+    const ingestOutcome = await asBusiness(biz.id, () =>
+      ingestSvc.applyIngestEvent(conn as never, {
+        topic: "product.updated",
+        deliveryId: "deliv-reconcile-defer-1",
+        payload: { id: 901, name: "نام تحمیلی از فروشگاه", sku: "SKU-GEL-1", regular_price: "199000" },
+      }),
+    );
+    expect(ingestOutcome).toEqual({ status: "deferred" });
+    const inboxRow = await db.query<{ status: string }>(
+      `SELECT status FROM integration_webhook_events WHERE connection_id = $1 AND delivery_id = 'deliv-reconcile-defer-1'`,
+      [conn.id],
+    );
+    expect(inboxRow.rows[0]?.status).toBe("deferred");
+    const itemNameRow = await db.query<{ name: string }>(`SELECT name FROM items WHERE id = $1`, [itemId]);
+    expect(itemNameRow.rows[0].name).toBe("ژل شستشو");
+
+    // Close the staged first-contact run, then run a real conflict resolution & check outbound suppression + reports
+    const activeProductRun = await asBusiness(biz.id, () => guards.findActiveRunForConnection(biz.id, conn.id, "product"));
+    expect(activeProductRun).not.toBeNull();
+    await asBusiness(biz.id, () => svc.cancelRun(biz.id, activeProductRun!.id, actor));
+
+    const run = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: conn.id,
+        connectionId: conn.id,
+        importMode: "live_link",
+        sourceFingerprint: "woo-suppress-1",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () =>
+      svc.stageProducts(biz.id, run.id, [
+        product("901", "ژل شستشو", "SKU-GEL-1", { fields: { stock_quantity: 5, regular_price: "199000" } }),
+      ]),
+    );
+    await asBusiness(biz.id, () => svc.completeProductDiscovery(biz.id, run.id, actor));
+
+    // Reject the incoming stock_quantity = 5 & regular_price = 199000 in favour of canonical
+    const [stagedItem] = await asBusiness(biz.id, () => svc.listItems(biz.id, run.id));
+    expect(stagedItem.outcome).toBe("field_conflict");
+    await asBusiness(biz.id, () =>
+      svc.decideItem({
+        businessId: biz.id,
+        runId: run.id,
+        itemId: stagedItem.id,
+        decision: "choose_authority",
+        authorityOverrides: { stock_quantity: "canonical", regular_price: "canonical" },
+        reason: "قیمت سیستم مرجع است",
+        actor,
+      }),
+    );
+
+    // Report builders work cleanly on this run
+    const summary = await asBusiness(biz.id, () => svc.getRunSummary(biz.id, run.id));
+    const items = await asBusiness(biz.id, () => svc.listItems(biz.id, run.id));
+    expect(reportMod.buildReconciliationRunReport(summary, items).counts.read).toBe(1);
+    expect(reportMod.buildReconciliationReportCsv(summary, items)).toContain("901");
+
+    // Manual outbound guard refuses while run is unapplied, then suppresses rejected 199000 after apply, allows 260000
+    const beforeApply = await asBusiness(biz.id, () =>
+      guards.checkManualProductOutboundGuard(biz.id, conn, "901", { regular_price: "260000" }),
+    );
+    expect(beforeApply).toEqual({ ok: false, reason: "reconciliation_active" });
+
+    const runRow = summary.run;
+    const token = await asBusiness(biz.id, () =>
+      dbLib.withTenantTransaction(biz.id, (c) => svc.productCanonicalToken(c, runRow)),
+    );
+    await asBusiness(biz.id, () =>
+      svc.applyRun({
+        businessId: biz.id,
+        runId: run.id,
+        handler: svc.createProductApplyHandler(),
+        current: { sourceFingerprint: runRow.sourceFingerprint, policyVersion: runRow.policyVersion, canonicalToken: token },
+        actor,
+      }),
+    );
+
+    const suppressedSet = await asBusiness(biz.id, () =>
+      guards.listSuppressedRemoteEditsForConnection(biz.id, conn.id),
+    );
+    expect(guards.isOutboxFieldSuppressed(suppressedSet, "901", "regular_price", "199000")).toBe(true);
+    expect(guards.isOutboxFieldSuppressed(suppressedSet, "901", "regular_price", 260000)).toBe(false);
+
+    expect(
+      await asBusiness(biz.id, () =>
+        guards.checkManualProductOutboundGuard(biz.id, conn, "901", { regular_price: "199000" }),
+      ),
+    ).toEqual({ ok: false, reason: "rejected_edit_suppressed" });
+    expect(
+      await asBusiness(biz.id, () =>
+        guards.checkManualProductOutboundGuard(biz.id, conn, "901", { regular_price: "260000" }),
+      ),
+    ).toEqual({ ok: true });
+    expect(
+      await guards.canPublishConnectionOutbound(biz.id, { id: conn.id, source_of_truth: "store" }),
+    ).toEqual({ allowed: false, reason: "source_of_truth_store" });
+  });
+
+  it("preserves reconciliation decisions on Data Transfer job completion, keeps food_service inventory.items on inventory_items, wires inventory/journal create writers, and reuses staged Woo runs", async () => {
+    const dtImport = await import("../src/lib/data-transfer/import-service");
+    const applyRunner = await import("../src/lib/import-reconciliation/apply-runner");
+    const guards = await import("../src/lib/import-reconciliation/entry-guards");
+    const holooSvc = await import("../src/lib/data-transfer/providers/holoo/service");
+
+    // 1. Food-service tenant: menu_items overlap must NOT trigger inventory.items overlap or create zero-priced menu_items
+    const foodBiz = await seedBusiness("food_service", "کافه تطبیق کامل");
+    await db.query(`INSERT INTO menu_items (location_id, name, sku, price) VALUES ($1, 'لاته', 'LATTE-1', 90000)`, [
+      foodBiz.locationId,
+    ]);
+    await db.query(
+      `INSERT INTO inventory_items (location_id, name, sku, unit) VALUES ($1, 'دانه قهوه', 'RAW-COFFEE-1', 'kg')`,
+      [foodBiz.locationId],
+    );
+    expect(await guards.hasCanonicalOverlapForImportEntity(foodBiz.id, "inventory.items", foodBiz.locationId)).toBe(true);
+
+    // Food-service raw-material import with 3 rows: 1 skip, 1 canonical-wins conflict (with duplicateStrategy=update), 1 create_new
+    const rawCsv = Buffer.from(
+      "name,sku,unit,avgCost\nدانه قهوه تغییریافته,RAW-COFFEE-1,kg,500000\nشکر قهوه‌ای ردشده,RAW-SKIP-2,kg,80000\nشیر تازه جدید,RAW-MILK-3,l,45000\n",
+      "utf8",
+    );
+    const { job: foodJob } = await asBusiness(foodBiz.id, () =>
+      dtImport.createImportJob({
+        businessId: foodBiz.id,
+        locationId: foodBiz.locationId,
+        entityKey: "inventory.items",
+        fileName: "raw-materials.csv",
+        format: "csv",
+        buffer: rawCsv.buffer.slice(rawCsv.byteOffset, rawCsv.byteOffset + rawCsv.byteLength),
+        actorUserId: null,
+        actorName: actor.name,
+        mapping: {
+          columns: [
+            { column: 0, field: "name" },
+            { column: 1, field: "sku" },
+            { column: 2, field: "unit" },
+            { column: 3, field: "avgCost" },
+          ],
+        },
+        options: { duplicateStrategy: "update" },
+      }),
+    );
+    await asBusiness(foodBiz.id, () => dtImport.previewImportJob(foodBiz.id, foodJob.id, { mapping: foodJob.mapping }));
+    const stagedFood = await asBusiness(foodBiz.id, () =>
+      dtImport.stageImportJobToReconciliation(foodBiz.id, foodJob.id, actor, foodBiz.locationId),
+    );
+    expect(stagedFood.run.scope).toEqual({ entityKey: "inventory.items", canonicalTable: "inventory_items" });
+
+    const foodItems = await asBusiness(foodBiz.id, () => svc.listItems(foodBiz.id, stagedFood.runId));
+    const coffee = foodItems.find((i) => i.externalKey === "RAW-COFFEE-1")!;
+    const skipRow = foodItems.find((i) => i.externalKey === "RAW-SKIP-2")!;
+    const milkRow = foodItems.find((i) => i.externalKey === "RAW-MILK-3")!;
+    expect(coffee.canonicalId).toBeTruthy();
+
+    await asBusiness(foodBiz.id, () =>
+      svc.decideItem({
+        businessId: foodBiz.id,
+        runId: stagedFood.runId,
+        itemId: coffee.id,
+        decision: coffee.outcome === "field_conflict" ? "choose_authority" : "link",
+        ...(coffee.outcome === "field_conflict"
+          ? { authorityOverrides: Object.fromEntries(coffee.conflicts.map((c) => [c.field, "canonical"])) }
+          : { canonicalId: coffee.canonicalId! }),
+        actor,
+      }),
+    );
+    await asBusiness(foodBiz.id, () =>
+      svc.decideItem({ businessId: foodBiz.id, runId: stagedFood.runId, itemId: skipRow.id, decision: "skip", actor }),
+    );
+    await asBusiness(foodBiz.id, () =>
+      svc.decideItem({ businessId: foodBiz.id, runId: stagedFood.runId, itemId: milkRow.id, decision: "create_separate", actor }),
+    );
+
+    const appliedFood = await asBusiness(foodBiz.id, () =>
+      applyRunner.applyReconciliationRunWithDomainHandlers({
+        businessId: foodBiz.id,
+        runId: stagedFood.runId,
+        locationId: foodBiz.locationId,
+        actor,
+      }),
+    );
+    expect(appliedFood.summary.run.status).toBe("applied");
+    expect(appliedFood.crossCheck.ok).toBe(true);
+
+    // Must write into inventory_items (NOT menu_items!), skip RAW-SKIP-2, and keep canonical RAW-COFFEE-1 intact
+    const menuCount = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM menu_items WHERE location_id = $1`, [foodBiz.locationId]);
+    expect(Number(menuCount.rows[0].n)).toBe(1);
+    const invRows = await db.query<{ name: string; sku: string | null; unit: string }>(
+      `SELECT name, sku, unit FROM inventory_items WHERE location_id = $1 ORDER BY sku`,
+      [foodBiz.locationId],
+    );
+    expect(invRows.rows).toEqual([
+      { name: "دانه قهوه", sku: "RAW-COFFEE-1", unit: "kg" },
+      { name: "شیر تازه جدید", sku: "RAW-MILK-3", unit: "l" },
+    ]);
+    // Job completed from reconciliation decisions -> queueImportJob refuses re-running blindly
+    const finishedJob = await asBusiness(foodBiz.id, () => dtImport.getImportJob(foodBiz.id, foodJob.id));
+    expect(finishedJob?.status).toBe("completed");
+    expect(finishedJob?.createdRows).toBe(1);
+    expect(finishedJob?.skippedRows).toBe(2);
+    await expect(asBusiness(foodBiz.id, () => dtImport.queueImportJob(foodBiz.id, foodJob.id))).rejects.toThrow(
+      /already_completed/,
+    );
+
+    // 2. Holoo inventory & journal create writers succeed cleanly through applyReconciliationRunWithDomainHandlers
+    const holooBiz = await seedBusiness("cosmetics", "آرایشی هلو اسناد و موجودی");
+    await db.query(
+      `INSERT INTO accounts (business_id, code, name, type) VALUES ($1, '1100', 'صندوق', 'asset'), ($1, '4300', 'فروش', 'revenue')`,
+      [holooBiz.id],
+    );
+    const hConnRes = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections (business_id, location_id, name, provider, base_url, currency_unit, status)
+       VALUES ($1, $2, 'Holoo Test', 'holoo', NULL, 'rial', 'active') RETURNING id`,
+      [holooBiz.id, holooBiz.locationId],
+    );
+    const hConnId = hConnRes.rows[0].id;
+    const hGoodsId = await addItem(holooBiz.locationId, "عطر هلو", "HG-SKU-1");
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'holoo_goods', 'hg-1', $3)`,
+      [holooBiz.id, hConnId, hGoodsId],
+    );
+    const stagedHoloo = await asBusiness(holooBiz.id, () =>
+      holooSvc.stageHolooBaseToReconciliation({
+        businessId: holooBiz.id,
+        connectionId: hConnId,
+        actorUserId: null,
+        actorName: actor.name,
+        scopes: ["openingInventory", "journal", "journalLines"],
+        source: "xlsx",
+        locationId: holooBiz.locationId,
+        base: {
+          goods: [],
+          persons: [],
+          accounts: [],
+          openingInventory: [
+            { remoteId: "hs-1", goodsRemoteId: "hg-1", name: "عطر هلو", unit: "عدد", quantity: "12", unitCostRial: 150000n },
+          ],
+        },
+        journals: [
+          {
+            remoteId: "hv-1",
+            entryDate: "2026-11-01",
+            memo: "سند آزمایشی هلو",
+            lines: [
+              { accountCode: "1100", debitRial: 500000n, creditRial: 0n },
+              { accountCode: "4300", debitRial: 0n, creditRial: 500000n },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const invRun = stagedHoloo.runs.find((r) => r.domain === "inventory")!;
+    const jrnRun = stagedHoloo.runs.find((r) => r.domain === "financial_document")!;
+    await asBusiness(holooBiz.id, () => svc.approveSafeBatch(holooBiz.id, invRun.runId, actor));
+    await asBusiness(holooBiz.id, () => svc.approveSafeBatch(holooBiz.id, jrnRun.runId, actor));
+
+    const appliedInv = await asBusiness(holooBiz.id, () =>
+      applyRunner.applyReconciliationRunWithDomainHandlers({
+        businessId: holooBiz.id,
+        runId: invRun.runId,
+        locationId: holooBiz.locationId,
+        actor,
+      }),
+    );
+    expect(appliedInv.summary.run.status).toBe("applied");
+    expect(appliedInv.crossCheck.ok).toBe(true);
+    const stockCheck = await db.query<{ quantity: string }>(`SELECT quantity::text FROM item_stock WHERE item_id = $1`, [hGoodsId]);
+    expect(Number(stockCheck.rows[0]?.quantity)).toBe(12);
+
+    const appliedJrn = await asBusiness(holooBiz.id, () =>
+      applyRunner.applyReconciliationRunWithDomainHandlers({
+        businessId: holooBiz.id,
+        runId: jrnRun.runId,
+        locationId: holooBiz.locationId,
+        actor,
+      }),
+    );
+    expect(appliedJrn.summary.run.status).toBe("applied");
+    expect(appliedJrn.crossCheck.ok).toBe(true);
+    const jeCount = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM journal_entries WHERE business_id = $1`, [holooBiz.id]);
+    expect(Number(jeCount.rows[0].n)).toBe(1);
+  });
 });
