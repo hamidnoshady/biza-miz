@@ -4,6 +4,12 @@ import { describe, expect, it } from "vitest";
 const server = readFileSync("server.ts", "utf8");
 
 describe("background execution targets", () => {
+  it("gates timers and the direct sync listener on Demo runtimes", () => {
+    const scheduler = server.slice(server.indexOf("const scheduleBackgroundTick"), server.indexOf("const scheduleSiteTick"));
+    expect(scheduler).toMatch(/if \(demoDeployment\) return;[\s\S]*setInterval\(run/);
+    expect(server).toMatch(/if \(!demoDeployment && runtimeRole === "site"\) \{\s*const \{ startSyncWakeListeners \}/);
+  });
+
   it("keeps site-authoritative durability workers on site runtimes", () => {
     for (const tick of ["rollupTick", "serverSyncTick", "cloudExceptionTick"]) {
       expect(server).toContain(`scheduleSiteTick(${tick},`);
