@@ -358,6 +358,14 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`desktop runtime build failed: ${error instanceof Error ? error.message : String(error)}`);
+  const message = `desktop runtime build failed: ${error instanceof Error ? error.message : String(error)}`;
+  console.error(message);
+  // Surface the cause in the check annotation as well as the full job log.
+  // Escape workflow-command control characters so paths/errors cannot inject
+  // another command. This does not change the packaging failure or its gate.
+  if (process.env.GITHUB_ACTIONS === "true") {
+    const escaped = message.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    console.error(`::error title=Desktop runtime staging::${escaped}`);
+  }
   process.exit(1);
 });

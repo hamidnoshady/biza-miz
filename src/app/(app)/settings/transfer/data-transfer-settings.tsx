@@ -10,12 +10,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { SectionCard, TabBar, type Tab } from "@/app/dashboard/page-chrome";
-import { ErrorBox, api } from "@/app/dashboard/ui";
+import { ErrorBox, SecondaryButton, api } from "@/app/dashboard/ui";
 import { DataTransferSkeleton, useDataCatalogue } from "./data-transfer-ui";
 import { ExportSection } from "./export-section";
 import { HistorySection } from "./history-section";
 import { CATALOGUE_IMPORT_ENTITY_KEY, ImportSection } from "./import-section";
 import { HolooTransferSection } from "./holoo-transfer-section";
+import { HistoricalInvoiceSection } from "./historical-invoice-section";
 import { ReconciliationWizard } from "./reconciliation-wizard";
 
 type PanelKey = "import" | "reconciliation" | "export" | "history" | "holoo";
@@ -27,6 +28,7 @@ export function DataTransferSettings() {
   const [revision, setRevision] = useState(0);
   const bump = useCallback(() => setRevision((current) => current + 1), []);
   const [panel, setPanel] = useState<PanelKey>("import");
+  const [historical, setHistorical] = useState(false);
   const [holooPermitted, setHolooPermitted] = useState(false);
   const [cataloguePermitted, setCataloguePermitted] = useState(false);
   const [requestedImportKey, setRequestedImportKey] = useState("");
@@ -89,14 +91,21 @@ export function DataTransferSettings() {
         />
       </SectionCard>
 
-      {active === "import" ? (
-        <ImportSection
-          entities={entities}
-          cataloguePermitted={cataloguePermitted}
-          initialEntityKey={requestedImportKey}
-          onJobQueued={bump}
-        />
-      ) : null}
+      {active === "import" ? <>
+        <SectionCard title="انتخاب نوع ورود">
+          <SecondaryButton onClick={() => setHistorical((current) => !current)}>
+            {historical ? "بازگشت به ورود اطلاعات دیگر" : "حسابداری: فاکتورهای فروش قبلی"}
+          </SecondaryButton>
+        </SectionCard>
+        {historical ? <HistoricalInvoiceSection /> : (
+          <ImportSection
+            entities={entities}
+            cataloguePermitted={cataloguePermitted}
+            initialEntityKey={requestedImportKey}
+            onJobQueued={bump}
+          />
+        )}
+      </> : null}
       {active === "reconciliation" && canImport ? <ReconciliationWizard onCompleted={bump} /> : null}
       {active === "export" ? <ExportSection entities={entities} onExported={bump} /> : null}
       {active === "history" ? (
