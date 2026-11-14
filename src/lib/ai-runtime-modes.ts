@@ -49,7 +49,9 @@ export interface PlatformAiModeRow {
 }
 
 /** The row shape `query` requires — every column is unknown-shaped to the DB. */
-type PlatformAiModeRowInput = PlatformAiModeRow & Record<string, unknown>;
+type PlatformAiModeRowInput = Omit<PlatformAiModeRow, "temperature"> & {
+  temperature: string | number | null;
+} & Record<string, unknown>;
 
 /**
  * The three configured modes. Falls back to sensible defaults when the table
@@ -62,7 +64,13 @@ export async function listPlatformAiModes(): Promise<PlatformAiModeRow[]> {
       `SELECT mode_key, model_alias, is_active, temperature, max_output_tokens, prompt_scope_key
          FROM platform_ai_modes`,
     );
-    if (rows.length > 0) return rows;
+    if (rows.length > 0) {
+      // PostgreSQL returns numeric columns as strings through node-postgres.
+      return rows.map((row) => ({
+        ...row,
+        temperature: row.temperature === null ? null : Number(row.temperature),
+      }));
+    }
   } catch (err) {
     console.error("platform AI modes unavailable; using defaults", err);
   }
