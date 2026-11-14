@@ -8,6 +8,11 @@
  * numeric and date cells whose original precision Excel may have lost.
  */
 import { detectDelimiter } from "./csv";
+import { HistoricalFileError } from "./historical-invoice-file-error";
+// Keep this local dependency static: a dynamic relative import causes Next's
+// standalone tracer to copy raw TypeScript into the desktop runtime.
+import { boundedHistoricalWorkbook } from "./historical-invoice-xlsx";
+export { HistoricalFileError } from "./historical-invoice-file-error";
 import type { HistoricalRawRow } from "./historical-invoice-mapping";
 
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -21,10 +26,6 @@ const MAX_MATERIALIZED_CELLS = 1_000_000;
 const MAX_STAGED_JSON_CHARS = 32 * 1024 * 1024;
 const MAX_CELL = 100_000;
 const MAX_SHEETS = 10;
-
-export class HistoricalFileError extends Error {
-  constructor(readonly code: string) { super(code); this.name = "HistoricalFileError"; }
-}
 
 export interface HistoricalFileSheet {
   name: string;
@@ -226,7 +227,6 @@ function jsonRows(input: string): SourceRow[] {
 }
 
 async function xlsxSheets(buffer: ArrayBuffer): Promise<HistoricalFileSheet[]> {
-  const { boundedHistoricalWorkbook } = await import("./historical-invoice-xlsx");
   const safeBuffer = await boundedHistoricalWorkbook(buffer);
   const ExcelJS = (await import("exceljs")).default;
   const workbook = new ExcelJS.Workbook();
