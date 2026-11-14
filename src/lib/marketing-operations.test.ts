@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { parseTargetInput, parseTargetChange, parseAssignmentInput, parsePriorityChange, parseTransition } from "./marketing-operations";
+import { parseTargetInput, parseTargetChange, parseAssignmentInput, parsePriorityChange, parseTransition, parseAssignmentPlanFilter, assignmentPlanQuery } from "./marketing-operations";
 import { PERMISSIONS, effectivePermissions, type Permission } from "./permissions";
 import { canOpenGrowth, growthApiPermission } from "./growth-access";
 const id = "123e4567-e89b-42d3-a456-426614174000";
 describe("marketing operations contracts", () => {
   it("validates targets and optional canonical party references", () => {
     expect(parseTargetInput({ locationId: id, siteLabel: "  Site ", partyId: id })).toEqual({ locationId: id, siteLabel: "Site", partyId: id, city: "", neighborhood: "" });
+    expect(parseTargetInput({ locationId: id, siteLabel: "Site", reviewToken: "a".repeat(64) })?.reviewToken).toBe("a".repeat(64));
+    for (const token of [null, "x", "A".repeat(64), 5, "a".repeat(65)]) expect(parseTargetInput({ locationId: id, siteLabel: "Site", reviewToken: token })).toBeNull();
     for (const body of [{ locationId: "invalid", siteLabel: "x" }, { locationId: id, siteLabel: " " }, { locationId: id, siteLabel: "x", partyId: "bad" }, { locationId: id, siteLabel: "x", city: "x".repeat(101) }]) expect(parseTargetInput(body)).toBeNull();
   });
   it("validates target revisions and lifecycle changes", () => {
@@ -25,13 +27,20 @@ describe("marketing operations contracts", () => {
     expect(parseTransition({ expected: "completed", next: "planned" })).toBeNull();
     expect(parseTransition({ expected: "planned", next: "planned" })).toBeNull();
   });
+  it("validates inclusive deadline filters and whitelisted sorting", () => {
+    expect(parseAssignmentPlanFilter(new URLSearchParams())).toEqual({ status: null, dueFrom: null, dueTo: null, sort: "newest" });
+    const filter = { status: "planned" as const, dueFrom: "2028-02-29", dueTo: "2028-03-01", sort: "due_asc" as const };
+    expect(parseAssignmentPlanFilter(new URLSearchParams("status=planned&dueFrom=2028-02-29&dueTo=2028-03-01&sort=due_asc"))).toEqual(filter);
+    expect(assignmentPlanQuery(filter)).toBe("&status=planned&dueFrom=2028-02-29&dueTo=2028-03-01&sort=due_asc");
+    for (const query of ["status=unknown", "status=", "sort=invalid", "sort=due_asc&sort=newest", "dueFrom=2027-02-29", "dueTo=1899-12-31", "dueTo=", "dueFrom=2028-03-02&dueTo=2028-03-01", "dueFrom=2028-02-29&dueFrom=2028-03-01"]) expect(parseAssignmentPlanFilter(new URLSearchParams(query))).toBeNull();
+  });
   it("validates priority revisions and rejects invalid changes", () => {
     expect(parsePriorityChange({ action: "priority", expectedRevision: 2, priority: "high", businessId: "ignored" })).toEqual({ action: "priority", expectedRevision: 2, priority: "high" });
     for (const body of [null, {}, { action: "priority", expectedRevision: -1, priority: "high" }, { action: "priority", expectedRevision: 1.5, priority: "high" }, { action: "priority", expectedRevision: 2147483647, priority: "high" }, { action: "priority", expectedRevision: 0, priority: "critical" }, { action: "other", expectedRevision: 0, priority: "high" }]) expect(parsePriorityChange(body)).toBeNull();
   });
   it("separates work permissions from directory and financial permissions", () => {
     expect(canOpenGrowth(new Set([PERMISSIONS.marketingAssignmentsView]))).toBe(true);
-    expect(growthApiPermission("/api/growth/marketing-targets", "POST")).toEqual([PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView]);
+    expect(growthApiPermission("/api/growth/marketing-targets", "POST")).toEqual([PERMISSIONS.marketingTargetsView, PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView]);
     expect(effectivePermissions("cashier", {}).has(PERMISSIONS.marketingAssignmentsView)).toBe(false);
     expect(effectivePermissions("manager", {}).has(PERMISSIONS.marketingAssignmentsManage)).toBe(true);
     expect(effectivePermissions("cashier", {}).has(PERMISSIONS.marketingAssignmentsSelf)).toBe(false);
