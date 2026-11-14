@@ -21,14 +21,14 @@ broadening this guard without replacing those implementations would be unsafe.
 
 | Industry | Existing catalogue / stock entry | Native supporting operations | Shared workspace status |
 | --- | --- | --- | --- |
-| Jewelry | `/accounting/jewelry`; `/api/jewelry/items` | Gold rates `/api/jewelry/prices`; consignment, reports and weighted-item services | Native weighted list, piece creation, read-only gold-rate board and read-only reconciliation/consignor reports; editable pricing and attributes still need shared-page work; labels use the printing catalogue. |
-| Watch | `/accounting/watch`; `/api/watch/items`, `/api/watch/units` | Serialized unit, warranty, repair, reservation and return APIs | Native model/serial list with structured facts, model creation and native warranty/repair reports; serial intake, pricing, attributes and richer detail still need shared-page work; labels use the printing catalogue. |
+| Jewelry | `/accounting/jewelry`; `/api/jewelry/items` | Gold rates `/api/jewelry/prices`; consignment, reports and weighted-item services | Native weighted list, piece creation, read-only gold-rate board and read-only reconciliation/consignor reports; read-only native attributes; editable pricing and attributes still need shared-page work; existing piece barcodes print with native purity and net weight. |
+| Watch | `/accounting/watch`; `/api/watch/items`, `/api/watch/units` | Serialized unit, warranty, repair, reservation and return APIs | Native model/serial list with structured facts, model creation and native warranty/repair reports; read-only model attributes; serial intake, pricing, editable attributes and richer detail still need shared-page work; existing model barcodes print with the native reference (not unit serials). |
 | Accessories | `/accounting/products`; `/api/accessories/items` | `trade-goods-service`, variant report API | Existing variant workspace; needs epic UX and safety review. |
 | Cosmetics | `/accounting/products`; `/api/cosmetics/items` | Batch/expiry inventory and `/accounting/cosmetics` specialist operations | Existing variant workspace; batch/FEFO and label experience need review. |
 | Wholesale | `/accounting/products`; `/api/wholesale/items` | Trade-goods and price-list services | Existing variant workspace; conversion and bulk pricing need review. |
 | Tools & Fittings | `/accounting/products`; `/api/tools-fittings/items` | Trade-goods and variant report API | Existing variant workspace; technical attributes need review. |
 | Haberdashery | `/accounting/products`; `/api/haberdashery/items` | Trade-goods and variant report API | Existing variant workspace; attributes and label experience need review. |
-| Automotive | `/accounting/automotive`; `/api/automotive/vehicles` | `automotive-service`, stock, reservations, sales and trade-ins | Native stock board and acquisition at shared list/new URLs; branch-scoped asking-price editor with history and read-only native stock/sales summary at shared prices/reports URLs. Other price fields, attributes and guided-form improvements still needed; labels use the printing catalogue. |
+| Automotive | `/accounting/automotive`; `/api/automotive/vehicles` | `automotive-service`, stock, reservations, sales and trade-ins | Native stock board and acquisition at shared list/new URLs; branch-scoped asking-price editor with history and read-only native stock/sales summary at shared prices/reports URLs. read-only native vehicle attributes; other price fields, editable attributes and guided-form improvements still needed; labels use the printing catalogue. |
 
 The specialists' operation pages remain reachable at their existing URLs.
 Food Service and service/project industries do not have this catalogue entry.
@@ -48,8 +48,20 @@ Food Service and service/project industries do not have this catalogue entry.
   `printing.execute` gates sample printing. Readers without settings access
   see built-in previews only. Printer test jobs still use the existing generic
   sample rather than the trade-specific preview data; the page explains this,
-  and unsaved designs cannot be test-printed from this product view. Actual
-  specialist item-label support and matching preview/test content still need
+  and unsaved designs cannot be test-printed from this product view. Native
+  jewelry-piece and watch-model label data now come from their branch's
+  actual item/barcode and attributes; the shared page can print those existing
+  codes with `printing.execute`. Jewelry labels include exact net weight and
+  purity; watch model labels include the reference, never an arbitrary physical
+  unit serial. Neither presents a variant-stock price as a specialist sale price.
+  Preview examples use those fields but printer test jobs still use generic
+  samples. For jewelry and watch, `inventory.adjust` separately permits assignment
+  of a
+  supplied, check-digit-valid EAN-13 or UPC code to an existing native item;
+  the write checks the active branch and locks the item, and never mints a
+  replacement code after an uncertain response. Legacy codes without bar
+  rendering are not offered as scannable prints. Automated code generation,
+  vehicle-specific labels and actual hardware/preview parity still need
   verification before epic acceptance. Existing branch weight-encoding patterns are
   offered separately, only to previously supported variant trades with both
   read permissions and only when patterns already exist; failed loading is
@@ -80,6 +92,14 @@ Food Service and service/project industries do not have this catalogue entry.
   existing gold-rate upsert replaces the day's row (and clears buy-back rate if
   omitted), so safe editing, history and conflict handling need dedicated work
   before treating it as an audited shared price editor.
+* Shared specialist attributes show native watch model specifications, jewelry
+  purity/weight/stone details, and vehicle specifications in the active branch,
+  using the same specialist read gates and APIs. These views are read-only: they
+  are not a variant option registry, and safe attribute editing, history and
+  conflict handling remain outstanding. Watch catalogue reads now include the
+  extended case/bracelet fields already stored by the native model service.
+  For vehicles with only a Gregorian model/production year, this view does not
+  invent a Shamsi year from an imprecise year-only value.
 * Automotive shared pricing changes only the native vehicle's asking price,
   requires `vehicles.view` for reading and `vehicles.price_edit` for writing,
   and leaves floor, wholesale, promotional and cost fields untouched. Existing
