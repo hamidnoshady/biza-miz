@@ -30,14 +30,14 @@
  * (`s3PutFile`).
  */
 import { createHash, createHmac } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { deflateSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { s3Delete, s3Get, s3Head, s3Put, s3PutFile, sha256Hex, type S3Config } from "./s3-lite";
+import { s3Delete, s3Get, s3GetToFile, s3Head, s3Put, s3PutFile, sha256Hex, type S3Config } from "./s3-lite";
 
 const ACCESS_KEY = "TESTACCESSKEY";
 const SECRET_KEY = "test-secret-key-value";
@@ -271,6 +271,30 @@ describe("tenant-shaped uploads against a signature-checking provider", () => {
       expect(requests[0].body.byteLength).toBe(bytes.byteLength);
       expect(store.get(key)?.equals(bytes)).toBe(true);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("streams a >1 MiB object from disk to S3 and back to disk with the same SHA-256", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "bizamiz-s3-roundtrip-"));
+    const key = `media/${BUSINESS_ID}/${ASSET_ID}/stream-roundtrip.bin`;
+    const source = path.join(dir, "source.bin");
+    const target = path.join(dir, "target.bin");
+    const bytes = payloadOf(2 * 1024 * 1024 + 31);
+    const hash = sha256Hex(bytes);
+    writeFileSync(source, bytes);
+    try {
+      await s3PutFile(config(), key, source, { payloadHash: hash, sizeBytes: bytes.byteLength });
+      const result = await s3GetToFile(config(), key, target, { maxBytes: bytes.byteLength });
+      expect(result).toEqual({ sizeBytes: bytes.byteLength, sha256: hash });
+      expect(readFileSync(target).equals(bytes)).toBe(true);
+      await expect(
+        s3GetToFile(config(), key, path.join(dir, "oversized.bin"), { maxBytes: bytes.byteLength - 1 }),
+      ).rejects.toThrow("artifact_too_large");
+      await s3Delete(config(), key);
+      expect(store.has(key)).toBe(false);
+    } finally {
+      store.delete(key);
       rmSync(dir, { recursive: true, force: true });
     }
   });
