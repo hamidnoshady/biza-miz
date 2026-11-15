@@ -35,6 +35,7 @@ import {
   type TableQrRejection,
 } from "./table-qr";
 import { createOrder, type CreateOrderInput, type CreateOrderOutput } from "./order-mutations";
+import type { Role } from "./auth-edge";
 import { getWebsiteConnectionRow } from "./website/connection-service";
 import type { CartItemInput } from "./order-cart";
 import type { DiscountInput } from "./orders";
@@ -590,6 +591,16 @@ export interface TableQrOrderInput {
    * ignored. It is never forwarded to `createOrder()`.
    */
   ignoredTableId?: string | null;
+  /**
+   * ESH-146 — a website order is created before staff have approved it, so its
+   * kitchen dispatch is held until the approval service accepts it. Every
+   * other caller leaves this false and keeps the immediate dispatch.
+   */
+  holdKitchenDispatch?: boolean;
+  /** The checkout's own instant, so a late delivery lands on its business day. */
+  openedAt?: string | null;
+  /** Persisted with the sync outbox event (see `createOrder`). */
+  actorRole?: Role;
 }
 
 /**
@@ -630,6 +641,9 @@ export async function createDineInOrderFromTableQr(
     items: input.items,
     openedBy: input.openedBy ?? null,
     clientRequestId: input.clientRequestId ?? null,
+    holdKitchenDispatch: input.holdKitchenDispatch === true,
+    openedAt: input.openedAt ?? null,
+    actorRole: input.actorRole,
   };
 
   const result = await createOrder(order);
