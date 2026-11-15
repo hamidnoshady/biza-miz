@@ -287,6 +287,26 @@ describe("transport failure classification (issue #1296)", () => {
 
   const cases: Array<{ name: string; error: unknown; code: string | null; label?: string; retryable: boolean }> = [
     {
+      name: "a programming error before fetch can send the body",
+      error: new TypeError("Cannot read properties of undefined (reading 'toWeb')"),
+      code: null,
+      label: "InternalError",
+      retryable: false,
+    },
+    {
+      name: "a local spool read error wrapped by fetch",
+      error: new TypeError("fetch failed", { cause: Object.assign(new Error("file"), { code: "EIO" }) }),
+      code: "EIO",
+      label: "LocalFileUnreadable",
+      retryable: false,
+    },
+    {
+      name: "a denied socket connection",
+      error: new TypeError("fetch failed", { cause: { code: "EACCES", syscall: "connect" } }),
+      code: "EACCES",
+      retryable: false,
+    },
+    {
       // The production failure: Undici's own class carries no code; the reason
       // is one level down. This used to collapse to the label "NetworkError"
       // and be marked non-retryable, so the bounded retries never ran.

@@ -30,14 +30,14 @@
  * (`s3PutFile`).
  */
 import { createHash, createHmac } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { deflateSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { s3Delete, s3Get, s3Head, s3Put, s3PutFile, sha256Hex, type S3Config } from "./s3-lite";
+import { s3Delete, s3Get, s3GetToFile, s3Head, s3Put, s3PutFile, sha256Hex, type S3Config } from "./s3-lite";
 
 const ACCESS_KEY = "TESTACCESSKEY";
 const SECRET_KEY = "test-secret-key-value";
@@ -238,6 +238,14 @@ function payloadOf(size: number, seed = 7): Buffer {
 const BUSINESS_ID = "11111111-1111-1111-1111-111111111111";
 const ASSET_ID = "22222222-2222-2222-2222-222222222222";
 
+// The source-level suite runs outside the Next.js production bundle, so a
+// dynamic built-in import can pass the HTTP roundtrip here but fail in that
+// bundle. Guard the import form as well as testing the real streamed bytes.
+it("keeps node:stream imports static for the Next.js server bundle", () => {
+  const source = readFileSync(new URL("./s3-lite.ts", import.meta.url), "utf8");
+  expect(source).not.toMatch(/\bimport\s*\(\s*["']node:stream["']\s*\)/);
+});
+
 describe("tenant-shaped uploads against a signature-checking provider", () => {
   it("buffered s3Put passes SigV4 and stores the exact bytes under prefix/business/asset/file", async () => {
     requests.length = 0;
@@ -275,6 +283,30 @@ describe("tenant-shaped uploads against a signature-checking provider", () => {
     }
   });
 
+  it("streams a >1 MiB object from disk to S3 and back to disk with the same SHA-256", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "bizamiz-s3-roundtrip-"));
+    const key = `media/${BUSINESS_ID}/${ASSET_ID}/stream-roundtrip.bin`;
+    const source = path.join(dir, "source.bin");
+    const target = path.join(dir, "target.bin");
+    const bytes = payloadOf(2 * 1024 * 1024 + 31);
+    const hash = sha256Hex(bytes);
+    writeFileSync(source, bytes);
+    try {
+      await s3PutFile(config(), key, source, { payloadHash: hash, sizeBytes: bytes.byteLength });
+      const result = await s3GetToFile(config(), key, target, { maxBytes: bytes.byteLength });
+      expect(result).toEqual({ sizeBytes: bytes.byteLength, sha256: hash });
+      expect(readFileSync(target).equals(bytes)).toBe(true);
+      await expect(
+        s3GetToFile(config(), key, path.join(dir, "oversized.bin"), { maxBytes: bytes.byteLength - 1 }),
+      ).rejects.toThrow("artifact_too_large");
+      await s3Delete(config(), key);
+      expect(store.has(key)).toBe(false);
+    } finally {
+      store.delete(key);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("signs and sends a Persian file name correctly (percent-encoded canonical URI)", async () => {
     requests.length = 0;
     const key = `media/${BUSINESS_ID}/${ASSET_ID}/تصویر-محصول نهایی.png`;
@@ -286,11 +318,12 @@ describe("tenant-shaped uploads against a signature-checking provider", () => {
     expect(store.get(key)?.equals(bytes)).toBe(true);
   });
 
-  it("s3PutFile against a 1-byte-below-threshold file and a 5 MiB file both verify", async () => {
+  it("s3PutFile verifies files below and at the threshold and at 5 MiB", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "bizamiz-s3putfile-"));
     try {
       for (const [name, size] of [
         ["just-below.png", 1024 * 1024 - 1],
+        ["آستانه.png", 1024 * 1024],
         ["large.png", 5 * 1024 * 1024],
       ] as const) {
         requests.length = 0;
@@ -405,6 +438,62 @@ describe("retry policy — transient vs deterministic", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
       await flaky.close();
+    }
+  });
+});
+
+describe("streamed download interruption and cleanup", () => {
+  it("retries an interrupted body and publishes only the complete download", async () => {
+    const bytes = payloadOf(256 * 1024);
+    let attempts = 0;
+    const server = createServer((_req, res) => {
+      attempts += 1;
+      res.writeHead(200, { "content-length": bytes.length });
+      if (attempts === 1) {
+        res.write(bytes.subarray(0, 64 * 1024), () => res.destroy());
+      } else {
+        res.end(bytes);
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const dir = mkdtempSync(path.join(os.tmpdir(), "bizamiz-s3-resume-"));
+    const target = path.join(dir, "target.bin");
+    try {
+      await expect(s3GetToFile({ ...config(), endpoint }, "probe", target, { retry: { baseDelayMs: 0 } }))
+        .resolves.toEqual({ sizeBytes: bytes.length, sha256: sha256Hex(bytes) });
+      expect(attempts).toBe(2);
+      expect(readFileSync(target).equals(bytes)).toBe(true);
+      expect(readdirSync(dir)).toEqual(["target.bin"]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops an oversized chunked response and preserves an existing destination", async () => {
+    let attempts = 0;
+    const server = createServer((_req, res) => {
+      attempts += 1;
+      res.writeHead(200, { "transfer-encoding": "chunked" });
+      res.end(payloadOf(64 * 1024));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const dir = mkdtempSync(path.join(os.tmpdir(), "bizamiz-s3-cap-"));
+    const target = path.join(dir, "target.bin");
+    writeFileSync(target, "previous file");
+    try {
+      await expect(s3GetToFile({ ...config(), endpoint }, "probe", target, { maxBytes: 1024 }))
+        .rejects.toMatchObject({ providerCode: "artifact_too_large", retryable: false });
+      expect(attempts).toBe(1);
+      expect(readFileSync(target, "utf8")).toBe("previous file");
+      expect(readdirSync(dir)).toEqual(["target.bin"]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
