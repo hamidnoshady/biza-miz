@@ -11,6 +11,9 @@
  * tested in s3-lite.test.ts; only the four `s3*` functions do network I/O.
  */
 import { createHash, createHmac } from "node:crypto";
+// Keep node:stream static: the production Next.js server bundle can expose
+// only a default export for a dynamic import of this Node built-in.
+import { Readable, Transform } from "node:stream";
 
 export interface S3Config {
   /** https://host[:port] — no trailing slash, no bucket */
@@ -763,7 +766,6 @@ export async function s3PutFile(
   if (opts.contentType) extraHeaders["content-type"] = opts.contentType;
   const { createReadStream } = await import("node:fs");
   const { stat } = await import("node:fs/promises");
-  const { Readable } = await import("node:stream");
   const what = `upload ${key}`;
 
   // The spooled file is the payload: if it is not the size the hash was
@@ -843,7 +845,7 @@ export async function s3GetToFile(
   const { pipeline } = await import("node:stream/promises");
   const hash = createHash("sha256");
   let total = 0;
-  const counting = new (await import("node:stream")).Transform({
+  const counting = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       total += chunk.byteLength;
       if (total > maxBytes) return callback(new Error(`download ${key}: artifact_too_large`));
