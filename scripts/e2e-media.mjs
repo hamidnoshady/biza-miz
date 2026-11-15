@@ -42,8 +42,9 @@
  *
  * Usage: node scripts/e2e-media.mjs
  */
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32 as zlibCrc32 } from "node:zlib";
@@ -88,9 +89,13 @@ const PNG_BASE64 =
  * decoder including sharp — so each run's bytes hash differently while the
  * file stays a genuine PNG.
  */
-function uniquePngBytes() {
+function uniquePngBytes(targetSize) {
   const base = Buffer.from(PNG_BASE64, "base64");
-  const keyword = Buffer.from(`Comment\0e2e-run-${RUN_ID}`, "latin1");
+  const comment = Buffer.from(`Comment\0e2e-run-${RUN_ID}`, "latin1");
+  const keyword = targetSize === undefined ? comment : Buffer.concat([
+    comment,
+    Buffer.alloc(targetSize - base.length - 12 - comment.length, "x"),
+  ]);
   const type = Buffer.from("tEXt", "latin1");
   const length = Buffer.alloc(4);
   length.writeUInt32BE(keyword.length);
@@ -177,7 +182,14 @@ function startMockS3(bucket) {
       const chunks = [];
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
-        objects.set(key, Buffer.concat(chunks));
+        const body = Buffer.concat(chunks);
+        const declared = req.headers["content-length"];
+        if ((declared && Number(declared) !== body.length)
+            || req.headers["x-amz-content-sha256"] !== createHash("sha256").update(body).digest("hex")) {
+          res.writeHead(400).end("<Error><Code>BadDigest</Code></Error>");
+          return;
+        }
+        objects.set(key, body);
         res.statusCode = 200;
         res.end();
       });
@@ -231,19 +243,67 @@ function startMockS3(bucket) {
     res.end();
   });
   return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => resolve({ server, port: server.address().port }));
+    server.listen(0, "127.0.0.1", () => resolve({ server, objects, port: server.address().port }));
   });
+}
+
+async function verifyPlatformStreaming(db, objects) {
+  const { tsImport } = await import("tsx/esm/api");
+  const { signPlatformSession } = await tsImport("../src/lib/platform-auth-edge.ts", import.meta.url);
+  const email = `media-e2e-${RUN_ID}@example.com`;
+  const { rows: [{ id, token_version }] } = await db.query(
+    `INSERT INTO platform_admins (email, password_hash, full_name, role)
+     VALUES ($1, 'unused', 'Media E2E', 'owner') RETURNING id, token_version`,
+    [email],
+  );
+  try {
+    const token = await signPlatformSession({ padmin: id, role: "owner", fullName: "Media E2E", email, tokenVersion: token_version });
+    const response = await fetch(`${BASE_URL}/api/platform/media/test`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { origin: new URL(BASE_URL).origin, cookie: `pos_platform_session=${token}` },
+    });
+    const body = await response.json().catch(() => null);
+    const expected = ["config", "temp_file", "buffered_write", "buffered_read", "streamed_write", "streamed_read", "cleanup"];
+    if (!response.ok || body?.ok !== true || body.steps?.length !== expected.length
+        || expected.some((id) => !body.steps.find((step) => step.id === id && step.ok))
+        || [...objects.keys()].some((key) => key.startsWith("media/.health/"))) {
+      fail("compiled-storage-health", `HTTP ${response.status} ${JSON.stringify(body?.steps ?? body)}`);
+    }
+    log("compiled-storage-health", "All seven stages passed, including disk-streamed PUT, GET and cleanup");
+  } finally {
+    await db.query("DELETE FROM platform_admins WHERE id = $1", [id]);
+  }
+}
+
+async function verifyTenantThresholds(request) {
+  for (const size of [1024 ** 2 - 1, 1024 ** 2, 1024 ** 2 + 1]) {
+    const bytes = uniquePngBytes(size);
+    const upload = await request.post(`${BASE_URL}/api/media`, {
+      headers: { origin: new URL(BASE_URL).origin },
+      multipart: { file: { name: `تصویر آزمایشی-${RUN_ID}-${size}.png`, mimeType: "image/png", buffer: bytes } },
+    });
+    const data = await upload.json().catch(() => null);
+    if (upload.status() !== 201 || !data?.asset?.id) {
+      fail("compiled-tenant-upload", `${size} bytes: HTTP ${upload.status()} ${JSON.stringify(data)}`);
+    }
+    const download = await request.get(`${BASE_URL}/api/media/${data.asset.id}/file`);
+    if (!download.ok() || !(await download.body()).equals(bytes)) {
+      fail("compiled-tenant-download", `${size} bytes: HTTP ${download.status()} or different bytes`);
+    }
+  }
+  log("compiled-tenant-upload", "Byte-identical upload and download just below, at and just above 1 MiB");
 }
 
 async function main() {
   // ---- Point the running server's Media Library at a real (fake) bucket ---
   const bucket = "media-e2e";
-  const { server: s3Server, port: s3Port } = await startMockS3(bucket);
+  const { server: s3Server, port: s3Port, objects } = await startMockS3(bucket);
   const db = new Client({ connectionString: DATABASE_URL });
   await db.connect();
   await db.query(
     `UPDATE platform_media_config SET
-       enabled = true, endpoint = $1, region = 'us-east-1', bucket = $2, key_prefix = 'media/',
+       enabled = true, force_path_style = true, endpoint = $1, region = 'us-east-1', bucket = $2, key_prefix = 'media/',
        access_key_id = 'e2e-access', secret_access_key = 'e2e-secret', updated_at = now()
      WHERE id = true`,
     [`http://127.0.0.1:${s3Port}`, bucket],
@@ -285,6 +345,9 @@ async function main() {
       await runWpMediaE2E({ page, db, baseUrl: BASE_URL, uploadPath, fileName: FILE_NAME, businessSlug: BUSINESS_SLUG });
       return;
     }
+
+    await verifyPlatformStreaming(db, objects);
+    await verifyTenantThresholds(ownerContext.request);
 
     // ======================================================================
     // 1. Upload, tag, and search by tag
@@ -765,6 +828,7 @@ async function main() {
     await browser.close();
     await new Promise((resolve) => s3Server.close(resolve));
     await db.end();
+    rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 

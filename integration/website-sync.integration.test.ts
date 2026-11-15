@@ -399,7 +399,7 @@ describe("Phase 38w — one-way website sync", () => {
     expect(new Date(later.rows[0].next_attempt_at).getTime()).toBe(new Date(first.rows[0].next_attempt_at).getTime());
     // The complete projection reaches the site's taxonomy/category step before
     // the product write; either way exactly one remote attempt was made.
-    expect(mock.calls.filter((c) => c.method === "upsertMenuTaxonomy" || c.method === "upsertProduct")).toHaveLength(1);
+    expect(mock.calls.filter((c) => c.method === "upsertMenuCategory" || c.method === "upsertProduct")).toHaveLength(1);
   });
 
   it("reclaims a stale processing lease without creating a second remote product", async () => {

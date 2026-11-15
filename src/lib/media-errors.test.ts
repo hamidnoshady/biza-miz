@@ -35,16 +35,29 @@ function s3Error(over: Partial<ConstructorParameters<typeof S3RequestError>[0]> 
 }
 
 describe("classifyMediaFailure — stage attribution", () => {
-  it("attributes a provider rejection to the cloud write and never offers a retry", () => {
+  it("attributes a signature mismatch to the cloud write and never offers a retry", () => {
     const failure = classifyMediaFailure(s3Error());
     expect(failure).toMatchObject({
       stage: "s3_upload",
-      code: "storage_credentials_rejected",
+      code: "storage_signature_mismatch",
       retryable: false,
       status: 502,
       providerStatus: 403,
       providerCode: "SignatureDoesNotMatch",
     });
+  });
+
+  it.each([
+    [403, "InvalidAccessKeyId", "storage_credentials_rejected"],
+    [403, "AccessDenied", "storage_access_denied"],
+    [403, "QuotaExceeded", "storage_quota_exceeded"],
+    [507, null, "storage_quota_exceeded"],
+    [400, "BadDigest", "storage_integrity_error"],
+    [null, "InternalError", "internal_error"],
+    [null, "ECONNRESET", "storage_network_error"],
+    [null, "LocalFileUnwritable", "temp_file_unwritable"],
+  ] as const)("classifies S3 status %s and code %s", (status, providerCode, code) => {
+    expect(classifyMediaFailure(s3Error({ status, providerCode }))).toMatchObject({ code, retryable: false });
   });
 
   it("attributes a 5xx/429 provider outage to the cloud write and offers a retry", () => {
@@ -144,6 +157,11 @@ describe("localized, actionable messages", () => {
       "temp_file_unreadable",
       "temp_file_mismatch",
       "storage_credentials_rejected",
+      "storage_signature_mismatch",
+      "storage_access_denied",
+      "storage_quota_exceeded",
+      "storage_integrity_error",
+      "storage_network_error",
       "storage_object_missing",
       "storage_unavailable",
       "storage_timeout",
@@ -225,7 +243,7 @@ describe("references and redaction", () => {
       requestId: "media-ref-1",
       businessId: "b1",
       stage: "s3_upload",
-      code: "storage_credentials_rejected",
+      code: "storage_signature_mismatch",
       providerStatus: 403,
       byteSize: 2048,
       streamed: true,
@@ -241,8 +259,8 @@ describe("the tenant-facing body", () => {
     const failure = classifyMediaFailure(s3Error({ message: "upload k: HTTP 403 <Code>SignatureDoesNotMatch</Code>" }));
     const body = mediaFailureBody(failure, "media-ref-9");
     expect(body).toEqual({
-      error: "storage_credentials_rejected",
-      message: mediaFailureMessage("storage_credentials_rejected"),
+      error: "storage_signature_mismatch",
+      message: mediaFailureMessage("storage_signature_mismatch"),
       reference: "media-ref-9",
       retryable: false,
       stage: "s3_upload",

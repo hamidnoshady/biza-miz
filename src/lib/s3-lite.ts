@@ -11,9 +11,13 @@
  * tested in s3-lite.test.ts; only the four `s3*` functions do network I/O.
  */
 import { createHash, createHmac } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdtemp, rename, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 // Keep node:stream static: the production Next.js server bundle can expose
 // only a default export for a dynamic import of this Node built-in.
 import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 export interface S3Config {
   /** https://host[:port] — no trailing slash, no bucket */
@@ -315,28 +319,30 @@ const RETRYABLE_TRANSPORT_CODES = new Set([
  *
  * Undici reports most outbound failures as one `TypeError: fetch failed` whose
  * *own* `code` is undefined; the real reason is one or two levels down in
- * `cause` (and, for a TLS failure, in `cause.cause`). `transportCodeOf` used to
+ * `cause` (and, for a TLS failure, in `cause.cause`). `transportFailureOf` used to
  * look exactly one level deep and give up, so the whole chain collapsed to the
  * generic label `NetworkError`, which was then marked non-retryable — a
  * transient reset skipped the bounded retries entirely. This walks the chain,
  * keeps the first recognised code, and never copies a message, an endpoint or a
  * header into the diagnostic.
  */
-function transportCodeOf(error: unknown): string | null {
+function transportFailureOf(error: unknown, remaining = 4): { code: string; syscall?: unknown } | null {
   let current: unknown = error;
-  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
-    const candidate = current as { code?: unknown; name?: unknown; cause?: unknown; errors?: unknown };
-    if (typeof candidate.code === "string" && candidate.code.length > 0) return candidate.code;
-    if (candidate.name === "TimeoutError") return "TimeoutError";
+  for (let depth = 0; depth < remaining && current && typeof current === "object"; depth += 1) {
+    const candidate = current as { code?: unknown; name?: unknown; cause?: unknown; errors?: unknown; syscall?: unknown };
+    if (typeof candidate.code === "string" && candidate.code.length > 0) {
+      return { code: candidate.code, syscall: candidate.syscall };
+    }
+    if (candidate.name === "TimeoutError") return { code: "TimeoutError" };
     // `AbortError` is this client's own timeout (AbortSignal.timeout aborts with
     // exactly that name) — classified as a timeout, not as a caller's abort.
-    if (candidate.name === "AbortError") return "TimeoutError";
+    if (candidate.name === "AbortError") return { code: "TimeoutError" };
     // `AggregateError` from a happy-eyeballs connect: the first inner code that
     // names a real transport failure is the useful one.
     if (Array.isArray(candidate.errors)) {
       for (const inner of candidate.errors) {
-        const code = transportCodeOf(inner);
-        if (code !== null && code !== "TimeoutError") return code;
+        const nested = transportFailureOf(inner, remaining - depth - 1);
+        if (nested) return nested;
       }
     }
     current = candidate.cause;
@@ -364,7 +370,7 @@ export function describeTransportFailure(error: unknown): {
     });
     current = candidate.cause;
   }
-  const code = transportCodeOf(error);
+  const code = transportFailureOf(error)?.code ?? null;
   return {
     code,
     // The outermost class is what an operator can look up ("fetch failed"),
@@ -376,12 +382,12 @@ export function describeTransportFailure(error: unknown): {
 
 /** The provider's `<Code>…</Code>` from an S3 XML error body, when present. */
 export function providerCodeFromXml(text: string): string | null {
-  return /<Code>([\s\S]{1,80}?)<\/Code>/.exec(text)?.[1]?.trim() || null;
+  return /<Code>\s*([A-Za-z][A-Za-z0-9_.-]{0,79})\s*<\/Code>/.exec(text)?.[1] ?? null;
 }
 
 /**
  * Read the failing response into a typed `S3RequestError`. The body is read at
- * most once and truncated; the message keeps the status and the provider code
+ * once. Only the status and provider code are emitted into diagnostics
  * so a support engineer can tell 403 `SignatureDoesNotMatch` from 503
  * `SlowDown` at a glance.
  */
@@ -389,13 +395,13 @@ async function toS3Error(
   res: Response,
   input: { what: string; operation: S3Operation; key: string },
 ): Promise<S3RequestError> {
-  const raw = (await res.text().catch(() => "")).slice(0, 400);
-  const detail = redactS3Detail(raw).replace(/\s+/g, " ").trim();
-  const providerCode = providerCodeFromXml(raw);
-  const retryable = RETRYABLE_STATUS.has(res.status);
+  const providerCode = providerCodeFromXml((await res.text().catch(() => "")).slice(0, 400));
+  const retryable = RETRYABLE_STATUS.has(res.status)
+    && !S3_QUOTA_CODES.has(providerCode ?? "")
+    && !S3_INTEGRITY_CODES.has(providerCode ?? "");
   const statusPart = `HTTP ${res.status}${providerCode ? ` ${providerCode}` : ""}`;
   return new S3RequestError({
-    message: `${input.what}: ${statusPart}${detail ? ` — ${detail}` : ""}`,
+    message: `${input.what}: ${statusPart}`,
     operation: input.operation,
     status: res.status,
     providerCode,
@@ -418,19 +424,47 @@ function classifyS3Failure(
   return toTransportError(error, input);
 }
 
+export const S3_QUOTA_CODES = new Set(["QuotaExceeded", "StorageQuotaExceeded", "InsufficientStorage", "AccountProblem"]);
+export const S3_INTEGRITY_CODES = new Set([
+  "BadDigest", "InvalidDigest", "XAmzContentSHA256Mismatch", "IncompleteBody",
+  "ContentLengthMismatch", "UND_ERR_REQ_CONTENT_LENGTH_MISMATCH", "UND_ERR_RES_CONTENT_LENGTH_MISMATCH",
+]);
+const S3_FILESYSTEM_CODES = new Set([
+  "EACCES", "EPERM", "EROFS", "ENOSPC", "EDQUOT", "EMFILE", "ENFILE",
+  "EIO", "ENOENT", "EISDIR", "ENOTDIR", "EXDEV",
+]);
+
+export function isS3Timeout(code: string | null): boolean {
+  return code === "timeout" || code === "TimeoutError" || code === "ETIMEDOUT"
+    || /^UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT$/.test(code ?? "");
+}
+
 function toTransportError(
   error: unknown,
   input: { what: string; operation: S3Operation; key: string },
 ): S3RequestError {
-  const code = transportCodeOf(error);
-  const isTimeout = code === "TimeoutError";
-  // Issue #1296: a transport failure with *no* extracted code (a bare
-  // `TypeError: fetch failed` whose cause chain names nothing Node recognises) is
-  // still a network failure, and a network failure may be transient. It is
-  // retried under the same bounded ladder; only a recognised deterministic code
-  // (a hostname that does not resolve, a TLS verification failure) skips it.
-  const retryable = code === null || RETRYABLE_TRANSPORT_CODES.has(code);
-  const label = isTimeout ? "timeout" : (code ?? "NetworkError");
+  const failure = transportFailureOf(error);
+  const code = failure?.code ?? null;
+  const connectFailure = failure?.syscall === "connect" || failure?.syscall === "getaddrinfo";
+  const localFile = !connectFailure && code !== null && S3_FILESYSTEM_CODES.has(code);
+  const knownTransport = code !== null && (
+    connectFailure || RETRYABLE_TRANSPORT_CODES.has(code) || code === "ENOTFOUND"
+    || /^(?:ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED_)/.test(code)
+  );
+  // Undici sometimes supplies no usable code for an interrupted request.
+  const fetchFailure = error instanceof TypeError && /^(fetch failed|terminated)(:|$)/.test(error.message);
+  const integrity = code !== null && S3_INTEGRITY_CODES.has(code);
+  let label = "InternalError";
+  let retryable = false;
+  if (localFile) {
+    label = input.operation === "get" ? "LocalFileUnwritable" : "LocalFileUnreadable";
+  } else if (integrity) {
+    label = code;
+    retryable = code === "UND_ERR_RES_CONTENT_LENGTH_MISMATCH";
+  } else if (knownTransport || (fetchFailure && code === null)) {
+    label = code === "TimeoutError" ? "timeout" : (code ?? "NetworkError");
+    retryable = code === null || RETRYABLE_TRANSPORT_CODES.has(code);
+  }
   return new S3RequestError({
     message: `${input.what}: ${label}`,
     operation: input.operation,
@@ -764,8 +798,6 @@ export async function s3PutFile(
 ): Promise<void> {
   const extraHeaders: Record<string, string> = {};
   if (opts.contentType) extraHeaders["content-type"] = opts.contentType;
-  const { createReadStream } = await import("node:fs");
-  const { stat } = await import("node:fs/promises");
   const what = `upload ${key}`;
 
   // The spooled file is the payload: if it is not the size the hash was
@@ -807,14 +839,20 @@ export async function s3PutFile(
         payloadHash: opts.payloadHash,
         extraHeaders,
       });
-      const res = await fetch(signed.url, {
-        method: "PUT",
-        headers: { ...signed.headers, "content-length": String(opts.sizeBytes) },
-        body: Readable.toWeb(createReadStream(filePath)) as unknown as BodyInit,
-        duplex: "half",
-        signal: AbortSignal.timeout(s3UploadTimeoutMs(opts.sizeBytes)),
-      } as RequestInit & { duplex: "half" });
-      await throwOnError(res, { what, operation: "put", key });
+      const stream = createReadStream(filePath);
+      try {
+        const res = await fetch(signed.url, {
+          method: "PUT",
+          headers: { ...signed.headers, "content-length": String(opts.sizeBytes) },
+          body: Readable.toWeb(stream) as unknown as BodyInit,
+          duplex: "half",
+          signal: AbortSignal.timeout(s3UploadTimeoutMs(opts.sizeBytes)),
+        } as RequestInit & { duplex: "half" });
+        await throwOnError(res, { what, operation: "put", key });
+        await res.body?.cancel().catch(() => {});
+      } finally {
+        stream.destroy();
+      }
     },
     (error) => classifyS3Failure(error, { what, operation: "put", key }),
     opts.retry,
@@ -831,34 +869,59 @@ export async function s3GetToFile(
   config: S3Config,
   key: string,
   filePath: string,
-  opts: { maxBytes?: number } = {},
+  opts: { maxBytes?: number; retry?: S3RetryOptions } = {},
 ): Promise<{ sizeBytes: number; sha256: string }> {
-  const res = await s3Fetch(config, { method: "GET", key, payloadHash: sha256Hex("") });
-  await throwOnError(res, { what: `download ${key}`, operation: "get", key });
   const maxBytes = opts.maxBytes ?? PLATFORM_S3_DOWNLOAD_LIMIT;
-  const declared = Number(res.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > maxBytes) throw new Error(`download ${key}: artifact_too_large`);
-  if (!res.body) throw new Error(`download ${key}: empty_body`);
+  const input = { what: `download ${key}`, operation: "get" as const, key };
+  function integrityFailure(providerCode: string, retryable = false): S3RequestError {
+    return new S3RequestError({
+      ...input,
+      message: `${input.what}: ${providerCode}`,
+      status: null,
+      providerCode,
+      retryable,
+    });
+  }
 
-  const { createHash } = await import("node:crypto");
-  const { createWriteStream } = await import("node:fs");
-  const { pipeline } = await import("node:stream/promises");
-  const hash = createHash("sha256");
-  let total = 0;
-  const counting = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      total += chunk.byteLength;
-      if (total > maxBytes) return callback(new Error(`download ${key}: artifact_too_large`));
-      hash.update(chunk);
-      callback(null, chunk);
-    },
-  });
-  await pipeline(
-    res.body as unknown as NodeJS.ReadableStream,
-    counting,
-    createWriteStream(filePath, { mode: 0o600 }),
-  );
-  return { sizeBytes: total, sha256: hash.digest("hex") };
+  return withS3Retry(async () => {
+    // Publish only a complete download. Each retry owns a fresh file and
+    // cannot truncate an existing destination or pick up partial bytes.
+    const dir = await mkdtemp(join(dirname(filePath), ".s3-download-"));
+    const partial = join(dir, "body");
+    let body: ReadableStream<Uint8Array> | null = null;
+    try {
+      const res = await s3Fetch(config, { method: "GET", key, payloadHash: sha256Hex("") });
+      await throwOnError(res, input);
+      body = res.body;
+      const length = res.headers.get("content-length");
+      const encoding = res.headers.get("content-encoding");
+      // Fetch may decode an encoded response. Its Content-Length describes
+      // the wire bytes, so compare against the disk file only for identity.
+      const declared = length !== null && /^\d+$/.test(length) && (!encoding || encoding === "identity")
+        ? Number(length)
+        : null;
+      if (declared !== null && declared > maxBytes) throw integrityFailure("artifact_too_large");
+      if (!body) throw integrityFailure("empty_body");
+
+      const hash = createHash("sha256");
+      let total = 0;
+      const counting = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          total += chunk.byteLength;
+          if (total > maxBytes) return callback(integrityFailure("artifact_too_large"));
+          hash.update(chunk);
+          callback(null, chunk);
+        },
+      });
+      await pipeline(Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]), counting, createWriteStream(partial, { mode: 0o600 }));
+      if (declared !== null && total !== declared) throw integrityFailure("ContentLengthMismatch", true);
+      await rename(partial, filePath);
+      return { sizeBytes: total, sha256: hash.digest("hex") };
+    } finally {
+      if (body && !body.locked) await body.cancel().catch(() => {});
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, (error) => classifyS3Failure(error, input), opts.retry);
 }
 
 /** Ceiling for a streamed object download; overridable per call. */

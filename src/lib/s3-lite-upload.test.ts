@@ -30,7 +30,7 @@
  * (`s3PutFile`).
  */
 import { createHash, createHmac } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -318,11 +318,12 @@ describe("tenant-shaped uploads against a signature-checking provider", () => {
     expect(store.get(key)?.equals(bytes)).toBe(true);
   });
 
-  it("s3PutFile against a 1-byte-below-threshold file and a 5 MiB file both verify", async () => {
+  it("s3PutFile verifies files below and at the threshold and at 5 MiB", async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), "bizamiz-s3putfile-"));
     try {
       for (const [name, size] of [
         ["just-below.png", 1024 * 1024 - 1],
+        ["آستانه.png", 1024 * 1024],
         ["large.png", 5 * 1024 * 1024],
       ] as const) {
         requests.length = 0;
@@ -437,6 +438,62 @@ describe("retry policy — transient vs deterministic", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
       await flaky.close();
+    }
+  });
+});
+
+describe("streamed download interruption and cleanup", () => {
+  it("retries an interrupted body and publishes only the complete download", async () => {
+    const bytes = payloadOf(256 * 1024);
+    let attempts = 0;
+    const server = createServer((_req, res) => {
+      attempts += 1;
+      res.writeHead(200, { "content-length": bytes.length });
+      if (attempts === 1) {
+        res.write(bytes.subarray(0, 64 * 1024), () => res.destroy());
+      } else {
+        res.end(bytes);
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const dir = mkdtempSync(path.join(os.tmpdir(), "bizamiz-s3-resume-"));
+    const target = path.join(dir, "target.bin");
+    try {
+      await expect(s3GetToFile({ ...config(), endpoint }, "probe", target, { retry: { baseDelayMs: 0 } }))
+        .resolves.toEqual({ sizeBytes: bytes.length, sha256: sha256Hex(bytes) });
+      expect(attempts).toBe(2);
+      expect(readFileSync(target).equals(bytes)).toBe(true);
+      expect(readdirSync(dir)).toEqual(["target.bin"]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops an oversized chunked response and preserves an existing destination", async () => {
+    let attempts = 0;
+    const server = createServer((_req, res) => {
+      attempts += 1;
+      res.writeHead(200, { "transfer-encoding": "chunked" });
+      res.end(payloadOf(64 * 1024));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const dir = mkdtempSync(path.join(os.tmpdir(), "bizamiz-s3-cap-"));
+    const target = path.join(dir, "target.bin");
+    writeFileSync(target, "previous file");
+    try {
+      await expect(s3GetToFile({ ...config(), endpoint }, "probe", target, { maxBytes: 1024 }))
+        .rejects.toMatchObject({ providerCode: "artifact_too_large", retryable: false });
+      expect(attempts).toBe(1);
+      expect(readFileSync(target, "utf8")).toBe("previous file");
+      expect(readdirSync(dir)).toEqual(["target.bin"]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
