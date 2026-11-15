@@ -13,9 +13,22 @@ import { HISTORICAL_INVOICE_FIELDS, HistoricalMappingError } from "@/lib/data-tr
 import { HistoricalJobPreviewError } from "@/lib/data-transfer/historical-invoice-staged-rows";
 import { previewHistoricalImportJob } from "@/lib/data-transfer/historical-invoice-job-preview";
 import { HistoricalArchiveError, previewHistoricalCustomerReview, confirmHistoricalCustomerReview } from "@/lib/data-transfer/historical-invoice-archive-service";
+import { HistoricalFileError, validHistoricalText } from "@/lib/data-transfer/historical-invoice-file";
+import { HistoricalStagingError, stageHistoricalInvoiceFile } from "@/lib/data-transfer/historical-invoice-staging";
+import { getHistoricalInvoiceJob, listHistoricalInvoiceJobs, searchHistoricalCustomers } from "@/lib/data-transfer/historical-invoice-history";
 
-// These endpoints operate only on already-staged jobs. They do not stage an
-// upload, approve a job, enqueue one, or execute/archive an invoice.
+// Staging is intentionally limited to text formats. This endpoint never
+// approves, enqueues, executes, or archives invoices.
+const stageContentType = "application/vnd.bizamiz.historical-invoice+json";
+const stageRequest = z.object({
+  fileName: z.string().trim().min(1).max(300).refine(validHistoricalText),
+  format: z.enum(["csv", "json"]),
+  content: z.string().min(1).refine(validHistoricalText),
+  sourceKey: z.string().trim().min(1).max(200).refine(validHistoricalText),
+  provider: z.string().trim().max(200).refine(validHistoricalText),
+  currency: z.enum(["rial", "toman"]), calendar: z.enum(["jalali", "gregorian"]),
+}).strict();
+
 const mapping = z.object({ columns: z.array(z.object({
   field: z.enum(HISTORICAL_INVOICE_FIELDS), column: z.number().int().min(0).max(511),
   transform: z.enum(["none", "trim"]).optional(),
@@ -26,6 +39,9 @@ const job = {
 };
 const customer = { externalCustomerCode: z.string().trim().min(1).max(300), partyId: z.string().uuid() };
 const command = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("list"), limit: z.number().int().min(1).max(50).default(20), offset: z.number().int().min(0).max(10_000).default(0) }).strict(),
+  z.object({ action: z.literal("get"), jobId: z.string().uuid() }).strict(),
+  z.object({ action: z.literal("search-customer"), term: z.string().trim().min(2).max(100).refine(validHistoricalText) }).strict(),
   z.object({ action: z.literal("preview"), ...job, sampleLimit: z.number().int().min(0).max(200).optional(),
     documentOffset: z.number().int().min(0).max(50_000).optional(), orphanOffset: z.number().int().min(0).max(50_000).optional() }).strict(),
   z.object({ action: z.literal("review-customer"), ...job, ...customer }).strict(),
@@ -67,6 +83,29 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   } catch {
     return NextResponse.json({ error: "service_activation_check_unavailable" }, { status: 503 });
   }
+  if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === stageContentType) {
+    // The outer JSON document is capped before it is parsed, even when the
+    // caller omits or falsifies Content-Length. XLSX is deliberately not
+    // accepted until workbook object amplification is bounded.
+    const body = await readBoundedJson(request, 20 * 1024 * 1024);
+    if (!body.ok) return NextResponse.json({ error: body.error }, { status: body.error === "payload_too_large" ? 413 : 400 });
+    const parsed = stageRequest.safeParse(body.value);
+    if (!parsed.success || !parsed.data.fileName.toLowerCase().endsWith(`.${parsed.data.format}`)) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    const { content, ...values } = parsed.data;
+    try {
+      const staged = await stageHistoricalInvoiceFile({ ...values, buffer: new TextEncoder().encode(content).buffer,
+        businessId: session.businessId, locationId: location.id, actor: { userId: session.sub, name: session.fullName ?? "" } });
+      return NextResponse.json({ staged, executionAvailable: false }, { status: 201, headers: { "Cache-Control": "no-store" } });
+    } catch (error) {
+      if (error instanceof HistoricalFileError || error instanceof HistoricalStagingError) {
+        const status = error.code === "file_too_large" ? 413 : error.code === "location_not_found" ? 404 : 400;
+        return NextResponse.json({ error: error.code }, { status, headers: { "Cache-Control": "no-store" } });
+      }
+      throw error;
+    }
+  }
   const body = await readBoundedJson(request, 32_768);
   if (!body.ok) return NextResponse.json({ error: body.error }, { status: body.error === "payload_too_large" ? 413 : 400 });
   const parsed = command.safeParse(body.value);
@@ -74,6 +113,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const input = parsed.data;
   const scope = { businessId: session.businessId, locationId: location.id };
   try {
+    if (input.action === "list") {
+      const result = await listHistoricalInvoiceJobs({ ...scope, limit: input.limit, offset: input.offset });
+      return NextResponse.json({ ...result, executionAvailable: false }, { headers: { "Cache-Control": "no-store" } });
+    }
+    if (input.action === "search-customer") {
+      const result = await searchHistoricalCustomers({ ...scope, term: input.term });
+      return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
+    }
+    if (input.action === "get") {
+      const result = await getHistoricalInvoiceJob({ ...scope, jobId: input.jobId });
+      return NextResponse.json({ job: result, executionAvailable: false }, { headers: { "Cache-Control": "no-store" } });
+    }
     if (input.action === "preview") {
       const { action: _action, ...values } = input;
       const preview = await previewHistoricalImportJob({ ...values, ...scope });

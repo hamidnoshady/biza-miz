@@ -7,7 +7,7 @@
 import { fromBuffer, type Entry, type ZipFile } from "yauzl";
 import JSZip from "jszip";
 import { buf as crc32 } from "crc-32";
-import { HistoricalFileError } from "./historical-invoice-file";
+import { HistoricalFileError } from "./historical-invoice-file-error";
 
 const MAX_ENTRIES = 1000;
 const MAX_UNCOMPRESSED = 64 * 1024 * 1024;

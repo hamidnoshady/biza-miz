@@ -8,6 +8,11 @@
  * numeric and date cells whose original precision Excel may have lost.
  */
 import { detectDelimiter } from "./csv";
+import { HistoricalFileError } from "./historical-invoice-file-error";
+// Keep this local dependency static: a dynamic relative import causes Next's
+// standalone tracer to copy raw TypeScript into the desktop runtime.
+import { boundedHistoricalWorkbook } from "./historical-invoice-xlsx";
+export { HistoricalFileError } from "./historical-invoice-file-error";
 import type { HistoricalRawRow } from "./historical-invoice-mapping";
 
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -22,10 +27,6 @@ const MAX_STAGED_JSON_CHARS = 32 * 1024 * 1024;
 const MAX_CELL = 100_000;
 const MAX_SHEETS = 10;
 
-export class HistoricalFileError extends Error {
-  constructor(readonly code: string) { super(code); this.name = "HistoricalFileError"; }
-}
-
 export interface HistoricalFileSheet {
   name: string;
   columns: string[];
@@ -33,6 +34,11 @@ export interface HistoricalFileSheet {
 }
 
 type SourceRow = { rowNumber: number; cells: string[] };
+
+/** PostgreSQL jsonb rejects NUL and unpaired UTF-16 surrogates. */
+export function validHistoricalText(value: string): boolean {
+  return !/\u0000|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value);
+}
 
 function sheet(name: string, source: SourceRow[], budget = { cells: 0, chars: 0 }): HistoricalFileSheet {
   if (!source.length) throw new HistoricalFileError("empty_file");
@@ -127,6 +133,9 @@ function csvRows(input: string): SourceRow[] {
 /** Strict JSON parser: detects duplicate keys and retains numeric literals as text. */
 function jsonValue(text: string): unknown {
   let i = 0, parsedProperties = 0;
+  // A sticky regex avoids repeatedly slicing the remaining JSON for every
+  // numeric cell in a large source file.
+  const numberPattern = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
   const ws = () => { while (i < text.length && /[\x20\t\r\n]/.test(text[i])) i++; };
   const string = (): string => {
     if (text[i] !== '"') throw new HistoricalFileError("invalid_json");
@@ -134,8 +143,14 @@ function jsonValue(text: string): unknown {
     while (i < text.length) {
       if (text[i] === "\\") { i += 2; continue; }
       if (text[i++] === '"') {
-        try { return JSON.parse(text.slice(start, i)) as string; }
-        catch { throw new HistoricalFileError("invalid_json"); }
+        try {
+          const value = JSON.parse(text.slice(start, i)) as string;
+          if (!validHistoricalText(value)) throw new HistoricalFileError("invalid_text");
+          return value;
+        } catch (error) {
+          if (error instanceof HistoricalFileError) throw error;
+          throw new HistoricalFileError("invalid_json");
+        }
       }
     }
     throw new HistoricalFileError("invalid_json");
@@ -157,19 +172,21 @@ function jsonValue(text: string): unknown {
     }
     if (text[i] === "{") {
       i++; ws(); const object: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+      let propertyCount = 0;
       if (text[i] === "}") { i++; return object; }
       while (true) {
         ws(); const key = string();
         if (Object.hasOwn(object, key)) throw new HistoricalFileError("duplicate_source_columns");
         if (++parsedProperties > MAX_MATERIALIZED_CELLS + MAX_COLUMNS) throw new HistoricalFileError("too_many_cells");
-        if (Object.keys(object).length >= MAX_COLUMNS) throw new HistoricalFileError("too_many_columns");
+        if (++propertyCount > MAX_COLUMNS) throw new HistoricalFileError("too_many_columns");
         ws(); if (text[i++] !== ":") throw new HistoricalFileError("invalid_json");
         object[key] = parse(depth + 1);
         ws(); if (text[i] === "}") { i++; return object; }
         if (text[i++] !== ",") throw new HistoricalFileError("invalid_json");
       }
     }
-    const numeric = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(text.slice(i));
+    numberPattern.lastIndex = i;
+    const numeric = numberPattern.exec(text);
     if (numeric) {
       i += numeric[0].length;
       return numeric[0];
@@ -210,7 +227,6 @@ function jsonRows(input: string): SourceRow[] {
 }
 
 async function xlsxSheets(buffer: ArrayBuffer): Promise<HistoricalFileSheet[]> {
-  const { boundedHistoricalWorkbook } = await import("./historical-invoice-xlsx");
   const safeBuffer = await boundedHistoricalWorkbook(buffer);
   const ExcelJS = (await import("exceljs")).default;
   const workbook = new ExcelJS.Workbook();
@@ -254,5 +270,6 @@ export async function parseHistoricalInvoiceFile(buffer: ArrayBuffer, format: "c
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(buffer); }
   catch { throw new HistoricalFileError("invalid_utf8"); }
+  if (!validHistoricalText(text)) throw new HistoricalFileError("invalid_text");
   return [sheet("", format === "csv" ? csvRows(text) : jsonRows(text))];
 }

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ auth: vi.fn(), owner: vi.fn(), entity: vi.fn(), location: vi.fn(), activation: vi.fn(), availability: vi.fn(), module: vi.fn(), feature: vi.fn(), preview: vi.fn(), review: vi.fn(), confirm: vi.fn() }));
+const mocks = vi.hoisted(() => ({ auth: vi.fn(), owner: vi.fn(), entity: vi.fn(), location: vi.fn(), activation: vi.fn(), availability: vi.fn(), module: vi.fn(), feature: vi.fn(), preview: vi.fn(), review: vi.fn(), confirm: vi.fn(), stage: vi.fn(), list: vi.fn(), get: vi.fn(), search: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ withTenantScope: (handler: unknown) => handler, requirePermissions: mocks.auth }));
 vi.mock("../guard", async () => {
   const { PERMISSIONS } = await import("@/lib/permissions");
@@ -12,6 +12,10 @@ vi.mock("@/lib/app-availability-service", () => ({ isAppAvailable: mocks.availab
 vi.mock("@/lib/industry-guard", () => ({ isModuleEnabled: mocks.module }));
 vi.mock("@/lib/features", () => ({ isFeatureEnabled: mocks.feature }));
 vi.mock("@/lib/service-activation/app-gate-service", () => ({ serviceActivationState: mocks.activation }));
+vi.mock("@/lib/data-transfer/historical-invoice-history", () => ({ listHistoricalInvoiceJobs: mocks.list, getHistoricalInvoiceJob: mocks.get, searchHistoricalCustomers: mocks.search }));
+vi.mock("@/lib/data-transfer/historical-invoice-staging", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/data-transfer/historical-invoice-staging")>()), stageHistoricalInvoiceFile: mocks.stage,
+}));
 vi.mock("@/lib/data-transfer/historical-invoice-job-preview", () => ({ previewHistoricalImportJob: mocks.preview }));
 vi.mock("@/lib/data-transfer/historical-invoice-archive-service", () => ({
   HistoricalArchiveError: class extends Error { constructor(readonly code: string) { super(code); } },
@@ -39,6 +43,10 @@ beforeEach(() => {
   mocks.preview.mockResolvedValue({ crossSourceChecked: false });
   mocks.review.mockResolvedValue({ reviewToken: "a".repeat(64) });
   mocks.confirm.mockResolvedValue("created");
+  mocks.stage.mockResolvedValue({ jobId, columns: ["id"], rowCount: 1 });
+  mocks.list.mockResolvedValue({ jobs: [], hasMore: false });
+  mocks.get.mockResolvedValue({ jobId });
+  mocks.search.mockResolvedValue({ customers: [], hasMore: false });
 });
 
 describe("historical invoice review API", () => {
@@ -114,5 +122,56 @@ describe("historical invoice review API", () => {
     const res = await POST(request({ action: "confirm-customer", ...job, externalCustomerCode: "c", partyId, reviewToken: "a".repeat(64), confirmed: true }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "customer_review_stale" });
+  });
+});
+
+const stagePayload = { fileName: "historical.csv", format: "csv", content: "id,total\nA,100", sourceKey: "legacy", provider: "generic", currency: "rial", calendar: "jalali" };
+function stageRequest(value: unknown, headers: Record<string, string> = {}) {
+  return new NextRequest("http://localhost/api/data/historical-invoices", { method: "POST", headers: { "content-type": "application/vnd.bizamiz.historical-invoice+json", ...headers }, body: JSON.stringify(value) });
+}
+describe("historical text staging API", () => {
+  it("stages only text with the session tenant, actor and active branch", async () => {
+    const res = await POST(stageRequest(stagePayload));
+    expect(res.status).toBe(201);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toMatchObject({ staged: { jobId }, executionAvailable: false });
+    expect(mocks.stage).toHaveBeenCalledWith({ fileName: stagePayload.fileName, format: "csv", sourceKey: "legacy", provider: "generic", currency: "rial", calendar: "jalali", buffer: new TextEncoder().encode(stagePayload.content).buffer,
+      businessId: "tenant", locationId: "active-branch", actor: { userId: "user", name: "Owner" } });
+  });
+  it("does not trust a missing or understated Content-Length", async () => {
+    const huge = { ...stagePayload, content: "x".repeat(20 * 1024 * 1024) };
+    expect((await POST(stageRequest(huge, { "content-length": "1" }))).status).toBe(413);
+    expect(mocks.stage).not.toHaveBeenCalled();
+  });
+  it("rejects unsafe formats, spoofed scope, invalid text, and excess bodies", async () => {
+    for (const body of [
+      { ...stagePayload, format: "xlsx", fileName: "x.xlsx" },
+      { ...stagePayload, fileName: "x.xlsx" }, { ...stagePayload, businessId: "other" },
+      { ...stagePayload, actor: { userId: "other" } }, { ...stagePayload, content: "a\u0000b" },
+      { ...stagePayload, sourceKey: "\ud800" },
+    ]) expect((await POST(stageRequest(body))).status).toBe(400);
+    expect((await POST(stageRequest(stagePayload, { "content-length": String(21 * 1024 * 1024) }))).status).toBe(413);
+    expect(mocks.stage).not.toHaveBeenCalled();
+  });
+  it("does not stage without every guard", async () => {
+    mocks.entity.mockResolvedValueOnce({ entity: null, error: NextResponse.json({ error: "forbidden" }, { status: 403 }) });
+    expect((await POST(stageRequest(stagePayload))).status).toBe(403);
+    expect(mocks.stage).not.toHaveBeenCalled();
+  });
+});
+
+describe("historical history API", () => {
+  it("uses the active tenant and branch rather than user supplied scope", async () => {
+    const list = await POST(request({ action: "list", limit: 5, offset: 10 }));
+    expect(list.status).toBe(200);
+    expect(list.headers.get("cache-control")).toBe("no-store");
+    expect(mocks.list).toHaveBeenCalledWith({ businessId: "tenant", locationId: "active-branch", limit: 5, offset: 10 });
+    const get = await POST(request({ action: "get", jobId }));
+    expect(get.status).toBe(200);
+    expect(mocks.get).toHaveBeenCalledWith({ businessId: "tenant", locationId: "active-branch", jobId });
+    expect((await POST(request({ action: "search-customer", term: "علی" }))).status).toBe(200);
+    expect(mocks.search).toHaveBeenCalledWith({ businessId: "tenant", locationId: "active-branch", term: "علی" });
+    expect((await POST(request({ action: "search-customer", term: "a" }))).status).toBe(400);
+    expect((await POST(request({ action: "list", locationId: "other" }))).status).toBe(400);
   });
 });
