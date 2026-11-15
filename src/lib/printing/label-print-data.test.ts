@@ -152,6 +152,36 @@ describe("a retail item's label", () => {
     expect(result?.label.fields).toEqual([{ label: "قیمت", value: "۱۵۰٬۰۰۰" }]);
   });
 
+  it("prints a jewelry piece's native purity and exact net weight, not its cost", async () => {
+    dbAnswers([
+      { match: /UNION ALL/, rows: [{ source: "item", id: ITEM_ID, name: "انگشتر", unit: null, unit_price: null }] },
+      { match: /FROM item_barcodes/, rows: [{ id: BARCODE_ID, code: "2000000000015" }] },
+      { match: /FROM businesses/, rows: [{ industry: "jewelry" }] },
+      { match: /FROM item_weight_attributes/, rows: [{ purity: "18", net_weight: "3.123456789" }] },
+      { match: /FROM item_stock/, rows: [{ unit_price: "987654321" }] },
+    ]);
+    const result = await getLabelPrintData({ businessId: "biz-1", locationId: "loc-1", itemId: ITEM_ID });
+    expect(result?.label.fields).toEqual([{ label: "عیار", value: "۱۸" }, { label: "وزن", value: "۳٫۱۲۳۴۵۶۷۸۹ گرم خالص" }]);
+    const call = vi.mocked(db.query).mock.calls.find(([sql]) => String(sql).includes("FROM item_weight_attributes"));
+    expect(call?.[1]).toEqual([ITEM_ID, "loc-1"]);
+    expect(String(call?.[0])).toContain("i.location_id = $2");
+  });
+
+  it("prints the watch model reference but never chooses an arbitrary unit serial", async () => {
+    dbAnswers([
+      { match: /UNION ALL/, rows: [{ source: "item", id: ITEM_ID, name: "ساعت", unit: null, unit_price: null }] },
+      { match: /FROM item_barcodes/, rows: [{ id: BARCODE_ID, code: "2000000000015" }] },
+      { match: /FROM businesses/, rows: [{ industry: "watch" }] },
+      { match: /FROM watch_item_attributes/, rows: [{ reference_no: "REF-7" }] },
+      { match: /FROM item_stock/, rows: [{ unit_price: "987654321" }] },
+    ]);
+    const result = await getLabelPrintData({ businessId: "biz-1", locationId: "loc-1", itemId: ITEM_ID });
+    expect(result?.label.fields).toEqual([{ label: "مدل", value: "REF-7" }]);
+    expect(vi.mocked(db.query).mock.calls.some(([sql]) => String(sql).includes("item_serials"))).toBe(false);
+    const call = vi.mocked(db.query).mock.calls.find(([sql]) => String(sql).includes("FROM watch_item_attributes"));
+    expect(call?.[1]).toEqual([ITEM_ID, "loc-1"]);
+  });
+
   it("looks the code up in the retail barcode table, scoped to the branch — never the inventory one", async () => {
     retailItem("cosmetics");
     await getLabelPrintData({ businessId: "biz-1", locationId: "loc-1", itemId: ITEM_ID });

@@ -38,6 +38,15 @@ describe("retail catalogue entry adapters", () => {
     }
   });
 
+  it.each(["jewelry", "watch", "automotive"] as const)("offers %s attributes only with the native catalogue read permission", (industry) => {
+    const href = `${ACCOUNTING_WORKSPACE_HREFS.products}/attributes`;
+    const permission = industry === "automotive" ? PERMISSIONS.vehiclesView : PERMISSIONS.inventoryView;
+    const allowed = flatten(accessibleNavItemsFor(industry, { settingsTabs: [] }, "manager", new Set([permission]), features));
+    expect(allowed.some((item) => item.href === href)).toBe(true);
+    const denied = flatten(accessibleNavItemsFor(industry, { settingsTabs: [] }, "manager", new Set(), features));
+    expect(denied.some((item) => item.href === href)).toBe(false);
+  });
+
   it("does not offer creation to a read-only variant catalogue member", () => {
     const permissions = new Set<Permission>([PERMISSIONS.inventoryView]);
     const items = flatten(accessibleNavItemsFor("accessories", { settingsTabs: [] }, "manager", permissions, features));

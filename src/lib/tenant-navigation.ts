@@ -172,7 +172,7 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
           roles: ["owner", "manager"] as Role[],
           requiredAnyPermission: [catalogueAdapter.readPermission],
           children: PRODUCT_WORKSPACE_SECTIONS
-            .filter((section) => section.key === "list" || section.key === "new" || (section.key === "prices" && (industry === "jewelry" || industry === "automotive")) || (section.key === "reports" && (industry === "watch" || industry === "jewelry" || industry === "automotive")) || (section.key === "barcodes" && hasCapability(industry, "barcode")))
+            .filter((section) => section.key === "list" || section.key === "new" || section.key === "attributes" || (section.key === "prices" && (industry === "jewelry" || industry === "automotive")) || (section.key === "reports" && (industry === "watch" || industry === "jewelry" || industry === "automotive")) || (section.key === "barcodes" && hasCapability(industry, "barcode")))
             .map((section) => ({
               label: section.label,
               module: "stock" as const,

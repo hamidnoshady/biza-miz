@@ -27,16 +27,32 @@ describe("sampleForTemplate — one sample per business type", () => {
     }
   });
 
-  it("gives every label a product, a barcode and a price — also in a café", () => {
+  it("gives every label a product and barcode, and only non-specialist labels a sample price", () => {
     for (const industry of INDUSTRIES) {
       for (const template of eligible(industry).filter((t) => t.docType === "label")) {
         const sample = sampleForTemplate(template, base, industry);
         expect(sample.barcodeValue, `${industry} / ${template.key}`).toBeTruthy();
         expect(sample.title, `${industry} / ${template.key}`).not.toBe(base.title);
-        expect(sample.labelFields?.some((field) => field.label === "قیمت نمونه"), `${industry} / ${template.key}`).toBe(true);
+        expect(sample.labelFields?.some((field) => field.label === "قیمت نمونه"), `${industry} / ${template.key}`).toBe(industry !== "jewelry" && industry !== "watch");
         expect(sample.subtitle ?? "", `${industry} / ${template.key}`).not.toContain("میز");
       }
     }
+  });
+
+  it("shows a scannable code and native fields for a jewelry piece", () => {
+    const template = BUILT_IN_TEMPLATES.find((item) => item.key === "label57x40-label")!;
+    const sample = sampleForTemplate(template, base, "jewelry");
+    expect(sample.barcodeValue).toBe("2000000000015");
+    expect(sample.barcodeFormat).toBe("ean13");
+    expect(sample.labelFields).toContainEqual({ label: "وزن", value: "۳٫۲ گرم خالص" });
+  });
+
+  it("does not suggest a model barcode identifies a particular watch serial", () => {
+    const template = BUILT_IN_TEMPLATES.find((item) => item.key === "label57x40-label")!;
+    const sample = sampleForTemplate(template, base, "watch");
+    expect(sample.labelFields).toContainEqual({ label: "مدل", value: "REF-2042" });
+    expect(sample.labelFields?.some((field) => field.label.includes("سریال"))).toBe(false);
+    expect(sample.barcodeValue).toBe("2000000000015");
   });
 
   it("reconciles totals and payment rows with the lines on every receipt and invoice", () => {

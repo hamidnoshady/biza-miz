@@ -198,12 +198,12 @@ export function sampleForTemplate(
       {
         title: template.docType === "label" ? "انگشتر نمونه" : "فاکتور فروش طلا و جواهر",
         number: "J-1042",
-        barcodeValue: "JEW-SAMPLE-42",
-        barcodeFormat: "code128",
+        barcodeValue: template.docType === "label" ? "2000000000015" : "JEW-SAMPLE-42",
+        barcodeFormat: template.docType === "label" ? "ean13" : "code128",
         labelFields: [
-          { label: "وزن", value: "۳٫۲ گرم" },
-          { label: "عیار", value: "۷۵۰" },
-          { label: "قیمت نمونه", value: formatMoney(84_000_000, data.unit ?? "toman") },
+          { label: "وزن", value: "۳٫۲ گرم خالص" },
+          { label: "عیار", value: "۱۸" },
+          ...(template.docType === "label" ? [] : [{ label: "قیمت نمونه", value: formatMoney(84_000_000, data.unit ?? "toman") }]),
         ],
         note: "مقادیر این نمونه فرضی هستند.",
       },
@@ -216,11 +216,14 @@ export function sampleForTemplate(
       [{ name: "ساعت مچی نمونه", quantity: 1, detail: "سریال SN-2042 · گارانتی نمونه · وضعیت سالم", unitPrice: 12_500_000, tax: 0, lineTotal: 12_500_000 }],
       0,
       {
-        title: template.docType === "label" ? "کالای سریال‌دار نمونه" : "فاکتور کالای سریال‌دار",
+        title: template.docType === "label" ? "مدل ساعت نمونه" : "فاکتور کالای سریال‌دار",
         number: "R-1042",
-        barcodeValue: "SN-2042",
-        barcodeFormat: "code128",
-        labelFields: [
+        // The model label does not claim an arbitrary physical unit's serial.
+        barcodeValue: template.docType === "label" && industry === "watch" ? "2000000000015" : "SN-2042",
+        barcodeFormat: template.docType === "label" && industry === "watch" ? "ean13" : "code128",
+        labelFields: template.docType === "label" && industry === "watch" ? [
+          { label: "مدل", value: "REF-2042" },
+        ] : [
           { label: "شماره سریال", value: "SN-2042" },
           { label: "وضعیت", value: "نمونه · سالم" },
           { label: "قیمت نمونه", value: formatMoney(12_500_000, data.unit ?? "toman") },
