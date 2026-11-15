@@ -276,21 +276,26 @@ async function verifyPlatformStreaming(db, objects) {
   }
 }
 
-async function verifyTenantThresholds(request) {
+async function verifyTenantThresholds(page) {
   for (const size of [1024 ** 2 - 1, 1024 ** 2, 1024 ** 2 + 1]) {
-    const bytes = uniquePngBytes(size);
-    const upload = await request.post(`${BASE_URL}/api/media`, {
-      headers: { origin: new URL(BASE_URL).origin },
-      multipart: { file: { name: `تصویر آزمایشی-${RUN_ID}-${size}.png`, mimeType: "image/png", buffer: bytes } },
-    });
-    const data = await upload.json().catch(() => null);
-    if (upload.status() !== 201 || !data?.asset?.id) {
-      fail("compiled-tenant-upload", `${size} bytes: HTTP ${upload.status()} ${JSON.stringify(data)}`);
-    }
-    const download = await request.get(`${BASE_URL}/api/media/${data.asset.id}/file`);
-    if (!download.ok() || !(await download.body()).equals(bytes)) {
-      fail("compiled-tenant-download", `${size} bytes: HTTP ${download.status()} or different bytes`);
-    }
+    const result = await page.evaluate(async ({ base64, name }) => {
+      const bytes = Uint8Array.from(atob(base64), (byte) => byte.charCodeAt(0));
+      const form = new FormData();
+      form.set("file", new File([bytes], name, { type: "image/png" }));
+      const upload = await fetch("/api/media", { method: "POST", body: form });
+      const data = await upload.json().catch(() => null);
+      if (upload.status !== 201 || !data?.asset?.id) {
+        return { uploadStatus: upload.status, error: data?.error, exact: false };
+      }
+      const download = await fetch(`/api/media/${data.asset.id}/file`);
+      const received = new Uint8Array(await download.arrayBuffer());
+      return {
+        uploadStatus: upload.status,
+        downloadStatus: download.status,
+        exact: download.ok && received.length === bytes.length && received.every((byte, index) => byte === bytes[index]),
+      };
+    }, { base64: uniquePngBytes(size).toString("base64"), name: `تصویر آزمایشی-${RUN_ID}-${size}.png` });
+    if (!result.exact) fail("compiled-tenant-roundtrip", `${size} bytes: ${JSON.stringify(result)}`);
   }
   log("compiled-tenant-upload", "Byte-identical upload and download just below, at and just above 1 MiB");
 }
@@ -347,13 +352,13 @@ async function main() {
     }
 
     await verifyPlatformStreaming(db, objects);
-    await verifyTenantThresholds(ownerContext.request);
 
     // ======================================================================
     // 1. Upload, tag, and search by tag
     // ======================================================================
     await goto(page, "/media");
     if (!page.url().includes("/media")) fail("upload", `expected to land on /media, got ${page.url()}`);
+    await verifyTenantThresholds(page);
 
     await page.getByRole("button", { name: "بارگذاری فایل", exact: true }).click();
     await page.locator('input[type="file"]').first().setInputFiles(uploadPath);
