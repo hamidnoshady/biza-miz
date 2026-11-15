@@ -207,17 +207,23 @@ export interface CmsProductModifierOption {
   sourceId: string;
   label: string;
   priceDelta: number;
-  isActive: boolean;
-  sortOrder: number;
+  isActive?: boolean;
+  sortOrder?: number;
+  active?: boolean | null;
+  menuOrder?: number | null;
 }
 export interface CmsProductModifierGroup {
   id?: string;
   sourceId: string;
   label: string;
-  minSelect: number;
-  maxSelect: number;
-  isActive: boolean;
-  sortOrder: number;
+  minSelect?: number;
+  maxSelect?: number;
+  isActive?: boolean;
+  sortOrder?: number;
+  minSelections?: number | null;
+  maxSelections?: number | null;
+  active?: boolean | null;
+  menuOrder?: number | null;
   options: CmsProductModifierOption[];
 }
 
@@ -243,6 +249,8 @@ export interface CmsProductWrite {
 
 export interface CmsProduct {
   id: string;
+  menuSourceId?: string | null;
+  menuAvailability?: "available" | "sold_out" | "unavailable" | null;
   sourceSystem?: string | null;
   sourceId?: string | null;
   terms?: (string | { id: string })[] | null;

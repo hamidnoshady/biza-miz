@@ -312,47 +312,34 @@ describe("ESH-145 — Payload café-menu contract", () => {
     expect(seen.filter((call) => call.method === "PATCH")).toHaveLength(1);
   });
 
-  it("recovers unchanged media by source identity instead of uploading it twice", async () => {
-    let stored: { id: string; filename: string; sourceId: string } | null = null;
-    let posts = 0;
+  it("repeats the same scoped media upload after a lost response", async () => {
+    let attempts = 0;
     const fetchImpl: FetchLike = async (url, init) => {
-      const method = init.method ?? "GET";
-      if (method === "POST") {
-        posts += 1;
-        stored = { id: "media-1", filename: "latte.png", sourceId: "media:asset-1:hash" };
-        throw new Error("response lost after upload");
-      }
-      expect(new URL(url).searchParams.get("where[sourceId][equals]")).toBe("media:asset-1:hash");
-      return new Response(JSON.stringify({ docs: stored ? [stored] : [], totalDocs: stored ? 1 : 0 }));
+      expect(new URL(url).pathname).toBe("/api/site/cafe-menu/media/media%3Aasset-1%3Ahash");
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeInstanceOf(FormData);
+      if (++attempts === 1) throw new Error("response lost after upload");
+      return Response.json({ id: "media-1", filename: "latte.png" });
     };
     const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
     const upload = { sourceId: "media:asset-1:hash", filename: "latte.png", mimeType: "image/png", bytes: new Uint8Array([1]) };
     await expect(adapter.uploadMedia(upload)).rejects.toMatchObject({ code: "unreachable" });
-    resetBreakers();
     expect((await adapter.uploadMedia(upload)).id).toBe("media-1");
-    expect(posts).toBe(1);
+    expect(attempts).toBe(2);
   });
 
-  it("uses taxonomy definitions/terms and the dedicated menu taxonomy key", async () => {
-    const seen: { url: string; method: string; body: unknown }[] = [];
-    const fetchImpl: FetchLike = async (url, init) => {
-      const method = init.method ?? "GET";
-      const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
-      seen.push({ url, method, body });
-      if (new URL(url).pathname === "/api/taxonomy-definitions") {
-        return new Response(JSON.stringify(method === "GET"
-          ? { docs: [], totalDocs: 0 }
-          : { id: "taxonomy-1", key: "biza_menu_categories" }));
-      }
-      if (method === "GET") return new Response(JSON.stringify({ docs: [], totalDocs: 0 }));
-      return new Response(JSON.stringify({ id: "term-1", name: body.name, description: body.description, menuOrder: body.menuOrder }));
-    };
+  it("uses the site-scoped category endpoint and retries a concurrent upsert", async () => {
+    let attempts = 0;
+    const { fetchImpl, seen } = fakeFetch({
+      "/api/site/cafe-menu/categories/category-1": () => ++attempts === 1
+        ? { status: 409, body: { message: "conflict" } }
+        : { body: { id: "term-1", taxonomyId: "taxonomy-1" } },
+    });
     const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
-    expect((await adapter.upsertMenuTaxonomy({})).id).toBe("taxonomy-1");
-    const term = await adapter.upsertMenuCategory({ taxonomyId: "taxonomy-1", sourceId: "category-1", name: "قهوه", description: "گرم", sortOrder: 2 });
-    expect(term.id).toBe("term-1");
-    expect(seen[0].url).toContain("where%5Bkey%5D%5Bequals%5D=biza_menu_categories");
-    expect(seen[3].body).toMatchObject({ taxonomy: "taxonomy-1", sourceSystem: "biza_miz", sourceId: "category-1", menuOrder: 2 });
+    const input = { sourceId: "category-1", name: "قهوه", description: "گرم", sortOrder: 2 };
+    await expect(adapter.upsertMenuCategory(input)).rejects.toMatchObject({ code: "unreachable" });
+    await expect(adapter.upsertMenuCategory(input)).resolves.toMatchObject({ id: "term-1", taxonomyId: "taxonomy-1" });
+    expect(seen[1]).toMatchObject({ method: "PUT", body: { name: "قهوه", description: "گرم", menuOrder: 2 } });
   });
 
   it("withdraws without deleting, and clears unknown stock without fabricating a count", async () => {
@@ -363,5 +350,39 @@ describe("ESH-145 — Payload café-menu contract", () => {
     expect(seen[0].body).toEqual({ _status: "draft", menuAvailable: false });
     expect(seen[1].body).toEqual({ trackInventory: false, inventory: null, inventoryManagedExternally: true });
     expect(seen.every((call) => call.method === "PATCH")).toBe(true);
+  });
+});
+
+describe("café menu sync contract", () => {
+  it("withdraws by source identity even when the first response never returned a remote ID", async () => {
+    const { fetchImpl, seen } = fakeFetch({
+      "/api/site/cafe-menu/products/menu_item%3Aitem-1": { body: { id: "product-1", status: "draft" } },
+    });
+    const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
+    await adapter.setProductAvailability(null, { published: false, available: false }, "menu_item:item-1");
+    expect(seen[0]).toMatchObject({ method: "PUT", body: { published: false, menuAvailability: "unavailable" } });
+  });
+
+  it("sends café products by stable source identity with CMS publication and inventory fields", async () => {
+    const fetchImpl: FetchLike = async (url, init) => {
+      expect(new URL(url).pathname).toBe("/api/site/cafe-menu/products/menu_item%3Aitem-1");
+      expect(init?.method).toBe("PUT");
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        price: 12500, categorySourceIds: ["category-1"], published: true,
+        menuAvailability: "sold_out", trackInventory: true, inventory: 0,
+        modifierGroups: [{ sourceId: "group-1", minSelections: 1, maxSelections: 2, active: true, menuOrder: 3,
+          options: [{ sourceId: "option-1", label: "Milk", priceDelta: -1500, active: false, menuOrder: 4 }] }],
+      });
+      return Response.json({ id: "product-1", status: "published", updatedAt: "now" });
+    };
+    const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
+    const input = {
+      sourceId: "menu_item:item-1", categorySourceId: "category-1",
+      inventoryManagedExternally: true, title: "Coffee", priceRial: 125000,
+      stock: 0, published: true, available: false, menuAvailability: "sold_out" as const,
+      modifierGroups: [{ sourceId: "group-1", label: "Size", minSelect: 1, maxSelect: 2, isActive: true, sortOrder: 3,
+        options: [{ sourceId: "option-1", label: "Milk", priceDeltaRial: -15000, isActive: false, sortOrder: 4 }] }],
+    };
+    await expect(adapter.upsertProduct(input)).resolves.toMatchObject({ id: "product-1", status: "published", stock: 0 });
   });
 });
