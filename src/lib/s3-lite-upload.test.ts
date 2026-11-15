@@ -238,6 +238,14 @@ function payloadOf(size: number, seed = 7): Buffer {
 const BUSINESS_ID = "11111111-1111-1111-1111-111111111111";
 const ASSET_ID = "22222222-2222-2222-2222-222222222222";
 
+// The source-level suite runs outside the Next.js production bundle, so a
+// dynamic built-in import can pass the HTTP roundtrip here but fail in that
+// bundle. Guard the import form as well as testing the real streamed bytes.
+it("keeps node:stream imports static for the Next.js server bundle", () => {
+  const source = readFileSync(new URL("./s3-lite.ts", import.meta.url), "utf8");
+  expect(source).not.toMatch(/\bimport\s*\(\s*["']node:stream["']\s*\)/);
+});
+
 describe("tenant-shaped uploads against a signature-checking provider", () => {
   it("buffered s3Put passes SigV4 and stores the exact bytes under prefix/business/asset/file", async () => {
     requests.length = 0;
