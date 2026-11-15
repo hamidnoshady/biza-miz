@@ -119,6 +119,28 @@ describe("marketing operations screens", () => {
     await screen.findByRole("option", { name: "Searched site" });
     expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("targetQ=Needle&targetPage=1"))).toBe(true);
   });
+  it("requires review of same-name sites before confirming creation, and invalidates changed input", async () => {
+    const token = "a".repeat(64);
+    const review = { ok: false, status: 409, aborted: false, data: { error: "possible_duplicate_target", reviewToken: token, hasMore: true, candidates: [{ id: "t", site_label: "Shop", city: "Tehran", neighborhood: "North", status: "archived", party_linked: false }] } } as never;
+    vi.mocked(api).mockImplementation(async (url, init) => {
+      if (init?.method === "POST") return String(init.body).includes("reviewToken") ? ok({ target: { id: "new" } }) : review;
+      if (url === "/api/growth/marketing-targets/locations") return ok({ locations: [{ id: "b", name: "Main" }] });
+      return ok({ targets: [], hasMore: false });
+    });
+    const user = userEvent.setup(); render(<MarketingTargetsSection canManage canCreate />);
+    await user.selectOptions(await screen.findByLabelText("شعبه مسئول"), "b");
+    await user.type(screen.getByLabelText("عنوان محل"), "Shop");
+    await user.click(screen.getByRole("button", { name: "ثبت مقصد" }));
+    expect(await screen.findByText(/مقصدهای هم‌نام در این شعبه/)).toBeTruthy();
+    expect(screen.getByText(/Tehran.*North.*بایگانی‌شده/)).toBeTruthy();
+    expect(screen.getByText(/موارد بیشتری وجود دارد/)).toBeTruthy();
+    await user.type(screen.getByLabelText("شهر"), "Other");
+    expect(screen.queryByRole("button", { name: "بررسی کردم، ثبت مقصد جدید" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "ثبت مقصد" }));
+    await user.click(await screen.findByRole("button", { name: "بررسی کردم، ثبت مقصد جدید" }));
+    await waitFor(() => expect(vi.mocked(api).mock.calls.some(([, init]) => init?.method === "POST" && JSON.parse(String(init.body)).reviewToken === token)).toBe(true));
+    await waitFor(() => expect((screen.getByLabelText("عنوان محل") as HTMLInputElement).value).toBe(""));
+  });
   it("searches the shared directory only after a manager asks for it", async () => {
     vi.mocked(api).mockImplementation(async (url) => {
       if (url === "/api/growth/marketing-targets/locations") return ok({ locations: [{ id: "b", name: "Main" }] });
@@ -131,4 +153,19 @@ describe("marketing operations screens", () => {
     await user.type(field, "Customer"); await user.click(screen.getByRole("button", { name: "جست‌وجوی شخص" }));
     await waitFor(() => expect(screen.getByRole("option", { name: "Customer" })).toBeTruthy());
   });
+});
+
+it("applies deadline planning filters server-side from the first page", async () => {
+  vi.mocked(api).mockResolvedValue(ok({ assignments: [], hasMore: true }));
+  const user = userEvent.setup(); render(<MarketingAssignmentsSection canManage={false} />);
+  await screen.findByText("ماموریتی یافت نشد.");
+  await user.click(screen.getByRole("button", { name: "صفحه بعد" }));
+  await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("page=2"))).toBe(true));
+  await user.selectOptions(screen.getByLabelText("فیلتر اولویت"), "high");
+  await user.selectOptions(screen.getByLabelText("وضعیت ماموریت"), "planned");
+  await user.selectOptions(screen.getByLabelText("ترتیب ماموریت‌ها"), "due_asc");
+  await user.click(screen.getByRole("button", { name: "اعمال فیلتر ماموریت‌ها" }));
+  await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("page=1&priority=high&status=planned&sort=due_asc"))).toBe(true));
+  await user.click(screen.getByRole("button", { name: "پاک کردن فیلتر ماموریت‌ها" }));
+  await waitFor(() => { const url = String(vi.mocked(api).mock.calls.at(-1)?.[0]); expect(url).toContain("page=1&priority=high"); expect(url).not.toContain("status="); expect(url).not.toContain("sort="); });
 });

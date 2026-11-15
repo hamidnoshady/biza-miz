@@ -3,7 +3,7 @@ import { requirePermission, requirePermissions, withTenantScope } from "@/lib/au
 import { actionableLocationIds } from "@/lib/authorize";
 import { PERMISSIONS } from "@/lib/permissions";
 import { parseTargetInput } from "@/lib/marketing-operations";
-import { createTarget, listTargets } from "@/lib/marketing-operations-service";
+import { createTarget, DuplicateTargetReview, TargetReviewChanged, listTargets } from "@/lib/marketing-operations-service";
 
 export const GET = withTenantScope(async (request: NextRequest) => {
   const { session, membership, error } = await requirePermission(PERMISSIONS.marketingTargetsView);
@@ -15,10 +15,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   return NextResponse.json(await listTargets(session.businessId, await actionableLocationIds(membership), q, page, status));
 });
 export const POST = withTenantScope(async (request: NextRequest) => {
-  const { session, membership, error } = await requirePermissions(PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView);
+  const { session, membership, error } = await requirePermissions(PERMISSIONS.marketingTargetsView, PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView);
   if (error) return error;
   const input = parseTargetInput(await request.json().catch(() => null));
   if (!input) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-  const target = await createTarget(session.businessId, session.sub, await actionableLocationIds(membership), input);
-  return target ? NextResponse.json({ target }, { status: 201 }) : NextResponse.json({ error: "invalid_location_or_party" }, { status: 400 });
+  try {
+    const target = await createTarget(session.businessId, session.sub, await actionableLocationIds(membership), input);
+    return target ? NextResponse.json({ target }, { status: 201 }) : NextResponse.json({ error: "invalid_location_or_party" }, { status: 400 });
+  } catch (error) {
+    if (error instanceof TargetReviewChanged) return NextResponse.json({ error: "target_review_changed" }, { status: 409 });
+    if (error instanceof DuplicateTargetReview) return NextResponse.json({ error: "possible_duplicate_target", candidates: error.candidates, hasMore: error.hasMore, reviewToken: error.reviewToken }, { status: 409 });
+    throw error;
+  }
 });

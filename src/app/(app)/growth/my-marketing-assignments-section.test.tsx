@@ -79,3 +79,18 @@ it("loads only the explicitly opened self history and supports search and pagina
   await user.click(screen.getByRole("button", { name: "بستن گزارش‌ها" }));
   expect(screen.queryByText("Lead")).toBeNull();
 });
+
+it("applies deadline planning filters server-side from the first page", async () => {
+  vi.mocked(api).mockResolvedValue(success({ assignments: [], hasMore: true }));
+  const user = userEvent.setup(); render(<MyMarketingAssignmentsSection />);
+  await screen.findByText("ماموریتی برای شما یافت نشد.");
+  await user.click(screen.getByRole("button", { name: "صفحه بعد" }));
+  await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("page=2"))).toBe(true));
+  await user.selectOptions(screen.getByLabelText("فیلتر اولویت ماموریت‌های من"), "high");
+  await user.selectOptions(screen.getByLabelText("وضعیت ماموریت"), "planned");
+  await user.selectOptions(screen.getByLabelText("ترتیب ماموریت‌ها"), "due_asc");
+  await user.click(screen.getByRole("button", { name: "اعمال فیلتر ماموریت‌ها" }));
+  await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("page=1&priority=high&status=planned&sort=due_asc"))).toBe(true));
+  await user.click(screen.getByRole("button", { name: "پاک کردن فیلتر ماموریت‌ها" }));
+  await waitFor(() => { const url = String(vi.mocked(api).mock.calls.at(-1)?.[0]); expect(url).toContain("page=1&priority=high"); expect(url).not.toContain("status="); expect(url).not.toContain("sort="); });
+});
