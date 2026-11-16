@@ -55,7 +55,7 @@ import { Client } from "pg";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { query, withoutTenantScope } from "./db";
+import { getPool, query, withoutTenantScope } from "./db";
 import {
   BACKUP_RUNS_SHOWN,
   CLOUD_RETRY_MS,
@@ -970,7 +970,8 @@ export async function localSchemaSnapshot(force = false): Promise<LocalSchemaSna
   if (!force && snapshotCache && Date.now() - snapshotCache.at < SNAPSHOT_CACHE_MS) return snapshotCache.value;
   // The scheduler has no tenant context, but the dump covers every business.
   return withoutTenantScope("platform", async () => {
-    const { rows } = await query<{
+    const pool = getPool();
+    const { rows } = await pool.query<{
       migrations: string;
       latest: string | null;
       version_num: string;
@@ -984,7 +985,7 @@ export async function localSchemaSnapshot(force = false): Promise<LocalSchemaSna
     const core: { name: string; rows: number }[] = [];
     for (const table of ["businesses", "locations", "users", "orders", "journal_entries", "settings"]) {
       try {
-        const { rows: c } = await query<{ n: string }>(`SELECT count(*)::text AS n FROM ${table}`);
+        const { rows: c } = await pool.query<{ n: string }>(`SELECT count(*)::text AS n FROM ${table}`);
         core.push({ name: table, rows: Number(c[0].n) });
       } catch {
         /* table absent in this build */
