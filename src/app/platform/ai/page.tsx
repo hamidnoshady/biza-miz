@@ -184,8 +184,30 @@ function readinessText(readiness: RuntimeReadiness | undefined): string {
   return readiness.ready ? "آماده" : (readiness.reason ? READINESS_REASON_FA[readiness.reason] ?? readiness.reason : "نیازمند تنظیم");
 }
 
+function gatewayErrorFa(message: string | null | undefined, preserveLocalized = false): string {
+  if (!message) return "آزمایش اتصال یا اعتبار کلید ناموفق بود.";
+  if (preserveLocalized && /^\p{Script=Arabic}/u.test(message.trimStart())) return message;
+  if (/invalid api key|authentication error|401/i.test(message)) return "کلید استفاده‌شده در LiteLLM معتبر نیست. اعتبار آن را بررسی کنید.";
+  if (/unreachable|timeout|timed out|ECONNREFUSED/i.test(message)) return "ارتباط با LiteLLM برقرار نشد؛ وضعیت سرویس را بررسی کنید.";
+  if (/not found|404/i.test(message)) return "کلید یا مسیر موردنظر در LiteLLM پیدا نشد.";
+  return "عملیات ناموفق بود؛ جزئیات فنی را بررسی کنید.";
+}
+
+function gatewayProbeErrorFa(status: GatewayStatus): string {
+  const failedStage = status.stages?.find((stage) => !stage.ok && !stage.skipped);
+  return failedStage?.message ? gatewayErrorFa(failedStage.message, true) : gatewayErrorFa(status.error);
+}
+
+const PROBE_STAGE_FA: Record<string, string> = {
+  server: "دسترسی به دروازه",
+  auth: "اعتبار کلید اصلی",
+  model_alias: "وجود مدل انتخاب‌شده",
+  master_completion: "آزمایش پاسخ‌دهی با کلید اصلی",
+  virtual_key_completion: "آزمایش پاسخ‌دهی با کلید مجازی کسب‌وکار",
+};
+
 function stageText(stage: GatewayProbeStage): string {
-  if (stage.skipped) return "رد شد";
+  if (stage.skipped) return "اجرا نشده";
   return stage.ok ? "موفق" : "ناموفق";
 }
 
@@ -390,17 +412,24 @@ export default function PlatformAiPage() {
     setBusy("");
     if (!result.ok) {
       const message = result.data.error ? errorMessage(result.data.error) : "انجام عملیات ممکن نشد.";
-      setError(result.data.detail ? `${message} — ${result.data.detail}` : message);
-      if (result.data.status) setData((current) => (current ? { ...current, status: result.data.status ?? null } : current));
+      setError(result.data.status && !result.data.status.ok
+        ? gatewayProbeErrorFa(result.data.status)
+        : result.data.detail ? message + " — " + result.data.detail : message);
       return false;
     }
-    if (result.data.status) setData((current) => (current ? { ...current, status: result.data.status ?? null } : current));
+    // Business verification is independent from global gateway diagnostics.
+    // The API returns 200 even when the completion probe itself fails.
+    if (result.data.status && !result.data.status.ok) {
+      setError(gatewayProbeErrorFa(result.data.status));
+      await load();
+      return false;
+    }
     if (result.data.gateway?.syncError) {
       setError(result.data.gateway.syncError);
       await load();
       return false;
     }
-    setNotice("تغییرات ذخیره شد.");
+    setNotice(key === "verify" ? "اعتبار کلید کسب‌وکار تأیید شد." : "عملیات کلید مجازی با موفقیت انجام شد.");
     await load();
     return true;
   }
@@ -473,14 +502,14 @@ export default function PlatformAiPage() {
       <header>
         <h1 className="text-xl font-bold">تنظیمات هوش مصنوعی (LiteLLM)</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          این صفحه فقط اتصال فنی LiteLLM و چرخهٔ عمر کلیدهای مجازی کسب‌وکارها را مدیریت می‌کند. مدل‌ها، ارائه‌دهنده‌ها، مسیر‌یابی و fallback در LiteLLM تنظیم می‌شوند؛ قیمت، اعتبار و درآمد در بخش Plan/Billing است.
+          این صفحه فقط اتصال فنی LiteLLM و چرخهٔ عمر کلیدهای مجازی کسب‌وکارها را مدیریت می‌کند. مدل‌ها، ارائه‌دهنده‌ها، مسیریابی و مسیرهای جایگزین در LiteLLM تنظیم می‌شوند؛ قیمت، اعتبار و درآمد در بخش Plan/Billing است.
         </p>
       </header>
 
       <ErrorBox>{error}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
 
-      <Card title="LiteLLM Connection">
+      <Card title="اتصال به LiteLLM">
         <dl className="grid gap-3 text-sm sm:grid-cols-3">
           <div>
             <dt className="text-muted-foreground">وضعیت اجرای پلتفرم</dt>
@@ -501,7 +530,7 @@ export default function PlatformAiPage() {
             </dd>
           </div>
           <div className="sm:col-span-3">
-            <dt className="text-muted-foreground">Base URL</dt>
+            <dt className="text-muted-foreground">نشانی پایه (Base URL)</dt>
             <dd className="mt-1 font-medium" dir="ltr">{draft?.baseUrl ?? data?.platformBaseUrl ?? "—"}</dd>
           </div>
         </dl>
@@ -509,20 +538,20 @@ export default function PlatformAiPage() {
         {status ? (
           <div className="mt-4 rounded-lg border border-border bg-card p-3 text-sm">
             <p className={status.ok ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}>
-              {status.ok ? "تست اتصال موفق بود" : status.error ?? "تست اتصال ناموفق بود"}
+              {status.ok ? "تست اتصال موفق بود" : gatewayProbeErrorFa(status)}
               {status.latencyMs !== null ? ` · ${status.latencyMs}ms` : ""}
             </p>
             <div className="mt-3 grid gap-2">
-              {(status.stages ?? []).map((stage) => (
+              {(status.stages ?? []).filter((stage) => !stage.skipped).map((stage) => (
                 <div key={stage.key} className="rounded-md border border-border p-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    <strong>{stage.label}</strong>
+                    <strong>{PROBE_STAGE_FA[stage.key] ?? stage.label}</strong>
                     <span className={stage.ok ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}>{stageText(stage)}</span>
                     {stage.status ? <span dir="ltr">HTTP {stage.status}</span> : null}
-                    {stage.model ? <span dir="ltr">Model: {stage.model}</span> : null}
+                    {stage.model ? <span>مدل: <span dir="ltr" className="inline-block">{stage.model}</span></span> : null}
                   </div>
-                  {stage.message ? <p className="mt-1 text-xs text-muted-foreground">{stage.message}</p> : null}
-                  {stage.detail ? <p className="mt-1 text-xs text-muted-foreground" dir="ltr">{stage.detail}</p> : null}
+                  {stage.message ? <p className="mt-1 text-xs text-muted-foreground">{stage.ok ? stage.message : gatewayErrorFa(stage.message, true)}</p> : null}
+                  {stage.detail ? <details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">جزئیات فنی</summary><p className="mt-1 break-all" dir="ltr">{stage.detail}</p></details> : null}
                 </div>
               ))}
             </div>
@@ -534,13 +563,13 @@ export default function PlatformAiPage() {
           <form onSubmit={saveConfig} className="mt-4 grid gap-4 lg:grid-cols-2">
             <label className="flex items-center gap-2 text-sm text-foreground lg:col-span-2">
               <input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />
-              Enabled
+              فعال
             </label>
-            <Field label="Base URL">
+            <Field label="نشانی پایه (Base URL)">
               <input className={inputClass} dir="ltr" value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} />
             </Field>
             <Field
-              label="Master key"
+              label="کلید اصلی"
               hint={
                 draft.masterKeyState === "undecryptable"
                   ? "کلید ذخیره‌شده با کلید رمزگشایی این استقرار قابل خواندن نیست. پیش از وارد کردن کلید تازه، در صورت امکان کلید رمزگشایی استقرار را بازیابی کنید؛ در غیر این صورت، ثبت کلید تازه نیاز به تأیید صریح دارد."
@@ -551,10 +580,10 @@ export default function PlatformAiPage() {
             >
               <input className={inputClass} dir="ltr" type="password" value={masterKey} onChange={(event) => setMasterKey(event.target.value)} autoComplete="off" />
             </Field>
-            <Field label="Default chat model alias" hint="باید دقیقاً در /model/info LiteLLM وجود داشته باشد، مانند pos-chat.">
+            <Field label="نام مستعار مدل پیش‌فرض گفتگو" hint="باید دقیقاً در /model/info LiteLLM وجود داشته باشد، مانند pos-chat.">
               <input className={inputClass} dir="ltr" placeholder="pos-chat" value={draft.chatModel} onChange={(event) => setDraft({ ...draft, chatModel: event.target.value })} />
             </Field>
-            <Field label="Embedding model alias" hint="اگر RAG/embeddings فعال است، alias مدل بردارسازی را وارد کنید.">
+            <Field label="نام مستعار مدل بردارسازی" hint="اگر RAG/embeddings فعال است، alias مدل بردارسازی را وارد کنید.">
               <input className={inputClass} dir="ltr" placeholder="pos-embed" value={draft.embeddingModel} onChange={(event) => setDraft({ ...draft, embeddingModel: event.target.value })} />
             </Field>
             <label className="flex items-center gap-2 text-sm text-foreground lg:col-span-2">
@@ -562,18 +591,18 @@ export default function PlatformAiPage() {
               صدور و استفاده از کلید مجازی برای کسب‌وکارها
             </label>
             <div className="flex flex-wrap gap-2 lg:col-span-2">
-              <Button type="submit" disabled={busy === "config"}>{busy === "config" ? "در حال ذخیره…" : "Save"}</Button>
+              <Button type="submit" disabled={busy === "config"}>{busy === "config" ? "در حال ذخیره…" : "ذخیره تنظیمات"}</Button>
               <Button type="button" variant="ghost" onClick={() => void probe()} disabled={Boolean(busy)}>
-                {busy === "probe" ? <Loader2Icon className="animate-spin" /> : "Test connection"}
+                {busy === "probe" ? <Loader2Icon className="animate-spin" /> : "آزمایش اتصال"}
               </Button>
             </div>
           </form>
         ) : null}
       </Card>
 
-      <Card title="Business Virtual Keys">
+      <Card title="مدیریت کلیدهای مجازی کسب‌وکارها">
         <p className="mb-3 text-sm text-muted-foreground">
-          کلیدهای مجازی secret هستند و نمایش داده نمی‌شوند. هر ردیف فقط alias، وضعیت همگام‌سازی و آمادگی runtime را نشان می‌دهد.
+          مقدار محرمانه کلیدها نمایش داده نمی‌شود. هر ردیف وضعیت صدور کلید، همگام‌سازی و آمادگی سرویس را نشان می‌دهد.
         </p>
         {!data?.active ? (
           <p className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
@@ -634,11 +663,11 @@ export default function PlatformAiPage() {
           <div className="space-y-4 border-t border-border pt-4">
             <div className={`rounded-lg border p-3 text-sm ${branchReadiness?.ready && branchReadiness.entitled ? "border-emerald-300 bg-emerald-50 dark:bg-emerald-500/10" : "border-amber-300 bg-amber-50 dark:bg-amber-500/10"}`}>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                <p>AI entitlement: <strong>{branchReadiness?.entitled ? "فعال" : "غیرفعال"}</strong></p>
-                <p>Gateway configuration: <strong>{branchReadiness?.gatewayReady ? "آماده" : "غیرفعال/ناقص"}</strong></p>
-                <p>Gateway connection: <strong>{status ? (status.ok ? "آخرین آزمون موفق" : "آخرین آزمون ناموفق") : "آزمون نشده"}</strong></p>
+                <p>دسترسی به هوش مصنوعی: <strong>{branchReadiness?.entitled ? "فعال" : "غیرفعال"}</strong></p>
+                <p>پیکربندی دروازه: <strong>{branchReadiness?.gatewayReady ? "آماده" : "غیرفعال/ناقص"}</strong></p>
+                <p>اتصال به دروازه: <strong>{status ? (status.ok ? "آخرین آزمون موفق" : "آخرین آزمون ناموفق") : "آزمون نشده"}</strong></p>
                 <p>کلید مجازی: <strong>{branchReadiness?.virtualKeyRequired ? (branchReadiness.virtualKeyReady ? "آماده" : "نیازمند صدور/رفع خطا") : "الزامی نیست"}</strong></p>
-                <p>Runtime: <strong>{branchReadiness?.ready && branchReadiness.entitled ? "آماده" : "نیازمند تنظیم"}</strong></p>
+                <p>وضعیت اجرای سرویس: <strong>{branchReadiness?.ready && branchReadiness.entitled ? "آماده" : "نیازمند تنظیم"}</strong></p>
                 {/* Audit F24: technical readiness is not commercial readiness. Affordability
                     (wallet balance vs. the per-turn precheck) is a billing decision and is
                     shown on the Billing tab, not inferred from this badge. */}
@@ -678,7 +707,7 @@ export default function PlatformAiPage() {
             <div className="grid gap-2 text-sm sm:grid-cols-3">
               <p>مدل مؤثر: <strong dir="ltr" className="font-medium">{branchReadiness?.effectiveModel ?? selectedRow?.effectiveModel ?? draft?.chatModel ?? "—"}</strong></p>
               <p>وضعیت کلید: {selectedRow?.hasVirtualKey ? "صادر شده" : "صادر نشده"}</p>
-              <p>Key alias: <span dir="ltr">{selectedRow?.keyAlias ?? "—"}</span></p>
+              <p>شناسه مستعار کلید: <span dir="ltr">{selectedRow?.keyAlias ?? "—"}</span></p>
               <p>آخرین بررسی/همگام‌سازی کلید مؤثر: {fmtDate(branchReadiness?.lastVerifiedAt ?? null)}</p>
             </div>
             {selectedLocationId && branchReadiness?.businessSyncError ? (
@@ -693,16 +722,16 @@ export default function PlatformAiPage() {
             {canManageAi ? (
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => void write({ action: "sync_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "sync")} disabled={Boolean(busy)}>
-                  {busy === "sync" ? <Loader2Icon className="animate-spin" /> : "Provision"}
+                  {busy === "sync" ? <Loader2Icon className="animate-spin" /> : "صدور / همگام‌سازی"}
                 </Button>
                 <Button variant="ghost" onClick={() => void write({ action: "verify_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "verify")} disabled={Boolean(busy) || !selectedRow?.hasVirtualKey}>
-                  {busy === "verify" ? <Loader2Icon className="animate-spin" /> : "Verify"}
+                  {busy === "verify" ? <Loader2Icon className="animate-spin" /> : "بررسی اعتبار"}
                 </Button>
                 <Button variant="ghost" onClick={() => setRotateConfirmOpen(true)} disabled={Boolean(busy)}>
-                  {busy === "rotate" ? <Loader2Icon className="animate-spin" /> : "Rotate/recreate"}
+                  {busy === "rotate" ? <Loader2Icon className="animate-spin" /> : "بازسازی کلید"}
                 </Button>
                 <Button variant="danger" onClick={() => setRevokeConfirmOpen(true)} disabled={Boolean(busy) || !selectedRow?.hasVirtualKey}>
-                  {busy === "revoke" ? <Loader2Icon className="animate-spin" /> : "Revoke"}
+                  {busy === "revoke" ? <Loader2Icon className="animate-spin" /> : "ابطال کلید"}
                 </Button>
               </div>
             ) : null}
@@ -731,45 +760,60 @@ export default function PlatformAiPage() {
           </Field>
         </div>
 
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-right text-xs text-muted-foreground">
+        <div className="mt-3 hidden overflow-x-auto md:block">
+          <table className="w-full table-fixed text-right text-sm">
+            <thead className="text-xs text-muted-foreground">
               <tr className="border-b border-border">
-                <th className="py-2 pr-1">کسب‌وکار</th>
-                <th className="py-2">AI entitlement</th>
-                <th className="py-2">Key status</th>
-                <th className="py-2">Key alias</th>
-                <th className="py-2">Last synced</th>
-                <th className="py-2">Runtime readiness</th>
-                <th className="py-2">Technical error</th>
+                <th className="w-[28%] py-3 pr-2">کسب‌وکار و شناسه کلید</th>
+                <th className="w-[12%] py-3">دسترسی</th>
+                <th className="w-[22%] py-3">وضعیت کلید</th>
+                <th className="w-[25%] py-3">آمادگی و خطا</th>
+                <th className="w-[13%] py-3">مدیریت</th>
               </tr>
             </thead>
             <tbody>
               {keyRows.map(({ business, key, readiness }) => (
-                <tr key={business.businessId} className="border-b border-border">
-                  <td className="py-2 pr-1 font-medium text-foreground">
-                    {business.businessName}
-                    {readiness?.hasBranchOverride ? <span className="mr-1 text-xs text-muted-foreground">(شعبه‌ای)</span> : null}
+                <tr key={business.businessId} className="border-b border-border align-top">
+                  <td className="py-3 pr-2">
+                    <p className="font-medium text-foreground">{business.businessName}</p>
+                    {readiness?.hasBranchOverride ? <p className="text-xs text-muted-foreground">دارای کلید اختصاصی شعبه</p> : null}
+                    {key?.keyAlias ? <code dir="ltr" className="mt-1 block max-w-full truncate text-xs text-muted-foreground" title={key.keyAlias}>{key.keyAlias}</code> : null}
                   </td>
-                  <td className="py-2">{business.aiEntitled ? "فعال" : "غیرفعال"}</td>
-                  <td className="py-2">
-                    {key?.credentialState === "undecryptable"
-                      ? "نیازمند بازیابی"
-                      : key?.hasVirtualKey
-                        ? (key.syncError ? "خطای همگام‌سازی" : "صادر شده")
-                        : "صادر نشده"}
+                  <td className="py-3">{business.aiEntitled ? "فعال" : "غیرفعال"}</td>
+                  <td className="py-3">
+                    <p>{key?.credentialState === "undecryptable" ? "نیازمند بازیابی اعتبارنامه" : key?.syncError ? "خطای همگام‌سازی" : key?.hasVirtualKey ? "صادر شده (اعتبار نامشخص)" : "صادر نشده"}</p>
+                    {key?.syncedAt ? <p className="mt-1 text-xs text-muted-foreground">آخرین همگام‌سازی: {fmtDate(key.syncedAt)}</p> : null}
                   </td>
-                  <td className="py-2" dir="ltr">{key?.keyAlias ?? "—"}</td>
-                  <td className="py-2">{fmtDate(key?.syncedAt ?? null)}</td>
-                  <td className="py-2">{readiness ? FLEET_STATUS_FA[readiness.status] ?? readinessText(readiness) : "—"}</td>
-                  <td className="py-2 text-xs text-rose-700 dark:text-rose-300">{key?.syncError ?? "—"}</td>
+                  <td className="py-3">
+                    <p>{readiness ? FLEET_STATUS_FA[readiness.status] ?? readinessText(readiness) : "—"}</p>
+                    {key?.syncError ? <details className="mt-1 text-xs text-rose-700 dark:text-rose-300"><summary className="cursor-pointer">نمایش خطا</summary><p>{gatewayErrorFa(key.syncError)}</p><p dir="ltr" className="mt-1 break-all text-muted-foreground">{key.syncError}</p></details> : null}
+                  </td>
+                  <td className="py-3">
+                    <Button variant="ghost" disabled={Boolean(busy)} onClick={() => { setSelectedBusinessId(business.businessId); setSelectedLocationId(""); }}>مدیریت</Button>
+                  </td>
                 </tr>
               ))}
-              {keyRows.length === 0 ? (
-                <tr><td colSpan={7} className="py-6 text-center text-muted-foreground">نتیجه‌ای یافت نشد.</td></tr>
-              ) : null}
+              {keyRows.length === 0 ? <tr><td colSpan={5} className="py-6 text-center text-muted-foreground">کسب‌وکاری با این فیلتر یافت نشد.</td></tr> : null}
             </tbody>
           </table>
+        </div>
+        <div className="mt-3 grid gap-3 md:hidden">
+          {keyRows.map(({ business, key, readiness }) => (
+            <div key={business.businessId} className="rounded-lg border border-border p-3 text-sm">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-semibold">{business.businessName}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">دسترسی: {business.aiEntitled ? "فعال" : "غیرفعال"}</p>
+                </div>
+                <Button variant="ghost" disabled={Boolean(busy)} onClick={() => { setSelectedBusinessId(business.businessId); setSelectedLocationId(""); }}>مدیریت</Button>
+              </div>
+              <p className="mt-2">وضعیت کلید: {key?.credentialState === "undecryptable" ? "نیازمند بازیابی" : key?.syncError ? "خطای همگام‌سازی" : key?.hasVirtualKey ? "صادر شده (اعتبار نامشخص)" : "صادر نشده"}</p>
+              <p>آمادگی سرویس: {readiness ? FLEET_STATUS_FA[readiness.status] ?? readinessText(readiness) : "—"}</p>
+              {key?.keyAlias ? <code dir="ltr" className="mt-2 block truncate text-xs text-muted-foreground" title={key.keyAlias}>{key.keyAlias}</code> : null}
+              {key?.syncError ? <details className="mt-2 text-xs"><summary className="cursor-pointer text-rose-700 dark:text-rose-300">نمایش خطا</summary><p>{gatewayErrorFa(key.syncError)}</p><p dir="ltr" className="mt-1 break-all text-muted-foreground">{key.syncError}</p></details> : null}
+            </div>
+          ))}
+          {keyRows.length === 0 ? <p className="py-6 text-center text-sm text-muted-foreground">کسب‌وکاری با این فیلتر یافت نشد.</p> : null}
         </div>
 
         {data?.pagination && data.pagination.totalPages > 1 ? (
@@ -788,9 +832,9 @@ export default function PlatformAiPage() {
       <PlatformConfirmDialog
         open={rotateConfirmOpen}
         onOpenChange={setRotateConfirmOpen}
-        title="چرخش کلید مجازی؟"
+        title="بازسازی کلید مجازی؟"
         description="کلید فعلی این کسب‌وکار/شعبه باطل می‌شود و کلید تازه‌ای صادر می‌گردد. تا صدور کلید جدید، درخواست‌های هوش مصنوعی این کسب‌وکار ممکن است موقتاً با خطا مواجه شوند. این عملیات را فقط در صورت لزوم (مثلاً افشای احتمالی کلید) انجام دهید."
-        confirmLabel="چرخش کلید"
+        confirmLabel="بازسازی کلید"
         onConfirm={() => {
           setRotateConfirmOpen(false);
           void write({ action: "rotate_key", businessId: selectedBusinessId, locationId: selectedLocationId || null }, "rotate");
