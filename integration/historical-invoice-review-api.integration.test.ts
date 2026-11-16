@@ -146,4 +146,52 @@ describe("historical customer review endpoint", () => {
     }
     expect((await owner.query(`SELECT count(*)::int AS n FROM parties WHERE business_id = $1`, [scope.businessId])).rows[0].n).toBe(2);
   });
+  it("rejects unsafe workbook layouts without staging and stages a valid two-sheet file exactly", async () => {
+    const ExcelJS = (await import("exceljs")).default;
+    const JSZip = (await import("jszip")).default;
+    const workbook = new ExcelJS.Workbook();
+    const header = workbook.addWorksheet("Headers");
+    header.addRow(["externalInvoiceId", "invoiceDate", "externalCustomerCode", "total"]);
+    header.addRow(["00000000000000000001", "1403/01/01", "C1", "100"]);
+    const lines = workbook.addWorksheet("Lines");
+    lines.addRow(["externalInvoiceId", "lineName", "quantity", "unitPrice"]);
+    lines.addRow(["00000000000000000001", "Item", "1", "100"]);
+    const bytes = Buffer.from(await workbook.xlsx.writeBuffer() as unknown as Uint8Array);
+    const payload = { fileName: "invoices.xlsx", format: "xlsx", sourceKey: "xlsx-api", provider: "generic",
+      currency: "rial", calendar: "jalali", sheets: { headers: "Headers", lines: "Lines" } };
+    const upload = (content: Buffer) => post(new NextRequest("http://localhost/api/data/historical-invoices", {
+      method: "POST", headers: { "content-type": "application/vnd.bizamiz.historical-invoice+json" },
+      body: JSON.stringify({ ...payload, content: content.toString("base64") }),
+    }));
+    const counts = async () => (await owner.query(`SELECT ARRAY[(SELECT count(*) FROM data_import_jobs),
+      (SELECT count(*) FROM historical_sales_invoices),(SELECT count(*) FROM orders),
+      (SELECT count(*) FROM payments),(SELECT count(*) FROM journal_entries),(SELECT count(*) FROM stock_movements)] AS n`)).rows[0].n;
+    const before = await counts();
+    const zip = await JSZip.loadAsync(bytes);
+    const worksheet = zip.file("xl/worksheets/sheet1.xml")!;
+    zip.file(worksheet.name, (await worksheet.async("string")).replace("</worksheet>",
+      '<dataValidations count="1"><dataValidation sqref="A1:XFD1048576"/></dataValidations></worksheet>'));
+    const malicious = await zip.generateAsync({ type: "nodebuffer" });
+    const rejected = await upload(malicious);
+    expect(rejected.status).toBe(400);
+    expect(await rejected.json()).toEqual({ error: "xlsx_unsupported_layout" });
+    expect(await counts()).toEqual(before);
+    const accepted = await upload(bytes);
+    expect(accepted.status).toBe(201);
+    const body = await accepted.json() as { executionAvailable: boolean; staged: { jobId: string; columns: string[]; lineColumns: string[]; rowCount: number } };
+    expect(body.executionAvailable).toBe(false);
+    expect(body.staged.rowCount).toBe(2);
+    const saved = await owner.query(`SELECT options->'historicalInvoice'->>'fileSha256' AS hash FROM data_import_jobs WHERE id=$1`, [body.staged.jobId]);
+    expect(saved.rows[0].hash).toBe(createHash("sha256").update(bytes).digest("hex"));
+    const mapping = (columns: string[]) => ({ columns: columns.map((field, column) => ({ field, column })) });
+    const result = await (await post(request({ action: "preview", jobId: body.staged.jobId, sourceKey: payload.sourceKey,
+      provider: payload.provider, currency: payload.currency, calendar: payload.calendar,
+      mapping: mapping(body.staged.columns), lineMapping: mapping(body.staged.lineColumns) }))).json();
+    expect(result).toMatchObject({ executionAvailable: false, preview: { totalInvoices: 1, reviewNeeded: 1, crossSourceChecked: false,
+      documents: [{ externalInvoiceId: "00000000000000000001", summaryOnly: false, totalRial: "100" }] } });
+    const after = await counts();
+    expect(after.slice(1)).toEqual(before.slice(1));
+    expect(Number(after[0])).toBe(Number(before[0]) + 1);
+  });
+
 });

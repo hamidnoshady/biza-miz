@@ -44,7 +44,7 @@ const historicalErrors: Record<string, string> = {
   invalid_xlsx: "فایل اکسل معتبر نیست.", invalid_xlsx_archive: "ساختار فایل اکسل معتبر نیست.",
   xlsx_cells_must_be_text: "شناسه‌ها، تاریخ‌ها و مبالغ اکسل را به‌صورت متن ذخیره کنید.",
   xlsx_expanded_too_large: "حجم بازشدهٔ فایل اکسل بیش از حد مجاز است.",
-  xlsx_unsupported_layout: "برگه‌های داده را بدون خانهٔ ادغام‌شده، جدول یا تصویر ذخیره کنید.",
+  xlsx_unsupported_layout: "فایل را بدون خانهٔ ادغام‌شده، جدول، تصویر، محدودهٔ نام‌گذاری‌شده یا اعتبارسنجی داده ذخیره کنید.",
   invalid_sheet_selection: "نام برگه‌های سربرگ و ردیف‌ها را مطابق فایل وارد کنید.",
   multi_sheet_not_supported: "برای فایل دوبرگه، نام هر دو برگه را وارد کنید.",
   invalid_text: "متن فایل حاوی نویسهٔ نامعتبر است.", invalid_utf8: "فایل باید با کدگذاری UTF-8 باشد.",
