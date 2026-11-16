@@ -310,6 +310,38 @@ async function prepare() {
   await fs.mkdir(dir, { recursive: true });
 }
 
+it("captures the platform business count through the restricted application role", async () => {
+  const client = await dbLib.getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const role = `platform_backup_reader_${databaseName}`;
+    await client.query(`CREATE ROLE "${role}" NOLOGIN`);
+    await client.query(`GRANT USAGE ON SCHEMA public TO "${role}"`);
+    await client.query(`GRANT SELECT ON schema_migrations, businesses, locations, users, orders, journal_entries, settings TO "${role}"`);
+    const { rows: businesses } = await client.query<{ id: string }>(
+      `INSERT INTO businesses (name, slug) VALUES ('Backup A', $1), ('Backup B', $2) RETURNING id`,
+      [`${databaseName.replaceAll("_", "-")}-a`, `${databaseName.replaceAll("_", "-")}-b`],
+    );
+    const { rows: expected } = await client.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM businesses",
+    );
+    await client.query(`SET LOCAL ROLE "${role}"`);
+    await dbLib.pinToClient(client, async () => {
+      const tenantCount = await dbLib.withTenant(businesses[0].id, () =>
+        dbLib.query<{ count: number }>("SELECT count(*)::int AS count FROM businesses"));
+      expect(tenantCount.rows[0].count).toBe(1);
+
+      const snapshot = await dbLib.withTenant(businesses[0].id, () => svc.localSchemaSnapshot(true));
+      expect(snapshot.businessCount).toBe(expected[0].count);
+      expect(snapshot.coreTables).toContainEqual({ name: "businesses", rows: expected[0].count });
+    });
+  } finally {
+    await client.query("ROLLBACK");
+    client.release();
+    await svc.localSchemaSnapshot(true);
+  }
+});
+
 describe("a fresh artifact reaches the bucket and is confirmed there", () => {
   it("uploads it encrypted, proves it by HEAD, and records the confirmation on the local run", async () => {
     await prepare();
