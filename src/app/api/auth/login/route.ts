@@ -42,7 +42,8 @@ import {
 interface PlatformUserRow extends Record<string, unknown> {
   id: string;
   full_name: string;
-  password_hash: string;
+  /** NULL for a passwordless identity: the dummy-hash fallback below fails it closed. */
+  password_hash: string | null;
   is_active: boolean;
   token_version: number;
 }
