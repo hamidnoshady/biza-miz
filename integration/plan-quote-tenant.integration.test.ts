@@ -146,7 +146,6 @@ describe("quoting inside a tenant scope", () => {
       discountRial: 180_000,
       taxRial: 307_800,
       netRial: 3_727_800,
-      savingsRial: 180_000,
     });
     expect(result.quote.lines[0]).toMatchObject({
       kind: "plan_base",

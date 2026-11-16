@@ -14,7 +14,6 @@ import {
   isPlanTermMonths,
   isQuoteStale,
   planBasePriceVersion,
-  quoteFingerprint,
   renderQuoteExplanation,
   type PlanQuoteRequest,
 } from "./plan-quote";
@@ -62,7 +61,6 @@ describe("buildPlanQuote", () => {
       discountRial: 0,
       taxRial: 0,
       netRial: 1_000_000,
-      savingsRial: 0,
     });
     expect(quote.lines.map((line) => line.kind)).toEqual(["plan_base"]);
     expect(quote.period).toEqual({
@@ -81,7 +79,6 @@ describe("buildPlanQuote", () => {
       discountRial: 150_000,
       taxRial: 256_500,
       netRial: 3_106_500,
-      savingsRial: 150_000,
     });
     expect(quote.period.end).toBe("2026-04-30T10:00:00.000Z");
   });
@@ -127,10 +124,9 @@ describe("buildPlanQuote", () => {
     expect(quote.lines.some((line) => line.kind === "term_discount")).toBe(false);
   });
 
-  it("cites the price version on the base line and reports savings", () => {
+  it("cites the price version on the base line", () => {
     const quote = buildPlanQuote(request({ termMonths: 3, termDiscountRate: 0.05 }));
-    expect(quote.lines[0].priceVersion).toEqual(BASE_VERSION);
-    expect(quote.totals.savingsRial).toBe(quote.totals.discountRial);
+    expect(planBasePriceVersion(quote)).toEqual(BASE_VERSION);
   });
 
   it("refuses a term it does not sell", () => {
@@ -152,19 +148,6 @@ describe("buildPlanQuote", () => {
 });
 
 describe("explanation", () => {
-  it("carries Rial amounts only — no currency label and no formatted digits", () => {
-    const quote = buildPlanQuote(
-      request({ termMonths: 3, termDiscountRate: 0.05, taxRate: 0.09 }),
-    );
-    expect(quote.explanation).toEqual([
-      { code: "term", months: 3 },
-      { code: "gross", amountRial: 3_000_000 },
-      { code: "discount", amountRial: 150_000 },
-      { code: "tax", amountRial: 256_500 },
-      { code: "net", amountRial: 3_106_500 },
-    ]);
-  });
-
   it("renders in the business's own unit and Persian digits", () => {
     const quote = buildPlanQuote(request({ termMonths: 3, termDiscountRate: 0.05 }));
     const toman = renderQuoteExplanation(quote, (rial) => formatMoney(rial, "toman"));
@@ -177,6 +160,20 @@ describe("explanation", () => {
     // renders the same facts with «ریال».
     const rial = renderQuoteExplanation(quote, (value) => formatMoney(value, "rial"));
     expect(rial).toContain("ریال");
+  });
+
+  it("mentions a discount or tax line only when there is one", () => {
+    const plain = renderQuoteExplanation(buildPlanQuote(request()), (value) => String(value));
+    expect(plain).not.toContain("تخفیف");
+    expect(plain).not.toContain("مالیات");
+    expect(plain).toContain("مبلغ دوره");
+
+    const discounted = renderQuoteExplanation(
+      buildPlanQuote(request({ termMonths: 3, termDiscountRate: 0.05, taxRate: 0.09 })),
+      (value) => String(value),
+    );
+    expect(discounted).toContain("پیش از تخفیف");
+    expect(discounted).toContain("مالیات");
   });
 });
 
@@ -278,25 +275,4 @@ describe("staleness", () => {
     ).toBe(true);
   });
 
-  it("fingerprints the priced facts, not the line order", () => {
-    const a = buildPlanQuote(
-      request({
-        termMonths: 3,
-        recurringAddOns: [
-          { key: "a", amountRial: 100_000, priceVersion: { id: "pv-a", version: 1 } },
-          { key: "b", amountRial: 200_000, priceVersion: { id: "pv-b", version: 1 } },
-        ],
-      }),
-    );
-    const b = buildPlanQuote(
-      request({
-        termMonths: 3,
-        recurringAddOns: [
-          { key: "b", amountRial: 200_000, priceVersion: { id: "pv-b", version: 1 } },
-          { key: "a", amountRial: 100_000, priceVersion: { id: "pv-a", version: 1 } },
-        ],
-      }),
-    );
-    expect(quoteFingerprint(a)).toBe(quoteFingerprint(b));
-  });
 });

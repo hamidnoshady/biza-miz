@@ -22,15 +22,14 @@
  *  5. **Every line cites its price version**, so a settled invoice can say
  *     which published price produced it. A line priced from a plain column
  *     (a plan feature's `price_rial`) cites `null` rather than pretending.
- *  6. **A quote carries a fingerprint and an expiry.** `isQuoteStale` is the
- *     payment boundary's check: a re-priced plan, a different term or an expired
- *     quote must be re-quoted, never settled.
- *  7. **A quote carries no formatted money.** `explanation` is structured parts
- *     in Rial; rendering calls `renderQuoteExplanation` with the business's own
- *     `formatMoney` (chosen unit, Persian digits). This module must never name a
- *     currency in user-facing text or format a number itself — the same rule
- *     every screen follows, and the reason “ريال” cannot leak into a Toman
- *     business's confirmation.
+ *  6. **A quote expires.** `isQuoteStale` is the payment boundary's check
+ *     against freshly read facts: a re-priced plan, a different term or an
+ *     expired quote must be re-quoted, never settled.
+ *  7. **A quote carries no formatted money.** `renderQuoteExplanation` derives
+ *     the sentence from the quote's own totals and calls the business's
+ *     `formatMoney` (chosen unit, Persian digits). Nothing is stored twice, and
+ *     this module never names a currency or formats a number itself — the reason
+ *     «ريال» cannot leak into a Toman business's confirmation.
  *
  * Pure and database-free on purpose: the resolver in `plan-quote-service.ts`
  * reads `billing_price_versions` and `billing_plan_features`, and the UI can
@@ -92,7 +91,6 @@ export type QuoteLineKind =
 export interface QuoteLine {
   kind: QuoteLineKind;
   key: string;
-  label: string;
   /** Months for recurring lines, 1 for one-off and tax/discount lines. */
   quantity: number;
   unitAmountRial: number;
@@ -109,34 +107,16 @@ export interface PlanQuoteTotals {
   discountRial: number;
   taxRial: number;
   netRial: number;
-  /** What the term saved against paying monthly for every month. */
-  savingsRial: number;
 }
-
-/**
- * One fact of the quote, unformatted. The UI turns these into a sentence with
- * the business's money unit and Persian digits; nothing here is display text.
- */
-export type QuoteExplanationPart =
-  | { code: "term"; months: PlanTermMonths }
-  | { code: "gross"; amountRial: number }
-  | { code: "discount"; amountRial: number }
-  | { code: "tax"; amountRial: number }
-  | { code: "net"; amountRial: number };
 
 export interface PlanQuote {
   planKey: string;
   termMonths: PlanTermMonths;
-  currency: "IRR";
   lines: QuoteLine[];
   totals: PlanQuoteTotals;
   period: { start: string; end: string };
   issuedAt: string;
   expiresAt: string;
-  /** Deterministic identity of the priced facts; see `isQuoteStale`. */
-  fingerprint: string;
-  /** Rial amounts and term only — render with `renderQuoteExplanation`. */
-  explanation: QuoteExplanationPart[];
 }
 
 /** What the payment boundary re-reads before settling. */
@@ -197,7 +177,6 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
   lines.push({
     kind: "plan_base",
     key: request.planKey,
-    label: `اشتراک ماهانهٔ پلن ${request.planKey}`,
     quantity: months,
     unitAmountRial: request.monthlyBaseRial,
     grossRial: baseGross,
@@ -213,7 +192,6 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
     lines.push({
       kind: "recurring_addon",
       key: addOn.key,
-      label: `افزونهٔ ماهانه: ${addOn.key}`,
       quantity: months,
       unitAmountRial: addOn.amountRial,
       grossRial: gross,
@@ -229,7 +207,6 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
     lines.push({
       kind: "one_off_addon",
       key: addOn.key,
-      label: `افزونهٔ یک‌باره: ${addOn.key}`,
       quantity: 1,
       unitAmountRial: addOn.amountRial,
       grossRial: addOn.amountRial,
@@ -246,7 +223,6 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
     lines.push({
       kind: "term_discount",
       key: `term_discount_${months}`,
-      label: `تخفیف پرداخت ${months} ماهه`,
       quantity: 1,
       unitAmountRial: 0,
       grossRial: 0,
@@ -262,7 +238,6 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
     lines.push({
       kind: "tax",
       key: "tax",
-      label: "مالیات بر ارزش افزوده",
       quantity: 1,
       unitAmountRial: 0,
       grossRial: taxRial,
@@ -280,42 +255,18 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
     throw new Error("invalid_quote_validity");
   }
 
-  const quote: PlanQuote = {
+  return {
     planKey: request.planKey,
     termMonths: months,
-    currency: "IRR",
     lines,
-    totals: { grossRial, discountRial, taxRial, netRial, savingsRial: discountRial },
+    totals: { grossRial, discountRial, taxRial, netRial },
     period: {
       start: issuedAt.toISOString(),
       end: addCalendarMonths(issuedAt.toISOString(), months),
     },
     issuedAt: issuedAt.toISOString(),
     expiresAt: new Date(issuedAt.getTime() + validityMinutes * 60_000).toISOString(),
-    fingerprint: "",
-    explanation: [],
   };
-
-  quote.fingerprint = quoteFingerprint(quote);
-  quote.explanation = quoteExplanationParts(quote);
-  return quote;
-}
-
-/**
- * The priced facts, canonicalised. Sorted so two builds of the same quote in
- * either line order compare equal.
- */
-export function quoteFingerprint(quote: PlanQuote): string {
-  const priced = quote.lines
-    .filter((line) => line.priceVersion !== null)
-    .map((line) => `${line.kind}:${line.key}@${line.priceVersion!.id}#${line.priceVersion!.version}`)
-    .sort();
-  return [
-    quote.planKey,
-    `term=${quote.termMonths}`,
-    `net=${quote.totals.netRial}`,
-    ...priced,
-  ].join("|");
 }
 
 /**
@@ -353,51 +304,30 @@ export function planBasePriceVersion(quote: PlanQuote): QuotePriceVersion | null
   return quote.lines.find((line) => line.kind === "plan_base")?.priceVersion ?? null;
 }
 
-/** The unformatted facts of the quote, in reading order. */
-function quoteExplanationParts(quote: PlanQuote): QuoteExplanationPart[] {
-  const { grossRial, discountRial, taxRial, netRial } = quote.totals;
-  const parts: QuoteExplanationPart[] = [
-    { code: "term", months: quote.termMonths },
-    { code: "gross", amountRial: grossRial },
-  ];
-  if (discountRial > 0) parts.push({ code: "discount", amountRial: discountRial });
-  if (taxRial > 0) parts.push({ code: "tax", amountRial: taxRial });
-  parts.push({ code: "net", amountRial: netRial });
-  return parts;
-}
-
 /**
- * Render the structured explanation as a Persian sentence.
+ * Render the quote as a Persian sentence, derived from its own totals.
  *
  * `formatMoney` is the business's own formatter — `(rial) => formatMoney(rial,
  * unit)` from `src/lib/money.ts` — so the sentence says «تومان» or «ریال» exactly
- * as the rest of the product does, in Persian digits, and this module never
- * hardcodes either.
+ * as the rest of the product does, in Persian digits, and this module hardcodes
+ * neither. Nothing is stored to make this possible: the term and the totals are
+ * already on the quote.
  */
 export function renderQuoteExplanation(
   quote: PlanQuote,
   formatMoney: (amountRial: number) => string,
 ): string {
-  const parts: string[] = [];
-  for (const part of quote.explanation) {
-    switch (part.code) {
-      case "term":
-        parts.push(`دورهٔ ${toPersianDigits(part.months)} ماهه`);
-        break;
-      case "gross":
-        parts.push(`${formatMoney(part.amountRial)} پیش از تخفیف`);
-        break;
-      case "discount":
-        parts.push(`${formatMoney(part.amountRial)} تخفیف`);
-        break;
-      case "tax":
-        parts.push(`${formatMoney(part.amountRial)} مالیات`);
-        break;
-      case "net":
-        parts.push(`مبلغ قابل پرداخت ${formatMoney(part.amountRial)}`);
-        break;
-    }
-  }
+  const { grossRial, discountRial, taxRial, netRial } = quote.totals;
+  const parts = [
+    `دورهٔ ${toPersianDigits(quote.termMonths)} ماهه`,
+    // "before discount" only makes sense when a discount line follows.
+    discountRial > 0
+      ? `${formatMoney(grossRial)} پیش از تخفیف`
+      : `${formatMoney(grossRial)} مبلغ دوره`,
+  ];
+  if (discountRial > 0) parts.push(`${formatMoney(discountRial)} تخفیف`);
+  if (taxRial > 0) parts.push(`${formatMoney(taxRial)} مالیات`);
+  parts.push(`مبلغ قابل پرداخت ${formatMoney(netRial)}`);
   return `${parts.join("، ")}.`;
 }
 
