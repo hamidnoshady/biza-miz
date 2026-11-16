@@ -95,6 +95,12 @@ export async function handleCmsStoreOrderWebhook(notice: CmsOrderEventNotice): P
     return NextResponse.json({ error: "site_not_connected" }, { status: 404 });
   }
 
+  // Some older CMS poll feeds infer paid events from updated_at. A counter
+  // payment belongs to the POS and already has its own accounting entry.
+  if (notice.event === "order.paid" && isCafeCmsOrder(notice.order) && notice.order.paymentMethod === "counter") {
+    return NextResponse.json({ status: "ignored" });
+  }
+
   return withTenant(connection.business_id, async () => {
     const claimed = await claimInboxRow(connection, notice);
     if (claimed.kind === "duplicate") {

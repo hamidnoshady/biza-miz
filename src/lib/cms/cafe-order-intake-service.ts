@@ -196,9 +196,14 @@ async function stampOrderOrigin(
         SET origin = 'website',
             cms_connection_id = $2,
             cms_order_id = $3,
-            website_approval_state = COALESCE(website_approval_state, 'pending')
+            website_approval_state = COALESCE(website_approval_state, 'pending'),
+            cms_counter_currency = COALESCE(cms_counter_currency, $4)
       WHERE id = $1`,
-    [orderId, connection.id, order.id],
+    [
+      orderId, connection.id, order.id,
+      order.paymentMethod === "counter" && (order.currency === "IRR" || order.currency === "IRT")
+        ? order.currency : null,
+    ],
   );
 }
 

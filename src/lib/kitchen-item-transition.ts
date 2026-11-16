@@ -1,4 +1,5 @@
 import { query, withTenantTransaction } from "./db";
+import { enqueueCafeKitchenState } from "./cms/cafe-order-state-delivery";
 import { recordOrderState } from "./order-state-sync";
 import { canKitchenBump, canMarkServed, type OrderItemStatus } from "./order-item-status";
 import type { OrderStateActor } from "./order-state-sync";
@@ -73,6 +74,7 @@ export async function transitionKitchenItem(input: {
           ? ({ kind: "conflict", currentStatus: current[0].status } as const)
           : ({ kind: "missing" } as const);
       }
+      await enqueueCafeKitchenState(client, item.order_id);
       if (input.syncActor) {
         await recordOrderState(client, {
           locationId: input.locationId,
