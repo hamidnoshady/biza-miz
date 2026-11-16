@@ -59,6 +59,7 @@ describe("buildPlanQuote", () => {
     expect(quote.totals).toEqual({
       grossRial: 1_000_000,
       discountRial: 0,
+      couponDiscountRial: 0,
       taxRial: 0,
       netRial: 1_000_000,
     });
@@ -77,6 +78,7 @@ describe("buildPlanQuote", () => {
     expect(quote.totals).toEqual({
       grossRial: 3_000_000,
       discountRial: 150_000,
+      couponDiscountRial: 0,
       taxRial: 256_500,
       netRial: 3_106_500,
     });
@@ -174,6 +176,67 @@ describe("explanation", () => {
     );
     expect(discounted).toContain("پیش از تخفیف");
     expect(discounted).toContain("مالیات");
+  });
+});
+
+describe("coupon", () => {
+  it("takes a percentage of the post-term-discount recurring total, before tax", () => {
+    const quote = buildPlanQuote(
+      request({
+        termMonths: 3,
+        termDiscountRate: 0.05,
+        taxRate: 0.09,
+        coupon: { kind: "percent", value: 1_000, code: "LAUNCH10" },
+      }),
+    );
+    // 3,000,000 − 5% = 2,850,000; 10% = 285,000; tax on 2,565,000 = 230,850.
+    expect(quote.totals.couponDiscountRial).toBe(285_000);
+    expect(quote.totals.netRial).toBe(2_795_850);
+    expect(quote.lines.find((line) => line.kind === "coupon_discount")).toMatchObject({
+      key: "coupon:LAUNCH10",
+      netRial: -285_000,
+    });
+  });
+
+  it("clamps a fixed coupon to the discounted recurring total", () => {
+    const quote = buildPlanQuote(
+      request({
+        termMonths: 3,
+        termDiscountRate: 0.05,
+        coupon: { kind: "fixed", value: 5_000_000, code: "BIG" },
+      }),
+    );
+    expect(quote.totals.couponDiscountRial).toBe(2_850_000);
+    expect(quote.totals.netRial).toBe(0);
+  });
+
+  it("never discounts a one-off add-on", () => {
+    const quote = buildPlanQuote(
+      request({
+        termMonths: 1,
+        oneOffAddOns: [{ key: "setup", amountRial: 1_000_000 }],
+        coupon: { kind: "percent", value: 1_000, code: "LAUNCH10" },
+      }),
+    );
+    expect(quote.totals.couponDiscountRial).toBe(100_000);
+    expect(quote.totals.netRial).toBe(1_900_000);
+  });
+
+  it("refuses a malformed coupon instead of quoting a silent zero", () => {
+    expect(() =>
+      buildPlanQuote(request({ coupon: { kind: "percent", value: 10_001, code: "X" } })),
+    ).toThrow("invalid_quote_coupon");
+    expect(() =>
+      buildPlanQuote(request({ coupon: { kind: "fixed", value: 0, code: "X" } })),
+    ).toThrow("invalid_quote_coupon");
+  });
+
+  it("names the coupon discount in the rendered sentence", () => {
+    const quote = buildPlanQuote(
+      request({ termMonths: 3, coupon: { kind: "fixed", value: 250_000, code: "X" } }),
+    );
+    const text = renderQuoteExplanation(quote, (value) => String(value));
+    expect(text).toContain("250000 تخفیف کد");
   });
 });
 

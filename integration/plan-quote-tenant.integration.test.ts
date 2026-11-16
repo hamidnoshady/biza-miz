@@ -144,6 +144,7 @@ describe("quoting inside a tenant scope", () => {
     expect(result.quote.totals).toEqual({
       grossRial: 3_600_000,
       discountRial: 180_000,
+      couponDiscountRial: 0,
       taxRial: 307_800,
       netRial: 3_727_800,
     });

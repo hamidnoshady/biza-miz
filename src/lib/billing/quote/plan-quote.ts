@@ -75,10 +75,24 @@ export interface PlanQuoteRequest {
   termDiscountRate: number;
   /** Tax rate applied after discounts (0.09 = 9%). */
   taxRate: number;
+  /**
+   * At most one coupon. Applied to the recurring total *after* the term
+   * discount and before tax; a one-off add-on is never coupon-eligible, and
+   * no two coupons ever combine.
+   */
+  coupon?: QuoteCoupon | null;
   /** When the quote was produced — the period starts here. */
   issuedAt: string;
   /** How long the quote may be paid at; defaults to 15 minutes. */
   validityMinutes?: number;
+}
+
+export interface QuoteCoupon {
+  /** Percent of the post-term-discount recurring total, or a flat Rial amount. */
+  kind: "percent" | "fixed";
+  /** Basis points for `percent` (500 = 5%), Rial for `fixed`. */
+  value: number;
+  code: string;
 }
 
 export type QuoteLineKind =
@@ -86,6 +100,7 @@ export type QuoteLineKind =
   | "recurring_addon"
   | "one_off_addon"
   | "term_discount"
+  | "coupon_discount"
   | "tax";
 
 export interface QuoteLine {
@@ -105,6 +120,8 @@ export interface QuoteLine {
 export interface PlanQuoteTotals {
   grossRial: number;
   discountRial: number;
+  /** The single coupon's contribution; zero when none was applied. */
+  couponDiscountRial: number;
   taxRial: number;
   netRial: number;
 }
@@ -164,6 +181,8 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
   assertRate(request.termDiscountRate, "invalid_quote_discount_rate");
   assertRate(request.taxRate, "invalid_quote_tax_rate");
   if (!request.planKey.trim()) throw new Error("invalid_quote_plan");
+  const coupon = request.coupon ?? null;
+  if (coupon) assertCoupon(coupon);
 
   const months = request.termMonths;
   const recurring = request.recurringAddOns ?? [];
@@ -232,7 +251,30 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
     });
   }
 
-  const netBeforeTax = grossRial - discountRial;
+  // A coupon applies to the recurring total *after* the configured term
+  // discount and before tax: a one-off add-on is never coupon-eligible, and
+  // tax is charged on what the customer actually pays. Clamped to the base so
+  // a fixed coupon can never make the quote negative.
+  const couponBase = recurringGross - discountRial;
+  const couponDiscountRial = coupon
+    ? coupon.kind === "percent"
+      ? Math.min(couponBase, Math.round((couponBase * coupon.value) / 10_000))
+      : Math.min(couponBase, coupon.value)
+    : 0;
+  if (couponDiscountRial > 0 && coupon) {
+    lines.push({
+      kind: "coupon_discount",
+      key: `coupon:${coupon.code}`,
+      quantity: 1,
+      unitAmountRial: 0,
+      grossRial: 0,
+      discountRial: couponDiscountRial,
+      netRial: -couponDiscountRial,
+      priceVersion: null,
+    });
+  }
+
+  const netBeforeTax = grossRial - discountRial - couponDiscountRial;
   const taxRial = Math.round(netBeforeTax * request.taxRate);
   if (request.taxRate > 0) {
     lines.push({
@@ -259,7 +301,7 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
     planKey: request.planKey,
     termMonths: months,
     lines,
-    totals: { grossRial, discountRial, taxRial, netRial },
+    totals: { grossRial, discountRial, couponDiscountRial, taxRial, netRial },
     period: {
       start: issuedAt.toISOString(),
       end: addCalendarMonths(issuedAt.toISOString(), months),
@@ -317,18 +359,31 @@ export function renderQuoteExplanation(
   quote: PlanQuote,
   formatMoney: (amountRial: number) => string,
 ): string {
-  const { grossRial, discountRial, taxRial, netRial } = quote.totals;
+  const { grossRial, discountRial, couponDiscountRial, taxRial, netRial } = quote.totals;
   const parts = [
     `دورهٔ ${toPersianDigits(quote.termMonths)} ماهه`,
     // "before discount" only makes sense when a discount line follows.
-    discountRial > 0
+    discountRial > 0 || couponDiscountRial > 0
       ? `${formatMoney(grossRial)} پیش از تخفیف`
       : `${formatMoney(grossRial)} مبلغ دوره`,
   ];
   if (discountRial > 0) parts.push(`${formatMoney(discountRial)} تخفیف`);
+  if (couponDiscountRial > 0) parts.push(`${formatMoney(couponDiscountRial)} تخفیف کد`);
   if (taxRial > 0) parts.push(`${formatMoney(taxRial)} مالیات`);
   parts.push(`مبلغ قابل پرداخت ${formatMoney(netRial)}`);
   return `${parts.join("، ")}.`;
+}
+
+/** A coupon is part of the contract, so a malformed one is a coded refusal, not a silent zero. */
+function assertCoupon(coupon: QuoteCoupon): void {
+  if (!coupon.code.trim() || coupon.code.length > 64) throw new Error("invalid_quote_coupon");
+  if (!Number.isSafeInteger(coupon.value) || coupon.value <= 0) {
+    throw new Error("invalid_quote_coupon");
+  }
+  // Basis points: 10000 = 100%. A larger "percent" is a configuration bug.
+  if (coupon.kind === "percent" && coupon.value > 10_000) {
+    throw new Error("invalid_quote_coupon");
+  }
 }
 
 function assertRial(value: number, code: string): void {

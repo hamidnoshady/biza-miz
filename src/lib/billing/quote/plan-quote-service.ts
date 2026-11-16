@@ -1,5 +1,5 @@
 /**
- * ESH-193 / #1378 — the plan quote resolver, stage 1.
+ * ESH-193 / #1378 — the plan quote resolver, stage 2.
  *
  * Reads the *existing* commercial catalogue — `billing_plans`,
  * `billing_price_versions` and `billing_plan_features` — and hands it to the
@@ -9,16 +9,14 @@
  * `billing_plans.monthly_price_rial` column is quoted from that column with an
  * honest `legacy:` pseudo-version instead of a fake published one.
  *
- * What this slice does **not** do yet (each is a later stage, in order):
- * coupon reservation and redemption, prepaid service terms, proration on
- * upgrade/downgrade, automatic renewal quoting, and wallet debit. The quote is
- * read-only: nothing here charges, reserves or writes.
+ * `readPlanPricing` is separated from `quotePlanSubscription` because the
+ * payment boundary has to re-read the same facts to decide whether a stored
+ * quote is still payable (`quote-store.ts`). Both paths therefore price through
+ * one function, not two that could drift.
  *
- * Scope: the caller is a tenant route or the super-admin preview. The reads are
- * tenant-scoped through the ambient `query()` where a business context exists;
- * the catalogue itself (`billing_plans`, price versions) is platform-owned and
- * readable by any authenticated caller, which is what lets the preview quote a
- * plan the caller has not bought.
+ * Still later stages: prepaid service terms, proration on upgrade/downgrade,
+ * automatic renewal quoting, and the wallet debit itself. Nothing here charges;
+ * persistence happens in `quote-store.ts` and only when a caller asks for it.
  */
 import { query } from "../../db";
 import {
@@ -27,6 +25,7 @@ import {
   type PlanQuote,
   type PlanTermMonths,
   type QuoteAddOn,
+  type QuoteCoupon,
   type QuotePriceVersion,
 } from "./plan-quote";
 
@@ -43,6 +42,7 @@ export interface PlanQuoteOptions {
   /** Configured for this term; never a default in code. */
   termDiscountRate: number;
   taxRate: number;
+  coupon?: QuoteCoupon | null;
   now?: Date;
   validityMinutes?: number;
   exec?: QuoteExecutor;
@@ -57,6 +57,18 @@ export type PlanQuoteResult =
   | { ok: true; quote: PlanQuote }
   | { ok: false; error: PlanQuoteError };
 
+/** The catalogue facts a quote is built from, and re-checked against. */
+export interface PlanPricing {
+  monthlyBaseRial: number;
+  basePriceVersion: QuotePriceVersion;
+  recurringAddOns: QuoteAddOn[];
+  oneOffAddOns: QuoteAddOn[];
+}
+
+export type PlanPricingResult =
+  | { ok: true; pricing: PlanPricing }
+  | { ok: false; error: PlanQuoteError };
+
 /** The facts the payment boundary compares a quote against. */
 export interface CurrentQuoteFacts {
   planKey: string;
@@ -67,14 +79,16 @@ export interface CurrentQuoteFacts {
 }
 
 /**
- * Quote one plan for one term.
+ * Read the live prices for a plan.
  *
  * A retired or draft plan is refused: its key stays a valid reference for
  * historical subscriptions, but it must not be sold again.
  */
-export async function quotePlanSubscription(
-  options: PlanQuoteOptions,
-): Promise<PlanQuoteResult> {
+export async function readPlanPricing(options: {
+  planKey: string;
+  now?: Date;
+  exec?: QuoteExecutor;
+}): Promise<PlanPricingResult> {
   const now = options.now ?? new Date();
   const exec = options.exec ?? { query };
 
@@ -125,9 +139,7 @@ export async function quotePlanSubscription(
     : // No published version exists yet. `legacy:` cannot collide with a real
       // uuid, and version 0 says plainly that no version priced this line.
       { id: `legacy:${options.planKey}`, version: 0 };
-  const monthlyBaseRial = published
-    ? Number(published.unit_amount_rial)
-    : legacyPrice!;
+  const monthlyBaseRial = published ? Number(published.unit_amount_rial) : legacyPrice!;
 
   const { rows: featureRows } = await exec.query<{
     feature_key: string;
@@ -158,16 +170,27 @@ export async function quotePlanSubscription(
     else oneOffAddOns.push(addOn);
   }
 
+  return {
+    ok: true,
+    pricing: { monthlyBaseRial, basePriceVersion, recurringAddOns, oneOffAddOns },
+  };
+}
+
+/** Quote one plan for one term, optionally with one coupon. */
+export async function quotePlanSubscription(
+  options: PlanQuoteOptions,
+): Promise<PlanQuoteResult> {
+  const pricing = await readPlanPricing(options);
+  if (!pricing.ok) return pricing;
+
   const quote = buildPlanQuote({
     planKey: options.planKey,
     termMonths: options.termMonths,
-    monthlyBaseRial,
-    basePriceVersion,
-    recurringAddOns,
-    oneOffAddOns,
+    ...pricing.pricing,
     termDiscountRate: options.termDiscountRate,
     taxRate: options.taxRate,
-    issuedAt: now.toISOString(),
+    coupon: options.coupon ?? null,
+    issuedAt: (options.now ?? new Date()).toISOString(),
     validityMinutes: options.validityMinutes,
   });
 
