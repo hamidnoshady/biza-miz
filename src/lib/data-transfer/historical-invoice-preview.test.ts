@@ -42,6 +42,25 @@ describe("historical invoice dry-run", () => {
     expect(result[0].rows).toHaveLength(2);
     expect(result[0].warnings.join()).toContain("پرداخت جزئی");
   });
+  it("holds potentially repeated line evidence instead of counting it twice or silently dropping it", () => {
+    const flat = [
+      { ...base, total: "100", paid: undefined, balance: undefined, lineName: "A", quantity: "1", unitPrice: "50" },
+      { rowNumber: 3, externalInvoiceId: "id-1", lineName: "A", quantity: "1", unitPrice: "50" },
+    ];
+    const result = previewHistoricalInvoices(flat, options)[0];
+    expect(result.outcome).toBe("invalid");
+    expect(result.errors.join(" ")).toContain("ردیف‌های یکسان");
+    expect(result.rows).toHaveLength(2);
+    const grouped = previewHistoricalInvoiceSheets([{ ...base, paid: undefined, balance: undefined }], [
+      { rowNumber: 3, externalInvoiceId: "id-1", lineName: "A", quantity: "1", unitPrice: "50" },
+      { rowNumber: 4, externalInvoiceId: "id-1", lineName: "A", quantity: "1", unitPrice: "50" },
+    ], options).documents[0];
+    expect(grouped.outcome).toBe("invalid");
+    expect(grouped.errors.join(" ")).toContain("ردیف‌های یکسان");
+    expect(grouped.rows).toHaveLength(3);
+    const different = previewHistoricalInvoices([flat[0], { ...flat[1], lineName: "B" }], options)[0];
+    expect(different.outcome).toBe("ready");
+  });
   it("keeps header-only records explicit and does not invent lines or balances", () => {
     const [doc] = previewHistoricalInvoices([{ ...base, paid: undefined, balance: undefined }], options);
     expect(doc).toMatchObject({ summaryOnly: true, paidRial: null, balanceRial: null, outcome: "ready" });

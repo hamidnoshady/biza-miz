@@ -3,7 +3,7 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { isUuid } from "@/lib/uuid";
-import { listHistoricalInvoices } from "@/lib/data-transfer/historical-invoice-archive-service";
+import { listHistoricalInvoices, summarizeHistoricalInvoiceSources } from "@/lib/data-transfer/historical-invoice-archive-service";
 
 /** Historical evidence is separate from the customer's operational timeline. */
 export const GET = withTenantScope(
@@ -23,7 +23,12 @@ export const GET = withTenantScope(
       businessId: session.businessId, locationId: location.id, partyId: id,
       search, limit: 51, offset,
     });
-    return NextResponse.json({ invoices: invoices.slice(0, 50), hasMore: invoices.length > 50 }, {
+    // These are per-source evidence subtotals across the whole active branch,
+    // independent of the list search/page. They are not reconciled net sales.
+    const sourceSummary = await summarizeHistoricalInvoiceSources({
+      businessId: session.businessId, locationId: location.id, partyId: id,
+    });
+    return NextResponse.json({ invoices: invoices.slice(0, 50), hasMore: invoices.length > 50, sourceSummary }, {
       headers: { "Cache-Control": "no-store" },
     });
   },

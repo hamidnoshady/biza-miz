@@ -409,6 +409,35 @@ export async function listHistoricalInvoices(input: {
   });
 }
 
+/**
+ * Separate source subtotals of archived face values for one customer and the
+ * active branch, including merged-away customer records. These are evidence,
+ * not net sales: cancellation/refund statuses and overlaps with other sources
+ * or posted orders have not been reconciled. Never combine them into a lifetime
+ * or operational total. Amounts and counts remain exact decimal strings.
+ */
+export async function summarizeHistoricalInvoiceSources(input: {
+  businessId: string; locationId: string; partyId: string;
+}): Promise<{ sources: { sourceKey: string; provider: string; invoiceCount: string; totalRial: string }[]; hasMore: boolean }> {
+  return withTenantTransaction(input.businessId, async (client) => {
+    const result = await client.query<{ sourceKey: string; provider: string; invoiceCount: string; totalRial: string }>(
+      `WITH RECURSIVE customer_family AS (
+         SELECT id FROM parties WHERE business_id = $1 AND id = $3::uuid
+         UNION
+         SELECT p.id FROM parties p JOIN customer_family f ON p.merged_into_id = f.id WHERE p.business_id = $1
+       )
+       SELECT source_key AS "sourceKey", source_provider AS "provider",
+              count(*)::text AS "invoiceCount", sum(total_rial)::text AS "totalRial"
+         FROM historical_sales_invoices
+        WHERE business_id = $1 AND location_id = $2 AND party_id IN (SELECT id FROM customer_family)
+        GROUP BY source_key, source_provider
+        ORDER BY source_key, source_provider LIMIT 51`,
+      [input.businessId, input.locationId, input.partyId],
+    );
+    return { sources: result.rows.slice(0, 50), hasMore: result.rows.length > 50 };
+  });
+}
+
 /** Detail is branch-scoped too; raw mapped evidence may contain sensitive data. */
 export async function getHistoricalInvoiceEvidence(input: {
   businessId: string;

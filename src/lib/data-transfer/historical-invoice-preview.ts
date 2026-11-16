@@ -189,6 +189,19 @@ function previewHistoricalInvoiceRows(
       warnings.push("پرداخت جزئی فقط به‌عنوان سابقه نمایش داده می‌شود و بدهی یا پرداختی در دفتر ثبت نمی‌کند.");
     }
     const lines = group.filter((row) => explicitLines.has(row) || LINE_FIELDS.some((field) => text(row[field])));
+    // Identical line evidence can be either a repeated export row or a real
+    // repeated sale. Without a stable line ID we cannot decide which: hold the
+    // whole invoice for correction/review rather than silently double it or
+    // discard evidence. Compare only line fields, not repeated header cells.
+    const seenLines = new Set<string>();
+    for (const row of lines) {
+      const key = JSON.stringify(LINE_FIELDS.map((field) => text(row[field])));
+      if (seenLines.has(key)) {
+        errors.push("ردیف‌های یکسان کالا ممکن است تکراری باشند؛ فایل فاکتور را بررسی و اصلاح کنید.");
+        break;
+      }
+      seenLines.add(key);
+    }
     let lineSum = new Exact(0);
     for (const row of lines) {
       const rowLabel = row.sourceSheet && row.sourceRowNumber ? `${row.sourceRowNumber} (برگهٔ ${row.sourceSheet})` : String(row.rowNumber);

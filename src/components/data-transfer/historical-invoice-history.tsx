@@ -5,9 +5,12 @@ import { Button } from "@/components/ui/button";
 import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, inputClass } from "@/app/dashboard/ui";
 import { formatJalali } from "@/lib/jalali";
+import { toPersianDigits } from "@/lib/digits";
 import { formatRialText } from "@/lib/money";
 import type { HistoricalInvoiceRow } from "@/lib/data-transfer/historical-invoice-preview";
 import type { HistoricalInvoiceSummary } from "@/lib/data-transfer/historical-invoice-archive-service";
+
+type SourceSummary = { sources: { sourceKey: string; provider: string; invoiceCount: string; totalRial: string }[]; hasMore: boolean };
 
 /** Separate, read-only history: never add these amounts to operational totals. */
 export function HistoricalInvoiceHistory({ customerId }: { customerId?: string }) {
@@ -15,7 +18,7 @@ export function HistoricalInvoiceHistory({ customerId }: { customerId?: string }
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
   const [version, setVersion] = useState(0);
-  const [state, setState] = useState<{ invoices: HistoricalInvoiceSummary[]; hasMore: boolean } | null>(null);
+  const [state, setState] = useState<{ invoices: HistoricalInvoiceSummary[]; hasMore: boolean; sourceSummary?: SourceSummary } | null>(null);
   const [error, setError] = useState(false);
 
   useEffect(() => {
@@ -24,14 +27,14 @@ export function HistoricalInvoiceHistory({ customerId }: { customerId?: string }
     setError(false);
     const params = new URLSearchParams({ offset: String(offset) });
     if (search) params.set("q", search);
-    void api<{ invoices: HistoricalInvoiceSummary[]; hasMore: boolean }>(
+    void api<{ invoices: HistoricalInvoiceSummary[]; hasMore: boolean; sourceSummary?: SourceSummary }>(
       customerId
         ? `/api/crm/customers/${encodeURIComponent(customerId)}/historical-invoices?${params}`
         : `/api/accounting/historical-invoices?${params}`,
       { signal: controller.signal },
     ).then(({ ok, data, aborted }) => {
       if (aborted || controller.signal.aborted) return;
-      if (ok && Array.isArray(data.invoices)) setState({ invoices: data.invoices, hasMore: data.hasMore === true });
+      if (ok && Array.isArray(data.invoices)) setState({ invoices: data.invoices, hasMore: data.hasMore === true, sourceSummary: data.sourceSummary });
       else setError(true);
     });
     return () => controller.abort();
@@ -42,6 +45,20 @@ export function HistoricalInvoiceHistory({ customerId }: { customerId?: string }
       title="فاکتورهای فروش قبلی"
       description="واردشده از نرم‌افزار قبلی / سابقه تاریخی؛ در دفتر رسمی، ماندهٔ بدهی و آمار فروش سامانه ثبت نشده است. نمایش فقط برای شعبهٔ فعال است."
     >
+      {customerId && state?.sourceSummary && state.sourceSummary.sources.length > 0 ? (
+        <div className="mb-4 space-y-2 text-sm">
+          <p className="font-medium">خلاصهٔ مبالغ اسمی فاکتورهای تاریخی، به تفکیک منبع</p>
+          <p>این مبالغ جمع کل فاکتورهای هر منبع در شعبهٔ فعال است و به جست‌وجو یا صفحه محدود نیست. وضعیت لغو و مرجوعی و هم‌پوشانی با سایر منابع یا فروش ثبت‌شده بررسی نشده‌اند؛ این اعداد فروش خالص یا جمع خرید قطعی نیستند و با هم جمع نمی‌شوند.</p>
+          <ul className="space-y-1">
+            {state.sourceSummary.sources.map((source) => (
+              <li key={JSON.stringify([source.sourceKey, source.provider])} className="break-words">
+                منبع: {source.sourceKey}{source.provider ? ` · ارائه‌دهنده: ${source.provider}` : ""} · تعداد فاکتور: {toPersianDigits(source.invoiceCount)} · مبلغ اسمی: {formatRialText(source.totalRial)}
+              </li>
+            ))}
+          </ul>
+          {state.sourceSummary.hasMore ? <p>فقط ۵۰ منبع نخست نمایش داده شده‌اند.</p> : null}
+        </div>
+      ) : null}
       <form className="mb-3 flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); setOffset(0); setSearch(draft.trim()); }}>
         <label className="sr-only" htmlFor="historical-invoice-search">جست‌وجوی فاکتورهای قبلی</label>
         <input id="historical-invoice-search" className={`${inputClass} max-w-xs`} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="شناسه، شماره یا منبع" />
