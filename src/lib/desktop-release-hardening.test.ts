@@ -527,6 +527,12 @@ describe("release workflow wiring", () => {
     expect(updater).not.toContain("Start-Process");
     const production = workflow("windows-production-release.yml");
     expect(production).toContain("-ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT");
+
+    // The release being upgraded FROM may predate a certificate rotation, so it is
+    // never held to the current pin - only the candidate is.
+    const retail = workflow("windows-11-release.yml");
+    expect(retail).toContain("-AllowHistoricalSigner");
+    expect(retail).toContain("-ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:CANDIDATE_COMMIT");
   });
 
   it("fails the shippables build when the package shape regresses", () => {

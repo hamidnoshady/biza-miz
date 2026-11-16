@@ -5,6 +5,10 @@ param(
   [ValidateSet("signed", "unsigned-development")][string]$Mode = "signed",
   [string]$ExpectedSigner = $env:WINDOWS_EXPECTED_SIGNER,
   [string]$ExpectedThumbprint = $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT,
+  # Only for artefacts that are deliberately not the current release: an install
+  # being upgraded FROM may carry a certificate that has since been rotated. The
+  # candidate itself must always be pinned.
+  [switch]$AllowHistoricalSigner,
   [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateCommit = $env:GITHUB_SHA,
   [string]$OutputPath = "windows-signature-verification.json"
 )
@@ -19,7 +23,7 @@ if ($Mode -eq "signed" -and [string]::IsNullOrWhiteSpace($ExpectedSigner)) {
 # Issue #1000 - a publisher name is not an identity. Signed verification pins the
 # exact signing certificate thumbprint, and a missing pin is a refusal.
 $pinnedThumbprint = if ($ExpectedThumbprint) { ($ExpectedThumbprint -replace '[\s:]', '').ToUpperInvariant() } else { "" }
-if ($Mode -eq "signed" -and $pinnedThumbprint -notmatch '^[0-9A-F]{40}$') {
+if ($Mode -eq "signed" -and -not $AllowHistoricalSigner -and $pinnedThumbprint -notmatch '^[0-9A-F]{40}$') {
   throw "ExpectedThumbprint/WINDOWS_EXPECTED_SIGNER_THUMBPRINT must be a 40-character SHA-1 thumbprint in signed mode"
 }
 
@@ -45,7 +49,7 @@ foreach ($entry in $manifest.required) {
       [string]::Equals($signer, $ExpectedSigner, [StringComparison]::OrdinalIgnoreCase) -or
       [string]::Equals($signerCommonName, $ExpectedSigner, [StringComparison]::OrdinalIgnoreCase)
     )
-    $thumbprintMatches = $thumbprint -and [string]::Equals($thumbprint, $pinnedThumbprint, [StringComparison]::OrdinalIgnoreCase)
+    $thumbprintMatches = if ($AllowHistoricalSigner) { $true } else { $thumbprint -and [string]::Equals($thumbprint, $pinnedThumbprint, [StringComparison]::OrdinalIgnoreCase) }
     $timestamped = -not [string]::IsNullOrWhiteSpace($timestampSigner)
     $accepted = if ($Mode -eq "signed") {
       $valid -and $signerMatches -and $thumbprintMatches -and $timestamped
@@ -80,7 +84,8 @@ $report = [ordered]@{
   schemaVersion = 1
   mode = $Mode
   expectedSigner = if ($Mode -eq "signed") { $ExpectedSigner } else { $null }
-  expectedThumbprint = if ($Mode -eq "signed") { $pinnedThumbprint } else { $null }
+  expectedThumbprint = if ($Mode -eq "signed" -and -not $AllowHistoricalSigner) { $pinnedThumbprint } else { $null }
+  historicalSignerAllowed = [bool]$AllowHistoricalSigner
   rfc3161TimestampRequired = $Mode -eq "signed"
   commit = $CandidateCommit
   generatedAt = [DateTime]::UtcNow.ToString("o")

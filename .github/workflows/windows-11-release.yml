@@ -224,10 +224,10 @@ jobs:
             $previousManifest = Join-Path "${{ runner.temp }}" "previous-installer-signing-manifest.json"
             (Get-Content config\windows-installer-signing-manifest.json -Raw).Replace("Bizamiz Setup", "$env:PREVIOUS_STEM Setup") | Set-Content -LiteralPath $previousManifest -Encoding utf8
           }
-          # A previous release signed by a retired certificate is verified against the
-          # publisher name it was built with; this run still requires the candidate
-          # itself to carry the currently pinned thumbprint.
-          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $previousRoot -ManifestPath $previousManifest -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:PREVIOUS_COMMIT -OutputPath previous-installer-signatures.json
+          # The release being upgraded FROM may carry a certificate that has since
+          # been rotated, so its signature is verified by publisher and timestamp
+          # without the current pin. The candidate above is always pinned.
+          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $previousRoot -ManifestPath $previousManifest -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -AllowHistoricalSigner -CandidateCommit $env:PREVIOUS_COMMIT -OutputPath previous-installer-signatures.json
 
       - name: Assert dedicated clean state
         run: |
