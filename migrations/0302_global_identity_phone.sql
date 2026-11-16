@@ -116,5 +116,11 @@ SELECT u.phone_e164,
  GROUP BY u.phone_e164
 HAVING count(DISTINCT u.platform_user_id) > 1;
 
+-- `CREATE OR REPLACE VIEW` resets `reloptions`, so the inline
+-- `security_invoker = true` above is not enough to keep the view on the
+-- invoker's rights after a later replace. Re-assert it explicitly — the same
+-- rule every post-0146 view migration in this repo follows.
+ALTER VIEW v_platform_verified_phone_conflicts SET (security_invoker = on);
+
 COMMENT ON VIEW v_platform_verified_phone_conflicts IS
     'Verified phone numbers held by more than one platform identity (ESH-199). These are deliberately NOT backfilled and need a reviewed repair, never an automatic merge.';

@@ -33,7 +33,7 @@ import {
   type QuoteCoupon,
   type QuoteLine,
 } from "./plan-quote";
-import { currentQuoteFacts, readPlanPricing } from "./plan-quote-service";
+import { currentQuoteFacts, readPlanPricing, type QuoteExecutor } from "./plan-quote-service";
 import { redeemCouponForQuote } from "./coupon-service";
 
 /** Without settlement, this is how a quote is remembered. */
@@ -163,22 +163,53 @@ export async function loadQuote(input: {
   businessId: string;
   quoteId: string;
 }): Promise<StoredQuote | null> {
-  const row = await withTenant(input.businessId, async () => {
-    const { rows } = await query<StoredQuoteRow>(
-      `SELECT id, business_id, platform_user_id, plan_key, term_months,
-              term_discount_basis_points, tax_basis_points,
-              coupon_id, coupon_code, coupon_kind, coupon_value,
-              gross_rial, discount_rial, coupon_discount_rial, tax_rial, net_rial,
-              lines, base_price_version_id, base_price_version,
-              period_start, period_end, issued_at, expires_at, status
-         FROM billing_quotes
-        WHERE id = $1
-          AND business_id = $2`,
-      [input.quoteId, input.businessId],
-    );
-    return rows[0] ?? null;
-  });
-  return row ? toStoredQuote(row) : null;
+  return withTenant(input.businessId, () =>
+    loadStoredQuoteWith({ query }, input.businessId, input.quoteId),
+  );
+}
+
+/** The minimum a caller needs from a connection to read and re-price a quote. */
+type QuoteReader = QuoteExecutor;
+
+/**
+ * Read one quote through a specific executor.
+ *
+ * Settlement passes its transaction's own client, so the stored quote and the
+ * catalogue it is compared against are read on the connection that then writes.
+ * The observation therefore shares one snapshot with the UPDATE, instead of
+ * being a separate connection's read that another commit can outrun.
+ */
+async function loadStoredQuoteWith(
+  reader: QuoteReader,
+  businessId: string,
+  quoteId: string,
+): Promise<StoredQuote | null> {
+  const { rows } = await reader.query<StoredQuoteRow>(
+    `SELECT id, business_id, platform_user_id, plan_key, term_months,
+            term_discount_basis_points, tax_basis_points,
+            coupon_id, coupon_code, coupon_kind, coupon_value,
+            gross_rial, discount_rial, coupon_discount_rial, tax_rial, net_rial,
+            lines, base_price_version_id, base_price_version,
+            period_start, period_end, issued_at, expires_at, status
+       FROM billing_quotes
+      WHERE id = $1
+        AND business_id = $2`,
+    [quoteId, businessId],
+  );
+  return rows[0] ? toStoredQuote(rows[0]) : null;
+}
+
+/** Adapt a pg client to the narrow reader shape the pricing path expects. */
+function asReader(client: PoolClient): QuoteReader {
+  return {
+    async query<T extends Record<string, unknown> = Record<string, unknown>>(
+      text: string,
+      params?: unknown[],
+    ) {
+      const result = await client.query(text, params);
+      return { rows: result.rows as T[] };
+    },
+  };
 }
 
 export type QuoteRefusal =
@@ -213,11 +244,27 @@ export async function assertQuotePayable(input: {
     return { ok: false, error: "quote_expired" };
   }
 
-  const pricing = await readPlanPricing({ planKey: stored.quote.planKey, now });
+  return repriceStoredQuote({ query }, stored, now);
+}
+
+/**
+ * Re-read the catalogue and decide whether the stored quote still matches.
+ *
+ * Shared by the read-only check and by settlement, so both compare with the
+ * same arithmetic; only the connection differs. Settlement passes its own
+ * client, which is what makes the check transactional rather than advisory.
+ */
+async function repriceStoredQuote(
+  reader: QuoteReader,
+  stored: StoredQuote,
+  now: Date,
+): Promise<QuotePayability> {
+  const pricing = await readPlanPricing({ planKey: stored.quote.planKey, now, exec: reader });
   if (!pricing.ok) {
     return {
       ok: false,
-      error: pricing.error === "plan_not_purchasable" ? "plan_not_purchasable" : "plan_price_missing",
+      error:
+        pricing.error === "plan_not_purchasable" ? "plan_not_purchasable" : "plan_price_missing",
     };
   }
 
@@ -258,11 +305,14 @@ export type ConsumeQuoteResult =
 /**
  * Consume an open quote for a payment, exactly once.
  *
- * The UPDATE's WHERE clause carries status, ownership and expiry, so the
- * decision and the write cannot interleave. The coupon is spent in the same
- * transaction: if the cap has been reached, the quote consumption rolls back
- * and the caller gets `coupon_exhausted` — never a discounted settlement that
- * the campaign did not actually authorise.
+ * The price check runs **inside** the transaction, on the same client that
+ * flips the row: a plan re-versioned midway cannot slip between a separate
+ * check and this UPDATE, because both observe one READ COMMITTED snapshot.
+ * The UPDATE's WHERE clause still carries status, ownership and expiry, so a
+ * concurrent settlement or cancellation cannot interleave either. The coupon
+ * is spent in the same transaction: if the cap has been reached, the quote
+ * consumption rolls back and the caller gets `coupon_exhausted` — never a
+ * discounted settlement that the campaign did not actually authorise.
  */
 export async function consumeQuote(input: {
   businessId: string;
@@ -272,15 +322,21 @@ export async function consumeQuote(input: {
 }): Promise<ConsumeQuoteResult> {
   const now = input.now ?? new Date();
 
-  // Price first: a settlement must never go through at a price the catalogue
-  // has since changed. The transaction below still guards status, expiry and
-  // coupon capacity atomically; the re-read and the consume are adjacent, and
-  // the stored quote is the only thing that can be settled either way.
-  const payable = await assertQuotePayable({ businessId: input.businessId, quoteId: input.quoteId, now });
-  if (!payable.ok) return { ok: false, error: payable.error };
-
   try {
     return await withTenantTransaction(input.businessId, async (client) => {
+      const reader = asReader(client);
+
+      // Observations and the write share this transaction's snapshot.
+      const stored = await loadStoredQuoteWith(reader, input.businessId, input.quoteId);
+      if (!stored) return { ok: false as const, error: "quote_not_found" as const };
+      if (stored.status !== "open") return { ok: false as const, error: "quote_consumed" as const };
+      if (new Date(stored.expiresAt).getTime() <= now.getTime()) {
+        return { ok: false as const, error: "quote_expired" as const };
+      }
+
+      const settled = await repriceStoredQuote(reader, stored, now);
+      if (!settled.ok) return { ok: false as const, error: settled.error };
+
       const { rows } = await client.query<{ coupon_id: string | null }>(
         `UPDATE billing_quotes
             SET status = 'consumed', payment_id = $3, consumed_at = now()
