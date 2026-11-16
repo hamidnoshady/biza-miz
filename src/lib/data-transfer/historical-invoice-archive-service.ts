@@ -300,7 +300,7 @@ export async function archiveHistoricalInvoice(input: {
 export async function persistHistoricalDocument(
   client: PoolClient,
   input: Pick<HistoricalStagedInput, "businessId" | "locationId" | "jobId" | "sourceKey" | "provider" | "currency" | "calendar"> & { actor: HistoricalArchiveActor },
-  doc: HistoricalPreviewDocument,
+  doc: Omit<HistoricalPreviewDocument, "outcome">,
   code: string,
   hash: string,
 ): Promise<{ status: "created" | "already_imported"; invoiceId: string }> {
