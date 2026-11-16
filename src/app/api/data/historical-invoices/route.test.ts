@@ -130,7 +130,7 @@ function stageRequest(value: unknown, headers: Record<string, string> = {}) {
   return new NextRequest("http://localhost/api/data/historical-invoices", { method: "POST", headers: { "content-type": "application/vnd.bizamiz.historical-invoice+json", ...headers }, body: JSON.stringify(value) });
 }
 describe("historical text staging API", () => {
-  it("stages only text with the session tenant, actor and active branch", async () => {
+  it("stages CSV with the session tenant, actor and active branch", async () => {
     const res = await POST(stageRequest(stagePayload));
     expect(res.status).toBe(201);
     expect(res.headers.get("cache-control")).toBe("no-store");
@@ -142,6 +142,14 @@ describe("historical text staging API", () => {
     const huge = { ...stagePayload, content: "x".repeat(20 * 1024 * 1024) };
     expect((await POST(stageRequest(huge, { "content-length": "1" }))).status).toBe(413);
     expect(mocks.stage).not.toHaveBeenCalled();
+  });
+  it("passes exact workbook bytes and explicit sheet roles to the staging service", async () => {
+    const bytes = Uint8Array.of(0x50, 0x4b, 0x03, 0x04, 0xff);
+    const content = Buffer.from(bytes).toString("base64");
+    const sheets = { headers: "Headers", lines: "Lines" };
+    const res = await POST(stageRequest({ ...stagePayload, format: "xlsx", fileName: "source.xlsx", content, sheets }));
+    expect(res.status).toBe(201);
+    expect(mocks.stage).toHaveBeenCalledWith(expect.objectContaining({ format: "xlsx", sheets, buffer: bytes.buffer }));
   });
   it("rejects unsafe formats, spoofed scope, invalid text, and excess bodies", async () => {
     for (const body of [

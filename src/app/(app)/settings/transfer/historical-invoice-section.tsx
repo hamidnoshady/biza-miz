@@ -41,6 +41,12 @@ function asMapping(selection: Partial<Record<FieldKey, number>>): Mapping {
 }
 const historicalErrors: Record<string, string> = {
   bad_request: "درخواست یا اطلاعات فایل معتبر نیست.", payload_too_large: "اندازهٔ درخواست بیش از حد مجاز است.",
+  invalid_xlsx: "فایل اکسل معتبر نیست.", invalid_xlsx_archive: "ساختار فایل اکسل معتبر نیست.",
+  xlsx_cells_must_be_text: "شناسه‌ها، تاریخ‌ها و مبالغ اکسل را به‌صورت متن ذخیره کنید.",
+  xlsx_expanded_too_large: "حجم بازشدهٔ فایل اکسل بیش از حد مجاز است.",
+  xlsx_unsupported_layout: "برگه‌های داده را بدون خانهٔ ادغام‌شده، جدول یا تصویر ذخیره کنید.",
+  invalid_sheet_selection: "نام برگه‌های سربرگ و ردیف‌ها را مطابق فایل وارد کنید.",
+  multi_sheet_not_supported: "برای فایل دوبرگه، نام هر دو برگه را وارد کنید.",
   invalid_text: "متن فایل حاوی نویسهٔ نامعتبر است.", invalid_utf8: "فایل باید با کدگذاری UTF-8 باشد.",
   invalid_json: "ساختار JSON معتبر نیست.", invalid_json_shape: "فایل JSON باید فهرستی از سطرهای ساده باشد.",
   invalid_csv_quote: "نشانه‌گذاری نقل‌قول در فایل CSV معتبر نیست.", row_wider_than_header: "یک ردیف از تعداد ستون‌های سربرگ بیشتر است.",
@@ -66,6 +72,8 @@ export function HistoricalInvoiceSection() {
   const [historyMore, setHistoryMore] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [headerSheet, setHeaderSheet] = useState("");
+  const [lineSheet, setLineSheet] = useState("");
   const [sourceKey, setSourceKey] = useState("");
   const [provider, setProvider] = useState("");
   const [currency, setCurrency] = useState<"rial" | "toman">("toman");
@@ -114,18 +122,28 @@ export function HistoricalInvoiceSection() {
   }
   async function upload() {
     if (!file || !sourceKey.trim()) { setError("فایل و شناسهٔ ثابت سامانهٔ مبدأ را وارد کنید."); return; }
-    const match = /\.(csv|json)$/i.exec(file.name);
-    if (!match) { setError("فعلاً فقط فایل CSV یا JSON پذیرفته می‌شود؛ ورود XLSX هنوز فعال نیست."); return; }
-    if (file.size > 20 * 1024 * 1024) { setError("اندازهٔ فایل بیش از حد مجاز است."); return; }
+    const format = /\.(csv|json|xlsx)$/i.exec(file.name)?.[1].toLowerCase();
+    if (!format) { setError("یکی از فایل‌های CSV، JSON یا XLSX را انتخاب کنید."); return; }
+    if (format === "xlsx" && Boolean(headerSheet) !== Boolean(lineSheet)) { setError("نام هر دو برگه را وارد کنید."); return; }
+    if (file.size > (format === "xlsx" ? 8 : 20) * 1024 * 1024) { setError("اندازهٔ فایل بیش از حد مجاز است."); return; }
     setBusy(true); setError(""); setNotice("");
     try {
-      const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer());
-      const result = await request({ fileName: file.name, format: match[1].toLowerCase(), content, sourceKey, provider, currency, calendar }, "application/vnd.bizamiz.historical-invoice+json");
+      const content = format === "xlsx"
+        ? await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result).split(",", 2)[1] ?? "");
+          reader.onerror = reader.onabort = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        })
+        : new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer());
+      const result = await request({ fileName: file.name, format, content, sourceKey, provider, currency, calendar,
+        ...(format === "xlsx" && headerSheet && lineSheet ? { sheets: { headers: headerSheet, lines: lineSheet } } : {}),
+      }, "application/vnd.bizamiz.historical-invoice+json");
       if (!result.ok) { setError(message(result.data.error)); return; }
       const staged = result.data.staged as { jobId: string };
       await openJob(staged.jobId); await loadHistory(0);
       setNotice("فایل برای بررسی ذخیره شد؛ هیچ فاکتوری ثبت نشده است.");
-    } catch { setError("فایل متنی UTF-8 معتبر نیست یا خواندن آن ممکن نشد."); }
+    } catch { setError("خواندن یا ارسال فایل ممکن نشد."); }
     finally { setBusy(false); }
   }
   async function showPreview(nextOffset = 0, nextOrphanOffset = 0) {
@@ -172,9 +190,16 @@ export function HistoricalInvoiceSection() {
   }
   return <div className="space-y-6">
     <SectionCard title="فاکتورهای فروش قدیمی" description="فقط شواهد تاریخی؛ هیچ سفارش، دریافت، موجودی یا سند حسابداری ایجاد نمی‌شود.">
-      <InfoBox>اجرای ورود هنوز فعال نیست. این پیش‌نمایش تطبیق میان منابع را بررسی نمی‌کند و تأیید ورود محسوب نمی‌شود. فایل XLSX فعلاً پذیرفته نمی‌شود.</InfoBox>
+      <InfoBox>اجرای ورود هنوز فعال نیست. این پیش‌نمایش تطبیق میان منابع را بررسی نمی‌کند و تأیید ورود محسوب نمی‌شود.</InfoBox>
       {error ? <ErrorBox>{error}</ErrorBox> : null}{notice ? <InfoBox>{notice}</InfoBox> : null}
-      <Field label="فایل CSV یا JSON با کدگذاری UTF-8"><input className={inputClass} type="file" accept=".csv,.json" disabled={busy} onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></Field>
+      <Field label="فایل XLSX، CSV یا JSON"><input className={inputClass} type="file" accept=".xlsx,.csv,.json" disabled={busy} onChange={(event) => {
+        setFile(event.target.files?.[0] ?? null); setHeaderSheet(""); setLineSheet("");
+      }} /></Field>
+      {file && /\.xlsx$/i.test(file.name) ? <>
+        <p>خانه‌های اکسل باید متنی باشند. برای فایل تک‌برگه، نام برگه‌ها را خالی بگذارید.</p>
+        <Field label="نام برگهٔ سربرگ‌ها"><input className={inputClass} value={headerSheet} maxLength={31} disabled={busy} onChange={(event) => setHeaderSheet(event.target.value)} /></Field>
+        <Field label="نام برگهٔ ردیف‌ها"><input className={inputClass} value={lineSheet} maxLength={31} disabled={busy} onChange={(event) => setLineSheet(event.target.value)} /></Field>
+      </> : null}
       <Field label="شناسهٔ ثابت سامانهٔ مبدأ" hint="برای فایل‌های بعدی همان سامانه، همین شناسه را استفاده کنید."><input className={inputClass} value={sourceKey} maxLength={200} disabled={busy} onChange={(event) => setSourceKey(event.target.value)} /></Field>
       <Field label="نام ارائه‌دهندهٔ مبدأ"><input className={inputClass} value={provider} maxLength={200} disabled={busy} onChange={(event) => setProvider(event.target.value)} /></Field>
       <Field label="واحد پول فایل"><select className={inputClass} value={currency} disabled={busy} onChange={(event) => setCurrency(event.target.value as "rial" | "toman")}><option value="toman">تومان</option><option value="rial">ریال</option></select></Field>

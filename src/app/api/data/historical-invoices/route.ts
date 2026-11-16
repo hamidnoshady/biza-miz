@@ -17,17 +17,24 @@ import { HistoricalFileError, validHistoricalText } from "@/lib/data-transfer/hi
 import { HistoricalStagingError, stageHistoricalInvoiceFile } from "@/lib/data-transfer/historical-invoice-staging";
 import { getHistoricalInvoiceJob, listHistoricalInvoiceJobs, searchHistoricalCustomers } from "@/lib/data-transfer/historical-invoice-history";
 
-// Staging is intentionally limited to text formats. This endpoint never
-// approves, enqueues, executes, or archives invoices.
+// Upload only stages evidence. Archive execution requires its own approval path.
 const stageContentType = "application/vnd.bizamiz.historical-invoice+json";
-const stageRequest = z.object({
+const stageFields = {
   fileName: z.string().trim().min(1).max(300).refine(validHistoricalText),
-  format: z.enum(["csv", "json"]),
-  content: z.string().min(1).refine(validHistoricalText),
   sourceKey: z.string().trim().min(1).max(200).refine(validHistoricalText),
   provider: z.string().trim().max(200).refine(validHistoricalText),
   currency: z.enum(["rial", "toman"]), calendar: z.enum(["jalali", "gregorian"]),
-}).strict();
+};
+const maxWorkbookBytes = 8 * 1024 * 1024;
+const maxWorkbookBase64 = Math.ceil(maxWorkbookBytes / 3) * 4;
+const sheetName = z.string().min(1).max(31).refine(validHistoricalText);
+const stageRequest = z.union([
+  z.object({ ...stageFields, format: z.enum(["csv", "json"]), content: z.string().min(1).refine(validHistoricalText) }).strict(),
+  z.object({ ...stageFields, format: z.literal("xlsx"),
+    content: z.string().min(4).max(maxWorkbookBase64),
+    sheets: z.object({ headers: sheetName, lines: sheetName }).strict().optional(),
+  }).strict(),
+]);
 
 const mapping = z.object({ columns: z.array(z.object({
   field: z.enum(HISTORICAL_INVOICE_FIELDS), column: z.number().int().min(0).max(511),
@@ -84,9 +91,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "service_activation_check_unavailable" }, { status: 503 });
   }
   if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === stageContentType) {
-    // The outer JSON document is capped before it is parsed, even when the
-    // caller omits or falsifies Content-Length. XLSX is deliberately not
-    // accepted until workbook object amplification is bounded.
+    // Cap the streamed envelope before parsing, including for chunked uploads.
     const body = await readBoundedJson(request, 20 * 1024 * 1024);
     if (!body.ok) return NextResponse.json({ error: body.error }, { status: body.error === "payload_too_large" ? 413 : 400 });
     const parsed = stageRequest.safeParse(body.value);
@@ -94,8 +99,17 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       return NextResponse.json({ error: "bad_request" }, { status: 400 });
     }
     const { content, ...values } = parsed.data;
+    let buffer: ArrayBuffer;
+    if (values.format === "xlsx") {
+      const decoded = Buffer.from(content, "base64");
+      if (decoded.length > maxWorkbookBytes) return NextResponse.json({ error: "file_too_large" }, { status: 413 });
+      if (decoded.toString("base64") !== content) return NextResponse.json({ error: "bad_request" }, { status: 400 });
+      buffer = Uint8Array.from(decoded).buffer;
+    } else {
+      buffer = new TextEncoder().encode(content).buffer;
+    }
     try {
-      const staged = await stageHistoricalInvoiceFile({ ...values, buffer: new TextEncoder().encode(content).buffer,
+      const staged = await stageHistoricalInvoiceFile({ ...values, buffer,
         businessId: session.businessId, locationId: location.id, actor: { userId: session.sub, name: session.fullName ?? "" } });
       return NextResponse.json({ staged, executionAvailable: false }, { status: 201, headers: { "Cache-Control": "no-store" } });
     } catch (error) {

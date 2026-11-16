@@ -113,16 +113,19 @@ describe("historical invoice review", () => {
     fireEvent.change(screen.getByLabelText(/شناسهٔ ثابت سامانهٔ مبدأ/), { target: { value: "old" } });
     const file = new File(["id,total\n001,9007199254740993"], "old.csv", { type: "text/csv" });
     Object.defineProperty(file, "arrayBuffer", { value: async () => new TextEncoder().encode("\uFEFFid,total\n001,9007199254740993").buffer });
-    fireEvent.change(screen.getByLabelText("فایل CSV یا JSON با کدگذاری UTF-8"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("فایل XLSX، CSV یا JSON"), { target: { files: [file] } });
     fireEvent.click(screen.getByRole("button", { name: "ذخیرهٔ فایل برای بررسی" }));
     await screen.findByText(/فایل برای بررسی ذخیره شد/);
     const upload = mocks.api.mock.calls.find(([, init]) => init?.headers?.["Content-Type"] === "application/vnd.bizamiz.historical-invoice+json");
     expect(JSON.parse(String(upload![1].body))).toMatchObject({ fileName: "old.csv", format: "csv", content: "\uFEFFid,total\n001,9007199254740993", sourceKey: "old" });
-    const xlsx = new File(["not excel"], "bad.xlsx");
-    fireEvent.change(screen.getByLabelText("فایل CSV یا JSON با کدگذاری UTF-8"), { target: { files: [xlsx] } });
+    const xlsx = new File(["workbook bytes"], "archive.xlsx");
+    fireEvent.change(screen.getByLabelText("فایل XLSX، CSV یا JSON"), { target: { files: [xlsx] } });
     fireEvent.click(screen.getByRole("button", { name: "ذخیرهٔ فایل برای بررسی" }));
-    expect(await screen.findByText(/فعلاً فقط فایل CSV یا JSON پذیرفته می‌شود/)).toBeTruthy();
-    expect(mocks.api.mock.calls.filter(([, init]) => init?.headers?.["Content-Type"] === "application/vnd.bizamiz.historical-invoice+json")).toHaveLength(1);
+    await waitFor(() => {
+      const uploads = mocks.api.mock.calls.filter(([, init]) => init?.headers?.["Content-Type"] === "application/vnd.bizamiz.historical-invoice+json");
+      expect(uploads).toHaveLength(2);
+      expect(JSON.parse(String(uploads[1][1].body))).toMatchObject({ fileName: "archive.xlsx", format: "xlsx", content: "d29ya2Jvb2sgYnl0ZXM=" });
+    });
   });
 
 });
