@@ -122,6 +122,10 @@ export async function decideCafeOrderApproval(
       ],
     );
 
+    if (input.decision === "accepted") {
+      await client.query("SELECT cms_record_cafe_kitchen_state($1)", [input.orderId]);
+    }
+
     await recordOrderAudit(client, {
       actor: { businessId: input.businessId, userId: input.actor.userId, role: input.actor.role },
       locationId: input.locationId,

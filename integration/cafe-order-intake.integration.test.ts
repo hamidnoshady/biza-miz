@@ -435,15 +435,18 @@ describe("submitted café order → one POS order", () => {
     const { completeOrderPayment } = await import("../src/lib/payment-service");
     const order = cmsOrder(tenant, { id: randomUUID(), paymentMethod: "counter" });
     const { orderId } = await intake(tenant, order);
+    const { rows: [line] } = await db.query<{ id: string }>(
+      "SELECT id FROM order_items WHERE order_id = $1", [orderId],
+    );
+    const bump = (to: "preparing" | "ready" | "served") => transitionKitchenItem({
+      businessId: tenant.businessId, locationId: tenant.locationId,
+      itemId: line.id, to, mayBumpKitchen: true, mayServe: true, actorUserId: randomUUID(),
+    });
+    expect(await bump("preparing")).toEqual({ kind: "missing" });
     const accepted = await decide(tenant, orderId, "accepted");
     if (!accepted.ok) throw new Error(accepted.error);
-    await db.query("UPDATE order_items SET status = 'sent' WHERE order_id = $1", [orderId]);
     for (const to of ["preparing", "ready", "served"] as const) {
-      expect(await transitionKitchenItem({
-        businessId: tenant.businessId, locationId: tenant.locationId,
-        itemId: accepted.dispatchedItemIds[0], to, mayBumpKitchen: true, mayServe: true,
-        actorUserId: randomUUID(),
-      })).toEqual({ kind: "updated", orderId });
+      expect(await bump(to)).toEqual({ kind: "updated", orderId });
     }
 
     await dbLib.withTenantTransaction(tenant.businessId, (client) => completeOrderPayment({

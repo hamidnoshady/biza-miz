@@ -38,6 +38,7 @@ export async function transitionKitchenItem(input: {
            FROM order_items oi JOIN orders o ON o.id=oi.order_id
           WHERE oi.id=$1 AND oi.location_id=$2 AND o.location_id=$2
             AND o.status IN ('open','held','completed')
+            AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
           FOR UPDATE OF o,oi`,
         [input.itemId, input.locationId],
       );

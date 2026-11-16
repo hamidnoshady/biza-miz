@@ -25,28 +25,7 @@ const MAX_ATTEMPTS = 12;
 export async function enqueueCafeKitchenState(client: PoolClient, orderId: string): Promise<void> {
   // The caller holds the parent order lock. Aggregate all non-voided lines,
   // so a single ready or served line cannot advance a multi-line order.
-  await client.query(
-    `WITH progress AS (
-        SELECT o.id, l.business_id, o.cms_connection_id, o.cms_order_id,
-               bool_and(oi.status IN ('ready', 'served')) AS ready,
-               bool_and(oi.status = 'served') AS served
-          FROM orders o
-          JOIN locations l ON l.id = o.location_id
-          JOIN order_items oi ON oi.order_id = o.id AND oi.status <> 'voided'
-         WHERE o.id = $1 AND o.origin = 'website' AND o.website_approval_state = 'accepted'
-           AND o.cms_connection_id IS NOT NULL AND o.cms_order_id IS NOT NULL
-         GROUP BY o.id, l.business_id
-     )
-     INSERT INTO cms_order_state_outbox (business_id, cms_connection_id, cms_order_id, pos_order_id, state)
-     SELECT business_id, cms_connection_id, cms_order_id, id, milestone.state
-       FROM progress
-       CROSS JOIN LATERAL (VALUES (1, 'preparing', true), (2, 'ready', ready), (3, 'served', served))
-         AS milestone(position, state, reached)
-      WHERE milestone.reached
-      ORDER BY milestone.position
-     ON CONFLICT (cms_connection_id, cms_order_id, state) DO NOTHING`,
-    [orderId],
-  );
+  await client.query("SELECT cms_record_cafe_kitchen_state($1)", [orderId]);
 }
 
 async function claimDue(limit: number): Promise<Delivery[]> {
