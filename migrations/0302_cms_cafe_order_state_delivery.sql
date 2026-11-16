@@ -1,3 +1,6 @@
+-- This migration backfills every tenant, including under FORCE RLS.
+SET LOCAL app.rls_bypass = 'on';
+
 ALTER TABLE cms_order_state_outbox
     DROP CONSTRAINT cms_order_state_outbox_state_check,
     ADD CONSTRAINT cms_order_state_outbox_state_check
