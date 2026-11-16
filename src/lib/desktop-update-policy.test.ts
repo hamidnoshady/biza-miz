@@ -147,7 +147,7 @@ function release(partial: Partial<PlatformDesktopRelease> & Pick<PlatformDesktop
     manifestSignature: "S".repeat(96), buildCommit: "abcdef0", buildId: "b", channel: "stable",
     status: "published", rolloutState: "internal", rolloutPercentage: 0, releasedAt: "2026-10-16T00:00:00.000Z",
     minimumSupportedVersion: null, mandatory: false,
-    installer: { url: "https://github.com/x/y.exe", sha256: "a".repeat(64), size: 10, signatureRequired: true, expectedPublisher: "P" },
+    installer: { url: "https://github.com/x/y.exe", sha256: "a".repeat(64), size: 10, signatureRequired: true, expectedPublisher: "P", expectedPublisherThumbprint: "A".repeat(40) },
     database: { migrationVersion: null, minimumSchemaVersion: null, maximumSchemaVersion: null, backupRequired: true },
     releaseNotes: [], recovery: { knownGoodVersion: null, notes: null },
     createdAt: "2026-10-16T00:00:00.000Z", updatedAt: "2026-10-16T00:00:00.000Z",

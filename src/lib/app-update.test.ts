@@ -57,6 +57,7 @@ const MANIFEST: DesktopReleaseManifest = {
     size: 4096,
     signatureRequired: true,
     expectedPublisher: "Business Suite",
+    expectedPublisherThumbprint: "A".repeat(40),
   },
   database: {
     migrationVersion: 227,

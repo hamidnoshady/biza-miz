@@ -22,6 +22,7 @@ const manifest = {
     size: 140_000_000,
     signatureRequired: true,
     expectedPublisher: "Business Suite",
+    expectedPublisherThumbprint: "A".repeat(40),
   },
   database: {
     migrationVersion: 187,
@@ -80,5 +81,8 @@ describe("release manifest validation", () => {
     expect(validateDesktopReleaseManifest({ ...manifest, installer: { ...manifest.installer, url: "http://updates.invalid/app.exe" } })).toEqual({ ok: false, error: "manifest_installer_url_invalid" });
     expect(validateDesktopReleaseManifest({ ...manifest, installer: { ...manifest.installer, sha256: "bad" } })).toEqual({ ok: false, error: "manifest_installer_hash_invalid" });
     expect(validateDesktopReleaseManifest({ ...manifest, database: { ...manifest.database, backupRequired: false } })).toEqual({ ok: false, error: "manifest_backup_required" });
+    const { expectedPublisherThumbprint: _omitted, ...installerWithoutPin } = manifest.installer;
+    expect(validateDesktopReleaseManifest({ ...manifest, installer: installerWithoutPin })).toEqual({ ok: false, error: "manifest_installer_thumbprint_missing" });
+    expect(validateDesktopReleaseManifest({ ...manifest, installer: { ...manifest.installer, expectedPublisherThumbprint: "not-a-thumbprint-at-all" } })).toEqual({ ok: false, error: "manifest_installer_thumbprint_invalid" });
   });
 });

@@ -1,0 +1,85 @@
+name: windows-updater-verification
+
+# Issue #1000 - proves the Desktop updater's security contract against the real
+# Windows Authenticode provider and a real signed candidate. It is read-only:
+# the installer is never executed and nothing is published or promoted.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Signed candidate version (X.Y.Z)'
+        type: string
+        required: true
+      candidate_run_id:
+        description: 'Successful windows-signed-candidate run id to verify'
+        type: string
+        required: true
+
+concurrency:
+  group: windows-updater-verification
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: powershell
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+  WINDOWS_EXPECTED_SIGNER: ${{ vars.WINDOWS_EXPECTED_SIGNER }}
+  WINDOWS_EXPECTED_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_EXPECTED_SIGNER_THUMBPRINT }}
+
+jobs:
+  verify:
+    name: verify updater pinning, tamper rejection and staging on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Validate inputs and protected configuration
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be X.Y.Z' }
+          if ($env:CANDIDATE_RUN_ID -notmatch '^\d+$') { throw 'candidate_run_id must be a workflow run id' }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_EXPECTED_SIGNER)) { throw 'NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER' }
+          if (($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '') -notmatch '^[0-9A-Fa-f]{40}$') { throw 'NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER_THUMBPRINT must be a 40-character SHA-1 thumbprint' }
+
+      - name: Download the signed candidate installer
+        uses: actions/download-artifact@v8
+        with:
+          name: business-suite-windows-${{ inputs.version }}-signed-candidate
+          path: ${{ runner.temp }}\signed-candidate
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the updater against the real signed installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem "${{ runner.temp }}\signed-candidate" -Recurse -File -Filter "Bizamiz Setup $env:RELEASE_VERSION.exe")
+          if ($installers.Count -ne 1) { throw "Expected exactly one signed installer; found $($installers.Count)" }
+          node scripts/windows-updater-verification.mjs `
+            --installer="$($installers[0].FullName)" `
+            --signer="$env:WINDOWS_EXPECTED_SIGNER" `
+            --thumbprint="$env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT" `
+            --output=windows-updater-verification.json
+
+      - name: Upload verification evidence
+        if: always() && hashFiles('windows-updater-verification.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-updater-verification-${{ inputs.version }}
+          path: windows-updater-verification.json
+          if-no-files-found: error
+
+# Full install and recovery acceptance stay in windows-11-release.yml and the
+# release-acceptance-aggregate workflow, which operate on the same accepted
+# installer bytes. This workflow adds the cryptographic updater checks.

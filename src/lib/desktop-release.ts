@@ -61,6 +61,8 @@ export interface DesktopReleaseManifest extends DesktopReleaseIdentity {
     size: number;
     signatureRequired: boolean;
     expectedPublisher: string | null;
+    /** SHA-1 thumbprint of the signing certificate (issue #1000 pin). */
+    expectedPublisherThumbprint: string | null;
   };
   database: {
     migrationVersion: number | null;
@@ -203,6 +205,11 @@ export function canonicalDesktopManifestPayload(manifest: DesktopReleaseManifest
       size: manifest.installer.size,
       signatureRequired: manifest.installer.signatureRequired,
       expectedPublisher: manifest.installer.expectedPublisher,
+      // Omitted only for manifests signed before thumbprint pinning existed;
+      // that keeps their signature valid without weakening new ones.
+      ...(manifest.installer.expectedPublisherThumbprint
+        ? { expectedPublisherThumbprint: manifest.installer.expectedPublisherThumbprint }
+        : {}),
     },
     database: {
       migrationVersion: manifest.database.migrationVersion,
@@ -255,6 +262,17 @@ export function validateDesktopReleaseManifest(value: unknown): ManifestValidati
   if (typeof installer.expectedPublisher !== "string" || !installer.expectedPublisher.trim()) {
     return { ok: false, error: "manifest_installer_publisher_invalid" };
   }
+  // Issue #1000 - a release must pin the exact certificate, not only a name.
+  if (installer.expectedPublisherThumbprint === undefined || installer.expectedPublisherThumbprint === null ||
+      installer.expectedPublisherThumbprint === "") {
+    return { ok: false, error: "manifest_installer_thumbprint_missing" };
+  }
+  const thumbprint = typeof installer.expectedPublisherThumbprint === "string"
+    ? installer.expectedPublisherThumbprint.trim()
+    : "";
+  if (!/^[0-9A-Fa-f]{40}$/.test(thumbprint)) {
+    return { ok: false, error: "manifest_installer_thumbprint_invalid" };
+  }
   if (!database || typeof database !== "object" || database.backupRequired !== true) {
     return { ok: false, error: "manifest_backup_required" };
   }
@@ -283,6 +301,7 @@ export function validateDesktopReleaseManifest(value: unknown): ManifestValidati
         size: Number(installer.size),
         signatureRequired: true,
         expectedPublisher: installer.expectedPublisher.trim(),
+        expectedPublisherThumbprint: thumbprint.toUpperCase(),
       },
       database: {
         migrationVersion: integerOrNull(database.migrationVersion),

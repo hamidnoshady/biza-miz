@@ -58,6 +58,7 @@
       "local-storage.js",
       "logger.js",
       "update-engine.js",
+      "installer-staging.js",
       "update-policy.js",
       "cloud-pane.js",
       "navigation-guard.js",
