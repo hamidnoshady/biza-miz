@@ -912,17 +912,19 @@ export function resolveRestorePlan(
     if (artifact && artifact !== fromUrl) return { ok: false, error: "artifact_url_mismatch" };
     artifact = fromUrl;
   }
-  if (source !== "cloud") {
-    if (!artifact) return { ok: false, error: "missing_artifact" };
-    // Local paths and peer query strings only accept a plain artifact name.
-    if (!isServeableArtifactName(artifact)) return { ok: false, error: "unsafe_artifact_name" };
-  }
+  if (!artifact) return { ok: false, error: "missing_artifact" };
+  // The name goes into a path on this machine and into a query string on
+  // someone else's, so it has to be one of ours and nothing else.
+  if (!isServeableArtifactName(artifact)) return { ok: false, error: "unsafe_artifact_name" };
 
   const passphrase = typeof b.passphrase === "string" ? b.passphrase : "";
   if (passphrase.includes("\0")) return { ok: false, error: "invalid_passphrase" };
 
-  // Validate the cloud key before its basename is used as a local filename.
-  // Existing callers can also supply a plain artifact name.
+  // Cloud identity is explicit (issue #807): the artifact *and* the object key
+  // travel separately, and the key is validated against the configured prefix
+  // rather than trusted. A request naming only the artifact still works — the
+  // key is derived — but a request naming an arbitrary key outside the prefix
+  // is refused before any S3 credential is used.
   let objectKey: string | null = null;
   if (source === "cloud") {
     const resolved = resolveCloudObjectKey(
