@@ -4,6 +4,11 @@ param(
   [string]$ManifestPath = "config/windows-signing-manifest.json",
   [ValidateSet("signed", "unsigned-development")][string]$Mode = "signed",
   [string]$ExpectedSigner = $env:WINDOWS_EXPECTED_SIGNER,
+  [string]$ExpectedThumbprint = $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT,
+  # Only for artefacts that are deliberately not the current release: an install
+  # being upgraded FROM may carry a certificate that has since been rotated. The
+  # candidate itself must always be pinned.
+  [switch]$AllowHistoricalSigner,
   [ValidatePattern('^[0-9a-f]{40}$')][string]$CandidateCommit = $env:GITHUB_SHA,
   [string]$OutputPath = "windows-signature-verification.json"
 )
@@ -14,6 +19,12 @@ $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 if ($manifest.schemaVersion -ne 1) { throw "Unsupported signing manifest schema: $($manifest.schemaVersion)" }
 if ($Mode -eq "signed" -and [string]::IsNullOrWhiteSpace($ExpectedSigner)) {
   throw "ExpectedSigner/WINDOWS_EXPECTED_SIGNER is required in signed mode"
+}
+# Issue #1000 - a publisher name is not an identity. Signed verification pins the
+# exact signing certificate thumbprint, and a missing pin is a refusal.
+$pinnedThumbprint = if ($ExpectedThumbprint) { ($ExpectedThumbprint -replace '[\s:]', '').ToUpperInvariant() } else { "" }
+if ($Mode -eq "signed" -and -not $AllowHistoricalSigner -and $pinnedThumbprint -notmatch '^[0-9A-F]{40}$') {
+  throw "ExpectedThumbprint/WINDOWS_EXPECTED_SIGNER_THUMBPRINT must be a 40-character SHA-1 thumbprint in signed mode"
 }
 
 $results = @()
@@ -31,15 +42,17 @@ foreach ($entry in $manifest.required) {
     $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
     $signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
     $signerCommonName = if ($signature.SignerCertificate) { $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { $null }
+    $thumbprint = if ($signature.SignerCertificate) { ([string]$signature.SignerCertificate.Thumbprint).ToUpperInvariant() } else { $null }
     $timestampSigner = if ($signature.TimeStamperCertificate) { $signature.TimeStamperCertificate.Subject } else { $null }
     $valid = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
     $signerMatches = $signer -and (
       [string]::Equals($signer, $ExpectedSigner, [StringComparison]::OrdinalIgnoreCase) -or
       [string]::Equals($signerCommonName, $ExpectedSigner, [StringComparison]::OrdinalIgnoreCase)
     )
+    $thumbprintMatches = if ($AllowHistoricalSigner) { $true } else { $thumbprint -and [string]::Equals($thumbprint, $pinnedThumbprint, [StringComparison]::OrdinalIgnoreCase) }
     $timestamped = -not [string]::IsNullOrWhiteSpace($timestampSigner)
     $accepted = if ($Mode -eq "signed") {
-      $valid -and $signerMatches -and $timestamped
+      $valid -and $signerMatches -and $thumbprintMatches -and $timestamped
     } else {
       $signature.Status -eq [System.Management.Automation.SignatureStatus]::NotSigned
     }
@@ -54,14 +67,15 @@ foreach ($entry in $manifest.required) {
       status = [string]$signature.Status
       signer = $signer
       signerCommonName = $signerCommonName
+      thumbprint = $thumbprint
       timestampSigner = $timestampSigner
       accepted = $accepted
     }
     if (-not $accepted) {
       $failed = $true
-      Write-Host "::error file=$relative,title=Authenticode verification failed::mode=$Mode status=$($signature.Status) expectedSigner=$ExpectedSigner signer=$signer signerCommonName=$signerCommonName timestampSigner=$timestampSigner"
+      Write-Host "::error file=$relative,title=Authenticode verification failed::mode=$Mode status=$($signature.Status) expectedSigner=$ExpectedSigner signer=$signer signerCommonName=$signerCommonName expectedThumbprint=$pinnedThumbprint thumbprint=$thumbprint timestampSigner=$timestampSigner"
     } else {
-      Write-Host "Verified $relative ($Mode, sha256:$hash)"
+      Write-Host "Verified $relative ($Mode, sha256:$hash, thumbprint:$thumbprint)"
     }
   }
 }
@@ -70,6 +84,8 @@ $report = [ordered]@{
   schemaVersion = 1
   mode = $Mode
   expectedSigner = if ($Mode -eq "signed") { $ExpectedSigner } else { $null }
+  expectedThumbprint = if ($Mode -eq "signed" -and -not $AllowHistoricalSigner) { $pinnedThumbprint } else { $null }
+  historicalSignerAllowed = [bool]$AllowHistoricalSigner
   rfc3161TimestampRequired = $Mode -eq "signed"
   commit = $CandidateCommit
   generatedAt = [DateTime]::UtcNow.ToString("o")

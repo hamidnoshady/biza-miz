@@ -50,6 +50,7 @@ interface ReleaseRow extends Record<string, unknown> {
   manifest_signature: string;
   signature_required: boolean;
   expected_publisher: string | null;
+  expected_publisher_thumbprint: string | null;
   migration_version: number | null;
   minimum_schema_version: number | null;
   maximum_schema_version: number | null;
@@ -98,6 +99,7 @@ function rowToRelease(row: ReleaseRow): PlatformDesktopRelease {
       size: Number(row.installer_size),
       signatureRequired: row.signature_required,
       expectedPublisher: row.expected_publisher,
+      expectedPublisherThumbprint: row.expected_publisher_thumbprint,
     },
     database: {
       migrationVersion: row.migration_version,
@@ -116,7 +118,7 @@ const RELEASE_SELECT = `
   SELECT r.id,r.version,r.build_commit,r.build_id,r.channel,r.status,r.rollout_state,
          r.rollout_percentage,r.released_at,r.minimum_supported_version,r.mandatory,
          r.installer_url,r.installer_sha256,r.installer_size,r.manifest_signature,r.signature_required,
-         r.expected_publisher,r.migration_version,r.minimum_schema_version,
+         r.expected_publisher,r.expected_publisher_thumbprint,r.migration_version,r.minimum_schema_version,
          r.maximum_schema_version,r.backup_required,r.release_notes,r.recovery_notes,
          kg.version AS known_good_version,r.created_at,r.updated_at
     FROM platform_releases r
@@ -695,6 +697,7 @@ export interface SaveDesktopReleaseInput {
   installerSize: number;
   manifestSignature: string;
   expectedPublisher: string;
+  expectedPublisherThumbprint: string;
   migrationVersion: number | null;
   minimumSchemaVersion: number | null;
   maximumSchemaVersion: number | null;
@@ -719,6 +722,7 @@ function releaseInputAsManifest(input: SaveDesktopReleaseInput): DesktopReleaseM
       size: input.installerSize,
       signatureRequired: true,
       expectedPublisher: input.expectedPublisher,
+      expectedPublisherThumbprint: input.expectedPublisherThumbprint,
     },
     database: {
       migrationVersion: input.migrationVersion,
@@ -799,6 +803,15 @@ export function validateDesktopReleaseInput(value: unknown):
   }
   const expectedPublisher = optionalText(body.expectedPublisher, 240);
   if (!expectedPublisher) return { ok: false, error: "invalid_expected_publisher" };
+  // Issue #1000 - every release registered from now on pins the exact signing
+  // certificate. Rotation is a new signed release carrying the new thumbprint;
+  // it is never inferred from the certificate being inspected.
+  const expectedPublisherThumbprint = typeof body.expectedPublisherThumbprint === "string"
+    ? body.expectedPublisherThumbprint.replace(/[\s:]/g, "").toUpperCase()
+    : "";
+  if (!/^[0-9A-F]{40}$/.test(expectedPublisherThumbprint)) {
+    return { ok: false, error: "invalid_expected_publisher_thumbprint" };
+  }
   const notes = Array.isArray(body.releaseNotes)
     ? body.releaseNotes.filter((note): note is string => typeof note === "string").map((note) => note.trim()).filter(Boolean)
     : [];
@@ -814,7 +827,7 @@ export function validateDesktopReleaseInput(value: unknown):
     rolloutState, rolloutPercentage,
     minimumSupportedVersion, mandatory: body.mandatory === true,
     installerUrl: installerUrl.toString(), installerSha256, installerSize,
-    manifestSignature, expectedPublisher,
+    manifestSignature, expectedPublisher, expectedPublisherThumbprint,
     migrationVersion, minimumSchemaVersion, maximumSchemaVersion,
     releaseNotes: notes.slice(0, 100), recoveryNotes: optionalText(body.recoveryNotes, 4_000),
     knownGoodReleaseId,
@@ -833,15 +846,16 @@ export async function createDesktopRelease(input: SaveDesktopReleaseInput, admin
       `INSERT INTO platform_releases
          (version,build_commit,build_id,channel,status,rollout_state,rollout_percentage,
           released_at,minimum_supported_version,mandatory,installer_url,installer_sha256,
-          installer_size,manifest_signature,signature_required,expected_publisher,migration_version,
-          minimum_schema_version,maximum_schema_version,backup_required,release_notes,
+          installer_size,manifest_signature,signature_required,expected_publisher,expected_publisher_thumbprint,
+          migration_version,minimum_schema_version,maximum_schema_version,backup_required,release_notes,
           recovery_notes,known_good_release_id,created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5='draft' THEN NULL ELSE now() END,
-               $8,$9,$10,$11,$12,$13,true,$14,$15,$16,$17,true,$18,$19,$20,$21)
+               $8,$9,$10,$11,$12,$13,true,$14,$15,$16,$17,$18,true,$19,$20,$21,$22)
        RETURNING id`,
       [input.version,input.buildCommit,input.buildId,input.channel,input.status,input.rolloutState,
         input.rolloutPercentage,input.minimumSupportedVersion,input.mandatory,input.installerUrl,
-        input.installerSha256,input.installerSize,input.manifestSignature,input.expectedPublisher,input.migrationVersion,
+        input.installerSha256,input.installerSize,input.manifestSignature,input.expectedPublisher,
+        input.expectedPublisherThumbprint,input.migrationVersion,
         input.minimumSchemaVersion,input.maximumSchemaVersion,JSON.stringify(input.releaseNotes),
         input.recoveryNotes,input.knownGoodReleaseId,adminId],
     );

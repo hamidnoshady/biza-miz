@@ -59,6 +59,7 @@ env:
   MINIMUM_SUPPORTED_VERSION: ${{ inputs.minimum_supported_version }}
   MIGRATION_VERSION: ${{ inputs.migration_version }}
   WINDOWS_EXPECTED_SIGNER: ${{ vars.WINDOWS_EXPECTED_SIGNER }}
+  WINDOWS_EXPECTED_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_EXPECTED_SIGNER_THUMBPRINT }}
   DESKTOP_RELEASE_PUBLIC_KEY_PEM: ${{ vars.DESKTOP_RELEASE_PUBLIC_KEY_PEM }}
 
 jobs:
@@ -88,6 +89,7 @@ jobs:
           if ($env:MINIMUM_SUPPORTED_VERSION -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { throw 'minimum_supported_version must be SemVer' }
           if ($env:MIGRATION_VERSION -notmatch '^\d+$' -or [int]$env:MIGRATION_VERSION -lt 1) { throw 'migration_version must be a positive integer' }
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_EXPECTED_SIGNER)) { throw 'NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER' }
+          if (($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '') -notmatch '^[0-9A-Fa-f]{40}$') { throw 'NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER_THUMBPRINT must be a 40-character SHA-1 thumbprint' }
           if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEY_PEM)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_PUBLIC_KEY_PEM' }
           if ($env:WORKFLOW_COMMIT -cne $env:CANDIDATE_COMMIT) { throw "Workflow definition commit $env:WORKFLOW_COMMIT does not match candidate $env:CANDIDATE_COMMIT" }
           $checkedOutCommit = (git rev-parse HEAD).Trim()
@@ -175,6 +177,9 @@ jobs:
           if ($provenance.signingStatusSha256 -cne $statusHash -or $provenance.signatureVerificationSha256 -cne $verificationHash) { throw 'Signing reports do not match release provenance' }
           if ($signingStatus.commit -cne $env:CANDIDATE_COMMIT -or $signingStatus.status -cne 'SIGNED - VERIFICATION REQUIRED') { throw 'Signing status is not bound to this candidate' }
           if (-not $signatureVerification.passed -or $signatureVerification.mode -cne 'signed' -or $signatureVerification.commit -cne $env:CANDIDATE_COMMIT) { throw 'Original signature verification is not a candidate-bound PASS' }
+          # Issue #1000 - the accepted candidate must have been signed by the exact pinned certificate.
+          $pinnedThumbprint = ($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '').ToUpperInvariant()
+          if ($signatureVerification.expectedThumbprint -cne $pinnedThumbprint) { throw 'Signature verification did not pin the required certificate thumbprint' }
           $verifiedInstaller = @($signatureVerification.artifacts | Where-Object id -eq 'nsis-installer')
           if ($verifiedInstaller.Count -ne 1 -or $verifiedInstaller[0].sha256 -cne $installerHash -or [long]($verifiedInstaller[0].bytes) -ne $installer.Length) { throw 'Originally verified installer does not match the promotion installer' }
 
@@ -189,7 +194,7 @@ jobs:
           $preflightRoot = Join-Path $env:RUNNER_TEMP 'promotion-signature-preflight'
           New-Item -ItemType Directory -Path $preflightRoot -Force | Out-Null
           Copy-Item -LiteralPath $installer.FullName -Destination $preflightRoot
-          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $preflightRoot -ManifestPath config\windows-installer-signing-manifest.json -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath promotion-installer-signatures.json
+          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $preflightRoot -ManifestPath config\windows-installer-signing-manifest.json -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath promotion-installer-signatures.json
           "PROMOTION_INSTALLER_SHA256=$installerHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CANDIDATE_EVIDENCE_FILE=$($candidateEvidenceFile.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CANDIDATE_PROVENANCE_FILE=$($provenanceFile.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -265,6 +270,7 @@ jobs:
               size = $installer[0].Length
               signatureRequired = $true
               expectedPublisher = $env:WINDOWS_EXPECTED_SIGNER
+              expectedPublisherThumbprint = ($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '').ToUpperInvariant()
             }
             database = [ordered]@{
               migrationVersion = [int]$env:MIGRATION_VERSION
@@ -330,6 +336,61 @@ jobs:
           gh @args
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }
 
+      # Issue #1000 - a published but unverifiable release is what left devices
+      # reporting no_update. Read the assets back from the release itself and
+      # prove the manifest the Desktop will download is the signed one, pins
+      # the required publisher and describes the accepted installer bytes,
+      # before Central is told a release exists.
+      - name: Verify the published signed release before registering it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ env.DESKTOP_RELEASE_TAG }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh release view $env:TAG --json isDraft,tagName,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release) { throw "Published release $env:TAG is not readable" }
+          if ($release.isDraft) { throw "Published release $env:TAG is still a draft" }
+          if ($release.tagName -cne $env:TAG) { throw "Published tag $($release.tagName) does not match $env:TAG" }
+          $names = @($release.assets | ForEach-Object { $_.name })
+          $installerName = "Bizamiz Setup $env:RELEASE_VERSION.exe"
+          foreach ($required in @($installerName, 'release-manifest.json', 'release-manifest.sha256')) {
+            if ($names -notcontains $required) { throw "Published release $env:TAG is missing $required" }
+          }
+          $installerAsset = @($release.assets | Where-Object { $_.name -ceq $installerName })[0]
+          if ([long]$installerAsset.size -ne [long]$env:DESKTOP_INSTALLER_SIZE) { throw 'Published installer size does not match the accepted installer' }
+
+          $verifyRoot = Join-Path $env:RUNNER_TEMP 'published-release'
+          New-Item -ItemType Directory -Path $verifyRoot -Force | Out-Null
+          gh release download $env:TAG --pattern 'release-manifest.json' --pattern 'release-manifest.sha256' --dir $verifyRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the published release manifest' }
+          $publishedManifest = Join-Path $verifyRoot 'release-manifest.json'
+          $publishedChecksum = Join-Path $verifyRoot 'release-manifest.sha256'
+          $manifestHash = (Get-FileHash -LiteralPath $publishedManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          $recordedHash = ((Get-Content -LiteralPath $publishedChecksum -Raw).Trim() -split '\s+')[0]
+          if ($recordedHash -cne $manifestHash) { throw 'Published release manifest does not match release-manifest.sha256' }
+
+          $manifest = Get-Content -LiteralPath $publishedManifest -Raw | ConvertFrom-Json
+          if ($manifest.version -cne $env:RELEASE_VERSION -or $manifest.buildCommit -cne $env:CANDIDATE_COMMIT) { throw 'Published manifest is not bound to this version and candidate' }
+          if ($manifest.installer.sha256 -cne $env:PROMOTION_INSTALLER_SHA256) { throw 'Published manifest does not describe the accepted installer' }
+          if ([long]$manifest.installer.size -ne [long]$env:DESKTOP_INSTALLER_SIZE) { throw 'Published manifest installer size is not the accepted installer size' }
+          if ($manifest.installer.signatureRequired -ne $true) { throw 'Published manifest no longer requires an Authenticode signature' }
+          if ($manifest.installer.expectedPublisher -cne $env:WINDOWS_EXPECTED_SIGNER) { throw 'Published manifest does not pin the required publisher' }
+          $pinnedThumbprint = ($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '').ToUpperInvariant()
+          if ($manifest.installer.expectedPublisherThumbprint -cne $pinnedThumbprint) { throw 'Published manifest does not pin the required certificate thumbprint' }
+          node scripts/sign-desktop-release-manifest.mjs --verify $publishedManifest
+          if ($LASTEXITCODE -ne 0) { throw 'Published release manifest signature is invalid' }
+
+          # Issue #1000 - the asset size is not proof. Download the published
+          # installer and hash the bytes a device will actually receive.
+          gh release download $env:TAG --pattern $installerName --dir $verifyRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the published installer' }
+          $publishedInstaller = Join-Path $verifyRoot $installerName
+          if (-not (Test-Path -LiteralPath $publishedInstaller)) { throw 'The published installer was not downloaded' }
+          if ([long](Get-Item -LiteralPath $publishedInstaller).Length -ne [long]$env:DESKTOP_INSTALLER_SIZE) { throw 'Downloaded installer size does not match the accepted installer' }
+          $publishedInstallerHash = (Get-FileHash -LiteralPath $publishedInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($publishedInstallerHash -cne $env:PROMOTION_INSTALLER_SHA256) { throw 'Downloaded release installer does not match the accepted installer bytes' }
+          if ($publishedInstallerHash -cne $manifest.installer.sha256) { throw 'Downloaded release installer does not match the signed manifest' }
+
       - name: Register the promoted release in Central
         env:
           REGISTRY_URL: ${{ vars.DESKTOP_RELEASE_REGISTRY_URL }}
@@ -355,6 +416,7 @@ jobs:
             installerSize = $manifest.installer.size
             manifestSignature = $manifest.manifestSignature
             expectedPublisher = $manifest.installer.expectedPublisher
+            expectedPublisherThumbprint = $manifest.installer.expectedPublisherThumbprint
             migrationVersion = $manifest.database.migrationVersion
             minimumSchemaVersion = $manifest.database.minimumSchemaVersion
             maximumSchemaVersion = $manifest.database.maximumSchemaVersion

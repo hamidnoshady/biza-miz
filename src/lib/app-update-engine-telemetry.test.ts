@@ -41,7 +41,7 @@ describe("Desktop engine telemetry state file", () => {
       manifestSignature: "A".repeat(96),
       version: "2.1.0", buildCommit: "a".repeat(40), buildId: "candidate-1", channel: "stable",
       releasedAt: "2026-09-28T08:00:00.000Z", minimumSupportedVersion: "1.0.0", mandatory: false,
-      installer: { url: "https://github.com/example/product/update.exe", sha256: "b".repeat(64), size: 12, signatureRequired: true, expectedPublisher: "Business Suite" },
+      installer: { url: "https://github.com/example/product/update.exe", sha256: "b".repeat(64), size: 12, signatureRequired: true, expectedPublisher: "Business Suite", expectedPublisherThumbprint: "A".repeat(40) },
       database: { migrationVersion: 187, minimumSchemaVersion: 1, maximumSchemaVersion: 187, backupRequired: true },
       releaseNotes: ["Verified"], recovery: { knownGoodVersion: null, notes: null },
     };

@@ -44,7 +44,7 @@ interface Release {
   minimumSupportedVersion: string | null;
   mandatory: boolean;
   manifestSignature: string;
-  installer: { url: string; sha256: string; size: number; signatureRequired: boolean; expectedPublisher: string | null };
+  installer: { url: string; sha256: string; size: number; signatureRequired: boolean; expectedPublisher: string | null; expectedPublisherThumbprint: string | null };
   database: { migrationVersion: number | null; minimumSchemaVersion: number | null; maximumSchemaVersion: number | null; backupRequired: boolean };
   releaseNotes: string[];
   recovery: { knownGoodVersion: string | null; notes: string | null };
@@ -348,6 +348,7 @@ export default function UpdatesPage() {
           <Field label="اندازه (بایت)"><input required name="installerSize" className={inputClass} dir="ltr" inputMode="numeric" /></Field>
           <Field label="حداقل نسخه پشتیبانی‌شده"><input name="minimumSupportedVersion" className={inputClass} dir="ltr" placeholder="1.0.3" /></Field>
           <Field label="ناشر مورد انتظار"><input required name="expectedPublisher" className={inputClass} /></Field>
+          <Field label="اثر انگشت گواهی امضا (SHA-1)"><input required name="expectedPublisherThumbprint" className={inputClass} dir="ltr" minLength={40} maxLength={40} pattern="[0-9A-Fa-f]{40}" /></Field>
           <div className="sm:col-span-2"><Field label="امضای RSA-SHA256 مانیفست"><textarea required name="manifestSignature" dir="ltr" rows={3} className={inputClass} /></Field></div>
           <Field label="نسخه مهاجرت"><input name="migrationVersion" className={inputClass} dir="ltr" inputMode="numeric" /></Field>
           <Field label="حداقل شِما"><input name="minimumSchemaVersion" className={inputClass} dir="ltr" inputMode="numeric" /></Field>
