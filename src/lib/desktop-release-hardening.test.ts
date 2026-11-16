@@ -84,9 +84,11 @@ describe("the packaged file list carries no test bootstrap", () => {
   const manifest = JSON.parse(readFileSync(path.join(root, "electron", "package.json"), "utf8")) as {
     build: { files: string[] };
   };
+  // Electron Builder's negated patterns remove files from the package.
+  const includedFiles = manifest.build.files.filter((entry) => !entry.startsWith("!"));
 
-  it("lists only files that exist and pass the release-scan path rules", () => {
-    for (const file of manifest.build.files) {
+  it("lists only included files that exist and pass the release-scan path rules", () => {
+    for (const file of includedFiles) {
       const absolute = path.join(root, "electron", file);
       expect(existsSync(absolute), file).toBe(true);
       expect(rules.scanPath(file), file).toEqual([]);
@@ -96,7 +98,7 @@ describe("the packaged file list carries no test bootstrap", () => {
   });
 
   it("contains no shipped credential, probe or mock activation literal", () => {
-    const shipped = manifest.build.files
+    const shipped = includedFiles
       .map((file) => readFileSync(path.join(root, "electron", file), "utf8"))
       .join("\n");
     for (const literal of [
