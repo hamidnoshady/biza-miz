@@ -208,7 +208,7 @@ export async function executeHistoricalArchiveJob(input: HistoricalStagedInput &
     await client.query(
       `UPDATE data_import_jobs SET status = 'completed', mapping = $2::jsonb,
          options = options || $3::jsonb, created_rows = $4, skipped_rows = $5,
-         valid_rows = $4 + $5, warning_rows = 0, error_rows = 0,
+         valid_rows = $4::integer + $5::integer, warning_rows = 0, error_rows = 0,
          started_at = now(), finished_at = now(), updated_at = now() WHERE id = $1`,
       [input.jobId, JSON.stringify(input.mapping), JSON.stringify({
         historicalArchiveResult: { ...result, reviewToken: input.reviewToken, lineMapping: input.lineMapping ?? null },
