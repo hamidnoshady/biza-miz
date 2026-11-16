@@ -826,6 +826,16 @@ describe("cloud artifact identity (issue #807)", () => {
     expect(plan).toEqual({ ok: false, error: "artifact_key_mismatch" });
   });
 
+  it("derives the filename from the S3 key selected in the console", () => {
+    const objectKey = `${prefix}/${cloudArtifact}`;
+    const opts = { cloudPrefix: prefix, knownCloudArtifacts: new Set([cloudArtifact]) };
+    expect(resolveRestorePlan({ source: "cloud", objectKey }, opts)).toMatchObject({
+      ok: true, source: "cloud", artifact: cloudArtifact, objectKey,
+    });
+    expect(resolveRestorePlan({ source: "cloud", objectKey: `another-prefix/${cloudArtifact}` }, opts))
+      .toEqual({ ok: false, error: "object_key_outside_prefix" });
+  });
+
   it("refuses traversal, absolute keys, backslashes and nested sub-paths", () => {
     const attempts = [
       `${prefix}/../${cloudArtifact}`,

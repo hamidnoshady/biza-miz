@@ -55,7 +55,7 @@ import { Client } from "pg";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { query } from "./db";
+import { query, withoutTenantScope } from "./db";
 import {
   BACKUP_RUNS_SHOWN,
   CLOUD_RETRY_MS,
@@ -934,7 +934,7 @@ async function buildArtifactManifest(
     version: deploymentVersion(),
   };
   try {
-    const schema = await localSchemaSnapshot();
+    const schema = await localSchemaSnapshot(true);
     return { ...base, ...schema };
   } catch (err) {
     // A manifest is informative, not load-bearing for the backup's own safety —
@@ -968,39 +968,42 @@ const SNAPSHOT_CACHE_MS = 15_000;
  */
 export async function localSchemaSnapshot(force = false): Promise<LocalSchemaSnapshot> {
   if (!force && snapshotCache && Date.now() - snapshotCache.at < SNAPSHOT_CACHE_MS) return snapshotCache.value;
-  const { rows } = await query<{
-    migrations: string;
-    latest: string | null;
-    version_num: string;
-    businesses: string;
-  }>(
-    `SELECT (SELECT count(*) FROM schema_migrations)::text AS migrations,
-            (SELECT filename FROM schema_migrations ORDER BY filename DESC LIMIT 1) AS latest,
-            current_setting('server_version_num') AS version_num,
-            (SELECT count(*) FROM businesses)::text AS businesses`,
-  );
-  const core: { name: string; rows: number }[] = [];
-  for (const table of ["businesses", "locations", "users", "orders", "journal_entries", "settings"]) {
-    try {
-      const { rows: c } = await query<{ n: string }>(`SELECT count(*)::text AS n FROM ${table}`);
-      core.push({ name: table, rows: Number(c[0].n) });
-    } catch {
-      /* table absent in this build */
+  // The scheduler has no tenant context, but the dump covers every business.
+  return withoutTenantScope("platform", async () => {
+    const { rows } = await query<{
+      migrations: string;
+      latest: string | null;
+      version_num: string;
+      businesses: string;
+    }>(
+      `SELECT (SELECT count(*) FROM schema_migrations)::text AS migrations,
+              (SELECT filename FROM schema_migrations ORDER BY filename DESC LIMIT 1) AS latest,
+              current_setting('server_version_num') AS version_num,
+              (SELECT count(*) FROM businesses)::text AS businesses`,
+    );
+    const core: { name: string; rows: number }[] = [];
+    for (const table of ["businesses", "locations", "users", "orders", "journal_entries", "settings"]) {
+      try {
+        const { rows: c } = await query<{ n: string }>(`SELECT count(*)::text AS n FROM ${table}`);
+        core.push({ name: table, rows: Number(c[0].n) });
+      } catch {
+        /* table absent in this build */
+      }
     }
-  }
-  // server_version_num is 180400 for 18.4 and 90624 for 9.6.24 — the major is
-  // the leading part above 10000 for modern versions, and n/100 before that.
-  const versionNum = Number(rows[0]?.version_num ?? "0");
-  const pgServerMajor = versionNum >= 100000 ? Math.floor(versionNum / 10000) : Math.floor(versionNum / 10000);
-  const value: LocalSchemaSnapshot = {
-    schemaMigrations: Number(rows[0]?.migrations ?? 0),
-    latestMigration: rows[0]?.latest ?? "",
-    pgServerMajor,
-    businessCount: Number(rows[0]?.businesses ?? 0),
-    coreTables: core,
-  };
-  snapshotCache = { at: Date.now(), value };
-  return value;
+    // server_version_num is 180400 for 18.4 and 90624 for 9.6.24 — the major is
+    // the leading part above 10000 for modern versions, and n/100 before that.
+    const versionNum = Number(rows[0]?.version_num ?? "0");
+    const pgServerMajor = versionNum >= 100000 ? Math.floor(versionNum / 10000) : Math.floor(versionNum / 10000);
+    const value: LocalSchemaSnapshot = {
+      schemaMigrations: Number(rows[0]?.migrations ?? 0),
+      latestMigration: rows[0]?.latest ?? "",
+      pgServerMajor,
+      businessCount: Number(rows[0]?.businesses ?? 0),
+      coreTables: core,
+    };
+    snapshotCache = { at: Date.now(), value };
+    return value;
+  });
 }
 
 async function pruneDirectory(dir: string, keep: number): Promise<void> {

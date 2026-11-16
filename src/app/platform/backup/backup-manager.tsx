@@ -1337,7 +1337,7 @@ function RestoreCard({
 
   /**
    * What this source contributes to the request body. A cloud restore sends the
-   * selected object key explicitly alongside the artifact name; a URL restore
+   * selected object key and lets the server derive the filename; a URL restore
    * sends the address and lets the server derive (and cross-check) the name.
    */
   function requestBody(apply: boolean): Record<string, unknown> {
@@ -1347,10 +1347,7 @@ function RestoreCard({
       ...(apply ? { confirm } : {}),
     };
     if (source === "local") return { source, artifact, ...shared };
-    // The cloud row's `artifact` is the full object key, and it travels as
-    // both fields: the server validates the key against the configured prefix
-    // and the artifact name against the key's last segment.
-    if (source === "cloud") return { source, artifact, objectKey: artifact, ...shared };
+    if (source === "cloud") return { source, objectKey: artifact, ...shared };
     if (source === "url") return { source, url: url.trim(), ...shared };
     return { source, peerId: peer?.id ?? "", artifact, ...shared };
   }
