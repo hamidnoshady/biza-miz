@@ -6,13 +6,16 @@
  * month-end periods and stale-quote rejection), at integer Rial.
  */
 import { describe, expect, it } from "vitest";
+import { formatMoney } from "../../money";
 import {
   PLAN_TERM_MONTHS,
   addCalendarMonths,
   buildPlanQuote,
   isPlanTermMonths,
   isQuoteStale,
+  planBasePriceVersion,
   quoteFingerprint,
+  renderQuoteExplanation,
   type PlanQuoteRequest,
 } from "./plan-quote";
 
@@ -128,9 +131,6 @@ describe("buildPlanQuote", () => {
     const quote = buildPlanQuote(request({ termMonths: 3, termDiscountRate: 0.05 }));
     expect(quote.lines[0].priceVersion).toEqual(BASE_VERSION);
     expect(quote.totals.savingsRial).toBe(quote.totals.discountRial);
-    expect(quote.explanation).toContain("دورهٔ");
-    expect(quote.explanation).toContain("ماهه");
-    expect(quote.explanation).toContain("ریال");
   });
 
   it("refuses a term it does not sell", () => {
@@ -148,6 +148,62 @@ describe("buildPlanQuote", () => {
     expect(() =>
       buildPlanQuote(request({ recurringAddOns: [{ key: "x", amountRial: -1 }] })),
     ).toThrow("invalid_quote_addon_price");
+  });
+});
+
+describe("explanation", () => {
+  it("carries Rial amounts only — no currency label and no formatted digits", () => {
+    const quote = buildPlanQuote(
+      request({ termMonths: 3, termDiscountRate: 0.05, taxRate: 0.09 }),
+    );
+    expect(quote.explanation).toEqual([
+      { code: "term", months: 3 },
+      { code: "gross", amountRial: 3_000_000 },
+      { code: "discount", amountRial: 150_000 },
+      { code: "tax", amountRial: 256_500 },
+      { code: "net", amountRial: 3_106_500 },
+    ]);
+  });
+
+  it("renders in the business's own unit and Persian digits", () => {
+    const quote = buildPlanQuote(request({ termMonths: 3, termDiscountRate: 0.05 }));
+    const toman = renderQuoteExplanation(quote, (rial) => formatMoney(rial, "toman"));
+    expect(toman).toContain("تومان");
+    expect(toman).not.toContain("ریال");
+    expect(toman).not.toMatch(/[0-9]/);
+    expect(toman).toContain("۳");
+
+    // The unit is the formatter's choice, not this module's: a Rial business
+    // renders the same facts with «ریال».
+    const rial = renderQuoteExplanation(quote, (value) => formatMoney(value, "rial"));
+    expect(rial).toContain("ریال");
+  });
+});
+
+describe("plan base lookup", () => {
+  it("finds the base line by kind, not by position", () => {
+    const quote = buildPlanQuote(request());
+    const baseLine = quote.lines[0];
+    const moved = {
+      ...quote,
+      // A future trial/proration line ahead of the base must not change which
+      // price version staleness compares against.
+      lines: [{ ...baseLine, kind: "recurring_addon" as const, key: "future_trial" }, ...quote.lines],
+    };
+    expect(planBasePriceVersion(moved)).toEqual(BASE_VERSION);
+    expect(
+      isQuoteStale(
+        moved,
+        {
+          planKey: "pro",
+          termMonths: 1,
+          netRial: quote.totals.netRial,
+          basePriceVersionId: BASE_VERSION.id,
+          basePriceVersion: BASE_VERSION.version,
+        },
+        new Date(quote.issuedAt),
+      ),
+    ).toBe(false);
   });
 });
 

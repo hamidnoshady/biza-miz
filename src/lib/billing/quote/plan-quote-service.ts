@@ -23,6 +23,7 @@
 import { query } from "../../db";
 import {
   buildPlanQuote,
+  planBasePriceVersion,
   type PlanQuote,
   type PlanTermMonths,
   type QuoteAddOn,
@@ -175,7 +176,8 @@ export async function quotePlanSubscription(
 
 /** The comparable facts of a freshly built quote, for `isQuoteStale`. */
 export function currentQuoteFacts(quote: PlanQuote): CurrentQuoteFacts {
-  const base = quote.lines[0]?.priceVersion;
+  // By kind, not index: a future trial/proration line may precede the base.
+  const base = planBasePriceVersion(quote);
   return {
     planKey: quote.planKey,
     termMonths: quote.termMonths,
