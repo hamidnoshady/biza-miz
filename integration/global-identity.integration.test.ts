@@ -9,7 +9,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
@@ -200,6 +200,8 @@ describe("global verified phone", () => {
     const membershipId = rows[0]?.id;
     expect(membershipId).toBeTruthy();
 
+    // The person has no global number yet: this is the *first* proof.
+    await identity.clearVerifiedPhone(personA.platformUserId);
     await stampPhoneVerified({
       businessId: personA.businessId,
       userId: membershipId!,
@@ -208,6 +210,108 @@ describe("global verified phone", () => {
 
     const assurance = await identity.readPlatformIdentityAssurance(personA.platformUserId);
     expect(assurance?.phone).toEqual({ e164: "+989121110005", verified: true });
+  });
+
+  it("refuses to let a second business rotate the person's verified number", async () => {
+    // A membership in a *different* business, belonging to the same global
+    // person. An admin there can set and prove a phone of their choosing; if
+    // that overwrote the identity, the employer would own the person's
+    // password-reset channel.
+    const membershipId = randomUUID();
+    await db.withTenant(personB.businessId, () =>
+      db.query(
+        `INSERT INTO users (id, business_id, role, full_name, email, platform_user_id)
+         VALUES ($1, $2, 'manager', 'الف', $3, $4)`,
+        [
+          membershipId,
+          personB.businessId,
+          `a-at-b-${randomUUID()}@example.com`,
+          personA.platformUserId,
+        ],
+      ),
+    );
+
+    const before = await identity.readPlatformIdentityAssurance(personA.platformUserId);
+    expect(before?.phone).toEqual({ e164: "+989121110005", verified: true });
+
+    // Direct service call: the write-once rule, not the door's choice.
+    expect(
+      await identity.claimVerifiedPhone({
+        platformUserId: personA.platformUserId,
+        phone: "+989121110006",
+      }),
+    ).toEqual({ ok: false, error: "identity_phone_locked" });
+
+    // Through the door, the refusal must be visible in the log and must not
+    // change the identity — but the membership keeps its own proven phone.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let warnCalls: unknown[][] = [];
+    try {
+      const { stampPhoneVerified } = await import("../src/lib/phone-otp");
+      await stampPhoneVerified({
+        businessId: personB.businessId,
+        userId: membershipId,
+        phone: "+989121110006",
+      });
+    } finally {
+      // mockRestore() also clears the recorded calls, so capture first.
+      warnCalls = [...warn.mock.calls];
+      warn.mockRestore();
+    }
+    expect(
+      warnCalls.some(
+        (call) =>
+          (call[1] as { reason?: string } | undefined)?.reason === "identity_phone_locked",
+      ),
+    ).toBe(true);
+    expect(await identity.readPlatformIdentityAssurance(personA.platformUserId)).toEqual(before);
+
+    const membershipPhone = await db.withTenant(personB.businessId, () =>
+      db.query<{ phone_e164: string | null; phone_verified_at: Date | null }>(
+        `SELECT phone_e164, phone_verified_at FROM users WHERE id = $1`,
+        [membershipId],
+      ),
+    );
+    expect(membershipPhone.rows[0]).toEqual({
+      phone_e164: "+989121110006",
+      phone_verified_at: expect.any(Date),
+    });
+  });
+
+  it("renews the same number from a second business instead of refusing it", async () => {
+    const { rows } = await db.withTenant(personB.businessId, () =>
+      db.query<{ id: string }>(
+        `SELECT id FROM users WHERE platform_user_id = $1 AND business_id = $2`,
+        [personA.platformUserId, personB.businessId],
+      ),
+    );
+    const membershipId = rows[0]?.id;
+    expect(membershipId).toBeTruthy();
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let warnCalls: unknown[][] = [];
+    try {
+      const { stampPhoneVerified } = await import("../src/lib/phone-otp");
+      await stampPhoneVerified({
+        businessId: personB.businessId,
+        userId: membershipId!,
+        phone: "+989121110005",
+      });
+    } finally {
+      warnCalls = [...warn.mock.calls];
+      warn.mockRestore();
+    }
+
+    expect(
+      warnCalls.some(
+        (call) =>
+          (call[1] as { reason?: string } | undefined)?.reason === "identity_phone_locked",
+      ),
+    ).toBe(false);
+    expect((await identity.readPlatformIdentityAssurance(personA.platformUserId))?.phone).toEqual({
+      e164: "+989121110005",
+      verified: true,
+    });
   });
 
   it("returns null for an identity that does not exist", async () => {

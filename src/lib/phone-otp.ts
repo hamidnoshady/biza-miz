@@ -491,11 +491,11 @@ export async function stampPhoneVerified(options: {
    *
    * Deliberately best-effort and last: the local stamp is already committed and
    * the person is already signed in, so a global mirror must never fail the
-   * door. `claimVerifiedPhone` refuses a number another identity has already
-   * proved (and logs nothing about the number), which is the correct outcome —
-   * this door does not get to take ownership of someone else's phone.
+   * door. It is *not* silent, though: a refusal (the number belongs to another
+   * identity, or this identity's number is write-once from a business door) and
+   * a thrown failure are both logged with ids only, never the number.
    */
-  await stampGlobalIdentityPhone(options.businessId, options.userId, phone).catch(() => {});
+  await stampGlobalIdentityPhone(options.businessId, options.userId, phone);
 }
 
 /**
@@ -511,15 +511,37 @@ async function stampGlobalIdentityPhone(
   userId: string,
   phone: string | null,
 ): Promise<void> {
-  const { rows } = await query<{ platform_user_id: string | null; phone_e164: string | null }>(
-    `SELECT platform_user_id, phone_e164 FROM users WHERE id = $1 AND business_id = $2`,
-    [userId, businessId],
-  );
-  const row = rows[0];
-  if (!row?.platform_user_id) return;
-  const candidate = phone ?? row.phone_e164;
-  if (!candidate) return;
-  await claimVerifiedPhone({ platformUserId: row.platform_user_id, phone: candidate });
+  let platformUserId: string | null = null;
+  try {
+    const { rows } = await query<{ platform_user_id: string | null; phone_e164: string | null }>(
+      `SELECT platform_user_id, phone_e164 FROM users WHERE id = $1 AND business_id = $2`,
+      [userId, businessId],
+    );
+    const row = rows[0];
+    platformUserId = row?.platform_user_id ?? null;
+    if (!platformUserId) return;
+    const candidate = phone ?? row.phone_e164;
+    if (!candidate) return;
+
+    const result = await claimVerifiedPhone({ platformUserId, phone: candidate });
+    if (!result.ok) {
+      // Ids only. The candidate number is never logged: logging it would put a
+      // verified personal identifier in every "mirror skipped" line.
+      console.warn("[identity] global phone mirror skipped", {
+        businessId,
+        membershipId: userId,
+        platformUserId,
+        reason: result.error,
+      });
+    }
+  } catch (error) {
+    console.error("[identity] global phone mirror failed", {
+      businessId,
+      membershipId: userId,
+      platformUserId,
+      error,
+    });
+  }
 }
 
 /** Validate + canonicalise a typed number, or null when it is not a mobile. */
