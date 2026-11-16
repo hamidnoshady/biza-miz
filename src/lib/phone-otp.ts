@@ -23,6 +23,7 @@ import {
   type OtpPurpose,
 } from "./otp-challenge";
 import { getSmsProvider } from "./sms-config";
+import { claimVerifiedPhone } from "./iam/global-identity-service";
 import { isMobilePhone, phoneE164 } from "./phone";
 import {
   DEFAULT_PHONE_OTP_POLICY,
@@ -481,6 +482,44 @@ export async function stampPhoneVerified(options: {
    * verification above has already succeeded, so nothing here can fail the login.
    */
   await ensurePersonnelFileForMembership(options.businessId, options.userId);
+
+  /*
+   * ESH-199 (#1384) — the proof also belongs to the *person*, not only to this
+   * membership. Until now `users.phone_e164` was the only record, so a verified
+   * number in one business was invisible to the global identity the commercial
+   * purchase precondition reads (`src/lib/identity-billing-contract.ts`).
+   *
+   * Deliberately best-effort and last: the local stamp is already committed and
+   * the person is already signed in, so a global mirror must never fail the
+   * door. `claimVerifiedPhone` refuses a number another identity has already
+   * proved (and logs nothing about the number), which is the correct outcome —
+   * this door does not get to take ownership of someone else's phone.
+   */
+  await stampGlobalIdentityPhone(options.businessId, options.userId, phone).catch(() => {});
+}
+
+/**
+ * Mirror a just-proved membership phone onto its global identity, if it has one.
+ *
+ * PIN-only memberships have no `platform_user_id` and are skipped: they are a
+ * person, but not a global identity, and inventing one here is exactly the
+ * implicit merge #1384 forbids. The phone actually on file is used when the
+ * caller did not name one, because that is the value the local stamp kept.
+ */
+async function stampGlobalIdentityPhone(
+  businessId: string,
+  userId: string,
+  phone: string | null,
+): Promise<void> {
+  const { rows } = await query<{ platform_user_id: string | null; phone_e164: string | null }>(
+    `SELECT platform_user_id, phone_e164 FROM users WHERE id = $1 AND business_id = $2`,
+    [userId, businessId],
+  );
+  const row = rows[0];
+  if (!row?.platform_user_id) return;
+  const candidate = phone ?? row.phone_e164;
+  if (!candidate) return;
+  await claimVerifiedPhone({ platformUserId: row.platform_user_id, phone: candidate });
 }
 
 /** Validate + canonicalise a typed number, or null when it is not a mobile. */
