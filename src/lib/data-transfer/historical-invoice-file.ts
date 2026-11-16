@@ -236,9 +236,12 @@ async function xlsxSheets(buffer: ArrayBuffer): Promise<HistoricalFileSheet[]> {
   const sheets: HistoricalFileSheet[] = [];
   let totalRows = 0;
   const budget = { cells: 0, chars: 0 };
+  let parsedCells = 0;
   for (const worksheet of workbook.worksheets) {
     const source: SourceRow[] = [];
     worksheet.eachRow((row, rowNumber) => {
+      parsedCells += row.cellCount;
+      if (parsedCells > MAX_MATERIALIZED_CELLS + MAX_COLUMNS * MAX_SHEETS) throw new HistoricalFileError("too_many_cells");
       if (row.cellCount > MAX_COLUMNS) throw new HistoricalFileError("too_many_columns");
       const cells: string[] = [];
       row.eachCell({ includeEmpty: true }, (cell, column) => {

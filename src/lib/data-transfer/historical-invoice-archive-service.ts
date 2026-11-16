@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { withTenantTransaction } from "../db";
 import { linkSourceIdentity } from "../import-reconciliation/service";
-import { previewHistoricalInvoices, type HistoricalCalendar, type HistoricalCurrency, type HistoricalInvoiceRow } from "./historical-invoice-preview";
+import { previewHistoricalInvoices, type HistoricalCalendar, type HistoricalCurrency, type HistoricalInvoiceRow, type HistoricalPreviewDocument } from "./historical-invoice-preview";
 import { loadHistoricalStagedRows, type HistoricalStagedInput } from "./historical-invoice-staged-rows";
 
 export class HistoricalArchiveError extends Error {
@@ -34,7 +34,7 @@ function bounded(value: string, max: number, code: string): string {
 }
 
 /** Serialize binding and archive operations in this tenant/source scope. */
-async function lockSource(client: PoolClient, businessId: string, sourceKey: string): Promise<void> {
+export async function lockHistoricalInvoiceSource(client: PoolClient, businessId: string, sourceKey: string): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [JSON.stringify([businessId, sourceKey, "historical-invoices"])]);
 }
 
@@ -64,7 +64,7 @@ export async function bindHistoricalCustomer(input: {
   const provider = input.provider.trim();
   if (provider.length > 200) throw new HistoricalArchiveError("provider_too_long");
   return withTenantTransaction(input.businessId, async (client) => {
-    await lockSource(client, input.businessId, sourceKey);
+    await lockHistoricalInvoiceSource(client, input.businessId, sourceKey);
     await assertActor(client, input.businessId, input.actor.userId);
     return bindCustomerInTransaction(client, { ...input, sourceKey, provider, externalCustomerCode: code });
   });
@@ -186,7 +186,7 @@ export async function confirmHistoricalCustomerReview(input: HistoricalStagedInp
   if (input.confirmed !== true || !/^[a-f0-9]{64}$/.test(input.reviewToken)) throw new HistoricalArchiveError("review_confirmation_required");
   const sourceKey = bounded(input.sourceKey, 200, "source_required"), provider = input.provider.trim();
   return withTenantTransaction(input.businessId, async (client) => {
-    await lockSource(client, input.businessId, sourceKey);
+    await lockHistoricalInvoiceSource(client, input.businessId, sourceKey);
     await assertActor(client, input.businessId, input.actor.userId);
     const review = await customerReviewInTransaction(client, { ...input, sourceKey, provider }, true);
     if (review.reviewToken !== input.reviewToken) throw new HistoricalArchiveError("customer_review_stale");
@@ -246,7 +246,7 @@ export async function archiveHistoricalInvoice(input: {
   const externalId = bounded(input.rows[0].externalInvoiceId, 300, "invoice_id_required");
   const hash = historicalInvoiceFingerprint(input.rows, input.currency, input.calendar);
   return withTenantTransaction(input.businessId, async (client) => {
-    await lockSource(client, input.businessId, sourceKey);
+    await lockHistoricalInvoiceSource(client, input.businessId, sourceKey);
     await assertActor(client, input.businessId, input.actor.userId);
     const job = await client.query<{ options: { historicalInvoice?: { sourceKey?: string; provider?: string; currency?: string; calendar?: string; structure?: string } } }>(
       `SELECT options FROM data_import_jobs WHERE id = $1 AND business_id = $2
@@ -292,46 +292,59 @@ export async function archiveHistoricalInvoice(input: {
     });
     if (docs.length !== 1 || docs[0].outcome !== "ready") throw new HistoricalArchiveError("invalid_document", docs.map((doc) => ({ errors: doc.errors, warnings: doc.warnings })));
     const doc = docs[0];
-    const prior = await client.query<{ id: string; party_id: string; location_id: string; source_fingerprint: string; source_provider: string }>(
-      `SELECT id, party_id, location_id, source_fingerprint, source_provider FROM historical_sales_invoices
-        WHERE business_id = $1 AND source_key = $2 AND external_id = $3 FOR SHARE`,
-      [input.businessId, sourceKey, externalId],
-    );
-    if (prior.rows[0]) {
-      const old = prior.rows[0];
-      if (old.party_id !== partyId || old.location_id !== input.locationId || old.source_fingerprint !== hash || old.source_provider !== provider) {
-        throw new HistoricalArchiveError("document_identity_conflict");
-      }
-      return { status: "already_imported", invoiceId: old.id };
-    }
-    const headerValue = (field: keyof HistoricalInvoiceRow): string => input.rows.map((r) => String(r[field] ?? "").trim()).find(Boolean) ?? "";
-    const inserted = await client.query<{ id: string }>(
-      `INSERT INTO historical_sales_invoices
-        (business_id, location_id, party_id, import_job_id, source_key, source_provider, external_id,
-         invoice_number, invoice_date, external_customer_code, source_branch, source_currency, source_calendar,
-         source_status, total_rial, paid_rial, balance_rial, summary_only, source_fingerprint, source_snapshot, created_by, created_by_name)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14,$15::bigint,$16::bigint,$17::bigint,$18,$19,$20::jsonb,$21,$22)
-       RETURNING id`,
-      [input.businessId, input.locationId, partyId, input.jobId, sourceKey, provider, externalId,
-        headerValue("invoiceNumber"), doc.invoiceDate, code, headerValue("sourceBranch"), input.currency, input.calendar,
-        headerValue("status"), doc.totalRial, doc.paidRial, doc.balanceRial, doc.summaryOnly, hash,
-        JSON.stringify(input.rows), input.actor.userId, input.actor.name],
-    );
-    const invoiceId = inserted.rows[0].id;
-    const lines = input.rows.filter((row) => lineKeys.some((key) => String(row[key] ?? "").trim()));
-    for (const [index, row] of lines.entries()) {
-      await client.query(
-        `INSERT INTO historical_sales_invoice_lines (business_id, invoice_id, line_number, source_snapshot)
-         VALUES ($1, $2, $3, $4::jsonb)`, [input.businessId, invoiceId, index + 1, JSON.stringify(row)],
-      );
-    }
-    await client.query(
-      `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
-       VALUES ($1, $2, 'historical_invoice.archived', $3, $4, $5::jsonb)`,
-      [input.businessId, input.actor.userId, ENTITY_KEY, invoiceId, JSON.stringify({ sourceKey, externalId, importJobId: input.jobId, partyId })],
-    );
-    return { status: "created", invoiceId };
+    return persistHistoricalDocument(client, { ...input, sourceKey, provider }, doc, code, hash);
   });
+}
+
+/** Caller holds the source lock and has revalidated the entire staged document. */
+export async function persistHistoricalDocument(
+  client: PoolClient,
+  input: Pick<HistoricalStagedInput, "businessId" | "locationId" | "jobId" | "sourceKey" | "provider" | "currency" | "calendar"> & { actor: HistoricalArchiveActor },
+  doc: Omit<HistoricalPreviewDocument, "outcome">,
+  code: string,
+  hash: string,
+): Promise<{ status: "created" | "already_imported"; invoiceId: string }> {
+  const { sourceKey, provider } = input;
+  const { partyId, externalInvoiceId: externalId } = doc;
+  const prior = await client.query<{ id: string; party_id: string; location_id: string; source_fingerprint: string; source_provider: string }>(
+    `SELECT id, party_id, location_id, source_fingerprint, source_provider FROM historical_sales_invoices
+      WHERE business_id = $1 AND source_key = $2 AND external_id = $3 FOR SHARE`,
+    [input.businessId, sourceKey, externalId],
+  );
+  if (prior.rows[0]) {
+    const old = prior.rows[0];
+    if (old.party_id !== partyId || old.location_id !== input.locationId || old.source_fingerprint !== hash || old.source_provider !== provider) {
+      throw new HistoricalArchiveError("document_identity_conflict");
+    }
+    return { status: "already_imported", invoiceId: old.id };
+  }
+  const headerValue = (field: keyof HistoricalInvoiceRow): string => doc.rows.map((r) => String(r[field] ?? "").trim()).find(Boolean) ?? "";
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO historical_sales_invoices
+      (business_id, location_id, party_id, import_job_id, source_key, source_provider, external_id,
+       invoice_number, invoice_date, external_customer_code, source_branch, source_currency, source_calendar,
+       source_status, total_rial, paid_rial, balance_rial, summary_only, source_fingerprint, source_snapshot, created_by, created_by_name)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14,$15::bigint,$16::bigint,$17::bigint,$18,$19,$20::jsonb,$21,$22)
+     RETURNING id`,
+    [input.businessId, input.locationId, partyId, input.jobId, sourceKey, provider, externalId,
+      headerValue("invoiceNumber"), doc.invoiceDate, code, headerValue("sourceBranch"), input.currency, input.calendar,
+      headerValue("status"), doc.totalRial, doc.paidRial, doc.balanceRial, doc.summaryOnly, hash,
+      JSON.stringify(doc.rows), input.actor.userId, input.actor.name],
+  );
+  const invoiceId = inserted.rows[0].id;
+  const lines = doc.rows.filter((row) => lineKeys.some((key) => String(row[key] ?? "").trim()));
+  for (const [index, row] of lines.entries()) {
+    await client.query(
+      `INSERT INTO historical_sales_invoice_lines (business_id, invoice_id, line_number, source_snapshot)
+       VALUES ($1, $2, $3, $4::jsonb)`, [input.businessId, invoiceId, index + 1, JSON.stringify(row)],
+    );
+  }
+  await client.query(
+    `INSERT INTO audit_log (business_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, $2, 'historical_invoice.archived', $3, $4, $5::jsonb)`,
+    [input.businessId, input.actor.userId, ENTITY_KEY, invoiceId, JSON.stringify({ sourceKey, externalId, importJobId: input.jobId, partyId })],
+  );
+  return { status: "created", invoiceId };
 }
 
 export interface HistoricalInvoiceSummary {

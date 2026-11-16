@@ -80,6 +80,14 @@ describe("historical invoice file parsing", () => {
       await expect(parseHistoricalInvoiceFile(await workbook([[["id"], [value]]]), "xlsx")).rejects.toMatchObject({ code: "xlsx_cells_must_be_text" });
     }
   });
+  it("refuses a worksheet merge before ExcelJS expands its range", async () => {
+    const buffer = await workbook([[["id"], ["001"]]]);
+    const zip = await JSZip.loadAsync(buffer);
+    const worksheet = zip.file("xl/worksheets/sheet1.xml")!;
+    zip.file(worksheet.name, (await worksheet.async("string")).replace("</worksheet>", '<mergeCells count="1"><mergeCell ref="A1:XFD1048576"/></mergeCells></worksheet>'));
+    const mutated = await zip.generateAsync({ type: "uint8array" });
+    await expect(parseHistoricalInvoiceFile(Uint8Array.from(mutated).buffer, "xlsx")).rejects.toMatchObject({ code: "xlsx_unsupported_layout" });
+  });
   it("bounds expanded XLSX data, even if the compressed upload is small", async () => {
     const zip = new JSZip();
     zip.file("large.xml", "0".repeat(32 * 1024 * 1024 + 1));
