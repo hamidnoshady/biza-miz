@@ -199,23 +199,6 @@ export async function applyIngestEvent(connection: ConnectionRow, event: Webhook
     return { status: "deferred" };
   }
 
-  if (await shouldDeferWebhookForReconciliation(businessId, connection.id, event.topic)) {
-    await query(
-      `UPDATE integration_webhook_events
-          SET status = 'deferred', error = NULL, processed_at = NULL
-        WHERE id = $1`,
-      [inboxId],
-    );
-    await writeIntegrationAudit({
-      businessId,
-      connectionId: connection.id,
-      action: "inbox.deferred_for_reconciliation",
-      entityType: event.topic,
-      remoteId,
-    });
-    return { status: "deferred" };
-  }
-
   return dispatchIngestEvent(connection, inboxId, event);
 
 }
@@ -228,6 +211,23 @@ async function dispatchIngestEvent(
   const businessId = connection.business_id;
   const remoteId = event.payload?.id != null ? String(event.payload.id) : "";
   try {
+    if (await shouldDeferWebhookForReconciliation(businessId, connection.id, event.topic)) {
+      await query(
+        `UPDATE integration_webhook_events
+            SET status = 'deferred', error = NULL, processed_at = NULL
+          WHERE id = $1`,
+        [inboxId],
+      );
+      await writeIntegrationAudit({
+        businessId,
+        connectionId: connection.id,
+        action: "inbox.deferred_for_reconciliation",
+        entityType: event.topic,
+        remoteId,
+      });
+      return { status: "deferred" };
+    }
+
     if (event.topic.endsWith("order.created") || event.topic.endsWith("order.updated") || event.topic.endsWith("order.restored")) {
       const order = event.payload as unknown as WooOrder;
       // An order the store has not been paid for yet is not a sale. It is
