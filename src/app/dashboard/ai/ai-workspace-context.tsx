@@ -29,6 +29,8 @@ export interface AiWorkspaceContextProps {
   accessibleFocuses?: readonly AiAppFocus[];
   runtimeMode: AiRuntimeMode;
   onRuntimeModeChange: (value: AiRuntimeMode) => void;
+  /** Open the dedicated cost-approved Deep Research workflow. */
+  onDeepResearchOpen?: () => void;
   deepResearchEnabled?: boolean;
   projectId: string | null;
   onProjectChange: (projectId: string | null) => void;
