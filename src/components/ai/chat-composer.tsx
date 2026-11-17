@@ -873,22 +873,25 @@ export function ChatComposer({
                 <SelectGroup>
                   <SelectLabel>حالت پاسخ‌گویی</SelectLabel>
                   {AI_CHAT_MODES.map((value) => {
-                  const Icon =
-                    value === "auto"
-                      ? SparklesIcon
-                      : value === "instant"
-                        ? ZapIcon
-                        : BrainCircuitIcon;
-                  return (
-                    <SelectItem key={value} value={value} className="py-2">
-                      <span className="inline-flex min-w-0 items-center gap-2">
-                        <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                        <span className="text-xs font-semibold">
-                          {AI_MODE_LABELS[value]}
+                    const Icon =
+                      value === "auto"
+                        ? SparklesIcon
+                        : value === "instant"
+                          ? ZapIcon
+                          : BrainCircuitIcon;
+                    return (
+                      <SelectItem key={value} value={value} className="py-2">
+                        <span className="inline-flex min-w-0 items-center gap-2">
+                          <Icon
+                            className="size-4 shrink-0 text-muted-foreground"
+                            aria-hidden="true"
+                          />
+                          <span className="text-xs font-semibold">
+                            {AI_MODE_LABELS[value]}
+                          </span>
                         </span>
-                      </span>
-                    </SelectItem>
-                  );
+                      </SelectItem>
+                    );
                   })}
                 </SelectGroup>
                 <SelectSeparator />
