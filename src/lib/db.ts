@@ -336,8 +336,19 @@ export async function withTenant<T>(
 export async function withTenantTransaction<T>(
   businessId: string,
   fn: (client: PoolClient) => Promise<T>,
-  options: { locationId?: string | null; userId?: string | null } = {},
+  options: {
+    locationId?: string | null;
+    userId?: string | null;
+    /**
+     * The transaction's isolation level (default `READ COMMITTED`). Use
+     * `REPEATABLE READ` when several statements must observe ONE catalogue
+     * snapshot — under READ COMMITTED each statement takes its own, so a
+     * check followed by a write can be decided against two different states.
+     */
+    isolationLevel?: "read committed" | "repeatable read" | "serializable";
+  } = {},
 ): Promise<T> {
+  const { isolationLevel, ...scopeOptions } = options;
   return withTenant(
     businessId,
     async () => {
@@ -351,7 +362,9 @@ export async function withTenantTransaction<T>(
       if (existing) return fn(existing);
       const client = await getPool().connect();
       try {
-        await client.query("BEGIN");
+        await client.query(
+          isolationLevel ? `BEGIN ISOLATION LEVEL ${isolationLevel.toUpperCase()}` : "BEGIN",
+        );
         const result = await runPinned(client, () => fn(client));
         await client.query("COMMIT");
         return result;
@@ -367,7 +380,7 @@ export async function withTenantTransaction<T>(
         client.release();
       }
     },
-    options,
+    scopeOptions,
   );
 }
 

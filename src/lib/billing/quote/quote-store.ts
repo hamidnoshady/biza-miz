@@ -299,15 +299,25 @@ export type ConsumeQuoteResult =
         | QuoteRefusal
         | "payment_already_used"
         | "coupon_exhausted"
-        | "coupon_reservation_missing";
+        | "coupon_reservation_missing"
+        | "settlement_conflict";
     };
 
 /**
  * Consume an open quote for a payment, exactly once.
  *
- * The price check runs **inside** the transaction, on the same client that
- * flips the row: a plan re-versioned midway cannot slip between a separate
- * check and this UPDATE, because both observe one READ COMMITTED snapshot.
+ * The price check runs **inside** a `REPEATABLE READ` transaction, on the same
+ * client that flips the row. That level is deliberate: under READ COMMITTED
+ * every statement takes a fresh snapshot, so the catalogue could be re-priced
+ * between the re-price and the UPDATE. Here the stored quote and the live
+ * catalogue are read from one snapshot, and the settlement therefore agrees
+ * with itself. The guarantee is exactly that — a price version committed after
+ * this transaction's snapshot is *not* applied to it; it applies to later
+ * settlements, and this one is the price the person was shown. Postgres also
+ * detects a concurrent write to either row (serialization failure, 40001),
+ * which is surfaced as `settlement_conflict` so the caller can retry rather
+ * than double-settle.
+ *
  * The UPDATE's WHERE clause still carries status, ownership and expiry, so a
  * concurrent settlement or cancellation cannot interleave either. The coupon
  * is spent in the same transaction: if the cap has been reached, the quote
@@ -323,52 +333,61 @@ export async function consumeQuote(input: {
   const now = input.now ?? new Date();
 
   try {
-    return await withTenantTransaction(input.businessId, async (client) => {
-      const reader = asReader(client);
+    return await withTenantTransaction(
+      input.businessId,
+      async (client) => {
+        const reader = asReader(client);
 
-      // Observations and the write share this transaction's snapshot.
-      const stored = await loadStoredQuoteWith(reader, input.businessId, input.quoteId);
-      if (!stored) return { ok: false as const, error: "quote_not_found" as const };
-      if (stored.status !== "open") return { ok: false as const, error: "quote_consumed" as const };
-      if (new Date(stored.expiresAt).getTime() <= now.getTime()) {
-        return { ok: false as const, error: "quote_expired" as const };
-      }
+        // REPEATABLE READ: the quote read, the catalogue read and the write all
+        // observe this transaction's one snapshot (see the doc comment).
+        const stored = await loadStoredQuoteWith(reader, input.businessId, input.quoteId);
+        if (!stored) return { ok: false as const, error: "quote_not_found" as const };
+        if (stored.status !== "open") {
+          return { ok: false as const, error: "quote_consumed" as const };
+        }
+        if (new Date(stored.expiresAt).getTime() <= now.getTime()) {
+          return { ok: false as const, error: "quote_expired" as const };
+        }
 
-      const settled = await repriceStoredQuote(reader, stored, now);
-      if (!settled.ok) return { ok: false as const, error: settled.error };
+        const settled = await repriceStoredQuote(reader, stored, now);
+        if (!settled.ok) return { ok: false as const, error: settled.error };
 
-      const { rows } = await client.query<{ coupon_id: string | null }>(
-        `UPDATE billing_quotes
-            SET status = 'consumed', payment_id = $3, consumed_at = now()
-          WHERE id = $1
-            AND business_id = $2
-            AND status = 'open'
-            AND expires_at > $4
-        RETURNING coupon_id`,
-        [input.quoteId, input.businessId, input.paymentId, now.toISOString()],
-      );
-      const consumed = rows[0];
-      if (!consumed) {
-        return { ok: false as const, error: await refusalFor(client, { ...input, now }) };
-      }
+        const { rows } = await client.query<{ coupon_id: string | null }>(
+          `UPDATE billing_quotes
+              SET status = 'consumed', payment_id = $3, consumed_at = now()
+            WHERE id = $1
+              AND business_id = $2
+              AND status = 'open'
+              AND expires_at > $4
+          RETURNING coupon_id`,
+          [input.quoteId, input.businessId, input.paymentId, now.toISOString()],
+        );
+        const consumed = rows[0];
+        if (!consumed) {
+          return { ok: false as const, error: await refusalFor(client, { ...input, now }) };
+        }
 
-      if (consumed.coupon_id) {
-        const redeemed = await redeemCouponForQuote(client, {
-          couponId: consumed.coupon_id,
-          quoteId: input.quoteId,
-          businessId: input.businessId,
-        });
-        if (!redeemed.ok) throw codedError(redeemed.error);
-      }
+        if (consumed.coupon_id) {
+          const redeemed = await redeemCouponForQuote(client, {
+            couponId: consumed.coupon_id,
+            quoteId: input.quoteId,
+            businessId: input.businessId,
+          });
+          if (!redeemed.ok) throw codedError(redeemed.error);
+        }
 
-      return { ok: true as const };
-    });
+        return { ok: true as const };
+      },
+      { isolationLevel: "repeatable read" },
+    );
   } catch (error) {
     const code = errorCode(error);
     if (code === "coupon_exhausted" || code === "coupon_reservation_missing") {
       return { ok: false, error: code };
     }
     if (code === "23505") return { ok: false, error: "payment_already_used" };
+    // The quote or its coupon row moved under us; nothing was settled.
+    if (code === "40001") return { ok: false, error: "settlement_conflict" };
     throw error;
   }
 }
