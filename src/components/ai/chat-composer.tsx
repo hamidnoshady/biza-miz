@@ -167,7 +167,9 @@ export function ChatComposer({
       ? SparklesIcon
       : activeRuntimeMode === "instant"
         ? ZapIcon
-        : BrainCircuitIcon;
+        : activeRuntimeMode === "thinking"
+          ? BrainCircuitIcon
+          : FlaskConicalIcon;
 
   const focusOptions =
     workspaceContext?.accessibleFocuses &&
