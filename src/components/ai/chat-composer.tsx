@@ -841,7 +841,7 @@ export function ChatComposer({
                     "border-amber-200 bg-amber-100 text-amber-950",
                 )}
               >
-                <SelectValue>{AI_MODE_LABELS[activeRuntimeMode]}</SelectValue>
+                <SelectValue />
               </SelectTrigger>
               <SelectContent side="top" align="start" position="popper" className="w-72">
                 <SelectLabel>حالت پاسخ‌گویی</SelectLabel>
@@ -871,18 +871,12 @@ export function ChatComposer({
                     !workspaceContext.onDeepResearchOpen
                   }
                   className="py-2"
+                  title="پژوهش چندمرحله‌ای و هزینه‌دار؛ پیش از اجرا سقف هزینه را تأیید می‌کنید"
                 >
-                  <span className="flex min-w-0 items-center gap-2.5">
-                    <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
-                      <FlaskConicalIcon className="size-4" aria-hidden="true" />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block text-xs font-semibold">
-                        {AI_MODE_LABELS.deep_research}
-                      </span>
-                      <span className="block whitespace-normal text-[10px] leading-4 text-muted-foreground">
-                        پژوهش چندمرحله‌ای و هزینه‌دار؛ پیش از اجرا سقف هزینه را تأیید می‌کنید
-                      </span>
+                  <span className="inline-flex min-w-0 items-center gap-2">
+                    <FlaskConicalIcon className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                    <span className="text-xs font-semibold">
+                      {AI_MODE_LABELS.deep_research}
                     </span>
                   </span>
                 </SelectItem>
