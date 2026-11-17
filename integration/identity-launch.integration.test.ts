@@ -148,6 +148,37 @@ describe("email verification", () => {
     expect((await credentials.consumeEmailVerification(second.token)).ok).toBe(true);
   });
 
+  it("clears an existing verification when the address changes", async () => {
+    const identityId = await insertIdentity({ email: `d-${randomUUID()}@example.com`, passwordHash: "hash" });
+    const first = await credentials.issueEmailVerification({ platformUserId: identityId });
+    if (!first.ok) throw new Error("issue failed");
+    expect((await credentials.consumeEmailVerification(first.token)).ok).toBe(true);
+    expect(await credentials.hasVerifiedEmail(identityId)).toBe(true);
+
+    // A fresh live link, then the address changes. The writer below stands in
+    // for both real writers (owner profile, cloud replication); the invariant
+    // is enforced in the database so neither has to remember it.
+    const live = await credentials.issueEmailVerification({ platformUserId: identityId });
+    if (!live.ok) throw new Error("issue failed");
+
+    await db.withoutTenantScope("platform", () =>
+      db.query("UPDATE platform_users SET email = $2 WHERE id = $1", [
+        identityId,
+        `moved-${randomUUID()}@example.com`,
+      ]),
+    );
+
+    expect(await credentials.hasVerifiedEmail(identityId)).toBe(false);
+
+    const { rows } = await db.withoutTenantScope("platform", () =>
+      db.query<{ consumed_at: Date | null }>(
+        "SELECT consumed_at FROM platform_email_verifications WHERE platform_user_id = $1",
+        [identityId],
+      ),
+    );
+    expect(rows.every((row) => row.consumed_at !== null)).toBe(true);
+  });
+
   it("does not verify a link whose address changed after issue", async () => {
     const identityId = await insertIdentity({ email: `c-${randomUUID()}@example.com`, passwordHash: "hash" });
     const issued = await credentials.issueEmailVerification({ platformUserId: identityId });

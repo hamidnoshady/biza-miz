@@ -285,6 +285,52 @@ describe("persisted quotes and the payment boundary", () => {
     ).toEqual({ ok: false, error: "quote_stale" });
   });
 
+  it("refuses a quote whose coupon stopped being usable after it was shown", async () => {
+    const mutations: Array<{ label: string; sql: string; error: string }> = [
+      { label: "paused", sql: "status = 'paused'", error: "coupon_inactive" },
+      {
+        label: "expired",
+        sql: "valid_from = now() - interval '2 hours', valid_until = now() - interval '1 hour'",
+        error: "coupon_expired",
+      },
+      { label: "term tightened", sql: "min_term_months = 12", error: "coupon_term_not_eligible" },
+    ];
+
+    for (const mutation of mutations) {
+      const coupon = await createCoupon();
+      const { quoteId } = await quoteWithCoupon(coupon.code);
+      await db.withoutTenantScope("platform", () =>
+        db.query(`UPDATE billing_coupons SET ${mutation.sql} WHERE id = $1`, [coupon.id]),
+      );
+
+      expect(
+        await store.assertQuotePayable({ businessId, quoteId }),
+        mutation.label,
+      ).toEqual({ ok: false, error: mutation.error });
+      expect(
+        await store.consumeQuote({ businessId, quoteId, paymentId: randomUUID() }),
+        mutation.label,
+      ).toEqual({ ok: false, error: mutation.error });
+    }
+  });
+
+  it("treats a coupon whose discount changed after the quote as stale", async () => {
+    const coupon = await createCoupon();
+    const { quoteId } = await quoteWithCoupon(coupon.code);
+
+    await db.withoutTenantScope("platform", () =>
+      db.query("UPDATE billing_coupons SET percent_basis_points = 500 WHERE id = $1", [coupon.id]),
+    );
+
+    expect(await store.assertQuotePayable({ businessId, quoteId })).toEqual({
+      ok: false,
+      error: "quote_stale",
+    });
+    expect(
+      await store.consumeQuote({ businessId, quoteId, paymentId: randomUUID() }),
+    ).toEqual({ ok: false, error: "quote_stale" });
+  });
+
   it("refuses an expired quote", async () => {
     const quoted = await quotes.quotePlanSubscription({
       planKey,

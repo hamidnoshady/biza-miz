@@ -34,7 +34,7 @@ import {
   type QuoteLine,
 } from "./plan-quote";
 import { currentQuoteFacts, readPlanPricing, type QuoteExecutor } from "./plan-quote-service";
-import { redeemCouponForQuote } from "./coupon-service";
+import { redeemCouponForQuote, revalidateCoupon, type CouponRefusal } from "./coupon-service";
 
 /** Without settlement, this is how a quote is remembered. */
 export interface StoredQuote {
@@ -218,7 +218,8 @@ export type QuoteRefusal =
   | "quote_consumed"
   | "quote_stale"
   | "plan_not_purchasable"
-  | "plan_price_missing";
+  | "plan_price_missing"
+  | CouponRefusal;
 
 export type QuotePayability =
   | { ok: true; quote: StoredQuote; refreshed: PlanQuote }
@@ -244,7 +245,10 @@ export async function assertQuotePayable(input: {
     return { ok: false, error: "quote_expired" };
   }
 
-  return repriceStoredQuote({ query }, stored, now);
+  // Inside the tenant scope the coupon re-validation can see this business's
+  // redemptions (the table is RLS'd); outside it they read as empty and the
+  // preview would disagree with settlement.
+  return withTenant(input.businessId, () => repriceStoredQuote({ query }, stored, now));
 }
 
 /**
@@ -253,6 +257,11 @@ export async function assertQuotePayable(input: {
  * Shared by the read-only check and by settlement, so both compare with the
  * same arithmetic; only the connection differs. Settlement passes its own
  * client, which is what makes the check transactional rather than advisory.
+ *
+ * The coupon is re-validated from its live row, not the quote's snapshot: the
+ * campaign can be paused, expire, tighten its term or change its discount
+ * after the quote was shown. A changed discount then fails the comparison
+ * below as `quote_stale`; a coupon that is no longer usable is refused by name.
  */
 async function repriceStoredQuote(
   reader: QuoteReader,
@@ -268,13 +277,26 @@ async function repriceStoredQuote(
     };
   }
 
+  let coupon = stored.coupon;
+  if (coupon) {
+    if (!stored.couponId) return { ok: false, error: "coupon_not_found" };
+    const live = await revalidateCoupon(reader, {
+      couponId: stored.couponId,
+      businessId: stored.businessId,
+      termMonths: stored.quote.termMonths,
+      now,
+    });
+    if (!live.ok) return { ok: false, error: live.error };
+    coupon = live.coupon;
+  }
+
   const refreshed = buildPlanQuote({
     planKey: stored.quote.planKey,
     termMonths: stored.quote.termMonths,
     ...pricing.pricing,
     termDiscountRate: stored.termDiscountRate,
     taxRate: stored.taxRate,
-    coupon: stored.coupon,
+    coupon,
     issuedAt: stored.issuedAt,
     validityMinutes: validityMinutes(stored),
   });
