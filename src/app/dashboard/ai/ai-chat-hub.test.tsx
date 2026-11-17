@@ -353,7 +353,13 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
       { scroll: false },
     );
     expect(screen.getByRole("heading", { name: "پژوهش عمیق" })).toBeTruthy();
-    expect(screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ })).toBeTruthy();
+    // The open panel is modal, so the composer behind it is hidden from the
+    // accessibility tree; read its trigger directly to prove the chat runtime
+    // mode is still Auto rather than matching `mode=deep_research`.
+    const composerBox = document.querySelector("[data-composer-box]") as HTMLElement;
+    expect(
+      composerBox.querySelector('[aria-label="حالت پاسخ‌گویی: خودکار"]'),
+    ).toBeTruthy();
     expect(replaceMock.mock.calls.some(([url]) => String(url).includes("mode=deep_research"))).toBe(false);
   });
 
@@ -731,6 +737,8 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
       }),
     ).toBeNull();
 
+    // The welcome composer starts collapsed; expand it before opening the `+` menu
+    fireEvent.click(document.querySelector("[data-composer-box]") as HTMLElement);
     // Open `+` menu and verify the project item is hidden when `workspace` is not in `accessibleFocuses`
     fireEvent.click(
       screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" }),
