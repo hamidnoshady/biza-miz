@@ -3,8 +3,8 @@
 /**
  * The clean conversation composer for the AI assistant (`/dashboard`, Issue #905).
  *
- * Unified upload/library and project/focus controls live in `+`. Task and
- * Auto/Fast/Thinking stay beside Send; action approvals live in conversation.
+ * Unified upload/library and project/focus controls live in `+`. The
+ * expanded composer keeps task and response-mode controls beside Send.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
