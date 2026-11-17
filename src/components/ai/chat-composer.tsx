@@ -305,7 +305,7 @@ export function ChatComposer({
           if (!isCollapsed) return;
           const target = event.target;
           if (
-            target instanceof HTMLElement &&
+            target instanceof Element &&
             target.closest("button, [role='combobox'], [data-slot='select-trigger']")
           ) {
             return;
