@@ -170,7 +170,6 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     });
     fireEvent.click(starterBtn);
 
-    const textarea = screen.getByLabelText("پیام") as HTMLTextAreaElement;
     expect(textarea.value).toBe(starterPrompts[0]);
     await waitFor(() => {
       expect(composerBox.getAttribute("data-composer-collapsed")).toBe("false");
@@ -215,6 +214,39 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     expect(
       fetchMock.mock.calls.filter(([url]) => String(url).startsWith("/api/ai/chat")),
     ).toHaveLength(0);
+  });
+
+  it("expands the compact composer when its empty surface is clicked", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ conversations: [], projects: [] }),
+      })) as unknown as typeof fetch,
+    );
+
+    render(
+      <AiChatHub
+        canManageAi={false}
+        canAutoApply={false}
+        allowedPanelSections={[]}
+        deepResearchEnabled={false}
+        eligibleTaskIds={["general"]}
+        accessibleFocuses={["all"]}
+      />,
+    );
+
+    const composerBox = document.querySelector("[data-composer-box]") as HTMLElement;
+    expect(composerBox.getAttribute("data-composer-collapsed")).toBe("true");
+
+    fireEvent.click(composerBox);
+
+    await waitFor(() => {
+      expect(composerBox.getAttribute("data-composer-collapsed")).toBe("false");
+    });
+    expect(screen.getByRole("combobox", { name: /وظیفه دستیار/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" })).toBeTruthy();
   });
 
   it("keeps task and Auto/Fast/Thinking beside Send, and limits + to supported attachments and context", async () => {
