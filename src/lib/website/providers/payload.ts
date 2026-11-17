@@ -40,9 +40,8 @@ import {
   type CmsConfig,
   type FetchLike,
 } from "../../cms/client";
-import type { CmsMedia, CmsPost, CmsProduct, CmsProductWrite, CmsProductModifierGroup, CmsTaxonomyDefinition, CmsTaxonomyTerm, PayloadList } from "../../cms/types";
+import type { CmsMedia, CmsPost, CmsProduct, CmsProductWrite, CmsProductModifierGroup, PayloadList } from "../../cms/types";
 import {
-  WEBSITE_MENU_TAXONOMY_KEY,
   WEBSITE_SOURCE_SYSTEM,
   WebsiteAdapterError,
   slugify,
@@ -166,26 +165,27 @@ export function mapPayloadProduct(doc: CmsProduct, ctx: PayloadMappingContext): 
     priceRial: siteAmountToRial(doc.price, ctx.currency),
     stock: doc.trackInventory ? (doc.inventory ?? null) : null,
     status: doc._status === "published" ? "published" : "draft",
-    sourceId: doc.sourceId ?? null,
+    sourceId: doc.menuSourceId ?? doc.sourceId ?? null,
+    summary: doc.summary ?? null,
     imageId: typeof doc.image === "string" ? doc.image : doc.image?.id ?? null,
     categoryTermId: doc.terms?.[0] ? (typeof doc.terms[0] === "string" ? doc.terms[0] : doc.terms[0].id) : null,
     menuOrder: doc.menuOrder ?? null,
-    available: doc.menuAvailable ?? null,
+    available: doc.menuAvailability ? doc.menuAvailability === "available" : doc.menuAvailable ?? null,
     modifierGroups: (doc.modifierGroups ?? []).map((group) => ({
       remoteId: group.id,
       sourceId: group.sourceId,
       label: group.label,
-      minSelect: group.minSelect,
-      maxSelect: group.maxSelect,
-      isActive: group.isActive,
-      sortOrder: group.sortOrder,
+      minSelect: group.minSelections ?? group.minSelect ?? 0,
+      maxSelect: group.maxSelections ?? group.maxSelect ?? 1,
+      isActive: group.active ?? group.isActive ?? true,
+      sortOrder: group.menuOrder ?? group.sortOrder ?? 0,
       options: group.options.map((option) => ({
         remoteId: option.id,
         sourceId: option.sourceId,
         label: option.label,
         priceDeltaRial: siteDeltaToRial(option.priceDelta, ctx.currency),
-        isActive: option.isActive,
-        sortOrder: option.sortOrder,
+        isActive: option.active ?? option.isActive ?? true,
+        sortOrder: option.menuOrder ?? option.sortOrder ?? 0,
       })),
     })),
     updatedAt: doc.updatedAt,
@@ -408,22 +408,16 @@ export class PayloadWebsiteAdapter implements WebsiteAdapter {
     if (!input.filename.trim() || !input.mimeType.startsWith("image/") || input.bytes.byteLength === 0) {
       throw new WebsiteAdapterError("rejected", "invalid image upload");
     }
-    if (input.sourceId) {
-      const existing = await this.findBySource<CmsMedia>("/api/media", input.sourceId);
-      if (existing) return mapPayloadMedia(existing, this.ctx.mediaOrigin);
-    }
     const form = new FormData();
-    if (input.sourceId) {
-      form.set("sourceSystem", WEBSITE_SOURCE_SYSTEM);
-      form.set("sourceId", input.sourceId);
-    }
     // Copy into a plain ArrayBuffer-backed view: a caller may give us a view of
     // a SharedArrayBuffer, which Blob deliberately refuses in Node's typings.
     const bytes = Uint8Array.from(input.bytes);
     form.set("file", new Blob([bytes.buffer], { type: input.mimeType }), input.filename);
-    if (input.alt?.trim()) form.set("alt", input.alt.trim());
+    if (!input.sourceId && input.alt?.trim()) form.set("alt", input.alt.trim());
+    if (input.sourceId) form.set("_payload", JSON.stringify({ alt: input.alt?.trim() }));
     const doc = await this.call(() => cmsFormRequest<CmsMedia>(this.config, {
-      path: "/api/media", form, fetchImpl: this.fetchImpl,
+      path: input.sourceId ? `/api/site/cafe-menu/media/${encodeURIComponent(input.sourceId)}` : "/api/media",
+      form, fetchImpl: this.fetchImpl,
     }));
     return mapPayloadMedia(doc, this.ctx.mediaOrigin);
   }
@@ -493,6 +487,7 @@ export class PayloadWebsiteAdapter implements WebsiteAdapter {
   }
 
   async upsertProduct(input: RemoteProductInput): Promise<RemoteProduct> {
+    if (input.categorySourceId !== undefined) return this.upsertCafeProduct(input);
     const doc = await this.call(async () => {
       let remoteId = input.remoteId;
       let existing: RemoteProduct | undefined;
@@ -545,56 +540,83 @@ export class PayloadWebsiteAdapter implements WebsiteAdapter {
     return mapPayloadProduct(doc, this.ctx);
   }
 
-  async upsertMenuTaxonomy(input: { remoteId?: string }): Promise<{ id: string }> {
-    if (input.remoteId) return { id: input.remoteId };
-    return this.call(async () => {
-      const list = await cmsRequest<PayloadList<CmsTaxonomyDefinition>>(this.config, {
-        path: "/api/taxonomy-definitions",
-        query: { limit: 2, depth: 0, "where[key][equals]": WEBSITE_MENU_TAXONOMY_KEY },
-        fetchImpl: this.fetchImpl,
-      });
-      if (list.totalDocs > 1 || list.docs.length > 1) {
-        throw new WebsiteAdapterError("rejected", "ambiguous menu taxonomy");
-      }
-      if (list.docs[0]) return { id: list.docs[0].id };
-      const doc = await cmsRequest<CmsTaxonomyDefinition>(this.config, {
-        method: "POST", path: "/api/taxonomy-definitions",
-        body: {
-          key: WEBSITE_MENU_TAXONOMY_KEY,
-          singularLabel: "دستهٔ منو", pluralLabel: "دسته‌های منو",
-          description: "دسته‌های منوی حسابداری بیزامیز", hierarchical: true, hasArchive: false,
-        },
-        fetchImpl: this.fetchImpl,
-      });
-      return { id: doc.id };
+  private async upsertCafeProduct(input: RemoteProductInput): Promise<RemoteProduct> {
+    if (!input.sourceId) throw new WebsiteAdapterError("rejected", "café menus require a source identity");
+    const modifiers = input.modifierGroups?.map((group) => ({
+      sourceId: group.sourceId,
+      label: group.label,
+      minSelections: group.minSelect,
+      maxSelections: group.maxSelect,
+      active: group.isActive,
+      menuOrder: group.sortOrder,
+      options: group.options.map((option) => ({
+        sourceId: option.sourceId,
+        label: option.label,
+        priceDelta: rialToSiteDelta(option.priceDeltaRial, this.currency),
+        active: option.isActive,
+        menuOrder: option.sortOrder,
+      })),
+    }));
+    const price = rialToSiteAmount(input.priceRial, this.currency);
+    const result = await this.writeCafeProduct(input.sourceId, {
+      title: input.title, summary: input.summary, sku: input.sku, price, image: input.imageId,
+      menuOrder: input.menuOrder, menuAvailability: input.menuAvailability, published: input.published,
+      categorySourceIds: input.categorySourceId ? [input.categorySourceId] : [],
+      modifierGroups: modifiers,
+      legacyProductId: input.remoteId,
+      ...(input.stock !== undefined ? { trackInventory: input.stock !== null, inventory: input.stock } : {}),
     });
+    if (!result.id || (input.published !== undefined && result.status !== (input.published ? "published" : "draft"))) {
+      throw new WebsiteAdapterError("rejected", "CMS did not confirm café product publication");
+    }
+    return {
+      id: result.id, status: result.status, updatedAt: result.updatedAt,
+      title: input.title, sku: input.sku ?? null, summary: input.summary,
+      priceRial: siteAmountToRial(price, this.currency), sourceId: input.sourceId,
+      stock: input.stock ?? null, imageId: input.imageId, categoryTermId: input.categoryTermId,
+      menuOrder: input.menuOrder, available: input.available,
+      // CMS checkout identifies modifiers by their stable source IDs, scoped to the item.
+      modifierGroups: input.modifierGroups?.map((group) => ({
+        ...group, remoteId: group.sourceId,
+        options: group.options.map((option) => ({ ...option, remoteId: option.sourceId })),
+      })),
+    };
+  }
+
+  private writeCafeProduct(sourceId: string, body: Record<string, unknown>) {
+    return this.writeCafeObject<{ id: string | null; status: PostStatus; updatedAt: string }>("products", sourceId, body);
+  }
+
+  private writeCafeObject<T>(collection: "products" | "categories", sourceId: string, body: Record<string, unknown>) {
+    return this.call(() => cmsRequest<T>(this.config, {
+      method: "PUT", path: `/api/site/cafe-menu/${collection}/${encodeURIComponent(sourceId)}`,
+      body, fetchImpl: this.fetchImpl,
+    }).catch((error: unknown) => {
+      if (error instanceof CmsApiError && (error.status === 409 || error.status >= 500)) {
+        throw new WebsiteAdapterError("unreachable", error.message);
+      }
+      throw error;
+    }));
   }
 
   async upsertMenuCategory(input: MenuCategoryInput): Promise<RemoteMenuCategory> {
-    const body = {
-      taxonomy: input.taxonomyId,
-      sourceSystem: WEBSITE_SOURCE_SYSTEM,
-      sourceId: input.sourceId,
-      name: input.name,
-      slug: `biza-${input.sourceId.replace(/[^a-zA-Z0-9-]+/g, "-")}`,
-      description: input.description ?? "",
-      menuOrder: input.sortOrder,
-    };
-    const doc = await this.call(async () => {
-      let remoteId = input.remoteId;
-      if (!remoteId) {
-        remoteId = (await this.findBySource<CmsTaxonomyTerm>("/api/taxonomy-terms", input.sourceId, { taxonomy: input.taxonomyId }))?.id;
-      }
-      return cmsRequest<CmsTaxonomyTerm>(this.config, {
-        method: remoteId ? "PATCH" : "POST",
-        path: remoteId ? `/api/taxonomy-terms/${encodeURIComponent(remoteId)}` : "/api/taxonomy-terms",
-        body, fetchImpl: this.fetchImpl,
-      });
-    });
-    return { id: doc.id, sourceId: input.sourceId, name: doc.name, description: doc.description ?? null, sortOrder: doc.menuOrder };
+    const body = { name: input.name, description: input.description ?? null, menuOrder: input.sortOrder };
+    const result = await this.writeCafeObject<{ id: string; taxonomyId: string }>("categories", input.sourceId, body);
+    if (!result.id || !result.taxonomyId) throw new WebsiteAdapterError("rejected", "CMS did not confirm café category identity");
+    return { ...result, sourceId: input.sourceId, name: input.name, description: body.description, sortOrder: input.sortOrder };
   }
 
-  async setProductAvailability(remoteId: string, input: ProductAvailability): Promise<void> {
+  async setProductAvailability(remoteId: string | null, input: ProductAvailability, menuSourceId?: string): Promise<void> {
+    if (menuSourceId) {
+      const result = await this.writeCafeProduct(menuSourceId, {
+        legacyProductId: remoteId || undefined, published: input.published, menuAvailability: input.available ? "available" : "unavailable",
+      });
+      if (result.status !== (input.published ? "published" : "draft")) {
+        throw new WebsiteAdapterError("rejected", "CMS did not confirm café product publication");
+      }
+      return;
+    }
+    if (!remoteId) throw new WebsiteAdapterError("not_found", "no remote id yet");
     await this.call(() => updateProduct(this.config, remoteId, {
       _status: input.published ? "published" : "draft", menuAvailable: input.available,
     }, this.opts()));

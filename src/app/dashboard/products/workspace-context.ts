@@ -125,6 +125,8 @@ export async function requireRetailLabels(): Promise<{
   industry: RetailCatalogueIndustry;
   canManage: boolean;
   canPrint: boolean;
+  canAssignBarcode: boolean;
+  locationId: string | null;
   canViewLegacyWeight: boolean;
   canEditLegacyWeight: boolean;
 }> {
@@ -140,6 +142,8 @@ export async function requireRetailLabels(): Promise<{
     industry,
     canManage: access.permissions.has(PERMISSIONS.settingsManage),
     canPrint: access.permissions.has(PERMISSIONS.printingExecute),
+    canAssignBarcode: (industry === "jewelry" || industry === "watch") && access.permissions.has(PERMISSIONS.inventoryAdjust),
+    locationId: (await resolveActiveLocation(session))?.id ?? null,
     canViewLegacyWeight: adapter.kind === "variants" && access.permissions.has(PERMISSIONS.menuView),
     canEditLegacyWeight: adapter.kind === "variants" && access.permissions.has(PERMISSIONS.menuView) && access.permissions.has(PERMISSIONS.menuEdit) && access.permissions.has(PERMISSIONS.inventoryAdjust),
   };

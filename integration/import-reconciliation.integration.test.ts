@@ -1235,11 +1235,29 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
       }),
     );
     expect(ingestOutcome).toEqual({ status: "deferred" });
-    const inboxRow = await db.query<{ status: string }>(
-      `SELECT status FROM integration_webhook_events WHERE connection_id = $1 AND delivery_id = 'deliv-reconcile-defer-1'`,
+    const inboxRow = await db.query<{ id: string; status: string }>(
+      `SELECT id, status FROM integration_webhook_events WHERE connection_id = $1 AND delivery_id = 'deliv-reconcile-defer-1'`,
       [conn.id],
     );
     expect(inboxRow.rows[0]?.status).toBe("deferred");
+
+    const inboxId = inboxRow.rows[0].id;
+    await expect(asBusiness(biz.id, () =>
+      ingestSvc.reprocessExistingIngestEvent(conn as never, inboxId),
+    )).resolves.toEqual({ status: "deferred" });
+    await expect(asBusiness(biz.id, () =>
+      ingestSvc.reprocessDeferredIngestEvents(conn as never),
+    )).resolves.toEqual({ processed: 0, failed: 0 });
+    const retriedInbox = await db.query<{ status: string }>(
+      `SELECT status FROM integration_webhook_events WHERE id = $1`,
+      [inboxId],
+    );
+    expect(retriedInbox.rows[0]?.status).toBe("deferred");
+
+    expect(guards.webhookTopicDomain("connector.product.updated")).toBe("product");
+    expect(guards.webhookTopicDomain("customers.sync_completed")).toBe("party");
+    expect(guards.webhookTopicDomain("orders.sync_completed")).toBe("financial_document");
+
     const itemNameRow = await db.query<{ name: string }>(`SELECT name FROM items WHERE id = $1`, [itemId]);
     expect(itemNameRow.rows[0].name).toBe("ژل شستشو");
 

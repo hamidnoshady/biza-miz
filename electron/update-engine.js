@@ -9,6 +9,7 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { spawn } = require("node:child_process");
 const { computePaths } = require("./app-paths");
+const { launchStagedInstaller, pruneStagedInstallers, stageInstaller } = require("./installer-staging");
 const {
   AUTO_INSTALL_GRACE_MS,
   MAX_LOCAL_POSTPONE_MS,
@@ -24,6 +25,10 @@ const STATES = new Set([
 ]);
 const CHANNELS = new Set(["stable", "beta", "internal"]);
 const PRE_UPDATE_BACKUP_RETENTION = 5;
+// Issue #1000 - progress used to be persisted (and emitted over IPC) once per
+// received chunk. Four updates a second is enough for a progress bar and keeps
+// the state file off the download's critical path.
+const PROGRESS_EMIT_INTERVAL_MS = 250;
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://github.com",
   "https://objects.githubusercontent.com",
@@ -72,6 +77,11 @@ function canonicalManifestPayload(manifest) {
       size: manifest.installer.size,
       signatureRequired: manifest.installer.signatureRequired,
       expectedPublisher: manifest.installer.expectedPublisher,
+      // Optional so a manifest signed before thumbprint pinning existed still
+      // verifies byte-for-byte; new releases always carry it (safeManifest).
+      ...(manifest.installer.expectedPublisherThumbprint
+        ? { expectedPublisherThumbprint: manifest.installer.expectedPublisherThumbprint }
+        : {}),
     },
     database: {
       migrationVersion: manifest.database.migrationVersion,
@@ -96,6 +106,14 @@ function safeManifest(value) {
   if (!Number.isSafeInteger(manifest.installer.size) || manifest.installer.size < 1) throw updateError("manifest_installer_size_invalid");
   if (manifest.installer.signatureRequired !== true) throw updateError("manifest_signature_required");
   if (typeof manifest.installer.expectedPublisher !== "string" || !manifest.installer.expectedPublisher.trim()) throw updateError("expected_publisher_missing");
+  // Issue #1000 - the certificate thumbprint is part of the signed manifest, so
+  // a release can only be installed by that exact signing certificate. A
+  // missing pin is a refusal, not a fall back to the subject/CN check.
+  const thumbprint = typeof manifest.installer.expectedPublisherThumbprint === "string"
+    ? manifest.installer.expectedPublisherThumbprint.trim()
+    : "";
+  if (!thumbprint) throw updateError("expected_publisher_thumbprint_missing");
+  if (!/^[0-9A-Fa-f]{40}$/.test(thumbprint)) throw updateError("expected_publisher_thumbprint_invalid");
   if (!manifest.database || manifest.database.backupRequired !== true) throw updateError("manifest_backup_required");
   if (!Array.isArray(manifest.releaseNotes) || !manifest.releaseNotes.every((note) => typeof note === "string")) throw updateError("manifest_release_notes_invalid");
   return JSON.parse(JSON.stringify({ ...manifest, installer: { ...manifest.installer, url: url.toString() } }));
@@ -125,6 +143,38 @@ function fileSha256(filePath) {
     stream.on("data", (chunk) => hash.update(chunk)); stream.once("error", reject);
     stream.once("end", () => resolve(hash.digest("hex")));
   });
+}
+
+/**
+ * Exact publisher pinning (issue #1000). The expected publisher is the exact
+ * Authenticode certificate Subject or its exact common name - never a
+ * substring, glob or prefix, so a publisher name no longer matches a
+ * certificate such as "CN=<publisher> Test Signer". Case is ignored because
+ * Windows renders the distinct-name order and casing itself.
+ */
+function publisherMatchesCertificate(certificate, expectedPublisher) {
+  const expected = String(expectedPublisher || "").trim().toLowerCase();
+  if (!expected || !certificate) return false;
+  return [certificate.subject, certificate.simpleName]
+    .map((value) => (typeof value === "string" ? value.trim().toLowerCase() : ""))
+    .some((value) => value.length > 0 && value === expected);
+}
+
+/**
+ * Windows SHA-1 thumbprints are hex and case-insensitive; a manifest pin and
+ * the certificate it describes must be the same 20 bytes, not merely similar.
+ */
+function thumbprintMatchesCertificate(certificate, expectedThumbprint) {
+  const normalize = (value) => (typeof value === "string" ? value.replace(/[\s:]/g, "").toUpperCase() : "");
+  const expected = normalize(expectedThumbprint);
+  const actual = normalize(certificate?.thumbprint);
+  return /^[0-9A-F]{40}$/.test(expected) && actual === expected;
+}
+
+/** Both halves of the pin: exact Subject/common name and exact thumbprint. */
+function certificateMatchesPin(certificate, expectedPublisher, expectedThumbprint) {
+  return publisherMatchesCertificate(certificate, expectedPublisher) &&
+    thumbprintMatchesCertificate(certificate, expectedThumbprint);
 }
 
 class DesktopUpdateEngine extends EventEmitter {
@@ -159,7 +209,7 @@ class DesktopUpdateEngine extends EventEmitter {
       progress: null, installerPath: null, backupPath: null, errorCode: null,
       errorDetail: null, checkedAt: null, updatedAt: new Date().toISOString(),
       policy: { automaticChecks: true, backgroundDownload: false, automaticInstall: false, channel: "stable" },
-      installOnNextRestart: false, previousVersion: null,
+      installOnNextRestart: false, previousVersion: null, stagedInstaller: null,
       // Central's resolved policy (see update-policy.js) and the unattended
       // install's visible status. Both are null on an install Central never
       // configured, which behaves exactly as before this layer existed.
@@ -455,11 +505,15 @@ class DesktopUpdateEngine extends EventEmitter {
       const append = offset > 0 && response.status === 206;
       if (offset > 0 && !append) fs.rmSync(partialPath, { force: true });
       let received = append ? offset : 0;
+      let lastProgressAt = 0;
       const stream = fs.createWriteStream(partialPath, { flags: append ? "a" : "w", mode: 0o600 });
       for await (const chunk of response.body) {
         received += chunk.length;
         if (received > manifest.installer.size) throw updateError("download_size_mismatch");
         if (!stream.write(chunk)) await new Promise((resolve) => stream.once("drain", resolve));
+        const stamp = Date.now();
+        if (stamp - lastProgressAt < PROGRESS_EMIT_INTERVAL_MS) continue;
+        lastProgressAt = stamp;
         this.transition("downloading", { progress: { received, total: manifest.installer.size, percent: Math.floor(received / manifest.installer.size * 100) } });
       }
       await new Promise((resolve, reject) => stream.end((error) => error ? reject(error) : resolve()));
@@ -480,34 +534,64 @@ class DesktopUpdateEngine extends EventEmitter {
   cancel() {
     this.abortController?.abort();
     if (this.state.installerPath) fs.rmSync(this.state.installerPath, { force: true });
+    if (this.state.stagedInstaller?.path) fs.rmSync(this.state.stagedInstaller.path, { force: true });
+    this.state.stagedInstaller = null;
     return this.transition("update_available", { progress: null, installerPath: null, backupPath: null, installOnNextRestart: false });
   }
 
   async verifyInstaller(installerPath, manifestValue) {
+    this.transition("verifying", { progress: null });
+    const manifest = await this.verifyInstallerBytes(installerPath, manifestValue);
+    return this.transition("ready_to_install", { target: manifest, installerPath, errorCode: null, errorDetail: null });
+  }
+
+  /**
+   * The download-time integrity checks, kept callable on their own so the
+   * launch path can repeat exactly them immediately before execution. The
+   * installer sits in a user-writable folder between download and install, so
+   * verifying only at download time leaves a TOCTOU window (issue #1000).
+   */
+  async verifyInstallerBytes(installerPath, manifestValue) {
     const manifest = safeManifest(manifestValue);
     this.verifyManifestSignature(manifest);
-    this.transition("verifying", { progress: null });
     const stat = fs.statSync(installerPath);
     if (stat.size !== manifest.installer.size) throw updateError("installer_size_mismatch");
     const digest = await fileSha256(installerPath);
     if (digest !== manifest.installer.sha256) throw updateError("installer_sha256_mismatch");
-    await this.verifyAuthenticode(installerPath, manifest.installer.expectedPublisher);
-    return this.transition("ready_to_install", { target: manifest, installerPath, errorCode: null, errorDetail: null });
+    await this.verifyAuthenticode(installerPath, manifest.installer.expectedPublisher, manifest.installer.expectedPublisherThumbprint);
+    return manifest;
   }
 
-  async verifyAuthenticode(installerPath, manifestPublisher) {
+  /**
+   * Reads the signer identity from Windows and decides the publisher pin in
+   * Node, so the comparison is exact and testable rather than a PowerShell
+   * wildcard match. `status` must be Valid (a chain and timestamp Windows
+   * accepted) before the identity is even considered.
+   */
+  async verifyAuthenticode(installerPath, manifestPublisher, manifestThumbprint) {
     if (process.platform !== "win32") throw updateError("authenticode_windows_required");
     const publisher = String(manifestPublisher || this.expectedPublisher || "").trim();
     if (!publisher) throw updateError("expected_publisher_missing");
+    const thumbprint = String(manifestThumbprint || "").trim();
+    if (!thumbprint) throw updateError("expected_publisher_thumbprint_missing");
+    if (!/^[0-9A-Fa-f]{40}$/.test(thumbprint)) throw updateError("expected_publisher_thumbprint_invalid");
     const script = [
       "$s=Get-AuthenticodeSignature -LiteralPath $args[0]",
-      "if($s.Status -ne 'Valid'){exit 10}",
-      "if(-not $s.SignerCertificate){exit 11}",
-      "if($s.SignerCertificate.Subject -notlike ('*'+$args[1]+'*')){exit 12}",
-      "$s.SignerCertificate.Subject",
+      "$c=$s.SignerCertificate",
+      "$subject=$null;$simpleName=$null;$thumbprint=$null",
+      "if($c){$subject=[string]$c.Subject;$simpleName=[string]$c.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName,$false);$thumbprint=[string]$c.Thumbprint}",
+      "[ordered]@{status=[string]$s.Status;subject=$subject;simpleName=$simpleName;thumbprint=$thumbprint} | ConvertTo-Json -Compress",
     ].join(";");
-    try { await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script, installerPath, publisher]); }
+    let stdout = "";
+    try {
+      ({ stdout } = await this.commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script, installerPath]));
+    } catch (error) { throw updateError("authenticode_invalid", error); }
+    let certificate;
+    try { certificate = JSON.parse(String(stdout).trim().split(/\r?\n/).pop()); }
     catch (error) { throw updateError("authenticode_invalid", error); }
+    if (certificate?.status !== "Valid") throw updateError("authenticode_invalid");
+    if (!certificateMatchesPin(certificate, publisher, thumbprint)) throw updateError("authenticode_invalid");
+    return certificate;
   }
 
   async prepareOffline(manifestPath, installerPath) {
@@ -601,16 +685,52 @@ class DesktopUpdateEngine extends EventEmitter {
     return this.transition("installing", { previousVersion: this.app.getVersion(), installOnNextRestart: false });
   }
 
-  launchInstaller() {
-    this.markInstalling();
-    const installDirectory = path.dirname(process.execPath);
-    const child = spawn(this.state.installerPath, ["/S", `/D=${installDirectory}`], {
-      detached: true, windowsHide: false, stdio: "ignore",
+  /**
+   * Verify the download, copy it into the protected staging folder, verify the
+   * copy and record the identity of those exact bytes. The launch that follows
+   * checks that identity again and holds the file locked while Windows starts
+   * it, so a replacement between verification and execution cannot run
+   * (issue #1000). This is deliberately not just a second hash of the same
+   * path: the path is user-writable, the staged file is checked by identity.
+   */
+  async stageVerifiedInstaller() {
+    const manifest = this.state.target;
+    const sourcePath = this.state.installerPath;
+    if (!sourcePath || !fs.existsSync(sourcePath)) throw updateError("installer_missing");
+    const staged = await stageInstaller({
+      sourcePath,
+      updatesDir: this.dir,
+      version: manifest?.version,
+      expectedSize: manifest.installer.size,
+      commandRunner: this.commandRunner,
+      logger: this.logger,
     });
-    child.unref();
-    // The PID lets main.js hand the maintenance gate to the installer,
-    // which outlives this process (issue #984).
-    return { state: this.transition("restarting"), installerPid: child.pid ?? null };
+    try {
+      await this.verifyInstallerBytes(staged.path, manifest);
+    } catch (error) {
+      fs.rmSync(staged.path, { force: true });
+      throw error;
+    }
+    try { pruneStagedInstallers(this.dir, staged.path); }
+    catch (error) { this.logger.warn("Could not prune staged installers", { detail: error?.message }); }
+    this.state.stagedInstaller = staged;
+    this.persist();
+    return staged;
+  }
+
+  async launchInstaller() {
+    if (!this.state.target) throw updateError("update_target_missing");
+    if (!this.state.installerPath || !fs.existsSync(this.state.installerPath)) throw updateError("installer_missing");
+    await this.verifyInstallerBytes(this.state.installerPath, this.state.target);
+    const staged = await this.stageVerifiedInstaller();
+    this.markInstalling();
+    const launched = await launchStagedInstaller({
+      staged,
+      installDirectory: path.dirname(process.execPath),
+      sha256: this.state.target.installer.sha256,
+      commandRunner: this.commandRunner,
+    });
+    return { state: this.transition("restarting"), installerPid: launched.installerPid };
   }
 
   completeStartupHealth() {
@@ -629,4 +749,7 @@ module.exports = {
   compareSemVer,
   safeManifest,
   fileSha256,
+  publisherMatchesCertificate,
+  thumbprintMatchesCertificate,
+  certificateMatchesPin,
 };

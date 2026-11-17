@@ -164,9 +164,9 @@ export async function hasCanonicalOverlapForImportEntity(
  * because an active reconciliation run is open for that connection & domain.
  */
 export function webhookTopicDomain(topic: string): ReconciliationDomain | null {
-  if (/^product\.|^catalogue\./.test(topic)) return "product";
-  if (/^customer\./.test(topic)) return "party";
-  if (/^order\.|^refund\./.test(topic)) return "financial_document";
+  if (/(?:^|\.)(?:product|catalogue)\.[^.]+$/.test(topic)) return "product";
+  if (/(?:^|\.)(?:customer\.[^.]+|customers\.sync_completed)$/.test(topic)) return "party";
+  if (/(?:^|\.)(?:(?:order|refund)\.[^.]+|orders\.sync_completed)$/.test(topic)) return "financial_document";
   return null;
 }
 

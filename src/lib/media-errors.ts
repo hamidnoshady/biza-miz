@@ -15,7 +15,7 @@
  * code and a safe localized message) and the log line (to record a
  * machine-greppable `stage`/`code`) derive from one decision.
  */
-import { S3RequestError, redactS3Detail } from "./s3-lite";
+import { isS3Timeout, S3_INTEGRITY_CODES, S3_QUOTA_CODES, S3RequestError, redactS3Detail } from "./s3-lite";
 
 export type MediaFailureStage = "config" | "temp_file" | "s3_upload" | "s3_read" | "database" | "aborted" | "unknown";
 
@@ -118,7 +118,11 @@ function detailOf(error: unknown): string {
   return "";
 }
 
-const LOCAL_FILE_CODES = new Set(["LocalFileUnreadable", "LocalFileSizeMismatch"]);
+const LOCAL_FILE_CODES = new Map([
+  ["LocalFileUnreadable", "temp_file_unreadable"],
+  ["LocalFileUnwritable", "temp_file_unwritable"],
+  ["LocalFileSizeMismatch", "temp_file_mismatch"],
+]);
 
 /**
  * Turn any thrown value from the upload path into a `MediaFailure`.
@@ -147,11 +151,11 @@ export function classifyMediaFailure(error: unknown): MediaFailure {
 
     // The spooled file itself was unreadable/truncated: a local failure that
     // would otherwise look like a provider rejection.
-    if (error.providerCode && LOCAL_FILE_CODES.has(error.providerCode)) {
-      const code = error.providerCode === "LocalFileSizeMismatch" ? "temp_file_mismatch" : "temp_file_unreadable";
+    const localCode = LOCAL_FILE_CODES.get(error.providerCode ?? "");
+    if (localCode) {
       return {
         stage: "temp_file",
-        code,
+        code: localCode,
         retryable: false,
         status: 507,
         providerStatus: null,
@@ -160,7 +164,28 @@ export function classifyMediaFailure(error: unknown): MediaFailure {
       };
     }
 
-    if (error.status === 401 || error.status === 403) {
+    const diagnostic = {
+      stage, detail, providerStatus: error.status, providerCode: error.providerCode,
+    };
+    if (error.status === null && error.providerCode === "InternalError") {
+      return { ...diagnostic, code: "internal_error", status: 500, retryable: false };
+    }
+    if (error.status === 408 || (error.status === null && isS3Timeout(error.providerCode))) {
+      return { ...diagnostic, code: "storage_timeout", status: 503, retryable: error.retryable };
+    }
+    if (error.providerCode === "SignatureDoesNotMatch") {
+      return { ...diagnostic, code: "storage_signature_mismatch", status: 502, retryable: false };
+    }
+    if (error.status === 507 || S3_QUOTA_CODES.has(error.providerCode ?? "")) {
+      return { ...diagnostic, code: "storage_quota_exceeded", status: 507, retryable: false };
+    }
+    if (S3_INTEGRITY_CODES.has(error.providerCode ?? "") || error.providerCode === "artifact_too_large" || error.providerCode === "empty_body") {
+      return { ...diagnostic, code: "storage_integrity_error", status: 502, retryable: error.retryable };
+    }
+    if (error.status === null) {
+      return { ...diagnostic, code: "storage_network_error", status: 503, retryable: error.retryable };
+    }
+    if (error.status === 401 || error.providerCode === "InvalidAccessKeyId" || error.providerCode === "InvalidToken" || error.providerCode === "ExpiredToken") {
       return {
         stage,
         code: "storage_credentials_rejected",
@@ -170,6 +195,9 @@ export function classifyMediaFailure(error: unknown): MediaFailure {
         providerCode: error.providerCode,
         detail,
       };
+    }
+    if (error.status === 403) {
+      return { ...diagnostic, code: "storage_access_denied", status: 502, retryable: false };
     }
     if (error.status === 404) {
       return {
@@ -194,10 +222,9 @@ export function classifyMediaFailure(error: unknown): MediaFailure {
       };
     }
     if (error.retryable) {
-      const code = error.providerCode === "TimeoutError" ? "storage_timeout" : "storage_unavailable";
       return {
         stage,
-        code,
+        code: "storage_unavailable",
         retryable: true,
         status: 503,
         providerStatus: error.status,
@@ -294,6 +321,11 @@ export const MEDIA_FAILURE_MESSAGES: Record<string, string> = {
   temp_file_mismatch: "فایل موقت بارگذاری کامل نشد. دوباره تلاش کنید.",
   storage_credentials_rejected:
     "سرویس ذخیره‌سازی ابری کلید دسترسی را نپذیرفت. این مورد باید توسط مدیر پلتفرم اصلاح شود؛ فایل شما ثبت نشد.",
+  storage_signature_mismatch: "سرویس ذخیره‌سازی امضای درخواست را نپذیرفت. کد پیگیری را به مدیر پلتفرم بدهید تا تنظیمات امضا را بررسی کند.",
+  storage_access_denied: "سرویس ذخیره‌سازی اجازهٔ این عملیات را نداد. کد پیگیری را برای بررسی مجوزهای باکت به مدیر پلتفرم بدهید.",
+  storage_quota_exceeded: "ظرفیت مجاز فضای ذخیره‌سازی ابری تکمیل شده است. کد پیگیری را به مدیر پلتفرم بدهید تا ظرفیت حساب را بررسی کند.",
+  storage_integrity_error: "اندازه یا محتوای فایل در انتقال تأیید نشد. اگر پیام تکرار شد، کد پیگیری را به پشتیبانی بدهید.",
+  storage_network_error: "ارتباط سرور با فضای ذخیره‌سازی ابری برقرار نماند. در صورت تکرار، کد پیگیری را به پشتیبانی بدهید.",
   storage_object_missing: "فایل در فضای ذخیره‌سازی ابری پیدا نشد. با پشتیبانی تماس بگیرید و کد پیگیری را اعلام کنید.",
   storage_unavailable: "سرویس ذخیره‌سازی ابری موقتاً در دسترس نیست؛ چند لحظه بعد دوباره تلاش کنید.",
   storage_timeout: "ارتباط با فضای ذخیره‌سازی ابری زمان‌بر شد و ناتمام ماند؛ دوباره تلاش کنید.",

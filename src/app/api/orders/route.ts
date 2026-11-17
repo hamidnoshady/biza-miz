@@ -6,6 +6,7 @@ import { type CartItemInput } from "@/lib/order-cart";
 import { createOrder } from "@/lib/order-mutations";
 import { recordTourEvidence } from "@/lib/tour-evidence-service";
 import { listOrders, listSettledOrdersInWindow } from "@/lib/order-read-service";
+import { listOrdersAwaitingApproval } from "@/lib/cms/cafe-order-approval-service";
 import { branchClosedOrdersWindow, type ClosedOrdersWindow } from "@/lib/shift-service";
 import { listRecentShiftOptions } from "@/lib/shift-orders-service";
 import type { DiscountInput } from "@/lib/orders";
@@ -81,11 +82,16 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const closedOrders = await listSettledOrdersInWindow(location.id, window.since, {
     until: selectedShift?.endedAt ?? null,
   });
+  // ESH-146 — website orders waiting for a staff decision. Only the orders
+  // screen asks for `scope=shift`, so the POS/waiter polls do not pay a query
+  // for a queue they never show.
+  const pendingWebsiteOrders = await listOrdersAwaitingApproval(location.id);
 
   return NextResponse.json({
     orders,
     heldOrders,
     closedOrders,
+    pendingWebsiteOrders,
     closedSince: window.since,
     shiftStartedAt: window.shiftStartedAt,
     // Null unless the branch has a business day configured — the screen then

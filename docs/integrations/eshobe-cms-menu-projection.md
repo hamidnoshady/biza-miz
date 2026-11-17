@@ -1,10 +1,7 @@
 # ESH-145 — Accounting café menu → Eshobe CMS
 
-Status: implemented in Accounting; the storefront/model companion is
-[eshobe-cms#196](https://github.com/hamidnoshady/eshobe-cms/issues/196)
-(Linear ESH-149). The CMS default branch does **not** yet carry the café fields
-below, so a live site that has not deployed #196 will reject or ignore them;
-the outbox keeps the rejection visible instead of silently dropping the menu.
+Deploy the Eshobe CMS café-menu contract before deploying this sender. The
+existing website outbox will requeue legacy café projections once.
 
 ## Ownership and scope
 
@@ -20,34 +17,25 @@ the outbox keeps the rejection visible instead of silently dropping the menu.
   `(business, base_url, site_id)` reactivates it without forgetting identities.
 - `menus` in the CMS is navigation. Product categories are
   `taxonomy-definitions` / `taxonomy-terms`, using the dedicated taxonomy key
-  `biza_menu_categories` and Product `terms`.
+  `cafe_menu_category` and Product `terms`.
 
-## Wire contract (companion #196)
+## Wire contract
 
-Products carry:
+Biza Miz uses the site-scoped CMS café routes:
 
-- `sourceSystem: "biza_miz"`, `sourceId: "menu_item:<uuid>"` (or `item:<uuid>`
-  for retail). Creates are recovered by these fields after a lost response;
-  name/SKU matching is never used.
-- `title`, `summary`, `sku`, `price`, `image`, `terms`, `menuOrder`.
-- `_status` plus `menuAvailable` for explicit publication/availability.
-  Withdrawal patches the existing product to draft/unavailable; it does not
-  delete the remote row or historical order snapshots.
-- `modifierGroups[]` with stable `sourceId`/`id`, `label`, effective
-  `minSelect`/`maxSelect`, `isActive`, `sortOrder`, and embedded `options[]`
-  with stable ids, labels, signed price deltas in the site's minor unit,
-  active state and order. Add-ons are not variations.
-- `trackInventory`, `inventory`, `inventoryManagedExternally`. Recipe stock is
-  sent only when the connection's stock switch is on. An untracked/no-recipe
-  item sends `inventory: null` and clears tracking; the sync never invents zero
-  or unlimited stock.
+- `PUT /api/site/cafe-menu/categories/:sourceId` upserts the category by stable
+  source ID with its name, description and order.
+- `PUT /api/site/cafe-menu/products/:sourceId` projects each `menu_item:<uuid>`
+  with category source IDs, item details and CMS modifier fields. Modifier
+  prices are signed amounts in the site's minor currency unit. Stock is sent
+  only when enabled. A missing recipe sends `inventory: null` with tracking off.
+- `POST /api/site/cafe-menu/media/:sourceId` uploads by a content-addressed
+  source ID. The object map remembers the remote file and content hash.
+  `image_media_id` takes precedence over the existing `image_url` fallback.
 
-Categories carry `sourceSystem`, `sourceId`, `name`, `description`,
-`menuOrder` and the taxonomy relation. Media uploads carry `sourceSystem` and
-a content-addressed `sourceId`; the local object map stores the media hash so
-unchanged bytes are not re-uploaded on every retry. Legacy `image_url` is
-fetched through the SSRF-safe outbound policy and uploaded as a fallback;
-`image_media_id` wins when present.
+A café item requires its own site opt-in. Withdrawal makes the existing
+product a draft and marks it unavailable while retaining its historic order
+references. The retail product scope still controls the retail catalogue.
 
 ## Queue behavior
 
@@ -56,7 +44,7 @@ fetched through the SSRF-safe outbound policy and uploaded as a fallback;
   send time.
 - `product.upsert`, `price.set` and `stock.set` coalesce per
   `(business, connection, kind, local product)`. Failed/dead rows keep their
-  backoff; a dead row needs the owner's retry. A stale `processing` lease is
+  backoff after the one-time café contract upgrade; a dead row needs the owner's retry. A stale `processing` lease is
   reclaimable after five minutes.
 - A per-connection advisory lock serializes remote identity recovery. Source
   ids and media hashes make a retry after a lost response idempotent.

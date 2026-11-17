@@ -17,7 +17,7 @@ state and audits the change in the same transaction. Reassignment can be done by
 canceling and creating a new task; the old record remains for history.
 
 Targets use `marketing_targets.view/manage`; tasks use
-`marketing_assignments.view/manage`. Creating targets also requires
+`marketing_assignments.view/manage`. Creating targets requires `marketing_targets.view` and
 `parties.view` (even for an unlinked site), because that flow can link the shared
 directory. Management pickers reveal only the branch-scoped operational labels
 and marketer names necessary to assign work. Owner/admin and manager receive
@@ -28,7 +28,7 @@ current membership's authorized active branches; composite foreign keys enforce
 tenant and branch affinity even on direct writes. Both tables have forced tenant
 RLS. Migration 0285 follows 0284; no data is backfilled.
 
-Current boundaries: there is no duplicate-site review, team
+Current boundaries: there is no comprehensive duplicate-site resolution, team
 hierarchy, precise address/coordinates, route planning, lead creation, consent,
 verified attribution or evidence. Links to a party follow the surviving canonical
 party on a CRM merge; archived party links still require review. Assignment pickers search active targets and marketers in the selected authorized
@@ -80,3 +80,48 @@ through their own queue. Both assignment lists can filter by a single priority
 server-side; results retain their existing creation-time order and branch/self
 scope. Priority sorting, day planning and follow-up workflows are not yet implemented. It does not establish a verified visit or
 change any access, CRM or compensation rights.
+
+
+## Same-name prospect-site review
+
+Creating a target requires `marketing_targets.view`, `marketing_targets.manage`
+and `parties.view`. This intentionally adds view permission to the previous
+create contract: review results reveal site details and must not be exposed to
+a manage-only custom role. The page already requires target view. Migration 0300
+adds a lookup index and does not modify existing data.
+
+Before creation, the service checks case-insensitive, trimmed exact site labels
+within the requested authorized active branch, including archived sites. Up to
+20 candidates show their current city, neighborhood, status and whether a party
+is linked (not the party's identity); if more exist the UI says the list is
+truncated. Identical labels may represent genuinely distinct locations, so the
+manager can explicitly confirm creation. The confirmation snapshot is bound to
+the tenant, actor, submitted fields and candidate revisions; if the displayed
+snapshot changes, the server requests a new review. The review override and
+visible candidate IDs/revisions are recorded with the creation audit in the same
+transaction. Target creation and lifecycle edits serialize using a per-tenant
+transaction lock, preventing application-service races during review. Older
+clients see a 409 on possible matches rather than silently creating a record.
+
+This is a narrow warning, **not** a uniqueness constraint, a CRM lead/party
+deduplication engine or evidence that two sites are the same. Spelling variants,
+non-exact names, different branches, direct SQL and mutations outside the
+service are not covered. Managers can intentionally create same-name locations;
+there is no merge workflow or durable audit of abandoned reviews. The snapshot
+token detects changed review inputs; it is not a security credential or proof that
+the manager read every candidate.
+
+
+## Assignment deadline filters
+
+The manager list and the self queue support status, an inclusive deadline range
+and an optional earliest-deadline-first order. Dates are selected using Jalali
+controls and transmitted as ISO civil dates. When either boundary is set,
+assignments without a deadline are excluded; without a range they appear after
+dated rows in deadline order. Equal dates use creation time and ID as stable
+tie-breakers. Search and priority filters combine with these filters on the
+server before pagination; changing filters resets to page one. Date ranges with
+an invalid date or reversed boundaries are rejected. Offset pages can still shift
+as records change. Existing tenant, active-branch and self-only access rules
+apply unchanged. A deadline is a planning field, not a scheduled or verified
+visit; a calendar, follow-up workflow and route planning remain separate work.

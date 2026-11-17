@@ -43,6 +43,7 @@ env:
   WINDOWS_SIGNING_PROVIDER: ${{ vars.WINDOWS_SIGNING_PROVIDER }}
   WINDOWS_SIGNING_RUNNER_JSON: ${{ vars.WINDOWS_SIGNING_RUNNER_JSON }}
   WINDOWS_EXPECTED_SIGNER: ${{ vars.WINDOWS_EXPECTED_SIGNER }}
+  WINDOWS_EXPECTED_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_EXPECTED_SIGNER_THUMBPRINT }}
   DESKTOP_RELEASE_PUBLIC_KEY_PEM: ${{ vars.DESKTOP_RELEASE_PUBLIC_KEY_PEM }}
   WINDOWS_RFC3161_URL: ${{ vars.WINDOWS_RFC3161_URL }}
   PG_SOURCE_VERSION: '16.15'
@@ -94,6 +95,7 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_PROVIDER)) { throw "NOT CONFIGURED: WINDOWS_SIGNING_PROVIDER" }
           if ($env:WINDOWS_SIGNING_PROVIDER -notin @('pfx','certificate-store','azure-trusted-signing')) { throw "Unsupported production WINDOWS_SIGNING_PROVIDER: $env:WINDOWS_SIGNING_PROVIDER" }
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_EXPECTED_SIGNER)) { throw "NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER" }
+          if (($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '') -notmatch '^[0-9A-Fa-f]{40}$') { throw "NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER_THUMBPRINT must be a 40-character SHA-1 thumbprint" }
           if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEY_PEM)) { throw "NOT CONFIGURED: DESKTOP_RELEASE_PUBLIC_KEY_PEM" }
           node -e "const k=require('node:crypto').createPublicKey(process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM.replaceAll('\\n','\n'));if(!String(k.asymmetricKeyType).startsWith('rsa'))process.exit(2)"
           if ($LASTEXITCODE -ne 0) { throw "DESKTOP_RELEASE_PUBLIC_KEY_PEM is not a valid public key" }
@@ -201,7 +203,7 @@ jobs:
           az account clear
 
       - name: Require valid expected-signer Authenticode and RFC3161 timestamps
-        run: .\scripts\verify-windows-signatures.ps1 -ArtifactRoot electron\dist -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath windows-signature-verification.json
+        run: .\scripts\verify-windows-signatures.ps1 -ArtifactRoot electron\dist -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath windows-signature-verification.json
 
       - name: Release scan - signed payload carries no test bootstrap or Central privileges
         # Issue #1194 - the acceptance criterion is about the SIGNED release
@@ -320,6 +322,9 @@ jobs:
           if ($signingStatus.commit -cne $env:CANDIDATE_COMMIT -or $signingStatus.provider -cne $env:WINDOWS_SIGNING_PROVIDER) { throw "Signing status is not bound to this candidate/provider" }
           if ($signingStatus.status -cne 'SIGNED - VERIFICATION REQUIRED') { throw "Signing hook did not record a signed candidate" }
           if (-not $signatureVerification.passed -or $signatureVerification.mode -cne 'signed' -or $signatureVerification.commit -cne $env:CANDIDATE_COMMIT) { throw "Signature verification report is not a passing result for this candidate" }
+          # Issue #1000 - the accepted bytes must have been signed by the exact pinned certificate.
+          $pinnedThumbprint = ($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '').ToUpperInvariant()
+          if ($signatureVerification.expectedThumbprint -cne $pinnedThumbprint) { throw "Signature verification report did not pin this candidate's certificate thumbprint" }
           $verifiedInstaller = @($signatureVerification.artifacts | Where-Object id -eq 'nsis-installer')
           if ($verifiedInstaller.Count -ne 1 -or $verifiedInstaller[0].sha256 -cne $rows[0].sha256 -or [long]($verifiedInstaller[0].bytes) -ne [long]($rows[0].bytes)) { throw "Verified installer does not match release provenance" }
           [ordered]@{
@@ -330,6 +335,7 @@ jobs:
             buildId = "signed-candidate-$env:GITHUB_RUN_ID"
             signingProvider = $env:WINDOWS_SIGNING_PROVIDER
             expectedSigner = $env:WINDOWS_EXPECTED_SIGNER
+            expectedThumbprint = ($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '').ToUpperInvariant()
             releaseManifestPublicKeySha256 = (Get-FileHash electron\desktop-release-public-key.pem -Algorithm SHA256).Hash.ToLowerInvariant()
             signingStatusSha256 = (Get-FileHash electron\dist\windows-signing-status.json -Algorithm SHA256).Hash.ToLowerInvariant()
             signatureVerificationSha256 = (Get-FileHash windows-signature-verification.json -Algorithm SHA256).Hash.ToLowerInvariant()

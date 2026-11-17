@@ -1,6 +1,6 @@
 # Issue #1128 — current remaining-work tracker
 
-Updated 2026-10-26 after Wave 22. This supersedes historical «not built yet»
+Updated 2026-10-26 after Wave 22 and the read-only campaign allocation preview. This supersedes historical «not built yet»
 statements in the original plan where later merged waves shipped those features.
 It is an implementation queue, not a claim that the epic checklist is complete.
 
@@ -54,6 +54,10 @@ See `ISSUE_1128_WAVE22_PROGRESS.md` for capacity, timezone and pagination limits
      tracking/non-overlap verification, actual-time approval and deliberate billing/
      cost-allocation policies remain open. Neither register approves, bills or
      prices labor; planned reservations are separate from actual duration entries.
+   - **Incremental backend foundation:** exact-rial, permission-scoped allocation
+     preview over posted expense lines and same-project/client campaigns. No saved
+     allocation, approval, posting, campaign revenue or P&L yet. See
+     `ISSUE_1128_CAMPAIGN_ALLOCATION_PREVIEW.md`.
    - Campaign dimensions on existing accounting flows and defensible campaign P&L
      tied to the ledger; preserve whole-project exact aggregates. Missing hours,
      revenue or allocation are unknown, not zero or an invented margin.

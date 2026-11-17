@@ -575,7 +575,9 @@ function runDesktopShell() {
       }
       gate = claimed.handle;
       await cleanup();
-      const launched = updater.launchInstaller();
+      // Issue #1000 - the installer's size, SHA-256 and Authenticode pin are
+      // re-verified inside launchInstaller immediately before execution.
+      const launched = await updater.launchInstaller();
       // The installer outlives this process: re-stamp the claim to its PID
       // so the companion stays out until the install actually exits.
       gate.handoff(launched.installerPid);

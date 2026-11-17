@@ -321,6 +321,51 @@ describe("historical invoice archive", () => {
     await owner.query(`UPDATE data_import_rows SET raw = jsonb_set(raw, '{sheet}', '"tampered"'::jsonb) WHERE job_id = $1 AND row_number = 6`, [staged.jobId]);
     await expect(previewService.previewHistoricalImportJob(options)).rejects.toMatchObject({ code: "invalid_staged_sheet_row" });
   });
+  it("atomically archives a reviewed two-sheet workbook and deduplicates a renamed re-upload", async () => {
+    const ExcelJS = (await import("exceljs")).default;
+    const workbook = new ExcelJS.Workbook();
+    const headers = workbook.addWorksheet("Headers");
+    headers.addRow(["externalInvoiceId", "invoiceDate", "externalCustomerCode", "total"]);
+    headers.addRow(["grouped-archive-1", "1403/01/01", "grouped-customer", "100"]);
+    const lines = workbook.addWorksheet("Lines");
+    lines.addRow(["externalInvoiceId", "lineName", "quantity", "unitPrice"]);
+    lines.addRow(["grouped-archive-1", "A", "1", "30"]);
+    lines.addRow(["grouped-archive-1", "B", "1", "70"]);
+    const buffer = Uint8Array.from(await workbook.xlsx.writeBuffer() as unknown as Uint8Array).buffer;
+    const input = { businessId: a.businessId, locationId: a.locationId, actor: { userId: a.actorId, name: "owner" },
+      fileName: "archive.xlsx", format: "xlsx" as const, buffer, sourceKey: "grouped-archive", provider: "generic",
+      currency: "rial" as const, calendar: "jalali" as const, sheets: { headers: "Headers", lines: "Lines" } };
+    await archive.bindHistoricalCustomer({ ...input, externalCustomerCode: "grouped-customer", partyId: a.partyId });
+    const staging = await import("../src/lib/data-transfer/historical-invoice-staging");
+    const stage = async (fileName: string) => {
+      const staged = await staging.stageHistoricalInvoiceFile({ ...input, fileName });
+      return { ...input, jobId: staged.jobId,
+        mapping: { columns: staged.columns.map((field, column) => ({ field, column })) },
+        lineMapping: { columns: staged.lineColumns!.map((field, column) => ({ field, column })) } };
+    };
+    const operationalCounts = async () => (await owner.query(
+      `SELECT ARRAY[(SELECT count(*) FROM orders),(SELECT count(*) FROM order_items),
+         (SELECT count(*) FROM payments),(SELECT count(*) FROM journal_entries),
+         (SELECT count(*) FROM stock_movements),(SELECT count(*) FROM parties)] AS counts`,
+    )).rows[0].counts;
+    const before = await operationalCounts();
+    const first = await stage("archive.xlsx");
+    const preview = await previewService.previewHistoricalImportJob(first);
+    const approve = { ...first, reviewToken: preview.archiveReviewToken, confirmed: true as const };
+    await expect(previewService.executeHistoricalArchiveJob({ ...approve, reviewToken: "0".repeat(64) })).rejects.toMatchObject({ code: "invoice_review_stale" });
+    const result = { createdInvoices: 1, skippedInvoices: 0 };
+    expect(await Promise.all([previewService.executeHistoricalArchiveJob(approve), previewService.executeHistoricalArchiveJob(approve)])).toEqual([result, result]);
+    const renamed = await stage("renamed.xlsx");
+    const retry = await previewService.previewHistoricalImportJob(renamed);
+    expect(await previewService.executeHistoricalArchiveJob({ ...renamed, reviewToken: retry.archiveReviewToken, confirmed: true }))
+      .toEqual({ createdInvoices: 0, skippedInvoices: 1 });
+    const invoices = await archive.listHistoricalInvoices({ ...input, partyId: a.partyId, search: "grouped-archive-1" });
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0]).toMatchObject({ externalId: "grouped-archive-1", totalRial: "100", partyId: a.partyId });
+    const evidence = await archive.getHistoricalInvoiceEvidence({ ...input, invoiceId: invoices[0].id });
+    expect(evidence?.lines.map((line) => line.lineName)).toEqual(["A", "B"]);
+    expect(await operationalCounts()).toEqual(before);
+  });
   it("reviews and atomically confirms only a customer code in the staged job", async () => {
     const staging = await import("../src/lib/data-transfer/historical-invoice-staging");
     const source = "externalInvoiceId,invoiceDate,externalCustomerCode,total,sourceCustomerName,sourceCustomerPhone\n" +

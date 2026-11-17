@@ -199,11 +199,12 @@ function switchesFor(row: WebsiteConnectionRow): SyncSwitches {
   return { pushPrices: row.push_prices, pushStock: row.push_stock, productScope: row.product_scope };
 }
 
-function desiredFor(map: ProductMapState, local: LocalProductSnapshot, switches: SyncSwitches): DesiredProductState {
-  const published = productInScope(map, switches);
+function desiredFor(map: ProductMapState, local: LocalProductSnapshot, switches: SyncSwitches, isMenu: boolean): DesiredProductState {
+  const published = isMenu ? map.syncEnabled : productInScope(map, switches);
   const available = (local.desired.available ?? true) && published && !(switches.pushStock && local.desired.stock === 0);
   const desired = { ...local.desired, published, available };
-  return { ...desired, contentHash: sha256(menuProjectionKey(local.product, desired)) };
+  const contractKey = isMenu ? `cafe-menu-v2:${local.desired.available !== false}:` : "";
+  return { ...desired, contentHash: sha256(contractKey + menuProjectionKey(local.product, desired)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -297,18 +298,22 @@ export async function enqueueWebsiteEvent(
   const connection = await getWebsiteConnectionRow(businessId, opts.connectionId);
   if (!connection || connection.status !== "active") throw new WebsiteNotConnectedError();
   const force = opts.force === true;
+  const cafeMenuContract = localKind === "menu_item" && kind === "product.upsert" ? 2 : undefined;
+  // Re-arm pre-contract dead letters once. Subsequent failures keep the normal retry policy.
+  const resume = "website_outbox.status = 'sent' OR $7 OR (EXCLUDED.payload ? 'cafeMenuContract' AND website_outbox.payload->'cafeMenuContract' IS DISTINCT FROM EXCLUDED.payload->'cafeMenuContract')";
   await query(
     `INSERT INTO website_outbox (business_id, connection_id, kind, local_kind, local_id, payload)
      VALUES ($1, $2, $3, $4, $5, $6::jsonb)
      ON CONFLICT (business_id, connection_id, kind, local_kind, local_id)
      DO UPDATE SET
-       status = CASE WHEN website_outbox.status = 'sent' OR $7 THEN 'pending' ELSE website_outbox.status END,
-       attempts = CASE WHEN website_outbox.status = 'sent' OR $7 THEN 0 ELSE website_outbox.attempts END,
-       next_attempt_at = CASE WHEN website_outbox.status = 'sent' OR $7 THEN now() ELSE website_outbox.next_attempt_at END,
-       error = CASE WHEN website_outbox.status = 'sent' OR $7 THEN NULL ELSE website_outbox.error END,
-       desired_at = CASE WHEN website_outbox.status = 'sent' OR $7 THEN now() ELSE website_outbox.desired_at END,
-       updated_at = CASE WHEN website_outbox.status = 'sent' OR $7 THEN now() ELSE website_outbox.updated_at END`,
-    [businessId, connection.id, kind, localKind, localId, JSON.stringify({ localKind, localId }), force],
+       payload = EXCLUDED.payload,
+       status = CASE WHEN ${resume} THEN 'pending' ELSE website_outbox.status END,
+       attempts = CASE WHEN ${resume} THEN 0 ELSE website_outbox.attempts END,
+       next_attempt_at = CASE WHEN ${resume} THEN now() ELSE website_outbox.next_attempt_at END,
+       error = CASE WHEN ${resume} THEN NULL ELSE website_outbox.error END,
+       desired_at = CASE WHEN ${resume} THEN now() ELSE website_outbox.desired_at END,
+       updated_at = CASE WHEN ${resume} THEN now() ELSE website_outbox.updated_at END`,
+    [businessId, connection.id, kind, localKind, localId, JSON.stringify({ localKind, localId, cafeMenuContract }), force],
   );
 }
 
@@ -328,8 +333,10 @@ export async function refreshWebsiteOutbox(row: WebsiteConnectionRow): Promise<n
       }
       continue;
     }
-    const desired = desiredFor(mapState(map), local, switches);
-    for (const kind of planProductEvents(mapState(map), desired, switches)) {
+    const isMenu = map.local_kind === "menu_item";
+    const effectiveSwitches = isMenu ? { ...switches, productScope: "selected" as const } : switches;
+    const desired = desiredFor(mapState(map), local, effectiveSwitches, isMenu);
+    for (const kind of planProductEvents(mapState(map), desired, effectiveSwitches)) {
       await enqueueWebsiteEvent(row.business_id, kind, map.local_kind, map.local_id, { connectionId: row.id });
       queued += 1;
     }
@@ -370,15 +377,8 @@ async function saveObjectMap(businessId: string, connectionId: string, kind: Obj
 
 async function ensureCategory(adapter: WebsiteAdapter, row: WebsiteConnectionRow, category: WebsiteLocalProduct["category"]): Promise<string | null> {
   if (!category) return null;
-  const taxonomies = await objectMaps(row.business_id, row.id, "taxonomy", [WEBSITE_MENU_TAXONOMY_KEY]);
-  const taxonomy = await adapter.upsertMenuTaxonomy({ remoteId: taxonomies.get(WEBSITE_MENU_TAXONOMY_KEY)?.remote_id });
-  await saveObjectMap(row.business_id, row.id, "taxonomy", WEBSITE_MENU_TAXONOMY_KEY, taxonomy.id);
-  const categories = await objectMaps(row.business_id, row.id, "category", [category.sourceId]);
-  const remote = await adapter.upsertMenuCategory({
-    ...category,
-    remoteId: categories.get(category.sourceId)?.remote_id,
-    taxonomyId: taxonomy.id,
-  });
+  const remote = await adapter.upsertMenuCategory(category);
+  await saveObjectMap(row.business_id, row.id, "taxonomy", WEBSITE_MENU_TAXONOMY_KEY, remote.taxonomyId);
   await saveObjectMap(row.business_id, row.id, "category", category.sourceId, remote.id);
   return remote.id;
 }
@@ -465,7 +465,7 @@ async function ensureMedia(adapter: WebsiteAdapter, row: WebsiteConnectionRow, p
   const existing = (await objectMaps(row.business_id, row.id, "media", [sourceKey])).get(sourceKey);
   if (existing && existing.content_hash === hash) return existing.remote_id;
   const remote = await adapter.uploadMedia({
-    sourceId: `${sourceKey}:${hash}`,
+    sourceId: `url:${sha256(`${sourceKey}:${hash}`)}`,
     filename: legacy.filename,
     mimeType: legacy.mimeType,
     bytes: legacy.bytes,
@@ -523,10 +523,12 @@ async function applyEvent(adapter: WebsiteAdapter, connection: WebsiteConnection
   if (!map) throw new WebsiteAdapterError("not_found", "product map row missing");
   const local = await readLocalProduct(locationId, event.local_kind, event.local_id, current.business_id);
   const switches = switchesFor(current);
-  const published = local !== null && productInScope(mapState(map), switches);
-  const desired = local ? desiredFor(mapState(map), local, switches) : null;
+  const isMenu = event.local_kind === "menu_item";
+  const sourceId = `${event.local_kind}:${event.local_id}`;
+  const desired = local ? desiredFor(mapState(map), local, switches, isMenu) : null;
+  const published = desired?.published === true;
 
-  if (event.kind === "price.set") {
+  if (event.kind === "price.set" && (!isMenu || adapter.key !== "payload")) {
     if (!switches.pushPrices) return;
     if (!map.remote_id) throw new WebsiteAdapterError("not_found", "no remote id yet");
     if (!local || local.desired.priceRial === null) throw new WebsiteAdapterError("rejected", "local product has no price");
@@ -535,7 +537,7 @@ async function applyEvent(adapter: WebsiteAdapter, connection: WebsiteConnection
                   WHERE business_id = $1 AND id = $3`, [current.business_id, local.desired.priceRial, map.id]);
     return;
   }
-  if (event.kind === "stock.set") {
+  if (event.kind === "stock.set" && (!isMenu || adapter.key !== "payload")) {
     if (!switches.pushStock) return;
     if (!map.remote_id) throw new WebsiteAdapterError("not_found", "no remote id yet");
     if (!local) throw new WebsiteAdapterError("not_found", "local product no longer exists");
@@ -545,10 +547,13 @@ async function applyEvent(adapter: WebsiteAdapter, connection: WebsiteConnection
     return;
   }
 
-  if (!map.remote_id && !published) return;
-  if (!local || !desired) {
-    if (map.remote_id) {
-      await adapter.setProductAvailability(map.remote_id, { published: false, available: false });
+  if (event.kind === "price.set" && !switches.pushPrices) return;
+  if (event.kind === "stock.set" && !switches.pushStock) return;
+  const withdrawCafe = isMenu && adapter.key === "payload" && !published;
+  if (!map.remote_id && !published && !withdrawCafe) return;
+  if (!local || !desired || withdrawCafe) {
+    if (map.remote_id || withdrawCafe) {
+      await adapter.setProductAvailability(map.remote_id, { published: false, available: false }, isMenu ? sourceId : undefined);
       await query(
         `UPDATE website_product_map SET last_pushed_at = now(), last_pushed_published = false,
             last_pushed_available = false, last_pushed_content_hash = NULL, updated_at = now()
@@ -567,16 +572,22 @@ async function applyEvent(adapter: WebsiteAdapter, connection: WebsiteConnection
   if (price === null) throw new WebsiteAdapterError("rejected", "local product has no price");
   const categoryTermId = await ensureCategory(adapter, current, local.product.category);
   const imageId = await ensureMedia(adapter, current, local.product);
-  const modifierGroups = await withRemoteModifierIds(current, local.product.modifierGroups ?? []);
+  const groups = local.product.modifierGroups ?? [];
+  const modifierGroups = adapter.key === "payload" && isMenu ? groups : await withRemoteModifierIds(current, groups);
   const input: RemoteProductInput = {
     remoteId: map.remote_id ?? undefined,
-    sourceId: `${event.local_kind}:${event.local_id}`,
+    sourceId,
     title: local.product.name,
     sku: local.product.sku ?? "",
     summary: local.product.description ?? "",
     priceRial: price,
     imageId,
     categoryTermId,
+    ...(isMenu ? {
+      categorySourceId: local.product.category?.sourceId ?? null,
+      menuAvailability: !published || local.desired.available === false ? "unavailable"
+        : switches.pushStock && local.desired.stock === 0 ? "sold_out" : "available",
+    } : {}),
     menuOrder: local.product.sortOrder ?? 0,
     published: desired.published,
     available: desired.available,

@@ -188,6 +188,27 @@ function OrderRowsSkeleton() {
   );
 }
 
+/**
+ * ESH-146 — one website order waiting for a staff decision. Approval is its own
+ * state, so these rows are *not* part of the status/type filters below: they
+ * are work, and they leave the panel when someone accepts or rejects them.
+ */
+interface AwaitingApprovalRow {
+  id: string;
+  orderNumber: string;
+  type: OrderType;
+  tableName: string | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  total: string;
+  note: string | null;
+  openedAt: string;
+  cmsOrderId: string | null;
+  itemCount: number;
+  /** Paid already — rejecting it means a refund is owed. */
+  hasPayment: boolean;
+}
+
 export function OrdersList({
   canEdit,
   canTakePayment,
@@ -219,6 +240,13 @@ export function OrdersList({
   const [orders, setOrders] = useState<OrderRow[] | null>(null);
   const [heldOrders, setHeldOrders] = useState<OrderRow[]>([]);
   const [closedOrders, setClosedOrders] = useState<OrderRow[]>([]);
+  /** Website orders awaiting a decision (ESH-146) — oldest first. */
+  const [pendingApprovals, setPendingApprovals] = useState<AwaitingApprovalRow[]>([]);
+  /** The order whose rejection reason is being typed, if any. */
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [approvalBusyId, setApprovalBusyId] = useState<string | null>(null);
+  const [approvalError, setApprovalError] = useState("");
   const [timeZone, setTimeZone] = useState("Asia/Tehran");
   const loadRequest = useRef(0);
   /** null = nobody is clocked in, so the closed list covers the business day instead of a shift. */
@@ -268,6 +296,7 @@ export function OrdersList({
         businessDay?: BusinessDayWindow | null;
         shifts?: ShiftOption[];
         selectedShift?: ShiftOption | null;
+        pendingWebsiteOrders?: AwaitingApprovalRow[];
         timeZone?: string;
         error?: string;
       }>(
@@ -279,6 +308,7 @@ export function OrdersList({
         setOrders(data.orders);
         setHeldOrders(data.heldOrders ?? []);
         setClosedOrders(data.closedOrders ?? []);
+        setPendingApprovals(data.pendingWebsiteOrders ?? []);
         setShiftStartedAt(data.shiftStartedAt ?? null);
         setBusinessDay(data.businessDay ?? null);
         setShifts(data.shifts ?? []);
@@ -482,6 +512,41 @@ export function OrdersList({
     setShiftFilter("");
   }
 
+  /**
+   * Accept or reject one website order. The server owns every rule (state
+   * machine, permission, exactly-once kitchen dispatch, the CMS outbox); this
+   * only reports what it said.
+   */
+  const decideApproval = useCallback(
+    async (orderId: string, decision: "accepted" | "rejected", reason?: string) => {
+      setApprovalBusyId(orderId);
+      setApprovalError("");
+      try {
+        const { ok, data } = await api<{ status?: string; error?: string }>(
+          `/api/orders/${orderId}/website-approval`,
+          { method: "POST", body: JSON.stringify({ decision, reason: reason ?? null }) },
+        );
+        if (!ok) {
+          setApprovalError(
+            data?.error === "reason_required"
+              ? "دلیل رد سفارش را بنویسید."
+              : "تصمیم ثبت نشد. دوباره تلاش کنید.",
+          );
+          return;
+        }
+        setPendingApprovals((rows) => rows.filter((row) => row.id !== orderId));
+        setRejectingId(null);
+        setRejectReason("");
+        void load();
+      } catch {
+        setApprovalError("ارتباط با سرور برقرار نشد. تصمیم ثبت نشد.");
+      } finally {
+        setApprovalBusyId(null);
+      }
+    },
+    [load],
+  );
+
   return (
     <PageShell>
       <header className={`mb-3 flex flex-col gap-3 ${cardClass} p-3 sm:p-4 md:flex-row md:items-center md:justify-between`}>
@@ -538,6 +603,123 @@ export function OrdersList({
           </button>
         </div>
       </header>
+
+      {pendingApprovals.length > 0 ? (
+        <section
+          className={`mb-3 ${cardClass} p-3`}
+          aria-label="سفارش‌های سایت در انتظار تأیید"
+        >
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <h2 className="text-sm font-bold text-foreground">
+              در انتظار تأیید ({toPersianDigits(pendingApprovals.length)})
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              سفارش سایت تا تأیید شما به آشپزخانه نمی‌رود.
+            </p>
+          </div>
+          {approvalError ? (
+            <p role="alert" className="mb-2 text-xs font-bold text-rose-700 dark:text-rose-300">
+              {approvalError}
+            </p>
+          ) : null}
+          <ul className="space-y-2">
+            {pendingApprovals.map((row) => {
+              const busy = approvalBusyId === row.id;
+              return (
+                <li
+                  key={row.id}
+                  className="rounded-xl border border-border/80 bg-muted/40 p-2"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openDetail(row.id)}
+                      className="min-h-11 min-w-0 flex-1 text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45"
+                    >
+                      <span className="block text-sm font-bold text-foreground">
+                        {formatQueueLabel(row.type, Number(row.orderNumber))} ·{" "}
+                        {money.format(Number(row.total))}
+                      </span>
+                      <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                        {[
+                          TYPE_LABELS[row.type],
+                          row.tableName,
+                          row.customerPhone ?? row.customerName,
+                          `${toPersianDigits(row.itemCount)} قلم`,
+                          formatJalali(row.openedAt, { withTime: true, timeZone }),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                    </button>
+                    <div className="flex shrink-0 gap-2">
+                      {canEdit ? (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void decideApproval(row.id, "accepted")}
+                          className="min-h-11 rounded-xl border border-emerald-500/25 bg-emerald-50 px-3 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 disabled:opacity-60 dark:border-emerald-500/25 dark:bg-emerald-500/15 dark:text-emerald-300 dark:hover:bg-emerald-500/25"
+                        >
+                          تأیید
+                        </button>
+                      ) : null}
+                      {canVoid ? (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            setRejectingId((current) => (current === row.id ? null : row.id));
+                            setRejectReason("");
+                            setApprovalError("");
+                          }}
+                          className="min-h-11 rounded-xl border border-border/80 bg-card px-3 text-xs font-bold text-muted-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 disabled:opacity-60"
+                        >
+                          رد
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                  {rejectingId === row.id ? (
+                    <div className="mt-2 space-y-2">
+                      {row.hasPayment ? (
+                        <p className="rounded-xl border border-amber-500/25 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/60 dark:bg-amber-500/15 dark:text-amber-200">
+                          این سفارش پرداخت شده است؛ رد آن نیازمند بازپرداخت از مسیر بازپرداخت‌های صندوق است.
+                        </p>
+                      ) : null}
+                      <label className="block text-xs text-muted-foreground">
+                        دلیل رد (برای مشتری و گزارش ثبت می‌شود)
+                        <textarea
+                          value={rejectReason}
+                          onChange={(event) => setRejectReason(event.target.value)}
+                          rows={2}
+                          className="mt-1 w-full rounded-xl border border-border/80 bg-card px-3 py-2 text-sm text-foreground outline-none focus-visible:border-amber-500 dark:focus-visible:border-amber-500/60 focus-visible:ring-2 focus-visible:ring-amber-500/25"
+                        />
+                      </label>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={busy || !rejectReason.trim()}
+                          onClick={() => void decideApproval(row.id, "rejected", rejectReason)}
+                          className="min-h-11 rounded-xl border border-rose-500/25 bg-rose-50 px-3 text-xs font-bold text-rose-700 transition-colors hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 disabled:opacity-60 dark:border-rose-500/25 dark:bg-rose-500/15 dark:text-rose-300 dark:hover:bg-rose-500/25"
+                        >
+                          ثبت رد
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRejectingId(null)}
+                          className="min-h-11 rounded-xl border border-border/80 bg-card px-3 text-xs font-bold text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45"
+                        >
+                          انصراف
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
 
       {loadError && orders ? (
         <div

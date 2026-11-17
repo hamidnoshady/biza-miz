@@ -505,7 +505,8 @@ async function updateJob(
 
 export async function getImportJob(businessId: string, jobId: string): Promise<ImportJob | null> {
   const { rows } = await query<JobRow>(
-    `SELECT ${JOB_COLUMNS} FROM data_import_jobs WHERE business_id = $1 AND id = $2`,
+    `SELECT ${JOB_COLUMNS} FROM data_import_jobs WHERE business_id = $1 AND id = $2
+       AND entity_key <> 'accounting.historical_invoices'`,
     [businessId, jobId],
   );
   return rows[0] ? toJob(rows[0]) : null;
@@ -516,7 +517,9 @@ export async function listImportJobs(
   options: { entityKey?: string | null; limit?: number } = {},
 ): Promise<ImportJob[]> {
   const params: unknown[] = [businessId];
-  const where = ["business_id = $1"];
+  // Historical evidence is branch-scoped and requires accounting + CRM
+  // permissions. Generic transfer history and AI reads lack those gates.
+  const where = ["business_id = $1", "entity_key <> 'accounting.historical_invoices'"];
   if (options.entityKey) {
     params.push(options.entityKey);
     where.push(`entity_key = $${params.length}`);

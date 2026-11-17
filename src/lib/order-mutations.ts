@@ -196,6 +196,17 @@ export interface CreateOrderInput {
   actorRole?: Role;
   /** False only while applying an event already present in the sync inbox. */
   recordSyncEvent?: boolean;
+  /**
+   * Skip the kitchen dispatch enqueue for this order (ESH-146).
+   *
+   * A website order is written before any staff member has seen it, and
+   * kitchen dispatch is a *decision*: an unapproved order must not print a
+   * ticket or appear on a KDS screen. The caller enqueues the same
+   * `enqueueKitchenDispatch()` set when it accepts the order, which is
+   * idempotent per (order, line set) — so accepting twice cannot print twice,
+   * and no second dispatch subsystem exists.
+   */
+  holdKitchenDispatch?: boolean;
 }
 
 export interface CreateOrderOutput {
@@ -614,7 +625,7 @@ export async function createOrder(
       );
     }
 
-    if (businessId) {
+    if (businessId && !input.holdKitchenDispatch) {
       await enqueueKitchenDispatch(client, {
         businessId,
         locationId: input.locationId,

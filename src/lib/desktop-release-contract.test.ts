@@ -26,7 +26,7 @@ describe("windows-production-release.yml → /api/desktop-releases/promote", () 
 
   it("posts exactly the fields Central's validator reads", () => {
     expect(keys.sort()).toEqual([
-      "buildCommit", "buildId", "channel", "expectedPublisher", "installerSha256", "installerSize", "installerUrl",
+      "buildCommit", "buildId", "channel", "expectedPublisher", "expectedPublisherThumbprint", "installerSha256", "installerSize", "installerUrl",
       "knownGoodReleaseId", "mandatory", "manifestSignature", "maximumSchemaVersion", "migrationVersion",
       "minimumSchemaVersion", "minimumSupportedVersion", "recoveryNotes", "releaseNotes", "rolloutPercentage",
       "rolloutState", "status", "version",
@@ -42,7 +42,7 @@ describe("windows-production-release.yml → /api/desktop-releases/promote", () 
         rolloutState: "internal", rolloutPercentage: 0, minimumSupportedVersion: null, mandatory: false,
         installerUrl: "https://github.com/example/product/releases/download/v1.2.3/Setup.exe",
         installerSha256: "a".repeat(64), installerSize: 1234, manifestSignature: "A".repeat(100),
-        expectedPublisher: "Example Publisher", migrationVersion: 226, minimumSchemaVersion: 1,
+        expectedPublisher: "Example Publisher", expectedPublisherThumbprint: "A".repeat(40), migrationVersion: 226, minimumSchemaVersion: 1,
         maximumSchemaVersion: 226, releaseNotes: ["note"], recoveryNotes: null, knownGoodReleaseId: null,
       };
       expect(Object.keys(payload).sort()).toEqual(keys.sort());

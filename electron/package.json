@@ -1,6 +1,6 @@
 {
   "name": "business-suite-desktop",
-  "version": "1.0.186",
+  "version": "1.0.193",
   "buildCommit": "unknown",
   "buildId": "development",
   "releaseChannel": "stable",
@@ -58,6 +58,7 @@
       "local-storage.js",
       "logger.js",
       "update-engine.js",
+      "installer-staging.js",
       "update-policy.js",
       "cloud-pane.js",
       "navigation-guard.js",

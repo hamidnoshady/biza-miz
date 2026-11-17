@@ -102,7 +102,7 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
   "/api/growth/marketing-touchpoints/options": { GET: [PERMISSIONS.marketingAttributionManage, PERMISSIONS.crmView, PERMISSIONS.crmManage, PERMISSIONS.marketingAssignmentsView] },
   "/api/growth/marketing-targets/locations": { GET: PERMISSIONS.marketingTargetsManage },
   "/api/growth/marketing-targets/[id]": { PATCH: PERMISSIONS.marketingTargetsManage },
-  "/api/growth/marketing-targets": { GET: PERMISSIONS.marketingTargetsView, POST: [PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView] },
+  "/api/growth/marketing-targets": { GET: PERMISSIONS.marketingTargetsView, POST: [PERMISSIONS.marketingTargetsView, PERMISSIONS.marketingTargetsManage, PERMISSIONS.partiesView] },
   "/api/growth/my-marketing-touchpoints": { GET: [PERMISSIONS.marketingAssignmentsSelf, PERMISSIONS.crmView, PERMISSIONS.crmManage], POST: [PERMISSIONS.marketingAssignmentsSelf, PERMISSIONS.crmView, PERMISSIONS.crmManage] },
   "/api/growth/my-marketing-assignments": { GET: PERMISSIONS.marketingAssignmentsSelf },
   "/api/growth/my-marketing-assignments/[id]": { PATCH: PERMISSIONS.marketingAssignmentsSelf },

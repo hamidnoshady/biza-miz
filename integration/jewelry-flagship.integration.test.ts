@@ -128,6 +128,40 @@ beforeEach(async () => {
   }
 });
 
+describe("native jewelry barcode labels", () => {
+  it("assigns a branch-locked supplied barcode atomically and refuses duplicates", async () => {
+    const { createItem } = await import("../src/lib/items-service");
+    const { assignBarcode } = await import("../src/lib/item-barcodes-service");
+    const item = await createItem({ locationId: biz.locationId, name: "قطعه", tracking: "weight" });
+    const assign = () => dbLib.withTenantTransaction(biz.id, async (client) => {
+      const lock = await client.query("SELECT id FROM items WHERE id = $1 AND location_id = $2 FOR UPDATE", [item.id, biz.locationId]);
+      expect(lock.rows).toHaveLength(1);
+      return assignBarcode(item.id, { code: "2000000000015" }, client);
+    }, { locationId: biz.locationId });
+    expect((await assign()).code).toBe("2000000000015");
+    await expect(assign()).rejects.toThrow("این بارکد قبلاً");
+    const result = await db.query("SELECT code, location_id FROM item_barcodes WHERE item_id = $1", [item.id]);
+    expect(result.rows).toEqual([{ code: "2000000000015", location_id: biz.locationId }]);
+  });
+  it("renders the real piece purity and exact net weight from its own branch", async () => {
+    const items = await import("../src/lib/items-service");
+    const { getLabelPrintData } = await import("../src/lib/printing/label-print-data");
+    const { labelToPrintDocument } = await import("../src/lib/printing/document-bridge");
+    const { builtInTemplate, renderPrintTemplate } = await import("../src/lib/print-template");
+    const item = await items.createItem({ locationId: biz.locationId, name: "انگشتر", tracking: "weight" });
+    await items.setWeightAttributes(item.id, { purity: "18", grossWeight: "3.5", netWeight: "3.123456789", unitCostPerGram: "10000" });
+    await db.query("INSERT INTO item_barcodes (location_id, item_id, code) VALUES ($1, $2, $3)", [biz.locationId, item.id, "2000000000015"]);
+    const data = await dbLib.withTenant(biz.id, () => getLabelPrintData({ businessId: biz.id, locationId: biz.locationId, itemId: item.id }));
+    expect(data?.label.fields).toContainEqual({ label: "عیار", value: "۱۸" });
+    expect(data?.label.fields).toContainEqual({ label: "وزن", value: "۳٫۱۲۳۴۵۶۷۸۹ گرم خالص" });
+    const html = renderPrintTemplate(builtInTemplate("label57x40-label")!, labelToPrintDocument(data!.label));
+    expect(html).toContain("۳٫۱۲۳۴۵۶۷۸۹ گرم خالص"); expect(html).toContain("2000000000015"); expect(html).toContain("<svg");
+    expect(html).not.toContain("بهای خرید");
+    const { rows: branches } = await db.query<{ id: string }>("INSERT INTO locations (business_id, name) VALUES ($1, 'Other') RETURNING id", [biz.id]);
+    expect(await dbLib.withTenant(biz.id, () => getLabelPrintData({ businessId: biz.id, locationId: branches[0].id, itemId: item.id }))).toBeNull();
+  });
+});
+
 async function withClient<T>(fn: (client: import("pg").PoolClient) => Promise<T>): Promise<T> {
   const client = await dbLib.getPool().connect();
   try {

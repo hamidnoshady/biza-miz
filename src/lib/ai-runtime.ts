@@ -59,13 +59,26 @@ export async function resolveAiConfigFor(
  * mode is a per-turn *routing* choice made by the member in front of the screen.
  * Letting a branch override silently win would mean the mode picker lies.
  */
-export function applyRuntimeModeAlias<T extends { model: string }>(
+export function applyRuntimeModeAlias<T extends { model: string; temperature?: number; maxOutputTokens?: number }>(
   config: T,
-  mode: { model_alias?: string | null } | null | undefined,
+  mode: {
+    model_alias?: string | null;
+    temperature?: number | null;
+    max_output_tokens?: number | null;
+  } | null | undefined,
 ): T {
   const alias = mode?.model_alias?.trim();
-  if (!alias) return config;
-  return { ...config, model: alias };
+  const temperature = mode?.temperature;
+  const maxOutputTokens = mode?.max_output_tokens;
+  // Null overrides mean "inherit the gateway's resolved defaults". Apply all
+  // three per-mode controls to real tenant turns, not only the playground.
+  if (!alias && temperature == null && maxOutputTokens == null) return config;
+  return {
+    ...config,
+    ...(alias ? { model: alias } : {}),
+    ...(temperature != null ? { temperature } : {}),
+    ...(maxOutputTokens != null ? { maxOutputTokens } : {}),
+  };
 }
 
 /**

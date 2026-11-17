@@ -198,7 +198,8 @@ export async function listWatchAttributes(locationId: string): Promise<Map<strin
   const { rows } = await query<AttributesRow>(
     `SELECT a.item_id, a.reference_no, a.movement, a.case_material,
             a.case_diameter_mm::text AS case_diameter_mm, a.water_resistance_m,
-            a.dial_color, a.bracelet_material, a.gender
+            a.dial_color, a.bracelet_material, a.gender, a.case_dimensions_mm,
+            a.bracelet_color, a.clasp_type, a.case_color, a.case_shape
        FROM watch_item_attributes a JOIN items i ON i.id = a.item_id
       WHERE i.location_id = $1`,
     [locationId],

@@ -16,6 +16,7 @@ module.exports = async function writeSigningStatus(result) {
     status: provider === "unsigned" ? "UNSIGNED DEVELOPMENT" : "SIGNED - VERIFICATION REQUIRED",
     provider,
     expectedSigner: process.env.WINDOWS_EXPECTED_SIGNER?.trim() || null,
+    expectedThumbprint: process.env.WINDOWS_EXPECTED_SIGNER_THUMBPRINT?.replace(/[\s:]/g, "").toUpperCase() || null,
     rfc3161TimestampRequired: provider !== "unsigned",
     artifacts: result.artifactPaths.map((artifactPath) => path.basename(artifactPath)).sort(),
     commit: process.env.CANDIDATE_COMMIT || process.env.GITHUB_SHA || null,

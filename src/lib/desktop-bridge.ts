@@ -129,7 +129,7 @@ export interface DesktopUpdateState {
     releasedAt: string;
     minimumSupportedVersion: string | null;
     mandatory: boolean;
-    installer: { url: string; sha256: string; size: number; signatureRequired: true; expectedPublisher: string | null };
+    installer: { url: string; sha256: string; size: number; signatureRequired: true; expectedPublisher: string | null; expectedPublisherThumbprint: string | null };
     database: { migrationVersion: number | null; minimumSchemaVersion: number | null; maximumSchemaVersion: number | null; backupRequired: true };
     releaseNotes: string[];
     recovery: { knownGoodVersion: string | null; notes: string | null };

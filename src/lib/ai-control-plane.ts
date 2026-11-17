@@ -46,8 +46,8 @@ export interface UpdateModeInput {
   mode: AiRuntimeMode;
   modelAlias?: string;
   isActive?: boolean;
-  temperature?: number;
-  maxOutputTokens?: number;
+  temperature?: number | null;
+  maxOutputTokens?: number | null;
   updatedBy: string;
 }
 
@@ -72,13 +72,15 @@ export async function updatePlatformAiMode(input: UpdateModeInput): Promise<Plat
     params.push(input.isActive);
     sets.push(`is_active = $${params.length}`);
   }
+  // Explicit null clears a per-mode override so the gateway defaults apply.
+  // Omitted fields leave the persisted override untouched.
   if (input.temperature !== undefined) {
-    if (!Number.isFinite(input.temperature) || input.temperature < 0 || input.temperature > 2) return null;
-    params.push(Math.round(input.temperature * 100) / 100);
+    if (input.temperature !== null && (!Number.isFinite(input.temperature) || input.temperature < 0 || input.temperature > 2)) return null;
+    params.push(input.temperature === null ? null : Math.round(input.temperature * 100) / 100);
     sets.push(`temperature = $${params.length}`);
   }
   if (input.maxOutputTokens !== undefined) {
-    if (!Number.isInteger(input.maxOutputTokens) || input.maxOutputTokens < 1 || input.maxOutputTokens > 200_000) {
+    if (input.maxOutputTokens !== null && (!Number.isInteger(input.maxOutputTokens) || input.maxOutputTokens < 1 || input.maxOutputTokens > 200_000)) {
       return null;
     }
     params.push(input.maxOutputTokens);
