@@ -963,6 +963,8 @@ async function runAcceptance() {
   /* 1 — the installed bytes carry no test bootstrap and no Central console. */
   const resourcesDir = path.join(path.dirname(executable), "resources");
   if (fs.existsSync(resourcesDir)) {
+    // Verify the actual installed bytes, not just electron-builder's config.
+    require("./postgres-gui-libraries.js").verifyPackaged(resourcesDir);
     const findings = scanShippedPayload({ resourcesDir });
     if (findings.length) {
       fail(

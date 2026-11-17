@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { HistoricalFileError, parseHistoricalInvoiceFile } from "./historical-invoice-file";
+import { boundedHistoricalWorkbook } from "./historical-invoice-xlsx";
 
 const bytes = (text: string): ArrayBuffer => new TextEncoder().encode(text).buffer as ArrayBuffer;
 async function workbook(rows: unknown[][][], names = ["Headers", "Lines"]): Promise<ArrayBuffer> {
@@ -87,6 +88,79 @@ describe("historical invoice file parsing", () => {
     zip.file(worksheet.name, (await worksheet.async("string")).replace("</worksheet>", '<mergeCells count="1"><mergeCell ref="A1:XFD1048576"/></mergeCells></worksheet>'));
     const mutated = await zip.generateAsync({ type: "uint8array" });
     await expect(parseHistoricalInvoiceFile(Uint8Array.from(mutated).buffer, "xlsx")).rejects.toMatchObject({ code: "xlsx_unsupported_layout" });
+  });
+  it("rejects validation and named ranges before ExcelJS can expand them", async () => {
+    const input = await workbook([[["id"], ["001"]]]);
+    const validations = await JSZip.loadAsync(input);
+    const worksheet = validations.file("xl/worksheets/sheet1.xml")!;
+    validations.file(worksheet.name, (await worksheet.async("string")).replace("</worksheet>",
+      '<dataValidations count="1"><dataValidation type="list" sqref="A1:XFD1048576"><formula1>1</formula1></dataValidation></dataValidations></worksheet>'));
+    await expect(boundedHistoricalWorkbook(Uint8Array.from(await validations.generateAsync({ type: "uint8array" })).buffer))
+      .rejects.toMatchObject({ code: "xlsx_unsupported_layout" });
+    const named = await JSZip.loadAsync(input);
+    const workbookXml = named.file("xl/workbook.xml")!;
+    named.file(workbookXml.name, (await workbookXml.async("string")).replace("</workbook>",
+      '<definedNames><definedName name="Huge">Headers!$A$1:$XFD$1048576</definedName></definedNames></workbook>'));
+    await expect(boundedHistoricalWorkbook(Uint8Array.from(await named.generateAsync({ type: "uint8array" })).buffer))
+      .rejects.toMatchObject({ code: "xlsx_unsupported_layout" });
+  });
+  it("rejects duplicate row coordinates instead of allowing ExcelJS to overwrite evidence", async () => {
+    const input = await workbook([[["id"], ["original"]]]);
+    const zip = await JSZip.loadAsync(input);
+    const worksheet = zip.file("xl/worksheets/sheet1.xml")!;
+    const xml = await worksheet.async("string");
+    const row = xml.match(/<row r="2"[^>]*>[\s\S]*?<\/row>/)?.[0];
+    expect(row).toBeTruthy();
+    zip.file(worksheet.name, xml.replace(row!, `${row}${row}`));
+    const mutated = Uint8Array.from(await zip.generateAsync({ type: "uint8array" })).buffer;
+    await expect(parseHistoricalInvoiceFile(mutated, "xlsx")).rejects.toMatchObject({ code: "invalid_xlsx_archive" });
+  });
+  it("rejects excessive or ambiguous workbook sheet identifiers before materialization", async () => {
+    const input = await workbook([[["id"], ["1"]], [["id"], ["2"]]]);
+    for (const change of [
+      (xml: string) => xml.replace('sheetId="1"', 'sheetId="999999999"'),
+      (xml: string) => xml.replace('sheetId="2"', 'sheetId="1"'),
+      (xml: string) => xml.replace('name="Lines"', 'name="Headers"'),
+      (xml: string) => {
+        const first = /<sheet\b[^>]*name="Headers"[^>]*r:id="([^"]+)"/.exec(xml)?.[1];
+        return xml.replace(/(<sheet\b[^>]*name="Lines"[^>]*r:id=")[^"]+/, `$1${first}`);
+      },
+    ]) {
+      const zip = await JSZip.loadAsync(input);
+      const file = zip.file("xl/workbook.xml")!;
+      const xml = await file.async("string");
+      const changed = change(xml);
+      expect(changed).not.toBe(xml);
+      zip.file(file.name, changed);
+      await expect(boundedHistoricalWorkbook(Uint8Array.from(await zip.generateAsync({ type: "uint8array" })).buffer))
+        .rejects.toMatchObject({ code: "invalid_xlsx_archive" });
+    }
+  });
+  it("rejects missing, duplicated and unsupported worksheet relationships rather than dropping a sheet", async () => {
+    const input = await workbook([[["id"], ["1"]], [["id"], ["2"]]]);
+    for (const change of [
+      (xml: string) => xml.replace('Target="worksheets/sheet2.xml"', 'Target="worksheets/missing.xml"'),
+      (xml: string) => xml.replace('Target="worksheets/sheet2.xml"', 'Target="worksheets/sheet1.xml"'),
+      (xml: string) => xml.replace('Target="worksheets/sheet2.xml"', 'Target="chartsheets/sheet2.xml"'),
+      (xml: string) => xml.replace('Target="worksheets/sheet2.xml"', 'Target="worksheets/sheet2.xml" TargetMode="External"'),
+      (xml: string) => {
+        const first = /<Relationship Id="([^"]+)"[^>]+Target="worksheets\/sheet1.xml"/.exec(xml)?.[1];
+        return xml.replace(/(<Relationship Id=")[^"]+("[^>]+Target="worksheets\/sheet2.xml")/, `$1${first}$2`);
+      },
+    ]) {
+      const zip = await JSZip.loadAsync(input);
+      const file = zip.file("xl/_rels/workbook.xml.rels")!;
+      const xml = await file.async("string");
+      const changed = change(xml);
+      expect(changed).not.toBe(xml);
+      zip.file(file.name, changed);
+      const mutated = Uint8Array.from(await zip.generateAsync({ type: "uint8array" })).buffer;
+      await expect(boundedHistoricalWorkbook(mutated)).rejects.toMatchObject({ code: "invalid_xlsx_archive" });
+    }
+    const zip = await JSZip.loadAsync(input);
+    zip.file("xl/worksheets/sheet3.xml", await zip.file("xl/worksheets/sheet2.xml")!.async("string"));
+    await expect(boundedHistoricalWorkbook(Uint8Array.from(await zip.generateAsync({ type: "uint8array" })).buffer))
+      .rejects.toMatchObject({ code: "invalid_xlsx_archive" });
   });
   it("bounds expanded XLSX data, even if the compressed upload is small", async () => {
     const zip = new JSZip();

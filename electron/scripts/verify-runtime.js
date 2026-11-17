@@ -166,6 +166,13 @@ if (process.platform === "win32") {
   if (JSON.stringify(platformPackages) !== JSON.stringify(["windows-x64"])) {
     fail(`expected exactly one Windows PostgreSQL payload, found: ${platformPackages.join(", ") || "none"}`);
   }
+  try {
+    require("./postgres-gui-libraries.js").verifySource(
+      path.join(embeddedRoot, "windows-x64", "native"), electronPackage.build.files,
+    );
+  } catch (error) {
+    fail(`PostgreSQL GUI library exclusion is unsafe: ${error.message}`);
+  }
 } else if (platformPackages.length !== 1) {
   fail(`expected one host PostgreSQL payload, found: ${platformPackages.join(", ") || "none"}`);
 }

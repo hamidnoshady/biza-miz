@@ -83,6 +83,14 @@ describe("the shipped main process has no smoke backdoor", () => {
       "!node_modules/@embedded-postgres/windows-x64/native/bin/stackbuilder.exe",
       "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase*.dll",
       "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw*.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase3210u_net_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase3210u_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase3210u_xml_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_adv_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_aui_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_core_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_html_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_xrc_vc_x64_custom.dll",
     ]);
   });
 });

@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ permission: vi.fn(), location: vi.fn(), list: vi.fn() }));
+const mocks = vi.hoisted(() => ({ permission: vi.fn(), location: vi.fn(), list: vi.fn(), summary: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ withTenantScope: (handler: unknown) => handler, requirePermission: mocks.permission }));
 vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: mocks.location }));
-vi.mock("@/lib/data-transfer/historical-invoice-archive-service", () => ({ listHistoricalInvoices: mocks.list }));
+vi.mock("@/lib/data-transfer/historical-invoice-archive-service", () => ({ listHistoricalInvoices: mocks.list, summarizeHistoricalInvoiceSources: mocks.summary }));
 import { GET } from "./route";
 
 const id = "8a86d451-f018-4bc9-bcb1-e04bcd96c91c";
@@ -14,6 +14,7 @@ beforeEach(() => {
   mocks.permission.mockReset().mockResolvedValue({ session: { businessId: "biz" }, error: null });
   mocks.location.mockReset().mockResolvedValue({ id: "active-branch" });
   mocks.list.mockReset().mockResolvedValue([]);
+  mocks.summary.mockReset().mockResolvedValue({ sources: [], hasMore: false });
 });
 
 describe("customer historical invoice history", () => {
@@ -22,6 +23,8 @@ describe("customer historical invoice history", () => {
     expect(response.status).toBe(200);
     expect(mocks.permission).toHaveBeenCalledWith("parties.view");
     expect(mocks.list).toHaveBeenCalledWith({ businessId: "biz", locationId: "active-branch", partyId: id, search: "old", limit: 51, offset: 50 });
+    expect(mocks.summary).toHaveBeenCalledWith({ businessId: "biz", locationId: "active-branch", partyId: id });
+    expect(await response.json()).toMatchObject({ sourceSummary: { sources: [], hasMore: false } });
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
   it("rejects unauthorized access, invalid customers and missing branches before a read", async () => {
@@ -31,6 +34,7 @@ describe("customer historical invoice history", () => {
     mocks.location.mockResolvedValueOnce(null);
     expect((await GET(...request())).status).toBe(409);
     expect(mocks.list).not.toHaveBeenCalled();
+    expect(mocks.summary).not.toHaveBeenCalled();
   });
   it("caps page output and reports whether another page exists", async () => {
     mocks.list.mockResolvedValueOnce(Array.from({ length: 51 }, (_, index) => ({ id: String(index) })));

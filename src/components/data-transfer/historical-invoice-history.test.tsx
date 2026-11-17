@@ -24,6 +24,20 @@ describe("historical customer invoices", () => {
     expect(screen.getByText(/پرداختی در منبع: ۱ ریال/)).toBeTruthy();
     expect(screen.getByText(/۱۴۰۳\/۰۱\/۰۱/)).toBeTruthy();
   });
+  it("shows separate unreconciled source subtotals without implying lifetime sales", async () => {
+    mocks.api.mockResolvedValueOnce({ ok: true, aborted: false, data: { invoices: [], hasMore: false, sourceSummary: {
+      sources: [
+        { sourceKey: "old-a", provider: "A", invoiceCount: "2", totalRial: "18446744073709551614" },
+        { sourceKey: "old-b", provider: "B", invoiceCount: "1", totalRial: "500" },
+      ], hasMore: true,
+    } } });
+    render(<HistoricalInvoiceHistory customerId="customer-a" />);
+    expect((await screen.findByText(/منبع: old-a/)).textContent).toContain("۱۸٬۴۴۶٬۷۴۴٬۰۷۳٬۷۰۹٬۵۵۱٬۶۱۴ ریال");
+    expect(screen.getByText(/منبع: old-b/).textContent).toContain("تعداد فاکتور: ۱");
+    expect(screen.getByText(/هم‌پوشانی با سایر منابع/).textContent).toContain("با هم جمع نمی‌شوند");
+    expect(screen.getByText(/فقط ۵۰ منبع نخست/)).toBeTruthy();
+    expect(screen.getByText(/فاکتور تاریخی برای این مشتری و شعبه یافت نشد/)).toBeTruthy();
+  });
   it("sends search and pagination to the server", async () => {
     render(<HistoricalInvoiceHistory customerId="customer-a" />);
     await screen.findByText(/external-17/);

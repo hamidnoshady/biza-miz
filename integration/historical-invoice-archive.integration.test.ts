@@ -321,6 +321,25 @@ describe("historical invoice archive", () => {
     await owner.query(`UPDATE data_import_rows SET raw = jsonb_set(raw, '{sheet}', '"tampered"'::jsonb) WHERE job_id = $1 AND row_number = 6`, [staged.jobId]);
     await expect(previewService.previewHistoricalImportJob(options)).rejects.toMatchObject({ code: "invalid_staged_sheet_row" });
   });
+  it("blocks identical line evidence before the archive executor writes anything", async () => {
+    const staging = await import("../src/lib/data-transfer/historical-invoice-staging");
+    const csv = "externalInvoiceId,invoiceDate,externalCustomerCode,total,lineName,quantity,unitPrice\n" +
+      "duplicate-line,1403/01/01,c,100,A,1,50\n" +
+      "duplicate-line,,,,A,1,50\n";
+    const input = { businessId: a.businessId, locationId: a.locationId, actor: { userId: a.actorId, name: "owner" },
+      fileName: "repeated.csv", format: "csv" as const, buffer: new TextEncoder().encode(csv).buffer,
+      sourceKey: "duplicate-line-source", provider: "generic", currency: "rial" as const, calendar: "jalali" as const };
+    await archive.bindHistoricalCustomer({ ...input, externalCustomerCode: "c", partyId: a.partyId });
+    const staged = await staging.stageHistoricalInvoiceFile(input);
+    const job = { ...input, jobId: staged.jobId, mapping: { columns: staged.columns.map((field, column) => ({ field, column })) } };
+    const preview = await previewService.previewHistoricalImportJob(job);
+    expect(preview).toMatchObject({ invalid: 1, toCreate: 0, totalInvoices: 1 });
+    expect(preview.documents[0].errors.join(" ")).toContain("ردیف‌های یکسان");
+    await expect(previewService.executeHistoricalArchiveJob({ ...job, reviewToken: preview.archiveReviewToken, confirmed: true }))
+      .rejects.toMatchObject({ code: "invoice_review_blocked" });
+    expect((await owner.query(`SELECT count(*)::int AS n FROM historical_sales_invoices WHERE import_job_id = $1`, [staged.jobId])).rows[0].n).toBe(0);
+    expect((await owner.query(`SELECT status FROM data_import_jobs WHERE id = $1`, [staged.jobId])).rows[0].status).toBe("pending");
+  });
   it("atomically archives a reviewed two-sheet workbook and deduplicates a renamed re-upload", async () => {
     const ExcelJS = (await import("exceljs")).default;
     const workbook = new ExcelJS.Workbook();
@@ -518,8 +537,47 @@ describe("historical invoice archive", () => {
     expect((await owner.query(`SELECT count(*)::int AS n FROM historical_sales_invoices WHERE import_job_id = $1`, [staged.jobId])).rows[0].n).toBe(0);
     expect(await countCustomers()).toBe(countBefore);
   }, 60_000);
+  it("summarizes exact archived face values per source, scoped to tenant, branch and customer", async () => {
+    const tenant = await seed("summary");
+    const other = await seed("summary-other");
+    const branch = (await owner.query<{ id: string }>(`INSERT INTO locations (business_id, name) VALUES ($1, 'other') RETURNING id`, [tenant.businessId])).rows[0].id;
+    const extraParty = (await owner.query<{ id: string }>(`INSERT INTO parties (business_id, name, role) VALUES ($1, 'other', 'customer') RETURNING id`, [tenant.businessId])).rows[0].id;
+    const insert = async (who: typeof tenant, location: string, party: string, source: string, id: string, total: string) => owner.query(
+      `INSERT INTO historical_sales_invoices (business_id, location_id, party_id, import_job_id, source_key, source_provider, external_id,
+        invoice_date, external_customer_code, source_currency, source_calendar, source_status, total_rial, summary_only, source_fingerprint, source_snapshot, created_by)
+       VALUES ($1,$2,$3,$4,$5,'provider',$6,'2024-01-01','c','rial','gregorian','unknown',$7::bigint,true,repeat('a',64),'[]'::jsonb,$8)`,
+      [who.businessId, location, party, who.jobId, source, id, total, who.actorId],
+    );
+    await insert(tenant, tenant.locationId, tenant.partyId, "source-a", "one", "9223372036854775807");
+    await insert(tenant, tenant.locationId, tenant.partyId, "source-a", "two", "9223372036854775807");
+    await insert(tenant, tenant.locationId, tenant.partyId, "source-b", "three", "500");
+    await insert(tenant, branch, tenant.partyId, "source-a", "different-branch", "9");
+    await insert(tenant, tenant.locationId, extraParty, "source-a", "different-party", "8");
+    await insert(other, other.locationId, other.partyId, "source-a", "other-tenant", "7");
+    expect(await archive.summarizeHistoricalInvoiceSources({ businessId: tenant.businessId, locationId: tenant.locationId, partyId: tenant.partyId })).toEqual({
+      sources: [
+        { sourceKey: "source-a", provider: "provider", invoiceCount: "2", totalRial: "18446744073709551614" },
+        { sourceKey: "source-b", provider: "provider", invoiceCount: "1", totalRial: "500" },
+      ], hasMore: false,
+    });
+    expect(await archive.summarizeHistoricalInvoiceSources({ businessId: other.businessId, locationId: tenant.locationId, partyId: tenant.partyId })).toEqual({ sources: [], hasMore: false });
+    expect(await archive.summarizeHistoricalInvoiceSources({ businessId: tenant.businessId, locationId: branch, partyId: tenant.partyId })).toEqual({
+      sources: [{ sourceKey: "source-a", provider: "provider", invoiceCount: "1", totalRial: "9" }], hasMore: false,
+    });
+    await owner.query(
+      `INSERT INTO historical_sales_invoices (business_id, location_id, party_id, import_job_id, source_key, source_provider, external_id,
+        invoice_date, external_customer_code, source_currency, source_calendar, total_rial, summary_only, source_fingerprint, source_snapshot, created_by)
+       SELECT $1, $2, $3, $4, 'extra-' || i, 'provider', 'x', '2024-01-01', 'c', 'rial', 'gregorian', 1, true, repeat('a',64), '[]'::jsonb, $5
+         FROM generate_series(1,51) AS series(i)`,
+      [tenant.businessId, tenant.locationId, tenant.partyId, tenant.jobId, tenant.actorId],
+    );
+    const capped = await archive.summarizeHistoricalInvoiceSources({ businessId: tenant.businessId, locationId: tenant.locationId, partyId: tenant.partyId });
+    expect(capped.sources).toHaveLength(50);
+    expect(capped.hasMore).toBe(true);
+  });
   it("preserves original attribution while following the audited customer merge chain", async () => {
     const original = await archive.listHistoricalInvoices({ businessId: a.businessId, locationId: a.locationId, partyId: a.partyId });
+    const originalSummary = await archive.summarizeHistoricalInvoiceSources({ businessId: a.businessId, locationId: a.locationId, partyId: a.partyId });
     const winner = (await owner.query<{ id: string }>(`INSERT INTO parties (business_id, name, role) VALUES ($1, 'winner', 'customer') RETURNING id`, [a.businessId])).rows[0].id;
     const crm = await import("../src/lib/crm-service");
     expect(await dbLib.withTenant(a.businessId, () => crm.mergeCustomers(a.businessId, winner, a.partyId, { mergedBy: "reviewer" }))).not.toBeNull();
@@ -529,6 +587,7 @@ describe("historical invoice archive", () => {
     expect(await archive.listHistoricalInvoiceLines({ businessId: a.businessId, locationId: a.locationId, invoiceId: original[0].id, partyId: winner })).not.toBeNull();
     const finalWinner = (await owner.query<{ id: string }>(`INSERT INTO parties (business_id, name, role) VALUES ($1, 'final winner', 'customer') RETURNING id`, [a.businessId])).rows[0].id;
     expect(await dbLib.withTenant(a.businessId, () => crm.mergeCustomers(a.businessId, finalWinner, winner, { mergedBy: "reviewer" }))).not.toBeNull();
+    expect(await archive.summarizeHistoricalInvoiceSources({ businessId: a.businessId, locationId: a.locationId, partyId: finalWinner })).toEqual(originalSummary);
     const chained = await archive.listHistoricalInvoices({ businessId: a.businessId, locationId: a.locationId, partyId: finalWinner });
     expect(chained.map((x) => x.id).sort()).toEqual(original.map((x) => x.id).sort());
     expect(chained.every((x) => x.partyId === a.partyId)).toBe(true);

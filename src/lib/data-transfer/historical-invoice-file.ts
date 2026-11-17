@@ -238,6 +238,7 @@ async function xlsxSheets(buffer: ArrayBuffer): Promise<HistoricalFileSheet[]> {
   const budget = { cells: 0, chars: 0 };
   let parsedCells = 0;
   for (const worksheet of workbook.worksheets) {
+    if (!validHistoricalText(worksheet.name)) throw new HistoricalFileError("invalid_text");
     const source: SourceRow[] = [];
     worksheet.eachRow((row, rowNumber) => {
       parsedCells += row.cellCount;
@@ -247,7 +248,10 @@ async function xlsxSheets(buffer: ArrayBuffer): Promise<HistoricalFileSheet[]> {
       row.eachCell({ includeEmpty: true }, (cell, column) => {
         const value = cell.value;
         if (value === null || value === undefined) cells[column - 1] = "";
-        else if (typeof value === "string") cells[column - 1] = value;
+        else if (typeof value === "string") {
+          if (!validHistoricalText(value)) throw new HistoricalFileError("invalid_text");
+          cells[column - 1] = value;
+        }
         else throw new HistoricalFileError("xlsx_cells_must_be_text");
       });
       if (cells.some((v) => v?.trim())) source.push({ rowNumber, cells });
