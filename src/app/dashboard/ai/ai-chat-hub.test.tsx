@@ -172,7 +172,9 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
 
     const textarea = screen.getByLabelText("پیام") as HTMLTextAreaElement;
     expect(textarea.value).toBe(starterPrompts[0]);
-    expect(composerBox.getAttribute("data-composer-collapsed")).toBe("false");
+    await waitFor(() => {
+      expect(composerBox.getAttribute("data-composer-collapsed")).toBe("false");
+    });
     expect(screen.getByRole("combobox", { name: /وظیفه دستیار/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" })).toBeTruthy();
 
@@ -284,6 +286,40 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     fireEvent.click(await screen.findByRole("menuitemradio", { name: "برج ساحلی" }));
     expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("project=p-1"), { scroll: false });
     expect(textarea.value).toBe("پیش‌نویس تستی من");
+  });
+
+  it("opens the cost-approved Deep Research panel from the mode selector without changing the chat runtime mode", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ runs: [] }),
+      })) as unknown as typeof fetch,
+    );
+
+    render(
+      <AiChatHub
+        canManageAi={false}
+        canAutoApply={false}
+        allowedPanelSections={["research"]}
+        deepResearchEnabled={true}
+      />,
+    );
+
+    const modeSelect = screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ });
+    fireEvent.click(modeSelect);
+    const deepResearchOption = screen.getByRole("option", { name: /پژوهش عمیق/ });
+    expect(deepResearchOption.getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(deepResearchOption);
+
+    expect(replaceMock).toHaveBeenCalledWith(
+      expect.stringContaining("aiPanel=research"),
+      { scroll: false },
+    );
+    expect(screen.getByRole("heading", { name: "پژوهش عمیق" })).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ })).toBeTruthy();
+    expect(replaceMock.mock.calls.some(([url]) => String(url).includes("mode=deep_research"))).toBe(false);
   });
 
   it("opens history in a left-side Sheet drawer with New Chat on narrow viewports without rendering a permanent desktop history rail", async () => {
