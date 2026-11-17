@@ -221,6 +221,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'layaway_payments', columns: ["created_by"] },
   { table: 'layaway_plans', columns: ["created_by"] },
   { table: 'ledger_party_attribution_moves', columns: ["actor_id"] },
+  { table: 'learning_path_assignments', columns: ["user_id", "assigned_by"] },
   // Issue #1128 §E. The rest of the media library is excused as tooling in the
   // schema-contract sweep, and this column deliberately is not: a review link is a
   // short-lived credential handed to someone *outside* the business, it carries no
@@ -257,6 +258,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'supplier_returns', columns: ["created_by"] },
   { table: 'table_sessions', columns: ["closed_by", "opened_by"], scope: { kind: 'location' } },
   { table: 'tax_invoice_events', columns: ["actor_user_id"] },
+  { table: 'tour_assignments', columns: ["user_id", "assigned_by"] },
   { table: 'tax_invoice_submissions', columns: ["prepared_by"] },
   // Issue #903 — who produced a managed backup, and who previewed/approved a
   // tenant restore. Both are business-scoped audit attribution; a departing
