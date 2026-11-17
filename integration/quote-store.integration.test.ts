@@ -46,12 +46,17 @@ async function createCoupon(overrides: Partial<{
   maxRedemptionsPerBusiness: number;
 }> = {}): Promise<{ id: string; code: string }> {
   const code = `C${randomUUID().slice(0, 8).toUpperCase()}`;
+  // `valid_from` is set explicitly: its `now()` default is microsecond-precision
+  // while `resolveCoupon` compares it with a millisecond JS clock, so a coupon
+  // created and resolved in the same instant can read as `coupon_not_yet_valid`
+  // on a runner whose clock ticks coarsely. A coupon being redeemed was created
+  // earlier anyway.
   const { rows } = await db.withoutTenantScope("platform", () =>
     db.query<{ id: string }>(
       `INSERT INTO billing_coupons
          (code, discount_kind, percent_basis_points, min_term_months,
-          max_redemptions, max_redemptions_per_business, status)
-       VALUES ($1, 'percent', $2, $3, 100, $4, 'active')
+          max_redemptions, max_redemptions_per_business, status, valid_from)
+       VALUES ($1, 'percent', $2, $3, 100, $4, 'active', now() - interval '1 minute')
        RETURNING id`,
       [code, overrides.percentBasisPoints ?? 1_000, overrides.minTermMonths ?? 1, overrides.maxRedemptionsPerBusiness ?? 1],
     ),
