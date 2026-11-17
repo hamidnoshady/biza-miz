@@ -369,6 +369,10 @@ describe("every tenant table is protected", () => {
       "platform_demo_sessions",
       // Migration 0227: singleton platform default; per-business layers are RLS-protected.
       "platform_desktop_update_policy",
+      // Migration 0303 — global identity: email proofs and the identity-PII
+      // audit, neither carrying a business_id.
+      "platform_email_verifications",
+      "platform_identity_events",
       // Issue #883 wave 3 (migration 0219) — the console's `pospmcp_` MCP
       // credential store: hashed tokens and capability lists keyed on
       // platform_admins, with authority over the whole deployment rather than
