@@ -874,13 +874,8 @@ export function ChatComposer({
                         >
                           <Icon className="size-4" aria-hidden="true" />
                         </span>
-                        <span className="min-w-0">
-                          <span className="block text-xs font-semibold">
-                            {AI_MODE_LABELS[value]}
-                          </span>
-                          <span className="block whitespace-normal text-[10px] leading-4 text-muted-foreground">
-                            {AI_MODE_HINTS[value]}
-                          </span>
+                        <span className="text-xs font-semibold">
+                          {AI_MODE_LABELS[value]}
                         </span>
                       </span>
                     </SelectItem>
