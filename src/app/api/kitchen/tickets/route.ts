@@ -26,6 +26,7 @@ export const GET = withTenantScope(async () => {
        JOIN orders o ON o.id = oi.order_id
        LEFT JOIN dining_tables dt ON dt.id = o.table_id
       WHERE oi.location_id = $1 AND o.status IN ('open', 'held', 'completed')
+        AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
         AND oi.status IN ('sent', 'preparing', 'ready')
       ORDER BY oi.sent_to_kitchen_at ASC NULLS LAST`,
     [location.id],
@@ -41,6 +42,7 @@ export const GET = withTenantScope(async () => {
        JOIN order_items oi ON oi.id = oim.order_item_id
        JOIN orders o ON o.id = oi.order_id
       WHERE oi.location_id = $1 AND o.status IN ('open', 'held', 'completed')
+        AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
         AND oi.status IN ('sent', 'preparing', 'ready')`,
     [location.id],
   );

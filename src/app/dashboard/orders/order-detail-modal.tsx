@@ -193,6 +193,10 @@ interface OrderRow {
   voided_reason: string | null;
   opened_at: string;
   closed_at: string | null;
+  origin?: string;
+  cms_order_id?: string | null;
+  website_approval_state?: "pending" | "accepted" | "rejected" | null;
+  website_approval_reason?: string | null;
 }
 
 interface OrderItemRow {
@@ -817,6 +821,37 @@ export function OrderDetailModal({
     }
   }
 
+  async function decideWebsiteApproval(decision: "accepted" | "rejected") {
+    if (!order || order.origin !== "website" || !orderId) return;
+    const targetOrderId = orderId;
+    const epoch = modalEpoch.current;
+    let reason: string | undefined;
+    if (decision === "rejected") {
+      const answer = await askText("دلیل رد سفارش وب‌سایت؟");
+      if (answer === null) return;
+      const trimmed = answer.trim();
+      if (!trimmed) {
+        setError("برای رد سفارش، ثبت دلیل الزامی است.");
+        return;
+      }
+      reason = trimmed;
+    }
+    if (epoch !== modalEpoch.current || targetOrderId !== orderIdRef.current || !openRef.current) return;
+    const decided = await run(() =>
+      api(`/api/orders/${targetOrderId}/website-approval`, {
+        method: "POST",
+        body: JSON.stringify({ decision, ...(reason ? { reason } : {}) }),
+      }),
+    );
+    if (decided && epoch === modalEpoch.current && targetOrderId === orderIdRef.current) {
+      toast.success(
+        decision === "accepted"
+          ? "سفارش تأیید و به آشپزخانه ارسال شد."
+          : "سفارش وب‌سایت رد شد.",
+      );
+    }
+  }
+
   async function voidItem(itemId: string) {
     const targetOrderId = orderId;
     const epoch = modalEpoch.current;
@@ -1019,7 +1054,10 @@ export function OrderDetailModal({
     }
   }
 
-  const editable = canEdit && order?.status === "open";
+  const editable =
+    canEdit &&
+    order?.status === "open" &&
+    order?.website_approval_state !== "rejected";
 
   // ⚡ Bolt: Extract O(N) filtering of menu items into useMemo to avoid recreating arrays on every render tick.
   const activeItems = useMemo(
@@ -1389,6 +1427,51 @@ export function OrderDetailModal({
                     </button>
                   </div>
                 ) : null}
+                {order.origin === "website" && order.website_approval_state === "pending" && order.status !== "voided" ? (
+                  <section
+                    className={`${CARD} mb-3 flex flex-col gap-3 border-amber-500/40 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-500/15 p-4 sm:flex-row sm:items-center sm:justify-between`}
+                    aria-label="تأیید سفارش وب‌سایت"
+                  >
+                    <div>
+                      <h3 className="font-semibold text-foreground">
+                        سفارش وب‌سایت در انتظار تأیید است
+                      </h3>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        اقلام این سفارش تا پیش از تأیید به آشپزخانه ارسال نمی‌شوند.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2 shrink-0">
+                      {canEdit ? (
+                        <button
+                          type="button"
+                          onClick={() => void decideWebsiteApproval("accepted")}
+                          disabled={busy}
+                          className={`${PRIMARY_BUTTON} min-h-11 sm:w-auto px-4`}
+                        >
+                          تأیید و ارسال به آشپزخانه
+                        </button>
+                      ) : null}
+                      {canVoid ? (
+                        <button
+                          type="button"
+                          onClick={() => void decideWebsiteApproval("rejected")}
+                          disabled={busy}
+                          className={`${DANGER_BUTTON} min-h-11 px-4`}
+                        >
+                          رد سفارش
+                        </button>
+                      ) : null}
+                    </div>
+                  </section>
+                ) : null}
+                {order.origin === "website" && order.website_approval_state === "rejected" ? (
+                  <p className="mb-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                    این سفارش وب‌سایت رد شده است
+                    {order.website_approval_reason
+                      ? `: ${order.website_approval_reason}`
+                      : "."}
+                  </p>
+                ) : null}
                 {order.status === "held" && canEdit ? (
                   <section className={`${CARD} mb-3 flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between`} aria-label="بازیابی سفارش نگه‌داشته‌شده">
                     <div>
@@ -1634,7 +1717,9 @@ export function OrderDetailModal({
                       </dl>
                     </section>
 
-                    {canTakePayment && order.status === "open" ? (
+                    {canTakePayment &&
+                    order.status === "open" &&
+                    order.website_approval_state !== "rejected" ? (
                       <section
                         className={`${CARD} mt-3 p-4`}
                         aria-label="دریافت وجه و تکمیل سفارش"
@@ -1742,6 +1827,20 @@ export function OrderDetailModal({
                           label="نوع سفارش"
                           value={TYPE_LABELS[order.type]}
                         />
+                        {order.origin === "website" ? (
+                          <Fact
+                            label="منبع"
+                            value={
+                              order.website_approval_state === "accepted"
+                                ? "وب‌سایت · تأییدشده"
+                                : order.website_approval_state === "rejected"
+                                  ? "وب‌سایت · ردشده"
+                                  : order.website_approval_state === "pending"
+                                    ? "وب‌سایت · در انتظار تأیید"
+                                    : "وب‌سایت"
+                            }
+                          />
+                        ) : null}
                         {order.table_name ? (
                           <Fact label="میز" value={order.table_name} />
                         ) : null}

@@ -17,7 +17,7 @@ import { getPool, query, type PoolClient } from "./db";
 import { broadcast } from "./realtime";
 import type { Role } from "./auth";
 import { PERMISSIONS, type Permission } from "./permissions";
-import { authorizeSyncReplay } from "./sync-replay-auth";
+import { authorizeAutomatedCloudReplay, authorizeSyncReplay } from "./sync-replay-auth";
 import { orderStateReplayPermissions } from "./order-state-replay-auth";
 import type { CartItemInput } from "./order-cart";
 import { addItemsToOrder, createOrder } from "./order-mutations";
@@ -93,6 +93,12 @@ interface OrderCreatePayload {
     courierId?: string;
     note?: string;
   };
+  holdKitchenDispatch?: boolean;
+  websiteOrigin?: {
+    cmsConnectionId?: string | null;
+    cmsOrderId?: string | null;
+    websiteApprovalState?: "pending" | "accepted" | "rejected" | null;
+  } | null;
 }
 interface OrderAddItemsPayload {
   orderId?: string;
@@ -149,6 +155,35 @@ async function dispatch(
       payload.clientRequestId.trim().length <= 200
         ? payload.clientRequestId.trim()
         : null;
+    let resolvedWebsiteOrigin: {
+      cmsConnectionId: string | null;
+      cmsOrderId: string;
+      websiteApprovalState: "pending" | "accepted" | "rejected";
+    } | null = null;
+    if (payload.websiteOrigin && typeof payload.websiteOrigin.cmsOrderId === "string" && payload.websiteOrigin.cmsOrderId.trim()) {
+      const candidateConnectionId =
+        typeof payload.websiteOrigin.cmsConnectionId === "string" && UUID_PATTERN.test(payload.websiteOrigin.cmsConnectionId)
+          ? payload.websiteOrigin.cmsConnectionId
+          : null;
+      let safeConnectionId: string | null = null;
+      if (candidateConnectionId) {
+        const { rows: connRows } = await query<{ id: string }>(
+          "SELECT id FROM eshobe_cms_connections WHERE id = $1 LIMIT 1",
+          [candidateConnectionId],
+        );
+        if (connRows[0]) safeConnectionId = connRows[0].id;
+      }
+      const approvalState =
+        payload.websiteOrigin.websiteApprovalState === "accepted" ||
+        payload.websiteOrigin.websiteApprovalState === "rejected"
+          ? payload.websiteOrigin.websiteApprovalState
+          : "pending";
+      resolvedWebsiteOrigin = {
+        cmsConnectionId: safeConnectionId,
+        cmsOrderId: payload.websiteOrigin.cmsOrderId.trim(),
+        websiteApprovalState: approvalState,
+      };
+    }
     const result = await createOrder({
       locationId,
       type: payload.type,
@@ -160,26 +195,19 @@ async function dispatch(
       note: payload.note ?? null,
       discount,
       items: payload.items ?? [],
-      openedBy: actor.userId,
-      // Domain-level dedupe in `orders` is independent of the transport inbox.
-      // If a future retry path reaches order creation without its original
-      // sync_events outcome, it still converges on the same order.
+      openedBy: actor.userId || null,
       clientRequestId: payloadClientRequestId ?? event.clientEventId,
       orderId:
         typeof payload.orderId === "string"
           ? payload.orderId
           : event.clientEventId,
-      // The sender's line ids (migration 0190); absent from an offline-queued
-      // phone payload, which the order-state reconciliation then covers.
       itemIds: Array.isArray(payload.itemIds)
         ? payload.itemIds.map((id) => (typeof id === "string" && UUID_PATTERN.test(id) ? id : null))
         : undefined,
-      // Only a peer *server's* replay carries the instant the order was
-      // really opened. A phone's offline flush does not: there is no
-      // "record a past sale" path, and a device clock must not be able to
-      // place a new order into a day that has already been closed.
       openedAt: origin === "remote" && Number.isFinite(Date.parse(event.occurredAt)) ? event.occurredAt : null,
       actorRole: actor.role,
+      holdKitchenDispatch: Boolean(payload.holdKitchenDispatch),
+      websiteOrigin: resolvedWebsiteOrigin,
       recordSyncEvent: false,
       delivery:
         payload.type === "delivery" && payload.delivery
@@ -315,7 +343,7 @@ async function applyLegacySyncEvent(
    * events and never bounces a pulled event back to its source.
    */
   origin: "local" | "remote" = "local",
-  metadata: { siteDeviceId?: string | null; schemaVersion?: number } = {},
+  metadata: TransactionalSyncMetadata = {},
 ): Promise<SyncEventResult> {
   const permissions = replayPermissionsFor(
     event.type,
@@ -324,11 +352,20 @@ async function applyLegacySyncEvent(
   if (!permissions) {
     return { clientEventId: event.clientEventId, ok: false, error: "unknown_event_type" };
   }
-  const access = await authorizeSyncReplay({
-    locationId,
-    userId: actor.userId,
-    permissions,
-  });
+  const automatedWebsiteCreate =
+    origin === "remote" &&
+    metadata.pulledFromCloud === true &&
+    !actor.userId &&
+    event.type === "order.create" &&
+    typeof (event.payload as OrderCreatePayload)?.websiteOrigin?.cmsOrderId === "string" &&
+    (event.payload as OrderCreatePayload).websiteOrigin!.cmsOrderId!.trim().length > 0;
+  const access = automatedWebsiteCreate
+    ? await authorizeAutomatedCloudReplay({ locationId, permissions })
+    : await authorizeSyncReplay({
+        locationId,
+        userId: actor.userId,
+        permissions,
+      });
   if (!access.ok) {
     return { clientEventId: event.clientEventId, ok: false, error: access.error };
   }
@@ -566,6 +603,24 @@ async function introducedVoids(
   return { wholeOrder, item };
 }
 
+async function isAutomatedCloudWebsiteEvent(
+  client: PoolClient,
+  locationId: string,
+  event: SyncEventInput,
+): Promise<boolean> {
+  if (event.type === "order.state.synced") {
+    const order = (event.payload as { order?: { origin?: unknown } } | null)?.order;
+    if (order?.origin === "website") return true;
+  }
+  const orderId = (event.payload as { orderId?: unknown } | null)?.orderId;
+  if (typeof orderId !== "string" || !UUID_PATTERN.test(orderId)) return false;
+  const { rows } = await client.query<{ origin: string }>(
+    `SELECT origin FROM orders WHERE id = $1 AND location_id = $2 LIMIT 1`,
+    [orderId, locationId],
+  );
+  return rows[0]?.origin === "website";
+}
+
 async function recordDeadLetter(
   client: PoolClient,
   params: {
@@ -785,14 +840,26 @@ async function applyTransactionalSyncEvent(
       if (introduced.wholeOrder) replayPermissions.push(PERMISSIONS.ordersVoid);
       if (introduced.item) replayPermissions.push(PERMISSIONS.ordersVoidItem);
     }
+    const automatedCloudEvent =
+      !scope.error &&
+      origin === "remote" &&
+      metadata.pulledFromCloud === true &&
+      !actor.userId &&
+      (await isAutomatedCloudWebsiteEvent(client, locationId, event));
     const access = scope.error
       ? { ok: false as const, error: scope.error }
-      : await authorizeSyncReplay({
-          locationId,
-          userId: actor.userId,
-          permissions: replayPermissions,
-          requireAll: true,
-        });
+      : automatedCloudEvent
+        ? await authorizeAutomatedCloudReplay({
+            locationId,
+            permissions: replayPermissions,
+            requireAll: true,
+          })
+        : await authorizeSyncReplay({
+            locationId,
+            userId: actor.userId,
+            permissions: replayPermissions,
+            requireAll: true,
+          });
     if (!access.ok) {
       const error = access.error;
       await recordDeadLetter(client, {

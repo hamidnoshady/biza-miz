@@ -28,7 +28,9 @@ const ORDER_SUMMARY_SELECT =
   "SELECT o.id, o.order_number, o.type, o.status, o.table_id, dt.name AS table_name, " +
   "o.customer_id, c.name AS customer_name, c.phone AS customer_phone, " +
   "o.guest_count, o.subtotal, o.discount, o.discount_type, o.discount_value, " +
-  "o.service_charge, o.tax, o.total, o.note, o.opened_at, o.closed_at, o.voided_reason " +
+  "o.service_charge, o.tax, o.total, o.note, o.opened_at, o.closed_at, o.voided_reason, " +
+  "o.origin, o.cms_connection_id, o.cms_order_id, o.website_approval_state, " +
+  "o.website_approval_decided_at, o.website_approval_reason " +
   "FROM orders o LEFT JOIN dining_tables dt ON dt.id = o.table_id " +
   "LEFT JOIN parties c ON c.id = o.customer_id";
 
@@ -193,6 +195,12 @@ export interface OrderDetailOrder extends Record<string, unknown> {
   opened_at: Date;
   closed_at: Date | null;
   voided_reason: string | null;
+  origin?: string;
+  cms_connection_id?: string | null;
+  cms_order_id?: string | null;
+  website_approval_state?: "pending" | "accepted" | "rejected" | null;
+  website_approval_decided_at?: Date | string | null;
+  website_approval_reason?: string | null;
 }
 
 export interface OrderDetailItem extends Record<string, unknown> {

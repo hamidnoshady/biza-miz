@@ -235,8 +235,9 @@ export async function applySyncDomainHandler(
             ? 0
             : exactInteger(payload.tipAmount, "invalid_tipAmount"),
         businessDate: optionalString(payload, "businessDate") ?? undefined,
-        receivedBy: actor.userId,
+        receivedBy: actor.userId || null,
         idempotencyKey: clientEventId,
+        skipCmsOrderStateSync: deploymentRole() === "site",
       });
       return {
         effectType: "order_payment",
@@ -281,12 +282,13 @@ export async function applySyncDomainHandler(
             ? 0
             : exactInteger(payload.tipAmount, "invalid_tipAmount"),
         businessDate: optionalString(payload, "businessDate") ?? undefined,
-        receivedBy: actor.userId,
+        receivedBy: actor.userId || null,
         idempotencyKey: clientEventId,
         // The paying side's own instant and journal date, so a sale synced
         // after midnight is still on the day it was made (migration 0190).
         settledAt: validInstant(context.occurredAt),
         entryDate: isoDate(optionalString(payload, "entryDate")),
+        skipCmsOrderStateSync: deploymentRole() === "site",
       });
       return {
         effectType: "order_payment",
@@ -331,9 +333,10 @@ export async function applySyncDomainHandler(
           businessId,
           locationId,
           orderId,
-          actorId: actor.userId,
+          actorId: actor.userId || null,
           input: validated.value,
           newItemIds: newItemIds as string[],
+          skipCmsOrderStateSync: deploymentRole() === "site",
         });
         return {
           effectType: "order_amendment",
@@ -374,7 +377,8 @@ export async function applySyncDomainHandler(
         refundAmount: rialText(requiredString(payload, "refundAmount")),
         reason: requiredString(payload, "reason"),
         idempotencyKey: clientEventId,
-        createdBy: actor.userId,
+        createdBy: actor.userId || null,
+        skipCmsOrderStateSync: deploymentRole() === "site",
         lines: array(payload, "lines").map((line) => ({
           orderItemId: requiredString(line, "orderItemId"),
           quantity: positiveQuantityText(requiredString(line, "quantity")),

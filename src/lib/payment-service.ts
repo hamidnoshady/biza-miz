@@ -20,6 +20,7 @@ import {
   tendersWithTip,
 } from "./payment-methods";
 import type { RoutedOrderTender } from "./order-payment-routing-service";
+import { syncOrderPaymentStateInTx } from "./cms/order-state-outbox-service";
 
 export const PAYMENT_METHODS = [
   "cash",
@@ -45,6 +46,8 @@ export interface CompleteOrderPaymentInput {
   receivedBy: string | null;
   /** Caller-owned domain idempotency identity (for offline/server sync). */
   idempotencyKey?: string | null;
+  /** True when the CMS webhook/poll itself is recording an already-paid online order. */
+  skipCmsOrderStateSync?: boolean;
 }
 
 export interface CompleteOrderPaymentResult {
@@ -98,6 +101,9 @@ export async function completeOrderPayment(
   const locked = await lockOpenOrder(client, locationId, orderId);
   if (!locked.ok) {
     throw Object.assign(new Error(locked.error), { code: locked.error, status: locked.status });
+  }
+  if (!input.skipCmsOrderStateSync && locked.order.website_approval_state === "rejected") {
+    throw Object.assign(new Error("order_rejected"), { code: "order_rejected", status: 409 });
   }
 
   if (customerId) {
@@ -212,6 +218,15 @@ export async function completeOrderPayment(
 
   const released = await releaseTableAfterOrderSettled(client, locationId, orderId, receivedBy);
 
+  if (!input.skipCmsOrderStateSync && locked.order.origin === "website") {
+    await syncOrderPaymentStateInTx(client, {
+      businessId,
+      locationId,
+      orderId,
+      state: "paid",
+    });
+  }
+
   return { amount, tipAmount, duplicate: false, releasedSessionId: released?.sessionId ?? null };
 }
 
@@ -226,15 +241,9 @@ export interface CompleteSplitOrderPaymentInput {
   businessDate?: string;
   receivedBy: string | null;
   idempotencyKey: string;
-  /**
-   * When the bill was actually paid, and the journal date the paying side
-   * posted it on (migration 0190). A replay that stamped its own `now()` put a
-   * sale synced after midnight on the next day's reports and books — the same
-   * rule the Holoo importer already follows: the row carries the instant the
-   * sale happened.
-   */
   settledAt?: string | null;
   entryDate?: string | null;
+  skipCmsOrderStateSync?: boolean;
 }
 
 /** Exact split-tender settlement used by server-sync replay. */
@@ -251,6 +260,9 @@ export async function completeSplitOrderPayment(input: CompleteSplitOrderPayment
   if (prior.rows[0]) return { amount: rialText(prior.rows[0].total), tipAmount: prior.rows[0].tip_amount, duplicate: true };
   const locked = await lockOpenOrder(client, locationId, orderId);
   if (!locked.ok) throw Object.assign(new Error(locked.error), { code: locked.error, status: locked.status });
+  if (!input.skipCmsOrderStateSync && locked.order.website_approval_state === "rejected") {
+    throw Object.assign(new Error("order_rejected"), { code: "order_rejected", status: 409 });
+  }
   if (customerId) {
     const owned = await client.query(`SELECT 1 FROM parties WHERE id=$1 AND business_id=$2 AND roles && ARRAY['customer']::text[]`, [customerId, businessId]);
     if (owned.rowCount !== 1) throw Object.assign(new Error("customer_not_found"), { code: "customer_not_found", status: 404 });
@@ -329,6 +341,14 @@ export async function completeSplitOrderPayment(input: CompleteSplitOrderPayment
   await markScoringDirtyIn(client, businessId);
   await enqueueHolooSaleForOrder(client, businessId, orderId);
   const released = await releaseTableAfterOrderSettled(client, locationId, orderId, receivedBy);
+  if (!input.skipCmsOrderStateSync && locked.order.origin === "website") {
+    await syncOrderPaymentStateInTx(client, {
+      businessId,
+      locationId,
+      orderId,
+      state: "paid",
+    });
+  }
   return { amount, tipAmount, duplicate: false, releasedSessionId: released?.sessionId ?? null };
 }
 

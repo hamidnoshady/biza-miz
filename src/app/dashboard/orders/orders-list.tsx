@@ -35,13 +35,31 @@ import {
   FilterToolbarSearch,
 } from "../filters";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { toast } from "sonner";
 import { JalaliDatePicker } from "../jalali-date-picker";
-import { api } from "../ui";
+import { usePromptDialog } from "../prompt-dialog";
+import { api, errorMessage } from "../ui";
 import { OrderDetailModal } from "./order-detail-modal";
 import { HistoricalInvoiceHistory } from "@/components/data-transfer/historical-invoice-history";
 
 type OrderStatus = "open" | "held" | "completed" | "voided";
 type OrderType = "dine_in" | "takeaway" | "delivery";
+type WebsiteApprovalState = "pending" | "accepted" | "rejected";
+
+interface AwaitingApprovalOrder {
+  id: string;
+  orderNumber: string;
+  type: OrderType;
+  tableName: string | null;
+  customerName: string | null;
+  customerPhone: string | null;
+  total: string;
+  note: string | null;
+  openedAt: string;
+  cmsOrderId: string | null;
+  itemCount: number;
+  hasPayment: boolean;
+}
 
 /** A row of either list the orders screen shows: the open queue, or an order closed this shift. */
 interface OrderRow {
@@ -59,6 +77,25 @@ interface OrderRow {
   opened_at: string;
   /** Set once the order is paid or voided — null for everything still in the queue. */
   closed_at: string | null;
+  origin?: string;
+  website_approval_state?: WebsiteApprovalState | null;
+  website_approval_reason?: string | null;
+}
+
+const WEBSITE_APPROVAL_LABELS: Record<WebsiteApprovalState, string> = {
+  pending: "در انتظار تأیید",
+  accepted: "تأییدشده",
+  rejected: "ردشده",
+};
+
+function websiteApprovalBadgeClass(state: WebsiteApprovalState): string {
+  if (state === "accepted") {
+    return "bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300";
+  }
+  if (state === "rejected") {
+    return "bg-destructive/10 text-destructive";
+  }
+  return "bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300";
 }
 
 const STATUS_LABELS: Record<OrderStatus, string> = {
@@ -216,8 +253,11 @@ export function OrdersList({
   initialOrderId?: string | null;
 }) {
   const money = useMoney();
+  const [promptDialog, askPrompt] = usePromptDialog();
   const [orders, setOrders] = useState<OrderRow[] | null>(null);
   const [heldOrders, setHeldOrders] = useState<OrderRow[]>([]);
+  const [awaitingApprovalOrders, setAwaitingApprovalOrders] = useState<AwaitingApprovalOrder[]>([]);
+  const [decidingOrderId, setDecidingOrderId] = useState<string | null>(null);
   const [closedOrders, setClosedOrders] = useState<OrderRow[]>([]);
   const [timeZone, setTimeZone] = useState("Asia/Tehran");
   const loadRequest = useRef(0);
@@ -262,6 +302,7 @@ export function OrdersList({
       const { ok, data } = await api<{
         orders: OrderRow[];
         heldOrders?: OrderRow[];
+        awaitingApprovalOrders?: AwaitingApprovalOrder[];
         closedOrders?: OrderRow[];
         closedSince?: string | null;
         shiftStartedAt?: string | null;
@@ -278,6 +319,7 @@ export function OrdersList({
       if (ok) {
         setOrders(data.orders);
         setHeldOrders(data.heldOrders ?? []);
+        setAwaitingApprovalOrders(data.awaitingApprovalOrders ?? []);
         setClosedOrders(data.closedOrders ?? []);
         setShiftStartedAt(data.shiftStartedAt ?? null);
         setBusinessDay(data.businessDay ?? null);
@@ -482,8 +524,45 @@ export function OrdersList({
     setShiftFilter("");
   }
 
+  async function decideWebsiteOrder(
+    target: AwaitingApprovalOrder,
+    decision: "accepted" | "rejected",
+  ) {
+    let reason: string | undefined;
+    if (decision === "rejected") {
+      const answer = await askPrompt("دلیل رد سفارش وب‌سایت را بنویسید:");
+      if (answer === null) return;
+      const trimmed = answer.trim();
+      if (!trimmed) {
+        toast.error("برای رد سفارش، ثبت دلیل الزامی است.");
+        return;
+      }
+      reason = trimmed;
+    }
+    setDecidingOrderId(target.id);
+    const { ok, data } = await api<{ error?: string }>(
+      `/api/orders/${target.id}/website-approval`,
+      {
+        method: "POST",
+        body: JSON.stringify({ decision, ...(reason ? { reason } : {}) }),
+      },
+    );
+    setDecidingOrderId(null);
+    if (!ok) {
+      toast.error(errorMessage(data.error));
+      return;
+    }
+    toast.success(
+      decision === "accepted"
+        ? "سفارش تأیید شد و به آشپزخانه ارسال شد."
+        : "سفارش وب‌سایت رد شد.",
+    );
+    void load();
+  }
+
   return (
     <PageShell>
+      {promptDialog}
       <header className={`mb-3 flex flex-col gap-3 ${cardClass} p-3 sm:p-4 md:flex-row md:items-center md:justify-between`}>
         <div className="flex min-w-0 items-center gap-3">
           <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-300">
@@ -783,6 +862,91 @@ export function OrdersList({
       </section>
 
       <div className="grid gap-3">
+        {awaitingApprovalOrders.length > 0 ? (
+          <section
+            className={`min-w-0 overflow-hidden ${cardClass} border-amber-500/40 dark:border-amber-500/40`}
+            aria-label="سفارش‌های وب‌سایت در انتظار تأیید"
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-border/80 bg-amber-50 dark:bg-amber-500/15 px-4 py-3">
+              <div>
+                <h2 className="text-sm font-bold text-foreground">
+                  در انتظار تأیید وب‌سایت
+                </h2>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  تا پیش از تأیید، اقلام به آشپزخانه ارسال نمی‌شوند.
+                </p>
+              </div>
+              <span className="inline-flex min-h-7 items-center rounded-lg bg-amber-100 dark:bg-amber-500/20 px-2.5 text-xs font-bold text-amber-700 dark:text-amber-300">
+                {toPersianDigits(awaitingApprovalOrders.length)} مورد
+              </span>
+            </div>
+            <ul className="divide-y divide-border/80">
+              {awaitingApprovalOrders.map((pending) => {
+                const isBusy = decidingOrderId === pending.id;
+                return (
+                  <li
+                    key={pending.id}
+                    className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => openDetail(pending.id)}
+                      className="min-w-0 flex-1 text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-foreground">
+                          {toPersianDigits(
+                            formatQueueLabel(pending.type, Number(pending.orderNumber)),
+                          )}
+                        </span>
+                        <span className="inline-flex min-h-7 items-center rounded-lg bg-teal-50 dark:bg-teal-500/15 px-2 text-[11px] font-bold text-teal-700 dark:text-teal-300">
+                          وب‌سایت
+                        </span>
+                        {pending.tableName ? (
+                          <span className="inline-flex min-h-7 items-center rounded-lg border border-amber-500/60 dark:border-amber-500/50 bg-amber-100 dark:bg-amber-500/20 px-2 text-[11px] font-black text-amber-700 dark:text-amber-300">
+                            {pending.tableName}
+                          </span>
+                        ) : null}
+                        <span className="inline-flex min-h-7 items-center rounded-lg bg-muted px-2 text-[11px] font-medium text-muted-foreground">
+                          {pending.hasPayment ? "پرداخت‌شده آنلاین" : "پرداخت در محل"}
+                        </span>
+                      </div>
+                      <p className="mt-1 truncate text-xs text-muted-foreground">
+                        {pending.customerName ? `${pending.customerName} · ` : ""}
+                        {toPersianDigits(pending.itemCount)} قلم ·{" "}
+                        {money.format(Number(pending.total))} ·{" "}
+                        {orderTimeLabel(pending.openedAt, timeZone)}
+                      </p>
+                    </button>
+                    <div className="flex shrink-0 flex-wrap items-center gap-2">
+                      {canEdit ? (
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void decideWebsiteOrder(pending, "accepted")}
+                          className="min-h-11 rounded-xl bg-emerald-600 dark:bg-emerald-500 px-3.5 text-xs font-bold text-white transition-colors hover:bg-emerald-700 dark:hover:bg-emerald-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/45 disabled:opacity-60"
+                        >
+                          {isBusy ? "در حال ثبت…" : "تأیید و ارسال به آشپزخانه"}
+                        </button>
+                      ) : null}
+                      {canVoid ? (
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void decideWebsiteOrder(pending, "rejected")}
+                          className="min-h-11 rounded-xl border border-destructive/30 bg-destructive/5 px-3.5 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40 disabled:opacity-60"
+                        >
+                          رد سفارش
+                        </button>
+                      ) : null}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ) : null}
+
         <section
           className={`min-w-0 overflow-hidden ${cardClass}`}
           aria-label="فهرست سفارش‌ها"
@@ -914,6 +1078,18 @@ export function OrdersList({
                         >
                           {STATUS_LABELS[order.status]}
                         </span>
+                        {order.origin === "website" ? (
+                          <span className="inline-flex min-h-7 items-center rounded-lg bg-teal-50 dark:bg-teal-500/15 px-2 text-[11px] font-bold text-teal-700 dark:text-teal-300">
+                            سایت
+                          </span>
+                        ) : null}
+                        {order.website_approval_state ? (
+                          <span
+                            className={`inline-flex min-h-7 items-center rounded-lg px-2 text-[11px] font-bold ${websiteApprovalBadgeClass(order.website_approval_state)}`}
+                          >
+                            {WEBSITE_APPROVAL_LABELS[order.website_approval_state]}
+                          </span>
+                        ) : null}
                         {/* The table is the second thing a runner looks for
                             after the number — same visual weight as the
                             number, not a whisper on the meta line. */}

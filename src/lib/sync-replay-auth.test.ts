@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { authorize } from "./authorize";
 import { query } from "./db";
-import { authorizeSyncReplay } from "./sync-replay-auth";
+import {
+  authorizeAutomatedCloudReplay,
+  authorizeSyncReplay,
+} from "./sync-replay-auth";
 
 vi.mock("./authorize", () => ({ authorize: vi.fn() }));
 vi.mock("./db", () => ({
@@ -60,5 +63,34 @@ describe("authorizeSyncReplay", () => {
       permissions: ["orders.create"],
     })).resolves.toEqual({ ok: false, error: "unknown_location" });
     expect(authorizeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("authorizeAutomatedCloudReplay", () => {
+  it("authorizes narrow automated website replay permissions without requiring a user row", async () => {
+    queryMock.mockResolvedValue({ rows: [{ business_id: "biz-current" }] } as never);
+
+    const result = await authorizeAutomatedCloudReplay({
+      locationId: "branch-1",
+      permissions: ["orders.create", "kitchen.view"],
+      requireAll: true,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.businessId).toBe("biz-current");
+      expect(result.permissions.has("orders.create")).toBe(true);
+      expect(result.permissions.has("orders.discount")).toBe(false);
+    }
+  });
+
+  it("refuses discount or non-order automated replay permissions", async () => {
+    queryMock.mockResolvedValue({ rows: [{ business_id: "biz-current" }] } as never);
+    await expect(
+      authorizeAutomatedCloudReplay({
+        locationId: "branch-1",
+        permissions: ["orders.discount"],
+        requireAll: true,
+      }),
+    ).resolves.toEqual({ ok: false, error: "forbidden" });
   });
 });

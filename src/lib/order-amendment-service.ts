@@ -69,6 +69,7 @@ import { recomputeOrderTotals } from "./order-totals";
 import type { DiscountInput } from "./orders";
 import type { OrderChannel } from "./ledger";
 import { tendersWithTip } from "./payment-methods";
+import { syncOrderPaymentStateInTx } from "./cms/order-state-outbox-service";
 
 export class OrderAmendmentError extends Error {
   status: number;
@@ -89,6 +90,9 @@ interface OrderRow {
   discount_value: string | null;
   note: string | null;
   closed_at: string | null;
+  origin: string;
+  cms_connection_id: string | null;
+  cms_order_id: string | null;
 }
 
 export interface AmendmentResult {
@@ -259,11 +263,14 @@ export async function amendClosedOrder(
      * then hold the same line ids, so a later amendment can name them.
      */
     newItemIds?: readonly string[];
+    /** True when driven by an incoming CMS cancellation/refund webhook so POS does not echo back. */
+    skipCmsOrderStateSync?: boolean;
   },
 ): Promise<AmendmentResult> {
   const { rows: orderRows } = await client.query<OrderRow>(
     `SELECT id, status, type, total::text, tax::text, tip_amount::text, discount_type,
-            discount_value::text, note, closed_at::text
+            discount_value::text, note, closed_at::text,
+            origin, cms_connection_id, cms_order_id
        FROM orders WHERE id = $1 AND location_id = $2 FOR UPDATE`,
     [params.orderId, params.locationId],
   );
@@ -415,6 +422,20 @@ export async function amendClosedOrder(
       `UPDATE orders SET status='voided', voided_reason=$2, amended_at=now(), amended_by=$3 WHERE id=$1`,
       [params.orderId, params.input.reason, params.actorId],
     );
+    if (
+      !params.skipCmsOrderStateSync &&
+      order.origin === "website" &&
+      order.cms_connection_id &&
+      order.cms_order_id
+    ) {
+      await syncOrderPaymentStateInTx(client, {
+        businessId: params.businessId,
+        locationId: params.locationId,
+        orderId: params.orderId,
+        state: "cancelled",
+        reason: params.input.reason,
+      });
+    }
   } else {
     // Migration 0014 freezes a settled order's lines at the database. An
     // amendment is the one write allowed to move them, and it says so for the

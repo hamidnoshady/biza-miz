@@ -29,9 +29,14 @@ import { deploymentRole } from "./deployment-role";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import { ensureSessionForTable } from "./table-session-service";
 import { isHlc } from "./sync-hlc";
+import {
+  enqueueOrderStateInTx,
+  syncOrderFulfillmentInTx,
+  syncOrderPaymentStateInTx,
+} from "./cms/order-state-outbox-service";
 
 export interface OrderStateActor {
-  userId: string;
+  userId: string | null;
   role: Role;
 }
 
@@ -101,6 +106,13 @@ export interface OrderStatePayload {
     voidedReason: string | null;
     closedBy: string | null;
     closedAt: string | null;
+    origin?: string;
+    cmsConnectionId?: string | null;
+    cmsOrderId?: string | null;
+    websiteApprovalState?: string | null;
+    websiteApprovalDecidedAt?: string | null;
+    websiteApprovalDecidedBy?: string | null;
+    websiteApprovalReason?: string | null;
   };
   items: OrderStateItem[];
 }
@@ -189,11 +201,20 @@ async function readOrderState(
     closed_at: Date | null;
     stamp: string;
     promotion_ids: string[] | null;
+    origin: string;
+    cms_connection_id: string | null;
+    cms_order_id: string | null;
+    website_approval_state: string | null;
+    website_approval_decided_at: Date | null;
+    website_approval_decided_by: string | null;
+    website_approval_reason: string | null;
   }>(
     `SELECT type::text, status::text, order_number::text, table_id, table_session_id, customer_id, guest_count, note,
             discount_type, discount_value::text, subtotal::text, discount::text, service_charge::text,
             tax::text, total::text, opened_at, opened_by, voided_reason, closed_by, closed_at,
-            promotion_ids, app_sync_next_hlc() AS stamp
+            promotion_ids, origin, cms_connection_id, cms_order_id, website_approval_state,
+            website_approval_decided_at, website_approval_decided_by, website_approval_reason,
+            app_sync_next_hlc() AS stamp
        FROM orders WHERE id = $1 AND location_id = $2`,
     [orderId, locationId],
   );
@@ -256,6 +277,13 @@ async function readOrderState(
       closedBy: order.closed_by,
       closedAt: iso(order.closed_at),
       promotionIds: order.promotion_ids,
+      origin: order.origin,
+      cmsConnectionId: order.cms_connection_id,
+      cmsOrderId: order.cms_order_id,
+      websiteApprovalState: order.website_approval_state,
+      websiteApprovalDecidedAt: iso(order.website_approval_decided_at),
+      websiteApprovalDecidedBy: order.website_approval_decided_by,
+      websiteApprovalReason: order.website_approval_reason,
     },
     items: itemRows.map((item) => ({
       id: item.id,
@@ -391,10 +419,34 @@ export async function applyOrderState(
   const knownMenu = await existingIds(client, "menu_items", menuIds);
   if (menuIds.some((id) => !knownMenu.has(id))) throw new Error("menu_item_not_found");
 
-  const users = await existingIds(client, "users", [order.openedBy, order.closedBy].filter((id): id is string => !!id));
+  const users = await existingIds(
+    client,
+    "users",
+    [order.openedBy, order.closedBy, order.websiteApprovalDecidedBy ?? null].filter(
+      (id): id is string => !!id,
+    ),
+  );
   const tables = order.tableId ? await existingIds(client, "dining_tables", [order.tableId]) : new Set<string>();
+  const cmsConnections = order.cmsConnectionId
+    ? await existingIds(client, "eshobe_cms_connections", [order.cmsConnectionId])
+    : new Set<string>();
   const tableId = order.tableId && tables.has(order.tableId) ? order.tableId : null;
   const openedBy = order.openedBy && users.has(order.openedBy) ? order.openedBy : null;
+  const safeCmsConnectionId =
+    order.cmsConnectionId && cmsConnections.has(order.cmsConnectionId)
+      ? order.cmsConnectionId
+      : null;
+  const safeApprovalDecidedBy =
+    order.websiteApprovalDecidedBy && users.has(order.websiteApprovalDecidedBy)
+      ? order.websiteApprovalDecidedBy
+      : null;
+  const safeOrigin = order.origin === "website" ? "website" : "pos";
+  const safeApprovalState =
+    order.websiteApprovalState === "pending" ||
+    order.websiteApprovalState === "accepted" ||
+    order.websiteApprovalState === "rejected"
+      ? order.websiteApprovalState
+      : null;
 
   if (!local) {
     // Keep the sender's number when it is free here, so a receipt reads the
@@ -422,8 +474,11 @@ export async function applyOrderState(
     }
     await client.query(
       `INSERT INTO orders (id, location_id, order_number, type, status, table_id, customer_id, guest_count,
-                           note, discount_type, discount_value, opened_at, opened_by, promotion_ids)
-       VALUES ($1, $2, $3::bigint, $4::order_type, 'open', $5, $6, $7, $8, $9, $10::numeric, $11::timestamptz, $12, $13::jsonb)`,
+                           note, discount_type, discount_value, opened_at, opened_by, promotion_ids,
+                           origin, cms_connection_id, cms_order_id, website_approval_state,
+                           website_approval_decided_at, website_approval_decided_by, website_approval_reason)
+       VALUES ($1, $2, $3::bigint, $4::order_type, 'open', $5, $6, $7, $8, $9, $10::numeric, $11::timestamptz, $12, $13::jsonb,
+               $14, $15, $16, $17, $18::timestamptz, $19, $20)`,
       [
         orderId,
         params.locationId,
@@ -440,6 +495,13 @@ export async function applyOrderState(
         // The origin's frozen promotion eligibility (issue #913 item 4) —
         // undefined in states from before the snapshot existed, which stays null.
         Array.isArray(order.promotionIds) ? JSON.stringify(order.promotionIds) : null,
+        safeOrigin,
+        safeCmsConnectionId,
+        order.cmsOrderId ?? null,
+        safeApprovalState,
+        order.websiteApprovalDecidedAt ?? null,
+        safeApprovalDecidedBy,
+        order.websiteApprovalReason ?? null,
       ],
     );
   } else {
@@ -451,6 +513,29 @@ export async function applyOrderState(
         WHERE id = $1`,
       [orderId, tableId, order.customerId, order.guestCount, order.note, order.openedAt],
     );
+    if (order.origin === "website" || safeApprovalState !== null) {
+      await client.query(
+        `UPDATE orders
+            SET origin = COALESCE($2, origin),
+                cms_connection_id = COALESCE(cms_connection_id, $3),
+                cms_order_id = COALESCE(cms_order_id, $4),
+                website_approval_state = COALESCE($5, website_approval_state),
+                website_approval_decided_at = COALESCE($6::timestamptz, website_approval_decided_at),
+                website_approval_decided_by = COALESCE(website_approval_decided_by, $7),
+                website_approval_reason = COALESCE($8, website_approval_reason)
+          WHERE id = $1`,
+        [
+          orderId,
+          order.origin === "website" ? "website" : null,
+          safeCmsConnectionId,
+          order.cmsOrderId ?? null,
+          safeApprovalState,
+          order.websiteApprovalDecidedAt ?? null,
+          safeApprovalDecidedBy,
+          order.websiteApprovalReason ?? null,
+        ],
+      );
+    }
     if (Array.isArray(order.promotionIds)) {
       // Only overwrite when the sender actually carries the snapshot; an older
       // peer's state leaves this side's eligibility alone.
@@ -602,5 +687,59 @@ export async function applyOrderState(
   }
   await client.query("UPDATE orders SET sync_state_hlc = $2 WHERE id = $1", [orderId, state.stateHlc]);
   await client.query("SELECT app_sync_observe_hlc($1)", [state.stateHlc]);
+
+  // When the central server applies state pushed from a paired desktop (for
+  // instance kitchen prep/ready/serve bumps or an open-order void), mirror
+  // the new fulfillment/cancellation state into the ESH-148 CMS outbox in the
+  // same transaction.
+  if (deploymentRole() !== "site") {
+    const { rows: afterRows } = await client.query<{
+      business_id: string;
+      origin: string;
+      cms_connection_id: string | null;
+      cms_order_id: string | null;
+      status: string;
+      voided_reason: string | null;
+      website_approval_state: string | null;
+      website_approval_reason: string | null;
+    }>(
+      `SELECT l.business_id, o.origin, o.cms_connection_id, o.cms_order_id,
+              o.status::text AS status, o.voided_reason,
+              o.website_approval_state, o.website_approval_reason
+         FROM orders o
+         JOIN locations l ON l.id = o.location_id
+        WHERE o.id = $1`,
+      [orderId],
+    );
+    const after = afterRows[0];
+    if (after && after.origin === "website" && after.cms_connection_id && after.cms_order_id) {
+      if (after.status === "voided") {
+        await syncOrderPaymentStateInTx(client, {
+          businessId: after.business_id,
+          locationId: params.locationId,
+          orderId,
+          state: "cancelled",
+          reason: after.voided_reason,
+        });
+      } else if (after.website_approval_state === "rejected") {
+        await enqueueOrderStateInTx(client, {
+          businessId: after.business_id,
+          locationId: params.locationId,
+          cmsConnectionId: after.cms_connection_id,
+          cmsOrderId: after.cms_order_id,
+          posOrderId: orderId,
+          state: "rejected",
+          reason: after.website_approval_reason,
+        });
+      } else if (after.website_approval_state === "accepted") {
+        await syncOrderFulfillmentInTx(client, {
+          businessId: after.business_id,
+          locationId: params.locationId,
+          orderId,
+        });
+      }
+    }
+  }
+
   return { orderId, outcome: "applied" };
 }

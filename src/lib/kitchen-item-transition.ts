@@ -2,6 +2,7 @@ import { query, withTenantTransaction } from "./db";
 import { recordOrderState } from "./order-state-sync";
 import { canKitchenBump, canMarkServed, type OrderItemStatus } from "./order-item-status";
 import type { OrderStateActor } from "./order-state-sync";
+import { syncOrderFulfillmentInTx } from "./cms/order-state-outbox-service";
 
 export type KitchenItemTransitionResult =
   | { kind: "updated"; orderId: string }
@@ -32,8 +33,10 @@ export async function transitionKitchenItem(input: {
         id: string;
         status: OrderItemStatus;
         order_id: string;
+        origin: string;
+        website_approval_state: string | null;
       }>(
-        `SELECT oi.id, oi.status, oi.order_id
+        `SELECT oi.id, oi.status, oi.order_id, o.origin, o.website_approval_state
            FROM order_items oi JOIN orders o ON o.id=oi.order_id
           WHERE oi.id=$1 AND oi.location_id=$2 AND o.location_id=$2
             AND o.status IN ('open','held','completed')
@@ -42,6 +45,12 @@ export async function transitionKitchenItem(input: {
       );
       const item = rows[0];
       if (!item) return { kind: "missing" } as const;
+      if (
+        item.website_approval_state === "pending" ||
+        item.website_approval_state === "rejected"
+      ) {
+        return { kind: "conflict", currentStatus: item.status } as const;
+      }
       if (item.status === input.to) {
         return { kind: "duplicate", currentStatus: item.status } as const;
       }
@@ -60,7 +69,8 @@ export async function transitionKitchenItem(input: {
                               THEN now() ELSE ready_at END
           WHERE oi.id=$1 AND oi.location_id=$2 AND oi.status=$4
             AND EXISTS (SELECT 1 FROM orders o WHERE o.id=oi.order_id AND o.location_id=$2
-                         AND o.status IN ('open','held','completed'))
+                         AND o.status IN ('open','held','completed')
+                         AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted'))
           RETURNING oi.id`,
         [input.itemId, input.locationId, input.to, item.status],
       );
@@ -73,6 +83,13 @@ export async function transitionKitchenItem(input: {
           ? ({ kind: "conflict", currentStatus: current[0].status } as const)
           : ({ kind: "missing" } as const);
       }
+      if (item.origin === "website") {
+        await syncOrderFulfillmentInTx(client, {
+          businessId: input.businessId,
+          locationId: input.locationId,
+          orderId: item.order_id,
+        });
+      }
       if (input.syncActor) {
         await recordOrderState(client, {
           locationId: input.locationId,
@@ -82,6 +99,6 @@ export async function transitionKitchenItem(input: {
       }
       return { kind: "updated", orderId: item.order_id } as const;
     },
-    { locationId: input.locationId, userId: input.actorUserId },
+    { locationId: input.locationId, userId: input.actorUserId || null },
   );
 }

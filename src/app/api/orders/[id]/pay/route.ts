@@ -31,6 +31,7 @@ import { releaseTableAfterOrderSettled } from "@/lib/table-session-service";
 import { appendSyncOutboxEvent } from "@/lib/sync-outbox";
 import { markScoringDirtyIn } from "@/lib/crm-scoring-freshness";
 import { OrderPaymentRoutingError, routeOrderTenders, type RoutedOrderTender } from "@/lib/order-payment-routing-service";
+import { syncOrderPaymentStateInTx } from "@/lib/cms/order-state-outbox-service";
 
 interface PayTenderBody {
   /** `payment_methods.id` — the way the cashier tapped. */
@@ -168,6 +169,10 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       return NextResponse.json({ error: locked.error }, { status: locked.status });
     }
     const order = locked.order;
+    if (order.website_approval_state === "rejected") {
+      await client.query("ROLLBACK");
+      return NextResponse.json({ error: "order_rejected" }, { status: 409 });
+    }
     // The exact bill being paid, queued for the paired peer before the payment
     // event and in the same transaction (order-state-sync.ts): even if every
     // earlier state was lost, the peer settles precisely these lines and totals.
@@ -350,6 +355,14 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     // freed table commit together or not at all, so a rolled-back checkout can
     // never leave a table that looks empty but still owes money.
     releasedSession = await releaseTableAfterOrderSettled(client, location.id, id, session.sub);
+    if (order.origin === "website") {
+      await syncOrderPaymentStateInTx(client, {
+        businessId: session.businessId,
+        locationId: location.id,
+        orderId: id,
+        state: "paid",
+      });
+    }
     await markScoringDirtyIn(client, session.businessId);
     // The date the entries above were posted on (CURRENT_DATE in this same
     // transaction), so the peer posts its copy on the same day however late

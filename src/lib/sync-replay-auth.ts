@@ -1,11 +1,55 @@
 import type { Role, SessionPayload } from "./auth-edge";
 import { authorize } from "./authorize";
 import { query, withoutTenantScope } from "./db";
-import type { Permission } from "./permissions";
+import { PERMISSIONS, type Permission } from "./permissions";
 
 export type SyncReplayAccess =
   | { ok: true; businessId: string; role: Role; permissions: Set<Permission> }
   | { ok: false; error: string };
+
+/**
+ * Automated cloud-originated website events (e.g. a CMS café order arriving
+ * via webhook/poll with no staff user) carry `actorUserId === ""` when pulled
+ * down to a paired desktop. They may exercise only the narrow non-discount
+ * order/payment/kitchen surface — never discount overrides or admin mutations.
+ */
+const AUTOMATED_CLOUD_PERMISSIONS = new Set<Permission>([
+  PERMISSIONS.ordersView,
+  PERMISSIONS.ordersCreate,
+  PERMISSIONS.ordersVoid,
+  PERMISSIONS.ordersVoidItem,
+  PERMISSIONS.ordersAmendClosed,
+  PERMISSIONS.paymentsTake,
+  PERMISSIONS.paymentsRefund,
+  PERMISSIONS.kitchenView,
+]);
+
+export async function authorizeAutomatedCloudReplay(input: {
+  locationId: string;
+  permissions: readonly Permission[];
+  requireAll?: boolean;
+}): Promise<SyncReplayAccess> {
+  const { rows } = await withoutTenantScope("authorization-membership", () =>
+    query<{ business_id: string }>(
+      `SELECT business_id FROM locations WHERE id = $1 AND is_active`,
+      [input.locationId],
+    ),
+  );
+  const businessId = rows[0]?.business_id;
+  if (!businessId) return { ok: false, error: "unknown_location" };
+
+  const allowed = input.requireAll
+    ? input.permissions.every((perm) => AUTOMATED_CLOUD_PERMISSIONS.has(perm))
+    : input.permissions.some((perm) => AUTOMATED_CLOUD_PERMISSIONS.has(perm));
+  if (!allowed) return { ok: false, error: "forbidden" };
+
+  return {
+    ok: true,
+    businessId,
+    role: "cashier",
+    permissions: new Set(AUTOMATED_CLOUD_PERMISSIONS),
+  };
+}
 
 /**
  * Resolve replay authority from live membership state, never the event's stored

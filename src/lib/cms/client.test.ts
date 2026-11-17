@@ -19,6 +19,7 @@ import {
   provisionSite,
   updatePost,
   updateSiteDomain,
+  patchCmsOrderState,
   type CmsConfig,
   type FetchLike,
 } from "./client";
@@ -225,5 +226,38 @@ describe("fetchMediaPreview", () => {
     expect(ok?.body.byteLength).toBe(3);
     expect(calls[1]!.startsWith(`${CONFIG.baseUrl}/api/media/file/a.png`)).toBe(true);
     expect(await fetchMediaPreview(CONFIG, "m1", { fetchImpl: respond("image/svg+xml") })).toBeNull();
+  });
+});
+
+describe("patchCmsOrderState", () => {
+  it("PATCHes /api/orders/:id with fulfillment and/or status payloads", async () => {
+    const { fetchImpl, calls } = fakeFetch(200, { id: "ord/1", status: "paid" });
+    await patchCmsOrderState(
+      CONFIG,
+      "ord/1",
+      {
+        status: "paid",
+        cafe: {
+          fulfillment: "accepted",
+          fulfillmentAt: "2026-11-14T12:00:00.000Z",
+        },
+      },
+      { fetchImpl },
+    );
+    expect(calls[0][0]).toBe("https://cms.eshobe.com/api/orders/ord%2F1");
+    expect(calls[0][1].method).toBe("PATCH");
+    expect(JSON.parse(String(calls[0][1].body))).toEqual({
+      status: "paid",
+      cafe: {
+        fulfillment: "accepted",
+        fulfillmentAt: "2026-11-14T12:00:00.000Z",
+      },
+    });
+  });
+
+  it("omits cafe object when only payment status is patched", async () => {
+    const { fetchImpl, calls } = fakeFetch(200, { id: "ord-2", status: "cancelled" });
+    await patchCmsOrderState(CONFIG, "ord-2", { status: "cancelled" }, { fetchImpl });
+    expect(JSON.parse(String(calls[0][1].body))).toEqual({ status: "cancelled" });
   });
 });

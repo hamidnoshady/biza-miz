@@ -3,7 +3,7 @@
  * webhook is configured, then ingest through the same path as POST /api/cms/order-events.
  */
 import { fetchOrderById } from "./client";
-import { getCmsConfigForBusiness } from "./connections";
+import { getCmsConfigForConnection } from "./connections";
 import { fetchCmsEvents } from "./platform-client";
 import {
   advanceStoreOrderIngestCursor,
@@ -26,13 +26,13 @@ export function orderIdFromEvent(event: { data?: Record<string, unknown>; id: st
   if (typeof event.data?.id === "string") return event.data.id;
   const parts = event.id.split(":");
   if (parts[0] === "order" && parts[2]) {
-    if (parts[1] === "paid") return parts[2];
+    if (parts[1] === "submitted" || parts[1] === "paid") return parts[2];
     if (parts[1] === "refunded" || parts[1] === "cancelled") return parts[2];
   }
   return null;
 }
 
-const STORE_ORDER_EVENT_KINDS = ["order.paid", "order.refunded", "order.cancelled"] as const;
+const STORE_ORDER_EVENT_KINDS = ["order.submitted", "order.paid", "order.refunded", "order.cancelled"] as const;
 type StoreOrderEventKind = (typeof STORE_ORDER_EVENT_KINDS)[number];
 
 function isStoreOrderEventKind(kind: string): kind is StoreOrderEventKind {
@@ -62,6 +62,10 @@ export async function runCmsStoreOrderPollTick(): Promise<CmsStoreOrderPollResul
 
     const order = await loadOrderForSite(siteId, orderId);
     if (!order) continue;
+    // `order.submitted` arrives unpaid for counter orders (and may already be
+    // `paid` when online PSP checkout raced); cancelled/refunded are skipped
+    // here because their own reversal event carries them.
+    if (event.kind === "order.submitted" && order.status !== "pending" && order.status !== "paid") continue;
     if (event.kind === "order.paid" && order.status !== "paid") continue;
     if (event.kind === "order.refunded" && order.status !== "refunded") continue;
     if (event.kind === "order.cancelled" && order.status !== "cancelled") continue;
@@ -89,7 +93,7 @@ async function loadOrderForSite(siteId: string, orderId: string): Promise<CmsOrd
 
   return withTenant(connection.business_id, async () => {
     try {
-      const config = await getCmsConfigForBusiness(connection.business_id);
+      const config = await getCmsConfigForConnection(connection.business_id, connection.id);
       return await fetchOrderById(config, orderId);
     } catch {
       return null;

@@ -40,6 +40,7 @@ import { recordOrderState, type OrderStateActor } from "./order-state-sync";
 import { discountPercentForControl, normalizeVoidReason } from "./order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
 import { enqueueKitchenDispatch } from "./kitchen-dispatch";
+import { syncOrderFulfillmentInTx } from "./cms/order-state-outbox-service";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -196,6 +197,21 @@ export interface CreateOrderInput {
   actorRole?: Role;
   /** False only while applying an event already present in the sync inbox. */
   recordSyncEvent?: boolean;
+  /**
+   * Hold kitchen dispatch & keep lines `pending` until staff accepts (ESH-146).
+   *
+   * Website café orders arrive as proposals: items enter as `'pending'` with
+   * `sent_to_kitchen_at = NULL`, invisible to KDS until staff accept via
+   * `decideCafeOrderApproval`, which promotes them to `'sent'` and calls
+   * `enqueueKitchenDispatch()` once.
+   */
+  holdKitchenDispatch?: boolean;
+  /** Website order provenance stamped atomically at creation. */
+  websiteOrigin?: {
+    cmsConnectionId: string | null;
+    cmsOrderId: string;
+    websiteApprovalState: "pending" | "accepted" | "rejected";
+  } | null;
 }
 
 export interface CreateOrderOutput {
@@ -476,10 +492,12 @@ export async function createOrder(
       `INSERT INTO orders (id, location_id, order_number, type, status, table_id, table_session_id, customer_id, guest_count,
               subtotal, discount, discount_type, discount_value, service_charge, tax, total, note, opened_by, client_request_id,
               request_fingerprint, promotion_ids, table_qr_token_id,
+              origin, cms_connection_id, cms_order_id, website_approval_state,
               opened_at)
        VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
                $19, $20::jsonb, $21,
-               coalesce($22::timestamptz, now()))
+               $22, $23, $24, $25,
+               coalesce($26::timestamptz, now()))
        RETURNING id`,
       [
         requestedOrderId,
@@ -507,6 +525,10 @@ export async function createOrder(
         // NULL would mean "evaluate live", which is only for legacy rows.
         JSON.stringify(promotions.map((p) => p.id)),
         input.tableQrTokenId ?? null,
+        input.websiteOrigin ? "website" : "pos",
+        input.websiteOrigin?.cmsConnectionId ?? null,
+        input.websiteOrigin?.cmsOrderId ?? null,
+        input.websiteOrigin?.websiteApprovalState ?? null,
         input.openedAt ?? null,
       ],
     );
@@ -581,16 +603,21 @@ export async function createOrder(
       });
     }
 
+    const holdKitchen = Boolean(input.holdKitchenDispatch);
     const lineIds: string[] = [];
     for (const [index, item] of preparedItems.entries()) {
-      // Submitting the order *is* "send to kitchen": items land as 'sent'
-      // straight away so they appear on the KDS within ~1s (Phase 4).
+      // Submitting a POS order sends lines to the kitchen immediately ('sent'),
+      // whereas held website proposals enter as 'pending' with NULL
+      // `sent_to_kitchen_at` until staff accept the order (ESH-146).
       // `tax_rate_snapshot` freezes this line's VAT rate at the moment it
       // entered the order (issue #913 item 11), like `unit_price` — the
       // category's live rate must not reprice a bill that already quoted it.
       const { rows: itemRows } = await client.query<{ id: string }>(
         `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
-         VALUES (coalesce($8::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6, $7, 'sent', now(), $9) RETURNING id`,
+         VALUES (coalesce($8::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6, $7,
+                 $10::order_item_status,
+                 CASE WHEN $11::boolean THEN NULL ELSE now() END,
+                 $9) RETURNING id`,
         [
           input.locationId,
           orderId,
@@ -601,6 +628,8 @@ export async function createOrder(
           item.note,
           input.itemIds?.[index] ?? null,
           cartLines[index]?.taxRatePercent ?? 0,
+          holdKitchen ? "pending" : "sent",
+          holdKitchen,
         ],
       );
       const orderItemId = itemRows[0].id;
@@ -614,7 +643,7 @@ export async function createOrder(
       );
     }
 
-    if (businessId) {
+    if (businessId && !holdKitchen) {
       await enqueueKitchenDispatch(client, {
         businessId,
         locationId: input.locationId,
@@ -645,6 +674,8 @@ export async function createOrder(
           // later order.state.synced finds them (migration 0190).
           itemIds: lineIds,
           delivery: input.delivery ?? null,
+          holdKitchenDispatch: holdKitchen,
+          ...(input.websiteOrigin ? { websiteOrigin: input.websiteOrigin } : {}),
           // The business-request identity rides along so a peer's replay
           // dedupes on the SAME key the till used, not on the outbox event id
           // (issue #913 item 1 — one identity across POST, queue, replay and
@@ -721,6 +752,11 @@ export async function addItemsToOrder(
       await client.query("ROLLBACK");
       return locked;
     }
+    if (locked.order.website_approval_state === "rejected") {
+      await client.query("ROLLBACK");
+      return { ok: false, error: "order_rejected", status: 409 };
+    }
+    const holdKitchen = locked.order.website_approval_state === "pending";
     const resolved = await resolveCartItems(
       input.locationId,
       input.items,
@@ -743,7 +779,7 @@ export async function addItemsToOrder(
       // Tax frozen at the moment the line joins the order (issue #913 item 11).
       const { rows: itemRows } = await client.query<{ id: string }>(
         `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', now(), $8) RETURNING id`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $9::order_item_status, CASE WHEN $10::boolean THEN NULL ELSE now() END, $8) RETURNING id`,
         [
           input.locationId,
           input.orderId,
@@ -753,6 +789,8 @@ export async function addItemsToOrder(
           item.quantity,
           item.note,
           cartLines[index]?.taxRatePercent ?? 0,
+          holdKitchen ? "pending" : "sent",
+          holdKitchen,
         ],
       );
       const orderItemId = itemRows[0].id;
@@ -765,12 +803,23 @@ export async function addItemsToOrder(
         item.modifiers,
       );
     }
-    if (businessId) {
+    if (businessId && !holdKitchen) {
       await enqueueKitchenDispatch(client, {
         businessId,
         locationId: input.locationId,
         orderId: input.orderId,
         itemIds,
+      });
+    }
+    if (
+      businessId &&
+      locked.order.origin === "website" &&
+      locked.order.website_approval_state === "accepted"
+    ) {
+      await syncOrderFulfillmentInTx(client, {
+        businessId,
+        locationId: input.locationId,
+        orderId: input.orderId,
       });
     }
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
@@ -859,6 +908,7 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
     replacementItemId: string | null;
   }>
 > {
+  const businessId = input.actor?.businessId ?? await businessIdForLocation(input.locationId);
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
@@ -867,6 +917,11 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
       await client.query("ROLLBACK");
       return locked;
     }
+    if (locked.order.website_approval_state === "rejected") {
+      await client.query("ROLLBACK");
+      return { ok: false, error: "order_rejected", status: 409 };
+    }
+    const holdKitchen = locked.order.website_approval_state === "pending";
     const { rows: itemRows } = await client.query<{
       id: string;
       status: string;
@@ -984,7 +1039,7 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
         // The replacement keeps the superseded line's frozen VAT rate too:
         // re-picking add-ons must not reprice tax from today's category.
         `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', now(), $8) RETURNING id`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $9::order_item_status, CASE WHEN $10::boolean THEN NULL ELSE now() END, $8) RETURNING id`,
         [
           input.locationId,
           input.orderId,
@@ -994,6 +1049,8 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
           quantity,
           note,
           Number(item.tax_rate),
+          holdKitchen ? "pending" : "sent",
+          holdKitchen,
         ],
       );
       replacementItemId = replacement[0].id;
@@ -1035,6 +1092,18 @@ export async function updateOrderItem(input: UpdateOrderItemInput): Promise<
     }
 
     const totals = await recomputeOrderTotals(client, input.orderId, discount);
+    if (
+      businessId &&
+      input.void &&
+      locked.order.origin === "website" &&
+      locked.order.website_approval_state === "accepted"
+    ) {
+      await syncOrderFulfillmentInTx(client, {
+        businessId,
+        locationId: input.locationId,
+        orderId: input.orderId,
+      });
+    }
     if (input.actor) {
       if (controlledAction) {
         await recordOrderAudit(client, {

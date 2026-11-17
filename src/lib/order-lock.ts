@@ -17,6 +17,10 @@ export interface LockedOpenOrder {
   tax: string;
   total: string;
   note: string | null;
+  origin?: "pos" | "website";
+  cms_connection_id?: string | null;
+  cms_order_id?: string | null;
+  website_approval_state?: "pending" | "accepted" | "rejected" | null;
 }
 
 export type LockOpenOrderResult =
@@ -38,7 +42,8 @@ export async function lockOpenOrder(
 ): Promise<LockOpenOrderResult> {
   const { rows } = await client.query<LockedOpenOrder & { status: string }>(
     `SELECT id, status, type, table_id, table_session_id, customer_id, guest_count, subtotal::text, discount::text, discount_type,
-            discount_value::text, service_charge::text, tax::text, total::text, note
+            discount_value::text, service_charge::text, tax::text, total::text, note,
+            origin, cms_connection_id, cms_order_id, website_approval_state
        FROM orders
       WHERE id = $1 AND location_id = $2
       FOR UPDATE`,

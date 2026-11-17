@@ -264,15 +264,71 @@ export interface CmsProduct {
   _status?: "draft" | "published" | null;
 }
 
+export type CmsCafeFulfillmentState =
+  | "awaiting_approval"
+  | "accepted"
+  | "preparing"
+  | "ready"
+  | "served"
+  | "rejected";
+
+export interface CmsOrderItemModifier {
+  groupSourceId?: string | null;
+  groupLabel?: string | null;
+  optionSourceId?: string | null;
+  optionLabel?: string | null;
+  quantity?: number | null;
+  priceDelta?: number | null;
+}
+
+/**
+ * One line of a multi-line café order (ESH-146 / ESH-150).
+ *
+ * Accepts both flat fixture fields (`productId`, `modifierIds`) and Payload's
+ * persisted `Orders.items` shape (`product`, `modifiers[].optionSourceId`).
+ */
+export interface CmsOrderItem {
+  id?: string | null;
+  lineId?: string | null;
+  productId?: string | null;
+  product?: string | { id: string; sourceId?: string | null; title?: string | null } | null;
+  productTitle?: string | null;
+  title?: string | null;
+  quantity: number;
+  /** Minor units, the CMS's own snapshot at checkout. */
+  unitPrice?: number | null;
+  total?: number | null;
+  /** CMS modifier/option ids; mapped to `modifiers` rows by the intake. */
+  modifierIds?: string[] | null;
+  modifiers?: CmsOrderItemModifier[] | null;
+  sourceLineId?: string | null;
+  note?: string | null;
+}
+
+export interface CmsOrderCafeMeta {
+  serviceMode?: "dine_in" | "takeaway" | null;
+  tableToken?: string | null;
+  paymentChoice?: "online" | "counter" | null;
+  checkoutRequestId?: string | null;
+  cartFingerprint?: string | null;
+  fulfillment?: CmsCafeFulfillmentState | null;
+  fulfillmentAt?: string | null;
+}
+
 export interface CmsOrder {
   id: string;
   reference: string;
   status: "pending" | "paid" | "cancelled" | "refunded";
-  product: string | CmsProduct;
+  /**
+   * Legacy one-product shape. A café order carries `items` instead and leaves
+   * these three to the first line (the CMS does that mirroring, ESH-150), or
+   * omits them on minimal test/webhook fixtures.
+   */
+  product?: string | CmsProduct;
   productTitle?: string | null;
-  quantity: number;
+  quantity?: number;
   /** Snapshot at purchase time — not the product's current price. */
-  unitPrice: number;
+  unitPrice?: number;
   total: number;
   currency: "EUR" | "IRR" | "IRT" | "USD";
   buyer: { name: string; phone: string; email?: string | null; note?: string | null };
@@ -288,6 +344,24 @@ export interface CmsOrder {
    */
   serviceMode?: "dine_in" | "takeaway" | null;
   tableToken?: string | null;
+  /**
+   * Multi-line café basket. Present on `order.submitted`; when it is absent the
+   * order is the legacy single-product storefront shape and keeps going through
+   * the Phase G paid import.
+   */
+  items?: CmsOrderItem[] | null;
+  /** How the customer chose to pay; `counter` orders arrive unpaid. */
+  paymentMethod?: "online" | "counter" | null;
+  /** Payload `Orders.cafe` nested group from `eshobe-cms`. */
+  cafe?: CmsOrderCafeMeta | null;
+  /** Payload `Orders.payment` nested group from `eshobe-cms`. */
+  payment?: { provider?: string | null; settled?: boolean | null } | null;
+  /**
+   * CMS-side fulfilment state (ESH-150 / ESH-148). The POS owns kitchen state,
+   * so approved/kitchen/rejected transitions flow from POS → CMS through the
+   * `cms_order_state_outbox`.
+   */
+  fulfillmentStatus?: CmsCafeFulfillmentState | "pending" | "cancelled" | null;
   updatedAt: string;
   createdAt: string;
 }

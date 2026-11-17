@@ -67,6 +67,11 @@ import {
 import { cmsDnsHint, isSiteLive } from "@/lib/cms/dns";
 import type { RegistrarDomain, RegistrarOperationRow, SiteCdnStatus } from "@/lib/cms/client";
 import { useMoney } from "@/components/money/money-context";
+import type { CmsOrderStateSyncSummary } from "@/lib/cms/order-inbox-service";
+import type {
+  CmsOrderStateQueueRow,
+  CmsOrderStateQueueSummary,
+} from "@/lib/cms/order-state-outbox-service";
 import type { CmsDnsStatus, WebsiteOverview } from "@/lib/cms/website-service";
 import { cmsSectionHref } from "../website-routes";
 import { CmsSyncSettings } from "./cms-sync-settings";
@@ -812,6 +817,7 @@ export function CmsProductsSection() {
 export function CmsOrdersSection() {
   const site = useCmsSite();
   const [updatingOrder, setUpdatingOrder] = useState("");
+  const [queueReloadKey, setQueueReloadKey] = useState(0);
 
   if (site.loading) return <SectionCardSkeleton rows={4} />;
   if (!site.connection) return <NoSiteYet what="سفارش‌های فروشگاه" />;
@@ -825,6 +831,7 @@ export function CmsOrdersSection() {
         <OrdersCard
           orders={site.overview.orders}
           orderInbox={site.overview.orderInbox ?? {}}
+          orderStateSync={site.overview.orderStateSync ?? {}}
           currency={currency}
           updatingOrder={updatingOrder}
           onStatusChange={(order, status) => {
@@ -855,6 +862,14 @@ export function CmsOrdersSection() {
           <LoadingSkeleton rows={3} compact label="در حال بارگذاری سفارش‌ها" />
         </SectionCard>
       )}
+      <OrderSyncQueueCard
+        connectionId={site.connection.id}
+        reloadKey={queueReloadKey}
+        onSynced={() => {
+          site.loadOverview();
+          setQueueReloadKey((k) => k + 1);
+        }}
+      />
     </div>
   );
 }
@@ -1340,15 +1355,46 @@ const INBOX_STATUS_TONE: Record<string, "positive" | "danger" | "active" | "neut
   duplicate: "neutral",
 };
 
+const OUTBOX_STATE_LABELS: Record<string, string> = {
+  accepted: "تأییدشده",
+  rejected: "ردشده",
+  preparing: "در حال آماده‌سازی",
+  ready: "آماده تحویل",
+  served: "تحویل‌شده",
+  paid: "پرداخت‌شده",
+  cancelled: "لغو شده",
+  refunded: "بازگشت خورده",
+};
+
+const OUTBOX_STATUS_LABELS: Record<string, string> = {
+  pending: "در صف ارسال",
+  processing: "در حال ارسال",
+  sent: "ارسال شد",
+  failed: "تلاش مجدد",
+  dead: "متوقف‌شده",
+  superseded: "جایگزین‌شده",
+};
+
+const OUTBOX_STATUS_TONE: Record<string, "positive" | "danger" | "active" | "neutral"> = {
+  pending: "active",
+  processing: "active",
+  sent: "positive",
+  failed: "danger",
+  dead: "danger",
+  superseded: "neutral",
+};
+
 function OrdersCard({
   orders,
   orderInbox,
+  orderStateSync,
   currency,
   updatingOrder,
   onStatusChange,
 }: {
   orders: CmsOrder[];
   orderInbox: Record<string, { status: string; error: string | null; reversed?: boolean }>;
+  orderStateSync: Record<string, CmsOrderStateSyncSummary>;
   currency: string;
   updatingOrder: string;
   onStatusChange: (order: CmsOrder, status: CmsOrder["status"]) => void;
@@ -1359,49 +1405,250 @@ function OrdersCard({
         <EmptyState>سفارشی ثبت نشده است.</EmptyState>
       ) : (
         <ul className="divide-y divide-border">
-          {orders.map((order) => (
-            <li key={order.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
+          {orders.map((order) => {
+            const syncSummary = orderStateSync[order.id];
+            const latestAxis = syncSummary?.payment ?? syncSummary?.fulfillment ?? null;
+            const itemCount = Array.isArray(order.items) && order.items.length > 0
+              ? order.items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)
+              : Number(order.quantity ?? 1);
+            const titleText =
+              order.productTitle ??
+              (Array.isArray(order.items) && order.items.length > 0
+                ? order.items.map((item) => item.title || "قلم").slice(0, 2).join("، ")
+                : "سفارش");
+            return (
+              <li key={order.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-foreground">
+                    {toPersianDigits(order.reference)} — {titleText}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {toPersianDigits(itemCount)} عدد · {toPersianDigits(order.buyer.phone)}
+                    {" · "}
+                    {formatPersianNumber(order.total)}{" "}
+                    {CURRENCY_LABELS[currency] ?? currency}
+                  </p>
+                </div>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {orderInbox[order.id] ? (
+                    <StatusBadge
+                      tone={
+                        orderInbox[order.id].reversed
+                          ? "neutral"
+                          : (INBOX_STATUS_TONE[orderInbox[order.id].status] ?? "neutral")
+                      }
+                    >
+                      {orderInbox[order.id].reversed
+                        ? "برگشت در حسابداری"
+                        : (INBOX_STATUS_LABELS[orderInbox[order.id].status] ?? orderInbox[order.id].status)}
+                    </StatusBadge>
+                  ) : null}
+                  {latestAxis ? (
+                    <StatusBadge tone={OUTBOX_STATUS_TONE[latestAxis.status] ?? "neutral"}>
+                      {OUTBOX_STATE_LABELS[latestAxis.state] ?? latestAxis.state} ·{" "}
+                      {OUTBOX_STATUS_LABELS[latestAxis.status] ?? latestAxis.status}
+                    </StatusBadge>
+                  ) : null}
+                  <StatusBadge tone={ORDER_STATUS_TONE[order.status] ?? "neutral"}>
+                    {ORDER_STATUS_LABELS[order.status] ?? order.status}
+                  </StatusBadge>
+                  <select
+                    className={`${inputClass} h-9 w-auto`}
+                    value={order.status}
+                    disabled={updatingOrder === order.id}
+                    onChange={(event) => onStatusChange(order, event.target.value as CmsOrder["status"])}
+                    aria-label={`وضعیت سفارش ${toPersianDigits(order.reference)}`}
+                  >
+                    {Object.entries(ORDER_STATUS_LABELS).map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </SectionCard>
+  );
+}
+
+function OrderSyncQueueCard({
+  connectionId,
+  reloadKey,
+  onSynced,
+}: {
+  connectionId: string;
+  reloadKey: number;
+  onSynced: () => void;
+}) {
+  const [filter, setFilter] = useState<"open" | "sent" | "all">("open");
+  const [rows, setRows] = useState<CmsOrderStateQueueRow[] | null>(null);
+  const [summary, setSummary] = useState<CmsOrderStateQueueSummary | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState<string>("");
+
+  const loadQueue = useCallback(() => {
+    const queryStr = new URLSearchParams({ status: filter, connectionId }).toString();
+    api<{ rows: CmsOrderStateQueueRow[]; summary: CmsOrderStateQueueSummary; error?: string }>(
+      `/api/cms/website/orders/sync-queue?${queryStr}`,
+    ).then(({ ok, data }) => {
+      if (ok) {
+        setRows(data.rows);
+        setSummary(data.summary);
+        setError("");
+      } else {
+        setError(errorMessageOrRaw(data.error));
+      }
+    });
+  }, [connectionId, filter]);
+
+  useEffect(() => {
+    loadQueue();
+  }, [loadQueue, reloadKey]);
+
+  async function syncNow() {
+    setBusy("sync");
+    const { ok, data } = await api<{ sent?: number; failed?: number; dead?: number; error?: string }>(
+      `/api/cms/website/orders/sync-queue/sync?connectionId=${encodeURIComponent(connectionId)}`,
+      { method: "POST" },
+    );
+    setBusy("");
+    if (!ok) {
+      toast.error(errorMessageOrRaw(data.error));
+      return;
+    }
+    toast.success(`همگام‌سازی انجام شد (${toPersianDigits(data.sent ?? 0)} ارسال‌شد).`);
+    loadQueue();
+    onSynced();
+  }
+
+  async function retryAll() {
+    setBusy("retry-all");
+    const { ok, data } = await api<{ requeued?: number; sent?: number; error?: string }>(
+      `/api/cms/website/orders/sync-queue/retry-all?connectionId=${encodeURIComponent(connectionId)}`,
+      { method: "POST" },
+    );
+    setBusy("");
+    if (!ok) {
+      toast.error(errorMessageOrRaw(data.error));
+      return;
+    }
+    toast.success(`تلاش مجدد انجام شد (${toPersianDigits(data.requeued ?? 0)} مورد در صف).`);
+    loadQueue();
+    onSynced();
+  }
+
+  async function retryOne(id: string) {
+    setBusy(id);
+    const { ok, data } = await api<{ sent?: number; error?: string }>(
+      `/api/cms/website/orders/sync-queue/${id}/retry`,
+      { method: "POST" },
+    );
+    setBusy("");
+    if (!ok) {
+      toast.error(errorMessageOrRaw(data.error));
+      return;
+    }
+    toast.success("درخواست همگام‌سازی دوباره ارسال شد.");
+    loadQueue();
+    onSynced();
+  }
+
+  const actions = (
+    <div className="flex flex-wrap gap-2">
+      <SecondaryButton onClick={() => void syncNow()} disabled={busy !== ""}>
+        <RefreshCwIcon className="size-4" />
+        {busy === "sync" ? "در حال ارسال…" : "همگام‌سازی اکنون"}
+      </SecondaryButton>
+      {(summary?.failed ?? 0) + (summary?.dead ?? 0) > 0 ? (
+        <Button type="button" variant="outline" onClick={() => void retryAll()} disabled={busy !== ""}>
+          تلاش مجدد همه
+        </Button>
+      ) : null}
+    </div>
+  );
+
+  return (
+    <SectionCard
+      title="صف همگام‌سازی وضعیت سفارش‌ها"
+      description="ارسال خودکار وضعیت‌های تأیید، آشپزخانه، پرداخت و لغو از صندوق به وب‌سایت."
+      actions={actions}
+    >
+      <ErrorBox>{error}</ErrorBox>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-2">
+          {(
+            [
+              { id: "open", label: "باز / نیازمند بررسی" },
+              { id: "sent", label: "ارسال‌شده" },
+              { id: "all", label: "همه" },
+            ] as const
+          ).map((item) => (
+            <Button
+              key={item.id}
+              type="button"
+              size="sm"
+              variant={filter === item.id ? "default" : "outline"}
+              onClick={() => setFilter(item.id)}
+            >
+              {item.label}
+            </Button>
+          ))}
+        </div>
+        {summary ? (
+          <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+            <span>در انتظار: {toPersianDigits(summary.pending)}</span>
+            <span>· ارسال‌شده: {toPersianDigits(summary.sent)}</span>
+            {summary.failed > 0 ? (
+              <span className="text-amber-700 dark:text-amber-300">
+                · در صف تلاش مجدد: {toPersianDigits(summary.failed)}
+              </span>
+            ) : null}
+            {summary.dead > 0 ? (
+              <span className="text-destructive">
+                · متوقف‌شده: {toPersianDigits(summary.dead)}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      {rows === null ? (
+        <LoadingSkeleton rows={2} compact label="در حال بارگذاری صف همگام‌سازی" />
+      ) : rows.length === 0 ? (
+        <EmptyState>موردی در این بخش از صف همگام‌سازی وجود ندارد.</EmptyState>
+      ) : (
+        <ul className="divide-y divide-border">
+          {rows.map((row) => (
+            <li key={row.id} className="flex flex-wrap items-center justify-between gap-3 py-2.5">
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-foreground">
-                  {toPersianDigits(order.reference)} — {order.productTitle ?? "محصول"}
+                  سفارش {toPersianDigits(row.cmsOrderId)} ·{" "}
+                  {OUTBOX_STATE_LABELS[row.state] ?? row.state}
                 </p>
                 <p className="truncate text-xs text-muted-foreground">
-                  {toPersianDigits(order.quantity)} عدد · {toPersianDigits(order.buyer.phone)}
-                  {" · "}
-                  {formatPersianNumber(order.total)}{" "}
-                  {CURRENCY_LABELS[currency] ?? currency}
+                  تلاش: {toPersianDigits(row.attempts)}
+                  {row.lastError ? ` · خطا: ${row.lastError}` : ""}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {orderInbox[order.id] ? (
-                  <StatusBadge
-                    tone={
-                      orderInbox[order.id].reversed
-                        ? "neutral"
-                        : (INBOX_STATUS_TONE[orderInbox[order.id].status] ?? "neutral")
-                    }
-                  >
-                    {orderInbox[order.id].reversed
-                      ? "برگشت در حسابداری"
-                      : (INBOX_STATUS_LABELS[orderInbox[order.id].status] ?? orderInbox[order.id].status)}
-                  </StatusBadge>
-                ) : null}
-                <StatusBadge tone={ORDER_STATUS_TONE[order.status] ?? "neutral"}>
-                  {ORDER_STATUS_LABELS[order.status] ?? order.status}
+                <StatusBadge tone={OUTBOX_STATUS_TONE[row.status] ?? "neutral"}>
+                  {OUTBOX_STATUS_LABELS[row.status] ?? row.status}
                 </StatusBadge>
-                <select
-                  className={`${inputClass} h-9 w-auto`}
-                  value={order.status}
-                  disabled={updatingOrder === order.id}
-                  onChange={(event) => onStatusChange(order, event.target.value as CmsOrder["status"])}
-                  aria-label={`وضعیت سفارش ${toPersianDigits(order.reference)}`}
-                >
-                  {Object.entries(ORDER_STATUS_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+                {row.status === "failed" || row.status === "dead" ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={busy !== ""}
+                    onClick={() => void retryOne(row.id)}
+                  >
+                    تلاش مجدد
+                  </Button>
+                ) : null}
               </div>
             </li>
           ))}

@@ -11,11 +11,11 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1271**. Rows: tenant **119**, platform **23**.
+Route files scanned: **1276**. Rows: tenant **119**, platform **23**.
 
 ## Summary of remaining gaps
 
-### Tenant (17)
+### Tenant (18)
 - **accounting.currencies** (Accounting · Currencies and exchange rates) — MCP gap
 - **accounting.multicurrency** (Accounting · Multi-currency entries, settlements and revaluations) — MCP gap
 - **accounting.opening-balances** (Accounting · Opening balances & fiscal carry-forward) — MCP gap
@@ -27,6 +27,7 @@ Route files scanned: **1271**. Rows: tenant **119**, platform **23**.
 - **crm.client_briefs** (CRM · Client briefs (record what the client asked for, send it, record their confirmation)) — MCP gap
 - **crm.client_proposals** (CRM · Proposals and quotes (price a brief, send the offer, record the client's decision)) — MCP gap
 - **crm.client_campaigns** (CRM · Client campaigns (the window, the channels, the media spend and the figures that came back)) — MCP gap
+- **cms.orders** (Website / CMS · Website orders) — partial
 - **agency.reimbursable_costs** (Accounting · Reimbursable client costs (media, print and production spent on a client's behalf)) — MCP gap
 - **agency.vendor_purchases** (Accounting · Agency supplier quotes and approved project purchases) — partial
 - **agency.vendor_settlements** (Accounting · Agency vendor payments and exact journal reversals) — MCP gap
@@ -41,7 +42,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 25
+Counts — covered: 61 · partial: 4 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 25
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -109,7 +110,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (in
 | Website / CMS | Printed table QR identity (scan → the table that printed it)<br>_ESH-147: the scan is a customer's phone with no session; it resolves one opaque table token to a display name and the CMS site id, so there is no tenant operation an assistant could perform on it. The staff generate/rotate/revoke/print routes are part of the `tables` row above_ | (route only) | — | — | — | — | — | — | — | integration/table-qr-identity.integration.test.ts | route-only (by design) |
 | Website / CMS | Drafts, pages, website media<br>_batch BD: alt-text edit and media delete close the row (media delete steps up; force/ in-use envelope kept). Page/draft publish stays a human-confirmed action off-MCP — the same rule website.post.publish already documents in tools.ts; media upload is bytes-in-flight, not a JSON envelope_ | list_cms_media, list_cms_pages, list_website_posts | website.post.draft | website.media.update, website.post.update | website.media.delete | — | cms.content_manage, cms.publish, cms.view | connection mode; step-up (always approve) | list_cms_media, list_cms_pages, list_website_posts, website.post.draft, website.media.update, website.post.update, website.media.delete | integration/website-sync.integration.test.ts | covered |
 | Website / CMS | Connection, setup/build, design, domain/DNS, CDN<br>_batch BC: the secretless ops are live (setup answers, theme tokens, CDN purge). Credential paths (connect/disconnect keys, sync-switch toggles), the domain PURCHASE flow (wallet spend), and the publish-family buttons (site build/deploy, page-publish) stay route-only: secrets never cross the chat channel and publishing a public surface stays a human-confirmed action off-MCP, the same rule website.post.publish documents in tools.ts_ | get_website_cdn, get_website_dns, get_website_status | website.design.theme.save | website.domain.set, website.setup.save | website.cdn.purge | — | cms.configure, cms.view | connection mode | get_website_cdn, get_website_dns, get_website_status, website.design.theme.save, website.domain.set, website.setup.save, website.cdn.purge | integration/website-sync.integration.test.ts | route-only (by design) |
-| Website / CMS | Website orders<br>_orders are read on the connected site itself — this lane owns only the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock_ | — | — | website.order.status | — | — | cms.content_manage | step-up (always approve) | website.order.status | integration/website-sync.integration.test.ts | covered |
+| Website / CMS | Website orders<br>_orders are read on the connected site itself — this lane owns the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock, plus the ESH-148 order-state sync queue endpoints (/api/cms/website/orders/sync-queue*)_ | (route only) | (route only) | website.order.status | (route only) | — | cms.content_manage, cms.view | step-up (always approve) | website.order.status | integration/website-sync.integration.test.ts | partial |
 | Website / CMS | WooCommerce manager (posts, queue, syncs)<br>_batch BE: content sync mirrors the integrations syncs; post save and media create keep the routes' plugin-capability rules (post_upsert / media_create refused honestly past an older plugin), the outbox coalescing keys and the operation-id idempotency; retry/flush only re-pend events the shop already approved or wake the drainer early — connection resolution follows the screens_ | get_wp_overview, get_wp_queue_summary, list_wp_queue | wp.media.create, wp.post.save | — | wp.content.sync | wp.queue.flush, wp.queue.retry, wp.queue.retry_all_failed | crm.manage, crm.view, media.manage, media.view, orders.view, woocommerce.manage, woocommerce.sync, woocommerce.view | connection mode | get_wp_overview, get_wp_queue_summary, list_wp_queue, wp.media.create, wp.post.save, wp.content.sync, wp.queue.flush, wp.queue.retry, wp.queue.retry_all_failed | integration/website-sync.integration.test.ts | covered |
 | Workspace | Projects, members, phases<br>_AQ close-out: member/phase lanes re-run requireProjectCapability exactly like their routes; last-owner removal is refused in service_ | get_workspace_project_status, list_workspace_projects | project.create, project.member.set, project.phase.create | project.update | project.member.remove | — | workspace.manage, workspace.view | connection mode | get_workspace_project_status, list_workspace_projects, project.create, project.member.set, project.phase.create, project.update, project.member.remove | integration/workspace.integration.test.ts | covered |
 | Workspace | Tasks, checklist, dependencies | list_workspace_tasks | task.create | task.update | task.status | — | workspace.manage, workspace.view | connection mode | list_workspace_tasks, task.create, task.update, task.status | integration/workspace.integration.test.ts | covered |

@@ -709,6 +709,14 @@ app.prepare().then(async () => {
     const cmsStoreOrderPollTick = () =>
       runCmsStoreOrderPollTick().catch((err) => console.error("cms store order poll failed:", err));
     scheduleCentralTick(cmsStoreOrderPollTick, 60_000, 45_000);
+
+    // ESH-148: deliver POS café order state transitions (`accepted`, `rejected`,
+    // `preparing`, `ready`, `served`, `paid`, `cancelled`, `refunded`) to
+    // connected `eshobe-cms` sites via leased outbox batches.
+    const { runCmsOrderStateOutboxTick } = await import("./src/lib/cms/order-state-outbox-service");
+    const cmsOrderStateOutboxTick = () =>
+      runCmsOrderStateOutboxTick().catch((err) => console.error("cms order-state outbox tick failed:", err));
+    scheduleCentralTick(cmsOrderStateOutboxTick, 15_000, 47_000);
   }
 
   // «ورود و خروج داده» — the platform data transfer engine (migration 0169).

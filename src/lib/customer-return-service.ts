@@ -28,6 +28,7 @@ import {
 } from "./ledger-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { systemJournalMemo } from "./journal-memo";
+import { syncOrderPaymentStateInTx } from "./cms/order-state-outbox-service";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import type { Role } from "./auth-edge";
 import {
@@ -53,6 +54,8 @@ interface CreateCustomerReturnParams {
   createdBy: string | null;
   lines: ReturnLine[];
   sync?: { actorRole: Role; clientEventId?: string };
+  /** True when initiated by an incoming CMS refund event so POS does not echo back. */
+  skipCmsOrderStateSync?: boolean;
 }
 
 async function findDuplicateReturn(
@@ -151,8 +154,16 @@ export async function createCustomerReturn(
   const priorIntent = await findDuplicateReturn(client, intent, lines, refundAmount, reason);
   if (priorIntent) return priorIntent;
 
-  const { rows: orders } = await client.query<{ tax: string; total: string }>(
-    "SELECT tax::text,total::text FROM orders WHERE id=$1 AND location_id=$2 AND status='completed' FOR UPDATE",
+  const { rows: orders } = await client.query<{
+    tax: string;
+    total: string;
+    origin: string;
+    cms_connection_id: string | null;
+    cms_order_id: string | null;
+  }>(
+    `SELECT tax::text, total::text, origin, cms_connection_id, cms_order_id
+       FROM orders
+      WHERE id=$1 AND location_id=$2 AND status='completed' FOR UPDATE`,
     [params.orderId, params.locationId],
   );
   if (!orders[0]) throw new Error("completed_order_not_found");
@@ -431,5 +442,22 @@ export async function createCustomerReturn(
     actorUserId: params.createdBy,
     actorRole: params.sync.actorRole,
   });
+
+  if (
+    !params.skipCmsOrderStateSync &&
+    refund > 0n &&
+    BigInt(capacity.remainingRefundRial) - refund === 0n &&
+    orders[0].origin === "website" &&
+    orders[0].cms_connection_id &&
+    orders[0].cms_order_id
+  ) {
+    await syncOrderPaymentStateInTx(client, {
+      businessId: params.businessId,
+      locationId: params.locationId,
+      orderId: params.orderId,
+      state: "refunded",
+      reason,
+    });
+  }
   return { id: returnId, refundAmount, recoveredValue: rialText(recovered.toString()), duplicate: false };
 }

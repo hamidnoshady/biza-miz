@@ -17,6 +17,7 @@ import { tomanText } from "@/lib/ai-labels";
 import { toPersianDigits } from "@/lib/digits";
 import { discountPercentForControl, normalizeVoidReason } from "@/lib/order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "@/lib/order-control-service";
+import { enqueueOrderStateInTx, syncOrderPaymentStateInTx } from "@/lib/cms/order-state-outbox-service";
 
 const isUuid = (v: unknown): v is string =>
   typeof v === "string" &&
@@ -194,6 +195,35 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
       if (rowCount !== 1) {
         await client.query("ROLLBACK");
         return NextResponse.json({ error: "order_not_open" }, { status: 409 });
+      }
+      if (locked.order.origin === "website" && locked.order.cms_connection_id && locked.order.cms_order_id) {
+        if (locked.order.website_approval_state === "pending") {
+          await client.query(
+            `UPDATE orders
+                SET website_approval_state = 'rejected',
+                    website_approval_decided_at = now(),
+                    website_approval_decided_by = $2,
+                    website_approval_reason = $3
+              WHERE id = $1`,
+            [id, session.sub, voidReason],
+          );
+          await enqueueOrderStateInTx(client, {
+            businessId: session.businessId,
+            locationId: location.id,
+            cmsConnectionId: locked.order.cms_connection_id,
+            cmsOrderId: locked.order.cms_order_id,
+            posOrderId: id,
+            state: "rejected",
+            reason: voidReason,
+          });
+        }
+        await syncOrderPaymentStateInTx(client, {
+          businessId: session.businessId,
+          locationId: location.id,
+          orderId: id,
+          state: "cancelled",
+          reason: voidReason,
+        });
       }
       voided = { orderNumber: voidedRows[0].order_number, total: Number(voidedRows[0].total) };
       await recordOrderAudit(client, {

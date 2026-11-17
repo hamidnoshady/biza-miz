@@ -44,7 +44,8 @@ export async function orderStateReplayPermissions(
     `SELECT type::text,status::text,order_number::text AS order_number,table_id,customer_id,guest_count,note,
             discount_type,discount_value::text AS discount_value,subtotal::text AS subtotal,
             discount::text AS discount,service_charge::text AS service_charge,tax::text AS tax,
-            total::text AS total,opened_at,opened_by,voided_reason,closed_by,closed_at
+            total::text AS total,opened_at,opened_by,voided_reason,closed_by,closed_at,
+            origin,website_approval_state,website_approval_reason
        FROM orders WHERE id=$1 AND location_id=$2 FOR UPDATE`,
     [orderId, locationId],
   );
@@ -67,6 +68,17 @@ export async function orderStateReplayPermissions(
       ? sameNumeric(incomingOrder[incoming], currentOrder[current])
       : same(incomingOrder[incoming], currentOrder[current])),
   );
+  const approvalPermissions = new Set<Permission>();
+  if (
+    incomingOrder.websiteApprovalState !== undefined &&
+    !same(incomingOrder.websiteApprovalState, currentOrder.website_approval_state)
+  ) {
+    if (incomingOrder.websiteApprovalState === "rejected") {
+      approvalPermissions.add(PERMISSIONS.ordersVoid);
+    } else {
+      approvalPermissions.add(PERMISSIONS.ordersCreate);
+    }
+  }
 
   const { rows: currentItems } = await client.query<Record<string, unknown>>(
     `SELECT id::text,menu_item_id::text,name_snapshot,unit_price::text,quantity,status::text,note,
@@ -150,6 +162,7 @@ export async function orderStateReplayPermissions(
   }
 
   if (structuralChange) changedStatusPermissions.add(PERMISSIONS.ordersCreate);
+  for (const perm of approvalPermissions) changedStatusPermissions.add(perm);
   return changedStatusPermissions.size > 0
     ? [...changedStatusPermissions]
     : [PERMISSIONS.ordersView];

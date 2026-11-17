@@ -34,6 +34,7 @@ import {
   type TableQrLink,
   type TableQrRejection,
 } from "./table-qr";
+import type { Role } from "./auth-edge";
 import { createOrder, type CreateOrderInput, type CreateOrderOutput } from "./order-mutations";
 import { getWebsiteConnectionRow } from "./website/connection-service";
 import type { CartItemInput } from "./order-cart";
@@ -585,6 +586,10 @@ export interface TableQrOrderInput {
   note?: string | null;
   openedBy?: string | null;
   clientRequestId?: string | null;
+  holdKitchenDispatch?: boolean;
+  openedAt?: string | null;
+  actorRole?: Role;
+  websiteOrigin?: CreateOrderInput["websiteOrigin"];
   /**
    * Present only so a caller that echoes a `tableId` can be told it is
    * ignored. It is never forwarded to `createOrder()`.
@@ -630,6 +635,10 @@ export async function createDineInOrderFromTableQr(
     items: input.items,
     openedBy: input.openedBy ?? null,
     clientRequestId: input.clientRequestId ?? null,
+    holdKitchenDispatch: input.holdKitchenDispatch,
+    openedAt: input.openedAt,
+    actorRole: input.actorRole,
+    websiteOrigin: input.websiteOrigin,
   };
 
   const result = await createOrder(order);

@@ -230,7 +230,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'media_review_links', columns: ["created_by"] },
   { table: 'opening_balance_sets', columns: ["approved_by", "created_by", "posted_by", "reversed_by", "submitted_by"] },
   { table: 'order_amendments', columns: ["created_by"] },
-  { table: 'orders', columns: ["amended_by"], scope: { kind: 'location' } },
+  { table: 'orders', columns: ["amended_by", "website_approval_decided_by"], scope: { kind: 'location' } },
   { table: 'payroll_engine_runs', columns: ["approved_by", "cancelled_by", "closed_by", "created_by", "paid_by", "posted_by", "reviewed_by"] },
   { table: 'payroll_runs', columns: ["voided_by"] },
   { table: 'periodic_closings', columns: ["created_by"] },

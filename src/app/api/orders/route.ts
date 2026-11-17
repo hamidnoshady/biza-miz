@@ -12,6 +12,7 @@ import type { DiscountInput } from "@/lib/orders";
 import { checkTableSectionAuthorization } from "@/lib/floor";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { broadcast } from "@/lib/realtime";
+import { listOrdersAwaitingApproval } from "@/lib/cms/cafe-order-approval-service";
 
 /**
  * Open orders for the cashier's "current orders" list.
@@ -54,12 +55,13 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ orders: [], heldOrders: [], timeZone: "Asia/Tehran" });
 
-  const [orders, heldOrders] = await Promise.all([
+  const [orders, heldOrders, awaitingApprovalOrders] = await Promise.all([
     listOrders(location.id, { status: "open" }),
     listOrders(location.id, { status: "held" }),
+    listOrdersAwaitingApproval(location.id),
   ]);
   if (new URL(request.url).searchParams.get("scope") !== "shift") {
-    return NextResponse.json({ orders, heldOrders, timeZone: location.timezone });
+    return NextResponse.json({ orders, heldOrders, awaitingApprovalOrders, timeZone: location.timezone });
   }
 
   // The shift-review audience of /api/reports/shift-orders. `reports.view` is
@@ -85,6 +87,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   return NextResponse.json({
     orders,
     heldOrders,
+    awaitingApprovalOrders,
     closedOrders,
     closedSince: window.since,
     shiftStartedAt: window.shiftStartedAt,

@@ -568,3 +568,55 @@ same `404` so the endpoint cannot be used to enumerate prints. A token resolves
 only inside the business that owns the signed CMS connection; a body-supplied
 `tableId` is never forwarded to `createOrder()`, and orders on the same table
 share the visit `table_sessions` row — paying one does not free the table.
+
+## Café order intake & approval (ESH-146)
+
+Website café orders (`order.submitted` webhook/poll) enter POS as held proposals
+rather than paid completed sales (`migrations/0301_cafe_order_intake.sql`,
+`src/lib/cms/cafe-order-intake-service.ts`, `src/lib/cms/cafe-order-approval-service.ts`):
+
+- `cms_store_order_inbox` is keyed by `(cms_connection_id, cms_order_id, event_topic)`
+  so `order.submitted`, `order.paid`, `order.cancelled`, and `order.refunded`
+  converge without colliding.
+- `orders` stamps `origin = 'website'`, `cms_connection_id`, `cms_order_id`, and
+  `website_approval_state = 'pending'` inside `createOrder()` with lines held at
+  `status = 'pending'` (`sent_to_kitchen_at IS NULL`) and kitchen dispatch suppressed.
+- Staff accept or reject via `POST /api/orders/[id]/website-approval`:
+  accept promotes `'pending'` lines to `'sent'` and dispatches to kitchen;
+  reject records the reason and refuses subsequent kitchen starts, line additions,
+  and counter payments.
+- Online payment (`order.paid`) settles the already-imported order after matching
+  `cmsMinorToRial(order.total, order.currency)` against `orders.total`, with
+  echo sync suppressed (`skipCmsOrderStateSync: true`).
+
+## POS → CMS order state sync (ESH-148)
+
+POS café order lifecycle transitions flow back to `eshobe-cms` over
+`PATCH /api/orders/:id` using a leased transactional outbox
+(`migrations/0302_cms_order_state_outbox.sql`,
+`src/lib/cms/order-state-sync-policy.ts`,
+`src/lib/cms/order-state-outbox-service.ts`):
+
+| Axis | States & `state_version` | Triggers |
+|---|---|---|
+| `fulfillment` | `accepted` (10), `preparing` (20), `ready` (30), `served` (40), `rejected` (100) | Approval decision, kitchen item transitions (all active lines progressed), item void recomputing order-level progress, desktop `order.state.synced` replay on central |
+| `payment` | `paid` (10), `refunded` (20), `cancelled` (30) | Counter/split payment (`paid`), open/closed order void (`cancelled`), full customer return with `remainingRefundRial === 0` (`refunded`) |
+
+- Monotonic precedence & terminal guards: `rejected` blocks subsequent
+  fulfillment transitions and counter payment; `cancelled`/`refunded` supersede
+  undelivered earlier rows so stale states never overwrite final outcomes.
+- Delivery worker: `runCmsOrderStateOutboxTick` (central server, 15s interval)
+  claims batches with `FOR UPDATE SKIP LOCKED` and 5-minute lease tokens, enforces
+  active website operational gate + active connection, retries with exponential
+  backoff (`OUTBOX_MAX_ATTEMPTS = 8`), dead-letters exhausted rows with URL-scrubbed
+  integration audit (`cms.order_state.dead_lettered`), and flags invalid site keys
+  (`401`/`403`) on the connection.
+- Echo suppression: POS-originated voids/returns and outbox-recorded terminal
+  states prevent incoming `order.cancelled`/`order.refunded` CMS webhooks from
+  double-reversing in `handleCmsCafeOrderReversal()`, while genuine CMS-initiated
+  cancellations/refunds void open website orders or reverse settled ones cleanly.
+- Queue visibility & manual retry: `GET /api/cms/website/orders/sync-queue`,
+  `POST /api/cms/website/orders/sync-queue/sync`,
+  `POST /api/cms/website/orders/sync-queue/retry-all`, and
+  `POST /api/cms/website/orders/sync-queue/[id]/retry`.
+

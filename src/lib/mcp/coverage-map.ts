@@ -772,7 +772,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     entity: "Website orders",
     routes: ["cms/website/orders"],
     ops: { update: ["website.order.status"] },
-    note: "orders are read on the connected site itself — this lane owns only the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock",
+    note: "orders are read on the connected site itself — this lane owns the status PATCH (pending/paid/cancelled/refunded), always_approve because it publishes customer-visible money state and the CMS hooks settle stock, plus the ESH-148 order-state sync queue endpoints (/api/cms/website/orders/sync-queue*)",
     test: "integration/website-sync.integration.test.ts",
   },
   {

@@ -142,6 +142,27 @@ export async function getCmsConfigForBusiness(businessId: string): Promise<CmsCo
   return cmsConfigFromRow(row, key);
 }
 
+/**
+ * Look up the credentials for one specific CMS connection row (multi-site
+ * safe — never mixes credentials across sites or businesses).
+ */
+export async function getCmsConfigForConnection(
+  businessId: string,
+  connectionId: string,
+): Promise<CmsConfig> {
+  const key = resolveEncryptionKey(process.env);
+  const { rows } = await query<CmsConnectionRow>(
+    `SELECT ${ROW_COLUMNS}
+       FROM eshobe_cms_connections
+      WHERE business_id = $1 AND id = $2 AND status = 'active'
+      LIMIT 1`,
+    [businessId, connectionId],
+  );
+  const row = rows[0];
+  if (!row) throw new CmsConnectionError();
+  return cmsConfigFromRow(row, key);
+}
+
 /** Masked summary — safe for the browser (never contains the key). */
 export interface CmsConnectionSummary {
   id: string;

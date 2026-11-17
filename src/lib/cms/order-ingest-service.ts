@@ -29,10 +29,17 @@ import { parseRemoteInstant } from "../online-sale-policy";
 import { recordOnlineOrderDocument, resolveOnlineChronology } from "../online-order-document-service";
 import {
   cmsReversalStatusMatches,
+  handleCmsCafeOrderReversal,
   isCmsReversalEvent,
   reverseImportedCmsStoreOrder,
 } from "./order-reversal-service";
 import type { CmsOrder } from "./types";
+import {
+  attachCafeOrderPayment,
+  CafeOrderIntakeError,
+  intakeSubmittedCafeOrder,
+  isCafeCmsOrder,
+} from "./cafe-order-intake-service";
 
 const zero = "0" as RialText;
 
@@ -100,10 +107,36 @@ export async function handleCmsStoreOrderWebhook(notice: CmsOrderEventNotice): P
     }
 
     try {
+      if (notice.event === "order.submitted") {
+        // A submitted café order is a proposal: it becomes a real POS order,
+        // visible to staff, with no kitchen dispatch until somebody accepts it
+        // (cafe-order-approval-service.ts).
+        if (!isCafeCmsOrder(notice.order)) {
+          await markInboxFailed(claimed.inboxId, "not_cafe_order");
+          return NextResponse.json({ error: "not_cafe_order" }, { status: 422 });
+        }
+        const intake = await intakeSubmittedCafeOrder(connection, notice.order);
+        await markInboxProcessed(claimed.inboxId, intake.orderId);
+        return NextResponse.json({ status: "processed", orderId: intake.orderId });
+      }
+
       if (notice.event === "order.paid") {
         if (notice.order.status !== "paid") {
           await markInboxFailed(claimed.inboxId, "not_paid");
           return NextResponse.json({ error: "not_paid" }, { status: 422 });
+        }
+        // A café order is created on submit and the payment is attached to
+        // that same order — never a second sale. If `order.paid` wins the
+        // race, the intake runs first so there is still exactly one order.
+        if (isCafeCmsOrder(notice.order)) {
+          const intake = await intakeSubmittedCafeOrder(connection, notice.order);
+          const payment = await attachCafeOrderPayment(connection, notice.order, intake.orderId);
+          await markInboxProcessed(claimed.inboxId, intake.orderId);
+          return NextResponse.json({
+            status: "processed",
+            orderId: intake.orderId,
+            duplicatePayment: payment.duplicate,
+          });
         }
         const orderId = await importPaidCmsOrder(connection, notice.order);
         await markInboxProcessed(claimed.inboxId, orderId);
@@ -114,6 +147,15 @@ export async function handleCmsStoreOrderWebhook(notice: CmsOrderEventNotice): P
         if (!cmsReversalStatusMatches(notice.event, notice.order)) {
           await markInboxFailed(claimed.inboxId, "status_mismatch");
           return NextResponse.json({ error: "status_mismatch" }, { status: 422 });
+        }
+        if (isCafeCmsOrder(notice.order)) {
+          const reversal = await handleCmsCafeOrderReversal(connection, notice, claimed.inboxId);
+          return NextResponse.json({
+            status: "processed",
+            orderId: reversal.orderId,
+            amendmentId: reversal.amendmentId,
+            alreadyReversed: reversal.alreadyReversed,
+          });
         }
         const reversal = await reverseImportedCmsStoreOrder(connection, notice, claimed.inboxId);
         return NextResponse.json({
@@ -127,6 +169,10 @@ export async function handleCmsStoreOrderWebhook(notice: CmsOrderEventNotice): P
       await markInboxFailed(claimed.inboxId, "unsupported_event");
       return NextResponse.json({ error: "unsupported_event" }, { status: 422 });
     } catch (err) {
+      if (err instanceof CafeOrderIntakeError) {
+        await markInboxFailed(claimed.inboxId, err.code);
+        return NextResponse.json({ error: err.code }, { status: err.status });
+      }
       const message = err instanceof Error ? err.message : "import_failed";
       await markInboxFailed(claimed.inboxId, message);
       return NextResponse.json({ error: message }, { status: 422 });
@@ -139,22 +185,44 @@ type ClaimResult =
   | { kind: "duplicate" }
   | { kind: "replay" };
 
+/**
+ * Claim the inbox row for one `(order, event)` pair.
+ *
+ * Migration 0301 re-keyed the inbox by `(cms_connection_id, cms_order_id,
+ * event_topic)`: `order.submitted`, `order.paid`, and reversals for one CMS
+ * order converge cleanly without colliding. A previously `failed` row is
+ * re-claimed on redelivery so fixing a product mapping lets the event retry.
+ */
 async function claimInboxRow(connection: WebsiteConnectionRow, notice: CmsOrderEventNotice): Promise<ClaimResult> {
-  if (notice.event === "order.paid") {
-    const { rows: imported } = await query<{ id: string }>(
-      `SELECT id FROM cms_store_order_inbox
-        WHERE cms_connection_id = $1 AND cms_order_id = $2 AND event_topic = 'order.paid' AND status = 'processed'
-        LIMIT 1`,
-      [connection.id, notice.order.id],
-    );
-    if (imported[0]) return { kind: "replay" };
+  const { rows: existing } = await query<{ id: string; status: string; delivery_id: string }>(
+    `SELECT id, status, delivery_id FROM cms_store_order_inbox
+      WHERE cms_connection_id = $1 AND cms_order_id = $2 AND event_topic = $3
+      LIMIT 1`,
+    [connection.id, notice.order.id, notice.event],
+  );
+  const prior = existing[0];
+  if (prior?.status === "processed") return { kind: "replay" };
+  if (prior?.delivery_id === notice.deliveryId && prior.status === "pending") {
+    return { kind: "new", inboxId: prior.id };
+  }
+  if (prior?.status === "failed") {
+    const { rows: reclaimed } = await query<{ id: string }>(
+      `UPDATE cms_store_order_inbox
+          SET status = 'pending', error = NULL, processed_at = NULL,
+              delivery_id = $2, payload = $3::jsonb
+        WHERE id = $1
+        RETURNING id`,
+      [prior.id, notice.deliveryId, JSON.stringify({ order: notice.order })],
+    ).catch(() => ({ rows: [] as { id: string }[] }));
+    if (reclaimed[0]) return { kind: "new", inboxId: reclaimed[0].id };
+    return { kind: "duplicate" };
   }
 
   const { rows } = await query<{ id: string }>(
     `INSERT INTO cms_store_order_inbox
        (business_id, cms_connection_id, event_topic, cms_order_id, delivery_id, payload)
      VALUES ($1, $2, $3, $4, $5, $6::jsonb)
-     ON CONFLICT (cms_connection_id, delivery_id) DO NOTHING
+     ON CONFLICT DO NOTHING
      RETURNING id`,
     [
       connection.business_id,
@@ -167,12 +235,12 @@ async function claimInboxRow(connection: WebsiteConnectionRow, notice: CmsOrderE
   );
   if (rows[0]) return { kind: "new", inboxId: rows[0].id };
 
-  const { rows: existing } = await query<{ status: string }>(
+  const { rows: byDelivery } = await query<{ status: string }>(
     `SELECT status FROM cms_store_order_inbox
       WHERE cms_connection_id = $1 AND delivery_id = $2`,
     [connection.id, notice.deliveryId],
   );
-  if (existing[0]?.status === "processed") return { kind: "replay" };
+  if (byDelivery[0]?.status === "processed") return { kind: "replay" };
   return { kind: "duplicate" };
 }
 
@@ -205,7 +273,7 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
   if (!hasSellableCatalogue(industry)) throw new Error(INDUSTRY_NOT_STOREFRONT);
   const remoteId = order.id;
   const total = cmsMinorToRial(order.total, order.currency);
-  const unit = cmsMinorToRial(order.unitPrice, order.currency);
+  const unit = cmsMinorToRial(order.unitPrice ?? order.total, order.currency);
   const tax = 0n;
   const net = total - tax;
 
@@ -258,7 +326,7 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
       typeof order.product === "object" && order.product && "title" in order.product
         ? String(order.product.title)
         : order.productTitle ?? "محصول فروشگاه";
-    const quantity = Math.max(1, order.quantity);
+    const quantity = Math.max(1, order.quantity ?? 1);
     // Resolve the mapping BEFORE writing the order header: a store product
     // mapped to a retail catalogue `item` makes this a *retail* order, not a
     // delivery order. Getting that wrong was why a CMS reversal later ran

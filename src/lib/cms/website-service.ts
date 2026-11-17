@@ -61,7 +61,11 @@ import {
 // is that resolution in one place (it reads the env pair itself), so a rotated key
 // is a form submission rather than a redeploy.
 import { resolvePlatformCmsConfig } from "./platform-control-service";
-import { inboxStatusForCmsOrders } from "./order-inbox-service";
+import {
+  inboxStatusForCmsOrders,
+  syncStatusForCmsOrders,
+  type CmsOrderStateSyncSummary,
+} from "./order-inbox-service";
 import { dnsHint, ipsOverlap, type DnsCheck } from "./dns";
 import {
   CmsConnectionError,
@@ -215,6 +219,7 @@ export interface WebsiteOverview {
       reversed: boolean;
     }
   >;
+  orderStateSync?: Record<string, CmsOrderStateSyncSummary>;
 }
 
 /** The connected site, in one call. Every read is cached by the CMS itself. */
@@ -235,9 +240,13 @@ export async function cmsWebsiteOverview(businessId: string): Promise<WebsiteRes
       fetchOrders(config, { limit: 50 }),
     ]);
     const connections = await listCmsConnections(businessId);
-    const orderInbox = connections[0]
-      ? await inboxStatusForCmsOrders(connections[0].id, orders.docs.map((o) => o.id))
-      : {};
+    const cmsOrderIds = orders.docs.map((o) => o.id);
+    const [orderInbox, orderStateSync] = connections[0]
+      ? await Promise.all([
+          inboxStatusForCmsOrders(connections[0].id, cmsOrderIds),
+          syncStatusForCmsOrders(connections[0].id, cmsOrderIds),
+        ])
+      : [{}, {}];
 
     return {
       ok: true,
@@ -248,6 +257,7 @@ export async function cmsWebsiteOverview(businessId: string): Promise<WebsiteRes
         products: products.docs,
         orders: orders.docs,
         orderInbox,
+        orderStateSync,
       },
     };
   } catch (error) {

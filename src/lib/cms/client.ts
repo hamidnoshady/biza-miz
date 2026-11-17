@@ -28,6 +28,7 @@ import { connectionFetch, connectionUrl } from "../integrations/outbound-http";
  */
 import type {
   ApiKeySummary,
+  CmsCafeFulfillmentState,
   CmsLocale,
   CmsMedia,
   CmsOrder,
@@ -389,6 +390,14 @@ export function updateSiteDomain(
   });
 }
 
+export interface CmsOrderStatePatch {
+  status?: CmsOrder["status"];
+  cafe?: {
+    fulfillment: CmsCafeFulfillmentState;
+    fulfillmentAt?: string;
+  };
+}
+
 /** Order status transitions are the one write the site key makes on orders. */
 export function updateOrderStatus(
   config: CmsConfig,
@@ -398,8 +407,26 @@ export function updateOrderStatus(
 ): Promise<CmsOrder> {
   return cmsRequest<CmsOrder>(config, {
     method: "PATCH",
-    path: `/api/orders/${id}`,
+    path: `/api/orders/${encodeURIComponent(id)}`,
     body: { status },
+    fetchImpl: opts?.fetchImpl,
+  });
+}
+
+/**
+ * ESH-148 — apply a monotonic fulfillment (`cafe.fulfillment`) and/or payment
+ * (`status`) state patch to an order on the connected CMS site.
+ */
+export function patchCmsOrderState(
+  config: CmsConfig,
+  id: string,
+  patch: CmsOrderStatePatch,
+  opts?: { fetchImpl?: FetchLike },
+): Promise<CmsOrder> {
+  return cmsRequest<CmsOrder>(config, {
+    method: "PATCH",
+    path: `/api/orders/${encodeURIComponent(id)}`,
+    body: patch,
     fetchImpl: opts?.fetchImpl,
   });
 }
