@@ -162,6 +162,12 @@ export function ChatComposer({
   const availableTasks = resolveAvailablePresetTasks(mode, eligibleTaskIds);
   const currentTask = resolveCurrentTaskSummary(task, customTask);
   const activeRuntimeMode = workspaceContext?.runtimeMode ?? "auto";
+  const ActiveRuntimeIcon =
+    activeRuntimeMode === "auto"
+      ? SparklesIcon
+      : activeRuntimeMode === "instant"
+        ? ZapIcon
+        : BrainCircuitIcon;
 
   const focusOptions =
     workspaceContext?.accessibleFocuses &&
@@ -293,6 +299,18 @@ export function ChatComposer({
         data-composer-box=""
         data-composer-collapsed={isCollapsed ? "true" : "false"}
         data-ai-guide="assistant-composer"
+        onClick={(event) => {
+          if (!isCollapsed) return;
+          const target = event.target;
+          if (
+            target instanceof HTMLElement &&
+            target.closest("button, [role='combobox'], [data-slot='select-trigger']")
+          ) {
+            return;
+          }
+          setExpanded(true);
+          textareaRef.current?.focus();
+        }}
         onDragOver={(event) => {
           event.preventDefault();
           setDragOver(true);
@@ -838,10 +856,15 @@ export function ChatComposer({
                   "h-8 gap-1.5 rounded-full px-2.5 text-[11px] font-semibold",
                   isCollapsed ? "w-[7.25rem]" : "w-[8.25rem] sm:w-[9.25rem]",
                   activeRuntimeMode !== "auto" &&
-                    "border-amber-200 bg-amber-100 text-amber-950",
+                    "border-amber-200 bg-amber-100 text-amber-950 dark:border-amber-800 dark:bg-amber-500/20 dark:text-amber-200",
                 )}
               >
-                <SelectValue />
+                <SelectValue>
+                  <span className="inline-flex min-w-0 items-center gap-1.5">
+                    <ActiveRuntimeIcon className="size-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">{AI_MODE_LABELS[activeRuntimeMode]}</span>
+                  </span>
+                </SelectValue>
               </SelectTrigger>
               <SelectContent side="top" align="start" position="popper" className="w-72">
                 <SelectLabel>حالت پاسخ‌گویی</SelectLabel>
