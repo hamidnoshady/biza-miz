@@ -48,10 +48,16 @@ async function createCoupon(overrides: Partial<{
   const code = `C${randomUUID().slice(0, 8).toUpperCase()}`;
   const { rows } = await db.withoutTenantScope("platform", () =>
     db.query<{ id: string }>(
+      // `valid_from` is set deliberately into the past rather than left to the
+      // column's `DEFAULT now()`. The database's clock can read a few
+      // milliseconds ahead of the test process's `new Date()` on a loaded
+      // runner, and `validateCoupon` refuses a coupon that starts strictly
+      // after "now" — a fixture sitting exactly on that boundary then fails as
+      // `coupon_not_yet_valid` intermittently (CI shard flake).
       `INSERT INTO billing_coupons
          (code, discount_kind, percent_basis_points, min_term_months,
-          max_redemptions, max_redemptions_per_business, status)
-       VALUES ($1, 'percent', $2, $3, 100, $4, 'active')
+          max_redemptions, max_redemptions_per_business, valid_from, status)
+       VALUES ($1, 'percent', $2, $3, 100, $4, now() - interval '1 minute', 'active')
        RETURNING id`,
       [code, overrides.percentBasisPoints ?? 1_000, overrides.minTermMonths ?? 1, overrides.maxRedemptionsPerBusiness ?? 1],
     ),
