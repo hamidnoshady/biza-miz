@@ -20,7 +20,7 @@ import {
   BrainCircuitIcon,
   SparklesIcon,
   ZapIcon,
-  ChevronDownIcon,
+  FlaskConicalIcon,
   LayersIcon,
   PenLineIcon,
   PlusIcon,
@@ -30,6 +30,15 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectLabel,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   DropdownMenu,
@@ -40,11 +49,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   APP_FOCUS_OPTIONS,
-  RUNTIME_MODE_LABELS,
   useAiWorkspaceProjects,
   type AiWorkspaceContextProps,
 } from "@/app/dashboard/ai/ai-workspace-context";
-import { AI_CHAT_MODES } from "@/lib/ai-runtime-modes-shared";
+import {
+  AI_CHAT_MODES,
+  AI_MODE_HINTS,
+  AI_MODE_LABELS,
+  type AiRuntimeMode,
+} from "@/lib/ai-runtime-modes-shared";
 import { AiCrossLibraryPicker } from "./ai-cross-library-picker";
 import {
   TaskIcon,
@@ -79,6 +92,8 @@ interface ChatComposerProps {
   eligibleTaskIds?: readonly AiTaskId[];
   showTaskSelector?: boolean;
   compact?: boolean;
+  /** Start as a one-line prompt on the welcome screen; focus expands it. */
+  startCollapsed?: boolean;
   workspaceContext?: Omit<AiWorkspaceContextProps, "disabled" | "compact">;
   inputRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
   actionsAllowed: boolean;
@@ -107,6 +122,7 @@ export function ChatComposer({
   eligibleTaskIds,
   showTaskSelector = true,
   compact = false,
+  startCollapsed = false,
   workspaceContext,
   inputRef,
   sendMessage,
@@ -120,6 +136,8 @@ export function ChatComposer({
   const sendRef = useRef<HTMLButtonElement>(null);
   const pointerToggleRef = useRef(false);
   const [focused, setFocused] = useState(false);
+  const [expanded, setExpanded] = useState(!startCollapsed);
+  const isCollapsed = startCollapsed && !expanded;
   const [dragOver, setDragOver] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuView, setMenuView] = useState<ComposerMenuView>("root");
@@ -144,6 +162,15 @@ export function ChatComposer({
 
   const availableTasks = resolveAvailablePresetTasks(mode, eligibleTaskIds);
   const currentTask = resolveCurrentTaskSummary(task, customTask);
+  const activeRuntimeMode = workspaceContext?.runtimeMode ?? "auto";
+  const ActiveRuntimeIcon =
+    activeRuntimeMode === "auto"
+      ? SparklesIcon
+      : activeRuntimeMode === "instant"
+        ? ZapIcon
+        : activeRuntimeMode === "thinking"
+          ? BrainCircuitIcon
+          : FlaskConicalIcon;
 
   const focusOptions =
     workspaceContext?.accessibleFocuses &&
@@ -182,6 +209,11 @@ export function ChatComposer({
     setMenuOpen(false);
     resetMenuState();
   };
+
+  // The welcome composer starts as a single-line prompt, then expands on focus.
+  useEffect(() => {
+    setExpanded(!startCollapsed);
+  }, [startCollapsed]);
 
   // Auto-grow the textarea up to a ceiling.
   useEffect(() => {
@@ -268,7 +300,11 @@ export function ChatComposer({
 
       <div
         data-composer-box=""
+        data-composer-collapsed={isCollapsed ? "true" : "false"}
         data-ai-guide="assistant-composer"
+        onClick={() => {
+          if (isCollapsed) setExpanded(true);
+        }}
         onDragOver={(event) => {
           event.preventDefault();
           setDragOver(true);
@@ -277,7 +313,7 @@ export function ChatComposer({
         onDrop={onDrop}
         className={cn(
           "relative rounded-2xl border bg-card shadow-[0_1px_2px_rgb(41_37_36/0.04)] transition-all duration-200",
-          compact ? "p-2" : "p-3 sm:p-3.5",
+          compact || isCollapsed ? "p-2" : "p-3 sm:p-3.5",
           dragOver
             ? "border-primary ring-4 ring-primary/20"
             : focused
@@ -298,13 +334,19 @@ export function ChatComposer({
           }}
           value={input}
           onChange={(event) => setInput(event.target.value)}
-          onFocus={() => setFocused(true)}
+          onFocus={() => {
+            setFocused(true);
+            if (startCollapsed) setExpanded(true);
+          }}
           onBlur={() => setFocused(false)}
           onKeyDown={onKeyDown}
-          rows={2}
+          rows={isCollapsed ? 1 : 2}
           placeholder="پیام خود را بنویسید…"
           aria-label="پیام"
-          className="w-full resize-none bg-transparent px-1.5 py-1 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground min-h-10"
+          className={cn(
+            "w-full resize-none bg-transparent px-1.5 py-1 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground",
+            isCollapsed ? "min-h-8" : "min-h-10",
+          )}
         />
 
         {/* One upload picker; server validation still limits supported AI inputs. */}
@@ -324,8 +366,15 @@ export function ChatComposer({
         ) : null}
 
         {/* Explicit direction keeps the tools at the physical right in both page directions. */}
-        <div dir="rtl" className="flex items-center gap-1 pt-1">
-          {showSecondaryMenu ? (
+        <div
+          dir="rtl"
+          data-composer-toolbar=""
+          className={cn(
+            "flex items-center gap-1 pt-1",
+            isCollapsed && "justify-between",
+          )}
+        >
+          {!isCollapsed && showSecondaryMenu ? (
             <DropdownMenu
               dir="rtl"
               open={menuOpen}
@@ -740,45 +789,129 @@ export function ChatComposer({
             </DropdownMenu>
           ) : null}
 
-          {mode === "dashboard" && showTaskSelector ? (
-            <label className="relative min-w-0">
-              <span className="sr-only">وظیفه دستیار</span>
-              <select
-                value={task}
-                disabled={busy}
+          {!isCollapsed && mode === "dashboard" && showTaskSelector ? (
+            <Select
+              dir="rtl"
+              value={task}
+              disabled={busy}
+              onValueChange={(value) => {
+                if (value === "custom") {
+                  setCustomTaskOpen(true);
+                  setCustomTaskDraft(customTask);
+                  setMenuView("task");
+                  setMenuOpen(true);
+                  return;
+                }
+                onTaskChange(value as AiTaskId);
+                if (customTask) onCustomTaskChange("");
+              }}
+            >
+              <SelectTrigger
+                size="sm"
                 aria-label={`وظیفه دستیار: ${currentTask.label}`}
-                onChange={(event) => {
-                  if (event.target.value === "custom") {
-                    setCustomTaskOpen(true);
-                    setCustomTaskDraft(customTask);
-                    setMenuView("task");
-                    setMenuOpen(true);
-                    return;
-                  }
-                  onTaskChange(event.target.value as AiTaskId);
-                  if (customTask) onCustomTaskChange("");
-                }}
-                className="h-8 w-full max-w-28 appearance-none rounded-full border border-border bg-card ps-2 pe-5 text-[11px] outline-none focus-visible:ring focus-visible:ring-ring/50 sm:max-w-36"
+                className="h-8 w-[min(8rem,28vw)] max-w-36 rounded-full px-2.5 text-[11px]"
               >
-                {availableTasks.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-                <option value="custom">وظیفه سفارشی…</option>
-              </select>
-              <ChevronDownIcon className="pointer-events-none absolute end-1 top-2 size-3 text-muted-foreground" />
-            </label>
+                <SelectValue>{currentTask.label}</SelectValue>
+              </SelectTrigger>
+              <SelectContent side="top" align="start" position="popper" className="w-56">
+                {availableTasks.map((item) => (
+                  <SelectItem key={item.id} value={item.id}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+                <SelectSeparator />
+                <SelectItem value="custom">وظیفهٔ سفارشی…</SelectItem>
+              </SelectContent>
+            </Select>
           ) : null}
-          {mode === "dashboard" && workspaceContext ? AI_CHAT_MODES.map((value) => {
-            const Icon = value === "auto" ? SparklesIcon : value === "instant" ? ZapIcon : BrainCircuitIcon;
-            const label = value === "auto" ? "خودکار" : value === "instant" ? "سریع" : "تفکر عمیق";
-            return (
-              <Button key={value} type="button" variant={workspaceContext.runtimeMode === value ? "secondary" : "ghost"}
-                size="icon-sm" disabled={busy} aria-label={`حالت پاسخ‌گویی: ${label}`} title={label}
-                aria-pressed={workspaceContext.runtimeMode === value}
-                onClick={() => workspaceContext.onRuntimeModeChange(value)}
-                className="size-7 shrink-0 rounded-full">
-                <Icon className="size-3.5" />
-              </Button>
-            );
-          }) : null}
+          {mode === "dashboard" && workspaceContext ? (
+            <Select
+              dir="rtl"
+              value={activeRuntimeMode}
+              disabled={busy}
+              onValueChange={(value) => {
+                if (value === "deep_research") {
+                  workspaceContext.onDeepResearchOpen?.();
+                  return;
+                }
+                if (AI_CHAT_MODES.includes(value as (typeof AI_CHAT_MODES)[number])) {
+                  workspaceContext.onRuntimeModeChange(value as AiRuntimeMode);
+                }
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                aria-label={`حالت پاسخ‌گویی: ${AI_MODE_LABELS[activeRuntimeMode]}`}
+                className={cn(
+                  "h-8 gap-1.5 rounded-full px-2.5 text-[11px] font-semibold",
+                  isCollapsed ? "w-[7.25rem]" : "w-[8.25rem] sm:w-[9.25rem]",
+                  activeRuntimeMode !== "auto" &&
+                    "border-amber-200 bg-amber-100 text-amber-950",
+                )}
+              >
+                <ActiveRuntimeIcon className="size-4 shrink-0" aria-hidden="true" />
+                <SelectValue>{AI_MODE_LABELS[activeRuntimeMode]}</SelectValue>
+              </SelectTrigger>
+              <SelectContent side="top" align="start" position="popper" className="w-72">
+                <SelectLabel>حالت پاسخ‌گویی</SelectLabel>
+                {AI_CHAT_MODES.map((value) => {
+                  const Icon =
+                    value === "auto"
+                      ? SparklesIcon
+                      : value === "instant"
+                        ? ZapIcon
+                        : BrainCircuitIcon;
+                  return (
+                    <SelectItem key={value} value={value} className="py-2">
+                      <span className="flex min-w-0 items-center gap-2.5">
+                        <span
+                          className={cn(
+                            "grid size-8 shrink-0 place-items-center rounded-lg",
+                            activeRuntimeMode === value
+                              ? "bg-amber-100 text-amber-800"
+                              : "bg-muted text-muted-foreground",
+                          )}
+                        >
+                          <Icon className="size-4" aria-hidden="true" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block text-xs font-semibold">
+                            {AI_MODE_LABELS[value]}
+                          </span>
+                          <span className="block whitespace-normal text-[10px] leading-4 text-muted-foreground">
+                            {AI_MODE_HINTS[value]}
+                          </span>
+                        </span>
+                      </span>
+                    </SelectItem>
+                  );
+                })}
+                <SelectSeparator />
+                <SelectItem
+                  value="deep_research"
+                  disabled={
+                    !workspaceContext.deepResearchEnabled ||
+                    !workspaceContext.onDeepResearchOpen
+                  }
+                  className="py-2"
+                >
+                  <span className="flex min-w-0 items-center gap-2.5">
+                    <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+                      <FlaskConicalIcon className="size-4" aria-hidden="true" />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-semibold">
+                        {AI_MODE_LABELS.deep_research}
+                      </span>
+                      <span className="block whitespace-normal text-[10px] leading-4 text-muted-foreground">
+                        پژوهش چندمرحله‌ای و هزینه‌دار؛ پیش از اجرا سقف هزینه را تأیید می‌کنید
+                      </span>
+                    </span>
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          ) : null}
           {busy && cancellable ? (
             <Button
               type="button"
