@@ -33,6 +33,7 @@ import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectLabel,
   SelectSeparator,
@@ -869,8 +870,9 @@ export function ChatComposer({
                 </SelectValue>
               </SelectTrigger>
               <SelectContent side="top" align="start" position="popper" className="w-72">
-                <SelectLabel>حالت پاسخ‌گویی</SelectLabel>
-                {AI_CHAT_MODES.map((value) => {
+                <SelectGroup>
+                  <SelectLabel>حالت پاسخ‌گویی</SelectLabel>
+                  {AI_CHAT_MODES.map((value) => {
                   const Icon =
                     value === "auto"
                       ? SparklesIcon
@@ -887,7 +889,8 @@ export function ChatComposer({
                       </span>
                     </SelectItem>
                   );
-                })}
+                  })}
+                </SelectGroup>
                 <SelectSeparator />
                 <SelectItem
                   value="deep_research"
