@@ -42,6 +42,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
         rolloutState: release.rolloutState,
         rolloutPercentage: release.rolloutPercentage,
         installerSha256: release.installer.sha256,
+        expectedPublisherThumbprint: release.installer.expectedPublisherThumbprint,
       },
     });
     return NextResponse.json({ release }, { status: 201 });

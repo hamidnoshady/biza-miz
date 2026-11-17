@@ -147,40 +147,62 @@ export async function isFeatureEnabled(
 }
 
 /**
- * API route prefix -> the flag that gates it. Deliberately excludes
- * `/api/locations` (just `/active`, core branch-resolution plumbing every
- * session needs regardless of any feature) and `/api/rollup/ingest`
- * (server-to-server, bearer-token authenticated, never carries a session —
- * see PUBLIC_PATHS in middleware.ts).
+ * API route prefix -> the flags that gate it. A list is **any-of**: the route
+ * is refused only when every listed entitlement is off.
+ *
+ * The table/floor surface is the one place that needs it (ESH-147). It serves
+ * both a restaurant that reserves tables and a café that only serves walk-ins
+ * with a printed QR, so it is refused only when *both* `reservations` and
+ * `dine_in` are disabled — a business with either capability still has tables
+ * to manage. Every other entry is a single flag, so its behaviour is unchanged.
+ *
+ * Deliberately excludes `/api/locations` (just `/active`, core
+ * branch-resolution plumbing every session needs regardless of any feature) and
+ * `/api/rollup/ingest` (server-to-server, bearer-token authenticated, never
+ * carries a session — see PUBLIC_PATHS in middleware.ts).
  */
-export const API_FEATURE_PREFIXES: [string, string][] = [
-  ["/api/inventory", "inventory"],
+export const API_FEATURE_PREFIXES: [string, readonly string[]][] = [
+  ["/api/inventory", ["inventory"]],
   // Issue #864's `/api/accounting/shareholders` read/write surface shares the
   // ledger entitlement and remains server-gated like the older `/api/ledger` routes.
-  ["/api/accounting", "ledger"],
-  ["/api/ledger", "ledger"],
-  ["/api/reservations", "reservations"],
-  ["/api/tables", "reservations"],
-  ["/api/table-sessions", "reservations"],
-  ["/api/floor", "reservations"],
-  ["/api/deliveries", "delivery"],
-  ["/api/couriers", "delivery"],
-  ["/api/reports", "reporting"],
-  ["/api/branches", "multi_location"],
-  ["/api/rollup", "site_cloud_sync"],
-  ["/api/server-sync", "site_cloud_sync"],
-  ["/api/backup", "backup"],
-  ["/api/ai", "ai_assistant"],
-  ["/api/integrations", "integrations"],
-  ["/api/connections/telegram", "integrations"],
-  ["/api/telegram", "integrations"],
+  ["/api/accounting", ["ledger"]],
+  ["/api/ledger", ["ledger"]],
+  ["/api/reservations", ["reservations"]],
+  [
+    "/api/tables",
+    // A printed table QR and the floor it belongs to are table service, not
+    // booking. Either entitlement opens the surface.
+    ["dine_in", "reservations"],
+  ],
+  ["/api/table-sessions", ["dine_in", "reservations"]],
+  ["/api/floor", ["dine_in", "reservations"]],
+  ["/api/deliveries", ["delivery"]],
+  ["/api/couriers", ["delivery"]],
+  ["/api/reports", ["reporting"]],
+  ["/api/branches", ["multi_location"]],
+  ["/api/rollup", ["site_cloud_sync"]],
+  ["/api/server-sync", ["site_cloud_sync"]],
+  ["/api/backup", ["backup"]],
+  ["/api/ai", ["ai_assistant"]],
+  ["/api/integrations", ["integrations"]],
+  ["/api/connections/telegram", ["integrations"]],
+  ["/api/telegram", ["integrations"]],
 ];
 
-export function featureForApiPath(pathname: string): string | null {
-  for (const [prefix, flag] of API_FEATURE_PREFIXES) {
-    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) return flag;
+/** The flags gating a request path; empty when the path is not feature-gated. */
+export function featuresForApiPath(pathname: string): readonly string[] {
+  for (const [prefix, flags] of API_FEATURE_PREFIXES) {
+    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) return flags;
   }
-  return null;
+  return [];
+}
+
+/**
+ * The first flag that gates a path, for callers that need one name to report.
+ * Gating itself must use `featuresForApiPath`: a path may be any-of.
+ */
+export function featureForApiPath(pathname: string): string | null {
+  return featuresForApiPath(pathname)[0] ?? null;
 }
 
 /**
@@ -200,26 +222,28 @@ const INDUSTRY_GUARDED_ACCOUNTING_PREFIXES = [
 ] as const;
 
 /** Dashboard page prefix -> the flag that gates it, for the nav list and each gated page's own redirect. */
-export const PAGE_FEATURE_PREFIXES: [string, string][] = [
+export const PAGE_FEATURE_PREFIXES: [string, readonly string[]][] = [
   // The public work areas inside Accounting. Inventory is special: its page
   // chooses the food-service inventory entitlement or the retail stock model
   // from the industry profile, so it guards that choice server-side rather
   // than falsely applying the food-only flag to retail.
-  ["/accounting/reservations", "reservations"],
-  ["/accounting/floor", "reservations"],
-  ["/accounting/waiter", "reservations"],
-  ["/accounting/delivery", "delivery"],
-  ["/accounting/reports", "reporting"],
+  ["/accounting/reservations", ["reservations"]],
+  // Same any-of as `/api/tables`: the floor is where a café's QR tables live,
+  // so `dine_in` alone must open it for a business that takes no bookings.
+  ["/accounting/floor", ["dine_in", "reservations"]],
+  ["/accounting/waiter", ["reservations"]],
+  ["/accounting/delivery", ["delivery"]],
+  ["/accounting/reports", ["reporting"]],
   // The Accounting app's own ledger prefix; retired `/dashboard/accounting`
   // and `/dashboard/ledger` bookmarks 308 to it in middleware before any page
   // renders, so only the canonical prefix needs a row.
-  ["/accounting", "ledger"],
+  ["/accounting", ["ledger"]],
   // `/settings/branch-management` is deliberately absent: the tab carries
   // *either* `multi_location` or `site_cloud_sync` (`requiredAnyFeature` in
   // settings-tabs.ts), and a single-flag prefix row here would wrongly gate a
   // sync-only business out of its own sync screen.
-  ["/settings/backup", "backup"],
-  ["/ai", "ai_assistant"],
+  ["/settings/backup", ["backup"]],
+  ["/ai", ["ai_assistant"]],
   // «مدیریت وب‌سایت»'s WordPress manager. The legacy `/dashboard/integrations`
   // and `/dashboard/wp` addresses 308 in middleware to the «اتصال‌های فنی»
   // hub and this prefix respectively, so the entitlement is answered at the
@@ -227,25 +251,30 @@ export const PAGE_FEATURE_PREFIXES: [string, string][] = [
   // dead end — while `/websites` itself (the app home and the Eshobe CMS
   // manager) is not gated, so a business without `integrations` still reaches
   // its platform site.
-  ["/websites/wp", "integrations"],
-  ["/settings/connections/holoo", "integrations"],
+  ["/websites/wp", ["integrations"]],
+  ["/settings/connections/holoo", ["integrations"]],
   // `/settings/connections` is deliberately absent: the technical hub carries
   // connections with different entitlements (and desktop with none), so it
   // gates each tab rather than the page. See src/lib/connection-kinds.ts.
 ];
 
-export function featureForPagePath(pathname: string): string | null {
+export function featuresForPagePath(pathname: string): readonly string[] {
   if (
     INDUSTRY_GUARDED_ACCOUNTING_PREFIXES.some(
       (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
     )
   ) {
-    return null;
+    return [];
   }
-  for (const [prefix, flag] of PAGE_FEATURE_PREFIXES) {
-    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) return flag;
+  for (const [prefix, flags] of PAGE_FEATURE_PREFIXES) {
+    if (pathname === prefix || pathname.startsWith(`${prefix}/`)) return flags;
   }
-  return null;
+  return [];
+}
+
+/** The first flag that gates a page; gating itself uses `featuresForPagePath`. */
+export function featureForPagePath(pathname: string): string | null {
+  return featuresForPagePath(pathname)[0] ?? null;
 }
 
 /**
@@ -277,6 +306,34 @@ export async function requireFeatureForPage(
   flagKey: string,
 ): Promise<void> {
   if (!(await isFeatureEnabled(businessId, flagKey))) redirect("/dashboard");
+}
+
+/**
+ * Any-of for a path that serves more than one entitlement — the floor/table
+ * surface, which a restaurant reaches through `reservations` and a walk-in
+ * café through `dine_in` (ESH-147).
+ *
+ * A key with no `feature_flags` row is treated as enabled, matching
+ * `isFeatureEnabled`'s fail-open rule: a typo in a prefix map must not lock a
+ * business out of its own tables.
+ */
+export async function isAnyFeatureEnabled(
+  businessId: string,
+  flagKeys: readonly string[],
+): Promise<boolean> {
+  if (flagKeys.length === 0) return true;
+  if (flagKeys.length === 1) return isFeatureEnabled(businessId, flagKeys[0]);
+  const details = (await effectiveFeatureDetails(businessId, flagKeys)) ?? [];
+  if (details.length === 0) return true;
+  return details.some((detail) => detail.enabled);
+}
+
+/** `requireFeatureForPage` for any-of entitlements. */
+export async function requireAnyFeatureForPage(
+  businessId: string,
+  flagKeys: readonly string[],
+): Promise<void> {
+  if (!(await isAnyFeatureEnabled(businessId, flagKeys))) redirect("/dashboard");
 }
 
 /**

@@ -85,11 +85,12 @@ export interface PostDraft {
   featuredImageId?: string;
 }
 
-export const WEBSITE_MENU_TAXONOMY_KEY = "biza_menu_categories";
+export const WEBSITE_MENU_TAXONOMY_KEY = "cafe_menu_category";
 export const WEBSITE_SOURCE_SYSTEM = "biza_miz";
 
 export interface RemoteMenuCategory {
   id: string;
+  taxonomyId: string;
   sourceId: string;
   name: string;
   description: string | null;
@@ -97,8 +98,6 @@ export interface RemoteMenuCategory {
 }
 
 export interface MenuCategoryInput {
-  remoteId?: string;
-  taxonomyId: string;
   sourceId: string;
   name: string;
   description?: string | null;
@@ -166,6 +165,9 @@ export interface RemoteProductInput {
   stock?: number | null;
   imageId?: string | null;
   categoryTermId?: string | null;
+  /** Present for café products, including null to clear the category. */
+  categorySourceId?: string | null;
+  menuAvailability?: "available" | "sold_out" | "unavailable";
   menuOrder?: number;
   published?: boolean;
   available?: boolean;
@@ -197,10 +199,8 @@ export interface WebsiteAdapter {
 
   listProducts(q: { limit: number; cursor?: string }): Promise<Page<RemoteProduct>>;
   upsertProduct(input: RemoteProductInput): Promise<RemoteProduct>;
-  /** The dedicated product-menu taxonomy, never site navigation. */
-  upsertMenuTaxonomy(input: { remoteId?: string }): Promise<{ id: string }>;
   upsertMenuCategory(input: MenuCategoryInput): Promise<RemoteMenuCategory>;
-  setProductAvailability(remoteId: string, input: ProductAvailability): Promise<void>;
+  setProductAvailability(remoteId: string | null, input: ProductAvailability, menuSourceId?: string): Promise<void>;
   setProductStock(remoteId: string, quantity: number | null): Promise<void>;
   setProductPrice(remoteId: string, priceRial: number): Promise<void>;
 }

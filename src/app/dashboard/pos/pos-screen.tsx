@@ -383,14 +383,16 @@ export function PosScreen({
   });
 
   useEffect(() => {
-    if (business.loaded && business.features?.reservations === false) {
+    // `tableServiceEnabled` resolves `dine_in` first, so a café that takes
+    // table orders without reservations is not reset to takeaway (ESH-147).
+    if (business.loaded && !isTableServiceEnabled(business.loaded, business.features)) {
       setOrderType("takeaway");
       setTableId("");
       setGuestCount("");
       setTablePickerFor(null);
       setTables([]);
     }
-  }, [business.loaded, business.features?.reservations]);
+  }, [business.loaded, business.features]);
 
   const menuIndex = useMemo(
     () => (menu ? buildRestaurantMenuIndex(menu) : null),

@@ -499,6 +499,42 @@ describe("release workflow wiring", () => {
     expect(production).toContain("-not $releaseScan.installer");
   });
 
+  it("verifies the published signed release before registering it in Central", () => {
+    const production = workflow("windows-production-release.yml");
+    const verify = production.indexOf("Verify the published signed release before registering it");
+    const register = production.indexOf("Register the promoted release in Central");
+    expect(verify).toBeGreaterThan(-1);
+    expect(register).toBeGreaterThan(verify);
+    expect(production).toContain("--verify");
+    expect(production).toContain("$manifest.installer.expectedPublisher -cne $env:WINDOWS_EXPECTED_SIGNER");
+    expect(production).toContain("$manifest.installer.expectedPublisherThumbprint -cne $pinnedThumbprint");
+    expect(production).toContain("$release.isDraft");
+    expect(production).toContain("release-manifest.sha256");
+    // Issue #1000 - the asset size is not proof: the published installer is
+    // downloaded again and hashed against the accepted candidate.
+    expect(production).toContain("gh release download $env:TAG --pattern $installerName");
+    expect(production).toContain("$publishedInstallerHash -cne $env:PROMOTION_INSTALLER_SHA256");
+    expect(production).toContain("$publishedInstallerHash -cne $manifest.installer.sha256");
+  });
+
+  it("prepares a read-only real-Windows updater verification for a signed candidate", () => {
+    const updater = workflow("windows-updater-verification.yml");
+    expect(updater).toContain("scripts/windows-updater-verification.mjs");
+    expect(updater).toContain("WINDOWS_EXPECTED_SIGNER_THUMBPRINT");
+    expect(updater).toContain("business-suite-windows-${{ inputs.version }}-signed-candidate");
+    // Verification never installs or promotes anything.
+    expect(updater).not.toContain("gh release create");
+    expect(updater).not.toContain("Start-Process");
+    const production = workflow("windows-production-release.yml");
+    expect(production).toContain("-ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT");
+
+    // The release being upgraded FROM may predate a certificate rotation, so it is
+    // never held to the current pin - only the candidate is.
+    const retail = workflow("windows-11-release.yml");
+    expect(retail).toContain("-AllowHistoricalSigner");
+    expect(retail).toContain("-ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:CANDIDATE_COMMIT");
+  });
+
   it("fails the shippables build when the package shape regresses", () => {
     const shippables = workflow("verify-shippables.yml");
     for (const suite of [

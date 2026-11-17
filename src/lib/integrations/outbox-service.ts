@@ -24,6 +24,11 @@ import { wooProductShape, wooUpdatePath } from "./woo-catalogue";
 import { parentRemoteIdFor, parentRemoteIdFromMeta } from "./sync-service";
 import type { ConnectionRow } from "./connections-service";
 import { effectivePushSwitches, stockPushPayload } from "./outbox-policy";
+import {
+  canPublishConnectionOutbound,
+  isOutboxFieldSuppressed,
+  listSuppressedRemoteEditsForConnection,
+} from "../import-reconciliation/entry-guards";
 import { pluginCronAlerts } from "./plugin-cron-alerts";
 import { recordNotification } from "../notification-events";
 import { resolveMappedWooPrice } from "./woo-price-source-service";
@@ -182,9 +187,14 @@ async function openManualProductAxes(connectionId: string): Promise<Map<string, 
 /** Diffs desired vs last-pushed and upserts outbox events for anything changed. */
 export async function refreshOutboxForConnection(connection: ConnectionRow): Promise<void> {
   const businessId = connection.business_id;
+  const gate = await canPublishConnectionOutbound(businessId, connection);
+  if (!gate.allowed) return;
   const locationId = await resolveLocationId(connection);
-  const mappings = await listMappings(businessId, connection.id, "product");
-  const manualAxes = await openManualProductAxes(connection.id);
+  const [mappings, manualAxes, suppressedEdits] = await Promise.all([
+    listMappings(businessId, connection.id, "product"),
+    openManualProductAxes(connection.id),
+    listSuppressedRemoteEditsForConnection(businessId, connection.id),
+  ]);
 
   for (const mapping of mappings) {
     const desired = await desiredState(connection, locationId, mapping);
@@ -213,20 +223,28 @@ export async function refreshOutboxForConnection(connection: ConnectionRow): Pro
     // it. Per-product pauses (item 4) are read from the same metadata.
     const previous = (mapping.lastPushedPayload ?? {}) as { stock?: number; priceRial?: string };
     if (desired.priceRial !== null && !manual?.price && !pricePaused) {
-      await upsertOutbox(
-        businessId,
-        connection.id,
-        "price",
-        mapping.remoteId,
-        mapping.localId,
-        {
-          regular_price: rialToWooAmount(desired.priceRial, connection.currency_unit),
-          ...(parentRemoteId ? { __parentRemoteId: parentRemoteId } : {}),
-        },
-        previous.priceRial !== desired.priceRial.toString(),
-      );
+      const wooPrice = rialToWooAmount(desired.priceRial, connection.currency_unit);
+      if (!isOutboxFieldSuppressed(suppressedEdits, mapping.remoteId, "regular_price", wooPrice)) {
+        await upsertOutbox(
+          businessId,
+          connection.id,
+          "price",
+          mapping.remoteId,
+          mapping.localId,
+          {
+            regular_price: wooPrice,
+            ...(parentRemoteId ? { __parentRemoteId: parentRemoteId } : {}),
+          },
+          previous.priceRial !== desired.priceRial.toString(),
+        );
+      }
     }
-    if (desired.stock !== null && !manual?.stock && !stockPaused) {
+    if (
+      desired.stock !== null &&
+      !manual?.stock &&
+      !stockPaused &&
+      !isOutboxFieldSuppressed(suppressedEdits, mapping.remoteId, "stock_quantity", desired.stock.stock_quantity)
+    ) {
       await upsertOutbox(
         businessId,
         connection.id,

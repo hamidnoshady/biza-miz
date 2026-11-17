@@ -7,6 +7,7 @@
  * like the items it labels.
  */
 import { query, type PoolClient } from "./db";
+import { attributeComparisonKey } from "./product-attributes";
 import { validateServiceIntervalMonths } from "./watch";
 
 export interface ItemBrand {
@@ -35,8 +36,10 @@ function mapBrand(row: BrandRow): ItemBrand {
   };
 }
 
-export async function listBrands(locationId: string): Promise<ItemBrand[]> {
-  const { rows } = await query<BrandRow>(
+export async function listBrands(locationId: string, client?: PoolClient): Promise<ItemBrand[]> {
+  const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
+    client ? client.query<T>(text, params as never) : query<T>(text, params);
+  const { rows } = await run<BrandRow>(
     `SELECT * FROM item_brands WHERE location_id = $1 ORDER BY name`,
     [locationId],
   );
@@ -46,13 +49,44 @@ export async function listBrands(locationId: string): Promise<ItemBrand[]> {
 export async function createBrand(
   locationId: string,
   input: { name: string; country?: string | null; productLine?: string | null },
+  client?: PoolClient,
 ): Promise<ItemBrand> {
   const name = input.name?.trim();
   if (!name) throw new Error("نام برند نمی‌تواند خالی باشد.");
-  const { rows } = await query<BrandRow>(
+  const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
+    client ? client.query<T>(text, params as never) : query<T>(text, params);
+  const { rows } = await run<BrandRow>(
     `INSERT INTO item_brands (location_id, name, country, product_line)
      VALUES ($1, $2, $3, $4) RETURNING *`,
     [locationId, name, input.country?.trim() || null, input.productLine?.trim() || null],
+  );
+  return mapBrand(rows[0]);
+}
+
+/**
+ * Resolve an existing brand by normalized comparison key within one branch,
+ * or create it safely without duplicating or failing under concurrent imports.
+ */
+export async function ensureBranchBrand(
+  locationId: string,
+  rawName: string,
+  client?: PoolClient,
+): Promise<ItemBrand> {
+  const name = rawName.trim();
+  if (!name || name.length > 100) throw new Error("نام برند معتبر نیست.");
+  const targetKey = attributeComparisonKey(name);
+  const existing = (await listBrands(locationId, client)).find(
+    (entry) => attributeComparisonKey(entry.name) === targetKey,
+  );
+  if (existing) return existing;
+  const run = <T extends Record<string, unknown>>(text: string, params: unknown[]) =>
+    client ? client.query<T>(text, params as never) : query<T>(text, params);
+  const { rows } = await run<BrandRow>(
+    `INSERT INTO item_brands (location_id, name)
+     VALUES ($1, $2)
+     ON CONFLICT (location_id, name) DO UPDATE SET name = EXCLUDED.name
+     RETURNING *`,
+    [locationId, name],
   );
   return mapBrand(rows[0]);
 }

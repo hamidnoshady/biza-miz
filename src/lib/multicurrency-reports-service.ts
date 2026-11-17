@@ -158,7 +158,7 @@ export async function foreignTrialBalance(
             COALESCE(sum(jl.debit), 0)::text AS base_debit,
             COALESCE(sum(jl.credit), 0)::text AS base_credit
        FROM journal_lines jl
-       JOIN journal_entries je ON je.id = jl.entry_id
+       JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
        JOIN accounts a ON a.id = jl.account_id
       WHERE je.business_id = $1
         AND je.currency_code IS NOT NULL
@@ -289,7 +289,7 @@ export async function accountStatement(
             jl.foreign_debit::text AS foreign_debit, jl.foreign_credit::text AS foreign_credit,
             jl.debit::text AS debit, jl.credit::text AS credit
        FROM journal_lines jl
-       JOIN journal_entries je ON je.id = jl.entry_id
+       JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
       WHERE je.business_id = $1
         AND jl.account_id = $2
         AND ($3::text IS NULL OR je.currency_code = $3::text)
@@ -405,7 +405,7 @@ async function foreignPartyBalancesForDirection(
                      THEN jl.debit - jl.credit
                      ELSE jl.credit - jl.debit END)::bigint AS base_booked
        FROM journal_lines jl
-       JOIN journal_entries je ON je.id = jl.entry_id
+       JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
        JOIN accounts a ON a.id = jl.account_id
        JOIN parties p ON p.id = jl.party_id
       WHERE je.business_id = $1
@@ -807,10 +807,11 @@ async function foreignAccountPositions(businessId: string): Promise<ForeignAccou
     `SELECT a.id::text AS id, a.code, a.name, a.type::text AS type, a.currency_code,
             (SELECT COALESCE(sum(jl.foreign_debit) - sum(jl.foreign_credit), 0)
                FROM journal_lines jl
-               JOIN journal_entries je ON je.id = jl.entry_id
+               JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
               WHERE jl.account_id = a.id AND je.currency_code = a.currency_code)::text AS foreign_balance,
             (SELECT COALESCE(sum(jl.debit) - sum(jl.credit), 0)
                FROM journal_lines jl
+               JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
               WHERE jl.account_id = a.id)::text AS book_base
        FROM accounts a
       WHERE a.business_id = $1 AND a.currency_code IS NOT NULL

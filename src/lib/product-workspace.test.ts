@@ -38,6 +38,15 @@ describe("retail catalogue entry adapters", () => {
     }
   });
 
+  it.each(["jewelry", "watch", "automotive"] as const)("offers %s attributes only with the native catalogue read permission", (industry) => {
+    const href = `${ACCOUNTING_WORKSPACE_HREFS.products}/attributes`;
+    const permission = industry === "automotive" ? PERMISSIONS.vehiclesView : PERMISSIONS.inventoryView;
+    const allowed = flatten(accessibleNavItemsFor(industry, { settingsTabs: [] }, "manager", new Set([permission]), features));
+    expect(allowed.some((item) => item.href === href)).toBe(true);
+    const denied = flatten(accessibleNavItemsFor(industry, { settingsTabs: [] }, "manager", new Set(), features));
+    expect(denied.some((item) => item.href === href)).toBe(false);
+  });
+
   it("does not offer creation to a read-only variant catalogue member", () => {
     const permissions = new Set<Permission>([PERMISSIONS.inventoryView]);
     const items = flatten(accessibleNavItemsFor("accessories", { settingsTabs: [] }, "manager", permissions, features));
@@ -46,6 +55,16 @@ describe("retail catalogue entry adapters", () => {
     permissions.add(PERMISSIONS.inventoryAdjust);
     const editorItems = flatten(accessibleNavItemsFor("accessories", { settingsTabs: [] }, "manager", permissions, features));
     expect(editorItems.some((item) => item.href === `${ACCOUNTING_WORKSPACE_HREFS.products}/new`)).toBe(true);
+  });
+
+  it.each(["jewelry", "watch"] as const)("shows %s creation only to members with both native read and adjust permissions", (industry) => {
+    const href = `${ACCOUNTING_WORKSPACE_HREFS.products}/new`;
+    for (const permissions of [[], [PERMISSIONS.inventoryView], [PERMISSIONS.inventoryAdjust]]) {
+      const items = flatten(accessibleNavItemsFor(industry, { settingsTabs: [] }, "manager", new Set(permissions), features));
+      expect(items.some((item) => item.href === href)).toBe(false);
+    }
+    const items = flatten(accessibleNavItemsFor(industry, { settingsTabs: [] }, "manager", new Set([PERMISSIONS.inventoryView, PERMISSIONS.inventoryAdjust]), features));
+    expect(items.some((item) => item.href === href)).toBe(true);
   });
 
   it("offers vehicle creation only with the vehicle view and create permissions", () => {
@@ -61,10 +80,22 @@ describe("retail catalogue entry adapters", () => {
   it("shows only implemented specialist pages with their native read permissions", () => {
     const jewelry = flatten(accessibleNavItemsFor("jewelry", { settingsTabs: [] }, "manager", new Set([PERMISSIONS.inventoryView]), features));
     expect(jewelry.some((item) => item.href === `${ACCOUNTING_WORKSPACE_HREFS.products}/prices`)).toBe(true);
+    expect(jewelry.some((item) => item.href === `${ACCOUNTING_WORKSPACE_HREFS.products}/reports`)).toBe(false);
+    const jewelryReporter = flatten(accessibleNavItemsFor("jewelry", { settingsTabs: [] }, "manager", new Set([PERMISSIONS.inventoryView, PERMISSIONS.reportsView]), features));
+    expect(jewelryReporter.some((item) => item.href === `${ACCOUNTING_WORKSPACE_HREFS.products}/reports`)).toBe(true);
     const watchReader = flatten(accessibleNavItemsFor("watch", { settingsTabs: [] }, "manager", new Set([PERMISSIONS.inventoryView]), features));
     expect(watchReader.some((item) => item.href === `${ACCOUNTING_WORKSPACE_HREFS.products}/reports`)).toBe(false);
     const watchReporter = flatten(accessibleNavItemsFor("watch", { settingsTabs: [] }, "manager", new Set([PERMISSIONS.inventoryView, PERMISSIONS.reportsView]), features));
     expect(watchReporter.some((item) => item.href === `${ACCOUNTING_WORKSPACE_HREFS.products}/reports`)).toBe(true);
+  });
+
+  it("exposes automotive prices to vehicle viewers and reports only with report permission", () => {
+    const href = ACCOUNTING_WORKSPACE_HREFS.products;
+    const viewer = flatten(accessibleNavItemsFor("automotive", { settingsTabs: [] }, "manager", new Set([PERMISSIONS.vehiclesView]), features));
+    expect(viewer.some((item) => item.href === `${href}/prices`)).toBe(true);
+    expect(viewer.some((item) => item.href === `${href}/reports`)).toBe(false);
+    const reporter = flatten(accessibleNavItemsFor("automotive", { settingsTabs: [] }, "manager", new Set([PERMISSIONS.vehiclesView, PERMISSIONS.reportsView]), features));
+    expect(reporter.some((item) => item.href === `${href}/reports`)).toBe(true);
   });
 
   it("hides specialist entry points without the native read permission", () => {

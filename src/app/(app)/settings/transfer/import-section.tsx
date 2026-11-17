@@ -48,6 +48,8 @@ import {
 } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
 import { TRANSFORM_LABELS, TRANSFORM_RULES } from "@/lib/data-transfer/types";
+import { CatalogueSection } from "./catalogue-section";
+import { ReconciliationWizard } from "./reconciliation-wizard";
 import {
   Count,
   SelectField,
@@ -57,6 +59,8 @@ import {
   type ImportJobView,
   type MappingColumn,
 } from "./data-transfer-ui";
+
+export const CATALOGUE_IMPORT_ENTITY_KEY = "__catalogue__";
 
 interface PreviewRow {
   rowNumber: number;
@@ -89,9 +93,13 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 
 export function ImportSection({
   entities,
+  cataloguePermitted = false,
+  initialEntityKey = "",
   onJobQueued,
 }: {
   entities: CatalogueEntity[] | null;
+  cataloguePermitted?: boolean;
+  initialEntityKey?: string;
   onJobQueued: () => void;
 }) {
   const importable = useMemo(
@@ -101,7 +109,7 @@ export function ImportSection({
   const groups = useMemo(() => groupByModule(importable), [importable]);
 
   const fileInput = useRef<HTMLInputElement>(null);
-  const [entityKey, setEntityKey] = useState("");
+  const [entityKey, setEntityKey] = useState(initialEntityKey);
   const [file, setFile] = useState<File | null>(null);
   const [job, setJob] = useState<ImportJobView | null>(null);
   const [columns, setColumns] = useState<string[]>([]);
@@ -119,24 +127,33 @@ export function ImportSection({
   const [busy, setBusy] = useState<"upload" | "preview" | "run" | "template" | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [reconcileRunId, setReconcileRunId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialEntityKey === CATALOGUE_IMPORT_ENTITY_KEY && cataloguePermitted) {
+      setEntityKey((current) => current || CATALOGUE_IMPORT_ENTITY_KEY);
+    }
+  }, [initialEntityKey, cataloguePermitted]);
+
+  const isCatalogue = cataloguePermitted && entityKey === CATALOGUE_IMPORT_ENTITY_KEY;
 
   const entity = useMemo(
-    () => importable.find((candidate) => candidate.key === entityKey) ?? null,
-    [importable, entityKey],
+    () => (isCatalogue ? null : (importable.find((candidate) => candidate.key === entityKey) ?? null)),
+    [importable, entityKey, isCatalogue],
   );
 
   // The saved mappings for this entity. Reloaded when the entity changes: a
   // template built for products would confidently map the wrong columns of a
   // customer file, so only this entity's are ever offered.
   useEffect(() => {
-    if (!entityKey) {
+    if (!entityKey || isCatalogue) {
       setTemplates([]);
       return;
     }
     api<{ templates: MappingTemplateView[] }>(
       `/api/data/templates?kind=mapping&entity=${encodeURIComponent(entityKey)}`,
     ).then(({ ok, data }) => setTemplates(ok ? data.templates : []));
-  }, [entityKey]);
+  }, [entityKey, isCatalogue]);
 
   const resetFlow = useCallback(() => {
     setJob(null);
@@ -283,26 +300,32 @@ export function ImportSection({
   async function run() {
     if (!job) return;
     setBusy("run");
-    const { ok, data } = await api<{ job: ImportJobView; error?: string }>(
+    const { ok, data } = await api<{ job?: ImportJobView; error?: string; runId?: string }>(
       `/api/data/imports/${job.id}`,
       { method: "POST", body: JSON.stringify({ action: "run" }) },
     );
     setBusy(null);
     if (!ok) {
+      if (data.error === "reconciliation_required" && data.runId) {
+        setReconcileRunId(data.runId);
+        setNotice("با توجه به وجود داده‌های هم‌پوشان، ابتدا ردیف‌ها را در میز تطبیق زیر بازبینی و اعمال کنید.");
+        setError("");
+        return;
+      }
       setError(dataError(data.error));
       return;
     }
     setNotice(
       "ورود اطلاعات در صف اجرا قرار گرفت. پیشرفت آن را در بخش «تاریخچه» می‌بینید و می‌توانید این صفحه را ببندید.",
     );
-    setJob(data.job);
+    if (data.job) setJob(data.job);
     setPreview(null);
     onJobQueued();
   }
 
   if (entities === null) return <LoadingSkeleton rows={6} />;
 
-  if (importable.length === 0) {
+  if (importable.length === 0 && !cataloguePermitted) {
     return (
       <SectionCard title="ورود اطلاعات">
         <EmptyState
@@ -329,10 +352,25 @@ export function ImportSection({
     <div className="space-y-6">
       {error ? <ErrorBox>{error}</ErrorBox> : null}
       {notice ? <InfoBox>{notice}</InfoBox> : null}
+      {reconcileRunId ? (
+        <ReconciliationWizard
+          initialRunId={reconcileRunId}
+          onCompleted={() => {
+            setReconcileRunId(null);
+            setNotice("تطبیق اعمال شد. اکنون می‌توانید ادامه دهید یا وضعیت را در تاریخچه ببینید.");
+            onJobQueued();
+          }}
+          onClose={() => setReconcileRunId(null)}
+        />
+      ) : null}
 
       <SectionCard
         title="۱. نوع داده و فایل"
-        description="ابتدا مشخص کنید چه چیزی را وارد می‌کنید، سپس فایل CSV، Excel، JSON یا PDF را انتخاب کنید."
+        description={
+          isCatalogue
+            ? "ورود بازبینی‌شدهٔ کاتالوگ محصولات از اکسل با تطبیق برند، شناسه‌ها و فروشگاه."
+            : "ابتدا مشخص کنید چه چیزی را وارد می‌کنید، سپس فایل CSV، Excel، JSON یا PDF را انتخاب کنید."
+        }
       >
         <div className="grid gap-4 md:grid-cols-2">
           <Field label="نوع داده" hint="فهرست فقط شامل مواردی است که اجازهٔ ورود آن‌ها را دارید.">
@@ -346,6 +384,11 @@ export function ImportSection({
               }}
             >
               <option value="">— انتخاب کنید —</option>
+              {cataloguePermitted ? (
+                <optgroup label="کاتالوگ و محصولات">
+                  <option value={CATALOGUE_IMPORT_ENTITY_KEY}>کاتالوگ محصولات</option>
+                </optgroup>
+              ) : null}
               {groups.map((group) => (
                 <optgroup key={group.module} label={group.label}>
                   {group.entities.map((candidate) => (
@@ -358,7 +401,7 @@ export function ImportSection({
             </select>
           </Field>
 
-          {templates.length > 0 ? (
+          {!isCatalogue && templates.length > 0 ? (
             <SelectField
               label="قالب نگاشت ذخیره‌شده"
               value={templateId}
@@ -372,31 +415,37 @@ export function ImportSection({
           ) : null}
         </div>
 
-        {entity ? (
-          <p className="mb-4 text-sm leading-6 text-muted-foreground">{entity.description}</p>
+        {!isCatalogue ? (
+          <>
+            {entity ? (
+              <p className="mb-4 text-sm leading-6 text-muted-foreground">{entity.description}</p>
+            ) : null}
+
+            <Field
+              label="فایل"
+              hint="حداکثر ۲۰ مگابایت. PDF ساختار جدول ندارد، پس تشخیص ستون‌ها در آن حدسی است؛ حتماً پیش‌نمایش را بررسی کنید."
+            >
+              <input
+                ref={fileInput}
+                type="file"
+                accept=".csv,.txt,.tsv,.xlsx,.xlsm,.json,.pdf"
+                className={inputClass}
+                onChange={(event) => {
+                  setFile(event.target.files?.[0] ?? null);
+                  setJob(null);
+                  setPreview(null);
+                }}
+              />
+            </Field>
+
+            <PrimaryButton onClick={upload} disabled={busy !== null || !entity || !file}>
+              {busy === "upload" ? "در حال خواندن فایل…" : "خواندن فایل و پیشنهاد نگاشت"}
+            </PrimaryButton>
+          </>
         ) : null}
-
-        <Field
-          label="فایل"
-          hint="حداکثر ۲۰ مگابایت. PDF ساختار جدول ندارد، پس تشخیص ستون‌ها در آن حدسی است؛ حتماً پیش‌نمایش را بررسی کنید."
-        >
-          <input
-            ref={fileInput}
-            type="file"
-            accept=".csv,.txt,.tsv,.xlsx,.xlsm,.json,.pdf"
-            className={inputClass}
-            onChange={(event) => {
-              setFile(event.target.files?.[0] ?? null);
-              setJob(null);
-              setPreview(null);
-            }}
-          />
-        </Field>
-
-        <PrimaryButton onClick={upload} disabled={busy !== null || !entity || !file}>
-          {busy === "upload" ? "در حال خواندن فایل…" : "خواندن فایل و پیشنهاد نگاشت"}
-        </PrimaryButton>
       </SectionCard>
+
+      {isCatalogue ? <CatalogueSection /> : null}
 
       {job && entity && columns.length > 0 ? (
         <SectionCard

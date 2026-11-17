@@ -32,6 +32,7 @@ import { isValidIsoDate } from "./iso-date";
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import { notCarryForwardSnapshotSql } from "./carry-forward-exclusion";
 import { accountIdsByCode, MissingLedgerAccountError, postJournalEntry } from "./ledger-service";
 import { agingBucketCaseSql, UNKNOWN_SUPPLIER_KEY, type AgingSummary } from "./aging";
 import { AP_SOURCE_ATTRIBUTION_CONTRACT, AP_SUPPLIER_ATTRIBUTION_SQL, AP_SUPPLIER_ID_SQL, apSupplierAttributionSql, apAttributionStatus } from "./ap-attribution";
@@ -350,7 +351,7 @@ export async function getApReconciliationSummary(businessId: string): Promise<Ap
        -- reads accounts of this type.
        SELECT coalesce(sum(jl.credit - jl.debit), 0) AS balance
          FROM journal_lines jl
-         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN journal_entries je ON je.id = jl.entry_id AND ${notCarryForwardSnapshotSql("je")}
         WHERE je.business_id = $1 AND jl.account_id = $2
      )
      SELECT s.payable::text AS payable, s.advances::text AS advances, s.net::text AS net,

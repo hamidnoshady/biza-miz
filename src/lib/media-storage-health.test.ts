@@ -9,6 +9,7 @@
  * accepts writes but refuses deletes — using injected I/O so each path is
  * provable without a network.
  */
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_MEDIA_CONFIG, type MediaStorageConfig } from "./media";
 import { HEALTH_STREAM_PROBE_BYTES, healthProbeKey, runMediaStorageHealthCheck } from "./media-storage-health";
@@ -46,6 +47,7 @@ function fakeBucket(overrides: {
   failGet?: (key: string) => unknown;
   failDelete?: (key: string) => unknown;
   tamperRead?: boolean;
+  tamperStreamedRead?: boolean;
   tempError?: unknown;
 } = {}) {
   const objects = new Map<string, Buffer>();
@@ -70,6 +72,12 @@ function fakeBucket(overrides: {
         const stored = objects.get(key);
         if (!stored) throw s3(404, "NoSuchKey", "get");
         return overrides.tamperRead ? Buffer.concat([stored, Buffer.from("tampered")]) : stored;
+      },
+      getToFile: async (key: string) => {
+        const stored = objects.get(key);
+        if (!stored) throw s3(404, "NoSuchKey", "get");
+        const sha256 = createHash("sha256").update(stored).digest("hex");
+        return { sizeBytes: stored.length, sha256: overrides.tamperStreamedRead ? "wrong" : sha256 };
       },
       head: async (key: string) => {
         const stored = objects.get(key);
@@ -178,7 +186,7 @@ describe("runMediaStorageHealthCheck", () => {
       deps: fakeBucket({ failPut: () => s3(403, "SignatureDoesNotMatch") }).deps,
     });
     expect(rejected.ok).toBe(false);
-    expect(rejected.failure).toMatchObject({ code: "storage_credentials_rejected", stage: "s3_upload" });
+    expect(rejected.failure).toMatchObject({ code: "storage_signature_mismatch", stage: "s3_upload" });
     expect(rejected.steps.find((step) => step.id === "buffered_write")).toMatchObject({
       ok: false,
       providerStatus: 403,
@@ -213,6 +221,14 @@ describe("runMediaStorageHealthCheck", () => {
     expect(result.ok).toBe(false);
     expect(result.capabilities).toMatchObject({ write: true, readBack: true, streamedUpload: false });
     expect(result.steps.find((step) => step.id === "streamed_write")).toMatchObject({ ok: false });
+  });
+
+  it("fails the streamed read when its SHA-256 differs and cleans up the probes", async () => {
+    const bucket = fakeBucket({ tamperStreamedRead: true });
+    const result = await runMediaStorageHealthCheck(config(), { ...OPTIONS, deps: bucket.deps });
+    expect(result.failure?.code).toBe("stream_probe_content_mismatch");
+    expect(result.steps.find((step) => step.id === "streamed_read")?.ok).toBe(false);
+    expect(bucket.objects.size).toBe(0);
   });
 
   it("does not report success when the probes cannot be deleted", async () => {

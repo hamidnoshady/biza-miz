@@ -230,30 +230,22 @@ export class MockWebsiteAdapter implements WebsiteAdapter {
     };
   }
 
-  async upsertMenuTaxonomy(input: { remoteId?: string }): Promise<{ id: string }> {
-    this.guard("upsertMenuTaxonomy", input);
-    this.taxonomyId = input.remoteId ?? this.taxonomyId ?? this.nextId("taxonomy");
-    return { id: this.taxonomyId };
-  }
-
   async upsertMenuCategory(input: MenuCategoryInput): Promise<RemoteMenuCategory> {
     this.guard("upsertMenuCategory", input);
-    const existing = input.remoteId
-      ? this.menuCategories.get(input.remoteId)
-      : [...this.menuCategories.values()].find((row) => row.sourceId === input.sourceId);
-    if (input.remoteId && !existing) throw new WebsiteAdapterError("not_found", input.remoteId);
+    const existing = [...this.menuCategories.values()].find((row) => row.sourceId === input.sourceId);
+    this.taxonomyId ??= this.nextId("taxonomy");
     const category: RemoteMenuCategory = {
-      id: existing?.id ?? this.nextId("term"), sourceId: input.sourceId, name: input.name,
+      id: existing?.id ?? this.nextId("term"), taxonomyId: this.taxonomyId, sourceId: input.sourceId, name: input.name,
       description: input.description ?? null, sortOrder: input.sortOrder,
     };
     this.menuCategories.set(category.id, category);
     return { ...category };
   }
 
-  async setProductAvailability(remoteId: string, input: ProductAvailability): Promise<void> {
+  async setProductAvailability(remoteId: string | null, input: ProductAvailability): Promise<void> {
     this.guard("setProductAvailability", remoteId, input);
     const product = this.products.find((row) => row.id === remoteId);
-    if (!product) throw new WebsiteAdapterError("not_found", remoteId);
+    if (!product) throw new WebsiteAdapterError("not_found", remoteId ?? undefined);
     product.status = input.published ? "published" : "draft";
     product.available = input.available;
     product.updatedAt = this.stamp();

@@ -137,6 +137,8 @@ const ERROR_STATUS: Record<string, number> = {
   has_invalid_rows: 400,
   already_completed: 409,
   job_running: 409,
+  reconciliation_required: 409,
+  reconciliation_unsupported_entity: 400,
   name_required: 400,
   name_taken: 409,
   invalid_email: 400,

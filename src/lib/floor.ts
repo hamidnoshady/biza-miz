@@ -205,6 +205,11 @@ export async function recordFloorAudit(
       | "table.status_changed"
       | "table.archived"
       | "table.restored"
+      // ESH-147 — the table's printed QR identity. Only its masked prefix is
+      // recorded; the token itself is never written to the audit log.
+      | "table.qr_generated"
+      | "table.qr_rotated"
+      | "table.qr_revoked"
       | "floor_section.created"
       | "floor_section.updated"
       | "floor_section.deleted";

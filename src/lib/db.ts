@@ -506,6 +506,17 @@ export async function withTenantTransaction<T>(
  *     `POST /api/cms/order-events` delivery to its `eshobe_cms_connections`
  *     row before ingest runs under `withTenant`.
  *
+ *   - **table-qr-resolution** (ESH-147) — resolving the opaque token printed
+ *     on a physical table to the one `table_qr_tokens` row that owns it, and
+ *     therefore to the business/location/table it names, before any session
+ *     exists (the customer is a stranger's phone). Same
+ *     identify-the-tenant-first shape as api-key-auth: the token is *how* the
+ *     tenant gets selected, the lookup is ONE row from ONE table keyed on its
+ *     SHA-256 hash, and it never consults a request-supplied business id.
+ *     Every later statement — the table, its branch, the CMS site, the
+ *     entitlement — runs inside `withTenant(row.business_id, …)`. The public
+ *     answer carries no uuid and is rate-limited per IP in middleware.
+ *
  *   - **single-tenant-check** — `restoreAvailable()`: whether this install
  *     holds exactly one business. The same shape as `first-run` — a `count(*)`
  *     about the *install*, which no tenant scope can express, since the whole

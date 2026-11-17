@@ -916,7 +916,7 @@ async function readCarryForwardInput(
        LEFT JOIN journal_lines jl ON jl.account_id = a.id
        LEFT JOIN journal_entries je ON je.id = jl.entry_id AND je.business_id = $1
       WHERE a.business_id = $1
-        AND (je.id IS NULL OR je.entry_date <= $2::date)
+        AND (je.id IS NULL OR (je.entry_date <= $2::date AND NOT is_carry_forward_snapshot(je)))
       GROUP BY a.id, a.code, a.name, a.type,
                jl.cost_center_id, jl.profit_center_id, jl.department_id, jl.detail_dimension_id
       ORDER BY a.code`,

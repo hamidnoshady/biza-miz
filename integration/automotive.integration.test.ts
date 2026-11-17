@@ -19,6 +19,8 @@
  *   - one business cannot see another's cars.
  */
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Client, type PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
@@ -562,6 +564,21 @@ describe("acquisition and cost accounting", () => {
   });
 });
 
+describe("automotive price revision migration", () => {
+  it("adds a zero revision to existing rows without changing prices or cost", async () => {
+    await withTransaction(async (client) => {
+      // A temp table shadows the already-migrated production-shaped table in
+      // this isolated test database, letting the actual migration run on old rows.
+      await client.query("CREATE TEMP TABLE automotive_vehicle_attributes (serial_id uuid PRIMARY KEY, asking_price_rial bigint NOT NULL, purchase_cost_rial bigint NOT NULL) ON COMMIT DROP");
+      const serialId = randomUUID();
+      await client.query("INSERT INTO automotive_vehicle_attributes VALUES ($1, $2, $3)", [serialId, 900000000, 700000000]);
+      await client.query(readFileSync(join(process.cwd(), "migrations/0298_automotive_price_revision.sql"), "utf8"));
+      const rows = await client.query("SELECT serial_id, asking_price_rial::text, purchase_cost_rial::text, price_revision::text FROM automotive_vehicle_attributes");
+      expect(rows.rows).toEqual([{ serial_id: serialId, asking_price_rial: "900000000", purchase_cost_rial: "700000000", price_revision: "0" }]);
+    });
+  });
+});
+
 describe("pricing", () => {
   it("records price history and never touches the cost", async () => {
     const created = await withTransaction((client) =>
@@ -594,6 +611,66 @@ describe("pricing", () => {
     expect(history[1].previousAskingPriceRial).toBe(0);
 
     expect(await accountBalance("1370")).toBe(700_000_000);
+  });
+
+  it("rejects stale price previews under the vehicle lock without another history row", async () => {
+    const created = await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "P-CAS", askingPriceRial: 900_000_000 })));
+    const original = await automotive.getVehicle(biz.id, created.serialId);
+    expect(original).not.toBeNull();
+    await withTransaction((client) => automotive.updateVehiclePrice(client, {
+      businessId: biz.id, serialId: created.serialId, locationId: biz.locationId,
+      askingPriceRial: 850_000_000, expectedPriceRevision: original!.priceRevision,
+    }));
+    await expect(withTransaction((client) => automotive.updateVehiclePrice(client, {
+      businessId: biz.id, serialId: created.serialId, locationId: biz.locationId,
+      askingPriceRial: 830_000_000, expectedPriceRevision: original!.priceRevision,
+    }))).rejects.toMatchObject({ code: "price_conflict", status: 409 });
+    expect((await automotive.getVehicle(biz.id, created.serialId))?.askingPriceRial).toBe(850_000_000);
+    expect(await automotive.listVehiclePriceHistory(biz.id, created.serialId)).toHaveLength(2);
+    const current = await automotive.getVehicle(biz.id, created.serialId);
+    expect(current?.priceRevision).not.toBe(original?.priceRevision);
+  });
+
+  it("checks competing previews only after the first writer releases the lock", async () => {
+    const created = await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "P-RACE", askingPriceRial: 900_000_000 })));
+    const original = await automotive.getVehicle(biz.id, created.serialId);
+    const first = await dbLib.getPool().connect();
+    const second = await dbLib.getPool().connect();
+    const observer = await dbLib.getPool().connect();
+    try {
+      await first.query("BEGIN"); await second.query("BEGIN");
+      const input = { businessId: biz.id, serialId: created.serialId, locationId: biz.locationId, expectedPriceRevision: original!.priceRevision };
+      await automotive.updateVehiclePrice(first, { ...input, askingPriceRial: 850_000_000 });
+      const secondPid = await backendPid(second);
+      const competing = automotive.updateVehiclePrice(second, { ...input, askingPriceRial: 830_000_000 });
+      void competing.catch(() => {});
+      await waitUntilBlocked(observer, secondPid);
+      await first.query("COMMIT");
+      await expect(competing).rejects.toMatchObject({ code: "price_conflict", status: 409 });
+      await second.query("ROLLBACK");
+      expect((await automotive.getVehicle(biz.id, created.serialId))?.askingPriceRial).toBe(850_000_000);
+      // Creation writes the initial price row; the winner adds exactly one.
+      expect(await automotive.listVehiclePriceHistory(biz.id, created.serialId)).toHaveLength(2);
+    } finally {
+      await first.query("ROLLBACK").catch(() => {});
+      await second.query("ROLLBACK").catch(() => {});
+      first.release(); second.release(); observer.release();
+    }
+  });
+
+  it("increments the revision for multiple changes in the same transaction", async () => {
+    const created = await withTransaction((client) => automotive.createVehicle(client, carInput({ stockNumber: "P-REV", askingPriceRial: 900_000_000 })));
+    const original = await automotive.getVehicle(biz.id, created.serialId);
+    await withTransaction(async (client) => {
+      await automotive.updateVehiclePrice(client, { businessId: biz.id, serialId: created.serialId, locationId: biz.locationId, askingPriceRial: 850_000_000 });
+      const middle = await automotive.getVehicle(biz.id, created.serialId, client);
+      await automotive.updateVehiclePrice(client, { businessId: biz.id, serialId: created.serialId, locationId: biz.locationId, askingPriceRial: 900_000_000 });
+      const end = await automotive.getVehicle(biz.id, created.serialId, client);
+      expect(middle?.priceRevision).not.toBe(original?.priceRevision);
+      expect(end?.priceRevision).not.toBe(middle?.priceRevision);
+      expect(end?.askingPriceRial).toBe(original?.askingPriceRial);
+    });
+    await expect(withTransaction((client) => automotive.updateVehiclePrice(client, { businessId: biz.id, serialId: created.serialId, locationId: biz.locationId, askingPriceRial: 800_000_000, expectedPriceRevision: original!.priceRevision }))).rejects.toMatchObject({ code: "price_conflict" });
   });
 
   it("enforces the recorded floor unless the caller holds the override", async () => {

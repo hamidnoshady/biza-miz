@@ -904,7 +904,7 @@ export async function getCommissionLiability(businessId: string): Promise<Commis
       await run<{ balance: string }>(
         `SELECT COALESCE(SUM(jl.credit - jl.debit), 0)::text AS balance
            FROM journal_lines jl
-           JOIN journal_entries je ON je.id = jl.entry_id
+           JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
            JOIN accounts a ON a.id = jl.account_id
           WHERE je.business_id = $1 AND a.business_id = $1 AND a.code = $2`,
         [businessId, WELL_KNOWN_CODES.salariesPayable],

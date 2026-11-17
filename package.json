@@ -97,6 +97,7 @@
     "react-grid-layout": "^2.2.3",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "saxes": "^5.0.1",
     "sharp": "^0.35.4",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",

@@ -68,7 +68,7 @@ const command = z.discriminatedUnion("action", [
 const fileOptions = z.object({
   action: z.enum(["analyse", "preview", "stage"]),
   mapping: z.unknown().optional(),
-  omax: z.boolean().default(false),
+  fallbackBrand: z.string().max(200).nullable().optional(),
   duplicateRows: z.array(z.number().int().min(2).max(CATALOGUE_MAX_ROWS + 1)).max(CATALOGUE_MAX_ROWS).default([]),
   sourceName: z.string().trim().min(1).max(100).default("catalogue"),
   axis: z.string().trim().max(100).default(""),
@@ -142,11 +142,11 @@ export const GET = withTenantScope(async (request: Request) => {
     const items = await catalogueItems(owner, runId);
     if (params.get("report") === "csv") {
       const byRow = new Map(items.map(item => [item.rowNumber, item]));
-      return fileResponse(toCsv(["row", "sku", "title", "outcome", "status", "issues", "other_rows", "family_parent_row", "error"], items.map(item => {
+      return fileResponse(toCsv(["row", "sku", "title", "brand", "brand_source", "outcome", "status", "issues", "other_rows", "family_parent_row", "error"], items.map(item => {
         const record = item.snapshot as CatalogueRecord;
         const row = record.catalogue;
         const effective = record.familyParentRow ? byRow.get(record.familyParentRow) ?? item : item;
-        return [row.number, row.sku, row.title, effective.outcome, effective.status,
+        return [row.number, row.sku, row.title, row.values.brand ?? "", row.brandSource, effective.outcome, effective.status,
           row.issues.map(issue => `${issue.field} ${issue.code}`).join(" | "), row.duplicateRows.join(", "), record.familyParentRow, effective.error];
       })), "text/csv; charset=utf-8", "catalogue-review.csv");
     }
@@ -165,7 +165,9 @@ export const POST = withTenantScope(async (request: Request) => {
       const { options, sheet, bytes, file } = await boundedWorkbook(request);
       if (options.action === "analyse") return NextResponse.json({ columns: sheet.columns, sheet: sheet.name, mapping: suggestCatalogueMapping(sheet.columns) });
       const mapping = validateCatalogueMapping(options.mapping, sheet.columns.length);
-      if (options.action === "preview") return NextResponse.json(parseCatalogueRows(sheet, mapping, options.omax));
+      if (options.action === "preview") {
+        return NextResponse.json(parseCatalogueRows(sheet, mapping, { fallbackBrand: options.fallbackBrand }));
+      }
       return NextResponse.json({ runId: await stageCatalogue(owner, {
         ...options, mapping, sheet, fileName: file.name.slice(0, 255), fingerprint: createHash("sha256").update(new Uint8Array(bytes)).digest("hex"),
       }) });

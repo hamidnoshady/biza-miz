@@ -8,10 +8,20 @@ vi.mock("@/app/dashboard/ui", async (original) => ({ ...(await original<typeof i
 const success = (data: unknown) => ({ ok: true, status: 200, data, aborted: false }) as never;
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 describe("my assignments", () => {
+  it("filters own work by priority and resets pagination", async () => {
+    vi.mocked(api).mockResolvedValue(success({ assignments: [], hasMore: true }));
+    const user = userEvent.setup(); render(<MyMarketingAssignmentsSection />);
+    await screen.findByText("ماموریتی برای شما یافت نشد.");
+    await user.click(screen.getByRole("button", { name: "صفحه بعد" }));
+    await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => url.includes("page=2"))).toBe(true));
+    await user.selectOptions(screen.getByLabelText("فیلتر اولویت ماموریت‌های من"), "high");
+    await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => url.includes("page=1&priority=high"))).toBe(true));
+  });
   it("shows only self-service actions and refreshes after a status change", async () => {
-    vi.mocked(api).mockImplementation(async (_url, init) => init?.method === "PATCH" ? success({ ok: true }) : success({ assignments: [{ id: "work", title: "Own work", target: "Site", location_name: "Main", status: "planned", due_date: null }], hasMore: false }));
+    vi.mocked(api).mockImplementation(async (_url, init) => init?.method === "PATCH" ? success({ ok: true }) : success({ assignments: [{ id: "work", title: "Own work", target: "Site", location_name: "Main", status: "planned", priority: "urgent", due_date: null }], hasMore: false }));
     const user = userEvent.setup(); render(<MyMarketingAssignmentsSection />);
     expect(await screen.findByText("Own work")).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "فوری" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "لغو" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "شروع" }));
     await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url, init]) => url === "/api/growth/my-marketing-assignments/work" && init?.method === "PATCH")).toBe(true));
@@ -21,7 +31,7 @@ describe("my assignments", () => {
 });
 
 it("only offers self reporting with the explicit CRM intersection and retains the retry key", async () => {
-  const task = { id: "work", title: "Own work", target: "Site", location_name: "Main", status: "planned", due_date: null };
+  const task = { id: "work", title: "Own work", target: "Site", location_name: "Main", status: "planned", priority: "urgent", due_date: null };
   const fail = { ok: false, status: 0, data: {}, aborted: false } as never;
   vi.mocked(api).mockImplementation(async (url, init) => {
     if (init?.method === "POST") return fail;
@@ -68,4 +78,19 @@ it("loads only the explicitly opened self history and supports search and pagina
   await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => url.includes("q=Lead&page=2"))).toBe(true));
   await user.click(screen.getByRole("button", { name: "بستن گزارش‌ها" }));
   expect(screen.queryByText("Lead")).toBeNull();
+});
+
+it("applies deadline planning filters server-side from the first page", async () => {
+  vi.mocked(api).mockResolvedValue(success({ assignments: [], hasMore: true }));
+  const user = userEvent.setup(); render(<MyMarketingAssignmentsSection />);
+  await screen.findByText("ماموریتی برای شما یافت نشد.");
+  await user.click(screen.getByRole("button", { name: "صفحه بعد" }));
+  await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("page=2"))).toBe(true));
+  await user.selectOptions(screen.getByLabelText("فیلتر اولویت ماموریت‌های من"), "high");
+  await user.selectOptions(screen.getByLabelText("وضعیت ماموریت"), "planned");
+  await user.selectOptions(screen.getByLabelText("ترتیب ماموریت‌ها"), "due_asc");
+  await user.click(screen.getByRole("button", { name: "اعمال فیلتر ماموریت‌ها" }));
+  await waitFor(() => expect(vi.mocked(api).mock.calls.some(([url]) => String(url).includes("page=1&priority=high&status=planned&sort=due_asc"))).toBe(true));
+  await user.click(screen.getByRole("button", { name: "پاک کردن فیلتر ماموریت‌ها" }));
+  await waitFor(() => { const url = String(vi.mocked(api).mock.calls.at(-1)?.[0]); expect(url).toContain("page=1&priority=high"); expect(url).not.toContain("status="); expect(url).not.toContain("sort="); });
 });

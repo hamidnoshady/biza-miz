@@ -172,6 +172,11 @@ export interface NavItem {
   /** Set when this page is gated by a Phase 17 feature flag; already filtered out of navItems if disabled and not lockable. */
   flag?: string;
   /**
+   * Any-of alternative to `flag` (ESH-147): the entry is shown when at least
+   * one listed entitlement is on. The floor uses it for `dine_in`/`reservations`.
+   */
+  flags?: readonly string[];
+  /**
    * The flag is off but the feature is lockable (features.ts's
    * LOCKABLE_FEATURES), so the entry stays in the nav and its page renders a
    * read-only preview. Server-computed; the padlock here only labels it.

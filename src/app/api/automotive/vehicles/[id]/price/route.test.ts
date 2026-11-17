@@ -144,3 +144,29 @@ describe("POST /api/automotive/vehicles/[id]/price", () => {
     expect(automotiveGuard.vehicleBranchContext).toHaveBeenCalledWith(SESSION, VEHICLE_ID, { mutation: true });
   });
 });
+
+describe("price preview revision", () => {
+  it("passes the optional native revision to the locked service", async () => {
+    allowPriceEdit();
+    mocks.readBody.mockResolvedValue({ askingPriceRial: 900_000_000, expectedPriceRevision: "4" });
+    const response = await POST(request({}), { params: Promise.resolve({ id: VEHICLE_ID }) });
+    expect(response.status).toBe(200);
+    expect(mocks.updatePrice).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ expectedPriceRevision: "4" }));
+  });
+  it("rejects a preview from a different active branch before writing", async () => {
+    allowPriceEdit();
+    mocks.readBody.mockResolvedValue({ askingPriceRial: 900_000_000, expectedPriceRevision: "4", expectedLocationId: "old-branch" });
+    const response = await POST(request({}), { params: Promise.resolve({ id: VEHICLE_ID }) });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "branch_changed" });
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+  it("rejects malformed revisions before opening a transaction", async () => {
+    allowPriceEdit();
+    mocks.readBody.mockResolvedValue({ askingPriceRial: 900_000_000, expectedPriceRevision: "4.5" });
+    const response = await POST(request({}), { params: Promise.resolve({ id: VEHICLE_ID }) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid_price_revision" });
+    expect(mocks.connect).not.toHaveBeenCalled();
+  });
+});

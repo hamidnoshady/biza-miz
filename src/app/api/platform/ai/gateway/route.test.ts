@@ -7,7 +7,9 @@ import {
   getAnyBusinessGatewayWithKey,
   listBusinessGatewaysForConsole,
   locationBelongsToBusiness,
+  probeGateway,
   revokeVirtualKey,
+  verifyVirtualKey,
 } from "@/lib/ai-gateway-service";
 import { query, withoutTenantScope } from "@/lib/db";
 
@@ -281,6 +283,14 @@ describe("GET /api/platform/ai/gateway", () => {
     expect(values).toEqual([true, false, true, "", "all", "", 20, 1]);
   });
 
+  it("runs an explicitly requested platform probe with the master connection only", async () => {
+    const res = await GET(new NextRequest("http://localhost:3000/api/platform/ai/gateway?probe=1"));
+    expect(res.status).toBe(200);
+    expect((await res.json()).status.ok).toBe(true);
+    expect(probeGateway).toHaveBeenCalledExactlyOnceWith(gatewayConfig, { platformModel: platformConfig.model });
+    expect(getAnyBusinessGatewayWithKey).not.toHaveBeenCalled();
+  });
+
   it("returns read-only ai.read visibility without enabling mutations", async () => {
     vi.mocked(requirePlatformCapability).mockResolvedValueOnce({
       session: { padmin: "admin-2", role: "support" },
@@ -326,14 +336,15 @@ describe("GET pagination input hardening and authorization", () => {
 });
 
 describe("PUT /api/platform/ai/gateway", () => {
-  it("runs the comprehensive probe using one selected tenant key", async () => {
+  it("probes the draft gateway configuration without selecting a tenant key", async () => {
     const res = await PUT(new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
       method: "PUT",
       body: JSON.stringify({ action: "probe", gateway: { baseUrl: "http://litellm:4000/v1" } }),
     }));
     expect(res.status).toBe(200);
     expect((await res.json()).status.ok).toBe(true);
-    expect(getAnyBusinessGatewayWithKey).toHaveBeenCalledTimes(1);
+    expect(probeGateway).toHaveBeenCalledExactlyOnceWith(gatewayConfig, { platformModel: platformConfig.model });
+    expect(getAnyBusinessGatewayWithKey).not.toHaveBeenCalled();
   });
 
   it("updates technical configuration when action is config", async () => {
@@ -363,6 +374,19 @@ describe("POST /api/platform/ai/gateway", () => {
     }));
     expect(res.status).toBe(200);
     expect((await res.json()).gateway.hasVirtualKey).toBe(true);
+  });
+
+  it("returns the result of an explicit verify for the selected business, including failed completions", async () => {
+    const probe = { ...probeStatus, ok: false, error: "invalid api key" };
+    vi.mocked(verifyVirtualKey).mockResolvedValueOnce({ gateway: businessKeyRow, probe } as never);
+    const res = await POST(new NextRequest("http://localhost:3000/api/platform/ai/gateway", {
+      method: "POST",
+      body: JSON.stringify({ action: "verify_key", businessId: "biz-1" }),
+    }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toMatchObject({ ok: false, error: "invalid api key" });
+    expect(verifyVirtualKey).toHaveBeenCalledExactlyOnceWith(gatewayConfig, "biz-1", null, platformConfig.model);
+    expect(probeGateway).not.toHaveBeenCalled();
   });
 
   it("revokes a virtual key for a business", async () => {

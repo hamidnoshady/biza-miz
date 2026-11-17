@@ -195,7 +195,7 @@ export function AgencyProfileForm() {
 
       <SectionCard
         title="زمینه‌های دیگر فعالیت"
-        description="کارهایی که علاوه بر پروفایل اصلی انجام می‌دهید. فقط برای معرفی است و هیچ قالب، صفحه یا دسترسی‌ای را محدود نمی‌کند."
+        description="کارهایی که علاوه بر پروفایل اصلی انجام می‌دهید. در پیشنهاد قالب‌های پروژه همراه پروفایل اصلی لحاظ می‌شود؛ هیچ قالب، صفحه یا دسترسی‌ای را محدود نمی‌کند."
       >
         <div className="flex flex-wrap gap-2">
           {AGENCY_OPERATING_PROFILES.filter((key) => key !== profile).map((key) => {

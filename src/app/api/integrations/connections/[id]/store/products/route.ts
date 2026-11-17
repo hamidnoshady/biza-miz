@@ -5,6 +5,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { localIdForRemote } from "@/lib/integrations/mapping-service";
 import { enqueueOperation, sanitizeProductPatch, setProductPushPause, WooOpsError } from "@/lib/integrations/woo-ops-service";
 import { rialToWooAmount } from "@/lib/integrations/woo-money";
+import { checkManualProductOutboundGuard } from "@/lib/import-reconciliation/entry-guards";
 
 /**
  * Push a product change to the store: its name, its price, its stock, whether
@@ -131,6 +132,10 @@ export const POST = withTenantScope(async (request: Request, context: { params: 
     }
     if (touchesStock && !connection.push_stock) {
       return NextResponse.json({ error: "push_stock_disabled" }, { status: 409 });
+    }
+    const outboundGuard = await checkManualProductOutboundGuard(session.businessId, connection, remoteId, patch);
+    if (!outboundGuard.ok) {
+      return NextResponse.json({ error: outboundGuard.reason }, { status: 409 });
     }
 
     await enqueueOperation(session.businessId, id, "product_update", remoteId, patch);

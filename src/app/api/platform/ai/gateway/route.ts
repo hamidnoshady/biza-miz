@@ -22,7 +22,6 @@ import {
   GatewayProvisioningError,
   getAiGatewayConfig,
   getAiGatewayRuntimeSettings,
-  getAnyBusinessGatewayWithKey,
   getBusinessGateway,
   listBusinessGatewaysForConsole,
   locationBelongsToBusiness,
@@ -296,9 +295,10 @@ export const GET = withPlatformScope(async (request: NextRequest) => {
 
   const canManage = platformCan(session.role, "ai.config.manage");
   const wantsProbe = params.get("probe") === "1";
-  const probeKey = canManage && wantsProbe ? await getAnyBusinessGatewayWithKey() : null;
+  // A platform connection probe must never test an arbitrary tenant credential.
+  // Each business key has its own explicit Verify action and independent state.
   const status = canManage && wantsProbe
-    ? await probeGateway(gateway, { platformModel: platform.model, virtualKey: probeKey?.virtualKey ?? null })
+    ? await probeGateway(gateway, { platformModel: platform.model })
     : null;
 
   const responseGateways = branchRows.map((row) => toPublicBusinessGateway(row, gateway, platform.model));
@@ -346,9 +346,8 @@ export const PUT = withPlatformScope(async (request: NextRequest) => {
     }
     const { gateway: current, platform } = await getAiGatewayRuntimeSettings();
     const merged = mergeGatewayConfig(draft as AiGatewayInput, current);
-    const firstVirtualKey = await getAnyBusinessGatewayWithKey();
     return NextResponse.json({
-      status: await probeGateway(merged, { platformModel: platform.model, virtualKey: firstVirtualKey?.virtualKey ?? null }),
+      status: await probeGateway(merged, { platformModel: platform.model }),
     });
   }
 

@@ -200,9 +200,11 @@ jobs:
       - name: Verify both downloaded installers before execution
         env:
           WINDOWS_EXPECTED_SIGNER: ${{ vars.WINDOWS_EXPECTED_SIGNER }}
+          WINDOWS_EXPECTED_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_EXPECTED_SIGNER_THUMBPRINT }}
           PREVIOUS_COMMIT: ${{ steps.candidate.outputs.previous_commit }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_EXPECTED_SIGNER)) { throw "NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER" }
+          if (($env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -replace '[\s:]', '') -notmatch '^[0-9A-Fa-f]{40}$') { throw "NOT CONFIGURED: WINDOWS_EXPECTED_SIGNER_THUMBPRINT must be a 40-character SHA-1 thumbprint" }
           $candidateInstallers = @(Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe")
           $previousInstallers = @(Get-ChildItem "${{ runner.temp }}\suite-previous" -Recurse -File -Filter "$env:PREVIOUS_STEM Setup *.exe")
           if ($candidateInstallers.Count -ne 1) { throw "Expected exactly one candidate installer; found $($candidateInstallers.Count)" }
@@ -215,14 +217,17 @@ jobs:
           New-Item -ItemType Directory -Path $candidateRoot, $previousRoot -Force | Out-Null
           Copy-Item -LiteralPath $candidateInstaller.FullName -Destination $candidateRoot
           Copy-Item -LiteralPath $previousInstaller.FullName -Destination $previousRoot
-          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $candidateRoot -ManifestPath config\windows-installer-signing-manifest.json -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath candidate-installer-signatures.json
+          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $candidateRoot -ManifestPath config\windows-installer-signing-manifest.json -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath candidate-installer-signatures.json
           # A prior release built before the rename still carries the "Business Suite Setup" name.
           $previousManifest = "config\windows-installer-signing-manifest.json"
           if ($env:PREVIOUS_STEM -cne "Bizamiz") {
             $previousManifest = Join-Path "${{ runner.temp }}" "previous-installer-signing-manifest.json"
             (Get-Content config\windows-installer-signing-manifest.json -Raw).Replace("Bizamiz Setup", "$env:PREVIOUS_STEM Setup") | Set-Content -LiteralPath $previousManifest -Encoding utf8
           }
-          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $previousRoot -ManifestPath $previousManifest -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:PREVIOUS_COMMIT -OutputPath previous-installer-signatures.json
+          # The release being upgraded FROM may carry a certificate that has since
+          # been rotated, so its signature is verified by publisher and timestamp
+          # without the current pin. The candidate above is always pinned.
+          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $previousRoot -ManifestPath $previousManifest -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -AllowHistoricalSigner -CandidateCommit $env:PREVIOUS_COMMIT -OutputPath previous-installer-signatures.json
 
       - name: Assert dedicated clean state
         run: |
@@ -305,12 +310,13 @@ jobs:
       - name: Verify installed candidate Authenticode and RFC3161 timestamp
         env:
           WINDOWS_EXPECTED_SIGNER: ${{ vars.WINDOWS_EXPECTED_SIGNER }}
+          WINDOWS_EXPECTED_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_EXPECTED_SIGNER_THUMBPRINT }}
         run: |
           $verification = Join-Path $env:ACCEPTANCE_ROOT "signature-root"
           New-Item -ItemType Directory -Path "$verification\win-unpacked" -Force | Out-Null
           Copy-Item (Join-Path $env:INSTALL_DIR "Bizamiz.exe") "$verification\win-unpacked\Bizamiz.exe"
           Copy-Item (Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1).FullName $verification
-          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $verification -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath windows-11-signatures.json
+          .\scripts\verify-windows-signatures.ps1 -ArtifactRoot $verification -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath windows-11-signatures.json
 
       - name: Record optional UAC-cancellation evidence without weakening desktop mode
         env:

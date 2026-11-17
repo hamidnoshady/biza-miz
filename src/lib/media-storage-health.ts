@@ -34,7 +34,7 @@ import {
   MediaStorageFailure,
   type MediaFailureStage,
 } from "./media-errors";
-import { s3Delete, s3Get, s3Head, s3Put, s3PutFile } from "./s3-lite";
+import { s3Delete, s3Get, s3GetToFile, s3Head, s3Put, s3PutFile } from "./s3-lite";
 
 /** Above the tenant route's 1 MiB spool threshold, so the streamed path runs. */
 export const HEALTH_STREAM_PROBE_BYTES = 1_250_000;
@@ -89,6 +89,7 @@ export interface MediaStorageHealthDeps {
   put: (key: string, body: Buffer, contentType?: string) => Promise<void>;
   putFile: (key: string, filePath: string, opts: { payloadHash: string; sizeBytes: number }) => Promise<void>;
   get: (key: string) => Promise<Buffer>;
+  getToFile: (key: string, filePath: string, maxBytes: number) => Promise<{ sizeBytes: number; sha256: string }>;
   head: (key: string) => Promise<{ size: number; etag: string | null } | null>;
   delete: (key: string) => Promise<void>;
   writeTempFile: (bytes: Buffer) => Promise<string>;
@@ -126,13 +127,19 @@ function defaultDeps(config: MediaStorageConfig): MediaStorageHealthDeps {
     put: (key, body, contentType) => s3Put(s3, key, body, { contentType }),
     putFile: (key, filePath, opts) => s3PutFile(s3, key, filePath, opts),
     get: (key) => s3Get(s3, key),
+    getToFile: (key, filePath, maxBytes) => s3GetToFile(s3, key, filePath, { maxBytes }),
     head: (key) => s3Head(s3, key),
     delete: (key) => s3Delete(s3, key),
     writeTempFile: async (bytes) => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "bizamiz-media-health-"));
       const filePath = path.join(dir, "probe.bin");
-      await writeFile(filePath, bytes, { mode: 0o600 });
-      return filePath;
+      try {
+        await writeFile(filePath, bytes, { mode: 0o600 });
+        return filePath;
+      } catch (error) {
+        await rm(dir, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
     },
     removeTempFile: async (filePath) => {
       await rm(path.dirname(filePath), { recursive: true, force: true });
@@ -294,11 +301,11 @@ export async function runMediaStorageHealthCheck(
     return { detail: `کلید: ${streamedKey}` };
   });
 
-  if (streamWriteOk) {
+  const downloadPath = tempFilePath;
+  if (streamWriteOk && downloadPath) {
     await step("streamed_read", async () => {
-      const readBack = await deps.get(streamedKey);
-      const readSha = createHash("sha256").update(readBack).digest("hex");
-      if (readBack.byteLength !== streamBody.byteLength || readSha !== streamSha) {
+      const readBack = await deps.getToFile(streamedKey, downloadPath, streamBody.byteLength);
+      if (readBack.sizeBytes !== streamBody.byteLength || readBack.sha256 !== streamSha) {
         throw new MediaStorageFailure({ stage: "s3_read", code: "stream_probe_content_mismatch", status: 502 });
       }
       return { detail: `${(streamBody.byteLength / 1024).toFixed(0)} کیلوبایت جریانی سالم خوانده شد.` };
@@ -337,7 +344,13 @@ export async function runMediaStorageHealthCheck(
           problems.push(`head_after_delete_failed:${classified.code}`);
         }
       }
-      if (temp) await deps.removeTempFile(temp).catch(() => {});
+      if (temp) {
+        try {
+          await deps.removeTempFile(temp);
+        } catch {
+          problems.push("temp_cleanup_failed");
+        }
+      }
       if (problems.length > 0) {
         throw new MediaStorageFailure({
           stage: "s3_upload",
@@ -348,7 +361,6 @@ export async function runMediaStorageHealthCheck(
       }
       return { detail: "هر دو فایل آزمایشی حذف و نبودشان با HEAD تأیید شد." };
     });
-    if (temp) await deps.removeTempFile(temp).catch(() => {});
   }
 }
 

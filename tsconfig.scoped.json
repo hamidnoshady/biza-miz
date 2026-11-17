@@ -12,13 +12,21 @@
     "src/app/api/knowledge/learning-paths/[pathId]/route.ts",
     "src/app/api/knowledge/learning-paths/[pathId]/progress/route.ts",
     "src/app/api/knowledge/learning-paths/route.test.ts",
+    "src/app/api/knowledge/learning-progress/route.ts",
     "src/lib/tours.ts",
+    "src/lib/tours-service.ts",
     "src/lib/tour-baseline.ts",
+    "src/lib/tour-studio-service.ts",
+    "src/lib/tour-studio.ts",
+    "src/lib/tour-verifiers.ts",
+    "src/lib/tour-evidence-service.ts",
     "src/lib/db.ts",
     "src/lib/auth.ts",
     "src/lib/knowledge-base.ts",
     "src/lib/industries.ts",
     "src/lib/permissions.ts",
-    "src/lib/industry-guard.ts"
+    "src/lib/industry-guard.ts",
+    "src/lib/features.ts",
+    "src/lib/inventory-service.ts"
   ]
 }

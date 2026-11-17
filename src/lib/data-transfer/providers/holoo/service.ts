@@ -8,6 +8,25 @@ import type { HolooVoucher } from "@/lib/integrations/holoo/journal-plan";
 import type { HolooSchemaFingerprint } from "@/lib/integrations/holoo/schema-profile";
 import { recordDataTransferAudit } from "../../audit";
 import type { HolooWorkbookBaseInput } from "./workbook";
+import { findActiveRunForConnection, hasCanonicalOverlapForDomain } from "@/lib/import-reconciliation/entry-guards";
+import {
+  completeFinancialDocumentDiscovery,
+  completeInventoryDiscovery,
+  completePartyDiscovery,
+  completeProductDiscovery,
+  openRun as openReconciliationRun,
+  stageFinancialDocuments as stageReconciliationFinancialDocuments,
+  stageInventory as stageReconciliationInventory,
+  stageParties as stageReconciliationParties,
+  stageProducts as stageReconciliationProducts,
+} from "@/lib/import-reconciliation/service";
+import type {
+  IncomingFinancialDocument,
+  IncomingInventory,
+  IncomingParty,
+  IncomingProduct,
+  ReconciliationDomain,
+} from "@/lib/import-reconciliation/types";
 
 export const HOLOO_BASE_SCOPES = ["goods", "persons", "accounts", "openingInventory"] as const;
 export const HOLOO_WORKBOOK_SCOPES = [...HOLOO_BASE_SCOPES, "journal", "journalLines"] as const;
@@ -166,6 +185,188 @@ function safeErrorCode(error: unknown): string {
   return /^[a-z0-9_]{1,80}$/i.test(candidate) ? candidate : "apply_failed";
 }
 
+export function holooScopesToReconciliationDomains(scopes: readonly HolooWorkbookScope[]): ReconciliationDomain[] {
+  const domains: ReconciliationDomain[] = [];
+  if (scopes.includes("goods")) domains.push("product");
+  if (scopes.includes("persons")) domains.push("party");
+  if (scopes.includes("openingInventory")) domains.push("inventory");
+  if (scopes.includes("journal")) domains.push("financial_document");
+  return domains;
+}
+
+/**
+ * Stages selected Holoo scopes into #1118 reconciliation runs before mutating
+ * canonical inventory, catalogue, party, or ledger tables.
+ */
+export async function stageHolooBaseToReconciliation(input: {
+  businessId: string;
+  connectionId: string;
+  actorUserId: string | null;
+  actorName: string;
+  scopes: readonly HolooWorkbookScope[];
+  base: BaseImportInput;
+  journals?: HolooVoucher[];
+  source: HolooTransferSource;
+  locationId?: string | null;
+}) {
+  const actor = { userId: input.actorUserId ?? null, name: (input.actorName ?? "").trim() || "سامانه" };
+  const runs: Array<{ domain: ReconciliationDomain; runId: string; run: unknown; gate: unknown; counts: unknown }> = [];
+
+  if (input.scopes.includes("goods") && input.base.goods.length > 0) {
+    const incoming: IncomingProduct[] = input.base.goods.map((g) => ({
+      domain: "product",
+      externalId: g.remoteId,
+      name: g.name,
+      sku: g.sku ?? null,
+      priceRial: g.priceRial != null ? g.priceRial.toString() : undefined,
+      unit: g.unit ?? undefined,
+      fields: { sku: g.sku ?? null, unit: g.unit ?? null },
+    }));
+    const run = await openReconciliationRun({
+      businessId: input.businessId,
+      locationId: input.locationId ?? null,
+      domain: "product",
+      sourceKind: input.source === "xlsx" ? "file" : "provider",
+      provider: "holoo",
+      sourceKey: `holoo:${input.connectionId}:goods`,
+      connectionId: input.connectionId,
+      importMode: "one_time",
+      sourceFingerprint: `holoo:goods:${incoming.length}`,
+      actor,
+    });
+    await stageReconciliationProducts(input.businessId, run.id, incoming);
+    const discovery = await completeProductDiscovery(input.businessId, run.id, actor);
+    runs.push({ domain: "product", runId: run.id, ...discovery });
+  }
+
+  if (input.scopes.includes("persons") && input.base.persons.length > 0) {
+    const incoming: IncomingParty[] = input.base.persons.map((p) => ({
+      domain: "party",
+      externalId: p.remoteId,
+      name: p.name,
+      phone: p.phone ?? null,
+      role: p.isSupplier ? "supplier" : "customer",
+      fields: { address: p.address ?? null },
+    }));
+    const run = await openReconciliationRun({
+      businessId: input.businessId,
+      locationId: input.locationId ?? null,
+      domain: "party",
+      sourceKind: input.source === "xlsx" ? "file" : "provider",
+      provider: "holoo",
+      sourceKey: `holoo:${input.connectionId}:persons`,
+      connectionId: input.connectionId,
+      importMode: "one_time",
+      sourceFingerprint: `holoo:persons:${incoming.length}`,
+      actor,
+    });
+    await stageReconciliationParties(input.businessId, run.id, incoming);
+    const discovery = await completePartyDiscovery(input.businessId, run.id, actor);
+    runs.push({ domain: "party", runId: run.id, ...discovery });
+  }
+
+  if (input.scopes.includes("openingInventory") && (input.base.openingInventory?.length ?? 0) > 0) {
+    const incoming: IncomingInventory[] = (input.base.openingInventory ?? []).map((inv) => ({
+      domain: "inventory",
+      externalId: inv.remoteId,
+      kind: "snapshot",
+      cause: "opening",
+      productExternalId: inv.goodsRemoteId ?? inv.remoteId,
+      quantity: inv.quantity,
+      fields: {
+        name: inv.name,
+        unit: inv.unit ?? null,
+        unitCostRial: inv.unitCostRial.toString(),
+        goodsRemoteId: inv.goodsRemoteId ?? null,
+      },
+    }));
+    const run = await openReconciliationRun({
+      businessId: input.businessId,
+      locationId: input.locationId ?? null,
+      domain: "inventory",
+      sourceKind: input.source === "xlsx" ? "file" : "provider",
+      provider: "holoo",
+      sourceKey: `holoo:${input.connectionId}:inventory`,
+      connectionId: input.connectionId,
+      importMode: "one_time",
+      sourceFingerprint: `holoo:inventory:${incoming.length}`,
+      actor,
+    });
+    await stageReconciliationInventory(input.businessId, run.id, incoming);
+    const discovery = await completeInventoryDiscovery(input.businessId, run.id, actor);
+    runs.push({ domain: "inventory", runId: run.id, ...discovery });
+  }
+
+  if (input.scopes.includes("journal") && (input.journals?.length ?? 0) > 0) {
+    const incoming: IncomingFinancialDocument[] = (input.journals ?? []).map((v) => {
+      const total = v.lines.reduce((acc, l) => {
+        const raw = l.debitRial;
+        const debit =
+          typeof raw === "bigint"
+            ? raw
+            : typeof raw === "number"
+              ? BigInt(Math.trunc(raw))
+              : typeof raw === "string" && /^\d+$/.test(raw.trim())
+                ? BigInt(raw.trim())
+                : 0n;
+        return acc + debit;
+      }, 0n);
+      return {
+        domain: "financial_document",
+        externalId: v.remoteId,
+        kind: "journal",
+        references: [v.remoteId],
+        totalRial: total.toString(),
+        currency: "IRR",
+        date: v.entryDate,
+        fields: {
+          memo: v.memo ?? null,
+          lines: v.lines.map((line) => ({
+            accountCode: line.accountCode,
+            debitRial: line.debitRial != null ? line.debitRial.toString() : "0",
+            creditRial: line.creditRial != null ? line.creditRial.toString() : "0",
+            costCenterCode: line.costCenterCode ?? null,
+            profitCenterCode: line.profitCenterCode ?? null,
+            departmentCode: line.departmentCode ?? null,
+            detailCode: line.detailCode ?? null,
+          })),
+        },
+      };
+    });
+    const run = await openReconciliationRun({
+      businessId: input.businessId,
+      locationId: input.locationId ?? null,
+      domain: "financial_document",
+      sourceKind: input.source === "xlsx" ? "file" : "provider",
+      provider: "holoo",
+      sourceKey: `holoo:${input.connectionId}:journal`,
+      connectionId: input.connectionId,
+      importMode: "backfill",
+      sourceFingerprint: `holoo:journal:${incoming.length}`,
+      actor,
+    });
+    await stageReconciliationFinancialDocuments(input.businessId, run.id, incoming);
+    const discovery = await completeFinancialDocumentDiscovery(input.businessId, run.id, actor);
+    runs.push({ domain: "financial_document", runId: run.id, ...discovery });
+  }
+
+  return { runs };
+}
+
+export async function holooNeedsReconciliation(
+  businessId: string,
+  connectionId: string,
+  scopes: readonly HolooWorkbookScope[],
+  locationId?: string | null,
+): Promise<boolean> {
+  const domains = holooScopesToReconciliationDomains(scopes);
+  for (const domain of domains) {
+    if (await findActiveRunForConnection(businessId, connectionId, domain)) return true;
+    if (await hasCanonicalOverlapForDomain(businessId, domain, locationId)) return true;
+  }
+  return false;
+}
+
 /**
  * Apply a previewed provider manifest through the existing Holoo domain
  * importer. Run IDs, integration mappings, reconciliation and both audit
@@ -186,6 +387,11 @@ export async function applyHolooBaseMigration(input: {
   unresolvedGoodsReferences?: HolooWorkbookBaseInput["unresolvedGoodsReferences"];
 }): Promise<HolooBaseApplyResult> {
   if (input.unresolvedGoodsReferences?.length) throw new Error("unresolved_references");
+  for (const domain of holooScopesToReconciliationDomains(input.scopes)) {
+    if (await findActiveRunForConnection(input.businessId, input.connectionId, domain)) {
+      throw new Error("reconciliation_required");
+    }
+  }
   const baseScopes = input.scopes.filter(isHolooBaseScope);
   const selected = selectHolooBaseScopes(input.base, baseScopes);
   if (input.scopes.includes("journal") && !input.journals) throw new Error("holoo_journal_manifest_missing");

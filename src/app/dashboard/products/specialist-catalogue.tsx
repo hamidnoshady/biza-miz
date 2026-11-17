@@ -23,6 +23,8 @@ interface Model {
 }
 type Catalogue = { kind: "jewelry"; items: WeightItem[] } | { kind: "watch"; models: Model[]; units: SerialUnit[] };
 const PAGE_SIZE = 20;
+const MOVEMENT_LABELS: Record<string, string> = { automatic: "اتوماتیک", quartz: "کوارتز", manual: "کوکی", solar: "سولار", kinetic: "کینتیک", smart: "هوشمند" };
+const GENDER_LABELS: Record<string, string> = { men: "مردانه", women: "زنانه", unisex: "یونیسکس" };
 
 /** A projection of the native branch APIs — never a second product master. */
 export function SpecialistCatalogue({ industry, canEdit }: { industry: "jewelry" | "watch"; canEdit: boolean }) {
@@ -114,8 +116,18 @@ export function SpecialistCatalogue({ industry, canEdit }: { industry: "jewelry"
                   <div className="flex flex-wrap items-baseline gap-2"><h3 className="break-words font-semibold">{model.name}</h3>{model.sku ? <span dir="ltr" className="break-all text-sm text-muted-foreground">{model.sku}</span> : null}{!model.isActive ? <span>غیرفعال</span> : null}</div>
                   <p className="text-sm text-muted-foreground">{toPersianDigits(stock)} دستگاه موجود · {toPersianDigits(units.length)} دستگاه ثبت‌شده{model.attributes?.referenceNo ? <> · رفرنس <bdi dir="ltr">{model.attributes.referenceNo}</bdi></> : null}</p>
                   <details className="text-sm"><summary className="cursor-pointer font-medium">مشخصات مدل و دستگاه‌ها</summary><div className="mt-2 space-y-2">
+                    {model.attributes?.movement ? <p>نوع موتور: {MOVEMENT_LABELS[model.attributes.movement] ?? model.attributes.movement}</p> : null}
                     {model.attributes?.caseMaterial ? <p>جنس قاب: {model.attributes.caseMaterial}</p> : null}
+                    {model.attributes?.caseDiameterMm != null ? <p>قطر قاب: {formatQuantity(model.attributes.caseDiameterMm)} میلی‌متر</p> : null}
+                    {model.attributes?.caseDimensionsMm?.length ? <p>ابعاد قاب: {model.attributes.caseDimensionsMm.map((dimension) => formatQuantity(dimension)).join(" × ")} میلی‌متر</p> : null}
+                    {model.attributes?.caseColor ? <p>رنگ قاب: {model.attributes.caseColor}</p> : null}
+                    {model.attributes?.caseShape ? <p>شکل قاب: {model.attributes.caseShape}</p> : null}
+                    {model.attributes?.waterResistanceM != null ? <p>مقاومت در برابر آب: {formatQuantity(model.attributes.waterResistanceM)} متر</p> : null}
                     {model.attributes?.dialColor ? <p>رنگ صفحه: {model.attributes.dialColor}</p> : null}
+                    {model.attributes?.braceletMaterial ? <p>جنس بند: {model.attributes.braceletMaterial}</p> : null}
+                    {model.attributes?.braceletColor ? <p>رنگ بند: {model.attributes.braceletColor}</p> : null}
+                    {model.attributes?.claspType ? <p>نوع قفل: {model.attributes.claspType}</p> : null}
+                    {model.attributes?.gender ? <p>دسته‌بندی: {GENDER_LABELS[model.attributes.gender] ?? model.attributes.gender}</p> : null}
                     {units.length === 0 ? <p>دستگاهی برای این مدل ثبت نشده است.</p> : <ul className="space-y-2">{units.map((unit) => <li key={unit.id} className="min-w-0 rounded-lg border border-border p-2"><bdi dir="ltr" className="break-all">{unit.serialNumber}</bdi> · {SERIAL_STATUS_LABELS[unit.status]} · بهای دستگاه: {unit.unitCost == null ? "تعیین نشده" : money.format(unit.unitCost)} · گارانتی: {toPersianDigits(unit.warrantyMonths)} ماه{unit.warrantyEnd ? ` · پایان: ${formatJalali(unit.warrantyEnd)}` : ""}</li>)}</ul>}
                   </div></details>
                 </li>;

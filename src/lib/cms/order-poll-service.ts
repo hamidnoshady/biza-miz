@@ -26,13 +26,13 @@ export function orderIdFromEvent(event: { data?: Record<string, unknown>; id: st
   if (typeof event.data?.id === "string") return event.data.id;
   const parts = event.id.split(":");
   if (parts[0] === "order" && parts[2]) {
-    if (parts[1] === "paid") return parts[2];
+    if (parts[1] === "submitted" || parts[1] === "paid") return parts[2];
     if (parts[1] === "refunded" || parts[1] === "cancelled") return parts[2];
   }
   return null;
 }
 
-const STORE_ORDER_EVENT_KINDS = ["order.paid", "order.refunded", "order.cancelled"] as const;
+const STORE_ORDER_EVENT_KINDS = ["order.submitted", "order.paid", "order.refunded", "order.cancelled"] as const;
 type StoreOrderEventKind = (typeof STORE_ORDER_EVENT_KINDS)[number];
 
 function isStoreOrderEventKind(kind: string): kind is StoreOrderEventKind {
@@ -62,6 +62,8 @@ export async function runCmsStoreOrderPollTick(): Promise<CmsStoreOrderPollResul
 
     const order = await loadOrderForSite(siteId, orderId);
     if (!order) continue;
+    // `order.submitted` is emitted before payment, so it has nothing to match
+    // beyond the order existing; the ingest validates the rest.
     if (event.kind === "order.paid" && order.status !== "paid") continue;
     if (event.kind === "order.refunded" && order.status !== "refunded") continue;
     if (event.kind === "order.cancelled" && order.status !== "cancelled") continue;

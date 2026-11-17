@@ -1,14 +1,20 @@
+import { notCarryForwardSnapshotSql } from "./carry-forward-exclusion";
+
 /** One source relation for all A/R reads. Each source contributes at most one
  * row, including the amendment -> original-order bridge. Named statements
  * push the party predicate into this same relation, before touching journals;
  * balances/aging LEFT JOIN it so unsupported/missing sources remain unknown.
  * $1 is always the authenticated business. Values are bound by the caller.
+ *
+ * The join carries the carry-forward exclusion (GH #1334): a fiscal-year
+ * snapshot's unattributed lines must not inflate control sums, aging or the
+ * per-customer balances this relation feeds.
  */
 export function arCustomerAttributionSql(customerParameter?: "$3::uuid"): string {
   const party = (column: string) => customerParameter ? ` AND ${column} = ${customerParameter}` : "";
   return `
   FROM journal_lines jl
-  JOIN journal_entries je ON je.id = jl.entry_id
+  JOIN journal_entries je ON je.id = jl.entry_id AND ${notCarryForwardSnapshotSql("je")}
   ${customerParameter ? "JOIN" : "LEFT JOIN"} (
     SELECT 'order'::text AS source_type, o.id AS source_id, o.customer_id,
            o.id AS order_id, o.order_number, NULL::text AS receipt_method,

@@ -6,6 +6,7 @@ import {
   isPeerBackupPath,
   isPublicPath,
   isStaffRosterPath,
+  isTableQrResolvePath,
   isStrayServerActionCall,
   isTelegramWebhookPath,
   isTelegramMiniAppPath,
@@ -403,5 +404,28 @@ describe("a POST aimed at a server action this app does not have", () => {
       expect(isStrayServerActionCall(method, page, "x")).toBe(false);
     }
     expect(isStrayServerActionCall("POST", page, "x")).toBe(true);
+  });
+});
+
+describe("the printed table QR — ESH-147", () => {
+  it("serves the resolve endpoint without a session, because a customer's phone has none", () => {
+    expect(isPublicPath("/api/public/table-qr/tqr_abcdefghijklmnopqrstuvwxyz012345")).toBe(true);
+    expect(isPublicPath("/api/public/table-qr")).toBe(true);
+    // Only that subtree: the staff QR surface stays behind the tenant gate.
+    expect(isPublicPath("/api/public/table-qrfoo")).toBe(false);
+    expect(isPublicPath("/api/public/table-qrs/tqr_x")).toBe(false);
+    expect(isPublicPath("/api/public/orders")).toBe(false);
+    expect(isPublicPath("/api/tables/123/qr")).toBe(false);
+  });
+
+  it("rate-limits the resolve path per IP, with a bucket of its own", () => {
+    // A scan is one GET, and a whole café can share one public IP, so the
+    // bucket is per-IP and generous (TABLE_QR_IP_LIMIT) rather than per-token.
+    expect(isTableQrResolvePath("/api/public/table-qr/tqr_abc")).toBe(true);
+    expect(isTableQrResolvePath("/api/public/table-qr")).toBe(true);
+    expect(isTableQrResolvePath("/api/public/table-qrfoo")).toBe(false);
+    expect(isTableQrResolvePath("/api/public/table-qrs/tqr_abc")).toBe(false);
+    expect(isTableQrResolvePath("/api/tables/123/qr")).toBe(false);
+    expect(isTableQrResolvePath("/api/v1/orders")).toBe(false);
   });
 });

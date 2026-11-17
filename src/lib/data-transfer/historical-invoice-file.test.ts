@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
-import { parseHistoricalInvoiceFile } from "./historical-invoice-file";
+import { HistoricalFileError, parseHistoricalInvoiceFile } from "./historical-invoice-file";
 
 const bytes = (text: string): ArrayBuffer => new TextEncoder().encode(text).buffer as ArrayBuffer;
 async function workbook(rows: unknown[][][], names = ["Headers", "Lines"]): Promise<ArrayBuffer> {
@@ -15,6 +17,22 @@ async function workbook(rows: unknown[][][], names = ["Headers", "Lines"]): Prom
 }
 
 describe("historical invoice file parsing", () => {
+  it("statically bundles the workbook helper so Next does not trace its raw TypeScript", () => {
+    const source = ts.createSourceFile("historical-invoice-file.ts", readFileSync(new URL("./historical-invoice-file.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+    const localImports: string[] = [];
+    const dynamicImports: string[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) localImports.push(node.moduleSpecifier.text);
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments.length && ts.isStringLiteral(node.arguments[0])) dynamicImports.push(node.arguments[0].text);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    expect(localImports).toContain("./historical-invoice-xlsx");
+    expect(dynamicImports).not.toContain("./historical-invoice-xlsx");
+  });
+  it("preserves the public error type for errors raised by the workbook helper", async () => {
+    await expect(parseHistoricalInvoiceFile(bytes("not a zip"), "xlsx")).rejects.toBeInstanceOf(HistoricalFileError);
+  });
   it("preserves exact CSV values, identifiers, quoted newlines and physical row numbers", async () => {
     const [s] = await parseHistoricalInvoiceFile(bytes('\uFEFFid;total;note\r\n\r\n"00001";"9223372036854775807";"a\r\nb"\r\n2;0.1;x\r\n'), "csv");
     expect(s.columns).toEqual(["id", "total", "note"]);
@@ -61,6 +79,14 @@ describe("historical invoice file parsing", () => {
     for (const value of [9007199254740992, 10, 1.5, new Date("2024-01-01"), { formula: "1+1", result: 2 }, { error: "#N/A" }]) {
       await expect(parseHistoricalInvoiceFile(await workbook([[["id"], [value]]]), "xlsx")).rejects.toMatchObject({ code: "xlsx_cells_must_be_text" });
     }
+  });
+  it("refuses a worksheet merge before ExcelJS expands its range", async () => {
+    const buffer = await workbook([[["id"], ["001"]]]);
+    const zip = await JSZip.loadAsync(buffer);
+    const worksheet = zip.file("xl/worksheets/sheet1.xml")!;
+    zip.file(worksheet.name, (await worksheet.async("string")).replace("</worksheet>", '<mergeCells count="1"><mergeCell ref="A1:XFD1048576"/></mergeCells></worksheet>'));
+    const mutated = await zip.generateAsync({ type: "uint8array" });
+    await expect(parseHistoricalInvoiceFile(Uint8Array.from(mutated).buffer, "xlsx")).rejects.toMatchObject({ code: "xlsx_unsupported_layout" });
   });
   it("bounds expanded XLSX data, even if the compressed upload is small", async () => {
     const zip = new JSZip();
@@ -113,6 +139,13 @@ describe("historical invoice file parsing", () => {
     await expect(parseHistoricalInvoiceFile(bytes(payload), "csv")).rejects.toMatchObject({ code: "staged_data_too_large" });
     const escaped = `${"\\".repeat(100_000)}\n${"value\n".repeat(168)}`;
     await expect(parseHistoricalInvoiceFile(bytes(escaped), "csv")).rejects.toMatchObject({ code: "staged_data_too_large" });
+  });
+  it("rejects text PostgreSQL cannot store without corrupting Unicode", async () => {
+    await expect(parseHistoricalInvoiceFile(bytes("id\n\u0000"), "csv")).rejects.toMatchObject({ code: "invalid_text" });
+    await expect(parseHistoricalInvoiceFile(bytes('[{"id":"\\u0000"}]'), "json")).rejects.toMatchObject({ code: "invalid_text" });
+    await expect(parseHistoricalInvoiceFile(bytes('[{"id":"\\ud800"}]'), "json")).rejects.toMatchObject({ code: "invalid_text" });
+    const parsed = await parseHistoricalInvoiceFile(bytes('[{"id":"\\ud83d\\ude00"}]'), "json");
+    expect(parsed[0].rows[0].raw.id).toBe("😀");
   });
   it("rejects oversized files and invalid UTF-8", async () => {
     await expect(parseHistoricalInvoiceFile(new ArrayBuffer(20 * 1024 * 1024 + 1), "csv")).rejects.toMatchObject({ code: "file_too_large" });

@@ -1577,12 +1577,12 @@ async function computeRevaluationOutcomes(
     `SELECT a.id, a.type::text AS type,
             (SELECT COALESCE(sum(jl.foreign_debit) - sum(jl.foreign_credit), 0)
                FROM journal_lines jl
-               JOIN journal_entries je ON je.id = jl.entry_id
+               JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
               WHERE jl.account_id = a.id AND je.currency_code = $2
                 AND je.entry_date <= $3::date)::text AS foreign_balance,
             (SELECT COALESCE(sum(jl.debit) - sum(jl.credit), 0)
                FROM journal_lines jl
-               JOIN journal_entries je ON je.id = jl.entry_id
+               JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
               WHERE jl.account_id = a.id AND je.entry_date <= $3::date)::text AS book_base
        FROM accounts a
       WHERE a.business_id = $1 AND a.currency_code = $2`,

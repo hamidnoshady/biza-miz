@@ -322,7 +322,7 @@ describe("POST /api/media — diagnosable failures (issue #1080)", () => {
   }
 
   it("answers a rejected credential with a localized operator-facing message, a reference and no retry", async () => {
-    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockRejectedValueOnce(s3Reject());
+    vi.mocked(mediaService.dedupeOrStoreMediaAsset).mockRejectedValueOnce(s3Reject({ providerCode: "InvalidAccessKeyId" }));
 
     const res = await POST(new NextRequest("http://localhost:3000/api/media", { method: "POST", body: pngForm() }));
 
@@ -413,7 +413,7 @@ describe("POST /api/media — diagnosable failures (issue #1080)", () => {
       scope: "tenant",
       businessId: BID,
       stage: "s3_upload",
-      code: "storage_credentials_rejected",
+      code: "storage_signature_mismatch",
       providerStatus: 403,
       providerCode: "SignatureDoesNotMatch",
     });

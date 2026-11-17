@@ -46,7 +46,8 @@ const FUND_SELECT = `
     JOIN users u ON u.id = f.custodian_id AND u.business_id = f.business_id
     LEFT JOIN LATERAL (
        SELECT SUM(jl.debit - jl.credit) AS balance
-         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
         WHERE jl.account_id = a.gl_account_id AND je.business_id = f.business_id
     ) b ON true`;
 
@@ -266,8 +267,10 @@ async function balanceAt(
   client: PoolClient, businessId: string, glAccountId: string, date: string | null,
 ): Promise<{ balance: string; latest: string | null }> {
   const { rows } = await client.query<{ balance: string; latest: string | null }>(
-    `SELECT COALESCE(SUM(jl.debit - jl.credit) FILTER (WHERE $3::date IS NULL OR j.entry_date <= $3::date), 0)::text AS balance,
-            MAX(j.entry_date)::text AS latest
+    `SELECT COALESCE(SUM(jl.debit - jl.credit)
+              FILTER (WHERE ($3::date IS NULL OR j.entry_date <= $3::date)
+                       AND NOT is_carry_forward_snapshot(j)), 0)::text AS balance,
+            MAX(j.entry_date) FILTER (WHERE NOT is_carry_forward_snapshot(j))::text AS latest
        FROM journal_lines jl JOIN journal_entries j ON j.id = jl.entry_id
       WHERE j.business_id = $1 AND jl.account_id = $2`, [businessId, glAccountId, date],
   );

@@ -542,3 +542,55 @@ Refund/cancel-after-import is not part of Phase G; no `order.refunded` ingest ye
 The one-way Accounting → CMS café menu projection, its connection-scoped
 maps/outbox, companion #196 wire contract and withdrawal/retry rules are
 documented in [eshobe-cms-menu-projection.md](./eshobe-cms-menu-projection.md).
+
+## Table QR identity (ESH-147)
+
+A café prints one QR per physical table. The QR carries **no uuid** — only an
+opaque, rotatable token (`tqr_` + 192 random bits) in the site's menu URL
+(`https://<site-domain>/menu?tableToken=…`). Biza resolves that token to the one
+tenant/site/location/table that printed it, so the CMS checkout never has to
+choose a business or a table.
+
+| Piece | Where |
+|---|---|
+| Token store | `table_qr_tokens` (migration 0297) — SHA-256 lookup key, AES-GCM ciphertext for reprinting, `active`/`rotated`/`revoked`, one active row per table |
+| Staff generate / read / revoke | `GET/POST/DELETE /api/tables/[id]/qr` — `tables.manage` to read and download, `tables.edit` to generate/rotate/revoke; audited as `table.qr_generated`, `table.qr_rotated`, `table.qr_revoked` |
+| Staff rotate | `POST /api/tables/[id]/qr/rotate` — retires the old print in the same transaction |
+| Print | `GET /api/tables/[id]/qr/image` (`format=png` or `format=svg`, plus `download=1`) — the only place the raw token leaves the server, as pixels |
+| Public resolve | `GET /api/public/table-qr/[token]?siteId=…` — session-less, per-IP rate-limited in middleware, answers a display name + the CMS site id only |
+| Intake seam | `resolveTableQrTokenForOrder()` / `createDineInOrderFromTableQr()` in `src/lib/table-qr-service.ts` — ESH-150/cms#197 supplies `order.tableToken`; #1304 resolves it and calls the shared `createOrder()` |
+| Entitlement | `dine_in` (migration 0297), separate from `reservations`: table service works with reservations switched off, and `/api/tables`, `/api/floor` and `/accounting/floor` are gated on **either** |
+
+Refusals are deliberate and distinct: rotated/revoked prints are `410`, a
+cleaning or out-of-service table is `409`, a disabled `dine_in` entitlement is
+`403`, and unknown/malformed tokens (including another site's token) are the
+same `404` so the endpoint cannot be used to enumerate prints. A token resolves
+only inside the business that owns the signed CMS connection; a body-supplied
+`tableId` is never forwarded to `createOrder()`, and orders on the same table
+share the visit `table_sessions` row — paying one does not free the table.
+
+## Café orders (ESH-146)
+
+A café checkout is not the Phase G paid store import. It arrives **before**
+payment (`order.submitted`), it has several lines and modifier selections, it
+names its table only through the printed QR token, and it is a proposal: the
+kitchen starts only after a staff member accepts it.
+
+| Piece | Where |
+|---|---|
+| Event | `order.submitted` (and later `order.paid`) on the same signed `POST /api/cms/order-events`; the poll feed carries it too |
+| Contract | `src/lib/cms/types.ts` `CmsOrder.items[]` / `serviceMode` / `tableToken` / `paymentMethod`; legacy one-product orders keep `product` + `quantity` |
+| Inbox | `cms_store_order_inbox` keyed by (connection, order, **topic**) since 0299, so submit and pay are two facts about one order; `imported_order_id` on both names the one POS order |
+| Intake | `src/lib/cms/cafe-order-intake-service.ts` — maps every line through `website_product_map` (`local_kind = 'menu_item'`) and every modifier through `website_menu_object_map`, then writes through the shared `createOrder()` with kitchen dispatch **held** |
+| Table | `resolveTableQrTokenForOrder()` — the token is the only source of table/location; dine-in without one is refused, takeaway with one is refused |
+| Approval | `orders.website_approval_state` (`pending` → `accepted` \| `rejected`), separate from `orders.status` and from payment; `POST /api/orders/[id]/website-approval` (accept `orders.create`, reject `orders.void`) |
+| Kitchen | nothing is enqueued on intake; accepting calls the existing `enqueueKitchenDispatch()` for the exact line set, so accepting twice prints once |
+| Payment | `order.paid` settles the **same** order through `completeOrderPayment()` with the CMS order id as idempotency key — one payment, never a second sale; pay-at-counter orders stay unpaid until the till settles them |
+| Back-sync | `cms_order_state_outbox` records accepted/rejected rows inside the same transaction as the decision; ESH-148's worker delivers them |
+
+Refusals are inbox rows the operator can see and retry: `product_not_mapped:<id>`,
+`modifier_not_mapped:<id>`, `table_token_required`, `table_token_not_allowed`,
+`location_mismatch`, and the table-token refusals of the QR endpoint. A basket
+with one unmappable line imports nothing — a half order billed to a customer is
+worse than a visible failure. Re-importing a failed row after fixing the mapping
+is the same delivery again; a processed one is a replay.

@@ -1,13 +1,14 @@
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { LegacyWeightPatterns } from "@/app/dashboard/products/legacy-weight-patterns";
+import { SpecialistLabelPrinter } from "@/app/dashboard/products/specialist-label-printer";
 import { ReadOnlyLabelGallery } from "@/app/dashboard/products/label-template-gallery";
 import { PrintingManager } from "@/app/(app)/settings/printing/printing-manager";
 import { requireRetailLabels } from "@/app/dashboard/products/workspace-context";
 
 /** Label designs share the existing print catalogue and branch print rules. */
 export default async function BarcodeTemplatesPage() {
-  const { industry, canManage, canPrint, canViewLegacyWeight, canEditLegacyWeight } = await requireRetailLabels();
+  const { industry, canManage, canPrint, canAssignBarcode, locationId, canViewLegacyWeight, canEditLegacyWeight } = await requireRetailLabels();
   return (
     <PageShell>
       <PageHeader
@@ -19,6 +20,7 @@ export default async function BarcodeTemplatesPage() {
       <div data-tour-id="barcode-templates.list">
         {canManage ? <PrintingManager labelsOnly canPrint={canPrint} /> : <ReadOnlyLabelGallery industry={industry} />}
       </div>
+      {(canPrint || canAssignBarcode) && (industry === "watch" || industry === "jewelry") ? <SpecialistLabelPrinter industry={industry} canPrint={canPrint} canAssign={canAssignBarcode} locationId={locationId} /> : null}
       {canViewLegacyWeight ? <LegacyWeightPatterns canEdit={canEditLegacyWeight} /> : null}
     </PageShell>
   );

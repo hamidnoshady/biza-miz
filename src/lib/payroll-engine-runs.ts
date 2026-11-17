@@ -1347,7 +1347,7 @@ export async function payrollLiabilityReconciliation(businessId: string, options
     const { rows: gl } = await client.query<{ code: string; engine: string; total: string }>(
       `SELECT a.code,
               COALESCE(sum(jl.credit - jl.debit) FILTER (WHERE je.source_type IN ('payroll_engine_accrual', 'payroll_engine_payment')), 0)::text AS engine,
-              COALESCE(sum(jl.credit - jl.debit), 0)::text AS total
+              COALESCE(sum(jl.credit - jl.debit) FILTER (WHERE NOT is_carry_forward_snapshot(je)), 0)::text AS total
          FROM accounts a
          LEFT JOIN journal_lines jl ON jl.account_id = a.id
          LEFT JOIN journal_entries je ON je.id = jl.entry_id

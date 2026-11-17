@@ -1,5 +1,6 @@
 "use client";
 
+import { CampaignCalendar } from "./campaign-calendar";
 import { CampaignReports } from "./campaign-reports";
 
 /**
@@ -565,6 +566,7 @@ export function ClientCampaignsSection({
 
   return (
     <div className="space-y-4">
+      <CampaignCalendar />
       <SectionCard
         title="کمپین‌های کارفرما"
         description="چه زمانی، در کدام کانال‌ها، با چه هزینه‌ای — و چه بازدهی. شاخص‌ها ادعای عضو تیم‌اند و روش انتساب کنارشان ثبت می‌شود."

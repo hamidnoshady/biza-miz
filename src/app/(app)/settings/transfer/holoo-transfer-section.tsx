@@ -23,6 +23,7 @@ import {
   api,
   inputClass,
 } from "@/app/dashboard/ui";
+import { ReconciliationWizard } from "./reconciliation-wizard";
 import { HOLOO_DATA_TRANSFER_PROFILE } from "@/lib/data-transfer/providers/holoo/profile";
 import { toPersianDigits } from "@/lib/digits";
 import { Count, JalaliCell } from "./data-transfer-ui";
@@ -162,6 +163,7 @@ const ERROR_LABELS: Record<string, string> = {
   missing_file: "فایل کتاب‌کار هلو را انتخاب کنید.",
   forbidden: "برای یکی از دامنه‌های انتخاب‌شده دسترسی لازم را ندارید.",
   no_scopes_selected: "دست‌کم یک دامنه را انتخاب کنید.",
+  reconciliation_required: "پیش از اعمال مهاجرت، داده‌های دارای هم‌پوشانی باید در میز تطبیق بررسی و اعمال شوند.",
 };
 
 function errorLabel(code: string | undefined): string {
@@ -185,7 +187,8 @@ export function HolooTransferSection() {
   const [approvedInputKey, setApprovedInputKey] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [busy, setBusy] = useState<"load" | "preview" | "apply" | "rollback" | null>("load");
+  const [reconcileRunId, setReconcileRunId] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"load" | "preview" | "apply" | "reconcile" | "rollback" | null>("load");
 
   const load = useCallback(async (selectedConnectionId = connectionId) => {
     setBusy((current) => current === "preview" || current === "apply" || current === "rollback" ? current : "load");
@@ -299,7 +302,7 @@ export function HolooTransferSection() {
     resetPreview();
   }
 
-  async function transfer(action: "preview" | "apply") {
+  async function transfer(action: "preview" | "apply" | "reconcile") {
     if (!connectionId) {
       setError("ابتدا یک اتصال هلو را از تنظیمات اتصال‌های فنی ایجاد و آزمایش کنید.");
       return;
@@ -338,8 +341,24 @@ export function HolooTransferSection() {
     }
     setBusy(null);
     if (!result.ok) {
+      if (result.data.error === "reconciliation_required") {
+        setNotice("ابتدا با زدن «بررسی و تطبیق پیش از اعمال» موارد هم‌پوشان را بازبینی کنید.");
+      }
       setError(errorLabel(typeof result.data.error === "string" ? result.data.error : undefined));
       if (result.data.error === "preview_expired_or_changed") resetPreview();
+      return;
+    }
+
+    if (action === "reconcile") {
+      const staged = Array.isArray(result.data.runs)
+        ? (result.data.runs as { runId: string }[])
+        : [];
+      if (staged.length === 0) {
+        setNotice("مورد هم‌پوشانی برای بررسی یافت نشد؛ می‌توانید مستقیماً اعمال مهاجرت را بزنید.");
+      } else {
+        setReconcileRunId(staged[0].runId);
+        setNotice("پروندهٔ تطبیق آماده شد؛ در میز تطبیق زیر تصمیم‌ها را ثبت و اعمال کنید.");
+      }
       return;
     }
 
@@ -536,12 +555,34 @@ export function HolooTransferSection() {
           </Button>
           <Button
             type="button"
+            variant="outline"
+            disabled={!sourceReady || !scopes.length || busy !== null}
+            onClick={() => void transfer("reconcile")}
+          >
+            {busy === "reconcile" ? "در حال آماده‌سازی تطبیق…" : "بررسی و تطبیق پیش از اعمال"}
+          </Button>
+          <Button
+            type="button"
             disabled={!sourceReady || !scopes.length || !previewIsCurrent || busy !== null}
             onClick={() => void transfer("apply")}
           >
             {busy === "apply" ? "در حال اعمال…" : "اعمال مهاجرت تأییدشده"}
           </Button>
         </div>
+        {reconcileRunId ? (
+          <div className="mt-4">
+            <ReconciliationWizard
+              initialRunId={reconcileRunId}
+              connectionId={connectionId}
+              onCompleted={() => {
+                setReconcileRunId(null);
+                setNotice("تطبیق اعمال شد. اکنون می‌توانید وضعیت نهایی را بررسی یا مهاجرت را ادامه دهید.");
+                void load(connectionId);
+              }}
+              onClose={() => setReconcileRunId(null)}
+            />
+          </div>
+        ) : null}
       </SectionCard>
       ) : (
         <HolooExportPanel catalogue={catalogue} connection={selectedConnection} connectionReady={Boolean(profileReady)} connectionId={connectionId} />

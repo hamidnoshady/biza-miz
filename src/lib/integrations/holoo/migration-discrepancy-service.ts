@@ -200,10 +200,11 @@ export async function buildMigrationDiscrepancyReport(
   if (accountCodes.length > 0) {
     ({ rows: appRows } = await query<{ code: string; debit: string; credit: string }>(
       `SELECT a.code,
-              COALESCE(SUM(jl.debit), 0)::text AS debit,
-              COALESCE(SUM(jl.credit), 0)::text AS credit
+              COALESCE(SUM(jl.debit) FILTER (WHERE je.id IS NOT NULL), 0)::text AS debit,
+              COALESCE(SUM(jl.credit) FILTER (WHERE je.id IS NOT NULL), 0)::text AS credit
          FROM accounts a
          LEFT JOIN journal_lines jl ON jl.account_id = a.id
+         LEFT JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
         WHERE a.business_id = $1 AND a.code = ANY($2::text[])
         GROUP BY a.code`,
       [businessId, accountCodes],

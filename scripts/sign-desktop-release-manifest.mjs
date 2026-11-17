@@ -16,6 +16,9 @@ function canonicalPayload(manifest) {
       size: manifest.installer.size,
       signatureRequired: manifest.installer.signatureRequired,
       expectedPublisher: manifest.installer.expectedPublisher,
+      ...(manifest.installer.expectedPublisherThumbprint
+        ? { expectedPublisherThumbprint: manifest.installer.expectedPublisherThumbprint }
+        : {}),
     },
     database: {
       migrationVersion: manifest.database.migrationVersion,
@@ -27,12 +30,29 @@ function canonicalPayload(manifest) {
   });
 }
 
-const manifestPath = process.argv[2];
-if (!manifestPath) throw new Error("Usage: sign-desktop-release-manifest.mjs <manifest.json>");
-const privatePem = process.env.DESKTOP_RELEASE_PRIVATE_KEY_PEM?.replaceAll("\\n", "\n").trim();
-if (!privatePem) throw new Error("DESKTOP_RELEASE_PRIVATE_KEY_PEM is required");
+const args = process.argv.slice(2);
+const verifyOnly = args.includes("--verify");
+const manifestPath = args.find((arg) => arg !== "--verify");
+if (!manifestPath) throw new Error("Usage: sign-desktop-release-manifest.mjs [--verify] <manifest.json>");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 const bytes = Buffer.from(canonicalPayload(manifest));
+
+// Issue #1000 - the production pipeline reads the manifest back from the
+// published release and verifies it against the same public key the Desktop
+// embeds, so an unsigned or truncated upload cannot be registered in Central.
+if (verifyOnly) {
+  const verifyPem = process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM?.replaceAll("\\n", "\n").trim();
+  if (!verifyPem) throw new Error("DESKTOP_RELEASE_PUBLIC_KEY_PEM is required to verify a release manifest");
+  const signature = typeof manifest.manifestSignature === "string" ? Buffer.from(manifest.manifestSignature, "base64") : null;
+  if (!signature || !verify("sha256", bytes, createPublicKey(verifyPem), signature)) {
+    throw new Error("The release manifest signature is not valid for the configured public key");
+  }
+  console.log(`Verified ${manifestPath} against the configured release public key`);
+  process.exit(0);
+}
+
+const privatePem = process.env.DESKTOP_RELEASE_PRIVATE_KEY_PEM?.replaceAll("\\n", "\n").trim();
+if (!privatePem) throw new Error("DESKTOP_RELEASE_PRIVATE_KEY_PEM is required");
 const privateKey = createPrivateKey(privatePem);
 if (privateKey.asymmetricKeyType !== "rsa" && privateKey.asymmetricKeyType !== "rsa-pss") {
   throw new Error("DESKTOP_RELEASE_PRIVATE_KEY_PEM must be an RSA key");

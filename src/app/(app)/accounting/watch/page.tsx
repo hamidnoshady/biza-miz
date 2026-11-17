@@ -22,7 +22,7 @@ export default async function WatchPage() {
         description="مدل‌ها و دستگاه‌های سریال‌دار، فروش با گارانتی، و تیکت‌های تعمیر."
         actions={<>
           {member.permissions.has("data.import") && member.permissions.has("inventory.adjust") ?
-            <Link className={buttonVariants({ variant: "outline" })} href="/settings/transfer?import=catalogue">ورود از اکسل</Link> : null}
+            <Link className={buttonVariants({ variant: "outline" })} href="/settings/data-transfer?import=catalogue">ورود از اکسل</Link> : null}
           <KnowledgeHelpButton section="watch" />
         </>}
       />

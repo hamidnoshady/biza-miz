@@ -27,8 +27,8 @@ describe("FEATURE_RELATIONS", () => {
 
   it("keeps the gate key on the side the request gate actually refuses on", () => {
     const gated = new Set<string>([
-      ...API_FEATURE_PREFIXES.map(([, flag]) => flag),
-      ...PAGE_FEATURE_PREFIXES.map(([, flag]) => flag),
+      ...API_FEATURE_PREFIXES.flatMap(([, flags]) => flags),
+      ...PAGE_FEATURE_PREFIXES.flatMap(([, flags]) => flags),
       // Gated by name at the call site rather than by a path prefix.
       "api_platform",
     ]);
@@ -39,8 +39,10 @@ describe("FEATURE_RELATIONS", () => {
 
   it("never lets a path prefix gate on a commercial-side key", () => {
     const commercial = new Set(FEATURE_RELATIONS.map((r) => r.commercialKey));
-    for (const [prefix, flag] of [...API_FEATURE_PREFIXES, ...PAGE_FEATURE_PREFIXES]) {
-      expect(commercial.has(flag), `${prefix} gates on ${flag}`).toBe(false);
+    for (const [prefix, flags] of [...API_FEATURE_PREFIXES, ...PAGE_FEATURE_PREFIXES]) {
+      for (const flag of flags) {
+        expect(commercial.has(flag), `${prefix} gates on ${flag}`).toBe(false);
+      }
     }
   });
 

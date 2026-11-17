@@ -147,6 +147,13 @@ export interface CreateOrderInput {
   type: OrderType;
   tableId?: string | null;
   /**
+   * The printed table QR that produced this order, when one did (ESH-147).
+   * Provenance only: the table itself is already resolved from the token by
+   * `table-qr-service.ts`, and no pricing, session or dispatch decision reads
+   * this column.
+   */
+  tableQrTokenId?: string | null;
+  /**
    * Optional customer the sale is attributed to, picked at the till. Customers
    * are business-wide (see parties-service.ts), so it is validated against
    * the location's business rather than the location itself.
@@ -189,6 +196,17 @@ export interface CreateOrderInput {
   actorRole?: Role;
   /** False only while applying an event already present in the sync inbox. */
   recordSyncEvent?: boolean;
+  /**
+   * Skip the kitchen dispatch enqueue for this order (ESH-146).
+   *
+   * A website order is written before any staff member has seen it, and
+   * kitchen dispatch is a *decision*: an unapproved order must not print a
+   * ticket or appear on a KDS screen. The caller enqueues the same
+   * `enqueueKitchenDispatch()` set when it accepts the order, which is
+   * idempotent per (order, line set) — so accepting twice cannot print twice,
+   * and no second dispatch subsystem exists.
+   */
+  holdKitchenDispatch?: boolean;
 }
 
 export interface CreateOrderOutput {
@@ -288,11 +306,13 @@ export async function createOrder(
 
   const businessId = await businessIdForLocation(input.locationId);
   if (input.type === "dine_in" && businessId) {
-    // Dine-in is a table-service capability just like the table/session APIs.
-    // Enforce it at the shared mutation boundary as well: a caller can post
-    // directly to /api/orders or replay an offline event without ever fetching
-    // /api/tables, so route-prefix gating alone cannot protect order creation.
-    if (!(await isFeatureEnabled(businessId, "reservations"))) {
+    // Dine-in is a table-service capability, but not a *reservations* one
+    // (ESH-147). Enforce it at the shared mutation boundary as well: a caller
+    // can post directly to /api/orders, replay an offline event or arrive from
+    // the CMS checkout without ever fetching /api/tables, so route-prefix
+    // gating alone cannot protect order creation. `dine_in` is its own gate so
+    // a café that takes walk-ins but no bookings can still serve its tables.
+    if (!(await isFeatureEnabled(businessId, "dine_in"))) {
       return { ok: false, error: "feature_disabled", status: 403 };
     }
   }
@@ -466,11 +486,11 @@ export async function createOrder(
     const { rows: orderRows } = await client.query<{ id: string }>(
       `INSERT INTO orders (id, location_id, order_number, type, status, table_id, table_session_id, customer_id, guest_count,
               subtotal, discount, discount_type, discount_value, service_charge, tax, total, note, opened_by, client_request_id,
-              request_fingerprint, promotion_ids,
+              request_fingerprint, promotion_ids, table_qr_token_id,
               opened_at)
        VALUES ($1, $2, $3, $4, 'open', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
-               $19, $20::jsonb,
-               coalesce($21::timestamptz, now()))
+               $19, $20::jsonb, $21,
+               coalesce($22::timestamptz, now()))
        RETURNING id`,
       [
         requestedOrderId,
@@ -497,6 +517,7 @@ export async function createOrder(
         // Eligibility snapshot for this open order (issue #913 item 4) —
         // NULL would mean "evaluate live", which is only for legacy rows.
         JSON.stringify(promotions.map((p) => p.id)),
+        input.tableQrTokenId ?? null,
         input.openedAt ?? null,
       ],
     );
@@ -604,7 +625,7 @@ export async function createOrder(
       );
     }
 
-    if (businessId) {
+    if (businessId && !input.holdKitchenDispatch) {
       await enqueueKitchenDispatch(client, {
         businessId,
         locationId: input.locationId,

@@ -60,6 +60,7 @@ import { acknowledgePushedEvent, claimableOutboxSql } from "./outbox-service";
 import { PLUGIN_JOB_MAX_ATTEMPTS } from "./retry";
 import { parseLocalQueuePageRequest, sanitizeLocalQueuePageAnswer } from "./local-queue-page";
 import { effectivePushSwitches, isNoopPush, STALE_PUSH_JOB_HOURS, type RemoteProductState } from "./outbox-policy";
+import { ensureFirstContactReconciliationGate } from "../import-reconciliation/entry-guards";
 
 /** How many jobs one pull may lease. Bounded so a WP-Cron run finishes inside PHP's time limit. */
 const JOB_PULL_LIMIT = 25;
@@ -467,6 +468,11 @@ export async function pluginHandshake(
     // WordPress content/media. Each is upserted on a unique key, so a later
     // manual request only refreshes the one outstanding export row.
     if (firstContact) {
+      const firstContactGate = await ensureFirstContactReconciliationGate(
+        connection.business_id,
+        connection.id,
+        connection.location_id ?? null,
+      );
       // Only the exports this plugin can actually apply. The lease query
       // filters by supported type, so an export queued past an older
       // plugin's capability set would never be leased — a row sitting
@@ -485,6 +491,7 @@ export async function pluginHandshake(
           customers: handshakeRows[0]?.sync_customers ?? true,
           orders: handshakeRows[0]?.sync_orders ?? true,
           content: true,
+          gatedDomains: firstContactGate.gatedDomains,
         },
       });
     }

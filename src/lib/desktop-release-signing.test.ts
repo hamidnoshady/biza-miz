@@ -22,6 +22,7 @@ describe("release manifest signing", () => {
       installer: {
         url: "https://github.com/example/product/releases/download/desktop-v2.3.0/setup.exe",
         sha256: "b".repeat(64), size: 12345, signatureRequired: true, expectedPublisher: "Business Suite",
+        expectedPublisherThumbprint: "A".repeat(40),
       },
       database: { migrationVersion: 187, minimumSchemaVersion: 1, maximumSchemaVersion: 187, backupRequired: true },
       releaseNotes: ["Verified release"], recovery: { knownGoodVersion: null, notes: null },

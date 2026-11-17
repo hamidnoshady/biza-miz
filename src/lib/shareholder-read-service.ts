@@ -681,6 +681,7 @@ export async function loadShareholderAccountStatement(
            FROM journal_entries je
            JOIN journal_lines jl ON jl.entry_id = je.id
           WHERE je.business_id = $1 AND jl.account_id = $2
+            AND NOT is_carry_forward_snapshot(je)
             AND ($3::uuid IS NULL OR jl.party_id = $3)
             AND ($4::date IS NULL OR je.entry_date >= $4::date)
             AND ($5::date IS NULL OR je.entry_date <= $5::date)
@@ -696,6 +697,7 @@ export async function loadShareholderAccountStatement(
          FROM journal_entries je
          JOIN journal_lines jl ON jl.entry_id = je.id
         WHERE je.business_id = $1 AND jl.account_id = $2
+          AND NOT is_carry_forward_snapshot(je)
           AND ($3::uuid IS NULL OR jl.party_id = $3)
           AND $4::date IS NOT NULL AND je.entry_date < $4::date`,
       [businessId, accountId, partyId, dateFrom],
@@ -720,6 +722,7 @@ export async function loadShareholderAccountStatement(
            JOIN journal_lines jl ON jl.entry_id = je.id
            LEFT JOIN parties p ON p.id = jl.party_id AND p.business_id = je.business_id
           WHERE je.business_id = $1 AND jl.account_id = $2
+            AND NOT is_carry_forward_snapshot(je)
             AND ($3::uuid IS NULL OR jl.party_id = $3)
             AND ($4::date IS NULL OR je.entry_date >= $4::date)
             AND ($5::date IS NULL OR je.entry_date <= $5::date)

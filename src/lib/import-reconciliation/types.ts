@@ -107,6 +107,9 @@ export const RECONCILIATION_DECISION_LABELS: Record<ReconciliationDecision, stri
 export type ReconciliationEffect = "none" | "link" | "create" | "skip";
 
 /** Run lifecycle — see `lifecycle.ts` for the allowed moves. */
+export const CUTOVER_AUTHORITIES = ["books", "source", "two_way", "archive_only"] as const;
+export type CutoverAuthority = (typeof CUTOVER_AUTHORITIES)[number];
+
 export const RECONCILIATION_RUN_STATUSES = [
   "discovering",
   "staged",
@@ -177,6 +180,9 @@ export interface IncomingProduct extends IncomingBase {
   /** The source's id of the parent when `kind` is a variant child. */
   parentExternalId?: string | null;
   unit?: string | null;
+  priceRial?: DecimalString | null;
+  stockQuantity?: DecimalString | null;
+  brand?: string | null;
   tracking?: ProductTracking | null;
   variantOptions?: Readonly<Record<string, string>>;
   /** Every other comparable field, keyed by the platform field name. */

@@ -23,6 +23,7 @@ import { addDays } from "./rollup";
 import { dimensionLinePredicate } from "./accounting-dimension-reports";
 import type { DimensionFilter } from "./accounting-dimensions";
 import { reportScopeLocationId, type ReportScope } from "./report-scope";
+import { notCarryForwardSnapshotSql } from "./carry-forward-exclusion";
 import {
   costOfSalesCodesForIndustry,
   isNonCurrentCode,
@@ -525,7 +526,7 @@ async function cashBalanceAsOf(
 ): Promise<number> {
   if (cashAccountIds.length === 0) return 0;
   const params: unknown[] = [businessId, cashAccountIds];
-  const where = ["je.business_id = $1", "jl.account_id = ANY($2::uuid[])"];
+  const where = ["je.business_id = $1", "jl.account_id = ANY($2::uuid[])", notCarryForwardSnapshotSql("je")];
   if (asOfDate) {
     params.push(asOfDate);
     where.push("je.entry_date <= $" + params.length);
@@ -562,7 +563,7 @@ export async function getCashFlow(
   }
 
   const params: unknown[] = [businessId, cashAccountIds];
-  const where = ["je.business_id = $1"];
+  const where = ["je.business_id = $1", notCarryForwardSnapshotSql("je")];
   if (filters.dateFrom) {
     params.push(filters.dateFrom);
     where.push(`je.entry_date >= $${params.length}`);
@@ -651,7 +652,7 @@ async function vatAccountTotals(
   dateTo?: string,
 ): Promise<Map<string, { debit: number; credit: number }>> {
   const params: unknown[] = [businessId, codes];
-  const where = ["je.business_id = $1", "a.code = ANY($2::text[])"];
+  const where = ["je.business_id = $1", "a.code = ANY($2::text[])", notCarryForwardSnapshotSql("je")];
   if (dateFrom) {
     params.push(dateFrom);
     where.push(`je.entry_date >= $${params.length}`);
@@ -817,7 +818,7 @@ export async function getAccountDrillDown(
   filters: DateRangeFilters & { offset?: number; limit?: number; locationId?: string } = {},
 ): Promise<AccountDrillDownPage> {
   const params: unknown[] = [businessId, accountCode];
-  const where = ["je.business_id = $1", "a.business_id = $1", "a.code = $2"];
+  const where = ["je.business_id = $1", "a.business_id = $1", "a.code = $2", notCarryForwardSnapshotSql("je")];
   if (filters.dateFrom) {
     params.push(filters.dateFrom);
     where.push(`je.entry_date >= $${params.length}`);
@@ -980,14 +981,15 @@ export async function getAccountStatement(
       `SELECT COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
          FROM journal_lines jl
          JOIN journal_entries je ON je.id = jl.entry_id
-        WHERE je.business_id = $1 AND jl.account_id = $2 AND je.entry_date < $3 AND ${openingDimension}`,
+        WHERE je.business_id = $1 AND jl.account_id = $2 AND je.entry_date < $3
+          AND ${notCarryForwardSnapshotSql("je")} AND ${openingDimension}`,
       openingParams,
     );
     openingBalance = sign * (Number(rows[0].debit) - Number(rows[0].credit));
   }
 
   const params: unknown[] = [businessId, accountId];
-  const where = ["je.business_id = $1", "jl.account_id = $2"];
+  const where = ["je.business_id = $1", "jl.account_id = $2", notCarryForwardSnapshotSql("je")];
   if (filters.dateFrom) {
     params.push(filters.dateFrom);
     where.push(`je.entry_date >= $${params.length}`);

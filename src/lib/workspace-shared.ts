@@ -881,12 +881,16 @@ export function templatesForIndustry(
   templates: WorkspaceTemplate[],
   industry: Industry | null,
   profile: WorkspaceOperatingProfile | null = null,
+  additionalProfiles: readonly WorkspaceOperatingProfile[] = [],
 ): WorkspaceTemplateChoice[] {
+  // Only the agency's combined-specialty UX changes. Other industries keep their
+  // existing single-profile behavior; eligible template keys never change.
+  const profiles = [profile, ...(industry === "advertising_agency" ? additionalProfiles : [])].filter(Boolean);
   const eligible = templates
     .filter((template) => !template.industry || template.industry === industry)
     .map((template) => ({
       ...template,
-      recommended: Boolean(profile && template.recommendedProfiles?.includes(profile)),
+      recommended: Boolean(template.recommendedProfiles?.some(p => profiles.includes(p))),
     }));
   return [
     ...eligible.filter((template) => template.recommended),

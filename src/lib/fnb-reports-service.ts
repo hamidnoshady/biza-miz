@@ -53,7 +53,7 @@ export async function wasteReport(
     `SELECT COALESCE(SUM(jl.debit - jl.credit), 0)::text AS total
        FROM journal_lines jl
        JOIN accounts a ON a.id = jl.account_id
-       JOIN journal_entries je ON je.id = jl.entry_id
+       JOIN journal_entries je ON je.id = jl.entry_id AND NOT is_carry_forward_snapshot(je)
       WHERE a.business_id = $1 AND a.code = '5150'
         AND ($2::date IS NULL OR je.entry_date >= $2::date)
         AND ($3::date IS NULL OR je.entry_date < ($3::date + 1))`,

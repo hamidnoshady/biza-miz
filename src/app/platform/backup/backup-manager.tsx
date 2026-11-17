@@ -1347,10 +1347,9 @@ function RestoreCard({
       ...(apply ? { confirm } : {}),
     };
     if (source === "local") return { source, artifact, ...shared };
-    // The cloud row's `artifact` is the full object key, and it travels as
-    // both fields: the server validates the key against the configured prefix
-    // and the artifact name against the key's last segment.
-    if (source === "cloud") return { source, artifact, objectKey: artifact, ...shared };
+    if (source === "cloud") {
+      return { source, artifact: artifact.split("/").at(-1), objectKey: artifact, ...shared };
+    }
     if (source === "url") return { source, url: url.trim(), ...shared };
     return { source, peerId: peer?.id ?? "", artifact, ...shared };
   }

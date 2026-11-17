@@ -13,6 +13,7 @@ import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import { useMoney } from "@/components/money/money-context";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
+import { CampaignReportImport } from "./campaign-report-import";
 import type { CampaignReport } from "@/lib/agency-campaign-report-service";
 
 /** Separate period evidence, never a sum of overlapping snapshots or ledger facts. */
@@ -261,6 +262,30 @@ export function CampaignReports({ campaignId }: { campaignId: string }) {
                 onChange={(e) => setNote(e.target.value)}
               />
             </Field>
+            <CampaignReportImport
+              start={start}
+              end={end}
+              note={note}
+              onPrepared={(data) => {
+                setReference(data.evidenceReference);
+                setConfirmed(false);
+                setJson(
+                  JSON.stringify(
+                    {
+                      spendRial: data.spendRial,
+                      impressions: data.impressions,
+                      clicks: data.clicks,
+                      leadsGenerated: data.leadsGenerated,
+                      conversions: data.conversions,
+                      reach: data.reach,
+                      revenueRial: data.revenueRial,
+                    },
+                    null,
+                    2,
+                  ),
+                );
+              }}
+            />
             <Field
               label="دادهٔ اندازه‌گیری JSON — پول فقط به ریال"
               hint="spendRial، impressions، clicks، leadsGenerated، conversions الزامی‌اند؛ reach و revenueRial می‌توانند null باشند. هیچ عددی پیش‌فرض گرفته نمی‌شود."

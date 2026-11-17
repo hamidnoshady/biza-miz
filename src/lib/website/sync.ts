@@ -47,7 +47,7 @@ export interface WebsiteLocalProduct {
   imageMediaId?: string | null;
   imageUrl?: string | null;
   sortOrder?: number;
-  category?: Omit<MenuCategoryInput, "taxonomyId" | "remoteId"> | null;
+  category?: MenuCategoryInput | null;
   modifierGroups?: MenuModifierGroup[];
 }
 

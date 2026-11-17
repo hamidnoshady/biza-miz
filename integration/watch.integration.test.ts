@@ -2338,6 +2338,38 @@ describe("Issue #795 Phase 6 — structured model attributes", () => {
     expect(await watchAttributes.getWatchAttributes(item.id)).toBeNull();
   });
 
+  it("returns extended structured specifications in the branch catalogue without leaking another branch", async () => {
+    const model = await itemsService.createItem({ locationId: biz.locationId, name: "مشخصات کامل", tracking: "serial" });
+    await watchAttributes.upsertWatchAttributes(model.id, {
+      movement: "quartz", caseDiameterMm: 40.5, caseDimensionsMm: [40.5, 12.2],
+      braceletColor: "آبی", claspType: "پروانه‌ای", caseColor: "طلایی", caseShape: "گرد", waterResistanceM: 0,
+    });
+    expect((await watchAttributes.listWatchAttributes(biz.locationId)).get(model.id)).toEqual(await watchAttributes.getWatchAttributes(model.id));
+    expect((await watchAttributes.listWatchAttributes(biz.locationId)).get(model.id)).toMatchObject({
+      caseDimensionsMm: [40.5, 12.2], braceletColor: "آبی", claspType: "پروانه‌ای", caseColor: "طلایی", caseShape: "گرد", waterResistanceM: 0,
+    });
+    const { rows: otherBranches } = await db.query<{ id: string }>("INSERT INTO locations (business_id, name) VALUES ($1, $2) RETURNING id", [biz.id, "Other branch"]);
+    expect((await watchAttributes.listWatchAttributes(otherBranches[0].id)).has(model.id)).toBe(false);
+  });
+
+  it("renders a real model barcode label with native reference but not a guessed unit serial", async () => {
+    const model = await itemsService.createItem({ locationId: biz.locationId, name: "ساعت برچسبی", tracking: "serial" });
+    await watchAttributes.upsertWatchAttributes(model.id, { referenceNo: "REF-77" });
+    await itemsService.addSerial(model.id, "SECRET-SERIAL", { warrantyMonths: 12 });
+    await db.query("INSERT INTO item_barcodes (location_id, item_id, code) VALUES ($1, $2, $3)", [biz.locationId, model.id, "2000000000015"]);
+    const { getLabelPrintData } = await import("../src/lib/printing/label-print-data");
+    const { labelToPrintDocument } = await import("../src/lib/printing/document-bridge");
+    const { builtInTemplate, renderPrintTemplate } = await import("../src/lib/print-template");
+    const data = await dbLib.withTenant(biz.id, () => getLabelPrintData({ businessId: biz.id, locationId: biz.locationId, itemId: model.id }));
+    expect(data?.label.fields).toContainEqual({ label: "مدل", value: "REF-77" });
+    expect(data?.label.fields.some((field) => field.label === "سریال")).toBe(false);
+    const html = renderPrintTemplate(builtInTemplate("label57x40-label")!, labelToPrintDocument(data!.label));
+    expect(html).toContain("REF-77"); expect(html).toContain("2000000000015"); expect(html).toContain("<svg");
+    expect(html).not.toContain("SECRET-SERIAL");
+    const { rows: branches } = await db.query<{ id: string }>("INSERT INTO locations (business_id, name) VALUES ($1, 'Other') RETURNING id", [biz.id]);
+    expect(await dbLib.withTenant(biz.id, () => getLabelPrintData({ businessId: biz.id, locationId: branches[0].id, itemId: model.id }))).toBeNull();
+  });
+
   it("rejects out-of-range or unknown attribute values with Persian errors", async () => {
     const item = await itemsService.createItem({
       locationId: biz.locationId,

@@ -21,6 +21,7 @@ import {
 } from "../ui";
 import { cardClass, LoadingSkeleton, PageShell } from "../page-chrome";
 import { SessionPanel } from "./session-panel";
+import { TableQrPanel } from "./table-qr-panel";
 
 export interface FloorSection {
   id: string;
@@ -318,6 +319,7 @@ export function FloorPlan({ canEdit }: { canEdit: boolean }) {
               sections={sections}
               tables={tables}
               timezone={timezone}
+              canManageQr={canEdit}
               onRefresh={() => void load()}
               setError={setError}
             />
@@ -842,6 +844,7 @@ function ViewPanel({
   sections,
   tables,
   timezone,
+  canManageQr,
   onRefresh,
   setError,
 }: {
@@ -849,6 +852,8 @@ function ViewPanel({
   sections: FloorSection[];
   tables: FloorTable[];
   timezone: string;
+  /** tables.edit: may generate, rotate and revoke the printed QR. */
+  canManageQr: boolean;
   onRefresh: () => void;
   setError: (s: string) => void;
 }) {
@@ -962,6 +967,16 @@ function ViewPanel({
           یادداشت میز: {table.note}
         </p>
       ) : null}
+
+      <div className="mb-3">
+        <TableQrPanel
+          tableId={table.id}
+          tableName={table.name}
+          canManage={canManageQr}
+          onChanged={onRefresh}
+          setError={setError}
+        />
+      </div>
 
       {!table.session_id && (table.open_orders?.length ?? 0) > 0 ? (
         <div className="mb-3 rounded-lg bg-muted/50 p-2.5 text-xs">

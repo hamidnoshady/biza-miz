@@ -8,8 +8,10 @@ import { MAX_IMPORT_FILE_BYTES } from "@/lib/data-transfer/import-service";
 import { xlsxToWorkbook } from "@/lib/data-transfer/codecs";
 import {
   applyHolooBaseMigration,
+  holooNeedsReconciliation,
   previewHolooBaseMigration,
   holooBaseInputFingerprint,
+  stageHolooBaseToReconciliation,
   validateHolooScopes,
 } from "@/lib/data-transfer/providers/holoo/service";
 import { HOLOO_DATA_TRANSFER_PROFILE } from "@/lib/data-transfer/providers/holoo/profile";
@@ -47,7 +49,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const action = String(form.get("action") ?? "preview");
   const connectionId = String(form.get("connectionId") ?? "");
   const scopes = stringArray(String(form.get("scopes") ?? ""));
-  if (action !== "preview" && action !== "apply") return NextResponse.json({ error: "unknown_action" }, { status: 400 });
+  if (action !== "preview" && action !== "apply" && action !== "reconcile") {
+    return NextResponse.json({ error: "unknown_action" }, { status: 400 });
+  }
   if (!(file instanceof File)) return NextResponse.json({ error: "missing_file" }, { status: 400 });
   if (file.size > MAX_IMPORT_FILE_BYTES) return NextResponse.json({ error: "file_too_large" }, { status: 413 });
   if (!file.name.toLowerCase().endsWith(".xlsx")) return NextResponse.json({ error: "unsupported_format" }, { status: 415 });
@@ -134,9 +138,40 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     if (action === "preview") {
       return NextResponse.json({ ok: true, provider: "holoo", preview: result, previewToken: issueHolooPreviewToken(tokenClaims) });
     }
+    if (action === "reconcile") {
+      const staged = await stageHolooBaseToReconciliation({
+        businessId: owner.businessId,
+        connectionId,
+        actorUserId: owner.actorUserId,
+        actorName: owner.actorName,
+        scopes: scopeValidation.scopes,
+        base: parsed.input,
+        journals: parsed.journals,
+        source: "xlsx",
+        locationId: targetLocationId,
+      });
+      return NextResponse.json({ ok: true, provider: "holoo", source: "xlsx", ...staged });
+    }
     const previewToken = String(form.get("previewToken") ?? "");
     if (!verifyHolooPreviewToken(previewToken, tokenClaims)) {
       return NextResponse.json({ error: "preview_expired_or_changed" }, { status: 409 });
+    }
+    if (
+      String(form.get("skipReconciliation") ?? "") !== "true" &&
+      (await holooNeedsReconciliation(owner.businessId, connectionId, scopeValidation.scopes, targetLocationId))
+    ) {
+      const staged = await stageHolooBaseToReconciliation({
+        businessId: owner.businessId,
+        connectionId,
+        actorUserId: owner.actorUserId,
+        actorName: owner.actorName,
+        scopes: scopeValidation.scopes,
+        base: parsed.input,
+        journals: parsed.journals,
+        source: "xlsx",
+        locationId: targetLocationId,
+      });
+      return NextResponse.json({ error: "reconciliation_required", ...staged }, { status: 409 });
     }
     const totalRows =
       (scopeValidation.scopes.includes("goods") ? parsed.input.goods.length : 0) +
@@ -253,10 +288,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       "invalid_holoo_amount",
       "invalid_holoo_quantity",
       "unresolved_references",
+      "reconciliation_required",
     ]);
     return NextResponse.json(
       { error: known.has(code) ? code : "holoo_transfer_failed" },
-      { status: code === "holoo_source_too_large" ? 413 : 400 },
+      { status: code === "holoo_source_too_large" ? 413 : code === "reconciliation_required" ? 409 : 400 },
     );
   }
 });

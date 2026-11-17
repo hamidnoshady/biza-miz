@@ -243,9 +243,12 @@ export async function growthOverview(
       [businessId, from, to],
     ),
     query<{ code: string; name: string; type: string; debit: string; credit: string }>(
-      `SELECT a.code, a.name, a.type::text, COALESCE(SUM(jl.debit), 0)::text AS debit, COALESCE(SUM(jl.credit), 0)::text AS credit
+      `SELECT a.code, a.name, a.type::text,
+              COALESCE(SUM(jl.debit) FILTER (WHERE NOT is_carry_forward_snapshot(je)), 0)::text AS debit,
+              COALESCE(SUM(jl.credit) FILTER (WHERE NOT is_carry_forward_snapshot(je)), 0)::text AS credit
          FROM accounts a
          LEFT JOIN journal_lines jl ON jl.account_id = a.id
+         LEFT JOIN journal_entries je ON je.id = jl.entry_id
         WHERE a.business_id = $1 AND a.code = ANY($2::text[])
         GROUP BY a.id
         ORDER BY a.code`,

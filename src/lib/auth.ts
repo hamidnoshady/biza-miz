@@ -15,7 +15,7 @@ import { appServiceActivationState } from "./service-activation/app-gate-service
 import { serviceGateDecision } from "./service-activation/app-gate";
 import { query, withoutTenantScope } from "./db";
 import { sessionStatus } from "./employee";
-import { featureForApiPath, isFeatureEnabled } from "./features";
+import { featuresForApiPath, isAnyFeatureEnabled, isFeatureEnabled } from "./features";
 import { isModuleEnabled } from "./industry-guard";
 import { moduleForApiPath } from "./industry-profile";
 import { holooGuardedEntityType, holooLocalIdFromPath, holooOwnedIds, HOLOO_GUARDED_PREFIXES } from "./integrations/holoo/holoo-ownership";
@@ -399,10 +399,25 @@ export function withTenantScope<Args extends unknown[]>(
           }
         }
 
-        const flag = request ? featureForApiPath(pathname) : null;
-        if (flag && !(await isFeatureEnabled(session.businessId, flag))) {
+        // Any-of: a path may serve more than one entitlement (the table/floor
+        // surface is `dine_in` or `reservations` — ESH-147), so it is refused
+        // only when every flag it names is off.
+        const flags = request ? featuresForApiPath(pathname) : [];
+        // One flag uses the single-flag resolver unchanged; a list is any-of.
+        const featureOn =
+          flags.length === 0
+            ? true
+            : flags.length === 1
+              ? await isFeatureEnabled(session.businessId, flags[0])
+              : await isAnyFeatureEnabled(session.businessId, flags);
+        if (flags.length > 0 && !featureOn) {
           return NextResponse.json(
-            { error: "feature_disabled", code: "FEATURE_NOT_IN_PLAN", flag },
+            {
+              error: "feature_disabled",
+              code: "FEATURE_NOT_IN_PLAN",
+              flag: flags[0],
+              flags,
+            },
             { status: 403 },
           );
         }

@@ -13,6 +13,9 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 });
 vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
 vi.mock("@/lib/integrations/mapping-service", () => ({ localIdForRemote: vi.fn() }));
+vi.mock("@/lib/import-reconciliation/entry-guards", () => ({
+  checkManualProductOutboundGuard: vi.fn(),
+}));
 // Keep the pure validator real — the route's contract IS its strictness —
 // and stub only the DB-touching enqueue.
 vi.mock("@/lib/integrations/woo-ops-service", async (importOriginal) => {
@@ -21,6 +24,7 @@ vi.mock("@/lib/integrations/woo-ops-service", async (importOriginal) => {
 });
 
 import * as connectionAccess from "@/lib/integrations/connection-access";
+import * as entryGuards from "@/lib/import-reconciliation/entry-guards";
 import * as mappingService from "@/lib/integrations/mapping-service";
 import * as opsService from "@/lib/integrations/woo-ops-service";
 import { POST } from "./route";
@@ -57,6 +61,7 @@ beforeEach(() => {
   vi.mocked(auth.requirePermission).mockResolvedValue({ session: SESSION, error: null } as never);
   vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(wooConnection() as never);
   vi.mocked(mappingService.localIdForRemote).mockResolvedValue("local-uuid");
+  vi.mocked(entryGuards.checkManualProductOutboundGuard).mockResolvedValue({ ok: true });
   vi.mocked(opsService.enqueueOperation).mockResolvedValue(undefined);
   vi.mocked(opsService.setProductPushPause).mockResolvedValue(undefined);
 });
@@ -203,6 +208,17 @@ describe("POST store/products — request validation", () => {
     const stockRes = await post({ remoteId: "55", fields: { stock_quantity: 4 } });
     expect(stockRes.status).toBe(409);
     expect(await stockRes.json()).toEqual({ error: "push_stock_disabled" });
+    expect(opsService.enqueueOperation).not.toHaveBeenCalled();
+  });
+
+  it("refuses to queue manual outbound patches while reconciliation or suppressed edits block them", async () => {
+    vi.mocked(entryGuards.checkManualProductOutboundGuard).mockResolvedValueOnce({
+      ok: false,
+      reason: "reconciliation_active",
+    });
+    const res = await post({ remoteId: "55", fields: { priceRial: "150000" } });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "reconciliation_active" });
     expect(opsService.enqueueOperation).not.toHaveBeenCalled();
   });
 

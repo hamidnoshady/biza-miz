@@ -207,17 +207,23 @@ export interface CmsProductModifierOption {
   sourceId: string;
   label: string;
   priceDelta: number;
-  isActive: boolean;
-  sortOrder: number;
+  isActive?: boolean;
+  sortOrder?: number;
+  active?: boolean | null;
+  menuOrder?: number | null;
 }
 export interface CmsProductModifierGroup {
   id?: string;
   sourceId: string;
   label: string;
-  minSelect: number;
-  maxSelect: number;
-  isActive: boolean;
-  sortOrder: number;
+  minSelect?: number;
+  maxSelect?: number;
+  isActive?: boolean;
+  sortOrder?: number;
+  minSelections?: number | null;
+  maxSelections?: number | null;
+  active?: boolean | null;
+  menuOrder?: number | null;
   options: CmsProductModifierOption[];
 }
 
@@ -243,6 +249,8 @@ export interface CmsProductWrite {
 
 export interface CmsProduct {
   id: string;
+  menuSourceId?: string | null;
+  menuAvailability?: "available" | "sold_out" | "unavailable" | null;
   sourceSystem?: string | null;
   sourceId?: string | null;
   terms?: (string | { id: string })[] | null;
@@ -264,10 +272,37 @@ export interface CmsProduct {
   _status?: "draft" | "published" | null;
 }
 
+/**
+ * One line of a multi-line café order (ESH-146 / ESH-150).
+ *
+ * `productId` is the CMS product id the site sold; the POS resolves it through
+ * `website_product_map` to a *local* menu item and prices the line from that
+ * item. `unitPrice`/`total` are the CMS's snapshots and are kept only for
+ * reconciliation — they never price the POS order, exactly like the legacy
+ * single-product fields.
+ */
+export interface CmsOrderItem {
+  lineId?: string | null;
+  productId: string;
+  title?: string | null;
+  quantity: number;
+  /** Minor units, the CMS's own snapshot at checkout. */
+  unitPrice?: number | null;
+  total?: number | null;
+  /** CMS modifier/option ids; mapped to `modifiers` rows by the intake. */
+  modifierIds?: string[] | null;
+  note?: string | null;
+}
+
 export interface CmsOrder {
   id: string;
   reference: string;
   status: "pending" | "paid" | "cancelled" | "refunded";
+  /**
+   * Legacy one-product shape. A café order carries `items` instead and leaves
+   * these three to the first line (the CMS does that mirroring, ESH-150), so
+   * existing single-product consumers keep working unchanged.
+   */
   product: string | CmsProduct;
   productTitle?: string | null;
   quantity: number;
@@ -276,6 +311,32 @@ export interface CmsOrder {
   total: number;
   currency: "EUR" | "IRR" | "IRT" | "USD";
   buyer: { name: string; phone: string; email?: string | null; note?: string | null };
+  /**
+   * ESH-150 (cms#197) — café/table-service fields, additive and optional so
+   * the existing single-product storefront payload is unchanged.
+   *
+   * `tableToken` is the opaque value printed on the physical table
+   * (`tqr_…`). It is resolved by `resolveTableQrTokenForOrder()` against the
+   * business that owns the signed CMS connection — never trusted as a table
+   * or location id, and never accepted from the browser in place of the
+   * token. Intake (#1304) refuses an order whose token does not resolve.
+   */
+  serviceMode?: "dine_in" | "takeaway" | null;
+  tableToken?: string | null;
+  /**
+   * Multi-line café basket. Present on `order.submitted`; when it is absent the
+   * order is the legacy single-product storefront shape and keeps going through
+   * the Phase G paid import.
+   */
+  items?: CmsOrderItem[] | null;
+  /** How the customer chose to pay; `counter` orders arrive unpaid. */
+  paymentMethod?: "online" | "counter" | null;
+  /**
+   * CMS-side fulfilment state (ESH-150). The POS owns kitchen state, so this is
+   * read-only here — accepted/rejected decisions travel the other way, through
+   * the state outbox in migration 0299.
+   */
+  fulfillmentStatus?: "pending" | "preparing" | "ready" | "served" | "cancelled" | null;
   updatedAt: string;
   createdAt: string;
 }

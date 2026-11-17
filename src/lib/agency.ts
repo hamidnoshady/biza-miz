@@ -154,7 +154,7 @@ export interface AgencyProfileSetting {
   /** The profile that decides blueprint ordering. */
   operatingProfile: AgencyOperatingProfile;
   /**
-   * Additional shapes the same agency works in. Labels only — they never widen
+   * Additional shapes the same agency works in. Ordering/labels only — they never widen
    * what the business can open, and the first entry is never duplicated into
    * `operatingProfile`.
    */

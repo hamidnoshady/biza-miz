@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope } from "@/lib/auth";
 import { readAecOperatingProfile } from "@/lib/aec-service";
-import { readAgencyOperatingProfile } from "@/lib/agency-service";
+import { readAgencyOperatingProfiles } from "@/lib/agency-service";
 import { archiveTemplate, listTemplates, saveTemplate } from "@/lib/workspace";
 import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../guard";
 
@@ -23,15 +23,15 @@ import { PERMISSIONS, handleWorkspaceError, readBody, workspaceOwner } from "../
  * «پیشنهادی» ordering. Read here rather than in the service because a *write*
  * must answer with the same shape it just changed.
  *
- * Both readers answer `null` for a trade that is not theirs (#799's AEC
- * profiles, #1128's agency ones), so the `??` chain is "whichever industry this
- * business is, if it has presets at all" and never a guess: a café resolves no
- * profile and gets the generic catalogue in authored order.
+ * The AEC reader answers null outside its industry; the agency reader returns
+ * an empty list outside its industry. A café gets the generic catalogue in
+ * authored order. Agency secondary specialties add recommendations, not gates.
  */
 async function templateChoices(businessId: string) {
-  const profile =
-    (await readAecOperatingProfile(businessId)) ?? (await readAgencyOperatingProfile(businessId));
-  return listTemplates(businessId, { profile });
+  const aecProfile = await readAecOperatingProfile(businessId);
+  if (aecProfile) return listTemplates(businessId, { profile: aecProfile });
+  const profiles = await readAgencyOperatingProfiles(businessId);
+  return listTemplates(businessId, { profile: profiles[0] ?? null, additionalProfiles: profiles.slice(1) });
 }
 
 export const GET = withTenantScope(async (request: NextRequest) => {

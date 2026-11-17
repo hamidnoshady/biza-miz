@@ -33,6 +33,7 @@ import { api, errorMessageOrRaw, inputClass } from "@/app/dashboard/ui";
 import { EmptyState, LoadingSkeleton, StatusBadge } from "@/app/dashboard/page-chrome";
 import { FilterChip, FilterChipRow, SearchField } from "@/app/dashboard/filters";
 import { Button } from "@/components/ui/button";
+import { ReconciliationWizard } from "@/app/(app)/settings/transfer/reconciliation-wizard";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { formatPersianNumber, formatPersianNumericText } from "@/lib/digits";
 import { formatMoneyText, type MoneyUnit } from "@/lib/money";
@@ -306,6 +307,8 @@ export function CatalogueSection({
   const [loadError, setLoadError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncNotice, setSyncNotice] = useState("");
+  const [reconcileOpen, setReconcileOpen] = useState(false);
+  const [reconcileRunId, setReconcileRunId] = useState<string | null>(null);
   /** The product whose storefront content sheet is open, if any (#1215, P1-2). */
   const [contentFor, setContentFor] = useState<CatalogueProduct | null>(null);
   const loadSeqRef = useRef(0);
@@ -528,6 +531,24 @@ export function CatalogueSection({
         <Button type="button" size="sm" variant="outline" disabled={loading || !connectionId} onClick={() => void load()}>
           تازه‌سازی
         </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy || !connectionId}
+          onClick={async () => {
+            setReconcileOpen((prev) => !prev);
+            if (!reconcileOpen && info?.linkMode !== "plugin") {
+              const res = await api<{ run?: { id: string } }>("/api/data/reconciliation", {
+                method: "POST",
+                body: JSON.stringify({ action: "stage_woo", connectionId }),
+              });
+              if (res.ok && res.data.run?.id) setReconcileRunId(res.data.run.id);
+            }
+          }}
+        >
+          تطبیق پیش از همگام‌سازی
+        </Button>
         <span className="text-[11px] text-muted-foreground">
           آخرین همگام‌سازی کاتالوگ: {formatDateTime(info?.lastCatalogueSyncAt ?? null)}
         </span>
@@ -538,6 +559,19 @@ export function CatalogueSection({
           صف و رویدادها
         </Link>
       </div>
+
+      {reconcileOpen ? (
+        <ReconciliationWizard
+          initialRunId={reconcileRunId}
+          connectionId={connectionId}
+          domainFilter="product"
+          onCompleted={() => {
+            setReconcileOpen(false);
+            void load();
+          }}
+          onClose={() => setReconcileOpen(false)}
+        />
+      ) : null}
 
       <p className="flex items-start gap-2 rounded-lg border border-border/70 bg-card p-2.5 text-[11px] leading-5 text-muted-foreground">
         <InfoIcon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />

@@ -156,6 +156,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   // settlements of a customer's subscription invoice are the company's trades,
   // so they land in this ledger with a label the company's accountant reads.
   platform_billing: "صورتحساب پلتفرم",
+  reconciliation_import: "سند وارداتی تطبیق‌یافته",
 };
 
 /**

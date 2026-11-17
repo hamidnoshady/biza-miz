@@ -140,7 +140,39 @@ const colors: Record<string, string> = {
   blue: "آبی", green: "سبز", brown: "قهوه ای", gray: "خاکستری", grey: "خاکستری",
 };
 
-export function parseCatalogueRows(sheet: CatalogueSheet, mapping: CatalogueMapping, omax: boolean) {
+export const CATALOGUE_MAX_BRAND_LENGTH = 100;
+
+export function normalizeBrandFallback(fallbackBrand: string | null | undefined): string | null {
+  if (fallbackBrand === undefined || fallbackBrand === null) return null;
+  const normalized = catalogueText(fallbackBrand);
+  if (!normalized || normalized.length > CATALOGUE_MAX_BRAND_LENGTH) {
+    throw new Error("catalogue_brand_invalid");
+  }
+  return normalized;
+}
+
+export type BrandSource = "excel" | "fallback" | "none";
+
+export interface ParseCatalogueOptions {
+  fallbackBrand?: string | null;
+}
+
+export function parseCatalogueRows(
+  sheet: CatalogueSheet,
+  mapping: CatalogueMapping,
+  options: ParseCatalogueOptions = {},
+) {
+  const fallbackBrand = normalizeBrandFallback(options.fallbackBrand);
+  const hasBrandColumn = mapping.brand !== undefined;
+  if (!hasBrandColumn && !fallbackBrand) {
+    throw new Error("catalogue_brand_required");
+  }
+
+  let blankBrandRows = 0;
+  let excelBrandRows = 0;
+  let fallbackBrandRows = 0;
+  let unbrandedRows = 0;
+
   const parsed = sheet.rows.map((row) => {
     const raw: Partial<Record<CatalogueField, string>> = {};
     const values: Partial<Record<CatalogueField, string>> = {};
@@ -160,7 +192,36 @@ export function parseCatalogueRows(sheet: CatalogueSheet, mapping: CatalogueMapp
         values[field] = text;
       }
     }
-    if (omax) values.brand = "Omax";
+
+    let brandSource: BrandSource = "none";
+    if (hasBrandColumn) {
+      if (values.brand) {
+        if (values.brand.length > CATALOGUE_MAX_BRAND_LENGTH) {
+          issues.push({ field: "brand", code: "invalid_brand" });
+          delete values.brand;
+          unbrandedRows += 1;
+        } else {
+          brandSource = "excel";
+          excelBrandRows += 1;
+        }
+      } else if (!issues.some((issue) => issue.field === "brand")) {
+        blankBrandRows += 1;
+        if (fallbackBrand) {
+          values.brand = fallbackBrand;
+          brandSource = "fallback";
+          fallbackBrandRows += 1;
+        } else {
+          unbrandedRows += 1;
+        }
+      } else {
+        unbrandedRows += 1;
+      }
+    } else if (fallbackBrand) {
+      values.brand = fallbackBrand;
+      brandSource = "fallback";
+      fallbackBrandRows += 1;
+    }
+
     for (const field of ["band_color", "face", "case_color"] as const) {
       const color = values[field];
       if (color) values[field] = colors[color.toLowerCase()] ?? color;
@@ -173,7 +234,7 @@ export function parseCatalogueRows(sheet: CatalogueSheet, mapping: CatalogueMapp
     if (values.drive && !movement) issues.push({ field: "drive", code: "movement_review" });
     const dimensions = values.case_dimension ? dimensionsMm(values.case_dimension) : null;
     if (values.case_dimension && !dimensions) issues.push({ field: "case_dimension", code: "dimension_review" });
-    return { number: row.number, raw, values, issues, sku, title, movement, dimensions };
+    return { number: row.number, raw, values, issues, sku, title, movement, dimensions, brandSource };
   });
   const groups = new Map<string, number[]>();
   for (const row of parsed) {
@@ -189,6 +250,10 @@ export function parseCatalogueRows(sheet: CatalogueSheet, mapping: CatalogueMapp
       rows: parsed.length,
       distinctSkus: groups.size,
       repeated: duplicates.reduce((total, [, rows]) => total + rows.length - 1, 0),
+      blankBrandRows,
+      excelBrandRows,
+      fallbackBrandRows,
+      unbrandedRows,
     },
   };
 }

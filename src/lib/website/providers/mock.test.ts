@@ -171,10 +171,11 @@ describe("ESH-145 — mock café-menu contract", () => {
 
   it("keeps category and media identities stable across retries", async () => {
     const adapter = new MockWebsiteAdapter();
-    const taxonomy = await adapter.upsertMenuTaxonomy({});
-    const category = { taxonomyId: taxonomy.id, sourceId: "category-1", name: "قهوه", description: "گرم", sortOrder: 1 };
+    const category = { sourceId: "category-1", name: "قهوه", description: "گرم", sortOrder: 1 };
     const first = await adapter.upsertMenuCategory(category);
-    expect((await adapter.upsertMenuCategory({ ...category, name: "نوشیدنی" })).id).toBe(first.id);
+    expect(await adapter.upsertMenuCategory({ ...category, name: "نوشیدنی" })).toMatchObject({
+      id: first.id, taxonomyId: first.taxonomyId,
+    });
     const upload = { sourceId: "media:asset-1:hash", filename: "latte.png", mimeType: "image/png", bytes: new Uint8Array([1]) };
     expect((await adapter.uploadMedia(upload)).id).toBe((await adapter.uploadMedia(upload)).id);
   });
