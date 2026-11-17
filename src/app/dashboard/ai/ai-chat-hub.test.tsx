@@ -134,7 +134,9 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     expect(within(composerBox as HTMLElement).queryByRole("combobox", { name: /وظیفه دستیار/ })).toBeNull();
     expect(within(composerBox as HTMLElement).queryByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" })).toBeNull();
     const modeSelect = within(composerBox as HTMLElement).getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ });
-    fireEvent.click(modeSelect);
+    const modeIcon = modeSelect.querySelector("svg");
+    expect(modeIcon).toBeTruthy();
+    fireEvent.click(modeIcon!);
     expect(screen.getByRole("option", { name: /خودکار/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /سریع/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /تفکر عمیق/ })).toBeTruthy();
