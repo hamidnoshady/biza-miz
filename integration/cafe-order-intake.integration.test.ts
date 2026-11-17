@@ -20,6 +20,8 @@ import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import type { CmsOrder } from "../src/lib/cms/types";
+import { CmsApiError, cmsRequest } from "../src/lib/cms/client";
+import { encryptSecret, resolveEncryptionKey } from "../src/lib/integrations/secrets";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -29,6 +31,11 @@ if (!rootDatabaseUrl) {
 vi.mock("@/lib/realtime", () => ({ broadcast: vi.fn() }));
 vi.mock("@/lib/notification-events", () => ({ recordNotification: vi.fn() }));
 vi.mock("@/lib/order-state-sync", () => ({ recordOrderState: vi.fn() }));
+
+vi.mock("../src/lib/cms/client", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../src/lib/cms/client")>(),
+  cmsRequest: vi.fn(),
+}));
 
 let databaseName: string;
 let db: Client;
@@ -160,6 +167,7 @@ interface OrderOptions {
   serviceMode?: "dine_in" | "takeaway" | null;
   tableToken?: string | null;
   status?: "pending" | "paid";
+  paymentMethod?: "online" | "counter";
   lines?: { remoteProductId: string; quantity?: number }[];
   id?: string;
 }
@@ -188,7 +196,7 @@ function cmsOrder(tenant: Tenant, opts: OrderOptions = {}): CmsOrder {
       total: 850000 * (line.quantity ?? 1),
       modifierIds: [],
     })),
-    paymentMethod: "online" as const,
+    paymentMethod: opts.paymentMethod ?? "online",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -419,6 +427,84 @@ describe("submitted café order → one POS order", () => {
       expect(flip.ok).toBe(false);
       if (!flip.ok) expect(flip.error).toBe("already_decided");
     });
+  });
+
+  it("recovers a leased delivery and sends fulfillment in order independently of counter payment", async () => {
+    const worker = await import("../src/lib/cms/cafe-order-state-delivery");
+    const { transitionKitchenItem } = await import("../src/lib/kitchen-item-transition");
+    const { completeOrderPayment } = await import("../src/lib/payment-service");
+    const order = cmsOrder(tenant, { id: randomUUID(), paymentMethod: "counter" });
+    const { orderId } = await intake(tenant, order);
+    const { rows: [line] } = await db.query<{ id: string }>(
+      "SELECT id FROM order_items WHERE order_id = $1", [orderId],
+    );
+    const bump = (to: "preparing" | "ready" | "served") => transitionKitchenItem({
+      businessId: tenant.businessId, locationId: tenant.locationId,
+      itemId: line.id, to, mayBumpKitchen: true, mayServe: true, actorUserId: randomUUID(),
+    });
+    expect(await bump("preparing")).toEqual({ kind: "missing" });
+    const accepted = await decide(tenant, orderId, "accepted");
+    if (!accepted.ok) throw new Error(accepted.error);
+    for (const to of ["preparing", "ready", "served"] as const) {
+      expect(await bump(to)).toEqual({ kind: "updated", orderId });
+    }
+
+    await dbLib.withTenantTransaction(tenant.businessId, (client) => completeOrderPayment({
+      client, businessId: tenant.businessId, locationId: tenant.locationId, orderId,
+      method: "cash", receivedBy: null,
+    }));
+    await db.query("UPDATE cms_order_state_outbox SET next_attempt_at = now() + interval '1 day' WHERE pos_order_id <> $1", [orderId]);
+    await db.query(
+      "UPDATE eshobe_cms_connections SET api_key_ciphertext = $2 WHERE id = $1",
+      [tenant.connectionId, encryptSecret("test-cafe-site-key", resolveEncryptionKey(process.env))],
+    );
+    await db.query(
+      `UPDATE cms_order_state_outbox SET lease_token = gen_random_uuid(), lease_until = now() - interval '1 second'
+        WHERE pos_order_id = $1 AND state = 'accepted'`,
+      [orderId],
+    );
+
+    const request = vi.mocked(cmsRequest);
+    const bodies: unknown[] = [];
+    let failAcceptance = true;
+    request.mockImplementation(async (config, options) => {
+      expect(config.apiKey).toBe("test-cafe-site-key");
+      expect(options.path).toBe(`/api/site/cafe-orders/${order.id}/state`);
+      expect(options.method).toBe("PATCH");
+      bodies.push(options.body);
+      if (failAcceptance && (options.body as { fulfillment?: string }).fulfillment === "accepted") {
+        failAcceptance = false;
+        throw new CmsApiError(503, options.path, {});
+      }
+      return { ok: true, result: "already_applied" };
+    });
+
+    try {
+      await Promise.all([worker.runCafeOrderStateDeliveryTick(), worker.runCafeOrderStateDeliveryTick()]);
+      expect(bodies).toHaveLength(2);
+      expect(bodies).toContainEqual({
+        kind: "counter_payment", accountingReference: expect.any(String), amount: 1700000,
+      });
+      expect(bodies).toContainEqual({ kind: "fulfillment", fulfillment: "accepted" });
+      await db.query(
+        "UPDATE cms_order_state_outbox SET next_attempt_at = now() WHERE pos_order_id = $1 AND state = 'accepted'",
+        [orderId],
+      );
+      for (let i = 0; i < 5; i++) await worker.runCafeOrderStateDeliveryTick();
+      expect(bodies.slice(2)).toEqual(["accepted", "preparing", "ready", "served"].map((fulfillment) => ({
+        kind: "fulfillment", fulfillment,
+      })));
+
+      const echo = await ingest.handleCmsStoreOrderWebhook({
+        siteId: tenant.siteId, event: "order.paid", deliveryId: randomUUID(),
+        order: { ...order, status: "paid" },
+      });
+      expect(await echo.json()).toEqual({ status: "ignored" });
+      const { rows } = await db.query("SELECT count(*)::int AS count FROM payments WHERE order_id = $1", [orderId]);
+      expect(rows[0].count).toBe(1);
+    } finally {
+      request.mockReset();
+    }
   });
 
   it("order.paid attaches one payment to the same order — never a second sale", async () => {

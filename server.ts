@@ -713,6 +713,11 @@ app.prepare().then(async () => {
     const cmsStoreOrderPollTick = () =>
       runCmsStoreOrderPollTick().catch((err) => console.error("cms store order poll failed:", err));
     scheduleCentralTick(cmsStoreOrderPollTick, 60_000, 45_000);
+
+    const { runCafeOrderStateDeliveryTick } = await import("./src/lib/cms/cafe-order-state-delivery");
+    const cmsCafeOrderStateTick = () =>
+      runCafeOrderStateDeliveryTick().catch(() => console.error("CMS café order-state delivery tick failed"));
+    scheduleCentralTick(cmsCafeOrderStateTick, 15_000, 48_000);
   }
 
   // «ورود و خروج داده» — the platform data transfer engine (migration 0169).

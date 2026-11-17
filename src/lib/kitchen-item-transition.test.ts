@@ -7,6 +7,8 @@ vi.mock("./db", () => ({
   withTenantTransaction: vi.fn(async (_businessId: string, operation: () => Promise<unknown>) => operation()),
 }));
 
+vi.mock("./cms/cafe-order-state-delivery", () => ({ enqueueCafeKitchenState: vi.fn() }));
+
 const queryMock = vi.mocked(query);
 const input = {
   businessId: "biz-1",

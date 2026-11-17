@@ -1,4 +1,5 @@
 import { query, withTenantTransaction } from "./db";
+import { enqueueCafeKitchenState } from "./cms/cafe-order-state-delivery";
 import { recordOrderState } from "./order-state-sync";
 import { canKitchenBump, canMarkServed, type OrderItemStatus } from "./order-item-status";
 import type { OrderStateActor } from "./order-state-sync";
@@ -37,6 +38,7 @@ export async function transitionKitchenItem(input: {
            FROM order_items oi JOIN orders o ON o.id=oi.order_id
           WHERE oi.id=$1 AND oi.location_id=$2 AND o.location_id=$2
             AND o.status IN ('open','held','completed')
+            AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
           FOR UPDATE OF o,oi`,
         [input.itemId, input.locationId],
       );
@@ -73,6 +75,7 @@ export async function transitionKitchenItem(input: {
           ? ({ kind: "conflict", currentStatus: current[0].status } as const)
           : ({ kind: "missing" } as const);
       }
+      await enqueueCafeKitchenState(client, item.order_id);
       if (input.syncActor) {
         await recordOrderState(client, {
           locationId: input.locationId,
