@@ -202,7 +202,8 @@ app.prepare().then(async () => {
   // error to notice. Refuse to serve production traffic in that state; in
   // development this only warns (see assertRlsEffective).
   const { isDemoDeployment, requireDemoDeployment } = await import("./src/lib/demo-session-credentials");
-  if (isDemoDeployment()) {
+  const demoDeployment = isDemoDeployment();
+  if (demoDeployment) {
     const { assertDemoDatabase } = await import("./src/lib/demo-database");
     await assertDemoDatabase(getPool(), requireDemoDeployment());
   }
@@ -219,6 +220,9 @@ app.prepare().then(async () => {
     intervalMs: number,
     initialDelayMs: number,
   ) => {
+    // Demo workers are started separately and only run explicitly selected jobs.
+    if (demoDeployment) return;
+
     const run = () => {
       const task: Promise<void> = Promise.resolve()
         .then(tick)
@@ -372,7 +376,7 @@ app.prepare().then(async () => {
   const serverSyncTick = () => syncRunner.run();
   scheduleSiteTick(serverSyncTick, SERVER_SYNC_INTERVAL_MS, 20_000);
   const syncWakeAbort = new AbortController();
-  if (runtimeRole === "site") {
+  if (!demoDeployment && runtimeRole === "site") {
     const { startSyncWakeListeners } = await import("./src/lib/sync-wake-service");
     startSyncWakeListeners({ onWake: (delayMs) => syncRunner.kick(delayMs), signal: syncWakeAbort.signal });
   }
@@ -709,6 +713,11 @@ app.prepare().then(async () => {
     const cmsStoreOrderPollTick = () =>
       runCmsStoreOrderPollTick().catch((err) => console.error("cms store order poll failed:", err));
     scheduleCentralTick(cmsStoreOrderPollTick, 60_000, 45_000);
+
+    const { runCafeOrderStateDeliveryTick } = await import("./src/lib/cms/cafe-order-state-delivery");
+    const cmsCafeOrderStateTick = () =>
+      runCafeOrderStateDeliveryTick().catch(() => console.error("CMS café order-state delivery tick failed"));
+    scheduleCentralTick(cmsCafeOrderStateTick, 15_000, 48_000);
   }
 
   // «ورود و خروج داده» — the platform data transfer engine (migration 0169).

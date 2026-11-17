@@ -1311,6 +1311,21 @@ export function reconcileTourProgress(
   };
 }
 
+/**
+ * Migrates stored progress to the current revision of `tour`: filters seen
+ * ids that no longer exist, withdraws completion when a step has appeared
+ * that the member never saw, and bumps `tourVersion` to `tour.version`.
+ * Pure and idempotent — the DB half is `migrateTourProgressForBusiness`.
+ */
+export function migrateTourProgress(
+  tour: TourDefinition,
+  stored: StoredTourProgress | null,
+): StoredTourProgress | null {
+  const reconciled = reconcileTourProgress(tour, stored);
+  if (!reconciled) return null;
+  return { ...reconciled, tourVersion: tour.version };
+}
+
 function firstUnseenStep(tour: TourDefinition, seen: readonly string[]): string | null {
   return tour.steps.find((step) => !seen.includes(step.id))?.id ?? null;
 }

@@ -276,6 +276,21 @@ export function reconcileLearningPathProgress(
   };
 }
 
+/**
+ * Migrates stored progress to the current revision of `path`: filters
+ * completed step ids that no longer exist, withdraws completion when a step
+ * has appeared that the member never completed, and bumps `pathVersion` to
+ * `path.version`. Pure and idempotent.
+ */
+export function migrateLearningPathProgress(
+  path: LearningPathDefinition,
+  stored: StoredLearningPathProgress | null,
+): StoredLearningPathProgress | null {
+  const reconciled = reconcileLearningPathProgress(path, stored);
+  if (!reconciled) return null;
+  return { ...reconciled, pathVersion: path.version };
+}
+
 function firstIncompleteStep(
   path: LearningPathDefinition,
   completed: readonly string[],

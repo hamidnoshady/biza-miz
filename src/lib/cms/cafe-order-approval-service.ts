@@ -84,7 +84,7 @@ export async function decideCafeOrderApproval(
       await client.query("ROLLBACK");
       return { ok: true, changed: false, state: input.decision, dispatchedItemIds: [] };
     }
-    if (locked.website_approval_state !== "pending") {
+    if (locked.status === "voided" || locked.website_approval_state !== "pending") {
       await client.query("ROLLBACK");
       return { ok: false, error: "already_decided", status: 409 };
     }
@@ -121,6 +121,10 @@ export async function decideCafeOrderApproval(
         reason,
       ],
     );
+
+    if (input.decision === "accepted") {
+      await client.query("SELECT cms_record_cafe_kitchen_state($1)", [input.orderId]);
+    }
 
     await recordOrderAudit(client, {
       actor: { businessId: input.businessId, userId: input.actor.userId, role: input.actor.role },
@@ -232,7 +236,7 @@ export async function listOrdersAwaitingApproval(
        FROM orders o
        LEFT JOIN dining_tables dt ON dt.id = o.table_id
        LEFT JOIN parties c ON c.id = o.customer_id
-      WHERE o.location_id = $1 AND o.website_approval_state = 'pending'
+      WHERE o.location_id = $1 AND o.website_approval_state = 'pending' AND o.status <> 'voided'
       ORDER BY o.opened_at, o.id`,
     [locationId],
   ).then((result) => result.rows);

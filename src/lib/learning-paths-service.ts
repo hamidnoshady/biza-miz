@@ -11,7 +11,7 @@
  */
 import { query, withTenantTransaction } from "./db";
 import { getBusinessIndustry } from "./industry-guard";
-import { applyLearningPathEvent, type LearningPathDefinition, type LearningPathEvent, type LearningPathEventError, type StoredLearningPathProgress } from "./learning-paths";
+import { applyLearningPathEvent, migrateLearningPathProgress, type LearningPathDefinition, type LearningPathEvent, type LearningPathEventError, type StoredLearningPathProgress } from "./learning-paths";
 
 type ProgressRow = {
   path_id: string;
@@ -137,4 +137,174 @@ export async function recordLearningPathEvent(
     );
     return { ok: true as const, progress: next };
   });
+}
+
+/**
+ * Migrates every member's stored progress for `path` within `businessId` to
+ * the path's current revision: bumps `path_version`, drops completed ids that
+ * no longer exist, withdraws completion when a step has appeared that the
+ * member never completed, and nulls a current step that no longer exists.
+ *
+ * Returns the number of rows that were actually changed. Idempotent.
+ */
+export type MigrateLearningPathProgressResult = {
+  changed: number;
+  migrated: number;
+};
+
+export async function migrateLearningPathProgressForPath(
+  businessId: string,
+  pathId: string,
+  path: LearningPathDefinition,
+): Promise<MigrateLearningPathProgressResult> {
+  return withTenantTransaction(businessId, async (client) => {
+    const { rows } = await client.query<ProgressRow & { user_id: string }>(
+      `SELECT ${COLUMNS}, user_id FROM learning_path_progress
+        WHERE business_id = $1 AND path_id = $2
+        FOR UPDATE`,
+      [businessId, pathId],
+    );
+
+    let changed = 0;
+    let migrated = 0;
+
+    for (const row of rows) {
+      const stored = mapRow(row);
+      const migratedProgress = migrateLearningPathProgress(path, stored);
+      if (!migratedProgress) continue;
+
+      migrated++;
+
+      const versionChanged = migratedProgress.pathVersion !== stored.pathVersion;
+      const completedChanged =
+        JSON.stringify(migratedProgress.completedStepIds.sort()) !==
+        JSON.stringify(stored.completedStepIds.sort());
+      const currentChanged = migratedProgress.currentStepId !== stored.currentStepId;
+      const completedAtChanged = migratedProgress.completedAt !== stored.completedAt;
+
+      if (!versionChanged && !completedChanged && !currentChanged && !completedAtChanged) continue;
+
+      changed++;
+
+      await client.query(
+        `UPDATE learning_path_progress
+            SET path_version = $4, completed_step_ids = $5::text[], current_step_id = $6,
+                completed_at = $7, last_active_at = now()
+          WHERE business_id = $1 AND user_id = $2 AND path_id = $3`,
+        [
+          businessId,
+          row.user_id,
+          pathId,
+          migratedProgress.pathVersion,
+          migratedProgress.completedStepIds,
+          migratedProgress.currentStepId,
+          migratedProgress.completedAt ? iso(new Date()) : null,
+        ],
+      );
+    }
+
+    return { changed, migrated };
+  });
+}
+
+/**
+ * Assigns a learning path to a staff member within `businessId`. Idempotent —
+ * assigning the same (member, path) twice is a no-op. Returns true when a new
+ * row was inserted, false when the assignment already existed.
+ */
+export async function assignLearningPathToStaff(
+  businessId: string,
+  pathId: string,
+  userId: string,
+  actorId: string,
+): Promise<boolean> {
+  return withTenantTransaction(businessId, async (client) => {
+    const { rows } = await client.query<{ inserted: boolean }>(
+      `INSERT INTO learning_path_assignments (business_id, user_id, path_id, assigned_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (business_id, user_id, path_id) DO NOTHING
+       RETURNING true AS inserted`,
+      [businessId, userId, pathId, actorId],
+    );
+    return rows.length > 0;
+  });
+}
+
+/**
+ * Removes a staff member's assignment to a learning path. Returns true when a
+ * row was deleted, false when no assignment existed.
+ */
+export async function unassignLearningPathFromStaff(
+  businessId: string,
+  pathId: string,
+  userId: string,
+): Promise<boolean> {
+  return withTenantTransaction(businessId, async (client) => {
+    const { rowCount } = await client.query(
+      `DELETE FROM learning_path_assignments
+        WHERE business_id = $1 AND user_id = $2 AND path_id = $3`,
+      [businessId, userId, pathId],
+    );
+    return (rowCount ?? 0) > 0;
+  });
+}
+
+/**
+ * The staff members assigned to one learning path, newest assignment first.
+ */
+export async function listLearningPathAssignments(
+  businessId: string,
+  pathId: string,
+): Promise<{ userId: string; fullName: string | null; assignedAt: string }[]> {
+  const { rows } = await query<{ user_id: string; full_name: string | null; assigned_at: Date | string }>(
+    `SELECT a.user_id, u.full_name, a.assigned_at
+       FROM learning_path_assignments a
+       JOIN users u ON u.id = a.user_id
+      WHERE a.business_id = $1 AND a.path_id = $2
+      ORDER BY a.assigned_at DESC, u.full_name`,
+    [businessId, pathId],
+  );
+  return rows.map((row) => ({
+    userId: row.user_id,
+    fullName: row.full_name,
+    assignedAt: iso(row.assigned_at),
+  }));
+}
+
+/**
+ * The learning paths assigned to one staff member, newest assignment first.
+ */
+export async function listStaffLearningPathAssignments(
+  businessId: string,
+  userId: string,
+): Promise<{ pathId: string; title: string; assignedAt: string }[]> {
+  const { rows } = await query<{ path_id: string; title: string; assigned_at: Date | string }>(
+    `SELECT a.path_id, lp.title, a.assigned_at
+       FROM learning_path_assignments a
+       JOIN users u ON u.id = a.user_id
+      WHERE a.business_id = $1 AND a.user_id = $2
+      ORDER BY a.assigned_at DESC, a.path_id`,
+    [businessId, userId],
+  );
+  return rows.map((row) => ({
+    pathId: row.path_id,
+    title: row.title,
+    assignedAt: iso(row.assigned_at),
+  }));
+}
+
+/**
+ * Whether `userId` is assigned `pathId` within `businessId`.
+ */
+export async function isLearningPathAssignedToStaff(
+  businessId: string,
+  pathId: string,
+  userId: string,
+): Promise<boolean> {
+  const { rows } = await query<{ id: string }>(
+    `SELECT 1 FROM learning_path_assignments
+      WHERE business_id = $1 AND user_id = $2 AND path_id = $3`,
+    [businessId, userId, pathId],
+  );
+  return rows.length > 0;
 }

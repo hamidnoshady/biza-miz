@@ -142,6 +142,11 @@ export const EXEMPT_TABLES = new Set([
   "billing_meters",
   "billing_plan_meter_allowances",
   "billing_price_versions",
+  // Migration 0304 — the coupon catalogue. Deployment-wide codes with no
+  // business_id, like the plan catalogue above. The tenant halves
+  // (billing_quotes, billing_coupon_redemptions) are FORCE RLS and stay in
+  // the export.
+  "billing_coupons",
   "billing_invoice_counters",
   "billing_commercial_settings",
   "billing_service_credentials",
@@ -287,6 +292,11 @@ export const EXEMPT_TABLES = new Set([
   // _site_heartbeat, _storage_samples, _upload_sessions, _upload_queue) are
   // RLS-protected and stay in the export.
   "platform_tenant_backup_service",
+  // Migration 0303 — global identity with no business_id: the one-live-token
+  // email proofs and the append-only identity-PII audit. Membership rows stay
+  // in `users`, which remains tenant-protected and exported.
+  "platform_email_verifications",
+  "platform_identity_events",
   "backup_key_versions",
   "tenant_backup_business_policy",
   "tenant_backup_restore_approvals",

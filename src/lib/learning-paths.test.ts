@@ -1,7 +1,7 @@
 /**
  * Learning paths (issue #972, item 3) — the pure half.
  */
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PERMISSIONS, type Permission } from "./permissions";
 import { type TourViewer } from "./tours";
 import {
@@ -10,6 +10,7 @@ import {
   learningPathProgressView,
   learningPathSummary,
   LEARNING_PATHS,
+  migrateLearningPathProgress,
   pathsForViewer,
   reconcileLearningPathProgress,
   validateLearningPaths,
@@ -246,5 +247,179 @@ describe("progress view", () => {
     const v2 = { ...path, version: 2 };
     const view = learningPathProgressView(v2, stored);
     expect(view.outdated).toBe(true);
+  });
+});
+
+describe("migrateLearningPathProgress", () => {
+  const stored: StoredLearningPathProgress = {
+    pathId: "cafe.first-day",
+    pathVersion: 1,
+    completedStepIds: ["register-customer", "create-product"],
+    currentStepId: "create-product",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    lastActiveAt: "2026-01-02T00:00:00.000Z",
+    completedAt: null,
+  };
+
+  const path: LearningPathDefinition = {
+    id: "cafe.first-day",
+    version: 1,
+    group: "cafe",
+    title: "First day at the cafe",
+    body: "Learn the basics.",
+    eligibility: {},
+    steps: [
+      { id: "register-customer", kind: "page", target: "/customers", title: "Register customer", body: "." },
+      { id: "create-product", kind: "page", target: "/products", title: "Create product", body: "." },
+      { id: "take-first-order", kind: "page", target: "/pos", title: "Take first order", body: "." },
+    ],
+  };
+
+  it("bumps the version and keeps compatible steps", () => {
+    const v2 = { ...path, version: 2 };
+    const migrated = migrateLearningPathProgress(v2, stored)!;
+    expect(migrated.pathVersion).toBe(2);
+    expect(migrated.completedStepIds).toEqual(["register-customer", "create-product"]);
+    expect(migrated.currentStepId).toBe("create-product");
+  });
+
+  it("drops completed step ids that no longer exist", () => {
+    const v2 = { ...path, version: 2, steps: path.steps.filter((s) => s.id !== "create-product") };
+    const migrated = migrateLearningPathProgress(v2, stored)!;
+    expect(migrated.pathVersion).toBe(2);
+    expect(migrated.completedStepIds).toEqual(["register-customer"]);
+    expect(migrated.currentStepId).toBeNull();
+  });
+
+  it("withdraws completion when a new step appeared", () => {
+    const completed: StoredLearningPathProgress = {
+      ...stored,
+      completedStepIds: ["register-customer", "create-product", "take-first-order"],
+      completedAt: "2026-01-03T00:00:00.000Z",
+    };
+    const v2: LearningPathDefinition = {
+      ...path,
+      version: 2,
+      steps: [...path.steps, { id: "new-step", kind: "page", target: "/x", title: "New", body: "." }],
+    };
+    const migrated = migrateLearningPathProgress(v2, completed)!;
+    expect(migrated.pathVersion).toBe(2);
+    expect(migrated.completedStepIds).toEqual(["register-customer", "create-product", "take-first-order"]);
+    expect(migrated.completedAt).toBeNull();
+  });
+
+  it("is idempotent — migrating twice changes nothing on the second run", () => {
+    const v2: LearningPathDefinition = {
+      ...path,
+      version: 2,
+      steps: [...path.steps, { id: "new-step", kind: "page", target: "/x", title: "New", body: "." }],
+    };
+    const first = migrateLearningPathProgress(v2, stored)!;
+    const second = migrateLearningPathProgress(v2, first)!;
+    expect(second.pathVersion).toBe(2);
+    expect(second.completedStepIds).toEqual(first.completedStepIds);
+    expect(second.currentStepId).toBe(first.currentStepId);
+    expect(second.completedAt).toBe(first.completedAt);
+  });
+
+  it("returns null for null stored progress", () => {
+    const v2 = { ...path, version: 2 };
+    expect(migrateLearningPathProgress(v2, null)).toBeNull();
+  });
+});
+
+/**
+ * Issue #972, item 9 — staff assignments for learning paths. These tests
+ * exercise the service-layer assignment functions against a stubbed
+ * `@/lib/db`; no real database is needed.
+ */
+const dbModule = vi.hoisted(() => ({
+  query: vi.fn(),
+  withTenantTransaction: vi.fn(async (_b: string, fn: (client: { query: typeof vi.fn }) => Promise<unknown>) => fn({ query: dbModule.query })),
+}));
+
+vi.mock("@/lib/db", () => dbModule);
+
+describe("learning path assignment service functions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbModule.withTenantTransaction.mockImplementation(
+      async (_b: string, fn: (client: { query: typeof vi.fn }) => Promise<unknown>) => fn({ query: dbModule.query }),
+    );
+  });
+
+  it("inserts a new assignment and returns true", async () => {
+    dbModule.query.mockResolvedValue({ rows: [{ inserted: true }], rowCount: 1 });
+    const { assignLearningPathToStaff } = await import("./learning-paths-service");
+    const created = await assignLearningPathToStaff("biz-1", "path-a", "user-2", "user-1");
+    expect(created).toBe(true);
+    expect(dbModule.query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO learning_path_assignments"),
+      ["biz-1", "user-2", "path-a", "user-1"],
+    );
+  });
+
+  it("is idempotent: assigning twice returns false the second time", async () => {
+    dbModule.query.mockResolvedValue({ rows: [], rowCount: 0 });
+    const { assignLearningPathToStaff } = await import("./learning-paths-service");
+    const created = await assignLearningPathToStaff("biz-1", "path-a", "user-2", "user-1");
+    expect(created).toBe(false);
+  });
+
+  it("unassigns a path and returns true when a row existed", async () => {
+    dbModule.query.mockResolvedValue({ rowCount: 1 });
+    const { unassignLearningPathFromStaff } = await import("./learning-paths-service");
+    const removed = await unassignLearningPathFromStaff("biz-1", "path-a", "user-2");
+    expect(removed).toBe(true);
+    expect(dbModule.query).toHaveBeenCalledWith(
+      expect.stringContaining("DELETE FROM learning_path_assignments"),
+      ["biz-1", "user-2", "path-a"],
+    );
+  });
+
+  it("returns false when unassigning a path that was never assigned", async () => {
+    dbModule.query.mockResolvedValue({ rowCount: 0 });
+    const { unassignLearningPathFromStaff } = await import("./learning-paths-service");
+    const removed = await unassignLearningPathFromStaff("biz-1", "path-a", "user-2");
+    expect(removed).toBe(false);
+  });
+
+  it("lists path assignments newest first", async () => {
+    dbModule.query.mockResolvedValue({
+      rows: [
+        { user_id: "user-3", full_name: "Carol", assigned_at: new Date("2026-02-01T00:00:00Z") },
+        { user_id: "user-2", full_name: "Alice", assigned_at: new Date("2026-01-01T00:00:00Z") },
+      ],
+    });
+    const { listLearningPathAssignments } = await import("./learning-paths-service");
+    const rows = await listLearningPathAssignments("biz-1", "path-a");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].userId).toBe("user-3");
+    expect(rows[0].assignedAt).toBe("2026-02-01T00:00:00.000Z");
+  });
+
+  it("lists staff path assignments newest first", async () => {
+    dbModule.query.mockResolvedValue({
+      rows: [
+        { path_id: "path-b", title: "Path B", assigned_at: new Date("2026-02-01T00:00:00Z") },
+        { path_id: "path-a", title: "Path A", assigned_at: new Date("2026-01-01T00:00:00Z") },
+      ],
+    });
+    const { listStaffLearningPathAssignments } = await import("./learning-paths-service");
+    const rows = await listStaffLearningPathAssignments("biz-1", "user-2");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].pathId).toBe("path-b");
+    expect(rows[0].title).toBe("Path B");
+  });
+
+  it("reports whether a staff member is assigned a path", async () => {
+    dbModule.query.mockResolvedValue({ rows: [{ id: "1" }] });
+    const { isLearningPathAssignedToStaff } = await import("./learning-paths-service");
+    const yes = await isLearningPathAssignedToStaff("biz-1", "path-a", "user-2");
+    expect(yes).toBe(true);
+
+    dbModule.query.mockResolvedValue({ rows: [] });
+    const no = await isLearningPathAssignedToStaff("biz-1", "path-a", "user-2");
+    expect(no).toBe(false);
   });
 });

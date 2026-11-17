@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { INDUSTRIES, isRetailCatalogueIndustry, type Industry } from "./industries";
 import { hasCapability, hasModule } from "./industry-profile";
 import { KNOWLEDGE_PAGES } from "./knowledge-base";
@@ -12,6 +12,7 @@ import {
   TOUR_ANCHORS,
   applyTourEvent,
   isTourEligible,
+  migrateTourProgress,
   reconcileTourProgress,
   tourById,
   tourFactsNeeded,
@@ -26,6 +27,7 @@ import {
   type TourDefinition,
   type TourInventorySystem,
   type TourProgressEvent,
+  type TourStep,
   type TourViewer,
 } from "./tours";
 
@@ -313,6 +315,73 @@ describe("tour progress", () => {
       expect(run([{ type: "start" }], completed, v2)?.tourVersion).toBe(2);
     });
   });
+
+  describe("migrateTourProgress", () => {
+    const stored: StoredTourProgress = {
+      tourId: "cafe.pos-ticket",
+      tourVersion: 1,
+      seenStepIds: ["a", "b"],
+      currentStepId: "b",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      lastActiveAt: "2026-01-02T00:00:00.000Z",
+      completedAt: null,
+    };
+
+    const tour: TourDefinition = {
+      id: "cafe.pos-ticket",
+      version: 1,
+      pageKey: "page:/pos/ticket",
+      route: "/pos/ticket",
+      title: "Point of sale ticket",
+      description: "Create a ticket at the counter.",
+      eligibility: {},
+      steps: [
+        { id: "a", kind: "explain", title: "A", body: "." },
+        { id: "b", kind: "explain", title: "B", body: "." },
+        { id: "c", kind: "explain", title: "C", body: "." },
+      ],
+    };
+
+    it("bumps the version and keeps compatible steps", () => {
+      const v2 = { ...tour, version: 2, steps: [...tour.steps, { id: "d", kind: "explain", title: "D", body: "." }] as TourStep[] };
+      const migrated = migrateTourProgress(v2, stored)!;
+      expect(migrated.tourVersion).toBe(2);
+      expect(migrated.seenStepIds).toEqual(["a", "b"]);
+      expect(migrated.currentStepId).toBe("b");
+    });
+
+    it("drops seen step ids that no longer exist", () => {
+      const v2 = { ...tour, version: 2, steps: tour.steps.filter((s) => s.id !== "b") };
+      const migrated = migrateTourProgress(v2, stored)!;
+      expect(migrated.tourVersion).toBe(2);
+      expect(migrated.seenStepIds).toEqual(["a"]);
+      expect(migrated.currentStepId).toBeNull();
+    });
+
+    it("withdraws completion when a new step appeared", () => {
+      const completed: StoredTourProgress = { ...stored, seenStepIds: ["a", "b", "c"], completedAt: "2026-01-03T00:00:00.000Z" };
+      const v2 = { ...tour, version: 2, steps: [...tour.steps, { id: "d", kind: "explain", title: "D", body: "." }] as TourStep[] };
+      const migrated = migrateTourProgress(v2, completed)!;
+      expect(migrated.tourVersion).toBe(2);
+      expect(migrated.seenStepIds).toEqual(["a", "b", "c"]);
+      expect(migrated.completedAt).toBeNull();
+    });
+
+    it("is idempotent — migrating twice changes nothing on the second run", () => {
+      const v2 = { ...tour, version: 2, steps: [...tour.steps, { id: "d", kind: "explain", title: "D", body: "." }] as TourStep[] };
+      const first = migrateTourProgress(v2, stored)!;
+      const second = migrateTourProgress(v2, first)!;
+      expect(second.tourVersion).toBe(2);
+      expect(second.seenStepIds).toEqual(first.seenStepIds);
+      expect(second.currentStepId).toBe(first.currentStepId);
+      expect(second.completedAt).toBe(first.completedAt);
+    });
+
+    it("returns null for null stored progress", () => {
+      const v2 = { ...tour, version: 2 };
+      expect(migrateTourProgress(v2, null)).toBeNull();
+    });
+  });
 });
 
 
@@ -551,5 +620,101 @@ describe("tour coverage of the nine article pages", () => {
     for (const def of TOURS) {
       expect(def.steps[0].kind, def.id).toBe("explain");
     }
+  });
+});
+
+/**
+ * Issue #972, item 9 — staff assignments for tours. These tests exercise the
+ * service-layer assignment functions against a stubbed `@/lib/db`; no real
+ * database is needed.
+ */
+const dbModule = vi.hoisted(() => ({
+  query: vi.fn(),
+  withTenantTransaction: vi.fn(async (_b: string, fn: (client: { query: typeof vi.fn }) => Promise<unknown>) => fn({ query: dbModule.query })),
+}));
+
+vi.mock("@/lib/db", () => dbModule);
+
+describe("tour assignment service functions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbModule.withTenantTransaction.mockImplementation(
+      async (_b: string, fn: (client: { query: typeof vi.fn }) => Promise<unknown>) => fn({ query: dbModule.query }),
+    );
+  });
+
+  it("inserts a new assignment and returns true", async () => {
+    dbModule.query.mockResolvedValue({ rows: [{ inserted: true }], rowCount: 1 });
+    const { assignTourToStaff } = await import("./tours-service");
+    const created = await assignTourToStaff("biz-1", "tour-a", "user-2", "user-1");
+    expect(created).toBe(true);
+    expect(dbModule.query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO tour_assignments"),
+      ["biz-1", "user-2", "tour-a", "user-1"],
+    );
+  });
+
+  it("is idempotent: assigning twice returns false the second time", async () => {
+    dbModule.query.mockResolvedValue({ rows: [], rowCount: 0 });
+    const { assignTourToStaff } = await import("./tours-service");
+    const created = await assignTourToStaff("biz-1", "tour-a", "user-2", "user-1");
+    expect(created).toBe(false);
+  });
+
+  it("unassigns a tour and returns true when a row existed", async () => {
+    dbModule.query.mockResolvedValue({ rowCount: 1 });
+    const { unassignTourFromStaff } = await import("./tours-service");
+    const removed = await unassignTourFromStaff("biz-1", "tour-a", "user-2");
+    expect(removed).toBe(true);
+    expect(dbModule.query).toHaveBeenCalledWith(
+      expect.stringContaining("DELETE FROM tour_assignments"),
+      ["biz-1", "user-2", "tour-a"],
+    );
+  });
+
+  it("returns false when unassigning a tour that was never assigned", async () => {
+    dbModule.query.mockResolvedValue({ rowCount: 0 });
+    const { unassignTourFromStaff } = await import("./tours-service");
+    const removed = await unassignTourFromStaff("biz-1", "tour-a", "user-2");
+    expect(removed).toBe(false);
+  });
+
+  it("lists tour assignments newest first", async () => {
+    dbModule.query.mockResolvedValue({
+      rows: [
+        { user_id: "user-3", full_name: "Carol", assigned_at: new Date("2026-02-01T00:00:00Z") },
+        { user_id: "user-2", full_name: "Alice", assigned_at: new Date("2026-01-01T00:00:00Z") },
+      ],
+    });
+    const { listTourAssignments } = await import("./tours-service");
+    const rows = await listTourAssignments("biz-1", "tour-a");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].userId).toBe("user-3");
+    expect(rows[0].assignedAt).toBe("2026-02-01T00:00:00.000Z");
+  });
+
+  it("lists staff tour assignments newest first", async () => {
+    dbModule.query.mockResolvedValue({
+      rows: [
+        { tour_id: "tour-b", title: "Tour B", assigned_at: new Date("2026-02-01T00:00:00Z") },
+        { tour_id: "tour-a", title: "Tour A", assigned_at: new Date("2026-01-01T00:00:00Z") },
+      ],
+    });
+    const { listStaffTourAssignments } = await import("./tours-service");
+    const rows = await listStaffTourAssignments("biz-1", "user-2");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].tourId).toBe("tour-b");
+    expect(rows[0].title).toBe("Tour B");
+  });
+
+  it("reports whether a staff member is assigned a tour", async () => {
+    dbModule.query.mockResolvedValue({ rows: [{ id: "1" }] });
+    const { isTourAssignedToStaff } = await import("./tours-service");
+    const yes = await isTourAssignedToStaff("biz-1", "tour-a", "user-2");
+    expect(yes).toBe(true);
+
+    dbModule.query.mockResolvedValue({ rows: [] });
+    const no = await isTourAssignedToStaff("biz-1", "tour-a", "user-2");
+    expect(no).toBe(false);
   });
 });

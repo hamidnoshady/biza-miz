@@ -23,6 +23,7 @@ import {
   type OtpPurpose,
 } from "./otp-challenge";
 import { getSmsProvider } from "./sms-config";
+import { claimVerifiedPhone } from "./iam/global-identity-service";
 import { isMobilePhone, phoneE164 } from "./phone";
 import {
   DEFAULT_PHONE_OTP_POLICY,
@@ -481,6 +482,66 @@ export async function stampPhoneVerified(options: {
    * verification above has already succeeded, so nothing here can fail the login.
    */
   await ensurePersonnelFileForMembership(options.businessId, options.userId);
+
+  /*
+   * ESH-199 (#1384) — the proof also belongs to the *person*, not only to this
+   * membership. Until now `users.phone_e164` was the only record, so a verified
+   * number in one business was invisible to the global identity the commercial
+   * purchase precondition reads (`src/lib/identity-billing-contract.ts`).
+   *
+   * Deliberately best-effort and last: the local stamp is already committed and
+   * the person is already signed in, so a global mirror must never fail the
+   * door. It is *not* silent, though: a refusal (the number belongs to another
+   * identity, or this identity's number is write-once from a business door) and
+   * a thrown failure are both logged with ids only, never the number.
+   */
+  await stampGlobalIdentityPhone(options.businessId, options.userId, phone);
+}
+
+/**
+ * Mirror a just-proved membership phone onto its global identity, if it has one.
+ *
+ * PIN-only memberships have no `platform_user_id` and are skipped: they are a
+ * person, but not a global identity, and inventing one here is exactly the
+ * implicit merge #1384 forbids. The phone actually on file is used when the
+ * caller did not name one, because that is the value the local stamp kept.
+ */
+async function stampGlobalIdentityPhone(
+  businessId: string,
+  userId: string,
+  phone: string | null,
+): Promise<void> {
+  let platformUserId: string | null = null;
+  try {
+    const { rows } = await query<{ platform_user_id: string | null; phone_e164: string | null }>(
+      `SELECT platform_user_id, phone_e164 FROM users WHERE id = $1 AND business_id = $2`,
+      [userId, businessId],
+    );
+    const row = rows[0];
+    platformUserId = row?.platform_user_id ?? null;
+    if (!platformUserId) return;
+    const candidate = phone ?? row.phone_e164;
+    if (!candidate) return;
+
+    const result = await claimVerifiedPhone({ platformUserId, phone: candidate });
+    if (!result.ok) {
+      // Ids only. The candidate number is never logged: logging it would put a
+      // verified personal identifier in every "mirror skipped" line.
+      console.warn("[identity] global phone mirror skipped", {
+        businessId,
+        membershipId: userId,
+        platformUserId,
+        reason: result.error,
+      });
+    }
+  } catch (error) {
+    console.error("[identity] global phone mirror failed", {
+      businessId,
+      membershipId: userId,
+      platformUserId,
+      error,
+    });
+  }
 }
 
 /** Validate + canonicalise a typed number, or null when it is not a mobile. */

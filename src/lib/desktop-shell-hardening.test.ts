@@ -74,7 +74,24 @@ describe("the shipped main process has no smoke backdoor", () => {
     expect(desktopManifest.build.files).not.toContain("scripts/smoke-packaged.js");
     expect(desktopManifest.build.files).not.toContain("smoke-packaged.js");
     // The harness must not be reachable through a wildcard either.
-    expect(desktopManifest.build.files.filter((entry) => entry.includes("*"))).toEqual([]);
+    const includedFiles = desktopManifest.build.files.filter((entry) => !entry.startsWith("!"));
+    expect(includedFiles.filter((entry) => entry.includes("*"))).toEqual([]);
+  });
+
+  it("excludes only the optional PostgreSQL GUI files from the package list", () => {
+    expect(desktopManifest.build.files.filter((entry) => entry.startsWith("!"))).toEqual([
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/stackbuilder.exe",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase*.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw*.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase3210u_net_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase3210u_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase3210u_xml_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_adv_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_aui_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_core_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_html_vc_x64_custom.dll",
+      "!node_modules/@embedded-postgres/windows-x64/native/bin/wxmsw3210u_xrc_vc_x64_custom.dll",
+    ]);
   });
 });
 
