@@ -137,6 +137,7 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     const modeIcon = modeSelect.querySelector("svg");
     expect(modeIcon).toBeTruthy();
     fireEvent.click(modeIcon!);
+    expect(composerBox.getAttribute("data-composer-collapsed")).toBe("true");
     expect(screen.getByRole("option", { name: /خودکار/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /سریع/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /تفکر عمیق/ })).toBeTruthy();
