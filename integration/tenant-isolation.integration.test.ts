@@ -796,3 +796,25 @@ describe("cross-business identity", () => {
     });
   });
 });
+
+it("reports platform backup manifest counts through the restricted application role", async () => {
+  const db = await import("../src/lib/db");
+  const { localSchemaSnapshot } = await import("../src/lib/platform-backup-service");
+  const previousUrl = process.env.DATABASE_URL;
+  await db.closeDatabasePool();
+  process.env.DATABASE_URL = urlFor(databaseName, { name: APP_ROLE, password: APP_PASSWORD });
+
+  try {
+    const tenantRows = await db.withTenant(alpha.businessId, () =>
+      db.query<{ count: number }>("SELECT count(*)::int AS count FROM businesses"));
+    expect(tenantRows.rows[0].count).toBe(1);
+    const expected = await ownerClient.query<{ count: number }>("SELECT count(*)::int AS count FROM businesses");
+
+    const snapshot = await db.withTenant(alpha.businessId, () => localSchemaSnapshot(true));
+    expect(snapshot.businessCount).toBe(expected.rows[0].count);
+    expect(snapshot.coreTables).toContainEqual({ name: "businesses", rows: expected.rows[0].count });
+  } finally {
+    await db.closeDatabasePool();
+    process.env.DATABASE_URL = previousUrl;
+  }
+});
