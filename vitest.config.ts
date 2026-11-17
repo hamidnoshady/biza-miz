@@ -31,6 +31,15 @@ export default defineConfig({
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     setupFiles: ["./vitest.setup.ts"],
     /*
+     * Node 26 enables its experimental Web Storage API by default and leaves
+     * `globalThis.localStorage` undefined without `--localstorage-file`. That
+     * property shadows the one Vitest's jsdom environment installs, so every
+     * component test touching storage died on `undefined.clear()` (and a
+     * `Storage.prototype` spy could not intercept anything). Disabling the
+     * Node feature in the workers lets jsdom's real implementation through.
+     */
+    poolOptions: { forks: { execArgv: ["--no-experimental-webstorage"] } },
+    /*
      * Vitest's 5s default is a *load* threshold here, not a correctness one.
      * The slowest honest tests in this suite are the ones that type through
      * `userEvent` (~2.5s) and the one that walks every client component's

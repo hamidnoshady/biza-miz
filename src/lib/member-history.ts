@@ -148,6 +148,10 @@ export const MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS: readonly MemberAttribution
 ];
 
 export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = [
+  // A persisted quote is the price a person was offered; the settlement keeps
+  // it (FK RESTRICT), so hard deletion must be refused with a flag, not a
+  // database error.
+  { table: 'billing_quotes', columns: ["platform_user_id"] },
   // A roster membership is retained rather than orphaned by hard deletion.
   { table: 'marketing_agents', columns: ["user_id", "created_by"] },
   { table: 'marketing_targets', columns: ["created_by"] },
