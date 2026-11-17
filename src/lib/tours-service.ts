@@ -17,6 +17,7 @@ import { publishedTourById } from "./tour-studio-service";
 import { hasTourEvidence } from "./tour-evidence-service";
 import {
   applyTourEvent,
+  migrateTourProgress,
   tourFactsNeeded,
   tourForViewer,
   type TourViewer,
@@ -216,4 +217,176 @@ export async function verifyTourStep(
   const result = await recordTourEvent(businessId, userId, tour, { type: "verified", stepId });
   if (!result.ok) return { ok: false, error: "not_verifiable" };
   return { ok: true, progress: result.progress, evidenceAt: evidence.lastAt };
+}
+
+/**
+ * Migrates every member's stored progress for `tour` within `businessId` to
+ * the tour's current revision: bumps `tour_version`, drops seen ids that no
+ * longer exist, withdraws completion when a step has appeared that the
+ * member never saw, and nulls a resume step that no longer exists.
+ *
+ * Returns the number of rows that were actually changed (version or step set
+ * differed). Idempotent — running it again after a successful migration
+ * changes nothing.
+ */
+export type MigrateTourProgressResult = {
+  changed: number;
+  migrated: number;
+};
+
+export async function migrateTourProgressForTour(
+  businessId: string,
+  tourId: string,
+  tour: TourDefinition,
+): Promise<MigrateTourProgressResult> {
+  return withTenantTransaction(businessId, async (client) => {
+    const { rows } = await client.query<ProgressRow & { user_id: string }>(
+      `SELECT ${COLUMNS}, user_id FROM tour_member_progress
+        WHERE business_id = $1 AND tour_id = $2
+        FOR UPDATE`,
+      [businessId, tourId],
+    );
+
+    let changed = 0;
+    let migrated = 0;
+
+    for (const row of rows) {
+      const stored = mapRow(row);
+      const migratedProgress = migrateTourProgress(tour, stored);
+      if (!migratedProgress) continue;
+
+      migrated++;
+
+      const versionChanged = migratedProgress.tourVersion !== stored.tourVersion;
+      const seenChanged =
+        JSON.stringify(migratedProgress.seenStepIds.sort()) !==
+        JSON.stringify(stored.seenStepIds.sort());
+      const currentChanged = migratedProgress.currentStepId !== stored.currentStepId;
+      const completedChanged = migratedProgress.completedAt !== stored.completedAt;
+
+      if (!versionChanged && !seenChanged && !currentChanged && !completedChanged) continue;
+
+      changed++;
+
+      await client.query(
+        `UPDATE tour_member_progress
+            SET tour_version = $4, seen_step_ids = $5::text[], current_step_id = $6,
+                completed_at = $7, last_active_at = now()
+          WHERE business_id = $1 AND user_id = $2 AND tour_id = $3`,
+        [
+          businessId,
+          row.user_id,
+          tourId,
+          migratedProgress.tourVersion,
+          migratedProgress.seenStepIds,
+          migratedProgress.currentStepId,
+          migratedProgress.completedAt ? iso(new Date()) : null,
+        ],
+      );
+    }
+
+    return { changed, migrated };
+  });
+}
+
+/**
+ * Assigns a tour to a staff member within `businessId`. Idempotent — assigning
+ * the same (member, tour) twice is a no-op. Returns true when a new row was
+ * inserted, false when the assignment already existed.
+ */
+export async function assignTourToStaff(
+  businessId: string,
+  tourId: string,
+  userId: string,
+  actorId: string,
+): Promise<boolean> {
+  return withTenantTransaction(businessId, async (client) => {
+    const { rows } = await client.query<{ inserted: boolean }>(
+      `INSERT INTO tour_assignments (business_id, user_id, tour_id, assigned_by)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (business_id, user_id, tour_id) DO NOTHING
+       RETURNING true AS inserted`,
+      [businessId, userId, tourId, actorId],
+    );
+    return rows.length > 0;
+  });
+}
+
+/**
+ * Removes a staff member's assignment to a tour. Returns true when a row was
+ * deleted, false when no assignment existed.
+ */
+export async function unassignTourFromStaff(
+  businessId: string,
+  tourId: string,
+  userId: string,
+): Promise<boolean> {
+  return withTenantTransaction(businessId, async (client) => {
+    const { rowCount } = await client.query(
+      `DELETE FROM tour_assignments
+        WHERE business_id = $1 AND user_id = $2 AND tour_id = $3`,
+      [businessId, userId, tourId],
+    );
+    return (rowCount ?? 0) > 0;
+  });
+}
+
+/**
+ * The staff members assigned to one tour, newest assignment first.
+ */
+export async function listTourAssignments(
+  businessId: string,
+  tourId: string,
+): Promise<{ userId: string; fullName: string | null; assignedAt: string }[]> {
+  const { rows } = await query<{ user_id: string; full_name: string | null; assigned_at: Date | string }>(
+    `SELECT a.user_id, u.full_name, a.assigned_at
+       FROM tour_assignments a
+       JOIN users u ON u.id = a.user_id
+      WHERE a.business_id = $1 AND a.tour_id = $2
+      ORDER BY a.assigned_at DESC, u.full_name`,
+    [businessId, tourId],
+  );
+  return rows.map((row) => ({
+    userId: row.user_id,
+    fullName: row.full_name,
+    assignedAt: iso(row.assigned_at),
+  }));
+}
+
+/**
+ * The tours assigned to one staff member, newest assignment first.
+ */
+export async function listStaffTourAssignments(
+  businessId: string,
+  userId: string,
+): Promise<{ tourId: string; title: string; assignedAt: string }[]> {
+  const { rows } = await query<{ tour_id: string; title: string; assigned_at: Date | string }>(
+    `SELECT a.tour_id, t.title, a.assigned_at
+       FROM tour_assignments a
+       JOIN users u ON u.id = a.user_id
+      WHERE a.business_id = $1 AND a.user_id = $2
+      ORDER BY a.assigned_at DESC, a.tour_id`,
+    [businessId, userId],
+  );
+  return rows.map((row) => ({
+    tourId: row.tour_id,
+    title: row.title,
+    assignedAt: iso(row.assigned_at),
+  }));
+}
+
+/**
+ * Whether `userId` is assigned `tourId` within `businessId`.
+ */
+export async function isTourAssignedToStaff(
+  businessId: string,
+  tourId: string,
+  userId: string,
+): Promise<boolean> {
+  const { rows } = await query<{ id: string }>(
+    `SELECT 1 FROM tour_assignments
+      WHERE business_id = $1 AND user_id = $2 AND tour_id = $3`,
+    [businessId, userId, tourId],
+  );
+  return rows.length > 0;
 }
