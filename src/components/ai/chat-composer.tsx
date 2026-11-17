@@ -301,7 +301,11 @@ export function ChatComposer({
         onDrop={onDrop}
         className={cn(
           "relative rounded-2xl border bg-card shadow-[0_1px_2px_rgb(41_37_36/0.04)] transition-all duration-200",
-          compact || isCollapsed ? "p-2" : "p-3 sm:p-3.5",
+          isCollapsed
+            ? "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 p-2"
+            : compact
+              ? "p-2"
+              : "p-3 sm:p-3.5",
           dragOver
             ? "border-primary ring-4 ring-primary/20"
             : focused
@@ -332,7 +336,7 @@ export function ChatComposer({
           placeholder="پیام خود را بنویسید…"
           aria-label="پیام"
           className={cn(
-            "w-full resize-none bg-transparent px-1.5 py-1 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground",
+            "w-full min-w-0 resize-none bg-transparent px-1.5 py-1 text-sm leading-6 text-foreground outline-none placeholder:text-muted-foreground",
             isCollapsed ? "min-h-8" : "min-h-10",
           )}
         />
@@ -358,8 +362,8 @@ export function ChatComposer({
           dir="rtl"
           data-composer-toolbar=""
           className={cn(
-            "flex items-center gap-1 pt-1",
-            isCollapsed && "justify-between",
+            "flex items-center gap-1",
+            isCollapsed ? "pt-0" : "pt-1",
           )}
         >
           {!isCollapsed && showSecondaryMenu ? (
