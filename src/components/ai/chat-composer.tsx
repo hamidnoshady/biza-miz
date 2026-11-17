@@ -54,7 +54,6 @@ import {
 } from "@/app/dashboard/ai/ai-workspace-context";
 import {
   AI_CHAT_MODES,
-  AI_MODE_HINTS,
   AI_MODE_LABELS,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
@@ -163,14 +162,6 @@ export function ChatComposer({
   const availableTasks = resolveAvailablePresetTasks(mode, eligibleTaskIds);
   const currentTask = resolveCurrentTaskSummary(task, customTask);
   const activeRuntimeMode = workspaceContext?.runtimeMode ?? "auto";
-  const ActiveRuntimeIcon =
-    activeRuntimeMode === "auto"
-      ? SparklesIcon
-      : activeRuntimeMode === "instant"
-        ? ZapIcon
-        : activeRuntimeMode === "thinking"
-          ? BrainCircuitIcon
-          : FlaskConicalIcon;
 
   const focusOptions =
     workspaceContext?.accessibleFocuses &&
@@ -302,9 +293,6 @@ export function ChatComposer({
         data-composer-box=""
         data-composer-collapsed={isCollapsed ? "true" : "false"}
         data-ai-guide="assistant-composer"
-        onClick={() => {
-          if (isCollapsed) setExpanded(true);
-        }}
         onDragOver={(event) => {
           event.preventDefault();
           setDragOver(true);
@@ -849,7 +837,6 @@ export function ChatComposer({
                     "border-amber-200 bg-amber-100 text-amber-950",
                 )}
               >
-                <ActiveRuntimeIcon className="size-4 shrink-0" aria-hidden="true" />
                 <SelectValue>{AI_MODE_LABELS[activeRuntimeMode]}</SelectValue>
               </SelectTrigger>
               <SelectContent side="top" align="start" position="popper" className="w-72">
@@ -863,17 +850,8 @@ export function ChatComposer({
                         : BrainCircuitIcon;
                   return (
                     <SelectItem key={value} value={value} className="py-2">
-                      <span className="flex min-w-0 items-center gap-2.5">
-                        <span
-                          className={cn(
-                            "grid size-8 shrink-0 place-items-center rounded-lg",
-                            activeRuntimeMode === value
-                              ? "bg-amber-100 text-amber-800"
-                              : "bg-muted text-muted-foreground",
-                          )}
-                        >
-                          <Icon className="size-4" aria-hidden="true" />
-                        </span>
+                      <span className="inline-flex min-w-0 items-center gap-2">
+                        <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                         <span className="text-xs font-semibold">
                           {AI_MODE_LABELS[value]}
                         </span>
