@@ -40,6 +40,14 @@ import { applyTaxAndRounding } from "./billing/rating/engine";
 import { billingLog } from "./billing/observability";
 import { decidePlanTransition, PlanTransitionError } from "./billing/policy/transitions";
 import { applyPayment, markOverdue, voidInvoice, InvoiceStateError } from "./billing/policy/invoice-state";
+import {
+  addCalendarMonths,
+  type PlanTermMonths,
+} from "./billing/quote/plan-quote";
+import {
+  readPromotionPolicy,
+  termDiscountRateFor,
+} from "./billing/quote/promotion-policy";
 
 export { WalletInsufficientFundsError };
 
@@ -60,6 +68,8 @@ export interface BusinessSubscription {
   autoRenew: boolean;
   cancelledAt: string | null;
   lastRenewalAt: string | null;
+  /** The paid prepayment term; 1 for legacy monthly subscriptions. */
+  termMonths: PlanTermMonths;
 }
 
 /** Persian labels for the console UI. */
@@ -105,6 +115,7 @@ type SubscriptionRow = {
   auto_renew: boolean;
   cancelled_at: string | Date | null;
   last_renewal_at: string | Date | null;
+  term_months: number;
 }
 
 function toSubscription(row: SubscriptionRow): BusinessSubscription {
@@ -123,12 +134,13 @@ function toSubscription(row: SubscriptionRow): BusinessSubscription {
     autoRenew: row.auto_renew,
     cancelledAt: row.cancelled_at ? iso(row.cancelled_at) : null,
     lastRenewalAt: row.last_renewal_at ? iso(row.last_renewal_at) : null,
+    termMonths: row.term_months === 3 || row.term_months === 12 ? row.term_months : 1,
   };
 }
 
 const SUBSCRIPTION_COLUMNS = `s.business_id, b.name AS business_name, s.plan_key, s.status, s.started_at,
        s.current_period_start, s.current_period_end, s.trial_end, s.trial_started_at, s.grace_end,
-       s.cancel_at_period_end, s.auto_renew, s.cancelled_at, s.last_renewal_at`;
+       s.cancel_at_period_end, s.auto_renew, s.cancelled_at, s.last_renewal_at, s.term_months`;
 
 export async function getBusinessSubscription(businessId: string): Promise<BusinessSubscription | null> {
   const { rows } = await query<SubscriptionRow>(
@@ -183,6 +195,8 @@ export async function changeBusinessPlan(input: {
   source: "admin" | "purchase" | "trial";
   /** Admin may set this. A purchase always enables auto-renew. */
   autoRenew?: boolean;
+  /** The prepaid term this activation buys; defaults to the payment's quote or 1. */
+  termMonths?: PlanTermMonths;
   /**
    * The verified plan-purchase payment this change fulfils. When given, the
    * payment's `plan_activated_at` is read under lock and stamped in this same
@@ -214,6 +228,7 @@ export async function changeBusinessPlan(input: {
   // Variables computed inside transaction need to be available after commit for logging/entitlements
   let isExtension = false;
   let extensionPeriodEnd: string | null = null;
+  let paymentTermMonths: PlanTermMonths | null = null;
   try {
     await client.query("BEGIN");
     // Lock the business row so two concurrent plan changes serialize.
@@ -234,11 +249,16 @@ export async function changeBusinessPlan(input: {
     // Use locked current for decision to prevent stale-state races (#928 P1 atomic transitions)
     existing = lockedCurrent;
     if (input.paymentId) {
-      const { rows: paymentRows } = await client.query<{ plan_activated_at: string | null }>(
-        `SELECT plan_activated_at FROM billing_payments
+      const { rows: paymentRows } = await client.query<{
+        plan_activated_at: string | null;
+        term_months: number | null;
+      }>(
+        `SELECT plan_activated_at, term_months FROM billing_payments
           WHERE id = $1 AND business_id = $2 FOR UPDATE`,
         [input.paymentId, input.businessId],
       );
+      const paidTerm = paymentRows[0]?.term_months;
+      if (paidTerm === 1 || paidTerm === 3 || paidTerm === 12) paymentTermMonths = paidTerm;
       if (paymentRows[0]?.plan_activated_at) {
         await client.query("ROLLBACK");
         const current = existing ?? (await getBusinessSubscription(input.businessId));
@@ -272,17 +292,17 @@ export async function changeBusinessPlan(input: {
       throw err;
     }
 
-    // P0 fix: same-plan purchase should extend the billing period exactly once,
-    // not silently do nothing. If decidePlanTransition returned unchanged for a purchase,
-    // we convert it into an explicit extension: currentPeriodEnd + 1 month.
+    // A same-plan purchase extends the billing period exactly once rather than
+    // silently doing nothing. If decidePlanTransition returned unchanged for a
+    // purchase, convert it into an explicit extension by the paid term.
     // This preserves Exactly-Once semantics via fulfilment_status idempotency
     // (retry of same payment does not extend twice).
     if (decision!.unchanged && existing) {
       if (input.source === "purchase" && samePlan) {
-        // Treat as renewal/extension: keep existing period and extend by one month from its end,
-        // or from now if already expired.
+        // Treat as renewal/extension: keep the existing start and extend by the
+        // paid term from its end, or from now if already expired.
         const baseEnd = existing.currentPeriodEnd > now.toISOString() ? existing.currentPeriodEnd : now.toISOString();
-        extensionPeriodEnd = addMonths(baseEnd, 1);
+        extensionPeriodEnd = addCalendarMonths(baseEnd, input.termMonths ?? paymentTermMonths ?? existing.termMonths);
         isExtension = true;
         // Build a synthetic decision that will write the extended period
         decision = {
@@ -299,8 +319,10 @@ export async function changeBusinessPlan(input: {
       }
     }
 
+    const termMonths: PlanTermMonths =
+      input.termMonths ?? paymentTermMonths ?? existing?.termMonths ?? 1;
     const periodStart = now.toISOString();
-    const paidPeriodEnd = addMonths(periodStart, 1);
+    const paidPeriodEnd = addCalendarMonths(periodStart, termMonths);
     const periodEnd =
       decision!.status === "trialing" && decision!.trialEnd ? decision!.trialEnd : extensionPeriodEnd ?? paidPeriodEnd;
     // A manual assignment keeps a period that is already running. A purchase
@@ -318,12 +340,14 @@ export async function changeBusinessPlan(input: {
     await client.query(
       `INSERT INTO business_subscriptions
          (business_id, plan_key, status, started_at, current_period_start, current_period_end,
-          trial_end, trial_started_at, grace_end, cancel_at_period_end, auto_renew, cancelled_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, false, $9, NULL)
+          trial_end, trial_started_at, grace_end, cancel_at_period_end, auto_renew, cancelled_at,
+          term_months)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, false, $9, NULL, $12)
        ON CONFLICT (business_id) DO UPDATE SET
          plan_key = EXCLUDED.plan_key,
          status = EXCLUDED.status,
          auto_renew = EXCLUDED.auto_renew,
+         term_months = EXCLUDED.term_months,
          current_period_start = CASE WHEN $10 THEN business_subscriptions.current_period_start
                                      ELSE EXCLUDED.current_period_start END,
          current_period_end = CASE WHEN $11 THEN business_subscriptions.current_period_end
@@ -345,6 +369,7 @@ export async function changeBusinessPlan(input: {
         decision!.autoRenew,
         keepStart,
         keepEnd,
+        termMonths,
       ],
     );
     await client.query(`UPDATE businesses SET plan = $2, updated_at = now() WHERE id = $1`, [
@@ -468,10 +493,10 @@ export async function reactivateBusinessSubscription(businessId: string): Promis
   await query(
     `UPDATE business_subscriptions
         SET status = 'active', cancelled_at = NULL, cancel_at_period_end = false,
-            current_period_start = now(), current_period_end = now() + interval '1 month',
+            current_period_start = now(), current_period_end = $2,
             updated_at = now()
       WHERE business_id = $1`,
-    [businessId],
+    [businessId, addCalendarMonths(new Date().toISOString(), current.termMonths)],
   );
   return (await getBusinessSubscription(businessId))!;
 }
@@ -508,7 +533,7 @@ export interface SubscriptionTotal {
  */
 export async function calculateSubscriptionTotal(
   businessId: string,
-  opts?: { planKey?: string; discountRial?: number },
+  opts?: { planKey?: string; discountRial?: number; termMonths?: PlanTermMonths },
 ): Promise<SubscriptionTotal> {
   const { rows } = await query<{
     plan_key: string;
@@ -540,15 +565,16 @@ export async function calculateSubscriptionTotal(
   );
   if (!rows[0]) throw new SubscriptionError("business_not_found");
 
+  const termMonths: PlanTermMonths = opts?.termMonths ?? 1;
   const lines: SubscriptionLine[] = [];
   const base = rows[0].monthly_price_rial == null ? 0 : n(rows[0].monthly_price_rial);
   if (base > 0) {
     lines.push({
       kind: "plan",
       description: `اشتراک ماهانهٔ پلن ${rows[0].plan_name}`,
-      quantity: 1,
+      quantity: termMonths,
       unitAmountRial: base,
-      amountRial: base,
+      amountRial: base * termMonths,
       featureKey: null,
       priceVersionId: rows[0].price_version_id ?? null,
     });
@@ -561,22 +587,28 @@ export async function calculateSubscriptionTotal(
     lines.push({
       kind: "addon",
       description: `افزونهٔ ماهانه: ${row.feature_name ?? row.feature_key}`,
-      quantity: 1,
+      quantity: termMonths,
       unitAmountRial: amount,
-      amountRial: amount,
+      amountRial: amount * termMonths,
       featureKey: row.feature_key,
     });
   }
-  const subtotal = base + addons;
+  const subtotal = (base + addons) * termMonths;
+  // A prepaid term's duration discount is configuration, and the default is
+  // zero. A one-month renewal is byte-for-byte the legacy calculation.
+  const termDiscountRial =
+    termMonths > 1
+      ? Math.round(subtotal * termDiscountRateFor(await readPromotionPolicy(), termMonths))
+      : 0;
   const taxed = applyTaxAndRounding({
     subtotalRial: subtotal,
-    discountRial: opts?.discountRial ?? 0,
+    discountRial: opts?.discountRial ?? termDiscountRial,
     taxRateBps: Number(rows[0].tax_rate_bps ?? 0),
     rounding: rows[0].rounding === "floor" ? "floor" : "ceil",
   });
   return {
-    baseRial: base,
-    addonsRial: addons,
+    baseRial: base * termMonths,
+    addonsRial: addons * termMonths,
     subtotalRial: taxed.subtotalRial,
     discountRial: taxed.discountRial,
     taxRial: taxed.taxRial,
@@ -891,7 +923,11 @@ export async function renewBusinessSubscription(
     return { status: "expired" };
   }
 
-  const total = await calculateSubscriptionTotal(businessId);
+  // Renewal repeats the term the business paid for; a prepaid 3/12-month
+  // subscription must not silently fall back to monthly billing.
+  const total = await calculateSubscriptionTotal(businessId, {
+    termMonths: subscription.termMonths,
+  });
   const reference = `subscription-renewal:${subscription.currentPeriodEnd}`;
   const plan = await getBillingPlan(subscription.planKey);
   const { rows: csRows } = await query<{ default_grace_days: number }>(
@@ -907,7 +943,11 @@ export async function renewBusinessSubscription(
           SET current_period_start = $2, current_period_end = $3, status = 'active',
               grace_end = NULL, last_renewal_at = now(), updated_at = now()
         WHERE business_id = $1`,
-      [businessId, subscription.currentPeriodEnd, addMonths(subscription.currentPeriodEnd, 1)],
+      [
+        businessId,
+        subscription.currentPeriodEnd,
+        addCalendarMonths(subscription.currentPeriodEnd, subscription.termMonths),
+      ],
     );
     return { status: "free", invoiceId: null };
   }
@@ -1026,7 +1066,11 @@ async function advancePeriodTx(
         SET current_period_start = $2, current_period_end = $3, status = 'active',
             grace_end = NULL, updated_at = now()
       WHERE business_id = $1`,
-    [businessId, subscription.currentPeriodEnd, addMonths(subscription.currentPeriodEnd, 1)],
+    [
+      businessId,
+      subscription.currentPeriodEnd,
+      addCalendarMonths(subscription.currentPeriodEnd, subscription.termMonths),
+    ],
   );
 }
 

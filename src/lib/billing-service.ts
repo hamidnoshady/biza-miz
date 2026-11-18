@@ -18,6 +18,8 @@ import {
 } from "./billing-plans-service";
 import { changeBusinessPlan } from "./subscription-service";
 import { issuePurchaseInvoice } from "./purchase-invoice-service";
+import { consumeQuote } from "./billing/quote/quote-store";
+import type { PlanTermMonths } from "./billing/quote/plan-quote";
 
 export { WalletInsufficientFundsError };
 
@@ -148,6 +150,8 @@ export async function activatePurchasedPlan(input: {
   source?: "purchase" | "admin";
   /** The payment being fulfilled — makes the activation apply once per payment. */
   paymentId?: string | null;
+  /** The prepaid term the payment bought; 1 keeps legacy monthly behaviour. */
+  termMonths?: PlanTermMonths;
 }): Promise<void> {
   await withoutTenantScope("plan_purchase", () =>
     changeBusinessPlan({
@@ -155,6 +159,7 @@ export async function activatePurchasedPlan(input: {
       planKey: input.planKey,
       source: input.source ?? "purchase",
       paymentId: input.paymentId ?? null,
+      termMonths: input.termMonths,
     }),
   );
 }
@@ -256,10 +261,52 @@ async function applyPurchasedPayment(payment: {
       source: "addon",
     });
   } else if (payment.purpose === "plan_purchase" && payment.planKey) {
+    // The payment's persisted quote is settled here, exactly once. For a wallet
+    // payment this debits the balance in the same transaction that flips the
+    // quote and spends the coupon; for a gateway payment the money already
+    // arrived and only the quote's once-only consumption is recorded.
+    let termMonths: PlanTermMonths = 1;
+    if (payment.id) {
+      const { rows } = await query<{
+        quote_id: string | null;
+        term_months: number;
+        amount_rial: string | number;
+        gateway: string;
+      }>(
+        `SELECT quote_id, term_months, amount_rial, gateway
+           FROM billing_payments
+          WHERE id = $1 AND business_id = $2`,
+        [payment.id, payment.businessId],
+      );
+      const row = rows[0];
+      if (row) {
+        termMonths = row.term_months === 3 || row.term_months === 12 ? row.term_months : 1;
+        if (row.quote_id) {
+          const { rows: quoteRows } = await query<{ net_rial: string | number }>(
+            `SELECT net_rial FROM billing_quotes WHERE id = $1 AND business_id = $2`,
+            [row.quote_id, payment.businessId],
+          );
+          if (
+            !quoteRows[0] ||
+            Number(quoteRows[0].net_rial) !== Number(row.amount_rial)
+          ) {
+            throw new Error("quote_amount_mismatch");
+          }
+          const consumed = await consumeQuote({
+            businessId: payment.businessId,
+            quoteId: row.quote_id,
+            paymentId: payment.id,
+            debitWallet: row.gateway === "wallet" ? { note: "خرید اشتراک از کیف پول" } : null,
+          });
+          if (!consumed.ok) throw new Error(consumed.error);
+        }
+      }
+    }
     await activatePurchasedPlan({
       businessId: payment.businessId,
       planKey: payment.planKey,
       paymentId: payment.id ?? null,
+      termMonths,
     });
     const features = await listPlanFeatures(payment.planKey);
     for (const f of features) {

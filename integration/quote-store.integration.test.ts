@@ -43,6 +43,7 @@ function maintenanceUrl(): string {
 async function createCoupon(overrides: Partial<{
   percentBasisPoints: number;
   minTermMonths: number;
+  maxRedemptions: number;
   maxRedemptionsPerBusiness: number;
 }> = {}): Promise<{ id: string; code: string }> {
   const code = `C${randomUUID().slice(0, 8).toUpperCase()}`;
@@ -57,9 +58,15 @@ async function createCoupon(overrides: Partial<{
       `INSERT INTO billing_coupons
          (code, discount_kind, percent_basis_points, min_term_months,
           max_redemptions, max_redemptions_per_business, valid_from, status)
-       VALUES ($1, 'percent', $2, $3, 100, $4, now() - interval '1 minute', 'active')
+       VALUES ($1, 'percent', $2, $3, $5, $4, now() - interval '1 minute', 'active')
        RETURNING id`,
-      [code, overrides.percentBasisPoints ?? 1_000, overrides.minTermMonths ?? 1, overrides.maxRedemptionsPerBusiness ?? 1],
+      [
+        code,
+        overrides.percentBasisPoints ?? 1_000,
+        overrides.minTermMonths ?? 1,
+        overrides.maxRedemptionsPerBusiness ?? 1,
+        overrides.maxRedemptions ?? 100,
+      ],
     ),
   );
   return { id: rows[0].id, code };
@@ -201,6 +208,69 @@ describe("coupon holds", () => {
     });
   });
 
+  it("counts a live hold from another business against the global cap, and returns it on release", async () => {
+    const coupon = await createCoupon({ maxRedemptions: 1, maxRedemptionsPerBusiness: 1 });
+    const reservedUntil = new Date(Date.now() + 15 * 60_000);
+
+    const first = await coupons.reserveCoupon({
+      couponId: coupon.id,
+      businessId,
+      termMonths: 3,
+      amountRial: 1_000,
+      reservedUntil,
+    });
+    expect(first.ok).toBe(true);
+
+    // The last use is HELD, not merely unredeemed: another business must not
+    // be able to hold it in parallel and discover the exhaustion after paying.
+    expect(
+      await coupons.reserveCoupon({
+        couponId: coupon.id,
+        businessId: otherBusinessId,
+        termMonths: 3,
+        amountRial: 1_000,
+        reservedUntil,
+      }),
+    ).toEqual({ ok: false, error: "coupon_exhausted" });
+
+    if (first.ok) {
+      await coupons.releaseCouponReservation({ redemptionId: first.redemptionId, businessId });
+    }
+    expect(
+      await coupons.reserveCoupon({
+        couponId: coupon.id,
+        businessId: otherBusinessId,
+        termMonths: 3,
+        amountRial: 1_000,
+        reservedUntil,
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("lets an expired hold from another business stop blocking capacity", async () => {
+    const coupon = await createCoupon({ maxRedemptions: 1, maxRedemptionsPerBusiness: 1 });
+    const first = await coupons.reserveCoupon({
+      couponId: coupon.id,
+      businessId,
+      termMonths: 3,
+      amountRial: 1_000,
+      reservedUntil: new Date(Date.now() + 60_000),
+    });
+    expect(first.ok).toBe(true);
+
+    // Two minutes later the hold has lapsed; the next business may take it.
+    expect(
+      await coupons.reserveCoupon({
+        couponId: coupon.id,
+        businessId: otherBusinessId,
+        termMonths: 3,
+        amountRial: 1_000,
+        reservedUntil: new Date(Date.now() + 15 * 60_000),
+        now: new Date(Date.now() + 2 * 60_000),
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
   it("refuses a code the term is not eligible for", async () => {
     const annual = await createCoupon({ minTermMonths: 12 });
     expect(await coupons.resolveCoupon({ code: annual.code, businessId, termMonths: 3 })).toEqual({
@@ -229,6 +299,22 @@ describe("persisted quotes and the payment boundary", () => {
         quote.totals.couponDiscountRial,
       );
     }
+  });
+
+  it("does not stack the duration discount with the coupon by default", async () => {
+    const coupon = await createCoupon({ percentBasisPoints: 1_000 });
+    const { quoteId, quote } = await quoteWithCoupon(coupon.code);
+    expect(quote.stackingPolicy).toBe("best_single");
+    // Recurring gross is 3,600,000 (3 months of the 1,000,000 base plus the
+    // 200,000 monthly add-on): the 10% coupon (360,000) beats the 5% term
+    // discount (180,000), so only the coupon is deducted.
+    expect(quote.totals.discountRial).toBe(0);
+    expect(quote.totals.couponDiscountRial).toBe(360_000);
+
+    const loaded = await store.loadQuote({ businessId, quoteId });
+    expect(loaded?.stackingPolicy).toBe("best_single");
+    const payable = await store.assertQuotePayable({ businessId, quoteId });
+    expect(payable.ok).toBe(true);
   });
 
   it("is invisible to another business even with the exact quote id", async () => {

@@ -54,6 +54,7 @@ interface PurchaseLine {
   unitAmountRial: number;
   amountRial: number;
   featureKey: string | null;
+  priceVersionId: string | null;
 }
 
 /**
@@ -64,6 +65,7 @@ interface PurchaseLine {
  */
 export function purchaseInvoiceBody(payment: Pick<PurchasePayment, "purpose" | "amountRial" | "description" | "featureKey" | "quoteSnapshot">): {
   subtotalRial: number;
+  discountRial: number;
   taxRial: number;
   totalRial: number;
   lines: PurchaseLine[];
@@ -71,20 +73,43 @@ export function purchaseInvoiceBody(payment: Pick<PurchasePayment, "purpose" | "
   const totalRial = Math.max(0, Math.floor(payment.amountRial));
   const snapshot = payment.quoteSnapshot ?? {};
   const rawTax = Number(snapshot.taxRial);
-  const taxRial = Number.isSafeInteger(rawTax) ? Math.min(Math.max(rawTax, 0), totalRial) : 0;
-  const subtotalRial = totalRial - taxRial;
+  const snapshotTax = Number.isSafeInteger(rawTax) ? Math.min(Math.max(rawTax, 0), totalRial) : 0;
   const kind: InvoiceLineKind = payment.purpose === "plan_purchase" ? "plan" : "addon";
+
+  // A canonical quote (ESH-193) states its own gross, discounts and tax. Use
+  // them only when they reconcile to what was actually charged; otherwise the
+  // payment remains the authority and the invoice says so with one line.
+  const gross = Number(snapshot.grossRial);
+  const discount =
+    Number(snapshot.discountRial ?? 0) + Number(snapshot.couponDiscountRial ?? 0);
+  const quoteReconciles =
+    Number.isSafeInteger(gross) &&
+    gross >= 0 &&
+    Number.isSafeInteger(discount) &&
+    discount >= 0 &&
+    Number.isSafeInteger(rawTax) &&
+    rawTax >= 0 &&
+    gross - Math.min(discount, gross) + rawTax === totalRial;
+  const subtotalRial = quoteReconciles ? gross : totalRial - snapshotTax;
+  const discountRial = quoteReconciles ? Math.min(discount, gross) : 0;
+  const taxRial = quoteReconciles ? rawTax : snapshotTax;
 
   const lines: PurchaseLine[] = [];
   if (Array.isArray(snapshot.lines)) {
     for (const raw of snapshot.lines as unknown[]) {
       const row = raw as Record<string, unknown> | null;
-      const amountRial = Number(row?.amountRial);
+      const quoteKind = typeof row?.kind === "string" ? row.kind : "";
+      // Discounts and tax are invoice-level columns, not duplicated lines.
+      if (quoteKind === "term_discount" || quoteKind === "coupon_discount" || quoteKind === "tax") {
+        continue;
+      }
+      const amountRial = Number(row?.grossRial ?? row?.amountRial);
       const quantity = Number(row?.quantity ?? 1);
       const unitAmountRial = Number(row?.unitAmountRial ?? amountRial);
+      const key = typeof row?.key === "string" ? row.key : null;
+      const priceVersion = row?.priceVersion as { id?: unknown } | null | undefined;
       if (
         !row ||
-        typeof row.description !== "string" ||
         !Number.isSafeInteger(amountRial) ||
         amountRial < 0 ||
         !Number.isSafeInteger(quantity) ||
@@ -95,13 +120,22 @@ export function purchaseInvoiceBody(payment: Pick<PurchasePayment, "purpose" | "
         lines.length = 0;
         break;
       }
+      // `plan`/`addon` are the legacy snapshot's kinds; the canonical quote
+      // uses `plan_base` and the two add-on kinds. Both describe the same line.
+      const isPlan = quoteKind === "plan_base" || quoteKind === "plan";
       lines.push({
-        kind: row.kind === "addon" ? "addon" : "plan",
-        description: row.description,
+        kind: isPlan ? "plan" : "addon",
+        description:
+          typeof row.description === "string"
+            ? row.description
+            : isPlan
+              ? payment.description || "اشتراک پلن"
+              : `افزونه: ${key ?? "افزونه"}`,
         quantity,
         unitAmountRial,
         amountRial,
-        featureKey: typeof row.featureKey === "string" ? row.featureKey : null,
+        featureKey: isPlan ? null : key,
+        priceVersionId: typeof priceVersion?.id === "string" ? priceVersion.id : null,
       });
     }
   }
@@ -109,6 +143,7 @@ export function purchaseInvoiceBody(payment: Pick<PurchasePayment, "purpose" | "
   if (lines.length === 0 || linesTotal !== subtotalRial) {
     return {
       subtotalRial,
+      discountRial,
       taxRial,
       totalRial,
       lines: [
@@ -119,11 +154,12 @@ export function purchaseInvoiceBody(payment: Pick<PurchasePayment, "purpose" | "
           unitAmountRial: subtotalRial,
           amountRial: subtotalRial,
           featureKey: kind === "addon" ? payment.featureKey : null,
+          priceVersionId: null,
         },
       ],
     };
   }
-  return { subtotalRial, taxRial, totalRial, lines };
+  return { subtotalRial, discountRial, taxRial, totalRial, lines };
 }
 
 function rowToPayment(row: Record<string, unknown>): PurchasePayment {
@@ -156,13 +192,14 @@ async function claimPurchaseInvoice(client: PoolClient, payment: PurchasePayment
     `INSERT INTO billing_invoices
        (business_id, invoice_number, status, subtotal_rial, discount_rial, tax_rial,
         total_rial, paid_rial, due_at, reference, note)
-     VALUES ($1, $2, 'open', $3, 0, $4, $5, 0, $6, $7, $8)
+     VALUES ($1, $2, 'open', $3, $4, $5, $6, 0, $7, $8, $9)
      ON CONFLICT (business_id, reference) DO NOTHING
      RETURNING id`,
     [
       payment.businessId,
       number,
       body.subtotalRial,
+      body.discountRial,
       body.taxRial,
       body.totalRial,
       issuedAt,
@@ -182,9 +219,19 @@ async function claimPurchaseInvoice(client: PoolClient, payment: PurchasePayment
   for (const line of body.lines) {
     await client.query(
       `INSERT INTO billing_invoice_lines
-         (invoice_id, kind, description, quantity, unit_amount_rial, amount_rial, feature_key, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [invoiceId, line.kind, line.description, line.quantity, line.unitAmountRial, line.amountRial, line.featureKey, order++],
+         (invoice_id, kind, description, quantity, unit_amount_rial, amount_rial, feature_key, sort_order, price_version_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        invoiceId,
+        line.kind,
+        line.description,
+        line.quantity,
+        line.unitAmountRial,
+        line.amountRial,
+        line.featureKey,
+        order++,
+        line.priceVersionId,
+      ],
     );
   }
   return { invoiceId, created: true };

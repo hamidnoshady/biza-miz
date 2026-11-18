@@ -18,6 +18,10 @@
  *  3. **Discount applies to the recurring gross, before tax.** The rate is
  *     supplied by configuration — this module has no built-in 5%/15% default,
  *     because a hardcoded promotion is a promise nobody can turn off.
+ *     A coupon and the duration discount **do not stack by default**: the
+ *     larger single discount wins, so a campaign cannot silently double up
+ *     with a prepayment term. Only an explicit `stack` policy (a documented
+ *     promotion decision) applies both.
  *  4. **Tax applies after the discount**, on the discounted amount.
  *  5. **Every line cites its price version**, so a settled invoice can say
  *     which published price produced it. A line priced from a plain column
@@ -76,15 +80,29 @@ export interface PlanQuoteRequest {
   /** Tax rate applied after discounts (0.09 = 9%). */
   taxRate: number;
   /**
-   * At most one coupon. Applied to the recurring total *after* the term
-   * discount and before tax; a one-off add-on is never coupon-eligible, and
-   * no two coupons ever combine.
+   * At most one coupon. Compared with the term discount on the same recurring
+   * base; a one-off add-on is never coupon-eligible, and no two coupons ever
+   * combine. Under the default `best_single` policy only the larger of the two
+   * discounts applies, so the coupon contributes nothing when the term
+   * discount is worth more (and must then not be reserved or redeemed).
    */
   coupon?: QuoteCoupon | null;
+  /**
+   * `best_single` (the default) disables stacking: one discount, whichever is
+   * larger. `stack` is an explicit promotion decision and applies both. Never
+   * inferred from the request body — the server reads it from configuration.
+   */
+  stackingPolicy?: QuoteStackingPolicy;
   /** When the quote was produced — the period starts here. */
   issuedAt: string;
   /** How long the quote may be paid at; defaults to 15 minutes. */
   validityMinutes?: number;
+}
+
+export type QuoteStackingPolicy = "best_single" | "stack";
+
+export function isQuoteStackingPolicy(value: unknown): value is QuoteStackingPolicy {
+  return value === "best_single" || value === "stack";
 }
 
 export interface QuoteCoupon {
@@ -134,6 +152,8 @@ export interface PlanQuote {
   period: { start: string; end: string };
   issuedAt: string;
   expiresAt: string;
+  /** The policy the quote was priced under; persisted so re-pricing agrees. */
+  stackingPolicy: QuoteStackingPolicy;
 }
 
 /** What the payment boundary re-reads before settling. */
@@ -181,6 +201,8 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
   assertRate(request.termDiscountRate, "invalid_quote_discount_rate");
   assertRate(request.taxRate, "invalid_quote_tax_rate");
   if (!request.planKey.trim()) throw new Error("invalid_quote_plan");
+  const stackingPolicy = request.stackingPolicy ?? "best_single";
+  if (!isQuoteStackingPolicy(stackingPolicy)) throw new Error("invalid_quote_stacking");
   const coupon = request.coupon ?? null;
   if (coupon) assertCoupon(coupon);
 
@@ -236,8 +258,40 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
   }
 
   const grossRial = recurringGross + oneOffGross;
-  // Half-up on integers; a term discount is never applied to a one-off add-on.
-  const discountRial = Math.round(recurringGross * request.termDiscountRate);
+  // Half-up on integers; neither discount is ever applied to a one-off add-on.
+  // The term discount and the coupon are both rates/amounts on the SAME
+  // recurring base, which is what makes "best single" a fair comparison.
+  const termDiscountRial = Math.min(
+    recurringGross,
+    Math.round(recurringGross * request.termDiscountRate),
+  );
+  const candidateCouponDiscountRial = coupon
+    ? coupon.kind === "percent"
+      ? Math.min(recurringGross, Math.round((recurringGross * coupon.value) / 10_000))
+      : Math.min(recurringGross, coupon.value)
+    : 0;
+
+  // Default: ONE discount. Stacking is opt-in through the promotion policy, so
+  // a duration promotion can never combine with a campaign by accident. A tie
+  // goes to the configured term discount — the customer pays the same either
+  // way and the campaign keeps its capacity.
+  let discountRial = 0;
+  let appliedCouponDiscountRial = 0;
+  if (stackingPolicy === "stack") {
+    discountRial = termDiscountRial;
+    // A stacked coupon applies to what remains after the term discount.
+    const couponBase = recurringGross - discountRial;
+    appliedCouponDiscountRial = coupon
+      ? coupon.kind === "percent"
+        ? Math.min(couponBase, Math.round((couponBase * coupon.value) / 10_000))
+        : Math.min(couponBase, coupon.value)
+      : 0;
+  } else if (candidateCouponDiscountRial > termDiscountRial) {
+    appliedCouponDiscountRial = candidateCouponDiscountRial;
+  } else {
+    discountRial = termDiscountRial;
+  }
+
   if (discountRial > 0) {
     lines.push({
       kind: "term_discount",
@@ -250,29 +304,19 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
       priceVersion: null,
     });
   }
-
-  // A coupon applies to the recurring total *after* the configured term
-  // discount and before tax: a one-off add-on is never coupon-eligible, and
-  // tax is charged on what the customer actually pays. Clamped to the base so
-  // a fixed coupon can never make the quote negative.
-  const couponBase = recurringGross - discountRial;
-  const couponDiscountRial = coupon
-    ? coupon.kind === "percent"
-      ? Math.min(couponBase, Math.round((couponBase * coupon.value) / 10_000))
-      : Math.min(couponBase, coupon.value)
-    : 0;
-  if (couponDiscountRial > 0 && coupon) {
+  if (appliedCouponDiscountRial > 0 && coupon) {
     lines.push({
       kind: "coupon_discount",
       key: `coupon:${coupon.code}`,
       quantity: 1,
       unitAmountRial: 0,
       grossRial: 0,
-      discountRial: couponDiscountRial,
-      netRial: -couponDiscountRial,
+      discountRial: appliedCouponDiscountRial,
+      netRial: -appliedCouponDiscountRial,
       priceVersion: null,
     });
   }
+  const couponDiscountRial = appliedCouponDiscountRial;
 
   const netBeforeTax = grossRial - discountRial - couponDiscountRial;
   const taxRial = Math.round(netBeforeTax * request.taxRate);
@@ -308,7 +352,27 @@ export function buildPlanQuote(request: PlanQuoteRequest): PlanQuote {
     },
     issuedAt: issuedAt.toISOString(),
     expiresAt: new Date(issuedAt.getTime() + validityMinutes * 60_000).toISOString(),
+    stackingPolicy,
   };
+}
+
+/**
+ * Which discount actually produced this quote's reduction.
+ *
+ * Derivable from the totals on purpose: the source is not a second stored
+ * fact, so a persisted quote and a fresh one cannot disagree about it. The
+ * payment boundary uses this to decide whether the coupon was applied (and
+ * therefore whether a hold may be spent).
+ */
+export type QuoteDiscountSource = "term" | "coupon" | "both" | null;
+
+export function quoteDiscountSource(quote: PlanQuote): QuoteDiscountSource {
+  const term = quote.totals.discountRial > 0;
+  const coupon = quote.totals.couponDiscountRial > 0;
+  if (term && coupon) return "both";
+  if (term) return "term";
+  if (coupon) return "coupon";
+  return null;
 }
 
 /**

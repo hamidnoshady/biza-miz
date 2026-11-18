@@ -1220,6 +1220,12 @@ export async function saveCommercialSettings(patch: {
   defaultSpendAction?: string;
   invoiceFooter?: string;
   taxRateBps?: number;
+  /** Duration discounts per sold term, in basis points (ESH-193). */
+  termDiscountBps1?: number;
+  termDiscountBps3?: number;
+  termDiscountBps12?: number;
+  /** Only an explicit true allows a coupon to stack with a duration discount. */
+  couponStackingEnabled?: boolean;
 }): Promise<void> {
   await query(
     `UPDATE billing_commercial_settings SET
@@ -1233,6 +1239,10 @@ export async function saveCommercialSettings(patch: {
        default_spend_action = COALESCE($8, default_spend_action),
        invoice_footer = COALESCE($9, invoice_footer),
        tax_rate_bps = COALESCE($10, tax_rate_bps),
+       term_discount_bps_1 = COALESCE($11, term_discount_bps_1),
+       term_discount_bps_3 = COALESCE($12, term_discount_bps_3),
+       term_discount_bps_12 = COALESCE($13, term_discount_bps_12),
+       coupon_stacking_enabled = COALESCE($14, coupon_stacking_enabled),
        updated_at = now()
      WHERE id`,
     [
@@ -1246,6 +1256,10 @@ export async function saveCommercialSettings(patch: {
       patch.defaultSpendAction ?? null,
       patch.invoiceFooter ?? null,
       patch.taxRateBps ?? null,
+      patch.termDiscountBps1 ?? null,
+      patch.termDiscountBps3 ?? null,
+      patch.termDiscountBps12 ?? null,
+      patch.couponStackingEnabled ?? null,
     ],
   );
 }

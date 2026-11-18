@@ -3,10 +3,15 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { listCreditPackages } from "@/lib/wallet-service";
 import { listBillingPlans, listPlanFeatures } from "@/lib/billing-plans-service";
-import { calculateSubscriptionTotal } from "@/lib/subscription-service";
 import { readCommercialSettings } from "@/lib/billing/runtime";
 import { applyTaxAndRounding } from "@/lib/billing/rating/engine";
 import { parseSafeIntInput } from "@/lib/platform-money";
+import {
+  isPlanTermMonths,
+  quoteDiscountSource,
+  type QuoteLine,
+} from "@/lib/billing/quote/plan-quote";
+import { createPlanCheckoutQuote } from "@/lib/billing/quote/checkout-quote";
 
 /**
  * Tenant-authorized quote endpoint using the SAME commercial calculator
@@ -15,6 +20,24 @@ import { parseSafeIntInput } from "@/lib/platform-money";
  * POST { kind: "plan", planKey } | { kind: "topup", packageId } | { kind: "topup", amountRial } | { kind: "addon", featureKey }
  * Returns subtotal, tax, discount, bonus, total, recurring amount, wallet requirements.
  */
+/** A human-readable line for the tenant's own itemisation (Shamsi dates only). */
+function quoteLineDescription(line: QuoteLine, planName: string): string {
+  switch (line.kind) {
+    case "plan_base":
+      return `اشتراک پلن ${planName} — ${line.quantity} ماه`;
+    case "recurring_addon":
+      return `افزونهٔ ماهانه: ${line.key} — ${line.quantity} ماه`;
+    case "one_off_addon":
+      return `افزونهٔ یک‌باره: ${line.key}`;
+    case "term_discount":
+      return "تخفیف دورهٔ پیش‌پرداخت";
+    case "coupon_discount":
+      return `تخفیف کد ${line.key.replace(/^coupon:/, "")}`;
+    case "tax":
+      return "مالیات";
+  }
+}
+
 export const POST = withTenantScope(async (req: Request) => {
   const { session, error } = await requirePermission(PERMISSIONS.billingView);
   if (error) return error;
@@ -38,40 +61,74 @@ export const POST = withTenantScope(async (req: Request) => {
       const plans = await listBillingPlans(true);
       const plan = plans.find((p) => p.key === planKey);
       if (!plan) return NextResponse.json({ error: "plan_not_found" }, { status: 404 });
-      const quote = await calculateSubscriptionTotal(session.businessId, { planKey });
-      // Immutable snapshot that payment will reuse
-      const snapshot = {
+
+      // ESH-193: the tenant quote is the SAME document the payment boundary
+      // settles. It is built by the canonical resolver, stored with its
+      // integer inputs, and returned with a real quote id — the old endpoint
+      // returned an object the payment route then re-priced differently.
+      const termMonths = isPlanTermMonths(body.termMonths) ? body.termMonths : 1;
+      const couponCode = typeof body.couponCode === "string" ? body.couponCode.trim() : "";
+      const created = await createPlanCheckoutQuote({
+        businessId: session.businessId,
+        platformUserId: session.platformUserId ?? null,
+        membershipId: session.sub,
+        planKey,
+        termMonths,
+        couponCode,
+      });
+      if (!created.ok) return NextResponse.json({ error: created.error }, { status: 409 });
+      const quote = created.quote;
+
+      const baseGross = quote.lines.find((line) => line.kind === "plan_base")?.grossRial ?? 0;
+      const addonsGross = quote.lines
+        .filter((line) => line.kind === "recurring_addon" || line.kind === "one_off_addon")
+        .reduce((sum, line) => sum + line.grossRial, 0);
+      const displayLines = quote.lines.map((line) => ({
+        kind: line.kind,
+        description: quoteLineDescription(line, plan.name),
+        quantity: line.quantity,
+        unitAmountRial: line.unitAmountRial,
+        amountRial: line.grossRial,
+        discountRial: line.discountRial,
+        netRial: line.netRial,
+        priceVersion: line.priceVersion,
+      }));
+
+      return NextResponse.json({
+        quoteId: created.quoteId,
         kind: "plan" as const,
         planKey: plan.key,
-        subtotalRial: quote.subtotalRial,
-        taxRial: quote.taxRial,
-        totalRial: quote.totalRial,
-        discountRial: quote.discountRial,
-        lines: quote.lines,
+        termMonths: quote.termMonths,
+        subtotalRial: quote.totals.grossRial,
+        discountRial: quote.totals.discountRial,
+        couponDiscountRial: quote.totals.couponDiscountRial,
+        discountSource: quoteDiscountSource(quote),
+        stackingPolicy: quote.stackingPolicy,
+        taxRial: quote.totals.taxRial,
+        totalRial: quote.totals.netRial,
+        lines: displayLines,
+        period: quote.period,
+        issuedAt: quote.issuedAt,
+        expiresAt: quote.expiresAt,
         rounding,
         taxRateBps,
-        quotedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // 10 min validity
-      };
-      return NextResponse.json({
-        quoteId: `${plan.key}:${quote.totalRial}:${Date.now()}`,
-        ...snapshot,
+        quotedAt: quote.issuedAt,
         breakdown: {
-          baseRial: quote.baseRial,
-          addonsRial: quote.addonsRial,
-          subtotalRial: quote.subtotalRial,
-          discountRial: quote.discountRial,
-          taxRial: quote.taxRial,
-          totalRial: quote.totalRial,
-          futureRecurringRial: quote.totalRial, // next renewal same amount
+          baseRial: baseGross,
+          addonsRial: addonsGross,
+          subtotalRial: quote.totals.grossRial,
+          discountRial: quote.totals.discountRial + quote.totals.couponDiscountRial,
+          taxRial: quote.totals.taxRial,
+          totalRial: quote.totals.netRial,
+          futureRecurringRial: quote.totals.netRial,
         },
         display: {
-          totalToman: Math.floor(quote.totalRial / 10),
-          totalRial: quote.totalRial,
+          totalToman: Math.floor(quote.totals.netRial / 10),
+          totalRial: quote.totals.netRial,
         },
         walletRequired: false,
         gatewayAllowed: true,
-        note: quote.totalRial === 0 ? "رایگان — نیازی به پرداخت نیست" : undefined,
+        note: quote.totals.netRial === 0 ? "رایگان — نیازی به پرداخت نیست" : undefined,
       });
     }
 

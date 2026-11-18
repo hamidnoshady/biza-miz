@@ -14,6 +14,7 @@ import {
   isPlanTermMonths,
   isQuoteStale,
   planBasePriceVersion,
+  quoteDiscountSource,
   renderQuoteExplanation,
   type PlanQuoteRequest,
 } from "./plan-quote";
@@ -180,12 +181,13 @@ describe("explanation", () => {
 });
 
 describe("coupon", () => {
-  it("takes a percentage of the post-term-discount recurring total, before tax", () => {
+  it("takes a percentage of the post-term-discount recurring total when stacking is explicitly allowed", () => {
     const quote = buildPlanQuote(
       request({
         termMonths: 3,
         termDiscountRate: 0.05,
         taxRate: 0.09,
+        stackingPolicy: "stack",
         coupon: { kind: "percent", value: 1_000, code: "LAUNCH10" },
       }),
     );
@@ -198,16 +200,69 @@ describe("coupon", () => {
     });
   });
 
-  it("clamps a fixed coupon to the discounted recurring total", () => {
+  it("clamps a fixed coupon to the discounted recurring total when stacking is explicitly allowed", () => {
     const quote = buildPlanQuote(
       request({
         termMonths: 3,
         termDiscountRate: 0.05,
+        stackingPolicy: "stack",
         coupon: { kind: "fixed", value: 5_000_000, code: "BIG" },
       }),
     );
     expect(quote.totals.couponDiscountRial).toBe(2_850_000);
     expect(quote.totals.netRial).toBe(0);
+  });
+
+  it("applies only the larger discount by default — no stacking", () => {
+    // 5% term discount = 150,000; 10% coupon = 300,000. The coupon wins and
+    // the duration discount is not also deducted.
+    const couponWins = buildPlanQuote(
+      request({
+        termMonths: 3,
+        termDiscountRate: 0.05,
+        coupon: { kind: "percent", value: 1_000, code: "LAUNCH10" },
+      }),
+    );
+    expect(couponWins.stackingPolicy).toBe("best_single");
+    expect(couponWins.totals.discountRial).toBe(0);
+    expect(couponWins.totals.couponDiscountRial).toBe(300_000);
+    expect(couponWins.totals.netRial).toBe(2_700_000);
+    expect(couponWins.lines.some((line) => line.kind === "term_discount")).toBe(false);
+    expect(quoteDiscountSource(couponWins)).toBe("coupon");
+  });
+
+  it("keeps the term discount and does not consume the weaker coupon", () => {
+    const termWins = buildPlanQuote(
+      request({
+        termMonths: 12,
+        termDiscountRate: 0.15,
+        coupon: { kind: "fixed", value: 100_000, code: "SMALL" },
+      }),
+    );
+    expect(termWins.totals.discountRial).toBe(1_800_000);
+    expect(termWins.totals.couponDiscountRial).toBe(0);
+    expect(termWins.totals.netRial).toBe(10_200_000);
+    expect(termWins.lines.some((line) => line.kind === "coupon_discount")).toBe(false);
+    expect(quoteDiscountSource(termWins)).toBe("term");
+  });
+
+  it("ties go to the configured term discount, leaving coupon capacity unspent", () => {
+    const tie = buildPlanQuote(
+      request({
+        termMonths: 3,
+        termDiscountRate: 0.1,
+        coupon: { kind: "percent", value: 1_000, code: "TEN" },
+      }),
+    );
+    expect(tie.totals.discountRial).toBe(300_000);
+    expect(tie.totals.couponDiscountRial).toBe(0);
+    expect(quoteDiscountSource(tie)).toBe("term");
+  });
+
+  it("refuses an unknown stacking policy", () => {
+    expect(() =>
+      buildPlanQuote(request({ stackingPolicy: "whatever" as "stack" })),
+    ).toThrow("invalid_quote_stacking");
   });
 
   it("never discounts a one-off add-on", () => {
