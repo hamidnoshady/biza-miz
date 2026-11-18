@@ -51,6 +51,17 @@ export type ResolvedCoupon =
   | { ok: false; error: CouponRefusal };
 
 /**
+ * The narrow query shape validation runs on; the pool, a tenant transaction or
+ * a settlement client all satisfy it structurally.
+ */
+export interface CouponReader {
+  query<T extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
+}
+
+/**
  * May this business use this code for this term, right now?
  *
  * Read-only and non-binding: the answer can go stale before payment, which is
@@ -83,21 +94,65 @@ export async function resolveCoupon(input: {
   const invalid = validateCoupon(row, input.termMonths, now);
   if (invalid) return { ok: false, error: invalid };
 
-  const { rows: usage } = await withTenant(input.businessId, () =>
-    query<{ used: string }>(
-      `SELECT count(*)::text AS used
-         FROM billing_coupon_redemptions
-        WHERE coupon_id = $1
-          AND business_id = $2
-          AND status = 'redeemed'`,
-      [row.id, input.businessId],
-    ),
+  const capReached = await withTenant(input.businessId, () =>
+    businessCapReached({ query }, row.id, input.businessId, row.max_redemptions_per_business),
   );
-  if (Number(usage[0]?.used ?? 0) >= row.max_redemptions_per_business) {
+  if (capReached) {
     return { ok: false, error: "coupon_already_used" };
   }
 
   return { ok: true, couponId: row.id, coupon: toQuoteCoupon(row) };
+}
+
+/**
+ * Re-validate an existing quote's coupon on the connection that will honour it.
+ *
+ * A quote stores the coupon as it stood when it was shown. Between then and
+ * settlement the campaign can be paused, reach its end date, tighten its
+ * minimum term or change its discount — none of which the snapshot can see.
+ * Settlement therefore re-reads the live row inside its own transaction. A
+ * changed discount falls through to the caller's existing `quote_stale`
+ * comparison; a coupon that is no longer usable is refused by name.
+ */
+export async function revalidateCoupon(
+  reader: CouponReader,
+  input: { couponId: string; businessId: string; termMonths: number; now: Date },
+): Promise<ResolvedCoupon> {
+  const { rows } = await reader.query<CouponRow>(
+    `SELECT id, code::text AS code, discount_kind, percent_basis_points, amount_rial,
+            min_term_months, valid_from, valid_until, max_redemptions,
+            max_redemptions_per_business, redeemed_count, status
+       FROM billing_coupons
+      WHERE id = $1`,
+    [input.couponId],
+  );
+  const row = rows[0];
+  if (!row) return { ok: false, error: "coupon_not_found" };
+
+  const invalid = validateCoupon(row, input.termMonths, input.now);
+  if (invalid) return { ok: false, error: invalid };
+  if (await businessCapReached(reader, row.id, input.businessId, row.max_redemptions_per_business)) {
+    return { ok: false, error: "coupon_already_used" };
+  }
+  return { ok: true, couponId: row.id, coupon: toQuoteCoupon(row) };
+}
+
+/** Has this business already spent its allowance for this coupon? */
+async function businessCapReached(
+  reader: CouponReader,
+  couponId: string,
+  businessId: string,
+  maxPerBusiness: number,
+): Promise<boolean> {
+  const { rows } = await reader.query<{ used: string }>(
+    `SELECT count(*)::text AS used
+       FROM billing_coupon_redemptions
+      WHERE coupon_id = $1
+        AND business_id = $2
+        AND status = 'redeemed'`,
+    [couponId, businessId],
+  );
+  return Number(rows[0]?.used ?? 0) >= maxPerBusiness;
 }
 
 export type ReserveCouponResult =

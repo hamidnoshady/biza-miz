@@ -46,17 +46,18 @@ async function createCoupon(overrides: Partial<{
   maxRedemptionsPerBusiness: number;
 }> = {}): Promise<{ id: string; code: string }> {
   const code = `C${randomUUID().slice(0, 8).toUpperCase()}`;
-  // `valid_from` is set explicitly: its `now()` default is microsecond-precision
-  // while `resolveCoupon` compares it with a millisecond JS clock, so a coupon
-  // created and resolved in the same instant can read as `coupon_not_yet_valid`
-  // on a runner whose clock ticks coarsely. A coupon being redeemed was created
-  // earlier anyway.
   const { rows } = await db.withoutTenantScope("platform", () =>
     db.query<{ id: string }>(
+      // `valid_from` is set deliberately into the past rather than left to the
+      // column's `DEFAULT now()`. The database's clock can read a few
+      // milliseconds ahead of the test process's `new Date()` on a loaded
+      // runner, and `validateCoupon` refuses a coupon that starts strictly
+      // after "now" — a fixture sitting exactly on that boundary then fails as
+      // `coupon_not_yet_valid` intermittently (CI shard flake).
       `INSERT INTO billing_coupons
          (code, discount_kind, percent_basis_points, min_term_months,
-          max_redemptions, max_redemptions_per_business, status, valid_from)
-       VALUES ($1, 'percent', $2, $3, 100, $4, 'active', now() - interval '1 minute')
+          max_redemptions, max_redemptions_per_business, valid_from, status)
+       VALUES ($1, 'percent', $2, $3, 100, $4, now() - interval '1 minute', 'active')
        RETURNING id`,
       [code, overrides.percentBasisPoints ?? 1_000, overrides.minTermMonths ?? 1, overrides.maxRedemptionsPerBusiness ?? 1],
     ),
@@ -279,6 +280,52 @@ describe("persisted quotes and the payment boundary", () => {
          VALUES ('plan', $1, 'month', 1200000, 2, '2026-01-01T00:00:00Z')`,
         [planKey],
       ),
+    );
+
+    expect(await store.assertQuotePayable({ businessId, quoteId })).toEqual({
+      ok: false,
+      error: "quote_stale",
+    });
+    expect(
+      await store.consumeQuote({ businessId, quoteId, paymentId: randomUUID() }),
+    ).toEqual({ ok: false, error: "quote_stale" });
+  });
+
+  it("refuses a quote whose coupon stopped being usable after it was shown", async () => {
+    const mutations: Array<{ label: string; sql: string; error: string }> = [
+      { label: "paused", sql: "status = 'paused'", error: "coupon_inactive" },
+      {
+        label: "expired",
+        sql: "valid_from = now() - interval '2 hours', valid_until = now() - interval '1 hour'",
+        error: "coupon_expired",
+      },
+      { label: "term tightened", sql: "min_term_months = 12", error: "coupon_term_not_eligible" },
+    ];
+
+    for (const mutation of mutations) {
+      const coupon = await createCoupon();
+      const { quoteId } = await quoteWithCoupon(coupon.code);
+      await db.withoutTenantScope("platform", () =>
+        db.query(`UPDATE billing_coupons SET ${mutation.sql} WHERE id = $1`, [coupon.id]),
+      );
+
+      expect(
+        await store.assertQuotePayable({ businessId, quoteId }),
+        mutation.label,
+      ).toEqual({ ok: false, error: mutation.error });
+      expect(
+        await store.consumeQuote({ businessId, quoteId, paymentId: randomUUID() }),
+        mutation.label,
+      ).toEqual({ ok: false, error: mutation.error });
+    }
+  });
+
+  it("treats a coupon whose discount changed after the quote as stale", async () => {
+    const coupon = await createCoupon();
+    const { quoteId } = await quoteWithCoupon(coupon.code);
+
+    await db.withoutTenantScope("platform", () =>
+      db.query("UPDATE billing_coupons SET percent_basis_points = 500 WHERE id = $1", [coupon.id]),
     );
 
     expect(await store.assertQuotePayable({ businessId, quoteId })).toEqual({

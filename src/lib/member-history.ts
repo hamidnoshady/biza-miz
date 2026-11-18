@@ -116,6 +116,14 @@ export interface MemberAttribution {
    * business (the fixed-asset tables, through `fixed_assets`).
    */
   scope?: { kind: "location" } | { kind: "join"; table: string; on: string };
+  /**
+   * The columns hold a **global identity** (`platform_users.id`), not a
+   * membership (`users.id`). The probe resolves the membership's
+   * `platform_user_id` first, so a person whose only history is platform-side
+   * (a billed quote) is still recognised. Comparing a membership id against
+   * these columns silently matches nothing.
+   */
+  identity?: boolean;
 }
 
 /** `EXISTS (…) OR EXISTS (…)` — one probe per attribution table. */
@@ -137,7 +145,10 @@ export function memberAttributionSql(
       : a.scope?.kind === "location"
         ? `l${i}.business_id = ${businessExpr}`
         : `${row}.business_id = ${businessExpr}`;
-    const whereUser = a.columns.map((c) => `${row}.${c} = ${userExpr}`).join(" OR ");
+    const userExprFor = a.identity
+      ? `(SELECT iu.platform_user_id FROM users iu WHERE iu.id = ${userExpr} AND iu.business_id = ${businessExpr})`
+      : userExpr;
+    const whereUser = a.columns.map((c) => `${row}.${c} = ${userExprFor}`).join(" OR ");
     return `EXISTS (SELECT 1 FROM ${a.table} ${row}${joinSql} WHERE ${whereBusiness} AND (${whereUser}))`;
   });
   return probes.length > 0 ? probes.join(" OR ") : "FALSE";
@@ -151,7 +162,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   // A persisted quote is the price a person was offered; the settlement keeps
   // it (FK RESTRICT), so hard deletion must be refused with a flag, not a
   // database error.
-  { table: 'billing_quotes', columns: ["platform_user_id"] },
+  { table: 'billing_quotes', columns: ["platform_user_id"], identity: true },
   // A roster membership is retained rather than orphaned by hard deletion.
   { table: 'marketing_agents', columns: ["user_id", "created_by"] },
   { table: 'marketing_targets', columns: ["created_by"] },
