@@ -90,7 +90,7 @@ async function openPage(page, path) {
 // Use Chromium's cookie jar and Origin header for every request. The
 // production session is Secure, including on the loopback CI origin.
 async function browserApi(page, url, data) {
-  const { status, payload } = await page.evaluate(async ({ url, data }) => {
+  const { status, text } = await page.evaluate(async ({ url, data }) => {
     const response = await fetch(url, {
       method: data === undefined ? "GET" : "POST",
       credentials: "same-origin",
@@ -101,9 +101,21 @@ async function browserApi(page, url, data) {
       }),
       signal: AbortSignal.timeout(120_000),
     });
-    return { status: response.status, payload: await response.json() };
+    return { status: response.status, text: await response.text() };
   }, { url, data });
-  return { ok: () => status >= 200 && status < 300, status: () => status, json: () => payload };
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    // A non-JSON body is reported by the caller through `body()` rather than
+    // hiding the HTTP status behind a JSON parse error.
+  }
+  return {
+    ok: () => status >= 200 && status < 300,
+    status: () => status,
+    json: () => payload,
+    body: () => text,
+  };
 }
 
 async function ownerLogin(page) {
@@ -196,10 +208,10 @@ try {
     await overlay(page).waitFor({ state: "detached", timeout: 120_000 });
     const playback = await browserApi(page,
       `${BASE_URL}/api/knowledge/tours/accounting.overview.ledger`,
-      { timeout: 120_000 },
     );
-    assert(playback.ok(), "tour playback request failed");
+    assert(playback.ok(), `tour playback request failed (${playback.status()}): ${playback.body()}`);
     const payload = playback.json();
+    assert(payload?.progress, `unexpected playback body: ${playback.body()}`);
     assert(payload.progress.status === "completed", `tour not completed: ${payload.progress.status}`);
   });
 
