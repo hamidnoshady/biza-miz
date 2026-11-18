@@ -169,6 +169,22 @@ async function clickNext(page) {
   await button.click({ timeout: 120_000 });
 }
 
+/** Press Next and wait until the visible step changed (or the tour closed). */
+async function clickNextAndSettle(page) {
+  const before = await overlayHeading(page).innerText().catch(() => "");
+  await clickNext(page);
+  await page.waitForFunction(
+    (previous) => {
+      const current = document.querySelector("[data-tour-overlay]");
+      if (!current) return true;
+      const heading = current.querySelector("h2");
+      return Boolean(heading && heading.textContent && heading.textContent.trim() !== previous);
+    },
+    before,
+    { timeout: 120_000 },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Contexts
 // ---------------------------------------------------------------------------
@@ -204,7 +220,7 @@ try {
   });
 
   await step("steps advance and the tour completes with server progress", async () => {
-    for (let i = 0; i < 7; i += 1) await clickNext(page);
+    for (let i = 0; i < 7; i += 1) await clickNextAndSettle(page);
     await overlay(page).waitFor({ state: "detached", timeout: 120_000 });
     const playback = await browserApi(page,
       `${BASE_URL}/api/knowledge/tours/accounting.overview.ledger`,
@@ -218,7 +234,7 @@ try {
   await step("a refresh mid-tour resumes at the same step", async () => {
     await startTourFromPage(page, "داشبورد حسابداری", "مرور دوباره");
     const first = await overlayHeading(page).innerText();
-    await clickNext(page);
+    await clickNextAndSettle(page);
     const second = await overlayHeading(page).innerText();
     assert(first !== second, "the second step did not open");
     await page.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
@@ -242,7 +258,7 @@ try {
   await step("a cross-page tour keeps the session across navigation", async () => {
     await openPage(page, "/accounting/orders");
     await startTourFromPage(page, "سفارش‌ها", "شروع تور");
-    for (let i = 0; i < 3; i += 1) await clickNext(page);
+    for (let i = 0; i < 3; i += 1) await clickNextAndSettle(page);
     const navigate = overlay(page).getByRole("button", { name: "رفتن به بخش بعدی" });
     await navigate.click();
     await page.waitForURL("**/accounting/pos", { timeout: 30_000 });
