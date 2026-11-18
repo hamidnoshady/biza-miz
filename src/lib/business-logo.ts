@@ -17,11 +17,17 @@
  * testable as strings.
  */
 import { hasMatchingMediaSignature } from "./media";
+import {
+  LOGO_MAX_BYTES,
+  LOGO_MIME_TYPES,
+  isLogoMimeType,
+  type LogoMimeType,
+} from "./business-logo-rules";
 
-export const LOGO_MAX_BYTES = 256 * 1024;
-
-export const LOGO_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/svg+xml"] as const;
-export type LogoMimeType = (typeof LOGO_MIME_TYPES)[number];
+// Re-exported for the existing server importers; the rules themselves live in
+// the client-safe module next door so the setup form can validate a file
+// without pulling in the media/billing graph.
+export { LOGO_MAX_BYTES, LOGO_MIME_TYPES, isLogoMimeType, type LogoMimeType };
 
 export interface BusinessLogo {
   /** `data:image/png;base64,…` — ready to drop into an <img src>. */
@@ -29,10 +35,6 @@ export interface BusinessLogo {
   mimeType: LogoMimeType;
   byteLength: number;
   updatedAt: string;
-}
-
-export function isLogoMimeType(value: unknown): value is LogoMimeType {
-  return typeof value === "string" && (LOGO_MIME_TYPES as readonly string[]).includes(value);
 }
 
 /**

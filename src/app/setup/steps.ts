@@ -1,4 +1,6 @@
+import type { AppKey } from "@/lib/apps";
 import type { Industry } from "@/lib/industries";
+import { setupStepRequired } from "@/lib/setup-apps";
 import { wizardStepsForIndustry, type WizardStep } from "@/lib/wizard-steps";
 
 export interface StepMeta {
@@ -19,6 +21,20 @@ export const STEPS: StepMeta[] = [
     short: "پروفایل",
     optional: true,
   },
+  {
+    id: "apps",
+    path: "/setup/apps",
+    title: "انتخاب برنامه‌های کسب‌وکار",
+    short: "برنامه‌ها",
+    optional: true,
+  },
+  {
+    id: "app_setup",
+    path: "/setup/app-setup",
+    title: "راه‌اندازی برنامه‌های انتخاب‌شده",
+    short: "راه‌اندازی برنامه",
+    optional: true,
+  },
   { id: "accounts", path: "/setup/accounts", title: "سرفصل حساب‌ها", short: "حساب‌ها" },
   { id: "costing", path: "/setup/costing", title: "روش قیمت‌گذاری موجودی", short: "قیمت‌گذاری" },
   { id: "tax", path: "/setup/tax", title: "تنظیم مالیات", short: "مالیات" },
@@ -29,10 +45,21 @@ export const STEPS: StepMeta[] = [
   { id: "opening", path: "/setup/opening", title: "مانده‌های افتتاحیه", short: "افتتاحیه", optional: true },
 ];
 
-/** The step sequence for one business, in order — `setup-state.ts`'s `wizardStepsForIndustry` decides which ids, this resolves them back to their metadata. */
-export function stepsFor(industry: Industry): StepMeta[] {
+/**
+ * The step sequence for one business, in order — `wizardStepsForIndustry`
+ * decides which ids, this resolves them back to their metadata.
+ *
+ * `selectedApps` narrows the sequence to the apps the owner actually chose:
+ * the accounting steps disappear when Accounting was not selected. Leaving it
+ * `undefined`/`null` keeps the legacy behaviour (every industry-required step),
+ * which is what a business that predates the gallery must still see.
+ */
+export function stepsFor(
+  industry: Industry,
+  selectedApps?: readonly AppKey[] | null,
+): StepMeta[] {
   const ids = new Set(wizardStepsForIndustry(industry));
-  return STEPS.filter((s) => ids.has(s.id));
+  return STEPS.filter((s) => ids.has(s.id) && setupStepRequired(s.id, selectedApps));
 }
 
 export function stepIndex(id: string, steps: StepMeta[] = STEPS): number {

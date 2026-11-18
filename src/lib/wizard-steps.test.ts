@@ -20,9 +20,16 @@ import {
   wizardStepsForIndustry,
 } from "./wizard-steps";
 
-/** The canonical F&B ordering the wizard is specified against. */
+/**
+ * The canonical F&B ordering the wizard is specified against.
+ *
+ * Issue #1239 / ESH-90 inserts the priced app gallery and the selected apps'
+ * own setup between the profile and Accounting's steps.
+ */
 const FNB_ORDER = [
   "business",
+  "apps",
+  "app_setup",
   "accounts",
   "costing",
   "tax",

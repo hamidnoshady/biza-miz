@@ -6,8 +6,9 @@
  * These are the two Superadmin decisions the service-activation epic adds:
  *
  *  - a per-service tariff: the one-time **setup fee** (a fixed Rial amount, or
- *    N hours at this service's hourly rate — the 72-hour / 3-day equivalent the
- *    issue asks for, never prepaid runtime) plus the **per-enabled-hour** rate.
+ *    N hours at this service's hourly rate — never prepaid runtime) plus the
+ *    **per-enabled-hour** rate. New tariffs default to 168 hours (seven days of
+ *    the daily fee, issue #1239); existing versions keep their own hours.
  *    A published 0 is the explicit "free" choice; a service with no published
  *    tariff stays ineligible, because an unpriced service must never activate
  *    on an assumed default;
@@ -105,7 +106,7 @@ export function BillingServicesTab() {
   const [selected, setSelected] = useState("");
   const [mode, setMode] = useState<PriceVersion["setupMode"]>("fixed");
   const [fixedToman, setFixedToman] = useState("");
-  const [hours, setHours] = useState("72");
+  const [hours, setHours] = useState("168");
   const [hourlyToman, setHourlyToman] = useState("");
   const [note, setNote] = useState("");
   const [published, setPublished] = useState(true);
@@ -131,7 +132,10 @@ export function BillingServicesTab() {
     const tariff = current.tariff;
     setMode(tariff?.setupMode ?? "fixed");
     setFixedToman(tariff ? String(Math.floor(tariff.setupFixedRial / 10)) : "");
-    setHours(tariff ? String(tariff.setupEquivalentHours || 72) : "72");
+    // Issue #1239 / ESH-90: a NEW tariff defaults to seven days of the daily
+    // fee (168 equivalent hours). Existing published versions keep their own
+    // hours; this only seeds the form when no version exists yet.
+    setHours(tariff ? String(tariff.setupEquivalentHours || 168) : "168");
     setHourlyToman(tariff ? String(Math.floor(tariff.hourlyRateRial / 10)) : "");
     setNote(tariff?.note ?? "");
     setPublished(tariff?.published ?? true);
