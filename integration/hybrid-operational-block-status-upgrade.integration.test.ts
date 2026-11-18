@@ -37,6 +37,7 @@ import { join } from "node:path";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { deploymentStatusBadgeLabel } from "../src/lib/deployment-status-badge";
 
 /** #988's table; everything before this filename is the old install's schema. */
 const OPERATIONAL_BLOCK_MIGRATION = "0228_iam_operational_sync_block_state.sql";
@@ -102,21 +103,6 @@ async function queuedEvents(): Promise<number> {
     `SELECT count(*)::text AS count FROM sync_events WHERE origin = 'local' AND pushed_at IS NULL`,
   );
   return Number(rows[0]?.count ?? 0);
-}
-
-/**
- * The badge's operational segment, as `deployment-status-indicator.tsx`
- * composes it. Kept in the test on purpose: the string is what the owner reads,
- * and asserting only the numbers behind it would still pass if the badge went
- * back to saying «در حال اتصال» on a blocked install.
- */
-function syncBadgeLabel(body: { operationalBlock?: { blocked?: boolean }; sync?: string }, pending: number): string {
-  if (body.operationalBlock?.blocked) {
-    return `سایت محلی · همگام‌سازی عملیاتی مسدود${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`;
-  }
-  if (body.sync === "connected") return "سایت محلی · همگام با ابر";
-  if (body.sync === "connecting") return "سایت محلی · در حال اتصال به ابر";
-  return `سایت محلی · همگام‌سازی متوقف${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`;
 }
 
 function getStatus() {
@@ -257,7 +243,8 @@ describe("blocked-sync badge on an install upgraded from the pre-#988 schema (ES
     expect(body.operationalBlock).toMatchObject({ state: "healthy", blocked: false, code: null, pendingOutbox: 0 });
     expect(body.health.operationalBlock).toEqual(body.operationalBlock);
     expect(body.outboundPending).toBe(3);
-    expect(syncBadgeLabel(body, body.outboundPending)).not.toContain("مسدود");
+    // The badge's own production wording, fed the route's own response.
+    expect(deploymentStatusBadgeLabel(body.profile, body)).not.toContain("مسدود");
   });
 
   it("shows the badge blocked — with the backlog and the reason — once the gate closes", async () => {
@@ -290,8 +277,13 @@ describe("blocked-sync badge on an install upgraded from the pre-#988 schema (ES
     // so before #988 this read as «در حال اتصال» forever.
     expect(body.outboundPending).toBe(3);
     expect(body.sync).toBe("paused");
-    expect(syncBadgeLabel(body, body.outboundPending)).toBe(
-      "سایت محلی · همگام‌سازی عملیاتی مسدود · ۳ در انتظار",
+    // The sentence the owner reads, composed by the production badge function.
+    // Its trailing identity clause is the *separate* login plane this freshly
+    // upgraded fixture has not converged yet (see the identities fixture in
+    // this suite); it is not part of the block.
+    expect(body.overallIdentity).toMatch(/degraded|limited/);
+    expect(deploymentStatusBadgeLabel(body.profile, body)).toBe(
+      "سایت محلی · همگام‌سازی عملیاتی مسدود · ۳ در انتظار · نیازمند بررسی هویت و ورود کارکنان",
     );
   });
 
@@ -318,7 +310,9 @@ describe("blocked-sync badge on an install upgraded from the pre-#988 schema (ES
     // queued (the tick pushes them on its own schedule), and the badge must not
     // claim they are gone.
     expect(body.outboundPending).toBe(3);
-    expect(syncBadgeLabel(body, body.outboundPending)).not.toContain("مسدود");
+    expect(deploymentStatusBadgeLabel(body.profile, body)).toBe(
+      "سایت محلی · در حال اتصال به ابر · نیازمند بررسی هویت و ورود کارکنان",
+    );
 
     // And the record on disk agrees with what the surface said.
     const row = await dbLib.withTenant(install.businessId, () =>
