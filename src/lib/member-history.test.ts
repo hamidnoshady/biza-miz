@@ -70,6 +70,17 @@ describe("memberAttributionSql (the reservations/records sweep)", () => {
     );
   });
 
+  it("resolves a membership to its global identity for platform-side columns", () => {
+    const sql = memberAttributionSql(
+      [{ table: "billing_quotes", columns: ["platform_user_id"], identity: true }],
+      "$2",
+      "$1",
+    );
+    expect(sql).toBe(
+      "EXISTS (SELECT 1 FROM billing_quotes a0 WHERE a0.business_id = $1 AND (a0.platform_user_id = (SELECT iu.platform_user_id FROM users iu WHERE iu.id = $2 AND iu.business_id = $1)))",
+    );
+  });
+
   it("walks branch-scoped tables through locations (the reservations shape)", () => {
     const sql = memberAttributionSql(MEMBER_HISTORY_RESERVATION_ATTRIBUTIONS, "$2", "$1");
     expect(sql).toBe(
