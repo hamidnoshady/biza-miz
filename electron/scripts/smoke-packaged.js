@@ -38,11 +38,11 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
-const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const rules = require(path.join(repoRoot, "scripts", "desktop", "release-scan-rules.cjs"));
+const { totpCode } = require(path.join(repoRoot, "scripts", "desktop", "totp-code.cjs"));
 
 /**
  * A fresh install runs initdb plus the full migration set before the server
@@ -212,40 +212,9 @@ const SESSION_COOKIE_NAME = "pos_session";
  * path, not a test hook.
  * ------------------------------------------------------------------ */
 
-function base32Decode(secret) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  const clean = String(secret).toUpperCase().replace(/[\s=]+/g, "");
-  const bytes = [];
-  let value = 0;
-  let bits = 0;
-  for (const character of clean) {
-    const index = alphabet.indexOf(character);
-    if (index < 0) throw new Error("totp secret is not base32");
-    value = ((value << 5) | index) & 0xffff;
-    bits += 5;
-    if (bits >= 8) {
-      bytes.push((value >>> (bits - 8)) & 0xff);
-      bits -= 8;
-    }
-  }
-  return Buffer.from(bytes);
-}
-
-/** The 6-digit RFC 6238 code for a secret at a moment (30-second steps). */
-function totpCode(secret, at = Date.now()) {
-  const counter = Math.floor(at / 30000);
-  const message = Buffer.alloc(8);
-  message.writeUInt32BE(Math.floor(counter / 2 ** 32), 0);
-  message.writeUInt32BE(counter % 2 ** 32, 4);
-  const digest = crypto.createHmac("sha1", base32Decode(secret)).update(message).digest();
-  const offset = digest[digest.length - 1] & 0x0f;
-  const binary =
-    ((digest[offset] & 0x7f) << 24) |
-    (digest[offset + 1] << 16) |
-    (digest[offset + 2] << 8) |
-    digest[offset + 3];
-  return String(binary % 1_000_000).padStart(6, "0");
-}
+// The RFC 6238 arithmetic itself lives once, in `scripts/desktop/totp-code.cjs`,
+// because the Full Offline mint script answers the same second factor against
+// the staging Cloud. Both callers require that module.
 
 /**
  * Answer the MFA challenge `POST /api/auth/login` returned.

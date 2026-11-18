@@ -557,4 +557,45 @@ describe("release workflow wiring", () => {
     expect(installer).toContain("--require-installer-extraction");
     expect(installer).toContain("desktop-release-scan.json");
   });
+
+  it("never mints an enrollment code on a pull_request build", () => {
+    const installer = workflow("build-desktop-installer.yml");
+    const start = installer.indexOf("Mint a fresh Full Offline enrollment code");
+    const end = installer.indexOf("run: node scripts/mint-offline-enrollment-code.mjs", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const step = installer.slice(start, end);
+    const condition = /^\s*if: (.+)$/m.exec(step)?.[1] ?? "";
+    // Minting needs a reusable staging owner password, which must never be
+    // reachable from a pull_request build.
+    expect(condition).toContain("github.event_name != 'pull_request'");
+    // Exempting forks alone was the first attempt and is not enough: a
+    // same-repository pull_request build can still read the secrets, so the
+    // gate has to exclude every pull_request and not name that field at all.
+    expect(condition).not.toContain("github.event.pull_request");
+  });
+
+  it("keeps the Full Offline phase to the fresh-install acceptance step", () => {
+    const retail = workflow("windows-11-release.yml");
+    // One mint per rehearsal: the phase always creates its own profile, so a
+    // second run covers nothing new and only spends another code and staging
+    // installation.
+    expect(retail.match(/Mint a fresh Full Offline enrollment code/g) ?? []).toHaveLength(1);
+    for (const name of [
+      "Abrupt-stop recovery acceptance",
+      "In-place update to signed candidate and persistence acceptance",
+    ]) {
+      const start = retail.indexOf(name);
+      expect(start).toBeGreaterThan(-1);
+      const next = retail.indexOf("\n      - name: ", start);
+      const step = retail.slice(start, next === -1 ? undefined : next);
+      // Withheld explicitly, not merely left unset: the fresh-install step's
+      // minted code is still in $GITHUB_ENV, so an empty URL is what keeps the
+      // phase from running again here.
+      expect(step).toContain("DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ''");
+      expect(step).toContain("DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ''");
+      expect(step).not.toContain("mint-offline-enrollment-code.mjs");
+      expect(step).not.toContain("vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL");
+    }
+  });
 });
