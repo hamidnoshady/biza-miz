@@ -232,7 +232,13 @@ try {
   });
 
   await step("a refresh mid-tour resumes at the same step", async () => {
-    await startTourFromPage(page, "داشبورد حسابداری", "مرور دوباره");
+    const resetForResume = await browserApi(
+      page,
+      `${BASE_URL}/api/knowledge/tours/accounting.overview.ledger/progress`,
+      { event: "reset" },
+    );
+    assert(resetForResume.ok(), `resume reset failed (${resetForResume.status()})`);
+    await startTourFromPage(page, "داشبورد حسابداری", "شروع تور");
     const first = await overlayHeading(page).innerText();
     await clickNextAndSettle(page);
     const second = await overlayHeading(page).innerText();
