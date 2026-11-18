@@ -138,6 +138,62 @@ beforeEach(async () => {
 });
 
 describe("the prompt resolver's state machine", () => {
+  it("allocates unique drafts and rejects a stale concurrent publish confirmation", async () => {
+    const input = { scopeKey: BASE_PROMPT_SCOPE, createdBy: alpha.userId };
+    const [first, second] = await Promise.all([
+      store.savePromptDraft({ ...input, text: "first draft" }),
+      store.savePromptDraft({ ...input, text: "second draft" }),
+    ]);
+    if (!first.ok || !second.ok) throw new Error("Draft setup failed");
+    expect(new Set([first.version.version, second.version.version])).toEqual(new Set([1, 2]));
+    const outcomes = await Promise.all([first.version.id, second.version.id].map((id) =>
+      store.publishPromptVersion({ id, publishedBy: alpha.userId, expectedPublishedId: null }),
+    ));
+    expect(outcomes.filter((result) => result.ok)).toHaveLength(1);
+    expect(outcomes.find((result) => !result.ok)).toEqual({ ok: false, error: "prompt_publish_conflict" });
+    expect((await store.listPromptVersions(BASE_PROMPT_SCOPE)).filter((row) => row.state === "published")).toHaveLength(1);
+  });
+
+  it("preserves the tested text when saving an edited draft", async () => {
+    const input = { scopeKey: BASE_PROMPT_SCOPE, createdBy: alpha.userId };
+    const first = await store.savePromptDraft({ ...input, text: "reviewed" });
+    if (!first.ok) throw new Error("Draft setup failed");
+    const edited = await store.savePromptDraft({ ...input, text: "revised", editDraftId: first.version.id });
+    expect(edited).toMatchObject({ ok: true, version: { state: "draft", text: "revised", version: 2 } });
+    expect(await store.getPromptVersion(first.version.id)).toMatchObject({ state: "draft", text: "reviewed" });
+    expect(await resolver.getPublishedPrompt(BASE_PROMPT_SCOPE)).toBeNull();
+  });
+
+  it("keeps the prior live prompt when publication cannot be audited", async () => {
+    const input = { scopeKey: BASE_PROMPT_SCOPE, createdBy: alpha.userId };
+    const first = await store.savePromptDraft({ ...input, text: "live" });
+    const second = await store.savePromptDraft({ ...input, text: "reviewed draft" });
+    if (!first.ok || !second.ok) throw new Error("Draft setup failed");
+    await store.publishPromptVersion({ id: first.version.id, publishedBy: alpha.userId });
+    await expect(store.publishPromptVersion({
+      id: second.version.id, publishedBy: alpha.userId, requiredState: "draft",
+      audit: async () => { throw new Error("audit fixture failure"); },
+    })).rejects.toThrow("audit fixture failure");
+    expect(await resolver.getPublishedPrompt(BASE_PROMPT_SCOPE)).toMatchObject({ id: first.version.id });
+    expect(await store.getPromptVersion(second.version.id)).toMatchObject({ state: "draft" });
+    await store.retirePromptVersion(second.version.id);
+    expect(await store.rollbackPromptVersion({
+      scopeKey: BASE_PROMPT_SCOPE, targetVersion: second.version.version, publishedBy: alpha.userId,
+    })).toEqual({ ok: false, error: "rollback_target_invalid" });
+  });
+
+  it("composes an app draft in a preview without changing the live resolver", async () => {
+    const scope = resolver.appPromptScope("crm");
+    const saved = await store.savePromptDraft({ scopeKey: scope, text: "PREVIEW_DRAFT_FIXTURE", createdBy: alpha.userId });
+    if (!saved.ok) throw new Error("Draft setup failed");
+    const preview = await resolver.previewSystemPrompt(scope, "auto", saved.version);
+    expect(preview.systemPrompt).toContain("PREVIEW_DRAFT_FIXTURE");
+    expect(preview.layers.app?.version).toBe(saved.version.version);
+    const live = await resolver.previewSystemPrompt(scope, "auto");
+    expect(live.systemPrompt).not.toContain("PREVIEW_DRAFT_FIXTURE");
+    expect(live.layers.app?.version).toBeNull();
+  });
+
   it("uses a published override and ignores a draft", async () => {
     // The draft is saved FIRST and is the higher version number, so a resolver
     // that sorted by version rather than filtered by state would pick it.
