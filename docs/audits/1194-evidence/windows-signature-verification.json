@@ -1,0 +1,37 @@
+﻿{
+    "schemaVersion":  1,
+    "mode":  "unsigned-development",
+    "expectedSigner":  null,
+    "expectedThumbprint":  null,
+    "historicalSignerAllowed":  false,
+    "rfc3161TimestampRequired":  false,
+    "commit":  "0929821b3ff0e7f755cba63a5bcdb6c6de04b555",
+    "generatedAt":  "2026-11-18T09:46:14.1589138Z",
+    "artifacts":  [
+                      {
+                          "id":  "desktop-executable",
+                          "path":  "win-unpacked/Bizamiz.exe",
+                          "bytes":  246236160,
+                          "sha256":  "ca728c7455252f06ae6046da56e7a8e3a1820029d200435a89f722ee5465505f",
+                          "status":  "NotSigned",
+                          "signer":  null,
+                          "signerCommonName":  null,
+                          "thumbprint":  null,
+                          "timestampSigner":  null,
+                          "accepted":  true
+                      },
+                      {
+                          "id":  "nsis-installer",
+                          "path":  "Bizamiz Setup 1.0.197.exe",
+                          "bytes":  180102193,
+                          "sha256":  "9b800aa326eb222373c955c4334b7e42596229bd5efed3f8239c7b23b789b438",
+                          "status":  "NotSigned",
+                          "signer":  null,
+                          "signerCommonName":  null,
+                          "thumbprint":  null,
+                          "timestampSigner":  null,
+                          "accepted":  true
+                      }
+                  ],
+    "passed":  true
+}
