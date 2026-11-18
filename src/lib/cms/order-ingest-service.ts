@@ -147,6 +147,18 @@ export async function handleCmsStoreOrderWebhook(notice: CmsOrderEventNotice): P
         return NextResponse.json({ status: "processed", orderId });
       }
 
+      // A `counter_refund` the till already queued comes back as the CMS's
+      // `order.refunded` event. That is an echo of our own write, not a second
+      // refund, so acknowledge it and change nothing — whatever shape the CMS
+      // mirrored the order in. The outbox row, not the payload, is the proof.
+      if (notice.event === "order.refunded") {
+        const posOrderId = await cafeCounterRefundEchoOrderId(connection, notice.order.id);
+        if (posOrderId) {
+          await markInboxProcessed(claimed.inboxId, posOrderId);
+          return NextResponse.json({ status: "ignored" });
+        }
+      }
+
       if (isCmsReversalEvent(notice.event) && isCafeCmsOrder(notice.order)) {
         // A café sale is POS-managed once imported: void/refund is a till
         // action with its own audit and stock reversal, and the CMS-side
@@ -243,6 +255,32 @@ async function claimInboxRow(connection: WebsiteConnectionRow, notice: CmsOrderE
   );
   if (byDelivery[0]?.status === "processed") return { kind: "replay" };
   return { kind: "duplicate" };
+}
+
+/**
+ * The POS order behind a `counter_refund` this till queued for the CMS. Its
+ * existence is the proof that a `order.refunded` webhook is our own write
+ * reflected back: the money already moved here, so the event must be absorbed
+ * rather than turned into a second customer return or a visible inbox failure.
+ */
+async function cafeCounterRefundEchoOrderId(
+  connection: WebsiteConnectionRow,
+  cmsOrderId: string,
+): Promise<string | null> {
+  const { rows } = await query<{ id: string }>(
+    `SELECT o.id
+       FROM orders o
+      WHERE o.cms_connection_id = $1 AND o.cms_order_id = $2
+        AND EXISTS (
+          SELECT 1 FROM cms_order_state_outbox e
+           WHERE e.pos_order_id = o.id
+             AND e.cms_connection_id = $1 AND e.cms_order_id = $2
+             AND e.state = 'counter_refund'
+        )
+      LIMIT 1`,
+    [connection.id, cmsOrderId],
+  );
+  return rows[0]?.id ?? null;
 }
 
 async function markInboxProcessed(inboxId: string, importedOrderId: string): Promise<void> {
