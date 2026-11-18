@@ -144,6 +144,7 @@ import { countPendingCoworkerRuns, listCoworkerJobs } from "./ai-coworker-servic
 import { ACTION_CATALOG, ACTION_TYPES } from "./ai";
 import { authorizedAiDestinations, findAuthorizedAiDestinations } from "./ai-navigation";
 import { AI_GUIDED_TOURS, resolveAuthorizedAiGuide } from "./ai-guided-tours";
+import { learningRecommendationsFor } from "./learning-recommendation-service";
 import { RECONCILABLE_ACCOUNT_LABELS, WASTE_REASON_LABELS, labelFor, moneyFields } from "./ai-labels";
 import { sumRialText } from "./money";
 import {
@@ -1752,6 +1753,28 @@ export async function runReadTool(
       return guide
         ? { ok: true, data: { status: "ready", guideId: guide.id, label: guide.label } }
         : { ok: false, data: { error: "guide_unavailable" } };
+    }
+    case "recommend_learning": {
+      // Issue #972, Phase F: the assistant may *name* an eligible tour or
+      // learning path, never invent one and never launch it. The member still
+      // presses the existing «آموزش» button (or the Learning Center's start
+      // button), which is the only thing that starts a tour.
+      if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };
+      const route = typeof args.route === "string" ? args.route.trim().slice(0, 200) : "";
+      const recommendations = await learningRecommendationsFor({
+        businessId,
+        userId: actorUserId,
+        permissions: permissions ?? new Set(),
+        route: route || null,
+      });
+      return {
+        ok: true,
+        data: {
+          recommendations,
+          note:
+            "این فهرست فقط از تورها و مسیرهای منتشرشده و مجاز همین کاربر ساخته شده است. تور را خودتان شروع نمی‌کنید؛ کاربر باید دکمهٔ آموزش همان صفحه را بزند.",
+        },
+      };
     }
     case "show_report_widget": {
       // The model names a registered source; the underlying read tool runs with

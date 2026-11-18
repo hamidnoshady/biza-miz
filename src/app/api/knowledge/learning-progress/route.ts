@@ -5,11 +5,11 @@ import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-devic
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { KNOWLEDGE_PAGES } from "@/lib/knowledge-base";
 import { pageTourCandidates } from "@/lib/tour-baseline";
-import { publishedToursForPage } from "@/lib/tour-studio-service";
+import { publishedTours } from "@/lib/tour-studio-service";
 import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
 import { tourForViewer, tourProgressView } from "@/lib/tours";
 import { loadLearningPathProgress, learningPathViewerFor } from "@/lib/learning-paths-service";
-import { pathsForViewer, learningPathSummary } from "@/lib/learning-paths";
+import { completedTourStepIds, LEARNING_PATHS, pathsForViewer, learningPathSummary } from "@/lib/learning-paths";
 import type { TourDefinition } from "@/lib/tours";
 
 /** Map route prefixes to the four apps plus platform-owned surfaces. */
@@ -96,15 +96,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // 1. Gather every tour the member could be offered across all pages.
   // ------------------------------------------------------------------
   const allCandidates: Array<{ pageKey: string; tour: TourDefinition }> = [];
+  const published = await publishedTours().catch(() => []);
   for (const page of KNOWLEDGE_PAGES) {
-    try {
-      const published = await publishedToursForPage(page.key).catch(() => []);
-      const candidates = pageTourCandidates(page.key, published);
-      for (const tour of candidates) {
-        allCandidates.push({ pageKey: page.key, tour });
-      }
-    } catch {
-      // A single page's lookup failure must not break the whole report.
+    const publishedForPage = published.filter((tour) => tour.pageKey === page.key);
+    const candidates = pageTourCandidates(page.key, publishedForPage);
+    for (const tour of candidates) {
+      allCandidates.push({ pageKey: page.key, tour });
     }
   }
 
@@ -124,16 +121,19 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     userId,
     eligibleTours.map((t) => t.tour.id),
   );
+  const completedTourIds = new Set(
+    eligibleTours
+      .filter(
+        (t) => tourProgressView(t.tour, tourProgress.get(t.tour.id) ?? null).status === "completed",
+      )
+      .map((t) => t.tour.id),
+  );
 
   // ------------------------------------------------------------------
   // 4. Learning paths — same eligibility pattern.
   // ------------------------------------------------------------------
-  const { LEARNING_PATHS } = await import("@/lib/learning-paths");
-  const pathViewer = await learningPathViewerFor(businessId, permissions);
-  const visiblePaths = pathsForViewer(LEARNING_PATHS, {
-    permissions: pathViewer.permissions,
-    industry: pathViewer.industry,
-  });
+  const pathViewer = await learningPathViewerFor(businessId, permissions, LEARNING_PATHS);
+  const visiblePaths = pathsForViewer(LEARNING_PATHS, pathViewer);
   const pathProgress = await loadLearningPathProgress(
     businessId,
     userId,
@@ -163,7 +163,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
     const pathEntries = pathsHere.map((p) => {
       const progress = pathProgress.get(p.id) ?? null;
-      const view = learningPathSummary(p, progress);
+      const view = learningPathSummary(p, progress, completedTourStepIds(p, completedTourIds));
       return {
         id: p.id,
         title: p.title,

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { tourPlayback, tourProgressView } from "@/lib/tours";
 import { eligibleTourById, loadTourProgress } from "@/lib/tours-service";
+import { tourSessionKey } from "@/lib/tour-session-key";
 
 /**
  * The steps of one tour plus the caller's resume point, fetched when the
@@ -22,6 +23,7 @@ export const GET = withTenantScope(
     return NextResponse.json({
       tour: tourPlayback(tour),
       progress: tourProgressView(tour, progress),
+      sessionKey: tourSessionKey(guard.session.businessId, guard.session.sub),
     });
   },
 );

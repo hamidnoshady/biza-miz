@@ -6,6 +6,7 @@ import { pathsForViewer } from "@/lib/learning-paths";
 import { learningPathViewerFor } from "@/lib/learning-paths-service";
 import {
   assignLearningPathToStaff,
+  isLearningPathAssignedToStaff,
   listLearningPathAssignments,
 } from "@/lib/learning-paths-service";
 
@@ -31,11 +32,9 @@ export const POST = withTenantScope(
     const viewer = await learningPathViewerFor(
       guard.session.businessId,
       guard.membership.permissions,
+      [path],
     );
-    const visible = pathsForViewer([path], {
-      permissions: viewer.permissions,
-      industry: viewer.industry,
-    });
+    const visible = pathsForViewer([path], viewer);
     if (visible.length === 0)
       return NextResponse.json({ error: "not_found" }, { status: 404 });
 
@@ -52,6 +51,9 @@ export const POST = withTenantScope(
       userId,
       guard.session.sub,
     );
+    if (!created && !(await isLearningPathAssignedToStaff(guard.session.businessId, pathId, userId))) {
+      return NextResponse.json({ error: "member_not_found" }, { status: 404 });
+    }
     return NextResponse.json({ created });
   },
 );
@@ -71,11 +73,9 @@ export const GET = withTenantScope(
     const viewer = await learningPathViewerFor(
       guard.session.businessId,
       guard.membership.permissions,
+      [path],
     );
-    const visible = pathsForViewer([path], {
-      permissions: viewer.permissions,
-      industry: viewer.industry,
-    });
+    const visible = pathsForViewer([path], viewer);
     if (visible.length === 0)
       return NextResponse.json({ error: "not_found" }, { status: 404 });
 

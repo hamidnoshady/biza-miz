@@ -18,6 +18,7 @@ import { hasTourEvidence } from "./tour-evidence-service";
 import {
   applyTourEvent,
   migrateTourProgress,
+  tourById,
   tourFactsNeeded,
   tourForViewer,
   type TourViewer,
@@ -112,6 +113,27 @@ export async function loadTourProgress(
     [businessId, userId, [...tourIds]],
   );
   return new Map(rows.map((row) => [row.tour_id, mapRow(row)]));
+}
+
+/**
+ * Every member's tour progress in this business, grouped by user. Used only by
+ * the `team.manage` assignment report, which is allowed to see its own team's
+ * learning state; nothing else may call it.
+ */
+export async function loadTourProgressForBusiness(
+  businessId: string,
+): Promise<Map<string, Map<string, StoredTourProgress>>> {
+  const { rows } = await query<ProgressRow & { user_id: string }>(
+    `SELECT ${COLUMNS}, user_id FROM tour_member_progress WHERE business_id = $1`,
+    [businessId],
+  );
+  const byUser = new Map<string, Map<string, StoredTourProgress>>();
+  for (const row of rows) {
+    const map = byUser.get(row.user_id) ?? new Map<string, StoredTourProgress>();
+    map.set(row.tour_id, mapRow(row));
+    byUser.set(row.user_id, map);
+  }
+  return byUser;
 }
 
 export type RecordTourEventResult =
@@ -301,6 +323,14 @@ export async function assignTourToStaff(
   actorId: string,
 ): Promise<boolean> {
   return withTenantTransaction(businessId, async (client) => {
+    // The person must be an active member of THIS business. The FK alone only
+    // proves the id exists somewhere; assigning a foreign or disabled account
+    // would create a meaningless (and privacy-adjacent) row.
+    const member = await client.query<{ id: string }>(
+      `SELECT id FROM users WHERE id = $1 AND business_id = $2 AND is_active = true`,
+      [userId, businessId],
+    );
+    if (member.rows.length === 0) return false;
     const { rows } = await client.query<{ inserted: boolean }>(
       `INSERT INTO tour_assignments (business_id, user_id, tour_id, assigned_by)
        VALUES ($1, $2, $3, $4)
@@ -354,23 +384,53 @@ export async function listTourAssignments(
 }
 
 /**
+ * Every tour assignment in this business, newest first, with the member's
+ * name. `team.manage`-guarded reporting only.
+ */
+export async function listAllTourAssignments(
+  businessId: string,
+): Promise<{ tourId: string; userId: string; fullName: string | null; assignedAt: string }[]> {
+  const { rows } = await query<{
+    tour_id: string;
+    user_id: string;
+    full_name: string | null;
+    assigned_at: Date | string;
+  }>(
+    `SELECT a.tour_id, a.user_id, u.full_name, a.assigned_at
+       FROM tour_assignments a
+       JOIN users u ON u.id = a.user_id
+      WHERE a.business_id = $1
+      ORDER BY a.assigned_at DESC, u.full_name`,
+    [businessId],
+  );
+  return rows.map((row) => ({
+    tourId: row.tour_id,
+    userId: row.user_id,
+    fullName: row.full_name,
+    assignedAt: iso(row.assigned_at),
+  }));
+}
+
+/**
  * The tours assigned to one staff member, newest assignment first.
  */
 export async function listStaffTourAssignments(
   businessId: string,
   userId: string,
 ): Promise<{ tourId: string; title: string; assignedAt: string }[]> {
-  const { rows } = await query<{ tour_id: string; title: string; assigned_at: Date | string }>(
-    `SELECT a.tour_id, t.title, a.assigned_at
+  const { rows } = await query<{ tour_id: string; assigned_at: Date | string }>(
+    `SELECT a.tour_id, a.assigned_at
        FROM tour_assignments a
-       JOIN users u ON u.id = a.user_id
       WHERE a.business_id = $1 AND a.user_id = $2
       ORDER BY a.assigned_at DESC, a.tour_id`,
     [businessId, userId],
   );
   return rows.map((row) => ({
     tourId: row.tour_id,
-    title: row.title,
+    // Tours are code or console definitions, not a table to join; a published
+    // tour whose id is not in this build falls back to its id rather than
+    // dropping the assignment.
+    title: tourById(row.tour_id)?.title ?? row.tour_id,
     assignedAt: iso(row.assigned_at),
   }));
 }

@@ -472,8 +472,20 @@ export async function publishedToursForPage(pageKey: string): Promise<TourDefini
   });
 }
 
+/**
+ * Every published tour in one query. The coverage-style surfaces (the member
+ * learning-progress roll-up, the console audit) need all of them; asking per
+ * page would be one query per registered page on every request.
+ */
+export async function publishedTours(): Promise<TourDefinition[]> {
+  const { rows } = await query<PublishedRow>(`${PUBLISHED_SELECT} ORDER BY t.tour_key`);
+  return rows.flatMap((row) => {
+    const definition = definitionOf(row, row.version);
+    return definition ? [definition] : [];
+  });
+}
+
 /** One published tour by its id, or null. Drafts and archived tours are invisible here. */
-export async function publishedTourById(tourKey: string): Promise<TourDefinition | null> {
-  const { rows } = await query<PublishedRow>(`${PUBLISHED_SELECT} AND t.tour_key = $1`, [tourKey]);
+export async function publishedTourById(tourKey: string): Promise<TourDefinition | null> {  const { rows } = await query<PublishedRow>(`${PUBLISHED_SELECT} AND t.tour_key = $1`, [tourKey]);
   return rows[0] ? definitionOf(rows[0], rows[0].version) : null;
 }

@@ -31,6 +31,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@/lib/tour-studio-service", () => ({
   publishedToursForPage: mocks.publishedForPage,
+  publishedTours: async () => [],
 }));
 
 vi.mock("@/lib/tours-service", async (importOriginal) => {

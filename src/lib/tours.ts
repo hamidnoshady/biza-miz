@@ -35,6 +35,7 @@
  */
 import { INDUSTRIES, hasSellableCatalogue, isRetailCatalogueIndustry, type Industry } from "./industries";
 import { hasCapability, hasModule, industryProfile } from "./industry-profile";
+import { KNOWLEDGE_PAGES } from "./knowledge-base";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
 import { PERMISSIONS, type Permission } from "./permissions";
 import { isTourVerifier, type TourVerifier } from "./tour-verifiers";
@@ -112,7 +113,15 @@ export type TourStepKind =
    * way (no click blocker), the page stays usable, and the step completes only
    * when the server confirms the action through `verifier`.
    */
-  | "action";
+  | "action"
+  /**
+   * A guided hand-off to another registered page (issue #972, cross-page
+   * tours). The card explains why the member is leaving this screen and offers
+   * one button that navigates; nothing moves until they press it. The step
+   * itself is an explanation, so pressing it is "seen" once the progress write
+   * has been accepted. Steps after it belong to `navigateTo`.
+   */
+  | "navigate";
 
 export interface TourStep {
   /** Stable across revisions: progress is keyed on it. Never reuse an id for a different step. */
@@ -128,6 +137,13 @@ export interface TourStep {
    * URL or a selector, so a step cannot be verified by an arbitrary request.
    */
   verifier?: TourVerifier;
+  /**
+   * Required for `navigate`, forbidden otherwise: the canonical registered
+   * route this step hands the member to. The runtime never navigates on its
+   * own — the member presses the step's one button — and every step after it
+   * belongs to that route until the next navigate step.
+   */
+  navigateTo?: string;
   /**
    * Narrows the tour for the viewer: a step the viewer does not match is not
    * part of THEIR tour at all (not described, not counted, not required for
@@ -1086,6 +1102,376 @@ export const TOURS: readonly TourDefinition[] = [
       },
     ],
   },
+  {
+    id: "platform.learning-overview",
+    version: 1,
+    pageKey: "page:/workspace",
+    route: "/workspace",
+    title: "از میز کار من تا مرکز آموزش",
+    description:
+      "نقشهٔ کوتاه پلتفرم: میز کار، برنامه‌های کسب‌وکار، تنظیمات و مرکز آموزش — و اینکه از کجا یادگیری را ادامه دهید.",
+    eligibility: {},
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "یک تور چندصفحه‌ای",
+        body:
+          "این تور شما را در چند صفحه همراهی می‌کند. هر جا لازم باشد صفحه عوض شود، خودتان دکمهٔ رفتن را می‌زنید؛ پیشرفتتان پیش از جابه‌جایی ذخیره می‌شود و اگر صفحه را دوباره باز کنید، از همان مرحله ادامه می‌دهید.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "میز کار من",
+        body:
+          "میز کار من کارهای شخصی شماست: پروژه‌ها، یادآوری‌ها و کارهایی که به شما سپرده شده. اینجا نقطهٔ شروع روز کاری است، نه جای عملیات فروش.",
+      },
+      {
+        id: "apps",
+        kind: "explain",
+        title: "چهار برنامهٔ مستقل",
+        body:
+          "بیزامیز چهار برنامهٔ مستقل دارد: حسابداری (فروش، خرید و انبار، محصولات)، رشد و بازاریابی، ارتباط با مشتری (CRM) و مدیریت وب‌سایت. تنظیمات و مرکز آموزش بین همه مشترک‌اند. هر برنامه‌ای که برای کسب‌وکار شما فعال و برای نقش شما مجاز باشد در منو دیده می‌شود.",
+      },
+      {
+        id: "to-knowledge",
+        kind: "navigate",
+        navigateTo: "/knowledge",
+        title: "رفتن به مرکز آموزش",
+        body:
+          "حالا به مرکز آموزش می‌رویم تا ببینید مسیرهای یادگیری، پیشرفت شما و راهنماهای نوشته‌شده کجاست. این صفحه برای همهٔ اعضا باز است.",
+      },
+      {
+        id: "knowledge-header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "مرکز آموزش",
+        body:
+          "اینجا خانهٔ یادگیری است: مقاله‌های کامل، جست‌وجو و پیوند به هر تیتر. از همین صفحه می‌توانید مسیرهای یادگیری و پیشرفت خودتان را هم ببینید.",
+      },
+      {
+        id: "learning",
+        kind: "explain",
+        title: "مسیر یادگیری و پیشرفت",
+        body:
+          "«مسیرهای یادگیری» چند تور و راهنما را به یک هدف وصل می‌کنند (مثلاً اولین روز کاری). «پیشرفت من» نشان می‌دهد چه چیزی را کامل کرده‌اید، چه چیزی نیمه‌کاره مانده و قدم بعدی چیست. تورهای هر صفحه هم از دکمهٔ آموزش همان صفحه شروع می‌شوند.",
+      },
+    ],
+  },
+  {
+    id: "crm.navigation.overview",
+    version: 1,
+    pageKey: "page:/crm/overview",
+    route: "/crm/overview",
+    title: "نقشهٔ CRM: از میز کار تا پروندهٔ مشتری",
+    description: "ببینید CRM چه کاری انجام می‌دهد، از کجا شروع کنید و پروندهٔ مشتری کجاست.",
+    eligibility: {},
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "CRM چه کاری می‌کند",
+        body:
+          "CRM رابطهٔ کسب‌وکار با مشتری را نگه می‌دارد: سرنخ‌ها، فرصت‌های فروش، پیگیری‌ها، تیکت‌ها و رضایت ارتباط. این تور نقشهٔ بخش‌هاست و چیزی را تغییر نمی‌دهد.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "میز کار CRM",
+        body:
+          "میز کار، خلاصهٔ امروز است: کارهای عقب‌افتاده، مشتریان در معرض ریسک و فرصت‌هایی که باید پیگیری شوند. از همین کارت‌ها به فهرست کامل می‌رسید.",
+      },
+      {
+        id: "modules",
+        kind: "explain",
+        title: "بخش‌های اصلی",
+        body:
+          "«مشتریان» پروندهٔ یکپارچهٔ اشخاص است؛ «فرصت‌ها» معامله‌های در جریان؛ «کارها و پیگیری‌ها» تعهدهای زمانی؛ «تیکت‌ها» درخواست‌های پشتیبانی؛ و «بخش‌بندی»، «رضایت ارتباط» و «کیفیت داده» برای مدیریت و پاک‌سازی اطلاعات. بریف، پیشنهاد قیمت و کمپین کارفرما هم برای کسب‌وکارهای خدماتی‌اند.",
+      },
+      {
+        id: "to-directory",
+        kind: "navigate",
+        navigateTo: "/crm/directory",
+        title: "رفتن به مشتریان",
+        body:
+          "برای دیدن پروندهٔ مشتری به فهرست مشتریان می‌رویم. همان فهرستی است که حسابداری هم از آن می‌خواند؛ یک شخص را یک بار ثبت می‌کنید و همه‌جا همان پرونده دیده می‌شود.",
+      },
+      {
+        id: "customer-file",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.partiesAdd,
+        title: "افزودن مشتری",
+        body:
+          "از همین دکمه مشتری تازه ثبت می‌شود. اگر دسترسی «مدیریت اشخاص» را ندارید این دکمه برای شما نمایش داده نمی‌شود و ثبت با همکار دارای دسترسی انجام می‌شود. برای تمرین گام‌به‌گام، تور «اولین مشتری را ثبت کنید» در همین صفحه را از دکمهٔ آموزش شروع کنید.",
+        eligibility: { permissions: [PERMISSIONS.partiesManage] },
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "از اینجا به کجا",
+        body:
+          "برای کار روزانه، «کارها و پیگیری‌ها» را ببینید؛ برای فروش، «فرصت‌ها»؛ و برای پشتیبانی، «تیکت‌ها». هر صفحه دکمهٔ آموزش خودش را دارد و پیشرفت هر تور جدا نگه داشته می‌شود.",
+      },
+    ],
+  },
+  {
+    id: "growth.navigation.overview",
+    version: 1,
+    pageKey: "page:/growth/overview",
+    route: "/growth/overview",
+    title: "نقشهٔ رشد و بازاریابی",
+    description: "از میز کار رشد به کمپین‌ها و باشگاه وفاداری؛ و اینکه هر بخش چه کاری برای شما انجام می‌دهد.",
+    eligibility: {},
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "رشد یعنی چه",
+        body:
+          "برنامهٔ رشد، مشتری تازه می‌آورد و مشتری فعلی را نگه می‌دارد: مخاطبان، کمپین‌ها، پیام‌رسانی، کارت هدیه، وفاداری و پورسانت. اعداد این صفحه از همان فروش و عملیات کسب‌وکار می‌آید، نه از یک دفتر جدا.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "میز کار رشد",
+        body: "خلاصهٔ عملکرد کمپین‌ها و مخاطبان. برای دیدن جزئیات هر بخش از منوی همین برنامه استفاده کنید.",
+      },
+      {
+        id: "map",
+        kind: "explain",
+        title: "کجای این برنامه چه کاری می‌کند",
+        body:
+          "«مخاطبان» فهرست یکپارچهٔ مشتریان برای بازاریابی است. «کمپین‌ها» اجرای یک برنامه روی مخاطب هدف. «پیام‌رسانی» ارسال و پیگیری پیام است. «کارت هدیه» و «وفاداری» اعتبار و امتیاز مشتری را نگه می‌دارند. «پورسانت» سهم فروشندگان و بازاریابان را حساب می‌کند.",
+      },
+      {
+        id: "to-campaigns",
+        kind: "navigate",
+        navigateTo: "/growth/campaigns",
+        title: "رفتن به کمپین‌ها",
+        body:
+          "کمپین‌ها قلب این برنامه‌اند: یک پیشنهاد، یک مخاطب هدف و یک بازهٔ زمانی. کمپین پیش از اجرا تأیید می‌شود و ارسال واقعی از مسیر عادی خودش انجام می‌شود؛ تور هیچ پیامی نمی‌فرستد.",
+      },
+      {
+        id: "campaigns",
+        kind: "explain",
+        title: "ساختن و سنجیدن کمپین",
+        body:
+          "برای هر کمپین، مخاطب هدف و پیام را مشخص می‌کنید و نتیجه را بر اساس فروش و پاسخ مخاطب می‌سنجید. گزارش‌ها به فروش همین کسب‌وکار وصل‌اند.",
+      },
+      {
+        id: "to-loyalty",
+        kind: "navigate",
+        navigateTo: "/growth/loyalty",
+        title: "رفتن به وفاداری",
+        body: "باشگاه وفاداری جای نگه‌داشتن مشتری است: امتیاز، اعتبار و پاداش. به صفحهٔ وفاداری می‌رویم.",
+      },
+      {
+        id: "loyalty",
+        kind: "explain",
+        title: "وفاداری و اعتبار",
+        body:
+          "اینجا قاعدهٔ کسب امتیاز و مصرف اعتبار را می‌بینید. موجودی اعتبار مشتری بخشی از حساب اوست؛ تغییر آن یک عملیات مالی واقعی است و این تور آن را انجام نمی‌دهد.",
+      },
+    ],
+  },
+  {
+    id: "websites.navigation.overview",
+    version: 1,
+    pageKey: "page:/websites/overview",
+    route: "/websites/overview",
+    title: "نقشهٔ مدیریت وب‌سایت",
+    description: "دو مدیر وب‌سایت در یک برنامه: سایت بیزامیز (CMS) و وردپرس/ووکامرس.",
+    eligibility: {},
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "یک برنامه، دو مدیر سایت",
+        body:
+          "برنامهٔ وب‌سایت دو سیستم هم‌رده دارد: سایت بیزامیز (CMS) و مدیریت وردپرس/ووکامرس. هر دو از یک در باز می‌شوند، اما هر کدام داده و تنظیمات خودش را دارد؛ یکی را به‌جای دیگری نه.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "میز کار وب‌سایت‌ها",
+        body: "اینجا وضعیت هر دو سایت را می‌بینید و می‌توانید وارد مدیر هر کدام شوید.",
+      },
+      {
+        id: "map",
+        kind: "explain",
+        title: "از کدام مدیر شروع کنم",
+        body:
+          "اگر سایت را با بیزامیز ساخته‌اید، «سایت بیزامیز» را باز کنید: صفحه‌ها، نوشته‌ها، رسانه، محصولات، سفارش‌ها، طراحی، دامنه و اشتراک. اگر فروشگاه وردپرس دارید، «وردپرس» را باز کنید: محصولات، سفارش‌ها، مشتریان، دسته‌ها، محتوا، رسانه و صف رویدادها.",
+      },
+      {
+        id: "to-cms",
+        kind: "navigate",
+        navigateTo: "/websites/cms",
+        title: "رفتن به سایت بیزامیز",
+        body: "اول مدیر سایت بیزامیز را می‌بینیم. اگر این سایت را ندارید، این مرحله را رد کنید.",
+      },
+      {
+        id: "cms",
+        kind: "explain",
+        title: "مدیر سایت بیزامیز",
+        body:
+          "از اینجا محتوای سایت، محصولات و سفارش‌های فروشگاه سایت را مدیریت می‌کنید. تغییر طراحی یا دامنه اثر مستقیم روی سایت زنده دارد؛ تور چنین کاری انجام نمی‌دهد.",
+      },
+      {
+        id: "to-wp",
+        kind: "navigate",
+        navigateTo: "/websites/wp",
+        title: "رفتن به وردپرس",
+        body:
+          "حالا مدیر وردپرس را می‌بینیم. این بخش به اتصال فعال وردپرس نیاز دارد و فقط وقتی نمایش داده می‌شود که آن اتصال برای کسب‌وکار شما فعال باشد.",
+        eligibility: { features: ["integrations"] },
+      },
+      {
+        id: "wp",
+        kind: "explain",
+        title: "مدیر وردپرس",
+        body:
+          "محصولات، سفارش‌ها و مشتریان وردپرس از طریق اتصال همگام می‌شوند؛ «صف و رویدادها» نشان می‌دهد چه چیزی در انتظار ارسال یا دریافت است. برای عیب‌یابی، وضعیت اتصال را در تنظیمات اتصال‌ها ببینید.",
+        eligibility: { features: ["integrations"] },
+      },
+    ],
+  },
+  {
+    id: "accounting.navigation.overview",
+    version: 1,
+    pageKey: "page:/accounting/orders",
+    route: "/accounting/orders",
+    title: "نقشهٔ فضای حسابداری",
+    description: "سفارش‌ها، صندوق فروش و محصولات؛ سه ایستگاه اصلی کار روزانه و راه رفتن بین آن‌ها.",
+    eligibility: {},
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "حسابداری، فضای کار اصلی",
+        body:
+          "حسابداری فقط دفتر و سند نیست: فروش، خرید و انبار، محصولات و گزارش‌ها هم اینجا هستند. این تور سه ایستگاه پرکاربرد را به هم وصل می‌کند.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سفارش‌ها",
+        body:
+          "فهرست سفارش‌ها جای پیگیری سفارش‌های ثبت‌شده است. برای فروش تازه به صندوق می‌رویم؛ برای ساختن کالا به محصولات.",
+      },
+      {
+        id: "map",
+        kind: "explain",
+        title: "ایستگاه‌های کار",
+        body:
+          "«صندوق فروش» ثبت فروش و دریافت وجه؛ «محصولات» کالا، قیمت و ویژگی‌ها؛ «انبار» موجودی و خرید. گزارش‌های کسب‌وکار و گزارش‌های مالی از همین داده‌ها ساخته می‌شوند.",
+      },
+      {
+        id: "to-pos",
+        kind: "navigate",
+        navigateTo: "/accounting/pos",
+        title: "رفتن به صندوق فروش",
+        body:
+          "به صندوق فروش می‌رویم. صفحهٔ صندوق برای هر صنف شکل خودش را دارد (سفارش کافه یا فاکتور فروشگاهی)؛ همان چیزی را می‌بینید که برای کسب‌وکار شما ساخته شده.",
+        eligibility: { permissions: [PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake] },
+      },
+      {
+        id: "cart",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.posCart,
+        title: "سبد و پرداخت",
+        body:
+          "اقلام انتخابی اینجاست. جمع، تخفیف و روش پرداخت را همین‌جا می‌بینید و ثبت نهایی را خودتان انجام می‌دهید؛ تور دکمهٔ ثبت را نمی‌زند.",
+        eligibility: { permissions: [PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake] },
+      },
+      {
+        id: "pos",
+        kind: "explain",
+        title: "پس از فروش",
+        body:
+          "سفارش ثبت‌شده در فهرست سفارش‌ها و گزارش‌ها دیده می‌شود. اگر روش پرداخت یا مشتری را اشتباه زدید، اصلاح از مسیر مجاز همان صفحه انجام می‌شود، نه با تور.",
+        eligibility: { permissions: [PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake] },
+      },
+      {
+        id: "to-products",
+        kind: "navigate",
+        navigateTo: "/accounting/products",
+        title: "رفتن به محصولات",
+        body: "قدم بعدی ساختن یا به‌روزرسانی کالاست. به فهرست محصولات می‌رویم.",
+        eligibility: {
+          permissions: [PERMISSIONS.inventoryView],
+          industries: PRODUCT_WORKSPACE_INDUSTRIES,
+        },
+      },
+      {
+        id: "products",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.productsKpis,
+        title: "فهرست محصولات",
+        body:
+          "از اینجا کالای تازه می‌سازید، قیمت‌ها را به‌روز می‌کنید و وضعیت موجودی را می‌بینید. تغییر قیمت یا موجودی یک عملیات واقعی است و به دسترسی مناسب نیاز دارد.",
+        eligibility: {
+          permissions: [PERMISSIONS.inventoryView],
+          industries: PRODUCT_WORKSPACE_INDUSTRIES,
+        },
+      },
+    ],
+  },
+  {
+    id: "settings.navigation.overview",
+    version: 1,
+    pageKey: "page:/settings",
+    route: "/settings",
+    title: "نقشهٔ تنظیمات پلتفرم",
+    description: "تنظیمات کسب‌وکار، تیم و اتصال‌های فنی — و اینکه هر تغییر کجا اثر می‌گذارد.",
+    eligibility: {},
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "تنظیمات، یک‌بار برای همه",
+        body:
+          "تنظیمات مشترک پلتفرم است: اطلاعات کسب‌وکار، تیم و دسترسی‌ها، روش‌های پرداخت، چاپ و اتصال‌ها. تغییر درست اینجا روی همهٔ برنامه‌ها اثر می‌گذارد؛ پس این تور فقط نقشه می‌دهد و چیزی را تغییر نمی‌دهد.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "صفحهٔ تنظیمات",
+        body:
+          "زبانه‌ها بر اساس نقش شما فیلتر می‌شوند: چیزی که اجازهٔ دیدنش را ندارید اصلاً نمایش داده نمی‌شود. تغییرهای حساس نیازمند دسترسی مدیریتی و در برخی موارد تأیید دوباره هستند.",
+      },
+      {
+        id: "map",
+        kind: "explain",
+        title: "کجای تنظیمات چه کاری می‌کند",
+        body:
+          "اطلاعات کسب‌وکار و واحد پول، تیم و نقش‌ها، روش‌های پرداخت، چاپ و رسید، اعلان‌ها و پشتیبان‌گیری از بخش‌های اصلی‌اند. هر برنامه تنظیمات تخصصی خودش را هم دارد (مثلاً تنظیمات حسابداری یا CRM).",
+      },
+      {
+        id: "to-connections",
+        kind: "navigate",
+        navigateTo: "/settings/connections",
+        title: "رفتن به اتصال‌ها",
+        body:
+          "اتصال‌های فنی مثل درگاه پرداخت، پیامک و وردپرس اینجاست. کلیدها و رمزها در این تور نمایش داده نمی‌شوند.",
+        eligibility: { permissions: [PERMISSIONS.settingsManage] },
+      },
+      {
+        id: "connections",
+        kind: "explain",
+        title: "اتصال‌های فنی",
+        body:
+          "هر اتصال وضعیت، آخرین بررسی و مالک دارد. قطع یا تغییر یک اتصال روی عملیات واقعی اثر می‌گذارد؛ فقط با هماهنگی و از مسیر تأییدشده انجامش دهید. برای دیدن آموزش هر اتصال، دکمهٔ آموزش همان بخش را بزنید.",
+        eligibility: { permissions: [PERMISSIONS.settingsManage] },
+      },
+    ],
+  },
 ];
 
 export function tourById(id: string): TourDefinition | undefined {
@@ -1095,6 +1481,47 @@ export function tourById(id: string): TourDefinition | undefined {
 /** Every tour registered for a page, eligible or not. Callers must filter with `isTourEligible`. */
 export function toursForPage(pageKey: string): TourDefinition[] {
   return TOURS.filter((tour) => tour.pageKey === pageKey);
+}
+
+/** The canonical routes a member may reach inside one tour, in step order. */
+export function tourRoutes(tour: Pick<TourDefinition, "route" | "steps">): string[] {
+  const routes = [tour.route];
+  for (const step of tour.steps) {
+    if (step.kind === "navigate" && step.navigateTo && !routes.includes(step.navigateTo)) {
+      routes.push(step.navigateTo);
+    }
+  }
+  return routes;
+}
+
+/**
+ * The route a step is shown on: the tour's entry route, then the most recent
+ * navigate target BEFORE this step. A `navigate` step belongs to the page it
+ * is standing on (it is the hand-off), so the step after it is the first one
+ * on the new route.
+ */
+export function tourStepRoute(
+  tour: Pick<TourDefinition, "route" | "steps">,
+  index: number,
+): string {
+  let route = tour.route;
+  for (let i = 0; i < Math.min(index, tour.steps.length); i += 1) {
+    const step = tour.steps[i];
+    if (step.kind === "navigate" && step.navigateTo) route = step.navigateTo;
+  }
+  return route;
+}
+
+/** Index of the first step shown on `route`, at or after `from` (default 0). */
+export function firstTourStepOnRoute(
+  tour: Pick<TourDefinition, "route" | "steps">,
+  route: string,
+  from = 0,
+): number {
+  for (let i = Math.max(0, from); i < tour.steps.length; i += 1) {
+    if (tourStepRoute(tour, i) === route) return i;
+  }
+  return -1;
 }
 
 export interface TourViewer {
@@ -1110,7 +1537,7 @@ export interface TourViewer {
   inventorySystem?: TourInventorySystem;
 }
 
-function matchesEligibility(rule: TourEligibility, viewer: TourViewer): boolean {
+export function viewerMatchesEligibility(rule: TourEligibility, viewer: TourViewer): boolean {
   for (const permission of rule.permissions ?? []) {
     if (!viewer.permissions.has(permission)) return false;
   }
@@ -1128,7 +1555,7 @@ function matchesEligibility(rule: TourEligibility, viewer: TourViewer): boolean 
     if (!viewer.features || viewer.features[key] !== false) return false;
   }
   if (rule.inventorySystem && viewer.inventorySystem !== rule.inventorySystem) return false;
-  if (rule.anyOf && !rule.anyOf.some((alternative) => matchesEligibility(alternative, viewer))) {
+  if (rule.anyOf && !rule.anyOf.some((alternative) => viewerMatchesEligibility(alternative, viewer))) {
     return false;
   }
   return true;
@@ -1140,7 +1567,7 @@ function matchesEligibility(rule: TourEligibility, viewer: TourViewer): boolean 
  * stops the writes, not just the button.
  */
 export function isTourEligible(tour: TourDefinition, viewer: TourViewer): boolean {
-  return matchesEligibility(tour.eligibility, viewer);
+  return viewerMatchesEligibility(tour.eligibility, viewer);
 }
 
 /**
@@ -1153,7 +1580,7 @@ export function isTourEligible(tour: TourDefinition, viewer: TourViewer): boolea
  */
 export function tourForViewer(tour: TourDefinition, viewer: TourViewer): TourDefinition | null {
   if (!isTourEligible(tour, viewer)) return null;
-  const steps = tour.steps.filter((step) => !step.eligibility || matchesEligibility(step.eligibility, viewer));
+  const steps = tour.steps.filter((step) => !step.eligibility || viewerMatchesEligibility(step.eligibility, viewer));
   if (steps.length === 0) return null;
   return steps.length === tour.steps.length ? tour : { ...tour, steps };
 }
@@ -1190,6 +1617,7 @@ export function validateTours(tours: readonly TourDefinition[]): string[] {
   const problems: string[] = [];
   const ids = new Set<string>();
   const anchors = new Set<string>(Object.values(TOUR_ANCHORS));
+  const registeredRoutes = new Set(KNOWLEDGE_PAGES.map((page) => page.route));
   for (const tour of tours) {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(tour.id)) problems.push(`${tour.id}: invalid id`);
     if (ids.has(tour.id)) problems.push(`${tour.id}: duplicate tour id`);
@@ -1201,7 +1629,7 @@ export function validateTours(tours: readonly TourDefinition[]): string[] {
       problems.push(`${tour.id}: pageKey must be page:<route>`);
     }
     const stepIds = new Set<string>();
-    for (const step of tour.steps) {
+    for (const [index, step] of tour.steps.entries()) {
       if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(step.id)) problems.push(`${tour.id}/${step.id}: invalid step id`);
       if (stepIds.has(step.id)) problems.push(`${tour.id}/${step.id}: duplicate step id`);
       stepIds.add(step.id);
@@ -1210,6 +1638,24 @@ export function validateTours(tours: readonly TourDefinition[]): string[] {
       }
       if (step.kind === "explain" && step.anchor) {
         problems.push(`${tour.id}/${step.id}: explain step must not name an anchor`);
+      }
+      if (step.kind === "navigate") {
+        if (!step.navigateTo || !registeredRoutes.has(step.navigateTo)) {
+          problems.push(`${tour.id}/${step.id}: navigate step needs a registered destination route`);
+        } else if (step.navigateTo === tourStepRoute(tour, index)) {
+          problems.push(`${tour.id}/${step.id}: navigate step must move to another page`);
+        } else if (tourStepRoute(tour, index + 1) !== step.navigateTo) {
+          // `tourStepRoute` is the single definition of "where the next step
+          // lives"; two navigate steps in a row would make it disagree with
+          // the card the member sees.
+          problems.push(`${tour.id}/${step.id}: a navigate step must be followed by a step on its destination`);
+        }
+        if (step.anchor) problems.push(`${tour.id}/${step.id}: navigate step must not name an anchor`);
+        if (index === tour.steps.length - 1) {
+          problems.push(`${tour.id}/${step.id}: a tour cannot end on a navigate step`);
+        }
+      } else if (step.navigateTo) {
+        problems.push(`${tour.id}/${step.id}: only a navigate step may name a destination`);
       }
       if (step.kind === "action") {
         if (!isTourVerifier(step.verifier)) {

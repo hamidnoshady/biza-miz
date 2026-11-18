@@ -6170,6 +6170,24 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     {
       type: "function",
       function: {
+        name: "recommend_learning",
+        description:
+          "برای پیشنهاد تور تعاملی یا مسیر یادگیری مناسب همین صفحه یا این کاربر. فقط از تورها و مسیرهای منتشرشده و مجاز استفاده می‌کند و تور را شروع نمی‌کند؛ کاربر باید دکمهٔ آموزش را بزند.",
+        parameters: {
+          type: "object",
+          properties: {
+            route: {
+              type: "string",
+              description: "مسیر صفحهٔ فعلی، مثل /accounting/pos؛ خالی یعنی پیشنهاد کلی.",
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "show_report_widget",
         description:
           "وقتی کاربر یک نمای بصری و خلاصه از مطالبات، بدهی به تأمین‌کنندگان یا مالیات ارزش‌افزوده می‌خواهد، منبع ثبت‌شده را با شناسه انتخاب کن تا کارت‌ها و جدول از داده‌های واقعی ساخته شود؛ عدد، ستون یا HTML نساز.",

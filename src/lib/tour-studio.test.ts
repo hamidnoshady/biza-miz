@@ -59,6 +59,45 @@ describe("authoring a tour", () => {
     expect(parse({ route: "/dashboard/crm/audit" })).toMatchObject({ ok: false, error: "route_mismatch" });
   });
 
+  it("authors a cross-page hand-off, but only to another registered page", () => {
+    const parsed = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "شروع", body: "." },
+        {
+          id: "to-directory",
+          kind: "navigate",
+          navigateTo: "/crm/directory",
+          title: "رفتن",
+          body: ".",
+        },
+        { id: "directory", kind: "explain", title: "مشتریان", body: "." },
+      ],
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.input.steps[1]).toMatchObject({ kind: "navigate", navigateTo: "/crm/directory" });
+      expect(validateTours([studioTourDefinition(parsed.input, 1)])).toEqual([]);
+    }
+
+    const unregistered = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "شروع", body: "." },
+        { id: "to-nowhere", kind: "navigate", navigateTo: "/not/a/page", title: "رفتن", body: "." },
+        { id: "after", kind: "explain", title: "بعد", body: "." },
+      ],
+    });
+    expect(unregistered).toMatchObject({ ok: false, error: "invalid_steps" });
+
+    const samePage = parse({
+      steps: [
+        { id: "intro", kind: "explain", title: "شروع", body: "." },
+        { id: "same", kind: "navigate", navigateTo: "/crm/audit", title: "رفتن", body: "." },
+        { id: "after", kind: "explain", title: "بعد", body: "." },
+      ],
+    });
+    expect(samePage).toMatchObject({ ok: false, error: "invalid_steps" });
+  });
+
   it("refuses an id that is malformed or reserved for the automatic baseline", () => {
     expect(parse({ tourKey: "Not A Key" })).toMatchObject({ ok: false, error: "invalid_tour_key" });
     expect(parse({ tourKey: `baseline.${"x".repeat(4)}` })).toMatchObject({

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireMember, withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { eligibleTourById } from "@/lib/tours-service";
 import { migrateTourProgressForTour } from "@/lib/tours-service";
 
@@ -17,7 +18,7 @@ export const POST = withTenantScope(
     request: NextRequest,
     context: { params: Promise<{ tourId: string }> },
   ) => {
-    const guard = await requireMember();
+    const guard = await requirePermission(PERMISSIONS.settingsManage);
     if (guard.error) return guard.error;
 
     const { tourId } = await context.params;
