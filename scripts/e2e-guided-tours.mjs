@@ -26,7 +26,7 @@
 import { mkdirSync } from "node:fs";
 import { chromium } from "playwright";
 
-const BASE_URL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000";
+const BASE_URL = new URL(process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000").origin;
 const EMAIL = process.env.SEED_OWNER_EMAIL ?? "owner@example.com";
 const PASSWORD = process.env.SEED_OWNER_PASSWORD ?? "owner1234";
 const BUSINESS_SLUG = process.env.SEED_BUSINESS_SLUG ?? "cafe-nemoone";
@@ -87,6 +87,52 @@ async function openPage(page, path) {
   await settle(page);
 }
 
+// Use Chromium's cookie jar and Origin header for every request. The
+// production session is Secure, including on the loopback CI origin.
+async function browserApi(page, url, data) {
+  const { status, payload } = await page.evaluate(async ({ url, data }) => {
+    const response = await fetch(url, {
+      method: data === undefined ? "GET" : "POST",
+      credentials: "same-origin",
+      redirect: "error",
+      ...(data === undefined ? {} : {
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    return { status: response.status, payload: await response.json() };
+  }, { url, data });
+  return { ok: () => status >= 200 && status < 300, status: () => status, json: () => payload };
+}
+
+async function ownerLogin(page) {
+  const url = `${BASE_URL}/api/auth/login`;
+  const credentials = { email: EMAIL, password: PASSWORD };
+  let login = await browserApi(page, url, credentials);
+  assert(login.ok(), `owner login failed (${login.status()})`);
+  const initial = login.json();
+  if (initial.needsBusinessSelection) {
+    const business = initial.businesses?.find(({ slug }) => slug === BUSINESS_SLUG);
+    assert(business, "owner login did not offer the seeded business");
+    login = await browserApi(page, url, { ...credentials, businessId: business.id });
+  }
+
+  assert(login.ok(), `owner tenant login failed (${login.status()})`);
+  const result = login.json();
+  assert(result.business?.slug === BUSINESS_SLUG && result.user?.role === "owner",
+    "login did not establish an owner session for the seeded business");
+  await assertSessionRole(page, "owner", result.business.id);
+  return result.business.id;
+}
+
+async function assertSessionRole(page, role, businessId) {
+  const session = await browserApi(page, `${BASE_URL}/api/auth/me`);
+  assert(session.ok(), `${role} browser session failed (${session.status()})`);
+  const { user } = session.json();
+  assert(user?.role === role && user.businessId === businessId, `unexpected ${role} browser session`);
+}
+
 const overlay = (page) => page.locator("[data-tour-overlay]");
 const overlayHeading = (page) => overlay(page).getByRole("heading", { level: 2 });
 
@@ -120,18 +166,17 @@ const desktop = await browser.newContext({
   timezoneId: "Asia/Tehran",
   reducedMotion: "reduce",
 });
-const login = await desktop.request.post(`${BASE_URL}/api/auth/login`, {
-  timeout: 120_000,
-  data: { email: EMAIL, password: PASSWORD },
-});
-assert(login.ok(), `owner login failed (${login.status()})`);
 const page = await desktop.newPage();
 let desktopState = null;
+let ownerBusinessId;
 
 try {
-  const reset = await desktop.request.post(
+  await page.goto(`${BASE_URL}/api/health`);
+  ownerBusinessId = await ownerLogin(page);
+
+  const reset = await browserApi(page,
     `${BASE_URL}/api/knowledge/tours/accounting.overview.ledger/progress`,
-    { headers: { Origin: BASE_URL }, timeout: 120_000, data: { event: "reset" } },
+    { event: "reset" },
   );
   assert(reset.ok(), `initial progress reset failed (${reset.status()})`);
 
@@ -149,12 +194,12 @@ try {
   await step("steps advance and the tour completes with server progress", async () => {
     for (let i = 0; i < 7; i += 1) await clickNext(page);
     await overlay(page).waitFor({ state: "detached", timeout: 120_000 });
-    const playback = await desktop.request.get(
+    const playback = await browserApi(page,
       `${BASE_URL}/api/knowledge/tours/accounting.overview.ledger`,
       { timeout: 120_000 },
     );
     assert(playback.ok(), "tour playback request failed");
-    const payload = await playback.json();
+    const payload = playback.json();
     assert(payload.progress.status === "completed", `tour not completed: ${payload.progress.status}`);
   });
 
@@ -197,50 +242,47 @@ try {
   });
 
   await step("verified action evidence is required, and a real write satisfies it", async () => {
-    const tour = await desktop.request.get(
+    const tour = await browserApi(page,
       `${BASE_URL}/api/knowledge/tours/crm.directory.first-customer`,
     );
     assert(tour.ok(), "action tour playback failed");
-    const before = await desktop.request.post(
+    const before = await browserApi(page,
       `${BASE_URL}/api/knowledge/tours/crm.directory.first-customer/verify`,
-      { headers: { Origin: BASE_URL }, data: { stepId: "register" } },
+      { stepId: "register" },
     );
     assert(before.status() === 409, `expected 409 before the write, got ${before.status()}`);
 
-    const created = await desktop.request.post(`${BASE_URL}/api/parties`, {
-      headers: { Origin: BASE_URL },
-      data: {
-        displayName: `مشتری تور ${RUN_ID}`,
-        role: "Customer",
-        roles: ["Customer"],
-      },
+    const created = await browserApi(page, `${BASE_URL}/api/parties`, {
+      displayName: `مشتری تور ${RUN_ID}`,
+      role: "Customer",
+      roles: ["Customer"],
     });
     assert(created.ok(), `party create failed (${created.status()})`);
 
-    const after = await desktop.request.post(
+    const after = await browserApi(page,
       `${BASE_URL}/api/knowledge/tours/crm.directory.first-customer/verify`,
-      { headers: { Origin: BASE_URL }, data: { stepId: "register" } },
+      { stepId: "register" },
     );
     assert(after.ok(), `expected 200 after the write, got ${after.status()}`);
   });
 
   await step("a tour step cannot be claimed, a page step can be acknowledged", async () => {
-    const refused = await desktop.request.post(
+    const refused = await browserApi(page,
       `${BASE_URL}/api/knowledge/learning-paths/cafe.first-day/progress`,
-      { headers: { Origin: BASE_URL }, data: { event: "step_completed", stepId: "register-customer" } },
+      { event: "step_completed", stepId: "register-customer" },
     );
     assert(refused.status() === 400, `tour step claim should be 400, got ${refused.status()}`);
 
-    const acknowledged = await desktop.request.post(
+    const acknowledged = await browserApi(page,
       `${BASE_URL}/api/knowledge/learning-paths/retail.first-sale/progress`,
-      { headers: { Origin: BASE_URL }, data: { event: "step_completed", stepId: "submit-invoice" } },
+      { event: "step_completed", stepId: "submit-invoice" },
     );
     assert(acknowledged.ok(), `page step acknowledgement failed (${acknowledged.status()})`);
-    const detail = await desktop.request.get(
+    const detail = await browserApi(page,
       `${BASE_URL}/api/knowledge/learning-paths/retail.first-sale`,
     );
     assert(detail.ok(), "path detail failed");
-    const payload = await detail.json();
+    const payload = detail.json();
     assert(
       payload.steps.find((entry) => entry.id === "submit-invoice")?.completed === true,
       "acknowledged page step is not shown as completed",
@@ -278,20 +320,23 @@ const cashierContext = await browser.newContext({
   reducedMotion: "reduce",
 });
 try {
-  const roster = await cashierContext.request.get(
+  const cashier = await cashierContext.newPage();
+  await cashier.goto(`${BASE_URL}/api/health`);
+  const roster = await browserApi(cashier,
     `${BASE_URL}/api/auth/pin-login/roster?businessSlug=${encodeURIComponent(BUSINESS_SLUG)}`,
   );
   assert(roster.ok(), `cashier roster failed (${roster.status()})`);
-  const rosterBody = await roster.json();
+  const rosterBody = roster.json();
   const employee = (rosterBody.employees ?? []).find((entry) => entry.role === "cashier");
   assert(employee, "the seed has no PIN cashier");
-  const pinLogin = await cashierContext.request.post(`${BASE_URL}/api/auth/pin-login`, {
-    data: { pin: CASHIER_PIN, employeeId: employee.id, businessSlug: BUSINESS_SLUG },
+  const pinLogin = await browserApi(cashier, `${BASE_URL}/api/auth/pin-login`, {
+    pin: CASHIER_PIN, employeeId: employee.id, businessSlug: BUSINESS_SLUG,
   });
   assert(pinLogin.ok(), `cashier PIN login failed (${pinLogin.status()})`);
 
+  await assertSessionRole(cashier, "cashier", ownerBusinessId);
   await step("an ineligible member is refused the protected tour", async () => {
-    const denied = await cashierContext.request.get(
+    const denied = await browserApi(cashier,
       `${BASE_URL}/api/knowledge/tours/crm.directory.first-customer`,
     );
     assert(denied.status() === 404, `expected 404, got ${denied.status()}`);
