@@ -17,6 +17,7 @@
  *  - A scope with nothing published resolves to the code default. The runtime
  *    can therefore never end up with an empty system prompt.
  */
+import type { PoolClient } from "pg";
 import { getPool, query } from "./db";
 import { ENABLED_INDUSTRIES, INDUSTRY_LABELS } from "./industries";
 import {
@@ -156,6 +157,8 @@ export async function publishedPromptFor(scopeKey: string): Promise<PublishedPro
   };
 }
 
+type PromptAudit = (version: PromptVersionRow, transaction: PoolClient) => Promise<void>;
+
 export type SavePromptResult =
   | { ok: true; version: PromptVersionRow }
   | { ok: false; error: string };
@@ -171,6 +174,7 @@ export async function savePromptDraft(input: {
   notes?: string;
   createdBy: string;
   editDraftId?: string;
+  audit?: PromptAudit;
 }): Promise<SavePromptResult> {
   if (!isPromptScopeKey(input.scopeKey)) return { ok: false, error: "prompt_scope_unknown" };
   const text = input.text.trim();
@@ -198,8 +202,10 @@ export async function savePromptDraft(input: {
          $2, 'draft', $3, $4) RETURNING *`,
       [input.scopeKey, text, input.notes ?? "", input.createdBy],
     );
+    const version = toRow(rows[0]);
+    await input.audit?.(version, client);
     await client.query("COMMIT");
-    return { ok: true, version: toRow(rows[0]) };
+    return { ok: true, version };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
@@ -232,6 +238,8 @@ export async function publishPromptVersion(input: {
   id: string;
   publishedBy: string;
   expectedPublishedId?: string | null;
+  audit?: PromptAudit;
+  requiredState?: "draft" | "retired";
 }): Promise<PublishPromptResult> {
   const version = await getPromptVersion(input.id);
   if (!version) return { ok: false, error: "prompt_version_not_found" };
@@ -252,6 +260,17 @@ export async function publishPromptVersion(input: {
       await client.query("ROLLBACK");
       return { ok: false, error: currentId === input.id ? "prompt_already_published" : "prompt_publish_conflict" };
     }
+    if (input.requiredState) {
+      const target = await client.query<{ state: PromptState; published_at: string | null }>(
+        "SELECT state, published_at FROM ai_prompt_versions WHERE id = $1 FOR UPDATE",
+        [input.id],
+      );
+      if (target.rows[0]?.state !== input.requiredState ||
+        (input.requiredState === "retired" && !target.rows[0]?.published_at)) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: input.requiredState === "draft" ? "prompt_not_a_draft" : "rollback_target_invalid" };
+      }
+    }
     const retiredResult = await client.query<Record<string, unknown>>(
       `UPDATE ai_prompt_versions
           SET state = 'retired', updated_at = now()
@@ -271,10 +290,12 @@ export async function publishPromptVersion(input: {
       await client.query("ROLLBACK");
       return { ok: false, error: "prompt_publish_failed" };
     }
+    const result = toRow(published);
+    await input.audit?.(result, client);
     await client.query("COMMIT");
     return {
       ok: true,
-      published: toRow(published),
+      published: result,
       retired: retiredResult.rows[0] ? toRow(retiredResult.rows[0]) : null,
     };
   } catch (error) {
@@ -302,23 +323,38 @@ export async function rollbackPromptVersion(input: {
   targetVersion: number;
   publishedBy: string;
   expectedPublishedId?: string | null;
+  audit?: PromptAudit;
 }): Promise<PublishPromptResult> {
   const { rows } = await query<Record<string, unknown>>(
     `SELECT id FROM ai_prompt_versions WHERE scope_key = $1 AND version = $2`,
     [input.scopeKey, input.targetVersion],
   );
   if (rows.length === 0) return { ok: false, error: "prompt_version_not_found" };
-  return publishPromptVersion({ id: String(rows[0].id), publishedBy: input.publishedBy, expectedPublishedId: input.expectedPublishedId });
+  return publishPromptVersion({
+    id: String(rows[0].id), publishedBy: input.publishedBy, expectedPublishedId: input.expectedPublishedId,
+    requiredState: "retired", audit: input.audit,
+  });
 }
 
 /** Retires a draft. A published version is refused — retire by publishing another. */
-export async function retirePromptVersion(id: string): Promise<boolean> {
-  const { rowCount } = await query(
-    `UPDATE ai_prompt_versions SET state = 'retired', updated_at = now()
-      WHERE id = $1 AND state = 'draft'`,
-    [id],
-  );
-  return (rowCount ?? 0) > 0;
+export async function retirePromptVersion(id: string, audit?: PromptAudit): Promise<boolean> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<Record<string, unknown>>(
+      `UPDATE ai_prompt_versions SET state = 'retired', updated_at = now()
+        WHERE id = $1 AND state = 'draft' RETURNING *`,
+      [id],
+    );
+    if (rows[0]) await audit?.(toRow(rows[0]), client);
+    await client.query("COMMIT");
+    return rows.length > 0;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function toRow(row: Record<string, unknown>): PromptVersionRow {

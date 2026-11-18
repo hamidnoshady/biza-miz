@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformCapability, platformAudit } from "@/lib/platform-auth";
 import {
@@ -8,6 +9,7 @@ import {
   retirePromptVersion,
   rollbackPromptVersion,
   savePromptDraft,
+  type PromptVersionRow,
 } from "@/lib/ai-prompt-store";
 import { agentPromptScope, previewSystemPrompt } from "@/lib/ai-prompt-resolver";
 import { listSystemAgents } from "@/lib/ai-system-agents";
@@ -59,13 +61,13 @@ export const POST = async (request: NextRequest) => {
     return NextResponse.json({ error: "invalid_request" }, { status: 400 });
   }
   const adminId = guard.session.padmin;
-  const audit = (event: string, id: string, scopeKey?: string) => platformAudit({
+  const audit = (event: string) => (version: PromptVersionRow, transaction: PoolClient) => platformAudit({
     adminId,
     action: `ai.prompt.${event}`,
     entity: "ai_prompt_versions",
-    entityId: id,
-    payload: { scopeKey },
-  });
+    entityId: version.id,
+    payload: { scopeKey: version.scopeKey, version: version.version },
+  }, transaction);
 
   if (action === "draft") {
     if (!isPromptScopeKey(body?.scopeKey)) {
@@ -80,17 +82,16 @@ export const POST = async (request: NextRequest) => {
       notes: typeof body.notes === "string" ? body.notes : "",
       createdBy: guard.session.email,
       editDraftId: body.editDraftId,
+      audit: audit(body.editDraftId ? "edited" : "drafted"),
     });
     if (!saved.ok) return NextResponse.json({ error: saved.error }, { status: 400 });
-    await audit(body.editDraftId ? "edited" : "drafted", saved.version.id, saved.version.scopeKey);
     return NextResponse.json({ version: saved.version }, { status: 201 });
   }
 
   if (action === "publish") {
     if (!isId(body?.id)) return NextResponse.json({ error: "id_required" }, { status: 400 });
-    const published = await publishPromptVersion({ id: body.id, publishedBy: guard.session.email, expectedPublishedId: expected });
+    const published = await publishPromptVersion({ id: body.id, publishedBy: guard.session.email, expectedPublishedId: expected, requiredState: "draft", audit: audit("published") });
     if (!published.ok) return NextResponse.json({ error: published.error }, { status: 409 });
-    await audit("published", published.published.id, published.published.scopeKey);
     return NextResponse.json({ version: published.published, retired: published.retired });
   }
 
@@ -103,17 +104,16 @@ export const POST = async (request: NextRequest) => {
       targetVersion: body.targetVersion,
       publishedBy: guard.session.email,
       expectedPublishedId: expected,
+      audit: audit("rolled_back"),
     });
     if (!rolled.ok) return NextResponse.json({ error: rolled.error }, { status: 409 });
-    await audit("rolled_back", rolled.published.id, rolled.published.scopeKey);
     return NextResponse.json({ version: rolled.published, retired: rolled.retired });
   }
 
   if (action === "retire") {
     if (!isId(body?.id)) return NextResponse.json({ error: "id_required" }, { status: 400 });
-    const retired = await retirePromptVersion(body.id);
+    const retired = await retirePromptVersion(body.id, audit("retired"));
     if (!retired) return NextResponse.json({ error: "prompt_not_a_draft" }, { status: 409 });
-    await audit("retired", body.id);
     return NextResponse.json({ ok: true });
   }
 

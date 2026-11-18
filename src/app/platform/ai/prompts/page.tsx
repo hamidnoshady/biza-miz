@@ -61,6 +61,7 @@ const ERROR_LABELS: Record<string, string> = {
   prompt_text_too_long: "متن پرامپت بیش از حد طولانی است.",
   prompt_publish_conflict: "نسخهٔ فعال تغییر کرده است. نسخهٔ تازه را بررسی و دوباره تأیید کنید.",
   prompt_not_a_draft: "این نسخه دیگر پیش‌نویس نیست.",
+  rollback_target_invalid: "برای بازگردانی، نسخه‌ای با سابقهٔ انتشار انتخاب کنید.",
   prompt_already_published: "این نسخه در حال حاضر منتشر شده است.",
 };
 
@@ -266,12 +267,12 @@ export default function PlatformAiPromptsPage() {
             <Button variant="ghost" disabled={!!busy} onClick={() => setSelected(version)}>متن و اختلاف نسخه</Button>
             {canManage && version.state === "draft" && <>
               <Button variant="ghost" disabled={!!busy || dirty} onClick={() => edit(version)}>ویرایش</Button>
-              {draftMode && <Link className="self-center text-sm text-primary underline" href={`/platform/ai/playground?draft=${encodeURIComponent(version.id)}&mode=${draftMode}`}>
+              {draftMode && !dirty && <Link className="self-center text-sm text-primary underline" href={`/platform/ai/playground?draft=${encodeURIComponent(version.id)}&mode=${draftMode}`}>
                 آزمایش نسخهٔ ذخیره‌شده
               </Link>}
               <Button variant="ghost" disabled={!!busy || dirty} onClick={() => void run("retire", { id: version.id })}>بایگانی</Button>
             </>}
-            {canManage && version.state !== "published" && <Button variant="ghost" disabled={!!busy} onClick={() =>
+            {canManage && (version.state === "draft" || (version.state === "retired" && version.publishedAt)) && <Button variant="ghost" disabled={!!busy} onClick={() =>
               setConfirmation({ action: version.state === "draft" ? "publish" : "rollback", target: version, expected: published?.id ?? null })}>
               {version.state === "draft" ? "انتشار" : "بازگردانی"}
             </Button>}

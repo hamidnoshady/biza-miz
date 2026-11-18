@@ -164,6 +164,24 @@ describe("the prompt resolver's state machine", () => {
     expect(await resolver.getPublishedPrompt(BASE_PROMPT_SCOPE)).toBeNull();
   });
 
+  it("keeps the prior live prompt when publication cannot be audited", async () => {
+    const input = { scopeKey: BASE_PROMPT_SCOPE, createdBy: alpha.userId };
+    const first = await store.savePromptDraft({ ...input, text: "live" });
+    const second = await store.savePromptDraft({ ...input, text: "reviewed draft" });
+    if (!first.ok || !second.ok) throw new Error("Draft setup failed");
+    await store.publishPromptVersion({ id: first.version.id, publishedBy: alpha.userId });
+    await expect(store.publishPromptVersion({
+      id: second.version.id, publishedBy: alpha.userId, requiredState: "draft",
+      audit: async () => { throw new Error("audit fixture failure"); },
+    })).rejects.toThrow("audit fixture failure");
+    expect(await resolver.getPublishedPrompt(BASE_PROMPT_SCOPE)).toMatchObject({ id: first.version.id });
+    expect(await store.getPromptVersion(second.version.id)).toMatchObject({ state: "draft" });
+    await store.retirePromptVersion(second.version.id);
+    expect(await store.rollbackPromptVersion({
+      scopeKey: BASE_PROMPT_SCOPE, targetVersion: second.version.version, publishedBy: alpha.userId,
+    })).toEqual({ ok: false, error: "rollback_target_invalid" });
+  });
+
   it("composes an app draft in a preview without changing the live resolver", async () => {
     const scope = resolver.appPromptScope("crm");
     const saved = await store.savePromptDraft({ scopeKey: scope, text: "PREVIEW_DRAFT_FIXTURE", createdBy: alpha.userId });
