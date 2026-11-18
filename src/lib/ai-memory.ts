@@ -153,6 +153,16 @@ export async function memoryLayersForTurn(input: {
   return { platform, tenant, app, project };
 }
 
+function normalizeMemoryText(text: string): string {
+  return text.normalize("NFKC").toLowerCase()
+    .replace(/ي/g, "ی").replace(/ك/g, "ک")
+    .replace(/[\s\u200c]+/g, " ").trim();
+}
+
+function memoryTerms(text: string): Set<string> {
+  return new Set(normalizeMemoryText(text).match(/[\p{L}\p{N}]{2,}/gu) ?? []);
+}
+
 /**
  * Renders the layers into a prompt block.
  *
@@ -167,7 +177,7 @@ export function renderMemoryForPrompt(layers: {
   tenant: AiMemoryEntry[];
   app: AiMemoryEntry[];
   project: AiMemoryEntry[];
-}): string {
+}, query = ""): string {
   const sections: { label: string; entries: AiMemoryEntry[] }[] = [
     { label: "حافظهٔ پلتفرم", entries: layers.platform },
     { label: "حافظهٔ کسب‌وکار", entries: layers.tenant },
@@ -175,18 +185,33 @@ export function renderMemoryForPrompt(layers: {
     { label: "حافظهٔ پروژه", entries: layers.project },
   ];
 
+  const terms = [...memoryTerms(query.slice(0, 600))];
+  const seen = new Set<string>();
+  const candidates = sections.flatMap(({ label, entries }) => {
+    const ranked = (entries ?? []).flatMap((entry) => {
+      const content = typeof entry.content === "string" ? entry.content.trim().slice(0, MAX_MEMORY_CHARS) : "";
+      const key = normalizeMemoryText(content);
+      if (!key || seen.has(key)) return [];
+      seen.add(key);
+      const words = memoryTerms(content);
+      const score = terms.filter((term) => words.has(term)).length;
+      return [{ content, score }];
+    }).sort((a, b) => b.score - a.score);
+    return ranked.length ? [{ label, ranked }] : [];
+  });
+
   const lines: string[] = [];
-  let used = 0;
-  for (const section of sections) {
-    // A layer may legitimately be absent (an empty app scope, a turn with no
-    // project). Rendering must not turn that into a broken prompt.
-    for (const entry of section.entries ?? []) {
-      if (used >= MAX_MEMORY_TOTAL_CHARS) break;
-      const remaining = MAX_MEMORY_TOTAL_CHARS - used;
-      const text = typeof entry.content === "string" ? entry.content : "";
-      const content = text.length > remaining ? text.slice(0, remaining) : text;
-      used += content.length;
-      lines.push(`- [${section.label}] ${content}`);
+  let remaining = MAX_MEMORY_TOTAL_CHARS;
+  for (const [index, section] of candidates.entries()) {
+    // Keep precedence order and share spare space with the more specific layers.
+    let budget = Math.floor(remaining / (candidates.length - index));
+    const prefix = `- [${section.label}] `;
+    for (const entry of section.ranked) {
+      if (budget <= prefix.length + 1) break;
+      const line = prefix + entry.content.slice(0, budget - prefix.length - 1);
+      lines.push(line);
+      budget -= line.length + 1;
+      remaining -= line.length + 1;
     }
   }
   if (lines.length === 0) return "";
