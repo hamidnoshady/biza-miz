@@ -13,7 +13,7 @@ type Delivery = {
   cms_connection_id: string;
   cms_order_id: string;
   site_id: string;
-  state: Fulfillment | "counter_payment";
+  state: Fulfillment | "counter_payment" | "counter_refund";
   payment_amount: string | null;
   payment_reference: string | null;
   lease_token: string;
@@ -30,7 +30,9 @@ export async function enqueueCafeKitchenState(client: PoolClient, orderId: strin
 
 async function claimDue(limit: number): Promise<Delivery[]> {
   // A dead-lettered predecessor blocks later fulfillment until it is retried.
-  // Payment has its own lifecycle and can proceed while fulfillment waits.
+  // The money events have their own lifecycle: payment can proceed while
+  // fulfillment waits, and a refund waits only for the payment it reverses —
+  // never for a kitchen update that may be dead-lettered.
   return inPlatformScope(async () => {
     const { rows } = await query<Delivery>(
       `WITH due AS (
@@ -45,7 +47,9 @@ async function claimDue(limit: number): Promise<Delivery[]> {
                  SELECT 1 FROM cms_order_state_outbox prior
                   WHERE prior.cms_connection_id = event.cms_connection_id
                     AND prior.cms_order_id = event.cms_order_id AND prior.version < event.version
-                    AND prior.delivered_at IS NULL AND prior.state <> 'counter_payment'
+                    AND prior.delivered_at IS NULL
+                    AND ((event.state = 'counter_refund' AND prior.state = 'counter_payment')
+                         OR (event.state <> 'counter_refund' AND prior.state <> 'counter_payment'))
              ))
            ORDER BY event.next_attempt_at, event.version
            LIMIT $1 FOR UPDATE OF event SKIP LOCKED
@@ -74,12 +78,14 @@ async function send(event: Delivery): Promise<{ error: string; permanent: boolea
   if (connection.site_id !== event.site_id) return { error: "connection_site_changed", permanent: true };
 
   let body;
-  if (event.state === "counter_payment") {
+  if (event.state === "counter_payment" || event.state === "counter_refund") {
     const amount = Number(event.payment_amount);
-    if (!event.payment_reference || event.payment_amount === null || !Number.isSafeInteger(amount) || amount < 0) {
-      return { error: "invalid_counter_settlement", permanent: true };
+    const isRefund = event.state === "counter_refund";
+    if (!event.payment_reference || event.payment_amount === null || !Number.isSafeInteger(amount)
+        || amount < 0 || (isRefund && amount === 0)) {
+      return { error: isRefund ? "invalid_counter_refund" : "invalid_counter_settlement", permanent: true };
     }
-    body = { kind: "counter_payment", accountingReference: event.payment_reference, amount };
+    body = { kind: event.state, accountingReference: event.payment_reference, amount };
   } else {
     body = { kind: "fulfillment", fulfillment: event.state };
   }

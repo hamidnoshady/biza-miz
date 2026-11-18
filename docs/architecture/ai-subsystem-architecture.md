@@ -313,15 +313,10 @@ stay the app's own (`sdkToolsFrom`), so a tool is never described twice.
 Today only the Superadmin playground route uses the adapter. **The tenant chat
 keeps its own tool loop and SSE protocol** until parity tests cover its
 settlement, approvals and streaming; migrating it is a separate change.
-ESH-184 makes that one caller stream: `runSdkTurn` relays provider deltas as the
-route's SSE (`start`, `delta`, `tool`, `done`, `error`), the browser renders the
-partial answer, and a cancelled response aborts the LiteLLM call through the
-same handler. Tool use is an explicit per-request grant (`tools: true`, or a
-named subset); the route narrows it to the administrator's role before offering
-anything, re-checks the grant at execution, and audits every call. The default
-playground turn offers no tools at all.
-*Rollback:* turn off the playground's «ابزارهای سلامت» switch (the route is
-tool-free without the request flag); the adapter has no other caller.
+The Superadmin client uses the SDK UI message stream. The Playground offers
+platform health tools only when the request grants them explicitly with
+`tools: true` or a named subset. The route checks the grant against the
+administrator’s current role. Saved draft tests run without tools.
 
 **Superadmin assistant tools.** `PLATFORM_TOOL_CAPABILITIES` names the platform
 capability each health tool needs; `runPlatformAssistantTool` re-checks it for

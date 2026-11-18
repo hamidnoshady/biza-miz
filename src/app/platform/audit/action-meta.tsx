@@ -148,6 +148,8 @@ export const ACTION_META: Record<string, ActionMeta> = {
   "ai.playground.requested": { label: "درخواست آزمون زمین بازی", tone: "info", icon: Send },
   "ai.playground.test": { label: "آزمون زمین بازی هوش مصنوعی", tone: "info", icon: Send },
   "ai.playground.failed": { label: "آزمون زمین بازی ناموفق", tone: "warning", icon: Ban },
+  "ai.platform_tool.read": { label: "اجرای ابزار فقط‌خواندنی هوش مصنوعی پلتفرم", tone: "info", icon: TerminalSquare },
+  "ai.platform_tool.denied": { label: "رد دسترسی به ابزار هوش مصنوعی پلتفرم", tone: "warning", icon: Ban },
   "ai_costing.changed": { label: "تغییر تعرفهٔ هزینهٔ هوش مصنوعی", tone: "warning", icon: WalletCards },
   "billing.spend_policy.updated": { label: "تغییر خط‌مشی هزینه", tone: "warning", icon: SlidersHorizontal },
   "sms.managed_service.alert_acknowledged": {

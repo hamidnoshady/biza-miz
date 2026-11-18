@@ -586,7 +586,8 @@ kitchen starts only after a staff member accepts it.
 | Approval | `orders.website_approval_state` (`pending` → `accepted` \| `rejected`), separate from `orders.status` and from payment; `POST /api/orders/[id]/website-approval` (accept `orders.create`, reject `orders.void`) |
 | Kitchen | nothing is enqueued on intake; accepting calls the existing `enqueueKitchenDispatch()` for the exact line set, so accepting twice prints once |
 | Payment | `order.paid` settles the **same** order through `completeOrderPayment()` with the CMS order id as idempotency key — one payment, never a second sale; pay-at-counter orders stay unpaid until the till settles them |
-| Back-sync | `cms_order_state_outbox` records accepted/rejected rows inside the same transaction as the decision; ESH-148's worker delivers them |
+| Refund | A **full** counter refund inserts `cms_order_state_outbox(state = 'counter_refund')` in the `customer_returns` transaction (migration 0308); partial refunds stay local because the CMS contract is whole-order only. The refund never overtakes its counter payment in the queue |
+| Back-sync | `cms_order_state_outbox` records accepted/rejected, kitchen and counter-payment/refund rows inside the same transaction as the decision; ESH-148's worker delivers them with leases, backoff and dead letters |
 
 Refusals are inbox rows the operator can see and retry: `product_not_mapped:<id>`,
 `modifier_not_mapped:<id>`, `table_token_required`, `table_token_not_allowed`,
@@ -594,3 +595,9 @@ Refusals are inbox rows the operator can see and retry: `product_not_mapped:<id>
 with one unmappable line imports nothing — a half order billed to a customer is
 worse than a visible failure. Re-importing a failed row after fixing the mapping
 is the same delivery again; a processed one is a replay.
+
+A POS-initiated refund comes back from the CMS as its own `order.refunded`
+event. When the till has already queued the matching `counter_refund`, the
+webhook absorbs that echo as processed: the money moved once at the counter and
+the inbox must neither reverse it again nor report it as an unsupported café
+reversal. A refund the till never made still records the refusal.

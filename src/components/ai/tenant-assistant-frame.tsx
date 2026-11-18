@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { AiChatHub, type AiChatHubProps } from "@/app/dashboard/ai/ai-chat-hub";
 import { isSiteLocalRoute } from "@/lib/site-routes";
+import { useTenantAiIdentityReady } from "./persistent-tenant-ai";
 import { AiGuidedTourOverlay } from "./ai-guided-tour-overlay";
 
 interface Props {
@@ -23,7 +24,8 @@ export function TenantAssistantFrame({ children, account, enabled, aiProps, hybr
   const home = pathname === "/dashboard";
   // On routes rendered by CloudPane, the guest owns both the full home and
   // its compact assistant. The desktop must leave the pane's slot visible.
-  const showAssistant = enabled && (!hybridSite || isSiteLocalRoute(pathname));
+  const identityReady = useTenantAiIdentityReady(account);
+  const showAssistant = enabled && identityReady && (!hybridSite || isSiteLocalRoute(pathname));
   const [open, setOpen] = useState(true);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [wide, setWide] = useState(true);

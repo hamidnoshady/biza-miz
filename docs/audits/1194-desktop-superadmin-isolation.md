@@ -62,9 +62,10 @@ the installed `Bizamiz.exe` with only ordinary user-facing switches
    credentials still sign in — completing the second factor enrolled at
    bootstrap (TOTP or single-use recovery code disclosed once by
    `/api/setup/bootstrap`) — while a wrong password is rejected;
-7. when `DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL` and
-   `DESKTOP_ACCEPTANCE_OFFLINE_TOKEN` are configured (protected repository
-   variable + secret), repeats a first run on a fresh profile in **Full
+7. when `DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL` is configured (protected
+   repository variable) and `DESKTOP_ACCEPTANCE_OFFLINE_TOKEN` is available (a
+   single-use code minted for that run, since a stored one is redeemable
+   only once), repeats a first run on a fresh profile in **Full
    Offline** mode: token preflight, real Cloud enrollment, activation record,
    owner session and a refused second bootstrap. Without that configuration
    the phase reports `skipped` — the harness never substitutes a mock service
@@ -217,6 +218,20 @@ node electron/scripts/smoke-packaged.js
 Record in the release ticket: build SHA, desktop version from
 `electron/package.json`, CI run URL, `desktop-release-scan.json`,
 `signed-candidate-release-scan.json` and the harness report.
+
+### Recorded so far (unsigned development only)
+
+[`docs/audits/1194-evidence/`](1194-evidence/EVIDENCE.md) holds the only Windows
+evidence CI has produced: the release scan for the **unsigned 1.0.197 development**
+installer (`desktop-release-scan-1.0.197.json`, `ok: true`, `findings: []`), the
+signature report showing that artefact is `NotSigned`
+(`windows-signature-verification.json`), and the **Hybrid-mode** acceptance log from
+the same `build-desktop-installer` run (`windows-acceptance-2026-11-18.log`).
+
+It deliberately contains no signed-installer scan and no Full Offline acceptance
+run — both are still outstanding, and the harness reports the Full Offline phase as
+`skipped` until a real staging Cloud URL and enrollment token are supplied (see
+`EVIDENCE.md` `What is missing, and why it cannot be attached`).
 
 ### Remaining risks (accepted, documented)
 

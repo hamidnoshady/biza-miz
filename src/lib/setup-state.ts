@@ -17,6 +17,9 @@ import {
 import { isLocalOnly } from "./deployment-mode";
 import { deploymentRole } from "./deployment-role";
 import { getBusinessIndustry } from "./industry-guard";
+import type { AppKey } from "./apps";
+import { normalizeSelectedApps } from "./setup-apps";
+import { isStoredLogo, type BusinessLogo } from "./business-logo";
 import {
   getSetting,
   getWizardProgress,
@@ -50,6 +53,15 @@ export interface BusinessPrefs {
   currencyDisplay: "toman" | "rial";
   language: "fa";
   calendar: "jalali";
+}
+
+/** The optional operational profile fields the setup step may collect. */
+export interface SetupBusinessProfile {
+  legalName?: string;
+  taxId?: string;
+  email?: string;
+  website?: string;
+  receiptFooter?: string;
 }
 
 export interface CostingSetting {
@@ -114,9 +126,18 @@ export interface SetupState {
     phone: string | null;
   } | null;
   prefs: BusinessPrefs | null;
+  /** Optional operational profile (legal name, contact, tax id, website). */
+  profile: SetupBusinessProfile | null;
+  /** The receipt/invoice logo, if one has been uploaded or deferred. */
+  logo: BusinessLogo | null;
   costing: (CostingSetting & { locked: boolean }) | null;
   tax: TaxSetting | null;
   progress: WizardProgress;
+  /**
+   * The gallery's saved draft. `null` means the flow has never saved a choice
+   * (a legacy business); `[]` is an explicit zero-app choice.
+   */
+  selectedApps: AppKey[] | null;
   counts: {
     accounts: number;
     users: number;
@@ -468,13 +489,18 @@ async function computeSetupStateInner(
   const industry = business?.industry ?? "food_service";
   const location = business ? await getPrimaryLocation(businessId) : null;
 
-  const [prefs, costing, tax, progress, localOnly] = await Promise.all([
-    getSetting<BusinessPrefs>(businessId, SETTING_KEYS.businessPrefs),
-    getSetting<CostingSetting>(businessId, SETTING_KEYS.costing),
-    getSetting<TaxSetting>(businessId, SETTING_KEYS.tax),
-    getWizardProgress(businessId),
-    isLocalOnly(businessId),
-  ]);
+  const [prefs, profile, logo, costing, tax, progress, localOnly, selectedRaw] =
+    await Promise.all([
+      getSetting<BusinessPrefs>(businessId, SETTING_KEYS.businessPrefs),
+      getSetting<SetupBusinessProfile>(businessId, SETTING_KEYS.businessProfile),
+      getSetting<BusinessLogo>(businessId, SETTING_KEYS.businessLogo),
+      getSetting<CostingSetting>(businessId, SETTING_KEYS.costing),
+      getSetting<TaxSetting>(businessId, SETTING_KEYS.tax),
+      getWizardProgress(businessId),
+      isLocalOnly(businessId),
+      getSetting<unknown>(businessId, SETTING_KEYS.setupSelectedApps),
+    ]);
+  const selectedApps = selectedRaw == null ? null : normalizeSelectedApps(selectedRaw);
 
   const [
     accounts,
@@ -540,6 +566,7 @@ async function computeSetupStateInner(
     hasTax: tax !== null,
     accounts,
     sellableMenuItems: sellableItems,
+    selectedApps,
   });
 
   // Issue #808 §6/§9: keep the stored markers honest about the data above, in
@@ -564,6 +591,9 @@ async function computeSetupStateInner(
     business,
     location,
     prefs,
+    profile,
+    logo: isStoredLogo(logo) ? logo : null,
+    selectedApps,
     costing: costing
       ? { ...costing, locked: Boolean(costing.lockedAt) || stockMovements > 0 }
       : null,

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getPlatformSession, withPlatformScope } from "@/lib/platform-auth";
+import { createHash } from "node:crypto";
+import { requirePlatformAdmin, withPlatformScope } from "@/lib/platform-auth";
 import { CAPABILITIES_FOR } from "@/lib/platform-admin";
 
 /**
@@ -10,7 +11,7 @@ import { CAPABILITIES_FOR } from "@/lib/platform-admin";
  * capability list to decide which controls to show.
  */
 export const GET = withPlatformScope(async () => {
-  const session = await getPlatformSession();
+  const { session } = await requirePlatformAdmin();
   if (!session) {
     return NextResponse.json({ admin: null });
   }
@@ -22,5 +23,8 @@ export const GET = withPlatformScope(async () => {
       role: session.role,
     },
     capabilities: CAPABILITIES_FOR(session.role),
+    aiSessionScope: session.sessionId
+      ? createHash("sha256").update(`ai:${session.padmin}:${session.sessionId}:${session.role}`).digest("hex")
+      : undefined,
   });
 });

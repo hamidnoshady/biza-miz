@@ -6,7 +6,7 @@ let pathname = "/dashboard";
 vi.mock("next/navigation", () => ({ usePathname: () => pathname, useRouter: () => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn() }) }));
 let chat: ReturnType<typeof usePersistentTenantAiChat>;
 function Probe() { chat = usePersistentTenantAiChat(); return null; }
-const view = (account: string) => <PersistentTenantAiProvider><TenantAiIdentity account={account} /><Probe /></PersistentTenantAiProvider>;
+const view = (account: string, enabled = true) => <PersistentTenantAiProvider><TenantAiIdentity account={account} enabled={enabled} /><Probe /></PersistentTenantAiProvider>;
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); pathname = "/dashboard"; });
 describe("tenant workspace persistence", () => {
   it("keeps the same stream, draft, task and response mode when the route changes", async () => {
@@ -37,5 +37,13 @@ describe("tenant workspace persistence", () => {
     expect(chat!.customTask).toBe("");
     expect(chat!.runtimeMode).toBe("auto");
     expect(chat!.conversationId).toBeNull();
+  });
+  it("clears the current session when its AI permission is revoked", () => {
+    const ui = render(view("business-a:user-a"));
+    act(() => chat!.setInput("private draft"));
+    ui.rerender(view("business-a:user-a", false));
+    expect(chat).toBeNull();
+    ui.rerender(view("business-a:user-a"));
+    expect(chat!.input).toBe("");
   });
 });

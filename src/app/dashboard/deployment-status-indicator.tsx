@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import type { DeploymentProfile } from "@/lib/deployment-mode";
+import { deploymentStatusBadgeLabel } from "@/lib/deployment-status-badge";
 import { LoadingSkeleton } from "./page-chrome";
 import { useOfflineQueue } from "./offline-queue";
 
@@ -17,7 +18,6 @@ import { useOfflineQueue } from "./offline-queue";
 export function DeploymentStatusIndicator({ profile }: { profile: DeploymentProfile }) {
   const { serverStatus } = useOfflineQueue();
   if (profile === "hybrid" && !serverStatus) return <LoadingSkeleton className="h-9 w-full rounded-lg" />;
-  const pending = serverStatus?.outboundPending ?? 0;
   const identityDegraded =
     serverStatus?.overallIdentity === "degraded" || serverStatus?.overallIdentity === "limited";
   // Issue #948 P0/P1-5 — operational sync and identity health are separate
@@ -28,26 +28,11 @@ export function DeploymentStatusIndicator({ profile }: { profile: DeploymentProf
   // Issue #988 — the gate is a different fact from a stalled pipe. While the
   // security plane refuses to let a tick run, nothing is being pushed and
   // nothing is failing: the till is simply not sending, and the badge has to
-  // say that rather than "connecting" forever.
+  // say that rather than "connecting" forever. The wording lives in
+  // `deploymentStatusBadgeLabel()` so the #1000 upgrade test can assert this
+  // exact sentence against the connection-status response that feeds it.
   const blocked = serverStatus?.operationalBlock?.blocked === true;
-  const syncLabel =
-    profile === "hybrid"
-      ? serverStatus?.pairingPending
-        ? "سایت محلی · در حال تکمیل جفت‌شدن"
-        : blocked
-          ? `سایت محلی · همگام‌سازی عملیاتی مسدود${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`
-        : serverStatus?.sync === "connected"
-          ? "سایت محلی · همگام با ابر"
-          : serverStatus?.sync === "connecting"
-            ? "سایت محلی · در حال اتصال به ابر"
-            : `سایت محلی · همگام‌سازی متوقف${pending ? ` · ${pending.toLocaleString("fa-IR")} در انتظار` : ""}`
-      : null;
-  const label =
-    profile === "cloud"
-      ? "ابر"
-      : profile === "local"
-        ? "فقط محلی · اتصال به ابر"
-        : `${syncLabel}${identityDegraded ? " · نیازمند بررسی هویت و ورود کارکنان" : ""}`;
+  const label = deploymentStatusBadgeLabel(profile, serverStatus);
   const tone =
     profile === "hybrid" &&
     (serverStatus?.pairingPending || blocked || serverStatus?.sync !== "connected" || identityDegraded)

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import type { AppKey } from "@/lib/apps";
 import { toPersianDigits } from "@/lib/digits";
 import { stepsFor } from "./steps";
 import { useSetupIndustry } from "./industry-context";
@@ -11,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 interface StateResponse {
   progress?: { steps: Record<string, string>; completedAt: string | null };
   siteInstall?: boolean;
+  selectedApps?: AppKey[] | null;
 }
 
 export function StepNav({ compact = false }: { compact?: boolean }) {
@@ -18,6 +20,7 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
   const industry = useSetupIndustry();
   const [done, setDone] = useState<Record<string, string>>({});
   const [siteInstall, setSiteInstall] = useState(false);
+  const [selectedApps, setSelectedApps] = useState<AppKey[] | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -29,6 +32,7 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
         if (cancelled) return;
         if (s.progress) setDone(s.progress.steps);
         setSiteInstall(Boolean(s.siteInstall));
+        setSelectedApps(s.selectedApps ?? null);
       })
       .catch(() => {})
       .finally(() => {
@@ -41,7 +45,7 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
 
   // Every site install owns a physical database, including Hybrid. Central
   // cloud tenants do not get an operator-storage destination step.
-  const steps = stepsFor(industry).filter(
+  const steps = stepsFor(industry, selectedApps).filter(
     (s) => s.id !== "backup" || siteInstall,
   );
 
@@ -76,6 +80,11 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
       {steps.map((s, i) => {
         const active = pathname === s.path;
         const isDone = Boolean(done[s.id]);
+        // `app_setup` is skippable only when no app was selected; with a
+        // selection the Finish gate requires its answers, so do not label it
+        // optional.
+        const optionalHere =
+          s.optional && !(s.id === "app_setup" && (selectedApps?.length ?? 0) > 0);
         return (
           <Link
             key={s.id}
@@ -99,7 +108,7 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
               {isDone ? "✓" : toPersianDigits(i + 1)}
             </span>
             <span className="truncate">{s.short}</span>
-            {s.optional ? (
+            {optionalHere ? (
               <span className="ms-auto text-[10px] text-muted-foreground">
                 اختیاری
               </span>

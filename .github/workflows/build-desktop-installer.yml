@@ -345,16 +345,33 @@ jobs:
           PGDATA: ${{ runner.temp }}\package-tools-pgdata
         run: npm run db:dev:stop
 
+      - name: Mint a fresh Full Offline enrollment code
+        # Issue #1194 - enrollment codes are single-use and expire after 24
+        # hours, so a stored secret covers one run and then fails with
+        # code_already_redeemed. Mint one per run; the code reaches the harness
+        # as DESKTOP_ACCEPTANCE_OFFLINE_TOKEN through $GITHUB_ENV. Skipped when
+        # no staging Cloud is configured, keeping the phase's existing
+        # "skipped" report instead of failing this job. Never on a pull_request
+        # build: that would put a reusable staging owner credential in PR runs,
+        # a bigger exposure than the one-time code this replaced.
+        if: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL != '' && github.event_name != 'pull_request' }}
+        env:
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          DESKTOP_ACCEPTANCE_OFFLINE_LOCATION_ID: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_LOCATION_ID }}
+          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_EMAIL: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_EMAIL }}
+          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_PASSWORD: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_PASSWORD }}
+          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_TOTP_SECRET: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_TOTP_SECRET }}
+        run: node scripts/mint-offline-enrollment-code.mjs
+
       - name: Install and run actual packaged desktop twice as a standard user
         # Issue #1194 - when a staging Cloud is configured, the external harness
         # also exercises Full Offline enrollment against the release bytes. The
-        # token is a secret; without it the phase reports "skipped" and the
-        # Hybrid install/restart checks still run.
+        # mint step above issues this run's single-use code; without one the
+        # phase reports "skipped" and the Hybrid install/restart checks still run.
         # Issue #1194 — a wedged runner must fail this step, not the job.
         timeout-minutes: 45
         env:
           DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
-          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
           $user = "SuiteSmoke"
@@ -370,6 +387,11 @@ jobs:
             Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
           $node = (Get-Command node).Source
           $smokeScript = (Resolve-Path "electron/scripts/smoke-packaged.js").Path
+          # Issue #1194 - Start-Process -Credential builds the child environment
+          # from the target user's profile, so this step's variables do not reach
+          # the harness. Carry the two Full Offline values into the batch file.
+          $offlineCloudUrl = "$env:DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL"
+          $offlineToken = "$env:DESKTOP_ACCEPTANCE_OFFLINE_TOKEN"
 
           if (-not $installer) { throw "NSIS installer missing before standard-user smoke" }
           New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
@@ -412,6 +434,9 @@ jobs:
           rem lands next to the smoke output instead of a temp directory.
           set DESKTOP_ACCEPTANCE_USER_DATA=$smokeRoot\profile
           set DESKTOP_ACCEPTANCE_REPORT=$smokeRoot\acceptance-report.json
+          rem Issue #1194 - full Offline values passed explicitly; see above.
+          set DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL=$offlineCloudUrl
+          set DESKTOP_ACCEPTANCE_OFFLINE_TOKEN=$offlineToken
           "$node" "$smokeScript" > "$outputPath" 2>&1
           set RC=%ERRORLEVEL%
           echo %RC% > "$exitPath"

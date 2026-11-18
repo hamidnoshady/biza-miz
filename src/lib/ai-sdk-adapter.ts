@@ -1,6 +1,5 @@
 /**
  * Issue #1140 §A5 — the one place the Vercel AI SDK touches this codebase.
- * ESH-184 — the Superadmin playground streams the turn instead of buffering it.
  *
  * The SDK is the application's orchestration layer (typed tool calls, the step
  * loop, usage accounting); LiteLLM stays the gateway. That is why the model is
@@ -14,7 +13,7 @@
  * for it; nothing here changes how tenants are billed or settled.
  */
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { jsonSchema, isStepCount, streamText, tool, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
+import { createUIMessageStream, createUIMessageStreamResponse, generateText, isStepCount, jsonSchema, streamText, tool, type UIMessage, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
 import type { OpenAiTool } from "./ai";
 
 export interface GatewayModelSettings {
@@ -78,140 +77,104 @@ export interface SdkTurnInput {
   abortSignal?: AbortSignal;
 }
 
-/** Incremental output the caller may relay while the turn is still running. */
-export interface SdkTurnCallbacks {
-  /** One provider text delta, in order. */
-  onDelta?: (text: string) => void;
-  /** One tool call, before its executor runs. */
-  onToolCall?: (call: { id: string; name: string; input: unknown }) => void;
-  /** One tool result (or tool failure) after the executor ran. */
-  onToolResult?: (result: { id: string; name: string; output: unknown; failed: boolean }) => void;
-}
-
 export interface SdkTurnResult {
   text: string;
   totalTokens: number;
   /** Sum of LiteLLM's per-call `x-litellm-response-cost`, or null when absent. */
   costUsd: number | null;
   toolsUsed: string[];
-  finishReason: string | null;
-}
-
-function abortError(): Error {
-  const error = new Error("The assistant turn was cancelled.");
-  error.name = "AbortError";
-  return error;
-}
-
-function totalTokensOf(usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined): number {
-  const reported = Number(usage?.totalTokens);
-  if (Number.isFinite(reported) && reported > 0) return reported;
-  const input = Number(usage?.inputTokens);
-  const output = Number(usage?.outputTokens);
-  return (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0);
 }
 
 /**
- * One bounded assistant turn, streamed. The step ceiling is a stop condition,
- * so the last allowed step can still be a plain answer instead of another tool
- * request. Cancellation reaches the provider through `abortSignal`, and the
- * caller observes deltas through `callbacks` while the turn runs.
+ * One bounded assistant turn. The step ceiling is a stop condition, so the last
+ * allowed step can still be a plain answer instead of another tool request.
  */
-export async function runSdkTurn(
-  input: SdkTurnInput,
-  callbacks: SdkTurnCallbacks = {},
-): Promise<SdkTurnResult> {
+export async function runSdkTurn(input: SdkTurnInput): Promise<SdkTurnResult> {
+  const result = await generateText(sdkTurnOptions(input));
+  return summarizeSdkTurn(input, result);
+}
+
+function sdkTurnOptions(input: SdkTurnInput) {
   assertSdkModelIsGatewayBound(input.model);
-  const result = streamText({
+  return {
     model: input.model,
     system: input.system,
     messages: input.messages,
     tools: input.tools,
     stopWhen: isStepCount(input.maxSteps),
-    // The final allowed step offers no tools, so the turn must end in an answer.
-    prepareStep: ({ stepNumber }) => (stepNumber >= input.maxSteps - 1 ? { activeTools: [] } : undefined),
+    prepareStep: ({ stepNumber }: { stepNumber: number }) => stepNumber >= input.maxSteps - 1 ? { activeTools: [] } : undefined,
     temperature: input.temperature,
     maxOutputTokens: input.maxOutputTokens,
     abortSignal: input.abortSignal,
     maxRetries: 0,
-  });
-
-  let text = "";
-  let totalTokens = 0;
-  let costUsd: number | null = null;
-  let finishReason: string | null = null;
-  const toolsUsed: string[] = [];
-
-  try {
-    for await (const part of result.stream) {
-      switch (part.type) {
-        case "text-delta":
-          if (part.text) {
-            text += part.text;
-            callbacks.onDelta?.(part.text);
-          }
-          break;
-        case "tool-call":
-          callbacks.onToolCall?.({ id: part.toolCallId, name: String(part.toolName), input: part.input });
-          // Only a call the turn actually offered counts; a hallucinated name is not "used".
-          if (String(part.toolName) in input.tools) toolsUsed.push(String(part.toolName));
-          break;
-        case "tool-result":
-          callbacks.onToolResult?.({
-            id: part.toolCallId,
-            name: String(part.toolName),
-            output: part.output,
-            failed: false,
-          });
-          break;
-        case "tool-error":
-          callbacks.onToolResult?.({
-            id: part.toolCallId,
-            name: String(part.toolName),
-            output: part.error,
-            failed: true,
-          });
-          break;
-        case "finish-step": {
-          const usage = totalTokensOf(part.usage);
-          if (usage > 0) totalTokens += usage;
-          const raw = part.response?.headers?.["x-litellm-response-cost"];
-          const cost = Number(raw);
-          if (raw !== undefined && Number.isFinite(cost) && cost >= 0) costUsd = (costUsd ?? 0) + cost;
-          break;
-        }
-        case "finish": {
-          const usage = totalTokensOf(part.totalUsage);
-          // `finish.totalUsage` is the aggregate; prefer it when a provider did
-          // not report per-step usage (some gateways only report it once).
-          if (totalTokens === 0 && usage > 0) totalTokens = usage;
-          finishReason = part.finishReason ?? null;
-          break;
-        }
-        case "abort":
-          throw abortError();
-        case "error":
-          throw part.error instanceof Error ? part.error : new Error("ai_stream_error");
-        default:
-          break;
-      }
-    }
-  } catch (error) {
-    // Abort surfaces as a provider AbortError or an `abort` part. Both mean the
-    // same thing to the caller, so normalise the name it checks.
-    if (input.abortSignal?.aborted) throw abortError();
-    throw error;
-  }
-  if (input.abortSignal?.aborted) throw abortError();
-
-  return {
-    text,
-    totalTokens: Number.isFinite(totalTokens) ? Math.max(0, totalTokens) : 0,
-    costUsd,
-    toolsUsed,
-    finishReason,
   };
 }
 
-/** Explicit alias for callers that want the streaming intent in the call site. */
-export const streamSdkTurn = runSdkTurn;
+function summarizeSdkTurn(
+  input: SdkTurnInput,
+  result: Pick<Awaited<ReturnType<typeof generateText>>, "steps" | "text" | "totalUsage">,
+): SdkTurnResult {
+  let costUsd: number | null = null;
+  for (const step of result.steps) {
+    const raw = step.response?.headers?.["x-litellm-response-cost"];
+    const cost = Number(raw);
+    if (raw !== undefined && Number.isFinite(cost) && cost >= 0) costUsd = (costUsd ?? 0) + cost;
+  }
+  const used = Number(result.totalUsage?.totalTokens);
+  return {
+    text: result.text,
+    totalTokens: Number.isFinite(used) ? Math.max(0, used) : 0,
+    costUsd,
+    // Only calls that name a tool this turn actually offered; a hallucinated name is not "used".
+    toolsUsed: result.steps.flatMap((step) => step.toolCalls.map((call) => String(call.toolName)).filter((name) => name in input.tools)),
+  };
+}
+
+type Diagnostics = Record<string, unknown>;
+type PlaygroundUiMessage = UIMessage<unknown, { diagnostics: Diagnostics; completion: Diagnostics }>;
+
+export function streamSdkTurn(input: SdkTurnInput, handlers: {
+  started: Diagnostics;
+  finished: (result: SdkTurnResult) => Promise<Diagnostics>;
+  failed: (error: unknown) => Promise<string>;
+}): Response {
+  const stream = createUIMessageStream<PlaygroundUiMessage>({
+    async execute({ writer }) {
+      writer.write({ type: "start" });
+      writer.write({ type: "data-diagnostics", data: handlers.started });
+      writer.write({ type: "text-start", id: "answer" });
+      try {
+        let providerError: unknown;
+        const result = streamText({
+          ...sdkTurnOptions(input),
+          onError: ({ error }) => { providerError = error; },
+        });
+        let text = "";
+        for await (const delta of result.textStream) {
+          const visible = delta.slice(0, Math.max(0, 16_000 - text.length));
+          if (!visible) continue;
+          text += visible;
+          writer.write({ type: "text-delta", id: "answer", delta: visible });
+        }
+        if (input.abortSignal?.aborted) throw input.abortSignal.reason;
+        if (providerError) throw providerError;
+        if (!text.trim()) throw new Error("invalid_provider_reply");
+        const summary = summarizeSdkTurn(input, {
+          text, steps: await result.steps, totalUsage: await result.totalUsage,
+        });
+        const diagnostics = await handlers.finished(summary);
+        writer.write({ type: "text-end", id: "answer" });
+        writer.write({ type: "data-completion", data: diagnostics });
+        writer.write({ type: "finish" });
+      } catch (error) {
+        writer.write({ type: "text-end", id: "answer" });
+        writer.write({ type: "error", errorText: await handlers.failed(error) });
+      }
+    },
+    onError: () => "provider_failed",
+  });
+  return createUIMessageStreamResponse({
+    stream,
+    headers: { "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" },
+  });
+}

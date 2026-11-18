@@ -95,10 +95,11 @@ const components: Components = {
   hr: () => <hr className="my-3 border-border" />,
 };
 
-export function AiMarkdown({ content, className }: { content: string; className?: string }) {
+export function AiMarkdown({ content, className, plainLinks = false }: { content: string; className?: string; plainLinks?: boolean }) {
   return (
     <div className={cn("min-w-0 text-sm leading-relaxed", className)}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} skipHtml
+        disallowedElements={plainLinks ? ["a", "img"] : undefined} unwrapDisallowed={plainLinks}>
         {content}
       </ReactMarkdown>
     </div>
