@@ -254,6 +254,10 @@ export function AiChatHub({
     allowedPanelSections !== undefined
       ? allowedPanelSections.length > 0
       : canManageAi;
+  const canOpenDeepResearch =
+    allowedPanelSections !== undefined
+      ? allowedPanelSections.includes("research")
+      : canManageAi;
   const defaultPanelSection: AiPanelSectionKey =
     allowedPanelSections && allowedPanelSections.length > 0
       ? allowedPanelSections[0]!
@@ -931,6 +935,7 @@ export function AiChatHub({
             <ChatComposer
               mode="dashboard"
               compact={compact}
+              startCollapsed={!compact && isWelcome}
               inputRef={composerInputRef}
               input={input}
               setInput={setInput}
@@ -950,6 +955,9 @@ export function AiChatHub({
                 accessibleFocuses: effectiveAccessibleFocuses,
                 runtimeMode,
                 onRuntimeModeChange: updateRuntimeMode,
+                onDeepResearchOpen: canOpenDeepResearch
+                  ? () => openPanel("research")
+                  : undefined,
                 deepResearchEnabled,
                 projectId: canSelectProject ? activeProjectId : null,
                 onProjectChange: changeProject,

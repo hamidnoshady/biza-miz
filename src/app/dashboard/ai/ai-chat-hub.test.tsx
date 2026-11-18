@@ -125,23 +125,32 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     expect(header.textContent).not.toContain("حالت:");
     expect(header.textContent).not.toContain("پروژه:");
 
-    // The main composer exposes task selection and three explicit model-profile buttons.
+    // The welcome composer starts as a compact one-line field with a visible shadcn mode selector.
     const composerBox = container.querySelector("[data-composer-box]")!;
-    expect(composerBox.querySelectorAll("select")).toHaveLength(1);
-    expect(within(composerBox as HTMLElement).getByRole("combobox", { name: /وظیفه دستیار/ })).toBeTruthy();
-    for (const label of ["خودکار", "سریع", "تفکر عمیق"]) {
-      expect(within(composerBox as HTMLElement).getByRole("button", { name: `حالت پاسخ‌گویی: ${label}` })).toBeTruthy();
-    }
+    expect(composerBox.getAttribute("data-composer-collapsed")).toBe("true");
+    expect(composerBox.querySelectorAll("select")).toHaveLength(0);
+    const textarea = within(composerBox as HTMLElement).getByLabelText("پیام") as HTMLTextAreaElement;
+    expect(textarea.rows).toBe(1);
+    expect(within(composerBox as HTMLElement).queryByRole("combobox", { name: /وظیفه دستیار/ })).toBeNull();
+    expect(within(composerBox as HTMLElement).queryByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" })).toBeNull();
+    const modeSelect = within(composerBox as HTMLElement).getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ });
+    const modeIcon = modeSelect.querySelector("svg");
+    expect(modeIcon).toBeTruthy();
+    fireEvent.click(modeIcon!);
+    expect(composerBox.getAttribute("data-composer-collapsed")).toBe("true");
+    expect(screen.getByRole("option", { name: /خودکار/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /سریع/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /تفکر عمیق/ })).toBeTruthy();
+    const deepResearchOption = screen.getByRole("option", { name: /پژوهش عمیق/ });
+    expect(deepResearchOption.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.keyDown(modeSelect, { key: "Escape" });
     expect(within(composerBox as HTMLElement).queryByLabelText("تنظیمات این پیام")).toBeNull();
     expect(within(composerBox as HTMLElement).queryByLabelText("جست‌وجو در گزارش‌ها و گفتگوهای قبلی")).toBeNull();
 
     const sendBtn = within(composerBox as HTMLElement).getByRole("button", { name: "ارسال پیام" });
-    const plusBtn = within(composerBox as HTMLElement).getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" });
-    const taskSelector = within(composerBox as HTMLElement).getByRole("combobox", { name: /وظیفه دستیار/ });
     const toolbar = sendBtn.parentElement!;
     expect(toolbar.dir).toBe("rtl");
-    expect(toolbar.firstElementChild).toBe(plusBtn);
-    expect(plusBtn.nextElementSibling).toBe(taskSelector.parentElement);
+    expect(toolbar.firstElementChild).toBe(modeSelect);
     expect(toolbar.lastElementChild).toBe(sendBtn);
 
     // Desktop physical-left history panel is rendered with New Chat inside it
@@ -164,8 +173,12 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     });
     fireEvent.click(starterBtn);
 
-    const textarea = screen.getByLabelText("پیام") as HTMLTextAreaElement;
     expect(textarea.value).toBe(starterPrompts[0]);
+    await waitFor(() => {
+      expect(composerBox.getAttribute("data-composer-collapsed")).toBe("false");
+    });
+    expect(screen.getByRole("combobox", { name: /وظیفه دستیار/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" })).toBeTruthy();
 
     // Collapsing the left history panel releases the panel completely, saves preference,
     // shows only the minimal reopen button, and preserves the composer draft
@@ -206,6 +219,39 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     ).toHaveLength(0);
   });
 
+  it("expands the compact composer when its empty surface is clicked", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ conversations: [], projects: [] }),
+      })) as unknown as typeof fetch,
+    );
+
+    render(
+      <AiChatHub
+        canManageAi={false}
+        canAutoApply={false}
+        allowedPanelSections={[]}
+        deepResearchEnabled={false}
+        eligibleTaskIds={["general"]}
+        accessibleFocuses={["all"]}
+      />,
+    );
+
+    const composerBox = document.querySelector("[data-composer-box]") as HTMLElement;
+    expect(composerBox.getAttribute("data-composer-collapsed")).toBe("true");
+
+    fireEvent.click(composerBox);
+
+    await waitFor(() => {
+      expect(composerBox.getAttribute("data-composer-collapsed")).toBe("false");
+    });
+    expect(screen.getByRole("combobox", { name: /وظیفه دستیار/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" })).toBeTruthy();
+  });
+
   it("keeps task and Auto/Fast/Thinking beside Send, and limits + to supported attachments and context", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -232,24 +278,31 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     );
 
     const textarea = screen.getByLabelText("پیام") as HTMLTextAreaElement;
+    fireEvent.focus(textarea);
     fireEvent.change(textarea, { target: { value: "پیش‌نویس تستی من" } });
 
-    const modeButton = screen.getByRole("button", { name: "حالت پاسخ‌گویی: تفکر عمیق" });
-    fireEvent.click(modeButton);
-    expect(modeButton.getAttribute("aria-pressed")).toBe("true");
+    const modeSelect = screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ });
+    fireEvent.click(modeSelect);
+    fireEvent.click(screen.getByRole("option", { name: "تفکر عمیق" }));
+    expect(screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: تفکر عمیق/ })).toBeTruthy();
     expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("mode=thinking"), { scroll: false });
 
     const taskSelect = screen.getByRole("combobox", { name: /وظیفه دستیار/ });
-    fireEvent.change(taskSelect, { target: { value: "sales" } });
-    expect((taskSelect as HTMLSelectElement).value).toBe("sales");
+    fireEvent.click(taskSelect);
+    fireEvent.click(screen.getByRole("option", { name: "تحلیل فروش" }));
+    expect(screen.getByRole("combobox", { name: /وظیفه دستیار: تحلیل فروش/ })).toBeTruthy();
 
-    fireEvent.change(taskSelect, { target: { value: "custom" } });
+    fireEvent.click(screen.getByRole("combobox", { name: /وظیفه دستیار: تحلیل فروش/ }));
+    fireEvent.click(screen.getByRole("option", { name: /وظیفهٔ سفارشی/ }));
     const customInput = screen.getByPlaceholderText(/پاسخ‌ها را کوتاه/);
     fireEvent.change(customInput, { target: { value: "خروجی فقط بولت‌پوینت" } });
     fireEvent.click(screen.getByRole("button", { name: "اعمال وظیفه" }));
-    expect((taskSelect as HTMLSelectElement).value).toBe("custom");
-    fireEvent.change(taskSelect, { target: { value: "sales" } });
-    expect((taskSelect as HTMLSelectElement).value).toBe("sales");
+    expect(screen.getByRole("combobox", { name: /وظیفه دستیار: وظیفهٔ سفارشی/ })).toBeTruthy();
+
+    const customTaskSelect = screen.getByRole("combobox", { name: /وظیفه دستیار: وظیفهٔ سفارشی/ });
+    fireEvent.click(customTaskSelect);
+    fireEvent.click(screen.getByRole("option", { name: "تحلیل فروش" }));
+    expect(screen.getByRole("combobox", { name: /وظیفه دستیار: تحلیل فروش/ })).toBeTruthy();
 
     const plusBtn = screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" });
     fireEvent.click(plusBtn);
@@ -268,6 +321,46 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     fireEvent.click(await screen.findByRole("menuitemradio", { name: "برج ساحلی" }));
     expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("project=p-1"), { scroll: false });
     expect(textarea.value).toBe("پیش‌نویس تستی من");
+  });
+
+  it("opens the cost-approved Deep Research panel from the mode selector without changing the chat runtime mode", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ runs: [] }),
+      })) as unknown as typeof fetch,
+    );
+
+    render(
+      <AiChatHub
+        canManageAi={false}
+        canAutoApply={false}
+        allowedPanelSections={["research"]}
+        deepResearchEnabled={true}
+      />,
+    );
+
+    const modeSelect = screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ });
+    fireEvent.click(modeSelect);
+    const deepResearchOption = screen.getByRole("option", { name: /پژوهش عمیق/ });
+    expect(deepResearchOption.getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(deepResearchOption);
+
+    expect(replaceMock).toHaveBeenCalledWith(
+      expect.stringContaining("aiPanel=research"),
+      { scroll: false },
+    );
+    expect(screen.getByRole("heading", { name: "پژوهش عمیق" })).toBeTruthy();
+    // The open panel is modal, so the composer behind it is hidden from the
+    // accessibility tree; read its trigger directly to prove the chat runtime
+    // mode is still Auto rather than matching `mode=deep_research`.
+    const composerBox = document.querySelector("[data-composer-box]") as HTMLElement;
+    expect(
+      composerBox.querySelector('[aria-label="حالت پاسخ‌گویی: خودکار"]'),
+    ).toBeTruthy();
+    expect(replaceMock.mock.calls.some(([url]) => String(url).includes("mode=deep_research"))).toBe(false);
   });
 
   it("opens history in a left-side Sheet drawer with New Chat on narrow viewports without rendering a permanent desktop history rail", async () => {
@@ -644,6 +737,8 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
       }),
     ).toBeNull();
 
+    // The welcome composer starts collapsed; expand it before opening the `+` menu
+    fireEvent.click(document.querySelector("[data-composer-box]") as HTMLElement);
     // Open `+` menu and verify the project item is hidden when `workspace` is not in `accessibleFocuses`
     fireEvent.click(
       screen.getByRole("button", { name: "افزودن پیوست و ابزارهای گفتگو" }),
