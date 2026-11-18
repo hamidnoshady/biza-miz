@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1279**. Rows: tenant **119**, platform **23**.
+Route files scanned: **1284**. Rows: tenant **119**, platform **23**.
 
 ## Summary of remaining gaps
 
@@ -152,7 +152,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (in
 | Products (retail) | Product price history (immutable audit)<br>_append-only audit read behind the pricing screens (issue #924 F07); history rows are written as part of an authorized price save inside the same transaction, never through a separate API or MCP verb, so there is nothing for an AI client to write here_ | (route only) | — | — | — | — | inventory.view | — | — | integration/product-price-hardening.integration.test.ts | route-only (by design) |
 | Sales | Sales invoices & voids<br>_creating an invoice stays register-only: the checkout path coordinates tender queue, loyalty, COGS and outbox in the route — same registered design note as the pos.orders lane; void (the reversal mirror) is service-backed and runs under explicit approval with the service's obstacle codes (batches, dismissed sessions, fiscal locks) verbatim_ | get_sales_invoice, list_sales_invoices | (route only) | — | sales.invoice.void | — | orders.amend_closed, orders.create, orders.view, payments.take, vehicles.cost_view, vehicles.override_min_price, vehicles.sell | step-up (always approve) | get_sales_invoice, list_sales_invoices, sales.invoice.void | integration/retail-invoice.integration.test.ts | route-only (by design) |
 | Workspace | Workspace dashboard, insights, lookups, reports, search<br>_each service derives visibility from the real member row (exactly the screens' owner shape); lookup/search picker endpoints stay route-only (they exist to feed the screens' keyboards, not a conversation)_ | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | — | — | — | — | workspace.view | — | get_workspace_dashboard, get_workspace_insights, get_workspace_project_report | integration/workspace.integration.test.ts | covered |
-| Cross-cutting | server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs | (route only) | (route only) | (route only) | (route only) | — | native_devices.manage, settings.manage, team.permissions_manage | — | — | — | n/a (infra) |
+| Cross-cutting | server-sync, sync, peer, pairing, browser desktop enrollment, v1, desktop releases/update, mcp management APIs | (route only) | (route only) | (route only) | (route only) | — | native_devices.manage, settings.manage, team.permissions_manage | — | — | — | n/a (infra) |
 | Cross-cutting | unauthenticated liveness probe (api/health)<br>_session-/DB-less liveness; listed in PUBLIC_PATHS so middleware doesn't bounce probes into host resolution. Not an AI-callable surface._ | (route only) | — | — | — | — | — | — | — | — | n/a (infra) |
 | Cross-cutting | Content-Security-Policy violation reports (api/csp-report)<br>_browser-posted CSP violation reports (issue #1003): session-less, logs a sanitized line and answers 204. Not an AI-callable surface._ | — | (route only) | — | — | — | — | — | — | — | n/a (infra) |
 | Cross-cutting | tenant auth/session endpoints (login, MFA, OTP, webauthn, step-up, switch business) + OAuth discovery metadata<br>_credential exchange surface — never an AI-callable verb_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |

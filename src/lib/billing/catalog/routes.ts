@@ -24,6 +24,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   "cloud-exceptions": keys("platform.exceptions"),
   "desktop-releases": keys("platform.internal"),
   "desktop-update": keys("operations.shared"),
+  // Issue #1115 §A.3 — browser enrollment of an unpaired Hybrid install: the
+  // same sync/pairing plane as `pairing` and `local-activation`, not a
+  // billable business operation.
+  "desktop-enroll": keys("platform.sync"),
   billing: keys("platform.billing_self_service"),
 
   orders: keys("accounting.orders"),

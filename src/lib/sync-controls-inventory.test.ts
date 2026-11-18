@@ -24,7 +24,7 @@ const listedFiles = new Set(
  * discovery rule: a new caller must be classified, not silently shipped.
  */
 const SYNC_ENDPOINT =
-  /\/api\/(?:server-sync|iam\/|team\/iam-status|team\/detach-site|auth\/pin-login\/roster\/sync|sync\/events|connection\/status|local-activation|desktop-update|setup\/(?:pair|reconnect|bootstrap)|connections\/(?:desktop|website\/sync|website\/queue)|integrations\/connections\/[^"'`]*\/(?:sync|reconcile|outbox)|platform\/updates\/commands)/;
+  /\/api\/(?:server-sync|iam\/|team\/iam-status|team\/detach-site|auth\/pin-login\/roster\/sync|sync\/events|connection\/status|local-activation|desktop-update|desktop-enroll|setup\/(?:pair|reconnect|bootstrap|enroll)|connections\/(?:desktop|website\/sync|website\/queue)|integrations\/connections\/[^"'`]*\/(?:sync|reconcile|outbox)|platform\/updates\/commands)/;
 const ELECTRON_UPDATE_CHANNEL = /desktop:update-|desktop-update/;
 
 function walk(dir: string, accept: (file: string) => boolean, out: string[] = []): string[] {

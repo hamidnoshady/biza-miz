@@ -57,6 +57,10 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/auth/desktop-login",
   "/api/auth/desktop-session",
   "/desktop-login",
+  // Issue #1115 §A.3 — browser enrollment is a Cloud surface: the reservation
+  // and its approval live on the central runtime, never on a site process.
+  "/api/desktop-enroll",
+  "/desktop-enroll",
   "/api/server-sync/config/generate-token",
   "/api/peer/backup",
   "/api/v1",
@@ -87,6 +91,14 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
   "/api/pairing/activate",
+  // Issue #1115 §A.3 — browser enrollment. The unpaired Windows app has no
+  // session and no code to type: it registers a reservation (`start`) and
+  // polls it (`poll`) with a device secret that never leaves the machine, and
+  // the signed-in owner approves on `/desktop-enroll` (which stays
+  // session-guarded, exactly like `/desktop-login`). Neither endpoint is
+  // reachable without that secret, and neither names a tenant in its body.
+  "/api/desktop-enroll/start",
+  "/api/desktop-enroll/poll",
   "/api/local-activation/cloud",
   "/api/server-sync/credential-rotation",
   "/api/iam/snapshot",
@@ -257,6 +269,10 @@ const PUBLIC_PATHS = [
   // database, so there is no session to require. The one-time code in the body
   // is the credential, and the route refuses once any user exists.
   "/api/setup/pair",
+  // Issue #1115 §A.3 — the app's half of browser enrollment, on the same
+  // empty-database terms as `/api/setup/pair` (prefix match also covers the
+  // poll proxy under it). Both refuse once any user exists.
+  "/api/setup/enroll",
   // Desktop first-run restore (a reinstall bringing its old database back):
   // the third choice on the same empty-database screen, refused by the route
   // itself once any business or user exists, and never on a central server.
@@ -677,6 +693,7 @@ const authIpLimits = new Map<string, RateLimitEntry>();
 const tableQrLimits = new Map<string, RateLimitEntry>();
 const telegramWebhookIpLimits = new Map<string, RateLimitEntry>();
 const rosterIpLimits = new Map<string, RateLimitEntry>();
+const desktopEnrollIpLimits = new Map<string, RateLimitEntry>();
 const mcpLimits = new Map<string, RateLimitEntry>();
 
 /**
@@ -732,6 +749,19 @@ const TELEGRAM_WEBHOOK_IP_WINDOW_MS = 60_000;
  */
 const ROSTER_IP_LIMIT = 120;
 const ROSTER_IP_WINDOW_MS = 60_000;
+/**
+ * Issue #1115 §A.3 — browser enrollment. The Windows app polls its reservation
+ * every 2.5 s (24/min) while the owner is in the browser, and the first-run
+ * wizard's own start call shares the address. That is three times the
+ * credential-exchange budget (`AUTH_IP_LIMIT`, 20/min), which exists to slow
+ * down *guessing* a short secret — but this pair is not guessable: the poll is
+ * authenticated by a 32-byte secret whose hash it must reproduce, and a start
+ * creates a row rather than testing one. It gets its own generous ceiling so
+ * an office behind one NAT address cannot lock its own enrollment out, and so
+ * polling cannot starve the sign-ins that follow it.
+ */
+const DESKTOP_ENROLL_IP_LIMIT = 120;
+const DESKTOP_ENROLL_IP_WINDOW_MS = 60_000;
 // Phase 34 — the MCP realm's own bucket, keyed by bearer credential (or by IP
 // where there is none yet, which is the OAuth flow). Higher than the public
 // API's, because a single model turn routinely fans out into a handful of tool
@@ -753,6 +783,7 @@ function maybeSweep(now: number) {
   sweepExpired(authIpLimits, now, STALE_ENTRY_MS);
   sweepExpired(telegramWebhookIpLimits, now, STALE_ENTRY_MS);
   sweepExpired(rosterIpLimits, now, STALE_ENTRY_MS);
+  sweepExpired(desktopEnrollIpLimits, now, STALE_ENTRY_MS);
   sweepExpired(mcpLimits, now, STALE_ENTRY_MS);
 }
 
@@ -868,6 +899,21 @@ export function isStaffRosterPath(pathname: string): boolean {
  */
 export function isAuthRateLimitedPath(pathname: string): boolean {
   return AUTH_RATE_LIMITED_PATHS.includes(pathname);
+}
+
+/**
+ * Issue #1115 §A.3 — the browser-enrollment pair (the app's start/poll and the
+ * Cloud's reservation/poll). Prefix-matched on the setup side, exact on the
+ * Cloud side: `/api/desktop-enroll/approve` is the owner's session-guarded
+ * route and does not belong to this pre-session bucket.
+ */
+export function isDesktopEnrollPath(pathname: string): boolean {
+  return (
+    pathname === "/api/setup/enroll" ||
+    pathname.startsWith("/api/setup/enroll/") ||
+    pathname === "/api/desktop-enroll/start" ||
+    pathname === "/api/desktop-enroll/poll"
+  );
 }
 
 /** The unauthenticated Telegram delivery endpoint has its own high-volume IP bucket. */
@@ -988,6 +1034,17 @@ async function handleRateLimits(
       `table-qr-ip:${clientIp(request)}`,
       TABLE_QR_IP_LIMIT,
       TABLE_QR_IP_WINDOW_MS,
+      now,
+    );
+    if (!result.allowed) return rateLimited(result.retryAfterMs);
+  }
+
+  if (isDesktopEnrollPath(pathname)) {
+    const result = await checkRateLimit(
+      desktopEnrollIpLimits,
+      `desktop-enroll-ip:${clientIp(request)}`,
+      DESKTOP_ENROLL_IP_LIMIT,
+      DESKTOP_ENROLL_IP_WINDOW_MS,
       now,
     );
     if (!result.allowed) return rateLimited(result.retryAfterMs);
