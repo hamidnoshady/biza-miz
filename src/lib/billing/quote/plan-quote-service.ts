@@ -27,6 +27,7 @@ import {
   type QuoteAddOn,
   type QuoteCoupon,
   type QuotePriceVersion,
+  type QuoteStackingPolicy,
 } from "./plan-quote";
 
 export interface QuoteExecutor {
@@ -43,6 +44,8 @@ export interface PlanQuoteOptions {
   termDiscountRate: number;
   taxRate: number;
   coupon?: QuoteCoupon | null;
+  /** From configuration; defaults to the no-stacking policy. */
+  stackingPolicy?: QuoteStackingPolicy;
   now?: Date;
   validityMinutes?: number;
   exec?: QuoteExecutor;
@@ -190,6 +193,7 @@ export async function quotePlanSubscription(
     termDiscountRate: options.termDiscountRate,
     taxRate: options.taxRate,
     coupon: options.coupon ?? null,
+    stackingPolicy: options.stackingPolicy,
     issuedAt: (options.now ?? new Date()).toISOString(),
     validityMinutes: options.validityMinutes,
   });

@@ -77,12 +77,16 @@ export type PaymentFulfilmentStatus = "pending" | "succeeded" | "failed";
 export interface PaymentRecord {
   id: string;
   businessId: string;
-  gateway: "manual" | "zarinpal";
+  gateway: "manual" | "zarinpal" | "wallet";
   sandbox?: boolean;
   purpose: "top_up" | "plan_purchase" | "addon_purchase";
   packageId: string | null;
   planKey: string | null;
   featureKey: string | null;
+  /** The persisted quote this purchase settles (ESH-193). */
+  quoteId: string | null;
+  /** The paid prepayment term; 1 for legacy monthly purchases. */
+  termMonths: number;
   amountRial: number;
   creditRial: number;
   description: string;
@@ -1047,7 +1051,7 @@ export async function savePaymentConfig(
  */
 export async function createPayment(input: {
   businessId: string;
-  gateway?: "manual" | "zarinpal";
+  gateway?: "manual" | "zarinpal" | "wallet";
   purpose: "top_up" | "plan_purchase" | "addon_purchase";
   amountRial: number;
   creditRial?: number;
@@ -1058,6 +1062,9 @@ export async function createPayment(input: {
   userId?: string | null;
   idempotencyKey?: string | null;
   quoteSnapshot?: Record<string, unknown> | null;
+  /** ESH-193: the quote this purchase settles and the term it was priced for. */
+  quoteId?: string | null;
+  termMonths?: 1 | 3 | 12;
 }): Promise<PaymentRecord> {
   if (!positiveInt(input.amountRial)) throw new Error("bad_amount");
   if (input.purpose === "top_up" && !input.packageId) {
@@ -1079,9 +1086,25 @@ export async function createPayment(input: {
         [input.businessId, input.idempotencyKey],
       );
       if (existing[0]) return rowToPayment(existing[0]);
+      // A quote is a checkout identity in its own right (ESH-193). Its unique
+      // index is the authority, so a retried checkout returns the row it
+      // already opened instead of failing on the constraint.
+      if (input.quoteId) {
+        const { rows: byQuote } = await query<Record<string, unknown>>(
+          `SELECT * FROM billing_payments WHERE business_id = $1 AND quote_id = $2 LIMIT 1`,
+          [input.businessId, input.quoteId],
+        );
+        if (byQuote[0]) return rowToPayment(byQuote[0]);
+      }
     } catch {
       // Column may not exist before migration 0233; fall through to create.
     }
+  } else if (input.quoteId) {
+    const { rows: byQuote } = await query<Record<string, unknown>>(
+      `SELECT * FROM billing_payments WHERE business_id = $1 AND quote_id = $2 LIMIT 1`,
+      [input.businessId, input.quoteId],
+    );
+    if (byQuote[0]) return rowToPayment(byQuote[0]);
   }
   // Snapshot current gateway identity for drift protection (#928 P1.4). Non-secret fields only.
   const snapshot = {
@@ -1096,8 +1119,9 @@ export async function createPayment(input: {
     const { rows } = await query<Record<string, unknown>>(
       `INSERT INTO billing_payments
          (business_id, gateway, sandbox, purpose, package_id, plan_key, feature_key,
-          amount_rial, credit_rial, description, created_by_user_id, idempotency_key, gateway_snapshot, quote_snapshot)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb)
+          amount_rial, credit_rial, description, created_by_user_id, idempotency_key, gateway_snapshot, quote_snapshot,
+          quote_id, term_months)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16)
        ON CONFLICT (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND btrim(idempotency_key) <> '' DO NOTHING
        RETURNING *`,
       [
@@ -1115,6 +1139,8 @@ export async function createPayment(input: {
         input.idempotencyKey ?? null,
         JSON.stringify(snapshot),
         input.quoteSnapshot ? JSON.stringify(input.quoteSnapshot) : null,
+        input.quoteId ?? null,
+        input.termMonths ?? 1,
       ],
     );
     if (rows[0]) return rowToPayment(rows[0]);
@@ -1127,6 +1153,15 @@ export async function createPayment(input: {
       if (conflictRows[0]) return rowToPayment(conflictRows[0]);
     }
   } catch (e) {
+    // A racing checkout lost the one-payment-per-quote race; that row is the
+    // answer, not an error.
+    if ((e as { code?: string })?.code === "23505" && input.quoteId) {
+      const { rows: byQuote } = await query<Record<string, unknown>>(
+        `SELECT * FROM billing_payments WHERE business_id = $1 AND quote_id = $2 LIMIT 1`,
+        [input.businessId, input.quoteId],
+      );
+      if (byQuote[0]) return rowToPayment(byQuote[0]);
+    }
     // Fallback for deployments without migration 0233 columns
     const msg = String((e as Error).message ?? "");
     const pgCode = (e as { code?: string })?.code ?? "";
@@ -1564,12 +1599,14 @@ function rowToPayment(row: Record<string, unknown>): PaymentRecord {
   return {
     id: String(row.id),
     businessId: String(row.business_id),
-    gateway: (row.gateway as "manual" | "zarinpal") ?? "zarinpal",
+    gateway: (row.gateway as PaymentRecord["gateway"]) ?? "zarinpal",
     sandbox: Boolean(row.sandbox ?? false),
     purpose: (row.purpose as PaymentRecord["purpose"]) ?? "top_up",
     packageId: (row.package_id as string | null) ?? null,
     planKey: (row.plan_key as string | null) ?? null,
     featureKey: (row.feature_key as string | null) ?? null,
+    quoteId: (row.quote_id as string | null) ?? null,
+    termMonths: Number(row.term_months ?? 1),
     amountRial: n(row.amount_rial as string | number),
     creditRial: n(row.credit_rial as string | number),
     description: String(row.description ?? ""),

@@ -7,8 +7,13 @@
  *      for *this term* right now. Read-only; a quote is built from the answer.
  *   2. **reserve** — take a hold for the quote. Inside one transaction the
  *      coupon row is locked, expired holds are released, the per-business cap
- *      is counted, and the hold is inserted. The partial unique index is the
- *      final authority, so two concurrent checkouts cannot both hold one code.
+ *      is counted, and the hold is inserted. The global cap counts *live holds
+ *      with redemptions*, not redemptions alone — otherwise every business
+ *      could hold the last use simultaneously and only discover the
+ *      exhaustion after paying. Capacity is therefore read across tenants
+ *      through one documented, transaction-local RLS bypass while the coupon
+ *      row is locked; the partial unique index is the final authority, so two
+ *      concurrent checkouts cannot both hold one code.
  *   3. **redeem** — called from `consumeQuote` in the settlement transaction.
  *      The global cap is spent here (`redeemed_count < max_redemptions`), never
  *      at reservation: an abandoned quote must not exhaust a campaign.
@@ -181,16 +186,13 @@ export async function reserveCoupon(input: {
 
   try {
     return await withTenantTransaction(input.businessId, async (client) => {
-      await client.query(
-        `UPDATE billing_coupon_redemptions
-            SET status = 'released'
-          WHERE business_id = $1
-            AND coupon_id = $2
-            AND status = 'reserved'
-            AND reserved_until <= $3`,
-        [input.businessId, input.couponId, now.toISOString()],
-      );
-
+      // Capacity is a GLOBAL fact: a hold taken by another business spends the
+      // same campaign limit, and an expired hold anywhere must stop blocking
+      // it. The coupon row is locked first, so reservations serialise and the
+      // cross-tenant read below sees a stable count. `billing_coupon_redemptions`
+      // is tenant-owned (FORCE RLS), so the two statements run with the
+      // transaction-local bypass `withoutTenantScope` documents; it is reset
+      // immediately afterwards and cannot outlive this callback.
       const { rows } = await client.query<CouponRow>(
         `SELECT id, code::text AS code, discount_kind, percent_basis_points, amount_rial,
                 min_term_months, valid_from, valid_until, max_redemptions,
@@ -205,7 +207,42 @@ export async function reserveCoupon(input: {
 
       const invalid = validateCoupon(row, input.termMonths, now);
       if (invalid) return { ok: false as const, error: invalid };
-      if (row.max_redemptions !== null && row.redeemed_count >= row.max_redemptions) {
+
+      const { rows: priorBypass } = await client.query<{ value: string | null }>(
+        `SELECT current_setting('app.rls_bypass', true) AS value`,
+      );
+      await client.query(`SELECT set_config('app.rls_bypass', 'on', true)`);
+      let liveHolds = 0;
+      try {
+        await client.query(
+          `UPDATE billing_coupon_redemptions
+              SET status = 'released'
+            WHERE coupon_id = $1
+              AND status = 'reserved'
+              AND reserved_until <= $2`,
+          [input.couponId, now.toISOString()],
+        );
+        const { rows: holds } = await client.query<{ live: string }>(
+          `SELECT count(*)::text AS live
+             FROM billing_coupon_redemptions
+            WHERE coupon_id = $1
+              AND status = 'reserved'
+              AND reserved_until > $2`,
+          [input.couponId, now.toISOString()],
+        );
+        liveHolds = Number(holds[0]?.live ?? 0);
+      } finally {
+        // Restore whatever scope the caller had — never widen it beyond this
+        // capacity read, and never turn a caller's bypass off under them.
+        await client.query(`SELECT set_config('app.rls_bypass', $1, true)`, [
+          priorBypass[0]?.value ?? "",
+        ]);
+      }
+
+      if (
+        row.max_redemptions !== null &&
+        row.redeemed_count + liveHolds >= row.max_redemptions
+      ) {
         return { ok: false as const, error: "coupon_exhausted" as const };
       }
 
@@ -243,7 +280,12 @@ export async function reserveCoupon(input: {
   }
 }
 
-/** Give a hold back without spending it (quote cancelled or re-quoted). */
+/**
+ * Give a hold back without spending it (quote cancelled or re-quoted).
+ *
+ * Global capacity is counted from live holds, so releasing one returns its
+ * capacity immediately — no counter can drift out of step with the rows.
+ */
 export async function releaseCouponReservation(input: {
   redemptionId: string;
   businessId: string;

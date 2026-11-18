@@ -32,9 +32,11 @@ import {
   type PlanTermMonths,
   type QuoteCoupon,
   type QuoteLine,
+  type QuoteStackingPolicy,
 } from "./plan-quote";
 import { currentQuoteFacts, readPlanPricing, type QuoteExecutor } from "./plan-quote-service";
 import { redeemCouponForQuote, revalidateCoupon, type CouponRefusal } from "./coupon-service";
+import { chargeSubscriptionFeeTx, WalletInsufficientFundsError } from "../../wallet-service";
 
 /** Without settlement, this is how a quote is remembered. */
 export interface StoredQuote {
@@ -45,6 +47,10 @@ export interface StoredQuote {
   couponId: string | null;
   coupon: QuoteCoupon | null;
   status: "open" | "consumed" | "expired" | "cancelled";
+  /** The payment that consumed it; null while the quote is still open. */
+  paymentId: string | null;
+  /** The policy it was priced under, so re-pricing reproduces it. */
+  stackingPolicy: QuoteStackingPolicy;
   termDiscountRate: number;
   taxRate: number;
   periodStart: string;
@@ -94,12 +100,12 @@ export async function persistQuote(input: {
             coupon_id, coupon_code, coupon_kind, coupon_value,
             gross_rial, discount_rial, coupon_discount_rial, tax_rial, net_rial,
             lines, base_price_version_id, base_price_version,
-            period_start, period_end, issued_at, expires_at)
+            period_start, period_end, issued_at, expires_at, stacking_policy)
          VALUES ($1, $2, $3, $4, $5, $6,
                  $7, $8, $9, $10,
                  $11, $12, $13, $14, $15,
                  $16::jsonb, $17, $18,
-                 $19, $20, $21, $22)
+                 $19, $20, $21, $22, $23)
          RETURNING id`,
         [
           input.businessId,
@@ -124,6 +130,7 @@ export async function persistQuote(input: {
           input.quote.period.end,
           input.quote.issuedAt,
           input.quote.expiresAt,
+          input.quote.stackingPolicy,
         ],
       );
       const quoteId = rows[0].id;
@@ -190,7 +197,8 @@ async function loadStoredQuoteWith(
             coupon_id, coupon_code, coupon_kind, coupon_value,
             gross_rial, discount_rial, coupon_discount_rial, tax_rial, net_rial,
             lines, base_price_version_id, base_price_version,
-            period_start, period_end, issued_at, expires_at, status
+            period_start, period_end, issued_at, expires_at, status,
+            payment_id, stacking_policy
        FROM billing_quotes
       WHERE id = $1
         AND business_id = $2`,
@@ -297,6 +305,7 @@ async function repriceStoredQuote(
     termDiscountRate: stored.termDiscountRate,
     taxRate: stored.taxRate,
     coupon,
+    stackingPolicy: stored.stackingPolicy,
     issuedAt: stored.issuedAt,
     validityMinutes: validityMinutes(stored),
   });
@@ -322,7 +331,11 @@ export type ConsumeQuoteResult =
         | "payment_already_used"
         | "coupon_exhausted"
         | "coupon_reservation_missing"
-        | "settlement_conflict";
+        | "settlement_conflict"
+        | "insufficient_funds";
+      /** Present with `insufficient_funds` — what the wallet still needs. */
+      requiredRial?: number;
+      balanceRial?: number;
     };
 
 /**
@@ -351,6 +364,13 @@ export async function consumeQuote(input: {
   quoteId: string;
   paymentId: string;
   now?: Date;
+  /**
+   * Pay the quote from the wallet in this same transaction. The debit, the
+   * quote flip and the coupon redemption are therefore one fact: a retry sees
+   * `consumed` by this payment and debits nothing, and a failure anywhere
+   * rolls the money back. The payment row itself is created by the caller.
+   */
+  debitWallet?: { note?: string | null } | null;
 }): Promise<ConsumeQuoteResult> {
   const now = input.now ?? new Date();
 
@@ -364,6 +384,11 @@ export async function consumeQuote(input: {
         // observe this transaction's one snapshot (see the doc comment).
         const stored = await loadStoredQuoteWith(reader, input.businessId, input.quoteId);
         if (!stored) return { ok: false as const, error: "quote_not_found" as const };
+        // A retried settlement of the same payment is a success, not a refusal:
+        // the money and the coupon moved exactly once, in the first call.
+        if (stored.status === "consumed" && stored.paymentId === input.paymentId) {
+          return { ok: true as const };
+        }
         if (stored.status !== "open") {
           return { ok: false as const, error: "quote_consumed" as const };
         }
@@ -373,6 +398,15 @@ export async function consumeQuote(input: {
 
         const settled = await repriceStoredQuote(reader, stored, now);
         if (!settled.ok) return { ok: false as const, error: settled.error };
+
+        if (input.debitWallet) {
+          await chargeSubscriptionFeeTx(client, {
+            businessId: input.businessId,
+            amountRial: stored.quote.totals.netRial,
+            invoiceId: null,
+            note: input.debitWallet.note ?? null,
+          });
+        }
 
         const { rows } = await client.query<{ coupon_id: string | null }>(
           `UPDATE billing_quotes
@@ -410,6 +444,14 @@ export async function consumeQuote(input: {
     if (code === "23505") return { ok: false, error: "payment_already_used" };
     // The quote or its coupon row moved under us; nothing was settled.
     if (code === "40001") return { ok: false, error: "settlement_conflict" };
+    if (error instanceof WalletInsufficientFundsError) {
+      return {
+        ok: false,
+        error: "insufficient_funds",
+        requiredRial: error.requiredRial,
+        balanceRial: error.balanceRial,
+      };
+    }
     throw error;
   }
 }
@@ -455,6 +497,8 @@ interface StoredQuoteRow extends Record<string, unknown> {
   issued_at: Date | string;
   expires_at: Date | string;
   status: "open" | "consumed" | "expired" | "cancelled";
+  payment_id: string | null;
+  stacking_policy: QuoteStackingPolicy;
 }
 
 function toStoredQuote(row: StoredQuoteRow): StoredQuote {
@@ -480,10 +524,13 @@ function toStoredQuote(row: StoredQuoteRow): StoredQuote {
       period: { start: new Date(row.period_start).toISOString(), end: new Date(row.period_end).toISOString() },
       issuedAt: new Date(row.issued_at).toISOString(),
       expiresAt: new Date(row.expires_at).toISOString(),
+      stackingPolicy: row.stacking_policy === "stack" ? "stack" : "best_single",
     },
     couponId: row.coupon_id,
     coupon,
     status: row.status,
+    paymentId: row.payment_id ?? null,
+    stackingPolicy: row.stacking_policy === "stack" ? "stack" : "best_single",
     termDiscountRate: Number(row.term_discount_basis_points) / 10_000,
     taxRate: Number(row.tax_basis_points) / 10_000,
     periodStart: new Date(row.period_start).toISOString(),

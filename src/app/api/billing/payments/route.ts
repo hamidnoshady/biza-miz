@@ -10,8 +10,10 @@ import {
   startPayment,
 } from "@/lib/wallet-service";
 import { listBillingPlans, listPlanFeatures } from "@/lib/billing-plans-service";
-import { calculateSubscriptionTotal } from "@/lib/subscription-service";
 import { readCommercialSettings } from "@/lib/billing/runtime";
+import { isPlanTermMonths, type PlanQuote } from "@/lib/billing/quote/plan-quote";
+import { createPlanCheckoutQuote } from "@/lib/billing/quote/checkout-quote";
+import { assertQuotePayable, consumeQuote, loadQuote } from "@/lib/billing/quote/quote-store";
 import { applyTaxAndRounding } from "@/lib/billing/rating/engine";
 import { parseSafeIntInput } from "@/lib/platform-money";
 import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
@@ -139,7 +141,7 @@ export const POST = withTenantScope(async (req: Request) => {
     } else if (kind === "plan") {
       const plans = await listBillingPlans(true);
       const plan = plans.find((p) => p.key === body.planKey);
-      if (!plan || plan.monthlyPriceRial == null) {
+      if (!plan) {
         return NextResponse.json({ error: "plan_not_found" }, { status: 404 });
       }
       // P0: prevent same-plan duplicate purchase without benefit. Check current subscription.
@@ -167,22 +169,143 @@ export const POST = withTenantScope(async (req: Request) => {
           return NextResponse.json({ error: "already_subscribed", planKey: plan.key, message: "شما همین پلن را دارید؛ برای تمدید از بخش مدیریت اشتراک اقدام کنید." }, { status: 409 });
         }
       }
-      const quote = await calculateSubscriptionTotal(session.businessId, { planKey: plan.key });
-      // Stale quote protection: if client supplied expected amount, ensure it matches authoritative quote
-      if (expectedAmountRial != null && expectedAmountRial !== quote.totalRial) {
-        return NextResponse.json({ error: "stale_quote", expected: expectedAmountRial, actual: quote.totalRial, quote }, { status: 409 });
+
+      // ESH-193: a plan checkout settles a PERSISTED quote. When the caller
+      // supplies one, it is authoritative and re-checked against live prices;
+      // otherwise the server creates and stores the same canonical document,
+      // so no legacy caller can pay a price the quote store never saw.
+      let quote: PlanQuote;
+      let effectiveQuoteId: string;
+      const stored = quoteId ? await loadQuote({ businessId: session.businessId, quoteId }) : null;
+      if (quoteId) {
+        if (!stored) return NextResponse.json({ error: "quote_not_found" }, { status: 404 });
+        if (stored.quote.planKey !== plan.key) {
+          return NextResponse.json({ error: "quote_plan_mismatch" }, { status: 409 });
+        }
+        const payable = await assertQuotePayable({
+          businessId: session.businessId,
+          quoteId: stored.id,
+        });
+        if (!payable.ok) return NextResponse.json({ error: payable.error }, { status: 409 });
+        quote = stored.quote;
+        effectiveQuoteId = stored.id;
+      } else {
+        const created = await createPlanCheckoutQuote({
+          businessId: session.businessId,
+          platformUserId: session.platformUserId ?? null,
+          membershipId: session.sub,
+          planKey: plan.key,
+          termMonths: isPlanTermMonths(body.termMonths) ? body.termMonths : 1,
+          couponCode: typeof body.couponCode === "string" ? body.couponCode : "",
+        });
+        if (!created.ok) return NextResponse.json({ error: created.error }, { status: 409 });
+        quote = created.quote;
+        effectiveQuoteId = created.quoteId;
       }
+
+      // Stale quote protection: if client supplied expected amount, ensure it matches the persisted quote
+      if (expectedAmountRial != null && expectedAmountRial !== quote.totals.netRial) {
+        return NextResponse.json(
+          { error: "stale_quote", expected: expectedAmountRial, actual: quote.totals.netRial },
+          { status: 409 },
+        );
+      }
+
+      const payWithWallet = body.payWithWallet === true;
       payment = await createPayment({
         businessId: session.businessId,
         purpose: "plan_purchase",
-        amountRial: quote.totalRial,
+        gateway: payWithWallet ? "wallet" : undefined,
+        amountRial: quote.totals.netRial,
         creditRial: 0,
         planKey: plan.key,
-        description: `اشتراک پلن «${plan.name}»`,
+        description: `اشتراک پلن «${plan.name}» — دورهٔ ${quote.termMonths} ماهه`,
         userId: session.sub,
-        idempotencyKey: idempotencyKey ?? (quoteId ?? null),
-        quoteSnapshot: { planKey: plan.key, totalRial: quote.totalRial, subtotalRial: quote.subtotalRial, taxRial: quote.taxRial, lines: quote.lines },
+        idempotencyKey: idempotencyKey ?? effectiveQuoteId,
+        quoteId: effectiveQuoteId,
+        termMonths: quote.termMonths,
+        quoteSnapshot: {
+          planKey: plan.key,
+          quoteId: effectiveQuoteId,
+          termMonths: quote.termMonths,
+          stackingPolicy: quote.stackingPolicy,
+          grossRial: quote.totals.grossRial,
+          discountRial: quote.totals.discountRial,
+          couponDiscountRial: quote.totals.couponDiscountRial,
+          taxRial: quote.totals.taxRial,
+          totalRial: quote.totals.netRial,
+          period: quote.period,
+          lines: quote.lines,
+        },
       });
+
+      if (payWithWallet) {
+        // A previous attempt that failed (for example a shortfall) left this
+        // quote's one payment row in `failed`; retry reuses it rather than
+        // creating a second row the unique quote index would refuse.
+        {
+          const { query } = await import("@/lib/db");
+          await query(
+            `UPDATE billing_payments
+                SET status = 'pending', fulfilment_status = 'pending', fulfilment_error = NULL
+              WHERE id = $1 AND status = 'failed'`,
+            [payment.id],
+          );
+        }
+        // The balance is the payment method, so settlement is immediate. The
+        // quote's net is debited inside `consumeQuote`, together with the quote
+        // flip and the coupon redemption: a retry of the same quote is a
+        // success and moves no money again.
+        const consumed = await consumeQuote({
+          businessId: session.businessId,
+          quoteId: effectiveQuoteId,
+          paymentId: payment.id,
+          debitWallet: { note: `خرید اشتراک پلن «${plan.name}»` },
+        });
+        if (!consumed.ok) {
+          const { query } = await import("@/lib/db");
+          await query(
+            `UPDATE billing_payments
+                SET status = 'failed', fulfilment_status = 'failed',
+                    fulfilment_error = $2, reviewed_at = now()
+              WHERE id = $1 AND status = 'pending'`,
+            [payment.id, consumed.error],
+          );
+          const status = consumed.error === "insufficient_funds" ? 402 : 409;
+          return NextResponse.json(
+            {
+              error: consumed.error,
+              requiredRial: consumed.requiredRial,
+              balanceRial: consumed.balanceRial,
+              quoteId: effectiveQuoteId,
+            },
+            { status },
+          );
+        }
+        const { query } = await import("@/lib/db");
+        await query(
+          `UPDATE billing_payments
+              SET status = 'verified', gateway_status = 'wallet', verified_at = now()
+            WHERE id = $1 AND status = 'pending'`,
+          [payment.id],
+        );
+        const { fulfilPurchasedPayment } = await import("@/lib/billing-service");
+        await fulfilPurchasedPayment({
+          id: payment.id,
+          businessId: session.businessId,
+          purpose: "plan_purchase",
+          planKey: plan.key,
+          featureKey: null,
+        });
+        return NextResponse.json({
+          paymentId: payment.id,
+          amountRial: quote.totals.netRial,
+          quoteId: effectiveQuoteId,
+          settled: true,
+          redirectUrl: null,
+          gateway: "wallet",
+        });
+      }
     } else if (kind === "addon") {
       const featureKey = String(body.featureKey ?? "");
       const { query } = await import("@/lib/db");
