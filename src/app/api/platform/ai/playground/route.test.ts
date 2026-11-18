@@ -82,6 +82,33 @@ describe("platform-only model testing", () => {
     }));
   });
 
+  it("offers only the named tools already allowed for the administrator", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a", role: "owner" }, error: null } as never);
+    const response = await POST(request({ mode: "auto", message: "backups?", tools: ["get_backup_health"] }));
+    expect(response.status).toBe(200);
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+    expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual(["get_backup_health"]);
+  });
+
+  it("rejects ungranted tools before calling the gateway and records the denial", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a", role: "owner" }, error: null } as never);
+    const response = await POST(request({ mode: "auto", message: "test", tools: ["get_backup_health", "get_ar_aging"] }));
+    expect(response.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(platformAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: "ai.platform_tool.denied",
+      payload: expect.objectContaining({ reason: "not_authorized_for_role", requestedCount: 2 }),
+    }));
+  });
+
+  it("rejects malformed tool grants and prevents named tools during draft tests", async () => {
+    const draftId = "01234567-89ab-4def-8123-456789abcdef";
+    expect((await POST(request({ mode: "auto", message: "test", tools: [true] }))).status).toBe(400);
+    expect((await POST(request({ mode: "auto", message: "test", tools: ["get_backup_health"], draftId }))).status).toBe(400);
+    expect(getPromptVersion).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("stops asking for tools after the round limit and answers without them", async () => {
     vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a", role: "owner" }, error: null } as never);
     const loop = () => Response.json({ choices: [{ message: { content: null, tool_calls: [

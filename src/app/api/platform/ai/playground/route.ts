@@ -12,11 +12,13 @@ import { toolDefinitions } from "@/lib/ai";
 import { gatewayChatModel, runSdkTurn, sdkToolsFrom, streamSdkTurn, type SdkTurnInput, type SdkTurnResult } from "@/lib/ai-sdk-adapter";
 import { PLATFORM_ASSISTANT_MAX_TOOL_ROUNDS, platformToolsForRole, runPlatformAssistantTool } from "@/lib/ai-platform-assistant";
 
+const MAX_AUTHORIZED_TOOLS = 8;
+
 /**
  * Superadmin-only AI endpoint. By default it is the read-only playground: the
  * configured LiteLLM alias and published mode prompt, no tools. With
- * `tools: true` it is the platform assistant: a bounded loop over the platform
- * health tools (`ai-platform-assistant.ts`), each gated by the administrator's
+ * `tools: true` or a named tool subset it is the platform assistant: a bounded
+ * loop over the platform health tools (`ai-platform-assistant.ts`), each gated by the administrator's
  * own capability and audited. Never the tenant chat endpoint; no mutations.
  */
 export const POST = withPlatformScope(async (request: NextRequest) => {
@@ -56,12 +58,35 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     history.push({ role: row.role, content: row.content.trim() });
   }
 
+  const grant = body?.tools;
+  if (grant !== undefined && typeof grant !== "boolean" && (
+    !Array.isArray(grant) || grant.length > MAX_AUTHORIZED_TOOLS ||
+    grant.some((name) => typeof name !== "string" || !name.trim() || name.length > 80)
+  )) {
+    return NextResponse.json({ error: "invalid_tools" }, { status: 400 });
+  }
+
   const draftId = body?.draftId;
   if (draftId !== undefined && (
     typeof draftId !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(draftId) ||
-    body?.tools === true || history.length > 0
+    grant === true || (Array.isArray(grant) && grant.length > 0) || history.length > 0
   )) {
     return NextResponse.json({ error: "invalid_draft_test" }, { status: 400 });
+  }
+
+  const requestId = randomUUID();
+  const requestedNames = Array.isArray(grant) ? new Set(grant) : null;
+  const roleTools = grant === true || requestedNames?.size
+    ? platformToolsForRole(session.role, toolDefinitions("platform"))
+    : [];
+  const tools = requestedNames ? roleTools.filter((tool) => requestedNames.has(tool.function.name)) : roleTools;
+  if (requestedNames && tools.length !== requestedNames.size) {
+    await platformAudit({
+      adminId: session.padmin, action: "ai.platform_tool.denied",
+      entity: "platform_ai_modes", entityId: mode,
+      payload: { requestId, reason: "not_authorized_for_role", requestedCount: requestedNames.size },
+    });
+    return NextResponse.json({ error: "tool_not_permitted" }, { status: 403 });
   }
 
   const [runtime, settings, basePrompt, modePrompt, draft] = await Promise.all([
@@ -83,7 +108,6 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   }
   const model = runtime.model_alias || gateway.chatModel;
   if (!model) return NextResponse.json({ error: "model_unavailable" }, { status: 409 });
-  const requestId = randomUUID();
   const startedAt = performance.now();
   const composed = draft && draft.scopeKey !== "base" && !draft.scopeKey.startsWith("mode:")
     ? await previewSystemPrompt(draft.scopeKey, mode, draft)
@@ -95,11 +119,10 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   const diagnostics = { requestId, modelAlias: model, promptVersions, draftScope: draft?.scopeKey ?? null, draftVersion: draft?.version ?? null };
   await platformAudit({
     adminId: session.padmin, action: "ai.playground.requested", entity: "platform_ai_modes", entityId: mode,
-    payload: { ...diagnostics, draftId: draft?.id ?? null },
+    payload: { ...diagnostics, draftId: draft?.id ?? null, toolGrants: tools.map((tool) => tool.function.name) },
   });
 
-  const useTools = body?.tools === true;
-  const tools = useTools ? platformToolsForRole(session.role, toolDefinitions("platform")) : [];
+  const useTools = tools.length > 0;
   const system = [
     useTools
       ? `You are the ${brandName("fa")} Superadmin platform assistant. You may call only the read-only platform health tools you are given; they never expose orders, customers or financial records, and you cannot change anything. State uncertainty plainly.`
