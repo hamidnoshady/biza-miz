@@ -14,6 +14,7 @@ const STATE_LABELS: Record<string, string> = {
   served: "تحویل",
   cancelled: "لغو",
   counter_payment: "پرداخت در صندوق",
+  counter_refund: "بازپرداخت در صندوق",
 };
 
 export async function CafeOrderDeliveryFailures() {

@@ -321,8 +321,9 @@ export async function platformAudit(entry: {
   payload?: Record<string, unknown> | null;
   ipAddress?: string | null;
   userAgent?: string | null;
-}): Promise<void> {
-  await query(
+}, transaction?: { query: (sql: string, values: unknown[]) => Promise<unknown> }): Promise<void> {
+  const execute = transaction ? transaction.query.bind(transaction) : query;
+  await execute(
     `INSERT INTO platform_audit_log
        (platform_admin_id, business_id, action, entity, entity_id, payload, ip_address, user_agent)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,

@@ -483,7 +483,7 @@ describe("submitted café order → one POS order", () => {
       await Promise.all([worker.runCafeOrderStateDeliveryTick(), worker.runCafeOrderStateDeliveryTick()]);
       expect(bodies).toHaveLength(2);
       expect(bodies).toContainEqual({
-        kind: "counter_payment", accountingReference: expect.any(String), amount: 1700000,
+        kind: "payment", state: "paid", reference: expect.any(String), amount: 1700000, currency: "IRR",
       });
       expect(bodies).toContainEqual({ kind: "fulfillment", fulfillment: "accepted" });
       await db.query(
@@ -502,6 +502,167 @@ describe("submitted café order → one POS order", () => {
       expect(await echo.json()).toEqual({ status: "ignored" });
       const { rows } = await db.query("SELECT count(*)::int AS count FROM payments WHERE order_id = $1", [orderId]);
       expect(rows[0].count).toBe(1);
+    } finally {
+      request.mockReset();
+    }
+  });
+
+  it("queues one full counter refund, survives downtime, and absorbs the CMS echo", async () => {
+    const worker = await import("../src/lib/cms/cafe-order-state-delivery");
+    const { completeOrderPayment } = await import("../src/lib/payment-service");
+    const { createCustomerReturn } = await import("../src/lib/customer-return-service");
+    const { quantityText, rialText } = await import("../src/lib/inventory-exact");
+    const order = cmsOrder(tenant, { id: randomUUID(), paymentMethod: "counter" });
+    const { orderId } = await intake(tenant, order);
+    const accepted = await decide(tenant, orderId, "accepted");
+    if (!accepted.ok) throw new Error(accepted.error);
+
+    await dbLib.withTenantTransaction(tenant.businessId, (client) => completeOrderPayment({
+      client, businessId: tenant.businessId, locationId: tenant.locationId, orderId,
+      method: "cash", receivedBy: null,
+    }));
+
+    const { rows: lines } = await db.query<{ id: string; quantity: string }>(
+      "SELECT id, quantity::text AS quantity FROM order_items WHERE order_id = $1 ORDER BY id",
+      [orderId],
+    );
+    const refund = (idempotencyKey: string) => dbLib.withTenantTransaction(tenant.businessId, (client) =>
+      createCustomerReturn(client, {
+        businessId: tenant.businessId,
+        locationId: tenant.locationId,
+        orderId,
+        refundMethod: "cash",
+        refundAmount: rialText("1700000"),
+        reason: "انصراف مشتری",
+        idempotencyKey,
+        createdBy: null,
+        lines: lines.map((line) => ({
+          orderItemId: line.id,
+          quantity: quantityText(line.quantity),
+          disposition: "discarded" as const,
+        })),
+        sync: { actorRole: "owner" },
+      }),
+    );
+
+    const first = await refund(`refund-${orderId}`);
+    const replay = await refund(`refund-${orderId}`);
+    expect(first.duplicate).toBe(false);
+    expect(replay.duplicate).toBe(true);
+
+    const { rows: refundOutbox } = await db.query<{
+      id: string;
+      payment_amount: string;
+      payment_reference: string;
+      delivered_at: string | null;
+    }>(
+      `SELECT id, payment_amount::text, payment_reference, delivered_at
+         FROM cms_order_state_outbox
+        WHERE pos_order_id = $1 AND state = 'counter_refund'`,
+      [orderId],
+    );
+    // A replayed refund request is the same refund: one row, not two.
+    expect(refundOutbox).toHaveLength(1);
+    expect(refundOutbox[0].payment_amount).toBe("1700000");
+    expect(refundOutbox[0].payment_reference).toBeTruthy();
+    expect(refundOutbox[0].delivered_at).toBeNull();
+
+    const isRefundPayload = (body: unknown) => {
+      const payment = body as { kind?: string; state?: string };
+      return payment.kind === "payment" && payment.state === "refunded";
+    };
+
+    // Both the payment and the refund were queued while the CMS was down.
+    // Keep every other tenant's rows out of this tick.
+    await db.query(
+      "UPDATE cms_order_state_outbox SET next_attempt_at = now() + interval '1 day' WHERE pos_order_id IS DISTINCT FROM $1",
+      [orderId],
+    );
+    await db.query("UPDATE cms_order_state_outbox SET next_attempt_at = now() WHERE pos_order_id = $1", [orderId]);
+    await db.query(
+      "UPDATE eshobe_cms_connections SET api_key_ciphertext = $2 WHERE id = $1",
+      [tenant.connectionId, encryptSecret("test-cafe-site-key", resolveEncryptionKey(process.env))],
+    );
+
+    const request = vi.mocked(cmsRequest);
+    const attempts: unknown[] = [];
+    let down = true;
+    let rejectRefund = false;
+    request.mockImplementation(async (_config, options) => {
+      attempts.push(options.body);
+      if (down) throw new CmsApiError(503, options.path, {});
+      if (rejectRefund && isRefundPayload(options.body)) {
+        throw new CmsApiError(409, options.path, { code: "amount_mismatch" });
+      }
+      const payment = options.body as { kind?: string; state?: string };
+      return { ok: true, result: payment.kind === "payment" && payment.state === "paid" ? "ignored_stale" : "already_applied" };
+    });
+
+    try {
+      await worker.runCafeOrderStateDeliveryTick();
+      // The failed tick sends neither the payment nor the refund.
+      expect(attempts.some((body) => isRefundPayload(body))).toBe(false);
+
+      down = false;
+      await db.query("UPDATE cms_order_state_outbox SET next_attempt_at = now() WHERE pos_order_id = $1", [orderId]);
+      await worker.runCafeOrderStateDeliveryTick();
+      // The refund waits behind the counter payment it reverses.
+      expect(attempts.some((body) => isRefundPayload(body))).toBe(false);
+
+      await db.query("UPDATE cms_order_state_outbox SET next_attempt_at = now() WHERE pos_order_id = $1", [orderId]);
+      await worker.runCafeOrderStateDeliveryTick();
+      expect(attempts).toContainEqual({
+        kind: "payment", state: "refunded", reference: refundOutbox[0].payment_reference,
+        amount: 1700000, currency: "IRR",
+      });
+      expect(attempts.filter((body) => isRefundPayload(body))).toHaveLength(1);
+
+      const { rows: delivered } = await db.query<{ delivered_at: string | null }>(
+        "SELECT delivered_at FROM cms_order_state_outbox WHERE id = $1",
+        [refundOutbox[0].id],
+      );
+      expect(delivered[0].delivered_at).toBeTruthy();
+
+      // Recreate a pending outbox row to exercise the CMS's permanent refusal.
+      await db.query(
+        "UPDATE cms_order_state_outbox SET delivered_at = NULL, next_attempt_at = now() WHERE id = $1",
+        [refundOutbox[0].id],
+      );
+      rejectRefund = true;
+      await worker.runCafeOrderStateDeliveryTick();
+      const { rows: refused } = await db.query(
+        "SELECT last_error, dead_lettered_at, delivered_at FROM cms_order_state_outbox WHERE id = $1",
+        [refundOutbox[0].id],
+      );
+      expect(refused[0]).toMatchObject({ last_error: "amount_mismatch", delivered_at: null });
+      expect(refused[0].dead_lettered_at).toBeTruthy();
+
+      // The CMS reflects the refund back. It is our own write, not a second
+      // refund, so the webhook absorbs it and changes nothing. Strip the café
+      // fields from the echo: the outbox row, not the payload shape, is what
+      // proves the event came from this till.
+      const echo = await ingest.handleCmsStoreOrderWebhook({
+        siteId: tenant.siteId,
+        event: "order.refunded",
+        deliveryId: randomUUID(),
+        order: { ...order, status: "refunded", items: null, serviceMode: null, tableToken: null },
+      });
+      expect(echo.status).toBe(200);
+      expect(await echo.json()).toEqual({ status: "ignored" });
+
+      const repeat = await ingest.handleCmsStoreOrderWebhook({
+        siteId: tenant.siteId,
+        event: "order.refunded",
+        deliveryId: randomUUID(),
+        order: { ...order, status: "refunded" },
+      });
+      expect(await repeat.json()).toEqual({ status: "processed" });
+
+      const { rows: returns } = await db.query<{ count: number }>(
+        "SELECT count(*)::int AS count FROM customer_returns WHERE order_id = $1",
+        [orderId],
+      );
+      expect(returns[0].count).toBe(1);
     } finally {
       request.mockReset();
     }

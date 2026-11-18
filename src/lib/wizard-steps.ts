@@ -15,6 +15,11 @@ export const WIZARD_STEPS = [
   // the default preset, which is a working state, and the same choice is
   // editable later in «تنظیمات ← کسب‌وکار و شعبه».
   "aec_profile",
+  // Issue #1239 / ESH-90 — the owner-approved order is profile → priced app
+  // choice → that app's own setup. Both steps sit before the accounting steps
+  // because those are Accounting's setup and only apply when it was selected.
+  "apps",
+  "app_setup",
   "accounts",
   "costing",
   "tax",
@@ -27,7 +32,18 @@ export const WIZARD_STEPS = [
 export type WizardStep = (typeof WIZARD_STEPS)[number];
 
 /** Steps that may be skipped and still allow finishing the wizard. */
-export const OPTIONAL_STEPS: WizardStep[] = ["aec_profile", "users", "hardware", "backup", "opening"];
+export const OPTIONAL_STEPS: WizardStep[] = [
+  "aec_profile",
+  // The gallery is always the first step after the profile, but its answer may
+  // legitimately be "no apps". The Finish gate separately requires a *saved*
+  // choice and every selected app's own answers.
+  "apps",
+  "app_setup",
+  "users",
+  "hardware",
+  "backup",
+  "opening",
+];
 
 /**
  * The three onboarding shapes the enabled industries fall into. Named shapes

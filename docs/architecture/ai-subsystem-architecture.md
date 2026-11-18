@@ -313,9 +313,10 @@ stay the app's own (`sdkToolsFrom`), so a tool is never described twice.
 Today only the Superadmin playground route uses the adapter. **The tenant chat
 keeps its own tool loop and SSE protocol** until parity tests cover its
 settlement, approvals and streaming; migrating it is a separate change.
-*Rollback:* drop the `tools: true` request flag in
-`platform-ai-chat-session.tsx` (the route is tool-free without it); the adapter
-has no other caller.
+The Superadmin client uses the SDK UI message stream. The Playground offers
+platform health tools only when the request grants them explicitly with
+`tools: true` or a named subset. The route checks the grant against the
+administrator’s current role. Saved draft tests run without tools.
 
 **Superadmin assistant tools.** `PLATFORM_TOOL_CAPABILITIES` names the platform
 capability each health tool needs; `runPlatformAssistantTool` re-checks it for

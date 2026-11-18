@@ -1,0 +1,55 @@
+{
+  "protocol": "biza_desktop_release_scan_v1",
+  "generatedAt": "2026-11-18T09:46:14.575Z",
+  "payload": {
+    "root": "D:\\a\\biza-miz\\biza-miz\\electron\\dist\\win-unpacked",
+    "files": 9184,
+    "bytes": 715535452,
+    "asar": [
+      {
+        "path": "resources/app.asar",
+        "entries": 2261,
+        "bytes": 863679
+      }
+    ],
+    "skipped": [],
+    "shape": {
+      "ok": true,
+      "missing": []
+    }
+  },
+  "installer": {
+    "path": "D:\\a\\biza-miz\\biza-miz\\electron\\dist\\Bizamiz Setup 1.0.197.exe",
+    "bytes": 180102193,
+    "sha256": "9b800aa326eb222373c955c4334b7e42596229bd5efed3f8239c7b23b789b438",
+    "extraction": {
+      "attempted": true,
+      "ok": true,
+      "nested": 1,
+      "note": "Scanned 2 extracted tree(s)."
+    }
+  },
+  "rules": {
+    "text": [
+      "desktop-smoke-environment",
+      "smoke-probe-module",
+      "run-smoke-probe",
+      "mock-cloud-activation",
+      "smoke-owner-password",
+      "platform-seed-password",
+      "platform-seed-script",
+      "private-signing-material"
+    ],
+    "paths": [
+      "central-platform-pages",
+      "central-platform-api",
+      "smoke-probe-file",
+      "platform-seed-file",
+      "private-key-file",
+      "source-or-test-file",
+      "environment-file"
+    ]
+  },
+  "findings": [],
+  "ok": true
+}

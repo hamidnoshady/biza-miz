@@ -205,8 +205,37 @@ export interface ResolvedSystemPrompt {
  * a row changes one layer, and only that layer.
  */
 export async function resolveSystemPrompt(input: ResolveSystemPromptInput): Promise<ResolvedSystemPrompt> {
-  const ctx: PromptContext = input;
+  return composeSystemPrompt(input, await listPublishedPrompts());
+}
+
+/** Compose a representative dashboard prompt with no business, member or memory reads. */
+export async function previewSystemPrompt(
+  scopeKey: string,
+  runtimeMode: AiRuntimeMode,
+  draft?: Pick<PublishedPromptRow, "scopeKey" | "version" | "text">,
+): Promise<ResolvedSystemPrompt> {
+  const [kind, key] = scopeKey.split(":");
   const published = await listPublishedPrompts();
+  if (draft?.scopeKey === scopeKey) {
+    const previous = published.get(scopeKey);
+    published.set(scopeKey, { id: previous?.id ?? "", notes: "", publishedAt: null, ...draft });
+  }
+  return composeSystemPrompt({
+    mode: "dashboard",
+    businessId: "",
+    runtimeMode,
+    loadMemory: false,
+    appKey: kind === "app" ? key as AppKey : null,
+    businessType: kind === "business_type" ? key : null,
+    agentKey: kind === "agent" ? key : null,
+  }, published);
+}
+
+async function composeSystemPrompt(
+  input: ResolveSystemPromptInput,
+  published: ReadonlyMap<string, PublishedPromptRow>,
+): Promise<ResolvedSystemPrompt> {
+  const ctx: PromptContext = input;
   const mode = input.runtimeMode ?? "auto";
 
   const baseKey = BASE_PROMPT_SCOPE;

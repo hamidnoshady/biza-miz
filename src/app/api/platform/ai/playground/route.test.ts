@@ -4,6 +4,7 @@ import { requirePlatformCapability, platformAudit } from "@/lib/platform-auth";
 import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
 import { getAiGatewayRuntimeSettings } from "@/lib/ai-gateway-service";
 import { POST } from "./route";
+import { getPromptVersion } from "@/lib/ai-prompt-store";
 import { runPlatformReadTool } from "@/lib/ai-platform-tools";
 vi.mock("@/lib/platform-auth", () => ({ requirePlatformCapability: vi.fn(), platformAudit: vi.fn(), withPlatformScope: (fn: unknown) => fn }));
 vi.mock("@/lib/ai-runtime-modes", () => ({ getPlatformAiMode: vi.fn() }));
@@ -12,8 +13,11 @@ vi.mock("@/lib/ai-platform-tools", async (original) => ({
   ...(await original<typeof import("@/lib/ai-platform-tools")>()),
   runPlatformReadTool: vi.fn(async () => ({ ok: true, data: { failedRuns: [] } })),
 }));
-vi.mock("@/lib/ai-prompt-store", () => ({ publishedPromptFor: async (key: string) => ({ text: `published:${key}`, version: 3 }) }));
+vi.mock("@/lib/ai-prompt-store", () => ({ getPromptVersion: vi.fn(), isPromptScopeKey: () => true, publishedPromptFor: async (key: string) => ({ text: `published:${key}`, version: 3 }) }));
 const request = (body: unknown) => new NextRequest("https://app.test/api/platform/ai/playground", { method: "POST", body: JSON.stringify(body) });
+const streamRequest = (body: unknown, signal?: AbortSignal) => new NextRequest("https://app.test/api/platform/ai/playground", {
+  method: "POST", body: JSON.stringify(body), headers: { Accept: "text/event-stream" }, signal,
+});
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a" }, error: null } as never);
@@ -78,6 +82,33 @@ describe("platform-only model testing", () => {
     }));
   });
 
+  it("offers only the named tools already allowed for the administrator", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a", role: "owner" }, error: null } as never);
+    const response = await POST(request({ mode: "auto", message: "backups?", tools: ["get_backup_health"] }));
+    expect(response.status).toBe(200);
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+    expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual(["get_backup_health"]);
+  });
+
+  it("rejects ungranted tools before calling the gateway and records the denial", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a", role: "owner" }, error: null } as never);
+    const response = await POST(request({ mode: "auto", message: "test", tools: ["get_backup_health", "get_ar_aging"] }));
+    expect(response.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(platformAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: "ai.platform_tool.denied",
+      payload: expect.objectContaining({ reason: "not_authorized_for_role", requestedCount: 2 }),
+    }));
+  });
+
+  it("rejects malformed tool grants and prevents named tools during draft tests", async () => {
+    const draftId = "01234567-89ab-4def-8123-456789abcdef";
+    expect((await POST(request({ mode: "auto", message: "test", tools: [true] }))).status).toBe(400);
+    expect((await POST(request({ mode: "auto", message: "test", tools: ["get_backup_health"], draftId }))).status).toBe(400);
+    expect(getPromptVersion).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("stops asking for tools after the round limit and answers without them", async () => {
     vi.mocked(requirePlatformCapability).mockResolvedValue({ session: { padmin: "admin-a", role: "owner" }, error: null } as never);
     const loop = () => Response.json({ choices: [{ message: { content: null, tool_calls: [
@@ -88,5 +119,102 @@ describe("platform-only model testing", () => {
     expect((await response.json()).answer).toBe("نهایی");
     const last = JSON.parse(String(vi.mocked(fetch).mock.calls[3][1]?.body));
     expect(last.tools).toBeUndefined();
+  });
+});
+
+describe("Playground SDK streaming", () => {
+  it.each([["auto", null], ["instant", "safe-fixture-fast"], ["thinking", "safe-fixture-thinking"]])(
+    "resolves %s on the server and inherits absent gateway overrides",
+    async (mode, alias) => {
+      vi.mocked(getPlatformAiMode).mockResolvedValue({
+        is_active: true, model_alias: alias, temperature: null, max_output_tokens: null,
+      } as never);
+      vi.mocked(getAiGatewayRuntimeSettings).mockResolvedValue({
+        gateway: { enabled: true, baseUrl: "https://gateway.test/v1", masterKey: "test-only", chatModel: "safe-fixture-default" },
+      } as never);
+      const response = await POST(request({ mode, message: "test", modelAlias: "client-override" }));
+      const providerBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+      expect(response.status).toBe(200);
+      expect(getPlatformAiMode).toHaveBeenCalledWith(mode);
+      expect(providerBody.model).toBe(alias ?? "safe-fixture-default");
+      expect(providerBody.temperature).toBeUndefined();
+    },
+  );
+
+  it("propagates cancellation to the LiteLLM request and audits cancellation", async () => {
+    const controller = new AbortController();
+    let providerStart!: () => void;
+    const started = new Promise<void>((resolve) => { providerStart = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init.signal!;
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      providerStart();
+    })));
+    const response = await POST(streamRequest({ mode: "auto", message: "hello" }, controller.signal));
+    const output = response.text();
+    await started;
+    controller.abort();
+    expect(await output).toContain("request_cancelled");
+    expect(platformAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: "ai.playground.failed", payload: expect.objectContaining({ reason: "request_cancelled" }),
+    }));
+  });
+
+  it("delivers an answer delta before the provider closes and audits completed usage", async () => {
+    const encoder = new TextEncoder();
+    let provider!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({ start(controller) { provider = controller; } });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { headers: { "Content-Type": "text/event-stream" } })));
+    const response = await POST(streamRequest({ mode: "thinking", message: "hello" }));
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    provider.enqueue(encoder.encode('data: {"id":"turn","model":"configured-thinking","choices":[{"index":0,"delta":{"content":"سلام"},"finish_reason":null}]}\n\n'));
+    const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader();
+    let received = "";
+    while (!received.includes("text-delta")) {
+      const next = await reader.read();
+      if (next.done) throw new Error("Stream ended before the first delta");
+      received += next.value;
+    }
+    expect(received).toContain("سلام");
+    expect(received).not.toContain("data-completion");
+    provider.enqueue(encoder.encode('data: {"id":"turn","model":"configured-thinking","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\ndata: [DONE]\n\n'));
+    provider.close();
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      received += next.value;
+    }
+    expect(received).toContain('"tokens":7');
+    expect(received).toContain('"type":"finish"');
+    expect(received).not.toContain("test-only");
+    expect(platformAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: "ai.playground.test", payload: expect.objectContaining({ tokens: 7 }),
+    }));
+  });
+
+  it("sanitizes provider rate-limit errors and does not emit a successful finish", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: { message: "secret fixture" } }, { status: 429 })));
+    const output = await (await POST(streamRequest({ mode: "auto", message: "hello" }))).text();
+    expect(output).toContain("provider_rate_limited");
+    expect(output).not.toContain("secret fixture");
+    expect(output).not.toContain('"type":"finish"');
+    expect(platformAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "ai.playground.failed" }));
+  });
+
+  it("allows a saved matching draft only in an isolated model-only test", async () => {
+    const draftId = "01234567-89ab-4def-8123-456789abcdef";
+    vi.mocked(getPromptVersion).mockResolvedValue({
+      id: draftId, scopeKey: "mode:thinking", state: "draft", text: "draft-only instructions", version: 7,
+    } as never);
+    expect((await POST(request({ mode: "auto", message: "test", draftId }))).status).toBe(409);
+    expect((await POST(request({ mode: "thinking", message: "test", draftId, tools: true }))).status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+    const response = await POST(request({ mode: "thinking", message: "test", draftId }));
+    expect(await response.json()).toMatchObject({ draftScope: "mode:thinking", promptVersions: { mode: 7 } });
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+    expect(body.messages[0].content).toContain("draft-only instructions");
+    expect(body.messages[0].content).not.toContain("published:mode:thinking");
+    expect(body.tools).toBeUndefined();
   });
 });

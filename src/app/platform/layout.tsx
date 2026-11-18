@@ -31,6 +31,7 @@ import { businessSections } from "./businesses/[id]/sections";
 interface Me {
   admin: { id: string; fullName: string; email: string; role: PlatformAdminRole } | null;
   capabilities?: PlatformCapability[];
+  aiSessionScope?: string;
 }
 
 /** The business a `/platform/businesses/{id}/…` URL points at, for the sidebar. */
@@ -66,6 +67,7 @@ export default function PlatformLayout({ children }: { children: React.ReactNode
       const { data } = await api<Me>("/api/platform/auth/me");
       if (cancelled) return;
       if (!data.admin) {
+        setMe(null);
         // An OAuth client's consent page must survive the sign-in, or the
         // authorization request the client started is lost.
         router.replace(
@@ -125,8 +127,13 @@ export default function PlatformLayout({ children }: { children: React.ReactNode
   }
 
   const caps = me.capabilities ?? [];
+  const canManageAi = caps.includes("ai.config.manage");
+  const aiSessionScope = canManageAi ? me.aiSessionScope : undefined;
 
   async function logout() {
+    if (aiSessionScope) {
+      try { sessionStorage.removeItem(`platform-ai:${aiSessionScope}`); } catch { /* Storage may be disabled. */ }
+    }
     await api("/api/platform/auth/logout", { method: "POST" });
     router.replace("/platform/login");
     router.refresh();
@@ -139,9 +146,9 @@ export default function PlatformLayout({ children }: { children: React.ReactNode
 
   return (
     <CapabilityContext.Provider value={caps}>
-      <PlatformAiChatProvider key={me.admin.id}>
+      <PlatformAiChatProvider key={`${me.admin.id}:${me.admin.role}:${aiSessionScope ?? ""}`} sessionScope={aiSessionScope}>
         <ConsoleShell admin={me.admin} caps={caps} workspace={workspace} onLogout={logout}
-          aiDock={caps.includes("ai.config.manage") ? <PlatformAiDock /> : null}>
+          aiDock={canManageAi ? <PlatformAiDock /> : null}>
           {children}
         </ConsoleShell>
       </PlatformAiChatProvider>

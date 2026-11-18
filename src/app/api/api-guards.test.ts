@@ -791,9 +791,13 @@ describe("every API route is guarded", () => {
         return;
       }
       if (SELF_GUARDING_ROUTES[key]) {
-        // Tenant self-guarding routes read getSession(); the platform console's
-        // self-guarding route (auth/me) reads getPlatformSession() instead.
-        expect(src).toMatch(/getSession\(|getPlatformSession\(/);
+        if (key === "platform/auth/me") {
+          // Session-scoped AI history needs the fresh, revocation-aware guard.
+          expect(src).toMatch(/requirePlatformAdmin\(/);
+          expect(src).toMatch(/withPlatformScope\(/);
+        } else {
+          expect(src).toMatch(/getSession\(/);
+        }
         return;
       }
       // Phase 15 — the super-admin console guards with requirePlatformAdmin /

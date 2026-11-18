@@ -57,10 +57,29 @@ describe("stepsFor — the sequence one business walks", () => {
     for (const industry of ENABLED_INDUSTRIES) {
       const ids = stepsFor(industry).map((s) => s.id);
       expect(ids).toContain("business");
+      expect(ids).toContain("apps");
       expect(ids).toContain("hardware");
       expect(ids).toContain("backup");
       expect(ids).toContain("opening");
     }
+  });
+
+  it("drops Accounting's steps when Accounting was not selected", () => {
+    // Issue #1239 — a zero-app onboarding must not be sent through a chart of
+    // accounts, costing or a menu. The legacy unset selection keeps every step.
+    const none = stepsFor("food_service", []).map((s) => s.id);
+    expect(none).not.toContain("accounts");
+    expect(none).not.toContain("costing");
+    expect(none).not.toContain("tax");
+    expect(none).not.toContain("menu");
+    expect(none).toContain("apps");
+
+    const accounting = stepsFor("food_service", ["accounting"]).map((s) => s.id);
+    expect(accounting).toEqual(expect.arrayContaining(["accounts", "costing", "tax", "menu"]));
+
+    expect(stepsFor("food_service", null).map((s) => s.id)).toEqual(
+      stepsFor("food_service").map((s) => s.id),
+    );
   });
 });
 

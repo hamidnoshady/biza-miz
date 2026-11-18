@@ -105,6 +105,19 @@ describe("cmsRequest", () => {
     expect((calls[0][1].headers as Headers).get("Host")).toBe("acme.ir");
   });
 
+  it("preserves the CMS cafe payment amount mismatch code when redacting the response", async () => {
+    const { fetchImpl } = fakeFetch(409, {
+      error: "amount_mismatch",
+      result: "amount_mismatch",
+      message: "provider returned internal payment details",
+    });
+    await expect(cmsRequest(CONFIG, { path: "/api/site/cafe-orders/test/state", fetchImpl }))
+      .rejects.toMatchObject({
+        status: 409,
+        body: { code: "amount_mismatch", message: "cms_request_failed_409" },
+      });
+  });
+
   it("redacts provider error bodies while preserving typed status", async () => {
     const { fetchImpl } = fakeFetch(403, { message: "You are not allowed", errors: [{ message: "role denied" }] });
     await expect(cmsRequest(CONFIG, { path: "/api/products", fetchImpl })).rejects.toMatchObject({
