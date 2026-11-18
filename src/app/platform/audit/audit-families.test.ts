@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -43,7 +43,7 @@ function source(relative: string): string {
  *    for exactly this reason: nothing with an `action:` field writes it.
  */
 function writtenActions(): Set<string> {
-  const files = execSync("git ls-files 'src/**/*.ts' 'src/**/*.tsx'", { cwd: repoRoot, encoding: "utf8" })
+  const files = execFileSync("git", ["ls-files", "src/**/*.ts", "src/**/*.tsx"], { cwd: repoRoot, encoding: "utf8" })
     .trim()
     .split("\n")
     .filter((file) => file && !/\.test\.tsx?$/.test(file));
