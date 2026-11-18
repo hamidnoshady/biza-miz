@@ -218,6 +218,20 @@ Record in the release ticket: build SHA, desktop version from
 `electron/package.json`, CI run URL, `desktop-release-scan.json`,
 `signed-candidate-release-scan.json` and the harness report.
 
+### Recorded so far (unsigned development only)
+
+[`docs/audits/1194-evidence/`](1194-evidence/EVIDENCE.md) holds the only Windows
+evidence CI has produced: the release scan for the **unsigned 1.0.197 development**
+installer (`desktop-release-scan-1.0.197.json`, `ok: true`, `findings: []`), the
+signature report showing that artefact is `NotSigned`
+(`windows-signature-verification.json`), and the **Hybrid-mode** acceptance log from
+the same `build-desktop-installer` run (`windows-acceptance-2026-11-18.log`).
+
+It deliberately contains no signed-installer scan and no Full Offline acceptance
+run — both are still outstanding, and the harness reports the Full Offline phase as
+`skipped` until a real staging Cloud URL and enrollment token are supplied (see
+`EVIDENCE.md` `What is missing, and why it cannot be attached`).
+
 ### Remaining risks (accepted, documented)
 
 - An owner of the machine can patch their own local copy of the application.
