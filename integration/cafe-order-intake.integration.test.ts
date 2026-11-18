@@ -483,7 +483,7 @@ describe("submitted café order → one POS order", () => {
       await Promise.all([worker.runCafeOrderStateDeliveryTick(), worker.runCafeOrderStateDeliveryTick()]);
       expect(bodies).toHaveLength(2);
       expect(bodies).toContainEqual({
-        kind: "counter_payment", accountingReference: expect.any(String), amount: 1700000,
+        kind: "payment", state: "paid", reference: expect.any(String), amount: 1700000, currency: "IRR",
       });
       expect(bodies).toContainEqual({ kind: "fulfillment", fulfillment: "accepted" });
       await db.query(
@@ -567,6 +567,11 @@ describe("submitted café order → one POS order", () => {
     expect(refundOutbox[0].payment_reference).toBeTruthy();
     expect(refundOutbox[0].delivered_at).toBeNull();
 
+    const isRefundPayload = (body: unknown) => {
+      const payment = body as { kind?: string; state?: string };
+      return payment.kind === "payment" && payment.state === "refunded";
+    };
+
     // Both the payment and the refund were queued while the CMS was down.
     // Keep every other tenant's rows out of this tick.
     await db.query(
@@ -582,35 +587,55 @@ describe("submitted café order → one POS order", () => {
     const request = vi.mocked(cmsRequest);
     const attempts: unknown[] = [];
     let down = true;
+    let rejectRefund = false;
     request.mockImplementation(async (_config, options) => {
       attempts.push(options.body);
       if (down) throw new CmsApiError(503, options.path, {});
-      return { ok: true, result: "already_applied" };
+      if (rejectRefund && isRefundPayload(options.body)) {
+        throw new CmsApiError(409, options.path, { code: "amount_mismatch" });
+      }
+      const payment = options.body as { kind?: string; state?: string };
+      return { ok: true, result: payment.kind === "payment" && payment.state === "paid" ? "ignored_stale" : "already_applied" };
     });
 
     try {
       await worker.runCafeOrderStateDeliveryTick();
       // The failed tick sends neither the payment nor the refund.
-      expect(attempts.some((body) => (body as { kind?: string }).kind === "counter_refund")).toBe(false);
+      expect(attempts.some((body) => isRefundPayload(body))).toBe(false);
 
       down = false;
       await db.query("UPDATE cms_order_state_outbox SET next_attempt_at = now() WHERE pos_order_id = $1", [orderId]);
       await worker.runCafeOrderStateDeliveryTick();
       // The refund waits behind the counter payment it reverses.
-      expect(attempts.some((body) => (body as { kind?: string }).kind === "counter_refund")).toBe(false);
+      expect(attempts.some((body) => isRefundPayload(body))).toBe(false);
 
       await db.query("UPDATE cms_order_state_outbox SET next_attempt_at = now() WHERE pos_order_id = $1", [orderId]);
       await worker.runCafeOrderStateDeliveryTick();
       expect(attempts).toContainEqual({
-        kind: "counter_refund", accountingReference: expect.any(String), amount: 1700000,
+        kind: "payment", state: "refunded", reference: refundOutbox[0].payment_reference,
+        amount: 1700000, currency: "IRR",
       });
-      expect(attempts.filter((body) => (body as { kind?: string }).kind === "counter_refund")).toHaveLength(1);
+      expect(attempts.filter((body) => isRefundPayload(body))).toHaveLength(1);
 
       const { rows: delivered } = await db.query<{ delivered_at: string | null }>(
         "SELECT delivered_at FROM cms_order_state_outbox WHERE id = $1",
         [refundOutbox[0].id],
       );
       expect(delivered[0].delivered_at).toBeTruthy();
+
+      // Recreate a pending outbox row to exercise the CMS's permanent refusal.
+      await db.query(
+        "UPDATE cms_order_state_outbox SET delivered_at = NULL, next_attempt_at = now() WHERE id = $1",
+        [refundOutbox[0].id],
+      );
+      rejectRefund = true;
+      await worker.runCafeOrderStateDeliveryTick();
+      const { rows: refused } = await db.query(
+        "SELECT last_error, dead_lettered_at, delivered_at FROM cms_order_state_outbox WHERE id = $1",
+        [refundOutbox[0].id],
+      );
+      expect(refused[0]).toMatchObject({ last_error: "amount_mismatch", delivered_at: null });
+      expect(refused[0].dead_lettered_at).toBeTruthy();
 
       // The CMS reflects the refund back. It is our own write, not a second
       // refund, so the webhook absorbs it and changes nothing. Strip the café

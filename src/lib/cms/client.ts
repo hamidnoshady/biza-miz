@@ -195,6 +195,7 @@ const CMS_SEMANTIC_CODES = [
   "bad_view",
   "bad_collection",
   "publish_forbidden",
+  "amount_mismatch",
 ] as const;
 export type CmsSemanticErrorCode = (typeof CMS_SEMANTIC_CODES)[number];
 
@@ -211,6 +212,9 @@ async function parseCmsResponse<T>(response: Response, path: string): Promise<T>
       // A current CMS names the refusal itself; only the allowlisted codes survive.
       if (typeof upstream.code === "string" && (CMS_SEMANTIC_CODES as readonly string[]).includes(upstream.code)) {
         code = upstream.code as CmsSemanticErrorCode;
+      } else if (response.status === 409 && /^\/api\/site\/cafe-orders\/[^/]+\/state$/.test(path)
+        && (upstream.error === "amount_mismatch" || upstream.result === "amount_mismatch")) {
+        code = "amount_mismatch";
       } else if (response.status === 404 && /سند|سایت/.test(message)) code = "document_not_found";
       if (response.status === 403 && /publish/i.test(message)) code = "publish_forbidden";
     } catch { /* Non-JSON error bodies are still redacted HTTP errors. */ }
