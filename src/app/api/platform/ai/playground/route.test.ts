@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { requirePlatformCapability, platformAudit } from "@/lib/platform-auth";
 import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
@@ -6,6 +6,10 @@ import { getAiGatewayRuntimeSettings } from "@/lib/ai-gateway-service";
 import { POST } from "./route";
 import { getPromptVersion } from "@/lib/ai-prompt-store";
 import { runPlatformReadTool } from "@/lib/ai-platform-tools";
+import { checkRateLimit } from "@/lib/rate-limit";
+vi.mock("@/lib/rate-limit", async (original) => ({
+  ...(await original<typeof import("@/lib/rate-limit")>()), checkRateLimit: vi.fn(),
+}));
 vi.mock("@/lib/platform-auth", () => ({ requirePlatformCapability: vi.fn(), platformAudit: vi.fn(), withPlatformScope: (fn: unknown) => fn }));
 vi.mock("@/lib/ai-runtime-modes", () => ({ getPlatformAiMode: vi.fn() }));
 vi.mock("@/lib/ai-gateway-service", () => ({ getAiGatewayRuntimeSettings: vi.fn() }));
@@ -216,5 +220,73 @@ describe("Playground SDK streaming", () => {
     expect(body.messages[0].content).toContain("draft-only instructions");
     expect(body.messages[0].content).not.toContain("published:mode:thinking");
     expect(body.tools).toBeUndefined();
+  });
+});
+
+describe("Jev decision smoke", () => {
+  const smoke = { decisionSmoke: "support-triage-v1" };
+
+  beforeEach(() => {
+    vi.stubEnv("TYPESAFE_DECISION_SMOKE_ENABLED", "1");
+    vi.stubEnv("TYPESAFE_DECISION_SMOKE_KEY", "fixture-secret");
+    vi.stubEnv("TYPESAFE_DECISION_SMOKE_MODEL", "fixture-model");
+    vi.mocked(checkRateLimit).mockResolvedValue({ allowed: true, retryAfterMs: 0 });
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("keeps unauthorized, disabled and arbitrary request data out of the provider", async () => {
+    vi.mocked(requirePlatformCapability).mockResolvedValueOnce({ error: Response.json({}, { status: 403 }) } as never);
+    expect((await POST(request(smoke))).status).toBe(403);
+    expect((await POST(request({ ...smoke, state: "private business record" }))).status).toBe(400);
+    vi.stubEnv("TYPESAFE_DECISION_SMOKE_ENABLED", "0");
+    expect((await POST(request(smoke))).status).toBe(409);
+    expect(checkRateLimit).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("enforces a shared request limit before using the provider", async () => {
+    vi.mocked(checkRateLimit).mockResolvedValueOnce({ allowed: false, retryAfterMs: 1_250 });
+    const response = await POST(request(smoke));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("2");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("runs only the registered case and audits usage without exposing the credential", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({
+      model: "fixture-model",
+      answers: {
+        intent: { type: "choice", choice: "information", confidence: 0.9, probabilities: { information: 0.9, complaint: 0.05, other: 0.05 } },
+        urgency: { type: "score", score: 0.1, confidence: 0.9, legend: {
+          0: "Routine informational question", 1: "Time-sensitive issue", 2: "Immediate escalation required",
+        }, probabilities: { 0: 0.9, 1: 0.1, 2: 0 } },
+        follow_up: { type: "noul", noul: 0.1 },
+      },
+      usage: { input_tokens: 100, output_tokens: 20 },
+    }));
+    const response = await POST(request(smoke));
+    const result = await response.json();
+    expect(response.status).toBe(200);
+    expect(result).toMatchObject({ passed: true, evaluation: { usage: { inputTokens: 100, outputTokens: 20 } } });
+    expect(JSON.stringify(result)).not.toContain("fixture-secret");
+    expect(getPlatformAiMode).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe("https://api.typesafe.ai/v1/systemone");
+    expect(platformAudit).toHaveBeenCalledTimes(2);
+    expect(platformAudit).toHaveBeenLastCalledWith(expect.objectContaining({
+      action: "ai.playground.test", payload: expect.objectContaining({ provider: "jev", passed: true }),
+    }));
+  });
+
+  it("audits a sanitized provider failure and returns no raw provider body", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("provider private details", { status: 429 }));
+    const response = await POST(request(smoke));
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ error: "provider_error" });
+    expect(platformAudit).toHaveBeenLastCalledWith(expect.objectContaining({
+      action: "ai.playground.failed", payload: expect.objectContaining({ providerStatus: 429 }),
+    }));
+    expect(JSON.stringify(vi.mocked(platformAudit).mock.calls)).not.toContain("provider private details");
   });
 });

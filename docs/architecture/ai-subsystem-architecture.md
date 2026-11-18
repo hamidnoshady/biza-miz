@@ -153,6 +153,12 @@ refuses any widget whose `requiredPermissions` the caller does not already hold
 per member and fails closed on an unknown permission — a stronger boundary than
 a dedicated key.
 
+## Jev deployment smoke test
+
+The Superadmin AI playground accepts `{"decisionSmoke":"support-triage-v1"}` as a separate JSON request to `POST /api/platform/ai/playground`. The caller needs `ai.config.manage`. The server sends only its fixed synthetic support request and exercises Choice, Score and Noul in one call. Retries share a three-request-per-minute platform limit. Results and usage are recorded in the existing playground audit trail.
+
+The smoke test is disabled by default. To enable it on a validation deployment, set `TYPESAFE_DECISION_SMOKE_ENABLED=1`, inject the platform credential as `TYPESAFE_DECISION_SMOKE_KEY`, and set `TYPESAFE_DECISION_SMOKE_MODEL` to the exact provider model version expected in the response. The designated platform provider account bears the smoke-test cost. The response includes an opaque request ID, the validated result and whether the expected classification matched. The test never takes a tenant ID, conversation or other caller-provided decision input.
+
 ## Deep Research — the isolated workflow
 
 `src/lib/ai-research.ts` + `ai-research-shared.ts`. Superadmin controls every
