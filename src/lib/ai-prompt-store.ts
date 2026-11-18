@@ -99,8 +99,9 @@ export const PROMPT_SCOPES: readonly { key: string; label: string; hint: string 
 
 export function isPromptScopeKey(value: unknown): value is string {
   if (typeof value !== "string" || !value.trim()) return false;
-  const [kind, rest] = value.split(":");
-  if (!rest) return kind === BASE_PROMPT_SCOPE;
+  if (value === BASE_PROMPT_SCOPE) return true;
+  const [kind, rest, extra] = value.split(":");
+  if (!rest || extra !== undefined || rest !== rest.trim() || rest.length > 128) return false;
   switch (kind) {
     case "mode":
       return isAiRuntimeMode(rest);
@@ -168,23 +169,42 @@ export async function savePromptDraft(input: {
   text: string;
   notes?: string;
   createdBy: string;
+  editDraftId?: string;
 }): Promise<SavePromptResult> {
   if (!isPromptScopeKey(input.scopeKey)) return { ok: false, error: "prompt_scope_unknown" };
   const text = input.text.trim();
   if (!text) return { ok: false, error: "prompt_text_required" };
   if (text.length > 40_000) return { ok: false, error: "prompt_text_too_long" };
 
-  const { rows } = await query<Record<string, unknown>>(
-    `INSERT INTO ai_prompt_versions (scope_key, version, text, state, notes, created_by)
-     VALUES (
-       $1,
-       (SELECT COALESCE(MAX(version), 0) + 1 FROM ai_prompt_versions WHERE scope_key = $1),
-       $2, 'draft', $3, $4
-     )
-     RETURNING *`,
-    [input.scopeKey, text, input.notes ?? "", input.createdBy],
-  );
-  return { ok: true, version: toRow(rows[0]) };
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('ai_prompt_versions'), hashtext($1))", [input.scopeKey]);
+    if (input.editDraftId) {
+      const previous = await client.query(
+        "SELECT id FROM ai_prompt_versions WHERE id = $1 AND scope_key = $2 AND state = 'draft'",
+        [input.editDraftId, input.scopeKey],
+      );
+      if (!previous.rowCount) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "prompt_not_a_draft" };
+      }
+    }
+    // A reviewed or tested draft always keeps the exact text associated with its version.
+    const { rows } = await client.query<Record<string, unknown>>(
+      `INSERT INTO ai_prompt_versions (scope_key, version, text, state, notes, created_by)
+       VALUES ($1, (SELECT COALESCE(MAX(version), 0) + 1 FROM ai_prompt_versions WHERE scope_key = $1),
+         $2, 'draft', $3, $4) RETURNING *`,
+      [input.scopeKey, text, input.notes ?? "", input.createdBy],
+    );
+    await client.query("COMMIT");
+    return { ok: true, version: toRow(rows[0]) };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export type PublishPromptResult =
@@ -210,10 +230,10 @@ export type PublishPromptResult =
 export async function publishPromptVersion(input: {
   id: string;
   publishedBy: string;
+  expectedPublishedId?: string | null;
 }): Promise<PublishPromptResult> {
   const version = await getPromptVersion(input.id);
   if (!version) return { ok: false, error: "prompt_version_not_found" };
-  if (version.state === "published") return { ok: false, error: "prompt_already_published" };
 
   // `ai_prompt_versions` is platform-scope and in `EXEMPT_TABLES`, so there is
   // no tenant to scope this to — the scope here is the prompt scope, not a
@@ -221,6 +241,16 @@ export async function publishPromptVersion(input: {
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('ai_prompt_versions'), hashtext($1))", [version.scopeKey]);
+    const { rows } = await client.query<{ id: string }>(
+      "SELECT id FROM ai_prompt_versions WHERE scope_key = $1 AND state = 'published'",
+      [version.scopeKey],
+    );
+    const currentId = rows[0]?.id ?? null;
+    if (currentId === input.id || (input.expectedPublishedId !== undefined && currentId !== input.expectedPublishedId)) {
+      await client.query("ROLLBACK");
+      return { ok: false, error: currentId === input.id ? "prompt_already_published" : "prompt_publish_conflict" };
+    }
     const retiredResult = await client.query<Record<string, unknown>>(
       `UPDATE ai_prompt_versions
           SET state = 'retired', updated_at = now()
@@ -270,13 +300,14 @@ export async function rollbackPromptVersion(input: {
   scopeKey: string;
   targetVersion: number;
   publishedBy: string;
+  expectedPublishedId?: string | null;
 }): Promise<PublishPromptResult> {
   const { rows } = await query<Record<string, unknown>>(
     `SELECT id FROM ai_prompt_versions WHERE scope_key = $1 AND version = $2`,
     [input.scopeKey, input.targetVersion],
   );
   if (rows.length === 0) return { ok: false, error: "prompt_version_not_found" };
-  return publishPromptVersion({ id: String(rows[0].id), publishedBy: input.publishedBy });
+  return publishPromptVersion({ id: String(rows[0].id), publishedBy: input.publishedBy, expectedPublishedId: input.expectedPublishedId });
 }
 
 /** Retires a draft. A published version is refused — retire by publishing another. */

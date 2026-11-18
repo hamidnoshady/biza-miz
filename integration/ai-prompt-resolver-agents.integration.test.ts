@@ -138,6 +138,32 @@ beforeEach(async () => {
 });
 
 describe("the prompt resolver's state machine", () => {
+  it("allocates unique drafts and rejects a stale concurrent publish confirmation", async () => {
+    const input = { scopeKey: BASE_PROMPT_SCOPE, createdBy: alpha.userId };
+    const [first, second] = await Promise.all([
+      store.savePromptDraft({ ...input, text: "first draft" }),
+      store.savePromptDraft({ ...input, text: "second draft" }),
+    ]);
+    if (!first.ok || !second.ok) throw new Error("Draft setup failed");
+    expect(new Set([first.version.version, second.version.version])).toEqual(new Set([1, 2]));
+    const outcomes = await Promise.all([first.version.id, second.version.id].map((id) =>
+      store.publishPromptVersion({ id, publishedBy: alpha.userId, expectedPublishedId: null }),
+    ));
+    expect(outcomes.filter((result) => result.ok)).toHaveLength(1);
+    expect(outcomes.find((result) => !result.ok)).toEqual({ ok: false, error: "prompt_publish_conflict" });
+    expect((await store.listPromptVersions(BASE_PROMPT_SCOPE)).filter((row) => row.state === "published")).toHaveLength(1);
+  });
+
+  it("preserves the tested text when saving an edited draft", async () => {
+    const input = { scopeKey: BASE_PROMPT_SCOPE, createdBy: alpha.userId };
+    const first = await store.savePromptDraft({ ...input, text: "reviewed" });
+    if (!first.ok) throw new Error("Draft setup failed");
+    const edited = await store.savePromptDraft({ ...input, text: "revised", editDraftId: first.version.id });
+    expect(edited).toMatchObject({ ok: true, version: { state: "draft", text: "revised", version: 2 } });
+    expect(await store.getPromptVersion(first.version.id)).toMatchObject({ state: "draft", text: "reviewed" });
+    expect(await resolver.getPublishedPrompt(BASE_PROMPT_SCOPE)).toBeNull();
+  });
+
   it("uses a published override and ignores a draft", async () => {
     // The draft is saved FIRST and is the higher version number, so a resolver
     // that sorted by version rather than filtered by state would pick it.

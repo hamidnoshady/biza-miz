@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUpIcon, BrainCircuitIcon, SquareIcon, SparklesIcon, ZapIcon } from "lucide-react";
+import { AiMarkdown } from "@/components/ai/ai-markdown";
 import { Button } from "@/components/ui/button";
 import { AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
 import { errorMessage } from "@/app/platform/ui";
@@ -221,12 +222,12 @@ export function PlatformAiChatPanel({ compact = false }: { compact?: boolean }) 
       {chat.turns.length === 0 && chat.pending.length === 0 ? <p className="text-sm text-muted-foreground">سؤالی بنویسید تا مدل انتخاب‌شده و پرامپت فعال آزمایش شود.</p> : null}
       {[...chat.turns, ...chat.pending].map((turn, index) => <div key={index} dir="auto"
         className={`max-w-[94%] whitespace-pre-wrap break-words rounded-xl border border-border p-3 text-sm ${turn.role === "user" ? "self-start bg-card" : "self-end bg-muted"}`}>
-        {turn.content}
+        {turn.role === "assistant" ? <AiMarkdown content={turn.content} plainLinks /> : turn.content}
       </div>)}
     </div>
     {chat.diagnostics && <details className="break-words text-xs text-muted-foreground">
       <summary className="cursor-pointer">جزئیات اجرا · <bdi>{chat.diagnostics.modelAlias}</bdi></summary>
-      <dl className="mt-1 space-y-1">
+      <div className="mt-1 space-y-1">
         <div>شناسهٔ درخواست <bdi>{chat.diagnostics.requestId}</bdi></div>
         <div>نسخهٔ پایه {chat.diagnostics.promptVersions.base ?? "پیش‌فرض"}</div>
         <div>نسخهٔ حالت {chat.diagnostics.promptVersions.mode ?? "پیش‌فرض"}</div>
@@ -236,7 +237,7 @@ export function PlatformAiChatPanel({ compact = false }: { compact?: boolean }) 
         {chat.diagnostics.toolResults?.map((tool, index) => <div key={index}>
           <bdi>{tool.name}</bdi> · {tool.allowed ? "اجرا شد" : "رد شد"} · {tool.durationMs} میلی‌ثانیه
         </div>)}
-      </dl>
+      </div>
     </details>}
     {chat.error ? <p role="alert" className="text-sm text-destructive">{chat.error}</p> : null}
     <div className="shrink-0 rounded-xl border border-border bg-card p-2">
