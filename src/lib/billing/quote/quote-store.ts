@@ -399,15 +399,6 @@ export async function consumeQuote(input: {
         const settled = await repriceStoredQuote(reader, stored, now);
         if (!settled.ok) return { ok: false as const, error: settled.error };
 
-        if (input.debitWallet) {
-          await chargeSubscriptionFeeTx(client, {
-            businessId: input.businessId,
-            amountRial: stored.quote.totals.netRial,
-            invoiceId: null,
-            note: input.debitWallet.note ?? null,
-          });
-        }
-
         const { rows } = await client.query<{ coupon_id: string | null }>(
           `UPDATE billing_quotes
               SET status = 'consumed', payment_id = $3, consumed_at = now()
@@ -421,6 +412,15 @@ export async function consumeQuote(input: {
         const consumed = rows[0];
         if (!consumed) {
           return { ok: false as const, error: await refusalFor(client, { ...input, now }) };
+        }
+
+        if (input.debitWallet) {
+          await chargeSubscriptionFeeTx(client, {
+            businessId: input.businessId,
+            amountRial: stored.quote.totals.netRial,
+            invoiceId: null,
+            note: input.debitWallet.note ?? null,
+          });
         }
 
         if (consumed.coupon_id) {

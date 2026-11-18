@@ -294,6 +294,11 @@ export const POST = withTenantScope(async (req: Request) => {
           debitWallet: { note: `خرید اشتراک پلن «${plan.name}»` },
         });
         if (!consumed.ok) {
+          // A racing request may be verifying this same payment after settling
+          // the quote. Leave its status alone when the database asks us to retry.
+          if (consumed.error === "settlement_conflict") {
+            return NextResponse.json({ error: consumed.error, quoteId: effectiveQuoteId }, { status: 409 });
+          }
           const { query } = await import("@/lib/db");
           await query(
             `UPDATE billing_payments
