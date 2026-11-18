@@ -56,4 +56,33 @@ describe("shared Superadmin chat", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1][1].body))).toMatchObject({ tools: false, history: [] });
     expect(sessionStorage.getItem("platform-ai:test-login")).toBeNull();
   });
+
+  it("reports Stop after the final event arrives and keeps the turn available for retry", async () => {
+    const encoder = new TextEncoder();
+    let streamController!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+        controller.enqueue(encoder.encode(
+          'data: {"type":"text-delta","delta":"پاسخ متوقف‌شده"}\n\ndata: {"type":"finish"}\n\n',
+        ));
+      },
+    });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(body, { headers: { "Content-Type": "text/event-stream" } }))
+      .mockResolvedValueOnce(stream({ type: "text-delta", delta: "پاسخ دوباره" }, { type: "finish" }));
+    vi.stubGlobal("fetch", fetchMock);
+    panel("stop-login");
+    send("سؤال");
+    await screen.findByText("پاسخ متوقف‌شده");
+    fireEvent.click(screen.getByRole("button", { name: "توقف پاسخ" }));
+    expect((fetchMock.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
+    streamController.close();
+
+    expect((await screen.findByRole("alert")).textContent).toBe("تولید پاسخ متوقف شد.");
+    expect(JSON.parse(sessionStorage.getItem("platform-ai:stop-login") ?? "{}").turns).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "ارسال دوبارهٔ پیام آزمایشی" }));
+    await screen.findByText("پاسخ دوباره");
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1].body))).toMatchObject({ message: "سؤال", history: [] });
+  });
 });
