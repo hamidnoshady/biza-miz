@@ -27,11 +27,13 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   const body = (await request.json().catch(() => null)) as
     | { mode?: unknown; message?: unknown; history?: unknown; tools?: unknown; draftId?: unknown }
     | null;
-  const mode = body?.mode;
+  const requestedMode = body?.mode;
   const message = typeof body?.message === "string" ? body.message.trim() : "";
-  if (typeof mode !== "string" || !(AI_CHAT_MODES as readonly string[]).includes(mode) || !message || message.length > 3000) {
+  if (typeof requestedMode !== "string" || !(AI_CHAT_MODES as readonly string[]).includes(requestedMode) || !message || message.length > 3000) {
     return NextResponse.json({ error: "invalid_request" }, { status: 400 });
   }
+
+  const mode = requestedMode as AiRuntimeMode;
 
   // Bound the in-memory Superadmin chat context. Client-provided history is
   // data only — never system/tool messages or tenant-scope grants. The server
@@ -63,7 +65,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   }
 
   const [runtime, settings, basePrompt, modePrompt, draft] = await Promise.all([
-    getPlatformAiMode(mode as AiRuntimeMode),
+    getPlatformAiMode(mode),
     getAiGatewayRuntimeSettings(),
     publishedPromptFor("base"),
     publishedPromptFor(`mode:${mode}`),
@@ -84,7 +86,7 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   const requestId = randomUUID();
   const startedAt = performance.now();
   const composed = draft && draft.scopeKey !== "base" && !draft.scopeKey.startsWith("mode:")
-    ? await previewSystemPrompt(draft.scopeKey, mode as AiRuntimeMode, draft)
+    ? await previewSystemPrompt(draft.scopeKey, mode, draft)
     : null;
   const promptVersions = {
     base: draft?.scopeKey === "base" ? draft.version : composed?.layers.base.version ?? basePrompt?.version ?? null,
@@ -164,7 +166,8 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   }
 
   if (request.headers.get("accept")?.includes("text/event-stream")) {
-    return streamSdkTurn(input, { started: diagnostics, finished, failed });
+    const response = streamSdkTurn(input, { started: diagnostics, finished, failed });
+    return new NextResponse(response.body, { status: response.status, headers: response.headers });
   }
 
   try {
