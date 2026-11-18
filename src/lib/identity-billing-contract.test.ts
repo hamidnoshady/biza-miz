@@ -16,6 +16,7 @@ import {
   commercialActorRefusalMessage,
   purchaseBlockerMessage,
   purchaseReadiness,
+  purchaseReadinessForAssurance,
   readIdentityAssurance,
   resolveCommercialActor,
   sameGlobalPerson,
@@ -233,6 +234,24 @@ describe("purchaseReadiness", () => {
       readIdentityAssurance(row({ phone_e164: null, phone_verified_at: null })),
     );
     expect(readiness.ok).toBe(false);
+  });
+
+  it("fails closed when there is no assurance row at all", () => {
+    // A legacy membership with no global identity, or an unknown id, must get
+    // the same onboarding blocker rather than a crash or an allowed purchase.
+    for (const assurance of [null, undefined]) {
+      expect(purchaseReadinessForAssurance(assurance)).toEqual({
+        ok: false,
+        blockedBy: ["phone_not_verified"],
+        message: purchaseBlockerMessage("phone_not_verified"),
+      });
+    }
+  });
+
+  it("passes a real assurance row through unchanged", () => {
+    expect(
+      purchaseReadinessForAssurance(readIdentityAssurance(row({ phone_e164: "09121234567" }))),
+    ).toEqual({ ok: true, phoneE164: "+989121234567" });
   });
 
   it("gives each blocker its own Persian sentence", () => {
