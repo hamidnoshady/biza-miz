@@ -3,7 +3,7 @@ import { evaluateSystemOne } from "./ai-decision-provider";
 
 const config = { apiKey: "test-key", model: "jev-pinned-example" };
 const request = {
-  state: "?????? ?????",
+  state: "\u067e\u06cc\u06af\u06cc\u0631\u06cc \u0633\u0641\u0627\u0631\u0634",
   questions: {
     topic: { type: "choice", instructions: "Select topic", criteria: { order: "Order", other: "Other" } },
     urgency: { type: "score", instructions: "Rate urgency", criteria: ["Normal", "Urgent"] },
@@ -67,7 +67,7 @@ describe("System One decision provider", () => {
   it("does not send invalid, oversized, unconfigured or pre-aborted requests", async () => {
     const send = vi.fn();
     vi.stubGlobal("fetch", send);
-    expect(await evaluateSystemOne({ ...request, state: "?".repeat(4_100) }, config)).toMatchObject({ reason: "invalid_request" });
+    expect(await evaluateSystemOne({ ...request, state: "\u0634".repeat(4_100) }, config)).toMatchObject({ reason: "invalid_request" });
     expect(await evaluateSystemOne({ ...request, questions: {} }, config)).toMatchObject({ reason: "invalid_request" });
     expect(await evaluateSystemOne(request, { ...config, apiKey: "" })).toMatchObject({ reason: "not_configured" });
     expect(await evaluateSystemOne(request, config, AbortSignal.abort())).toMatchObject({ reason: "aborted" });
