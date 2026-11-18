@@ -3,6 +3,10 @@
 An audit of every tenant-facing area against the approved reference screenshots,
 with what each screen uses today, how it differs, and its migration priority.
 
+> This matrix measures component adoption *inside* screens. The route and
+> workflow coverage *across* screens — navigation, forms/tables, responsive and
+> system states — is in [route-audit.md](route-audit.md).
+
 Measured on the branch `arena/01a0b61c-cafe-restaurant-pos`, not estimated.
 Counts are files that reference the primitive at all, so they are an upper
 bound on adoption per area, not per screen.
