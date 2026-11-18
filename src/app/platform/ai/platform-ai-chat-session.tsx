@@ -152,7 +152,8 @@ export function PlatformAiChatProvider({ children, sessionScope, draftTest }: {
       }, (data) => {
         if (requestRef.current === controller && !controller.signal.aborted) setDiagnostics(data);
       });
-      if (requestRef.current !== controller || controller.signal.aborted) return;
+      if (requestRef.current !== controller) return;
+      controller.signal.throwIfAborted();
       setTurns((current) => [...current, user, { role: "assistant" as const, content: answer }].slice(-40));
       setPending([]);
       setText("");
