@@ -393,17 +393,18 @@ const mobileContext = await browser.newContext({
 try {
   const mobile = await mobileContext.newPage();
   await step("mobile/RTL: the button, the modal and the overlay fit the viewport", async () => {
-    await openPage(mobile, "/accounting/pos");
+    await openPage(mobile, "/accounting/overview");
     assert((await mobile.locator("html").getAttribute("dir")) === "rtl", "mobile page is not RTL");
     const horizontal = await mobile.evaluate(
       () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
     );
     assert(!horizontal, "mobile page scrolls horizontally");
 
-    const help = mobile.getByRole("button", { name: /^آموزش / }).first();
+    const help = mobile.getByRole("button", { name: "آموزش داشبورد حسابداری" });
     await help.click();
     const dialog = mobile.getByRole("dialog");
     await dialog.waitFor({ timeout: 15_000 });
+    await dialog.getByText("تور تعاملی صفحه").waitFor({ timeout: 60_000 });
     const dialogBox = await dialog.boundingBox();
     assert(dialogBox, "modal has no box");
     assert(dialogBox.width <= 390 + 1, `modal is wider than the phone: ${dialogBox.width}`);
