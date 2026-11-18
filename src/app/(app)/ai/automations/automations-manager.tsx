@@ -18,7 +18,7 @@
  * documents remain expressible through the assistant.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PlayIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -91,6 +91,7 @@ export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) 
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const runKeys = useRef(new Map<string, string>());
 
   const load = useCallback(async () => {
     const { ok, data } = await api<{ automations: AutomationView[] } & Catalogue>("/api/ai/automations");
@@ -142,26 +143,34 @@ export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) 
   }
 
   async function runNow(a: AutomationView) {
+    const key = runKeys.current.get(a.id) ?? crypto.randomUUID();
+    runKeys.current.set(a.id, key);
     setBusyId(a.id);
-    const { ok, data } = await api<{ error?: string; run?: { status: string } }>(
+    const { ok, status, data } = await api<{ error?: string; run?: { outcome: string } }>(
       `/api/ai/automations/${a.id}/run`,
-      { method: "POST" },
+      { method: "POST", headers: { "Idempotency-Key": key } },
     );
     setBusyId(null);
     if (!ok) {
+      // Network and server errors can leave the outcome unknown. Keep the key
+      // for the next attempt so a committed action cannot run twice.
+      if (status >= 400 && status < 500) runKeys.current.delete(a.id);
       toast.error(automationErrorMessage(data.error ?? ""));
       return;
     }
-    const status = data.run?.status;
-    toast.success(
-      status === "applied"
-        ? "اجرا شد و ثبت گردید"
-        : status === "pending_approval"
-          ? "برای تأیید شما گذاشته شد"
-          : status === "skipped"
-            ? "شرط‌ها برقرار نبود؛ کاری انجام نشد"
-            : "اجرا شد",
-    );
+    const outcome = data.run?.outcome;
+    if (outcome === "running") {
+      toast.info("در حال اجراست. برای بررسی نتیجه دوباره همین دکمه را بزنید.");
+      return;
+    }
+    switch (outcome) {
+      case "applied": toast.success("اجرا شد و ثبت گردید"); break;
+      case "pending_approval": toast.info("برای تأیید شما گذاشته شد"); break;
+      case "skipped": toast.info("شرط‌ها برقرار نبود؛ کاری انجام نشد"); break;
+      case "failed": toast.error("اجرای اتوماسیون ناموفق بود"); break;
+      default: toast.info("نتیجهٔ اجرا هنوز تأیید نشده است"); return;
+    }
+    runKeys.current.delete(a.id);
     void load();
   }
 

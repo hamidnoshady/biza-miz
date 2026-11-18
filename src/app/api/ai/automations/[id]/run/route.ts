@@ -1,35 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
-import { withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { requirePermission } from "@/lib/auth";
-import { getAutomation, runAutomationNow } from "@/lib/ai-automations-service";
+import { runAutomationForMember } from "@/lib/ai-automations-service";
 
-/**
- * Run an automation once, right now, on demand. Fires it through the identical
- * guarded path a scheduled or event firing takes: an `auto` automation still
- * passes the owner's per-category caps, and an over-cap payload is HELD as a
- * clickable proposal rather than forced through. Returns the run outcome.
- *
- * An `auto` automation writes unattended, so — like creating one — running it
- * on demand requires the owner, not just a manager.
- */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ERROR_STATUS = { not_found: 404, automation_disabled: 409, owner_required: 403 } as const;
+
+/** Manual calls use the same run claim and guarded executor as scheduled work. */
 export const POST = withTenantScope(
-  async (_request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
     const guard = await requirePermission(PERMISSIONS.aiAutomationsManage);
     if (guard.error) return guard.error;
+    const key = request.headers.get("Idempotency-Key");
+    if (key !== null && !UUID.test(key)) {
+      return NextResponse.json({ error: "invalid_idempotency_key" }, { status: 400 });
+    }
     const { id } = await context.params;
-
-    const automation = await getAutomation(guard.session.businessId, id);
-    if (!automation) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    if (!automation.enabled) {
-      return NextResponse.json({ error: "automation_disabled" }, { status: 409 });
+    const result = await runAutomationForMember({
+      businessId: guard.session.businessId,
+      automationId: id,
+      actorUserId: guard.session.sub,
+      isOwner: guard.session.role === "owner",
+      requestKey: key?.toLowerCase() ?? null,
+    });
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: ERROR_STATUS[result.error] });
     }
-    if (automation.approvalMode === "auto" && guard.session.role !== "owner") {
-      return NextResponse.json({ error: "owner_required" }, { status: 403 });
-    }
-
-    const result = await runAutomationNow(guard.session.businessId, id);
-    if (!result) return NextResponse.json({ error: "not_found" }, { status: 404 });
-    return NextResponse.json({ run: result });
+    return NextResponse.json({ run: result.run }, { status: result.run.outcome === "running" ? 202 : 200 });
   },
 );
