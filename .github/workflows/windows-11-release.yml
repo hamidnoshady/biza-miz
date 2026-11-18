@@ -288,24 +288,16 @@ jobs:
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
 
-      - name: Mint a fresh Full Offline enrollment code for abrupt-stop recovery
-        # Issue #1194 - a fresh profile redeems a fresh single-use code.
-        if: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL != '' }}
-        env:
-          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
-          DESKTOP_ACCEPTANCE_OFFLINE_LOCATION_ID: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_LOCATION_ID }}
-          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_EMAIL: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_EMAIL }}
-          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_PASSWORD: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_PASSWORD }}
-          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_TOTP_SECRET: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_TOTP_SECRET }}
-        run: node scripts/mint-offline-enrollment-code.mjs
-
       - name: Abrupt-stop recovery acceptance
         # Issue #1194 — a wedged runner must fail this step, not the job.
         timeout-minutes: 30
         env:
-          # Issue #1194 - optional Full Offline enrollment against a staging Cloud.
-          # The mint step above exports this run's single-use code.
-          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          # Issue #1194 - Hybrid only. The Full Offline phase always runs on its
+          # own fresh profile, so repeating it here would spend another
+          # single-use code and another staging installation without covering
+          # anything the fresh-install step did not. Withheld deliberately.
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ''
+          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ''
         run: |
           $exe = Join-Path $env:INSTALL_DIR "$env:PREVIOUS_STEM.exe"
           $process = Start-Process $exe -ArgumentList "--user-data-dir=$env:USER_DATA" -PassThru
@@ -317,24 +309,14 @@ jobs:
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
 
-      - name: Mint a fresh Full Offline enrollment code for in-place update
-        # Issue #1194 - a fresh profile redeems a fresh single-use code.
-        if: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL != '' }}
-        env:
-          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
-          DESKTOP_ACCEPTANCE_OFFLINE_LOCATION_ID: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_LOCATION_ID }}
-          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_EMAIL: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_EMAIL }}
-          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_PASSWORD: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_PASSWORD }}
-          DESKTOP_ACCEPTANCE_OFFLINE_OWNER_TOTP_SECRET: ${{ secrets.DESKTOP_ACCEPTANCE_OFFLINE_OWNER_TOTP_SECRET }}
-        run: node scripts/mint-offline-enrollment-code.mjs
-
       - name: In-place update to signed candidate and persistence acceptance
         # Issue #1194 — a wedged runner must fail this step, not the job.
         timeout-minutes: 30
         env:
-          # Issue #1194 - optional Full Offline enrollment against a staging Cloud.
-          # The mint step above exports this run's single-use code.
-          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          # Issue #1194 - Hybrid only, as in the abrupt-stop step above: the
+          # Full Offline phase covers nothing new on a second fresh profile.
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ''
+          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ''
         run: |
           $installer = Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1
           if (-not $installer) { throw "Candidate installer is missing" }
