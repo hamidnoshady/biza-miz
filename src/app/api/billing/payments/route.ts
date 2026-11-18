@@ -13,6 +13,8 @@ import { listBillingPlans, listPlanFeatures } from "@/lib/billing-plans-service"
 import { calculateSubscriptionTotal } from "@/lib/subscription-service";
 import { readCommercialSettings } from "@/lib/billing/runtime";
 import { applyTaxAndRounding } from "@/lib/billing/rating/engine";
+import { purchaseReadinessForAssurance } from "@/lib/identity-billing-contract";
+import { readPlatformIdentityAssurance } from "@/lib/iam/global-identity-service";
 import { parseSafeIntInput } from "@/lib/platform-money";
 import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
 
@@ -57,6 +59,35 @@ export const GET = withTenantScope(async (req: Request) => {
 export const POST = withTenantScope(async (req: Request) => {
   const { session, error } = await requirePermission(PERMISSIONS.billingManage);
   if (error) return error;
+
+  /*
+   * ESH-199 × ESH-193 — the commercial purchase boundary.
+   *
+   * A verified mobile is the agreed precondition for starting a paid plan or
+   * activating a paid service, and this route is where money starts moving.
+   * Identity owns the rule (`purchaseReadiness`); billing only renders its
+   * blocker, so checkout and onboarding cannot disagree about what "verified"
+   * means. The assurance read is the narrow, read-only contract — billing never
+   * writes identity rows.
+   *
+   * A legacy membership with no global identity fails closed with the same
+   * onboarding sentence rather than being allowed through on an unproven
+   * membership phone.
+   */
+  const assurance = session.platformUserId
+    ? await readPlatformIdentityAssurance(session.platformUserId)
+    : null;
+  const readiness = purchaseReadinessForAssurance(assurance);
+  if (!readiness.ok) {
+    return NextResponse.json(
+      {
+        error: "phone_verification_required",
+        blockedBy: readiness.blockedBy,
+        message: readiness.message,
+      },
+      { status: 403 },
+    );
+  }
 
   let body: Record<string, unknown>;
   try {

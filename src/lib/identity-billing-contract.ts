@@ -220,6 +220,26 @@ export function purchaseReadiness(assurance: IdentityAssurance): PurchaseReadine
   return { ok: true, phoneE164: normalised.e164 };
 }
 
+/**
+ * The purchase check when there is no assurance row at all.
+ *
+ * A legacy membership with no global identity, or an unknown id, is not a
+ * person who "simply has not verified a phone yet" — but both are unready to
+ * buy, and both must get the same onboarding sentence rather than a crash or a
+ * silently allowed purchase. The read helper returns `null` precisely so this
+ * distinction stays visible; the purchase boundary still fails closed.
+ */
+export function purchaseReadinessForAssurance(
+  assurance: IdentityAssurance | null | undefined,
+): PurchaseReadiness {
+  return purchaseReadiness(
+    assurance ?? {
+      phone: { e164: null, verified: false },
+      email: { address: null, verified: false },
+    },
+  );
+}
+
 function blockedFor(blocker: PurchaseBlocker): PurchaseReadiness {
   return { ok: false, blockedBy: [blocker], message: purchaseBlockerMessage(blocker) };
 }
