@@ -3,6 +3,8 @@ import { getPool } from "@/lib/db";
 import { markSetupComplete } from "@/lib/settings";
 import { computeSetupState, requireManager } from "@/lib/setup-state";
 import { withTenantScope } from "@/lib/auth";
+import { selectedAppSetupStatuses } from "@/lib/setup-apps-service";
+import { serviceTariffAt } from "@/lib/service-activation/pricing-service";
 
 /**
  * The canonical interactive completion transition — the *only* one for a
@@ -25,11 +27,34 @@ export const POST = withTenantScope(async () => {
   if (error) return error;
 
   const state = await computeSetupState(session.businessId);
-  if (state.missingForCompletion.length > 0) {
-    return NextResponse.json(
-      { error: "incomplete", messages: state.missingForCompletion },
-      { status: 409 },
-    );
+
+  // Every *selected* app's essential answers must be saved before the business
+  // wizard can finish. This is deliberately separate from
+  // `businesses.setup_progress`: an app's later reconfiguration must never
+  // reopen the business's onboarding, and an unselected app is never a
+  // requirement.
+  const selectedAppStatuses = await selectedAppSetupStatuses(
+    session.businessId,
+    state.selectedApps,
+  );
+  const incompleteApps = selectedAppStatuses.filter((app) => !app.setupComplete);
+  const selectedKeys = state.selectedApps ?? [];
+  const tariffs = await Promise.all(
+    selectedKeys.map((key) => serviceTariffAt({ kind: "app", key })),
+  );
+  const unpriced = selectedKeys.filter((_, index) => {
+    const tariff = tariffs[index];
+    return !tariff || tariff.published === false;
+  });
+
+  const messages = [
+    ...(state.selectedApps === null ? ["انتخاب برنامه‌ها ذخیره نشده است."] : []),
+    ...state.missingForCompletion,
+    ...incompleteApps.map((app) => `راه‌اندازی برنامهٔ ${app.label} کامل نشده است.`),
+    ...unpriced.map((key) => `تعرفهٔ منتشرشدهٔ برنامهٔ ${key} موجود نیست.`),
+  ];
+  if (messages.length > 0) {
+    return NextResponse.json({ error: "incomplete", messages }, { status: 409 });
   }
 
   const client = await getPool().connect();

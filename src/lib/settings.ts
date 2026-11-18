@@ -76,6 +76,14 @@ export const SETTING_KEYS = {
    * derived from the domain data (src/lib/setup-state.ts).
    */
   wizardProgress: "setup.progress",
+  /**
+   * SetupAppSelectionRecord (src/lib/setup-apps.ts) — { apps: AppKey[],
+   * updatedAt }. The owner's draft app choice from the first-run gallery
+   * (issue #1239 / ESH-90). Deliberately NOT a billing record: an app in this
+   * list is selected for setup, not activated, and no money moves because of
+   * it. Absent means the flow has never saved a choice (legacy businesses).
+   */
+  setupSelectedApps: "setup.selectedApps",
   /** { centralUrl, token, enabled } — this location's push target (Phase 9) */
   rollupConfig: "rollup.config",
   /** { lastAttemptAt, lastSuccessAt, lastSuccessDay, lastError } — local push status (Phase 9) */

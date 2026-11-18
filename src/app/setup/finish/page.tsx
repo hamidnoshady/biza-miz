@@ -3,13 +3,21 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { cardClass } from "@/app/dashboard/page-chrome";
+import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
-import { api, ErrorBox, errorMessage, PrimaryButton, SetupDataSkeleton } from "../ui";
+import type { AppKey } from "@/lib/apps";
+import type { SetupAppCatalogData } from "@/lib/setup-apps";
+import { api, ErrorBox, errorMessage, InfoBox, PrimaryButton, SetupDataSkeleton } from "../ui";
 import { catalogueHrefFor } from "@/lib/wizard-steps";
 import { stepsFor } from "../steps";
 import { useSetupIndustry } from "../industry-context";
 
 interface StateResponse {
+  business?: { name: string; industry?: string } | null;
+  location?: { name: string; address: string | null; phone: string | null } | null;
+  logo?: { dataUrl: string } | null;
+  selectedApps?: AppKey[] | null;
   progress?: { steps: Record<string, string>; completedAt: string | null };
   counts?: { accounts: number; users: number; categories: number; items: number; printers: number };
   missingForCompletion?: string[];
@@ -17,18 +25,37 @@ interface StateResponse {
   error?: string;
 }
 
+/**
+ * Step 4 (issue #1239 / ESH-90): review, then hand off to the dashboard.
+ *
+ * Finish is intentionally cheap: it requires the business profile and every
+ * *selected* app's essential answers, and nothing else. Imports, menu/catalogue
+ * population, staff, printers, backups and opening balances never block it.
+ * No money moves here; unpaid selected apps are shown as “setup ready, awaiting
+ * payment”, never as active.
+ */
 export default function FinishPage() {
   const router = useRouter();
   const industry = useSetupIndustry();
+  const money = useMoney();
   const [state, setState] = useState<StateResponse | null>(null);
+  const [apps, setApps] = useState<SetupAppCatalogData | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [completed, setCompleted] = useState(false);
 
   const load = useCallback(() => {
-    api<StateResponse>("/api/setup/state").then(({ data }) => {
-      setState(data);
-      setCompleted(Boolean(data.progress?.completedAt));
+    void Promise.all([
+      api<StateResponse>("/api/setup/state"),
+      api<SetupAppCatalogData>("/api/setup/apps"),
+    ]).then(([stateResult, appsResult]) => {
+      if (stateResult.ok) {
+        setState(stateResult.data);
+        setCompleted(Boolean(stateResult.data.progress?.completedAt));
+      } else {
+        setError("بارگذاری وضعیت راه‌اندازی ممکن نشد.");
+      }
+      if (appsResult.ok) setApps(appsResult.data);
     });
   }, []);
   useEffect(load, [load]);
@@ -51,17 +78,37 @@ export default function FinishPage() {
         return;
       }
       setCompleted(true);
-      router.replace("/settings");
+      router.replace("/dashboard");
     } finally {
       setBusy(false);
     }
   }
 
-  if (state === null) return <SetupDataSkeleton rows={5} />;
+  if (state === null) {
+    return (
+      <div>
+        <ErrorBox>{error}</ErrorBox>
+        <SetupDataSkeleton rows={5} />
+      </div>
+    );
+  }
 
-  const missing = state.missingForCompletion ?? [];
-  // Central cloud tenants do not own the operator's backup destinations.
-  const steps = stepsFor(industry).filter((s) => s.id !== "backup" || state?.siteInstall);
+  // `null` is the legacy "never saved a choice" state and must keep the full
+  // sequence; `[]` is an explicit zero-app choice and drops Accounting's steps.
+  const selectedApps = state.selectedApps;
+  const steps = stepsFor(industry, selectedApps).filter(
+    (s) => s.id !== "backup" || state.siteInstall,
+  );
+  const selectedCards = (apps?.cards ?? []).filter((card) => card.selected);
+  const appSetupRequired = (selectedApps?.length ?? 0) > 0;
+  const incompleteApps = selectedCards.filter((card) => !card.setupComplete);
+  const unpricedApps = selectedCards.filter((card) => !card.pricing);
+  const missing = [
+    ...(state.selectedApps === null ? ["انتخاب برنامه‌ها ذخیره نشده است."] : []),
+    ...(state.missingForCompletion ?? []),
+    ...incompleteApps.map((card) => `راه‌اندازی برنامهٔ ${card.label} کامل نشده است.`),
+    ...unpricedApps.map((card) => `تعرفهٔ منتشرشدهٔ برنامهٔ ${card.label} موجود نیست.`),
+  ];
   // Non-F&B trades have no menu step: their catalogue lives in the products
   // workspace / their trade's own items page, and this points at it.
   const catalogueHref = catalogueHrefFor(industry);
@@ -73,28 +120,131 @@ export default function FinishPage() {
       <header className="mb-6">
         <h1 className="text-xl font-bold">پایان راه‌اندازی</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          مرور وضعیت مراحل و تکمیل نهایی — بعد از این، سیستم آمادهٔ ثبت سفارش است.
+          مرور اطلاعات کسب‌وکار و برنامه‌های انتخاب‌شده، سپس ورود به داشبورد.
         </p>
       </header>
 
       <ErrorBox>{error}</ErrorBox>
 
       {completed ? (
-        <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-500/15 p-6 text-center">
+        <div className={`${cardClass} p-6 text-center`}>
           <p className="mb-2 text-2xl">🎉</p>
-          <p className="mb-1 font-bold text-emerald-800 dark:text-emerald-200">راه‌اندازی کامل شد!</p>
-          <p className="mb-4 text-sm text-emerald-700 dark:text-emerald-300">
-            کسب‌وکار شما آمادهٔ ثبت فروش است.
+          <p className="mb-1 font-bold text-foreground">راه‌اندازی اولیه کامل شد!</p>
+          <p className="mb-4 text-sm text-muted-foreground">
+            حالا به داشبورد می‌روید. برنامه‌های انتخاب‌شده تا زمانی که فعال‌سازی
+            و پرداخت را تأیید نکرده‌اید، هزینه‌ای از کیف پول کم نمی‌کنند.
           </p>
           <Link
             href="/dashboard"
-            className="inline-block rounded-lg bg-emerald-700 dark:bg-emerald-300 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-800 dark:hover:bg-emerald-200"
+            className="inline-block rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
           >
             رفتن به داشبورد
           </Link>
         </div>
       ) : (
         <>
+          <section className={`${cardClass} mb-6 p-5`} aria-label="مرور کسب‌وکار">
+            <div className="flex flex-wrap items-center gap-4">
+              {state.logo?.dataUrl ? (
+                <img
+                  src={state.logo.dataUrl}
+                  alt="لوگوی کسب‌وکار"
+                  className="h-14 w-auto max-w-32 rounded-lg border border-border bg-card p-1"
+                />
+              ) : null}
+              <div className="min-w-0">
+                <p className="font-semibold text-foreground">{state.business?.name}</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {state.location?.name ?? "شعبهٔ مرکزی"}
+                  {state.location?.address ? ` — ${state.location.address}` : ""}
+                  {state.location?.phone ? ` — ${state.location.phone}` : ""}
+                </p>
+              </div>
+              <Link href="/setup/business" className="ms-auto text-xs text-primary hover:underline">
+                ویرایش اطلاعات
+              </Link>
+            </div>
+          </section>
+
+          <section className={`${cardClass} mb-6 p-5`} aria-label="برنامه‌های انتخاب‌شده">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="font-semibold text-foreground">برنامه‌های انتخاب‌شده</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {selectedCards.length === 0
+                    ? "هیچ برنامه‌ای انتخاب نشده است. می‌توانید بدون برنامه هم راه‌اندازی را تمام کنید."
+                    : "وضعیت واقعی هر برنامه؛ برنامهٔ انتخاب‌شده تا پرداخت و تأیید فعال‌سازی، فعال نیست."}
+                </p>
+              </div>
+              <Link href="/setup/apps" className="text-xs text-primary hover:underline">
+                تغییر انتخاب برنامه‌ها
+              </Link>
+            </div>
+
+            {selectedCards.length > 0 ? (
+              <ul className="divide-y divide-border rounded-xl border border-border">
+                {selectedCards.map((card) => (
+                  <li key={card.key} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm">
+                    <span className="flex items-center gap-2">
+                      <span
+                        className={`size-2 rounded-full ${
+                          card.setupComplete
+                            ? "bg-emerald-600 dark:bg-emerald-400"
+                            : "bg-amber-500 dark:bg-amber-400"
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <span className="font-medium text-foreground">{card.label}</span>
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {card.activation?.active
+                        ? "فعال"
+                        : card.setupComplete
+                          ? "راه‌اندازی آماده — در انتظار پرداخت و فعال‌سازی"
+                          : "نیاز به تکمیل راه‌اندازی"}
+                    </span>
+                    {!card.setupComplete ? (
+                      <Link href="/setup/app-setup" className="text-xs text-primary hover:underline">
+                        تکمیل راه‌اندازی
+                      </Link>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {selectedCards.length > 0 ? (
+              <dl className="mt-4 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl bg-muted/50 p-3">
+                  <dt className="text-xs text-muted-foreground">جمع هزینهٔ راه‌اندازی</dt>
+                  <dd className="mt-1 font-semibold tabular-nums text-foreground">
+                    {money.format(apps?.totals.setupRial ?? 0)}
+                  </dd>
+                </div>
+                <div className="rounded-xl bg-muted/50 p-3">
+                  <dt className="text-xs text-muted-foreground">جمع برآورد روزانه</dt>
+                  <dd className="mt-1 font-semibold tabular-nums text-foreground">
+                    {money.format(apps?.totals.estimated24hRial ?? 0)}
+                  </dd>
+                </div>
+              </dl>
+            ) : null}
+
+            {selectedCards.length > 0 ? (
+              <p className="mt-4 text-xs leading-5 text-muted-foreground">
+                شروع هزینه فقط بعد از فعال‌سازی تأییدشده و با موجودی کافی کیف پول
+                است. مبلغ راه‌اندازی یک‌بار برای هر برنامه کسر می‌شود و هفت روز
+                استفادهٔ رایگان ایجاد نمی‌کند.
+              </p>
+            ) : null}
+          </section>
+
+          <InfoBox>
+            {selectedCards.length === 0
+              ? "بدون برنامهٔ انتخاب‌شده، هشدار شارژ کیف پول نمایش داده نمی‌شود. هر زمان خواستید از داشبورد برنامه اضافه کنید."
+              : "با تکمیل راه‌اندازی، هیچ مبلغی از کیف پول کسر نمی‌شود. پرداخت و فعال‌سازی را بعداً با مشاهدهٔ صورت‌حساب نهایی تأیید می‌کنید."}
+          </InfoBox>
+
           <ul className="mb-6 divide-y divide-border rounded-xl border border-border">
             {steps.map((s) => {
               const done = Boolean(state?.progress?.steps[s.id]);
@@ -109,7 +259,9 @@ export default function FinishPage() {
                       {done ? "✓" : "•"}
                     </span>
                     {s.title}
-                    {s.optional ? <span className="text-xs text-muted-foreground">(اختیاری)</span> : null}
+                    {s.optional && !(s.id === "app_setup" && appSetupRequired) ? (
+                      <span className="text-xs text-muted-foreground">(اختیاری)</span>
+                    ) : null}
                   </span>
                   <Link href={s.path} className="text-xs text-primary hover:underline">
                     {done ? "ویرایش" : "تکمیل"}
@@ -140,13 +292,6 @@ export default function FinishPage() {
             </div>
           ) : null}
 
-          {/*
-            Non-F&B trades have no menu step by design: their catalogue is the
-            products workspace (or the trade's own items page), which is the one
-            door for it. Point at that door instead of leaving a retail owner to
-            discover it — the wizard's answer to "where do I enter my goods?"
-            (issue #808 §8).
-          */}
           {catalogueHref ? (
             <div className="mb-6 rounded-lg border border-border bg-muted/40 p-4 text-sm">
               <p className="mb-1 font-semibold">ثبت کالاها و موجودی</p>
@@ -155,14 +300,14 @@ export default function FinishPage() {
                 <Link href={catalogueHref} className="text-primary hover:underline">
                   {catalogueLabel}
                 </Link>{" "}
-                ثبت می‌شوند؛ راه‌اندازی برای آن‌ها مرحلهٔ جداگانه‌ای ندارد و بعد از پایان
-                راه‌اندازی هم از همان مسیر ادامه می‌دهید.
+                ثبت می‌شوند؛ ورود آن‌ها برای پایان راه‌اندازی الزامی نیست و بعداً هم
+                از همان مسیر ادامه می‌دهید.
               </p>
             </div>
           ) : null}
 
           <PrimaryButton type="button" onClick={complete} disabled={busy || missing.length > 0}>
-            تکمیل راه‌اندازی
+            تکمیل راه‌اندازی و ورود به داشبورد
           </PrimaryButton>
         </>
       )}

@@ -5,7 +5,9 @@
  * transitions can use exactly the same contract without importing the
  * server-component/auth/database helpers in that module.
  */
+import type { AppKey } from "./apps";
 import type { Industry } from "./industries";
+import { setupStepRequired } from "./setup-apps";
 import { requiredStepsForIndustry } from "./wizard-steps";
 
 export interface SetupReadiness {
@@ -31,8 +33,17 @@ export function setupReadiness(input: {
   accounts: number;
   /** Active items in menu_items across the business's branches. F&B only. */
   sellableMenuItems: number;
+  /**
+   * The owner's explicit app choice. `null`/absent = the legacy state (no
+   * gallery save yet), which keeps every industry-required step. An explicit
+   * list drops the steps owned by an app that was not selected — a zero-app
+   * onboarding is complete without a chart of accounts or a menu.
+   */
+  selectedApps?: readonly AppKey[] | null;
 }): SetupReadiness {
-  const required = requiredStepsForIndustry(input.industry);
+  const required = requiredStepsForIndustry(input.industry).filter((step) =>
+    setupStepRequired(step, input.selectedApps),
+  );
   const satisfied: Record<string, boolean> = {
     business: input.hasBusiness && input.hasLocation && input.hasPrefs,
     accounts: input.accounts > 0,
