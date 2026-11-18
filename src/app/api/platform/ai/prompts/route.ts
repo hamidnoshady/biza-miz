@@ -9,9 +9,9 @@ import {
   rollbackPromptVersion,
   savePromptDraft,
 } from "@/lib/ai-prompt-store";
-import { resolveSystemPrompt } from "@/lib/ai-prompt-resolver";
+import { agentPromptScope, previewSystemPrompt } from "@/lib/ai-prompt-resolver";
+import { listSystemAgents } from "@/lib/ai-system-agents";
 import { AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
-import type { AppKey } from "@/lib/apps";
 
 /**
  * Issue #812 §8 — the Superadmin prompt console.
@@ -35,21 +35,14 @@ export const GET = async (request: NextRequest) => {
     if (!(AI_CHAT_MODES as readonly string[]).includes(mode)) {
       return NextResponse.json({ error: "invalid_request" }, { status: 400 });
     }
-    const resolved = await resolveSystemPrompt({
-      mode: "dashboard",
-      businessId: "",
-      runtimeMode: mode as AiRuntimeMode,
-      loadMemory: false,
-      appKey: kind === "app" ? key as AppKey : null,
-      businessType: kind === "business_type" ? key : null,
-      agentKey: kind === "agent" ? key : null,
-    });
+    const resolved = await previewSystemPrompt(previewScope, mode as AiRuntimeMode);
     return NextResponse.json(resolved, { headers: { "Cache-Control": "no-store" } });
   }
+  const [versions, agents] = await Promise.all([listPromptVersions(), listSystemAgents()]);
   return NextResponse.json({
-    scopes: PROMPT_SCOPES,
-    versions: await listPromptVersions(),
-  });
+    scopes: [...PROMPT_SCOPES, ...agents.map((agent) => ({ key: agentPromptScope(agent.agentKey), label: agent.name, hint: "" }))],
+    versions,
+  }, { headers: { "Cache-Control": "no-store" } });
 };
 
 export const POST = async (request: NextRequest) => {

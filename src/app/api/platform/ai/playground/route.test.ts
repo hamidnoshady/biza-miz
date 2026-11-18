@@ -13,7 +13,7 @@ vi.mock("@/lib/ai-platform-tools", async (original) => ({
   ...(await original<typeof import("@/lib/ai-platform-tools")>()),
   runPlatformReadTool: vi.fn(async () => ({ ok: true, data: { failedRuns: [] } })),
 }));
-vi.mock("@/lib/ai-prompt-store", () => ({ getPromptVersion: vi.fn(), publishedPromptFor: async (key: string) => ({ text: `published:${key}`, version: 3 }) }));
+vi.mock("@/lib/ai-prompt-store", () => ({ getPromptVersion: vi.fn(), isPromptScopeKey: () => true, publishedPromptFor: async (key: string) => ({ text: `published:${key}`, version: 3 }) }));
 const request = (body: unknown) => new NextRequest("https://app.test/api/platform/ai/playground", { method: "POST", body: JSON.stringify(body) });
 const streamRequest = (body: unknown, signal?: AbortSignal) => new NextRequest("https://app.test/api/platform/ai/playground", {
   method: "POST", body: JSON.stringify(body), headers: { Accept: "text/event-stream" }, signal,
@@ -96,6 +96,43 @@ describe("platform-only model testing", () => {
 });
 
 describe("Playground SDK streaming", () => {
+  it.each([["auto", null], ["instant", "safe-fixture-fast"], ["thinking", "safe-fixture-thinking"]])(
+    "resolves %s on the server and inherits absent gateway overrides",
+    async (mode, alias) => {
+      vi.mocked(getPlatformAiMode).mockResolvedValue({
+        is_active: true, model_alias: alias, temperature: null, max_output_tokens: null,
+      } as never);
+      vi.mocked(getAiGatewayRuntimeSettings).mockResolvedValue({
+        gateway: { enabled: true, baseUrl: "https://gateway.test/v1", masterKey: "test-only", chatModel: "safe-fixture-default" },
+      } as never);
+      const response = await POST(request({ mode, message: "test", modelAlias: "client-override" }));
+      const providerBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+      expect(response.status).toBe(200);
+      expect(getPlatformAiMode).toHaveBeenCalledWith(mode);
+      expect(providerBody.model).toBe(alias ?? "safe-fixture-default");
+      expect(providerBody.temperature).toBeUndefined();
+    },
+  );
+
+  it("propagates cancellation to the LiteLLM request and audits cancellation", async () => {
+    const controller = new AbortController();
+    let providerStart!: () => void;
+    const started = new Promise<void>((resolve) => { providerStart = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init.signal!;
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      providerStart();
+    })));
+    const response = await POST(streamRequest({ mode: "auto", message: "hello" }, controller.signal));
+    const output = response.text();
+    await started;
+    controller.abort();
+    expect(await output).toContain("request_cancelled");
+    expect(platformAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: "ai.playground.failed", payload: expect.objectContaining({ reason: "request_cancelled" }),
+    }));
+  });
+
   it("delivers an answer delta before the provider closes and audits completed usage", async () => {
     const encoder = new TextEncoder();
     let provider!: ReadableStreamDefaultController<Uint8Array>;

@@ -164,6 +164,18 @@ describe("the prompt resolver's state machine", () => {
     expect(await resolver.getPublishedPrompt(BASE_PROMPT_SCOPE)).toBeNull();
   });
 
+  it("composes an app draft in a preview without changing the live resolver", async () => {
+    const scope = resolver.appPromptScope("crm");
+    const saved = await store.savePromptDraft({ scopeKey: scope, text: "PREVIEW_DRAFT_FIXTURE", createdBy: alpha.userId });
+    if (!saved.ok) throw new Error("Draft setup failed");
+    const preview = await resolver.previewSystemPrompt(scope, "auto", saved.version);
+    expect(preview.systemPrompt).toContain("PREVIEW_DRAFT_FIXTURE");
+    expect(preview.layers.app?.version).toBe(saved.version.version);
+    const live = await resolver.previewSystemPrompt(scope, "auto");
+    expect(live.systemPrompt).not.toContain("PREVIEW_DRAFT_FIXTURE");
+    expect(live.layers.app?.version).toBeNull();
+  });
+
   it("uses a published override and ignores a draft", async () => {
     // The draft is saved FIRST and is the higher version number, so a resolver
     // that sorted by version rather than filtered by state would pick it.

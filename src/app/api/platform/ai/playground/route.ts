@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformCapability, withPlatformScope, platformAudit } from "@/lib/platform-auth";
 import { getAiGatewayRuntimeSettings } from "@/lib/ai-gateway-service";
 import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
-import { getPromptVersion, publishedPromptFor } from "@/lib/ai-prompt-store";
+import { getPromptVersion, isPromptScopeKey, publishedPromptFor } from "@/lib/ai-prompt-store";
 import { AI_CHAT_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
+import { previewSystemPrompt } from "@/lib/ai-prompt-resolver";
+import { isAppKey } from "@/lib/apps";
 import { randomUUID } from "node:crypto";
 import { brandName } from "@/lib/brand";
 import { toolDefinitions } from "@/lib/ai";
@@ -68,7 +70,9 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     typeof draftId === "string" ? getPromptVersion(draftId) : null,
   ]);
 
-  if (draftId !== undefined && (!draft || draft.state !== "draft" || !["base", `mode:${mode}`].includes(draft.scopeKey))) {
+  if (draftId !== undefined && (!draft || draft.state !== "draft" || !isPromptScopeKey(draft.scopeKey) ||
+    (draft.scopeKey.startsWith("mode:") && draft.scopeKey !== `mode:${mode}`) ||
+    (draft.scopeKey.startsWith("app:") && !isAppKey(draft.scopeKey.slice(4))))) {
     return NextResponse.json({ error: "invalid_draft_test" }, { status: 409 });
   }
   const gateway = settings.gateway;
@@ -79,11 +83,14 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   if (!model) return NextResponse.json({ error: "model_unavailable" }, { status: 409 });
   const requestId = randomUUID();
   const startedAt = performance.now();
+  const composed = draft && draft.scopeKey !== "base" && !draft.scopeKey.startsWith("mode:")
+    ? await previewSystemPrompt(draft.scopeKey, mode as AiRuntimeMode, draft)
+    : null;
   const promptVersions = {
-    base: draft?.scopeKey === "base" ? draft.version : basePrompt?.version ?? null,
-    mode: draft?.scopeKey === `mode:${mode}` ? draft.version : modePrompt?.version ?? null,
+    base: draft?.scopeKey === "base" ? draft.version : composed?.layers.base.version ?? basePrompt?.version ?? null,
+    mode: draft?.scopeKey === `mode:${mode}` ? draft.version : composed?.layers.mode.version ?? modePrompt?.version ?? null,
   };
-  const diagnostics = { requestId, modelAlias: model, promptVersions, draftScope: draft?.scopeKey ?? null };
+  const diagnostics = { requestId, modelAlias: model, promptVersions, draftScope: draft?.scopeKey ?? null, draftVersion: draft?.version ?? null };
   await platformAudit({
     adminId: session.padmin, action: "ai.playground.requested", entity: "platform_ai_modes", entityId: mode,
     payload: { ...diagnostics, draftId: draft?.id ?? null },
@@ -95,8 +102,10 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
     useTools
       ? `You are the ${brandName("fa")} Superadmin platform assistant. You may call only the read-only platform health tools you are given; they never expose orders, customers or financial records, and you cannot change anything. State uncertainty plainly.`
       : `You are in the ${brandName("fa")} Superadmin read-only AI configuration playground. Do not claim to access any tenant, execute tools, or change records. State uncertainty plainly.`,
-    (draft?.scopeKey === "base" ? draft.text : basePrompt?.text) ?? "",
-    (draft?.scopeKey === `mode:${mode}` ? draft.text : modePrompt?.text) ?? "",
+    ...(composed ? [composed.systemPrompt] : [
+      (draft?.scopeKey === "base" ? draft.text : basePrompt?.text) ?? "",
+      (draft?.scopeKey === `mode:${mode}` ? draft.text : modePrompt?.text) ?? "",
+    ]),
   ].filter(Boolean).join("\n\n");
 
   const auditFailure = async (reason: string, extra: Record<string, unknown> = {}) => {

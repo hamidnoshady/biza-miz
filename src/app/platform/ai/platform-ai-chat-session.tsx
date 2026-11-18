@@ -14,6 +14,7 @@ type Diagnostics = {
   modelAlias: string;
   promptVersions: { base: number | null; mode: number | null };
   draftScope?: string | null;
+  draftVersion?: number | null;
   durationMs?: number;
   tokens?: number | null;
   toolResults?: { name: string; allowed: boolean; durationMs: number }[];
@@ -231,7 +232,7 @@ export function PlatformAiChatPanel({ compact = false }: { compact?: boolean }) 
         <div>شناسهٔ درخواست <bdi>{chat.diagnostics.requestId}</bdi></div>
         <div>نسخهٔ پایه {chat.diagnostics.promptVersions.base ?? "پیش‌فرض"}</div>
         <div>نسخهٔ حالت {chat.diagnostics.promptVersions.mode ?? "پیش‌فرض"}</div>
-        {chat.diagnostics.draftScope && <div>پیش‌نویس <bdi>{chat.diagnostics.draftScope}</bdi></div>}
+        {chat.diagnostics.draftScope && <div>پیش‌نویس <bdi>{chat.diagnostics.draftScope}</bdi> · {chat.diagnostics.draftVersion}</div>}
         {chat.diagnostics.durationMs !== undefined && <div>مدت اجرا {chat.diagnostics.durationMs} میلی‌ثانیه</div>}
         {chat.diagnostics.tokens != null && <div>تعداد توکن {chat.diagnostics.tokens}</div>}
         {chat.diagnostics.toolResults?.map((tool, index) => <div key={index}>

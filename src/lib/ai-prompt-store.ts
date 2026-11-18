@@ -18,6 +18,7 @@
  *    can therefore never end up with an empty system prompt.
  */
 import { getPool, query } from "./db";
+import { ENABLED_INDUSTRIES, INDUSTRY_LABELS } from "./industries";
 import {
   BASE_PROMPT_SCOPE,
   agentPromptScope,
@@ -70,11 +71,11 @@ export const PROMPT_SCOPES: readonly { key: string; label: string; hint: string 
     label: "پژوهش عمیق",
     hint: "لایهٔ دوم پرامپت برای پژوهش عمیق؛ هر عدد باید منبع داشته باشد.",
   },
-  {
-    key: businessTypePromptScope("food_service"),
-    label: "نوع کسب‌وکار — غذا و رستوران",
-    hint: "قالب اختصاصی این نوع کسب‌وکار. فقط برای کسب‌وکارهای همین نوع اعمال می‌شود.",
-  },
+  ...ENABLED_INDUSTRIES.map((industry) => ({
+    key: businessTypePromptScope(industry),
+    label: INDUSTRY_LABELS[industry],
+    hint: "این لایه برای کسب‌وکارهای همین نوع اعمال می‌شود.",
+  })),
   {
     key: appPromptScope("accounting"),
     label: "بخش — حسابداری",

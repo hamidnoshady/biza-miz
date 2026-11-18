@@ -144,7 +144,7 @@ export default function PlatformAiPromptsPage() {
   const activeScope = scopes.find((entry) => entry.key === scope);
   const visibleScopes = scopes.filter((entry) => `${entry.label} ${entry.key}`.toLowerCase().includes(search.trim().toLowerCase()));
   const isResearch = scope === "mode:deep_research";
-  const draftMode = scope === "base" ? "auto" : /^mode:(auto|instant|thinking)$/.exec(scope)?.[1];
+  const draftMode = isResearch ? undefined : /^mode:(auto|instant|thinking)$/.exec(scope)?.[1] ?? "auto";
 
   function edit(version: PromptVersion | null) {
     setEditing(version);

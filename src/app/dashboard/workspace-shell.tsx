@@ -223,7 +223,7 @@ export async function WorkspaceShell({
           belongs here and not in the root/login/setup/platform layouts.
         */}
         <SessionExpiryListener />
-        <TenantAiIdentity account={`${session.businessId}:${session.sub}`} />
+        <TenantAiIdentity account={`${session.businessId}:${session.sub}`} enabled={aiEnabled} />
         <OfflineQueueProvider businessId={session.businessId}>
         <KitchenDispatchAgentLoader enabled={permissions.has(PERMISSIONS.printingExecute)} />
         <BugReportProvider>
