@@ -27,6 +27,18 @@ const mocks = vi.hoisted(() => ({
   listPlanFeatures: vi.fn(async () => [] as unknown[]) as AnyFn,
   calculateSubscriptionTotal: vi.fn() as AnyFn,
   requirePermission: vi.fn() as AnyFn,
+  query: vi.fn() as AnyFn,
+  loadQuote: vi.fn() as AnyFn,
+  assertQuotePayable: vi.fn() as AnyFn,
+  consumeQuote: vi.fn() as AnyFn,
+}));
+
+vi.mock("@/lib/db", () => ({ query: mocks.query }));
+
+vi.mock("@/lib/billing/quote/quote-store", () => ({
+  loadQuote: mocks.loadQuote,
+  assertQuotePayable: mocks.assertQuotePayable,
+  consumeQuote: mocks.consumeQuote,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -141,5 +153,26 @@ describe("POST /api/billing/payments — verified-phone precondition", () => {
     expect(await response.json()).toEqual({ error: "bad_request" });
     expect(mocks.readPlatformIdentityAssurance).toHaveBeenCalledWith(session.platformUserId);
     expect(mocks.createPayment).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/billing/payments - wallet checkout", () => {
+  it("preserves the shared payment status when a concurrent settlement wins", async () => {
+    mocks.readPlatformIdentityAssurance.mockResolvedValue({ phone: { e164: "+989121234567", verified: true } });
+    mocks.listBillingPlans.mockResolvedValue([{ key: "pro", name: "Pro" }]);
+    mocks.loadQuote.mockResolvedValue({
+      id: "quote-1",
+      quote: { planKey: "pro", termMonths: 1, totals: { netRial: 1000 } },
+    });
+    mocks.assertQuotePayable.mockResolvedValue({ ok: true });
+    mocks.consumeQuote.mockResolvedValue({ ok: false, error: "settlement_conflict" });
+
+    const { POST } = await import("./route");
+    const response = await POST(post({ kind: "plan", planKey: "pro", quoteId: "quote-1", payWithWallet: true }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "settlement_conflict", quoteId: "quote-1" });
+    expect(mocks.query).toHaveBeenCalledTimes(1);
+    expect(mocks.query).toHaveBeenCalledWith(expect.stringContaining("AND status = 'failed'"), ["pay-1"]);
   });
 });

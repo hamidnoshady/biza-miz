@@ -179,13 +179,17 @@ describe("quote-driven checkout", () => {
     );
 
     // 3. Wallet settlement: quote consumption + debit + coupon spend, once.
-    const settled = await store.consumeQuote({
+    const settle = () => store.consumeQuote({
       businessId,
       quoteId: quoted.quoteId,
       paymentId: payment.id,
       debitWallet: { note: "خرید اشتراک پلن آزمون" },
     });
-    expect(settled.ok).toBe(true);
+    const concurrentSettlements = await Promise.all([settle(), settle()]);
+    expect(concurrentSettlements).toContainEqual({ ok: true });
+    for (const result of concurrentSettlements) {
+      if (!result.ok) expect(result.error).toBe("settlement_conflict");
+    }
     await db.withoutTenantScope("platform", () =>
       db.query(
         `UPDATE billing_payments
@@ -196,7 +200,7 @@ describe("quote-driven checkout", () => {
     );
 
     // 4. Fulfilment activates the prepaid term and issues the invoice.
-    await db.withTenant(businessId, () =>
+    const fulfil = () => db.withTenant(businessId, () =>
       billing.fulfilPurchasedPayment({
         id: payment.id,
         businessId,
@@ -205,6 +209,7 @@ describe("quote-driven checkout", () => {
         featureKey: null,
       }),
     );
+    await Promise.all([fulfil(), fulfil()]);
 
     const after = await db.withTenant(businessId, () =>
       wallet.getWallet(businessId),
@@ -221,6 +226,14 @@ describe("quote-driven checkout", () => {
     expect(ledger.rows).toHaveLength(1);
     expect(Number(ledger.rows[0].amount_rial)).toBe(3_531_600);
     expect(ledger.rows[0].direction).toBe("debit");
+
+    const redemptions = await db.withTenant(businessId, () =>
+      db.query<{ status: string }>(
+        `SELECT status FROM billing_coupon_redemptions WHERE business_id = $1 AND quote_id = $2`,
+        [businessId, quoted.quoteId],
+      ),
+    );
+    expect(redemptions.rows).toEqual([{ status: "redeemed" }]);
 
     const subscription = await db.withTenant(businessId, () =>
       subscriptions.getBusinessSubscription(businessId),
