@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { LEARNING_PATH_EVENT_TYPES } from "@/lib/learning-paths";
-import { applyLearningPathEvent, learningPathById, learningPathProgressView, pathsForViewer, type LearningPathEvent } from "@/lib/learning-paths";
-import { learningPathViewerFor } from "@/lib/learning-paths-service";
+import { applyLearningPathEvent, completedTourStepIds, learningPathById, learningPathProgressView, pathsForViewer, type LearningPathEvent } from "@/lib/learning-paths";
+import { completedTourIdsForPaths, learningPathViewerFor } from "@/lib/learning-paths-service";
 import { recordLearningPathEvent } from "@/lib/learning-paths-service";
 
 /**
@@ -26,11 +26,9 @@ export const POST = withTenantScope(
     const viewer = await learningPathViewerFor(
       guard.session.businessId,
       guard.membership.permissions,
+      [path],
     );
-    const visible = pathsForViewer([path], {
-      permissions: viewer.permissions,
-      industry: viewer.industry,
-    });
+    const visible = pathsForViewer([path], viewer);
     if (visible.length === 0) return NextResponse.json({ error: "not_found" }, { status: 404 });
     const tour = visible[0];
 
@@ -51,11 +49,21 @@ export const POST = withTenantScope(
       event = { type } as LearningPathEvent;
     }
 
+    const external = completedTourStepIds(
+      tour,
+      await completedTourIdsForPaths(
+        guard.session.businessId,
+        guard.session.sub,
+        [tour],
+        guard.membership.permissions,
+      ),
+    );
     const result = await recordLearningPathEvent(
       guard.session.businessId,
       guard.session.sub,
       tour,
       event,
+      external,
     );
     if (!result.ok) {
       const status = result.error === "steps_uncompleted" ? 409 : 400;
@@ -66,7 +74,7 @@ export const POST = withTenantScope(
     // tour progress; the path progress row itself only stores what the
     // client has explicitly marked complete.
     return NextResponse.json({
-      progress: learningPathProgressView(tour, result.progress),
+      progress: learningPathProgressView(tour, result.progress, external),
     });
   },
 );

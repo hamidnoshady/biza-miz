@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/auth", () => ({
   requireMember: mocks.requireMember,
+  requirePermission: mocks.requireMember,
   withTenantScope: <A extends unknown[]>(handler: (...args: A) => unknown) => handler,
 }));
 
@@ -84,6 +85,7 @@ describe("POST /api/knowledge/learning-paths/[pathId]/migrate", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ changed: 2, migrated: 4 });
+    expect(mocks.requireMember).toHaveBeenCalledWith(PERMISSIONS.settingsManage);
     expect(mocks.migrateLearningPathProgress).toHaveBeenCalledWith("biz-1", PATH, expect.objectContaining({ id: PATH, version: 2 }));
   });
 });

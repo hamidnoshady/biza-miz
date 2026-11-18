@@ -241,6 +241,18 @@ describe("the coverage audit", () => {
     expect(report.issues).toEqual([]);
     expect(report.advancedPages + report.baselinePages).toBe(KNOWLEDGE_PAGES.length);
     expect(report.pages.every((row) => row.stepCount > 0)).toBe(true);
+    // A registered page can never silently escape coverage: every page has a
+    // tour, and the report distinguishes a real spotlight from a plain
+    // explanation instead of counting both as "covered".
+    expect(report.uncoveredPages).toEqual([]);
+    expect(report.staleTourIds).toEqual([]);
+    expect(report.spotlightPages).toBeGreaterThan(0);
+    expect(report.explanationOnlyPages).toBe(
+      report.pages.filter((row) => !row.hasSpotlight).length,
+    );
+    expect(report.spotlightSteps + report.actionSteps + report.navigateSteps).toBeLessThanOrEqual(
+      report.steps,
+    );
   });
 
   it("reports the authored pages as advanced and the rest as the editorial backlog", () => {
@@ -268,11 +280,11 @@ describe("the coverage audit", () => {
 
   it("counts a published Studio tour as real coverage, not as the baseline", () => {
     const studio = {
-      id: "studio.accounting.orders",
+      id: "studio.accounting.entries",
       version: 2,
-      pageKey: "page:/accounting/orders",
-      route: "/accounting/orders",
-      title: "سفارش‌ها",
+      pageKey: "page:/accounting/entries",
+      route: "/accounting/entries",
+      title: "دفتر روزنامه",
       description: "از استودیو",
       eligibility: {},
       steps: [
@@ -281,7 +293,7 @@ describe("the coverage audit", () => {
       ],
     };
     const withStudio = tourCoverage(TOURS, PAGE_TOUR_REGIONS, [studio]);
-    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/accounting/orders")!;
+    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/accounting/entries")!;
     expect(row.kind).toBe("advanced");
     expect(row.studioTourIds).toEqual([studio.id]);
     expect(row.primaryTourId).toBe(studio.id);

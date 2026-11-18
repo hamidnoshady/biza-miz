@@ -10,8 +10,12 @@
  * `applyLearningPathEvent`).
  */
 import { query, withTenantTransaction } from "./db";
+import { effectiveFeatures } from "./features";
 import { getBusinessIndustry } from "./industry-guard";
-import { applyLearningPathEvent, migrateLearningPathProgress, type LearningPathDefinition, type LearningPathEvent, type LearningPathEventError, type StoredLearningPathProgress } from "./learning-paths";
+import { getInventorySystem } from "./inventory-service";
+import { applyLearningPathEvent, migrateLearningPathProgress, type LearningPathDefinition, type LearningPathEvent, type LearningPathEventError, type StoredLearningPathProgress, learningPathById } from "./learning-paths";
+import { tourProgressView, type TourInventorySystem, type TourViewer } from "./tours";
+import { eligibleTourById, loadTourProgress } from "./tours-service";
 
 type ProgressRow = {
   path_id: string;
@@ -43,16 +47,36 @@ function mapRow(row: ProgressRow): StoredLearningPathProgress {
 }
 
 /**
- * The facts eligibility is decided on, read fresh for this request.
- * Feature flags are not part of learning path eligibility today — only
- * permissions — so no extra query is needed.
+ * The facts eligibility is decided on, read fresh for this request. Feature
+ * flags and the costing system are read only when a path asks about one, the
+ * same laziness `tourViewerFor` applies.
  */
 export async function learningPathViewerFor(
   businessId: string,
   permissions: ReadonlySet<string>,
-): Promise<{ permissions: ReadonlySet<string>; industry: string | null }> {
+  paths: readonly LearningPathDefinition[] = [],
+): Promise<TourViewer> {
   const industry = await getBusinessIndustry(businessId);
-  return { permissions, industry };
+  const needsFeatures = paths.some(
+    (path) =>
+      path.eligibility.features?.length ||
+      path.eligibility.withoutFeatures?.length ||
+      path.steps.some(
+        (step) =>
+          step.eligibility?.features?.length || step.eligibility?.withoutFeatures?.length,
+      ),
+  );
+  const needsInventory = paths.some(
+    (path) =>
+      path.eligibility.inventorySystem ||
+      path.steps.some((step) => step.eligibility?.inventorySystem),
+  );
+  const viewer: TourViewer = { permissions, industry };
+  if (needsFeatures) viewer.features = await effectiveFeatures(businessId);
+  if (needsInventory) {
+    viewer.inventorySystem = (await getInventorySystem(businessId)) as TourInventorySystem;
+  }
+  return viewer;
 }
 
 /** The caller's stored progress for the given paths, keyed by path id. */
@@ -70,6 +94,23 @@ export async function loadLearningPathProgress(
   return new Map(rows.map((row) => [row.path_id, mapRow(row)]));
 }
 
+/** Every member's path progress in this business, grouped by user. */
+export async function loadLearningPathProgressForBusiness(
+  businessId: string,
+): Promise<Map<string, Map<string, StoredLearningPathProgress>>> {
+  const { rows } = await query<ProgressRow & { user_id: string }>(
+    `SELECT ${COLUMNS}, user_id FROM learning_path_progress WHERE business_id = $1`,
+    [businessId],
+  );
+  const byUser = new Map<string, Map<string, StoredLearningPathProgress>>();
+  for (const row of rows) {
+    const map = byUser.get(row.user_id) ?? new Map<string, StoredLearningPathProgress>();
+    map.set(row.path_id, mapRow(row));
+    byUser.set(row.user_id, map);
+  }
+  return byUser;
+}
+
 export type RecordLearningPathEventResult =
   | { ok: true; progress: StoredLearningPathProgress | null }
   | { ok: false; error: LearningPathEventError };
@@ -80,6 +121,7 @@ export async function recordLearningPathEvent(
   userId: string,
   path: LearningPathDefinition,
   event: LearningPathEvent,
+  externallyCompleted: ReadonlySet<string> = new Set(),
 ): Promise<RecordLearningPathEventResult> {
   return withTenantTransaction(businessId, async (client) => {
     await client.query(
@@ -100,7 +142,7 @@ export async function recordLearningPathEvent(
         ? mapRow(row)
         : null;
     const now = new Date().toISOString();
-    const result = applyLearningPathEvent(path, previous, event, now);
+    const result = applyLearningPathEvent(path, previous, event, now, externallyCompleted);
 
     if (!result.ok || result.progress === null) {
       await client.query(
@@ -219,6 +261,12 @@ export async function assignLearningPathToStaff(
   actorId: string,
 ): Promise<boolean> {
   return withTenantTransaction(businessId, async (client) => {
+    // Active member of THIS business only; see `assignTourToStaff`.
+    const member = await client.query<{ id: string }>(
+      `SELECT id FROM users WHERE id = $1 AND business_id = $2 AND is_active = true`,
+      [userId, businessId],
+    );
+    if (member.rows.length === 0) return false;
     const { rows } = await client.query<{ inserted: boolean }>(
       `INSERT INTO learning_path_assignments (business_id, user_id, path_id, assigned_by)
        VALUES ($1, $2, $3, $4)
@@ -272,23 +320,51 @@ export async function listLearningPathAssignments(
 }
 
 /**
+ * Every learning-path assignment in this business, newest first, with the
+ * member's name. `team.manage`-guarded reporting only.
+ */
+export async function listAllLearningPathAssignments(
+  businessId: string,
+): Promise<{ pathId: string; userId: string; fullName: string | null; assignedAt: string }[]> {
+  const { rows } = await query<{
+    path_id: string;
+    user_id: string;
+    full_name: string | null;
+    assigned_at: Date | string;
+  }>(
+    `SELECT a.path_id, a.user_id, u.full_name, a.assigned_at
+       FROM learning_path_assignments a
+       JOIN users u ON u.id = a.user_id
+      WHERE a.business_id = $1
+      ORDER BY a.assigned_at DESC, u.full_name`,
+    [businessId],
+  );
+  return rows.map((row) => ({
+    pathId: row.path_id,
+    userId: row.user_id,
+    fullName: row.full_name,
+    assignedAt: iso(row.assigned_at),
+  }));
+}
+
+/**
  * The learning paths assigned to one staff member, newest assignment first.
  */
 export async function listStaffLearningPathAssignments(
   businessId: string,
   userId: string,
 ): Promise<{ pathId: string; title: string; assignedAt: string }[]> {
-  const { rows } = await query<{ path_id: string; title: string; assigned_at: Date | string }>(
-    `SELECT a.path_id, lp.title, a.assigned_at
+  const { rows } = await query<{ path_id: string; assigned_at: Date | string }>(
+    `SELECT a.path_id, a.assigned_at
        FROM learning_path_assignments a
-       JOIN users u ON u.id = a.user_id
       WHERE a.business_id = $1 AND a.user_id = $2
       ORDER BY a.assigned_at DESC, a.path_id`,
     [businessId, userId],
   );
   return rows.map((row) => ({
     pathId: row.path_id,
-    title: row.title,
+    // Paths are code definitions, not a table to join.
+    title: learningPathById(row.path_id)?.title ?? row.path_id,
     assignedAt: iso(row.assigned_at),
   }));
 }
@@ -307,4 +383,37 @@ export async function isLearningPathAssignedToStaff(
     [businessId, userId, pathId],
   );
   return rows.length > 0;
+}
+
+/**
+ * The tour ids that are completed for this member, restricted to the tours the
+ * given paths actually name. A path's `tour` step is done only when the server's
+ * own tour progress says completed — the client never claims it.
+ */
+export async function completedTourIdsForPaths(
+  businessId: string,
+  userId: string,
+  paths: readonly LearningPathDefinition[],
+  permissions: ReadonlySet<string>,
+): Promise<Set<string>> {
+  const targets = [
+    ...new Set(
+      paths.flatMap((path) =>
+        path.steps.filter((step) => step.kind === "tour").map((step) => step.target),
+      ),
+    ),
+  ];
+  if (targets.length === 0) return new Set();
+  const progress = await loadTourProgress(businessId, userId, targets);
+  const completed = new Set<string>();
+  await Promise.all(
+    targets.map(async (tourId) => {
+      const tour = await eligibleTourById(tourId, businessId, permissions);
+      if (!tour) return;
+      if (tourProgressView(tour, progress.get(tourId) ?? null).status === "completed") {
+        completed.add(tourId);
+      }
+    }),
+  );
+  return completed;
 }

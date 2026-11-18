@@ -11,6 +11,7 @@ import {
   TOURS,
   TOUR_ANCHORS,
   applyTourEvent,
+  firstTourStepOnRoute,
   isTourEligible,
   migrateTourProgress,
   reconcileTourProgress,
@@ -19,6 +20,8 @@ import {
   tourForViewer,
   tourPlayback,
   tourProgressView,
+  tourRoutes,
+  tourStepRoute,
   tourSummary,
   toursForPage,
   toursForViewer,
@@ -696,15 +699,17 @@ describe("tour assignment service functions", () => {
   it("lists staff tour assignments newest first", async () => {
     dbModule.query.mockResolvedValue({
       rows: [
-        { tour_id: "tour-b", title: "Tour B", assigned_at: new Date("2026-02-01T00:00:00Z") },
-        { tour_id: "tour-a", title: "Tour A", assigned_at: new Date("2026-01-01T00:00:00Z") },
+        { tour_id: "tour-b", assigned_at: new Date("2026-02-01T00:00:00Z") },
+        { tour_id: "tour-a", assigned_at: new Date("2026-01-01T00:00:00Z") },
       ],
     });
     const { listStaffTourAssignments } = await import("./tours-service");
     const rows = await listStaffTourAssignments("biz-1", "user-2");
     expect(rows).toHaveLength(2);
     expect(rows[0].tourId).toBe("tour-b");
-    expect(rows[0].title).toBe("Tour B");
+    // Tours are code/console definitions, not a table; an id outside this
+    // build falls back to itself rather than dropping the assignment.
+    expect(rows[0].title).toBe("tour-b");
   });
 
   it("reports whether a staff member is assigned a tour", async () => {
@@ -716,5 +721,137 @@ describe("tour assignment service functions", () => {
     dbModule.query.mockResolvedValue({ rows: [] });
     const no = await isTourAssignedToStaff("biz-1", "tour-a", "user-2");
     expect(no).toBe(false);
+  });
+});
+
+describe("cross-page tours", () => {
+  const crossPage: TourDefinition = {
+    id: "test.cross-page",
+    version: 1,
+    pageKey: "page:/crm/overview",
+    route: "/crm/overview",
+    title: "تور چندصفحه‌ای",
+    description: ".",
+    eligibility: {},
+    steps: [
+      { id: "intro", kind: "explain", title: "شروع", body: "." },
+      {
+        id: "to-directory",
+        kind: "navigate",
+        navigateTo: "/crm/directory",
+        title: "رفتن",
+        body: ".",
+      },
+      { id: "directory", kind: "explain", title: "مشتریان", body: "." },
+      {
+        id: "to-deals",
+        kind: "navigate",
+        navigateTo: "/crm/deals",
+        title: "رفتن",
+        body: ".",
+      },
+      { id: "deals", kind: "explain", title: "فرصت‌ها", body: "." },
+    ],
+  };
+
+  it("knows which page each step belongs to", () => {
+    expect(tourRoutes(crossPage)).toEqual(["/crm/overview", "/crm/directory", "/crm/deals"]);
+    expect(tourStepRoute(crossPage, 0)).toBe("/crm/overview");
+    expect(tourStepRoute(crossPage, 1)).toBe("/crm/overview");
+    expect(tourStepRoute(crossPage, 2)).toBe("/crm/directory");
+    expect(tourStepRoute(crossPage, 3)).toBe("/crm/directory");
+    expect(tourStepRoute(crossPage, 4)).toBe("/crm/deals");
+    expect(firstTourStepOnRoute(crossPage, "/crm/directory")).toBe(2);
+    expect(firstTourStepOnRoute(crossPage, "/crm/deals", 3)).toBe(4);
+  });
+
+  it("is valid, and counts a navigate step as seen like an explanation", () => {
+    expect(validateTours([crossPage])).toEqual([]);
+    const progress = run(
+      [
+        { type: "start" },
+        { type: "step_seen", stepId: "intro" },
+        { type: "step_seen", stepId: "to-directory" },
+        { type: "step_seen", stepId: "directory" },
+        { type: "step_seen", stepId: "to-deals" },
+        { type: "step_seen", stepId: "deals" },
+        { type: "complete" },
+      ],
+      null,
+      crossPage,
+    );
+    expect(progress!.completedAt).not.toBeNull();
+    expect(tourProgressView(crossPage, progress).percent).toBe(100);
+  });
+
+  it("refuses an unregistered destination, an anchor on a hand-off, and an ending hand-off", () => {
+    const unregistered = {
+      ...crossPage,
+      steps: [
+        crossPage.steps[0],
+        { id: "bad", kind: "navigate" as const, navigateTo: "/not/registered", title: "x", body: "." },
+        { id: "after", kind: "explain" as const, title: "x", body: "." },
+      ],
+    };
+    expect(validateTours([unregistered]).join(" ")).toContain("registered destination route");
+
+    const anchored = {
+      ...crossPage,
+      steps: [
+        crossPage.steps[0],
+        {
+          id: "bad",
+          kind: "navigate" as const,
+          navigateTo: "/crm/directory",
+          anchor: TOUR_ANCHORS.pageHeader,
+          title: "x",
+          body: ".",
+        },
+        { id: "after", kind: "explain" as const, title: "x", body: "." },
+      ],
+    };
+    expect(validateTours([anchored]).join(" ")).toContain("must not name an anchor");
+
+    const ending = {
+      ...crossPage,
+      steps: [
+        crossPage.steps[0],
+        { id: "last", kind: "navigate" as const, navigateTo: "/crm/directory", title: "x", body: "." },
+      ],
+    };
+    expect(validateTours([ending]).join(" ")).toContain("cannot end on a navigate step");
+
+    const samePage = {
+      ...crossPage,
+      steps: [
+        crossPage.steps[0],
+        {
+          id: "same",
+          kind: "navigate" as const,
+          navigateTo: "/crm/overview",
+          title: "x",
+          body: ".",
+        },
+        { id: "after", kind: "explain" as const, title: "x", body: "." },
+      ],
+    };
+    expect(validateTours([samePage]).join(" ")).toContain("must move to another page");
+  });
+
+  it("ships the platform and app navigation overviews as real multi-page tours", () => {
+    const overviews = [
+      "platform.learning-overview",
+      "crm.navigation.overview",
+      "growth.navigation.overview",
+      "websites.navigation.overview",
+      "accounting.navigation.overview",
+      "settings.navigation.overview",
+    ];
+    for (const id of overviews) {
+      const tour = tourById(id);
+      expect(tour, id).toBeDefined();
+      expect(tour!.steps.some((step) => step.kind === "navigate")).toBe(true);
+      expect(tourRoutes(tour!).length).toBeGreaterThan(1);
+    }
   });
 });

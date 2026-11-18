@@ -38,6 +38,7 @@ import {
 } from "@/lib/tour-geometry";
 import {
   TOUR_ANCHOR_ATTRIBUTE,
+  tourStepRoute,
   type TourPlayback,
   type TourProgressEvent,
 } from "@/lib/tours";
@@ -83,6 +84,13 @@ export interface TourOverlayProps {
    * when the member's own save navigates away before the poll caught it.
    */
   onStepChange?: (stepId: string) => void;
+  /**
+   * Cross-page hand-off (issue #972): called after the navigate step's
+   * `step_seen` write is accepted, with the destination route and the index of
+   * the step that waits there. The provider owns the router; the overlay never
+   * navigates on its own.
+   */
+  onNavigate?: (route: string, targetIndex: number) => void | Promise<void>;
   onExit: (reason: TourExit) => void;
   /** Where focus goes when the tour ends — the button that started it. */
   returnFocus?: HTMLElement | null;
@@ -117,6 +125,7 @@ export function TourOverlay({
   onEvent,
   onVerify,
   onStepChange,
+  onNavigate,
   onExit,
   returnFocus,
 }: TourOverlayProps) {
@@ -143,6 +152,8 @@ export function TourOverlay({
   // An `action` step may point at a button, but unlike a spotlight it leaves
   // the page interactive — the member has to do the thing themselves.
   const isAction = step.kind === "action" && Boolean(onVerify);
+  const isNavigate = step.kind === "navigate" && Boolean(step.navigateTo);
+  const navigateTarget = isNavigate ? step.navigateTo! : null;
   const actionAnchor = step.kind === "action" && step.anchor ? step.anchor : null;
   const verifier = step.kind === "action" ? tourVerifierDefinition(step.verifier) : null;
   const highlighted = isSpotlight || (isAction && actionAnchor !== null);
@@ -344,6 +355,10 @@ export function TourOverlay({
   // Back or Skip would act on a step the member has not been shown.
   const busyRef = useRef(false);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+
+  /** The route this step and the one before it live on, for Back/Skip. */
+  const routeAt = useCallback((at: number) => tourStepRoute(tour, at), [tour]);
 
   const goNext = useCallback(async () => {
     if (busyRef.current) return;
@@ -354,10 +369,26 @@ export function TourOverlay({
     }
     busyRef.current = true;
     setSaving(true);
+    setSaveError(false);
     try {
       // A verified action was already recorded by the server when it confirmed
       // the evidence; sending `step_seen` for it would be refused.
       const seen = isAction ? true : await onEvent({ type: "step_seen", stepId: step.id });
+      // A cross-page hand-off saves before it moves. A failed write means the
+      // member stays on this page rather than arriving somewhere with progress
+      // the server never received.
+      if (!seen) {
+        setSaveError(true);
+        // The member pressed Finish on the last step: end the walk as
+        // incomplete rather than leaving a card with nowhere to go. Nothing is
+        // reported as completed.
+        if (isLast) onExit("incomplete");
+        return;
+      }
+      if (navigateTarget && onNavigate) {
+        await onNavigate(navigateTarget, Math.min(index + 1, tour.steps.length - 1));
+        return;
+      }
       if (!isLast) {
         setIndex((i) => Math.min(i + 1, tour.steps.length - 1));
         return;
@@ -369,22 +400,48 @@ export function TourOverlay({
       busyRef.current = false;
       setSaving(false);
     }
-  }, [actionState, checkAction, isAction, isLast, onEvent, onExit, step.id, tour.steps.length]);
+  }, [
+    actionState,
+    checkAction,
+    index,
+    isAction,
+    isLast,
+    navigateTarget,
+    onEvent,
+    onExit,
+    onNavigate,
+    step.id,
+    tour.steps.length,
+  ]);
 
   const goBack = useCallback(() => {
-    if (busyRef.current) return;
-    setIndex((i) => Math.max(0, i - 1));
-  }, []);
+    if (busyRef.current || index === 0) return;
+    const previous = index - 1;
+    // Back can cross a page boundary too; the provider routes and reopens the
+    // overlay at the exact step rather than showing a step for another screen.
+    if (routeAt(previous) !== routeAt(index) && onNavigate) {
+      void onNavigate(routeAt(previous), previous);
+      return;
+    }
+    setIndex(previous);
+  }, [index, onNavigate, routeAt]);
 
-  // Skipping is not completing: nothing is recorded for the step.
+  // Skipping is not completing: nothing is recorded for the step. If the next
+  // step belongs to another page, the hand-off still has to happen, so the
+  // member is not stranded on a card pointing at a route they cannot see.
   const skip = useCallback(() => {
     if (busyRef.current) return;
     if (isLast) {
       pauseAndExit();
       return;
     }
-    setIndex((i) => i + 1);
-  }, [isLast, pauseAndExit]);
+    const next = index + 1;
+    if (routeAt(next) !== routeAt(index) && onNavigate) {
+      void onNavigate(routeAt(next), next);
+      return;
+    }
+    setIndex(next);
+  }, [index, isLast, onNavigate, pauseAndExit, routeAt]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -488,6 +545,18 @@ export function TourOverlay({
         <p id={bodyId} className="mt-1.5 leading-6 text-foreground/80">
           {step.body}
         </p>
+        {isNavigate ? (
+          <p className="mt-2 rounded-lg bg-primary/10 px-3 py-2 text-xs leading-5 text-foreground/80">
+            این مرحله شما را به صفحهٔ دیگری از بیزامیز می‌برد. تور همان‌جا ادامه پیدا می‌کند و
+            پیشرفتتان پیش از جابه‌جایی ذخیره می‌شود.
+          </p>
+        ) : null}
+        {saveError ? (
+          <p role="alert" className="mt-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+            پیشرفت این مرحله ذخیره نشد. اتصال را بررسی کنید و دوباره بزنید؛ تا ذخیره نشدن، جابه‌جا
+            نمی‌شویم.
+          </p>
+        ) : null}
         {isAction && verifier ? (
           <p className="mt-2 rounded-lg bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
             {verifier.promise}
@@ -566,9 +635,11 @@ export function TourOverlay({
             >
               {isAction && actionState !== "verified"
                 ? "انجام دادم"
-                : isLast
-                  ? "پایان"
-                  : "بعدی"}
+                : isNavigate
+                  ? "رفتن به بخش بعدی"
+                  : isLast
+                    ? "پایان"
+                    : "بعدی"}
               {isLast || (isAction && actionState !== "verified") ? null : (
                 <ArrowLeftIcon className="size-3.5" aria-hidden="true" />
               )}

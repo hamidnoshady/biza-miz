@@ -343,4 +343,26 @@ describe("verified action evidence", () => {
     );
     expect(result).toEqual({ ok: false, error: "not_verifiable" });
   });
+
+  it("keeps progress in the business that recorded it", async () => {
+    const tour = (await import("../src/lib/tours")).tourById("accounting.products.list")!;
+    await dbLib.withTenantTransaction(businessId, () =>
+      toursService.recordTourEvent(businessId, userId, tour, { type: "start" }),
+    );
+    const own = await dbLib.withTenantTransaction(businessId, () =>
+      toursService.loadTourProgress(businessId, userId, [tour.id]),
+    );
+    expect(own.get(tour.id)?.tourId).toBe(tour.id);
+    const foreign = await dbLib.withTenantTransaction(otherBusinessId, () =>
+      toursService.loadTourProgress(otherBusinessId, userId, [tour.id]),
+    );
+    expect(foreign.size).toBe(0);
+  });
+
+  it("refuses to assign a learning item to a member of another business", async () => {
+    const assigned = await dbLib.withTenantTransaction(otherBusinessId, () =>
+      toursService.assignTourToStaff(otherBusinessId, "accounting.products.list", userId, userId),
+    );
+    expect(assigned).toBe(false);
+  });
 });
