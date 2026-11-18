@@ -146,7 +146,7 @@ export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) 
     const key = runKeys.current.get(a.id) ?? crypto.randomUUID();
     runKeys.current.set(a.id, key);
     setBusyId(a.id);
-    const { ok, status, data } = await api<{ error?: string; run?: { outcome: string } }>(
+    const { ok, data } = await api<{ error?: string; run?: { outcome: string } }>(
       `/api/ai/automations/${a.id}/run`,
       { method: "POST", headers: { "Idempotency-Key": key } },
     );
@@ -154,7 +154,6 @@ export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) 
     if (!ok) {
       // Network and server errors can leave the outcome unknown. Keep the key
       // for the next attempt so a committed action cannot run twice.
-      if (status >= 400 && status < 500) runKeys.current.delete(a.id);
       toast.error(automationErrorMessage(data.error ?? ""));
       return;
     }
