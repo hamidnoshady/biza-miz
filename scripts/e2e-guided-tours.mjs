@@ -371,7 +371,7 @@ try {
   await assertSessionRole(cashier, "cashier", ownerBusinessId);
   await step("an ineligible member is refused the protected tour", async () => {
     const denied = await browserApi(cashier,
-      `${BASE_URL}/api/knowledge/tours/crm.directory.first-customer`,
+      `${BASE_URL}/api/knowledge/tours/accounting.overview.ledger`,
     );
     assert(denied.status() === 404, `expected 404, got ${denied.status()}`);
   });
