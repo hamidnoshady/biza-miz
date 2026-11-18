@@ -65,9 +65,17 @@ installer are `NotSigned`. This is a development artefact, not the signed releas
    `windows-production` environment.
 2. **Full Offline has never been exercised.**
    The harness's Full Offline phase needs `DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL`
-   (repository variable) and `DESKTOP_ACCEPTANCE_OFFLINE_TOKEN` (secret). Both were empty
+   (repository variable) and `DESKTOP_ACCEPTANCE_OFFLINE_TOKEN`. Both were empty
    in run 44277108577 (`DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL:` / `..._TOKEN:` with no
    value), so the phase reported `skipped`. Only the Hybrid path has Windows evidence.
+   The enrollment code is **single-use with a 24-hour TTL**
+   (`LOCAL_ENROLLMENT_CODE_TTL_HOURS`): Cloud stamps `local_enrollment_codes.redeemed_at`
+   on the first successful bootstrap and answers any later attempt with
+   `code_already_redeemed`, and issuing a replacement revokes the unredeemed code for the
+   same branch. A code stored as a repository secret therefore passes exactly one
+   acceptance run and fails every run after it, so both desktop workflows now mint a
+   fresh code per run (`scripts/mint-offline-enrollment-code.mjs`) instead of reading one
+   from a secret.
 3. Independent on-device assessment (recovery, in-place upgrade, retail Windows 11) is the
    `windows-11-release` workflow, which has never run.
 
@@ -80,9 +88,14 @@ installer are `NotSigned`. This is a development artefact, not the signed releas
    --installer="electron/dist/Bizamiz Setup <version>.exe" --output=desktop-release-scan.json
    --require-installer-extraction` and uploads
    `business-suite-windows-<version>-release-scan`.
-2. Set the repository variable `DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL` and the secret
-   `DESKTOP_ACCEPTANCE_OFFLINE_TOKEN` (real staging Cloud) so the Full Offline phase stops
-   reporting `skipped`.
+2. Configure the Full Offline phase against the real staging Cloud so it stops reporting
+   `skipped`: repository variable `DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL` (public HTTPS
+   origin), variable `DESKTOP_ACCEPTANCE_OFFLINE_LOCATION_ID` (the branch to enroll), and
+   secrets `DESKTOP_ACCEPTANCE_OFFLINE_OWNER_EMAIL` / `..._OWNER_PASSWORD` for an owner of
+   that staging business — plus `..._OWNER_TOTP_SECRET` only if that owner has a confirmed
+   second factor. The workflows then mint a single-use code per run with
+   `scripts/mint-offline-enrollment-code.mjs`. Do not store a code as a secret: it would
+   work once and fail with `code_already_redeemed` afterwards.
 3. Trigger `windows-11-release` with `version`, `candidate_commit`, `candidate_run_id`,
    `previous_run_id`, `previous_version`, `previous_artifact` and
    `uac_cancellation_evidence_url`. It re-scans the downloaded signed installer on the

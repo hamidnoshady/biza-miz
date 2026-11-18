@@ -62,9 +62,10 @@ the installed `Bizamiz.exe` with only ordinary user-facing switches
    credentials still sign in — completing the second factor enrolled at
    bootstrap (TOTP or single-use recovery code disclosed once by
    `/api/setup/bootstrap`) — while a wrong password is rejected;
-7. when `DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL` and
-   `DESKTOP_ACCEPTANCE_OFFLINE_TOKEN` are configured (protected repository
-   variable + secret), repeats a first run on a fresh profile in **Full
+7. when `DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL` is configured (protected
+   repository variable) and `DESKTOP_ACCEPTANCE_OFFLINE_TOKEN` is available (a
+   single-use code minted for that run, since a stored one is redeemable
+   only once), repeats a first run on a fresh profile in **Full
    Offline** mode: token preflight, real Cloud enrollment, activation record,
    owner session and a refused second bootstrap. Without that configuration
    the phase reports `skipped` — the harness never substitutes a mock service
