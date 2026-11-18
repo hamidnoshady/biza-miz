@@ -13,7 +13,7 @@
  * for it; nothing here changes how tenants are billed or settled.
  */
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { generateText, isStepCount, jsonSchema, tool, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
+import { createUIMessageStream, createUIMessageStreamResponse, generateText, isStepCount, jsonSchema, streamText, tool, type UIMessage, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
 import type { OpenAiTool } from "./ai";
 
 export interface GatewayModelSettings {
@@ -90,20 +90,30 @@ export interface SdkTurnResult {
  * allowed step can still be a plain answer instead of another tool request.
  */
 export async function runSdkTurn(input: SdkTurnInput): Promise<SdkTurnResult> {
+  const result = await generateText(sdkTurnOptions(input));
+  return summarizeSdkTurn(input, result);
+}
+
+function sdkTurnOptions(input: SdkTurnInput) {
   assertSdkModelIsGatewayBound(input.model);
-  const result = await generateText({
+  return {
     model: input.model,
     system: input.system,
     messages: input.messages,
     tools: input.tools,
     stopWhen: isStepCount(input.maxSteps),
-    // The final allowed step offers no tools, so the turn must end in an answer.
-    prepareStep: ({ stepNumber }) => (stepNumber >= input.maxSteps - 1 ? { activeTools: [] } : undefined),
+    prepareStep: ({ stepNumber }: { stepNumber: number }) => stepNumber >= input.maxSteps - 1 ? { activeTools: [] } : undefined,
     temperature: input.temperature,
     maxOutputTokens: input.maxOutputTokens,
     abortSignal: input.abortSignal,
     maxRetries: 0,
-  });
+  };
+}
+
+function summarizeSdkTurn(
+  input: SdkTurnInput,
+  result: Pick<Awaited<ReturnType<typeof generateText>>, "steps" | "text" | "totalUsage">,
+): SdkTurnResult {
   let costUsd: number | null = null;
   for (const step of result.steps) {
     const raw = step.response?.headers?.["x-litellm-response-cost"];
@@ -118,4 +128,53 @@ export async function runSdkTurn(input: SdkTurnInput): Promise<SdkTurnResult> {
     // Only calls that name a tool this turn actually offered; a hallucinated name is not "used".
     toolsUsed: result.steps.flatMap((step) => step.toolCalls.map((call) => String(call.toolName)).filter((name) => name in input.tools)),
   };
+}
+
+type Diagnostics = Record<string, unknown>;
+type PlaygroundUiMessage = UIMessage<unknown, { diagnostics: Diagnostics; completion: Diagnostics }>;
+
+export function streamSdkTurn(input: SdkTurnInput, handlers: {
+  started: Diagnostics;
+  finished: (result: SdkTurnResult) => Promise<Diagnostics>;
+  failed: (error: unknown) => Promise<string>;
+}): Response {
+  const stream = createUIMessageStream<PlaygroundUiMessage>({
+    async execute({ writer }) {
+      writer.write({ type: "start" });
+      writer.write({ type: "data-diagnostics", data: handlers.started });
+      writer.write({ type: "text-start", id: "answer" });
+      try {
+        let providerError: unknown;
+        const result = streamText({
+          ...sdkTurnOptions(input),
+          onError: ({ error }) => { providerError = error; },
+        });
+        let text = "";
+        for await (const delta of result.textStream) {
+          const visible = delta.slice(0, Math.max(0, 16_000 - text.length));
+          if (!visible) continue;
+          text += visible;
+          writer.write({ type: "text-delta", id: "answer", delta: visible });
+        }
+        if (input.abortSignal?.aborted) throw input.abortSignal.reason;
+        if (providerError) throw providerError;
+        if (!text.trim()) throw new Error("invalid_provider_reply");
+        const summary = summarizeSdkTurn(input, {
+          text, steps: await result.steps, totalUsage: await result.totalUsage,
+        });
+        const diagnostics = await handlers.finished(summary);
+        writer.write({ type: "text-end", id: "answer" });
+        writer.write({ type: "data-completion", data: diagnostics });
+        writer.write({ type: "finish" });
+      } catch (error) {
+        writer.write({ type: "text-end", id: "answer" });
+        writer.write({ type: "error", errorText: await handlers.failed(error) });
+      }
+    },
+    onError: () => "provider_failed",
+  });
+  return createUIMessageStreamResponse({
+    stream,
+    headers: { "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" },
+  });
 }
