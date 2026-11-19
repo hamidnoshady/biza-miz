@@ -283,11 +283,11 @@ describe("the coverage audit", () => {
 
   it("counts a published Studio tour as real coverage, not as the baseline", () => {
     const studio = {
-      id: "studio.accounting.vouchers",
+      id: "studio.accounting.manual",
       version: 2,
-      pageKey: "page:/accounting/vouchers",
-      route: "/accounting/vouchers",
-      title: "اسناد و شماره‌گذاری",
+      pageKey: "page:/accounting/manual",
+      route: "/accounting/manual",
+      title: "ثبت سند دستی",
       description: "از استودیو",
       eligibility: {},
       steps: [
@@ -296,7 +296,7 @@ describe("the coverage audit", () => {
       ],
     };
     const withStudio = tourCoverage(TOURS, PAGE_TOUR_REGIONS, [studio]);
-    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/accounting/vouchers")!;
+    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/accounting/manual")!;
     expect(row.kind).toBe("advanced");
     expect(row.studioTourIds).toEqual([studio.id]);
     expect(row.primaryTourId).toBe(studio.id);
