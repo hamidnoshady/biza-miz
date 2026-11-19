@@ -1913,6 +1913,32 @@ export const TOURS: readonly TourDefinition[] = [  {
     navAnchor: TOUR_ANCHORS.appSectionNav,
     filters: true,
   }),
+  listPageTour({
+    id: "websites.cms.overview",
+    pageKey: "page:/websites/cms",
+    title: "مدیر سایت بیزامیز",
+    description: "محتوای سایت، محصولات، سفارش‌ها و طراحی را از یک مدیر بشناسید.",
+    introTitle: "سایت بیزامیز چیست",
+    introBody:
+      "این مدیر، سایت ساخته‌شده با بیزامیز را اداره می‌کند: صفحه‌ها، نوشته‌ها، رسانه، محصولات و سفارش‌های فروشگاه سایت، طراحی، دامنه و اشتراک. هر تغییر در طراحی یا دامنه روی سایت زنده اثر دارد.",
+    nextBody:
+      "برای شروع، از «صفحه‌ها» یا «نوشته‌ها» محتوای موجود را ببینید. انتشار و تغییر دامنه عملیات واقعی‌اند و تور آن‌ها را انجام نمی‌دهد.",
+    eligibility: {},
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+  }),
+  listPageTour({
+    id: "websites.wp.overview",
+    pageKey: "page:/websites/wp",
+    title: "مدیر وردپرس و ووکامرس",
+    description: "محصولات، سفارش‌ها، محتوا و صف همگام‌سازی وردپرس را بشناسید.",
+    introTitle: "اتصال وردپرس",
+    introBody:
+      "این بخش یک فروشگاه وردپرس/ووکامرس متصل را مدیریت می‌کند: محصولات، سفارش‌ها، مشتریان، دسته‌ها، محتوا و رسانه. صف و رویدادها نشان می‌دهد چه چیزی در انتظار ارسال یا دریافت است.",
+    nextBody:
+      "برای عیب‌یابی، ابتدا وضعیت اتصال را در تنظیمات اتصال‌ها ببینید. همگام‌سازی، حذف یا تغییر محصول یک عملیات واقعی روی فروشگاه است و تور آن را انجام نمی‌دهد.",
+    eligibility: { features: ["integrations"] },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+  }),
 ];
 
 export function tourById(id: string): TourDefinition | undefined {
