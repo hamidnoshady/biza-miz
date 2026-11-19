@@ -119,7 +119,7 @@ describe("GET /api/knowledge/tours", () => {
     expect(body.tours[0]).toMatchObject({
       id: BASELINE_TOUR,
       route: "/crm/audit",
-      stepCount: 4,
+      stepCount: 5,
       progress: { status: "not_started" },
     });
     expect(JSON.stringify(body)).not.toContain("tour-id");
@@ -207,8 +207,10 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.tour.id).toBe(BASELINE_TOUR);
-    expect(body.tour.steps.length).toBe(4);
+    expect(body.tour.steps.length).toBe(5);
     expect(body.progress.status).toBe("not_started");
+    // The baseline's page header is still a real step; the section menu added
+    // by the app-wide region is the extra one.
 
     const shadowed = baselineTourIdForRoute("/accounting/products");
     const refused = await getTour(req(`/api/knowledge/tours/${shadowed}`), ctx(shadowed));
