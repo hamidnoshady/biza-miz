@@ -89,6 +89,77 @@ export const PAGE_TOUR_REGIONS: Readonly<Record<string, readonly PageTourRegion[
   ],
 };
 
+/**
+ * Regions that apply to every page under a route prefix. The sidebar a shell
+ * already draws is the region a navigation overview should point at, and it is
+ * exactly the kind of reusable declaration the owner decision asked for: one
+ * anchor on the owning component, one declaration per app, and every page in
+ * that app gains a truthful spotlight without an entry per page.
+ *
+ * A page-specific entry wins over a prefix (same anchor is described once), and
+ * the wildcard header remains the fallback for pages outside these apps.
+ */
+export const PAGE_TOUR_REGION_PREFIXES: ReadonlyArray<{
+  prefix: string;
+  regions: readonly PageTourRegion[];
+}> = [
+  {
+    prefix: "/accounting",
+    regions: [
+      {
+        anchor: TOUR_ANCHORS.accountingSectionNav,
+        title: "منوی فضای کار حسابداری",
+        body:
+          "از این منو بین بخش‌های حسابداری جابه‌جا می‌شوید: فروش و سفارش‌ها، صندوق، خرید و انبار، محصولات، عملیات و گزارش‌ها. فقط بخش‌هایی که برای نقش و صنف شما مجاز است در این فهرست دیده می‌شود.",
+      },
+    ],
+  },
+  {
+    prefix: "/crm",
+    regions: [
+      {
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی CRM",
+        body:
+          "این منو بخش‌های CRM را نگه می‌دارد: مشتریان، فرصت‌ها، کارها و پیگیری‌ها، تیکت‌ها، بخش‌بندی و کیفیت داده. جایی که هستید با نشانگر انتخاب شده است و بقیه بخش‌ها یک کلیک دورترند.",
+      },
+    ],
+  },
+  {
+    prefix: "/growth",
+    regions: [
+      {
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی رشد و بازاریابی",
+        body:
+          "از این منو به مخاطبان، کمپین‌ها، پیام‌رسانی، کارت هدیه، وفاداری، پورسانت و تنظیمات رشد می‌رسید. آیتم فعال همان صفحه‌ای است که باز کرده‌اید.",
+      },
+    ],
+  },
+  {
+    prefix: "/websites",
+    regions: [
+      {
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی مدیریت وب‌سایت",
+        body:
+          "این منو دو مدیر سایت را کنار هم نگه می‌دارد: سایت بیزامیز (CMS) و وردپرس/ووکامرس. بخش فعال و بخش‌های در دسترس نقش شما همین‌جاست.",
+      },
+    ],
+  },
+  {
+    prefix: "/settings",
+    regions: [
+      {
+        anchor: TOUR_ANCHORS.pageSectionNav,
+        title: "منوی تنظیمات",
+        body:
+          "تنظیمات به بخش‌های جدا تقسیم شده است (کسب‌وکار، تیم، پرداخت، چاپ، اعلان‌ها، اتصال‌ها و…). این منو همان بخش‌ها را جابه‌جا می‌کند و فقط موارد مجاز نقش شما را نشان می‌دهد.",
+      },
+    ],
+  },
+];
+
 /** The stable baseline id for a canonical route: `/accounting/pos` → `baseline.accounting.pos`. */
 export function baselineTourIdForRoute(route: string): string {
   const slug = route
@@ -111,11 +182,20 @@ export function isBaselineTourId(id: string): boolean {
 export function regionsForPage(
   pageKey: string,
   regions: Readonly<Record<string, readonly PageTourRegion[]>> = PAGE_TOUR_REGIONS,
+  prefixes: typeof PAGE_TOUR_REGION_PREFIXES = PAGE_TOUR_REGION_PREFIXES,
 ): PageTourRegion[] {
   const own = regions[pageKey] ?? [];
-  const seen = new Set<string>(own.map((region) => region.anchor));
-  const shared = (regions["*"] ?? []).filter((region) => !seen.has(region.anchor));
-  return [...own, ...shared];
+  const route = pageKey.startsWith("page:") ? pageKey.slice("page:".length) : pageKey;
+  const prefixed = prefixes
+    .filter((rule) => route === rule.prefix || route.startsWith(`${rule.prefix}/`))
+    .flatMap((rule) => rule.regions);
+  const seen = new Set<string>();
+  const ordered = [...own, ...prefixed, ...(regions["*"] ?? [])].filter((region) => {
+    if (seen.has(region.anchor)) return false;
+    seen.add(region.anchor);
+    return true;
+  });
+  return ordered;
 }
 
 /**
@@ -125,8 +205,9 @@ export function regionsForPage(
 export function baselineTourForPage(
   page: KnowledgePage,
   regions: Readonly<Record<string, readonly PageTourRegion[]>> = PAGE_TOUR_REGIONS,
+  prefixes: typeof PAGE_TOUR_REGION_PREFIXES = PAGE_TOUR_REGION_PREFIXES,
 ): TourDefinition {
-  const declared = regionsForPage(page.key, regions);
+  const declared = regionsForPage(page.key, regions, prefixes);
   const steps: TourStep[] = [
     {
       id: "intro",

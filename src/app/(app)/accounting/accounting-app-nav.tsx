@@ -53,7 +53,7 @@ export function AccountingAppNav({
 
   return (
     <SidebarContent className="px-3 py-4">
-      <nav aria-label="منوی حسابداری" className="space-y-3">
+      <nav aria-label="منوی حسابداری" data-tour-id="accounting.section-nav" className="space-y-3">
         <BackToWorkspaceMenu onNavigate={onNavigate} />
 
         {groups.map((group) => {

@@ -10,9 +10,10 @@ The button never leads to a dead end: a page with no authored tour gets an
 (`src/lib/tour-baseline.ts`). That is the owner's 2026-11-06 decision — one
 shared, metadata-driven system rather than a hand-written tour per page.
 
-This document covers what ships and the rules the next slices must keep. The
-epic's remaining phases (hierarchy and learning paths, verified tasks, Learning
-Center, AI discovery, offline progress) are tracked on #972.
+This document covers what ships and the rules the next slices must keep. Cross-page
+tours, the platform/app navigation overviews, the Learning Center, staff
+reporting, contextual recommendations and the offline queue are now part of the
+same system; the remaining editorial and operational work is listed at the end.
 
 ## What ships
 
@@ -32,7 +33,12 @@ Center, AI discovery, offline progress) are tracked on #972.
 | Console API | `GET/POST /api/platform/knowledge/tours`, `GET/POST/DELETE /api/platform/knowledge/tours/[tourId]` |
 | Console UI | «تورهای تعاملی» tab in `/platform/knowledge` (`kb-tours-panel.tsx`) |
 | Runtime | `src/components/tours/tour-provider.tsx` (one, in `DashboardMain`), `tour-overlay.tsx` (lazy) |
+| Cross-page tours | `navigate` step kind in `src/lib/tours.ts`, route resolution in `tourStepRoute`/`tourRoutes`, provider hand-off |
 | Modal | `src/app/dashboard/knowledge-help.tsx` |
+| Learning Center | `/knowledge/learning` (`src/app/dashboard/knowledge/learning-center.tsx`) |
+| Staff learning report | `GET /api/knowledge/learning-assignments` (`team.manage`) |
+| Recommendations | `src/lib/learning-recommendations.ts` (pure), `learning-recommendation-service.ts`, `GET /api/knowledge/recommendations`, assistant tool `recommend_learning` |
+| Offline delivery | `src/lib/tour-progress-queue.ts`, flushed by the provider on open/online |
 | Tours | the catalogue below, in `TOURS`, plus one automatic baseline per registered page |
 
 ## Which pages have a tour
@@ -110,15 +116,19 @@ Rules that make it honest and universal:
   `baseline.accounting.orders`), so a baseline id can never collide with — or be
   mistaken for — a hand-authored one, and progress survives a copy change.
 - **Declared regions, not discovered ones.** `PAGE_TOUR_REGIONS` maps a page key
-  (or `"*"` for every baseline page) to `{ anchor, title, body }`. Today the one
-  shared declaration is `page.header`, the anchor `page-chrome.tsx` now carries
-  on its `PageHeader`; it is a data attribute, no visual change. A page can
-  reword a shared region without showing it twice. `tours.test.ts` already fails
-  when a `data-tour-id` in the source is not registered in `TOUR_ANCHORS`, so a
-  declared region can never point at a selector nobody renders. A page that does
-  not render the shared header (the app shells that draw their own) degrades that
-  step to its explanation after three seconds — the overlay's normal rule — so it
-  is never a stuck highlight.
+  (or `"*"` for every baseline page) to `{ anchor, title, body }`, and
+  `PAGE_TOUR_REGION_PREFIXES` does the same once for a whole app. Today the
+  shared declarations are `page.header` on `PageHeader`, `app.section-nav` on
+  the CRM/Growth/Websites sidebar, `accounting.section-nav` on Accounting's own
+  sidebar, `page.section-nav` on the in-page menu, `page.table` on the shared
+  table frame and `page.filters` on the shared search/filter row — all data
+  attributes, no visual change. That is why 95 of 101 pages now have a real
+  spotlight: one declaration covers every page that renders the same shell. A
+  page can reword a shared region without showing it twice. `tours.test.ts`
+  fails when a `data-tour-id` in the source is not registered in `TOUR_ANCHORS`,
+  so a declared region can never point at a selector nobody renders. A page that
+  does not render a declared region degrades that step to its explanation after
+  three seconds — the overlay's normal rule — so it is never a stuck highlight.
 - **Not an authorization input.** A baseline describes the page's label, group
   and route — metadata that ships in the client bundle (`KNOWLEDGE_PAGES`) — and
   never a control, a figure or a permission-gated instruction. Authored tours
@@ -220,18 +230,146 @@ when `party.created` evidence exists. Its action step points at the shared
 «افزودن مشتری» button (`data-tour-id="parties.add"`), which the store's
 suppliers and the ledger's party file reuse — one button, one anchor.
 
+## Cross-page tours
+
+A tour may now walk across registered pages without a second engine or a global
+store. The contract is one new step kind:
+
+- `kind: "navigate"` with `navigateTo` (a **registered** route). The step is an
+  explanation: it shows one button («رفتن به بخش بعدی») and the card says why the
+  member is leaving. Nothing moves until they press it.
+- Every step after a hand-off belongs to that destination until the next
+  hand-off; `tourStepRoute(tour, index)` is the one definition of where a step
+  lives, and `tourRoutes(tour)` lists the tour's pages. `validateTours` refuses
+  an unregistered destination, an anchor on a hand-off, and a tour that ends on
+  one.
+- **Progress is saved before navigation.** The overlay sends `step_seen` and
+  only calls the provider's router when the server accepted it; a failed write
+  keeps the member on the page with a retry message.
+- **The session survives the route change.** The provider (`tour-provider.tsx`)
+  remembers the hand-off target and reopens the same tour at the exact step on
+  the destination instead of treating the navigation as leaving. Moving to
+  another page of the tour by any route keeps the workflow; leaving every page
+  of it pauses as before.
+- **A refresh resumes.** The active tour and step are kept in `sessionStorage`
+  (`bizamiz.guided-tour.session`); on mount the provider asks the server for the
+  playback again (eligibility is re-checked) and opens the saved step. Pausing
+  or completing clears it.
+- **Back/Skip stay coherent.** Back across a page boundary routes back to the
+  previous step's page; Skip crosses a hand-off without marking anything seen;
+  a completed step is a union on the server, so it can never be counted twice.
+- **Single-page tours are unchanged** — no `navigate` step, no new state, same
+  progress rows.
+
+## Platform and application navigation overviews
+
+Six authored walkthroughs explain where things are and how the apps relate,
+using the same hand-off mechanism:
+
+| Entry page | Tour | Route(s) |
+|---|---|---|
+| `/workspace` | `platform.learning-overview` | `/workspace` → `/knowledge` |
+| `/accounting/orders` | `accounting.navigation.overview` | `/accounting/orders` → `/accounting/pos` → `/accounting/products` |
+| `/crm/overview` | `crm.navigation.overview` | `/crm/overview` → `/crm/directory` |
+| `/growth/overview` | `growth.navigation.overview` | `/growth/overview` → `/growth/campaigns` → `/growth/loyalty` |
+| `/websites/overview` | `websites.navigation.overview` | `/websites/overview` → `/websites/cms` → `/websites/wp` (the WordPress leg is gated on `integrations`) |
+| `/settings` | `settings.navigation.overview` | `/settings` → `/settings/connections` (gated on `settings.manage`) |
+
+They describe only the modules the member is eligible for: a step (and the
+hand-off that leads to it) is filtered out for an ineligible viewer, so the
+tour never promises a screen they cannot open. The `/knowledge` page itself is
+now a registered page with the same Knowledge button, and links to
+`/knowledge/learning`.
+
+## Learning Center
+
+`/knowledge/learning` is a child of the existing centre, not a second help
+product. It renders the server's one aggregate
+(`GET /api/knowledge/learning-progress`) and the curated paths:
+
+- platform percentage, per-app and per-section progress (deduplicated over
+  eligible content, never averaged);
+- resume the last incomplete tour, or the next lesson;
+- each path with its real steps: a `tour` step starts through the existing
+  runtime; an `article` step links to the guide and can be acknowledged as read;
+  a `page` step links to the route. A `tour` step **cannot** be claimed by the
+  client — `POST …/progress` answers `step_not_completable`; it completes only
+  when that tour's own server progress says completed
+  (`completedTourStepIds`/`completedTourIdsForPaths`).
+- members with `team.manage` additionally see `GET
+  /api/knowledge/learning-assignments`: who was assigned which tour or path,
+  their state, percentage and last activity. The endpoint joins the member's
+  name and learning state only, under RLS and an explicit business predicate.
+
+## Contextual recommendations
+
+`recommendLearningRecommendations` ranks **existing** tours and paths:
+deterministic, permission-filtered, never inventing an id and never starting
+anything. It prefers the current page, then in-progress work, then a starter
+path, excluding completed and empty items. The server function caches its feed
+per member and page for 60 seconds, so it is not recomputed on every render and
+never calls a model in a render path.
+
+Two consumers share it:
+
+- the Learning Center's «پیشنهاد برای شما» strip, where the member presses the
+  start button themselves;
+- the assistant's `recommend_learning` tool. The model may name a tour or path
+  and explain why, but the user still starts it from the existing button; the
+  model never navigates, clicks or claims completion.
+
+## Offline and Hybrid progress
+
+Progress events are a monotone union on the server, so delivery only needs to be
+at-least-once. The provider queues client-legitimate events (`start`,
+`step_seen`, `pause`, `complete`, `reset`) in
+`src/lib/tour-progress-queue.ts` when the request fails or the server answers
+5xx/429, and flushes them in order when a tour opens or the browser goes online.
+
+- **Nothing sensitive is stored**: a tour id, an event name, a step id and an
+  opaque per-member key — no customer, amount, form value or free text.
+- **Identity is enforced**: the key is a server-issued hash of (business,
+  member). A queue belonging to another viewer is discarded, and an auth
+  failure clears it instead of replaying it into the next session.
+- **Duplicates are harmless and bounded**: identical events are stored once, a
+  `reset` drops earlier events for that tour, and the queue is capped.
+- **A queued `complete` is not a finished tour.** The overlay still reports
+  "incomplete" until the server accepts completion; the replay then finishes
+  it. `verified` is never queued (it is server-raised only).
+- **Hybrid**: `/knowledge` is a cloud-pane route, so its writes already go to
+  the cloud origin; this queue covers a local page that loses connectivity. It
+  deliberately does **not** ride the business `sync_events` outbox, which is
+  location-scoped operational data (orders, stock) and has a different
+  authorization shape.
+
 ## Coverage audit
 
 `tourCoverage()` (pure) lists **every** registered page exactly once with
-`advanced` or `baseline`, its primary tour, step count, spotlight count and the
-anchors it points at, plus contract problems: an anchor nobody registers, a
-region for a page that does not exist, an authored tour attached to an
-unregistered page, a duplicate or colliding id. `npm run tours:audit` prints it
-(grouped like the console, `--json`, `--check` exits non-zero on a contract
-problem) and `tour-baseline.test.ts` asserts the same report is clean, so CI
-catches an anchor contract break without a browser. It distinguishes **content
-coverage** (this report) from **learning progress** (`tour_member_progress`)
-and from **business setup readiness** (`setup.progress`) on purpose.
+`advanced` or `baseline`, its primary tour, step count, spotlight count, action
+and hand-off counts and the anchors it points at. It separates:
+
+- **spotlight coverage** — pages whose own tour points at a region other than
+  the universal `page.header`;
+- **explanation-only coverage** — pages that still rely on a baseline or a
+  header-only spotlight (the editorial backlog);
+- **contract problems** — an anchor nobody registers, a region for a page that
+  does not exist, an authored tour attached to an unregistered page, a
+  duplicate or colliding id;
+- **uncovered pages** and **stale tours**, listed explicitly rather than hidden.
+
+`npm run tours:audit` prints the report (grouped like the console, `--json`,
+`--check` exits non-zero on a contract problem or an uncovered page) and
+`tour-baseline.test.ts` asserts the live registry is clean, so CI catches a new
+page that escaped baseline coverage or an anchor contract break without a
+browser. Current figures on this commit: **101 registered pages, 18 advanced,
+83 baseline, 23 authored tours, 554 offered steps** (225 spotlight steps, 5
+verified actions, 9 hand-offs), **95 pages with a page-specific spotlight, 6
+header-only/explanation-only pages, 0 uncovered pages, 0 stale tours, 0 contract
+problems**. The five app groups now derive a real section-navigation spotlight
+from one prefix declaration, so every page in Accounting, CRM, Growth, Websites
+and Settings points at the menu it actually uses. It distinguishes **content coverage** (this report) from **learning
+progress** (`tour_member_progress`) and from **business setup readiness**
+(`setup.progress`) on purpose.
 
 ## Eligibility, in one place
 
@@ -310,17 +448,25 @@ instead of trapping the member.
 - **The article never depends on the tour.** The modal fetches the tour list in
   a separate request; its failure leaves the article exactly as it was.
 
-## Not in this slice
+## Remaining known limitations
 
-Rich Studio features beyond authoring and publishing: reusable templates, a
-live in-panel preview, conditional branches, and the parts of the coverage report
-that need editorial data (stale published article, last validation, per-page
-abandonment). Also: eligibility **rules** the API already accepts but the panel
-does not yet expose (`anyOf`, feature flags, `withoutPermissions`), cross-page
-tours and learning paths, further verified actions (payments, stock receipts,
-role changes — each needs its own reviewer-approved success point), offline progress
-queueing, the Learning Center, staff assignments and reports, the AI discovery
-tool, Hybrid cloud-pane handling (the overlay runs in the page that
-renders it; across the pane's origin boundary a route-based explanation is the
-fallback), and per-tenant analytics. Each needs its own design decision on the
-epic.
+- **Editorial coverage**: 83 pages still rely on their automatic baseline. Most
+  now spotlight the real section menu their shell draws (95 of 101 pages have a
+  page-specific spotlight); 6 remain header-only. Turning the baselines into
+  step-by-step workflow tours is ongoing editorial work, not a code gap.
+- **Tour Studio** authors explanations, spotlights, verified actions and
+  hand-offs, but not reusable templates or conditional branches; a live
+  in-panel preview is still a deployment-and-review step. Eligibility rules the
+  API accepts (`anyOf`, feature flags, `withoutPermissions`) are not yet exposed
+  by the panel.
+- **Further verified actions** (payments, stock receipts, role changes) each
+  need their own reviewer-approved server success point.
+- **Hybrid origin boundary**: the overlay runs in the page that renders it.
+  Across the cloud pane's origin boundary a route-based explanation is the
+  fallback; there is no cross-origin DOM access.
+- **Per-tenant analytics** now exists at `GET /api/knowledge/learning-analytics`
+  and in the Learning Center for `team.manage` (starts, completions,
+  abandonment, completion rate and the most common stuck step). It is aggregate
+  by design; it does not expose member names or business payloads.
+- The queue covers connectivity loss on a local page; it is not a general
+  business-data outbox and does not sync a tenant's operational records.

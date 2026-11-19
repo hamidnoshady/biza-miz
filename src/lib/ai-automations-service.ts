@@ -696,6 +696,47 @@ export async function runAutomationNow(
   });
 }
 
+type ManualRun =
+  | { ok: true; run: { runId: string; outcome: AutomationRunOutcome | "running" } }
+  | { ok: false; error: "not_found" | "automation_disabled" | "owner_required" };
+
+/** Runs the exact automation snapshot whose approval mode the member may trigger. */
+export async function runAutomationForMember(input: {
+  businessId: string;
+  automationId: string;
+  actorUserId: string;
+  isOwner: boolean;
+  requestKey: string | null;
+}): Promise<ManualRun> {
+  const automation = await getAutomation(input.businessId, input.automationId);
+  if (!automation) return { ok: false, error: "not_found" };
+  if (!automation.enabled) return { ok: false, error: "automation_disabled" };
+  if (automation.approvalMode === "auto" && !input.isOwner) {
+    return { ok: false, error: "owner_required" };
+  }
+
+  const now = new Date();
+  const dedupeKey = input.requestKey
+    ? `manual-request:${input.actorUserId}:${input.requestKey}`
+    : dedupeKeyForManual(now);
+  const run = await fireAutomation({
+    businessId: input.businessId, automation, triggerSource: "manual", dedupeKey, now,
+  });
+  if (run) return { ok: true, run };
+
+  // The existing unique run claim already has an owner. Never execute it again
+  // or report its initial database status as a completed outcome.
+  const { rows } = await query<{ id: string; status: AutomationRunOutcome; finished_at: Date | null }>(
+    `SELECT id, status, finished_at FROM ai_automation_runs
+      WHERE business_id = $1 AND automation_id = $2 AND dedupe_key = $3`,
+    [input.businessId, input.automationId, dedupeKey],
+  );
+  const prior = rows[0];
+  return prior
+    ? { ok: true, run: { runId: prior.id, outcome: prior.finished_at ? prior.status : "running" } }
+    : { ok: false, error: "not_found" };
+}
+
 /**
  * The tick for one business, riding the proactive enumeration exactly as the
  * coworker and autopilot do (one tenant walk, not three). Fires every enabled

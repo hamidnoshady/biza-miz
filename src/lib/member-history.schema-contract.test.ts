@@ -107,6 +107,10 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'data_mapping_templates.created_by': 'data-transfer tooling',
   'data_scheduled_exports.created_by': 'data-transfer tooling',
   'desktop_login_codes.user_id': 'sign-in security',
+  // Issue #1115 §A.3 — browser enrollment: the approving member is a device
+  // decision on the pairing/credential plane, like desktop_login_codes above,
+  // not an authored business record that must keep its name after a delete.
+  'desktop_enrollment_requests.approved_by': 'device enrollment decision',
   'employees.id': 'employee identity row is the membership identity (0042)',
   'financial_accounts.archived_by': 'financial account configuration (movement lives in financial_transfers)',
   'financial_accounts.created_by': 'financial account configuration (movement lives in financial_transfers)',

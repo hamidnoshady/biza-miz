@@ -101,7 +101,7 @@ describe("automatic baseline tours", () => {
   });
 
   it("describes only what metadata can prove, and highlights only declared regions", () => {
-    const bare = baselineTourForPage(NEW_PAGE, {});
+    const bare = baselineTourForPage(NEW_PAGE, {}, []);
     expect(bare.steps.some((step) => step.kind === "spotlight")).toBe(false);
     expect(bare.steps[0].kind).toBe("explain");
     for (const step of bare.steps) {
@@ -119,7 +119,7 @@ describe("automatic baseline tours", () => {
       "*": [{ anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحه", body: "شرح" }],
       [NEW_PAGE.key]: [{ anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحهٔ این صفحه", body: "شرح" }],
     };
-    const tour = baselineTourForPage(NEW_PAGE, regions);
+    const tour = baselineTourForPage(NEW_PAGE, regions, []);
     const spotlights = tour.steps.filter((step) => step.kind === "spotlight");
     expect(spotlights).toHaveLength(1);
     expect(spotlights[0]).toMatchObject({ anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحهٔ این صفحه" });
@@ -127,8 +127,11 @@ describe("automatic baseline tours", () => {
     for (const step of tour.steps) {
       if (step.anchor) expect(registered.has(step.anchor), step.id).toBe(true);
     }
-    // The shared region applies to every page without repeating per page.
+    // The shared region applies to every page without repeating per page, and
+    // an app whose shell already draws a sidebar gets that sidebar as a real
+    // region from its one prefix declaration.
     expect(regionsForPage("page:/crm/audit").map((region) => region.anchor)).toEqual([
+      TOUR_ANCHORS.appSectionNav,
       TOUR_ANCHORS.pageHeader,
     ]);
   });
@@ -241,6 +244,18 @@ describe("the coverage audit", () => {
     expect(report.issues).toEqual([]);
     expect(report.advancedPages + report.baselinePages).toBe(KNOWLEDGE_PAGES.length);
     expect(report.pages.every((row) => row.stepCount > 0)).toBe(true);
+    // A registered page can never silently escape coverage: every page has a
+    // tour, and the report distinguishes a real spotlight from a plain
+    // explanation instead of counting both as "covered".
+    expect(report.uncoveredPages).toEqual([]);
+    expect(report.staleTourIds).toEqual([]);
+    expect(report.spotlightPages).toBeGreaterThan(0);
+    expect(report.explanationOnlyPages).toBe(
+      report.pages.filter((row) => !row.hasSpotlight).length,
+    );
+    expect(report.spotlightSteps + report.actionSteps + report.navigateSteps).toBeLessThanOrEqual(
+      report.steps,
+    );
   });
 
   it("reports the authored pages as advanced and the rest as the editorial backlog", () => {
@@ -268,11 +283,11 @@ describe("the coverage audit", () => {
 
   it("counts a published Studio tour as real coverage, not as the baseline", () => {
     const studio = {
-      id: "studio.accounting.orders",
+      id: "studio.accounting.entries",
       version: 2,
-      pageKey: "page:/accounting/orders",
-      route: "/accounting/orders",
-      title: "سفارش‌ها",
+      pageKey: "page:/accounting/entries",
+      route: "/accounting/entries",
+      title: "دفتر روزنامه",
       description: "از استودیو",
       eligibility: {},
       steps: [
@@ -281,7 +296,7 @@ describe("the coverage audit", () => {
       ],
     };
     const withStudio = tourCoverage(TOURS, PAGE_TOUR_REGIONS, [studio]);
-    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/accounting/orders")!;
+    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/accounting/entries")!;
     expect(row.kind).toBe("advanced");
     expect(row.studioTourIds).toEqual([studio.id]);
     expect(row.primaryTourId).toBe(studio.id);

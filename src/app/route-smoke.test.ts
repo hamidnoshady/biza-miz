@@ -142,6 +142,7 @@ const JOURNEY: readonly string[] = [
   // — asserted among the legacy redirects below instead.
   "/media",
   "/knowledge",
+  "/knowledge/learning",
   "/support",
 ];
 

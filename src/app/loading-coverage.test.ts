@@ -36,6 +36,7 @@ const BOUNDARIES = [
   { path: "(app)/settings/loading.tsx", primitive: "FormPageSkeleton" },
   { path: "(app)/media/loading.tsx", primitive: "TablePageSkeleton" },
   { path: "(app)/knowledge/loading.tsx", primitive: "TablePageSkeleton" },
+  { path: "(app)/knowledge/learning/loading.tsx", primitive: "TablePageSkeleton" },
   { path: "(app)/support/loading.tsx", primitive: "TablePageSkeleton" },
   { path: "(app)/websites/loading.tsx", primitive: "TablePageSkeleton" },
   // A route one level deeper than its realm, overriding the realm's own

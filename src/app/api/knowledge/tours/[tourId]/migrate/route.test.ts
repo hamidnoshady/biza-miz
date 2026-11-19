@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/auth", () => ({
   requireMember: mocks.requireMember,
+  requirePermission: mocks.requireMember,
   withTenantScope: <A extends unknown[]>(handler: (...args: A) => unknown) => handler,
 }));
 
@@ -78,6 +79,7 @@ describe("POST /api/knowledge/tours/[tourId]/migrate", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ changed: 3, migrated: 5 });
+    expect(mocks.requireMember).toHaveBeenCalledWith(PERMISSIONS.settingsManage);
     expect(mocks.eligibleTourById).toHaveBeenCalledWith(TOUR, "biz-1", expect.any(Set));
     expect(mocks.migrateTourProgress).toHaveBeenCalledWith("biz-1", TOUR, expect.objectContaining({ id: TOUR, version: 2 }));
   });

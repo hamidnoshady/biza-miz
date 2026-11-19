@@ -67,6 +67,8 @@ describe("System One decision provider", () => {
   it("does not send invalid, oversized, unconfigured or pre-aborted requests", async () => {
     const send = vi.fn();
     vi.stubGlobal("fetch", send);
+    // 4,100 Persian characters: inside the 8,192-character cap but 8,200 UTF-8
+    // bytes, so it is the byte limit that rejects this state, not the length.
     expect(await evaluateSystemOne({ ...request, state: "\u0634".repeat(4_100) }, config)).toMatchObject({ reason: "invalid_request" });
     expect(await evaluateSystemOne({ ...request, questions: {} }, config)).toMatchObject({ reason: "invalid_request" });
     expect(await evaluateSystemOne(request, { ...config, apiKey: "" })).toMatchObject({ reason: "not_configured" });

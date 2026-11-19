@@ -32,7 +32,7 @@
  * import this same module as the server route does.
  */
 import { INDUSTRIES, type Industry } from "./industries";
-import { knowledgePage } from "./knowledge-base";
+import { KNOWLEDGE_PAGES, knowledgePage } from "./knowledge-base";
 import { PERMISSIONS, type Permission } from "./permissions";
 import { TOUR_VERIFIER_KEYS, isTourVerifier, type TourVerifier } from "./tour-verifiers";
 import {
@@ -275,7 +275,7 @@ function parseEligibility(raw: unknown, path: string): { ok: true; value: TourEl
   return { ok: true, value: value as TourEligibility };
 }
 
-function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourInvalid {
+function parseSteps(raw: unknown, pageRoute: string): { ok: true; steps: TourStep[] } | StudioTourInvalid {
   if (!Array.isArray(raw) || raw.length === 0) {
     return invalid("invalid_steps", "a tour needs at least one step");
   }
@@ -285,6 +285,7 @@ function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourI
 
   const steps: TourStep[] = [];
   const ids = new Set<string>();
+  let currentRoute = pageRoute;
   for (const [index, entry] of raw.entries()) {
     const at = `step ${index + 1}`;
     if (!isRecord(entry)) return invalid("invalid_steps", `${at}: must be an object`);
@@ -295,8 +296,8 @@ function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourI
     ids.add(id);
 
     const kind = entry.kind;
-    if (kind !== "explain" && kind !== "spotlight" && kind !== "action") {
-      return invalid("invalid_steps", `${at}: kind must be explain, spotlight or action`);
+    if (kind !== "explain" && kind !== "spotlight" && kind !== "action" && kind !== "navigate") {
+      return invalid("invalid_steps", `${at}: kind must be explain, spotlight, action or navigate`);
     }
 
     const title = text(entry.title);
@@ -313,7 +314,26 @@ function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourI
     // evidence, so it names a whitelisted verifier instead of an anchor. The
     // anchor is optional (the button to press); when given it must be real.
     let verifier: TourVerifier | undefined;
-    if (kind === "action") {
+    let navigateTo: string | undefined;
+    if (kind === "navigate") {
+      const target = text(entry.navigateTo);
+      if (!target || !KNOWLEDGE_PAGES.some((page) => page.route === target)) {
+        return invalid("invalid_steps", `${at}: a navigate step needs a registered destination route`);
+      }
+      // A hand-off to the page the member is already on would never trigger a
+      // route change, so the overlay could not advance. Refuse it at authoring.
+      if (target === currentRoute) {
+        return invalid("invalid_steps", `${at}: a navigate step must move to another page`);
+      }
+      currentRoute = target;
+      if (index === raw.length - 1) {
+        return invalid("invalid_steps", `${at}: a tour cannot end on a navigate step`);
+      }
+      navigateTo = target;
+      if (text(entry.anchor)) {
+        return invalid("invalid_steps", `${at}: a navigate step must not name an anchor`);
+      }
+    } else if (kind === "action") {
       const rawVerifier = text(entry.verifier);
       if (!isTourVerifier(rawVerifier)) {
         return invalid(
@@ -360,6 +380,7 @@ function parseSteps(raw: unknown): { ok: true; steps: TourStep[] } | StudioTourI
       title,
       body,
       ...(verifier ? { verifier } : {}),
+      ...(navigateTo ? { navigateTo } : {}),
       ...(Object.keys(eligibility.value).length > 0 ? { eligibility: eligibility.value } : {}),
     });
   }
@@ -416,7 +437,7 @@ export function parseStudioTourInput(body: unknown): StudioTourParseResult {
     return invalid("invalid_description", `the description is longer than ${STUDIO_DESCRIPTION_MAX} characters`);
   }
 
-  const steps = parseSteps(body.steps);
+  const steps = parseSteps(body.steps, page.route);
   if (!steps.ok) return steps;
 
   const eligibility = parseEligibility(body.eligibility, "eligibility");

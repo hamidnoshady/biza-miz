@@ -169,6 +169,7 @@ export function DataTable({
     : injectMobileDataLabels(children);
   return (
     <div
+      data-tour-id="page.table"
       className={cn(
         frame ? "overflow-hidden rounded-xl border border-border/80" : "min-w-0",
         className,

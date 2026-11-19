@@ -189,6 +189,8 @@ export interface ResolveSystemPromptInput extends PromptContext {
   taskContext?: string | null;
   /** Set false for turns that must not read durable memory (platform realm). */
   loadMemory?: boolean;
+  /** Latest user text, used only to rank the current turn's authorized memory. */
+  memoryQuery?: string;
 }
 
 export interface ResolvedSystemPrompt {
@@ -260,7 +262,7 @@ async function composeSystemPrompt(
       appKey: input.appKey ?? null,
       projectId: input.projectId ?? null,
     });
-    memoryBlock = renderMemoryForPrompt(layers);
+    memoryBlock = renderMemoryForPrompt(layers, input.memoryQuery);
     for (const scope of ["platform", "tenant", "app", "project"] as const) {
       if (layers[scope].length > 0) memoryScopes.push(scope);
     }

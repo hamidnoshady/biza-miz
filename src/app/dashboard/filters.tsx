@@ -90,6 +90,7 @@ export function FilterChipRow({
   return (
     <div
       role="group"
+      data-tour-id="page.filters"
       aria-label={label}
       className={cn("flex flex-wrap items-center gap-2", className)}
     >
@@ -126,7 +127,7 @@ export function SearchField({
 }) {
   const clear = onClear ?? (() => onChange(""));
   return (
-    <div className={cn("relative min-w-0", className)}>
+    <div data-tour-id="page.filters" className={cn("relative min-w-0", className)}>
       <SearchIcon
         aria-hidden="true"
         className="pointer-events-none absolute inset-y-0 start-3 my-auto size-4 text-muted-foreground"

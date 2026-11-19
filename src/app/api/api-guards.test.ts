@@ -255,6 +255,23 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "first-run only — probes whether a typed address reaches a POS server at all, so a wrong " +
     "address is separable from a wrong code before the one-time code is spent; refuses with 409 " +
     "as soon as any user exists, exactly like setup/pair itself",
+  // Issue #1115 §A.3 — browser enrollment of an unpaired Hybrid install. The
+  // app has no session and no code: it registers a reservation it alone can
+  // use and polls it with that secret.
+  "setup/enroll":
+    "first-run only — registers this install's device-secret hash with the Cloud and answers the " +
+    "browser page to open; refuses with 409 as soon as any user exists, exactly like setup/pair",
+  "setup/enroll/poll":
+    "first-run only — forwards the device secret to the fixed /api/desktop-enroll/poll path on the " +
+    "address the owner typed; refuses with 409 as soon as any user exists",
+  "desktop-enroll/start":
+    "browser-enrollment reservation (issue #1115 §A.3) — the caller is an unpaired install with no " +
+    "session; the business comes from the serving origin, never the body, and the returned row is " +
+    "usable only with the device secret whose hash was registered",
+  "desktop-enroll/poll":
+    "browser-enrollment poll (issue #1115 §A.3) — the device secret authenticates it; every answer " +
+    "for a wrong or missing secret is `not_found`, and only `approved` carries the sealed one-time " +
+    "pairing code",
   "pairing/redeem":
     "the host-neutral twin of platform/pairing/redeem, session-less for the identical reason — " +
     "it exists because middleware moves everything under /api/platform to the console's host, " +

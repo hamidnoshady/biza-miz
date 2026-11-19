@@ -464,9 +464,11 @@ jobs:
         # screen races a webpack build and the shot can catch a half-rendered
         # page. This fixture covers Cloud applications, so its runtime role is
         # explicit rather than inheriting site-role inference from a loopback
-        # test host. `BIND_ADDR` remains explicit for deterministic binding.
+        # test host. The shared screenshot and accessibility fixture drives
+        # one tenant in quick succession, so use the media E2E job's local limit.
         run: |
           BIND_ADDR=127.0.0.1 PORT=3000 DEPLOYMENT_ROLE=central \
+          BUSINESS_API_LIMIT=3000 \
           DATABASE_URL=postgres://pos_app:ci-only-app-role-password@127.0.0.1:55432/pos \
           npm run start > server.log 2>&1 &
           for i in $(seq 1 60); do
@@ -630,6 +632,14 @@ jobs:
           exit 1
       - name: CRM Today customer-link E2E (desktop and mobile)
         run: npm run test:e2e:crm-queue-links
+      - name: Guided tours E2E (authenticated, desktop + mobile, cross-page)
+        run: npm run test:e2e:guided-tours
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: guided-tours-failure
+          path: .cache/guided-tours/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

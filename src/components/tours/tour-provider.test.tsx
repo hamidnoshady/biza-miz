@@ -9,10 +9,15 @@ import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.fn();
-vi.mock("next/navigation", () => ({ usePathname: () => "/accounting/products" }));
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/accounting/products",
+  useRouter: () => ({ push: vi.fn() }),
+}));
 vi.mock("@/app/dashboard/ui", () => ({ api: (...args: unknown[]) => api(...args) }));
 vi.mock("next/dynamic", () => ({ default: () => () => null }));
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), message: vi.fn(), error: vi.fn() } }));
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), message: vi.fn(), error: vi.fn(), info: vi.fn() },
+}));
 
 import { TourProvider, useTourRuntime } from "./tour-provider";
 

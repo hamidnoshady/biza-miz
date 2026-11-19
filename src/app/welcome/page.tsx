@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { FormLoadingSkeleton } from "@/components/form-loading-skeleton";
 import { cardClass } from "@/app/dashboard/page-chrome";
+import { CloudEnrollForm } from "./cloud-enroll-form";
 import { ModeChoice } from "./mode-choice";
 import { PairForm } from "./pair-form";
 import { UploadRestorePanel } from "@/app/dashboard/backup/backup-manager";
@@ -15,7 +16,7 @@ import {
 } from "@/lib/industries";
 import { classifyLocalEnrollmentCode } from "@/lib/connection-code";
 
-type Stage = "choosing" | "local" | "connecting" | "restoring";
+type Stage = "choosing" | "local" | "connecting" | "manual" | "restoring";
 
 /**
  * First-run page. On a completely empty database it asks how this install
@@ -95,7 +96,13 @@ export default function WelcomePage() {
           <LocalBootstrapForm onBack={() => setStage("choosing")} />
         ) : null}
         {stage === "connecting" ? (
-          <PairForm onBack={() => setStage("choosing")} />
+          <CloudEnrollForm
+            onBack={() => setStage("choosing")}
+            onUsePairingCode={() => setStage("manual")}
+          />
+        ) : null}
+        {stage === "manual" ? (
+          <PairForm onBack={() => setStage("connecting")} />
         ) : null}
         {stage === "restoring" ? (
           <RestoreFromFileForm onBack={() => setStage("choosing")} />

@@ -1170,7 +1170,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "knowledge.tours",
     module: "Knowledge base",
     entity: "Guided tours — lookup and the caller's own learning progress (issue #972)",
-    routes: ["knowledge/tours", "knowledge/learning-progress", "knowledge/tours/[tourId]/assignments"],
+    routes: ["knowledge/tours", "knowledge/tours/session", "knowledge/learning-progress", "knowledge/recommendations", "knowledge/tours/[tourId]/assignments"],
     note: "a member's own walk-through state on the page they are looking at, written only by the browser overlay; aggregate tour + learning-path progress across apps plus current device pairing/trust state; staff can assign a tour to a team member (issue #972 item 9); it moves no business data, so an AI client has nothing to operate",
     status: "n/a (infra)",
     test: "integration/tours.integration.test.ts + src/app/api/knowledge/learning-progress/route.test.ts + src/app/api/knowledge/tours/[tourId]/assignments/route.test.ts",
@@ -1179,7 +1179,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "knowledge.learning-paths",
     module: "Knowledge base",
     entity: "Learning paths — curated step sequences and the member's completion progress (issue #972 item 3)",
-    routes: ["knowledge/learning-paths", "knowledge/learning-paths/[pathId]/assignments"],
+    routes: ["knowledge/learning-paths", "knowledge/learning-assignments", "knowledge/learning-analytics", "knowledge/learning-paths/[pathId]/assignments"],
     note: "a member's own completion state for curated learning steps; a path's tour steps are confirmed through tour progress, article and page steps through the member's own mark-complete event; staff can assign a path to a team member (issue #972 item 9) — no business data moves, so an AI client has nothing to operate",
     status: "n/a (infra)",
     test: "src/app/api/knowledge/learning-paths/route.test.ts + src/app/api/knowledge/learning-paths/[pathId]/assignments/route.test.ts",
@@ -1331,8 +1331,8 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
   {
     id: "misc.sync-infra",
     module: "Cross-cutting",
-    entity: "server-sync, sync, peer, pairing, v1, desktop releases/update, mcp management APIs",
-    routes: ["server-sync", "sync", "peer", "pairing", "local-activation", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/preferences", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
+    entity: "server-sync, sync, peer, pairing, browser desktop enrollment, v1, desktop releases/update, mcp management APIs",
+    routes: ["server-sync", "sync", "peer", "pairing", "local-activation", "desktop-enroll", "v1", "desktop-releases", "desktop-update", "mcp", "notifications/devices", "native-devices", "notifications/inbox", "notifications/preferences", "notifications/public-key", "notifications/test", "iam", "cloud-exceptions"],
     status: "n/a (infra)",
   },
   {

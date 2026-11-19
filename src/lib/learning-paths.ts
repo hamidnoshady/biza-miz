@@ -28,7 +28,7 @@
  *
  * Client-safe: pure data, no database and no DOM.
  */
-import type { TourEligibility, TourViewer } from "./tours";
+import { viewerMatchesEligibility, type TourEligibility, type TourViewer } from "./tours";
 
 /** A step's target is a tour, an article, or a page. */
 export type LearningPathStepKind = "tour" | "article" | "page";
@@ -137,13 +137,7 @@ export const LEARNING_PATHS: readonly LearningPathDefinition[] = [
 export type LearningPathId = (typeof LEARNING_PATHS)[number]["id"];
 
 function matchesEligibility(rule: TourEligibility, viewer: TourViewer): boolean {
-  for (const permission of rule.permissions ?? []) {
-    if (!viewer.permissions.has(permission)) return false;
-  }
-  for (const permission of rule.withoutPermissions ?? []) {
-    if (viewer.permissions.has(permission)) return false;
-  }
-  return true;
+  return viewerMatchesEligibility(rule, viewer);
 }
 
 /** Every path registered for a viewer, narrowed to their steps. */
@@ -310,6 +304,7 @@ export function applyLearningPathEvent(
   previous: StoredLearningPathProgress | null,
   event: LearningPathEvent,
   now: string,
+  externallyCompleted: ReadonlySet<string> = new Set(),
 ): { ok: true; progress: StoredLearningPathProgress | null } | { ok: false; error: LearningPathEventError } {
   if (event.type === "reset") return { ok: true, progress: null };
 
@@ -339,7 +334,7 @@ export function applyLearningPathEvent(
   }
 
   if (event.type === "complete") {
-    if (!path.steps.every((step) => next.completedStepIds.includes(step.id))) {
+    if (!path.steps.every((step) => next.completedStepIds.includes(step.id) || externallyCompleted.has(step.id))) {
       return { ok: false, error: "steps_uncompleted" };
     }
     next.completedAt = next.completedAt ?? now;
@@ -351,11 +346,17 @@ export function applyLearningPathEvent(
   if (index < 0) return { ok: false, error: "unknown_step" };
 
   if (event.type === "step_completed") {
+    // A tour step is completed by the tour's own server-verified progress, not
+    // by a client claim. Article and page steps are the member's own reading
+    // acknowledgement.
+    if (path.steps[index].kind === "tour") {
+      return { ok: false, error: "step_not_completable" };
+    }
     if (!next.completedStepIds.includes(event.stepId)) {
       next.completedStepIds = [...next.completedStepIds, event.stepId];
     }
     if (!completed) {
-      next.currentStepId = firstIncompleteStep(path, next.completedStepIds) ?? event.stepId;
+      next.currentStepId = firstIncompleteStep(path, [...next.completedStepIds, ...externallyCompleted]) ?? event.stepId;
     }
     return { ok: true, progress: next };
   }
@@ -378,20 +379,29 @@ export function learningPathProgressView(
   const reconciled = reconcileLearningPathProgress(path, stored);
   const totalSteps = path.steps.length;
   if (!reconciled) {
+    const completedFromTours = path.steps.filter((step) => completedSteps.has(step.id)).length;
+    const allComplete = path.steps.every((step) => completedSteps.has(step.id));
     return {
-      status: "not_started",
-      completedCount: 0,
+      status: allComplete ? "completed" : completedFromTours > 0 ? "in_progress" : "not_started",
+      completedCount: completedFromTours,
       totalSteps,
-      percent: 0,
-      resumeStepId: firstIncompleteStep(path, []),
+      percent: allComplete
+        ? 100
+        : totalSteps === 0
+          ? 0
+          : Math.min(99, Math.floor((completedFromTours / totalSteps) * 100)),
+      resumeStepId: allComplete
+        ? null
+        : firstIncompleteStep(path, [...completedSteps]),
       outdated: false,
       lastActiveAt: null,
       completedAt: null,
     };
   }
   const merged = new Set([...reconciled.completedStepIds, ...completedSteps]);
-  const completedCount = merged.size;
-  const pathCompleted = reconciled.completedAt !== null;
+  const completedCount = path.steps.filter((step) => merged.has(step.id)).length;
+  const allComplete = path.steps.every((step) => merged.has(step.id));
+  const pathCompleted = reconciled.completedAt !== null || allComplete;
   const status: LearningPathStatus = pathCompleted
     ? "completed"
     : completedCount > 0 || reconciled.currentStepId
@@ -405,7 +415,7 @@ export function learningPathProgressView(
       totalSteps === 0 ? 0 : pathCompleted ? 100 : Math.min(99, Math.floor((completedCount / totalSteps) * 100)),
     resumeStepId: pathCompleted
       ? null
-      : reconciled.currentStepId ?? firstIncompleteStep(path, reconciled.completedStepIds),
+      : reconciled.currentStepId ?? firstIncompleteStep(path, [...merged]),
     outdated: (stored?.pathVersion ?? path.version) !== path.version,
     lastActiveAt: reconciled.lastActiveAt,
     completedAt: reconciled.completedAt,
@@ -441,4 +451,20 @@ export function learningPathSummary(
 
 export function learningPathById(id: string): LearningPathDefinition | undefined {
   return LEARNING_PATHS.find((path) => path.id === id);
+}
+
+/**
+ * The path steps that are already done because the tour they name is done.
+ * Tour completion is server data (`tour_member_progress`), never a client
+ * claim: a path cannot be finished by pressing a button on a tour step.
+ */
+export function completedTourStepIds(
+  path: LearningPathDefinition,
+  completedTourIds: ReadonlySet<string>,
+): Set<string> {
+  return new Set(
+    path.steps
+      .filter((step) => step.kind === "tour" && completedTourIds.has(step.target))
+      .map((step) => step.id),
+  );
 }

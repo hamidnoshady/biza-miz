@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireMember, withTenantScope } from "@/lib/auth";
+import { requirePermission, withTenantScope } from "@/lib/auth";
+import { PERMISSIONS } from "@/lib/permissions";
 import { learningPathById } from "@/lib/learning-paths";
 import { pathsForViewer } from "@/lib/learning-paths";
 import { learningPathViewerFor } from "@/lib/learning-paths-service";
@@ -19,7 +20,7 @@ export const POST = withTenantScope(
     request: NextRequest,
     context: { params: Promise<{ pathId: string }> },
   ) => {
-    const guard = await requireMember();
+    const guard = await requirePermission(PERMISSIONS.settingsManage);
     if (guard.error) return guard.error;
 
     const { pathId } = await context.params;
@@ -29,11 +30,9 @@ export const POST = withTenantScope(
     const viewer = await learningPathViewerFor(
       guard.session.businessId,
       guard.membership.permissions,
+      [path],
     );
-    const visible = pathsForViewer([path], {
-      permissions: viewer.permissions,
-      industry: viewer.industry,
-    });
+    const visible = pathsForViewer([path], viewer);
     if (visible.length === 0)
       return NextResponse.json({ error: "not_found" }, { status: 404 });
 

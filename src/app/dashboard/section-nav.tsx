@@ -255,6 +255,7 @@ export function SectionNav<K extends string>({
   return (
     <div
       ref={rootRef}
+      data-tour-id="page.section-nav"
       className={cn(
         "min-w-0 scroll-mt-3",
         variant === "rail"

@@ -24,6 +24,7 @@
 import { KNOWLEDGE_PAGES } from "./knowledge-base";
 import {
   PAGE_TOUR_REGIONS,
+  PAGE_TOUR_REGION_PREFIXES,
   baselineTourForPage,
   baselineTourIdForRoute,
   regionsForPage,
@@ -51,6 +52,14 @@ export interface TourCoverageRow {
   spotlightCount: number;
   /** Registered anchors the primary tour points at, in step order. */
   anchors: string[];
+  /** Steps that are explanation-only (no anchor, no action, no hand-off). */
+  explanationCount: number;
+  /** Steps that ask for a server-verified real action. */
+  actionCount: number;
+  /** Steps that hand the member to another page. */
+  navigateCount: number;
+  /** True when the primary tour can point at at least one real UI region. */
+  hasSpotlight: boolean;
   /** Problems with this page's coverage; empty means publishable. */
   issues: string[];
 }
@@ -66,10 +75,24 @@ export interface TourCoverageReport {
   studioTours: number;
   /** Steps across every tour the button can offer, baseline tours included. */
   steps: number;
+  /** Pages whose primary tour points at at least one real UI region. */
+  spotlightPages: number;
+  /** Pages whose primary tour is explanation-only (the editorial backlog). */
+  explanationOnlyPages: number;
+  /** How many steps across the offered tours point at an anchor. */
+  spotlightSteps: number;
+  /** How many steps across the offered tours ask for a verified real action. */
+  actionSteps: number;
+  /** How many steps hand the member to another registered page. */
+  navigateSteps: number;
   /** Catalogue-level contract problems. Empty means the whole registry is consistent. */
   issues: string[];
   /** Page keys that still need an authored tour, in registry order. */
   editorialGaps: string[];
+  /** Page keys with no tour at all. A contract failure when non-empty. */
+  uncoveredPages: string[];
+  /** Authored tours attached to a page the registry no longer knows. */
+  staleTourIds: string[];
 }
 
 function anchorsOf(tour: TourDefinition): string[] {
@@ -113,6 +136,17 @@ export function tourCoverage(
       }
     }
   }
+  for (const rule of PAGE_TOUR_REGION_PREFIXES) {
+    if (!rule.prefix.startsWith("/")) issues.push(`${rule.prefix}: region prefix must start with /`);
+    for (const region of rule.regions) {
+      if (!registeredAnchors.has(region.anchor)) {
+        issues.push(`${rule.prefix}: region anchor ${region.anchor} is not registered`);
+      }
+      if (!region.title.trim() || !region.body.trim()) {
+        issues.push(`${rule.prefix}: region ${region.anchor} needs a title and a body`);
+      }
+    }
+  }
 
   const authoredByPage = new Map<string, TourDefinition[]>();
   for (const tour of tours) {
@@ -127,7 +161,12 @@ export function tourCoverage(
     // otherwise added, exactly as the member lookup composes the catalogue.
     const authored = mergePublishedTours(authoredByPage.get(page.key) ?? [], publishedForPage);
     const baseline = baselineTourForPage(page, regions);
-    const primary = authored[0] ?? baseline;
+    // A console-published tour is the editorial head of the page; a code tour
+    // remains a valid fallback and is still offered beside it.
+    const primary =
+      authored.find((tour) => publishedForPage.some((entry) => entry.id === tour.id)) ??
+      authored[0] ??
+      baseline;
     const pageIssues: string[] = [];
     if (authored.length === 0 && regionsForPage(page.key, regions).length === 0) {
       pageIssues.push("no declared region: the baseline is explanation-only");
@@ -144,6 +183,13 @@ export function tourCoverage(
       stepCount: primary.steps.length,
       spotlightCount: anchorsOf(primary).length,
       anchors: anchorsOf(primary),
+      explanationCount: primary.steps.filter((step) => step.kind === "explain").length,
+      actionCount: primary.steps.filter((step) => step.kind === "action").length,
+      navigateCount: primary.steps.filter((step) => step.kind === "navigate").length,
+      // The shared page header is the universal fallback, not a meaningful
+      // spotlight of the page's own work: a page that only points at it is
+      // still an editorial gap, and the report says so.
+      hasSpotlight: anchorsOf(primary).some((anchor) => anchor !== TOUR_ANCHORS.pageHeader),
       issues: pageIssues,
     };
   });
@@ -164,14 +210,15 @@ export function tourCoverage(
   // Two authored tours may share a page on purpose (the ledger and the staff
   // overview); the button then offers both, so the totals count every tour it
   // can offer rather than only the row's primary one.
-  const offeredSteps = KNOWLEDGE_PAGES.reduce((total, page) => {
+  const offered = KNOWLEDGE_PAGES.flatMap((page) => {
     const authored = mergePublishedTours(
       authoredByPage.get(page.key) ?? [],
       published.filter((tour) => tour.pageKey === page.key),
     );
-    const offered = authored.length > 0 ? authored : [baselineTourForPage(page, regions)];
-    return total + offered.reduce((sum, tour) => sum + tour.steps.length, 0);
-  }, 0);
+    return authored.length > 0 ? authored : [baselineTourForPage(page, regions)];
+  });
+  const offeredSteps = offered.reduce((total, tour) => total + tour.steps.length, 0);
+  const allOfferedSteps = offered.flatMap((tour) => [...tour.steps]);
 
   return {
     pages: rows,
@@ -180,7 +227,14 @@ export function tourCoverage(
     authoredTours: tours.length,
     studioTours: published.length,
     steps: offeredSteps,
+    spotlightPages: rows.filter((row) => row.hasSpotlight).length,
+    explanationOnlyPages: rows.filter((row) => !row.hasSpotlight).length,
+    spotlightSteps: allOfferedSteps.filter((step) => Boolean(step.anchor)).length,
+    actionSteps: allOfferedSteps.filter((step) => step.kind === "action").length,
+    navigateSteps: allOfferedSteps.filter((step) => step.kind === "navigate").length,
     issues,
     editorialGaps: rows.filter((row) => row.kind === "baseline").map((row) => row.pageKey),
+    uncoveredPages: rows.filter((row) => row.stepCount === 0).map((row) => row.pageKey),
+    staleTourIds: tours.filter((tour) => !pagesByKey.has(tour.pageKey)).map((tour) => tour.id),
   };
 }
