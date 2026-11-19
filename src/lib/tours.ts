@@ -370,6 +370,104 @@ function listPageTour(spec: ListPageTourSpec): TourDefinition {
   };
 }
 
+/**
+ * A page of one of the two website managers. Their shells draw one shared menu
+ * and one page header, and their bodies are cards rather than tables, so every
+ * page tour is: what the screen is for, the header, the manager menu, the one or
+ * two decisions the screen really makes, and a truthful next step. Declared
+ * region anchors only — the page bodies expose no `data-tour-id` of their own,
+ * so this helper never invents a control.
+ */
+interface WebsitePageTourSpec {
+  id: string;
+  pageKey: string;
+  title: string;
+  description: string;
+  eligibility: TourEligibility;
+  intro: { title: string; body: string };
+  details: readonly { title: string; body: string }[];
+  nextBody: string;
+}
+
+function websitePageTour(spec: WebsitePageTourSpec): TourDefinition {
+  const steps: TourStep[] = [
+    { id: "welcome", kind: "explain", ...spec.intro },
+    {
+      id: "header",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.pageHeader,
+      title: "سرصفحهٔ صفحه",
+      body:
+        "عنوان صفحه، توضیح کوتاه آن و کارهای اصلی بالای آن چیده شده‌اند؛ دکمهٔ «آموزش» هم در همین نوار است.",
+    },
+    {
+      id: "menu",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.appSectionNav,
+      title: "منوی مدیریت وب‌سایت",
+      body:
+        "این منو دو مدیر سایت را کنار هم نگه می‌دارد: سایت بیزامیز (CMS) و وردپرس/ووکامرس. بخش فعال و بخش‌های در دسترس نقش شما همین‌جاست.",
+    },
+    ...spec.details.map((detail, index) => ({
+      id: `detail-${index + 1}`,
+      kind: "explain" as const,
+      title: detail.title,
+      body: detail.body,
+    })),
+    { id: "next", kind: "explain", title: "قدم بعدی", body: spec.nextBody },
+  ];
+  return {
+    id: spec.id,
+    version: 1,
+    pageKey: spec.pageKey,
+    route: spec.pageKey.replace(/^page:/, ""),
+    title: spec.title,
+    description: spec.description,
+    eligibility: spec.eligibility,
+    steps,
+  };
+}
+
+/** The same shape for an Accounting work area; the menu is the app's own rail. */
+function accountingPageTour(spec: WebsitePageTourSpec): TourDefinition {
+  const steps: TourStep[] = [
+    { id: "welcome", kind: "explain", ...spec.intro },
+    {
+      id: "header",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.pageHeader,
+      title: "سرصفحهٔ صفحه",
+      body:
+        "عنوان، توضیح و کارهای اصلی این بخش بالای صفحه‌اند؛ دکمهٔ «آموزش» هم در همین نوار است.",
+    },
+    {
+      id: "menu",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.accountingSectionNav,
+      title: "منوی فضای کار حسابداری",
+      body:
+        "از این منو بین بخش‌های حسابداری جابه‌جا می‌شوید. فقط بخش‌هایی که برای نقش شما مجاز است در این فهرست دیده می‌شود.",
+    },
+    ...spec.details.map((detail, index) => ({
+      id: `detail-${index + 1}`,
+      kind: "explain" as const,
+      title: detail.title,
+      body: detail.body,
+    })),
+    { id: "next", kind: "explain", title: "قدم بعدی", body: spec.nextBody },
+  ];
+  return {
+    id: spec.id,
+    version: 1,
+    pageKey: spec.pageKey,
+    route: spec.pageKey.replace(/^page:/, ""),
+    title: spec.title,
+    description: spec.description,
+    eligibility: spec.eligibility,
+    steps,
+  };
+}
+
 export const TOURS: readonly TourDefinition[] = [  {
     id: "crm.directory.first-customer",
     version: 1,
@@ -2833,6 +2931,846 @@ export const TOURS: readonly TourDefinition[] = [  {
         title: "پیش از تغییر",
         body:
           "تغییر قیف یا فیلدها روی گزارش‌های آینده اثر دارد. پیش از تغییر مرحله‌ها با تیم فروش هماهنگ کنید.",
+      },
+    ],
+  },
+  websitePageTour({
+    id: "websites.cms.setup.page",
+    pageKey: "page:/websites/cms/setup",
+    title: "ساخت سایت",
+    description: "دامنه، CDN، نوع سایت و ساخت روی سایت‌ساز.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "چهار گام تا سایت",
+      body:
+        "ساخت سایت چهار گام دارد: دامنه (خرید از بیزامیز یا اتصال دامنهٔ خودتان)، CDN ابر آروان، نوع سایت (کسب‌وکار، نمونه‌کار یا فروشگاه) و ساخت روی سایت‌ساز.",
+    },
+    details: [
+      {
+        title: "ترتیب گام‌ها",
+        body:
+          "هر گام وضعیت خودش را دارد و گام بعدی تا کامل نشدن قبلی جلو نمی‌رود. اگر ساخت نیمه‌کاره بماند، همین صفحه نشان می‌دهد کجا متوقف شده است.",
+      },
+      {
+        title: "دامنه و CDN",
+        body:
+          "دامنه و CDN پیش از ساخت تعیین می‌شوند. تغییر بعدی دامنه روی آدرس عمومی سایت اثر دارد و باید آگاهانه باشد.",
+      },
+    ],
+    nextBody: "ساخت سایت یک عمل واقعی است. این تور فقط گام‌ها را توضیح می‌دهد و چیزی را نمی‌سازد.",
+  }),
+  websitePageTour({
+    id: "websites.cms.pages.page",
+    pageKey: "page:/websites/cms/pages",
+    title: "صفحه‌های سایت",
+    description: "برگه‌های ثابت سایت و وضعیت انتشار.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "صفحه‌های ثابت",
+      body:
+        "صفحه‌ها برگه‌های ثابت سایت‌اند (درباره ما، تماس، قوانین). نوشته‌های زمان‌دار در «نوشته‌ها» هستند.",
+    },
+    details: [
+      {
+        title: "پیش‌نویس و انتشار",
+        body:
+          "هر صفحه پیش‌نویس یا منتشرشده است؛ انتشار فوراً روی سایت زنده دیده می‌شود. پیش‌نمایش پیش از انتشار، متن و چیدمان را نشان می‌دهد.",
+      },
+    ],
+    nextBody: "برای تغییر محتوا از ویرایشگر خود صفحه استفاده کنید. تور چیزی را منتشر یا حذف نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.cms.posts.page",
+    pageKey: "page:/websites/cms/posts",
+    title: "نوشته‌های سایت",
+    description: "مطالب وبلاگ و اخبار با تاریخ و دسته.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "نوشته‌ها",
+      body: "نوشته‌ها مطالب وبلاگ و اخبار سایت‌اند و برخلاف صفحه‌ها تاریخ و دسته دارند.",
+    },
+    details: [
+      {
+        title: "پیش‌نویس و زمان انتشار",
+        body:
+          "نوشته هم پیش‌نویس و منتشرشده دارد. زمان‌بندی انتشار و دسته‌ها روی فهرست عمومی سایت اثر می‌گذارند.",
+      },
+    ],
+    nextBody: "انتشار و حذف نوشته عملیات واقعی‌اند. برای بازبینی متن از پیش‌نمایش استفاده کنید.",
+  }),
+  websitePageTour({
+    id: "websites.cms.media.page",
+    pageKey: "page:/websites/cms/media",
+    title: "رسانه‌های سایت",
+    description: "تصاویر و فایل‌های مشترک صفحه‌ها و نوشته‌ها.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "کتابخانهٔ رسانه",
+      body:
+        "کتابخانهٔ رسانه، تصاویر و فایل‌های سایت را نگه می‌دارد و صفحه‌ها و نوشته‌ها از همین‌جا به آن‌ها ارجاع می‌دهند.",
+    },
+    details: [
+      {
+        title: "جایگزینی و حذف",
+        body:
+          "حذف یا جایگزینی یک فایل روی هر صفحه‌ای که به آن ارجاع داده اثر می‌گذارد. اندازه و نوع فایل را قبل از بارگذاری بررسی کنید.",
+      },
+    ],
+    nextBody: "بارگذاری و حذف فایل واقعی است. این تور فقط کتابخانه را معرفی می‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.cms.products.page",
+    pageKey: "page:/websites/cms/products",
+    title: "محصولات سایت",
+    description: "کالاهای فروشگاه اینترنتی و همگام‌سازی با صندوق.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "کالاهای فروشگاه سایت",
+      body:
+        "محصولات سایت، کالاهای فروشگاه اینترنتی‌اند. قیمت و موجودی می‌تواند از صندوق همگام شود، اما خود محصول جای خودش را دارد.",
+    },
+    details: [
+      {
+        title: "جهت همگام‌سازی",
+        body:
+          "تنظیمات همگام‌سازی در «تنظیمات سایت» است و یک‌طرفه از صندوق به سایت کار می‌کند. تغییر محصول در سایت، صندوق را عوض نمی‌کند.",
+      },
+    ],
+    nextBody: "انتشار یا حذف محصول روی فروشگاه زنده اثر دارد. پیش از تغییر قیمت، همگام‌سازی را بررسی کنید.",
+  }),
+  websitePageTour({
+    id: "websites.cms.orders.page",
+    pageKey: "page:/websites/cms/orders",
+    title: "سفارش‌های سایت",
+    description: "سفارش‌های آنلاین فروشگاه و خطاهای تحویل.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "سفارش آنلاین",
+      body:
+        "سفارش‌های آنلاین فروشگاه سایت اینجا دیده می‌شوند. تغییر وضعیت یا برگشت وجه یک عمل واقعی است.",
+    },
+    details: [
+      {
+        title: "خطاهای تحویل",
+        body:
+          "اگر سفارش کافه‌ای در تحویل ناموفق باشد، بخش خطاهای تحویل بالای فهرست نشان داده می‌شود تا پیگیری شود.",
+      },
+    ],
+    nextBody: "وضعیت سفارش را از مسیر خودش تغییر دهید. تور هیچ سفارشی را تأیید یا لغو نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.cms.design.page",
+    pageKey: "page:/websites/cms/design",
+    title: "طراحی و پوسته",
+    description: "پوسته، استقرار و ظاهر سایت.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "ظاهر سایت",
+      body:
+        "طراحی و پوسته ظاهر سایت را تعیین می‌کند: قالب، رنگ‌ها و چیدمان. تغییر پوسته روی همهٔ صفحه‌ها اثر دارد.",
+    },
+    details: [
+      {
+        title: "استقرار",
+        body:
+          "ذخیرهٔ طراحی با استقرار همراه است؛ پیش از استقرار از پیش‌نمایش استفاده کنید. بازگشت به نسخهٔ قبلی از مسیر خودش انجام می‌شود.",
+      },
+    ],
+    nextBody: "استقرار پوسته یک عمل واقعی و عمومی است. این تور چیزی را تغییر نمی‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.cms.domain.page",
+    pageKey: "page:/websites/cms/domain",
+    title: "دامنه و DNS",
+    description: "دامنه، رکوردها و CDN سایت.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "آدرس عمومی سایت",
+      body:
+        "اینجا دامنه، رکوردهای DNS و CDN سایت دیده می‌شوند. دامنه همان آدرسی است که مشتری در مرورگر می‌زند.",
+    },
+    details: [
+      {
+        title: "تغییر رکورد",
+        body:
+          "تغییر رکورد DNS یا CDN می‌تواند سایت را از دسترس خارج کند. مقدارها را از ارائه‌دهنده بگیرید و پس از تغییر، انتشار DNS را بررسی کنید.",
+      },
+    ],
+    nextBody: "ثبت یا تغییر دامنه عمل واقعی است و ممکن است هزینه داشته باشد. تور فقط وضعیت را توضیح می‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.cms.settings.page",
+    pageKey: "page:/websites/cms/settings",
+    title: "تنظیمات همگام‌سازی",
+    description: "چه چیزی از صندوق به سایت می‌رود.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "همگام‌سازی یک‌طرفه",
+      body:
+        "این تنظیمات می‌گوید چه چیزی از صندوق به سایت برود: قیمت و موجودی، یک‌طرفه. خود اتصال سایت در «اتصال‌های فنی» است.",
+    },
+    details: [
+      {
+        title: "دامنهٔ همگام‌سازی",
+        body:
+          "فقط محصولات علامت‌خورده همگام می‌شوند. ارسال قیمت یا موجودی را می‌توان جدا خاموش کرد تا عمداً دستی بماند.",
+      },
+    ],
+    nextBody: "ذخیرهٔ تنظیمات روی ارسال‌های بعدی اثر دارد. صف ارسال را پس از تغییر بررسی کنید.",
+  }),
+  websitePageTour({
+    id: "websites.cms.billing.page",
+    pageKey: "page:/websites/cms/billing",
+    title: "اشتراک و صورت‌حساب",
+    description: "طرح، پایان دوره، هزینه‌ها و اعتبار.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "هزینهٔ سایت",
+      body:
+        "اشتراک سایت، دامنه و تمدید از اعتبار پلتفرم پرداخت می‌شوند. سایت‌ساز کار سایت را انجام می‌دهد و صورت‌حساب اینجاست.",
+    },
+    details: [
+      {
+        title: "خواندن صورت‌حساب",
+        body:
+          "طرح، پایان دورهٔ جاری، هزینه‌های ثبت‌شده و موجودی اعتبار را ببینید. تمدید یا تغییر طرح یک عمل مالی واقعی است.",
+      },
+    ],
+    nextBody: "پرداخت و تمدید از مسیر خودش با تأیید انجام می‌شود. این تور چیزی خریداری نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.wp.products.page",
+    pageKey: "page:/websites/wp/products",
+    title: "محصولات وردپرس",
+    description: "کاتالوگ همگام‌شدهٔ فروشگاه ووکامرس.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "کاتالوگ فروشگاه",
+      body:
+        "این فهرست، محصولات همگام‌شدهٔ فروشگاه وردپرس/ووکامرس است. ویرایش اینجا روی فروشگاه زنده اثر دارد.",
+    },
+    details: [
+      {
+        title: "همگام‌سازی و صف",
+        body:
+          "همگام‌سازی از دکمهٔ خودش انجام می‌شود و صف عملیات نتیجه را نشان می‌دهد. اگر اتصال قطع باشد، تغییرات در صف می‌مانند.",
+      },
+    ],
+    nextBody: "حذف یا تغییر قیمت یک عمل واقعی روی فروشگاه است. تور چیزی را تغییر نمی‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.wp.orders.page",
+    pageKey: "page:/websites/wp/orders",
+    title: "سفارش‌های وردپرس",
+    description: "سفارش‌های فروشگاه و صف عملیات.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "سفارش‌های فروشگاه",
+      body:
+        "سفارش‌های فروشگاه وردپرس اینجا خوانده می‌شوند. تغییر وضعیت و برگشت وجه از طریق صف عملیات به فروشگاه می‌رود.",
+    },
+    details: [
+      {
+        title: "نتیجهٔ عملیات",
+        body:
+          "اگر نتیجهٔ یک عملیات برنگردد، در «صف و رویدادها» دیده می‌شود. وضعیت محلی تا تأیید فروشگاه قطعی نیست.",
+      },
+    ],
+    nextBody: "تغییر وضعیت سفارش و برگشت وجه واقعی است. این تور فقط مسیر را توضیح می‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.wp.customers.page",
+    pageKey: "page:/websites/wp/customers",
+    title: "مشتریان وردپرس",
+    description: "مشتریان فروشگاه و اتصال آن‌ها به CRM.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "مشتری فروشگاه",
+      body:
+        "مشتریان فروشگاه وردپرس به پروندهٔ مشتریان CRM وصل می‌شوند تا خرید آنلاین و سابقهٔ داخلی یک نفر کنار هم دیده شود.",
+    },
+    details: [
+      {
+        title: "اتصال و رضایت",
+        body:
+          "اتصال مشتری، رضایت بازاریابی نمی‌سازد. برای تغییر رضایت از پروندهٔ همان مشتری در CRM استفاده کنید.",
+      },
+    ],
+    nextBody: "همگام‌سازی مشتریان از دکمهٔ خودش انجام می‌شود؛ این تور چیزی را تغییر نمی‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.wp.taxonomies.page",
+    pageKey: "page:/websites/wp/taxonomies",
+    title: "دسته‌ها و ویژگی‌ها",
+    description: "درخت دسته‌بندی، برچسب و ویژگی‌های فروشگاه.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "ساختار کاتالوگ",
+      body:
+        "دسته‌ها، برچسب‌ها و ویژگی‌ها ساختار کاتالوگ فروشگاه را می‌سازند و محصولات به آن‌ها وصل می‌شوند.",
+    },
+    details: [
+      {
+        title: "اثر تغییر ساختار",
+        body:
+          "حذف یک دسته می‌تواند محصولات را از فهرست دسته بیرون بیاورد. پیش از تغییر ساختار، محصولات وابسته را بررسی کنید.",
+      },
+    ],
+    nextBody: "تغییر دسته یا ویژگی روی فروشگاه زنده اثر دارد. تور چیزی را حذف نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.wp.content.page",
+    pageKey: "page:/websites/wp/content",
+    title: "محتوای وردپرس",
+    description: "نوشته‌ها و برگه‌های وردپرس.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "محتوا",
+      body:
+        "نوشته‌ها و برگه‌های وردپرس اینجا دیده و ویرایش می‌شوند. ویرایش با اجازهٔ مدیریت محتوا انجام می‌شود.",
+    },
+    details: [
+      {
+        title: "پیش‌نویس و انتشار",
+        body:
+          "پیش‌نویس تا انتشار روی سایت دیده نمی‌شود. پیش از انتشار، متن و رسانه‌های پیوست را بررسی کنید.",
+      },
+    ],
+    nextBody: "ایجاد یا انتشار محتوا واقعی است. این تور فقط مسیر را نشان می‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.wp.media.page",
+    pageKey: "page:/websites/wp/media",
+    title: "رسانه‌های وردپرس",
+    description: "کتابخانهٔ تصاویر و فایل‌های فروشگاه.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "کتابخانهٔ فروشگاه",
+      body:
+        "کتابخانهٔ رسانهٔ فروشگاه، تصاویر و فایل‌های پیوست را نگه می‌دارد. بارگذاری و حذف با اجازهٔ مدیریت انجام می‌شود.",
+    },
+    details: [
+      {
+        title: "رسانهٔ کانونیک",
+        body:
+          "اگر رسانهٔ کانونیک هم فعال باشد، می‌توانید فایل مشترک پلتفرم را به‌جای بارگذاری دوباره انتخاب کنید.",
+      },
+    ],
+    nextBody: "حذف یک فایل روی محصول یا نوشته‌ای که به آن ارجاع دارد اثر می‌گذارد. تور چیزی را حذف نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.wp.queue.page",
+    pageKey: "page:/websites/wp/queue",
+    title: "صف و رویدادهای وردپرس",
+    description: "عملیات در انتظار ارسال و رویدادهای ناموفق.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "صف عملیات",
+      body:
+        "صف عملیات خروجی و رویدادهای ورودی ناموفق را نشان می‌دهد: چه چیزی در انتظار ارسال است و چه چیزی برنگشته.",
+    },
+    details: [
+      {
+        title: "تلاش دوباره",
+        body:
+          "تلاش دوباره و ارسال فوری با اجازهٔ همگام‌سازی انجام می‌شود. پیش از تلاش دوباره، علت خطا و وضعیت اتصال را ببینید.",
+      },
+    ],
+    nextBody: "پاک‌کردن صف یا تلاش دوباره یک عمل واقعی است. این تور فقط وضعیت را توضیح می‌دهد.",
+  }),
+  accountingPageTour({
+    id: "accounting.reports.page",
+    pageKey: "page:/accounting/reports",
+    title: "گزارش‌ها",
+    description: "کتابخانهٔ گزارش‌های آماده و گزارش‌ساز.",
+    eligibility: { permissions: [PERMISSIONS.reportsView] },
+    intro: {
+      title: "کتابخانهٔ گزارش",
+      body:
+        "گزارش‌ها کتابخانهٔ گزارش‌های آماده است: فروش، انبار، حسابداری و کارکنان، به‌همراه گزارش‌ساز. هر گزارش از دادهٔ همین کسب‌وکار و در بازهٔ انتخابی ساخته می‌شود.",
+    },
+    details: [
+      {
+        title: "آماده یا سفارشی",
+        body:
+          "اگر سؤال تکرارشونده دارید از گزارش آماده شروع کنید؛ اگر ستون و فیلتر سفارشی می‌خواهید گزارش‌ساز را باز کنید.",
+      },
+    ],
+    nextBody: "خروجی و ارسال گزارش با اجازهٔ خروجی انجام می‌شود. این تور چیزی صادر نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.reservations.page",
+    pageKey: "page:/accounting/reservations",
+    title: "رزرو میز",
+    description: "رزروهای آینده و وضعیت هر رزرو.",
+    eligibility: { permissions: [PERMISSIONS.reservationsView] },
+    intro: {
+      title: "رزرو، پیش از فروش",
+      body:
+        "رزرو میز برای زمانی در آینده است؛ با ورود مهمان به میز، فروش از مسیر سفارش انجام می‌شود.",
+    },
+    details: [
+      {
+        title: "ثبت و لغو",
+        body:
+          "ثبت رزرو با اجازهٔ مدیریت رزرو انجام می‌شود. برای تغییر یا لغو، وضعیت همان رزرو را از مسیر خودش عوض کنید.",
+      },
+    ],
+    nextBody: "این تور رزروی نمی‌سازد و چیزی را لغو نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.delivery.page",
+    pageKey: "page:/accounting/delivery",
+    title: "ارسال و پیک",
+    description: "تخصیص سفارش به پیک و پیگیری تحویل.",
+    eligibility: { permissions: [PERMISSIONS.deliveryManage] },
+    intro: {
+      title: "تحویل سفارش",
+      body:
+        "این صفحه سفارش‌های ارسالی را به پیک‌ها تخصیص می‌دهد و وضعیت تحویل را پیگیری می‌کند.",
+    },
+    details: [
+      {
+        title: "پیک و پیکربندی",
+        body:
+          "فهرست پیک‌ها و تنظیمات ارسال با اجازهٔ پیکربندی مدیریت می‌شوند. تغییر وضعیت تحویل روی سفارش و مشتری اثر دارد.",
+      },
+    ],
+    nextBody: "تخصیص یا بستن تحویل یک عمل واقعی است. این تور چیزی را تغییر نمی‌دهد.",
+  }),
+  accountingPageTour({
+    id: "accounting.floor.page",
+    pageKey: "page:/accounting/floor",
+    title: "نقشهٔ میزها",
+    description: "وضعیت میزها و سفارش هر میز.",
+    eligibility: { permissions: [PERMISSIONS.tablesManage] },
+    intro: {
+      title: "سالن",
+      body:
+        "نقشهٔ میزها وضعیت اشغال و سفارش هر میز را نشان می‌دهد. این صفحه برای کار روزانهٔ سالن است.",
+    },
+    details: [
+      {
+        title: "چیدمان و ویرایش",
+        body:
+          "ویرایش ساختاری چیدمان با اجازهٔ ویرایش میزها انجام می‌شود؛ جابه‌جایی میز روی سفارش‌های باز اثر دارد.",
+      },
+    ],
+    nextBody: "این تور میزی را باز یا جابه‌جا نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.kitchen.page",
+    pageKey: "page:/accounting/kitchen",
+    title: "صفحهٔ آشپزخانه",
+    description: "سفارش‌های در جریان آماده‌سازی.",
+    eligibility: { permissions: [PERMISSIONS.kitchenView] },
+    intro: {
+      title: "آشپزخانه",
+      body:
+        "صفحهٔ آشپزخانه سفارش‌های در جریان را برای آماده‌سازی نشان می‌دهد و با سالن هماهنگ است.",
+    },
+    details: [
+      {
+        title: "وضعیت آماده‌سازی",
+        body:
+          "تغییر وضعیت هر آیتم، آماده‌شدن آن را به سالن اعلام می‌کند. این صفحه مالی نیست و سندی نمی‌سازد.",
+      },
+    ],
+    nextBody: "این تور وضعیت هیچ سفارشی را عوض نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.waiter.page",
+    pageKey: "page:/accounting/waiter",
+    title: "میزهای من",
+    description: "نمای خدمه از میزها و سفارش‌های خودشان.",
+    eligibility: {
+      anyOf: [
+        { permissions: [PERMISSIONS.ordersCreate] },
+        { permissions: [PERMISSIONS.tablesManage] },
+        { permissions: [PERMISSIONS.ordersView] },
+      ],
+    },
+    intro: {
+      title: "نمای خدمه",
+      body:
+        "«میزهای من» نمای خدمه از میزهای خودشان است؛ هر نفر فقط میزهایی را می‌بیند که به او سپرده شده‌اند.",
+    },
+    details: [
+      {
+        title: "سفارش و وضعیت میز",
+        body:
+          "ثبت سفارش از همین‌جا یا صفحهٔ فروش انجام می‌شود؛ تغییر وضعیت میز با همان دسترسی سفارش و میز کنترل می‌شود.",
+      },
+    ],
+    nextBody: "این تور سفارشی ثبت یا میزی را آزاد نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.jewelry.page",
+    pageKey: "page:/accounting/jewelry",
+    title: "طلا و جواهر",
+    description: "کالای وزنی، نرخ روز، امانت و فروش قطعه.",
+    eligibility: {
+      permissions: [PERMISSIONS.inventoryView],
+      industries: ["jewelry"],
+    },
+    intro: {
+      title: "کالای وزنی",
+      body:
+        "این بخش کالاهای وزنی، نرخ روز طلا، امانت‌گذاران و فروش قطعات را کنار هم نگه می‌دارد.",
+    },
+    details: [
+      {
+        title: "نرخ و مالکیت",
+        body:
+          "قیمت قطعه از وزن و نرخ روز ساخته می‌شود؛ نرخ را پیش از فروش بررسی کنید و مالکیت یا امانت قطعه را مشخص نگه دارید.",
+      },
+    ],
+    nextBody: "فروش یا تغییر نرخ یک عمل واقعی است. این تور چیزی را نمی‌فروشد.",
+  }),
+  accountingPageTour({
+    id: "accounting.watch.page",
+    pageKey: "page:/accounting/watch",
+    title: "ساعت",
+    description: "مدل‌ها، سریال، گارانتی و تیکت تعمیر.",
+    eligibility: {
+      permissions: [PERMISSIONS.inventoryView],
+      industries: ["watch"],
+    },
+    intro: {
+      title: "دستگاه سریال‌دار",
+      body:
+        "این بخش مدل‌ها و دستگاه‌های سریال‌دار، فروش با گارانتی و تیکت‌های تعمیر را مدیریت می‌کند.",
+    },
+    details: [
+      {
+        title: "سریال و گارانتی",
+        body:
+          "سریال هر دستگاه یکتاست و گارانتی به همان دستگاه می‌چسبد. تیکت تعمیر از پروندهٔ همان دستگاه پیگیری می‌شود.",
+      },
+    ],
+    nextBody: "ثبت سریال، فروش یا تیکت تعمیر واقعی است. این تور چیزی را تغییر نمی‌دهد.",
+  }),
+  accountingPageTour({
+    id: "accounting.cosmetics.page",
+    pageKey: "page:/accounting/cosmetics",
+    title: "آرایشی و بهداشتی",
+    description: "بچ، انقضا، برند و ماتریس تنوع‌ها.",
+    eligibility: {
+      permissions: [PERMISSIONS.inventoryView],
+      industries: ["cosmetics"],
+    },
+    intro: {
+      title: "بچ و انقضا",
+      body:
+        "این بخش بچ و انقضای کالا، برندها و ماتریس تنوع‌ها را نگه می‌دارد؛ گزارش‌های صنف در «گزارش‌های آماده» خوانده می‌شوند.",
+    },
+    details: [
+      {
+        title: "بچ معتبر",
+        body:
+          "هر بچ تاریخ انقضای خودش را دارد و فروش باید از بچ معتبر انجام شود. بچ منقضی نباید وارد فروش شود.",
+      },
+    ],
+    nextBody: "این تور موجودی یا تاریخ انقضا را تغییر نمی‌دهد.",
+  }),
+  accountingPageTour({
+    id: "accounting.ledger.page",
+    pageKey: "page:/accounting/ledger",
+    title: "فضای کار حسابداری",
+    description: "فهرست همهٔ ابزارهای دفترداری.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "یک جا برای همهٔ ابزارها",
+      body:
+        "فضای کار حسابداری همهٔ ابزارهای دفترداری را فهرست می‌کند: دفتر و اسناد، دریافتنی و پرداختنی، وجوه و هزینه، دوره، مالیات و حقوق.",
+    },
+    details: [
+      {
+        title: "انتخاب ابزار",
+        body:
+          "هر ابزار همان صفحهٔ خودش را باز می‌کند. این فهرست فقط راهنماست و خودش چیزی ثبت نمی‌کند.",
+      },
+    ],
+    nextBody: "برای شروع، از «دفتر و اسناد» یا «دریافتنی و پرداختنی» استفاده کنید.",
+  }),
+  accountingPageTour({
+    id: "accounting.manual.page",
+    pageKey: "page:/accounting/manual",
+    title: "سند دستی",
+    description: "ثبت دوطرفه با پیش‌نویس و تأیید.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "سند دوطرفه",
+      body:
+        "سند دستی برای ثبت رویدادی است که فروش، خرید یا هزینه خودکار نمی‌سازد. پیش‌نویس را می‌بینید و پس از تأیید وارد دفتر می‌شود.",
+    },
+    details: [
+      {
+        title: "توازن و اصلاح",
+        body:
+          "جمع بدهکار و بستانکار باید برابر باشد. سند تأییدشده ویرایش نمی‌شود؛ اصلاح با سند برگشت انجام می‌گیرد تا سابقه بماند.",
+      },
+    ],
+    nextBody: "ثبت سند یک عمل مالی واقعی است و در تور انجام نمی‌شود.",
+  }),
+  accountingPageTour({
+    id: "accounting.directory.page",
+    pageKey: "page:/accounting/directory",
+    title: "اشخاص",
+    description: "یک پرونده برای هر طرف‌حساب، با چند نقش.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "یک فهرست، همهٔ نقش‌ها",
+      body:
+        "این فهرست همهٔ طرف‌حساب‌ها را نگه می‌دارد: مشتری، تأمین‌کننده، فروشنده و کارمند. یک نفر می‌تواند چند نقش داشته باشد.",
+    },
+    details: [
+      {
+        title: "نقش اصلی و فیلترها",
+        body:
+          "نقش اصلی پیشوند کد حسابداری را تعیین می‌کند و نقش‌های دیگر در همان پرونده می‌مانند. برای دیدن فقط یک نقش از فیلترهای بالای فهرست استفاده کنید.",
+      },
+    ],
+    nextBody: "افزودن یا تغییر شخص از فرم خودش با تأیید انجام می‌شود؛ تور چیزی را تغییر نمی‌دهد.",
+  }),
+  accountingPageTour({
+    id: "accounting.financial-accounts.page",
+    pageKey: "page:/accounting/financial-accounts",
+    title: "حساب‌های مالی",
+    description: "بانک، صندوق، تنخواه و کارت‌خوان.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "ظرف پول کسب‌وکار",
+      body:
+        "هر حساب مالی یک ظرف پول است: بانک، صندوق، تنخواه یا کارت‌خوان. هر حساب به یک سرفصل دفتر کل وصل است و مانده‌اش از دفتر خوانده می‌شود.",
+    },
+    details: [
+      {
+        title: "اصلاح مانده",
+        body:
+          "مانده را دستی ویرایش نکنید؛ با انتقال، دریافت/پرداخت یا تطبیق بانکی اصلاح کنید تا دفتر و حساب هم‌خوان بمانند.",
+      },
+    ],
+    nextBody: "ساخت حساب یا تغییر اتصال آن واقعی است. این تور چیزی را تغییر نمی‌دهد.",
+  }),
+  accountingPageTour({
+    id: "accounting.transfers.page",
+    pageKey: "page:/accounting/transfers",
+    title: "انتقال وجه",
+    description: "جابه‌جایی پول بین حساب‌های مالی.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "انتقال بین حساب‌ها",
+      body:
+        "انتقال وجه پول را بین حساب‌های مالی کسب‌وکار جابه‌جا می‌کند و سند دوطرفهٔ خودکار می‌سازد. پیش از ثبت، پیش‌نمایش سند را ببینید.",
+    },
+    details: [
+      {
+        title: "بدون ویرایش",
+        body:
+          "انتقال ویرایش یا حذف نمی‌شود؛ برای اصلاح، سند را برگشت دهید و انتقال درست را ثبت کنید.",
+      },
+    ],
+    nextBody: "ثبت انتقال یک عمل مالی واقعی است. این تور انتقالی ثبت نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.cheques.page",
+    pageKey: "page:/accounting/cheques",
+    title: "چک‌ها",
+    description: "چک دریافتی و پرداختی و وضعیت هر کدام.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "چک، سند تعهد",
+      body:
+        "چک‌های دریافتی و پرداختی اینجا با سررسید و وضعیت نگه داشته می‌شوند: در جریان، وصول، برگشتی یا خرج‌شده.",
+    },
+    details: [
+      {
+        title: "تغییر وضعیت",
+        body:
+          "وضعیت چک با رویداد واقعی بانک عوض می‌شود. چک برگشتی از مسیر خودش اصلاح می‌شود تا سابقهٔ تعهد بماند.",
+      },
+    ],
+    nextBody: "ثبت یا وصول چک واقعی است. این تور وضعیت هیچ چکی را عوض نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.vat.page",
+    pageKey: "page:/accounting/vat",
+    title: "گزارش مالیات",
+    description: "مالیات ارزش افزودهٔ فروش و خرید در هر دوره.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "مالیات دوره",
+      body:
+        "این گزارش مالیات بر ارزش افزودهٔ فروش و خرید را در دورهٔ انتخابی جمع می‌کند.",
+    },
+    details: [
+      {
+        title: "بازه و نرخ",
+        body:
+          "نرخ و دوره را بررسی کنید؛ گزارش فقط می‌خواند و اظهارنامه نمی‌فرستد. ارسال یا اصلاح اظهارنامه از مسیر خودش انجام می‌شود.",
+      },
+    ],
+    nextBody: "این تور چیزی ارسال یا اصلاح نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.financial-reports.page",
+    pageKey: "page:/accounting/financial-reports",
+    title: "گزارش‌های مالی",
+    description: "صورت‌های مالی و گزارش‌های حسابداری.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView, PERMISSIONS.reportsView] },
+    intro: {
+      title: "صورت‌های مالی",
+      body:
+        "گزارش‌های مالی از دفتر همان دوره خوانده می‌شوند و راه رسیدن به گزارش‌های کسب‌وکار را نشان می‌دهند.",
+    },
+    details: [
+      {
+        title: "دورهٔ باز یا بسته",
+        body:
+          "اگر دوره بسته نشده باشد، اعداد موقت‌اند. برای عدد نهایی، ابتدا وضعیت دوره را در «سال‌ها و دوره‌های مالی» بررسی کنید.",
+      },
+    ],
+    nextBody: "این تور چیزی صادر یا دوره‌ای را نمی‌بندد.",
+  }),
+  accountingPageTour({
+    id: "accounting.growth.page",
+    pageKey: "page:/accounting/growth",
+    title: "رشد در حسابداری",
+    description: "اثر مالی وفاداری، کمپین و پورسانت در دفتر.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "پل رشد و دفتر",
+      body:
+        "این صفحه اثر مالی باشگاه مشتریان، کمپین‌ها و پورسانت را در دفتر نشان می‌دهد.",
+    },
+    details: [
+      {
+        title: "کجا مدیریت می‌شود",
+        body:
+          "خود کمپین، امتیاز و قانون پورسانت در برنامهٔ رشد مدیریت می‌شوند. اینجا فقط اثر مالی آن‌ها در حسابداری خوانده می‌شود.",
+      },
+    ],
+    nextBody: "این تور کمپینی نمی‌سازد و در دفتر چیزی ثبت نمی‌کند.",
+  }),
+  accountingPageTour({
+    id: "accounting.settings.page",
+    pageKey: "page:/accounting/settings",
+    title: "تنظیمات حسابداری",
+    description: "سرفصل‌ها، دوره‌ها و قواعد سندزنی.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    intro: {
+      title: "تنظیمات همین برنامه",
+      body:
+        "این تنظیمات مخصوص حسابداری است: سرفصل حساب‌ها، دوره‌های مالی و قواعد سندزنی. تنظیمات کسب‌وکار و پلتفرم در /settings است.",
+    },
+    details: [
+      {
+        title: "اثر قواعد",
+        body:
+          "تغییر قواعد سندزنی روی ثبت‌های آینده اثر دارد. سرفصل‌های سیستمی محافظت می‌شوند و حساب دارای سند بایگانی می‌شود، نه حذف.",
+      },
+    ],
+    nextBody: "این تور تنظیمی را تغییر نمی‌دهد.",
+  }),
+  {
+    id: "workspace.projects.page",
+    version: 1,
+    pageKey: "page:/workspace/projects",
+    route: "/workspace/projects",
+    title: "پروندهٔ پروژه",
+    description: "کارها، زمان و هزینهٔ پروژه در یک جا.",
+    eligibility: { permissions: [PERMISSIONS.workspaceView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "پروندهٔ پروژه",
+        body:
+          "پروندهٔ پروژه کارها، زمان و هزینهٔ یک پروژه را در یک جا نگه می‌دارد و به مشتری و اسناد مالی وصل می‌شود.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ پروژه",
+        body:
+          "عنوان و توضیح صفحه بالای آن است؛ دکمهٔ «آموزش» هم در همین نوار قرار دارد.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی میز کار من",
+        body:
+          "این منو بخش‌های میز کار را نگه می‌دارد: پروژه‌ها، وظایف، اسناد و قراردادها. فقط بخش‌های مجاز نقش شما نمایش داده می‌شود.",
+      },
+      {
+        id: "detail-1",
+        kind: "explain",
+        title: "دسترسی پروژه",
+        body:
+          "عضویت و نقش داخل پروژه دسترسی را محدودتر می‌کند. اسناد مالی پروژه از مسیر حسابداری ثبت می‌شوند، نه از این پرونده.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "قدم بعدی",
+        body: "این تور پروژه‌ای نمی‌سازد و چیزی را تغییر نمی‌دهد.",
+      },
+    ],
+  },
+  {
+    id: "settings.connections.page",
+    version: 1,
+    pageKey: "page:/settings/connections",
+    route: "/settings/connections",
+    title: "اتصال‌های فنی",
+    description: "دسکتاپ، وردپرس، سایت، هلو و دسترسی توسعه‌دهنده.",
+    eligibility: {},
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "یک هاب برای اتصال‌ها",
+        body:
+          "اتصال‌های فنی همهٔ پیوندهای بیرونی کسب‌وکار را یک‌جا نگه می‌دارد: نصب دسکتاپ، وردپرس/ووکامرس، سایت بیزامیز، هلو، همگام‌سازی سرور و دسترسی توسعه‌دهنده.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ اتصال‌ها",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. وضعیت کلی اتصال‌ها و تب فعال از همین نوار دیده می‌شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageSectionNav,
+        title: "منوی تنظیمات",
+        body:
+          "تنظیمات به بخش‌های جدا تقسیم شده است. این منو همان بخش‌ها را جابه‌جا می‌کند و فقط موارد مجاز نقش شما را نشان می‌دهد.",
+      },
+      {
+        id: "detail-1",
+        kind: "explain",
+        title: "تب‌های جدا",
+        body:
+          "هر تب اجازه و قفل خودش را دارد و تب غیرمجاز برای نقش شما نمایش داده نمی‌شود. کلیدها و رمزها در تور نمایش داده نمی‌شوند.",
+      },
+      {
+        id: "detail-2",
+        kind: "explain",
+        title: "قطع و تغییر",
+        body:
+          "قطع یا تغییر یک اتصال روی عملیات واقعی اثر می‌گذارد. فقط با هماهنگی و از مسیر تأییدشده انجامش دهید.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "قدم بعدی",
+        body: "این تور هیچ اتصالی را وصل، قطع یا تغییر نمی‌دهد.",
       },
     ],
   },

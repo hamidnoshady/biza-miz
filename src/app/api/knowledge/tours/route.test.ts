@@ -51,8 +51,8 @@ import { POST as postProgress } from "./[tourId]/progress/route";
 const PAGE = "page:/accounting/products";
 const TOUR = "accounting.products.list";
 // A registered page nobody has authored a tour for.
-const BASELINE_PAGE = "page:/accounting/reports";
-const BASELINE_TOUR = baselineTourIdForRoute("/accounting/reports");
+const BASELINE_PAGE = "page:/knowledge";
+const BASELINE_TOUR = baselineTourIdForRoute("/knowledge");
 
 function member(permissions: string[]) {
   return {
@@ -118,8 +118,8 @@ describe("GET /api/knowledge/tours", () => {
     expect(body.tours).toHaveLength(1);
     expect(body.tours[0]).toMatchObject({
       id: BASELINE_TOUR,
-      route: "/accounting/reports",
-      stepCount: 5,
+      route: "/knowledge",
+      stepCount: 4,
       progress: { status: "not_started" },
     });
     expect(JSON.stringify(body)).not.toContain("tour-id");
@@ -133,8 +133,8 @@ describe("published Studio tours", () => {
     id: STUDIO_ID,
     version: 4,
     pageKey: BASELINE_PAGE,
-    route: "/accounting/reports",
-    title: "سابقهٔ تصمیم‌ها",
+    route: "/knowledge",
+    title: "مرکز آموزش",
     description: "تور منتشرشده از استودیو",
     eligibility: {},
     steps: [
@@ -148,7 +148,7 @@ describe("published Studio tours", () => {
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(BASELINE_PAGE)}`));
     const body = await res.json();
     expect(body.tours).toHaveLength(1);
-    expect(body.tours[0]).toMatchObject({ id: STUDIO_ID, title: "سابقهٔ تصمیم‌ها", stepCount: 2 });
+    expect(body.tours[0]).toMatchObject({ id: STUDIO_ID, title: "مرکز آموزش", stepCount: 2 });
     expect(mocks.publishedForPage).toHaveBeenCalledWith(BASELINE_PAGE);
   });
 
@@ -207,10 +207,10 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.tour.id).toBe(BASELINE_TOUR);
-    expect(body.tour.steps.length).toBe(5);
+    expect(body.tour.steps.length).toBe(4);
     expect(body.progress.status).toBe("not_started");
-    // The baseline's page header is still a real step; the section menu added
-    // by the app-wide region is the extra one.
+    // The baseline's page header is still a real step; this page has no
+    // section rail, so the header is its only declared region.
 
     const shadowed = baselineTourIdForRoute("/accounting/products");
     const refused = await getTour(req(`/api/knowledge/tours/${shadowed}`), ctx(shadowed));

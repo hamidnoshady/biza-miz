@@ -372,9 +372,9 @@ and hand-off counts and the anchors it points at. It separates:
 `--check` exits non-zero on a contract problem or an uncovered page) and
 `tour-baseline.test.ts` asserts the live registry is clean, so CI catches a new
 page that escaped baseline coverage or an anchor contract break without a
-browser. Current figures on this commit: **101 registered pages, 62 advanced,
-39 baseline, 67 authored tours, 571 offered steps** (256 spotlight steps, 11
-verified actions, 10 hand-offs), **95 pages with a page-specific spotlight, 6
+browser. Current figures on this commit: **101 registered pages, 100 advanced,
+1 baseline, 105 authored tours, 574 offered steps** (257 spotlight steps, 11
+verified actions, 10 hand-offs), **96 pages with a page-specific spotlight, 5
 header-only/explanation-only pages, 0 uncovered pages, 0 stale tours, 0 contract
 problems**. The five app groups now derive a real section-navigation spotlight
 from one prefix declaration, so every page in Accounting, CRM, Growth, Websites
@@ -461,10 +461,10 @@ instead of trapping the member.
 
 ## Remaining known limitations
 
-- **Editorial coverage**: 39 pages still rely on their automatic baseline. Most
-  now spotlight the real section menu their shell draws (95 of 101 pages have a
-  page-specific spotlight); 6 remain header-only. Turning the baselines into
-  step-by-step workflow tours is ongoing editorial work, not a code gap.
+- **Editorial coverage**: 1 page still relies on its automatic baseline — the
+  Learning Center itself, kept as the live fallback canary. Every workflow page
+  now has an authored tour; 96 of 101 pages have a page-specific spotlight; 5
+  remain header-only.
 - **Tour Studio** authors explanations, spotlights, verified actions, hand-offs
   and cross-page navigation, and offers reusable step templates plus a
   step-sequence preview. The panel now exposes feature-flag and
