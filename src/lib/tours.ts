@@ -52,6 +52,16 @@ export const TOUR_ANCHORS = {
   // what the automatic baseline tour of every registered page points at
   // (`tour-baseline.ts`), so a page needs no anchor of its own to get one.
   pageHeader: "page.header",
+  /** The shared table frame (`data-table.tsx`), for a page whose work is a list. */
+  pageTable: "page.table",
+  /** The shared filter/search row (`filters.tsx`). */
+  pageFilters: "page.filters",
+  /** The in-page section menu (`section-nav.tsx`) — settings, inventory, reports. */
+  pageSectionNav: "page.section-nav",
+  /** The flat app sidebar (`app-section-nav.tsx`) — CRM, Growth, Websites. */
+  appSectionNav: "app.section-nav",
+  /** Accounting's own workspace sidebar (`accounting-app-nav.tsx`). */
+  accountingSectionNav: "accounting.section-nav",
   productsKpis: "products.kpis",
   productsToolbar: "products.toolbar",
   productsExport: "products.export",
@@ -1469,6 +1479,88 @@ export const TOURS: readonly TourDefinition[] = [
         body:
           "هر اتصال وضعیت، آخرین بررسی و مالک دارد. قطع یا تغییر یک اتصال روی عملیات واقعی اثر می‌گذارد؛ فقط با هماهنگی و از مسیر تأییدشده انجامش دهید. برای دیدن آموزش هر اتصال، دکمهٔ آموزش همان بخش را بزنید.",
         eligibility: { permissions: [PERMISSIONS.settingsManage] },
+      },
+    ],
+  },
+  {
+    id: "accounting.receivables.walkthrough",
+    version: 1,
+    pageKey: "page:/accounting/receivables",
+    route: "/accounting/receivables",
+    title: "کار با حساب‌های دریافتنی",
+    description: "مشتریان بدهکار، مانده و سن بدهی را بخوانید و مسیر دریافت وجه را پیدا کنید.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "حساب‌های دریافتنی چیست",
+        body:
+          "هر فروش نسیه یک مطالبه از مشتری می‌سازد. این صفحه همان مطالبات را بر اساس شخص، مانده و مدت گذشته نشان می‌دهد؛ ثبت دریافت وجه از مسیر «دریافت و پرداخت» انجام می‌شود.",
+      },
+      {
+        id: "search",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageFilters,
+        title: "جست‌وجو و محدودکردن فهرست",
+        body:
+          "با جست‌وجوی نام یا شماره، فهرست را به یک مشتری محدود کنید. فیلترها همان چیزی را نشان می‌دهند که اجازهٔ دیدنش را دارید؛ تور چیزی را تغییر نمی‌دهد.",
+      },
+      {
+        id: "table",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageTable,
+        title: "ماندهٔ حساب مشتریان",
+        body:
+          "نمای «مانده حساب‌ها» هر مشتری را با شمارهٔ تماس و ماندهٔ حسابش نشان می‌دهد؛ ستون‌های سن بدهی در نمای «نمای سنی بدهی‌ها» بالای همان فهرست است. ردیف را باز کنید تا صورت‌حساب و سابقهٔ دریافت‌ها را ببینید؛ مبلغی را خودتان ثبت نمی‌کنید.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "قدم بعدی",
+        body:
+          "برای ثبت دریافت، از «دریافت و پرداخت» استفاده کنید یا پروندهٔ مشتری را در فهرست اشخاص باز کنید. هر دو از همان دفتر و همان مانده می‌خوانند.",
+      },
+    ],
+  },
+  {
+    id: "accounting.payables.walkthrough",
+    version: 1,
+    pageKey: "page:/accounting/payables",
+    route: "/accounting/payables",
+    title: "کار با حساب‌های پرداختنی",
+    description: "بدهی به تأمین‌کنندگان، مانده و سن بدهی را بخوانید و مسیر پرداخت را پیدا کنید.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "حساب‌های پرداختنی چیست",
+        body:
+          "خرید نسیه از تأمین‌کننده یک بدهی می‌سازد. این صفحه بدهی‌ها را بر اساس شخص، مانده و مدت گذشته نشان می‌دهد؛ پرداخت از مسیر «دریافت و پرداخت» ثبت می‌شود.",
+      },
+      {
+        id: "search",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageFilters,
+        title: "جست‌وجو و محدودکردن فهرست",
+        body:
+          "با نام یا شمارهٔ تأمین‌کننده فهرست را محدود کنید. فقط اشخاص و مبالغی دیده می‌شود که نقش شما اجازهٔ دیدنشان را دارد.",
+      },
+      {
+        id: "table",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageTable,
+        title: "ماندهٔ حساب تأمین‌کنندگان",
+        body:
+          "نمای «مانده حساب‌ها» هر تأمین‌کننده را با ماندهٔ حسابش نشان می‌دهد؛ ستون‌های سن بدهی در نمای «نمای سنی بدهی‌ها» بالای همان فهرست است. ردیف را باز کنید تا صورت‌حساب و سابقهٔ پرداخت‌ها را ببینید.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "قدم بعدی",
+        body:
+          "برای ثبت پرداخت، از «دریافت و پرداخت» استفاده کنید. پرداخت یک عملیات مالی واقعی است و این تور آن را انجام نمی‌دهد.",
       },
     ],
   },

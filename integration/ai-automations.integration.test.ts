@@ -405,6 +405,46 @@ describe("firing an automation through the shared guarded path", () => {
     expect(rows[0].prior_state.price).toBe(100_000);
   });
 
+  it("reuses a member's manual run claim and never lets a non-owner start an auto run", async () => {
+    const before = await priceOf(alpha.menuItemId);
+    const created = await dbLib.withTenant(alpha.businessId, () =>
+      service.createAutomation(alpha.businessId, {
+        name: "اجرای دستی قابل بازیابی",
+        triggerKind: "manual",
+        actionType: "menu.item.priceUpdate",
+        actionPayload: { menuItemId: alpha.menuItemId, price: before + 50_000 },
+        approvalMode: "auto",
+      }, { userId: alpha.userId, authorizedBy: alpha.userId }),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const input = {
+      businessId: alpha.businessId,
+      automationId: created.automation.id,
+      actorUserId: alpha.userId,
+      isOwner: true,
+      requestKey: "4c88d2f5-7aa4-4a10-8fc3-6d254989eef7",
+    };
+    const run = (isOwner: boolean) => dbLib.withTenant(alpha.businessId, () =>
+      service.runAutomationForMember({ ...input, isOwner }),
+    );
+    expect(await run(false)).toEqual({ ok: false, error: "owner_required" });
+    const [first, second] = await Promise.all([run(true), run(true)]);
+    const replay = await run(true);
+    expect(replay).toMatchObject({ ok: true, run: { outcome: "pending_approval" } });
+    if (!replay.ok) throw new Error("expected a completed replay");
+    for (const attempt of [first, second]) {
+      expect(attempt).toMatchObject({ ok: true, run: { runId: replay.run.runId } });
+    }
+    const { rows } = await db.query<{ run_count: number; audit_count: number }>(
+      `SELECT count(*)::int AS run_count, count(audit_id)::int AS audit_count
+         FROM ai_automation_runs WHERE automation_id = $1`,
+      [input.automationId],
+    );
+    expect(rows).toEqual([{ run_count: 1, audit_count: 1 }]);
+    expect(await priceOf(alpha.menuItemId)).toBe(before);
+  });
+
   it("an over-cap auto automation is HELD as a clickable proposal, never applied", async () => {
     const before = await priceOf(alpha.menuItemId);
     const created = await dbLib.withTenant(alpha.businessId, () =>

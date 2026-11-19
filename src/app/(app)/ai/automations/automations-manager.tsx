@@ -41,6 +41,7 @@ import { actionLabel, type ActionType } from "@/lib/ai";
 import { api } from "@/app/dashboard/ui";
 import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { Field, inputClass } from "@/app/dashboard/ui";
+import { clearPendingIdempotencyKey, pendingIdempotencyKey } from "@/lib/pending-idempotency";
 
 const OPERATOR_LABELS: Record<AutomationOperator, string> = {
   gte: "بزرگ‌تر یا مساوی",
@@ -81,6 +82,22 @@ function conditionSummary(a: AutomationView, fieldLabels: Record<string, string>
   const field = fieldLabels[first.field] ?? first.field;
   const op = OPERATOR_LABELS[first.op as AutomationOperator] ?? first.op;
   return `اگر ${field} ${op} ${first.value.toLocaleString("fa-IR")}`;
+}
+
+/**
+ * The idempotency key for one automation's manual run, retained until the
+ * outcome is confirmed.
+ *
+ * A key held only in component state disappears when this manager unmounts —
+ * switching to another AI panel section and back, or a page reload — and the
+ * next click then generates a new key and runs the automation a second time.
+ * It is persisted per tab instead, under the automation's own scope, by the
+ * same helper the retail forms use. The run's dedupe key on the server is
+ * `manual-request:<actorUserId>:<key>`, so a retained key stays bound to the
+ * member and business that caused it.
+ */
+function runKeyScope(automationId: string): string {
+  return `ai.automation.run:${automationId}`;
 }
 
 export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) {
@@ -142,26 +159,32 @@ export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) 
   }
 
   async function runNow(a: AutomationView) {
+    const key = pendingIdempotencyKey(window.sessionStorage, runKeyScope(a.id), { automationId: a.id });
     setBusyId(a.id);
-    const { ok, data } = await api<{ error?: string; run?: { status: string } }>(
+    const { ok, data } = await api<{ error?: string; run?: { outcome: string } }>(
       `/api/ai/automations/${a.id}/run`,
-      { method: "POST" },
+      { method: "POST", headers: { "Idempotency-Key": key } },
     );
     setBusyId(null);
     if (!ok) {
+      // Network and server errors can leave the outcome unknown. Keep the key
+      // for the next attempt so a committed action cannot run twice.
       toast.error(automationErrorMessage(data.error ?? ""));
       return;
     }
-    const status = data.run?.status;
-    toast.success(
-      status === "applied"
-        ? "اجرا شد و ثبت گردید"
-        : status === "pending_approval"
-          ? "برای تأیید شما گذاشته شد"
-          : status === "skipped"
-            ? "شرط‌ها برقرار نبود؛ کاری انجام نشد"
-            : "اجرا شد",
-    );
+    const outcome = data.run?.outcome;
+    if (outcome === "running") {
+      toast.info("در حال اجراست. برای بررسی نتیجه دوباره همین دکمه را بزنید.");
+      return;
+    }
+    switch (outcome) {
+      case "applied": toast.success("اجرا شد و ثبت گردید"); break;
+      case "pending_approval": toast.info("برای تأیید شما گذاشته شد"); break;
+      case "skipped": toast.info("شرط‌ها برقرار نبود؛ کاری انجام نشد"); break;
+      case "failed": toast.error("اجرای اتوماسیون ناموفق بود"); break;
+      default: toast.info("نتیجهٔ اجرا هنوز تأیید نشده است"); return;
+    }
+    clearPendingIdempotencyKey(window.sessionStorage, runKeyScope(a.id));
     void load();
   }
 

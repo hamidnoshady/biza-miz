@@ -167,6 +167,24 @@ interface Recommendation {
   reason: string;
 }
 
+interface AnalyticsRow {
+  tourId: string;
+  title: string;
+  route: string | null;
+  started: number;
+  completed: number;
+  inProgress: number;
+  abandoned: number;
+  completionPercent: number;
+  lastActiveAt: string | null;
+  topStuckStep: { stepId: string; title: string | null; count: number } | null;
+}
+
+interface AnalyticsReport {
+  tours: AnalyticsRow[];
+  totals: { started: number; completed: number; inProgress: number; abandoned: number; completionPercent: number };
+}
+
 const STATUS_TEXT: Record<LessonStatus, string> = {
   not_started: "شروع نشده",
   in_progress: "در حال یادگیری",
@@ -208,6 +226,7 @@ export function LearningCenter() {
   const [detailBusy, setDetailBusy] = useState("");
   const [marking, setMarking] = useState("");
   const [staff, setStaff] = useState<StaffReport | null>(null);
+  const [analytics, setAnalytics] = useState<AnalyticsReport | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   const load = useCallback(async () => {
@@ -230,10 +249,14 @@ export function LearningCenter() {
     setPaths(Array.isArray(pathsResult.data.paths) ? pathsResult.data.paths : []);
     if (staffResult.ok) {
       setStaff(staffResult.data);
+      void api<AnalyticsReport>("/api/knowledge/learning-analytics")
+        .then(({ ok, data }) => setAnalytics(ok ? data : null))
+        .catch(() => setAnalytics(null));
     } else {
       // 403 is the expected answer for a member without `team.manage`; it is
       // not an error state, the section simply does not exist for them.
       setStaff(null);
+      setAnalytics(null);
     }
   }, []);
 
@@ -634,6 +657,68 @@ export function LearningCenter() {
                           ? toPersianDigits(formatJalali(row.lastActiveAt, { withMonthName: true }))
                           : "—"}
                       </span>
+                    </Td>
+                  </DataTableRow>
+                ))}
+              </DataTableBody>
+            </DataTable>
+          )}
+        </SectionCard>
+      ) : null}
+
+      {analytics ? (
+        <SectionCard
+          title="تحلیل تورها"
+          description="شروع، تکمیل، رهاکردن و مرحله‌ای که افراد ناتمام در آن مانده‌اند — فقط شمارش تجمیعی، بدون نام یا دادهٔ کسب‌وکار."
+          footer={
+            <p className="text-xs text-muted-foreground">
+              {toPersianDigits(analytics.totals.started)} شروع · {toPersianDigits(analytics.totals.completed)} تکمیل ·{" "}
+              {toPersianDigits(analytics.totals.abandoned)} رهاشده · نرخ تکمیل{" "}
+              {percentLabel(analytics.totals.completionPercent)}
+            </p>
+          }
+        >
+          {analytics.tours.length === 0 ? (
+            <EmptyState icon={CompassIcon} title="هنوز کسی توری را شروع نکرده است">
+              وقتی اعضا تورها را باز کنند، آمار شرکت، تکمیل و رهاکردن همین‌جا دیده می‌شود.
+            </EmptyState>
+          ) : (
+            <DataTable caption="تحلیل تورهای یادگیری">
+              <DataTableHead>
+                <Th>تور</Th>
+                <Th numeric>شروع</Th>
+                <Th numeric>تکمیل</Th>
+                <Th numeric>در جریان</Th>
+                <Th numeric>رهاشده</Th>
+                <Th>مرحلهٔ توقف</Th>
+              </DataTableHead>
+              <DataTableBody>
+                {analytics.tours.map((row) => (
+                  <DataTableRow key={row.tourId}>
+                    <Td>
+                      <span className="block text-sm font-semibold text-foreground">{row.title}</span>
+                      {row.route ? (
+                        <span className="block text-[11px] text-muted-foreground" dir="ltr">
+                          {row.route}
+                        </span>
+                      ) : null}
+                    </Td>
+                    <Td numeric>{toPersianDigits(row.started)}</Td>
+                    <Td numeric>
+                      {toPersianDigits(row.completed)}{" "}
+                      <span className="text-[11px] text-muted-foreground">{percentLabel(row.completionPercent)}</span>
+                    </Td>
+                    <Td numeric>{toPersianDigits(row.inProgress)}</Td>
+                    <Td numeric>{toPersianDigits(row.abandoned)}</Td>
+                    <Td>
+                      {row.topStuckStep ? (
+                        <span className="text-xs text-muted-foreground">
+                          {row.topStuckStep.title ?? row.topStuckStep.stepId} ·{" "}
+                          {toPersianDigits(row.topStuckStep.count)} نفر
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </Td>
                   </DataTableRow>
                 ))}

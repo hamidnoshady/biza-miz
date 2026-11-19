@@ -101,7 +101,7 @@ describe("automatic baseline tours", () => {
   });
 
   it("describes only what metadata can prove, and highlights only declared regions", () => {
-    const bare = baselineTourForPage(NEW_PAGE, {});
+    const bare = baselineTourForPage(NEW_PAGE, {}, []);
     expect(bare.steps.some((step) => step.kind === "spotlight")).toBe(false);
     expect(bare.steps[0].kind).toBe("explain");
     for (const step of bare.steps) {
@@ -119,7 +119,7 @@ describe("automatic baseline tours", () => {
       "*": [{ anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحه", body: "شرح" }],
       [NEW_PAGE.key]: [{ anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحهٔ این صفحه", body: "شرح" }],
     };
-    const tour = baselineTourForPage(NEW_PAGE, regions);
+    const tour = baselineTourForPage(NEW_PAGE, regions, []);
     const spotlights = tour.steps.filter((step) => step.kind === "spotlight");
     expect(spotlights).toHaveLength(1);
     expect(spotlights[0]).toMatchObject({ anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحهٔ این صفحه" });
@@ -127,8 +127,11 @@ describe("automatic baseline tours", () => {
     for (const step of tour.steps) {
       if (step.anchor) expect(registered.has(step.anchor), step.id).toBe(true);
     }
-    // The shared region applies to every page without repeating per page.
+    // The shared region applies to every page without repeating per page, and
+    // an app whose shell already draws a sidebar gets that sidebar as a real
+    // region from its one prefix declaration.
     expect(regionsForPage("page:/crm/audit").map((region) => region.anchor)).toEqual([
+      TOUR_ANCHORS.appSectionNav,
       TOUR_ANCHORS.pageHeader,
     ]);
   });

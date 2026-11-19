@@ -365,4 +365,24 @@ describe("verified action evidence", () => {
     );
     expect(assigned).toBe(false);
   });
+
+  it("counts a tenant's own starts and never another tenant's", async () => {
+    const tour = (await import("../src/lib/tours")).tourById("accounting.products.list")!;
+    await dbLib.withTenantTransaction(businessId, () =>
+      toursService.recordTourEvent(businessId, userId, tour, { type: "start" }),
+    );
+    const own = await dbLib.withTenantTransaction(businessId, () =>
+      toursService.loadTourAnalyticsForBusiness(businessId),
+    );
+    expect(own.find((row) => row.tourId === tour.id)).toMatchObject({
+      started: 1,
+      completed: 0,
+      inProgress: 1,
+      abandoned: 0,
+    });
+    const foreign = await dbLib.withTenantTransaction(otherBusinessId, () =>
+      toursService.loadTourAnalyticsForBusiness(otherBusinessId),
+    );
+    expect(foreign).toEqual([]);
+  });
 });

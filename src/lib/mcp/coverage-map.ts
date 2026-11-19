@@ -1179,7 +1179,7 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     id: "knowledge.learning-paths",
     module: "Knowledge base",
     entity: "Learning paths — curated step sequences and the member's completion progress (issue #972 item 3)",
-    routes: ["knowledge/learning-paths", "knowledge/learning-assignments", "knowledge/learning-paths/[pathId]/assignments"],
+    routes: ["knowledge/learning-paths", "knowledge/learning-assignments", "knowledge/learning-analytics", "knowledge/learning-paths/[pathId]/assignments"],
     note: "a member's own completion state for curated learning steps; a path's tour steps are confirmed through tour progress, article and page steps through the member's own mark-complete event; staff can assign a path to a team member (issue #972 item 9) — no business data moves, so an AI client has nothing to operate",
     status: "n/a (infra)",
     test: "src/app/api/knowledge/learning-paths/route.test.ts + src/app/api/knowledge/learning-paths/[pathId]/assignments/route.test.ts",
