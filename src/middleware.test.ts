@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isAuthRateLimitedPath,
+  isDesktopEnrollPath,
   isBrowserLoginMutationPath,
   isCentralExecutionPath,
   isPeerBackupPath,
@@ -44,6 +45,16 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/welcome")).toBe(true);
     expect(isPublicPath("/api/setup/state")).toBe(true);
     expect(isPublicPath("/api/setup/pair")).toBe(true);
+  });
+
+  it("opens the pre-session enrollment halves and leaves the owner's approval gated", () => {
+    // Issue #1115 §A.3: an unpaired Windows install calls these two
+    // server-to-server with a device secret and no session cookie at all.
+    expect(isPublicPath("/api/desktop-enroll/start")).toBe(true);
+    expect(isPublicPath("/api/desktop-enroll/poll")).toBe(true);
+    // The browser approval and the page around it belong to a signed-in owner.
+    expect(isPublicPath("/api/desktop-enroll/approve")).toBe(false);
+    expect(isPublicPath("/desktop-enroll")).toBe(false);
   });
 
   it("lets bearer-authenticated credential hand-offs reach their machine guard", () => {
@@ -342,6 +353,29 @@ describe("the staff picker's roster read — bucketed apart from the credentials
     // ...and the roster is not smuggled in as a near-miss of either name.
     expect(isStaffRosterPath("/api/auth/pin-login")).toBe(false);
     expect(isStaffRosterPath("/api/auth/pin-login/rosters")).toBe(false);
+  });
+});
+
+describe("browser-enrollment poll budget (issue #1115 §A.3)", () => {
+  it("uses its own bucket instead of the credential-exchange one", () => {
+    // The Windows app polls its reservation every 2.5 s (24/min) while the
+    // owner is in the browser; AUTH_IP_LIMIT is 20/min. Sharing it would have
+    // made the app lock its own enrollment out after fifty seconds and then
+    // spend the sign-in budget that follows it.
+    expect(isDesktopEnrollPath("/api/setup/enroll")).toBe(true);
+    expect(isDesktopEnrollPath("/api/setup/enroll/poll")).toBe(true);
+    expect(isDesktopEnrollPath("/api/desktop-enroll/start")).toBe(true);
+    expect(isDesktopEnrollPath("/api/desktop-enroll/poll")).toBe(true);
+    expect(isAuthRateLimitedPath("/api/desktop-enroll/poll")).toBe(false);
+    expect(isAuthRateLimitedPath("/api/setup/enroll")).toBe(false);
+  });
+
+  it("does not swallow the owner's session-guarded approval route", () => {
+    // `/approve` requires an owner session; only the two pre-session halves
+    // belong to this bucket.
+    expect(isDesktopEnrollPath("/api/desktop-enroll/approve")).toBe(false);
+    expect(isDesktopEnrollPath("/api/platform/desktop-enroll/poll")).toBe(false);
+    expect(isDesktopEnrollPath("/api/setup/enrollments")).toBe(false);
   });
 });
 
