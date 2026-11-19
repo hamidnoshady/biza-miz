@@ -296,8 +296,81 @@ const INVOICE_TAIL_STEPS: readonly TourStep[] = [
   },
 ];
 
-export const TOURS: readonly TourDefinition[] = [
-  {
+interface ListPageTourSpec {
+  id: string;
+  pageKey: string;
+  title: string;
+  description: string;
+  introTitle: string;
+  introBody: string;
+  nextBody: string;
+  eligibility: TourEligibility;
+  navAnchor: TourAnchor;
+  filters?: boolean;
+  table?: boolean;
+}
+
+/**
+ * A list/ledger page's walkthrough, built from the shared regions its shell
+ * already renders: the page header, the app menu, and (when the page really has
+ * them) the filter row and table frame. Each entry still supplies its own
+ * purpose and next step, so the copy is about that screen rather than a generic
+ * template; a missing region degrades to its explanation after three seconds.
+ */
+function listPageTour(spec: ListPageTourSpec): TourDefinition {
+  const steps: TourStep[] = [
+    { id: "welcome", kind: "explain", title: spec.introTitle, body: spec.introBody },
+    {
+      id: "header",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.pageHeader,
+      title: "این صفحه و کارهای آن",
+      body:
+        "عنوان، توضیح کوتاه و کنترل‌های اصلی همین‌جاست. دکمهٔ آموزش و راهنمای مکتوب این صفحه هم در همین نوار است.",
+    },
+    {
+      id: "menu",
+      kind: "spotlight",
+      anchor: spec.navAnchor,
+      title: "جابه‌جایی بین بخش‌ها",
+      body:
+        "از این منو بین بخش‌های همین برنامه می‌روید. بخش فعال و بخش‌هایی که نقش شما اجازهٔ دیدنشان را دارد در همین فهرست است.",
+    },
+  ];
+  if (spec.filters) {
+    steps.push({
+      id: "filters",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.pageFilters,
+      title: "جست‌وجو و محدودکردن فهرست",
+      body:
+        "با جست‌وجو یا فیلتر، فهرست را به آنچه می‌خواهید محدود کنید. نتیجه همان چیزی است که دسترسی شما نشان می‌دهد.",
+    });
+  }
+  if (spec.table) {
+    steps.push({
+      id: "table",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.pageTable,
+      title: "ردیف‌ها و ستون‌ها",
+      body:
+        "هر ردیف یک مورد است و ستون‌ها وضعیت، مبلغ یا تاریخ آن را نشان می‌دهند. برای دیدن جزئیات، ردیف را باز کنید؛ تور چیزی را تغییر نمی‌دهد.",
+    });
+  }
+  steps.push({ id: "next", kind: "explain", title: "قدم بعدی", body: spec.nextBody });
+  return {
+    id: spec.id,
+    version: 1,
+    pageKey: spec.pageKey,
+    route: spec.pageKey.replace(/^page:/, ""),
+    title: spec.title,
+    description: spec.description,
+    eligibility: spec.eligibility,
+    steps,
+  };
+}
+
+export const TOURS: readonly TourDefinition[] = [  {
     id: "crm.directory.first-customer",
     version: 1,
     pageKey: "page:/crm/directory",
@@ -1583,6 +1656,202 @@ export const TOURS: readonly TourDefinition[] = [
       },
     ],
   },
+  listPageTour({
+    id: "accounting.entries.list",
+    pageKey: "page:/accounting/entries",
+    title: "دفتر روزنامه: خواندن سندها",
+    description: "سندهای ثبت‌شده، فیلترها و مسیر ثبت سند تازه را ببینید.",
+    introTitle: "دفتر روزنامه چیست",
+    introBody:
+      "هر سند یک رویداد مالی با تاریخ، شرح و ردیف‌های بدهکار/بستانکار است. این صفحه سندهای ثبت‌شده را نشان می‌دهد؛ ثبت سند تازه از «سند دستی» انجام می‌شود.",
+    nextBody:
+      "برای ثبت سند تازه به «سند دستی» بروید و برای دیدن ترازها از «تراز آزمایشی» استفاده کنید. تور هیچ سندی ثبت یا اصلاح نمی‌کند.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.expenses.list",
+    pageKey: "page:/accounting/expenses",
+    title: "هزینه‌ها: ثبت و پیگیری",
+    description: "فهرست هزینه‌ها، وضعیت و مسیر ثبت هزینهٔ تازه.",
+    introTitle: "هزینه‌ها",
+    introBody:
+      "هزینه‌های کسب‌وکار با دسته، مبلغ، تاریخ و وضعیت پرداخت اینجا نگه داشته می‌شوند. ثبت هزینه یک عملیات مالی واقعی است و از فرم خودش انجام می‌شود.",
+    nextBody:
+      "برای ثبت هزینهٔ تازه از دکمهٔ افزودن همین صفحه استفاده کنید. اگر هزینه به تأمین‌کننده بدهکار شده، تسویه از مسیر پرداخت‌ها انجام می‌شود.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.fixed-assets.list",
+    pageKey: "page:/accounting/fixed-assets",
+    title: "دارایی‌های ثابت و استهلاک",
+    description: "دارایی‌ها، بهای تمام‌شده و برنامهٔ استهلاک را بشناسید.",
+    introTitle: "دارایی ثابت چیست",
+    introBody:
+      "دارایی ثابت کالایی است که برای استفادهٔ بلندمدت نگه داشته می‌شود، نه برای فروش. هر دارایی بهای تمام‌شده، عمر مفید و استهلاک دوره‌ای دارد.",
+    nextBody:
+      "برای ثبت دارایی تازه از فرم همین صفحه استفاده کنید. استهلاک و کنارگذاری دارایی عملیات حسابداری واقعی‌اند و تور آن‌ها را انجام نمی‌دهد.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.installments.list",
+    pageKey: "page:/accounting/installments",
+    title: "اقساط و سررسیدها",
+    description: "اقساط مشتریان، سررسید و وضعیت پرداخت را ببینید.",
+    introTitle: "اقساط",
+    introBody:
+      "فروش اقساطی به چند قسط با سررسیدهای جدا تبدیل می‌شود. این صفحه اقساط و ماندهٔ هرکدام را نشان می‌دهد و از حساب دریافتنی همان مشتری می‌خواند.",
+    nextBody:
+      "برای ثبت پرداخت قسط از «دریافت و پرداخت» استفاده کنید. تغییر سررسید یا مبلغ یک اصلاح مالی است و از مسیر مجاز خودش انجام می‌شود.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.fiscal-periods.list",
+    pageKey: "page:/accounting/fiscal-periods",
+    title: "دوره‌های مالی و بستن",
+    description: "سال مالی، دوره‌های بسته و وضعیت جاری را بخوانید.",
+    introTitle: "دورهٔ مالی",
+    introBody:
+      "هر سال مالی به دوره‌هایی تقسیم می‌شود که سندها در آن‌ها ثبت می‌شوند. دورهٔ بسته دیگر سند تازه نمی‌پذیرد تا گزارش‌های همان دوره پایدار بمانند.",
+    nextBody:
+      "باز و بسته‌کردن دوره یک عملیات حساس است و از همین صفحه با تأیید انجام می‌شود. تور فقط وضعیت را توضیح می‌دهد.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.receipts.list",
+    pageKey: "page:/accounting/receipts",
+    title: "دریافت و پرداخت",
+    description: "دریافت‌ها و پرداخت‌ها، روش‌ها و سندهای مرتبط را ببینید.",
+    introTitle: "دریافت و پرداخت",
+    introBody:
+      "هر دریافت یا پرداخت یک سند نقدی می‌سازد و ماندهٔ طرف حساب را تغییر می‌دهد. این صفحه تاریخ، روش، مبلغ و طرف حساب را نشان می‌دهد.",
+    nextBody:
+      "برای ثبت دریافت یا پرداخت تازه از دکمهٔ افزودن همین صفحه استفاده کنید. اگر اشتباه شد، اصلاح یا برگشت از مسیر مجاز همان سند انجام می‌شود.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.chart-of-accounts.list",
+    pageKey: "page:/accounting/chart-of-accounts",
+    title: "سرفصل حساب‌ها",
+    description: "درخت حساب‌ها، نوع و کدینگ را بشناسید.",
+    introTitle: "سرفصل حساب‌ها",
+    introBody:
+      "هر سند به حساب‌های همین درخت می‌خورد. نوع حساب (دارایی، بدهی، سرمایه، درآمد، هزینه) تعیین می‌کند مانده در کدام گزارش دیده شود.",
+    nextBody:
+      "افزودن یا تغییر سرفصل یک تصمیم حسابداری است و از فرم خودش انجام می‌شود. پیش از تغییر، اثر آن را روی گزارش‌ها بسنجید.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "crm.deals.list",
+    pageKey: "page:/crm/deals",
+    title: "فرصت‌های فروش",
+    description: "قیف فروش، مرحله و اقدام بعدی هر فرصت را ببینید.",
+    introTitle: "فرصت فروش چیست",
+    introBody:
+      "هر فرصت یک معاملهٔ احتمالی با یک شخص است: مرحله، مبلغ، تاریخ بسته‌شدن و اقدام بعدی. جابه‌جایی مرحله، پیشرفت واقعی کار را نشان می‌دهد.",
+    nextBody:
+      "برای ساخت فرصت تازه از دکمهٔ افزودن استفاده کنید و برای پیگیری، کار یا تماس را از همان ردیف ثبت کنید. تور چیزی را تغییر نمی‌دهد.",
+    eligibility: {
+      anyOf: [{ permissions: [PERMISSIONS.crmView] }, { permissions: [PERMISSIONS.crmManage] }],
+    },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    filters: true,
+  }),
+  listPageTour({
+    id: "crm.activities.list",
+    pageKey: "page:/crm/activities",
+    title: "کارها و پیگیری‌ها",
+    description: "تعهدهای زمانی، سررسید و اقدام بعدی را مدیریت کنید.",
+    introTitle: "کار و پیگیری",
+    introBody:
+      "هر کار یک تعهد با سررسید و مسئول است: تماس، جلسه، یادآوری یا پیگیری. کارهای عقب‌افتاده در میز کار CRM هم دیده می‌شوند.",
+    nextBody:
+      "کار تازه را از دکمهٔ افزودن ثبت کنید و پس از انجام، نتیجه را در همان کار بنویسید. تغییر وضعیت کار یک عمل واقعی است و تور آن را انجام نمی‌دهد.",
+    eligibility: {
+      anyOf: [{ permissions: [PERMISSIONS.crmView] }, { permissions: [PERMISSIONS.crmManage] }],
+    },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    filters: true,
+  }),
+  listPageTour({
+    id: "crm.cases.list",
+    pageKey: "page:/crm/cases",
+    title: "تیکت‌های خدمات",
+    description: "درخواست‌های پشتیبانی، وضعیت و مسئول را ببینید.",
+    introTitle: "تیکت خدمات",
+    introBody:
+      "هر تیکت یک درخواست پشتیبانی با موضوع، اولویت، وضعیت و مسئول است. تاریخچهٔ پاسخ‌ها در همان تیکت می‌ماند.",
+    nextBody:
+      "برای ثبت تیکت تازه از دکمهٔ افزودن استفاده کنید. بستن تیکت بدون پاسخ دادن به مشتری، یک تصمیم واقعی است و تور آن را انجام نمی‌دهد.",
+    eligibility: {
+      anyOf: [{ permissions: [PERMISSIONS.crmView] }, { permissions: [PERMISSIONS.crmManage] }],
+    },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    filters: true,
+  }),
+  listPageTour({
+    id: "crm.leads.list",
+    pageKey: "page:/crm/leads",
+    title: "سرنخ‌ها",
+    description: "سرنخ‌های تازه، منبع و مسیر تبدیل به مشتری.",
+    introTitle: "سرنخ چیست",
+    introBody:
+      "سرنخ یک تماس یا علاقهٔ اولیه است که هنوز به مشتری یا فرصت تبدیل نشده. منبع سرنخ نشان می‌دهد از کدام کانال آمده است.",
+    nextBody:
+      "برای پیگیری، سرنخ را به فرصت یا مشتری تبدیل کنید یا کار پیگیری بسازید. این تبدیل یک تصمیم فروش است و تور آن را انجام نمی‌دهد.",
+    eligibility: {
+      anyOf: [{ permissions: [PERMISSIONS.crmView] }, { permissions: [PERMISSIONS.crmManage] }],
+    },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    filters: true,
+  }),
+  listPageTour({
+    id: "growth.customers.list",
+    pageKey: "page:/growth/customers",
+    title: "مخاطبان بازاریابی",
+    description: "فهرست یکپارچهٔ مخاطبان، فیلترها و آمادگی برای کمپین.",
+    introTitle: "مخاطب بازاریابی",
+    introBody:
+      "این فهرست از همان پروندهٔ اشخاص ساخته می‌شود، اما فقط برای کار بازاریابی است: مخاطب هدف، رضایت ارتباط و سابقهٔ خرید. تغییر رضایت ارتباط یک تصمیم قانونی است.",
+    nextBody:
+      "برای ساخت کمپین، مخاطبان را انتخاب و در بخش «کمپین‌ها» پیام و زمان‌بندی را مشخص کنید. تور هیچ پیامی نمی‌فرستد.",
+    eligibility: { permissions: [PERMISSIONS.growthView] },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    filters: true,
+    table: true,
+  }),
+  listPageTour({
+    id: "growth.campaigns.list",
+    pageKey: "page:/growth/campaigns",
+    title: "کمپین‌های بازاریابی",
+    description: "کمپین‌ها، مخاطب هدف، وضعیت و نتیجه را ببینید.",
+    introTitle: "کمپین چیست",
+    introBody:
+      "هر کمپین یک پیشنهاد با مخاطب هدف و بازهٔ زمانی است. وضعیت کمپین نشان می‌دهد پیش‌نویس، در حال اجرا یا تمام‌شده است.",
+    nextBody:
+      "برای کمپین تازه از دکمهٔ افزودن استفاده کنید. تأیید و ارسال واقعی از مسیر خودش انجام می‌شود؛ تور پیامی نمی‌فرستد و پرداختی انجام نمی‌دهد.",
+    eligibility: {
+      anyOf: [
+        { permissions: [PERMISSIONS.campaignsView] },
+        { permissions: [PERMISSIONS.campaignsManage] },
+      ],
+    },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    filters: true,
+  }),
 ];
 
 export function tourById(id: string): TourDefinition | undefined {
