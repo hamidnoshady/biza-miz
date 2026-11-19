@@ -514,6 +514,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             // managed, tenant-isolated knowledge integration is configured.
             retrieval: knowledgeReady,
             taskContext: taskDirective || null,
+            projectId: activeProjectId,
+            memoryQuery: latestPrompt,
           });
           promptLayers = resolved.layers;
           const systemPrompt = resolved.systemPrompt;
