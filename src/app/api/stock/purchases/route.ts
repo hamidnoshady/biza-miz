@@ -20,6 +20,7 @@ import {
   type RetailPurchaseSettlementMethod,
 } from "@/lib/retail-stock-service";
 import { enqueueHolooPurchase } from "@/lib/integrations/holoo/outbox-producer";
+import { recordTourEvidence } from "@/lib/tour-evidence-service";
 
 /**
  * This branch's purchase history — server-side filtered (supplier, date
@@ -361,6 +362,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       await enqueueHolooPurchase(client, session.businessId, purchase.id, "item_purchase");
     }
     await client.query("COMMIT");
+    // Issue #972 — a guided task that asked for "receive stock" is proven by
+    // this write, not by a click in the tour. Best-effort: never fails the
+    // purchase (a failed receipt leaves no evidence).
+    await recordTourEvidence({
+      businessId: session.businessId,
+      userId: session.sub,
+      verifier: "stock.received",
+      entityId: purchase.id,
+    }).catch(() => undefined);
     return NextResponse.json({ ok: true, purchase });
   } catch (err) {
     await client.query("ROLLBACK");

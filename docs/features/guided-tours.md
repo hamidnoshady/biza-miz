@@ -195,7 +195,8 @@ that is not a click on «بعدی».
 
 - **A step names a whitelisted event, not a URL.** `kind: "action"` requires a
   key from `TOUR_VERIFIERS` (`product.created`, `party.created`,
-  `order.created`, `receivable.payment_recorded`, `payable.payment_recorded`, …). Each entry carries the Persian promise shown in the card
+  `order.created`, `receivable.payment_recorded`, `payable.payment_recorded`,
+  `stock.received`, …). Each entry carries the Persian promise shown in the card
   and the endpoint that records it; `tour-verifiers.test.ts` asserts every
   `recordedBy` really calls `recordTourEvidence` with that key, so a tour can
   never be published around a writer that does not exist.
@@ -368,7 +369,7 @@ and hand-off counts and the anchors it points at. It separates:
 `tour-baseline.test.ts` asserts the live registry is clean, so CI catches a new
 page that escaped baseline coverage or an anchor contract break without a
 browser. Current figures on this commit: **101 registered pages, 31 advanced,
-70 baseline, 36 authored tours, 558 offered steps** (239 spotlight steps, 7
+70 baseline, 36 authored tours, 564 offered steps** (239 spotlight steps, 10
 verified actions, 10 hand-offs), **95 pages with a page-specific spotlight, 6
 header-only/explanation-only pages, 0 uncovered pages, 0 stale tours, 0 contract
 problems**. The five app groups now derive a real section-navigation spotlight
@@ -467,8 +468,8 @@ instead of trapping the member.
   server-supported but not edited in the panel. The preview shows step content
   and order, not the target page's live DOM — that remains a review step on the
   real page.
-- **Further verified actions** (stock receipts, role changes) each need their
-  own reviewer-approved server success point.
+- **Further verified actions** (role changes) still need their own
+  reviewer-approved server success point.
 - **Hybrid origin boundary**: the overlay runs in the page that renders it.
   Across the cloud pane's origin boundary a route-based explanation is the
   fallback; there is no cross-origin DOM access.
