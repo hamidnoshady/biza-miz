@@ -285,6 +285,15 @@ const PUBLIC_PATHS = [
   "/api/pairing/redeem",
   "/api/pairing/acknowledge",
   "/api/pairing/activate",
+  // Issue #1115 §A.3 — the app's pre-session half of browser enrollment. The
+  // unpaired install has no session cookie by definition: it posts the device
+  // secret to `start` and to `poll`, and that secret is the credential — a
+  // request id on its own answers `not_found`. Listing these two is what lets
+  // their handlers run at all, exactly as the pairing entries above do. The
+  // owner's `/api/desktop-enroll/approve` is deliberately NOT listed and keeps
+  // the ordinary session requirement.
+  "/api/desktop-enroll/start",
+  "/api/desktop-enroll/poll",
   // Issue #974 — Cloud activation, periodic validation, online-only support,
   // and outbound remote-support relay for Full Offline (`local`) desktop
   // installations. Authenticated by `OFL1-…` enrollment code or `LOC1-…`

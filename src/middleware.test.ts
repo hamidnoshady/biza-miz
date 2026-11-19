@@ -47,6 +47,16 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/api/setup/pair")).toBe(true);
   });
 
+  it("opens the pre-session enrollment halves and leaves the owner's approval gated", () => {
+    // Issue #1115 §A.3: an unpaired Windows install calls these two
+    // server-to-server with a device secret and no session cookie at all.
+    expect(isPublicPath("/api/desktop-enroll/start")).toBe(true);
+    expect(isPublicPath("/api/desktop-enroll/poll")).toBe(true);
+    // The browser approval and the page around it belong to a signed-in owner.
+    expect(isPublicPath("/api/desktop-enroll/approve")).toBe(false);
+    expect(isPublicPath("/desktop-enroll")).toBe(false);
+  });
+
   it("lets bearer-authenticated credential hand-offs reach their machine guard", () => {
     expect(isPublicPath("/api/server-sync/credential-rotation")).toBe(true);
     expect(isPublicPath("/api/server-sync/credential-rotation/ack")).toBe(true);

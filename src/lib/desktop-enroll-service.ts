@@ -17,7 +17,13 @@
  * rule: approving a browser request retires an older unused code for that
  * branch exactly as issuing a new one from the panel does.
  */
-import { query, withTenant, withoutTenantScope, withoutTenantScopeTransaction } from "./db";
+import {
+  query,
+  withTenant,
+  withTenantTransaction,
+  withoutTenantScope,
+  withoutTenantScopeTransaction,
+} from "./db";
 import {
   deviceSecretMatches,
   ENROLLMENT_TTL_SECONDS,
@@ -287,63 +293,87 @@ export async function approveEnrollmentRequest(input: {
   });
   if (!readiness.ready) return { ok: false, error: "not_ready", readiness };
 
-  // Claim first, mint second: two approvers cannot both mint a code, and a
-  // crash between the two leaves a row the same owner can finish by approving
-  // again (see `canApprove`).
-  const claimed = await withTenant(input.businessId, async () => {
-    const { rows } = await query<{ id: string }>(
-      `UPDATE desktop_enrollment_requests
-          SET state = 'approved', approved_at = now(), approved_by = $3, location_id = $4
+  // Claim, mint and seal are one serialized step.
+  //
+  // Overlapping approvals happen in practice — a double click, two browser
+  // tabs, a retry while the first response is still in flight. Minting while
+  // the row still reads `approved` with no ciphertext let both of them claim
+  // it and both call `issuePairingCode`, which retires the previous unused code
+  // for the branch: the later approval revoked the earlier one's fresh code,
+  // and that code could then be sealed into a row nobody could redeem. The
+  // transaction-scoped advisory lock makes the second approver wait here; when
+  // it gets in it sees the sealed ciphertext and reports the same request as
+  // approved instead of minting again.
+  //
+  // Sealing in the same statement as the approval also means "approved without
+  // a code" is never observable, and a crash before it leaves the request
+  // pending — the owner simply approves again (see `canApprove`).
+  return withTenantTransaction(input.businessId, async () => {
+    await query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      `desktop-enroll:${input.requestId}`,
+    ]);
+    const { rows } = await query<{
+      state: EnrollmentState;
+      pairing_code_ciphertext: string | null;
+      location_id: string | null;
+      expires_at: Date;
+    }>(
+      `SELECT state, pairing_code_ciphertext, location_id, expires_at
+         FROM desktop_enrollment_requests
         WHERE id = $1 AND business_id = $2
-          AND state IN ('pending', 'approved') AND pairing_code_ciphertext IS NULL
-          AND expires_at > now()
-        RETURNING id`,
-      [input.requestId, input.businessId, input.approvedBy, input.locationId],
+        FOR UPDATE`,
+      [input.requestId, input.businessId],
     );
-    return rows[0] ?? null;
-  });
+    const row = rows[0];
+    if (!row) return { ok: false as const, error: "not_found" as const };
 
-  if (!claimed) {
-    // Already sealed by an earlier approve (a double click, or a retry after a
-    // lost response) — that is success, not an error.
-    const current = await readEnrollmentRequest(input.businessId, input.requestId);
-    if (current && current.state === "approved" && current.locationId === input.locationId) {
-      return { ok: true };
+    if (row.pairing_code_ciphertext) {
+      // Already sealed by an earlier approve (a double click, or a retry after a
+      // lost response) — that is success, not an error.
+      return row.state === "approved" && row.location_id === input.locationId
+        ? { ok: true as const }
+        : { ok: false as const, error: "not_found" as const };
     }
-    return { ok: false, error: "not_found" };
-  }
+    if (
+      row.state === "denied" ||
+      row.state === "expired" ||
+      row.expires_at.getTime() <= Date.now()
+    ) {
+      return { ok: false as const, error: "not_found" as const };
+    }
 
-  const issued = await withTenant(input.businessId, () =>
-    issuePairingCode(input.businessId, input.issuedByPlatformUserId, input.locationId),
-  );
-  if ("error" in issued) {
-    // Release the claim so the request is still approvable once the branch is
-    // valid again; nothing was minted, so nothing is stale.
-    await withTenant(input.businessId, () =>
-      query(
-        `UPDATE desktop_enrollment_requests
-            SET state = 'pending', approved_at = NULL, approved_by = NULL, location_id = NULL
-          WHERE id = $1 AND business_id = $2 AND pairing_code_ciphertext IS NULL`,
-        [input.requestId, input.businessId],
-      ),
+    const issued = await issuePairingCode(
+      input.businessId,
+      input.issuedByPlatformUserId,
+      input.locationId,
     );
-    return { ok: false, error: "not_found" };
-  }
+    if ("error" in issued) {
+      // Nothing was written, so the request is still approvable once the branch
+      // is valid again and nothing is stale.
+      return { ok: false as const, error: "not_found" as const };
+    }
 
-  await withTenant(input.businessId, () =>
-    query(
+    const { rowCount } = await query(
       `UPDATE desktop_enrollment_requests
-          SET pairing_code_ciphertext = $2, pairing_code_id = $3
-        WHERE id = $1 AND business_id = $4 AND pairing_code_ciphertext IS NULL`,
+          SET state = 'approved', approved_at = now(), approved_by = $3,
+              location_id = $4, pairing_code_ciphertext = $5, pairing_code_id = $6
+        WHERE id = $1 AND business_id = $2`,
       [
         input.requestId,
+        input.businessId,
+        input.approvedBy,
+        input.locationId,
         encryptSecret(issued.code, resolveEncryptionKey(process.env)),
         issued.summary.id,
-        input.businessId,
       ],
-    ),
-  );
-  return { ok: true };
+    );
+    if (!rowCount) {
+      // The seal did not land, so the freshly minted code must not stay live.
+      await revokeSealedPairingCode(input.businessId, issued.summary.id);
+      return { ok: false as const, error: "not_found" as const };
+    }
+    return { ok: true as const };
+  });
 }
 
 /**
