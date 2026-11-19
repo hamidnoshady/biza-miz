@@ -368,8 +368,8 @@ and hand-off counts and the anchors it points at. It separates:
 `--check` exits non-zero on a contract problem or an uncovered page) and
 `tour-baseline.test.ts` asserts the live registry is clean, so CI catches a new
 page that escaped baseline coverage or an anchor contract break without a
-browser. Current figures on this commit: **101 registered pages, 33 advanced,
-68 baseline, 38 authored tours, 562 offered steps** (239 spotlight steps, 10
+browser. Current figures on this commit: **101 registered pages, 42 advanced,
+59 baseline, 47 authored tours, 562 offered steps** (248 spotlight steps, 10
 verified actions, 10 hand-offs), **95 pages with a page-specific spotlight, 6
 header-only/explanation-only pages, 0 uncovered pages, 0 stale tours, 0 contract
 problems**. The five app groups now derive a real section-navigation spotlight
@@ -457,7 +457,7 @@ instead of trapping the member.
 
 ## Remaining known limitations
 
-- **Editorial coverage**: 68 pages still rely on their automatic baseline. Most
+- **Editorial coverage**: 59 pages still rely on their automatic baseline. Most
   now spotlight the real section menu their shell draws (95 of 101 pages have a
   page-specific spotlight); 6 remain header-only. Turning the baselines into
   step-by-step workflow tours is ongoing editorial work, not a code gap.
