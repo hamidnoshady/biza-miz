@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   viewer: vi.fn(),
   loadProgress: vi.fn(),
   record: vi.fn(),
+  completedTours: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -25,6 +26,7 @@ vi.mock("@/lib/learning-paths-service", () => ({
   learningPathViewerFor: mocks.viewer,
   loadLearningPathProgress: mocks.loadProgress,
   recordLearningPathEvent: mocks.record,
+  completedTourIdsForPaths: mocks.completedTours,
 }));
 
 import { GET as listPaths } from "./route";
@@ -58,6 +60,7 @@ beforeEach(() => {
   mocks.viewer.mockResolvedValue({ permissions: new Set([PERMISSIONS.inventoryView]), industry: "cosmetics" });
   mocks.loadProgress.mockResolvedValue(new Map());
   mocks.record.mockResolvedValue({ ok: true, progress: null });
+  mocks.completedTours.mockResolvedValue(new Set());
 });
 
 describe("list", () => {

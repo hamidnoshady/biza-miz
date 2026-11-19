@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
-import { learningPathById } from "@/lib/learning-paths";
+import { completedTourStepIds, learningPathById } from "@/lib/learning-paths";
 import { pathsForViewer } from "@/lib/learning-paths";
-import { learningPathViewerFor } from "@/lib/learning-paths-service";
+import { completedTourIdsForPaths, learningPathViewerFor } from "@/lib/learning-paths-service";
 import { loadLearningPathProgress } from "@/lib/learning-paths-service";
 import { learningPathSummary } from "@/lib/learning-paths";
 
@@ -23,11 +23,9 @@ export const GET = withTenantScope(
     const viewer = await learningPathViewerFor(
       guard.session.businessId,
       guard.membership.permissions,
+      [path],
     );
-    const visible = pathsForViewer([path], {
-      permissions: viewer.permissions,
-      industry: viewer.industry,
-    });
+    const visible = pathsForViewer([path], viewer);
     if (visible.length === 0) return NextResponse.json({ error: "not_found" }, { status: 404 });
 
     const progress = await loadLearningPathProgress(
@@ -35,9 +33,27 @@ export const GET = withTenantScope(
       guard.session.sub,
       [pathId],
     );
+    const completedTours = await completedTourIdsForPaths(
+      guard.session.businessId,
+      guard.session.sub,
+      visible,
+      guard.membership.permissions,
+    );
+    const visiblePath = visible[0];
+    const external = completedTourStepIds(visiblePath, completedTours);
+    const stored = progress.get(pathId) ?? null;
+    const done = new Set([...(stored?.completedStepIds ?? []), ...external]);
 
     return NextResponse.json({
-      path: learningPathSummary(visible[0], progress.get(pathId) ?? null),
+      path: learningPathSummary(visiblePath, stored, external),
+      steps: visiblePath.steps.map((step) => ({
+        id: step.id,
+        kind: step.kind,
+        target: step.target,
+        title: step.title,
+        body: step.body,
+        completed: done.has(step.id),
+      })),
     });
   },
 );

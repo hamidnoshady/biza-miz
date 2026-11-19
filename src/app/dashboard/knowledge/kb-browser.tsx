@@ -22,6 +22,7 @@ import {
   BookOpenIcon,
   ClockIcon,
   FolderOpenIcon,
+  GraduationCapIcon,
   PlayCircleIcon,
   TagIcon,
 } from "lucide-react";
@@ -34,6 +35,7 @@ import { formatPersianNumber, toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
 import { api, ErrorBox } from "../ui";
 import { cardClass, PageHeader, PageShell, SectionCard } from "../page-chrome";
+import { KnowledgeHelpButton } from "../knowledge-help";
 import { articleHref, Highlighted, KbSearchResults, KbSideMenuFrame, useKbSearch } from "./kb-nav";
 
 function KbHomeSkeleton() {
@@ -217,6 +219,18 @@ export function KnowledgeBrowser({ initialTag }: { initialTag: string }) {
       <PageHeader
         title="مرکز آموزش"
         description="راهنمای کامل پلتفرم: هر بخش را قدم‌به‌قدم بیاموزید، تیترها پیوند لنگری دارند و راهنماها متن، تصویر، ویدیو و نمونه‌کد را کنار هم نشان می‌دهند."
+        actions={
+          <>
+            <Link
+              href="/knowledge/learning"
+              className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border/80 px-3 text-sm font-medium text-foreground/80 transition-colors hover:bg-muted"
+            >
+              <GraduationCapIcon className="size-4" aria-hidden="true" />
+              مسیر یادگیری من
+            </Link>
+            <KnowledgeHelpButton />
+          </>
+        }
       />
 
       <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-start lg:gap-6">

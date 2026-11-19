@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { eligibleTourById } from "@/lib/tours-service";
 import {
   assignTourToStaff,
+  isTourAssignedToStaff,
   listTourAssignments,
 } from "@/lib/tours-service";
 
@@ -43,6 +44,9 @@ export const POST = withTenantScope(
       userId,
       guard.session.sub,
     );
+    if (!created && !(await isTourAssignedToStaff(guard.session.businessId, tourId, userId))) {
+      return NextResponse.json({ error: "member_not_found" }, { status: 404 });
+    }
     return NextResponse.json({ created });
   },
 );

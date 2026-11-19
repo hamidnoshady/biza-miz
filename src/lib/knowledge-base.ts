@@ -218,6 +218,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/workspace", "میز کار من"],
     ["/workspace/projects", "پروندهٔ پروژه"],
   ]),
+  ...pageGroup("مرکز آموزش", [["/knowledge", "مرکز آموزش"]]),
   ...pageGroup("تنظیمات پلتفرم", [
     ["/settings", "تنظیمات"],
     ["/settings/connections", "اتصال‌های فنی"],

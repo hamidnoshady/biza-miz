@@ -56,7 +56,15 @@ if (asJson) {
   console.log(`advanced:         ${report.advancedPages}`);
   console.log(`baseline:         ${report.baselinePages}`);
   console.log(`authored tours:   ${report.authoredTours}`);
+  console.log(`studio tours:     ${report.studioTours}`);
   console.log(`steps offered:    ${report.steps}`);
+  console.log(`  spotlights:     ${report.spotlightSteps}`);
+  console.log(`  actions:        ${report.actionSteps}`);
+  console.log(`  hand-offs:      ${report.navigateSteps}`);
+  console.log(`spotlight pages:  ${report.spotlightPages}`);
+  console.log(`explanation-only: ${report.explanationOnlyPages}`);
+  console.log(`uncovered pages:  ${report.uncoveredPages.length}`);
+  console.log(`stale tours:      ${report.staleTourIds.length}`);
 
   if (report.issues.length > 0) {
     console.log("");
@@ -71,6 +79,17 @@ if (asJson) {
     console.log(`editorial backlog (${report.editorialGaps.length} pages on their baseline):`);
     for (const pageKey of report.editorialGaps) console.log(`  - ${pageKey}`);
   }
+  if (report.uncoveredPages.length > 0) {
+    console.log("");
+    console.log(`uncovered pages (${report.uncoveredPages.length}) — every registered page must answer:`);
+    for (const pageKey of report.uncoveredPages) console.log(`  - ${pageKey}`);
+  }
+
+  if (report.staleTourIds.length > 0) {
+    console.log("");
+    console.log(`stale tours (${report.staleTourIds.length}) — attached to an unregistered page:`);
+    for (const id of report.staleTourIds) console.log(`  - ${id}`);
+  }
 }
 
-if (check && report.issues.length > 0) process.exitCode = 1;
+if (check && (report.issues.length > 0 || report.uncoveredPages.length > 0)) process.exitCode = 1;

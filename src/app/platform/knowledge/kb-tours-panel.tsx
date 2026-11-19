@@ -62,10 +62,12 @@ import {
 
 type EditableStep = {
   id: string;
-  kind: "explain" | "spotlight" | "action";
+  kind: "explain" | "spotlight" | "action" | "navigate";
   anchor: string;
   /** Only an `action` step has one; the key the server verifies. */
   verifier: string;
+  /** Only a `navigate` step has one; a registered destination route. */
+  navigateTo: string;
   title: string;
   body: string;
 };
@@ -131,6 +133,7 @@ function formFor(tour: StudioTour): Form {
       kind: step.kind,
       anchor: step.anchor ?? "",
       verifier: step.verifier ?? "",
+      navigateTo: step.navigateTo ?? "",
       title: step.title,
       body: step.body,
     })),
@@ -151,6 +154,7 @@ function payloadFor(form: Form): Record<string, unknown> {
         ? { anchor: step.anchor }
         : {}),
       ...(step.kind === "action" ? { verifier: step.verifier } : {}),
+      ...(step.kind === "navigate" ? { navigateTo: step.navigateTo } : {}),
       title: step.title,
       body: step.body,
     })),
@@ -262,6 +266,7 @@ export function ToursPanel() {
           kind,
           anchor: kind === "spotlight" ? ANCHORS[0] ?? "" : "",
           verifier: kind === "action" ? TOUR_VERIFIER_KEYS[0] ?? "" : "",
+          navigateTo: kind === "navigate" ? PAGES[0]?.route ?? "" : "",
           title: "",
           body: "",
         },
@@ -566,6 +571,10 @@ export function ToursPanel() {
                 <PlusIcon className="size-4" aria-hidden="true" />
                 کار واقعی
               </Button>
+              <Button type="button" onClick={() => addStep("navigate")} disabled={!canManage}>
+                <PlusIcon className="size-4" aria-hidden="true" />
+                رفتن به صفحه
+              </Button>
             </div>
           </div>
 
@@ -600,12 +609,17 @@ export function ToursPanel() {
                             kind === "action"
                               ? step.verifier || TOUR_VERIFIER_KEYS[0] || ""
                               : "",
+                          navigateTo:
+                            kind === "navigate"
+                              ? step.navigateTo || PAGES[0]?.route || ""
+                              : "",
                         });
                       }}
                     >
                       <option value="explain">توضیح</option>
                       <option value="spotlight">هایلایت</option>
                       <option value="action">کار واقعی</option>
+                      <option value="navigate">رفتن به صفحه</option>
                     </select>
                     <input
                       className={`${inputClass} w-36 font-mono`}
@@ -643,6 +657,21 @@ export function ToursPanel() {
                         {TOUR_VERIFIER_KEYS.map((key) => (
                           <option key={key} value={key}>
                             {TOUR_VERIFIERS[key].label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    {step.kind === "navigate" ? (
+                      <select
+                        className={`${selectClass} w-64`}
+                        value={step.navigateTo}
+                        disabled={!canManage}
+                        onChange={(event) => updateStep(index, { navigateTo: event.target.value })}
+                        aria-label="صفحهٔ مقصد"
+                      >
+                        {PAGES.map((page) => (
+                          <option key={page.route} value={page.route}>
+                            {page.label} — {page.route}
                           </option>
                         ))}
                       </select>

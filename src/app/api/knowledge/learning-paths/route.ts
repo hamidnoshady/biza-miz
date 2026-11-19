@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { LEARNING_PATHS } from "@/lib/learning-paths";
-import { pathsForViewer } from "@/lib/learning-paths";
-import { learningPathViewerFor } from "@/lib/learning-paths-service";
+import { completedTourStepIds, pathsForViewer } from "@/lib/learning-paths";
+import { completedTourIdsForPaths, learningPathViewerFor } from "@/lib/learning-paths-service";
 import { loadLearningPathProgress } from "@/lib/learning-paths-service";
 import { learningPathSummary } from "@/lib/learning-paths";
 
@@ -22,21 +22,29 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const viewer = await learningPathViewerFor(
     guard.session.businessId,
     guard.membership.permissions,
+    LEARNING_PATHS,
   );
-  const paths = pathsForViewer(LEARNING_PATHS, {
-    permissions: viewer.permissions,
-    industry: viewer.industry,
-  });
+  const paths = pathsForViewer(LEARNING_PATHS, viewer);
 
   const progress = await loadLearningPathProgress(
     guard.session.businessId,
     guard.session.sub,
     paths.map((p) => p.id),
   );
+  const completedTours = await completedTourIdsForPaths(
+    guard.session.businessId,
+    guard.session.sub,
+    paths,
+    guard.membership.permissions,
+  );
 
   return NextResponse.json({
     paths: paths.map((p) =>
-      learningPathSummary(p, progress.get(p.id) ?? null),
+      learningPathSummary(
+        p,
+        progress.get(p.id) ?? null,
+        completedTourStepIds(p, completedTours),
+      ),
     ),
   });
 });

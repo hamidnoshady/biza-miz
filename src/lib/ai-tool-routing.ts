@@ -31,6 +31,7 @@ const ALWAYS_ON_TOOLS = new Set([
   "draft_expense_from_receipt",
   "get_bill_split_preview",
   "run_accounting_review",
+  "recommend_learning",
 ]);
 
 /**

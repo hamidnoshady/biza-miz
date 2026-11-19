@@ -30,10 +30,16 @@ const path: LearningPathDefinition = {
   body: "مشتری اول را ثبت کنید، یک محصول بسازید و اولین سفارش را بگیرید.",
   eligibility: {},
   steps: [
-    { id: "register-customer", kind: "tour", target: "crm.directory.first-customer", title: "مشتری", body: "." },
-    { id: "create-product", kind: "tour", target: "accounting.products.new", title: "محصول", body: ".", eligibility: { permissions: ["inventory.adjust"] } },
-    { id: "take-first-order", kind: "tour", target: "accounting.pos.order-ticket", title: "سفارش", body: ".", eligibility: { permissions: ["orders.create", "payments.take"] } },
+    { id: "register-customer", kind: "page", target: "crm.directory.first-customer", title: "مشتری", body: "." },
+    { id: "create-product", kind: "page", target: "accounting.products.new", title: "محصول", body: ".", eligibility: { permissions: ["inventory.adjust"] } },
+    { id: "take-first-order", kind: "page", target: "accounting.pos.order-ticket", title: "سفارش", body: ".", eligibility: { permissions: ["orders.create", "payments.take"] } },
   ],
+};
+
+/** The same shape with the steps the real catalogue uses (server-verified tours). */
+const tourPath: LearningPathDefinition = {
+  ...path,
+  steps: path.steps.map((step) => ({ ...step, kind: "tour" as const })),
 };
 
 function run(
@@ -128,6 +134,27 @@ describe("progress events", () => {
     const result = applyLearningPathEvent(path, null, { type: "complete" }, T1);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toBe("steps_uncompleted");
+  });
+
+  it("never accepts a client claim for a tour step", () => {
+    const result = applyLearningPathEvent(
+      tourPath,
+      null,
+      { type: "step_completed", stepId: "register-customer" },
+      T1,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("step_not_completable");
+  });
+
+  it("completes a tour step from the tour's own server progress, not a click", () => {
+    const external = new Set(["register-customer", "create-product", "take-first-order"]);
+    const result = applyLearningPathEvent(tourPath, null, { type: "complete" }, T1, external);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.progress!.completedAt).toBe(T1);
+    const view = learningPathProgressView(tourPath, null, external);
+    expect(view.status).toBe("completed");
+    expect(view.percent).toBe(100);
   });
 
   it("refuses unknown step", () => {
@@ -401,15 +428,17 @@ describe("learning path assignment service functions", () => {
   it("lists staff path assignments newest first", async () => {
     dbModule.query.mockResolvedValue({
       rows: [
-        { path_id: "path-b", title: "Path B", assigned_at: new Date("2026-02-01T00:00:00Z") },
-        { path_id: "path-a", title: "Path A", assigned_at: new Date("2026-01-01T00:00:00Z") },
+        { path_id: "path-b", assigned_at: new Date("2026-02-01T00:00:00Z") },
+        { path_id: "path-a", assigned_at: new Date("2026-01-01T00:00:00Z") },
       ],
     });
     const { listStaffLearningPathAssignments } = await import("./learning-paths-service");
     const rows = await listStaffLearningPathAssignments("biz-1", "user-2");
     expect(rows).toHaveLength(2);
     expect(rows[0].pathId).toBe("path-b");
-    expect(rows[0].title).toBe("Path B");
+    // Paths are code definitions, not a table; an id outside this build falls
+    // back to itself rather than dropping the assignment.
+    expect(rows[0].title).toBe("path-b");
   });
 
   it("reports whether a staff member is assigned a path", async () => {
