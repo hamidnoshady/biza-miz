@@ -9,6 +9,7 @@ import { isValidIsoDate } from "@/lib/iso-date";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { streamVoucherExportCsv, voucherExportFilename } from "@/lib/voucher-export";
 import { isJsonObject, isVoucherMethod, optionalBodyText, PayablesInputError, VOUCHER_METHODS } from "@/lib/payables-input";
+import { recordTourEvidence } from "@/lib/tour-evidence-service";
 
 /**
  * The «پرداخت‌ها» ledger slice — payment vouchers, newest first, keyset-
@@ -156,6 +157,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       cashAccountId,
       bankReference,
     });
+    // Issue #972 — a guided task that asked for "pay a supplier" is proven by
+    // this write, not by a click in the tour. Best-effort: never fails payment.
+    await recordTourEvidence({
+      businessId: session.businessId,
+      userId: session.sub,
+      verifier: "payable.payment_recorded",
+      entityId: payment.id,
+    }).catch(() => undefined);
     return NextResponse.json({ payment }, { status: payment.duplicate ? 200 : 201 });
   } catch (err) {
     if (err instanceof ApError) return NextResponse.json({ error: err.message }, { status: err.status });
