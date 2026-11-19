@@ -2074,6 +2074,392 @@ export const TOURS: readonly TourDefinition[] = [  {
     navAnchor: TOUR_ANCHORS.accountingSectionNav,
     table: true,
   }),
+  listPageTour({
+    id: "growth.marketers.list",
+    pageKey: "page:/growth/marketers",
+    title: "بازاریابان و سرپرستی",
+    description: "نوع همکاری، سرپرست و وضعیت فعال هر بازاریاب را بخوانید.",
+    introTitle: "بازاریاب کیست",
+    introBody:
+      "بازاریاب می‌تواند کارمند، پیمانکار، همکار ارجاعی یا آژانس باشد. برای کارمند، عضویت فعال تیم در همان شعبه لازم است؛ ثبت همکار خارجی دسترسی به سامانه نمی‌دهد.",
+    nextBody:
+      "پیش از غیرفعال‌سازی، ماموریت‌های باز را تعیین تکلیف کنید. غیرفعال‌سازی سابقه را حذف نمی‌کند و وضعیت حساب کاربری عضو را تغییر نمی‌دهد.",
+    eligibility: { permissions: [PERMISSIONS.marketersView] },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "growth.marketing-targets.list",
+    pageKey: "page:/growth/marketing-targets",
+    title: "مقصدهای بازاریابی",
+    description: "محل‌های بیرونی، شهر و شخص مرتبط را مدیریت کنید.",
+    introTitle: "مقصد بازاریابی",
+    introBody:
+      "مقصد، محل بیرونی است که بازاریاب به آن مراجعه می‌کند و از شعبهٔ داخلی جداست. اتصال به شخص موجود، رضایت بازاریابی ایجاد نمی‌کند؛ رضایت جای خودش را دارد.",
+    nextBody:
+      "مقصد دارای ماموریت باز بایگانی نمی‌شود. برای تغییر شعبه یا شخص مرتبط، مقصد را بایگانی و از نو ثبت کنید تا سابقهٔ ماموریت‌ها دست‌نخورده بماند.",
+    eligibility: { permissions: [PERMISSIONS.marketingTargetsView] },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "growth.marketing-assignments.list",
+    pageKey: "page:/growth/marketing-assignments",
+    title: "ماموریت‌های بازاریابی",
+    description: "ماموریت‌ها، مهلت، اولویت و وضعیت هر بازاریاب را ببینید.",
+    introTitle: "ماموریت چیست",
+    introBody:
+      "هر ماموریت یک بازاریاب را به یک مقصد در همان شعبه وصل می‌کند و مهلت، اولویت و وضعیت دارد. تکمیل وظیفه به‌تنهایی مدرک ملاقات یا فروش نیست.",
+    nextBody:
+      "برای ثبت گزارش واقعی، بازاریاب از «ماموریت‌های من» گزارش تعامل ثبت می‌کند؛ تکمیل ماموریت جای آن گزارش را نمی‌گیرد.",
+    eligibility: { permissions: [PERMISSIONS.marketingAssignmentsView] },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "growth.my-marketing-assignments.list",
+    pageKey: "page:/growth/my-marketing-assignments",
+    title: "ماموریت‌های بازاریابی من",
+    description: "کارهای منتسب به شما، اولویت و مسیر شروع و تکمیل.",
+    introTitle: "کارهای من",
+    introBody:
+      "فقط ماموریت‌های منتسب به شما در شعبه‌های مجاز دیده می‌شود. با «شروع» وضعیت به در حال انجام و با «تکمیل» به تکمیل‌شده می‌رود.",
+    nextBody:
+      "گزارش تعامل، مدرک ملاقات است و جدا از تکمیل وظیفه ثبت می‌شود. تکمیل وظیفه به‌تنهایی پاداش یا فروش نمی‌سازد.",
+    eligibility: { permissions: [PERMISSIONS.marketingAssignmentsSelf] },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "growth.marketing-touchpoints.list",
+    pageKey: "page:/growth/marketing-touchpoints",
+    title: "تعامل‌های بازاریابی",
+    description: "تماس و ملاقات‌های ثبت‌شده، کانال و سرنخ مرتبط را ببینید.",
+    introTitle: "گزارش تعامل",
+    introBody:
+      "هر تعامل، تماس یا ملاقات یک بازاریاب با یک مقصد را با کانال و منبع ثبت می‌کند و می‌تواند به سرنخ CRM وصل شود.",
+    nextBody:
+      "برای دیدن سابقهٔ یک سرنخ، از پروندهٔ همان سرنخ استفاده کنید. ثبت تعامل تازه، رضایت پیام‌رسانی نمی‌سازد.",
+    eligibility: { permissions: [PERMISSIONS.marketingAttributionView] },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    table: true,
+  }),
+  {
+    id: "growth.messaging.overview",
+    version: 1,
+    pageKey: "page:/growth/messaging",
+    route: "/growth/messaging",
+    title: "پیام‌رسانی و کمپین پیام",
+    description: "قالب‌ها، مخاطبان مجاز و صف ارسال پیامک و ایمیل.",
+    eligibility: { permissions: [PERMISSIONS.campaignsView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "پیام‌رسانی رشد",
+        body:
+          "قالب‌های پیامک و ایمیل، مخاطبان و کمپین‌های خروجی اینجا مدیریت می‌شوند. ارسال فقط برای مشتریانی است که رضایت ارتباط دارند.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "وضعیت ارسال",
+        body:
+          "وضعیت اتصال پیام‌رسانی و نرخ هر پیام بالای صفحه دیده می‌شود. قالب یا کمپین بدون اتصال سالم ارسال نمی‌شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی رشد",
+        body:
+          "از این منو بین مخاطبان، کمپین‌ها، پیام‌رسانی، کارت هدیه، وفاداری و پورسانت جابه‌جا می‌شوید؛ آیتم فعال همین صفحه است.",
+      },
+      {
+        id: "audience",
+        kind: "explain",
+        title: "مخاطبِ مجاز",
+        body:
+          "با شروع ارسال، فهرست مشتریان مجاز همان لحظه ثابت می‌شود؛ افرادی که رضایت ندارند یا لغو کرده‌اند کنار گذاشته می‌شوند. تغییر فهرست بعد از شروع، ارسال را عوض نمی‌کند.",
+      },
+      {
+        id: "templates",
+        kind: "explain",
+        title: "قالب و پیش‌نمایش",
+        body:
+          "هر قالب متن پیامک یا ایمیل و متغیرهایش را نگه می‌دارد. پیش از ارسال، پیش‌نمایش و تعداد بخش‌های پیامک را ببینید؛ ارسال واقعی است و بازگشت ندارد.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "پیش از ارسال انبوه",
+        body:
+          "برای آزمایش، یک قالب و مخاطب کوچک انتخاب کنید. گزارش تحویل و تأخیر صف در همین صفحه است؛ ارسال انبوه را بدون هماهنگی انجام ندهید.",
+      },
+    ],
+  },
+  {
+    id: "growth.gift-cards.overview",
+    version: 1,
+    pageKey: "page:/growth/gift-cards",
+    route: "/growth/gift-cards",
+    title: "کارت هدیه",
+    description: "صدور، استعلام، مصرف و ثبت انقضای کارت هدیه.",
+    eligibility: { permissions: [PERMISSIONS.giftCardsView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "کارت هدیه، یک بدهی",
+        body:
+          "صدور کارت، پول نقد را به حساب کارت هدیه (۲۴۲۰) می‌برد و مصرف آن از همان حساب کم می‌کند. درآمد فقط وقتی ثبت می‌شود که مشتری با کارت خرید کند.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ کارت هدیه",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. موجودی و سابقهٔ کارت با جست‌وجوی کد در همین صفحه خوانده می‌شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی رشد",
+        body:
+          "کارت هدیه کنار وفاداری و پورسانت در منوی رشد است. هر بخش اجازهٔ دسترسی خودش را دارد و موارد غیرمجاز نمایش داده نمی‌شوند.",
+      },
+      {
+        id: "permissions",
+        kind: "explain",
+        title: "سه اجازهٔ جدا",
+        body:
+          "استعلام مانده، صدور و مصرف سه اجازهٔ جدا هستند. کسی که فقط مانده را می‌بیند نمی‌تواند کارت صادر یا مصرف کند.",
+      },
+      {
+        id: "expiry",
+        kind: "explain",
+        title: "انقضا",
+        body:
+          "اگر انقضا در تنظیمات رشد فعال باشد، کارت منقضی قابل خرج نیست. «ثبت انقضا» ماندهٔ خرج‌نشده را یک‌بار از ۲۴۲۰ به سایر درآمدها می‌برد.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "عملیات واقعی",
+        body:
+          "صدور، مصرف و ثبت انقضا حرکات واقعی مالی‌اند و از فرم خودشان انجام می‌شوند؛ تور هیچ کارتی صادر یا باطل نمی‌کند.",
+      },
+    ],
+  },
+  {
+    id: "growth.loyalty.overview",
+    version: 1,
+    pageKey: "page:/growth/loyalty",
+    route: "/growth/loyalty",
+    title: "وفاداری و اعتبار مشتری",
+    description: "برنامهٔ امتیاز، مشتریان آمادهٔ خرید مجدد و اعتبار فروشگاهی.",
+    eligibility: { permissions: [PERMISSIONS.loyaltyView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "برنامهٔ وفاداری",
+        body:
+          "هر برنامه نرخ کسب امتیاز، ارزش هر امتیاز و مدت انقضا را تعیین می‌کند. مانده‌ها از دفتر امتیاز و رویدادهای حسابداری خوانده می‌شوند، نه از یک ستون قابل ویرایش.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ وفاداری",
+        body:
+          "عنوان صفحه و وضعیت برنامهٔ پیش‌فرض بالای آن است. برنامهٔ پیش‌فرض همان است که در فروش عادی امتیاز می‌دهد.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی رشد",
+        body:
+          "این صفحه در منوی رشد، کنار مخاطبان، کمپین‌ها و کارت هدیه قرار دارد. فقط بخش‌های مجاز نقش شما در منو دیده می‌شود.",
+      },
+      {
+        id: "repeat",
+        kind: "explain",
+        title: "خرید مجدد",
+        body:
+          "«مشتریان آمادهٔ خرید مجدد» از تاریخچهٔ خرید همان مشتری در شعبهٔ فعال پیش‌بینی می‌شود؛ موعد گذشته یعنی وقت تماس یا پیام است.",
+      },
+      {
+        id: "credit",
+        kind: "explain",
+        title: "مشتری و اعتبار",
+        body:
+          "در این بخش مانده و اعتبار فروشگاهی مشتری را می‌بینید. صدور یا بازپرداخت اعتبار یک عمل مالی جدا با اجازهٔ خودش است.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "اثر تغییرها",
+        body:
+          "تغییر برنامه روی کسب امتیاز آینده اثر دارد، نه مانده‌های قبلی. مصرف امتیاز در صندوق با اجازهٔ «مصرف امتیاز» انجام می‌شود.",
+      },
+    ],
+  },
+  {
+    id: "growth.commission.overview",
+    version: 1,
+    pageKey: "page:/growth/commission",
+    route: "/growth/commission",
+    title: "پورسانت فروشندگان",
+    description: "قوانین پورسانت، رتبه‌بندی و مبنای محاسبه.",
+    eligibility: { permissions: [PERMISSIONS.commissionView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "پورسانت چگونه ساخته می‌شود",
+        body:
+          "هر خط فروش به خاص‌ترین قانون پورسانت می‌رسد: کالا، سپس برند، سپس دسته و در پایان قانون کلی. مبنای حاشیه از همان بهای تمام‌شدهٔ COGS استفاده می‌کند.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ پورسانت",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. این صفحه گزارش و قوانین را نشان می‌دهد؛ پرداخت پورسانت از مسیر تسویهٔ خودش انجام می‌شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی رشد",
+        body:
+          "پورسانت یکی از بخش‌های منوی رشد است. داده‌های حقوقی و پورسانت فقط برای نقش‌هایی نمایش داده می‌شود که اجازهٔ دیدن دارند.",
+      },
+      {
+        id: "leaderboard",
+        kind: "explain",
+        title: "رتبه‌بندی",
+        body:
+          "رتبه‌بندی، مجموع پورسانت انباشته در بازهٔ انتخابی است؛ همان عددی که به‌عنوان بدهی حقوق ثبت شده. بازه را با تاریخ شمسی انتخاب کنید.",
+      },
+      {
+        id: "rules",
+        kind: "explain",
+        title: "قوانین",
+        body:
+          "قانون حذف نمی‌شود، غیرفعال می‌شود تا تاریخچهٔ تسویه حفظ شود. میان قوانین هم‌سطح، اولویت بزرگ‌تر برنده است.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "اثر قانون تازه",
+        body:
+          "ساخت یا تغییر قانون روی فروش‌های آینده اثر دارد. پرداخت و تسویهٔ پورسانت از مسیر تأییدشدهٔ خودش انجام می‌شود، نه با تور.",
+      },
+    ],
+  },
+  {
+    id: "growth.torob.overview",
+    version: 1,
+    pageKey: "page:/growth/torob",
+    route: "/growth/torob",
+    title: "کانال ترب",
+    description: "سایت‌های قابل انتشار، وضعیت اتصال و آنچه ترب می‌گوید.",
+    eligibility: { permissions: [PERMISSIONS.torobView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "ترب و سایت‌های بیزامیز",
+        body:
+          "ترب فقط از سایت‌هایی منتشر می‌کند که در بیزامیز ساخته و فعالانه وصل شده‌اند. این صفحه نشان می‌دهد کدام سایت‌ها می‌توانند منتشر کنند و ترب چه می‌گوید.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ ترب",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. وضعیت کلی کانال و نتیجهٔ آخرین اقدام مجوزدهی در همین نوار دیده می‌شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی رشد",
+        body:
+          "ترب یک بخش داخل رشد است، نه برنامهٔ جدا. از همین منو به وب‌سایت‌ها و سایر بخش‌های رشد می‌رسید.",
+      },
+      {
+        id: "states",
+        kind: "explain",
+        title: "معنی «متصل»",
+        body:
+          "«متصل» یعنی ترب اجازهٔ انتشار داده است، نه اینکه محصولی در ترب دیده می‌شود. وضعیت هر فروشگاه را همان ترب اعلام می‌کند و در صفحهٔ همان فروشگاه دیده می‌شود.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "اتصال و قطع",
+        body:
+          "اتصال، مجوزدهی و قطع کانال روی فهرست زندهٔ ترب اثر دارد و با اجازهٔ «مدیریت ترب» انجام می‌شود. تور چیزی را وصل یا قطع نمی‌کند.",
+      },
+    ],
+  },
+  {
+    id: "growth.settings.overview",
+    version: 1,
+    pageKey: "page:/growth/settings",
+    route: "/growth/settings",
+    title: "تنظیمات رشد",
+    description: "پنجرهٔ اسناد، سقف تخفیف و اعتبار کارت هدیه.",
+    eligibility: { permissions: [PERMISSIONS.marketingConfigure] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "تنظیمات سراسری رشد",
+        body:
+          "این صفحه تنظیمات سراسری رشد را نگه می‌دارد: پنجرهٔ اسناد بازاریابی، سقف تخفیف ۳۰ روزه و اعتبار اختیاری کارت هدیه. همین اعداد در گزارش‌ها و فرمان‌ها خوانده می‌شوند.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ تنظیمات رشد",
+        body:
+          "عنوان و وضعیت آمادگی رشد بالای صفحه است. هشدار آمادگی یعنی یک موتور هنوز پیکربندی نشده و باید پیش از استفاده بررسی شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی رشد",
+        body:
+          "این تنظیمات مخصوص رشد است، نه تنظیمات کل پلتفرم. هر بخش تنظیمات تخصصی خودش را دارد و از همین منو باز می‌شود.",
+      },
+      {
+        id: "elsewhere",
+        kind: "explain",
+        title: "چه چیزی اینجا نیست",
+        body:
+          "برنامهٔ وفاداری، آمادگی پیام‌رسانی و قوانین پورسانت هرکدام صفحهٔ خودشان را دارند. اینجا فقط میان‌بر و هشدار آمادگی نشان داده می‌شود.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "پیش از ذخیره",
+        body:
+          "ذخیرهٔ تنظیمات محاسبات آینده را عوض می‌کند. پیش از گستردن پنجرهٔ اسناد یا سقف تخفیف، اثر مالی آن را با حسابداری هماهنگ کنید.",
+      },
+    ],
+  },
 ];
 
 export function tourById(id: string): TourDefinition | undefined {
