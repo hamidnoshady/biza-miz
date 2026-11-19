@@ -302,6 +302,22 @@ export function ToursPanel() {
 
   async function save(): Promise<StudioTour | null> {
     if (busy) return null;
+    // An alternative with no rule at all matches every member, which would make
+    // the base eligibility meaningless. The server accepts the shape, so the
+    // console has to refuse the empty one before it is written.
+    if (
+      form.eligibility.anyOf?.some(
+        (alternative) =>
+          !Object.values(alternative).some((value) =>
+            Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null,
+          ),
+      )
+    ) {
+      setFormError("هر گزینهٔ جایگزین باید حداقل یک شرط داشته باشد.");
+      setFormDetail("");
+      setNotice("");
+      return null;
+    }
     setBusy("save");
     setFormError("");
     setFormDetail("");
@@ -637,6 +653,92 @@ export function ToursPanel() {
                 );
               })}
             </div>
+          </fieldset>
+
+          <fieldset className="mt-4">
+            <legend className="text-xs font-bold text-muted-foreground">گزینه‌های جایگزین (anyOf)</legend>
+            <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+              اگر پر شود، عضو باید شرط‌های بالا و دست‌کم یکی از این گزینه‌ها را داشته باشد. هر گزینه حداقل یک شرط لازم دارد؛
+              حداکثر هشت گزینه.
+            </p>
+            {(form.eligibility.anyOf ?? []).map((alternative, index) => {
+              const replaceAlternative = (next: TourEligibility) => {
+                const alternatives = [...(form.eligibility.anyOf ?? [])];
+                alternatives[index] = next;
+                setForm({ ...form, eligibility: { ...form.eligibility, anyOf: alternatives } });
+              };
+              const removeAlternative = () => {
+                const alternatives = (form.eligibility.anyOf ?? []).filter((_, position) => position !== index);
+                const eligibility = { ...form.eligibility };
+                if (alternatives.length > 0) eligibility.anyOf = alternatives;
+                else delete eligibility.anyOf;
+                setForm({ ...form, eligibility });
+              };
+              return (
+                <div
+                  key={index}
+                  className="mt-2 grid gap-2 rounded-lg border border-border p-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
+                >
+                  <Field label={`گزینهٔ ${index + 1} — دسترسی‌ها (با کاما)`}>
+                    <input
+                      className={inputClass}
+                      dir="ltr"
+                      placeholder="crm.export, crm.configure"
+                      value={(alternative.permissions ?? []).join(", ")}
+                      disabled={!canManage}
+                      onChange={(event) => {
+                        const permissions = event.target.value
+                          .split(",")
+                          .map((value) => value.trim())
+                          .filter((value): value is Permission =>
+                            (PERMISSION_KEYS as readonly string[]).includes(value),
+                          );
+                        const next: TourEligibility = { ...alternative };
+                        if (permissions.length > 0) next.permissions = permissions;
+                        else delete next.permissions;
+                        replaceAlternative(next);
+                      }}
+                    />
+                  </Field>
+                  <Field label={`گزینهٔ ${index + 1} — صنف‌ها (با کاما)`}>
+                    <input
+                      className={inputClass}
+                      dir="ltr"
+                      placeholder="automotive, barcode"
+                      value={(alternative.industries ?? []).join(", ")}
+                      disabled={!canManage}
+                      onChange={(event) => {
+                        const industries = event.target.value
+                          .split(",")
+                          .map((value) => value.trim())
+                          .filter((value): value is (typeof INDUSTRIES)[number] =>
+                            (INDUSTRIES as readonly string[]).includes(value),
+                          );
+                        const next: TourEligibility = { ...alternative };
+                        if (industries.length > 0) next.industries = industries;
+                        else delete next.industries;
+                        replaceAlternative(next);
+                      }}
+                    />
+                  </Field>
+                  <Button type="button" variant="ghost" onClick={removeAlternative} disabled={!canManage}>
+                    حذف گزینه
+                  </Button>
+                </div>
+              );
+            })}
+            <Button
+              type="button"
+              variant="ghost"
+              className="mt-2"
+              disabled={!canManage || (form.eligibility.anyOf?.length ?? 0) >= 8}
+              onClick={() => {
+                const alternatives = [...(form.eligibility.anyOf ?? []), { permissions: [] }];
+                setForm({ ...form, eligibility: { ...form.eligibility, anyOf: alternatives } });
+              }}
+            >
+              افزودن گزینه
+            </Button>
           </fieldset>
         </div>
 
