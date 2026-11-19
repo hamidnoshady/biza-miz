@@ -18,7 +18,7 @@
  * documents remain expressible through the assistant.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { PlayIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,7 @@ import { actionLabel, type ActionType } from "@/lib/ai";
 import { api } from "@/app/dashboard/ui";
 import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { Field, inputClass } from "@/app/dashboard/ui";
+import { clearPendingIdempotencyKey, pendingIdempotencyKey } from "@/lib/pending-idempotency";
 
 const OPERATOR_LABELS: Record<AutomationOperator, string> = {
   gte: "بزرگ‌تر یا مساوی",
@@ -83,6 +84,22 @@ function conditionSummary(a: AutomationView, fieldLabels: Record<string, string>
   return `اگر ${field} ${op} ${first.value.toLocaleString("fa-IR")}`;
 }
 
+/**
+ * The idempotency key for one automation's manual run, retained until the
+ * outcome is confirmed.
+ *
+ * A key held only in component state disappears when this manager unmounts —
+ * switching to another AI panel section and back, or a page reload — and the
+ * next click then generates a new key and runs the automation a second time.
+ * It is persisted per tab instead, under the automation's own scope, by the
+ * same helper the retail forms use. The run's dedupe key on the server is
+ * `manual-request:<actorUserId>:<key>`, so a retained key stays bound to the
+ * member and business that caused it.
+ */
+function runKeyScope(automationId: string): string {
+  return `ai.automation.run:${automationId}`;
+}
+
 export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) {
   const locked = useFeatureLocked();
   const [automations, setAutomations] = useState<AutomationView[]>([]);
@@ -91,7 +108,6 @@ export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) 
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const runKeys = useRef(new Map<string, string>());
 
   const load = useCallback(async () => {
     const { ok, data } = await api<{ automations: AutomationView[] } & Catalogue>("/api/ai/automations");
@@ -143,8 +159,7 @@ export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) 
   }
 
   async function runNow(a: AutomationView) {
-    const key = runKeys.current.get(a.id) ?? crypto.randomUUID();
-    runKeys.current.set(a.id, key);
+    const key = pendingIdempotencyKey(window.sessionStorage, runKeyScope(a.id), { automationId: a.id });
     setBusyId(a.id);
     const { ok, data } = await api<{ error?: string; run?: { outcome: string } }>(
       `/api/ai/automations/${a.id}/run`,
@@ -169,7 +184,7 @@ export function AutomationsManager({ canAutoApply }: { canAutoApply: boolean }) 
       case "failed": toast.error("اجرای اتوماسیون ناموفق بود"); break;
       default: toast.info("نتیجهٔ اجرا هنوز تأیید نشده است"); return;
     }
-    runKeys.current.delete(a.id);
+    clearPendingIdempotencyKey(window.sessionStorage, runKeyScope(a.id));
     void load();
   }
 
