@@ -2460,6 +2460,382 @@ export const TOURS: readonly TourDefinition[] = [  {
       },
     ],
   },
+  listPageTour({
+    id: "crm.briefs.list",
+    pageKey: "page:/crm/briefs",
+    title: "بریف کارفرما",
+    description: "خواستهٔ مشتری، بودجه و تصمیم‌گیرنده پیش از قیمت‌گذاری.",
+    introTitle: "بریف چیست",
+    introBody:
+      "بریف، خواستهٔ کارفرما را پیش از قیمت‌گذاری و اجرا ثبت می‌کند: دامنهٔ کار، بودجه و تصمیم‌گیرنده. تأیید بریف شکل آن را قطعی می‌کند و اصلاح بعدی با بریف جانشین انجام می‌شود.",
+    nextBody:
+      "پیشنهاد قیمت روی همین بریف ساخته می‌شود. حذف بریف فقط تا پیش از تأیید و با اجازهٔ حذف ممکن است؛ سابقهٔ خواستهٔ مشتری را نگه دارید.",
+    eligibility: {
+      permissions: [PERMISSIONS.crmView, PERMISSIONS.crmManage],
+      anyOf: [
+        { permissions: [PERMISSIONS.crmExport] },
+        { permissions: [PERMISSIONS.crmConfigure] },
+      ],
+    },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "crm.proposals.list",
+    pageKey: "page:/crm/proposals",
+    title: "پیشنهاد قیمت",
+    description: "قیمت، حاشیه و وضعیت پیشنهاد تا پذیرش یا رد.",
+    introTitle: "پیشنهاد قیمت",
+    introBody:
+      "پیشنهاد، قیمت و حاشیهٔ یک بریف را ثبت می‌کند و تا پذیرش، رد یا انقضا پیش می‌رود. حاشیه داخلی است و در نمای مشتری دیده نمی‌شود.",
+    nextBody:
+      "پس از ارسال، پیشنهاد قفل می‌شود؛ اصلاح با «پیشنهاد تازه از روی این» انجام می‌شود تا عددی که مشتری دیده تغییر نکند.",
+    eligibility: {
+      permissions: [PERMISSIONS.crmView, PERMISSIONS.crmManage],
+      anyOf: [
+        { permissions: [PERMISSIONS.crmExport] },
+        { permissions: [PERMISSIONS.crmConfigure] },
+      ],
+    },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "crm.client-campaigns.list",
+    pageKey: "page:/crm/client-campaigns",
+    title: "کمپین کارفرما",
+    description: "بازه، کانال‌ها، هزینهٔ رسانه و اعداد بازگشتی.",
+    introTitle: "کمپین کارفرما",
+    introBody:
+      "کمپین کارفرما ثبت می‌کند چه زمانی، در چه کانال‌هایی و با چه هزینهٔ رسانه‌ای اجرا شد و چه اعدادی برگشت. هیچ عددی حدس زده نمی‌شود؛ مخرج صفر «—» نشان می‌دهد.",
+    nextBody:
+      "کمپین تکمیل یا لغوشده قفل است و اصلاح آن یک کمپین تازه است. روش انتساب را کنار عدد درآمد ثبت کنید تا گزارش قابل دفاع باشد.",
+    eligibility: {
+      permissions: [PERMISSIONS.crmView, PERMISSIONS.crmManage],
+      anyOf: [
+        { permissions: [PERMISSIONS.crmExport] },
+        { permissions: [PERMISSIONS.crmConfigure] },
+      ],
+    },
+    navAnchor: TOUR_ANCHORS.appSectionNav,
+    table: true,
+  }),
+  {
+    id: "crm.persons.overview",
+    version: 1,
+    pageKey: "page:/crm/persons",
+    route: "/crm/persons",
+    title: "پروندهٔ مشتری",
+    description: "جست‌وجوی مشتری و باز کردن پروندهٔ ۳۶۰ درجه.",
+    eligibility: { permissions: [PERMISSIONS.crmView, PERMISSIONS.partiesView] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "پروندهٔ ۳۶۰ درجه",
+        body:
+          "این صفحه نقطهٔ شروع پروندهٔ مشتری است: نام یا شماره را جست‌وجو کنید تا خریدها، یادداشت‌ها، تیکت‌ها و وضعیت رضایت یک نفر در یک جا دیده شود.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ پرونده",
+        body:
+          "عنوان و توضیح این صفحه بالای آن است. تا مشتری انتخاب نشود، پرونده‌ای باز نمی‌شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی CRM",
+        body:
+          "پروندهٔ مشتری از منوی CRM باز می‌شود. فهرست مشتریان برای مدیریت چند رکورد است و پرونده برای فهم یک نفر؛ هر دو از یک دفتر اشخاص می‌خوانند.",
+      },
+      {
+        id: "difference",
+        kind: "explain",
+        title: "پرونده یا فهرست",
+        body:
+          "تغییر مشخصات از دفتر اشخاص و تغییر رضایت کنار همان پرونده انجام می‌شود. پرونده جای فهرست را نمی‌گیرد و فهرست جای پرونده را.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "قدم بعد",
+        body:
+          "برای اصلاح مشخصات از دفتر اشخاص یا دکمهٔ ویرایش پرونده استفاده کنید. این تور چیزی را تغییر نمی‌دهد.",
+      },
+    ],
+  },
+  {
+    id: "crm.segments.overview",
+    version: 1,
+    pageKey: "page:/crm/segments",
+    route: "/crm/segments",
+    title: "بخش‌بندی مشتری",
+    description: "قانون بخش، پیش‌نمایش جمعیت و مخاطب قابل تماس.",
+    eligibility: { permissions: [PERMISSIONS.crmView, PERMISSIONS.crmConfigure] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "بخش، یک سند قانون",
+        body:
+          "بخش‌بندی یک سند قانون است، نه پرس‌وجوی SQL: فیلدها و عملگرها از فهرست بسته می‌آیند و مقدارها پارامتر می‌شوند.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ بخش‌بندی",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. بخش‌ها برای مخاطب کمپین و گزارش ساخته می‌شوند، نه برای حذف مشتری.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی CRM",
+        body:
+          "بخش‌بندی کنار مشتریان، فرصت‌ها و کمپین کارفرما در منوی CRM است. فقط بخش‌های مجاز نقش شما نمایش داده می‌شود.",
+      },
+      {
+        id: "preview",
+        kind: "explain",
+        title: "پیش‌نمایش جمعیت",
+        body:
+          "پیش‌نمایش دو عدد نشان می‌دهد: چند مشتری با قانون می‌خوانند و چند نفر از آن‌ها برای هدف انتخابی قابل تماس‌اند. فاصلهٔ این دو، تصمیم کمپین را می‌سازد.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "اثر تغییر قانون",
+        body:
+          "تغییر قانون روی کمپین‌های بعدی اثر دارد. حذف بخش، مشتریان را حذف نمی‌کند.",
+      },
+    ],
+  },
+  {
+    id: "crm.consent.overview",
+    version: 1,
+    pageKey: "page:/crm/consent",
+    route: "/crm/consent",
+    title: "رضایت ارتباط",
+    description: "پوشش رضایت پیامک و ایمیل و دفتر تغییرات.",
+    eligibility: { permissions: [PERMISSIONS.crmConsentManage] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "پوشش و دفتر",
+        body:
+          "رضایت ارتباط دو چیز را کنار هم نشان می‌دهد: پوشش («چند مشتری را می‌توانیم پیام دهیم») و دفتر تغییرات («چه زمانی و چرا عوض شد»).",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ رضایت",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. این گزارش برای پاسخ به شکایت یا بازبینی قانونی نگه داشته می‌شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی CRM",
+        body:
+          "رضایت ارتباط بخشی از CRM است و از همین منو باز می‌شود. تنظیمات CRM فقط میان‌بری به این صفحه دارد.",
+      },
+      {
+        id: "trail",
+        kind: "explain",
+        title: "دفتر فقط افزودنی",
+        body:
+          "دفتر فقط افزودنی است؛ ویرایش یا حذف ندارد، چون سندی که بتوان بازنویسی کرد مدرک نیست.",
+      },
+      {
+        id: "change",
+        kind: "explain",
+        title: "کجا تغییر می‌کند",
+        body:
+          "رضایت کنار پروندهٔ خود مشتری تغییر می‌کند، نه از این صفحه. سطح ویرایش گروهی برای اجازهٔ پیام عمداً وجود ندارد.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "قدم بعد",
+        body:
+          "برای تغییر رضایت، پروندهٔ همان مشتری را باز کنید. این صفحه فقط می‌خواند.",
+      },
+    ],
+  },
+  {
+    id: "crm.quality.overview",
+    version: 1,
+    pageKey: "page:/crm/quality",
+    route: "/crm/quality",
+    title: "کیفیت داده",
+    description: "مسائل داده، اشخاص تکراری و تطبیق فروشگاه آنلاین.",
+    eligibility: { permissions: [PERMISSIONS.crmMerge] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "یک کارگاه، سه پرسش",
+        body:
+          "کیفیت داده یک کارگاه است: مسائل داده، اشخاص تکراری و تطبیق فروشگاه آنلاین همه به یک تصمیم می‌رسند — اصلاح رکورد.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ کیفیت داده",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. هر نمای این کارگاه با همان کلید ادغام باز می‌شود.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی CRM",
+        body:
+          "کیفیت داده کنار مشتریان و بخش‌بندی در منوی CRM است. نمای غیرمجاز نقش شما اصلاً کشیده نمی‌شود.",
+      },
+      {
+        id: "issues",
+        kind: "explain",
+        title: "مسائل نام‌دار",
+        body:
+          "مسائل نام‌دار با شمار واقعی فهرست می‌شوند؛ امتیاز کلی ساخته نمی‌شود چون عددی است که نمی‌توان روی آن کار کرد.",
+      },
+      {
+        id: "merge",
+        kind: "explain",
+        title: "ادغام با تأیید انسان",
+        body:
+          "ادغام خودکار وجود ندارد. نمای تکرار پیش‌نمایش می‌دهد و تأیید انسان لازم است؛ تطبیق هم انتخاب انسان می‌خواهد.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "قدم بعد",
+        body:
+          "از هر مسئله به رکورد خودش بروید. ادغام برگشت‌ناپذیر است و باید با اجازهٔ ادغام انجام شود.",
+      },
+    ],
+  },
+  {
+    id: "crm.audit.overview",
+    version: 1,
+    pageKey: "page:/crm/audit",
+    route: "/crm/audit",
+    title: "سابقهٔ تصمیم‌ها",
+    description: "چه کسی، چه زمانی و چرا تصمیم گرفت.",
+    eligibility: { permissions: [PERMISSIONS.crmConfigure] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "دفتر تصمیم‌ها",
+        body:
+          "سابقهٔ تصمیم‌ها فقط قضاوت‌هایی را نگه می‌دارد که ردیف طبیعی ندارند: ادغام، تغییر رضایت و تصمیم کیفیت. خریدهای مشتری اینجا نیستند.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ سابقه",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. این گزارش دربارهٔ کار کارکنان است، نه تاریخچهٔ خرید مشتری.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی CRM",
+        body:
+          "سابقهٔ تصمیم‌ها در منوی CRM است و فقط برای نقش‌هایی نمایش داده می‌شود که اجازهٔ پیکربندی دارند.",
+      },
+      {
+        id: "filters",
+        kind: "explain",
+        title: "فیلترهای زنده",
+        body:
+          "فیلتر نوع و فاعل از خود گزارش ساخته می‌شود، نه از فهرست ثابت؛ گزینه‌ای که هرگز رخ نداده نمایش داده نمی‌شود.",
+      },
+      {
+        id: "trail",
+        kind: "explain",
+        title: "تفاوت با تاریخچهٔ مشتری",
+        body:
+          "این گزارش فقط رشد می‌کند. برای تاریخچهٔ کامل یک مشتری از پروندهٔ او استفاده کنید.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "قدم بعد",
+        body:
+          "برای پاسخ به «چه کسی و چه زمانی» از همین صفحه استفاده کنید. این تور چیزی را تغییر نمی‌دهد.",
+      },
+    ],
+  },
+  {
+    id: "crm.settings.overview",
+    version: 1,
+    pageKey: "page:/crm/settings",
+    route: "/crm/settings",
+    title: "تنظیمات CRM",
+    description: "تشخیص تکرار، رضایت، قیف، فیلدها و اتوماسیون.",
+    eligibility: { permissions: [PERMISSIONS.crmConfigure] },
+    steps: [
+      {
+        id: "welcome",
+        kind: "explain",
+        title: "تنظیمات همین برنامه",
+        body:
+          "تنظیمات CRM مخصوص همین برنامه است: تشخیص تکرار، رضایت، قیف و مراحل فروش، فیلدهای کسب‌وکار و میان‌بر اتوماسیون.",
+      },
+      {
+        id: "header",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحهٔ تنظیمات CRM",
+        body:
+          "عنوان و توضیح صفحه بالای آن است. تنظیمات سراسری پلتفرم در /settings است، نه اینجا.",
+      },
+      {
+        id: "menu",
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی CRM",
+        body:
+          "این تنظیمات از منوی CRM باز می‌شود. هر گروه یا خود تنظیم را دارد یا به صفحهٔ صاحبش وصل می‌شود.",
+      },
+      {
+        id: "groups",
+        kind: "explain",
+        title: "گروه‌های تنظیم",
+        body:
+          "تشخیص تکرار و رضایت به کارگاه کیفیت و دفتر رضایت وصل می‌شوند؛ قیف و فیلدها همین‌جا ویرایش می‌شوند.",
+      },
+      {
+        id: "automations",
+        kind: "explain",
+        title: "اتوماسیون",
+        body:
+          "قواعد خودکار («وقتی → اگر → آنگاه») از همین تنظیمات باز می‌شوند و با قوی‌ترین کلید CRM نوشته می‌شوند، چون بدون ناظر رکورد تغییر می‌دهند.",
+      },
+      {
+        id: "next",
+        kind: "explain",
+        title: "پیش از تغییر",
+        body:
+          "تغییر قیف یا فیلدها روی گزارش‌های آینده اثر دارد. پیش از تغییر مرحله‌ها با تیم فروش هماهنگ کنید.",
+      },
+    ],
+  },
 ];
 
 export function tourById(id: string): TourDefinition | undefined {

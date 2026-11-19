@@ -51,8 +51,8 @@ import { POST as postProgress } from "./[tourId]/progress/route";
 const PAGE = "page:/accounting/products";
 const TOUR = "accounting.products.list";
 // A registered page nobody has authored a tour for.
-const BASELINE_PAGE = "page:/crm/audit";
-const BASELINE_TOUR = baselineTourIdForRoute("/crm/audit");
+const BASELINE_PAGE = "page:/accounting/reports";
+const BASELINE_TOUR = baselineTourIdForRoute("/accounting/reports");
 
 function member(permissions: string[]) {
   return {
@@ -118,7 +118,7 @@ describe("GET /api/knowledge/tours", () => {
     expect(body.tours).toHaveLength(1);
     expect(body.tours[0]).toMatchObject({
       id: BASELINE_TOUR,
-      route: "/crm/audit",
+      route: "/accounting/reports",
       stepCount: 5,
       progress: { status: "not_started" },
     });
@@ -133,7 +133,7 @@ describe("published Studio tours", () => {
     id: STUDIO_ID,
     version: 4,
     pageKey: BASELINE_PAGE,
-    route: "/crm/audit",
+    route: "/accounting/reports",
     title: "سابقهٔ تصمیم‌ها",
     description: "تور منتشرشده از استودیو",
     eligibility: {},

@@ -130,8 +130,8 @@ describe("automatic baseline tours", () => {
     // The shared region applies to every page without repeating per page, and
     // an app whose shell already draws a sidebar gets that sidebar as a real
     // region from its one prefix declaration.
-    expect(regionsForPage("page:/crm/audit").map((region) => region.anchor)).toEqual([
-      TOUR_ANCHORS.appSectionNav,
+    expect(regionsForPage("page:/accounting/reports").map((region) => region.anchor)).toEqual([
+      TOUR_ANCHORS.accountingSectionNav,
       TOUR_ANCHORS.pageHeader,
     ]);
   });
@@ -160,7 +160,7 @@ describe("automatic baseline tours", () => {
     // The products tour is gated: an ineligible member gets nothing rather than
     // a baseline describing a screen its instructions are gated on.
     expect(authored).toEqual([]);
-    const baseline = pageTourCandidates("page:/crm/audit").flatMap(
+    const baseline = pageTourCandidates("page:/accounting/reports").flatMap(
       (tour) => tourForViewer(tour, viewer) ?? [],
     );
     expect(baseline).toHaveLength(1);
@@ -184,7 +184,7 @@ describe("automatic baseline tours", () => {
 
     // A page that only had the automatic baseline now answers with the tour the
     // super-admin wrote and published.
-    const edited = pageTourCandidates("page:/crm/audit", [published("page:/crm/audit", "studio.crm.audit", "تور استودیو")]);
+    const edited = pageTourCandidates("page:/accounting/reports", [published("page:/accounting/reports", "studio.crm.audit", "تور استودیو")]);
     expect(edited.map((tour) => tour.id)).toEqual(["studio.crm.audit"]);
     expect(edited[0].title).toBe("تور استودیو");
 
@@ -201,7 +201,7 @@ describe("automatic baseline tours", () => {
     expect(overview[1].title).not.toBe("نسخهٔ استودیو");
 
     // A published tour of another page never leaks into this one.
-    expect(pageTourCandidates("page:/crm/audit", [published("page:/crm/quality", "studio.x", "x")])[0].id).toMatch(
+    expect(pageTourCandidates("page:/accounting/reports", [published("page:/crm/quality", "studio.x", "x")])[0].id).toMatch(
       /^baseline\./,
     );
   });
