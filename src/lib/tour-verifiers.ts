@@ -67,6 +67,11 @@ export const TOUR_VERIFIERS = {
     promise: "وقتی خرید دریافت و موجودی به‌روز شود، این مرحله خودکار تأیید می‌شود.",
     recordedBy: "POST /api/stock/purchases",
   },
+  "role.changed": {
+    label: "تغییر نقش یا دسترسی یک عضو",
+    promise: "وقتی نقش یا دسترسی عضو ذخیره شود، این مرحله خودکار تأیید می‌شود.",
+    recordedBy: "PATCH /api/team/[id]",
+  },
 } as const satisfies Record<string, TourVerifierDefinition>;
 
 /** The keys a tour step may name. */

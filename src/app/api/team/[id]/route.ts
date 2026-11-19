@@ -12,6 +12,7 @@ import {
 } from "@/lib/team-service";
 import { canonicalMemberPhone } from "@/lib/phone-otp";
 import { query } from "@/lib/db";
+import { recordTourEvidence } from "@/lib/tour-evidence-service";
 import { ASSIGNABLE_ROLES } from "@/lib/roles";
 import type { Role } from "@/lib/auth";
 
@@ -196,6 +197,18 @@ export const PATCH = withTenantScope(async (request: NextRequest, context: { par
      * permission change cannot stamp the file with a label the request omitted,
      * because the values are read from the membership row rather than the body.
      */
+    // Issue #972 — the guided "change a member's access" task is proven by the
+    // saved membership, not by a click in the tour. Only an access edit counts;
+    // a rename, suspend or phone change leaves no evidence. Best-effort: a
+    // broken evidence table costs a tour retry, never the member's save.
+    if (changesAccess) {
+      await recordTourEvidence({
+        businessId: session.businessId,
+        userId: session.sub,
+        verifier: "role.changed",
+        entityId: id,
+      }).catch(() => undefined);
+    }
     return NextResponse.json({ ok: true });
   } catch (err) {
     return errorResponse(err);
