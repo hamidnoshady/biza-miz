@@ -8,6 +8,7 @@ import { previewSystemPrompt } from "@/lib/ai-prompt-resolver";
 import { isAppKey } from "@/lib/apps";
 import { randomUUID } from "node:crypto";
 import { brandName } from "@/lib/brand";
+import { runDecisionSmoke } from "@/lib/ai-decision-smoke";
 import { toolDefinitions } from "@/lib/ai";
 import { gatewayChatModel, runSdkTurn, sdkToolsFrom, streamSdkTurn, type SdkTurnInput, type SdkTurnResult } from "@/lib/ai-sdk-adapter";
 import { PLATFORM_ASSISTANT_MAX_TOOL_ROUNDS, platformToolsForRole, runPlatformAssistantTool } from "@/lib/ai-platform-assistant";
@@ -27,8 +28,9 @@ export const POST = withPlatformScope(async (request: NextRequest) => {
   const { session } = guard;
 
   const body = (await request.json().catch(() => null)) as
-    | { mode?: unknown; message?: unknown; history?: unknown; tools?: unknown; draftId?: unknown }
+    | { mode?: unknown; message?: unknown; history?: unknown; tools?: unknown; draftId?: unknown; decisionSmoke?: unknown }
     | null;
+  if (body?.decisionSmoke !== undefined) return runDecisionSmoke(body, session.padmin, request.signal);
   const requestedMode = body?.mode;
   const message = typeof body?.message === "string" ? body.message.trim() : "";
   if (typeof requestedMode !== "string" || !(AI_CHAT_MODES as readonly string[]).includes(requestedMode) || !message || message.length > 3000) {
