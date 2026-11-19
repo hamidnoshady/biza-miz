@@ -467,11 +467,11 @@ instead of trapping the member.
   remain header-only.
 - **Tour Studio** authors explanations, spotlights, verified actions, hand-offs
   and cross-page navigation, and offers reusable step templates plus a
-  step-sequence preview. The panel now exposes feature-flag and
-  `withoutPermissions` rules; `anyOf` and conditional branches are still
-  server-supported but not edited in the panel. The preview shows step content
-  and order, not the target page's live DOM — that remains a review step on the
-  real page.
+  step-sequence preview. The panel exposes permission, `withoutPermissions`,
+  industry, feature-flag and `anyOf` rules (up to eight alternatives, each with
+  permissions and/or industries; an empty alternative is refused before save).
+  Conditional branches and a live preview of the target page are still open —
+  the preview shows step content and order, not the target page's DOM.
 - **Further verified actions** can be added the same way: register a key in
   `TOUR_VERIFIERS`, record evidence only after the domain write succeeds, and
   add the step. There is no verifier without a writer, because

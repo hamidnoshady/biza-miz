@@ -191,6 +191,30 @@ describe("Tour Studio — saving and publishing", () => {
     expect(body.steps[0].anchor).toBeUndefined();
   });
 
+  it("edits an anyOf alternative and refuses an empty one", async () => {
+    await renderPanel();
+    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: /افزودن گزینه/ }));
+    fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس/ }));
+    await waitFor(() =>
+      expect(screen.getByText("هر گزینهٔ جایگزین باید حداقل یک شرط داشته باشد.")).toBeTruthy(),
+    );
+    expect(apiMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+
+    fireEvent.change(screen.getByLabelText("گزینهٔ 1 — دسترسی‌ها (با کاما)"), {
+      target: { value: "crm.export" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس/ }));
+    await waitFor(() => expect(screen.getByText("پیش‌نویس ذخیره شد.")).toBeTruthy());
+
+    const posted = apiMock.mock.calls.find(([, init]) => init?.method === "POST");
+    const body = JSON.parse(posted![1]!.body as string);
+    expect(body.eligibility.anyOf).toEqual([{ permissions: ["crm.export"] }]);
+  });
+
   it("answers a collision with this feature's Persian sentence, not the raw code", async () => {
     tours = [tour()];
     await renderPanel();
