@@ -13,6 +13,7 @@ import { PERMISSIONS } from "./permissions";
 import {
   STUDIO_ERROR_TEXT,
   STUDIO_STEP_BODY_MAX,
+  TOUR_STUDIO_TEMPLATES,
   isServableStudioTour,
   mergePublishedTours,
   parseStudioTourInput,
@@ -54,13 +55,36 @@ describe("authoring a tour", () => {
     expect(definition.pageKey).toBe("page:/crm/audit");
   });
 
+  it("ships reusable templates that are valid starting points, not invented anchors", () => {
+    const registered = new Set<string>(Object.values(TOUR_ANCHORS));
+    for (const template of TOUR_STUDIO_TEMPLATES) {
+      expect(template.label.trim()).not.toBe("");
+      expect(template.steps[0]?.kind).toBe("explain");
+      for (const step of template.steps) {
+        expect(step.title.trim()).not.toBe("");
+        expect(step.body.trim()).not.toBe("");
+        if (step.anchor) expect(registered.has(step.anchor)).toBe(true);
+      }
+
+      const parsed = parse({
+        steps: template.steps.map((step, index) => ({
+          id: `tpl-${index + 1}`,
+          kind: step.kind,
+          ...(step.anchor ? { anchor: step.anchor } : {}),
+          title: step.title,
+          body: step.body,
+        })),
+      });
+      expect(parsed.ok, template.id).toBe(true);
+    }
+  });
+
   it("refuses a page the registry does not know, or a route that is not that page's", () => {
     expect(parse({ pageKey: "page:/nope" })).toMatchObject({ ok: false, error: "unknown_page" });
     expect(parse({ route: "/dashboard/crm/audit" })).toMatchObject({ ok: false, error: "route_mismatch" });
   });
 
-  it("authors a cross-page hand-off, but only to another registered page", () => {
-    const parsed = parse({
+  it("authors a cross-page hand-off, but only to another registered page", () => {    const parsed = parse({
       steps: [
         { id: "intro", kind: "explain", title: "شروع", body: "." },
         {

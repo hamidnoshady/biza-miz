@@ -27,6 +27,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   CirclePlayIcon,
+  LayoutTemplateIcon,
   PlusIcon,
   RotateCcwIcon,
   SaveIcon,
@@ -38,7 +39,7 @@ import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { KNOWLEDGE_PAGES } from "@/lib/knowledge-base";
 import { tourCoverage } from "@/lib/tour-coverage";
 import { TOUR_ANCHORS } from "@/lib/tours";
-import { STUDIO_ERROR_TEXT, type StudioTour, type StudioTourRevision } from "@/lib/tour-studio";
+import { STUDIO_ERROR_TEXT, TOUR_STUDIO_TEMPLATES, type StudioTour, type StudioTourTemplate, type StudioTourRevision } from "@/lib/tour-studio";
 import {
   TOUR_VERIFIERS,
   TOUR_VERIFIER_KEYS,
@@ -272,6 +273,29 @@ export function ToursPanel() {
         },
       ],
     }));
+  }
+
+  /**
+   * Inserts a reviewed preset. Ids are generated from the current list, so a
+   * template can be inserted twice without colliding; the editor still owns
+   * the copy and the publish step.
+   */
+  function applyTemplate(template: StudioTourTemplate) {
+    setForm((current) => {
+      const steps = [...current.steps];
+      for (const step of template.steps) {
+        steps.push({
+          id: nextStepId(steps),
+          kind: step.kind,
+          anchor: step.anchor ?? "",
+          verifier: "",
+          navigateTo: "",
+          title: step.title,
+          body: step.body,
+        });
+      }
+      return { ...current, steps };
+    });
   }
 
   async function save(): Promise<StudioTour | null> {
@@ -576,6 +600,24 @@ export function ToursPanel() {
                 رفتن به صفحه
               </Button>
             </div>
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-medium text-muted-foreground">قالب آماده:</span>
+            {TOUR_STUDIO_TEMPLATES.map((template) => (
+              <Button
+                key={template.id}
+                type="button"
+                variant="ghost"
+                title={template.description}
+                onClick={() => applyTemplate(template)}
+                disabled={!canManage}
+                className="h-8 gap-1.5 px-2.5 text-xs"
+              >
+                <LayoutTemplateIcon className="size-3.5" aria-hidden="true" />
+                {template.label}
+              </Button>
+            ))}
           </div>
 
           {form.steps.length === 0 ? (

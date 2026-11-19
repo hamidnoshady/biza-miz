@@ -9,6 +9,7 @@ import { isValidIsoDate } from "@/lib/iso-date";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { streamVoucherExportCsv, voucherExportFilename } from "@/lib/voucher-export";
 import { isJsonObject, isVoucherMethod, optionalBodyText, PayablesInputError, VOUCHER_METHODS, type VoucherMethod } from "@/lib/payables-input";
+import { recordTourEvidence } from "@/lib/tour-evidence-service";
 
 /**
  * The «دریافت‌ها» ledger slice — receipt vouchers, newest first, keyset-
@@ -182,6 +183,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       cashAccountId,
       bankReference,
     });
+    // Issue #972 — a guided task that asked for "record a customer receipt" is
+    // proven by this write, not by a click in the tour. Best-effort: never
+    // fails the receipt (and a failed receipt leaves no evidence).
+    await recordTourEvidence({
+      businessId: session.businessId,
+      userId: session.sub,
+      verifier: "receivable.payment_recorded",
+      entityId: receipt.id,
+    }).catch(() => undefined);
     // An idempotent replay answers the original voucher with 200 so the client
     // can tell it did not create a second one; a fresh posting is 201.
     return NextResponse.json({ receipt }, { status: receipt.duplicate ? 200 : 201 });

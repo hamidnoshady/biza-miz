@@ -1515,11 +1515,30 @@ export const TOURS: readonly TourDefinition[] = [
           "نمای «مانده حساب‌ها» هر مشتری را با شمارهٔ تماس و ماندهٔ حسابش نشان می‌دهد؛ ستون‌های سن بدهی در نمای «نمای سنی بدهی‌ها» بالای همان فهرست است. ردیف را باز کنید تا صورت‌حساب و سابقهٔ دریافت‌ها را ببینید؛ مبلغی را خودتان ثبت نمی‌کنید.",
       },
       {
-        id: "next",
-        kind: "explain",
-        title: "قدم بعدی",
+        id: "to-receipts",
+        kind: "navigate",
+        navigateTo: "/accounting/receipts",
+        title: "رفتن به ثبت دریافت",
         body:
-          "برای ثبت دریافت، از «دریافت و پرداخت» استفاده کنید یا پروندهٔ مشتری را در فهرست اشخاص باز کنید. هر دو از همان دفتر و همان مانده می‌خوانند.",
+          "برای ثبت دریافت واقعی به صفحهٔ «دریافت و پرداخت» می‌رویم. این صفحه فقط خواندنی است و دریافت را آنجا ثبت می‌کنید.",
+        eligibility: { permissions: [PERMISSIONS.financeReceivablesManage] },
+      },
+      {
+        id: "record-receipt",
+        kind: "action",
+        verifier: "receivable.payment_recorded",
+        title: "یک دریافت ثبت کنید",
+        body:
+          "مشتری، روش دریافت و مبلغ را انتخاب کنید و سند دریافت را ثبت کنید. این مرحله با فشردن «بعدی» کامل نمی‌شود؛ وقتی سرور همان دریافت را ثبت کند، خودکار تأیید می‌شود. اگر دریافت واقعی ندارید، می‌توانید رد شوید.",
+        eligibility: { permissions: [PERMISSIONS.financeReceivablesManage] },
+      },
+      {
+        id: "done",
+        kind: "explain",
+        title: "پس از ثبت",
+        body:
+          "دریافت ثبت‌شده در همین فهرست و در صورت‌حساب مشتری دیده می‌شود. اگر اشتباه ثبت شد، اصلاح از مسیر مجاز همان برگه انجام می‌شود، نه با تور.",
+        eligibility: { permissions: [PERMISSIONS.financeReceivablesManage] },
       },
     ],
   },

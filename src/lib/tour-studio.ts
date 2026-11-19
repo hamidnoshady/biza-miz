@@ -128,6 +128,101 @@ export const STUDIO_DESCRIPTION_MAX = 300;
 export const STUDIO_STEP_TITLE_MAX = 120;
 export const STUDIO_STEP_BODY_MAX = 1000;
 
+/** A reusable opening an editor can insert instead of retyping the same shape. */
+export interface StudioTourTemplate {
+  id: string;
+  label: string;
+  description: string;
+  steps: readonly Pick<TourStep, "kind" | "anchor" | "title" | "body">[];
+}
+
+/**
+ * Reusable step presets (issue #972, editorial item). They are deliberately
+ * made of shared anchors every shell can render — a template is a starting
+ * point a reviewer edits, not a promise that every page has a table or filters.
+ */
+export const TOUR_STUDIO_TEMPLATES: readonly StudioTourTemplate[] = [
+  {
+    id: "standard-intro",
+    label: "معرفی استاندارد",
+    description: "توضیح صفحه و هایلایت سرصفحه؛ کوتاه‌ترین شروع معتبر.",
+    steps: [
+      {
+        kind: "explain",
+        title: "این صفحه چه کاری می‌کند",
+        body:
+          "در یک یا دو جمله بگویید این صفحه برای چیست، چه کاری را آسان می‌کند و از کجای منو به آن می‌رسند.",
+      },
+      {
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageHeader,
+        title: "سرصفحه و کارهای اصلی",
+        body:
+          "عنوان صفحه، توضیح آن و کنترل‌های اصلی همین‌جاست. دکمهٔ آموزش و دسترسی به راهنمای مکتوب هم در همین نوار است.",
+      },
+    ],
+  },
+  {
+    id: "list-walkthrough",
+    label: "صفحهٔ فهرست",
+    description: "معرفی، جست‌وجو/فیلتر، جدول و قدم بعدی.",
+    steps: [
+      {
+        kind: "explain",
+        title: "این فهرست چه چیزی را نشان می‌دهد",
+        body:
+          "بگویید هر ردیف چه چیزی است و این فهرست از کدام بخش کسب‌وکار می‌آید؛ سپس در مرحلهٔ بعد جست‌وجو و جدول را نشان دهید.",
+      },
+      {
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageFilters,
+        title: "جست‌وجو و فیلتر",
+        body:
+          "با جست‌وجو فهرست را به یک مورد محدود کنید. فیلترها همان چیزی را نشان می‌دهند که نقش شما اجازهٔ دیدنش را دارد.",
+      },
+      {
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.pageTable,
+        title: "ردیف‌ها و ستون‌ها",
+        body:
+          "هر ردیف یک مورد است و ستون‌ها وضعیت، مبلغ یا زمان مربوط به آن را نشان می‌دهند. برای دیدن جزئیات، ردیف را باز کنید.",
+      },
+      {
+        kind: "explain",
+        title: "قدم بعدی",
+        body:
+          "بگویید برای انجام کار واقعی از کدام دکمه یا صفحه استفاده شود. اگر کار مالی یا حساس است، تأکید کنید که تور آن را انجام نمی‌دهد.",
+      },
+    ],
+  },
+  {
+    id: "section-walkthrough",
+    label: "معرفی بخش و منو",
+    description: "توضیح هدف بخش و هایلایت منوی همان برنامه.",
+    steps: [
+      {
+        kind: "explain",
+        title: "این بخش به چه کاری می‌آید",
+        body:
+          "هدف این بخش را در یک جمله بگویید و بگویید با کدام بخش‌های دیگر هم‌کاری دارد.",
+      },
+      {
+        kind: "spotlight",
+        anchor: TOUR_ANCHORS.appSectionNav,
+        title: "منوی بخش‌ها",
+        body:
+          "از این منو بین بخش‌های همین برنامه جابه‌جا می‌شوید. بخش فعال و بخش‌های مجاز نقش شما همین‌جاست.",
+      },
+      {
+        kind: "explain",
+        title: "از کجا شروع کنید",
+        body:
+          "کار روزانه را از کدام تب یا دکمه شروع کنید و برای راهنمای مکتوب به مرکز آموزش سر بزنید.",
+      },
+    ],
+  },
+];
+
 /**
  * The console's Persian sentence for every code this feature can emit — the
  * input errors below and the service's own (`not_found`, `version_conflict`,
