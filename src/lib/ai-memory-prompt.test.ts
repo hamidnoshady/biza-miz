@@ -37,6 +37,18 @@ describe("durable memory prompt selection", () => {
     expect(text).toContain("ارسال سریع");
   });
 
+  it("lets a later layer render a fact the earlier layer had no budget for", () => {
+    const text = renderMemoryForPrompt({
+      ...empty,
+      platform: [entry("p".repeat(4_000)), entry("q".repeat(4_000)), entry("shared fact")],
+      tenant: [entry("shared fact"), entry("tenant extra")],
+    });
+    // The platform copy was cut by the budget, so dropping the tenant copy
+    // would remove the fact from the prompt entirely.
+    expect(text).toContain("shared fact");
+    expect(text).toContain("tenant extra");
+  });
+
   it("leaves room for active project context after a large platform layer", () => {
     const text = renderMemoryForPrompt({
       ...empty,

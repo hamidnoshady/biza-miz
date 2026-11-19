@@ -186,30 +186,39 @@ export function renderMemoryForPrompt(layers: {
   ];
 
   const terms = [...memoryTerms(query.slice(0, 600))];
-  const seen = new Set<string>();
   const candidates = sections.flatMap(({ label, entries }) => {
+    // Only a duplicate inside one layer can be dropped here: whether a higher
+    // layer's copy is redundant is a question about the prompt that is actually
+    // rendered, which is not known until the budget is allocated below.
+    const seenInLayer = new Set<string>();
     const ranked = (entries ?? []).flatMap((entry) => {
       const content = typeof entry.content === "string" ? entry.content.trim().slice(0, MAX_MEMORY_CHARS) : "";
       const key = normalizeMemoryText(content);
-      if (!key || seen.has(key)) return [];
-      seen.add(key);
+      if (!key || seenInLayer.has(key)) return [];
+      seenInLayer.add(key);
       const words = memoryTerms(content);
       const score = terms.filter((term) => words.has(term)).length;
-      return [{ content, score }];
+      return [{ content, key, score }];
     }).sort((a, b) => b.score - a.score);
     return ranked.length ? [{ label, ranked }] : [];
   });
 
   const lines: string[] = [];
+  const rendered = new Set<string>();
   let remaining = MAX_MEMORY_TOTAL_CHARS;
   for (const [index, section] of candidates.entries()) {
     // Keep precedence order and share spare space with the more specific layers.
     let budget = Math.floor(remaining / (candidates.length - index));
     const prefix = `- [${section.label}] `;
     for (const entry of section.ranked) {
+      // A copy an earlier layer actually rendered makes this one redundant, so
+      // it costs no budget. A copy that had to be left out does not: suppressing
+      // the later layer's copy would lose the fact from the prompt altogether.
+      if (rendered.has(entry.key)) continue;
       if (budget <= prefix.length + 1) break;
       const line = prefix + entry.content.slice(0, budget - prefix.length - 1);
       lines.push(line);
+      rendered.add(entry.key);
       budget -= line.length + 1;
       remaining -= line.length + 1;
     }
