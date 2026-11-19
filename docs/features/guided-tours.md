@@ -189,7 +189,7 @@ that is not a click on «بعدی».
 
 - **A step names a whitelisted event, not a URL.** `kind: "action"` requires a
   key from `TOUR_VERIFIERS` (`product.created`, `party.created`,
-  `order.created`, …). Each entry carries the Persian promise shown in the card
+  `order.created`, `receivable.payment_recorded`, …). Each entry carries the Persian promise shown in the card
   and the endpoint that records it; `tour-verifiers.test.ts` asserts every
   `recordedBy` really calls `recordTourEvidence` with that key, so a tour can
   never be published around a writer that does not exist.
@@ -362,8 +362,8 @@ and hand-off counts and the anchors it points at. It separates:
 `tour-baseline.test.ts` asserts the live registry is clean, so CI catches a new
 page that escaped baseline coverage or an anchor contract break without a
 browser. Current figures on this commit: **101 registered pages, 18 advanced,
-83 baseline, 23 authored tours, 554 offered steps** (225 spotlight steps, 5
-verified actions, 9 hand-offs), **95 pages with a page-specific spotlight, 6
+83 baseline, 23 authored tours, 556 offered steps** (225 spotlight steps, 6
+verified actions, 10 hand-offs), **95 pages with a page-specific spotlight, 6
 header-only/explanation-only pages, 0 uncovered pages, 0 stale tours, 0 contract
 problems**. The five app groups now derive a real section-navigation spotlight
 from one prefix declaration, so every page in Accounting, CRM, Growth, Websites
@@ -459,8 +459,8 @@ instead of trapping the member.
   in-panel preview is still a deployment-and-review step. Eligibility rules the
   API accepts (`anyOf`, feature flags, `withoutPermissions`) are not yet exposed
   by the panel.
-- **Further verified actions** (payments, stock receipts, role changes) each
-  need their own reviewer-approved server success point.
+- **Further verified actions** (supplier payments, stock receipts, role changes)
+  each need their own reviewer-approved server success point.
 - **Hybrid origin boundary**: the overlay runs in the page that renders it.
   Across the cloud pane's origin boundary a route-based explanation is the
   fallback; there is no cross-origin DOM access.
