@@ -809,6 +809,23 @@ export const TOURS: readonly TourDefinition[] = [  {
         body:
           "برای هر قلم انبار بارکد تعیین کنید و لیبل آن را چاپ کنید تا شمارش و رسیدگی با اسکنر سریع‌تر شود.",
       },
+      {
+        id: "receive-purchase",
+        kind: "action",
+        verifier: "stock.received",
+        title: "یک خرید را دریافت کنید",
+        body:
+          "از بخش «تأمین‌کنندگان و خرید» یک خرید با حداقل یک قلم ثبت و دریافت کنید. این مرحله با «بعدی» کامل نمی‌شود؛ وقتی سرور خرید را ثبت و موجودی را به‌روز کند، خودکار تأیید می‌شود. اگر خرید واقعی ندارید، می‌توانید رد شوید.",
+        eligibility: { permissions: [PERMISSIONS.purchasesManage] },
+      },
+      {
+        id: "after-purchase",
+        kind: "explain",
+        title: "پس از دریافت",
+        body:
+          "خرید در فهرست خریدها و تاریخچهٔ انبار دیده می‌شود. اصلاح یا برگشت خرید از مسیر مجاز خودش انجام می‌شود، نه با تور.",
+        eligibility: { permissions: [PERMISSIONS.purchasesManage] },
+      },
     ],
   },
   {
@@ -874,6 +891,23 @@ export const TOURS: readonly TourDefinition[] = [  {
         title: "بارکد و لیبل",
         body: "برای هر قلم انبار بارکد تعیین کنید و لیبل آن را چاپ کنید.",
       },
+      {
+        id: "receive-purchase",
+        kind: "action",
+        verifier: "stock.received",
+        title: "یک خرید را دریافت کنید",
+        body:
+          "از بخش «تأمین‌کنندگان و خرید» یک خرید با حداقل یک قلم ثبت و دریافت کنید. این مرحله با «بعدی» کامل نمی‌شود؛ وقتی سرور خرید را ثبت کند، خودکار تأیید می‌شود. اگر خرید واقعی ندارید، می‌توانید رد شوید.",
+        eligibility: { permissions: [PERMISSIONS.purchasesManage] },
+      },
+      {
+        id: "after-purchase",
+        kind: "explain",
+        title: "پس از دریافت",
+        body:
+          "خرید در فهرست خریدها دیده می‌شود. اصلاح یا برگشت خرید از مسیر مجاز خودش انجام می‌شود، نه با تور.",
+        eligibility: { permissions: [PERMISSIONS.purchasesManage] },
+      },
     ],
   },
   {
@@ -927,6 +961,23 @@ export const TOURS: readonly TourDefinition[] = [  {
         title: "خرید و حوالهٔ بازگشت",
         body:
           "خرید از تأمین‌کننده را در «خرید» ثبت کنید. «حواله بازگشت» کالایی را که به تأمین‌کننده برمی‌گردانید از موجودی خارج می‌کند.",
+      },
+      {
+        id: "receive-purchase",
+        kind: "action",
+        verifier: "stock.received",
+        title: "یک خرید را دریافت کنید",
+        body:
+          "از بخش «خرید» یک خرید با حداقل یک قلم ثبت و دریافت کنید. این مرحله با «بعدی» کامل نمی‌شود؛ وقتی سرور خرید را ثبت کند، خودکار تأیید می‌شود. اگر خرید واقعی ندارید، می‌توانید رد شوید.",
+        eligibility: { permissions: [PERMISSIONS.purchasesManage] },
+      },
+      {
+        id: "after-purchase",
+        kind: "explain",
+        title: "پس از دریافت",
+        body:
+          "خرید در فهرست خریدها و تاریخچهٔ انبار دیده می‌شود. اصلاح یا برگشت خرید از مسیر مجاز خودش انجام می‌شود، نه با تور.",
+        eligibility: { permissions: [PERMISSIONS.purchasesManage] },
       },
     ],
   },
