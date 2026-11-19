@@ -13,7 +13,7 @@ import { effectiveFeatures } from "./features";
 import { getBusinessIndustry } from "./industry-guard";
 import { getInventorySystem } from "./inventory-service";
 import { tourDefinitionById } from "./tour-baseline";
-import { publishedTourById } from "./tour-studio-service";
+import { publishedTourById, publishedTours } from "./tour-studio-service";
 import { hasTourEvidence } from "./tour-evidence-service";
 import {
   applyTourEvent,
@@ -21,6 +21,7 @@ import {
   tourById,
   tourFactsNeeded,
   tourForViewer,
+  tourProgressView,
   type TourViewer,
   type StoredTourProgress,
   type TourDefinition,
@@ -452,59 +453,80 @@ export interface TourAnalyticsRow {
   topStuckStep: { stepId: string; count: number } | null;
 }
 
+/** A tour counts as abandoned once its member has been idle this long. */
+const TOUR_ABANDONED_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The step the most unfinished members are parked on; ties resolve by step id. */
+function topStuckStep(stuck: Map<string, number>): { stepId: string; count: number } | null {
+  let best: { stepId: string; count: number } | null = null;
+  for (const [stepId, count] of stuck) {
+    if (!best || count > best.count || (count === best.count && stepId < best.stepId)) {
+      best = { stepId, count };
+    }
+  }
+  return best;
+}
+
 export async function loadTourAnalyticsForBusiness(
   businessId: string,
 ): Promise<TourAnalyticsRow[]> {
-  const { rows } = await query<{
-    tour_id: string;
-    started: string;
-    completed: string;
-    abandoned: string;
-    last_active_at: Date | string | null;
-  }>(
-    `SELECT tour_id,
-            count(*)::text AS started,
-            count(completed_at)::text AS completed,
-            count(*) FILTER (
-              WHERE completed_at IS NULL AND last_active_at < now() - interval '30 days'
-            )::text AS abandoned,
-            max(last_active_at) AS last_active_at
-       FROM tour_member_progress
-      WHERE business_id = $1
-      GROUP BY tour_id
-      ORDER BY count(*) DESC, tour_id`,
-    [businessId],
-  );
-  if (rows.length === 0) return [];
+  // Aggregated from the member rows through the same reconciliation the member
+  // view and the assignment report use, never from `count(completed_at)`:
+  // a stored completion is withdrawn once the tour gains steps, so the raw
+  // column would report a finished tour to `team.manage` while the assignment
+  // report still shows the member as incomplete.
+  const [progressByUser, published] = await Promise.all([
+    loadTourProgressForBusiness(businessId),
+    publishedTours().catch(() => []),
+  ]);
 
-  const stuck = await query<{ tour_id: string; current_step_id: string; count: string }>(
-    `SELECT tour_id, current_step_id, count(*)::text AS count
-       FROM tour_member_progress
-      WHERE business_id = $1 AND completed_at IS NULL AND current_step_id IS NOT NULL
-      GROUP BY tour_id, current_step_id
-      ORDER BY tour_id, count(*) DESC`,
-    [businessId],
-  );
-  const stuckByTour = new Map<string, { stepId: string; count: number }>();
-  for (const row of stuck.rows) {
-    if (!stuckByTour.has(row.tour_id)) {
-      stuckByTour.set(row.tour_id, { stepId: row.current_step_id, count: Number(row.count) });
+  const abandonedBefore = Date.now() - TOUR_ABANDONED_AFTER_MS;
+  type Bucket = {
+    started: number;
+    completed: number;
+    abandoned: number;
+    lastActiveAt: number | null;
+    stuck: Map<string, number>;
+  };
+  const buckets = new Map<string, Bucket>();
+
+  for (const tours of progressByUser.values()) {
+    for (const [tourId, stored] of tours) {
+      const definition = tourDefinitionById(tourId, published);
+      const view = definition ? tourProgressView(definition, stored) : null;
+      // A tour this build no longer defines cannot be reconciled; its stored
+      // row is reported as it stands rather than dropped.
+      const completedAt = view ? view.completedAt : stored.completedAt;
+      const lastActiveAt = view ? view.lastActiveAt : stored.lastActiveAt;
+      const resumeStepId = view ? view.resumeStepId : stored.currentStepId;
+      const activeMs = lastActiveAt ? Date.parse(lastActiveAt) : Number.NaN;
+      const active = !Number.isNaN(activeMs);
+
+      const bucket = buckets.get(tourId) ?? {
+        started: 0, completed: 0, abandoned: 0, lastActiveAt: null, stuck: new Map<string, number>(),
+      };
+      bucket.started += 1;
+      if (completedAt) bucket.completed += 1;
+      else if (active && activeMs < abandonedBefore) bucket.abandoned += 1;
+      else if (resumeStepId) bucket.stuck.set(resumeStepId, (bucket.stuck.get(resumeStepId) ?? 0) + 1);
+      if (active && (bucket.lastActiveAt === null || activeMs > bucket.lastActiveAt)) {
+        bucket.lastActiveAt = activeMs;
+      }
+      buckets.set(tourId, bucket);
     }
   }
 
-  return rows.map((row) => {
-    const started = Number(row.started);
-    const completed = Number(row.completed);
-    return {
-      tourId: row.tour_id,
-      started,
-      completed,
-      inProgress: Math.max(0, started - completed - Number(row.abandoned)),
-      abandoned: Number(row.abandoned),
-      lastActiveAt: row.last_active_at ? iso(row.last_active_at) : null,
-      topStuckStep: stuckByTour.get(row.tour_id) ?? null,
-    };
-  });
+  return [...buckets.entries()]
+    .sort(([aId, a], [bId, b]) => b.started - a.started || aId.localeCompare(bId))
+    .map(([tourId, bucket]) => ({
+      tourId,
+      started: bucket.started,
+      completed: bucket.completed,
+      inProgress: Math.max(0, bucket.started - bucket.completed - bucket.abandoned),
+      abandoned: bucket.abandoned,
+      lastActiveAt: bucket.lastActiveAt === null ? null : new Date(bucket.lastActiveAt).toISOString(),
+      topStuckStep: topStuckStep(bucket.stuck),
+    }));
 }
 
 /**
