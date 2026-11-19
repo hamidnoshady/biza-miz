@@ -108,7 +108,7 @@ describe("the tour catalogue", () => {
     expect(tourById("accounting.products.list")?.route).toBe("/accounting/products");
     expect(tourById("nope")).toBeUndefined();
     expect(toursForPage("page:/accounting/products").map((t) => t.id)).toContain("accounting.products.list");
-    expect(toursForPage("page:/accounting/reports")).toEqual([]);
+    expect(toursForPage("page:/knowledge")).toEqual([]);
   });
 });
 

@@ -160,7 +160,7 @@ describe("automatic baseline tours", () => {
     // The products tour is gated: an ineligible member gets nothing rather than
     // a baseline describing a screen its instructions are gated on.
     expect(authored).toEqual([]);
-    const baseline = pageTourCandidates("page:/accounting/reports").flatMap(
+    const baseline = pageTourCandidates("page:/knowledge").flatMap(
       (tour) => tourForViewer(tour, viewer) ?? [],
     );
     expect(baseline).toHaveLength(1);
@@ -184,8 +184,8 @@ describe("automatic baseline tours", () => {
 
     // A page that only had the automatic baseline now answers with the tour the
     // super-admin wrote and published.
-    const edited = pageTourCandidates("page:/accounting/reports", [published("page:/accounting/reports", "studio.crm.audit", "تور استودیو")]);
-    expect(edited.map((tour) => tour.id)).toEqual(["studio.crm.audit"]);
+    const edited = pageTourCandidates("page:/knowledge", [published("page:/knowledge", "studio.knowledge", "تور استودیو")]);
+    expect(edited.map((tour) => tour.id)).toEqual(["studio.knowledge"]);
     expect(edited[0].title).toBe("تور استودیو");
 
     // A published tour with a code tour's id replaces it, and the page's other
@@ -201,7 +201,7 @@ describe("automatic baseline tours", () => {
     expect(overview[1].title).not.toBe("نسخهٔ استودیو");
 
     // A published tour of another page never leaks into this one.
-    expect(pageTourCandidates("page:/accounting/reports", [published("page:/crm/quality", "studio.x", "x")])[0].id).toMatch(
+    expect(pageTourCandidates("page:/knowledge", [published("page:/crm/quality", "studio.x", "x")])[0].id).toMatch(
       /^baseline\./,
     );
   });
@@ -283,11 +283,11 @@ describe("the coverage audit", () => {
 
   it("counts a published Studio tour as real coverage, not as the baseline", () => {
     const studio = {
-      id: "studio.accounting.manual",
+      id: "studio.knowledge",
       version: 2,
-      pageKey: "page:/accounting/manual",
-      route: "/accounting/manual",
-      title: "ثبت سند دستی",
+      pageKey: "page:/knowledge",
+      route: "/knowledge",
+      title: "مرکز آموزش",
       description: "از استودیو",
       eligibility: {},
       steps: [
@@ -296,7 +296,7 @@ describe("the coverage audit", () => {
       ],
     };
     const withStudio = tourCoverage(TOURS, PAGE_TOUR_REGIONS, [studio]);
-    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/accounting/manual")!;
+    const row = withStudio.pages.find((entry) => entry.pageKey === "page:/knowledge")!;
     expect(row.kind).toBe("advanced");
     expect(row.studioTourIds).toEqual([studio.id]);
     expect(row.primaryTourId).toBe(studio.id);
