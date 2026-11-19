@@ -1939,6 +1939,132 @@ export const TOURS: readonly TourDefinition[] = [  {
     eligibility: { features: ["integrations"] },
     navAnchor: TOUR_ANCHORS.appSectionNav,
   }),
+  listPageTour({
+    id: "accounting.trial-balance.list",
+    pageKey: "page:/accounting/trial-balance",
+    title: "تراز آزمایشی",
+    description: "جمع بدهکار و بستانکار هر حساب و تراز کل را بخوانید.",
+    introTitle: "تراز آزمایشی چیست",
+    introBody:
+      "تراز آزمایشی ماندهٔ هر حساب را در یک بازه نشان می‌دهد و بررسی می‌کند جمع بدهکاران با جمع بستانکاران برابر باشد. این صفحه فقط خواندنی است.",
+    nextBody:
+      "برای دیدن جزئیات یک حساب، دفتر روزنامه یا گزارش‌های مالی را باز کنید. اگر تراز برابر نیست، ابتدا سندهای همان بازه را بررسی کنید.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.vouchers.list",
+    pageKey: "page:/accounting/vouchers",
+    title: "اسناد و شماره‌گذاری",
+    description: "شمارهٔ سندها، وضعیت و ترتیب ثبت را ببینید.",
+    introTitle: "شماره‌گذاری اسناد",
+    introBody:
+      "هر سند یک شمارهٔ یکتا در دورهٔ مالی دارد. این صفحه شماره‌ها و وضعیت سندها را نشان می‌دهد تا دنبالهٔ ثبت و شکاف‌ها را ببینید.",
+    nextBody:
+      "برای ثبت سند تازه از «سند دستی» استفاده کنید. تغییر شماره‌گذاری یا حذف سند از مسیر مجاز خودش و با تأیید انجام می‌شود.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.opening-balances.list",
+    pageKey: "page:/accounting/opening-balances",
+    title: "ترازات افتتاحیه",
+    description: "مانده‌های آغاز دوره و وضعیت ثبت آن‌ها را ببینید.",
+    introTitle: "تراز افتتاحیه",
+    introBody:
+      "تراز افتتاحیه ماندهٔ حساب‌ها را در شروع دوره نگه می‌دارد. این اعداد پایهٔ گزارش‌های دوره‌اند و باید با دارایی و بدهی واقعی بخوانند.",
+    nextBody:
+      "ورود یا اصلاح تراز افتتاحیه یک عملیات حسابداری حساس است و از فرم خودش با تأیید انجام می‌شود؛ تور آن را تغییر نمی‌دهد.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.reconciliation.list",
+    pageKey: "page:/accounting/reconciliation",
+    title: "تطبیق بانکی",
+    description: "سندهای بانکی، موارد تطبیق‌نشده و مسیر رسیدگی را ببینید.",
+    introTitle: "تطبیق بانکی",
+    introBody:
+      "صورت‌حساب بانک را با ثبت‌های دفتر مقایسه می‌کنید تا اختلاف‌ها پیدا شوند. تطبیق یک بازبینی است، نه تغییر خودکار مانده‌ها.",
+    nextBody:
+      "برای رسیدگی به هر اختلاف، سند مربوط را باز کنید. ثبت اصلاح از مسیر مجاز همان سند انجام می‌شود و تور چیزی را تغییر نمی‌دهد.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.multicurrency.list",
+    pageKey: "page:/accounting/multicurrency",
+    title: "ارز و تسعیر",
+    description: "نرخ‌ها، اسناد ارزی و تفاوت تسعیر را بشناسید.",
+    introTitle: "حسابداری چندارزی",
+    introBody:
+      "سند ارزی با نرخ همان تاریخ ثبت می‌شود و ماندهٔ ارزی جدا نگه داشته می‌شود. تسعیر، ماندهٔ ارزی را با نرخ تازه به پول پایه برمی‌گرداند.",
+    nextBody:
+      "ثبت نرخ یا تسعیر یک عملیات مالی واقعی است و از فرم خودش انجام می‌شود. پیش از تسعیر، نرخ و بازهٔ درست را بررسی کنید.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.dimensions.list",
+    pageKey: "page:/accounting/dimensions",
+    title: "ابعاد حسابداری",
+    description: "مراکز هزینه، پروژه‌ها و تخصیص سندها را بشناسید.",
+    introTitle: "بعد حسابداری",
+    introBody:
+      "ابعاد به سندها برچسب می‌دهند تا هزینه و درآمد را بر اساس پروژه، شعبه یا مرکز هزینه ببینید. خود بعد سند نمی‌سازد؛ فقط گزارش‌ها را دقیق‌تر می‌کند.",
+    nextBody:
+      "برای تعریف یا اتصال بعد، از تب‌های همین صفحه استفاده کنید. تغییر نگاشت ابعاد روی گزارش‌های آینده اثر دارد و باید آگاهانه باشد.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.payroll.list",
+    pageKey: "page:/accounting/payroll",
+    title: "حقوق و دستمزد",
+    description: "دوره‌های حقوق، اقلام و وضعیت پرداخت را ببینید.",
+    introTitle: "حقوق و دستمزد",
+    introBody:
+      "هر دورهٔ حقوق اقلام هر کارمند (پایه، اضافه‌کاری، کسورات) را جمع می‌کند و سند هزینه و بدهی می‌سازد. اطلاعات حقوقی از این صفحه به نقش‌های مجاز محدود است.",
+    nextBody:
+      "محاسبه، تأیید و پرداخت دوره عملیات مالی واقعی‌اند و از مسیر تأییدشده انجام می‌شوند. تور هیچ دستمزدی را تغییر نمی‌دهد.",
+    eligibility: { permissions: [PERMISSIONS.payrollView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.tax-invoices.list",
+    pageKey: "page:/accounting/tax-invoices",
+    title: "صورتحساب مؤدیان",
+    description: "صورتحساب‌های مالیاتی، وضعیت ارسال و پاسخ سامانه را ببینید.",
+    introTitle: "صورتحساب مؤدیان",
+    introBody:
+      "این صفحه صورتحساب‌های الکترونیکی مالیاتی را نگه می‌دارد: شناسه، وضعیت ارسال و پاسخ سامانه. ارسال به سامانه یک عمل واقعی و برگشت‌ناپذیر است.",
+    nextBody:
+      "ارسال، اصلاح یا ابطال صورتحساب از مسیر مجاز و با تأیید انجام می‌شود. تور فقط وضعیت را توضیح می‌دهد و چیزی ارسال نمی‌کند.",
+    eligibility: { permissions: [PERMISSIONS.taxView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
+  listPageTour({
+    id: "accounting.shareholders.list",
+    pageKey: "page:/accounting/shareholders",
+    title: "سهام‌داران و تقسیم سود",
+    description: "سرمایه، سهام و توزیع سود را بشناسید.",
+    introTitle: "سهام‌داران و سرمایه",
+    introBody:
+      "این بخش سهام هر شریک و تغییرات سرمایه را نگه می‌دارد. تقسیم سود از سود انباشته و با تصمیم مجاز انجام می‌شود.",
+    nextBody:
+      "افزودن شریک، تغییر سرمایه یا تقسیم سود عملیات حساس‌اند و از فرم خودش با تأیید انجام می‌شوند؛ تور آن‌ها را تغییر نمی‌دهد.",
+    eligibility: { permissions: [PERMISSIONS.ledgerView] },
+    navAnchor: TOUR_ANCHORS.accountingSectionNav,
+    table: true,
+  }),
 ];
 
 export function tourById(id: string): TourDefinition | undefined {
