@@ -436,6 +436,78 @@ export async function listStaffTourAssignments(
 }
 
 /**
+ * Per-tenant tour analytics for the `team.manage` staff report: how many
+ * members started, completed or abandoned each tour, and where the unfinished
+ * ones are currently parked. Aggregate counts only — no member identity and no
+ * business payload.
+ */
+export interface TourAnalyticsRow {
+  tourId: string;
+  started: number;
+  completed: number;
+  inProgress: number;
+  abandoned: number;
+  lastActiveAt: string | null;
+  /** The step most unfinished members are currently on, if any. */
+  topStuckStep: { stepId: string; count: number } | null;
+}
+
+export async function loadTourAnalyticsForBusiness(
+  businessId: string,
+): Promise<TourAnalyticsRow[]> {
+  const { rows } = await query<{
+    tour_id: string;
+    started: string;
+    completed: string;
+    abandoned: string;
+    last_active_at: Date | string | null;
+  }>(
+    `SELECT tour_id,
+            count(*)::text AS started,
+            count(completed_at)::text AS completed,
+            count(*) FILTER (
+              WHERE completed_at IS NULL AND last_active_at < now() - interval '30 days'
+            )::text AS abandoned,
+            max(last_active_at) AS last_active_at
+       FROM tour_member_progress
+      WHERE business_id = $1
+      GROUP BY tour_id
+      ORDER BY count(*) DESC, tour_id`,
+    [businessId],
+  );
+  if (rows.length === 0) return [];
+
+  const stuck = await query<{ tour_id: string; current_step_id: string; count: string }>(
+    `SELECT tour_id, current_step_id, count(*)::text AS count
+       FROM tour_member_progress
+      WHERE business_id = $1 AND completed_at IS NULL AND current_step_id IS NOT NULL
+      GROUP BY tour_id, current_step_id
+      ORDER BY tour_id, count(*) DESC`,
+    [businessId],
+  );
+  const stuckByTour = new Map<string, { stepId: string; count: number }>();
+  for (const row of stuck.rows) {
+    if (!stuckByTour.has(row.tour_id)) {
+      stuckByTour.set(row.tour_id, { stepId: row.current_step_id, count: Number(row.count) });
+    }
+  }
+
+  return rows.map((row) => {
+    const started = Number(row.started);
+    const completed = Number(row.completed);
+    return {
+      tourId: row.tour_id,
+      started,
+      completed,
+      inProgress: Math.max(0, started - completed - Number(row.abandoned)),
+      abandoned: Number(row.abandoned),
+      lastActiveAt: row.last_active_at ? iso(row.last_active_at) : null,
+      topStuckStep: stuckByTour.get(row.tour_id) ?? null,
+    };
+  });
+}
+
+/**
  * Whether `userId` is assigned `tourId` within `businessId`.
  */
 export async function isTourAssignedToStaff(

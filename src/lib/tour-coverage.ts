@@ -24,6 +24,7 @@
 import { KNOWLEDGE_PAGES } from "./knowledge-base";
 import {
   PAGE_TOUR_REGIONS,
+  PAGE_TOUR_REGION_PREFIXES,
   baselineTourForPage,
   baselineTourIdForRoute,
   regionsForPage,
@@ -132,6 +133,17 @@ export function tourCoverage(
       }
       if (!region.title.trim() || !region.body.trim()) {
         issues.push(`${pageKey}: region ${region.anchor} needs a title and a body`);
+      }
+    }
+  }
+  for (const rule of PAGE_TOUR_REGION_PREFIXES) {
+    if (!rule.prefix.startsWith("/")) issues.push(`${rule.prefix}: region prefix must start with /`);
+    for (const region of rule.regions) {
+      if (!registeredAnchors.has(region.anchor)) {
+        issues.push(`${rule.prefix}: region anchor ${region.anchor} is not registered`);
+      }
+      if (!region.title.trim() || !region.body.trim()) {
+        issues.push(`${rule.prefix}: region ${region.anchor} needs a title and a body`);
       }
     }
   }

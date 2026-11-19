@@ -116,15 +116,19 @@ Rules that make it honest and universal:
   `baseline.accounting.orders`), so a baseline id can never collide with — or be
   mistaken for — a hand-authored one, and progress survives a copy change.
 - **Declared regions, not discovered ones.** `PAGE_TOUR_REGIONS` maps a page key
-  (or `"*"` for every baseline page) to `{ anchor, title, body }`. Today the one
-  shared declaration is `page.header`, the anchor `page-chrome.tsx` now carries
-  on its `PageHeader`; it is a data attribute, no visual change. A page can
-  reword a shared region without showing it twice. `tours.test.ts` already fails
-  when a `data-tour-id` in the source is not registered in `TOUR_ANCHORS`, so a
-  declared region can never point at a selector nobody renders. A page that does
-  not render the shared header (the app shells that draw their own) degrades that
-  step to its explanation after three seconds — the overlay's normal rule — so it
-  is never a stuck highlight.
+  (or `"*"` for every baseline page) to `{ anchor, title, body }`, and
+  `PAGE_TOUR_REGION_PREFIXES` does the same once for a whole app. Today the
+  shared declarations are `page.header` on `PageHeader`, `app.section-nav` on
+  the CRM/Growth/Websites sidebar, `accounting.section-nav` on Accounting's own
+  sidebar, `page.section-nav` on the in-page menu, `page.table` on the shared
+  table frame and `page.filters` on the shared search/filter row — all data
+  attributes, no visual change. That is why 95 of 101 pages now have a real
+  spotlight: one declaration covers every page that renders the same shell. A
+  page can reword a shared region without showing it twice. `tours.test.ts`
+  fails when a `data-tour-id` in the source is not registered in `TOUR_ANCHORS`,
+  so a declared region can never point at a selector nobody renders. A page that
+  does not render a declared region degrades that step to its explanation after
+  three seconds — the overlay's normal rule — so it is never a stuck highlight.
 - **Not an authorization input.** A baseline describes the page's label, group
   and route — metadata that ships in the client bundle (`KNOWLEDGE_PAGES`) — and
   never a control, a figure or a permission-gated instruction. Authored tours
@@ -357,11 +361,13 @@ and hand-off counts and the anchors it points at. It separates:
 `--check` exits non-zero on a contract problem or an uncovered page) and
 `tour-baseline.test.ts` asserts the live registry is clean, so CI catches a new
 page that escaped baseline coverage or an anchor contract break without a
-browser. Current figures on this commit: **101 registered pages, 16 advanced,
-85 baseline, 21 authored tours, 473 offered steps** (142 spotlight steps, 5
-verified actions, 9 hand-offs), **12 pages with a page-specific spotlight, 89
+browser. Current figures on this commit: **101 registered pages, 18 advanced,
+83 baseline, 23 authored tours, 554 offered steps** (225 spotlight steps, 5
+verified actions, 9 hand-offs), **95 pages with a page-specific spotlight, 6
 header-only/explanation-only pages, 0 uncovered pages, 0 stale tours, 0 contract
-problems**. It distinguishes **content coverage** (this report) from **learning
+problems**. The five app groups now derive a real section-navigation spotlight
+from one prefix declaration, so every page in Accounting, CRM, Growth, Websites
+and Settings points at the menu it actually uses. It distinguishes **content coverage** (this report) from **learning
 progress** (`tour_member_progress`) and from **business setup readiness**
 (`setup.progress`) on purpose.
 
@@ -444,9 +450,10 @@ instead of trapping the member.
 
 ## Remaining known limitations
 
-- **Editorial coverage**: 85 pages still rely on their automatic baseline (or a
-  header-only spotlight). The audit names them; authoring them is ongoing
-  editorial work, not a code gap.
+- **Editorial coverage**: 83 pages still rely on their automatic baseline. Most
+  now spotlight the real section menu their shell draws (95 of 101 pages have a
+  page-specific spotlight); 6 remain header-only. Turning the baselines into
+  step-by-step workflow tours is ongoing editorial work, not a code gap.
 - **Tour Studio** authors explanations, spotlights, verified actions and
   hand-offs, but not reusable templates or conditional branches; a live
   in-panel preview is still a deployment-and-review step. Eligibility rules the
@@ -457,7 +464,9 @@ instead of trapping the member.
 - **Hybrid origin boundary**: the overlay runs in the page that renders it.
   Across the cloud pane's origin boundary a route-based explanation is the
   fallback; there is no cross-origin DOM access.
-- **Per-tenant analytics** (participation, abandonment, stuck steps) are not
-  built; the assignment report covers completion visibility only.
+- **Per-tenant analytics** now exists at `GET /api/knowledge/learning-analytics`
+  and in the Learning Center for `team.manage` (starts, completions,
+  abandonment, completion rate and the most common stuck step). It is aggregate
+  by design; it does not expose member names or business payloads.
 - The queue covers connectivity loss on a local page; it is not a general
   business-data outbox and does not sync a tenant's operational records.

@@ -171,7 +171,7 @@ export function AppSectionNav<K extends string>({
     : [{ label: null, items }];
   return (
     <SidebarContent className="px-3 py-4">
-      <nav aria-label={ariaLabel} className="space-y-3">
+      <nav aria-label={ariaLabel} data-tour-id="app.section-nav" className="space-y-3">
         <div className="px-2 group-data-[state=collapsed]/sidebar:hidden">
           <p className="text-sm font-bold text-foreground">{title}</p>
           <p className="mt-0.5 text-[11px] leading-5 text-muted-foreground">{description}</p>
