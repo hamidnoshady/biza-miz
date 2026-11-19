@@ -28,6 +28,7 @@ import {
   ArrowUpIcon,
   CirclePlayIcon,
   LayoutTemplateIcon,
+  EyeIcon,
   PlusIcon,
   RotateCcwIcon,
   SaveIcon,
@@ -192,6 +193,7 @@ export function ToursPanel() {
   const [formError, setFormError] = useState("");
   const [formDetail, setFormDetail] = useState("");
   const [notice, setNotice] = useState("");
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     const { ok, data } = await api<{ tours: StudioTour[]; error?: string }>(
@@ -510,6 +512,65 @@ export function ToursPanel() {
                 <option value="periodic">دوره‌ای</option>
               </select>
             </Field>
+            <Field label="پرچم‌های ویژگی لازم (با کاما)">
+              <input
+                className={inputClass}
+                dir="ltr"
+                value={(form.eligibility.features ?? []).join(", ")}
+                placeholder="ledger, inventory"
+                onChange={(event) => {
+                  const values = event.target.value
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean);
+                  const next = { ...form.eligibility };
+                  if (values.length > 0) next.features = values;
+                  else delete next.features;
+                  setForm({ ...form, eligibility: next });
+                }}
+                disabled={!canManage}
+              />
+            </Field>
+            <Field label="پرچم‌های ویژگی که باید خاموش باشند">
+              <input
+                className={inputClass}
+                dir="ltr"
+                value={(form.eligibility.withoutFeatures ?? []).join(", ")}
+                placeholder="ai_assistant"
+                onChange={(event) => {
+                  const values = event.target.value
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean);
+                  const next = { ...form.eligibility };
+                  if (values.length > 0) next.withoutFeatures = values;
+                  else delete next.withoutFeatures;
+                  setForm({ ...form, eligibility: next });
+                }}
+                disabled={!canManage}
+              />
+            </Field>
+            <Field label="دسترسی‌هایی که نباید داشته باشد (با کاما)">
+              <input
+                className={inputClass}
+                dir="ltr"
+                value={(form.eligibility.withoutPermissions ?? []).join(", ")}
+                placeholder="ledger.view"
+                onChange={(event) => {
+                  const values = event.target.value
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter((value): value is Permission =>
+                      (PERMISSION_KEYS as readonly string[]).includes(value),
+                    );
+                  const next = { ...form.eligibility };
+                  if (values.length > 0) next.withoutPermissions = values;
+                  else delete next.withoutPermissions;
+                  setForm({ ...form, eligibility: next });
+                }}
+                disabled={!canManage}
+              />
+            </Field>
           </div>
 
           <fieldset className="mt-4">
@@ -599,6 +660,15 @@ export function ToursPanel() {
                 <PlusIcon className="size-4" aria-hidden="true" />
                 رفتن به صفحه
               </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setPreviewIndex(form.steps.length > 0 ? 0 : null)}
+                disabled={form.steps.length === 0}
+              >
+                <EyeIcon className="size-4" aria-hidden="true" />
+                پیش‌نمایش مراحل
+              </Button>
             </div>
           </div>
 
@@ -619,6 +689,67 @@ export function ToursPanel() {
               </Button>
             ))}
           </div>
+
+          {previewIndex !== null && form.steps[previewIndex] ? (
+            <div className="mt-3 rounded-xl border border-primary/30 bg-primary/5 p-4">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[11px] font-medium text-muted-foreground">
+                  پیش‌نمایش مرحلهٔ {previewIndex + 1} از {form.steps.length} ·{" "}
+                  {form.steps[previewIndex].kind === "spotlight"
+                    ? "هایلایت"
+                    : form.steps[previewIndex].kind === "action"
+                      ? "کار واقعی"
+                      : form.steps[previewIndex].kind === "navigate"
+                        ? "رفتن به صفحه"
+                        : "توضیح"}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setPreviewIndex(null)}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  بستن
+                </button>
+              </div>
+              <p className="mt-2 text-sm font-bold text-foreground">
+                {form.steps[previewIndex].title || "بدون عنوان"}
+              </p>
+              <p className="mt-1 text-sm leading-6 text-foreground/80">
+                {form.steps[previewIndex].body || "متنی نوشته نشده است."}
+              </p>
+              {form.steps[previewIndex].anchor ? (
+                <p className="mt-2 font-mono text-[11px] text-muted-foreground" dir="ltr">
+                  {form.steps[previewIndex].anchor}
+                </p>
+              ) : null}
+              <div className="mt-3 flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => setPreviewIndex((index) => Math.max(0, (index ?? 0) - 1))}
+                  disabled={previewIndex === 0}
+                >
+                  قبلی
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() =>
+                    setPreviewIndex((index) =>
+                      Math.min(form.steps.length - 1, (index ?? 0) + 1),
+                    )
+                  }
+                  disabled={previewIndex >= form.steps.length - 1}
+                >
+                  بعدی
+                </Button>
+              </div>
+              <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
+                این پیش‌نمایش متن و ترتیب مراحل را نشان می‌دهد؛ صفحهٔ مقصد و لنگرها فقط در خود
+                برنامه با دکمهٔ آموزش دیده می‌شوند.
+              </p>
+            </div>
+          ) : null}
 
           {form.steps.length === 0 ? (
             <p className="mt-3 text-xs text-muted-foreground">

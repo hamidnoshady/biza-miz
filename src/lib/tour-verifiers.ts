@@ -57,6 +57,11 @@ export const TOUR_VERIFIERS = {
     promise: "وقتی دریافت روی حساب مشتری ثبت شود، این مرحله خودکار تأیید می‌شود.",
     recordedBy: "POST /api/ledger/ar/receipts",
   },
+  "payable.payment_recorded": {
+    label: "ثبت پرداخت به تأمین‌کننده",
+    promise: "وقتی پرداخت روی حساب تأمین‌کننده ثبت شود، این مرحله خودکار تأیید می‌شود.",
+    recordedBy: "POST /api/ledger/ap/payments",
+  },
 } as const satisfies Record<string, TourVerifierDefinition>;
 
 /** The keys a tour step may name. */
