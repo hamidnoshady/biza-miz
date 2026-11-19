@@ -34,7 +34,8 @@ describe("the verifier whitelist", () => {
   it("every entry points at an endpoint that really records that key", () => {
     for (const key of TOUR_VERIFIER_KEYS) {
       const { recordedBy } = TOUR_VERIFIERS[key];
-      const route = recordedBy.replace(/^POST /, "").replace(/^\/api\//, "src/app/api/") + "/route.ts";
+      const route =
+        recordedBy.replace(/^(?:POST|PUT|PATCH|DELETE) /, "").replace(/^\/api\//, "src/app/api/") + "/route.ts";
       const source = readFileSync(route, "utf8");
       expect(source, `${recordedBy} must record ${key}`).toContain("recordTourEvidence");
       expect(source, `${recordedBy} must record ${key}`).toContain(`verifier: "${key}"`);

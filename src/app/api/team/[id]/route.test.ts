@@ -340,6 +340,31 @@ describe("PATCH /api/team/[id] — no promoting yourself", () => {
   });
 });
 
+describe("PATCH /api/team/[id] — verified access-change evidence (issue #972)", () => {
+  function evidenceWrites() {
+    return vi
+      .mocked(db.query)
+      .mock.calls.filter(([sql]) => String(sql).includes("tour_action_evidence"));
+  }
+
+  it("records role.changed for the actor after a saved access change", async () => {
+    // The guided task must be proven by the membership write, never by a click
+    // in the tour. This is the reviewer-visible success point `role.changed`
+    // names, and it belongs to the member who made the change.
+    const res = await patch({ role: "waiter", reason: "جابه‌جایی مسئولیت" });
+    expect(res.status).toBe(200);
+    const writes = evidenceWrites();
+    expect(writes).toHaveLength(1);
+    expect(writes[0][1]).toEqual(["biz-1", ACTOR_ID, "role.changed", TARGET_ID]);
+  });
+
+  it("leaves no evidence for an edit that does not touch access", async () => {
+    const res = await patch({ fullName: "نام تازه" });
+    expect(res.status).toBe(200);
+    expect(evidenceWrites()).toHaveLength(0);
+  });
+});
+
 describe("DELETE /api/team/[id] — offboard vs hard delete (issue #1007)", () => {
   async function del({ hard = false, targetId = TARGET_ID }: { hard?: boolean; targetId?: string } = {}) {
     const url = `http://localhost/api/team/${targetId}${hard ? "?hard=1" : ""}`;

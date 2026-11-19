@@ -196,13 +196,17 @@ that is not a click on «بعدی».
 - **A step names a whitelisted event, not a URL.** `kind: "action"` requires a
   key from `TOUR_VERIFIERS` (`product.created`, `party.created`,
   `order.created`, `receivable.payment_recorded`, `payable.payment_recorded`,
-  `stock.received`, …). Each entry carries the Persian promise shown in the card
+  `stock.received`, `role.changed`, …). Each entry carries the Persian promise
+  shown in the card
   and the endpoint that records it; `tour-verifiers.test.ts` asserts every
   `recordedBy` really calls `recordTourEvidence` with that key, so a tour can
   never be published around a writer that does not exist.
 - **Only the server credits the action.** The success path itself records
-  evidence — `POST /api/products/items`, `POST /api/parties`, `POST /api/orders`
-  — after the write succeeded, inside the same tenant scope. The client's
+  evidence — `POST /api/products/items`, `POST /api/parties`, `POST /api/orders`,
+  `PATCH /api/team/[id]` — after the write succeeded, inside the same tenant
+  scope. The team route records only when the request actually touches role,
+  custom role or overrides; a rename, suspend or phone change leaves no
+  evidence. The client's
   `POST …/verify` body carries one field, a step id; the server looks the
   evidence up and answers `200` or `409 evidence_missing`. There is no field a
   page could set to claim success, and `step_seen` on an action step is a
@@ -369,7 +373,7 @@ and hand-off counts and the anchors it points at. It separates:
 `tour-baseline.test.ts` asserts the live registry is clean, so CI catches a new
 page that escaped baseline coverage or an anchor contract break without a
 browser. Current figures on this commit: **101 registered pages, 42 advanced,
-59 baseline, 47 authored tours, 562 offered steps** (248 spotlight steps, 10
+59 baseline, 47 authored tours, 563 offered steps** (248 spotlight steps, 11
 verified actions, 10 hand-offs), **95 pages with a page-specific spotlight, 6
 header-only/explanation-only pages, 0 uncovered pages, 0 stale tours, 0 contract
 problems**. The five app groups now derive a real section-navigation spotlight
@@ -468,8 +472,10 @@ instead of trapping the member.
   server-supported but not edited in the panel. The preview shows step content
   and order, not the target page's live DOM — that remains a review step on the
   real page.
-- **Further verified actions** (role changes) still need their own
-  reviewer-approved server success point.
+- **Further verified actions** can be added the same way: register a key in
+  `TOUR_VERIFIERS`, record evidence only after the domain write succeeds, and
+  add the step. There is no verifier without a writer, because
+  `tour-verifiers.test.ts` reads the endpoint's source.
 - **Hybrid origin boundary**: the overlay runs in the page that renders it.
   Across the cloud pane's origin boundary a route-based explanation is the
   fallback; there is no cross-origin DOM access.
