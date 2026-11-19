@@ -370,6 +370,64 @@ function listPageTour(spec: ListPageTourSpec): TourDefinition {
   };
 }
 
+/**
+ * A page of one of the two website managers. Their shells draw one shared menu
+ * and one page header, and their bodies are cards rather than tables, so every
+ * page tour is: what the screen is for, the header, the manager menu, the one or
+ * two decisions the screen really makes, and a truthful next step. Declared
+ * region anchors only — the page bodies expose no `data-tour-id` of their own,
+ * so this helper never invents a control.
+ */
+interface WebsitePageTourSpec {
+  id: string;
+  pageKey: string;
+  title: string;
+  description: string;
+  eligibility: TourEligibility;
+  intro: { title: string; body: string };
+  details: readonly { title: string; body: string }[];
+  nextBody: string;
+}
+
+function websitePageTour(spec: WebsitePageTourSpec): TourDefinition {
+  const steps: TourStep[] = [
+    { id: "welcome", kind: "explain", ...spec.intro },
+    {
+      id: "header",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.pageHeader,
+      title: "سرصفحهٔ صفحه",
+      body:
+        "عنوان صفحه، توضیح کوتاه آن و کارهای اصلی بالای آن چیده شده‌اند؛ دکمهٔ «آموزش» هم در همین نوار است.",
+    },
+    {
+      id: "menu",
+      kind: "spotlight",
+      anchor: TOUR_ANCHORS.appSectionNav,
+      title: "منوی مدیریت وب‌سایت",
+      body:
+        "این منو دو مدیر سایت را کنار هم نگه می‌دارد: سایت بیزامیز (CMS) و وردپرس/ووکامرس. بخش فعال و بخش‌های در دسترس نقش شما همین‌جاست.",
+    },
+    ...spec.details.map((detail, index) => ({
+      id: `detail-${index + 1}`,
+      kind: "explain" as const,
+      title: detail.title,
+      body: detail.body,
+    })),
+    { id: "next", kind: "explain", title: "قدم بعدی", body: spec.nextBody },
+  ];
+  return {
+    id: spec.id,
+    version: 1,
+    pageKey: spec.pageKey,
+    route: spec.pageKey.replace(/^page:/, ""),
+    title: spec.title,
+    description: spec.description,
+    eligibility: spec.eligibility,
+    steps,
+  };
+}
+
 export const TOURS: readonly TourDefinition[] = [  {
     id: "crm.directory.first-customer",
     version: 1,
@@ -2836,6 +2894,350 @@ export const TOURS: readonly TourDefinition[] = [  {
       },
     ],
   },
+  websitePageTour({
+    id: "websites.cms.setup.page",
+    pageKey: "page:/websites/cms/setup",
+    title: "ساخت سایت",
+    description: "دامنه، CDN، نوع سایت و ساخت روی سایت‌ساز.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "چهار گام تا سایت",
+      body:
+        "ساخت سایت چهار گام دارد: دامنه (خرید از بیزامیز یا اتصال دامنهٔ خودتان)، CDN ابر آروان، نوع سایت (کسب‌وکار، نمونه‌کار یا فروشگاه) و ساخت روی سایت‌ساز.",
+    },
+    details: [
+      {
+        title: "ترتیب گام‌ها",
+        body:
+          "هر گام وضعیت خودش را دارد و گام بعدی تا کامل نشدن قبلی جلو نمی‌رود. اگر ساخت نیمه‌کاره بماند، همین صفحه نشان می‌دهد کجا متوقف شده است.",
+      },
+      {
+        title: "دامنه و CDN",
+        body:
+          "دامنه و CDN پیش از ساخت تعیین می‌شوند. تغییر بعدی دامنه روی آدرس عمومی سایت اثر دارد و باید آگاهانه باشد.",
+      },
+    ],
+    nextBody: "ساخت سایت یک عمل واقعی است. این تور فقط گام‌ها را توضیح می‌دهد و چیزی را نمی‌سازد.",
+  }),
+  websitePageTour({
+    id: "websites.cms.pages.page",
+    pageKey: "page:/websites/cms/pages",
+    title: "صفحه‌های سایت",
+    description: "برگه‌های ثابت سایت و وضعیت انتشار.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "صفحه‌های ثابت",
+      body:
+        "صفحه‌ها برگه‌های ثابت سایت‌اند (درباره ما، تماس، قوانین). نوشته‌های زمان‌دار در «نوشته‌ها» هستند.",
+    },
+    details: [
+      {
+        title: "پیش‌نویس و انتشار",
+        body:
+          "هر صفحه پیش‌نویس یا منتشرشده است؛ انتشار فوراً روی سایت زنده دیده می‌شود. پیش‌نمایش پیش از انتشار، متن و چیدمان را نشان می‌دهد.",
+      },
+    ],
+    nextBody: "برای تغییر محتوا از ویرایشگر خود صفحه استفاده کنید. تور چیزی را منتشر یا حذف نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.cms.posts.page",
+    pageKey: "page:/websites/cms/posts",
+    title: "نوشته‌های سایت",
+    description: "مطالب وبلاگ و اخبار با تاریخ و دسته.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "نوشته‌ها",
+      body: "نوشته‌ها مطالب وبلاگ و اخبار سایت‌اند و برخلاف صفحه‌ها تاریخ و دسته دارند.",
+    },
+    details: [
+      {
+        title: "پیش‌نویس و زمان انتشار",
+        body:
+          "نوشته هم پیش‌نویس و منتشرشده دارد. زمان‌بندی انتشار و دسته‌ها روی فهرست عمومی سایت اثر می‌گذارند.",
+      },
+    ],
+    nextBody: "انتشار و حذف نوشته عملیات واقعی‌اند. برای بازبینی متن از پیش‌نمایش استفاده کنید.",
+  }),
+  websitePageTour({
+    id: "websites.cms.media.page",
+    pageKey: "page:/websites/cms/media",
+    title: "رسانه‌های سایت",
+    description: "تصاویر و فایل‌های مشترک صفحه‌ها و نوشته‌ها.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "کتابخانهٔ رسانه",
+      body:
+        "کتابخانهٔ رسانه، تصاویر و فایل‌های سایت را نگه می‌دارد و صفحه‌ها و نوشته‌ها از همین‌جا به آن‌ها ارجاع می‌دهند.",
+    },
+    details: [
+      {
+        title: "جایگزینی و حذف",
+        body:
+          "حذف یا جایگزینی یک فایل روی هر صفحه‌ای که به آن ارجاع داده اثر می‌گذارد. اندازه و نوع فایل را قبل از بارگذاری بررسی کنید.",
+      },
+    ],
+    nextBody: "بارگذاری و حذف فایل واقعی است. این تور فقط کتابخانه را معرفی می‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.cms.products.page",
+    pageKey: "page:/websites/cms/products",
+    title: "محصولات سایت",
+    description: "کالاهای فروشگاه اینترنتی و همگام‌سازی با صندوق.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "کالاهای فروشگاه سایت",
+      body:
+        "محصولات سایت، کالاهای فروشگاه اینترنتی‌اند. قیمت و موجودی می‌تواند از صندوق همگام شود، اما خود محصول جای خودش را دارد.",
+    },
+    details: [
+      {
+        title: "جهت همگام‌سازی",
+        body:
+          "تنظیمات همگام‌سازی در «تنظیمات سایت» است و یک‌طرفه از صندوق به سایت کار می‌کند. تغییر محصول در سایت، صندوق را عوض نمی‌کند.",
+      },
+    ],
+    nextBody: "انتشار یا حذف محصول روی فروشگاه زنده اثر دارد. پیش از تغییر قیمت، همگام‌سازی را بررسی کنید.",
+  }),
+  websitePageTour({
+    id: "websites.cms.orders.page",
+    pageKey: "page:/websites/cms/orders",
+    title: "سفارش‌های سایت",
+    description: "سفارش‌های آنلاین فروشگاه و خطاهای تحویل.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "سفارش آنلاین",
+      body:
+        "سفارش‌های آنلاین فروشگاه سایت اینجا دیده می‌شوند. تغییر وضعیت یا برگشت وجه یک عمل واقعی است.",
+    },
+    details: [
+      {
+        title: "خطاهای تحویل",
+        body:
+          "اگر سفارش کافه‌ای در تحویل ناموفق باشد، بخش خطاهای تحویل بالای فهرست نشان داده می‌شود تا پیگیری شود.",
+      },
+    ],
+    nextBody: "وضعیت سفارش را از مسیر خودش تغییر دهید. تور هیچ سفارشی را تأیید یا لغو نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.cms.design.page",
+    pageKey: "page:/websites/cms/design",
+    title: "طراحی و پوسته",
+    description: "پوسته، استقرار و ظاهر سایت.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "ظاهر سایت",
+      body:
+        "طراحی و پوسته ظاهر سایت را تعیین می‌کند: قالب، رنگ‌ها و چیدمان. تغییر پوسته روی همهٔ صفحه‌ها اثر دارد.",
+    },
+    details: [
+      {
+        title: "استقرار",
+        body:
+          "ذخیرهٔ طراحی با استقرار همراه است؛ پیش از استقرار از پیش‌نمایش استفاده کنید. بازگشت به نسخهٔ قبلی از مسیر خودش انجام می‌شود.",
+      },
+    ],
+    nextBody: "استقرار پوسته یک عمل واقعی و عمومی است. این تور چیزی را تغییر نمی‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.cms.domain.page",
+    pageKey: "page:/websites/cms/domain",
+    title: "دامنه و DNS",
+    description: "دامنه، رکوردها و CDN سایت.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "آدرس عمومی سایت",
+      body:
+        "اینجا دامنه، رکوردهای DNS و CDN سایت دیده می‌شوند. دامنه همان آدرسی است که مشتری در مرورگر می‌زند.",
+    },
+    details: [
+      {
+        title: "تغییر رکورد",
+        body:
+          "تغییر رکورد DNS یا CDN می‌تواند سایت را از دسترس خارج کند. مقدارها را از ارائه‌دهنده بگیرید و پس از تغییر، انتشار DNS را بررسی کنید.",
+      },
+    ],
+    nextBody: "ثبت یا تغییر دامنه عمل واقعی است و ممکن است هزینه داشته باشد. تور فقط وضعیت را توضیح می‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.cms.settings.page",
+    pageKey: "page:/websites/cms/settings",
+    title: "تنظیمات همگام‌سازی",
+    description: "چه چیزی از صندوق به سایت می‌رود.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "همگام‌سازی یک‌طرفه",
+      body:
+        "این تنظیمات می‌گوید چه چیزی از صندوق به سایت برود: قیمت و موجودی، یک‌طرفه. خود اتصال سایت در «اتصال‌های فنی» است.",
+    },
+    details: [
+      {
+        title: "دامنهٔ همگام‌سازی",
+        body:
+          "فقط محصولات علامت‌خورده همگام می‌شوند. ارسال قیمت یا موجودی را می‌توان جدا خاموش کرد تا عمداً دستی بماند.",
+      },
+    ],
+    nextBody: "ذخیرهٔ تنظیمات روی ارسال‌های بعدی اثر دارد. صف ارسال را پس از تغییر بررسی کنید.",
+  }),
+  websitePageTour({
+    id: "websites.cms.billing.page",
+    pageKey: "page:/websites/cms/billing",
+    title: "اشتراک و صورت‌حساب",
+    description: "طرح، پایان دوره، هزینه‌ها و اعتبار.",
+    eligibility: { permissions: [PERMISSIONS.cmsView] },
+    intro: {
+      title: "هزینهٔ سایت",
+      body:
+        "اشتراک سایت، دامنه و تمدید از اعتبار پلتفرم پرداخت می‌شوند. سایت‌ساز کار سایت را انجام می‌دهد و صورت‌حساب اینجاست.",
+    },
+    details: [
+      {
+        title: "خواندن صورت‌حساب",
+        body:
+          "طرح، پایان دورهٔ جاری، هزینه‌های ثبت‌شده و موجودی اعتبار را ببینید. تمدید یا تغییر طرح یک عمل مالی واقعی است.",
+      },
+    ],
+    nextBody: "پرداخت و تمدید از مسیر خودش با تأیید انجام می‌شود. این تور چیزی خریداری نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.wp.products.page",
+    pageKey: "page:/websites/wp/products",
+    title: "محصولات وردپرس",
+    description: "کاتالوگ همگام‌شدهٔ فروشگاه ووکامرس.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "کاتالوگ فروشگاه",
+      body:
+        "این فهرست، محصولات همگام‌شدهٔ فروشگاه وردپرس/ووکامرس است. ویرایش اینجا روی فروشگاه زنده اثر دارد.",
+    },
+    details: [
+      {
+        title: "همگام‌سازی و صف",
+        body:
+          "همگام‌سازی از دکمهٔ خودش انجام می‌شود و صف عملیات نتیجه را نشان می‌دهد. اگر اتصال قطع باشد، تغییرات در صف می‌مانند.",
+      },
+    ],
+    nextBody: "حذف یا تغییر قیمت یک عمل واقعی روی فروشگاه است. تور چیزی را تغییر نمی‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.wp.orders.page",
+    pageKey: "page:/websites/wp/orders",
+    title: "سفارش‌های وردپرس",
+    description: "سفارش‌های فروشگاه و صف عملیات.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "سفارش‌های فروشگاه",
+      body:
+        "سفارش‌های فروشگاه وردپرس اینجا خوانده می‌شوند. تغییر وضعیت و برگشت وجه از طریق صف عملیات به فروشگاه می‌رود.",
+    },
+    details: [
+      {
+        title: "نتیجهٔ عملیات",
+        body:
+          "اگر نتیجهٔ یک عملیات برنگردد، در «صف و رویدادها» دیده می‌شود. وضعیت محلی تا تأیید فروشگاه قطعی نیست.",
+      },
+    ],
+    nextBody: "تغییر وضعیت سفارش و برگشت وجه واقعی است. این تور فقط مسیر را توضیح می‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.wp.customers.page",
+    pageKey: "page:/websites/wp/customers",
+    title: "مشتریان وردپرس",
+    description: "مشتریان فروشگاه و اتصال آن‌ها به CRM.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "مشتری فروشگاه",
+      body:
+        "مشتریان فروشگاه وردپرس به پروندهٔ مشتریان CRM وصل می‌شوند تا خرید آنلاین و سابقهٔ داخلی یک نفر کنار هم دیده شود.",
+    },
+    details: [
+      {
+        title: "اتصال و رضایت",
+        body:
+          "اتصال مشتری، رضایت بازاریابی نمی‌سازد. برای تغییر رضایت از پروندهٔ همان مشتری در CRM استفاده کنید.",
+      },
+    ],
+    nextBody: "همگام‌سازی مشتریان از دکمهٔ خودش انجام می‌شود؛ این تور چیزی را تغییر نمی‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.wp.taxonomies.page",
+    pageKey: "page:/websites/wp/taxonomies",
+    title: "دسته‌ها و ویژگی‌ها",
+    description: "درخت دسته‌بندی، برچسب و ویژگی‌های فروشگاه.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "ساختار کاتالوگ",
+      body:
+        "دسته‌ها، برچسب‌ها و ویژگی‌ها ساختار کاتالوگ فروشگاه را می‌سازند و محصولات به آن‌ها وصل می‌شوند.",
+    },
+    details: [
+      {
+        title: "اثر تغییر ساختار",
+        body:
+          "حذف یک دسته می‌تواند محصولات را از فهرست دسته بیرون بیاورد. پیش از تغییر ساختار، محصولات وابسته را بررسی کنید.",
+      },
+    ],
+    nextBody: "تغییر دسته یا ویژگی روی فروشگاه زنده اثر دارد. تور چیزی را حذف نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.wp.content.page",
+    pageKey: "page:/websites/wp/content",
+    title: "محتوای وردپرس",
+    description: "نوشته‌ها و برگه‌های وردپرس.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "محتوا",
+      body:
+        "نوشته‌ها و برگه‌های وردپرس اینجا دیده و ویرایش می‌شوند. ویرایش با اجازهٔ مدیریت محتوا انجام می‌شود.",
+    },
+    details: [
+      {
+        title: "پیش‌نویس و انتشار",
+        body:
+          "پیش‌نویس تا انتشار روی سایت دیده نمی‌شود. پیش از انتشار، متن و رسانه‌های پیوست را بررسی کنید.",
+      },
+    ],
+    nextBody: "ایجاد یا انتشار محتوا واقعی است. این تور فقط مسیر را نشان می‌دهد.",
+  }),
+  websitePageTour({
+    id: "websites.wp.media.page",
+    pageKey: "page:/websites/wp/media",
+    title: "رسانه‌های وردپرس",
+    description: "کتابخانهٔ تصاویر و فایل‌های فروشگاه.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "کتابخانهٔ فروشگاه",
+      body:
+        "کتابخانهٔ رسانهٔ فروشگاه، تصاویر و فایل‌های پیوست را نگه می‌دارد. بارگذاری و حذف با اجازهٔ مدیریت انجام می‌شود.",
+    },
+    details: [
+      {
+        title: "رسانهٔ کانونیک",
+        body:
+          "اگر رسانهٔ کانونیک هم فعال باشد، می‌توانید فایل مشترک پلتفرم را به‌جای بارگذاری دوباره انتخاب کنید.",
+      },
+    ],
+    nextBody: "حذف یک فایل روی محصول یا نوشته‌ای که به آن ارجاع دارد اثر می‌گذارد. تور چیزی را حذف نمی‌کند.",
+  }),
+  websitePageTour({
+    id: "websites.wp.queue.page",
+    pageKey: "page:/websites/wp/queue",
+    title: "صف و رویدادهای وردپرس",
+    description: "عملیات در انتظار ارسال و رویدادهای ناموفق.",
+    eligibility: { permissions: [PERMISSIONS.woocommerceView], features: ["integrations"] },
+    intro: {
+      title: "صف عملیات",
+      body:
+        "صف عملیات خروجی و رویدادهای ورودی ناموفق را نشان می‌دهد: چه چیزی در انتظار ارسال است و چه چیزی برنگشته.",
+    },
+    details: [
+      {
+        title: "تلاش دوباره",
+        body:
+          "تلاش دوباره و ارسال فوری با اجازهٔ همگام‌سازی انجام می‌شود. پیش از تلاش دوباره، علت خطا و وضعیت اتصال را ببینید.",
+      },
+    ],
+    nextBody: "پاک‌کردن صف یا تلاش دوباره یک عمل واقعی است. این تور فقط وضعیت را توضیح می‌دهد.",
+  }),
 ];
 
 export function tourById(id: string): TourDefinition | undefined {
