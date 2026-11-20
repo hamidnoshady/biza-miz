@@ -195,6 +195,8 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "server-to-server master-data feed (migration 0190) — authenticated by the exact site-device credential (requireSiteCredential); the credential, never the request, names the business and branch, and writes are confined to that branch's rows",
   "server-sync/digest":
     "server-to-server drift check (migration 0190) — authenticated by the exact site-device credential; compares figures for that credential's branch only and writes nothing",
+  "server-sync/retry-events":
+    "server-to-server retry request (issue #1446) — authenticated by the exact site-device credential (requireSiteCredential); the credential names the business and branch, only an event that never applied can be selected, and it writes no business data",
   "server-sync/desktop-login":
     "server-to-server one-click sign-in redemption (Phase 46) — authenticated by the exact site-device credential (requireSiteCredential); a code redeems only for the install it was minted for, once, within two minutes",
   "auth/desktop-session":

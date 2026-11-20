@@ -340,12 +340,21 @@ export async function createOrder(
   if (customerId) {
     const params: unknown[] = [customerId];
     if (businessId) params.push(businessId);
-    const { rows: customer } = await query<{ id: string }>(
-      `SELECT id FROM parties WHERE id = $1` + (businessId ? ` AND business_id = $2` : ``),
+    // Issue #1446 — the party must not merely exist in this business: it must
+    // be a customer. A supplier or employee party (and, in the reported case,
+    // a site-only employee party that never arrived on the central server) may
+    // not be attached to a sale. Every order-creation path — the POS route,
+    // `/api/v1`, offline replay and the CMS intake — reaches this one function,
+    // so the check cannot be bypassed by a caller that skipped the picker.
+    const { rows: customer } = await query<{ id: string; roles: string[] | null }>(
+      `SELECT id, roles FROM parties WHERE id = $1` +
+        (businessId ? ` AND business_id = $2` : ``),
       params,
     );
     if (customer.length === 0)
       return { ok: false, error: "customer_not_found", status: 404 };
+    if (!(customer[0].roles ?? []).includes("customer"))
+      return { ok: false, error: "customer_role_required", status: 409 };
   }
 
   // The till asks for the table before it places a dine-in order, but a table

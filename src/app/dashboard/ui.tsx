@@ -705,6 +705,8 @@ const ERROR_MESSAGES: Record<string, string> = {
     // Phase 16 — AR subledger
     customer_required: "برای پرداخت نسیه انتخاب مشتری الزامی است.",
     customer_not_found: "مشتری انتخاب‌شده معتبر نیست.",
+    customer_role_required:
+      "طرف انتخاب‌شده نقش «مشتری» ندارد و نمی‌تواند به فروش متصل شود. ابتدا نقش مشتری را برای او فعال کنید.",
     invalid_amount: "مبلغ معتبر نیست.",
     // Issue #913 item 7 — the «مبلغ دریافتی» box held text that is not a
     // usable amount; the whole bill is NOT silently taken instead.

@@ -315,6 +315,22 @@ export interface MasterApplyResult {
 /** After this many attempts a change still missing its parent is recorded as a conflict and skipped. */
 export const MAX_DEPENDENCY_ATTEMPTS = 10;
 
+/**
+ * How many times a merge that failed for a reason that *might* have changed on
+ * the next tick (a duplicate natural key the other side is still reconciling)
+ * is retried before it is quarantined.
+ *
+ * Issue #1446: the cursor used to advance immediately over a `conflict`, so a
+ * change that never applied was only ever a row in `sync_master_conflicts` —
+ * that is still the terminal record, but a bounded retry first gives a
+ * concurrent edit on the other side a chance to resolve it. After this many
+ * attempts the change becomes a terminal `conflict` and the cursor moves on:
+ * retrying a permanent duplicate forever would starve every later customer or
+ * menu edit, which is the opposite failure. The row stays `open` and visible
+ * until an operator resolves it.
+ */
+export const MAX_CONFLICT_ATTEMPTS = 3;
+
 class DependencyMissing extends Error {}
 class MergeConflict extends Error {
   constructor(readonly code: string, detail: string) {
@@ -330,6 +346,31 @@ function pgConstraint(error: unknown): string {
   return error && typeof error === "object" && "constraint" in error
     ? String((error as { constraint: unknown }).constraint ?? "")
     : "";
+}
+
+/**
+ * The state one failed change lands in, decided here so the bounded-retry policy
+ * is one testable rule rather than an expression buried in the merge loop.
+ *
+ * `deferred` means "stop the cursor and try this change again next tick"; the
+ * failure can plausibly change (a parent that has not arrived, a duplicate
+ * natural key the peer may still be reconciling, an infrastructure error).
+ * `conflict` is terminal: the change is quarantined in
+ * `sync_master_conflicts` (already written before this is called) and the
+ * cursor moves past it, because retrying a permanent failure forever would
+ * starve every unrelated change behind it. A deterministic merge refusal is
+ * terminal immediately; there is nothing a retry could discover.
+ */
+export function masterApplyOutcomeForFailure(
+  failure: "dependency_missing" | "merge_conflict" | "apply_failed",
+  code: string | null,
+  attempts: number,
+): MasterApplyOutcome {
+  if (failure === "dependency_missing") {
+    return attempts < MAX_DEPENDENCY_ATTEMPTS ? "deferred" : "conflict";
+  }
+  const retryable = failure !== "merge_conflict" || code === "unique_violation";
+  return retryable && attempts < MAX_CONFLICT_ATTEMPTS ? "deferred" : "conflict";
 }
 
 /**
@@ -376,8 +417,15 @@ export async function applyMasterChanges(
         const code = error instanceof MergeConflict ? error.code : error instanceof DependencyMissing ? "dependency_missing" : pgCode(error) ?? "apply_failed";
         const detail = error instanceof Error ? error.message.slice(0, 500) : String(error);
         const attempts = await recordConflict(client, businessId, change, code, detail);
-        outcomes[index] =
-          error instanceof DependencyMissing && attempts < MAX_DEPENDENCY_ATTEMPTS ? "deferred" : "conflict";
+        outcomes[index] = masterApplyOutcomeForFailure(
+          error instanceof DependencyMissing
+            ? "dependency_missing"
+            : error instanceof MergeConflict
+              ? "merge_conflict"
+              : "apply_failed",
+          error instanceof MergeConflict ? error.code : null,
+          attempts,
+        );
       }
     }
     await client.query("COMMIT");
@@ -578,7 +626,19 @@ async function applyOne(
       await client.query("ROLLBACK TO SAVEPOINT master_write");
       const code = pgCode(error);
       if (code === "23505") {
-        throw new MergeConflict("unique_violation", `${config.table}: ${pgConstraint(error)}`);
+        const constraint = pgConstraint(error);
+        // Issue #1446: two sites can hold the same employee party under two
+        // UUIDs, and `idx_parties_employee_user` makes the rows mutually
+        // exclusive. Record the reason an operator can act on instead of a bare
+        // `unique_violation`; merging the parties is a data repair, never
+        // something a merge tick may do on its own.
+        if (config.table === "parties" && constraint === "idx_parties_employee_user") {
+          throw new MergeConflict(
+            "employee_party_identity_conflict",
+            `${config.table}: ${constraint}`,
+          );
+        }
+        throw new MergeConflict("unique_violation", `${config.table}: ${constraint}`);
       }
       if (code !== "23503") throw error;
       const constraint = pgConstraint(error);
@@ -773,6 +833,44 @@ export async function listMasterConflicts(businessId: string, limit = 50): Promi
   }));
 }
 
+/**
+ * An operator's explicit acknowledgement of a terminal master-data conflict.
+ * The row is closed and audited; this never rewrites either side's business
+ * data — reconciling a duplicate identity is a separate, reviewed data repair.
+ */
+export async function resolveMasterConflict(
+  businessId: string,
+  conflictId: number,
+  actorUserId: string | null,
+  note: string | null,
+): Promise<boolean> {
+  const { rows } = await query<{ table_name: string; row_id: string; error_code: string }>(
+    `UPDATE sync_master_conflicts
+        SET status = 'resolved', last_seen_at = now()
+      WHERE business_id = $1 AND id = $2 AND status = 'open'
+      RETURNING table_name, row_id, error_code`,
+    [businessId, conflictId],
+  );
+  const row = rows[0];
+  if (!row) return false;
+  await query(
+    `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+     VALUES ($1, NULL, $2, 'sync.master_conflict.resolved', 'sync_master_conflict', $3, $4)`,
+    [
+      businessId,
+      actorUserId,
+      String(conflictId),
+      JSON.stringify({
+        table: row.table_name,
+        rowId: row.row_id,
+        errorCode: row.error_code,
+        note: note?.slice(0, 500) ?? null,
+      }),
+    ],
+  );
+  return true;
+}
+
 /** A conflict that later applied cleanly is closed, so the panel shows only what is still stuck. */
 export async function resolveAppliedMasterConflicts(
   businessId: string,
@@ -794,6 +892,13 @@ export async function resolveAppliedMasterConflicts(
  * first change that must be retried, or the page's own end when everything
  * settled. Cursor positions are (txid, table, row), exactly as the feed orders
  * them.
+ *
+ * Only `deferred` blocks the cursor. `applied` and `noop` are settled by
+ * definition, and `conflict` is terminal: the change was quarantined in
+ * `sync_master_conflicts` after its bounded retries (issue #1446), so holding
+ * the cursor there forever would stop every later independent change from ever
+ * arriving. That is why the two outcomes are kept distinct rather than folded
+ * into one "not applied" bucket.
  */
 export function cursorAfterApply(
   start: MasterCursor,

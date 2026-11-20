@@ -355,42 +355,68 @@ async function applyLegacySyncEvent(
     ],
   );
 
-  if (inserted.length === 0) {
+  let syncEventId = inserted[0]?.id ?? null;
+  if (!syncEventId) {
     const { rows: prior } = await query<{
+      id: string;
       applied_at: string | null;
       error: string | null;
+      retry_requested_at: string | null;
     }>(
-      "SELECT applied_at, error FROM sync_events WHERE location_id = $1 AND client_event_id = $2",
+      `SELECT id, applied_at, error, retry_requested_at
+         FROM sync_events WHERE location_id = $1 AND client_event_id = $2`,
       [locationId, event.clientEventId],
     );
     const row = prior[0];
-    if (!row?.applied_at && !row?.error) {
-      // Another worker is still applying this event, or a process stopped
-      // between the domain mutation and the outcome marker. Never report that
-      // ambiguous state as success: callers must retry/raise an operational
-      // alert, while the unique inbox row still prevents a second effect.
+    if (row?.retry_requested_at && !row.applied_at) {
+      /*
+       * Issue #1446 — an operator asked for exactly this failed event to be
+       * attempted again after the missing master data was reconciled
+       * (migration 0309). The claim is a single atomic UPDATE: of two pushes
+       * racing the same request only one runs the effect, and a successful
+       * apply leaves `applied_at` set so no later request can select it. The
+       * event's payload, type and identity are unchanged; the retry is the
+       * same command, never a rewritten one.
+       */
+      const claimed = await query<{ id: string }>(
+        `UPDATE sync_events
+            SET error = NULL, retry_requested_at = NULL,
+                attempt_count = attempt_count + 1, last_attempt_at = now()
+          WHERE id = $1 AND retry_requested_at IS NOT NULL AND applied_at IS NULL
+          RETURNING id`,
+        [row.id],
+      );
+      syncEventId = claimed.rows[0]?.id ?? null;
+    }
+    if (!syncEventId) {
+      if (!row?.applied_at && !row?.error) {
+        // Another worker is still applying this event, or a process stopped
+        // between the domain mutation and the outcome marker. Never report that
+        // ambiguous state as success: callers must retry/raise an operational
+        // alert, while the unique inbox row still prevents a second effect.
+        return {
+          clientEventId: event.clientEventId,
+          ok: false,
+          duplicate: true,
+          error: "event_outcome_pending",
+        };
+      }
       return {
         clientEventId: event.clientEventId,
-        ok: false,
+        ok: !row.error,
         duplicate: true,
-        error: "event_outcome_pending",
+        error: row.error ?? undefined,
       };
     }
-    return {
-      clientEventId: event.clientEventId,
-      ok: !row.error,
-      duplicate: true,
-      error: row.error ?? undefined,
-    };
   }
 
   try {
     const result = await dispatch(locationId, authorizedActor, event, origin);
     if (result.error) {
-      await query("UPDATE sync_events SET error = $2 WHERE id = $1", [
-        inserted[0].id,
-        result.error,
-      ]);
+      await query(
+        "UPDATE sync_events SET error = $2, attempt_count = attempt_count + 1, last_attempt_at = now() WHERE id = $1",
+        [syncEventId, result.error],
+      );
       return {
         clientEventId: event.clientEventId,
         ok: false,
@@ -398,18 +424,62 @@ async function applyLegacySyncEvent(
         error: result.error,
       };
     }
-    await query("UPDATE sync_events SET applied_at = now() WHERE id = $1", [
-      inserted[0].id,
+    await query("UPDATE sync_events SET applied_at = now(), error = NULL WHERE id = $1", [
+      syncEventId,
     ]);
     return { clientEventId: event.clientEventId, ok: true, data: result.data };
   } catch (err) {
     const code = (err as { code?: string })?.code ?? "apply_failed";
-    await query("UPDATE sync_events SET error = $2 WHERE id = $1", [
-      inserted[0].id,
-      code,
-    ]);
+    await query(
+      "UPDATE sync_events SET error = $2, attempt_count = attempt_count + 1, last_attempt_at = now() WHERE id = $1",
+      [syncEventId, code],
+    );
     return { clientEventId: event.clientEventId, ok: false, error: code };
   }
+}
+
+/**
+ * Operator-safe reset of failed *legacy* inbox events (issue #1446).
+ *
+ * Only a row that never applied can be selected; the retry is then claimed
+ * atomically by the apply path, so an already-applied event (and therefore a
+ * financial or operational effect) is never re-run. Scoped to the caller's
+ * business and, when the caller is a site, to its own location. The caller is
+ * the authenticated site credential route, which also records the audit entry.
+ */
+export async function requestSyncEventRetry(input: {
+  businessId: string;
+  locationId: string | null;
+  clientEventIds: string[];
+}): Promise<{ requested: number }> {
+  const ids = input.clientEventIds.filter((id) => UUID_PATTERN.test(id));
+  if (ids.length === 0) return { requested: 0 };
+  const { rows } = await query<{ id: string }>(
+    `UPDATE sync_events se
+        SET retry_requested_at = now()
+       FROM locations l
+      WHERE l.id = se.location_id
+        AND l.business_id = $1
+        AND ($2::uuid IS NULL OR se.location_id = $2::uuid)
+        AND se.client_event_id = ANY($3::uuid[])
+        AND se.applied_at IS NULL
+        AND se.retry_requested_at IS NULL
+      RETURNING se.id`,
+    [input.businessId, input.locationId, ids],
+  );
+  if (rows.length > 0) {
+    await query(
+      `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, NULL, 'sync.event.retry_requested', 'sync_event', $3, $4)`,
+      [
+        input.businessId,
+        input.locationId,
+        String(rows.length),
+        JSON.stringify({ clientEventIds: ids }),
+      ],
+    );
+  }
+  return { requested: rows.length };
 }
 
 interface TransactionalSyncMetadata {
