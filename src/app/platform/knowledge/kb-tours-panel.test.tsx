@@ -215,6 +215,22 @@ describe("Tour Studio — saving and publishing", () => {
     expect(body.eligibility.anyOf).toEqual([{ permissions: ["crm.export"] }]);
   });
 
+  it("authors a conditional branch as step eligibility", async () => {
+    await renderPanel();
+    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
+    fireEvent.change(screen.getByLabelText("دسترسی‌های لازم (با کاما)"), {
+      target: { value: "crm.export" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس/ }));
+
+    await waitFor(() => expect(screen.getByText("پیش‌نویس ذخیره شد.")).toBeTruthy());
+    const posted = apiMock.mock.calls.find(([, init]) => init?.method === "POST");
+    const body = JSON.parse(posted![1]!.body as string);
+    expect(body.steps[0].eligibility).toEqual({ permissions: ["crm.export"] });
+  });
+
   it("answers a collision with this feature's Persian sentence, not the raw code", async () => {
     tours = [tour()];
     await renderPanel();
