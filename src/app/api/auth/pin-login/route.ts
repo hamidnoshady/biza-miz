@@ -22,7 +22,7 @@ import { memberPhoneState, pinGateCloses } from "@/lib/phone-otp-policy";
 import {
   auditTrustedDeviceLogin,
   readTrustedDeviceToken,
-  verifyTrustedDevice,
+  resolveTrustedDeviceSubject,
 } from "@/lib/trusted-device";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { pinEligibleRolesSql } from "@/lib/login-eligibility";
@@ -118,6 +118,20 @@ export async function POST(request: NextRequest) {
     // Local/hybrid: both sets, since a standalone install has nothing else to
     // offer an owner standing at the till.
     const pinEligibleRoles = pinEligibleRolesSql(deployment.profile);
+    /**
+     * The member this browser's seven-day trust belongs to, if any.
+     *
+     * Resolved once, before the candidate is read, because it widens the doors
+     * a PIN may open by exactly one person: on a Cloud deployment the roster is
+     * staff-only, yet an owner who completed the account + second-factor login
+     * and asked to be remembered is offered their PIN next time. That member
+     * could otherwise never use the PIN-only screen the product promises.
+     * Anyone else still has to be a PIN role.
+     */
+    const trustedSubject = await resolveTrustedDeviceSubject({
+      businessId,
+      token: readTrustedDeviceToken(request),
+    });
     // Phase 20 Wave 8 — the request names the employee, so a lockout is
     // checked before touching the PIN at all.
     const lockout = await checkLoginLockout(businessId, employeeId);
@@ -146,10 +160,10 @@ export async function POST(request: NextRequest) {
             ORDER BY created_at DESC LIMIT 1
          ) ec ON true
         WHERE u.is_active
-          AND u.role IN ${pinEligibleRoles}
+          AND (u.role IN ${pinEligibleRoles} OR ($2::uuid IS NOT NULL AND u.id = $2))
           AND coalesce(ec.secret_hash, u.pin_hash) IS NOT NULL
           AND u.id = $1`,
-      [employeeId],
+      [employeeId, trustedSubject?.userId ?? null],
     );
 
     const candidate = rows[0];
@@ -206,18 +220,12 @@ export async function POST(request: NextRequest) {
     // the exempt path here cannot lengthen it; an expired or revoked row
     // reads as a miss and the gate shuts again.
     //
-    // Only consulted while the policy is enforced. Before the adoption date
-    // there is no challenge to waive, and asking the table anyway would be a
-    // query per login for nothing.
-    const deviceTrust =
-      enforcement.state === "enforced"
-        ? await verifyTrustedDevice({
-            businessId: user.business_id,
-            userId: user.id,
-            token: readTrustedDeviceToken(request),
-          })
-        : null;
-    const trustExempt = deviceTrust?.trusted === true;
+    // Already resolved above (and scoped to this member): the same trust that
+    // opens the PIN-only screen waives the routine phone re-verification and,
+    // for a privileged role, stands in for the second factor this device
+    // completed when it was trusted.
+    const deviceTrust = trustedSubject?.userId === user.id ? trustedSubject : null;
+    const trustExempt = deviceTrust !== null;
 
     // Hard gate: past the adoption date (and with SMS configured), the PIN
     // alone opens the door only for a device this member has trusted inside
@@ -286,7 +294,23 @@ export async function POST(request: NextRequest) {
           )
         : [];
 
-      if (requiresMfa || enrolments.length > 0) {
+      // A device that completed the full account + second-factor login and was
+      // trusted for seven days is the one case where the privileged role may
+      // use the PIN: the second factor was already proven on this device, which
+      // is exactly what the trust record attests. Every other privileged login
+      // still goes to the account door.
+      if ((requiresMfa || enrolments.length > 0) && trustExempt) {
+        await auditTrustedDeviceLogin({
+          businessId: user.business_id,
+          userId: user.id,
+          platformUserId: user.platform_user_id,
+          door: "pin",
+          waived: "mfa",
+          expiresAt: deviceTrust.expiresAt,
+        });
+      }
+
+      if ((requiresMfa || enrolments.length > 0) && !trustExempt) {
         await auditLoginFailure(user.business_id, user.id, "privileged_pin_mfa_required");
         return NextResponse.json(
           {
@@ -303,7 +327,7 @@ export async function POST(request: NextRequest) {
     // The trust only mattered if the gate would otherwise have shut; record
     // that case before the session exists, so it cannot be minted unlogged.
     if (
-      deviceTrust?.trusted === true &&
+      deviceTrust &&
       pinGateCloses({ enforcement: enforcement.state, phoneState, deviceTrusted: false })
     ) {
       await auditTrustedDeviceLogin({

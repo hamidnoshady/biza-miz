@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { toPersianDigits } from "@/lib/digits";
+import { useEffect, useRef, useState } from "react";
+import { normalizeSecurityDigits, toPersianDigits } from "@/lib/digits";
 import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin-policy";
 
 /**
@@ -22,6 +22,16 @@ import { PIN_MAX_LENGTH, PIN_MIN_LENGTH } from "@/lib/pin-policy";
  * component can share the server's rule. Two copies of a security-relevant
  * bound is how one of them gets changed without the other, and the pad is the
  * component that decides when a PIN is complete enough to submit.
+ *
+ * Typing is the equal path to tapping, not a fallback: the pad listens for a
+ * physical keyboard too, so a cashier at a terminal — or anyone without a
+ * working pointer — types the digits, Backspace deletes one, Escape clears and
+ * Enter submits. The on-screen keys stay, because a touchscreen till has no
+ * keyboard; nothing here requires a mouse. Both routes run through the same
+ * `press` / `submit` pair, so the length ceiling and the four-digit minimum
+ * cannot drift between them, and typed digits are normalized from Persian and
+ * Arabic-Indic numerals (`normalizeSecurityDigits`) — the rule every other
+ * security-code input in the app already follows.
  */
 const MIN_DIGITS = PIN_MIN_LENGTH;
 const MAX_DIGITS = PIN_MAX_LENGTH;
@@ -42,11 +52,23 @@ export function PinPad({
   submitLabel?: string;
 }) {
   const [pin, setPin] = useState("");
+  /** The pad itself, so the caret starts here and the keys work without a first tap. */
+  const padRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setPin("");
 
   }, [resetKey]);
+
+  useEffect(() => {
+    // Focus lands on the pad when the step opens. Not a convenience: the key
+    // handler below never steals a keystroke from a focused field, and on the
+    // lock screen that field can still be a dashboard input sitting behind the
+    // overlay — without moving focus here, nothing typed would reach the pad.
+    // `preventScroll` keeps a long form from jumping; the pad is not a field,
+    // so no caret appears.
+    padRef.current?.focus({ preventScroll: true });
+  }, []);
 
   function submit(value: string) {
     if (busy) return;
@@ -66,8 +88,56 @@ export function PinPad({
 
   const canSubmit = !busy && pin.length >= MIN_DIGITS;
 
+  useEffect(() => {
+    // A physical keyboard is a first-class way to enter the PIN. The listener
+    // is window-level rather than on a field because the pad has no field —
+    // and because the keypad buttons are the target a keyboard user tabs to,
+    // so it must not swallow keys meant for anything else on the screen.
+    function onKeyDown(event: KeyboardEvent) {
+      // Leave modified keystrokes (browser shortcuts, copy/paste) alone.
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName ?? "";
+      // Another field owns the keystroke — this pad is not the only input on
+      // every screen it is mounted in.
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) {
+        return;
+      }
+      // A focused keypad button keeps its native Enter/Space activation; only
+      // keys the buttons do not handle themselves are intercepted.
+      if (tag === "BUTTON" && (event.key === "Enter" || event.key === " ")) return;
+
+      const digit = normalizeSecurityDigits(event.key);
+      if (digit.length === 1) {
+        event.preventDefault();
+        press(digit);
+        return;
+      }
+      if (event.key === "Backspace" || event.key === "Delete") {
+        // Backspace on a page with nothing focused can navigate back in older
+        // browsers — the pad's own meaning wins here.
+        event.preventDefault();
+        setPin((current) => current.slice(0, -1));
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setPin("");
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (canSubmit) submit(pin);
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
   return (
-    <div>
+    <div ref={padRef} tabIndex={-1}>
       <div
         className={`mb-4 flex min-h-3.5 items-center justify-center ${pin.length > 8 ? "gap-1.5" : "gap-3"}`}
         role="progressbar"

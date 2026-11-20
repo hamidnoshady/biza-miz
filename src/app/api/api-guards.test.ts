@@ -59,6 +59,10 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/pin-login/roster/sync":
     "pre-session retry for missing replicated staff credentials (issue #843) — " +
     "host-resolved, no-op unless Hybrid identity is unhealthy, rate-limited with the login door",
+  "auth/pin-login/trusted":
+    "the cloud door's PIN-only decision — pre-session by definition, answers only the one member " +
+    "the seven-day trust cookie names and only when that member holds an active PIN; never lists " +
+    "the roster and carries no credential",
   // Phase 42 — the phone-OTP door. `request` dispatches the code and is the
   // same shape as pin-login: a credential exchange that necessarily runs
   // before any session exists (its three addressing modes — a PIN-verified

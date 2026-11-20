@@ -32,6 +32,7 @@ import { query, withTenant } from "../db";
 import { getSetting, SETTING_KEYS } from "../settings";
 import type { ServerSyncConfig } from "../server-sync-config";
 import {
+  planSitePinAcceptance,
   type ReplicatedLoginCredential,
   type ReplicatedPin,
   validateLoginCredentialPayload,
@@ -39,6 +40,7 @@ import {
 import {
   applyLoginCredentials,
   applyReplicatedPins,
+  sitePinSnapshot,
   spentRecoveryCodes,
 } from "./login-credentials-service";
 import {
@@ -532,6 +534,37 @@ export async function syncHybridLoginCredentials(
       return fail(context, "degraded", `login_credential_apply_failed: ${errorText(error)}`);
     }
 
+    /**
+     * Push after the pull, not before.
+     *
+     * The site's own PIN writes — the owner's first-run PIN, a rotation at the
+     * till — have to reach the cloud or "the PIN is wrong" depends on which
+     * replica asked. But the cloud's payload is also what says which staff
+     * PINs it owns and has cleared (`staffPinMemberships`), so pushing before
+     * reading it would resurrect a PIN the cloud deleted. Read first, then send
+     * only what the payload shows the cloud does not already hold and what the
+     * site wrote later. A failure here is recorded as degraded, never silent.
+     */
+    let pinPushError: string | null = null;
+    try {
+      const pushes = planSitePinAcceptance(
+        await sitePinSnapshot(businessId),
+        pins,
+        validated.staffPinMemberships,
+      );
+      if (pushes.length > 0) {
+        const response = await fetch(`${baseUrl(remoteUrl)}/api/iam/login-credentials`, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ spent: [], pins: pushes }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!response.ok) pinPushError = `pin_push_http_${response.status}`;
+      }
+    } catch (error) {
+      pinPushError = `pin_push_unreachable: ${errorText(error)}`;
+    }
+
     const gap = await pinCredentialGap(businessId);
     const missingIdentityBindings = await missingGlobalIdentityBindings(businessId);
     // A credential pass that fetched and applied cleanly can still leave a
@@ -542,13 +575,16 @@ export async function syncHybridLoginCredentials(
     // matching hashes are "credential data synced", not "identity correctly
     // bound". (A password-role member the cloud has *no* identity for — a
     // PIN-eligible manager — is legitimate and is not in the payload at all.)
-    const status: CredentialSyncStatus = gap.missing > 0 || identityMismatches > 0 ? "degraded" : "healthy";
+    const status: CredentialSyncStatus =
+      pinPushError !== null || gap.missing > 0 || identityMismatches > 0 ? "degraded" : "healthy";
     // `last_error` records a *failure*; the remaining counts live in their own
     // columns and in `HybridIdentityStatus` — writing them into `last_error`
     // made a healthy pass look like it had failed.
     const error = !reportedSpentCodes
       ? "spent_recovery_codes_not_reported"
-      : gap.missing > 0
+      : pinPushError !== null
+        ? pinPushError
+        : gap.missing > 0
         ? `pin_credentials_missing:${gap.missing}`
         : identityMismatches > 0
           ? `identity_binding_mismatch:${identityMismatches}`

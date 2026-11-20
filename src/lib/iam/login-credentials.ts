@@ -132,8 +132,26 @@ function isCredentialRecord(value: unknown): value is ReplicatedLoginCredential 
 function isPinRecord(value: unknown): value is ReplicatedPin {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
+  if (record.updatedAt !== undefined
+    && (typeof record.updatedAt !== "string" || Number.isNaN(Date.parse(record.updatedAt)))) return false;
   return typeof record.membershipId === "string" && UUID.test(record.membershipId)
     && typeof record.pinHash === "string" && record.pinHash.length > 0;
+}
+
+/**
+ * Validate a batch of PIN records travelling between the two replicas.
+ *
+ * The site pushes its own PINs (and the cloud pushes its own) on the same
+ * site-authenticated channel as the credentials, so both directions get the
+ * same all-or-nothing gate the full payload has.
+ */
+export function validateReplicatedPins(
+  raw: unknown,
+): { ok: true; pins: ReplicatedPin[] } | { ok: false; code: string } {
+  if (!Array.isArray(raw)) return { ok: false, code: "pins_not_array" };
+  if (raw.length > 500) return { ok: false, code: "pins_too_many" };
+  if (!raw.every(isPinRecord)) return { ok: false, code: "invalid_pin_record" };
+  return { ok: true, pins: raw };
 }
 
 /**
@@ -207,6 +225,18 @@ export function validateLoginCredentialPayload(raw: unknown): {
 export interface ReplicatedPin {
   membershipId: string;
   pinHash: string;
+  /**
+   * When this PIN was written on the replica that sent it (ISO 8601).
+   *
+   * PINs are the one credential both sides may originate: the owner sets one
+   * at the end of the desktop's first-run pairing, staff set and rotate theirs
+   * at the till, and the cloud remains where most staff are created. Without a
+   * stamp neither replica can tell "this is the newer PIN" from "this is the
+   * other replica's PIN", which is what made the owner's setup PIN and the
+   * cloud's disagree forever. Optional so an older peer keeps the role-based
+   * fallback below.
+   */
+  updatedAt?: string;
 }
 
 /** What the site holds today for one member: its role and its active PIN, if any. */
@@ -214,6 +244,8 @@ export interface LocalPinState {
   membershipId: string;
   role: string;
   pinHash: string | null;
+  /** When the local PIN was written; see `ReplicatedPin.updatedAt`. */
+  pinUpdatedAt?: string | null;
 }
 
 /**
@@ -227,13 +259,16 @@ const STAFF_PIN_ROLES: ReadonlySet<string> = new Set(PIN_ROLES);
 /**
  * Which members' site PIN to replace with the cloud's. Pure.
  *
- * - Staff roles (cashier/waiter/kitchen) sign in with a PIN on the cloud too,
- *   so the cloud's PIN is authoritative: a different local one is put back.
- * - An owner/manager's PIN is the offline door the pairing wizard asks for on
- *   the desktop itself; the cloud's only fills it in when the site has none,
- *   and never overrides the one the owner chose at the till.
- * - A member the cloud has no PIN for keeps whatever the site has; a member the
- *   site has not replicated yet is skipped until the IAM snapshot creates it.
+ * PINs are written on both replicas (the desktop's first-run pairing asks for
+ * the owner's, the till lets a member rotate one), so the rule is *who wrote
+ * last*, by the `updatedAt` stamp both sides send. Equal hashes never rewrite —
+ * otherwise every pass would stamp a new time and the two would chase each
+ * other.
+ *
+ * A peer that sends no stamp (an older deployment) keeps the old shape: a staff
+ * PIN is the cloud's, and an owner/manager's PIN is the device's. A member the
+ * cloud has no PIN for keeps whatever the site has; a member the site has not
+ * replicated yet is skipped until the IAM snapshot creates it.
  */
 export function planPinReplication(
   cloud: readonly ReplicatedPin[],
@@ -244,8 +279,73 @@ export function planPinReplication(
     const here = byId.get(pin.membershipId);
     if (!here || !pin.pinHash) return false;
     if (here.pinHash === pin.pinHash) return false;
-    return STAFF_PIN_ROLES.has(here.role) || here.pinHash === null;
+    // Nothing local to lose: the cloud's PIN fills the empty slot on every role.
+    if (here.pinHash === null) return true;
+    // Both sides have a PIN that differs. The newer write wins, so a PIN the
+    // owner set at the till (or a staff member rotated there) is not put back
+    // to the cloud's older one on the next pass.
+    const cloudAt = pinTimestamp(pin.updatedAt);
+    const localAt = pinTimestamp(here.pinUpdatedAt);
+    if (cloudAt !== null && localAt !== null) return cloudAt > localAt;
+    // Legacy peer with no stamp: staff PINs stay cloud-owned, a password
+    // role's PIN stays device-local (the pre-bidirectional behaviour).
+    return STAFF_PIN_ROLES.has(here.role);
   });
+}
+
+/**
+ * The other half of the same rule: which site-originated PINs may the cloud
+ * adopt? Pure, and the mirror image of `planPinReplication`.
+ *
+ * The bug this closes: a PIN written on the site — the owner's first-run PIN, a
+ * PIN rotated at the till, a staff PIN reset while the uplink was down — stayed
+ * on the site forever. The sync only ever pulled, so the cloud kept its old
+ * hash and the member's PIN "did not match" depending on which side they were
+ * asked on. With stamps the newer write wins; without them a password role's
+ * site PIN is still the local authority, and a staff PIN stays the cloud's.
+ */
+/**
+ * Which of the site's PINs the cloud may adopt. Pure.
+ *
+ * `staffPinMemberships` is the cloud's own authoritative list of staff (the
+ * `staffPins` block of the payload). It is what tells a deleted staff PIN
+ * apart from one the cloud has never had: a listed staff member with no PIN in
+ * the payload was deliberately cleared on the cloud, so a site copy must not
+ * resurrect it. A member the cloud does not list may simply be PIN-only staff
+ * it does not own — or a password role — and the site's PIN is adopted.
+ *
+ * A differing PIN both sides hold is resolved by `updatedAt`, the same rule as
+ * the pull. An older peer without stamps keeps the pre-bidirectional shape:
+ * staff PINs stay the cloud's, password-role PINs stay the site's.
+ */
+export function planSitePinAcceptance(
+  site: readonly ReplicatedPin[],
+  cloud: readonly ReplicatedPin[],
+  staffPinMemberships: readonly string[] = [],
+): ReplicatedPin[] {
+  const byId = new Map(cloud.map((row) => [row.membershipId, row]));
+  const cloudOwnsStaff = new Set(staffPinMemberships);
+  return site.filter((pin) => {
+    if (!pin.pinHash) return false;
+    const here = byId.get(pin.membershipId);
+    if (!here) {
+      // No cloud PIN. A staff member the cloud owns and lists has had theirs
+      // removed there; anyone else's site PIN (the owner's setup PIN) is new.
+      return !cloudOwnsStaff.has(pin.membershipId);
+    }
+    if (here.pinHash === pin.pinHash) return false;
+    const siteAt = pinTimestamp(pin.updatedAt);
+    const cloudAt = pinTimestamp(here.updatedAt);
+    if (siteAt !== null && cloudAt !== null) return siteAt > cloudAt;
+    return !cloudOwnsStaff.has(pin.membershipId);
+  });
+}
+
+/** A PIN write time in ms, or null when the peer sent no usable stamp. */
+function pinTimestamp(value: string | null | undefined): number | null {
+  if (typeof value !== "string" || value === "") return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
 }
 
 /**

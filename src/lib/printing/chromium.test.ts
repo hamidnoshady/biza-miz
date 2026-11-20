@@ -165,4 +165,25 @@ describe("renderHtmlToPng — the context is hostile-by-default", () => {
     await expect(renderHtmlToPng("<html><head></head><body>x</body></html>", 512)).rejects.toThrow("render blew up");
     expect(context.close).toHaveBeenCalledOnce();
   });
+
+  it("retries a capture Chromium refuses before it has a frame, and returns the retry's raster", async () => {
+    // The Windows integration shard hit this on the first render of a fresh
+    // browser; every later render of the same run passed.
+    const png = pngOf(8, 20);
+    screenshot
+      .mockRejectedValueOnce(
+        new Error(
+          "page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot\nCall log:\n  - taking page screenshot",
+        ),
+      )
+      .mockResolvedValueOnce(png);
+    await expect(renderHtmlToPng("<html><head></head><body>x</body></html>", 512)).resolves.toBe(png);
+    expect(screenshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry any other capture failure", async () => {
+    screenshot.mockRejectedValue(new Error("page.screenshot: Timeout 20000ms exceeded"));
+    await expect(renderHtmlToPng("<html><head></head><body>x</body></html>", 512)).rejects.toThrow("Timeout 20000ms exceeded");
+    expect(screenshot).toHaveBeenCalledOnce();
+  });
 });

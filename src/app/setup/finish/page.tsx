@@ -5,10 +5,11 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { cardClass } from "@/app/dashboard/page-chrome";
 import { useMoney } from "@/components/money/money-context";
-import { toPersianDigits } from "@/lib/digits";
+import { toLatinDigits, toPersianDigits } from "@/lib/digits";
+import { isValidPin } from "@/lib/pin-policy";
 import type { AppKey } from "@/lib/apps";
 import type { SetupAppCatalogData } from "@/lib/setup-apps";
-import { api, ErrorBox, errorMessage, InfoBox, PrimaryButton, SetupDataSkeleton } from "../ui";
+import { api, ErrorBox, errorMessage, InfoBox, inputClass, PrimaryButton, SetupDataSkeleton } from "../ui";
 import { catalogueHrefFor } from "@/lib/wizard-steps";
 import { stepsFor } from "../steps";
 import { useSetupIndustry } from "../industry-context";
@@ -43,12 +44,19 @@ export default function FinishPage() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [completed, setCompleted] = useState(false);
+  /** The owner's quick-login PIN — asked once, at the end, as the product flow requires. */
+  const [owner, setOwner] = useState<{ id: string; hasPin: boolean } | null>(null);
+  const [ownerPin, setOwnerPin] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinError, setPinError] = useState("");
+  const [pinSaved, setPinSaved] = useState(false);
 
   const load = useCallback(() => {
     void Promise.all([
       api<StateResponse>("/api/setup/state"),
       api<SetupAppCatalogData>("/api/setup/apps"),
-    ]).then(([stateResult, appsResult]) => {
+      api<{ users?: { id: string; role: string; has_pin: boolean }[] }>("/api/setup/users"),
+    ]).then(([stateResult, appsResult, usersResult]) => {
       if (stateResult.ok) {
         setState(stateResult.data);
         setCompleted(Boolean(stateResult.data.progress?.completedAt));
@@ -56,6 +64,10 @@ export default function FinishPage() {
         setError("بارگذاری وضعیت راه‌اندازی ممکن نشد.");
       }
       if (appsResult.ok) setApps(appsResult.data);
+      const ownerRow = usersResult.ok
+        ? usersResult.data.users?.find((row) => row.role === "owner")
+        : undefined;
+      if (ownerRow) setOwner({ id: ownerRow.id, hasPin: ownerRow.has_pin });
     });
   }, []);
   useEffect(load, [load]);
@@ -81,6 +93,40 @@ export default function FinishPage() {
       router.replace("/dashboard");
     } finally {
       setBusy(false);
+    }
+  }
+
+  /**
+   * Save the owner's first PIN.
+   *
+   * A PIN has nothing to prove against the first time, so this is the same
+   * "set, don't rotate" path the profile screen uses — and on a paired install
+   * the write is pushed to the cloud by the credential sync, which is what
+   * keeps the PIN the owner chose here equal to the one the cloud knows.
+   */
+  async function saveOwnerPin(e: React.FormEvent) {
+    e.preventDefault();
+    if (!owner) return;
+    if (!isValidPin(ownerPin)) {
+      setPinError("رمز عددی باید ۴ تا ۱۲ رقم باشد.");
+      return;
+    }
+    setPinBusy(true);
+    setPinError("");
+    try {
+      const { ok, data, status } = await api<{ error?: string }>(
+        `/api/team/${owner.id}/credentials`,
+        { method: "PUT", body: JSON.stringify({ pin: ownerPin }) },
+      );
+      if (!ok) {
+        setPinError(errorMessage(data.error, undefined, status));
+        return;
+      }
+      setPinSaved(true);
+      setOwnerPin("");
+      setOwner({ ...owner, hasPin: true });
+    } finally {
+      setPinBusy(false);
     }
   }
 
@@ -304,6 +350,39 @@ export default function FinishPage() {
                 از همان مسیر ادامه می‌دهید.
               </p>
             </div>
+          ) : null}
+
+          {owner && !owner.hasPin && !pinSaved ? (
+            <section className={`${cardClass} mb-6 p-5`} aria-label="رمز عددی ورود سریع">
+              <p className="font-semibold text-foreground">رمز عددی ورود سریع خود را بسازید</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                بعد از پایان راه‌اندازی، روی این دستگاه با انتخاب نام و همین رمز وارد
+                می‌شوید — بدون ایمیل و رمز عبور. هر وقت خواستید از تنظیمات پروفایل
+                عوضش کنید.
+              </p>
+              <form className="mt-3 flex flex-wrap items-end gap-3" onSubmit={saveOwnerPin}>
+                <div>
+                  <label htmlFor="owner-pin" className="mb-1 block text-xs text-muted-foreground">
+                    رمز عددی (۴ تا ۱۲ رقم)
+                  </label>
+                  <input
+                    id="owner-pin"
+                    className={`${inputClass} w-40 text-center tracking-[0.25em]`}
+                    dir="ltr"
+                    inputMode="numeric"
+                    maxLength={12}
+                    value={ownerPin}
+                    onChange={(e) => setOwnerPin(toLatinDigits(e.target.value).replace(/[^0-9]/g, ""))}
+                  />
+                </div>
+                <PrimaryButton disabled={pinBusy || !isValidPin(ownerPin)}>ثبت رمز عددی</PrimaryButton>
+                {pinError ? <p className="text-sm text-destructive">{pinError}</p> : null}
+              </form>
+            </section>
+          ) : pinSaved ? (
+            <p className="mb-6 rounded-lg border border-emerald-600/30 bg-emerald-600/5 px-4 py-3 text-sm text-foreground">
+              رمز عددی ثبت شد؛ از این پس با انتخاب نام خود وارد می‌شوید.
+            </p>
           ) : null}
 
           <PrimaryButton type="button" onClick={complete} disabled={busy || missing.length > 0}>
