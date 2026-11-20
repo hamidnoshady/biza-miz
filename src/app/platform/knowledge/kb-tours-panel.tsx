@@ -72,6 +72,12 @@ type EditableStep = {
   navigateTo: string;
   title: string;
   body: string;
+  /**
+   * Issue #972 — a conditional branch. When set, `tourForViewer` removes this
+   * step for a member the rule does not match, so the remaining steps are the
+   * path that member actually plays. Empty means every viewer sees it.
+   */
+  eligibility: TourEligibility;
 };
 
 type Form = {
@@ -119,6 +125,31 @@ function nextStepId(steps: EditableStep[]): string {
   return `step-${index}`;
 }
 
+/** Comma input → the known permission keys only; unknown text is dropped. */
+function permissionsFrom(value: string): Permission[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry): entry is Permission => (PERMISSION_KEYS as readonly string[]).includes(entry));
+}
+
+/** Comma input → the known trade ids only; unknown text is dropped. */
+function industriesFrom(value: string): (typeof INDUSTRIES)[number][] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry): entry is (typeof INDUSTRIES)[number] =>
+      (INDUSTRIES as readonly string[]).includes(entry),
+    );
+}
+
+function flagsFrom(value: string): string[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 function formFor(tour: StudioTour): Form {
   return {
     id: tour.id,
@@ -138,6 +169,7 @@ function formFor(tour: StudioTour): Form {
       navigateTo: step.navigateTo ?? "",
       title: step.title,
       body: step.body,
+      eligibility: step.eligibility ?? {},
     })),
   };
 }
@@ -159,6 +191,7 @@ function payloadFor(form: Form): Record<string, unknown> {
       ...(step.kind === "navigate" ? { navigateTo: step.navigateTo } : {}),
       title: step.title,
       body: step.body,
+      ...(Object.keys(step.eligibility).length > 0 ? { eligibility: step.eligibility } : {}),
     })),
     ...(form.version !== null ? { expectedVersion: form.version } : {}),
   };
@@ -272,6 +305,7 @@ export function ToursPanel() {
           navigateTo: kind === "navigate" ? PAGES[0]?.route ?? "" : "",
           title: "",
           body: "",
+          eligibility: {},
         },
       ],
     }));
@@ -294,6 +328,7 @@ export function ToursPanel() {
           navigateTo: "",
           title: step.title,
           body: step.body,
+          eligibility: {},
         });
       }
       return { ...current, steps };
@@ -904,6 +939,11 @@ export function ToursPanel() {
                       onChange={(event) => updateStep(index, { id: event.target.value })}
                       aria-label={`شناسهٔ مرحلهٔ ${index + 1}`}
                     />
+                    {Object.keys(step.eligibility).length > 0 ? (
+                      <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                        شرطی
+                      </span>
+                    ) : null}
                     {step.kind === "spotlight" || step.kind === "action" ? (
                       <select
                         className={`${selectClass} w-56 font-mono`}
@@ -1000,6 +1040,97 @@ export function ToursPanel() {
                     disabled={!canManage}
                     onChange={(event) => updateStep(index, { body: event.target.value })}
                   />
+                  <details className="mt-2 rounded-lg border border-border/70 bg-muted/30 p-2">
+                    <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground">
+                      شرط نمایش این مرحله (اختیاری)
+                    </summary>
+                    <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                      اگر پر شود، این مرحله فقط برای عضوی نمایش داده می‌شود که شرط را دارد؛ بقیه آن را
+                      نمی‌بینند و مسیرشان از مرحلهٔ بعد ادامه می‌یابد.
+                    </p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      <Field label="دسترسی‌های لازم (با کاما)">
+                        <input
+                          className={inputClass}
+                          dir="ltr"
+                          placeholder="ledger.view"
+                          value={(step.eligibility.permissions ?? []).join(", ")}
+                          disabled={!canManage}
+                          onChange={(event) => {
+                            const next = { ...step.eligibility };
+                            const permissions = permissionsFrom(event.target.value);
+                            if (permissions.length > 0) next.permissions = permissions;
+                            else delete next.permissions;
+                            updateStep(index, { eligibility: next });
+                          }}
+                        />
+                      </Field>
+                      <Field label="دسترسی‌های ممنوع (با کاما)">
+                        <input
+                          className={inputClass}
+                          dir="ltr"
+                          placeholder="payroll.view"
+                          value={(step.eligibility.withoutPermissions ?? []).join(", ")}
+                          disabled={!canManage}
+                          onChange={(event) => {
+                            const next = { ...step.eligibility };
+                            const permissions = permissionsFrom(event.target.value);
+                            if (permissions.length > 0) next.withoutPermissions = permissions;
+                            else delete next.withoutPermissions;
+                            updateStep(index, { eligibility: next });
+                          }}
+                        />
+                      </Field>
+                      <Field label="صنف‌های این مرحله (با کاما)">
+                        <input
+                          className={inputClass}
+                          dir="ltr"
+                          placeholder="food_service, retail"
+                          value={(step.eligibility.industries ?? []).join(", ")}
+                          disabled={!canManage}
+                          onChange={(event) => {
+                            const next = { ...step.eligibility };
+                            const industries = industriesFrom(event.target.value);
+                            if (industries.length > 0) next.industries = industries;
+                            else delete next.industries;
+                            updateStep(index, { eligibility: next });
+                          }}
+                        />
+                      </Field>
+                      <Field label="پرچم‌های لازم (با کاما)">
+                        <input
+                          className={inputClass}
+                          dir="ltr"
+                          placeholder="ledger"
+                          value={(step.eligibility.features ?? []).join(", ")}
+                          disabled={!canManage}
+                          onChange={(event) => {
+                            const next = { ...step.eligibility };
+                            const flags = flagsFrom(event.target.value);
+                            if (flags.length > 0) next.features = flags;
+                            else delete next.features;
+                            updateStep(index, { eligibility: next });
+                          }}
+                        />
+                      </Field>
+                      <Field label="پرچم‌های خاموش (با کاما)">
+                        <input
+                          className={inputClass}
+                          dir="ltr"
+                          placeholder="ai_assistant"
+                          value={(step.eligibility.withoutFeatures ?? []).join(", ")}
+                          disabled={!canManage}
+                          onChange={(event) => {
+                            const next = { ...step.eligibility };
+                            const flags = flagsFrom(event.target.value);
+                            if (flags.length > 0) next.withoutFeatures = flags;
+                            else delete next.withoutFeatures;
+                            updateStep(index, { eligibility: next });
+                          }}
+                        />
+                      </Field>
+                    </div>
+                  </details>
                   {step.kind === "action" ? (
                     <p className="mt-1.5 px-1 text-[11px] leading-5 text-muted-foreground">
                       {tourVerifierDefinition(step.verifier)?.promise ??

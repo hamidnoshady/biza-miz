@@ -397,7 +397,9 @@ rule names the page guard it mirrors.
   the narrowed definition and every server path (lookup, playback, progress
   writes) starts from it. If permissions change, seen ids for steps that no
   longer apply are dropped on the next write; a step that applies again is
-  simply unseen.
+  simply unseen. Studio authors this rule on each step (“شرط نمایش این مرحله”),
+  which is how a single tour covers, say, ledger and non-ledger staff without
+  two tours.
 - **Optional facts are read lazily.** Feature flags and the costing system cost
   a query each and the lookup runs whenever a page's «آموزش» button mounts, so
   `tourViewerFor` reads them only when a tour on that page asks
@@ -470,8 +472,10 @@ instead of trapping the member.
   step-sequence preview. The panel exposes permission, `withoutPermissions`,
   industry, feature-flag and `anyOf` rules (up to eight alternatives, each with
   permissions and/or industries; an empty alternative is refused before save).
-  Conditional branches and a live preview of the target page are still open —
-  the preview shows step content and order, not the target page's DOM.
+  **Conditional branches are authored as per-step eligibility**: a step whose
+  rule the viewer fails is removed before playback, so the remaining steps are
+  that member's path. A live preview of the target page is still open — the
+  preview shows step content and order, not the target page's DOM.
 - **Further verified actions** can be added the same way: register a key in
   `TOUR_VERIFIERS`, record evidence only after the domain write succeeds, and
   add the step. There is no verifier without a writer, because
