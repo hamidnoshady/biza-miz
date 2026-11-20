@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { cardClass } from "@/app/dashboard/page-chrome";
@@ -271,6 +271,12 @@ const ROSTER_FAILURE_MESSAGES: Record<RosterFailure, string> = {
 const MAX_ROSTER_RETRIES = 2;
 
 /**
+ * How many names the roster grid puts in a row — must match the `grid-cols-3`
+ * on the grid itself, because an Up/Down arrow is read as "one row of names".
+ */
+const ROSTER_COLUMNS = 3;
+
+/**
  * Phase 20 Wave 4 — this terminal's paired-device token, if an owner/manager
  * registered it from Settings → دستگاه‌های ثبت‌شده. `readDeviceToken` is
  * shared with that Settings screen and the self-service biometric panel, so
@@ -330,6 +336,8 @@ function PinLogin({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [webauthnSupported, setWebauthnSupported] = useState(false);
+  /** The name grid, so a keyboard has something to move between (below). */
+  const rosterGridRef = useRef<HTMLDivElement | null>(null);
 
   /** The door's step for the selected member: the pad, the number input, or the OTP. */
   const [doorStep, setDoorStep] = useState<"pin" | "set_phone" | "otp">("pin");
@@ -476,6 +484,20 @@ function PinLogin({
     });
   }, [employees]);
 
+  useEffect(() => {
+    // The roster hands focus to its first name as soon as it arrives, so the
+    // list is reachable with no pointer at all — otherwise the arrows below
+    // have nowhere to start from and the only way in is to Tab down the page.
+    // Guarded: a field the browser already focused (a restored form, another
+    // door's input) keeps it; this only fills an empty stage.
+    if (selected || !employees || employees.length === 0) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    rosterGridRef.current
+      ?.querySelector<HTMLButtonElement>("[data-roster-member]")
+      ?.focus({ preventScroll: true });
+  }, [employees, selected]);
+
   /** Re-asks for the roster from scratch — the button under a failed load. */
   function retryRoster() {
     setEmployees(null);
@@ -519,6 +541,46 @@ function PinLogin({
     if (employee.loginMode === "otp") {
       void startOtp({ kind: "employee", employeeId: employee.id });
     }
+  }
+
+  /**
+   * Arrow keys walk the name grid; Enter and Space confirm through the
+   * buttons' own activation, so a click does exactly what it did before. The
+   * grid is three wide and reads right-to-left, so ArrowLeft steps to the next
+   * name and ArrowRight to the previous one, while Up/Down move a row of three
+   * and stop at the first/last row instead of wrapping to a name that is not
+   * on the side the arrow points at. Home/End jump to the ends.
+   *
+   * Every name keeps its own Tab stop: this adds movement, it does not take
+   * Tab away from a list a cashier might already be tabbing through.
+   */
+  function moveRosterFocus(event: React.KeyboardEvent<HTMLDivElement>) {
+    const buttons = Array.from(
+      rosterGridRef.current?.querySelectorAll<HTMLButtonElement>("[data-roster-member]") ?? [],
+    );
+    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (current === -1) return;
+
+    const last = buttons.length - 1;
+    const vertical = event.key === "ArrowDown" || event.key === "ArrowUp";
+    let target: number;
+    if (event.key === "Home") {
+      target = 0;
+    } else if (event.key === "End") {
+      target = last;
+    } else if (vertical) {
+      const step = event.key === "ArrowDown" ? ROSTER_COLUMNS : -ROSTER_COLUMNS;
+      target = Math.min(last, Math.max(0, current + step));
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      const step = event.key === "ArrowLeft" ? 1 : -1;
+      target = (current + step + buttons.length) % buttons.length;
+    } else {
+      return;
+    }
+
+    // The arrows would otherwise scroll the page behind the login card.
+    event.preventDefault();
+    buttons[target]?.focus();
   }
 
   function goNext(employeeId?: string) {
@@ -907,11 +969,16 @@ function PinLogin({
             </div>
           </div>
         )}
-        <div className="grid grid-cols-3 gap-2">
+        <div
+          ref={rosterGridRef}
+          onKeyDown={moveRosterFocus}
+          className="grid grid-cols-3 gap-2"
+        >
           {ordered.map((employee) => (
             <button
               key={employee.id}
               type="button"
+              data-roster-member={employee.id}
               onClick={() => pick(employee)}
               className="flex flex-col items-center gap-1.5 rounded-lg p-2 text-center transition hover:bg-primary/10 active:scale-95 outline-none focus-visible:ring focus-visible:ring-ring/50"
             >
