@@ -9,7 +9,15 @@
 #      (POS_CONNECTOR_UPDATE_URL) — upload it next to the zip;
 #   4. commits the bump and tags vX.Y.Z, so the repo always says which
 #      version was actually shipped;
-#   5. uploads the zip (+ update.json) as a downloadable artifact.
+#   5. publishes a versioned GitHub Release vX.Y.Z carrying the zip (and
+#      update.json when self-hosted updates are configured), so every stable
+#      build is kept on GitHub Releases and the plugin's GitHub update mode
+#      can install it;
+#   6. uploads the zip (+ update.json) as a downloadable artifact.
+#
+# Desktop and Android releases share this repository, separated by tag prefix:
+# `desktop-vX.Y.Z` and `android-vX.Y.Z`. This plugin's release tags stay plain
+# `vX.Y.Z`, which is what the updater looks for.
 #
 # Triggers: automatically on every `push` to `main` that touches
 # `wordpress-plugin/**`, and still `workflow_dispatch` for a manual build with
@@ -22,8 +30,9 @@
 # that never ships as that version. Automatic runs always use a `patch` bump
 # with no custom notes (the generic changelog line below); use
 # `workflow_dispatch` for a minor/major bump or written release notes.
-# The download is hosted on the owner's own server, not attached to a GitHub
-# release. Full runbook: docs/deployment/wordpress-plugin-updates.md
+# The zip is attached to a versioned GitHub Release (vX.Y.Z), and can also be
+# hosted on the owner's own server for self-hosted updates. Full runbook:
+# docs/deployment/wordpress-plugin-updates.md
 #
 # Runs on the GitHub-hosted **Windows** runner (`windows-latest`), so every
 # step is PowerShell and uses only what Windows ships with: `Compress-Archive`
@@ -327,6 +336,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           git push origin "HEAD:refs/heads/$env:GITHUB_REF_NAME" "refs/tags/v$env:NEXT"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Publish the versioned GitHub Release
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+          NOTES: ${{ inputs.notes }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "v$env:NEXT"
+          $files = @("wordpress-plugin/pos-accounting-connector.zip")
+          if (Test-Path -LiteralPath "update.json") { $files += "update.json" }
+          $notes = $env:NOTES
+          if ([string]::IsNullOrWhiteSpace($notes)) { $notes = "Plugin release v$env:NEXT." }
+
+          # A version that was already shipped is never republished.
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "::error::Release $tag already exists - a shipped version is not published twice."
+            exit 1
+          }
+
+          gh release create $tag @files --title "Bizamiz Connector v$env:NEXT" --notes "$notes"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::GitHub release publication failed"
+            exit 1
+          }
+          exit 0
 
       # The zip is uploaded UNZIPPED (`archive: false`). GitHub otherwise wraps
       # every artifact in its own zip, so the download is a zip that contains

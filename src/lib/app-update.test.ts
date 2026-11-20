@@ -34,7 +34,7 @@ vi.mock("./settings", () => ({
   setSetting: mocks.setSetting,
 }));
 
-import { checkDesktopUpdateNow, summarizeUpdateCheck } from "./app-update";
+import { checkDesktopUpdateNow, refreshAppUpdateStatus, summarizeUpdateCheck } from "./app-update";
 
 const CONFIG = {
   enabled: true,
@@ -82,7 +82,7 @@ const status = (over: Partial<AppUpdateStatus> = {}): AppUpdateStatus => ({
   ...over,
 });
 
-function centralAnswer(body: Record<string, unknown>, init: ResponseInit = { status: 200 }) {
+function centralAnswer(body: unknown, init: ResponseInit = { status: 200 }) {
   return new Response(JSON.stringify(body), {
     ...init,
     headers: { "content-type": "application/json" },
@@ -197,14 +197,121 @@ describe("checkDesktopUpdateNow", () => {
     expect(result).toMatchObject({ outcome: "error", offline: false, error: "remote_rejected_401" });
   });
 
-  it("does not call Central at all when the install is not paired", async () => {
-    const fetchMock = vi.fn();
+  it("does not call Central when the install is not paired, and names the GitHub failure", async () => {
+    // No credential means Central is never asked — the GitHub release feed is the
+    // default source. When that is unreachable too, the check is an error, never
+    // an invented "up to date".
+    const fetchMock = vi.fn(async (_url: string) => { throw new TypeError("fetch failed"); });
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await checkDesktopUpdateNow("biz-1", null);
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ outcome: "error", offline: false, error: "sync_not_configured" });
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(urls.some((url) => url.includes("/api/server-sync/runtime-status"))).toBe(false);
+    expect(result).toMatchObject({ outcome: "error", offline: false, error: "github_releases_unreachable" });
+  });
+});
+
+const GITHUB_RELEASES = "https://api.github.com/repos/hamidnoshady/biza-miz/releases?per_page=30";
+
+function release(tag: string, over: Record<string, unknown> = {}) {
+  return {
+    tag_name: tag,
+    draft: false,
+    prerelease: false,
+    html_url: `https://github.com/hamidnoshady/biza-miz/releases/tag/${tag}`,
+    body: "یادداشت انتشار",
+    assets: [{
+      name: "release-manifest.json",
+      browser_download_url: `https://github.com/hamidnoshady/biza-miz/releases/download/${tag}/release-manifest.json`,
+    }],
+    ...over,
+  };
+}
+
+/** Answers the release list and the manifest asset exactly like GitHub does. */
+function githubFetch(releases: unknown[], manifest: unknown = MANIFEST) {
+  return vi.fn(async (url: string) => {
+    if (String(url) === GITHUB_RELEASES) return centralAnswer(releases);
+    if (String(url).endsWith("/release-manifest.json")) return centralAnswer(manifest);
+    return centralAnswer({ error: "unexpected" }, { status: 404 });
+  });
+}
+
+describe("GitHub Releases update feed", () => {
+  it("offers a stable release from GitHub when Central is not configured", async () => {
+    vi.stubGlobal("fetch", githubFetch([release("desktop-v1.0.69")]));
+
+    const result = await checkDesktopUpdateNow("biz-1", null);
+
+    expect(result.outcome).toBe("update_available");
+    expect(result.offline).toBe(false);
+    expect(result.error).toBeNull();
+    expect(result.status.source).toBe("github");
+    expect(result.targetRelease?.version).toBe("1.0.69");
+
+    // The engine consumes the same handoff the Central exchange writes.
+    const handoff = JSON.parse(await readFile(process.env.DESKTOP_UPDATE_TARGET_PATH!, "utf8")) as { version: string };
+    expect(handoff.version).toBe("1.0.69");
+  });
+
+  it("picks the newest stable desktop tag and ignores the other products' releases", async () => {
+    const fetchMock = githubFetch([
+      release("android-v5.0.0"),
+      release("v9.9.9"),
+      release("desktop-v1.0.70", { prerelease: true }),
+      release("desktop-v1.0.68"),
+      release("desktop-v1.0.69"),
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await checkDesktopUpdateNow("biz-1", null);
+
+    expect(result.targetRelease?.version).toBe("1.0.69");
+    expect(fetchMock).toHaveBeenCalledWith(GITHUB_RELEASES, expect.anything());
+  });
+
+  it("falls back to GitHub when Central refuses the check", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).includes("/api/server-sync/runtime-status")) return centralAnswer({ error: "unauthorized" }, { status: 401 });
+      if (String(url) === GITHUB_RELEASES) return centralAnswer([release("desktop-v1.0.69")]);
+      return centralAnswer(MANIFEST);
+    }));
+
+    const result = await checkDesktopUpdateNow("biz-1", CONFIG);
+
+    expect(result.outcome).toBe("update_available");
+    expect(result.status.source).toBe("github");
+  });
+
+  it("reuses a fresh GitHub answer instead of querying the API on every tick", async () => {
+    const fetchMock = githubFetch([release("desktop-v1.0.69")]);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await refreshAppUpdateStatus("biz-1", null);
+    const second = await refreshAppUpdateStatus("biz-1", null);
+
+    expect(first.targetRelease?.version).toBe("1.0.69");
+    expect(second.targetRelease?.version).toBe("1.0.69");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports an unreachable GitHub feed as an error, never as up to date", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+
+    const result = await checkDesktopUpdateNow("biz-1", null);
+
+    expect(result.outcome).toBe("error");
+    expect(result.error).toBe("github_releases_unreachable");
+    expect(result.outcome).not.toBe("up_to_date");
+  });
+
+  it("reports when GitHub holds no stable desktop release", async () => {
+    vi.stubGlobal("fetch", githubFetch([release("android-v1.0.0")]));
+
+    const result = await checkDesktopUpdateNow("biz-1", null);
+
+    expect(result).toMatchObject({ outcome: "error", error: "github_release_not_found" });
   });
 });
 

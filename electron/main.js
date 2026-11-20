@@ -4,7 +4,7 @@
 "use strict";
 const { authorizeGatewayInvocation } = require("./gateway-ipc-authorization");
 
-const { app, BrowserWindow, dialog, ipcMain, session, shell, safeStorage } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Notification, session, shell, safeStorage } = require("electron");
 const path = require("node:path");
 const { BackendManager, BackendStoppedError } = require("./backend-manager");
 const { createCertificateManager } = require("./certificate-manager");
@@ -35,6 +35,10 @@ const { resolveUserDataDir } = require("./user-data-path");
 // userData folder from the app name, so pin it before anything reads it: an
 // existing install keeps its folder (and its database), a new one gets "Bizamiz".
 app.setName(BRAND_NAME_EN);
+// Windows shows an Electron notification only for an app with an AppUserModelId
+// matching its shortcut (build.appId in electron/package.json). Without it the
+// update notification installed by the NSIS build never appears.
+if (process.platform === "win32") app.setAppUserModelId("com.businesssuite.desktop");
 // An explicit --user-data-dir (acceptance runs, support) is the operator's choice and wins.
 if (!app.commandLine.hasSwitch("user-data-dir")) {
   app.setPath("userData", resolveUserDataDir(app.getPath("appData")));
@@ -83,12 +87,46 @@ function runDesktopShell() {
   let mainAppUrl = null;
   // A login link that arrived before the till window existed (a cold start from the browser).
   let pendingLoginLink = cloudLoginLink(process.argv);
+  // One Windows notification per discovered version, so an available update is
+  // not a silent state change the user only finds in Settings.
+  let lastUpdateNoticeVersion = null;
 
   function focusMainWindow() {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
+  }
+
+  /**
+   * Tells the user a newer release was found. The install itself stays where it
+   * already is — Settings → Desktop updates, with the engine's verification —
+   * this only makes the discovery visible. A duplicate state event for the same
+   * version is not announced twice.
+   */
+  function announceAvailableUpdate(state) {
+    if (state?.state !== "update_available" && state?.state !== "ready_to_install") return;
+    const version = state?.target?.version;
+    if (typeof version !== "string" || !version || version === lastUpdateNoticeVersion) return;
+    lastUpdateNoticeVersion = version;
+    try {
+      if (!Notification.isSupported()) return;
+      const notice = new Notification({
+        title: byLocale(app.getLocale(), {
+          fa: `${brandName("fa")} ${version} آمادهٔ به‌روزرسانی است`,
+          en: `${brandName("en")} ${version} is available`,
+        }),
+        body: byLocale(app.getLocale(), {
+          fa: "برای دانلود و نصب، تنظیمات ← به‌روزرسانی دسکتاپ را باز کنید.",
+          en: "Open Settings → Desktop updates to download and install it.",
+        }),
+      });
+      notice.on("click", () => focusMainWindow());
+      notice.show();
+    } catch (error) {
+      // A machine with notifications disabled must not fail an update check.
+      logger?.warn?.("Desktop update notification could not be shown", { detail: error?.message });
+    }
   }
 
   /**
@@ -777,6 +815,7 @@ function runDesktopShell() {
     updater = new DesktopUpdateEngine({ app, logger });
     updater.on("state", (state) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("desktop:update-state", state);
+      announceAvailableUpdate(state);
     });
     // The packaged backend refreshes the credential-bound Central target during
     // its normal sync tick. Electron consumes that narrow local handoff even

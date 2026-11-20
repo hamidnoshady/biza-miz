@@ -1,4 +1,3 @@
-<?xml version="1.0" encoding="utf-8"?>
 <!-- app_name is not defined here. Each product flavor supplies it with resValue from
      config/android-environments.json, so development, staging and production are labelled apart.
      These defaults are already Persian; only the launcher label has a values-fa variant per flavor,
@@ -8,4 +7,8 @@
     <string name="offline_retry">تلاش دوباره</string>
     <string name="not_configured_body">آدرس وب این نسخه تنظیم نشده است. این نسخه را از کانال رسمی دریافت کنید.</string>
     <string name="browser_unavailable_body">مرورگر سازگار با این برنامه روی دستگاه پیدا نشد. Chrome را نصب یا به‌روز کنید.</string>
+    <string name="update_channel_name">به‌روزرسانی برنامه</string>
+    <string name="update_channel_description">اطلاع‌رسانی نسخه‌های جدید برنامه</string>
+    <string name="update_available_title">به‌روزرسانی بیزامیز %1$s در دسترس است</string>
+    <string name="update_available_body">نسخهٔ نصب‌شده %1$s است. برای دانلود و نصب نسخهٔ جدید، ضربه بزنید.</string>
 </resources>

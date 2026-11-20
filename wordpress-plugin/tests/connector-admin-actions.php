@@ -292,9 +292,12 @@ foreach ( $actions as $action => $spec ) {
 t_reset();
 $GLOBALS['t']['http']['https://pos.example/api/integrations/wordpress/ping'] = t_json( 200, array( 'ok' => true, 'status' => 'active', 'serverTime' => gmdate( 'c' ) ) );
 $GLOBALS['t']['http']['https://updates.example.test/'] = array( 'error' => 'could not resolve host' );
-$GLOBALS['t']['http']['https://api.github.com/repos/hamidnoshady/biza-miz/releases/latest'] = t_json( 200, array(
-	'tag_name' => 'v1.7.0', 'html_url' => 'https://github.com/hamidnoshady/biza-miz/releases/tag/v1.7.0', 'body' => 'notes',
-	'assets' => array( array( 'name' => 'pos-accounting-connector.zip', 'browser_download_url' => 'https://github.com/hamidnoshady/biza-miz/releases/download/v1.7.0/pos-accounting-connector.zip' ) ),
+$GLOBALS['t']['http']['https://api.github.com/repos/hamidnoshady/biza-miz/releases?per_page=30'] = t_json( 200, array(
+	// Another product's release is the newest one in the list: it must never
+	// become the plugin's version.
+	array( 'tag_name' => 'android-v1.7.0', 'draft' => false, 'prerelease' => false, 'assets' => array( array( 'name' => 'bizamiz-android-1.7.0.apk', 'browser_download_url' => 'https://github.com/hamidnoshady/biza-miz/releases/download/android-v1.7.0/bizamiz-android-1.7.0.apk' ) ) ),
+	array( 'tag_name' => 'v1.7.0', 'html_url' => 'https://github.com/hamidnoshady/biza-miz/releases/tag/v1.7.0', 'body' => 'notes', 'draft' => false, 'prerelease' => false,
+		'assets' => array( array( 'name' => 'pos-accounting-connector.zip', 'browser_download_url' => 'https://github.com/hamidnoshady/biza-miz/releases/download/v1.7.0/pos-accounting-connector.zip' ) ) ),
 ) );
 
 foreach ( $actions as $action => $spec ) {
@@ -430,9 +433,9 @@ check( 'test_not_configured' === $out['query']['pos_notice'], 'test: no token is
 // --- B2: the update check falls back to GitHub, and says so ---------------------------------------
 t_reset();
 $GLOBALS['t']['http']['https://updates.example.test/'] = array( 'error' => 'could not resolve host' );
-$GLOBALS['t']['http']['https://api.github.com/repos/hamidnoshady/biza-miz/releases/latest'] = t_json( 200, array(
-	'tag_name' => 'v1.7.0', 'html_url' => 'https://github.com/hamidnoshady/biza-miz/releases/tag/v1.7.0', 'body' => '',
-	'assets' => array( array( 'name' => 'pos-accounting-connector.zip', 'browser_download_url' => 'https://github.com/hamidnoshady/biza-miz/releases/download/v1.7.0/pos-accounting-connector.zip' ) ),
+$GLOBALS['t']['http']['https://api.github.com/repos/hamidnoshady/biza-miz/releases?per_page=30'] = t_json( 200, array(
+	array( 'tag_name' => 'v1.7.0', 'html_url' => 'https://github.com/hamidnoshady/biza-miz/releases/tag/v1.7.0', 'body' => '', 'draft' => false, 'prerelease' => false,
+		'assets' => array( array( 'name' => 'pos-accounting-connector.zip', 'browser_download_url' => 'https://github.com/hamidnoshady/biza-miz/releases/download/v1.7.0/pos-accounting-connector.zip' ) ) ),
 ) );
 $latest = POS_Connector_Updater::check();
 check( '' === $latest['error'] && '1.7.0' === $latest['version'] && 'github' === $latest['source'], 'update: an unreachable manifest falls back to GitHub releases' );
@@ -446,6 +449,20 @@ $out = run_handler( array( 'POS_Connector_Updater', 'handle_check_update' ) );
 check( 'update_check_failed' === $out['query']['pos_notice'], 'update: both sources down is a failure' );
 $detail = $GLOBALS['t']['transients']['pos_connector_notice_detail_7'];
 check( false !== strpos( $detail, 'manifest_unreachable' ) && false !== strpos( $detail, 'http_403' ), 'update: the notice carries the specific error codes of both sources (got ' . $detail . ')' );
+
+// Releases for the desktop app and Android live in the same repository, separated by tag
+// prefix. Only a plain `vX.Y.Z` release (not a draft, not a prerelease) is this plugin's.
+t_reset();
+$GLOBALS['t']['http']['https://updates.example.test/'] = array( 'error' => 'could not resolve host' );
+$GLOBALS['t']['http']['https://api.github.com/repos/hamidnoshady/biza-miz/releases?per_page=30'] = t_json( 200, array(
+	array( 'tag_name' => 'android-v1.0.9', 'draft' => false, 'prerelease' => false, 'assets' => array( array( 'name' => 'bizamiz-android-1.0.9.apk', 'browser_download_url' => 'https://github.com/hamidnoshady/biza-miz/releases/download/android-v1.0.9/bizamiz-android-1.0.9.apk' ) ) ),
+	array( 'tag_name' => 'desktop-v1.0.208', 'draft' => false, 'prerelease' => false, 'assets' => array() ),
+	array( 'tag_name' => 'v1.7.0', 'draft' => true, 'prerelease' => false, 'assets' => array() ),
+	array( 'tag_name' => 'v1.6.30', 'draft' => false, 'prerelease' => false, 'assets' => array( array( 'name' => 'pos-accounting-connector.zip', 'browser_download_url' => 'https://github.com/hamidnoshady/biza-miz/releases/download/v1.6.30/pos-accounting-connector.zip' ) ) ),
+) );
+$latest = POS_Connector_Updater::check();
+check( '1.6.30' === $latest['version'], 'update: a desktop, Android or draft release never becomes the plugin version (got ' . $latest['version'] . ')' );
+check( false !== strpos( $latest['download_url'], '/v1.6.30/' ), 'update: the package is the plugin release asset' );
 
 t_reset();
 $GLOBALS['t']['http']['https://updates.example.test/'] = t_json( 200, array( 'version' => '1.8.0', 'download_url' => 'https://updates.example.test/pos-accounting-connector.zip', 'checksum' => str_repeat( 'a', 64 ) ) );
