@@ -54,9 +54,16 @@ const mocks = vi.hoisted(() => ({
   maskPhoneE164: vi.fn((p: string) => `***${p.slice(-4)}`) as AnyFn,
   signPhonePendingToken: vi.fn(async () => "pending-token") as AnyFn,
   readTrustedDeviceToken: vi.fn(() => "tdev_presented") as AnyFn,
-  verifyTrustedDevice: vi.fn() as AnyFn,
+  resolveTrustedDeviceSubject: vi.fn() as AnyFn,
   auditTrustedDeviceLogin: vi.fn(async () => {}) as AnyFn,
   bcryptCompare: vi.fn(async () => true) as AnyFn,
+  // The privileged-role gate. Real implementations reach the database, so they
+  // are the one policy boundary this route-level test states outright.
+  isPrivilegedMfaRole: vi.fn((role: string) => role !== "cashier" && role !== "waiter" && role !== "kitchen") as AnyFn,
+  mfaAppliesToRole: vi.fn(() => true) as AnyFn,
+  getMfaPolicy: vi.fn(async () => ({ requiredRoles: [] })) as AnyFn,
+  getAccountMfaEnrolments: vi.fn(async () => []) as AnyFn,
+  filterActiveMfaEnrolments: vi.fn((rows: unknown[]) => rows) as AnyFn,
 }));
 
 vi.mock("@/lib/db", () => ({ query: mocks.query, withTenant: mocks.withTenant }));
@@ -79,8 +86,20 @@ vi.mock("@/lib/phone-otp", () => ({
 }));
 vi.mock("@/lib/trusted-device", () => ({
   readTrustedDeviceToken: mocks.readTrustedDeviceToken,
-  verifyTrustedDevice: mocks.verifyTrustedDevice,
+  // The route resolves the trusted subject once — it also decides whether the
+  // PIN-only greeting and the privileged-role waiver apply, not just the phone
+  // gate — so the mock answers that shape.
+  resolveTrustedDeviceSubject: mocks.resolveTrustedDeviceSubject,
   auditTrustedDeviceLogin: mocks.auditTrustedDeviceLogin,
+}));
+vi.mock("@/lib/mfa", () => ({
+  isPrivilegedMfaRole: mocks.isPrivilegedMfaRole,
+  mfaAppliesToRole: mocks.mfaAppliesToRole,
+}));
+vi.mock("@/lib/mfa-policy", () => ({ getMfaPolicy: mocks.getMfaPolicy }));
+vi.mock("@/lib/mfa-service", () => ({
+  getAccountMfaEnrolments: mocks.getAccountMfaEnrolments,
+  filterActiveMfaEnrolments: mocks.filterActiveMfaEnrolments,
 }));
 vi.mock("@/lib/auth", () => ({
   SESSION_COOKIE: "pos_session",
@@ -110,12 +129,13 @@ beforeEach(() => {
   mocks.readDeploymentProfile.mockResolvedValue({ profile: "cloud" });
   mocks.phoneOtpEnforcementFor.mockResolvedValue({ state: "enforced", daysLeft: 0 });
   mocks.readTrustedDeviceToken.mockReturnValue("tdev_presented");
+  mocks.resolveTrustedDeviceSubject.mockResolvedValue(null);
 });
 
 describe("PIN login — device trust decides the routine challenge (gap 4)", () => {
   it("skips the OTP challenge for a trusted device on this account and tenant", async () => {
     const expiresAt = new Date("2026-10-25T00:00:00Z");
-    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, expiresAt });
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue({ userId: USER.id, expiresAt });
 
     const res = await POST(postPin());
     const data = await res.json();
@@ -130,16 +150,16 @@ describe("PIN login — device trust decides the routine challenge (gap 4)", () 
     expect(issuedSession(res)).toBe(true);
 
     // The exemption has to be *scoped*, or it is the old member-wide window
-    // wearing a new name: this business, this member, the presented cookie.
-    expect(mocks.verifyTrustedDevice).toHaveBeenCalledWith({
+    // wearing a new name: this business, the presented cookie — and the session
+    // still names the member only because the PIN proved it.
+    expect(mocks.resolveTrustedDeviceSubject).toHaveBeenCalledWith({
       businessId: USER.business_id,
-      userId: USER.id,
       token: "tdev_presented",
     });
   });
 
   it("demands the OTP from an untrusted device, even minutes after another device verified", async () => {
-    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "wrong_subject" });
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue(null);
 
     const res = await POST(postPin());
     const data = await res.json();
@@ -151,7 +171,7 @@ describe("PIN login — device trust decides the routine challenge (gap 4)", () 
   });
 
   it("demands the OTP again once the trust was revoked", async () => {
-    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "revoked" });
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue(null);
 
     const res = await POST(postPin());
     const data = await res.json();
@@ -161,7 +181,7 @@ describe("PIN login — device trust decides the routine challenge (gap 4)", () 
   });
 
   it("demands the OTP again once the trust expired past seven days", async () => {
-    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "expired" });
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue(null);
 
     const res = await POST(postPin());
     const data = await res.json();
@@ -172,7 +192,7 @@ describe("PIN login — device trust decides the routine challenge (gap 4)", () 
 
   it("never exempts a device with no trusted-device cookie at all", async () => {
     mocks.readTrustedDeviceToken.mockReturnValue(null);
-    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "missing" });
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue(null);
 
     const res = await POST(postPin());
     const data = await res.json();
@@ -181,25 +201,68 @@ describe("PIN login — device trust decides the routine challenge (gap 4)", () 
     expect(issuedSession(res)).toBe(false);
   });
 
-  it("does not consult the trust table while the policy is unenforced — there is nothing to waive", async () => {
+  it("waives nothing while the policy is unenforced — there is no challenge, so no audit row", async () => {
     mocks.phoneOtpEnforcementFor.mockResolvedValue({ state: "off", daysLeft: null });
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue({
+      userId: USER.id,
+      expiresAt: new Date("2026-10-25T00:00:00Z"),
+    });
 
     const res = await POST(postPin());
     const data = await res.json();
 
-    expect(mocks.verifyTrustedDevice).not.toHaveBeenCalled();
+    expect(mocks.auditTrustedDeviceLogin).not.toHaveBeenCalled();
     expect(issuedSession(res)).toBe(true);
     expect(data.phoneVerification).toBeUndefined();
   });
 
-  it("cannot buy a session with trust alone: a wrong PIN is refused before trust is read", async () => {
+  it("cannot buy a session with trust alone: a wrong PIN is still refused", async () => {
     mocks.bcryptCompare.mockResolvedValue(false);
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue({
+      userId: USER.id,
+      expiresAt: new Date("2026-10-25T00:00:00Z"),
+    });
 
     const res = await POST(postPin());
 
     expect(res.status).toBe(401);
-    expect(mocks.verifyTrustedDevice).not.toHaveBeenCalled();
+    expect(mocks.signSession).not.toHaveBeenCalled();
     expect(issuedSession(res)).toBe(false);
+  });
+});
+
+describe("PIN login — a trusted device may carry the privileged PIN door", () => {
+  const OWNER = { ...USER, role: "owner", phone_e164: null, phone_verified_at: null };
+  const expiresAt = new Date("2026-10-25T00:00:00Z");
+
+  beforeEach(() => {
+    mocks.query.mockResolvedValue({ rows: [{ ...OWNER }] });
+    mocks.phoneOtpEnforcementFor.mockResolvedValue({ state: "off", daysLeft: null });
+    // `clearAllMocks` keeps implementations between tests; the
+    // wrong-PIN case above sets this to false, so state it here too.
+    mocks.bcryptCompare.mockResolvedValue(true);
+  });
+
+  it("lets the owner's PIN through on a device that completed the second factor, and records the waiver", async () => {
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue({ userId: OWNER.id, expiresAt });
+
+    const res = await POST(postPin());
+    // The widening is exactly this one member: a trust record minted only by a
+    // completed verification is what stands in for the second factor here.
+    expect(issuedSession(res)).toBe(true);
+    expect(mocks.auditTrustedDeviceLogin).toHaveBeenCalledWith(
+      expect.objectContaining({ door: "pin", waived: "mfa", userId: OWNER.id, expiresAt }),
+    );
+  });
+
+  it("still sends an owner without device trust to the account door", async () => {
+    mocks.resolveTrustedDeviceSubject.mockResolvedValue(null);
+
+    const res = await POST(postPin());
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toBe("mfa_required");
+    expect(issuedSession(res)).toBe(false);
+    expect(mocks.auditTrustedDeviceLogin).not.toHaveBeenCalled();
   });
 });
 
@@ -213,11 +276,12 @@ describe("PIN login — the member is named, the PIN is never an identifier", ()
   });
 
   it("checks the PIN against the named member only", async () => {
-    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, reason: "trusted" });
     await POST(postPin());
     const [sql, params] = mocks.query.mock.calls[0] as [string, unknown[]];
     expect(sql).toContain("AND u.id = $1");
-    expect(params).toEqual([USER.id]);
+    // $2 is the trusted member's id (null here), which may widen the role list
+    // by exactly that one account — never into a PIN scan.
+    expect(params).toEqual([USER.id, null]);
     expect(mocks.bcryptCompare).toHaveBeenCalledTimes(1);
   });
 });

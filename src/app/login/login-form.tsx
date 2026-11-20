@@ -11,16 +11,12 @@ import {
 } from "@simplewebauthn/browser";
 import { PinPad } from "@/components/auth/pin-pad";
 import { PhoneOtpStep, type PhoneOtpSendSpec } from "@/components/auth/phone-otp-step";
-import {
-  ChangeLoginTypeLink,
-  LoginDoorChooser,
-  OfflineLoginNote,
-  type DoorChoice,
-} from "@/components/auth/login-door-chooser";
+import { useLoginCapabilities } from "@/components/auth/login-door-chooser";
+import { AccountLoginForm } from "@/components/auth/account-login-form";
 import { formatJalali } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import { readDeviceToken } from "@/lib/device-token";
-import { clearRememberedLoginDoor, readRememberedLoginDoor } from "@/lib/login-door";
+import { readRememberedLoginDoor } from "@/lib/login-door";
 import { CloudLoginButton } from "@/components/auth/cloud-login-button";
 import {
   lockoutMessage,
@@ -38,11 +34,14 @@ import { withLoginNextParam } from "@/lib/login-contract";
  * host's login before this form ever renders, because a session minted on an
  * alias host can never stick.
  *
- * Since the login split this page is the *staff* door only: name-then-PIN
- * (plus biometrics where registered). The owner/manager password login moved
- * to the tenant origin's `/admin` subdirectory (src/app/admin), so the till's
- * front screen no longer offers a password form — the business's origin simply
- * *is* the staff quick login.
+ * The door this page shows follows the install, not one house style: a Local or
+ * Hybrid server opens on the name-then-PIN roster (plus biometrics where
+ * registered), because that is the door that still works when the Internet is
+ * down; a Cloud deployment opens on the account form (email **or** phone +
+ * password → second factor → optional seven-day trust), with the PIN roster
+ * one tap away for staff and a PIN-only greeting for a trusted device whose
+ * member has set one. The owner/manager password door at `/admin` still exists
+ * and is still reachable from a remembered browser.
  *
  * Phase 42 added the phone axis to the same door. After a name is picked, the
  * step the door shows follows that member's `loginMode` (decided server-side
@@ -53,102 +52,156 @@ import { withLoginNextParam } from "@/lib/login-contract";
  * every member — managers and owners included — can use once their number is
  * verified; admins keep the email+password door at /admin.
  *
- * Login-type chooser (audit fix): before this fix the route jumped straight
- * into the staff roster on every single visit — a fresh install, a brand-new
- * browser, a cleared profile — with no way to discover that `/admin` existed
- * at all. `LoginDoorChooser` is the missing front door: shown once per
- * browser unless that browser asked to be remembered, and always reachable
- * again through «تغییر نوع ورود» underneath the roster, so a device that
- * picked "staff" and needs to switch to "admin" (or just doesn't want to be
- * remembered anymore) is never stuck.
+ * The chooser this page used to render first is gone: asking every instal-
+ * lation "which door?" before showing the one door it has was the cloud's
+ * shape leaking onto a till that should simply ask for a PIN. A browser that
+ * explicitly remembered the manager door still skips to `/admin`.
  */
 export default function LoginForm() {
   const router = useRouter();
   // Where this visit was heading, so switching doors does not lose it
   // (issue #885 L06).
   const next = useNextPath("/dashboard");
-  // `null` = "not decided yet" (still reading localStorage, first paint must
-  // not flash the wrong screen); `false` = show the chooser now.
-  const [remembered, setRemembered] = useState<boolean | null>(null);
-  const [offlineNote, setOfflineNote] = useState(false);
+  /**
+   * Which door this install opens, asked from the server that answers the page.
+   *
+   * The old behaviour was the same on every deployment: a colourless “which
+   * door?” chooser, then the name+pin roster — the cloud's shape even on a
+   * paired desktop whose whole point is that it works offline. Now the door is
+   * decided by the install:
+   *
+   *  - **Local or Hybrid server** (`localServer: true`) → the PIN roster is the
+   *    front door, full stop. The cloud sign-in button stays available (Hybrid)
+   *    and hands the browser back into this install; there is no account form
+   *    to get lost in when the Internet is down.
+   *  - **Cloud** → the account form (email/phone + password, then the second
+   *    factor, then the optional seven-day trust). A device that has completed
+   *    that and whose member holds a PIN greets them with the PIN pad only.
+   */
+  const capabilities = useLoginCapabilities();
+  const [redirecting, setRedirecting] = useState(false);
+  /**
+   * Cloud only: the member this browser's seven-day trust belongs to, if they
+   * hold a PIN. `undefined` = still asking; `null` = not a PIN-only device.
+   * A server decision — the cookie is never interpreted here.
+   */
+  const [trusted, setTrusted] = useState<RosterEmployee | null | undefined>(undefined);
+  /** `auto` follows `trusted`; the two explicit views are the member's choice. */
+  const [cloudView, setCloudView] = useState<"auto" | "account" | "roster">("auto");
 
   useEffect(() => {
-    const door = readRememberedLoginDoor();
-    // Issue #885 L07 — both remembered doors are honoured.
-    //
-    // `login-door.ts` stores "admin" and "staff" symmetrically, but this was
-    // the only reader and it tested `=== "staff"`, so a browser that had
-    // chosen the manager door and asked to be remembered was shown the
-    // chooser again on every visit. The preference it had just written was
-    // dead on arrival.
-    //
-    // Still a UI shortcut and nothing more: `/admin` re-checks the credential
-    // server-side, and a stale or hand-edited value here costs one redirect.
-    if (door === "admin") {
+    // Issue #885 L07 — a browser that asked to be remembered on the manager
+    // door still skips straight there. A UI shortcut only: `/admin` re-checks
+    // the credential server-side.
+    if (readRememberedLoginDoor() === "admin") {
+      setRedirecting(true);
       router.replace(withLoginNextParam("/admin", next));
-      return;
     }
-    setRemembered(door === "staff");
   }, [next, router]);
 
-  function chooseDoor(choice: DoorChoice) {
-    // "admin" already navigated away inside the chooser; only "staff" and
-    // "offline" (the same staff door, with a note) render in place.
-    setOfflineNote(choice === "offline");
-    setRemembered(true);
-  }
+  useEffect(() => {
+    if (!capabilities || capabilities.localServer) return;
+    const controller = new AbortController();
+    fetch("/api/auth/pin-login/trusted", { signal: controller.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (controller.signal.aborted) return;
+        setTrusted((data?.employee as RosterEmployee | null) ?? null);
+      })
+      .catch(() => {
+        // A failed probe means the account form is shown — never a claim that
+        // this device is trusted.
+        if (!controller.signal.aborted) setTrusted(null);
+      });
+    return () => controller.abort();
+  }, [capabilities]);
 
-  function changeLoginType() {
-    clearRememberedLoginDoor();
-    setRemembered(false);
-    setOfflineNote(false);
-  }
-
-  if (remembered === null) {
+  if (redirecting || !capabilities) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
         <div className={`w-full max-w-sm ${cardClass} p-8`}>
           <Skeleton className="mx-auto mb-2 h-6 w-40" />
           <Skeleton className="mx-auto mb-6 h-4 w-28" />
-          {/* Two doors while capabilities load (fail closed — issue #948 P1-4);
-              the third appears only on a confirmed Local-only install. */}
-          <div className="grid grid-cols-2 gap-2">
-            {Array.from({ length: 2 }, (_, i) => (
-              <Skeleton key={i} className="h-16 rounded-xl" />
-            ))}
-          </div>
+          <Skeleton className="h-40 rounded-xl" />
         </div>
       </main>
     );
   }
 
-  if (!remembered) {
+  // -------------------------------------------------------------------------
+  // Local / Hybrid install: PIN is the door.
+  // -------------------------------------------------------------------------
+  if (capabilities.localServer) {
     return (
       <main className="flex min-h-screen items-center justify-center p-4">
-        <div className="w-full max-w-3xl">
-          <LoginDoorChooser next={next} onChoose={chooseDoor} />
-          <div className="mx-auto max-w-sm">
-            <CloudLoginButton />
-          </div>
+        <div className={`w-full max-w-sm ${cardClass} p-8`}>
+          <h1 className="mb-1 text-center text-xl font-bold">بیزامیز</h1>
+          <p className="mb-6 text-center text-sm text-muted-foreground">
+            ورود با رمز عددی
+          </p>
+          <PinLogin />
+          {/* Hybrid only in practice — the desktop's one-click cloud sign-in,
+              which comes back and signs this same member in locally. */}
+          <CloudLoginButton />
         </div>
       </main>
     );
   }
+
+  // -------------------------------------------------------------------------
+  // Cloud: account door, or the PIN pad for a trusted device that has one.
+  // -------------------------------------------------------------------------
+  if (trusted === undefined && cloudView === "auto") {
+    return (
+      <main className="flex min-h-screen items-center justify-center p-4">
+        <div className={`w-full max-w-sm ${cardClass} p-8`}>
+          <Skeleton className="mx-auto mb-2 h-6 w-40" />
+          <Skeleton className="mx-auto mb-6 h-4 w-28" />
+          <Skeleton className="h-40 rounded-xl" />
+        </div>
+      </main>
+    );
+  }
+
+  const pinOnly = cloudView === "auto" && trusted;
+  const roster = cloudView === "roster";
 
   return (
     <main className="flex min-h-screen items-center justify-center p-4">
       <div className={`w-full max-w-sm ${cardClass} p-8`}>
-        <h1 className="mb-1 text-center text-xl font-bold">
-          بیزامیز
-        </h1>
+        <h1 className="mb-1 text-center text-xl font-bold">بیزامیز</h1>
         <p className="mb-6 text-center text-sm text-muted-foreground">
-          ورود سریع کارکنان
+          {pinOnly ? "ورود سریع" : roster ? "ورود کارکنان" : "ورود به حساب"}
         </p>
 
-        <PinLogin />
-        <CloudLoginButton />
-        {offlineNote ? <OfflineLoginNote /> : null}
-        <ChangeLoginTypeLink onClick={changeLoginType} />
+        {pinOnly && trusted ? (
+          <>
+            <PinLogin preselected={trusted} hideBack />
+            <button
+              type="button"
+              onClick={() => setCloudView("account")}
+              className="mx-auto mt-4 block text-center text-xs text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
+            >
+              ورود با حساب دیگر
+            </button>
+          </>
+        ) : roster ? (
+          <>
+            <PinLogin />
+            <button
+              type="button"
+              onClick={() => setCloudView("auto")}
+              className="mx-auto mt-4 block text-center text-xs text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
+            >
+              ← بازگشت به ورود با ایمیل یا شمارهٔ موبایل
+            </button>
+          </>
+        ) : (
+          <>
+            <AccountLoginForm onStaffPin={() => setCloudView("roster")} />
+            <CloudLoginButton />
+          </>
+        )}
       </div>
     </main>
   );
@@ -254,7 +307,15 @@ function rememberRecent(employeeId: string) {
  * that member's door step is — the PIN pad (Phase 42: PINs are 4–12 digits
  * now), the OTP screen, or the PIN pad followed by «شمارهٔ موبایل».
  */
-function PinLogin() {
+function PinLogin({
+  preselected = null,
+  hideBack = false,
+}: {
+  /** A trusted-device member the server already resolved; the roster is not needed. */
+  preselected?: RosterEmployee | null;
+  /** Hide «کارمند دیگر» — a trusted device greets one member, not a staff directory. */
+  hideBack?: boolean;
+} = {}) {
   const router = useRouter();
   const next = useNextPath("/dashboard");
   const [employees, setEmployees] = useState<RosterEmployee[] | null>(null);
@@ -265,7 +326,7 @@ function PinLogin() {
   const [rosterFailure, setRosterFailure] = useState<RosterFailure | null>(null);
   /** Bumped by the retry button; the roster effect keys off it. */
   const [rosterReloadKey, setRosterReloadKey] = useState(0);
-  const [selected, setSelected] = useState<RosterEmployee | null>(null);
+  const [selected, setSelected] = useState<RosterEmployee | null>(preselected);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [webauthnSupported, setWebauthnSupported] = useState(false);
@@ -309,6 +370,13 @@ function PinLogin() {
   }, []);
 
   useEffect(() => {
+    // The trusted-device door already knows the member; asking for the roster
+    // would render a staff picker nobody asked to see.
+    if (preselected) {
+      setEmployees([preselected]);
+      setSelected(preselected);
+      return;
+    }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -392,7 +460,7 @@ function PinLogin() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [rosterReloadKey]);
+  }, [rosterReloadKey, preselected]);
 
   const ordered = useMemo(() => {
     if (!employees) return [];
@@ -881,7 +949,7 @@ function PinLogin() {
   if (doorStep === "otp") {
     return (
       <div>
-        <DoorHeader employee={selected} onBack={() => pick(selected)} />
+        <DoorHeader employee={selected} onBack={hideBack ? undefined : () => pick(selected)} />
         {otpSent && otpSpec ? (
           <PhoneOtpStep
             sendSpec={otpSpec}
@@ -921,7 +989,7 @@ function PinLogin() {
   if (doorStep === "set_phone" && pinPending) {
     return (
       <div>
-        <DoorHeader employee={selected} onBack={() => pick(selected)} />
+        <DoorHeader employee={selected} onBack={hideBack ? undefined : () => pick(selected)} />
         <form
           className="space-y-4"
           onSubmit={(e) => {
@@ -1023,17 +1091,19 @@ function DoorHeader({
   onBack,
 }: {
   employee: RosterEmployee;
-  onBack: () => void;
+  onBack?: () => void;
 }) {
   return (
     <div className="mb-4 flex items-center justify-between">
-      <button
-        type="button"
-        onClick={onBack}
-        className="rounded text-sm text-muted-foreground hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
-      >
-        ← کارمند دیگر
-      </button>
+      {onBack ? (
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded text-sm text-muted-foreground hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
+        >
+          ← کارمند دیگر
+        </button>
+      ) : null}
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold">{employee.fullName}</span>
         <EmployeeAvatar employee={employee} size="sm" />

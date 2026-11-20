@@ -1,287 +1,26 @@
 "use client";
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { cardClass } from "@/app/dashboard/page-chrome";
-import {
-  MfaStep,
-  TENANT_MFA_THEME,
-  type MfaMethod,
-} from "@/components/auth/mfa-step";
-import { BusinessPicker, useBusinessSelection } from "@/components/auth/business-picker";
-import { lockoutMessage, useNextPath } from "@/components/auth/login-helpers";
-import { loginErrorMessage } from "@/lib/login-contract";
-import { networkErrorMessage, useLoginRequest } from "@/components/auth/use-login-request";
-import { toPersianDigits } from "@/lib/digits";
+import { AccountLoginForm } from "@/components/auth/account-login-form";
 import { clearRememberedLoginDoor } from "@/lib/login-door";
-
-/** What `/api/auth/login` can answer with, beyond the plain success shape. */
-interface LoginResponse {
-  error?: string;
-  lockedUntil?: string;
-  mfaRequired?: boolean;
-  mfaToken?: string;
-  mfaMethod?: MfaMethod | null;
-  availableMethods?: MfaMethod[];
-  mfaState?: "grace" | "required";
-  graceUntil?: string | null;
-  graceDaysLeft?: number | null;
-  /** Present only on a real session — this is what "authenticated" means here. */
-  user?: { id: string; role: string; fullName: string };
-  business?: { id: string; name: string; slug: string };
-  /** Issue #854 (P1.19) — the multi-business answer, which carries no session. */
-  needsBusinessSelection?: boolean;
-  businesses?: { id: string; name: string }[];
-}
 
 /**
  * The owner/manager door of a tenant's origin, at `/admin`.
  *
- * Before the login split this password form shared `/login` with the staff
- * quick login behind a two-tab switch. The tenant origin's root is now the
- * staff door only; owners and managers sign in here, on the same business
- * origin — the API underneath (`/api/auth/login`, MFA interstitial, grace
- * nag) is unchanged, only the address moved.
+ * The form itself is `AccountLoginForm` — the same component the cloud door at
+ * `/login` mounts. This route previously carried its own copy of the password +
+ * MFA + business-picker flow, which meant every fix (the bounded request, the
+ * 423 wording, the MFA interstitial) had to be made twice and could silently
+ * land in one door only. Only the card, heading and the way back to the staff
+ * door are specific to `/admin`.
+ *
+ * Two deliberate differences from the cloud door, both props:
+ *  - the field is labelled «ایمیل» (this door has always taken an address);
+ *  - a successful sign-in lands on `/`, the setup-aware root, not `/dashboard`.
  */
 export default function AdminLoginForm() {
   const router = useRouter();
-  // Root routes owners/managers to the wizard until setup is complete, so it
-  // stays the fallback rather than /dashboard.
-  const next = useNextPath("/");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  /*
-   * The shared bounded-request hook rather than a local `busy` flag.
-   *
-   * This form previously did `setBusy(true)`, awaited a bare `fetch`, and
-   * released `busy` on the line *after* the await. A network rejection
-   * therefore threw straight past the release and the submit button stayed
-   * disabled for the rest of the visit with no message explaining why — the
-   * only recovery was a reload. The hook releases in a `finally`, bounds the
-   * wait, and reports the failure as a failure.
-   */
-  const { busy, send } = useLoginRequest();
-  /**
-   * Phase 24 Wave 2 — the second-factor interstitial.
-   *
-   * `/api/auth/login` answers `{ mfaRequired: true, mfaToken, mfaState }` for
-   * an account past its grace window instead of setting a session cookie. Until
-   * now nothing in the UI read that, so the response looked to the user exactly
-   * like a wrong password.
-   */
-  const [pending, setPending] = useState<{
-    token: string;
-    method: MfaMethod | null;
-    availableMethods: MfaMethod[];
-  } | null>(null);
-  /**
-   * Issue #854 (P1.19) — the missing step.
-   *
-   * A member of two businesses cannot be signed in until they name one, so
-   * `/api/auth/login` answers `{ needsBusinessSelection: true, businesses }`
-   * with **HTTP 200 and no session**. This door treated any `res.ok` as a
-   * successful login and navigated to the destination, which then bounced the
-   * user straight back here — a loop with no explanation on either screen.
-   *
-   * The step is `BusinessPicker` from `components/auth`, the same one the
-   * phone-OTP door renders, so the two cannot drift apart again.
-   */
-  const { selection, capture, clear } = useBusinessSelection();
-  /**
-   * The grace nag: `mfaState: "grace"` arrives *alongside* a real session, so
-   * this is a prompt, not a gate — the user is already signed in and may
-   * dismiss it. Persisted for the length of the visit only; the countdown comes
-   * back on the next login, which is the point of a countdown.
-   */
-  const [graceNotice, setGraceNotice] = useState<{ daysLeft: number | null } | null>(null);
-
-  function goNext() {
-    router.push(next);
-    router.refresh();
-  }
-
-  /**
-   * Sign in, optionally naming the business.
-   *
-   * The password door has no bearer token to replay: `/api/auth/login` requires
-   * `email`+`password` on *every* call (`missing_credentials` otherwise), so the
-   * business-selection round re-sends the same credentials plus the chosen id
-   * and the route re-verifies them. Nothing about the first response is trusted
-   * on the second call, which is why there is no token here.
-   */
-  async function submit(e: React.FormEvent | null, businessId?: string) {
-    e?.preventDefault();
-    setError(null);
-
-    const outcome = await send<LoginResponse>((signal) =>
-      fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, ...(businessId ? { businessId } : {}) }),
-        signal,
-      }),
-    );
-
-    // A newer submit superseded this one; its state is already correct and
-    // applying this response on top would fight it.
-    if (outcome.stale) return;
-
-    /*
-     * The request never completed. This is the case the previous version could
-     * not represent at all: a rejection skipped the `setBusy(false)` line and
-     * the form reported nothing. It is deliberately *not* folded into the
-     * wrong-password message below — the credential was never evaluated, so
-     * telling the user to re-check it sends them to retype a correct password.
-     */
-    if (outcome.networkError) {
-      setError(networkErrorMessage(outcome.networkError));
-      return;
-    }
-
-    const { ok, status, data } = outcome;
-
-    // A locked account answers 423 with the time it unlocks. Reporting that as
-    // "wrong email or password" sends the user off to re-check a password that
-    // is perfectly correct, and to keep trying, which is exactly what extends
-    // the lockout.
-    if (status === 423) {
-      setError(lockoutMessage(data.lockedUntil));
-      return;
-    }
-
-    /*
-     * The selection request is checked before the MFA interstitial and before
-     * the success path: the response is `res.ok` with no cookie, so treating it
-     * as success is precisely the bug. It is also reachable *after* a wrong
-     * business id on the second round, in which case the list comes back again
-     * and the member simply picks another.
-     */
-    if (ok && capture(data)) return;
-
-    if (ok && data.mfaRequired && data.mfaToken) {
-      setPending({
-        token: data.mfaToken,
-        method: data.mfaMethod ?? null,
-        availableMethods: data.availableMethods ?? [],
-      });
-      return;
-    }
-
-    /*
-     * Authenticated means the route sent the session shape, not merely that the
-     * status was 2xx. The old `if (res.ok)` accepted *any* 200 — including one
-     * whose body failed to parse and fell back to `{}` — and navigated to the
-     * destination with no cookie, which bounced straight back here looking like
-     * a broken form. `user` and `business` are set together on every success
-     * path in the route, so requiring both is exact rather than stricter.
-     */
-    if (ok && data.user && data.business) {
-      if (data.mfaState === "grace") {
-        setGraceNotice({ daysLeft: data.graceDaysLeft ?? null });
-        return;
-      }
-      goNext();
-      return;
-    }
-
-    /*
-     * Everything that is not a lockout, a selection request, an MFA prompt or a
-     * session is mapped by the shared helper rather than collapsed into one
-     * "wrong email or password". This door previously used that single string
-     * for all of them, so a member with no active membership, or one arriving on
-     * the wrong business origin, was told to re-check a password that was never
-     * the problem. 423 stays above because it carries the exact unlock time.
-     */
-    setError(loginErrorMessage({ status, code: data.error ?? null }));
-  }
-
-  // The MFA interstitial and the grace nag replace the form *inside* the same
-  // card chrome — MfaStep's theme is only its inner spacing, not a page.
-  let body: React.ReactNode;
-  if (selection) {
-    body = (
-      <BusinessPicker
-        selection={selection}
-        busy={busy}
-        error={error}
-        onChoose={(businessId) => void submit(null, businessId)}
-        onCancel={() => {
-          clear();
-          setPassword("");
-        }}
-      />
-    );
-  } else if (pending) {
-    body = (
-      <MfaStep
-        mfaToken={pending.token}
-        mfaMethod={pending.method}
-        availableMethods={pending.availableMethods}
-        theme={TENANT_MFA_THEME}
-        offerTrustDevice
-        endpoints={{
-          challenge: "/api/auth/mfa/challenge",
-          verify: "/api/auth/mfa/verify",
-          enrol: "/api/auth/mfa/enrol",
-        }}
-        onVerified={goNext}
-        onCancel={() => {
-          setPending(null);
-          setPassword("");
-        }}
-      />
-    );
-  } else if (graceNotice) {
-    body = <GracePrompt daysLeft={graceNotice.daysLeft} onContinue={goNext} />;
-  } else {
-    body = (
-      <form onSubmit={submit} className="space-y-4">
-          <div>
-            <label
-              htmlFor="email"
-              className="mb-1 block text-sm text-muted-foreground"
-            >
-              ایمیل
-            </label>
-            <input
-              id="email"
-              type="email"
-              dir="ltr"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-lg border border-input px-3 py-2 text-start focus:border-primary focus:outline-none"
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="password"
-              className="mb-1 block text-sm text-muted-foreground"
-            >
-              رمز عبور
-            </label>
-            <input
-              id="password"
-              type="password"
-              dir="ltr"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-input px-3 py-2 text-start focus:border-primary focus:outline-none"
-            />
-          </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          <button
-            type="submit"
-            disabled={busy}
-            className="w-full rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 outline-none focus-visible:ring focus-visible:ring-ring/50"
-          >
-            {busy ? "در حال ورود…" : "ورود"}
-          </button>
-        </form>
-    );
-  }
 
   return (
     <main className="flex min-h-screen items-center justify-center p-4">
@@ -293,13 +32,18 @@ export default function AdminLoginForm() {
           ورود مدیر / مالک
         </p>
 
-        {body}
+        <AccountLoginForm
+          identifierLabel="ایمیل"
+          identifierType="email"
+          defaultNext="/"
+          trustDeviceDefault={false}
+        />
 
         {/*
-          The audit fix's other half: an owner who lands here by mistake (or
-          who wants to switch this device back to the staff door) must not be
-          stuck on a password form with no way out. Clearing the remembered
-          door sends `/login` back to the chooser on its next visit.
+          An owner who lands here by mistake (or who wants to switch this
+          device back to the staff door) must not be stuck on a password form
+          with no way out. Clearing the remembered door sends `/login` back to
+          its normal door on the next visit.
         */}
         <button
           type="button"
@@ -313,53 +57,5 @@ export default function AdminLoginForm() {
         </button>
       </div>
     </main>
-  );
-}
-
-/**
- * Phase 24 Wave 2 — the "set up 2FA, N days left" nag.
- *
- * Shown *after* a successful sign-in, never instead of one. The phase spec is
- * explicit that during the grace window login shows "an enrolment prompt with
- * a 'later' button and a visible countdown", and that the hard gate only
- * follows once the window closes — a business cannot be locked out of its own
- * till by a security feature it has not been given time to adopt.
- *
- * Enrolment itself lives in the dashboard rather than here: at this point the
- * session cookie is already set, so «همین حالا فعال می‌کنم» is a normal
- * authenticated navigation, not a second login step.
- */
-function GracePrompt({ daysLeft, onContinue }: { daysLeft: number | null; onContinue: () => void }) {
-  const router = useRouter();
-  return (
-    <div className="space-y-4">
-      <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
-        <p className="mb-1 font-semibold">ورود دومرحله‌ای را فعال کنید</p>
-        <p className="text-muted-foreground">
-          {daysLeft === null
-            ? "حساب مالک باید به‌زودی با ورود دومرحله‌ای محافظت شود."
-            : daysLeft <= 0
-              ? "مهلت فعال‌سازی ورود دومرحله‌ای امروز تمام می‌شود."
-              : `${toPersianDigits(String(daysLeft))} روز تا اجباری‌شدن ورود دومرحله‌ای باقی مانده است.`}
-        </p>
-      </div>
-      <button
-        type="button"
-        onClick={() => {
-          router.push("/settings/profile");
-          router.refresh();
-        }}
-        className="w-full rounded-lg bg-primary py-2.5 font-semibold text-primary-foreground transition hover:bg-primary/85 outline-none focus-visible:ring focus-visible:ring-ring/50"
-      >
-        همین حالا فعال می‌کنم
-      </button>
-      <button
-        type="button"
-        onClick={onContinue}
-        className="w-full rounded-lg border border-input py-2.5 text-sm font-semibold transition hover:bg-primary/10 outline-none focus-visible:ring focus-visible:ring-ring/50"
-      >
-        بعداً
-      </button>
-    </div>
   );
 }

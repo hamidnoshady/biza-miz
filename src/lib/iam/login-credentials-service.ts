@@ -3,7 +3,9 @@
  * paired site may read; site side applies it. Covered by
  * integration/iam-login-credentials.integration.test.ts.
  */
+import type { PoolClient } from "pg";
 import { STAFF_PIN_ROLES_SQL } from "../login-eligibility";
+import { PIN_ROLES } from "../roles";
 import { getPool, query, withTenant, withoutTenantScope } from "../db";
 import { lockMembership, lockMemberships } from "../membership-lock";
 import { decryptTotpSecret, encryptTotpSecret } from "../mfa-service";
@@ -12,6 +14,7 @@ import {
   planIdentityBinding,
   planPinRemoval,
   planPinReplication,
+  planSitePinAcceptance,
   type LocalPinState,
   type ReplicatedLoginCredential,
   type ReplicatedPin,
@@ -394,7 +397,7 @@ export async function applyLoginCredentials(
 }
 
 const ACTIVE_PIN = `LEFT JOIN LATERAL (
-           SELECT secret_hash FROM employee_credentials
+           SELECT secret_hash, created_at FROM employee_credentials
             WHERE employee_id = u.id AND business_id = u.business_id
               AND credential_type = 'pin' AND status = 'active'
             ORDER BY created_at DESC LIMIT 1
@@ -427,19 +430,117 @@ export async function buildStaffPinMemberships(businessId: string): Promise<stri
   });
 }
 
-/** Cloud: the active quick-login PIN of every active member that has one. */
+/**
+ * Cloud: the active quick-login PIN of every active member that has one.
+ *
+ * `updatedAt` is the moment the PIN was written (the credential row's
+ * `created_at`, or the legacy `users` row's `updated_at`). Both replicas send
+ * it so a diff can be resolved by "who wrote last" instead of by role — the
+ * fix for an owner's setup PIN never matching the cloud's.
+ */
 export async function buildReplicatedPins(businessId: string): Promise<ReplicatedPin[]> {
   return withTenant(businessId, async () => {
-    const { rows } = await query<{ id: string; pin_hash: string }>(
-      `SELECT u.id, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
+    const { rows } = await query<{ id: string; pin_hash: string; updated_at: Date | null }>(
+      `SELECT u.id, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash,
+              coalesce(ec.created_at, u.updated_at) AS updated_at
          FROM users u ${ACTIVE_PIN}
         WHERE u.business_id = $1 AND u.is_active
           AND coalesce(ec.secret_hash, u.pin_hash) IS NOT NULL
         ORDER BY u.id`,
       [businessId],
     );
-    return rows.map((row) => ({ membershipId: row.id, pinHash: row.pin_hash }));
+    return rows.map((row) => ({
+      membershipId: row.id,
+      pinHash: row.pin_hash,
+      updatedAt: row.updated_at?.toISOString(),
+    }));
   });
+}
+
+/**
+ * Site: this replica's own PINs, for the push half of the sync.
+ *
+ * Sent before the cloud's payload is fetched, so the payload that comes back
+ * already carries whichever write won. A PIN the site has and the cloud does
+ * not is accepted on arrival; a differing one is compared by `updatedAt`.
+ */
+export async function sitePinSnapshot(businessId: string): Promise<ReplicatedPin[]> {
+  // Same query and RLS scope as the cloud's own list; the two replicas hold the
+  // same table shape, so a second copy of this SQL would only be able to drift.
+  return buildReplicatedPins(businessId);
+}
+
+/**
+ * Cloud: adopt the site's PIN writes that are newer than the cloud's own.
+ *
+ * The cloud is the merge point because it is the only replica both sides can
+ * reach; a site may be offline for a day while a PIN is rotated on it, so the
+ * write has to survive until the next uplink. Equal hashes are skipped, which
+ * is what stops the stamp from being refreshed on both sides on every pass.
+ */
+export async function applySitePins(
+  businessId: string,
+  pins: readonly ReplicatedPin[],
+): Promise<{ applied: number }> {
+  if (pins.length === 0) return { applied: 0 };
+  return withTenant(businessId, async () => {
+    const ids = [...new Set(pins.map((pin) => pin.membershipId))];
+    const cloud = await query<{ id: string; role: string; pin_hash: string | null; updated_at: Date | null }>(
+      `SELECT u.id, u.role::text AS role, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash,
+              coalesce(ec.created_at, u.updated_at) AS updated_at
+         FROM users u ${ACTIVE_PIN}
+        WHERE u.business_id = $1 AND u.is_active AND u.id = ANY($2::uuid[])`,
+      [businessId, ids],
+    );
+    // The cloud's own state, in the payload's shape, plus the staff list it
+    // owns — the same two facts a paired site gets from the GET.
+    const cloudPins: ReplicatedPin[] = cloud.rows
+      .filter((row): row is typeof row & { pin_hash: string } => row.pin_hash !== null)
+      .map((row) => ({
+        membershipId: row.id,
+        pinHash: row.pin_hash,
+        updatedAt: row.updated_at?.toISOString(),
+      }));
+    const staffIds = cloud.rows
+      .filter((row) => (PIN_ROLES as readonly string[]).includes(row.role))
+      .map((row) => row.id);
+    const accepted = planSitePinAcceptance(pins, cloudPins, staffIds);
+    if (accepted.length === 0) return { applied: 0 };
+
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await lockMemberships(client, businessId, accepted.map((pin) => pin.membershipId));
+      for (const pin of accepted) await writeActivePin(client, businessId, pin.membershipId, pin.pinHash);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+    return { applied: accepted.length };
+  });
+}
+
+/** One active PIN per member: revoke the old row, insert the new, drop the legacy copy. */
+async function writeActivePin(
+  client: PoolClient,
+  businessId: string,
+  membershipId: string,
+  pinHash: string,
+): Promise<void> {
+  await client.query(`INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [membershipId, businessId]);
+  await client.query(
+    `UPDATE employee_credentials SET status = 'revoked', revoked_at = now()
+      WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
+    [membershipId, businessId],
+  );
+  await client.query(
+    `INSERT INTO employee_credentials (employee_id, business_id, credential_type, secret_hash) VALUES ($1, $2, 'pin', $3)`,
+    [membershipId, businessId, pinHash],
+  );
+  await client.query(`UPDATE users SET pin_hash = NULL WHERE id = $1 AND business_id = $2 AND pin_hash IS NOT NULL`, [membershipId, businessId]);
 }
 
 /**
@@ -465,13 +566,19 @@ export async function applyReplicatedPins(
   // listed, so absence from `pins` can be resolved here in one pass.
   const ids = Array.from(new Set([...pins.map((pin) => pin.membershipId), ...(authoritative ? memberships : [])]));
   if (ids.length === 0) return { applied: 0, removed: 0 };
-  const local = await query<{ id: string; role: string; pin_hash: string | null }>(
-    `SELECT u.id, u.role::text AS role, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash
+  const local = await query<{ id: string; role: string; pin_hash: string | null; updated_at: Date | null }>(
+    `SELECT u.id, u.role::text AS role, coalesce(ec.secret_hash, u.pin_hash) AS pin_hash,
+            coalesce(ec.created_at, u.updated_at) AS updated_at
        FROM users u ${ACTIVE_PIN}
       WHERE u.business_id = $1 AND u.id = ANY($2::uuid[])`,
     [businessId, ids],
   );
-  const localStates: LocalPinState[] = local.rows.map((row) => ({ membershipId: row.id, role: row.role, pinHash: row.pin_hash }));
+  const localStates: LocalPinState[] = local.rows.map((row) => ({
+    membershipId: row.id,
+    role: row.role,
+    pinHash: row.pin_hash,
+    pinUpdatedAt: row.updated_at?.toISOString() ?? null,
+  }));
   const plan = planPinReplication(pins, localStates);
   const removals = planPinRemoval({ pins, memberships, authoritative }, localStates);
   if (plan.length === 0 && removals.length === 0) return { applied: 0, removed: 0 };
@@ -499,17 +606,7 @@ export async function applyReplicatedPins(
       );
     }
     for (const pin of plan) {
-      await client.query(`INSERT INTO employees (id, business_id) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, [pin.membershipId, businessId]);
-      await client.query(
-        `UPDATE employee_credentials SET status = 'revoked', revoked_at = now()
-          WHERE employee_id = $1 AND business_id = $2 AND credential_type = 'pin' AND status = 'active'`,
-        [pin.membershipId, businessId],
-      );
-      await client.query(
-        `INSERT INTO employee_credentials (employee_id, business_id, credential_type, secret_hash) VALUES ($1, $2, 'pin', $3)`,
-        [pin.membershipId, businessId, pin.pinHash],
-      );
-      await client.query(`UPDATE users SET pin_hash = NULL WHERE id = $1 AND business_id = $2 AND pin_hash IS NOT NULL`, [pin.membershipId, businessId]);
+      await writeActivePin(client, businessId, pin.membershipId, pin.pinHash);
     }
     await client.query("COMMIT");
   } catch (error) {

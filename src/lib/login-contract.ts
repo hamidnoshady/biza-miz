@@ -275,6 +275,7 @@ export function loginErrorMessage(options: {
     case "needsBusinessSelection":
       return "برای ادامه، کسب‌وکار خود را انتخاب کنید.";
     case "bad_request":
+    case "invalid_identifier":
     case "invalid_email":
     case "invalid_credentials":
     case "invalid_pin":

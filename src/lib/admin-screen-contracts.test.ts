@@ -26,6 +26,10 @@ import { PERMISSIONS } from "./permissions";
 const ROOT = join(__dirname, "..");
 const TEAM_MANAGER = readFileSync(join(ROOT, "app/dashboard/team/team-manager.tsx"), "utf8");
 const ADMIN_LOGIN = readFileSync(join(ROOT, "app/admin/admin-login-form.tsx"), "utf8");
+const CLOUD_ACCOUNT_FORM = readFileSync(
+  join(ROOT, "components/auth/account-login-form.tsx"),
+  "utf8",
+);
 const PHONE_OTP_STEP = readFileSync(join(ROOT, "components/auth/phone-otp-step.tsx"), "utf8");
 const BUSINESS_PICKER = readFileSync(join(ROOT, "components/auth/business-picker.tsx"), "utf8");
 const TWO_FACTOR = readFileSync(join(ROOT, "app/(app)/settings/two-factor-settings.tsx"), "utf8");
@@ -179,19 +183,31 @@ describe("custom roles screen (P2.4)", () => {
  */
 describe("multi-business selection is one shared step (P1.19)", () => {
   it("renders the shared picker from both doors", () => {
-    expect(ADMIN_LOGIN).toContain("@/components/auth/business-picker");
+    /*
+     * `/admin` used to carry its own copy of the password + MFA + picker flow;
+     * it now mounts the cloud door's form. That makes the property structural —
+     * there is one implementation to keep right — so the assertion is that the
+     * owner door does *not* grow a picker of its own again.
+     */
+    expect(ADMIN_LOGIN).toContain("@/components/auth/account-login-form");
+    expect(ADMIN_LOGIN).toMatch(/<AccountLoginForm/);
+    expect(ADMIN_LOGIN).not.toMatch(/<BusinessPicker/);
+    expect(ADMIN_LOGIN).not.toMatch(/useBusinessSelection\(\)/);
+
+    expect(CLOUD_ACCOUNT_FORM).toContain("@/components/auth/business-picker");
+    expect(CLOUD_ACCOUNT_FORM).toMatch(/<BusinessPicker/);
     expect(PHONE_OTP_STEP).toMatch(/from "\.\/business-picker"/);
-    expect(ADMIN_LOGIN).toMatch(/<BusinessPicker/);
     expect(PHONE_OTP_STEP).toMatch(/<BusinessPicker/);
   });
 
   it("keeps the pending choice in the shared hook, not in per-screen state", () => {
-    expect(ADMIN_LOGIN).toMatch(/useBusinessSelection\(\)/);
+    expect(CLOUD_ACCOUNT_FORM).toMatch(/useBusinessSelection\(\)/);
     expect(PHONE_OTP_STEP).toMatch(/useBusinessSelection\(\)/);
     // The phone step used to declare its own `interface BusinessSelection` and
     // its own `useState`. A local copy is how the two drifted apart before.
     expect(PHONE_OTP_STEP).not.toMatch(/interface BusinessSelection/);
     expect(PHONE_OTP_STEP).not.toMatch(/useState<BusinessSelection/);
+    expect(CLOUD_ACCOUNT_FORM).not.toMatch(/interface BusinessSelection/);
   });
 
   it("returns before the success path, so a selection answer is never read as a login", () => {
@@ -204,10 +220,12 @@ describe("multi-business selection is one shared step (P1.19)", () => {
      * the property this test exists for — that the selection branch returns
      * first — instead of pinning a variable name.
      */
-    expect(ADMIN_LOGIN).toMatch(/if \(ok && capture\(data\)\) return;/);
+    expect(CLOUD_ACCOUNT_FORM).toMatch(/if \(ok && capture\(data\)\) return;/);
 
-    const captureGuard = ADMIN_LOGIN.indexOf("if (ok && capture(data)) return;");
-    const successGate = ADMIN_LOGIN.indexOf("if (ok && data.user && data.business) {");
+    const captureGuard = CLOUD_ACCOUNT_FORM.indexOf("if (ok && capture(data)) return;");
+    const successGate = CLOUD_ACCOUNT_FORM.indexOf(
+      "if (ok && data.user && data.business) {",
+    );
     expect(captureGuard).toBeGreaterThan(-1);
     expect(successGate).toBeGreaterThan(-1);
     expect(captureGuard).toBeLessThan(successGate);
@@ -218,8 +236,8 @@ describe("multi-business selection is one shared step (P1.19)", () => {
   it("re-sends the password credentials on the selection round (no token exists for it)", () => {
     // The password route verifies email+password on every call, so the chosen
     // business id rides along with them; there is no token to replay.
-    expect(ADMIN_LOGIN).toMatch(
-      /password, \.\.\.\(businessId \? \{ businessId \} : \{\}\)/,
+    expect(CLOUD_ACCOUNT_FORM).toMatch(
+      /identifier, password, \.\.\.\(businessId \? \{ businessId \} : \{\}\)/,
     );
   });
 });

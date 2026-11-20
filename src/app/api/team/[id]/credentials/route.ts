@@ -27,7 +27,7 @@ import {
 } from "@/lib/login-lockout-service";
 import { PASSWORD_LOCKOUT_POLICY } from "@/lib/login-lockout";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
-import { verifySelfPin } from "@/lib/self-credentials";
+import { readSelfCredentialState, verifySelfPin } from "@/lib/self-credentials";
 import { auditLoginFailure, checkLoginLockout } from "@/lib/employee-service";
 import { authErrorMessage, AUTH_ERROR_CODES } from "@/lib/auth-contracts";
 
@@ -147,7 +147,20 @@ export const PUT = withTenantScope(
         }
 
         let currentPinVerified = false;
-        if (isSelf) {
+        /**
+         * A first-time PIN has nothing to prove against.
+         *
+         * The self branch below used to demand `currentPin` on *every* self
+         * write, which made it impossible for an owner who has never had a PIN
+         * to create one — exactly the step the setup wizard and the desktop's
+         * first-run pairing need ("ask for a PIN at the end"). The proof is
+         * only owed when a PIN already exists and is being replaced; the
+         * `/api/auth/pin/self` route already draws the line in that place.
+         */
+        const selfHasPin = isSelf
+          ? (await readSelfCredentialState(session.businessId, session.sub))?.hasPin === true
+          : false;
+        if (isSelf && selfHasPin) {
           const offered = String(body.currentPin ?? "");
           if (!offered) {
             return NextResponse.json(
@@ -183,7 +196,7 @@ export const PUT = withTenantScope(
         }
 
         await setPin(session.businessId, id, pin, session.sub, {
-          selfService: isSelf,
+          selfService: isSelf && selfHasPin,
           currentPinVerified,
         });
         return NextResponse.json({ ok: true });

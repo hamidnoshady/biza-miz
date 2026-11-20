@@ -4,7 +4,9 @@ import {
   planIdentityBinding,
   planPinRemoval,
   planPinReplication,
+  planSitePinAcceptance,
   validateLoginCredentialPayload,
+  validateReplicatedPins,
   type ReplicatedLoginCredential,
 } from "./login-credentials";
 
@@ -190,6 +192,83 @@ describe("validateLoginCredentialPayload", () => {
     // (strangerId) keeps their PIN, and a listed member that already has no
     // PIN (kitchenId) has nothing to remove.
     expect(planPinRemoval({ pins: [], memberships: [cashierId, kitchenId], authoritative: true }, local)).toEqual([cashierId]);
+  });
+});
+
+describe("bidirectional PIN convergence", () => {
+  const site = [
+    { membershipId: "owner", pinHash: "$wizard", updatedAt: "2026-11-20T09:00:00.000Z" },
+  ];
+
+  it("adopts a site PIN the cloud has none for and does not own", () => {
+    expect(planSitePinAcceptance(site, [], [])).toEqual(site);
+  });
+
+  it("never resurrects a staff PIN the cloud lists with none", () => {
+    expect(planSitePinAcceptance(
+      [{ membershipId: "cashier", pinHash: "$till", updatedAt: "2026-11-20T09:00:00.000Z" }],
+      [],
+      ["cashier"],
+    )).toEqual([]);
+  });
+
+  it("adopts the newer site write — the setup PIN finally reaches the cloud", () => {
+    expect(planSitePinAcceptance(site, [{
+      membershipId: "owner",
+      pinHash: "$cloud-old",
+      updatedAt: "2026-11-19T09:00:00.000Z",
+    }])).toEqual(site);
+  });
+
+  it("keeps the cloud's PIN when the site's copy is older", () => {
+    expect(planSitePinAcceptance(site, [{
+      membershipId: "owner",
+      pinHash: "$cloud-new",
+      updatedAt: "2026-11-21T09:00:00.000Z",
+    }])).toEqual([]);
+  });
+
+  it("pulls the cloud's newer PIN and stops rewriting equal hashes", () => {
+    const cloud = [{ membershipId: "owner", pinHash: "$cloud-new", updatedAt: "2026-11-21T09:00:00.000Z" }];
+    expect(planPinReplication(cloud, [{
+      membershipId: "owner",
+      role: "owner",
+      pinHash: "$wizard",
+      pinUpdatedAt: "2026-11-20T09:00:00.000Z",
+    }])).toEqual(cloud);
+    // Converged: the same hash is never rewritten, so the stamps cannot churn.
+    expect(planPinReplication(cloud, [{
+      membershipId: "owner",
+      role: "owner",
+      pinHash: "$cloud-new",
+      pinUpdatedAt: "2026-11-20T09:00:00.000Z",
+    }])).toEqual([]);
+    expect(planSitePinAcceptance([{
+      membershipId: "owner",
+      pinHash: "$cloud-new",
+      updatedAt: "2026-11-21T09:00:00.000Z",
+    }], cloud)).toEqual([]);
+  });
+
+  it("keeps a staff PIN cloud-owned and a password PIN device-owned for a legacy peer with no stamps", () => {
+    expect(planSitePinAcceptance(
+      [{ membershipId: "cashier", pinHash: "$site" }],
+      [{ membershipId: "cashier", pinHash: "$cloud" }],
+      ["cashier"],
+    )).toEqual([]);
+    expect(planSitePinAcceptance(
+      [{ membershipId: "owner", pinHash: "$site" }],
+      [{ membershipId: "owner", pinHash: "$cloud" }],
+    )).toHaveLength(1);
+  });
+
+  it("validates a pushed batch, including its optional stamp", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    expect(validateReplicatedPins([{ membershipId: id, pinHash: "h", updatedAt: "2026-11-20T09:00:00.000Z" }]))
+      .toMatchObject({ ok: true });
+    expect(validateReplicatedPins({})).toEqual({ ok: false, code: "pins_not_array" });
+    expect(validateReplicatedPins([{ membershipId: id, pinHash: "h", updatedAt: "not-a-date" }]))
+      .toEqual({ ok: false, code: "invalid_pin_record" });
   });
 });
 
