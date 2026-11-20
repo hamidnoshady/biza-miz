@@ -475,14 +475,17 @@ instead of trapping the member.
   **Conditional branches are authored as per-step eligibility**: a step whose
   rule the viewer fails is removed before playback, so the remaining steps are
   that member's path. A live preview of the target page is still open — the
-  preview shows step content and order, not the target page's DOM.
+  preview shows step content and order, not the target page's DOM. The app sends
+  `X-Frame-Options: DENY` by design, so this needs a dedicated same-origin
+  preview route rather than relaxing a security header.
 - **Further verified actions** can be added the same way: register a key in
   `TOUR_VERIFIERS`, record evidence only after the domain write succeeds, and
   add the step. There is no verifier without a writer, because
   `tour-verifiers.test.ts` reads the endpoint's source.
 - **Hybrid origin boundary**: the overlay runs in the page that renders it.
   Across the cloud pane's origin boundary a route-based explanation is the
-  fallback; there is no cross-origin DOM access.
+  specified behaviour, not a defect: there is no cross-origin DOM access, and
+  none is claimed.
 - **Per-tenant analytics** now exists at `GET /api/knowledge/learning-analytics`
   and in the Learning Center for `team.manage` (starts, completions,
   abandonment, completion rate and the most common stuck step). It is aggregate
