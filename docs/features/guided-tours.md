@@ -474,11 +474,14 @@ instead of trapping the member.
   permissions and/or industries; an empty alternative is refused before save).
   **Conditional branches are authored as per-step eligibility**: a step whose
   rule the viewer fails is removed before playback, so the remaining steps are
-  that member's path. The preview now links to the **real target page in a new
-  tab** so anchors can be checked live; an embedded preview inside the console
-  is still open, because the app sends `X-Frame-Options: DENY` by design and
-  framing it would need a dedicated same-origin preview route or a weaker
-  security header.
+  that member's path. The preview links to the **real target page in a new tab**
+  so anchors are checked live. An embedded preview inside the console is
+  **intentionally out of scope** (owner decision, 2026-11-20): the app keeps
+  `X-Frame-Options: DENY`, and the new-tab page is the live check. No other tour
+  limitation is open.
+- **Deployed-console acceptance**: Studio publish/rollback has integration tests
+  and the packaged desktop E2E, but the final reviewer pass needs a deployed
+  console. That is a verification step, not a code gap.
 - **Further verified actions** can be added the same way: register a key in
   `TOUR_VERIFIERS`, record evidence only after the domain write succeeds, and
   add the step. There is no verifier without a writer, because
