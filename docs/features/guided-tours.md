@@ -474,10 +474,11 @@ instead of trapping the member.
   permissions and/or industries; an empty alternative is refused before save).
   **Conditional branches are authored as per-step eligibility**: a step whose
   rule the viewer fails is removed before playback, so the remaining steps are
-  that member's path. A live preview of the target page is still open — the
-  preview shows step content and order, not the target page's DOM. The app sends
-  `X-Frame-Options: DENY` by design, so this needs a dedicated same-origin
-  preview route rather than relaxing a security header.
+  that member's path. The preview now links to the **real target page in a new
+  tab** so anchors can be checked live; an embedded preview inside the console
+  is still open, because the app sends `X-Frame-Options: DENY` by design and
+  framing it would need a dedicated same-origin preview route or a weaker
+  security header.
 - **Further verified actions** can be added the same way: register a key in
   `TOUR_VERIFIERS`, record evidence only after the domain write succeeds, and
   add the step. There is no verifier without a writer, because
