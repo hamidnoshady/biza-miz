@@ -267,18 +267,25 @@ On a Windows 11 machine, the downloaded 1.0.202 installer was verified by hash
 answered `NotSigned`, matching `windows-signature-verification.json`. The new
 scan rule reported the raw source above.
 
-A build of this change (`npm run build`, then `npm run desktop:runtime`)
-reported `Removed 1 traced TypeScript source file(s) (8013 bytes)`, `Excluded
-Central Superadmin routes … 706 file(s)`, and no raw TypeScript or platform
-route directory in `.desktop-runtime`. A payload assembled from that runtime
-and the 1.0.202 `app.asar` passed the release scan (`ok`, 6,972 files). The
-external harness then ran against the updated runtime and passed fresh-install
-bootstrap, Owner login, restart with the same instance id, and every
-platform-realm 404 probe; the Full Offline phase reported `skipped` (no staging
-Cloud), and clean shutdown was skipped because the session had no window, so it
-force-stopped and exercised the abrupt-stop path instead. This is local,
-unsigned evidence; it is not the signed-artifact acceptance the ticket still
-requires.
+A full package build of this change (`npm run build`, `npm run
+desktop:runtime`, `npm run dist` in `electron/`) reported `Removed 1 traced
+TypeScript source file(s) (8013 bytes)`, `Excluded Central Superadmin routes …
+706 file(s)`, and no raw TypeScript or platform route directory in
+`.desktop-runtime`. The rebuilt unsigned installer
+(`Bizamiz Setup 1.0.202.exe`, 180,073,848 bytes, SHA-256
+`c905e0b51d0df40aa75864e0cc02dd385281c2c42f4cbbf3d55b9e588a34d3f8`) is
+`NotSigned` and passed the release scan: `ok: true`, `findings: []`, 9,224
+payload files, `app.asar` 2,261 entries, installer extraction attempted and
+`ok`. The external harness then ran against that package's
+`win-unpacked/Bizamiz.exe` and passed fresh-install bootstrap, Owner login,
+restart with the same instance id (`4f030401-1932-42c8-b8cd-dc0c21b48f7e`),
+every platform-realm 404 probe, and the inert-legacy-switch check. The Full
+Offline phase reported `skipped` (no staging Cloud), and clean shutdown was
+skipped because the session had no window, so it force-stopped and exercised
+the abrupt-stop path instead. The version metadata was not bumped for this
+local build; it is evidence about the bytes, not a release candidate. This is
+local, unsigned evidence; it is not the signed-artifact acceptance the ticket
+still requires.
 
 It deliberately contains no signed-installer scan and no Full Offline acceptance
 run — both are still outstanding, and the harness reports the Full Offline phase as
