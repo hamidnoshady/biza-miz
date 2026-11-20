@@ -106,7 +106,18 @@ other's credentials, or if the registry payload and Central's validator drift ap
    gets it, in this order: pin it to a canary business, location or device from the device's
    policy dialog; then pilot; then percentage; then full. All of this is inside Bizamiz, never in Coolify.
 5. Each enrolled desktop asks Central (authenticated by its own device credential) for its
-   effective policy and target. Central decides eligibility before it returns anything.
+effective policy and target. Central decides eligibility before it returns anything.
+
+**GitHub Releases fallback (no Central required).** When the installation is not enrolled
+(`sync_not_configured`) or Central is unreachable/refusing, the updater reads the release
+feed directly: the newest non-draft, non-prerelease GitHub Release whose tag matches the
+channel (`desktop-vX.Y.Z` for stable), downloads its signed `release-manifest.json` asset,
+and writes it as the update target. The engine then verifies and installs exactly as it
+does for a Central target — signature, SHA-256, Authenticode publisher/thumbprint pin and
+the verified pre-update backup are unchanged. A GitHub answer is cached for six hours per
+device (the unauthenticated GitHub API is rate limited; the manual «بررسی به‌روزرسانی»
+button bypasses the cache). The repository must therefore be public for asset downloads,
+otherwise use the private-delivery option in section 6.
 6. The desktop downloads from the artifact URL, verifies the signature, SHA-256 and publisher,
    and installs only if the policy and every local safety gate allow it.
 7. Progress comes back as stepwise events with server-receipt times. **Requested**, **delivered**

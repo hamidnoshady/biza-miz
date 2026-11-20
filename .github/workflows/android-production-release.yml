@@ -1,11 +1,15 @@
 name: android-production-release
 
 # Manual, main only. Builds the signed production AAB and APK, tags the commit as
-# android-v<version>, and uploads the bundle to a Google Play track only when the
-# PLAY_SERVICE_ACCOUNT_JSON secret is configured. The android-production environment is the
-# approval gate: give it required reviewers in the repository settings.
+# android-v<version>, publishes the signed APK as a versioned GitHub Release (the feed the
+# installed app checks for updates, see android/.../updates/), and uploads the bundle to a
+# Google Play track only when the PLAY_SERVICE_ACCOUNT_JSON secret is configured. The
+# android-production environment is the approval gate: give it required reviewers in the
+# repository settings.
 #
 # The Android version is independent of the web app and of the Windows desktop release.
+# Desktop releases use desktop-v<version> and the WordPress plugin uses v<version>, so the
+# three products' stable builds stay separated by tag prefix in the same repository.
 
 on:
   workflow_dispatch:
@@ -130,6 +134,26 @@ jobs:
             android/app/build/outputs/mapping/productionRelease/mapping.txt
           if-no-files-found: error
           retention-days: 90
+
+      # The stable APK is the update feed: every release is kept, tagged and versioned, and
+      # installed apps read this list to find a newer build. The asset name is stable
+      # (bizamiz-android-<version>.apk) so the checker can pick an APK without guessing.
+      - name: Publish the versioned GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="android-v${RELEASE_VERSION_NAME}"
+          apk=$(ls android/app/build/outputs/apk/production/release/*.apk | head -n 1)
+          asset="bizamiz-android-${RELEASE_VERSION_NAME}.apk"
+          cp "$apk" "$asset"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag already exists - a shipped version is not published twice." >&2
+            exit 1
+          fi
+          gh release create "$tag" "$asset" \
+            --title "Bizamiz Android ${RELEASE_VERSION_NAME}" \
+            --notes "Signed stable Android APK (version code ${RELEASE_VERSION_CODE}). Installed apps check this release for updates."
 
       - name: Upload to Google Play
         if: env.HAS_PLAY_UPLOAD == 'true'

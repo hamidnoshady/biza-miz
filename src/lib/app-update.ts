@@ -12,9 +12,11 @@ import { query } from "./db";
 import { getSetting, setSetting, SETTING_KEYS } from "./settings";
 import type { ServerSyncConfig } from "./server-sync-config";
 import {
+  compareSemVer,
   isDesktopReleaseChannel,
   isDesktopUpdateState,
   parseSemVer,
+  validateDesktopReleaseManifest,
   type DesktopReleaseChannel,
   type DesktopReleaseIdentity,
   type DesktopReleaseManifest,
@@ -91,6 +93,8 @@ export interface AppUpdateStatus {
   targetRelease: DesktopReleaseManifest | null;
   compliance: DeviceComplianceStatus;
   error: string | null;
+  /** Which feed answered: Bizamiz Central or the GitHub release feed. */
+  source?: UpdateSource | null;
   /** Compatibility fields for older packaged web runtimes during in-place update. */
   currentVersion: string;
   latestVersion: string | null;
@@ -252,6 +256,7 @@ function statusFrom(input: {
   centralRuntime?: CentralRuntimeIdentity | null;
   targetRelease?: DesktopReleaseManifest | null;
   error?: string | null;
+  source?: UpdateSource | null;
 }): AppUpdateStatus {
   const target = input.targetRelease ?? null;
   const compliance = input.error
@@ -268,10 +273,139 @@ function statusFrom(input: {
     targetRelease: target,
     compliance,
     error: input.error ?? null,
+    source: input.source ?? null,
     currentVersion: input.installed.version,
     latestVersion: target?.version ?? null,
     updateAvailable: compliance === "update_available",
   };
+}
+
+/** The repository whose GitHub Releases are the release feed. */
+export const DESKTOP_RELEASES_REPO = "hamidnoshady/biza-miz";
+const GITHUB_API = `https://api.github.com/repos/${DESKTOP_RELEASES_REPO}`;
+/** Stable builds are `desktop-vX.Y.Z`; other channels keep their own prefix. */
+const GITHUB_RELEASE_TAGS: Record<DesktopReleaseChannel, RegExp> = {
+  stable: /^desktop-v([0-9]+\.[0-9]+\.[0-9]+)$/,
+  beta: /^desktop-beta-v([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$/,
+  internal: /^desktop-internal-v([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)$/,
+};
+/**
+ * Unauthenticated GitHub API calls are rate limited per address, and the sync
+ * tick runs every 30 seconds, so a GitHub answer is reused for hours. A manual
+ * "check for updates" bypasses this on purpose.
+ */
+const GITHUB_CHECK_TTL_MS = 6 * 60 * 60_000;
+const GITHUB_ACCEPT = "application/vnd.github+json";
+const GITHUB_DOWNLOAD_HOSTS = new Set([
+  "github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+]);
+
+export function githubReleaseVersion(tag: unknown, channel: DesktopReleaseChannel): string | null {
+  const match = typeof tag === "string" ? tag.trim().match(GITHUB_RELEASE_TAGS[channel]) : null;
+  return match ? match[1] : null;
+}
+
+function githubDownloadUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && GITHUB_DOWNLOAD_HOSTS.has(url.hostname) ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The newest published GitHub release for a channel: the signed
+ * `release-manifest.json` attached by the release workflow. Nothing is trusted
+ * here beyond fetching it — the Electron engine verifies the manifest
+ * signature, the installer SHA-256 and the Authenticode pin before it ever
+ * downloads or installs anything.
+ */
+export async function fetchDesktopReleaseFromGitHub(
+  channel: DesktopReleaseChannel,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ manifest: DesktopReleaseManifest | null; error: string | null }> {
+  const headers = { Accept: GITHUB_ACCEPT, "User-Agent": "bizamiz-desktop-updates" };
+  let releases: unknown;
+  try {
+    const response = await fetchImpl(`${GITHUB_API}/releases?per_page=30`, {
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return { manifest: null, error: `github_releases_http_${response.status}` };
+    releases = await response.json();
+  } catch {
+    return { manifest: null, error: "github_releases_unreachable" };
+  }
+  if (!Array.isArray(releases)) return { manifest: null, error: "github_releases_invalid" };
+
+  const candidates = releases
+    .map((release) => ({ release, version: githubReleaseVersion((release as Record<string, unknown>)?.tag_name, channel) }))
+    .filter((item): item is { release: Record<string, unknown>; version: string } => Boolean(item.version))
+    .filter(({ release }) => release.draft !== true && release.prerelease !== true)
+    .sort((a, b) => (compareSemVer(b.version, a.version) ?? 0));
+  if (candidates.length === 0) return { manifest: null, error: "github_release_not_found" };
+
+  const { release, version } = candidates[0];
+  const assets = Array.isArray(release.assets) ? (release.assets as Record<string, unknown>[]) : [];
+  const asset = assets.find((item) => item?.name === "release-manifest.json");
+  const manifestUrl = githubDownloadUrl(asset?.browser_download_url);
+  if (!manifestUrl) return { manifest: null, error: "github_manifest_missing" };
+
+  let body: unknown;
+  try {
+    const response = await fetchImpl(manifestUrl, { headers, signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) return { manifest: null, error: `github_manifest_http_${response.status}` };
+    body = await response.json();
+  } catch {
+    return { manifest: null, error: "github_manifest_unreachable" };
+  }
+
+  const parsed = validateDesktopReleaseManifest(body);
+  if (!parsed.ok) return { manifest: null, error: parsed.error };
+  if (parsed.manifest.channel !== channel) return { manifest: null, error: "github_release_channel_mismatch" };
+  if (parsed.manifest.version !== version) return { manifest: null, error: "github_release_version_mismatch" };
+  if (!parseSemVer(parsed.manifest.version)) return { manifest: null, error: "github_release_version_mismatch" };
+  return { manifest: parsed.manifest, error: null };
+}
+
+/**
+ * Resolves a release from GitHub Releases, reusing the last answer while it is
+ * fresh. The returned status and the persisted target are the same handoff the
+ * Central exchange produces, so the Electron engine cannot tell the two feeds
+ * apart — it still validates everything itself.
+ */
+async function resolveGitHubDesktopUpdate(
+  businessId: string,
+  installed: DesktopReleaseIdentity,
+  force: boolean,
+): Promise<{ status: AppUpdateStatus | null; error: string | null }> {
+  if (!force) {
+    const cached = await getAppUpdateStatus(businessId);
+    if (cached?.source === "github") {
+      const checkedAt = Date.parse(cached.checkedAt);
+      if (Number.isFinite(checkedAt) && Date.now() - checkedAt < GITHUB_CHECK_TTL_MS) {
+        // The target file may have been removed with the profile; rewriting it is idempotent.
+        await persistDesktopUpdateTarget(cached.targetRelease ?? null);
+        return {
+          status: statusFrom({
+            installed,
+            checkedAt: cached.checkedAt,
+            targetRelease: cached.targetRelease ?? null,
+            source: "github",
+          }),
+          error: null,
+        };
+      }
+    }
+  }
+  const { manifest, error } = await fetchDesktopReleaseFromGitHub(installed.channel);
+  if (!manifest) return { status: null, error };
+  await persistDesktopUpdateTarget(manifest);
+  return { status: statusFrom({ installed, targetRelease: manifest, source: "github" }), error: null };
 }
 
 /**
@@ -281,6 +415,7 @@ function statusFrom(input: {
 export async function refreshAppUpdateStatus(
   businessId: string,
   config: ServerSyncConfig | null,
+  options: { forceGitHubCheck?: boolean } = {},
 ): Promise<AppUpdateStatus> {
   const policy = await getDesktopUpdatePolicy(businessId);
   const installed = currentDesktopIdentity(policy.channel);
@@ -290,7 +425,9 @@ export async function refreshAppUpdateStatus(
   };
 
   if (!config?.enabled || !config.remoteUrl?.trim() || !config.token?.trim()) {
-    return save(statusFrom({ installed, error: "sync_not_configured" }));
+    const github = await resolveGitHubDesktopUpdate(businessId, installed, options.forceGitHubCheck === true);
+    if (github.status) return save(github.status);
+    return save(statusFrom({ installed, error: github.error ?? "sync_not_configured" }));
   }
 
   const engineTelemetry = await readDesktopEngineTelemetry();
@@ -320,7 +457,7 @@ export async function refreshAppUpdateStatus(
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) {
-      return save(statusFrom({ installed, error: `remote_rejected_${res.status}` }));
+      return save(await fallBackToGitHub(businessId, installed, options, `remote_rejected_${res.status}`));
     }
     const body = (await res.json()) as UpdateCheckResponse;
     await persistDesktopUpdateTarget(body.targetRelease);
@@ -331,13 +468,29 @@ export async function refreshAppUpdateStatus(
       checkedAt: body.reportedAt,
       centralRuntime: body.centralRuntime,
       targetRelease: body.targetRelease,
+      source: "central",
     }));
   } catch (error) {
-    return save(statusFrom({
-      installed,
-      error: error instanceof Error && error.name === "TimeoutError" ? "remote_timeout" : "remote_unreachable",
-    }));
+    const centralError = error instanceof Error && error.name === "TimeoutError" ? "remote_timeout" : "remote_unreachable";
+    return save(await fallBackToGitHub(businessId, installed, options, centralError));
   }
+}
+
+/**
+ * Central unreachable or refusing: try the GitHub release feed before reporting
+ * a failure. The device keeps updating straight from versioned GitHub releases
+ * when Central is down, and the engine's signature/size/publisher pins are
+ * unchanged.
+ */
+async function fallBackToGitHub(
+  businessId: string,
+  installed: DesktopReleaseIdentity,
+  options: { forceGitHubCheck?: boolean },
+  centralError: string,
+): Promise<AppUpdateStatus> {
+  const github = await resolveGitHubDesktopUpdate(businessId, installed, options.forceGitHubCheck === true);
+  if (github.status) return github.status;
+  return statusFrom({ installed, error: centralError });
 }
 
 /**
@@ -351,6 +504,8 @@ export async function refreshAppUpdateStatus(
  * immediately — outside the tick's interval — and `summarizeUpdateCheck` turns
  * its stored outcome into the one shape the settings screen renders.
  */
+export type UpdateSource = "central" | "github";
+
 export type UpdateCheckOutcome = "update_available" | "up_to_date" | "offline" | "error";
 
 export interface DesktopUpdateCheck {
@@ -387,5 +542,5 @@ export async function checkDesktopUpdateNow(
   businessId: string,
   config: ServerSyncConfig | null,
 ): Promise<DesktopUpdateCheck> {
-  return summarizeUpdateCheck(await refreshAppUpdateStatus(businessId, config));
+  return summarizeUpdateCheck(await refreshAppUpdateStatus(businessId, config, { forceGitHubCheck: true }));
 }

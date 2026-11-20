@@ -177,8 +177,15 @@ With `POS_CONNECTOR_UPDATE_URL` empty, the updater asks GitHub:
 2. No releases at all → the newest **tag** (the workflow's `vX.Y.Z` tags make this
    path work with zero extra effort).
 
-A GitHub **Release** is therefore optional in GitHub mode: publish one when you
-want the release notes in the details modal; otherwise tagging is enough.
+Every workflow build now publishes a versioned GitHub **Release** (`vX.Y.Z`) with
+`pos-accounting-connector.zip` (and `update.json` when self-hosted mode is
+configured) attached, so stable builds are kept on GitHub Releases and a store in
+GitHub mode installs the clean asset instead of the whole-repository tag zipball.
+
+The repository also publishes the desktop (`desktop-vX.Y.Z`) and Android
+(`android-vX.Y.Z`) releases. The updater lists releases and only accepts a plain
+`vX.Y.Z` tag, so another product shipping later can never be mistaken for a
+plugin version.
 
 ## What a store sees (both modes)
 

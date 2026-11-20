@@ -34,6 +34,8 @@ import com.bizamiz.android.notifications.NotificationChannelManager
 import com.bizamiz.android.printing.AndroidPrintingGateway
 import com.bizamiz.android.scanner.AndroidBarcodeScanner
 import com.bizamiz.android.sync.TenantSyncStateStore
+import com.bizamiz.android.updates.AppUpdateChecker
+import com.bizamiz.android.updates.AppUpdateScheduler
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -67,6 +69,10 @@ class TwaLauncherActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         NotificationChannelManager.ensureChannelsCreated(this)
+        // Stable Android builds are published on GitHub Releases; the launch check
+        // and the daily worker only ever post a notification (production flavor only).
+        AppUpdateScheduler.schedule(this)
+        AppUpdateChecker.checkInBackground(this)
         AndroidMediaPickerAndShare.cleanupTempFiles(cacheDir)
         enqueueNotificationDeepLinkIfPresent(intent)
         launch(intent?.data)

@@ -73,9 +73,15 @@ const ERROR_TEXT: Record<string, string> = {
 
 /** The reasons the on-demand check itself can come back with (before the engine runs). */
 const CHECK_ERROR_TEXT: Record<string, string> = {
-  sync_not_configured: "این دستگاه به سرور مرکزی متصل نیست. ابتدا اتصال ابری را در تنظیمات همگام‌سازی برقرار کنید.",
+  sync_not_configured: "این دستگاه به سرور مرکزی متصل نیست و انتشارهای GitHub نیز در دسترس نبود. اتصال اینترنت را بررسی کنید یا اتصال ابری را برقرار کنید.",
   remote_timeout: "سرور مرکزی در زمان مقرر پاسخ نداد. اینترنت و دسترسی به سرور مرکزی را بررسی کنید.",
   update_check_failed: "بررسی به‌روزرسانی انجام نشد؛ دوباره تلاش کنید.",
+  github_releases_unreachable: "دسترسی به انتشارهای GitHub برقرار نشد. اتصال اینترنت را بررسی کنید.",
+  github_release_not_found: "نسخهٔ پایدار جدیدی در انتشارهای GitHub پیدا نشد.",
+  github_releases_invalid: "پاسخ انتشارهای GitHub قابل خواندن نبود؛ دوباره تلاش کنید.",
+  github_manifest_missing: "انتشار جدید فایل معرفی امضاشده ندارد و نصب نشد.",
+  github_manifest_unreachable: "فایل معرفی انتشار از GitHub دریافت نشد؛ دوباره تلاش کنید.",
+  github_release_version_mismatch: "نسخهٔ فایل معرفی با برچسب انتشار هم‌خوان نیست؛ نصب مسدود شد.",
 };
 
 function checkFailureText(code: string): string {

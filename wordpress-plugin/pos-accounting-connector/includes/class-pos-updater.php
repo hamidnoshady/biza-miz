@@ -275,7 +275,15 @@ class POS_Connector_Updater {
 	}
 
 	/**
-	 * The GitHub source: the newest published release, else the newest tag.
+	 * The GitHub source: the newest published release for THIS plugin, else
+	 * the newest plugin tag.
+	 *
+	 * The repository publishes several products' releases, separated by tag
+	 * prefix: `vX.Y.Z` for this plugin, `desktop-vX.Y.Z` for the Windows app and
+	 * `android-vX.Y.Z` for Android. `/releases/latest` therefore cannot be used
+	 * — it answers with whichever product shipped last, and a `desktop-v…` tag
+	 * is not a plugin version, so the check would read `unreadable_tag`. The
+	 * release list is filtered to plugin tags instead.
 	 */
 	private static function fetch_github() {
 		$fields = array(
@@ -288,18 +296,18 @@ class POS_Connector_Updater {
 			'source'       => 'github',
 		);
 
-		$release = self::api( '/repos/' . self::repo() . '/releases/latest' );
+		$releases = self::api( '/repos/' . self::repo() . '/releases?per_page=30' );
 
-		if ( is_wp_error( $release ) && 'http_404' === $release->get_error_code() ) {
+		if ( is_wp_error( $releases ) && 'http_404' === $releases->get_error_code() ) {
 			// No published release at all — not an error, just the fallback
 			// path: a plain tag is still a shippable version.
-			$tags = self::api( '/repos/' . self::repo() . '/tags?per_page=1' );
+			$tags = self::api( '/repos/' . self::repo() . '/tags?per_page=30' );
+			$tag  = is_wp_error( $tags ) ? '' : self::newest_plugin_tag( $tags );
 			if ( is_wp_error( $tags ) ) {
 				$fields['error'] = $tags->get_error_message();
-			} elseif ( empty( $tags[0]['name'] ) ) {
+			} elseif ( '' === $tag ) {
 				$fields['error'] = 'no_release_found';
 			} else {
-				$tag  = (string) $tags[0]['name'];
 				$fields['version'] = self::normalize_version( $tag );
 				$fields['error']   = '' === $fields['version'] ? 'unreadable_tag' : '';
 				if ( '' !== $fields['version'] ) {
@@ -307,18 +315,23 @@ class POS_Connector_Updater {
 					$fields['url'] = 'https://github.com/' . self::repo() . '/releases/tag/' . rawurlencode( $tag );
 				}
 			}
-		} elseif ( is_wp_error( $release ) ) {
-			$fields['error'] = $release->get_error_message();
+		} elseif ( is_wp_error( $releases ) ) {
+			$fields['error'] = $releases->get_error_message();
 		} else {
-			$tag  = isset( $release['tag_name'] ) ? (string) $release['tag_name'] : '';
-			$fields['version'] = self::normalize_version( $tag );
-			if ( '' === $fields['version'] ) {
-				$fields['error'] = 'unreadable_tag';
+			$release = self::newest_plugin_release( $releases );
+			if ( null === $release ) {
+				$fields['error'] = 'no_release_found';
 			} else {
-				$fields['download_url'] = self::release_package( $release, $tag );
-				$fields['url']          = isset( $release['html_url'] ) ? (string) $release['html_url'] : '';
-				$fields['changelog']    = isset( $release['body'] ) ? (string) $release['body'] : '';
-				$fields['published_at'] = isset( $release['published_at'] ) ? (string) $release['published_at'] : '';
+				$tag  = isset( $release['tag_name'] ) ? (string) $release['tag_name'] : '';
+				$fields['version'] = self::normalize_version( $tag );
+				if ( '' === $fields['version'] ) {
+					$fields['error'] = 'unreadable_tag';
+				} else {
+					$fields['download_url'] = self::release_package( $release, $tag );
+					$fields['url']          = isset( $release['html_url'] ) ? (string) $release['html_url'] : '';
+					$fields['changelog']    = isset( $release['body'] ) ? (string) $release['body'] : '';
+					$fields['published_at'] = isset( $release['published_at'] ) ? (string) $release['published_at'] : '';
+				}
 			}
 		}
 
@@ -334,6 +347,49 @@ class POS_Connector_Updater {
 		}
 
 		return $fields;
+	}
+
+	/**
+	 * The newest published release whose tag is a plain plugin version
+	 * (`v1.5.1`), skipping drafts, prereleases and the other products' releases.
+	 * Returns null when the list holds no plugin release at all.
+	 */
+	private static function newest_plugin_release( array $releases ) {
+		$best         = null;
+		$best_version = '';
+		foreach ( $releases as $release ) {
+			if ( ! is_array( $release ) || ! empty( $release['draft'] ) || ! empty( $release['prerelease'] ) ) {
+				continue;
+			}
+			$tag = isset( $release['tag_name'] ) ? (string) $release['tag_name'] : '';
+			if ( ! preg_match( '/^v\d+\.\d+\.\d+$/', $tag ) ) {
+				continue;
+			}
+			$version = self::normalize_version( $tag );
+			if ( '' !== $version && ( '' === $best_version || version_compare( $version, $best_version, '>' ) ) ) {
+				$best         = $release;
+				$best_version = $version;
+			}
+		}
+		return $best;
+	}
+
+	/** The newest tag that is a plain plugin version, out of a tag list that also holds other products' tags. */
+	private static function newest_plugin_tag( array $tags ) {
+		$best_version = '';
+		$best_tag     = '';
+		foreach ( $tags as $tag ) {
+			$name = isset( $tag['name'] ) ? (string) $tag['name'] : '';
+			if ( ! preg_match( '/^v\d+\.\d+\.\d+$/', $name ) ) {
+				continue;
+			}
+			$version = self::normalize_version( $name );
+			if ( '' !== $version && ( '' === $best_version || version_compare( $version, $best_version, '>' ) ) ) {
+				$best_version = $version;
+				$best_tag     = $name;
+			}
+		}
+		return $best_tag;
 	}
 
 	/**
