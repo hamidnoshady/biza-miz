@@ -1121,19 +1121,28 @@ async function tickBusiness(businessId: string): Promise<void> {
     }
   });
 
-  // Issue #903 §5 — the heartbeat is recorded once per tick, outside the tenant
-  // transaction, so the tenant inventory can say when this install was last
-  // seen (and how deep its upload queue is) instead of assuming it is online.
+  // Issue #903 §5 — the heartbeat is recorded once per tick so the tenant
+  // inventory can say when this install was last seen (and how deep its upload
+  // queue is) instead of assuming it is online.
+  //
+  // Issue #1446 — it must run **inside** the tenant scope: both the generation
+  // read and the heartbeat write touch a FORCE ROW LEVEL SECURITY table, and
+  // without `app_current_business()` the INSERT is rejected outright (the
+  // heartbeat table stayed empty on every affected install). Keeping the write
+  // tenant-scoped, rather than bypassing RLS, also means it can never cross
+  // into another business.
   try {
-    const { rows } = await query<{ generation: string }>(
-      `SELECT COALESCE(MAX(site_generation), 0)::text AS generation
-         FROM tenant_backup_site_heartbeat WHERE business_id = $1`,
-      [businessId],
-    );
-    await recordHeartbeat({
-      businessId,
-      siteGeneration: Number(rows[0]?.generation ?? 0),
-      appVersion: process.env.APP_VERSION ?? null,
+    await withTenant(businessId, async () => {
+      const { rows } = await query<{ generation: string }>(
+        `SELECT COALESCE(MAX(site_generation), 0)::text AS generation
+           FROM tenant_backup_site_heartbeat WHERE business_id = $1`,
+        [businessId],
+      );
+      await recordHeartbeat({
+        businessId,
+        siteGeneration: Number(rows[0]?.generation ?? 0),
+        appVersion: process.env.APP_VERSION ?? null,
+      });
     });
   } catch (err) {
     console.error(`backup: heartbeat failed for business ${businessId}:`, errText(err));

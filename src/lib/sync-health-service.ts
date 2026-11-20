@@ -237,8 +237,13 @@ async function localBacklog(businessId: string): Promise<{
        (SELECT min(se.received_at) FROM sync_events se JOIN locations l ON l.id = se.location_id
          WHERE l.business_id = $1 AND se.scope = 'location' AND se.origin = 'local' AND se.applied_at IS NOT NULL
            AND se.error IS NULL AND se.pushed_at IS NULL AND se.retracted_at IS NULL) AS oldest,
+       -- Only a row still being retried is "refused". A quarantined event has
+       -- an error and an open dead letter (issue #1446), so counting it here too
+       -- would double-report the same failure and keep the counter non-zero
+       -- after the owner has archived the dead letter.
        (SELECT count(*)::int FROM sync_events se JOIN locations l ON l.id = se.location_id
-         WHERE l.business_id = $1 AND se.scope = 'location' AND se.pushed_at IS NULL AND se.push_attempts > 0) AS refused,
+         WHERE l.business_id = $1 AND se.scope = 'location' AND se.pushed_at IS NULL
+           AND se.error IS NULL AND se.push_attempts > 0) AS refused,
        (SELECT count(*)::int FROM sync_domain_effects WHERE business_id = $1 AND status = 'deferred') AS deferred,
        (SELECT count(*)::int FROM sync_event_dead_letters WHERE business_id = $1 AND status = 'open') AS dead,
        (SELECT count(*)::int FROM sync_master_conflicts WHERE business_id = $1 AND status = 'open') AS conflicts`,

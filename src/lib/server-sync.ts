@@ -606,6 +606,17 @@ export async function updateSyncDeadLetter(
             WHERE location_id=$1 AND client_event_id=$2::uuid`,
           [row.location_id, row.client_event_id],
         );
+        // Issue #1446: a site's own refused outbox row was never delivered.
+        // Clear the terminal marker and its backoff so the next tick offers the
+        // identical event again. Only a locally applied, not-yet-delivered row
+        // qualifies — an applied remote effect or a delivered row is untouched.
+        await client.query(
+          `UPDATE sync_events
+              SET push_attempts=0, next_push_at=now()
+            WHERE location_id=$1 AND client_event_id=$2::uuid
+              AND applied_at IS NOT NULL AND pushed_at IS NULL`,
+          [row.location_id, row.client_event_id],
+        );
       }
       await client.query(
         `UPDATE sync_event_dead_letters
@@ -622,7 +633,16 @@ export async function updateSyncDeadLetter(
     client.release();
   }
 
-  if (!row || action !== "retry" || row.source !== "server_pull") return true;
+  if (!row || action !== "retry") return true;
+
+  // A central server may hold a cached error for the same client_event_id (the
+  // legacy apply path stores the last refusal on its own inbox row). Ask it,
+  // with this site's credential, to allow one re-application; it can only
+  // select an event that never applied. Best effort: a failure here leaves the
+  // local retry queued and is visible through the normal sync error surfaces.
+  await requestRemoteEventRetry(businessId, [row.client_event_id]).catch(() => {});
+
+  if (row.source !== "server_pull") return true;
   let result: SyncEventResult;
   try {
     result = await applySyncEvent(
@@ -749,6 +769,16 @@ type SyncEventRow = {
 // ---------------------------------------------------------------------------
 // Push: local → remote
 // ---------------------------------------------------------------------------
+
+/**
+ * How many times one operational event may be refused by the central server
+ * before it is dead-lettered (30 s doubling to a 15-minute ceiling, so this is
+ * roughly a day of retries). Past this point retrying is no longer a transport
+ * question: the remote keeps answering with the same refusal, and leaving the
+ * row in the queue forever hides it behind a "refused" counter with no
+ * terminal state (issue #1446).
+ */
+export const MAX_PUSH_ATTEMPTS = 20;
 
 export type PushResult =
   | { status: "disabled" }
@@ -895,6 +925,7 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
   const url = `${config.remoteUrl.trim().replace(/\/+$/, "")}/api/server-sync/push`;
   const delivered: string[] = [];
   const refused: string[] = [];
+  const refusedErrors = new Map<string, string>();
   let firstFailure: string | null = null;
   try {
     const res = await fetch(url, {
@@ -936,6 +967,10 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
         delivered.push(String(rows[index].id));
       } else {
         refused.push(String(rows[index].id));
+        refusedErrors.set(
+          String(rows[index].id),
+          `remote_apply_failed: ${result.error || "unknown"}`.slice(0, 240),
+        );
         firstFailure ??= `remote_apply_failed: ${result.error || "unknown"}`;
       }
     }
@@ -954,13 +989,65 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
   // Each refused row waits longer before it is offered again (30 s doubling
   // to a 15-minute ceiling), so one poison event is not re-sent every tick.
   if (refused.length > 0) {
-    await query(
-      `UPDATE sync_events
-          SET push_attempts = push_attempts + 1,
-              next_push_at = now() + make_interval(secs => least(900, 30 * power(2, least(push_attempts, 10))))
-        WHERE id = ANY($1::bigint[])`,
-      [refused],
+    const refusedIds = refused.map(Number);
+    const refusedMessages = refused.map((id) => refusedErrors.get(id) ?? "remote_apply_failed");
+    /*
+     * Issue #1446 — a permanent remote refusal used to be retried forever: the
+     * row never reached `sync_event_dead_letters`, `pushed_at` stayed NULL and
+     * the health screen could only count it as "refused" with no terminal
+     * state. After MAX_PUSH_ATTEMPTS the row is quarantined: `error` is set so
+     * it is no longer selected, `next_push_at` is cleared, and an open dead
+     * letter carries the last refusal for the owner's existing
+     * retry/archive controls. `pushed_at` is deliberately NOT set — nothing was
+     * delivered, and the health surface must not say it was. The payload stays
+     * on `sync_events`, so a retry re-sends the identical event.
+     */
+    const { rows: refusedRows } = await query<{
+      id: string;
+      location_id: string;
+      client_event_id: string;
+      event_type: string;
+      schema_version: number;
+      payload: Record<string, unknown>;
+      error: string | null;
+      permanently_refused: boolean;
+    }>(
+      `UPDATE sync_events se
+          SET push_attempts = se.push_attempts + 1,
+              next_push_at = CASE
+                WHEN se.push_attempts + 1 >= $3 THEN NULL
+                ELSE now() + make_interval(secs => least(900, 30 * power(2, least(se.push_attempts, 10))))
+              END,
+              error = CASE WHEN se.push_attempts + 1 >= $3 THEN refused.error ELSE se.error END,
+              dead_lettered_at = CASE WHEN se.push_attempts + 1 >= $3 THEN now() ELSE se.dead_lettered_at END
+         FROM unnest($1::bigint[], $2::text[]) AS refused(id, error)
+        WHERE se.id = refused.id
+      RETURNING se.id, se.location_id, se.client_event_id::text, se.event_type,
+                se.schema_version, se.payload, se.error,
+                (se.push_attempts >= $3) AS permanently_refused`,
+      [refusedIds, refusedMessages, MAX_PUSH_ATTEMPTS],
     );
+    for (const row of refusedRows.filter((entry) => entry.permanently_refused)) {
+      await query(
+        `INSERT INTO sync_event_dead_letters
+           (business_id, location_id, client_event_id, event_type, schema_version,
+            payload_sha256, error_code, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'domain')
+         ON CONFLICT (business_id, client_event_id, event_type, schema_version, source)
+         DO UPDATE SET error_code = EXCLUDED.error_code, status = 'open',
+                       last_seen_at = now(), resolved_at = NULL,
+                       resolved_by = NULL, resolution_note = NULL`,
+        [
+          businessId,
+          row.location_id,
+          row.client_event_id,
+          row.event_type,
+          row.schema_version,
+          createHash("sha256").update(JSON.stringify(row.payload)).digest("hex"),
+          row.error ?? "remote_apply_failed",
+        ],
+      );
+    }
   }
   // PostgreSQL bigint values arrive from node-postgres as strings even though
   // the persisted settings contract uses JSON numbers. The mark is kept for
@@ -1293,6 +1380,46 @@ export async function refreshStagedSiteCredentialAttempt(
     return {
       ready: false,
       error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Ask the paired central server to permit one re-application of these events
+ * (issue #1446). Machine-to-machine with the site credential; the central
+ * endpoint only ever marks an event *it has not applied* as retryable.
+ */
+export async function requestRemoteEventRetry(
+  businessId: string,
+  clientEventIds: string[],
+): Promise<{ status: "skipped" | "ok" | "error"; requested?: number; error?: string }> {
+  const config = await getServerSyncConfig(businessId);
+  if (!config?.enabled || !config.remoteUrl?.trim() || !config.token?.trim()) {
+    return { status: "skipped" };
+  }
+  const base = config.remoteUrl.trim().replace(/\/+$/, "");
+  try {
+    const response = await fetch(`${base}/api/server-sync/retry-events`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.token.trim()}`,
+      },
+      body: JSON.stringify({ clientEventIds }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      return { status: "error", error: `retry_rejected: HTTP ${response.status}` };
+    }
+    const body = (await response.json()) as { requested?: unknown };
+    return {
+      status: "ok",
+      requested: Number.isSafeInteger(body.requested) ? Number(body.requested) : 0,
+    };
+  } catch (error) {
+    return {
+      status: "error",
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 300),
     };
   }
 }
