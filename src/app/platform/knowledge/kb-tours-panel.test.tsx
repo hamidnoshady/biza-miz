@@ -215,6 +215,18 @@ describe("Tour Studio — saving and publishing", () => {
     expect(body.eligibility.anyOf).toEqual([{ permissions: ["crm.export"] }]);
   });
 
+  it("offers the target page itself for a live check", async () => {
+    await renderPanel();
+    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /پیش‌نمایش مراحل/ }));
+
+    const link = screen.getByRole("link", { name: /باز کردن صفحهٔ هدف/ });
+    expect(link.getAttribute("href")).toBe(BASELINE_PAGE.route);
+    expect(link.getAttribute("target")).toBe("_blank");
+  });
+
   it("authors a conditional branch as step eligibility", async () => {
     await renderPanel();
     fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });

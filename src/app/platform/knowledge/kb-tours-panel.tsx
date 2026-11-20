@@ -859,6 +859,14 @@ export function ToursPanel() {
                   {form.steps[previewIndex].anchor}
                 </p>
               ) : null}
+              <a
+                className="mt-2 inline-flex text-xs font-medium text-primary hover:underline"
+                href={PAGES.find((page) => page.key === form.pageKey)?.route ?? form.pageKey.replace(/^page:/, "")}
+                target="_blank"
+                rel="noreferrer"
+              >
+                باز کردن صفحهٔ هدف برای بررسی زنده
+              </a>
               <div className="mt-3 flex items-center gap-2">
                 <Button
                   type="button"
@@ -882,8 +890,8 @@ export function ToursPanel() {
                 </Button>
               </div>
               <p className="mt-2 text-[11px] leading-5 text-muted-foreground">
-                این پیش‌نمایش متن و ترتیب مراحل را نشان می‌دهد؛ صفحهٔ مقصد و لنگرها فقط در خود
-                برنامه با دکمهٔ آموزش دیده می‌شوند.
+                این پیش‌نمایش متن و ترتیب مراحل را نشان می‌دهد. صفحهٔ هدف در تب تازه باز می‌شود، چون
+                کنسول صفحات برنامه را در همین پنجره قاب نمی‌کند؛ لنگرها را همان‌جا بررسی کنید.
               </p>
             </div>
           ) : null}
