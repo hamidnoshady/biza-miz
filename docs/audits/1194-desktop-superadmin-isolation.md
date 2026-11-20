@@ -30,6 +30,12 @@ is enforced by three independent checks:
   installer are scanned in CI (`build-desktop-installer`,
   `windows-signed-candidate`, `windows-11-release`).
 
+The shell also deletes a customer-inherited
+`LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK` from the spawned server child
+(`electron/backend-manager.js`), so the remaining test-loopback condition cannot
+be reached by a variable the customer sets even if a future change accidentally
+weakened `NODE_ENV`.
+
 ### Preserved fresh-install testing (external, CI-only)
 
 `electron/scripts/smoke-packaged.js` (`npm run desktop:acceptance`) launches
@@ -87,6 +93,15 @@ temporary directory per run), and the report path from
   **fails the build** if any platform path survives (`assertNoCentralRoutes`).
   What was excluded is recorded in `.desktop-runtime/runtime-build.json`
   (`centralExclusions`) and reported by `npm run desktop:size`.
+- **Traced source.** Next's node-file-trace can copy the original TypeScript
+  of a dynamically imported module into `standalone/src/` even though the
+  compiled server chunk is what executes. The 1.0.202 installer shipped
+  `resources/desktop-runtime/src/lib/billing/entitlement/outbox-service.ts`,
+  a Central billing-entitlement client, inside a site payload.
+  `scripts/desktop/traced-source-exclusions.cjs` now removes our traced
+  `.ts`/`.tsx` copies (font assets stay) and fails the build if any raw
+  TypeScript survives outside `node_modules`; the release scan reports the
+  same shape as `raw-source-file`.
 - **Request time.** `src/middleware.ts` keeps answering 404 for the realm
   before the rate limiter; `isPlatformRealmPath` is now segment-aware
   (`/api/platformx` is no longer mistaken for the realm).
@@ -117,6 +132,8 @@ The release gate (`scripts/scan-desktop-release.mjs`) fails on:
   `desktop-release-public-key.pem` is the only key-shaped file allowed);
 - `*.pfx`, `*.p12`, `*.p8`, `id_rsa`-style names, `.env` files, test suites,
   coverage, `.git`;
+- any raw `.ts`/`.tsx` outside `node_modules` (`raw-source-file`) — the
+  packaged runtime executes compiled chunks only;
 - any `app/platform` or `app/api/platform` path in the payload, and (for an
   unpacked build) the required runtime shape.
 
@@ -173,11 +190,14 @@ they are Central, and an install that does not say so cannot reach the realm.
 | --- | --- |
 | `/platform/*`, `/api/platform/*` on a site, any cookie | `src/middleware.issue-1194.test.ts`, `src/middleware.issue-1003.test.ts` |
 | direct handler invocation on a site (no middleware) | `src/lib/platform-realm-isolation.test.ts` |
+| every platform API route is guarded (static enumeration) | `src/lib/platform-realm-isolation.test.ts` |
+| direct platform logout on a site | `src/lib/platform-realm-isolation.test.ts` |
 | forged platform cookie / tenant token replayed as platform | `src/middleware.issue-1194.test.ts` |
 | tenant token with forged platform claims | `src/lib/platform-realm-isolation.test.ts` |
 | platform session minted on another installation | `src/lib/platform-realm-isolation.test.ts` |
+| inherited env cannot set the site role, test mode or test loopback | `src/lib/backend-manager-environment.test.ts` |
 | installed release cannot be switched into test mode | `electron/scripts/smoke-packaged.js` (Windows CI) |
-| packaged runtime contains no platform module | `scripts/desktop/central-route-exclusions.cjs` + release scan |
+| packaged runtime contains no platform module or raw TypeScript | `scripts/desktop/central-route-exclusions.cjs`, `scripts/desktop/traced-source-exclusions.cjs`, `src/lib/desktop-traced-source.test.ts` + release scan |
 
 Expected behaviour in all cases: denial with **no mutation** — middleware
 returns 404 without setting a cookie or redirecting, and the authorization
@@ -227,6 +247,45 @@ installer (`desktop-release-scan-1.0.197.json`, `ok: true`, `findings: []`), the
 signature report showing that artefact is `NotSigned`
 (`windows-signature-verification.json`), and the **Hybrid-mode** acceptance log from
 the same `build-desktop-installer` run (`windows-acceptance-2026-11-18.log`).
+The 1.0.202 CI run (`44415239203`, commit `d4c7466f`) repeated the same
+unsigned-development result: installer SHA-256
+`75901fe55665858aba5e5f2c2a6ab2dded49cf0d946792268fd0c464484707b1`,
+`NotSigned`, release scan `ok: true` under the rules as they stood.
+
+Re-running the *new* scan against those same 1.0.202 bytes found one defect the
+old rules missed: `raw-source-file` at
+`resources/desktop-runtime/src/lib/billing/entitlement/outbox-service.ts`. The
+file is dead trace output (the compiled chunk in
+`.next/server/chunks/20353.js` is what executes), but it disclosed the source of
+a Central billing-entitlement client inside a site installer. It is now removed
+at staging and rejected by the gate; see the *Traced source* bullet in section 2.
+
+### Local reproduction (unsigned, 2026-11-20)
+
+On a Windows 11 machine, the downloaded 1.0.202 installer was verified by hash
+(`75901fe5…07b1`, matching the CI report) and `Get-AuthenticodeSignature`
+answered `NotSigned`, matching `windows-signature-verification.json`. The new
+scan rule reported the raw source above.
+
+A full package build of this change (`npm run build`, `npm run
+desktop:runtime`, `npm run dist` in `electron/`) reported `Removed 1 traced
+TypeScript source file(s) (8013 bytes)`, `Excluded Central Superadmin routes …
+706 file(s)`, and no raw TypeScript or platform route directory in
+`.desktop-runtime`. The rebuilt unsigned installer
+(`Bizamiz Setup 1.0.202.exe`, 180,073,848 bytes, SHA-256
+`c905e0b51d0df40aa75864e0cc02dd385281c2c42f4cbbf3d55b9e588a34d3f8`) is
+`NotSigned` and passed the release scan: `ok: true`, `findings: []`, 9,224
+payload files, `app.asar` 2,261 entries, installer extraction attempted and
+`ok`. The external harness then ran against that package's
+`win-unpacked/Bizamiz.exe` and passed fresh-install bootstrap, Owner login,
+restart with the same instance id (`4f030401-1932-42c8-b8cd-dc0c21b48f7e`),
+every platform-realm 404 probe, and the inert-legacy-switch check. The Full
+Offline phase reported `skipped` (no staging Cloud), and clean shutdown was
+skipped because the session had no window, so it force-stopped and exercised
+the abrupt-stop path instead. The version metadata was not bumped for this
+local build; it is evidence about the bytes, not a release candidate. This is
+local, unsigned evidence; it is not the signed-artifact acceptance the ticket
+still requires.
 
 It deliberately contains no signed-installer scan and no Full Offline acceptance
 run — both are still outstanding, and the harness reports the Full Offline phase as
@@ -235,6 +294,24 @@ run — both are still outstanding, and the harness reports the Full Offline pha
 
 ### Remaining risks (accepted, documented)
 
+- **No signed artifact exists yet.** Every Windows installer produced so far is
+  `NotSigned`; `windows-signed-candidate` requires protected signing variables
+  that are not configured in the repository. There is therefore no publisher
+  identity / Authenticode evidence, and the release-scan evidence attached so
+  far is for unsigned development bytes only.
+- **Full Offline has not been exercised on a candidate yet.** The harness
+  reports `skipped` unless a staging Cloud URL and a fresh single-use
+  enrollment code are supplied. `windows-11-release.yml` now mints the code
+  after the prior-release install, runs the phase against the updated
+  candidate (`$env:INSTALL_DIR\Bizamiz.exe`), retains the candidate report and
+  **fails the release** when the phase is not `passed`, instead of promoting
+  on Hybrid alone. Until the `DESKTOP_ACCEPTANCE_OFFLINE_*` variables and
+  secrets are configured, that workflow will fail closed — which is the
+  intended release blocker, not evidence that Full Offline works.
+- The 1.0.202 payload contained the raw source file described in section 2.
+  The staging fix and the new `raw-source-file` rule are in place, but a new
+  installer must be built and scanned before the artifact claim is true for a
+  release candidate.
 - An owner of the machine can patch their own local copy of the application.
   The guarantee is that doing so confers **no Central authority**: Central
   verifies its own session secret and its own database, and the platform

@@ -260,8 +260,9 @@ jobs:
         # hours, so a stored secret covers one run and then fails with
         # code_already_redeemed. Mint one per acceptance step; the code reaches
         # the harness as DESKTOP_ACCEPTANCE_OFFLINE_TOKEN through $GITHUB_ENV.
-        # Skipped when no staging Cloud is configured, keeping the phase's
-        # existing "skipped" report instead of failing this job.
+        # The phase runs against the *candidate* in the in-place update step
+        # below, never the prior release, so the evidence is for the bytes
+        # being promoted.
         if: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL != '' }}
         env:
           DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
@@ -275,9 +276,10 @@ jobs:
         # Issue #1194 — a wedged runner must fail this step, not the job.
         timeout-minutes: 30
         env:
-          # Issue #1194 - optional Full Offline enrollment against a staging Cloud.
-          # The mint step above exports this run's single-use code.
-          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
+          # Full Offline is candidate evidence: it runs after the in-place
+          # update below, not against the prior release.
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ''
+          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ''
         run: |
           $installer = Get-ChildItem "${{ runner.temp }}\suite-previous" -Recurse -File -Filter "$env:PREVIOUS_STEM Setup *.exe" | Select-Object -First 1
           if (-not $installer) { throw "Prior installer is missing" }
@@ -285,8 +287,10 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Prior installer failed: $($process.ExitCode)" }
           $env:DESKTOP_EXECUTABLE = Join-Path $env:INSTALL_DIR "$env:PREVIOUS_STEM.exe"
           $env:DESKTOP_ACCEPTANCE_USER_DATA = $env:USER_DATA
+          $env:DESKTOP_ACCEPTANCE_REPORT = Join-Path $env:ACCEPTANCE_ROOT "prior-acceptance-report.json"
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
+          Copy-Item $env:DESKTOP_ACCEPTANCE_REPORT "$env:GITHUB_WORKSPACE\prior-acceptance-report.json" -Force
 
       - name: Abrupt-stop recovery acceptance
         # Issue #1194 — a wedged runner must fail this step, not the job.
@@ -313,10 +317,11 @@ jobs:
         # Issue #1194 — a wedged runner must fail this step, not the job.
         timeout-minutes: 30
         env:
-          # Issue #1194 - Hybrid only, as in the abrupt-stop step above: the
-          # Full Offline phase covers nothing new on a second fresh profile.
-          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ''
-          DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ''
+          # Issue #1194 - the Full Offline phase runs here, against the exact
+          # signed candidate bytes this release promotes. The single-use code
+          # was minted above; the harness reports `skipped` when no staging
+          # Cloud is configured, and the check below fails the release.
+          DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}
         run: |
           $installer = Get-ChildItem "${{ runner.temp }}\suite-candidate" -Recurse -File -Filter "Bizamiz Setup *.exe" | Select-Object -First 1
           if (-not $installer) { throw "Candidate installer is missing" }
@@ -324,8 +329,24 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Candidate update failed: $($process.ExitCode)" }
           $env:DESKTOP_EXECUTABLE = Join-Path $env:INSTALL_DIR "Bizamiz.exe"
           $env:DESKTOP_ACCEPTANCE_USER_DATA = $env:USER_DATA
+          $env:DESKTOP_ACCEPTANCE_REPORT = Join-Path $env:ACCEPTANCE_ROOT "candidate-acceptance-report.json"
           $env:GITHUB_ACTIONS = "true"
           node electron/scripts/smoke-packaged.js
+          Copy-Item $env:DESKTOP_ACCEPTANCE_REPORT "$env:GITHUB_WORKSPACE\candidate-acceptance-report.json" -Force
+
+      - name: Require Full Offline acceptance on the signed candidate
+        # Issue #1194 - Hybrid and Full Offline are both release criteria. A
+        # skipped phase is not evidence, so this fails closed until the staging
+        # Cloud variables are configured instead of promoting on Hybrid alone.
+        run: |
+          $report = Join-Path $env:GITHUB_WORKSPACE "candidate-acceptance-report.json"
+          if (-not (Test-Path -LiteralPath $report)) { throw "Candidate acceptance report was not written" }
+          $acceptance = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+          $status = $acceptance.fullOffline.status
+          if ($status -ne 'passed') {
+            $reason = if ($acceptance.fullOffline.reason) { $acceptance.fullOffline.reason } else { "no reason recorded" }
+            throw "Full Offline acceptance did not pass on the signed candidate: $status ($reason)"
+          }
 
       - name: Verify installed candidate Authenticode and RFC3161 timestamp
         env:
@@ -378,7 +399,8 @@ jobs:
             platform = "${{ steps.platform.outputs.caption }} build ${{ steps.platform.outputs.build }}"
             networkProfiles = "${{ steps.network.outputs.profiles }}"
             ordinaryUser = $true
-            checks = @("candidate-and-prior-provenance", "pre-execution-authenticode", "release-scan", "clean-state", "non-elevated-install", "two-launch", "private-network-profile", "abrupt-stop-recovery", "in-place-update", "installed-candidate-authenticode", "uac-cancellation-evidence", "uninstall", "data-preserved")
+            fullOffline = "PASS"
+            checks = @("candidate-and-prior-provenance", "pre-execution-authenticode", "release-scan", "clean-state", "non-elevated-install", "two-launch", "private-network-profile", "abrupt-stop-recovery", "in-place-update", "full-offline-candidate", "installed-candidate-authenticode", "uac-cancellation-evidence", "uninstall", "data-preserved")
           } | ConvertTo-Json -Depth 6 | Set-Content windows-11-release-evidence.json -Encoding UTF8
 
       - name: Upload retail evidence
@@ -390,6 +412,8 @@ jobs:
           path: |
             windows-11-release-evidence.json
             signed-candidate-release-scan.json
+            candidate-acceptance-report.json
+            prior-acceptance-report.json
             candidate-installer-signatures.json
             previous-installer-signatures.json
             windows-11-signatures.json

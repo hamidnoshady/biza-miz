@@ -232,8 +232,20 @@ async function loadOrCreateConfig(userDataDir, options = {}) {
   return { config, configPath };
 }
 
+/**
+ * Test-only switches issue #1194 removed from the distributable. The desktop
+ * shell never sets them, but the child inherits the customer's environment;
+ * deleting them here means a future code path cannot be switched on by a
+ * variable the customer happens to have in their shell.
+ */
+const TEST_ONLY_ENVIRONMENT = Object.freeze([
+  "LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK",
+]);
+
 function childEnvironment(extra) {
-  return { ...process.env, ELECTRON_RUN_AS_NODE: "1", ...extra };
+  const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1", ...extra };
+  for (const key of TEST_ONLY_ENVIRONMENT) delete env[key];
+  return env;
 }
 
 function desktopServerProcessEnvironment(extra) {

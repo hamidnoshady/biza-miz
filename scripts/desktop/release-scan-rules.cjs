@@ -134,6 +134,13 @@ const FORBIDDEN_PATH_RULES = Object.freeze([
     scope: "outside-node-modules",
   },
   {
+    id: "raw-source-file",
+    pattern: /\.(?:ts|tsx|mts|cts)$/i,
+    description:
+      "Raw TypeScript source. The packaged runtime executes compiled chunks only; a traced source copy discloses implementation and is dead weight (issue #1194).",
+    scope: "outside-node-modules",
+  },
+  {
     id: "environment-file",
     pattern: /(?:^|\/)\.env(?:\.(?!example$)[\w.-]+)?$/,
     description:
