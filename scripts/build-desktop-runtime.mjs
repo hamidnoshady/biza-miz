@@ -25,6 +25,10 @@ const { stripNextTraceMetadata } = require("./desktop/strip-next-trace-metadata.
 const { compactRuntimeJson } = require("./desktop/compact-runtime-json.cjs");
 const { compactNextClientManifests } = require("./desktop/compact-next-client-manifests.cjs");
 const { assertNoCentralRoutes, removeCentralRoutes } = require("./desktop/central-route-exclusions.cjs");
+const {
+  assertNoRawTypeScript,
+  removeTracedSourceCopies,
+} = require("./desktop/traced-source-exclusions.cjs");
 
 function required(relativePath, explanation) {
   const absolute = path.join(root, relativePath);
@@ -168,6 +172,22 @@ async function main() {
   console.log(
     `Excluded Central Superadmin routes from the desktop runtime: ${centralExclusions.filesRemoved} file(s), ` +
       `${(centralExclusions.bytesRemoved / 1024 / 1024).toFixed(1)} MiB, ${centralExclusions.manifestEntriesRemoved} manifest entr(ies)`,
+  );
+
+  /*
+   * Issue #1194 — Next's node-file-trace can copy the original TypeScript of a
+   * dynamically imported module into the standalone runtime. The compiled
+   * server chunk is what executes, so the copy is dead weight, and in the
+   * 1.0.202 payload it was `src/lib/billing/entitlement/outbox-service.ts` —
+   * a Central billing-entitlement client whose source a site installer has no
+   * reason to disclose. Remove our raw source, keep runtime assets (fonts),
+   * and fail the build if any TypeScript survives anywhere else.
+   */
+  const tracedSource = await removeTracedSourceCopies(outDir);
+  await assertNoRawTypeScript(outDir);
+  console.log(
+    `Removed ${tracedSource.filesRemoved} traced TypeScript source file(s) ` +
+      `(${tracedSource.bytesRemoved} bytes) from the desktop runtime`,
   );
 
   // Next's conservative package-level trace reaches its optional TypeScript
@@ -326,7 +346,6 @@ async function main() {
     }
     await collectSource(path.join(outDir, "src"));
     const unexpected = sourceFiles.filter((file) => {
-      if (file.startsWith("src/lib/billing/entitlement/")) return false;
       if (file.startsWith("src/app/fonts/") && /\.(woff2?|ttf|otf)$/i.test(file)) return false;
       return true;
     });

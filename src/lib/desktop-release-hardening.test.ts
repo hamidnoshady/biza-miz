@@ -123,8 +123,16 @@ describe("the packaged file list carries no test bootstrap", () => {
   });
 });
 
-describe("central-route exclusions", () => {
-  function fixtureRuntime(): string {
+describe("build-time source exclusions", () => {
+  it("wires the traced-source removal and has no billing source exception", () => {
+    const buildScript = readFileSync(path.join(root, "scripts", "build-desktop-runtime.mjs"), "utf8");
+    expect(buildScript).toContain("removeTracedSourceCopies");
+    expect(buildScript).toContain("assertNoRawTypeScript");
+    expect(buildScript).not.toMatch(/startsWith\(["']src\/lib\/billing\/entitlement/);
+  });
+});
+
+describe("central-route exclusions", () => {  function fixtureRuntime(): string {
     const dir = temporaryDir();
     write(path.join(dir, ".next", "server", "app", "platform", "login", "page.js"), "module.exports = {};\n");
     write(path.join(dir, ".next", "server", "app", "api", "platform", "auth", "login", "route.js"), "exports.POST=1;\n");
@@ -211,6 +219,7 @@ describe("release-scan rules", () => {
       "resources/app.asar.unpacked/smoke-probe.js",
       "scripts/seed-platform-admin.ts",
       "electron/dist/win-unpacked/resources/cert.pfx",
+      "resources/desktop-runtime/src/lib/billing/entitlement/outbox-service.ts",
       "some/__tests__/route.test.ts",
       "Configuration/.env",
     ]) {
@@ -221,6 +230,7 @@ describe("release-scan rules", () => {
       ".next/server/app/api/setup/state/route.js",
       ".next/server/app/api/local-activation/cloud/route.js",
       "desktop-release-public-key.pem",
+      "resources/desktop-runtime/src/app/fonts/Vazirmatn-Variable.woff2",
       "Configuration/.env.example",
     ]) {
       expect(rules.scanPath(allowed), allowed).toEqual([]);
@@ -542,6 +552,8 @@ describe("release workflow wiring", () => {
     for (const suite of [
       "src/lib/desktop-shell-hardening.test.ts",
       "src/lib/desktop-release-hardening.test.ts",
+      "src/lib/desktop-traced-source.test.ts",
+      "src/lib/backend-manager-environment.test.ts",
       "src/lib/platform-realm-isolation.test.ts",
       "src/middleware.issue-1194.test.ts",
     ]) {
@@ -575,27 +587,33 @@ describe("release workflow wiring", () => {
     expect(condition).not.toContain("github.event.pull_request");
   });
 
-  it("keeps the Full Offline phase to the fresh-install acceptance step", () => {
+  it("keeps Full Offline to one candidate acceptance step", () => {
     const retail = workflow("windows-11-release.yml");
     // One mint per rehearsal: the phase always creates its own profile, so a
     // second run covers nothing new and only spends another code and staging
     // installation.
     expect(retail.match(/Mint a fresh Full Offline enrollment code/g) ?? []).toHaveLength(1);
-    for (const name of [
-      "Abrupt-stop recovery acceptance",
-      "In-place update to signed candidate and persistence acceptance",
-    ]) {
-      const start = retail.indexOf(name);
-      expect(start).toBeGreaterThan(-1);
-      const next = retail.indexOf("\n      - name: ", start);
-      const step = retail.slice(start, next === -1 ? undefined : next);
-      // Withheld explicitly, not merely left unset: the fresh-install step's
-      // minted code is still in $GITHUB_ENV, so an empty URL is what keeps the
-      // phase from running again here.
-      expect(step).toContain("DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ''");
-      expect(step).toContain("DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ''");
-      expect(step).not.toContain("mint-offline-enrollment-code.mjs");
-      expect(step).not.toContain("vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL");
-    }
+
+    // The abrupt-stop step is Hybrid only: the single-use code belongs to the
+    // candidate acceptance below.
+    const abruptStart = retail.indexOf("Abrupt-stop recovery acceptance");
+    expect(abruptStart).toBeGreaterThan(-1);
+    const abruptEnd = retail.indexOf("\n      - name: ", abruptStart);
+    const abrupt = retail.slice(abruptStart, abruptEnd === -1 ? undefined : abruptEnd);
+    expect(abrupt).toContain("DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ''");
+    expect(abrupt).toContain("DESKTOP_ACCEPTANCE_OFFLINE_TOKEN: ''");
+    expect(abrupt).not.toContain("mint-offline-enrollment-code.mjs");
+
+    // The candidate is the artefact being promoted, so Full Offline evidence
+    // must come from it — not from the prior release installed before the
+    // update, and not from a second profile in the abrupt-stop step.
+    const candidateStart = retail.indexOf("In-place update to signed candidate");
+    const requiredStart = retail.indexOf("Require Full Offline acceptance on the signed candidate");
+    expect(candidateStart).toBeGreaterThan(abruptStart);
+    expect(requiredStart).toBeGreaterThan(candidateStart);
+    const candidate = retail.slice(candidateStart, requiredStart);
+    expect(candidate).toContain("DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL: ${{ vars.DESKTOP_ACCEPTANCE_OFFLINE_CLOUD_URL }}");
+    expect(candidate).toContain("candidate-acceptance-report.json");
+    expect(retail).toContain("if ($status -ne 'passed')");
   });
 });

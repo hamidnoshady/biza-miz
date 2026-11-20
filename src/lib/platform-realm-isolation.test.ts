@@ -64,7 +64,51 @@ describe("the Central realm is a deployment-role decision, not a cookie decision
     expect(await response.json()).toEqual({ error: "deployment_unsupported" });
   });
 
-  it("every platform entry point carries the guard", async () => {
+  it("every platform API route is guarded directly or through the shared report wrapper", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const path = await import("node:path");
+    const root = path.join(process.cwd(), "src", "app", "api", "platform");
+    const routes: string[] = [];
+    function walk(directory: string) {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const absolute = path.join(directory, entry.name);
+        if (entry.isDirectory()) walk(absolute);
+        else if (entry.name === "route.ts") routes.push(absolute);
+      }
+    }
+    walk(root);
+    expect(routes.length).toBeGreaterThan(100);
+
+    const reportWrapper = readFileSync(
+      path.join(process.cwd(), "src", "lib", "platform-report-route.ts"),
+      "utf8",
+    );
+    expect(reportWrapper).toContain("withPlatformScope");
+    expect(reportWrapper).toContain("requirePlatformCapability");
+
+    for (const file of routes) {
+      const source = readFileSync(file, "utf8");
+      const guardedDirectly =
+        /platformRealmUnavailable|requirePlatformAdmin|requirePlatformCapability|withPlatformScope/.test(
+          source,
+        );
+      const guardedThroughReports = source.includes("platformReportRoute");
+      expect(
+        guardedDirectly || guardedThroughReports,
+        `${path.relative(process.cwd(), file)} must enforce the platform realm guard`,
+      ).toBe(true);
+    }
+  });
+
+  it("denies a directly invoked platform logout on a site", async () => {
+    vi.stubEnv("DEPLOYMENT_ROLE", "site");
+    const { POST } = await import("../app/api/platform/auth/logout/route");
+    const response = await POST();
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "deployment_unsupported" });
+  });
+
+  it("every unauthenticated platform entrance carries the guard", async () => {
     const { readFileSync } = await import("node:fs");
     const path = await import("node:path");
     const root = process.cwd();

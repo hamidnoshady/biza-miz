@@ -122,6 +122,34 @@ describe("desktopServerEnvironment", () => {
     }
   });
 
+  // Issue #1194 — the customer controls the machine's environment. Neither a
+  // role override nor a test-mode switch inherited from it may reach the
+  // server child, and both desktop modes spawn the same binary.
+  it("cannot be flipped to central or test mode by an inherited environment", () => {
+    const inherited = {
+      DEPLOYMENT_ROLE: process.env.DEPLOYMENT_ROLE,
+      NODE_ENV: process.env.NODE_ENV,
+      LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK:
+        process.env.LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK,
+    };
+    const mutable = process.env as Record<string, string | undefined>;
+    mutable.DEPLOYMENT_ROLE = "central";
+    mutable.NODE_ENV = "test";
+    mutable.LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK = "1";
+    try {
+      const serverEnv = backendManager.desktopServerEnvironment(CONFIG, "postgres://runtime", "1.2.3");
+      const env = backendManager.desktopServerProcessEnvironment(serverEnv);
+      expect(env.DEPLOYMENT_ROLE).toBe("site");
+      expect(env.NODE_ENV).toBe("production");
+      expect(env.LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK).toBeUndefined();
+    } finally {
+      for (const [key, value] of Object.entries(inherited)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("hardens only newly initialized clusters with checksums and SCRAM", () => {
     expect(backendManager.postgresInitdbFlags()).toEqual([
       "--encoding=UTF8",

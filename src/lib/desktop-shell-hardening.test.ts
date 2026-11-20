@@ -64,9 +64,11 @@ describe("the shipped main process has no smoke backdoor", () => {
   it("spawns the server child without a test-loopback opt-in", () => {
     // The old shell forwarded DESKTOP_SMOKE_MARKER to the server together with
     // LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK=1, which is what let the
-    // packaged build redeem a plain-HTTP loopback "cloud". Neither may be set
-    // by the shell any more.
-    expect(backendManager).not.toContain("LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK");
+    // packaged build redeem a plain-HTTP loopback "cloud". The shell must not
+    // set it: the only remaining mention is the child-environment scrub that
+    // deletes a customer-inherited value (issue #1194 defence in depth).
+    expect(backendManager).not.toMatch(/LOCAL_ACTIVATION_ALLOW_TEST_HTTP_LOOPBACK\s*:\s*["']1["']/);
+    expect(backendManager).toContain("TEST_ONLY_ENVIRONMENT");
   });
 
   it("ships an external acceptance harness that is not part of the package", () => {
