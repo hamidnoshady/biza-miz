@@ -21,7 +21,7 @@
  */
 import { readFileSync } from "fs";
 import { join } from "path";
-import { chromium, type Browser, type Route } from "playwright-core";
+import { chromium, type Browser, type Page, type Route } from "playwright-core";
 import { chromiumLaunchArgs, findChromiumExecutable } from "../chromium-executable";
 
 const FONT_PATH = join(process.cwd(), "src", "app", "fonts", "Vazirmatn-Variable.woff2");
@@ -35,6 +35,33 @@ export const RENDER_TIMEOUT_MS = 20_000;
 
 /** Ceiling for one inline document (the same 8 MB the print route accepts). */
 export const MAX_DOCUMENT_BYTES = 8_000_000;
+
+/**
+ * Captures of a freshly launched browser before its compositor has produced a
+ * frame can be refused by CDP ("Page.captureScreenshot: Unable to capture
+ * screenshot") — the first label render of the Windows integration shard hit it
+ * twice while every later render of the same run passed. That is a transient
+ * browser state, not a bad document, so the capture is retried as-is: same
+ * page, same timeout, same bytes. Nothing else is retried, and a page that
+ * really cannot be captured still fails on the last attempt.
+ */
+const CAPTURE_ATTEMPTS = 3;
+const CAPTURE_RETRY_DELAY_MS = 250;
+
+function isTransientCaptureError(error: unknown): boolean {
+  return error instanceof Error && /Unable to capture screenshot/.test(error.message);
+}
+
+async function captureFullPage(page: Page, timeoutMs: number): Promise<Buffer> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await page.screenshot({ type: "png", fullPage: true, timeout: timeoutMs });
+    } catch (error) {
+      if (attempt >= CAPTURE_ATTEMPTS || !isTransientCaptureError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, CAPTURE_RETRY_DELAY_MS * attempt));
+    }
+  }
+}
 
 function getFontDataUri(): string {
   if (!fontDataUri) {
@@ -119,7 +146,7 @@ export async function renderHtmlToPng(html: string, widthPx: number, options: { 
     const page = await context.newPage();
     page.setDefaultTimeout(RENDER_TIMEOUT_MS);
     await page.setContent(withEmbeddedFont(html), { waitUntil: "load", timeout: RENDER_TIMEOUT_MS });
-    const buffer = await page.screenshot({ type: "png", fullPage: true, timeout: RENDER_TIMEOUT_MS });
+    const buffer = await captureFullPage(page, RENDER_TIMEOUT_MS);
     const height = pngHeightOf(buffer);
     if (height != null && height > MAX_RENDER_HEIGHT_PX) throw new Error("document_too_tall");
     return buffer;
