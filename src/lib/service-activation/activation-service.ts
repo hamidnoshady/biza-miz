@@ -63,6 +63,26 @@ import {
 } from "./catalog";
 import { serviceTariffAt, type ServicePriceRow } from "./pricing-service";
 import { effectiveRetentionPolicy } from "./retention-service";
+import {
+  readServiceChargeContext,
+  readRentalSettlementContext,
+  setupChargeFromContext,
+} from "../billing/resolver/service";
+import { splitSegmentByCoverage } from "../billing/resolver/prepaid";
+import type { ResolvedCharge } from "../billing/resolver/precedence";
+
+/**
+ * The reason a setup amount differs from the published tariff, in the
+ * vocabulary `quoteServiceActivation` reports. A discount is still an approved
+ * policy, so it is reported as an inclusion; a zero tariff is its own fact.
+ */
+function setupWaivedReasonFor(charge: ResolvedCharge): "plan_included" | "published_free" | null {
+  const line = charge.lines[0];
+  if (!line) return null;
+  if (line.explanation.code === "published_free") return "published_free";
+  if (line.inclusionRial > 0 || line.discountRial > 0) return "plan_included";
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Rows and types
@@ -635,11 +655,23 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
       });
     }
 
-    const tariff = await serviceTariffAt(identity, nowIso, client);
+    const setupContext = await readServiceChargeContext({ businessId, identity, at: nowIso });
+    const tariff = setupContext.tariff;
     if (!tariff) return { status: "not_configured" };
+    const resolvedSetup = setupChargeFromContext(setupContext, nowIso);
 
     const balance = await lockWallet(client, businessId);
-    const quote = quoteServiceActivation({ identity, tariff, walletBalanceRial: balance, nowIso });
+    const quote = quoteServiceActivation({
+      identity,
+      tariff,
+      walletBalanceRial: balance,
+      nowIso,
+      // The canonical resolver is the only source of a changed setup amount: an
+      // approved plan inclusion or configured discount (ESH-193). A refusal
+      // keeps the published tariff rather than charging zero.
+      setupRialOverride: resolvedSetup.ok ? resolvedSetup.totals.netRial : null,
+      setupWaivedReason: setupWaivedReasonFor(resolvedSetup),
+    });
     if (!quote.eligible) {
       return {
         status: "insufficient_credit",
@@ -647,6 +679,20 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
         balanceRial: balance,
       };
     }
+
+    const setupQuoteJson = JSON.stringify({
+      setupRial: quote.setupRial,
+      hourlyRial: quote.hourlyRial,
+      firstHourRial: quote.firstHourRial,
+      reserveRial: quote.reserveRial,
+      priceVersion: tariff.version,
+      quotedAt: nowIso,
+      // ESH-193: why the amount is what it is, and which policy priced it.
+      policyVersion: setupContext.policyVersion,
+      setupWaivedReason: quote.setupWaivedReason,
+      setupBenefitId: resolvedSetup.lines[0]?.benefitId ?? null,
+      setupExplanation: resolvedSetup.lines[0]?.explanation ?? null,
+    });
 
     const { rows } = await client.query<ActivationDbRow>(
       `INSERT INTO business_service_activations
@@ -661,14 +707,7 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
         identity.key,
         identity.runtimeInstanceId,
         labelFor(identity),
-        JSON.stringify({
-          setupRial: quote.setupRial,
-          hourlyRial: quote.hourlyRial,
-          firstHourRial: quote.firstHourRial,
-          reserveRial: quote.reserveRial,
-          priceVersion: tariff.version,
-          quotedAt: nowIso,
-        }),
+        setupQuoteJson,
         nowIso,
         input.requestId ?? null,
       ],
@@ -719,13 +758,7 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
         tariff.setupEquivalentHours,
         tariff.hourlyRateRial,
         tariff.version,
-        JSON.stringify({
-          setupRial: quote.setupRial,
-          hourlyRial: quote.hourlyRial,
-          firstHourRial: quote.firstHourRial,
-          reserveRial: quote.reserveRial,
-          quotedAt: nowIso,
-        }),
+        setupQuoteJson,
         ledgerId,
         usageEventId,
         nowIso,
@@ -995,7 +1028,19 @@ async function settleIntervalTx(
   }
 
   const rate = Number(interval.hourly_rate_rial);
-  const amount = enabledRialForSeconds(seconds, rate);
+  // ESH-193: prepaid term coverage and approved plan inclusion are applied at
+  // the settlement boundary, on this transaction's own snapshot. Only the
+  // uncovered seconds are rented; the covered seconds are still recorded as
+  // availability in the usage ledger, at zero amount.
+  const rental = await readRentalSettlementContext(client, {
+    businessId: interval.business_id,
+    activationId: interval.activation_id,
+    from: cursor,
+    to: target,
+  });
+  const coverageSplit = splitSegmentByCoverage({ start: cursor, end: target }, rental.coverage);
+  const chargeableSeconds = rental.rentalIncluded ? 0 : coverageSplit.uncoveredSeconds;
+  const amount = enabledRialForSeconds(chargeableSeconds, rate);
 
   // Affordability is checked BEFORE anything is written, so a closing interval
   // can stop at the last covered second without aborting its transaction. A
@@ -1028,7 +1073,12 @@ async function settleIntervalTx(
       rate,
       interval.hourly_price_version,
       amount,
-      JSON.stringify({ closing }),
+      JSON.stringify({
+        closing,
+        coveredSeconds: rental.rentalIncluded ? seconds : coverageSplit.coveredSeconds,
+        rentalIncluded: rental.rentalIncluded,
+        policyVersion: rental.policyVersion,
+      }),
     ],
   );
   if (!claim[0]) {
@@ -1054,7 +1104,7 @@ async function settleIntervalTx(
       kind: "service_runtime",
       direction: "debit",
       amountRial: amount,
-      note: `هزینهٔ فعال بودن «${label}» — ${Math.ceil(seconds / 60)} دقیقه`,
+      note: `هزینهٔ فعال بودن «${label}» — ${Math.ceil(chargeableSeconds / 60)} دقیقه`,
       userId: actorUserId,
       metadata: {
         activationId: interval.activation_id,
@@ -1084,6 +1134,9 @@ async function settleIntervalTx(
       dimensions: {
         intervalId: interval.id,
         priceVersion: interval.hourly_price_version,
+        coveredSeconds: rental.rentalIncluded ? seconds : coverageSplit.coveredSeconds,
+        rentalIncluded: rental.rentalIncluded,
+        policyVersion: rental.policyVersion,
       },
       ratedAmountRial: amount,
       sourceReference: interval.id,

@@ -1386,6 +1386,13 @@ export async function voidBillingInvoice(invoiceId: string): Promise<InvoiceReco
 // ---------------------------------------------------------------------------
 
 export function addMonths(isoDate: string, months: number): string {
+  // Positive month arithmetic is the billing calendar's one implementation, so
+  // a subscription period and a quote period cannot clamp a month end
+  // differently. Zero/negative offsets keep their historical behaviour.
+  const parsed = new Date(isoDate);
+  if (!Number.isNaN(parsed.getTime()) && Number.isInteger(months) && months > 0) {
+    return addCalendarMonths(isoDate, months);
+  }
   const date = new Date(isoDate);
   const day = date.getUTCDate();
   date.setUTCMonth(date.getUTCMonth() + months);

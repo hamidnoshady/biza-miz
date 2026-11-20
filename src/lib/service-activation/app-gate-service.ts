@@ -75,6 +75,39 @@ export async function appServiceActivationStates(
 }
 
 /**
+ * ESH-193 — is this app's mutating surface restricted because the paid service
+ * is unpaid? True only when BOTH facts hold:
+ *
+ *   - the business is explicitly enrolled in a reviewed commercial policy
+ *     (`business_commercial_policies`), and
+ *   - its app activation is suspended for insufficient credit.
+ *
+ * A business with no enrolment row is grandfathered and returns false, which is
+ * what keeps every existing customer's access exactly as it was. One indexed
+ * query, called only when the caller already saw a suspension state.
+ */
+export async function appServiceCommercialRestriction(
+  businessId: string,
+  appKey: string,
+): Promise<boolean> {
+  return withTenant(businessId, async () => {
+    const { rows } = await query<{ restricted: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM business_commercial_policies p
+           JOIN business_service_activations a ON a.business_id = p.business_id
+          WHERE p.business_id = $1
+            AND a.service_kind = 'app'
+            AND a.service_key = $2
+            AND a.state = 'suspended_insufficient_credit'
+       ) AS restricted`,
+      [businessId, appKey],
+    );
+    return rows[0]?.restricted === true;
+  });
+}
+
+/**
  * App and Workspace work remains available for legacy tenants with no
  * activation row and for every state except a deliberate customer disable.
  * In particular, credit/platform suspension and legal hold do not masquerade
