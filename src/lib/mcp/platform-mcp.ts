@@ -134,6 +134,22 @@ import {
   adminUpdateKbTag,
   adminDeleteKbTag,
 } from "../knowledge-service";
+import { parseStudioTourInput, TOUR_STUDIO_TEMPLATES } from "../tour-studio";
+import { KNOWLEDGE_PAGES } from "../knowledge-base";
+import { TOUR_ANCHORS } from "../tours";
+import { ALL_PERMISSIONS } from "../permissions";
+import { INDUSTRIES } from "../industries";
+import {
+  archiveStudioTour,
+  deleteStudioTourDraft,
+  getStudioTour,
+  listStudioTourRevisions,
+  listStudioTours,
+  publishStudioTour,
+  rollbackStudioTour,
+  saveStudioTour,
+  StudioTourServiceError,
+} from "../tour-studio-service";
 import {
   listMirroredCmsSites,
   resolvePlatformCmsConfig,
@@ -481,6 +497,12 @@ interface PlatformToolInput {
   write?: Record<string, unknown> | null;
   sessionId?: string;
   active?: boolean;
+  // Tour Studio management (platform-owned Knowledge content; never tenant-bridged).
+  tourId?: string;
+  pageKey?: string;
+  version?: number;
+  expectedVersion?: number;
+  toVersion?: number;
 }
 
 export interface PlatformMcpTool {
@@ -1214,6 +1236,83 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
   },
   {
+    name: "get_guided_tour_authoring_options",
+    description: "Return canonical pages, spotlight anchors, reusable templates, industries and permissions accepted by Tour Studio authoring validation.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_guided_tours",
+    description: "List platform Tour Studio entries, including drafts and archived tours. Optional pageKey and status filters.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        pageKey: { type: "string", description: "Canonical page key, for example page:/crm/audit." },
+        status: { type: "string", enum: ["draft", "published", "archived"] },
+      },
+    },
+  },
+  {
+    name: "get_guided_tour",
+    description: "Load one Tour Studio record and its immutable revision history by row UUID.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: { tourId: { type: "string" } }, required: ["tourId"] },
+  },
+  {
+    name: "save_guided_tour",
+    description: "Create or save a Tour Studio draft. record contains tourKey, pageKey, title, description, eligibility and steps; pass expectedVersion to prevent overwriting a newer edit.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: {
+        record: { type: "object", description: "Tour content: tourKey, pageKey, title, description, eligibility, steps." },
+        expectedVersion: { type: "number", description: "Current saved version for optimistic concurrency; omit only when creating." },
+      },
+      required: ["record"],
+    },
+  },
+  {
+    name: "publish_guided_tour",
+    description: "Publish the current saved version of a guided tour to eligible members. Requires the version just reviewed.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { tourId: { type: "string" }, version: { type: "number" } },
+      required: ["tourId", "version"],
+    },
+  },
+  {
+    name: "rollback_guided_tour",
+    description: "Restore a prior valid Tour Studio revision as a newly published revision.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: {
+      type: "object",
+      properties: { tourId: { type: "string" }, toVersion: { type: "number" } },
+      required: ["tourId", "toVersion"],
+    },
+  },
+  {
+    name: "archive_guided_tour",
+    description: "Archive a guided tour so it is no longer offered to members while preserving its history.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: { tourId: { type: "string" } }, required: ["tourId"] },
+  },
+  {
+    name: "delete_draft_guided_tour",
+    description: "Permanently delete a never-published draft. Published or archived tours are preserved and must be archived instead.",
+    capability: "knowledge.manage",
+    bridged: false,
+    inputSchema: { type: "object", properties: { tourId: { type: "string" } }, required: ["tourId"] },
+  },
+  {
     name: "list_cms_sites",
     description: "List websites mirrored from the CMS fleet (the mirror is the console's single source).",
     capability: "system.read",
@@ -1450,6 +1549,18 @@ export async function callPlatformMcpTool(
     });
     throw err;
   }
+}
+
+function requireTourId(value: string | undefined): string {
+  if (!value?.trim()) throw new Error("tourId is required");
+  return value;
+}
+
+function requirePositiveVersion(value: number | undefined, field: string): number {
+  if (value === undefined || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${field} must be a positive integer`);
+  }
+  return value;
 }
 
 /** Per-business batch invocation results: the "outcomes" map has exactly one
@@ -1994,6 +2105,15 @@ async function executePlatformTool(
         return { perBusiness: results };
       }
       // ── Batch BN — knowledge, CMS fleet reads, backup, system dials ───────
+      case "get_guided_tour_authoring_options": {
+        return {
+          pages: KNOWLEDGE_PAGES,
+          anchors: Object.values(TOUR_ANCHORS).sort(),
+          templates: TOUR_STUDIO_TEMPLATES,
+          industries: INDUSTRIES,
+          permissions: ALL_PERMISSIONS,
+        };
+      }
       case "list_kb_articles": {
         const articles = await adminListKbArticles({
           q: arg.query || undefined,
@@ -2055,6 +2175,74 @@ async function executePlatformTool(
         await adminDeleteKbArticle(arg.id);
         await platformAuditSafe(connection, arg.id, tool.name, "ok", { action: "knowledge_article.delete" });
         return { ok: true, id: arg.id };
+      }
+      case "list_guided_tours": {
+        const tours = await listStudioTours();
+        return {
+          tours: tours.filter((tour) =>
+            (!arg.pageKey || tour.pageKey === arg.pageKey) &&
+            (!arg.status || tour.status === arg.status),
+          ),
+        };
+      }
+      case "get_guided_tour": {
+        const id = requireTourId(arg.tourId);
+        const tour = await getStudioTour(id);
+        if (!tour) throw new StudioTourServiceError("not_found");
+        return { tour, revisions: await listStudioTourRevisions(id) };
+      }
+      case "save_guided_tour": {
+        if (!arg.record || typeof arg.record !== "object" || Array.isArray(arg.record)) {
+          throw new Error("record must contain valid Tour Studio content");
+        }
+        if (arg.expectedVersion !== undefined) requirePositiveVersion(arg.expectedVersion, "expectedVersion");
+        const parsed = parseStudioTourInput(arg.record);
+        if (!parsed.ok) throw new Error(`${parsed.error}: ${parsed.detail}`);
+        const saved = await saveStudioTour(parsed.input, connection.adminId, arg.expectedVersion ?? null);
+        await platformAuditSafe(connection, saved.id, tool.name, "ok", {
+          action: saved.created ? "knowledge_tour.create" : "knowledge_tour.save",
+          tourKey: parsed.input.tourKey,
+          version: saved.version,
+        });
+        return { ok: true, ...saved };
+      }
+      case "publish_guided_tour": {
+        const id = requireTourId(arg.tourId);
+        const version = requirePositiveVersion(arg.version, "version");
+        const tour = await publishStudioTour(id, connection.adminId, version);
+        await platformAuditSafe(connection, id, tool.name, "ok", {
+          action: "knowledge_tour.publish",
+          tourKey: tour.tourKey,
+          version: tour.publishedVersion,
+        });
+        return { ok: true, tour };
+      }
+      case "rollback_guided_tour": {
+        const id = requireTourId(arg.tourId);
+        const toVersion = requirePositiveVersion(arg.toVersion, "toVersion");
+        const tour = await rollbackStudioTour(id, toVersion, connection.adminId);
+        await platformAuditSafe(connection, id, tool.name, "ok", {
+          action: "knowledge_tour.rollback",
+          tourKey: tour.tourKey,
+          restoredFrom: toVersion,
+          version: tour.publishedVersion,
+        });
+        return { ok: true, tour };
+      }
+      case "archive_guided_tour": {
+        const id = requireTourId(arg.tourId);
+        const tour = await archiveStudioTour(id, connection.adminId);
+        await platformAuditSafe(connection, id, tool.name, "ok", {
+          action: "knowledge_tour.archive",
+          tourKey: tour.tourKey,
+        });
+        return { ok: true, tour };
+      }
+      case "delete_draft_guided_tour": {
+        const id = requireTourId(arg.tourId);
+        await deleteStudioTourDraft(id);
+        await platformAuditSafe(connection, id, tool.name, "ok", { action: "knowledge_tour.delete_draft" });
+        return { ok: true, id };
       }
       case "list_cms_sites": {
         return { sites: await listMirroredCmsSites() };

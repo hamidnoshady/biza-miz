@@ -1702,6 +1702,20 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     note: "the management plane of this very feature; mint/list/revoke exist as HTTP+UI, not MCP verbs",
   },
   {
+    id: "platform.knowledge-tours",
+    module: "Platform — Content",
+    entity: "Tour Studio authoring, publication and revision history",
+    routes: ["platform/knowledge/tours"],
+    ops: {
+      listDetail: ["list_guided_tours", "get_guided_tour"],
+      create: ["save_guided_tour"],
+      update: ["save_guided_tour"],
+      lifecycle: ["publish_guided_tour", "rollback_guided_tour", "archive_guided_tour", "delete_draft_guided_tour"],
+    },
+    note: "platform-owned tours are managed through the existing Tour Studio service; tools require knowledge.manage, validate content and versions server-side, and audit every mutation",
+    test: "src/app/api/platform/knowledge/tours/route.test.ts + src/lib/mcp/platform-mcp.tours.test.ts",
+  },
+  {
     id: "platform.company",
     module: "Platform — Company",
     entity: "Platform's own company surfaces (CRM, growth, workspace, websites, reports, setup)",
