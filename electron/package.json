@@ -66,6 +66,7 @@
       "support-companion.js",
       "maintenance-gate.js",
       "desktop-release-public-key.pem",
+      "desktop-release-keys.json",
       "package.json",
       "!node_modules/@embedded-postgres/windows-x64/native/bin/stackbuilder.exe",
       "!node_modules/@embedded-postgres/windows-x64/native/bin/wxbase*.dll",

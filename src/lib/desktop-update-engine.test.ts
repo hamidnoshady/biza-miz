@@ -10,15 +10,17 @@ const { DesktopUpdateEngine, canonicalManifestPayload, compareSemVer, safeManife
   DesktopUpdateEngine: new (input: Record<string, unknown>) => {
     check(value: unknown): { state: string; errorCode: string | null };
     checkPersistedTarget(): { state: string; errorCode: string | null };
-    publicState(): { state: string; backupPath?: string | null };
+    publicState(): { state: string; backupPath?: string | null; releaseSequences?: Record<string, number> };
     dir: string;
     download(): Promise<unknown>;
     launchInstaller(): Promise<{ state: string }>;
     stageVerifiedInstaller(): Promise<{ path: string; identity: Record<string, unknown> }>;
+    verifyInstallerBytes(path: string, manifest: unknown): Promise<Record<string, unknown>>;
+    completeStartupHealth(): { state: string };
     on(event: string, listener: (state: { state: string }) => void): void;
     targetPath: string;
     backupDir: string;
-    state: { target: unknown; installerPath: string | null; backupPath: string | null };
+    state: { target: unknown; installerPath: string | null; backupPath: string | null; state: string; releaseSequences?: Record<string, number> };
     pgTool(name: string): string;
     prunePreUpdateBackups(preservePath?: string): string[];
     createVerifiedBackup(backend: unknown): Promise<string>;
@@ -262,5 +264,116 @@ describe("packaged Desktop Update Engine", () => {
     expect(removed.sort()).toEqual([files[0], files[1]].sort());
     expect(fs.readdirSync(updater.backupDir).filter((name) => name.endsWith(".dump"))).toHaveLength(5);
     expect(fs.existsSync(unrelated)).toBe(true);
+  });
+});
+
+describe("certificate-free schema 2 manifests", () => {
+  const ed = crypto.generateKeyPairSync("ed25519");
+  const edPublicPem = ed.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const edKeyId = `sha256:${crypto.createHash("sha256").update(ed.publicKey.export({ type: "spki", format: "der" })).digest("hex")}`;
+  const payload = Buffer.from("unsigned installer bytes");
+  const payloadSha = crypto.createHash("sha256").update(payload).digest("hex");
+
+  function v2(overrides: Record<string, unknown> = {}) {
+    const value = {
+      schemaVersion: 2,
+      appId: "bizamiz-desktop",
+      version: "1.2.0",
+      releaseSequence: 1020,
+      buildCommit: "a".repeat(40),
+      buildId: "build-run-1",
+      channel: "stable",
+      platform: "win32",
+      architecture: process.arch,
+      releasedAt: "2026-11-21T08:00:00.000Z",
+      expiresAt: "2027-05-20T08:00:00.000Z",
+      minimumSupportedVersion: "1.0.0",
+      mandatory: false,
+      installer: { url: "https://github.com/example/release.exe", sha256: payloadSha, size: payload.length, signatureRequired: false },
+      database: { migrationVersion: 311, minimumSchemaVersion: 1, maximumSchemaVersion: 311, backupRequired: true },
+      releaseNotes: ["certificate-free"],
+      recovery: { knownGoodVersion: null, notes: null },
+      signatureAlgorithm: "ed25519",
+      signingKeyId: edKeyId,
+      manifestSignature: "",
+      ...overrides,
+    };
+    value.manifestSignature = crypto.sign(null, Buffer.from(canonicalManifestPayload(value)), ed.privateKey).toString("base64");
+    return value;
+  }
+
+  function v2Engine(version = "1.0.0", extra: Record<string, unknown> = {}) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-update-v2-"));
+    roots.push(root);
+    return new DesktopUpdateEngine({
+      app: { getPath: () => root, getVersion: () => version },
+      logger: { warn: () => undefined, info: () => undefined },
+      manifestKeyring: { schemaVersion: 1, keys: [{ id: edKeyId, algorithm: "ed25519", publicKeyPem: edPublicPem }] },
+      platform: "win32",
+      architecture: process.arch,
+      ...extra,
+    });
+  }
+
+  it("accepts an unsigned installer when the signed manifest allows it", async () => {
+    const value = v2();
+    expect(safeManifest(value)).toMatchObject({ schemaVersion: 2, installer: { signatureRequired: false } });
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-update-v2-file-"));
+    roots.push(root);
+    const installer = path.join(root, "setup.exe");
+    fs.writeFileSync(installer, payload);
+    await expect(v2Engine().verifyInstallerBytes(installer, value)).resolves.toMatchObject({ version: "1.2.0" });
+  });
+
+  it("still requires the signed manifest and the exact key id", () => {
+    const tampered = v2({ version: "1.2.1" });
+    (tampered.installer as Record<string, unknown>).sha256 = "b".repeat(64);
+    expect(v2Engine().check(tampered)).toMatchObject({ state: "failed", errorCode: "manifest_signature_invalid" });
+    expect(v2Engine().check(v2({ signingKeyId: `sha256:${"0".repeat(64)}` })))
+      .toMatchObject({ state: "failed", errorCode: "manifest_signing_key_unknown" });
+  });
+
+  it("rejects replay, expiry, wrong platform and a downgrade", () => {
+    const rollback = v2Engine();
+    rollback.state.releaseSequences = { stable: 1020 };
+    expect(rollback.check(v2({ version: "1.2.1", releaseSequence: 1020 })))
+      .toMatchObject({ state: "failed", errorCode: "release_sequence_rollback" });
+    const expired = v2Engine();
+    expect(expired.check(v2({
+      version: "1.2.2", releaseSequence: 1022,
+      releasedAt: new Date(Date.now() - 10 * 86_400_000).toISOString(),
+      expiresAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+    }))).toMatchObject({ state: "failed", errorCode: "manifest_expired" });
+    expect(v2Engine("1.0.0", { platform: "linux" }).check(v2({ version: "1.2.3", releaseSequence: 1023 })))
+      .toMatchObject({ state: "failed", errorCode: "manifest_platform_mismatch" });
+    expect(v2Engine("2.0.0").check(v2({ version: "1.2.3", releaseSequence: 1023 })))
+      .toMatchObject({ state: "no_update" });
+  });
+
+  it("requires publisher and thumbprint when Authenticode is requested", () => {
+    const installer = v2().installer as Record<string, unknown>;
+    expect(() => safeManifest(v2({ installer: { ...installer, signatureRequired: true } })))
+      .toThrow("expected_publisher_missing");
+  });
+
+  it("binds the optional Authenticode pin to the manifest signature", () => {
+    const installer = {
+      ...(v2().installer as Record<string, unknown>),
+      signatureRequired: true,
+      expectedPublisher: "Business Suite",
+      expectedPublisherThumbprint: "A".repeat(40),
+    };
+    const signed = v2({ installer });
+    expect(safeManifest(signed)).toMatchObject({ installer: { signatureRequired: true, expectedPublisher: "Business Suite" } });
+    expect(v2Engine().check({ ...signed, installer: { ...installer, expectedPublisher: "Other" } }))
+      .toMatchObject({ state: "failed", errorCode: "manifest_signature_invalid" });
+  });
+
+  it("records the applied sequence only after a healthy post-update boot", () => {
+    const updater = v2Engine("1.2.0");
+    updater.state.state = "installing";
+    updater.state.target = v2();
+    updater.completeStartupHealth();
+    expect(updater.publicState().releaseSequences).toMatchObject({ stable: 1020 });
   });
 });

@@ -3,6 +3,10 @@
 Desktop update identity is **SemVer**. A Git commit and build ID are provenance and are never
 compared to a version. Central's Docker SHA is exposed separately as Central runtime provenance.
 
+> **Two release paths exist.** The default is certificate-free:
+> `build-desktop-installer.yml` → `windows-release.yml` (see *Certificate-free release trust*
+> below). Steps 1-3 in the flow below describe the optional Authenticode path.
+
 ## End-to-end flow
 
 1. `windows-signed-candidate.yml` embeds `version`, `buildCommit`, `buildId` and `channel`, then
@@ -145,23 +149,136 @@ The platform fleet view uses server-received report time. Reports older than 10 
 reports older than 60 minutes are offline. Unknown, stale, offline, invalid or incompatible devices
 are never shown as compliant green.
 
-## Required production configuration
+## Certificate-free release trust (manifest schema 2)
+
+The default release path no longer needs a paid Windows Authenticode certificate. Trust is:
+
+1. a **detached signature over a deterministic manifest** (Ed25519 preferred, RSA-SHA256 kept for
+   legacy schema 1 manifests);
+2. a **public keyring embedded in `app.asar`** (`electron/desktop-release-keys.json`), never chosen
+   by a server or supplied by the manifest;
+3. the exact installer **SHA-256 and byte size** from that signed manifest;
+4. the existing HTTPS-origin, staging, backup and post-boot health checks.
+
+Authenticode is optional defense-in-depth (`installer.signatureRequired`). When a manifest asks for
+it, the exact publisher and certificate thumbprint are still enforced. A manifest can never disable
+its own signature, the SHA-256 check, the origin check, the backup or the release-sequence rules.
+
+### Manifest schema 2
+
+```json
+{
+  "schemaVersion": 2,
+  "appId": "bizamiz-desktop",
+  "version": "1.0.221",
+  "releaseSequence": 1000221,
+  "buildCommit": "<40-hex>",
+  "buildId": "build-run-...",
+  "channel": "stable",
+  "platform": "win32",
+  "architecture": "x64",
+  "releasedAt": "...",
+  "expiresAt": "...",
+  "minimumSupportedVersion": "1.0.218",
+  "mandatory": false,
+  "installer": { "url": "https://github.com/...", "sha256": "<64-hex>", "size": 123, "signatureRequired": false },
+  "database": { "migrationVersion": 311, "minimumSchemaVersion": 1, "maximumSchemaVersion": 311, "backupRequired": true },
+  "releaseNotes": ["..."],
+  "recovery": { "knownGoodVersion": null, "notes": "..." },
+  "signatureAlgorithm": "ed25519",
+  "signingKeyId": "sha256:<SPKI SHA-256>",
+  "manifestSignature": "<base64>"
+}
+```
+
+Every field except `manifestSignature` is canonicalised and signed. Schema 1 remains byte-for-byte
+compatible for already signed RSA manifests.
+
+### Verification flow
+
+1. The engine validates the manifest shape, version, channel, app id, platform/architecture and
+   `minimumSupportedVersion`.
+2. It resolves `signingKeyId` in the embedded keyring, rejects unknown/revoked/inactive keys,
+   then verifies the signature over the canonical payload.
+3. It rejects a `releaseSequence` at or below the last successfully applied sequence for that
+   channel, a downgrade, an expiry outside the freshness policy and an installer origin outside the
+   allow-list.
+4. It downloads, checks exact size and SHA-256, stages the file, and repeats the size, SHA-256 and
+   signature checks against the staged bytes immediately before execution (TOCTOU protection).
+5. It quiesces the backend, creates and verifies a PostgreSQL backup, installs, and only marks the
+   release successful after the new version boots and passes health checks.
+
+### Anti-rollback, freshness and offline
+
+`releaseSequence` is the primary replay/rollback defence: a successful post-update boot records the
+channel's applied sequence, and a manifest at or below it is refused. Freshness uses `expiresAt`
+with a 24-hour clock-skew grace. If the local clock is before `releasedAt`, expiry is not treated as
+proof of staleness, so an offline device with a wrong clock keeps working; the signature and
+sequence still apply. Offline packages should carry a long expiry (for example 180 days). A local
+clock alone can never authorise an older sequence.
+
+### Required production configuration
 
 The `windows-production` GitHub environment must provide:
 
-- `WINDOWS_EXPECTED_SIGNER`
-- `DESKTOP_RELEASE_PUBLIC_KEY_PEM` (GitHub environment variable and Central environment variable)
-- `DESKTOP_RELEASE_PRIVATE_KEY_PEM` (GitHub environment secret; never configured on a client or Central)
-- `DESKTOP_RELEASE_REGISTRY_URL` (full Central endpoint URL,
-  e.g. `https://…/api/desktop-releases/promote`)
-- `DESKTOP_RELEASE_PUBLISH_TOKEN` (secret)
+- `DESKTOP_RELEASE_ED25519_PRIVATE_KEY_PEM` (secret; never on a client or Central)
+- `DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM` (variable, also configured on Central)
+- `DESKTOP_RELEASE_PUBLIC_KEYS_JSON` (repository variable; the keyring embedded in the build)
+- `DESKTOP_RELEASE_REGISTRY_URL` (full Central endpoint, e.g. `https://.../api/desktop-releases/promote`)
+- `DESKTOP_RELEASE_PUBLISH_TOKEN` (secret; the same value on Central)
 
-Generate a protected RSA key pair outside the repository. The candidate workflow embeds only the
-public key, while the production workflow signs the canonical manifest with the private key and
-checks that the pair matches. Central verifies signatures before registration in production and
-Electron verifies them again before accepting online or offline packages. Rotate keys only through
-a signed client release that embeds the next public key before manifests switch signers.
+Keep `DESKTOP_RELEASE_PUBLIC_KEY_PEM` and `DESKTOP_RELEASE_PRIVATE_KEY_PEM` while any schema 1
+client remains. They are not used by the certificate-free workflow. The optional Authenticode path
+additionally uses `WINDOWS_SIGNING_PROVIDER`, `WINDOWS_EXPECTED_SIGNER` and
+`WINDOWS_EXPECTED_SIGNER_THUMBPRINT`.
 
-Central must hold the same token as `DESKTOP_RELEASE_PUBLISH_TOKEN`. Normal platform and tenant
+Central must hold `DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM` (or the same keyring) to verify a
+registered manifest, and the same `DESKTOP_RELEASE_PUBLISH_TOKEN`. Normal platform and tenant
 sessions cannot use the pipeline endpoint. Installer URLs are product metadata; raw storage
 credentials do not exist in the release model.
+
+### Publishing a certificate-free release
+
+1. Let `build-desktop-installer.yml` build and accept the version on `main`; it records
+   `desktop-vX.Y.Z` and uploads `business-suite-desktop-installer-X.Y.Z`.
+2. Run `windows-release.yml` with that run id, version, channel, `minimum_supported_version`,
+   `migration_version`, release note and `release_sequence`. It reuses the accepted bytes, generates
+   and signs the schema 2 manifest, publishes the GitHub Release, verifies the published bytes and
+   registers Central as `published / internal / 0%`.
+3. Promote the release for the intended scope in `/platform/updates`. A registered release reaches
+   no device before that promotion.
+
+`windows-production-release.yml` remains available for an optional Authenticode-signed release. Do
+not run both workflows for the same version.
+
+### Key rotation and revocation
+
+1. Add the next public key to `DESKTOP_RELEASE_PUBLIC_KEYS_JSON` and ship a client release that
+   embeds it **before** signing anything with the new key.
+2. Sign new manifests with the new `signingKeyId`; keep the previous key in the ring for clients
+   that have not updated yet.
+3. Mark a compromised key `revoked: true` in a new shipped keyring and stop signing with it. A
+   revoked key is refused even if an old manifest is replayed.
+4. Never accept a replacement key from a manifest, Central, or an environment variable in a
+   packaged build. `DESKTOP_ALLOW_RELEASE_KEY_OVERRIDE` is a test/migration-only escape hatch and
+   must not be set on production devices.
+
+### Migrating 1.0.218 and 1.0.220
+
+Those builds shipped the placeholder key (and older code that only understands required
+Authenticode). They cannot verify a schema 2 manifest, so the first schema 2 build needs **one
+manual install**:
+
+1. Back up the business database through Settings → Backups.
+2. Install the schema 2 installer from its GitHub Release (Unknown Publisher/SmartScreen may appear
+   because it is not Authenticode-signed).
+3. Start Bizamiz, confirm the version and that the local database/device identity is intact.
+4. Future releases arrive through the normal in-app updater.
+
+The temporary `DESKTOP_RELEASE_PUBLIC_KEY_PEM` user environment variable used during diagnosis is
+not a production trust mechanism. Remove it after the manual upgrade. A packaged build ignores
+environment trust overrides unless `DESKTOP_ALLOW_RELEASE_KEY_OVERRIDE=1`.
+
+Manifest signing authenticates an update to Bizamiz's updater; it does not create Windows publisher
+identity. Running an installer manually outside Bizamiz can still show Unknown Publisher,
+SmartScreen or UAC warnings.

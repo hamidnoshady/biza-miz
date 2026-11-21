@@ -33,6 +33,14 @@ type Channel = "stable" | "beta" | "internal";
 
 interface Release {
   id: string;
+  schemaVersion?: 1 | 2;
+  appId?: string | null;
+  signatureAlgorithm?: "ed25519" | "rsa-sha256" | null;
+  signingKeyId?: string | null;
+  releaseSequence?: number | null;
+  platform?: string | null;
+  architecture?: string | null;
+  expiresAt?: string | null;
   version: string;
   buildCommit: string;
   buildId: string;

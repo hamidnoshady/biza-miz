@@ -93,3 +93,51 @@ describe("the Cloud and Desktop pipelines stay isolated", () => {
     expect(promoteRoute).not.toContain("DESKTOP_RELEASE_PRIVATE_KEY_PEM");
   });
 });
+
+describe("certificate-free windows-release.yml -> Central", () => {
+  const certificateFree = read(".github", "workflows", "windows-release.yml");
+  const keys = payloadKeys(certificateFree);
+
+  it("posts every field Central needs for a schema 2 release", () => {
+    expect(keys.sort()).toEqual([
+      "architecture", "buildCommit", "buildId", "channel", "expectedPublisher", "expectedPublisherThumbprint",
+      "expiresAt", "installerSha256", "installerSize", "installerUrl", "knownGoodReleaseId", "mandatory",
+      "manifestSignature", "maximumSchemaVersion", "migrationVersion", "minimumSchemaVersion",
+      "minimumSupportedVersion", "platform", "recoveryNotes", "releaseNotes", "releaseSequence",
+      "releasedAt", "rolloutPercentage", "rolloutState", "schemaVersion", "signatureAlgorithm",
+      "signatureRequired", "signingKeyId", "status", "version",
+    ]);
+  });
+
+  it("validates a certificate-free payload without a publisher pin", () => {
+    const previous = process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM;
+    delete process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM;
+    try {
+      const payload = {
+        schemaVersion: 2, version: "1.2.3", buildCommit: "abcdef0123456789", buildId: "build-run-1", channel: "stable",
+        status: "published", rolloutState: "internal", rolloutPercentage: 0, minimumSupportedVersion: "1.0.0",
+        mandatory: false, installerUrl: "https://github.com/example/product/releases/download/desktop-v1.2.3/setup.exe",
+        installerSha256: "a".repeat(64), installerSize: 1234, manifestSignature: "A".repeat(88),
+        signatureAlgorithm: "ed25519", signingKeyId: `sha256:${"b".repeat(64)}`, releaseSequence: 1002003,
+        platform: "win32", architecture: "x64", releasedAt: "2026-11-21T08:00:00.000Z",
+        expiresAt: "2027-05-20T08:00:00.000Z", signatureRequired: false, expectedPublisher: null,
+        expectedPublisherThumbprint: null, migrationVersion: 311, minimumSchemaVersion: 1,
+        maximumSchemaVersion: 311, releaseNotes: ["note"], recoveryNotes: null, knownGoodReleaseId: null,
+      };
+      expect(validateDesktopReleaseInput(payload)).toMatchObject({ ok: true });
+      expect(validateDesktopReleaseInput({ ...payload, signatureRequired: true, expectedPublisher: null, expectedPublisherThumbprint: null }))
+        .toMatchObject({ ok: false, error: "invalid_expected_publisher" });
+    } finally {
+      if (previous !== undefined) process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM = previous;
+    }
+  });
+
+  it("uses the protected Ed25519 key and never requires Authenticode", () => {
+    expect(certificateFree).toContain("DESKTOP_RELEASE_ED25519_PRIVATE_KEY_PEM");
+    expect(certificateFree).toContain("DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM");
+    expect(certificateFree).toContain("signatureAlgorithm = 'ed25519'");
+    expect(certificateFree).toContain("signatureRequired = $false");
+    expect(certificateFree).not.toContain("WINDOWS_EXPECTED_SIGNER");
+    expect(certificateFree).not.toContain("verify-windows-signatures.ps1");
+  });
+});

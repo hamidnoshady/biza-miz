@@ -24,6 +24,12 @@ const STATES = new Set([
   "verifying_health", "success", "failed", "recovery_required",
 ]);
 const CHANNELS = new Set(["stable", "beta", "internal"]);
+const RELEASE_APP_ID = "bizamiz-desktop";
+const MANIFEST_ALGORITHMS = new Set(["ed25519", "rsa-sha256"]);
+const RELEASE_PLATFORMS = new Set(["win32"]);
+const RELEASE_ARCHITECTURES = new Set(["x64", "arm64", "ia32"]);
+/** Clock-tolerant freshness: an hour of skew must not block a valid release. */
+const MANIFEST_EXPIRY_GRACE_MS = 24 * 3_600_000;
 const PRE_UPDATE_BACKUP_RETENTION = 5;
 // Issue #1000 - progress used to be persisted (and emitted over IPC) once per
 // received chunk. Four updates a second is enough for a progress bar and keeps
@@ -63,7 +69,7 @@ function compareSemVer(left, right) {
   return 0;
 }
 
-function canonicalManifestPayload(manifest) {
+function canonicalManifestPayloadV1(manifest) {
   return JSON.stringify({
     version: manifest.version,
     buildCommit: manifest.buildCommit,
@@ -93,10 +99,68 @@ function canonicalManifestPayload(manifest) {
   });
 }
 
+/**
+ * Schema 2 binds everything that can select or execute installer bytes, plus
+ * the app identity, platform/architecture, release sequence, freshness and the
+ * id of the key that signed it. Authenticode is optional here, never the
+ * manifest signature.
+ */
+function canonicalManifestPayloadV2(manifest) {
+  return JSON.stringify({
+    schemaVersion: 2,
+    appId: manifest.appId,
+    version: manifest.version,
+    releaseSequence: manifest.releaseSequence,
+    buildCommit: manifest.buildCommit,
+    buildId: manifest.buildId,
+    channel: manifest.channel,
+    platform: manifest.platform,
+    architecture: manifest.architecture,
+    releasedAt: manifest.releasedAt,
+    expiresAt: manifest.expiresAt ?? null,
+    minimumSupportedVersion: manifest.minimumSupportedVersion,
+    mandatory: manifest.mandatory,
+    installer: {
+      url: manifest.installer.url,
+      sha256: manifest.installer.sha256,
+      size: manifest.installer.size,
+      signatureRequired: manifest.installer.signatureRequired === true,
+      ...(manifest.installer.signatureRequired === true ? {
+        expectedPublisher: manifest.installer.expectedPublisher ?? null,
+        expectedPublisherThumbprint: manifest.installer.expectedPublisherThumbprint ?? null,
+      } : {}),
+    },
+    database: {
+      migrationVersion: manifest.database.migrationVersion,
+      minimumSchemaVersion: manifest.database.minimumSchemaVersion,
+      maximumSchemaVersion: manifest.database.maximumSchemaVersion,
+      backupRequired: manifest.database.backupRequired,
+    },
+    releaseNotes: manifest.releaseNotes,
+    recovery: {
+      knownGoodVersion: manifest.recovery?.knownGoodVersion ?? null,
+      notes: manifest.recovery?.notes ?? null,
+    },
+    signatureAlgorithm: manifest.signatureAlgorithm,
+    signingKeyId: manifest.signingKeyId,
+  });
+}
+
+function canonicalManifestPayload(manifest) {
+  return (manifest.schemaVersion ?? 1) >= 2
+    ? canonicalManifestPayloadV2(manifest)
+    : canonicalManifestPayloadV1(manifest);
+}
+
 function safeManifest(value) {
   if (!value || typeof value !== "object") throw updateError("manifest_invalid");
   const manifest = value;
+  const schemaVersion = manifest.schemaVersion === undefined ? 1 : manifest.schemaVersion;
+  if (schemaVersion !== 1 && schemaVersion !== 2) throw updateError("manifest_schema_unsupported");
   if (!parseSemVer(manifest.version)) throw updateError("manifest_version_invalid");
+  if (typeof manifest.buildCommit !== "string" || !/^[0-9a-f]{7,64}$/i.test(manifest.buildCommit)) throw updateError("manifest_commit_invalid");
+  if (typeof manifest.buildId !== "string" || !manifest.buildId.trim() || manifest.buildId.length > 200) throw updateError("manifest_build_invalid");
+  if (typeof manifest.releasedAt !== "string" || !Number.isFinite(Date.parse(manifest.releasedAt))) throw updateError("manifest_release_time_invalid");
   if (typeof manifest.manifestSignature !== "string" || !/^[A-Za-z0-9+/]{80,}={0,2}$/.test(manifest.manifestSignature)) throw updateError("manifest_signature_invalid");
   if (!CHANNELS.has(manifest.channel)) throw updateError("manifest_channel_invalid");
   if (!manifest.installer || typeof manifest.installer !== "object") throw updateError("manifest_installer_invalid");
@@ -104,19 +168,71 @@ function safeManifest(value) {
   if (url.protocol !== "https:") throw updateError("manifest_installer_url_invalid");
   if (!/^[0-9a-f]{64}$/.test(String(manifest.installer.sha256 || ""))) throw updateError("manifest_installer_hash_invalid");
   if (!Number.isSafeInteger(manifest.installer.size) || manifest.installer.size < 1) throw updateError("manifest_installer_size_invalid");
-  if (manifest.installer.signatureRequired !== true) throw updateError("manifest_signature_required");
-  if (typeof manifest.installer.expectedPublisher !== "string" || !manifest.installer.expectedPublisher.trim()) throw updateError("expected_publisher_missing");
-  // Issue #1000 - the certificate thumbprint is part of the signed manifest, so
-  // a release can only be installed by that exact signing certificate. A
-  // missing pin is a refusal, not a fall back to the subject/CN check.
-  const thumbprint = typeof manifest.installer.expectedPublisherThumbprint === "string"
-    ? manifest.installer.expectedPublisherThumbprint.trim()
-    : "";
-  if (!thumbprint) throw updateError("expected_publisher_thumbprint_missing");
-  if (!/^[0-9A-Fa-f]{40}$/.test(thumbprint)) throw updateError("expected_publisher_thumbprint_invalid");
   if (!manifest.database || manifest.database.backupRequired !== true) throw updateError("manifest_backup_required");
   if (!Array.isArray(manifest.releaseNotes) || !manifest.releaseNotes.every((note) => typeof note === "string")) throw updateError("manifest_release_notes_invalid");
-  return JSON.parse(JSON.stringify({ ...manifest, installer: { ...manifest.installer, url: url.toString() } }));
+
+  if (schemaVersion === 1) {
+    if (manifest.installer.signatureRequired !== true) throw updateError("manifest_signature_required");
+    if (typeof manifest.installer.expectedPublisher !== "string" || !manifest.installer.expectedPublisher.trim()) throw updateError("expected_publisher_missing");
+    // Issue #1000 - the certificate thumbprint is part of the signed manifest, so
+    // a release can only be installed by that exact signing certificate. A
+    // missing pin is a refusal, not a fall back to the subject/CN check.
+    const thumbprint = typeof manifest.installer.expectedPublisherThumbprint === "string"
+      ? manifest.installer.expectedPublisherThumbprint.trim()
+      : "";
+    if (!thumbprint) throw updateError("expected_publisher_thumbprint_missing");
+    if (!/^[0-9A-Fa-f]{40}$/.test(thumbprint)) throw updateError("expected_publisher_thumbprint_invalid");
+    return JSON.parse(JSON.stringify({ ...manifest, installer: { ...manifest.installer, url: url.toString() } }));
+  }
+
+  if (manifest.appId !== RELEASE_APP_ID) throw updateError("manifest_app_identity_invalid");
+  if (!MANIFEST_ALGORITHMS.has(manifest.signatureAlgorithm)) throw updateError("manifest_algorithm_invalid");
+  const signingKeyId = typeof manifest.signingKeyId === "string" ? manifest.signingKeyId.trim() : "";
+  if (signingKeyId.length < 8 || signingKeyId.length > 200 || !/^[A-Za-z0-9:+._-]+$/.test(signingKeyId)) {
+    throw updateError("manifest_signing_key_invalid");
+  }
+  if (!Number.isSafeInteger(manifest.releaseSequence) || manifest.releaseSequence < 1) throw updateError("manifest_release_sequence_invalid");
+  if (!RELEASE_PLATFORMS.has(manifest.platform)) throw updateError("manifest_platform_invalid");
+  if (!RELEASE_ARCHITECTURES.has(manifest.architecture)) throw updateError("manifest_architecture_invalid");
+  const minimum = manifest.minimumSupportedVersion;
+  if (minimum !== null && minimum !== undefined && (typeof minimum !== "string" || !parseSemVer(minimum))) throw updateError("manifest_minimum_version_invalid");
+  let expiresAt = null;
+  if (manifest.expiresAt !== null && manifest.expiresAt !== undefined && manifest.expiresAt !== "") {
+    if (typeof manifest.expiresAt !== "string" || !Number.isFinite(Date.parse(manifest.expiresAt))) throw updateError("manifest_expiry_invalid");
+    if (Date.parse(manifest.expiresAt) <= Date.parse(manifest.releasedAt)) throw updateError("manifest_expiry_invalid");
+    expiresAt = new Date(manifest.expiresAt).toISOString();
+  }
+  if (typeof manifest.installer.signatureRequired !== "boolean") throw updateError("manifest_signature_required_invalid");
+  let expectedPublisher = null;
+  let expectedPublisherThumbprint = null;
+  if (manifest.installer.signatureRequired) {
+    if (typeof manifest.installer.expectedPublisher !== "string" || !manifest.installer.expectedPublisher.trim()) throw updateError("expected_publisher_missing");
+    const thumbprint = typeof manifest.installer.expectedPublisherThumbprint === "string"
+      ? manifest.installer.expectedPublisherThumbprint.trim()
+      : "";
+    if (!/^[0-9A-Fa-f]{40}$/.test(thumbprint)) throw updateError("expected_publisher_thumbprint_invalid");
+    expectedPublisher = manifest.installer.expectedPublisher.trim();
+    expectedPublisherThumbprint = thumbprint.toUpperCase();
+  }
+  return {
+    ...manifest,
+    schemaVersion: 2,
+    appId: RELEASE_APP_ID,
+    signingKeyId,
+    releaseSequence: manifest.releaseSequence,
+    platform: manifest.platform,
+    architecture: manifest.architecture,
+    expiresAt,
+    minimumSupportedVersion: typeof minimum === "string" ? minimum : null,
+    mandatory: manifest.mandatory === true,
+    installer: {
+      ...manifest.installer,
+      url: url.toString(),
+      signatureRequired: manifest.installer.signatureRequired,
+      expectedPublisher,
+      expectedPublisherThumbprint,
+    },
+  };
 }
 
 function updateError(code, cause) {
@@ -177,8 +293,33 @@ function certificateMatchesPin(certificate, expectedPublisher, expectedThumbprin
     thumbprintMatchesCertificate(certificate, expectedThumbprint);
 }
 
+/** A keyring is data, never an inline key chosen by the server or manifest. */
+function normalizeKeyring(value) {
+  const empty = { schemaVersion: 1, keys: [] };
+  if (!value) return empty;
+  let parsed = value;
+  if (typeof value === "string") {
+    try { parsed = JSON.parse(value); } catch { return empty; }
+  }
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.keys)) return empty;
+  const keys = parsed.keys
+    .filter((entry) => entry && typeof entry === "object" &&
+      typeof entry.id === "string" && entry.id.trim().length >= 8 && entry.id.length <= 200 &&
+      typeof entry.publicKeyPem === "string" && entry.publicKeyPem.includes("BEGIN PUBLIC KEY") &&
+      MANIFEST_ALGORITHMS.has(entry.algorithm))
+    .map((entry) => ({
+      id: entry.id.trim(),
+      algorithm: entry.algorithm,
+      publicKeyPem: entry.publicKeyPem.replaceAll("\\n", "\n").trim(),
+      notBefore: typeof entry.notBefore === "string" ? entry.notBefore : null,
+      notAfter: typeof entry.notAfter === "string" ? entry.notAfter : null,
+      revoked: entry.revoked === true,
+    }));
+  return { schemaVersion: 1, keys };
+}
+
 class DesktopUpdateEngine extends EventEmitter {
-  constructor({ app, logger, expectedPublisher, allowedOrigins, manifestPublicKey, commandRunner }) {
+  constructor({ app, logger, expectedPublisher, allowedOrigins, manifestPublicKey, manifestKeyring, platform, architecture, commandRunner }) {
     super();
     this.app = app; this.logger = logger;
     this.commandRunner = commandRunner || run;
@@ -189,10 +330,24 @@ class DesktopUpdateEngine extends EventEmitter {
     this.targetPath = path.join(paths.configDir, "update-target.json");
     this.policyPath = path.join(paths.configDir, "update-policy.json");
     this.commandPath = path.join(paths.configDir, "update-command.json");
-    this.expectedPublisher = String(expectedPublisher || process.env.WINDOWS_EXPECTED_SIGNER || "").trim();
-    this.manifestPublicKey = String(manifestPublicKey || process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM || "").replaceAll("\\n", "\n").trim();
+    // A packaged app trusts only keys shipped inside app.asar. Environment
+    // overrides exist for the test harness and a controlled migration window,
+    // never as a way for a server or an operator flag to replace the anchor.
+    const packaged = app?.isPackaged === true;
+    const allowEnvironmentTrust = !packaged || process.env.DESKTOP_ALLOW_RELEASE_KEY_OVERRIDE === "1";
+    this.platform = String(platform || process.platform);
+    this.architecture = String(architecture || process.arch);
+    this.expectedPublisher = String(expectedPublisher || (allowEnvironmentTrust ? process.env.WINDOWS_EXPECTED_SIGNER : "") || "").trim();
+    this.manifestPublicKey = String(manifestPublicKey || (allowEnvironmentTrust ? process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM : "") || "").replaceAll("\\n", "\n").trim();
     if (!this.manifestPublicKey) {
       try { this.manifestPublicKey = fs.readFileSync(path.join(__dirname, "desktop-release-public-key.pem"), "utf8").trim(); } catch { /* fail closed during verification */ }
+    }
+    const environmentKeyring = allowEnvironmentTrust ? process.env.DESKTOP_RELEASE_KEYS_JSON : null;
+    if (manifestKeyring !== undefined) this.manifestKeyring = normalizeKeyring(manifestKeyring);
+    else if (environmentKeyring) this.manifestKeyring = normalizeKeyring(environmentKeyring);
+    else {
+      try { this.manifestKeyring = normalizeKeyring(fs.readFileSync(path.join(__dirname, "desktop-release-keys.json"), "utf8")); }
+      catch { this.manifestKeyring = normalizeKeyring(null); }
     }
     const configured = String(process.env.DESKTOP_UPDATE_ALLOWED_ORIGINS || "").split(",").map((item) => item.trim()).filter(Boolean);
     this.allowedOrigins = new Set([...(allowedOrigins || DEFAULT_ALLOWED_ORIGINS), ...configured]);
@@ -214,6 +369,9 @@ class DesktopUpdateEngine extends EventEmitter {
       // install's visible status. Both are null on an install Central never
       // configured, which behaves exactly as before this layer existed.
       centralPolicy: null, autoInstall: null,
+      // Per-channel anti-rollback counters. A release sequence only ever moves
+      // forward for the channel it was signed for.
+      releaseSequences: {},
       lastCommandSequence: 0, commandResults: [],
     };
   }
@@ -422,13 +580,36 @@ class DesktopUpdateEngine extends EventEmitter {
   }
 
   verifyManifestSignature(manifest) {
+    const schemaVersion = manifest.schemaVersion ?? 1;
+    const payload = Buffer.from(canonicalManifestPayload(manifest));
+    const signature = Buffer.from(manifest.manifestSignature, "base64");
+    if (schemaVersion >= 2) {
+      const entry = this.manifestKeyring.keys.find((key) => key.id === manifest.signingKeyId);
+      if (!entry) throw updateError("manifest_signing_key_unknown");
+      if (entry.revoked) throw updateError("manifest_signing_key_revoked");
+      if (entry.algorithm !== manifest.signatureAlgorithm) throw updateError("manifest_key_algorithm_mismatch");
+      const now = Date.now();
+      if (entry.notBefore && Date.parse(entry.notBefore) > now) throw updateError("manifest_signing_key_not_yet_valid");
+      if (entry.notAfter && Date.parse(entry.notAfter) < now) throw updateError("manifest_signing_key_expired");
+      try {
+        const key = crypto.createPublicKey(entry.publicKeyPem);
+        const valid = manifest.signatureAlgorithm === "ed25519"
+          ? crypto.verify(null, payload, key, signature)
+          : crypto.verify("sha256", payload, key, signature);
+        if (!valid) throw updateError("manifest_signature_invalid");
+      } catch (error) {
+        if (error?.code === "manifest_signature_invalid") throw error;
+        throw updateError("manifest_signature_invalid", error);
+      }
+      return;
+    }
     if (!this.manifestPublicKey) throw updateError("manifest_public_key_missing");
     try {
       const valid = crypto.verify(
         "sha256",
-        Buffer.from(canonicalManifestPayload(manifest)),
+        payload,
         crypto.createPublicKey(this.manifestPublicKey),
-        Buffer.from(manifest.manifestSignature, "base64"),
+        signature,
       );
       if (!valid) throw updateError("manifest_signature_invalid");
     } catch (error) {
@@ -453,6 +634,32 @@ class DesktopUpdateEngine extends EventEmitter {
     }
   }
 
+  /**
+   * Identity, platform and replay checks that are independent of the installed
+   * version. They run only for a manifest that is allowed to replace bytes.
+   */
+  assertManifestApplicable(manifest, { now = new Date() } = {}) {
+    if ((manifest.schemaVersion ?? 1) >= 2) {
+      if (manifest.appId !== RELEASE_APP_ID) throw updateError("manifest_app_identity_invalid");
+      if (manifest.platform !== this.platform) throw updateError("manifest_platform_mismatch");
+      if (manifest.architecture !== this.architecture) throw updateError("manifest_architecture_mismatch");
+      const applied = Number(this.state.releaseSequences?.[manifest.channel] ?? 0);
+      if (manifest.releaseSequence <= applied) throw updateError("release_sequence_rollback");
+      if (manifest.expiresAt) {
+        const released = Date.parse(manifest.releasedAt);
+        // A clock behind the release time is not evidence of expiry; offline
+        // clients keep working and anti-rollback stays sequence-based.
+        if (Number.isFinite(released) && now.getTime() >= released &&
+            now.getTime() > Date.parse(manifest.expiresAt) + MANIFEST_EXPIRY_GRACE_MS) {
+          throw updateError("manifest_expired");
+        }
+      }
+    }
+    if (manifest.minimumSupportedVersion && compareSemVer(this.app.getVersion(), manifest.minimumSupportedVersion) < 0) {
+      throw updateError("installed_version_unsupported");
+    }
+  }
+
   check(manifestValue) {
     this.transition("checking", { checkedAt: new Date().toISOString(), errorCode: null, errorDetail: null });
     try {
@@ -463,9 +670,7 @@ class DesktopUpdateEngine extends EventEmitter {
       const comparison = compareSemVer(this.app.getVersion(), manifest.version);
       if (comparison === null) throw updateError("installed_version_invalid");
       if (comparison >= 0) return this.transition("no_update", { target: manifest, progress: null });
-      if (manifest.minimumSupportedVersion && compareSemVer(this.app.getVersion(), manifest.minimumSupportedVersion) < 0) {
-        throw updateError("installed_version_unsupported");
-      }
+      this.assertManifestApplicable(manifest);
       const targetUrl = new URL(manifest.installer.url);
       if (!this.allowedOrigins.has(targetUrl.origin)) throw updateError("installer_origin_not_allowed");
       const next = this.transition("update_available", { target: manifest, progress: null, installerPath: null, backupPath: null });
@@ -558,7 +763,12 @@ class DesktopUpdateEngine extends EventEmitter {
     if (stat.size !== manifest.installer.size) throw updateError("installer_size_mismatch");
     const digest = await fileSha256(installerPath);
     if (digest !== manifest.installer.sha256) throw updateError("installer_sha256_mismatch");
-    await this.verifyAuthenticode(installerPath, manifest.installer.expectedPublisher, manifest.installer.expectedPublisherThumbprint);
+    // Schema 2 makes Authenticode optional defense-in-depth. It is never a
+    // substitute for the signed manifest and SHA-256 checked above, and a
+    // manifest that asks for it must carry an exact publisher + thumbprint.
+    if (manifest.installer.signatureRequired === true) {
+      await this.verifyAuthenticode(installerPath, manifest.installer.expectedPublisher, manifest.installer.expectedPublisherThumbprint);
+    }
     return manifest;
   }
 
@@ -596,9 +806,10 @@ class DesktopUpdateEngine extends EventEmitter {
 
   async prepareOffline(manifestPath, installerPath) {
     try {
-      const manifest = safeManifest(JSON.parse(fs.readFileSync(manifestPath, "utf8")));
+      const manifest = safeManifest(JSON.parse(fs.readFileSync(manifestPath, "utf8").replace(/^\uFEFF/, "")));
       const comparison = compareSemVer(this.app.getVersion(), manifest.version);
       if (comparison === null || comparison >= 0) throw updateError("offline_version_not_newer");
+      this.assertManifestApplicable(manifest);
       if (!path.isAbsolute(installerPath) || path.extname(installerPath).toLowerCase() !== ".exe") throw updateError("offline_installer_invalid");
       this.transition("update_available", { target: manifest, checkedAt: new Date().toISOString() });
       return await this.verifyInstaller(installerPath, manifest);
@@ -737,7 +948,17 @@ class DesktopUpdateEngine extends EventEmitter {
     if (!["installing", "restarting", "verifying_health"].includes(this.state.state)) return this.publicState();
     this.transition("verifying_health");
     if (this.state.target?.version === this.app.getVersion()) {
-      return this.transition("success", { installedVersion: this.app.getVersion(), errorCode: null, errorDetail: null });
+      const sequences = { ...(this.state.releaseSequences ?? {}) };
+      const target = this.state.target;
+      if (Number.isSafeInteger(target?.releaseSequence) && target.releaseSequence > 0) {
+        sequences[target.channel] = Math.max(Number(sequences[target.channel] ?? 0), target.releaseSequence);
+      }
+      return this.transition("success", {
+        installedVersion: this.app.getVersion(),
+        errorCode: null,
+        errorDetail: null,
+        releaseSequences: sequences,
+      });
     }
     return this.fail(updateError("post_update_version_mismatch"));
   }

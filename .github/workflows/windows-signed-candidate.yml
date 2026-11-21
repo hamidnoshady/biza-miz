@@ -45,6 +45,7 @@ env:
   WINDOWS_EXPECTED_SIGNER: ${{ vars.WINDOWS_EXPECTED_SIGNER }}
   WINDOWS_EXPECTED_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_EXPECTED_SIGNER_THUMBPRINT }}
   DESKTOP_RELEASE_PUBLIC_KEY_PEM: ${{ vars.DESKTOP_RELEASE_PUBLIC_KEY_PEM }}
+  DESKTOP_RELEASE_PUBLIC_KEYS_JSON: ${{ vars.DESKTOP_RELEASE_PUBLIC_KEYS_JSON }}
   WINDOWS_RFC3161_URL: ${{ vars.WINDOWS_RFC3161_URL }}
   PG_SOURCE_VERSION: '16.15'
   PG_SOURCE_URL: https://ftp.postgresql.org/pub/source/v16.15/postgresql-16.15.tar.gz
@@ -155,8 +156,16 @@ jobs:
 
       - name: Embed protected release-manifest verification key
         run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEYS_JSON)) { throw "NOT CONFIGURED: DESKTOP_RELEASE_PUBLIC_KEYS_JSON" }
           $key = $env:DESKTOP_RELEASE_PUBLIC_KEY_PEM.Replace('\\n', "`n").Trim()
           [IO.File]::WriteAllText("${{ github.workspace }}\electron\desktop-release-public-key.pem", "$key`n", [Text.UTF8Encoding]::new($false))
+          if (-not [string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEYS_JSON)) {
+            $env:KEYS_JSON = $env:DESKTOP_RELEASE_PUBLIC_KEYS_JSON.Trim()
+            node -e "const crypto=require('node:crypto');const parsed=JSON.parse(process.env.KEYS_JSON);if(!Array.isArray(parsed.keys)||parsed.keys.length===0)process.exit(2);for(const key of parsed.keys){if(!key||typeof key.id!=='string'||typeof key.publicKeyPem!=='string'||!['ed25519','rsa-sha256'].includes(key.algorithm))process.exit(3);crypto.createPublicKey(key.publicKeyPem.replaceAll('\\n','\n'))}"
+            if ($LASTEXITCODE -ne 0) { throw "DESKTOP_RELEASE_PUBLIC_KEYS_JSON is not a valid v2 keyring" }
+            [IO.File]::WriteAllText("${{ github.workspace }}\electron\desktop-release-keys.json", "$($env:KEYS_JSON)`n", [Text.UTF8Encoding]::new($false))
+          }
 
       - name: Install and audit Electron dependencies
         working-directory: electron
@@ -201,6 +210,11 @@ jobs:
         run: |
           az logout
           az account clear
+
+      - name: Verify packaged release-manifest verification key
+        env:
+          REQUIRE_REAL_RELEASE_KEY: "1"
+        run: node scripts/verify-packaged-release-key.mjs electron/dist/win-unpacked/resources/app.asar electron/desktop-release-public-key.pem electron/desktop-release-keys.json
 
       - name: Require valid expected-signer Authenticode and RFC3161 timestamps
         run: .\scripts\verify-windows-signatures.ps1 -ArtifactRoot electron\dist -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath windows-signature-verification.json

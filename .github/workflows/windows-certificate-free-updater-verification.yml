@@ -1,0 +1,78 @@
+name: windows-certificate-free-updater-verification
+
+# Issue #1463. Proves the certificate-free updater against the ACTUAL installer
+# bytes on Windows: a signed schema 2 manifest is accepted, a changed manifest
+# or installer is rejected, SHA-256/size are enforced, and Authenticode is still
+# enforced when a manifest asks for it. Uses a throwaway Ed25519 key; the
+# protected production key is never involved. The installer is not executed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Built version to verify (X.Y.Z)'
+        type: string
+        required: true
+      build_run_id:
+        description: 'Successful build-desktop-installer run id'
+        type: string
+        required: true
+
+concurrency:
+  group: windows-certificate-free-updater-verification
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: powershell
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  BUILD_RUN_ID: ${{ inputs.build_run_id }}
+
+jobs:
+  verify:
+    name: verify real installer bytes on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Validate inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be X.Y.Z' }
+          if ($env:BUILD_RUN_ID -notmatch '^\d+$') { throw 'build_run_id must be a workflow run id' }
+
+      - name: Download the accepted installer artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: business-suite-desktop-installer-${{ inputs.version }}
+          path: ${{ runner.temp }}\installer
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the certificate-free updater against those exact bytes
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem "${{ runner.temp }}\installer" -Recurse -File -Filter "Bizamiz Setup $env:RELEASE_VERSION.exe")
+          if ($installers.Count -ne 1) { throw "Expected exactly one installer; found $($installers.Count)" }
+          node scripts/verify-desktop-updater-certificate-free.mjs `
+            --installer "$($installers[0].FullName)" `
+            --output windows-certificate-free-updater-verification.json
+          if ($LASTEXITCODE -ne 0) { throw 'Certificate-free updater verification failed' }
+
+      - name: Upload verification evidence
+        if: always() && hashFiles('windows-certificate-free-updater-verification.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-certificate-free-updater-verification-${{ inputs.version }}
+          path: windows-certificate-free-updater-verification.json
