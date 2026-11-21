@@ -73,6 +73,17 @@ function urlFor(database: string): string {
   return url.toString();
 }
 
+/**
+ * A date `days` from today, as `YYYY-MM-DD`.
+ *
+ * The walk below asserts that an approved-but-not-yet-delivered award is *not*
+ * late (`delayedCount === 0`), so an expected date written as a literal turns
+ * the suite red the day after it was authored — `2026-11-20` did exactly that on
+ * 2026-11-21, with no change to the code under test.
+ */
+const inDays = (days: number): string =>
+  new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+
 function maintenanceUrl(): string {
   const url = new URL(rootDatabaseUrl!);
   url.pathname = "/postgres";
@@ -401,7 +412,7 @@ describe("§18's flow", () => {
         title: "خرید ورق گالوانیزه",
         supplierPartyId: supplierB,
         valueRial: 4_500_000_000,
-        expectedDeliveryDate: "2026-11-20",
+        expectedDeliveryDate: inDays(30),
         requestId: request.id,
         rfqId: rfq.id,
         quotationId: quotationB.id,
@@ -571,7 +582,7 @@ describe("§18's flow", () => {
         title: "اجرای نازک‌کاری طبقهٔ ۳",
         supplierPartyId: subcontractor,
         valueRial: 2_000_000_000,
-        expectedDeliveryDate: "2026-12-10",
+        expectedDeliveryDate: inDays(45),
       }),
     );
     expect(award.commitmentNumber).toBe("SC-001");
