@@ -8,7 +8,7 @@
 
 ALTER TABLE platform_releases
   ALTER COLUMN expected_publisher DROP NOT NULL,
-  ALTER COLUMN signature_required SET DEFAULT false,
+  ALTER COLUMN signature_required SET DEFAULT true,
   ADD COLUMN manifest_schema_version integer NOT NULL DEFAULT 1
     CONSTRAINT platform_releases_manifest_schema CHECK (manifest_schema_version IN (1, 2)),
   ADD COLUMN signature_algorithm text
