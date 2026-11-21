@@ -47,8 +47,8 @@ import {
 } from "./tools";
 import { findMcpWriteStatus, performMcpWrite } from "./write-service";
 import { mcpWriteRegistryEntry } from "./registry";
-import { appServiceActivationState } from "../service-activation/app-gate-service";
-import { SERVICE_GATE_ERROR, serviceGateDecision } from "../service-activation/app-gate";
+import { appServiceActivationState, appServiceCommercialRestriction } from "../service-activation/app-gate-service";
+import { SERVICE_UNPAID_ERROR, serviceGateDecision } from "../service-activation/app-gate";
 
 async function resolveTenantIndustry(businessId: string): Promise<Industry> {
   try {
@@ -343,8 +343,12 @@ async function callTool(
   const activationApp = registeredWrite ? activationAppForMcpApp(registeredWrite.app) : null;
   if (activationApp) {
     let activationState;
+    let unpaid = false;
     try {
       activationState = await appServiceActivationState(auth.businessId, activationApp);
+      if (activationState === "suspended_insufficient_credit") {
+        unpaid = await appServiceCommercialRestriction(auth.businessId, activationApp);
+      }
     } catch {
       return {
         error: {
@@ -353,13 +357,22 @@ async function callTool(
         },
       };
     }
-    if (serviceGateDecision({ method: "POST", app: activationApp, state: activationState })) {
+    const gate = serviceGateDecision({
+      method: "POST",
+      app: activationApp,
+      state: activationState,
+      unpaid,
+    });
+    if (gate) {
       return {
         result: toolResult(
           {
             status: "failed",
-            error: SERVICE_GATE_ERROR,
-            message: "این برنامه غیرفعال شده است؛ تغییر از راه اتصال هم ثبت نمی‌شود. داده‌های مجاز همچنان قابل خواندن هستند.",
+            error: gate.error,
+            message:
+              gate.error === SERVICE_UNPAID_ERROR
+                ? "سرویس پرداخت‌نشده است؛ تغییر از راه اتصال هم ثبت نمی‌شود. داده‌های مجاز همچنان قابل خواندن هستند."
+                : "این برنامه غیرفعال شده است؛ تغییر از راه اتصال هم ثبت نمی‌شود. داده‌های مجاز همچنان قابل خواندن هستند.",
           },
           true,
         ),

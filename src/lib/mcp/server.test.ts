@@ -24,6 +24,9 @@ const mocks = vi.hoisted(() => ({
   appServiceActivationState: vi.fn<(businessId: string, appKey: string) => Promise<string | null>>(
     async () => null,
   ),
+  appServiceCommercialRestriction: vi.fn<(businessId: string, appKey: string) => Promise<boolean>>(
+    async () => false,
+  ),
 }));
 vi.mock("../member-access", () => ({ memberAccessForUser: mocks.memberAccessForUser }));
 vi.mock("../setup-state", async (importOriginal) => ({
@@ -33,6 +36,7 @@ vi.mock("../setup-state", async (importOriginal) => ({
 vi.mock("../ai-system-read", () => ({ runSystemReadTool: mocks.runSystemReadTool }));
 vi.mock("../service-activation/app-gate-service", () => ({
   appServiceActivationState: mocks.appServiceActivationState,
+  appServiceCommercialRestriction: mocks.appServiceCommercialRestriction,
 }));
 
 const AUTH: McpAuthentication = {

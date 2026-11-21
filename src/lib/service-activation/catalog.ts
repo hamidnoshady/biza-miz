@@ -456,18 +456,31 @@ export interface ActivationQuote {
   walletBalanceRial: number;
   balanceAfterSetupRial: number;
   additionalCharges: readonly string[];
+  /**
+   * Why the setup fee is not the published amount, when it is not:
+   * a `billing_plan_benefits` inclusion (ESH-193) or a published zero tariff.
+   * Null means "the tariff was charged as published".
+   */
+  setupWaivedReason: "plan_included" | "published_free" | null;
 }
 
 /**
  * The quote shown before the irreversible debit. A missing or unpublished
  * tariff is NOT free: it makes the service ineligible ("fail closed"), because
  * an unpriced new agent must never activate on an assumed default.
+ *
+ * `setupRialOverride` is the canonical resolver's answer for this identity
+ * (ESH-193): an approved plan inclusion or a configured discount changes the
+ * setup amount without changing the eligibility check. It is never a client
+ * value — only `resolveServiceSetupCharge` supplies it.
  */
 export function quoteServiceActivation(input: {
   identity: ServiceIdentity;
   tariff: ServiceTariff | null;
   walletBalanceRial: number;
   nowIso?: string;
+  setupRialOverride?: number | null;
+  setupWaivedReason?: "plan_included" | "published_free" | null;
 }): ActivationQuote {
   const balance = Number.isFinite(input.walletBalanceRial)
     ? Math.max(0, Math.floor(input.walletBalanceRial))
@@ -489,9 +502,21 @@ export function quoteServiceActivation(input: {
       walletBalanceRial: balance,
       balanceAfterSetupRial: balance,
       additionalCharges: SERVICE_ADDITIONAL_CHARGES[input.identity.kind],
+      setupWaivedReason: null,
     };
   }
-  const setup = setupFeeRial(tariff);
+  const publishedSetup = setupFeeRial(tariff);
+  const override =
+    input.setupRialOverride != null && Number.isFinite(input.setupRialOverride)
+      ? Math.max(0, Math.floor(input.setupRialOverride))
+      : null;
+  const setup = override ?? publishedSetup;
+  const waived =
+    override != null && override < publishedSetup
+      ? (input.setupWaivedReason ?? "plan_included")
+      : publishedSetup === 0
+        ? "published_free"
+        : null;
   const hourly = nonNegativeInt(tariff.hourlyRateRial);
   const firstHour = firstHourRial(tariff);
   const reserve = setup + firstHour;
@@ -509,6 +534,7 @@ export function quoteServiceActivation(input: {
     walletBalanceRial: balance,
     balanceAfterSetupRial: Math.max(0, balance - setup),
     additionalCharges: SERVICE_ADDITIONAL_CHARGES[input.identity.kind],
+    setupWaivedReason: waived,
   };
 }
 

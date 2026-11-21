@@ -24,80 +24,23 @@ import { query, withoutTenantScope } from "./db";
 import { isSubscriptionCarryingPlan } from "./billing-plans-service";
 
 /** The billing calendar: everything AI-bills in Asia/Tehran. */
-export const AI_BILLING_TIME_ZONE = "Asia/Tehran";
+import {
+  AI_BILLING_TIME_ZONE as BILLING_TIME_ZONE,
+  currentPeriodMonth as currentPeriodMonthImpl,
+  monthWindow,
+  periodMonthFor as periodMonthForImpl,
+} from "./billing/resolver/calendar";
 
+export const AI_BILLING_TIME_ZONE = BILLING_TIME_ZONE;
+export const currentPeriodMonth = currentPeriodMonthImpl;
+export const periodMonthFor = periodMonthForImpl;
 /**
- * The `period_month` key ('YYYY-MM') for a moment, in the billing calendar.
- * Pure — the unit test shifts a moment across the Tehran midnight to prove the
- * month flip happens at the right boundary.
+ * The exact UTC `[startUtc, nextStartUtc)` window for the calendar month
+ * containing `now` in the billing calendar. The implementation lives in
+ * `billing/resolver/calendar.ts` so the allowance and the resolver cannot
+ * disagree about a month boundary.
  */
-export function periodMonthFor(date: Date, timeZone: string = AI_BILLING_TIME_ZONE): string {
-  // en-CA formats as YYYY-MM-DD; the first seven characters are the key.
-  const formatted = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
-  return formatted.slice(0, 7);
-}
-
-/** The current period key. */
-export function currentPeriodMonth(): string {
-  return periodMonthFor(new Date());
-}
-
-function zonedMidnightUtc(year: number, month: number, day: number, timeZone: string): Date {
-  const targetUtc = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  });
-  const offsetAt = (utcMs: number): number => {
-    const parts = fmt.formatToParts(new Date(utcMs));
-    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
-    const asUtc = Date.UTC(
-      get("year"),
-      get("month") - 1,
-      get("day"),
-      get("hour"),
-      get("minute"),
-      get("second"),
-      0,
-    );
-    return asUtc - utcMs;
-  };
-  const firstGuess = targetUtc - offsetAt(targetUtc);
-  const refined = targetUtc - offsetAt(firstGuess);
-  return new Date(refined);
-}
-
-/**
- * Compute the exact UTC `[startUtc, nextStartUtc)` window for the calendar
- * month containing `now` in `timeZone` (default `Asia/Tehran`).
- */
-export function tehranMonthWindow(
-  now: Date = new Date(),
-  timeZone: string = AI_BILLING_TIME_ZONE,
-): { periodMonth: string; startUtc: Date; nextStartUtc: Date } {
-  const periodMonth = periodMonthFor(now, timeZone);
-  const [yStr, mStr] = periodMonth.split("-");
-  const year = Number(yStr);
-  const month = Number(mStr);
-  const nextYear = month === 12 ? year + 1 : year;
-  const nextMonth = month === 12 ? 1 : month + 1;
-  return {
-    periodMonth,
-    startUtc: zonedMidnightUtc(year, month, 1, timeZone),
-    nextStartUtc: zonedMidnightUtc(nextYear, nextMonth, 1, timeZone),
-  };
-}
+export { monthWindow as tehranMonthWindow };
 
 export interface PlanAllowance {
   /** The effective monthly AI credit right now (kept as `monthlyCreditRial` for compatibility). */
