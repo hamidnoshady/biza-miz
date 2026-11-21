@@ -61,6 +61,14 @@ export const OTP_PURPOSES = [
    * a code minted here can never be spent as a login, and vice versa.
    */
   "contract_signing",
+  /**
+   * ESH-200 (#1385) — proving a number for a *new* personal identity. Distinct
+   * from `login` so a signup code cannot authenticate an existing account and a
+   * login code cannot create one; keyed on the signup request id in the
+   * `platform_signup` realm. Migration 0310 grows the database constraint to
+   * match this list.
+   */
+  "signup",
 ] as const;
 
 export type OtpPurpose = (typeof OTP_PURPOSES)[number];

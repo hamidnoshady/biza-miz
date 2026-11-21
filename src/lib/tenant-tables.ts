@@ -297,6 +297,13 @@ export const EXEMPT_TABLES = new Set([
   // in `users`, which remains tenant-protected and exported.
   "platform_email_verifications",
   "platform_identity_events",
+  // Migration 0310 — phone-first signup and short onboarding (#1385/#1387/#1388).
+  // A pending proof, a person's own business draft and a deployment-wide switch
+  // all exist *before* any business does, so none carries a business_id. They are
+  // `platform_only` under FORCE RLS; a tenant export must not include them.
+  "platform_signup_requests",
+  "platform_onboarding_progress",
+  "platform_auth_settings",
   "backup_key_versions",
   "tenant_backup_business_policy",
   "tenant_backup_restore_approvals",

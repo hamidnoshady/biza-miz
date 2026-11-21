@@ -60,6 +60,12 @@ const mocks = vi.hoisted(() => ({
   distinctSecondFactorMethods: vi.fn(() => [] as string[]) as AnyFn,
   enrolmentRequirement: vi.fn(() => "none" as string) as AnyFn,
   shouldChallengeMfaOnLogin: vi.fn(() => false) as AnyFn,
+  // ESH-201 / #1386 — the routine SMS factor is the one just redeemed, so a
+  // challenge is due only for a stronger distinct enrolment. The route test
+  // wires the real rule rather than accepting any prompt.
+  phoneOtpRoutineChallengeRequired: vi.fn(
+    (input: { distinctSecondFactors: string[] }) => input.distinctSecondFactors.length > 0,
+  ) as AnyFn,
   graceDaysRemaining: vi.fn(() => null as number | null) as AnyFn,
   issueTrustedDevice: vi.fn(async () => ({ token: "tdev_new", expiresAt: new Date() })) as AnyFn,
   verifyTrustedDevice: vi.fn(async () => ({ trusted: false, reason: "missing" })) as AnyFn,
@@ -95,6 +101,7 @@ vi.mock("@/lib/mfa", () => ({
   mfaAppliesToRole: mocks.mfaAppliesToRole,
   MFA_GRACE_DAYS_TENANT: 14,
   shouldChallengeMfaOnLogin: mocks.shouldChallengeMfaOnLogin,
+  phoneOtpRoutineChallengeRequired: mocks.phoneOtpRoutineChallengeRequired,
 }));
 vi.mock("@/lib/mfa-policy", () => ({ getMfaPolicy: mocks.getMfaPolicy }));
 vi.mock("@/lib/mfa-service", () => ({
@@ -331,6 +338,7 @@ describe("the seven-day trusted-device offer", () => {
     });
     mocks.mfaAppliesToRole.mockReturnValue(true);
     mocks.getAccountMfaEnrolments.mockResolvedValue([{ method: "totp", confirmed_at: new Date() }]);
+    mocks.distinctSecondFactorMethods.mockReturnValue(["totp"]);
     mocks.enrolmentRequirement.mockReturnValue("required");
     mocks.shouldChallengeMfaOnLogin.mockReturnValue(true);
 
@@ -415,6 +423,7 @@ describe("trusted-device exemption before MFA (gap 3)", () => {
     });
     mocks.mfaAppliesToRole.mockReturnValue(true);
     mocks.getAccountMfaEnrolments.mockResolvedValue([{ method: "totp", confirmed_at: new Date() }]);
+    mocks.distinctSecondFactorMethods.mockReturnValue(["totp"]);
     mocks.enrolmentRequirement.mockReturnValue("required");
     mocks.shouldChallengeMfaOnLogin.mockReturnValue(true);
   }

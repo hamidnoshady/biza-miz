@@ -23,7 +23,7 @@ import {
   graceDaysRemaining,
   mfaAppliesToRole,
   MFA_GRACE_DAYS_TENANT,
-  shouldChallengeMfaOnLogin,
+  phoneOtpRoutineChallengeRequired,
 } from "@/lib/mfa";
 import { getMfaPolicy } from "@/lib/mfa-policy";
 import {
@@ -380,10 +380,14 @@ async function completePhoneLogin(
           role: member.role,
         });
 
-        const challengeDue = shouldChallengeMfaOnLogin({
-          hasConfirmedEnrolment: activeEnrolments.length > 0,
-          appliesToRole: requiresMfa,
-          requirement: req,
+        /*
+         * ESH-201 / #1386 — the routine SMS factor is the one just redeemed, so
+         * it is not a *second* factor. Only a stronger distinct enrolment
+         * (TOTP/WebAuthn) challenges here. Password login keeps its mandatory
+         * 2FA unchanged; sensitive-action step-up is enforced elsewhere.
+         */
+        const challengeDue = phoneOtpRoutineChallengeRequired({
+          distinctSecondFactors: distinctMethods,
         });
 
         /*

@@ -22,7 +22,7 @@ import { PIN_MAX_LENGTH, PIN_MIN_LENGTH, PIN_POLICY_HINT, isValidPin } from "./p
 import { toLatinDigits } from "./digits";
 
 describe("OTP purposes", () => {
-  it("separates login, phone-change, enrolment, step-up, recovery and contract signing", () => {
+  it("separates login, phone-change, enrolment, step-up, recovery, contract signing and signup", () => {
     /**
      * Issue #854 P0.8 / invariant 4: a code is only spendable for the purpose
      * it was issued for. The vocabulary has to be explicit for that to be
@@ -32,6 +32,10 @@ describe("OTP purposes", () => {
      * no account, and their code must never be redeemable in a sign-in, a step-up
      * or a password recovery — nor may those codes sign a contract. Same table,
      * same hashing, separate purpose.
+     *
+     * `signup` (ESH-200 / #1385) is the eighth: a code that proves a number for a
+     * *new* identity must not sign an existing account in, and a login code must
+     * not create a person.
      */
     expect([...OTP_PURPOSES]).toEqual([
       "login",
@@ -42,6 +46,7 @@ describe("OTP purposes", () => {
       "step_up_sms",
       "password_recovery",
       "contract_signing",
+      "signup",
     ]);
     expect(isOtpPurpose("login")).toBe(true);
     expect(isOtpPurpose("mfaLogin")).toBe(false);

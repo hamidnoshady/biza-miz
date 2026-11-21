@@ -6,6 +6,7 @@ import {
   graceDaysRemaining,
   isMfaEnrolmentConfirmed,
   mfaAppliesToRole,
+  phoneOtpRoutineChallengeRequired,
   selectPrimaryMfaEnrolment,
   shouldChallengeMfaOnLogin,
   sortMfaEnrolments,
@@ -285,5 +286,46 @@ describe("mayConfirmPendingEnrolmentAtLogin", () => {
 
   it("stays shut for an account with no enrolments at all", () => {
     expect(mayConfirmPendingEnrolmentAtLogin([], "totp")).toBe(false);
+  });
+});
+
+describe("phoneOtpRoutineChallengeRequired (ESH-201 / #1386)", () => {
+  const smsOnly = [
+    { method: "sms_otp" as const, confirmedAt: NOW, isPrimary: true },
+  ];
+  const totpAndSms = [
+    { method: "sms_otp" as const, confirmedAt: NOW, isPrimary: false },
+    { method: "totp" as const, confirmedAt: NOW, isPrimary: true },
+  ];
+
+  it("does not ask for a second SMS when SMS OTP was the primary login factor", () => {
+    // The same factor twice is not a second factor: `distinctSecondFactorMethods`
+    // already excludes sms_otp for a phone-OTP login, and the routine sign-in
+    // ends after the single code the person just redeemed.
+    expect(
+      phoneOtpRoutineChallengeRequired({
+        distinctSecondFactors: distinctSecondFactorMethods(smsOnly, "phone_otp"),
+      }),
+    ).toBe(false);
+  });
+
+  it("still demands a stronger enrolled factor", () => {
+    expect(
+      phoneOtpRoutineChallengeRequired({
+        distinctSecondFactors: distinctSecondFactorMethods(totpAndSms, "phone_otp"),
+      }),
+    ).toBe(true);
+  });
+
+  it("leaves password login's mandatory 2FA untouched", () => {
+    // Password login keeps the old predicate, where a confirmed SMS enrolment
+    // is a real second factor.
+    expect(
+      shouldChallengeMfaOnLogin({
+        hasConfirmedEnrolment: true,
+        appliesToRole: true,
+        requirement: "not_required",
+      }),
+    ).toBe(true);
   });
 });

@@ -158,6 +158,56 @@ export async function consumeEmailVerification(
   });
 }
 
+/**
+ * Set (or replace) the identity's optional email address.
+ *
+ * The address is stored **unverified**: a non-null `email_verified_at` is a
+ * claim nobody has proved yet, and migration 0305's trigger clears an existing
+ * stamp the moment the address changes, so a new address cannot inherit the old
+ * one's proof. Sensitive notification and recovery must therefore ask
+ * `hasVerifiedEmail`, never merely "is there an email".
+ *
+ * Uniqueness is the same global constraint `platform_users.email` already
+ * carries; a collision is reported as `email_taken` rather than as a raw
+ * database error, because the caller is a person filling in their own profile
+ * and needs an actionable answer.
+ */
+export async function setIdentityEmail(input: {
+  platformUserId: string;
+  email: string;
+}): Promise<
+  | { ok: true; email: string }
+  | { ok: false; error: "invalid_email" | "identity_missing" | "email_taken" }
+> {
+  const email = input.email.trim().toLowerCase();
+  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { ok: false, error: "invalid_email" };
+  }
+  try {
+    const { rows } = await withoutTenantScope("identity", () =>
+      query<{ email: string }>(
+        `UPDATE platform_users
+            SET email = $2,
+                updated_at = now()
+          WHERE id = $1
+          RETURNING email::text AS email`,
+        [input.platformUserId, email],
+      ),
+    );
+    if (!rows[0]) return { ok: false, error: "identity_missing" };
+    return { ok: true, email: rows[0].email };
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      (error as { code?: unknown }).code === "23505"
+    ) {
+      return { ok: false, error: "email_taken" };
+    }
+    throw error;
+  }
+}
+
 /** The stored form of a delivered token. Never the token itself. */
 export function hashEmailVerificationToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");

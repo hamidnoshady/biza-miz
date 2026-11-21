@@ -350,3 +350,32 @@ export function shouldChallengeMfaOnLogin(params: {
   if (params.appliesToRole && params.requirement === "required") return true;
   return false;
 }
+
+/**
+ * ESH-201 / #1386 — whether a *routine* phone-OTP login needs another step.
+ *
+ * This is the one deliberate policy change from #854/#809: the SMS OTP that
+ * completed the passwordless sign-in **is** the routine factor, so asking for a
+ * second SMS code in the same ceremony is asking the same factor twice. The
+ * previous `shouldChallengeMfaOnLogin` treated a confirmed `sms_otp` enrolment
+ * as "a factor exists" and produced a challenge whose only available method was
+ * `sms_otp` — a prompt `distinctSecondFactorMethods` had just excluded, i.e. a
+ * dead end for an Owner with SMS as their only factor.
+ *
+ * What still challenges:
+ *  - **a stronger enrolled factor** (`totp`, WebAuthn via the same distinct-
+ *    methods list): switching from password to OTP must not skip it;
+ *  - **sensitive-action step-up**, which is a separate `requireRecentAuth`
+ *    check on the routes that need it and is untouched here;
+ *  - **trusted-device expiry** for those stronger factors, unchanged.
+ *
+ * What no longer challenges: the routine SMS enrolment itself. Password login
+ * keeps its mandatory 2FA exactly as before — this predicate is only used by
+ * the phone-OTP door.
+ */
+export function phoneOtpRoutineChallengeRequired(params: {
+  /** Confirmed *distinct* factors (`distinctSecondFactorMethods(..., "phone_otp")`). */
+  distinctSecondFactors: readonly MfaMethod[];
+}): boolean {
+  return params.distinctSecondFactors.length > 0;
+}

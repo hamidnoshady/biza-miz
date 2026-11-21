@@ -304,6 +304,17 @@ const PUBLIC_PATHS = [
   // would otherwise be scoped to, so it cannot require one. Refuses with 403
   // unless ALLOW_PUBLIC_SIGNUP is set.
   "/api/setup/signup",
+  // ESH-200/202 (#1385/#1387) — the phone-first door. Signup has no session by
+  // definition: the number being proven is the credential. Onboarding carries
+  // its own encrypted, short-lived continuation cookie instead of a tenant
+  // session (a person without a business has nothing to scope one to), and the
+  // route re-reads the identity from the database on every request. Both refuse
+  // server-side once public registration is disabled.
+  "/signup",
+  "/api/auth/signup/request",
+  "/api/auth/signup/verify",
+  "/onboarding",
+  "/api/onboarding",
   // Phase 13: an invitee has no session and no membership of the inviting
   // business yet — the single-use token in the link is the credential.
   "/invite",

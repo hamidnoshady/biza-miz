@@ -7,6 +7,10 @@ import type { RouteClass } from "./types";
 export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   health: keys("platform.health"),
   auth: keys("platform.auth"),
+  // ESH-200/202 (#1385/#1387) — phone-first signup and the short business
+  // onboarding. Platform authentication work, deliberately never charged to a
+  // tenant: no wallet, subscription or paid app is touched by this segment.
+  onboarding: keys("platform.auth"),
   sessions: keys("platform.auth"),
   host: keys("platform.host"),
   "well-known": keys("platform.discovery"),

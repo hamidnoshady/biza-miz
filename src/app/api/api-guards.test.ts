@@ -140,6 +140,25 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "setup/signup":
     "self-service business registration — creates the tenant a session would otherwise be scoped to; " +
     "refuses with 403 unless ALLOW_PUBLIC_SIGNUP is explicitly enabled",
+  // ESH-200/202 (#1385/#1387) — the phone-first door. Signup has no session by
+  // definition: the number being proven is the credential, the code is purpose-
+  // bound and single-use, and the route refuses server-side while public
+  // registration is disabled. It creates a personal identity only — never a
+  // tenant — and reveals account existence only after the code is redeemed.
+  "auth/signup/request":
+    "public phone-first signup — no identity exists yet, so no session can; the send limiter, the " +
+    "deployment switch and a purpose-bound signup challenge bound to the exact number are the " +
+    "controls, and the answer never changes with account existence",
+  "auth/signup/verify":
+    "redeems the purpose-bound signup code; the caller has no account until this succeeds, and the " +
+    "only credential is the code plus proof of the number — it creates one identity and no tenant",
+  "onboarding":
+    "the short post-signup business onboarding — the caller has a verified identity but no business, " +
+    "so a tenant session cannot exist; the encrypted, short-lived `pos_onboarding` continuation " +
+    "names one person and every request re-reads that identity from the database",
+  "onboarding/submit":
+    "provisions the first business exactly once from the saved onboarding draft and then mints the " +
+    "normal tenant session; authorised only by the same encrypted onboarding continuation",
   // Issue #908 — the public contract-signing session. The caller is an external
   // signatory with no account, so no session can exist by definition; the
   // per-recipient token in the path is the credential (256 bits, HMAC-hashed at

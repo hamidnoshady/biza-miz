@@ -349,6 +349,9 @@ describe("every tenant table is protected", () => {
       // optional business_id is protected by migration 0228's standard
       // tenant_isolation policy (the platform console uses the RLS bypass).
       "platform_audit_log",
+      // Migration 0310 — the deployment's public-registration switch; one
+      // singleton row, no business_id, platform_only under FORCE RLS.
+      "platform_auth_settings",
       // Migration 0132 — the console's whole-system backup. Its config, run
       // history, hashed peer tokens, the peers this install may restore from, and
       // the restore log: all deployment-wide, none of it carrying a business_id,
@@ -394,6 +397,9 @@ describe("every tenant table is protected", () => {
       // Phase 37 — singleton message provider config + rates (no business_id;
       // the business side of messaging billing is RLS-protected).
       "platform_message_config",
+      // Migration 0310 — a verified person's saved first-business draft, before
+      // any tenant exists; no business_id, platform_only under FORCE RLS.
+      "platform_onboarding_progress",
       // Migration 0130 — singleton payment gateway config (Zarinpal merchant
       // id etc.), no business_id; the business side of billing is RLS-protected.
       "platform_payment_config",
@@ -401,6 +407,9 @@ describe("every tenant table is protected", () => {
       // Migration 0187: global release catalogue; device telemetry is tenant-scoped.
       "platform_releases",
       "platform_restore_runs",
+      // Migration 0310 — the in-flight phone proof that becomes one identity;
+      // no business_id, and consumed by the signup transaction.
+      "platform_signup_requests",
       // Phase 24 — the deployment-wide SMS gateway credentials (Kavenegar) the
       // MFA challenge sends through. A singleton with no business_id, the same
       // shape as platform_ai_config: one account, configured once by a

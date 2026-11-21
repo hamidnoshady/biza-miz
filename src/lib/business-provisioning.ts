@@ -37,7 +37,7 @@ import { lockChartOfAccounts, recordAccountAudit } from "./accounts-service";
 import { attachmentLevel, type AttachableParent } from "./account-hierarchy";
 import { wizardStepsForIndustry } from "./wizard-steps";
 import { seedPaymentMethods } from "./payment-methods-service";
-import { isMobilePhone, phoneE164 } from "./phone";
+import { isMobilePhone, normalizePhone, phoneE164 } from "./phone";
 import { generateSecret, generateURI } from "otplib";
 import { provisionMfaEnrolment } from "./mfa-service";
 import { issueRecoveryCodes } from "./mfa-recovery";
@@ -69,7 +69,11 @@ export interface ProvisionBusinessInput {
   phone?: string | null;
   ownerName: string;
   ownerPhone?: string | null;
-  email: string;
+  /**
+   * Absent only on the phone-first onboarding path (#1387): the identity is
+   * resolved by `platformUserId`, so there may be no address to resolve it by.
+   */
+  email?: string;
   /**
    * Ignored when `ownerActivation` is set — that path deliberately has no
    * password to pass, because nobody but the owner may choose it.
@@ -155,6 +159,22 @@ export interface ProvisionBusinessInput {
    */
   canonicalBusinessId?: string;
   canonicalLocationId?: string;
+  /**
+   * ESH-202 (#1387) — provision this business *for an existing verified
+   * identity* instead of resolving or creating one by email.
+   *
+   * The phone-first journey already created the person by redeeming an SMS
+   * code, so this path must not look them up by email (there may be none), must
+   * not ask for a password and must not create a second identity. It is the only
+   * caller that leaves `email` absent; every other path keeps its current
+   * contract.
+   */
+  platformUserId?: string;
+  /**
+   * The logo captured during short onboarding, moved into
+   * `settings.business.logo` in the same transaction that creates the business.
+   */
+  logo?: { dataUrl: string; mimeType: string; byteLength: number } | null;
 }
 
 export interface ProvisionedBusiness {
@@ -405,6 +425,187 @@ export async function provisionBusiness(
   return inProvisioningTransaction((client) => insertBusiness(client, input, ownerPhone));
 }
 
+/** The business a completed short onboarding points at (#1387). */
+export interface ProvisionedFirstBusiness {
+  businessId: string;
+  businessSlug: string;
+  businessSubdomain: string;
+  locationId: string;
+  userId: string;
+  platformUserId: string;
+  ownerName: string;
+  /** False when this call found the business an earlier submit had created. */
+  created: boolean;
+}
+
+export interface FirstBusinessOnboardingInput {
+  platformUserId: string;
+  businessName: string;
+  industry: Industry;
+  locationName?: string | null;
+  address?: string | null;
+  phone?: string | null;
+  logo?: { dataUrl: string; mimeType: string; byteLength: number } | null;
+}
+
+/**
+ * ESH-202 (#1387) — create the first business for an already-verified person,
+ * exactly once.
+ *
+ * This is the *only* thing short onboarding does that touches tenancy, and it
+ * reuses `insertBusiness`'s transaction so the business, branch, membership,
+ * settings and payment ways are created by the same code as every other entry
+ * point. What is different is only how the owner is resolved: by the identity
+ * the signup code proved, never by email and never by creating a second person.
+ *
+ * Idempotency is a lock plus a stored result, not a client key: the transaction
+ * takes `onboarding:<identity>`, locks the progress row, and if it already names
+ * a business returns that one. A double tap, a second tab and a network retry
+ * therefore converge on one tenant. Setup is deliberately left incomplete — the
+ * existing `/setup` wizard (#1239) still owns Finish.
+ */
+export async function provisionFirstBusinessFromOnboarding(
+  input: FirstBusinessOnboardingInput,
+): Promise<ProvisionedFirstBusiness> {
+  const businessName = input.businessName?.trim();
+  if (!businessName) throw new Error("business_name_required");
+  if (!ENABLED_INDUSTRIES.includes(input.industry)) {
+    throw new Error("industry_not_available");
+  }
+
+  return inProvisioningTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      `onboarding:${input.platformUserId}`,
+    ]);
+
+    const { rows: progressRows } = await client.query<{
+      provisioned_business_id: string | null;
+    }>(
+      `SELECT provisioned_business_id
+         FROM platform_onboarding_progress
+        WHERE platform_user_id = $1
+        FOR UPDATE`,
+      [input.platformUserId],
+    );
+    const existingBusinessId = progressRows[0]?.provisioned_business_id ?? null;
+    if (existingBusinessId) {
+      const existing = await readFirstBusiness(client, input.platformUserId, existingBusinessId);
+      if (existing) return existing;
+    }
+
+    const { rows: identityRows } = await client.query<{
+      id: string;
+      full_name: string;
+      email: string | null;
+      phone_e164: string | null;
+    }>(
+      `SELECT id, full_name, email::text AS email, phone_e164
+         FROM platform_users
+        WHERE id = $1 AND is_active`,
+      [input.platformUserId],
+    );
+    const identity = identityRows[0];
+    if (!identity) throw new Error("identity_missing");
+
+    /*
+     * The draft holds the contact number canonically (`phone_e164`), but the
+     * branch contact is the field `/setup` shows for people to type a local
+     * number into, and every other entry point writes it that way. Store the
+     * national form here; the person's verified identity number is untouched.
+     */
+    const branchPhone = input.phone ? (normalizePhone(input.phone).national ?? input.phone) : null;
+
+    const tenant = await insertBusiness(
+      client,
+      {
+        businessName,
+        industry: input.industry,
+        locationName: input.locationName?.trim() || undefined,
+        address: input.address ?? null,
+        phone: branchPhone,
+        ownerName: identity.full_name,
+        ownerPhone: identity.phone_e164,
+        email: identity.email ?? undefined,
+        platformUserId: input.platformUserId,
+        logo: input.logo ?? null,
+      },
+      identity.phone_e164 ? phoneE164(identity.phone_e164) : null,
+    );
+
+    await client.query(
+      `INSERT INTO platform_onboarding_progress
+         (platform_user_id, industry, business_name, location_name, address, phone_e164,
+          status, provisioned_business_id, provisioned_at, submitted_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'provisioned', $7, now(), now(), now())
+       ON CONFLICT (platform_user_id) DO UPDATE SET
+         status = 'provisioned',
+         provisioned_business_id = EXCLUDED.provisioned_business_id,
+         provisioned_at = now(),
+         submitted_at = COALESCE(platform_onboarding_progress.submitted_at, now()),
+         updated_at = now()`,
+      [
+        input.platformUserId,
+        input.industry,
+        businessName,
+        input.locationName?.trim() || null,
+        input.address ?? null,
+        input.phone ?? null,
+        tenant.businessId,
+      ],
+    );
+
+    return {
+      businessId: tenant.businessId,
+      businessSlug: tenant.businessSlug,
+      businessSubdomain: tenant.businessSubdomain,
+      locationId: tenant.locationId,
+      userId: tenant.userId,
+      platformUserId: input.platformUserId,
+      ownerName: identity.full_name,
+      created: true,
+    };
+  });
+}
+
+/** The owner's membership and primary branch for a business already provisioned. */
+async function readFirstBusiness(
+  client: PoolClient,
+  platformUserId: string,
+  businessId: string,
+): Promise<ProvisionedFirstBusiness | null> {
+  const { rows } = await client.query<{
+    business_id: string;
+    business_slug: string;
+    business_subdomain: string;
+    location_id: string | null;
+    user_id: string | null;
+    full_name: string;
+  }>(
+    `SELECT b.id AS business_id, b.slug::text AS business_slug,
+            b.subdomain::text AS business_subdomain,
+            l.id AS location_id, u.id AS user_id, COALESCE(u.full_name, '') AS full_name
+       FROM businesses b
+       LEFT JOIN locations l ON l.business_id = b.id
+       LEFT JOIN users u ON u.business_id = b.id AND u.platform_user_id = $2
+      WHERE b.id = $1
+      ORDER BY l.created_at ASC NULLS LAST
+      LIMIT 1`,
+    [businessId, platformUserId],
+  );
+  const row = rows[0];
+  if (!row?.location_id || !row.user_id) return null;
+  return {
+    businessId: row.business_id,
+    businessSlug: row.business_slug,
+    businessSubdomain: row.business_subdomain,
+    locationId: row.location_id,
+    userId: row.user_id,
+    platformUserId,
+    ownerName: row.full_name,
+    created: false,
+  };
+}
+
 export interface DemoTemplate {
   industry: Industry;
   version: string;
@@ -507,7 +708,8 @@ async function insertBusiness(
   const businessName = input.businessName.trim();
   const locationName = input.locationName?.trim() || DEFAULT_LOCATION_NAME;
   const ownerName = input.ownerName.trim();
-  const email = input.email.trim().toLowerCase();
+  // Null only on the phone-first onboarding path, where the identity was created
+  // from a verified number and has no address yet (ESH-202).
   // Serialises slug allocation and the identity upsert against a
   // concurrent signup for the same email — neither is protected by a row
   // lock, because in both cases the row may not exist yet.
@@ -543,49 +745,69 @@ async function insertBusiness(
     subdomain = uniqueSlug(subdomainFromBusinessName(businessName) || SLUG_FALLBACK, takenHosts);
   }
 
-  const { rows: existingIdentity } = await client.query<{
-    id: string;
-    password_hash: string;
-    is_active: boolean;
-  }>("SELECT id, password_hash, is_active FROM platform_users WHERE email = $1", [email]);
+  const email = input.email?.trim().toLowerCase() ?? null;
 
-  const ownerIdentityCreated = existingIdentity.length === 0;
+  let ownerIdentityCreated = false;
   let platformUserId: string;
-  if (existingIdentity[0]) {
-    const identity = existingIdentity[0];
-    if (demo || !identity.is_active) throw new EmailPasswordMismatchError();
-    if (input.ownershipKind === "platform_internal") {
-      // The platform-company member mapping is the authorization proof.
-      // Never ask an infrastructure operator for a tenant password and
-      // never manufacture an impersonation grant for permanent access.
-      platformUserId = identity.id;
-    } else if (input.ownerActivation) {
-      // Nobody types their password for an inbound business, so this is not
-      // an authentication but a confirmation. It still refuses to attach a
-      // business to somebody's account silently.
-      if (!input.confirmExistingOwner) throw new ExistingOwnerConfirmationRequiredError();
-      platformUserId = identity.id;
-    } else {
-      // The password-choosing paths are a person adding a business to their
-      // own account, and still have to prove that is who they are.
-      if (!(await bcrypt.compare(input.password ?? "", identity.password_hash))) {
-        throw new EmailPasswordMismatchError();
+  if (input.platformUserId) {
+    // The person is already proven by a redeemed signup code (#1385). Nothing
+    // here may create, merge or re-resolve an identity.
+    const { rows: identityRows } = await client.query<{ id: string; is_active: boolean }>(
+      "SELECT id, is_active FROM platform_users WHERE id = $1",
+      [input.platformUserId],
+    );
+    const identity = identityRows[0];
+    if (!identity || !identity.is_active) throw new Error("identity_missing");
+    platformUserId = identity.id;
+  } else if (email) {
+    const { rows: existingIdentity } = await client.query<{
+      id: string;
+      password_hash: string;
+      is_active: boolean;
+    }>("SELECT id, password_hash, is_active FROM platform_users WHERE email = $1", [email]);
+
+    ownerIdentityCreated = existingIdentity.length === 0;
+    if (existingIdentity[0]) {
+      const identity = existingIdentity[0];
+      if (demo || !identity.is_active) throw new EmailPasswordMismatchError();
+      if (input.ownershipKind === "platform_internal") {
+        // The platform-company member mapping is the authorization proof.
+        // Never ask an infrastructure operator for a tenant password and
+        // never manufacture an impersonation grant for permanent access.
+        platformUserId = identity.id;
+      } else if (input.ownerActivation) {
+        // Nobody types their password for an inbound business, so this is not
+        // an authentication but a confirmation. It still refuses to attach a
+        // business to somebody's account silently.
+        if (!input.confirmExistingOwner) throw new ExistingOwnerConfirmationRequiredError();
+        platformUserId = identity.id;
+      } else {
+        // The password-choosing paths are a person adding a business to their
+        // own account, and still have to prove that is who they are.
+        if (!(await bcrypt.compare(input.password ?? "", identity.password_hash))) {
+          throw new EmailPasswordMismatchError();
+        }
+        platformUserId = identity.id;
       }
-      platformUserId = identity.id;
+    } else {
+      // On the activation path nobody ever knows this password — not the
+      // operator, not this code. It is 32 random bytes, replaced by the owner
+      // at the activation link, and any comparison against it fails closed.
+      const secret =
+        input.ownerActivation || input.ownershipKind === "platform_internal"
+          ? randomBytes(32).toString("hex")
+          : (input.password ?? "");
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO platform_users (email, password_hash, full_name, is_active)
+         VALUES ($1, $2, $3, $4) RETURNING id`,
+        [email, demo ? "demo-login-disabled" : await bcrypt.hash(secret, BCRYPT_COST), ownerName, !demo],
+      );
+      platformUserId = rows[0].id;
     }
   } else {
-    // On the activation path nobody ever knows this password — not the
-    // operator, not this code. It is 32 random bytes, replaced by the owner
-    // at the activation link, and any comparison against it fails closed.
-    const secret = input.ownerActivation || input.ownershipKind === "platform_internal"
-      ? randomBytes(32).toString("hex")
-      : (input.password ?? "");
-    const { rows } = await client.query<{ id: string }>(
-      `INSERT INTO platform_users (email, password_hash, full_name, is_active)
-       VALUES ($1, $2, $3, $4) RETURNING id`,
-      [email, demo ? "demo-login-disabled" : await bcrypt.hash(secret, BCRYPT_COST), ownerName, !demo],
-    );
-    platformUserId = rows[0].id;
+    // No identity to attach and no address to resolve one by. Every caller must
+    // name one or the other; a business with no owner is not a valid tenant.
+    throw new Error("email_required");
   }
 
   const { rows: bizRows } = await client.query<{ id: string }>(
@@ -642,6 +864,28 @@ async function insertBusiness(
     await seedChartOfAccounts(client, businessId, input.industry ?? "food_service");
   }
 
+  // The logo captured by short onboarding (#1387) is written in the business's
+  // own settings row, the same record `/setup` and receipts read. Deliberately
+  // the canonical key, not a second image store.
+  if (input.logo) {
+    await client.query(
+      `INSERT INTO settings (business_id, location_id, key, value)
+       VALUES ($1, NULL, $2, $3)
+       ON CONFLICT (business_id, location_id, key)
+       DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [
+        businessId,
+        SETTING_KEYS.businessLogo,
+        JSON.stringify({
+          dataUrl: input.logo.dataUrl,
+          mimeType: input.logo.mimeType,
+          byteLength: input.logo.byteLength,
+          updatedAt: new Date().toISOString(),
+        }),
+      ],
+    );
+  }
+
   // The payment ways the till offers (migration 0091), in the same
   // transaction as the business itself: a shop that exists but cannot say
   // «نقدی» cannot take money. Seeded rather than implied so the owner can
@@ -690,7 +934,14 @@ async function insertBusiness(
   // owner's credentials.
   let recoveryCodes: string[] | undefined;
   let ownerActivation: { token: string; expiresAt: Date } | undefined;
-  if (!demo && !input.ownerActivation && input.ownershipKind !== "platform_internal") {
+  /*
+   * ESH-202 (#1387) — a phone-first owner already proved control of their number
+   * with the signup code, and has no password yet, so provisioning does not
+   * mint a second factor or hand back recovery codes nobody asked to see. Factor
+   * enrolment belongs to the person's account-security surface, where the
+   * secret can actually be shown once.
+   */
+  if (!demo && !input.platformUserId && !input.ownerActivation && input.ownershipKind !== "platform_internal") {
     if (input.deploymentMode === "local") {
       await client.query(
         `INSERT INTO settings (business_id, location_id, key, value)
@@ -701,7 +952,9 @@ async function insertBusiness(
 
       totpSecret = generateSecret();
       totpUrl = generateURI({
-        label: email,
+        // A local install's label is only ever read by the owner; the business
+        // name is the fallback when the identity has no address.
+        label: email ?? businessName,
         // Phase 42 — the business's own name, so the entry in the
         // authenticator app is tellable apart from every other business
         // this person holds an entry for (see mfa-enrol.ts's TOTP_ISSUER).
@@ -762,7 +1015,7 @@ async function insertBusiness(
   // Not issued when the email already had a login: that person's credentials
   // are theirs already, the operator learns nothing about them, and asking
   // them to "activate" an account they have used for years would be a lie.
-  if (input.ownerActivation && ownerIdentityCreated) {
+  if (input.ownerActivation && ownerIdentityCreated && email) {
     ownerActivation = await createOwnerActivation(client, {
       businessId,
       platformUserId,

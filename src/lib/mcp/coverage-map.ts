@@ -69,6 +69,14 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
   },
   // ============================ Accounting (ledger + banking) ============================
   {
+    id: "account.phone-first-onboarding",
+    module: "Settings",
+    entity: "Phone-first personal signup & short first-business onboarding",
+    routes: ["onboarding"],
+    note: "ESH-200/202 (#1385/#1387): proving a phone creates a personal identity and a saved first-business draft, never a tenant; the draft is provisioned exactly once by the owner's own submit and handed to the /setup wizard. Route-only by design — account creation is a human act with an OTP, not an assistant operation.",
+    status: "route-only (by design)",
+  },
+  {
     id: "accounting.historical-invoices",
     module: "Accounting",
     entity: "Historical external sales invoice archive",
