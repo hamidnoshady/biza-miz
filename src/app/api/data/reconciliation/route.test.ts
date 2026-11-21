@@ -14,6 +14,10 @@ const {
   mockApproveSafe,
   mockDecideItem,
   mockCancelRun,
+  mockGetConnection,
+  mockStageDeferred,
+  mockCompleteProductDiscovery,
+  mockCompletePartyDiscovery,
 } = vi.hoisted(() => ({
   mockDataOwner: vi.fn(),
   mockEntityAccess: vi.fn(),
@@ -27,6 +31,10 @@ const {
   mockApproveSafe: vi.fn(),
   mockDecideItem: vi.fn(),
   mockCancelRun: vi.fn(),
+  mockGetConnection: vi.fn(),
+  mockStageDeferred: vi.fn(),
+  mockCompleteProductDiscovery: vi.fn(),
+  mockCompletePartyDiscovery: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -54,6 +62,13 @@ vi.mock("../guard", () => ({
 }));
 vi.mock("@/lib/import-reconciliation/apply-runner", () => ({
   applyReconciliationRunWithDomainHandlers: mockApply,
+  releaseDeferredInboxIfClear: vi.fn(),
+}));
+vi.mock("@/lib/integrations/connections-service", () => ({
+  getConnection: mockGetConnection,
+}));
+vi.mock("@/lib/integrations/webhook-ingest-service", () => ({
+  stageDeferredInboxForRun: mockStageDeferred,
 }));
 vi.mock("@/lib/import-reconciliation/service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/import-reconciliation/service")>();
@@ -66,6 +81,8 @@ vi.mock("@/lib/import-reconciliation/service", async (importOriginal) => {
     approveSafeBatch: mockApproveSafe,
     decideItem: mockDecideItem,
     cancelRun: mockCancelRun,
+    completeProductDiscovery: mockCompleteProductDiscovery,
+    completePartyDiscovery: mockCompletePartyDiscovery,
   };
 });
 
@@ -266,5 +283,59 @@ describe("/api/data/reconciliation routes (#1118)", () => {
     const invReq = new NextRequest(`http://localhost/api/data/reconciliation/${runId}`);
     await getRunHandler(invReq, { params: Promise.resolve({ id: runId }) });
     expect(mockEntityAccess).toHaveBeenLastCalledWith(owner, "inventory.items", "import");
+  });
+
+  it("stages buffered source events only while a product/party run is discovering", async () => {
+    mockGetRunSummary.mockResolvedValueOnce({
+      run: {
+        id: runId,
+        domain: "product",
+        locationId: "loc-1",
+        connectionId: "22222222-2222-4222-8222-222222222222",
+        status: "discovering",
+      },
+      counts: {},
+      progress: {},
+    });
+    mockGetConnection.mockResolvedValueOnce({
+      id: "22222222-2222-4222-8222-222222222222",
+      business_id: "biz-1",
+      currency_unit: "rial",
+    });
+    mockStageDeferred.mockResolvedValueOnce({ staged: 3, total: 3 });
+    mockCompleteProductDiscovery.mockResolvedValueOnce({
+      run: { id: runId, status: "staged" },
+      counts: { read: 3 },
+      progress: {},
+    });
+
+    const stagedReq = new NextRequest(`http://localhost/api/data/reconciliation/${runId}`, {
+      method: "POST",
+      body: JSON.stringify({ action: "stage_deferred" }),
+    });
+    const stagedRes = await postRunHandler(stagedReq, { params: Promise.resolve({ id: runId }) });
+    expect(stagedRes.status).toBe(200);
+    expect(mockStageDeferred).toHaveBeenCalledTimes(1);
+    expect(mockCompleteProductDiscovery).toHaveBeenCalledTimes(1);
+
+    // A run that has already been staged is not silently re-staged.
+    mockGetRunSummary.mockResolvedValueOnce({
+      run: {
+        id: runId,
+        domain: "product",
+        locationId: "loc-1",
+        connectionId: "22222222-2222-4222-8222-222222222222",
+        status: "in_review",
+      },
+      counts: {},
+      progress: {},
+    });
+    const twiceReq = new NextRequest(`http://localhost/api/data/reconciliation/${runId}`, {
+      method: "POST",
+      body: JSON.stringify({ action: "stage_deferred" }),
+    });
+    const twiceRes = await postRunHandler(twiceReq, { params: Promise.resolve({ id: runId }) });
+    expect(twiceRes.status).toBe(409);
+    expect(mockStageDeferred).toHaveBeenCalledTimes(1);
   });
 });

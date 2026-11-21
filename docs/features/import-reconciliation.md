@@ -8,8 +8,10 @@ the Data Transfer engine ([data-transfer-engine.md](data-transfer-engine.md)) an
 `integration_mappings`.
 
 > The shared engine powers the [reviewed XLSX product catalogue](xlsx-product-catalogue.md)
-> for Watch and retail. The remaining importers and provider onboarding work
-> are listed under [What is not built yet](#what-is-not-built-yet).
+> for Watch and retail, the provider first handshake, WooCommerce product sync,
+> Holoo base/workbook feeds and populated Data Transfer imports. The paths that
+> run through it, and the domains still owned by a follow-up issue, are listed
+> under [What runs through it](#what-runs-through-it).
 
 ## The contract
 
@@ -34,7 +36,9 @@ the Data Transfer engine ([data-transfer-engine.md](data-transfer-engine.md)) an
 6. **Non-destructive.** Staging writes only the four tables below. Absence in a
    partial feed is not deletion.
 7. **Truthful progress.** "Reconciled" needs every item terminal, none failed or
-   waiting, the run `applied`, and the post-apply cross-check.
+   waiting, no source event parked in the durable inbox, the run `applied`, and
+   the post-apply cross-check. The run summary, wizard and report expose that
+   buffered count separately from staged items.
 
 ## Where it lives
 
@@ -82,37 +86,58 @@ openRun ─► stageProducts … ─► completeProductDiscovery ─► decideIt
   bounded batches are found by an `identity_keys` sweep.
 * **A stale preview cannot be applied.** `applyRun` re-validates the source
   fingerprint, policy version and canonical-state digest first; a changed one
-  marks the run `stale` and sends every approval back to `proposed`. If the source
-  or the books cannot be read (offline) the preview is `unverified` and is refused
-  unless the caller explicitly accepts that.
+  marks the run `stale` and sends every approval back to `proposed`. For
+  connection-backed runs a relevant source event that arrived after staging also
+  marks the run stale (`hasNewSourceEventsForRun`): approving product/customer/
+  order data while a newer inbox event is unread would approve an old view. If
+  the source or the books cannot be read (offline) the preview is `unverified`
+  and is refused unless the caller explicitly accepts that.
 * **Apply is resumable.** Bounded batches, `FOR UPDATE SKIP LOCKED`, one savepoint
   per item: a failing item is recorded `failed` with its error and the rest carry
   on; the run ends `applied` only if nothing is pending or failed, otherwise
-  `partially_applied`.
+  `partially_applied`. An owner can return the failed rows to review
+  (`retry_failed`) and apply again; already-applied links and the decision/audit
+  history are kept.
 * **Domain writes belong to the domain.** The service decides *whether*; an
   `ApplyHandler` (`createProductApplyHandler`) does the write. Its `link` writes
   the source identity (and the `integration_mappings` row for a connection-backed
   source, which the existing sync code reads); `create` is delegated to the owning
   service and fails loudly (`create_not_supported`) if none is supplied.
 
-## What is not built yet
+## What runs through it
 
-Deliberately left for follow-up changes, in the order they unblock the issue's
-acceptance matrix:
+| Entry point | Behaviour |
+|---|---|
+| WooCommerce plugin first handshake | `ensureFirstContactReconciliationGate` opens a **discovering** product and/or party run when the tenant already has canonical rows. Bootstrap exports are still queued, but their product/customer webhooks are parked in `integration_webhook_events` as `deferred` until the run resolves. The export completion marker stages the buffered records in bounded keyset batches (`stageDeferredInboxForRun`) and completes discovery, so the run reaches review instead of sitting empty. |
+| WooCommerce `syncProducts` / «تطبیق پیش از همگام‌سازی» | A populated catalogue is staged through `stageWooCatalogueToReconciliation`; the blind sync path refuses with `reconciliation_required` until review. |
+| Orders and refunds during any active run | Financial webhooks wait behind the product/party run too, so a historical sale cannot create a customer or relieve stock while identity decisions are open. They stay durable in the inbox and are replayed after the last run applies. |
+| Holoo base/workbook feeds | `stageHolooBaseToReconciliation` splits goods, persons, opening inventory and journals into their own runs; the create writers post through the domain services. |
+| Data Transfer file imports | A populated entity is staged through `stageImportJobToReconciliation`; a completed job is finalised from the reconciled decisions, never by replaying the raw rows. |
+| Review, apply, report | The shared wizard and `/api/data/reconciliation` routes list runs, decide items, set cutover policy, apply bounded batches and download a non-sensitive JSON/CSV report. The summary, wizard and JSON report show how many source events are still buffered; a run with buffered events is not "fully reconciled". |
+| Outbound publication | WooCommerce price/stock pushes are gated on the item being applied, the mapping committed, ownership confirmed and no active product run; rejected remote edits are suppressed so an unchanged remote value is not echoed back. The Holoo accounting push queue waits for **any** active run on its connection, so a sale, receipt or purchase is never written while inventory/ledger ownership is still under review. |
 
-1. **Wiring the existing entry points** through a run: the WooCommerce plugin
-   first handshake (stage `catalogue_export`/`customer_export`/`orders_export`
-   instead of applying them; buffer live events while a run is open), Woo
-   `syncProducts`, Holoo `import-plan`/`import-service`, and the Data Transfer
-   `import-service` for populated entities.
-2. **Initial Reconciliation in provider onboarding** and review panels for additional import domains.
-3. **DB loaders and apply handlers for party, financial-document and inventory**
-   (the resolvers and planners exist and are unit-tested; party loading needs the
-   encrypted-field blind indexes, inventory needs the stock/lot/serial readers),
-   and category/attribute/media resolvers.
-4. **Posting policy / cutover** for historical financial documents (idempotent,
-   domain-approved) and the recorded ledger/inventory authority boundary.
-5. **Outbound gating** in the Woo/Holoo push queues using `canPublishOutbound`,
-   and rejected-remote-edit suppression via `remoteEditFingerprint`.
-6. **Downloadable non-sensitive run report**, and Cloud/Hybrid/Offline wiring of
-   the stale/unverified labels.
+WooCommerce product shapes are preserved through staging: a `variable` product
+is a non-sellable `variant_parent`, a variation is a `variant_child` with its
+parent external id and option axis, and apply writes parents before children.
+A child whose parent cannot be resolved fails visibly instead of becoming a
+second simple product.
+
+Apply uses one handler per domain: product `createItem`/`createVariantChild`/
+`inventory_items`, party `createParty`, Holoo journals through the posting
+service, and inventory through opening/adjustment movements and lots. A run is only `reconciled` when
+every item is terminal and the post-apply cross-check passes.
+
+## Remaining owner scopes
+
+- **#951** owns the WooCommerce-specific order/product sync architecture. Orders
+  buffered by this epic are replayed through the normal idempotent order path
+  after product/customer mappings commit; they are not independently reviewed as
+  financial documents here.
+- **#1289** owns historical sales-invoice workbooks and their posting/cutover.
+- **#1376** owns safe re-import of existing product prices and stock.
+- **#1335** (delivered) owns the catalogue entry point and generic brand handling.
+- Category/attribute/media reconciliation stays with the taxonomy and media
+  services; the engine currently reviews product, party, financial-document and
+  inventory domains.
+- A live WooCommerce/Holoo store acceptance run is separate from the automated
+  suite and has not been recorded for this change.

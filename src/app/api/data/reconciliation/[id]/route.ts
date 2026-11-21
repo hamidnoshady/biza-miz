@@ -4,7 +4,10 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { isRetailCatalogueIndustry } from "@/lib/industries";
 import { resolveActiveLocation } from "@/lib/setup-state";
-import { applyReconciliationRunWithDomainHandlers } from "@/lib/import-reconciliation/apply-runner";
+import {
+  applyReconciliationRunWithDomainHandlers,
+  releaseDeferredInboxIfClear,
+} from "@/lib/import-reconciliation/apply-runner";
 import { buildReconciliationReportCsv, buildReconciliationRunReport } from "@/lib/import-reconciliation/report";
 import {
   approveSafeBatch,
@@ -13,6 +16,7 @@ import {
   getRunSummary,
   listItems,
   ReconciliationError,
+  retryFailedItems,
   setRunCutoverPolicy,
 } from "@/lib/import-reconciliation/service";
 import type { ReconciliationDomain, ReconciliationItemStatus, ReconciliationOutcome } from "@/lib/import-reconciliation/types";
@@ -47,6 +51,8 @@ const commandSchema = z.discriminatedUnion("action", [
     cutoverAt: z.string().datetime().optional(),
   }),
   z.object({ action: z.literal("apply") }),
+  z.object({ action: z.literal("retry_failed") }),
+  z.object({ action: z.literal("stage_deferred") }),
   z.object({ action: z.literal("cancel") }),
 ]);
 
@@ -209,8 +215,39 @@ export const POST = withTenantScope(
           });
           return NextResponse.json({ ok: true, ...result });
         }
+        case "retry_failed": {
+          const result = await retryFailedItems(owner.businessId, id, actor);
+          return NextResponse.json({ ok: true, ...result, ...(await getRunSummary(owner.businessId, id)) });
+        }
+        case "stage_deferred": {
+          if (summary.run.status !== "discovering") {
+            return NextResponse.json({ error: "run_not_discovering" }, { status: 409 });
+          }
+          if (!summary.run.connectionId || !["product", "party"].includes(summary.run.domain)) {
+            return NextResponse.json({ error: "source_has_no_buffered_events" }, { status: 409 });
+          }
+          const { getConnection } = await import("@/lib/integrations/connections-service");
+          const connection = await getConnection(owner.businessId, summary.run.connectionId);
+          if (!connection) return NextResponse.json({ error: "connection_not_found" }, { status: 404 });
+          const { stageDeferredInboxForRun } = await import("@/lib/integrations/webhook-ingest-service");
+          const staged = await stageDeferredInboxForRun(connection, summary.run);
+          if (staged.total > 0) {
+            const { completePartyDiscovery, completeProductDiscovery } = await import(
+              "@/lib/import-reconciliation/service"
+            );
+            if (summary.run.domain === "product") {
+              await completeProductDiscovery(owner.businessId, id, actor);
+            } else {
+              await completePartyDiscovery(owner.businessId, id, actor);
+            }
+          }
+          return NextResponse.json({ ok: true, ...staged, ...(await getRunSummary(owner.businessId, id)) });
+        }
         case "cancel": {
           const run = await cancelRun(owner.businessId, id, actor);
+          // Cancelling is an explicit decision to release the scope; buffered
+          // events may now apply through their normal, idempotent path.
+          await releaseDeferredInboxIfClear(owner.businessId, summary.run.connectionId);
           return NextResponse.json({ ok: true, run });
         }
       }

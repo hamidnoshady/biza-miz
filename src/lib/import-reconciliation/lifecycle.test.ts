@@ -149,6 +149,11 @@ describe("truthful progress", () => {
     const done = summarizeItems([view("create_new", "applied"), view("ambiguous", "skipped")]);
     expect(progressStage({ runStatus: "applied", counts: done, crossChecked: false })).toMatchObject({ stage: "acknowledged", fullyReconciled: false });
     expect(progressStage({ runStatus: "applied", counts: done, crossChecked: true })).toMatchObject({ stage: "reconciled", fullyReconciled: true });
+    // Parked source events are not staged items yet; they keep a run from
+    // claiming full reconciliation and count toward the remaining work.
+    expect(
+      progressStage({ runStatus: "applied", counts: done, crossChecked: true, bufferedEvents: 2 }),
+    ).toMatchObject({ stage: "acknowledged", fullyReconciled: false, remaining: 2, bufferedEvents: 2 });
   });
 
   it("reports queued-but-unapplied work as reviewed, not synced", () => {

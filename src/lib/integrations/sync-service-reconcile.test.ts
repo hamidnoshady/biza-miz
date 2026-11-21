@@ -44,7 +44,7 @@ vi.mock("../import-reconciliation/service", () => ({
   stageProducts: mockStageProducts,
 }));
 
-import { stageWooCatalogueToReconciliation } from "./sync-service";
+import { stageWooCatalogueToReconciliation, wooProductToIncoming } from "./sync-service";
 
 const bizId = "11111111-1111-4111-8111-111111111111";
 const connId = "22222222-2222-4222-8222-222222222222";
@@ -98,5 +98,47 @@ describe("stageWooCatalogueToReconciliation reuse & reopen behavior", () => {
     expect(mockReopenStaleRun).toHaveBeenCalledWith(bizId, runId, { sourceFingerprint: `woo:${connId}:1` }, actor);
     expect(mockStageProducts).toHaveBeenCalledTimes(1);
     expect(mockCompleteDiscovery).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the WooCommerce parent/child shape instead of flattening variations to simple", () => {
+    const parent = wooProductToIncoming(
+      {
+        id: 10,
+        type: "variable",
+        name: "تی‌شرت",
+        sku: "TSHIRT",
+        price: "100000",
+        regular_price: "100000",
+        manage_stock: false,
+        stock_quantity: null,
+        stock_status: "instock",
+        status: "publish",
+      },
+      "rial",
+    );
+    expect(parent.kind).toBe("variant_parent");
+
+    const child = wooProductToIncoming(
+      {
+        id: 11,
+        parent_id: 10,
+        type: "variation",
+        name: "تی‌شرت - قرمز",
+        sku: "TSHIRT-RED",
+        price: "120000",
+        regular_price: "120000",
+        manage_stock: true,
+        stock_quantity: 3,
+        stock_status: "instock",
+        status: "publish",
+        attributes: [
+          { id: 1, name: "رنگ", position: 0, visible: true, variation: true, options: ["قرمز"], option: "قرمز" },
+        ],
+      },
+      "rial",
+    );
+    expect(child.kind).toBe("variant_child");
+    expect(child.parentExternalId).toBe("10");
+    expect(child.variantOptions).toEqual({ "رنگ": "قرمز" });
   });
 });

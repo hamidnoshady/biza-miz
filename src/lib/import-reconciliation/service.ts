@@ -46,6 +46,7 @@ import {
   type Progress,
   type ReconciliationCounts,
   type StaleCheck,
+  type StaleReason,
 } from "./lifecycle";
 import {
   identityKeysOf,
@@ -1858,6 +1859,8 @@ export interface RunSummary {
   run: ReconciliationRun;
   counts: ReconciliationCounts;
   progress: Progress;
+  /** Inbound events parked in the source inbox while this connection is gated. */
+  bufferedEvents: number;
 }
 
 export interface ListRunsFilter {
@@ -1935,7 +1938,27 @@ export async function getRunSummary(businessId: string, runId: string): Promise<
   return withTenantTransaction(businessId, async (client) => {
     const run = await loadRun(client, businessId, runId);
     const counts = summarizeItems(await readItemViews(client, run));
-    return { run, counts, progress: progressStage({ runStatus: run.status, counts, crossChecked: run.crossChecked }) };
+    let bufferedEvents = 0;
+    if (run.connectionId) {
+      const { rows } = await client.query<{ n: string }>(
+        `SELECT count(*)::text AS n
+           FROM integration_webhook_events
+          WHERE business_id = $1 AND connection_id = $2::uuid AND status = 'deferred'`,
+        [businessId, run.connectionId],
+      );
+      bufferedEvents = Number(rows[0]?.n ?? 0);
+    }
+    return {
+      run,
+      counts,
+      progress: progressStage({
+        runStatus: run.status,
+        counts,
+        crossChecked: run.crossChecked,
+        bufferedEvents,
+      }),
+      bufferedEvents,
+    };
   });
 }
 
@@ -2172,6 +2195,31 @@ export async function revalidateRun(
   });
 }
 
+/**
+ * Invalidate a preview because the source itself moved (a newer inbox event).
+ * Approvals go back to review; the run keeps its items, decisions and history.
+ */
+export async function markRunStale(
+  businessId: string,
+  runId: string,
+  reasons: StaleReason[],
+): Promise<ReconciliationRun> {
+  return withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId, true);
+    if (REVIEWABLE.includes(run.status)) {
+      await setRunStatus(client, run, "stale");
+      await client.query(
+        `UPDATE import_reconciliation_items
+            SET status = 'proposed', effect = NULL, updated_at = now()
+          WHERE run_id = $1 AND business_id = $2 AND status = 'approved'`,
+        [run.id, businessId],
+      );
+      await audit(client, businessId, null, "reconciliation.run.stale", run.id, { reasons });
+    }
+    return loadRun(client, businessId, runId);
+  });
+}
+
 /** Reopen a stale run for re-staging against the new source/canonical state. */
 export async function reopenStaleRun(
   businessId: string,
@@ -2263,10 +2311,17 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
     const processed = await withTenantTransaction(businessId, async (client) => {
       const run = await loadRun(client, businessId, runId);
       const { rows } = await client.query(
+        // Product parents must be written before their children. The snapshot
+        // carries the shape, so this is a stable ordering rule, not a guess.
         `SELECT * FROM import_reconciliation_items
           WHERE run_id = $1 AND business_id = $2 AND status = 'approved'
-          ORDER BY id LIMIT $3 FOR UPDATE SKIP LOCKED`,
-        [runId, businessId, batchSize],
+          ORDER BY CASE
+                     WHEN $4 = 'product' AND snapshot->>'kind' = 'variant_child' THEN 1
+                     ELSE 0
+                   END,
+                   id
+          LIMIT $3 FOR UPDATE SKIP LOCKED`,
+        [runId, businessId, batchSize, run.domain],
       );
       for (const row of rows) {
         const item = mapItem(row);
@@ -2346,6 +2401,42 @@ export async function applyRun(options: ApplyOptions): Promise<ApplyResult> {
 // ---------------------------------------------------------------------------
 // Cross-check
 // ---------------------------------------------------------------------------
+
+/**
+ * Safe recovery for a partial apply: failed items go back to review so the
+ * owner can approve them again. The run's decisions, evidence and identities
+ * are untouched; only the failed rows' transient apply state is cleared.
+ */
+export async function retryFailedItems(
+  businessId: string,
+  runId: string,
+  actor: Actor,
+): Promise<{ retried: number; run: ReconciliationRun }> {
+  return withTenantTransaction(businessId, async (client) => {
+    const run = await loadRun(client, businessId, runId, true);
+    if (run.status === "applied" || run.status === "cancelled") {
+      throw new ReconciliationError("run_closed", { status: run.status });
+    }
+    const { rows } = await client.query<{ id: number }>(
+      `UPDATE import_reconciliation_items
+          SET status = 'proposed', effect = NULL, error = NULL,
+              resolved_canonical_id = NULL, applied_at = NULL, updated_at = now()
+        WHERE run_id = $1 AND business_id = $2 AND status = 'failed'
+        RETURNING id`,
+      [runId, businessId],
+    );
+    if (rows.length === 0) throw new ReconciliationError("no_failed_items");
+    if (run.status === "partially_applied") {
+      await setRunStatus(client, run, "in_review");
+    } else if (run.status === "failed") {
+      await setRunStatus(client, run, "staged");
+    }
+    await audit(client, businessId, actor, "reconciliation.run.retried", run.id, {
+      retried: rows.length,
+    });
+    return { retried: rows.length, run: await loadRun(client, businessId, runId) };
+  });
+}
 
 export interface CrossCheckResult {
   ok: boolean;

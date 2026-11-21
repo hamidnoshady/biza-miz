@@ -24,6 +24,7 @@ import { connectHolooSql, connectHolooSqlWriter, createHolooWebServiceClient } f
 import { diagnoseProfile, profileForKey } from "./schema-profile";
 import { probeHolooSchema } from "./schema-probe";
 import { writeIntegrationAudit } from "../audit";
+import { canPublishAnyConnectionOutbound } from "../../import-reconciliation/entry-guards";
 
 export const HOLOO_PUSH_TICK_INTERVAL_MS = 60 * 1000;
 export const HOLOO_PUSH_DRAIN_BATCH = 25;
@@ -52,6 +53,20 @@ export async function pushForConnection(businessId: string, connectionId: string
   if (!(await isAppServiceOperational(businessId, "accounting"))) return { attempted: 0, sent: 0 };
   const settings = await getHolooSettingsRow(businessId, connectionId);
   if (!settings) return { attempted: 0, sent: 0 };
+  const connection = await getConnection(businessId, connectionId);
+  const gate = await canPublishAnyConnectionOutbound(businessId, {
+    id: connectionId,
+    source_of_truth: connection?.source_of_truth ?? null,
+  });
+  if (!gate.allowed) {
+    await writeIntegrationAudit({
+      businessId,
+      connectionId,
+      action: "holoo.push_blocked",
+      payload: { reason: gate.reason ?? "outbound_blocked" },
+    });
+    return { attempted: 0, sent: 0 };
+  }
 
   // Claim each batch atomically. Manual sends and the scheduled tick can race;
   // SELECT+UPDATE in separate pool queries could otherwise send one document
@@ -148,6 +163,12 @@ export async function sendPendingHolooOutbox(businessId: string, connectionId: s
   if (!settings.web_service_base_url || !settings.ws_user_ciphertext || !settings.ws_password_ciphertext) {
     throw new Error("holoo_web_service_credentials_missing");
   }
+  const connection = await getConnection(businessId, connectionId);
+  const gate = await canPublishAnyConnectionOutbound(businessId, {
+    id: connectionId,
+    source_of_truth: connection?.source_of_truth ?? null,
+  });
+  if (!gate.allowed) throw new Error(gate.reason ?? "outbound_blocked");
 
   const drain = await pushForConnection(businessId, connectionId);
   const [{ rows: afterRows }, { rows: scheduledRows }, { rows: processingRows }, { rows: deadRows }] = await Promise.all([
