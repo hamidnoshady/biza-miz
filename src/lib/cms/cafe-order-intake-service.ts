@@ -42,7 +42,7 @@ import {
   resolveTableQrTokenForOrder,
   type ResolvedTableQrIntake,
 } from "../table-qr-service";
-import type { CmsOrder } from "./types";
+import type { CmsOrder, CmsOrderItem } from "./types";
 
 /** A refusal the inbox records verbatim — the operator sees the code. */
 export class CafeOrderIntakeError extends Error {
@@ -103,6 +103,40 @@ interface MappedLine {
 }
 
 /**
+ * The CMS product id a line sold.
+ *
+ * The order document carries the relationship (`items[].product`), and a
+ * site that reads it with depth sees an object. `productId` is accepted too
+ * because it is what this module was written against; a CMS that only ever
+ * sends the relationship used to fail every café order with
+ * `product_id_required`, so both shapes are read here.
+ */
+export function lineProductId(line: CmsOrderItem): string {
+  if (typeof line.productId === "string" && line.productId.trim()) return line.productId.trim();
+  const relation = line.product;
+  if (typeof relation === "string") return relation.trim();
+  if (relation && typeof relation === "object" && "id" in relation) return String(relation.id).trim();
+  return "";
+}
+
+/**
+ * The option ids a line chose, from either shape: a flat `modifierIds` list, or
+ * the snapshots the CMS actually writes (`modifiers[].optionSourceId`).
+ */
+export function lineModifierIds(line: CmsOrderItem): string[] {
+  const ids = new Set<string>();
+  for (const raw of Array.isArray(line.modifierIds) ? line.modifierIds : []) {
+    const id = String(raw ?? "").trim();
+    if (id) ids.add(id);
+  }
+  for (const snapshot of Array.isArray(line.modifiers) ? line.modifiers : []) {
+    const id = typeof snapshot?.optionSourceId === "string" ? snapshot.optionSourceId.trim() : "";
+    if (id) ids.add(id);
+  }
+  return [...ids];
+}
+
+/**
  * Maps every CMS line onto a local menu item (and every CMS modifier id onto a
  * local modifier) *before* any write. A basket with one unmappable line fails
  * whole: importing the mapped half would bill a customer for a meal they did
@@ -117,7 +151,7 @@ async function mapCafeLines(
   if (items.length === 0) throw new CafeOrderIntakeError("items_required", 400);
   if (items.length > 100) throw new CafeOrderIntakeError("too_many_items", 400);
 
-  const remoteIds = [...new Set(items.map((line) => String(line.productId ?? "").trim()))];
+  const remoteIds = [...new Set(items.map(lineProductId))];
   if (remoteIds.some((id) => !id)) throw new CafeOrderIntakeError("product_id_required", 400);
 
   const { rows: mappedRows } = await query<{ remote_id: string; local_id: string }>(
@@ -129,15 +163,7 @@ async function mapCafeLines(
   );
   const localByRemote = new Map(mappedRows.map((row) => [row.remote_id, row.local_id]));
 
-  const remoteModifierIds = [
-    ...new Set(
-      items.flatMap((line) =>
-        (Array.isArray(line.modifierIds) ? line.modifierIds : [])
-          .map((id) => String(id).trim())
-          .filter(Boolean),
-      ),
-    ),
-  ];
+  const remoteModifierIds = [...new Set(items.flatMap(lineModifierIds))];
   const localModifierByRemote = new Map<string, string>();
   if (remoteModifierIds.length > 0) {
     const { rows: modifierRows } = await query<{ source_key: string; remote_id: string }>(
@@ -151,7 +177,7 @@ async function mapCafeLines(
   }
 
   return items.map((line) => {
-    const remoteId = String(line.productId).trim();
+    const remoteId = lineProductId(line);
     const menuItemId = localByRemote.get(remoteId);
     if (!menuItemId) throw new CafeOrderIntakeError(`product_not_mapped:${remoteId}`);
 
@@ -161,9 +187,7 @@ async function mapCafeLines(
     }
 
     const modifierIds: string[] = [];
-    for (const raw of Array.isArray(line.modifierIds) ? line.modifierIds : []) {
-      const remoteModifierId = String(raw).trim();
-      if (!remoteModifierId) continue;
+    for (const remoteModifierId of lineModifierIds(line)) {
       const local = localModifierByRemote.get(remoteModifierId);
       if (!local) throw new CafeOrderIntakeError(`modifier_not_mapped:${remoteModifierId}`);
       modifierIds.push(local);
