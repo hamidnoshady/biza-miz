@@ -78,6 +78,36 @@ export function isCafeCmsOrder(order: CmsOrder): boolean {
   );
 }
 
+/**
+ * Lift the CMS order document's café block onto the flat fields intake reads.
+ *
+ * Two shapes reach this module and they are not the same shape:
+ *
+ *   - the `order.submitted` **event summary** is flat (`serviceMode`,
+ *     `tableToken`, `paymentProvider`), which is what this type was written
+ *     against;
+ *   - the **order document** the poll fetches nests them — `cafe.serviceMode`,
+ *     `cafe.tableToken`, `cafe.fulfillment`, and the payment provider under
+ *     `payment.provider`.
+ *
+ * Reading only the flat fields meant `serviceMode` was `null` on every document,
+ * the intake fell back to `takeaway`, and a table order was created as a
+ * takeaway with no table: the guest scanned a QR, the CMS said dine-in, the POS
+ * said takeaway, and nobody could see which table had ordered.
+ */
+export function normalizeCmsOrder(order: CmsOrder): CmsOrder {
+  const cafe = order.cafe ?? null;
+  const provider = order.payment?.provider ?? null;
+  const paymentMethod = order.paymentMethod
+    ?? (provider === "counter" ? "counter" : provider ? "online" : null);
+  return {
+    ...order,
+    paymentMethod,
+    serviceMode: order.serviceMode ?? cafe?.serviceMode ?? null,
+    tableToken: order.tableToken ?? cafe?.tableToken ?? null,
+  };
+}
+
 /** The CMS order's own checkout instant, so the sale lands on its business day. */
 function openedAtFor(order: CmsOrder): string | null {
   // Already an ISO instant (or null) — `parseRemoteInstant` is the one policy

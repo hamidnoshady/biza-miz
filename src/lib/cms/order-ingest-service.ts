@@ -37,6 +37,7 @@ import {
   attachCafeOrderPayment,
   intakeSubmittedCafeOrder,
   isCafeCmsOrder,
+  normalizeCmsOrder,
 } from "./cafe-order-intake-service";
 
 const zero = "0" as RialText;
@@ -90,6 +91,10 @@ export async function resolveCmsConnectionBySiteId(siteId: string): Promise<Webs
 }
 
 export async function handleCmsStoreOrderWebhook(notice: CmsOrderEventNotice): Promise<NextResponse> {
+  // The event summary is flat; the fetched order document nests the café fields
+  // under `cafe`. Normalizing once here is what makes a table order a table order
+  // (see `normalizeCmsOrder`).
+  notice.order = normalizeCmsOrder(notice.order);
   const connection = await resolveCmsConnectionBySiteId(notice.siteId);
   if (!connection) {
     return NextResponse.json({ error: "site_not_connected" }, { status: 404 });

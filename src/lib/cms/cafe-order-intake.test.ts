@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCafeCmsOrder, lineModifierIds, lineProductId } from "./cafe-order-intake-service";
+import { isCafeCmsOrder, lineModifierIds, lineProductId, normalizeCmsOrder } from "./cafe-order-intake-service";
 import type { CmsOrder, CmsOrderItem } from "./types";
 
 const legacy: CmsOrder = {
@@ -66,5 +66,44 @@ describe("café line identity", () => {
     };
     expect([...lineModifierIds(line)].sort()).toEqual(["option-a", "option-b", "option-c"]);
     expect(lineModifierIds({ quantity: 1 })).toEqual([]);
+  });
+});
+
+describe("normalizeCmsOrder", () => {
+  it("lifts the nested café block of the order document onto the flat fields", () => {
+    // Exactly what the CMS order document carries (verified against production):
+    // flat fields null, the real values under `cafe` and `payment.provider`.
+    const document = {
+      ...legacy,
+      serviceMode: null,
+      tableToken: null,
+      paymentMethod: null,
+      cafe: {
+        serviceMode: "dine_in",
+        tableToken: "tqr_xcJBijBaCL3f9p4c8hL44f_2m-LwBmpT",
+        tableLabel: "میز ۲",
+        paymentChoice: "counter",
+        fulfillment: "awaiting_approval",
+      },
+      payment: { provider: "counter", mode: null, paidAt: null, reference: null },
+    } as CmsOrder;
+
+    const normalized = normalizeCmsOrder(document);
+    expect(normalized.serviceMode).toBe("dine_in");
+    expect(normalized.tableToken).toBe("tqr_xcJBijBaCL3f9p4c8hL44f_2m-LwBmpT");
+    expect(normalized.paymentMethod).toBe("counter");
+  });
+
+  it("keeps the flat event-summary shape untouched", () => {
+    const summary = { ...legacy, serviceMode: "takeaway", tableToken: null, paymentMethod: "online" } as CmsOrder;
+    const normalized = normalizeCmsOrder(summary);
+    expect(normalized.serviceMode).toBe("takeaway");
+    expect(normalized.paymentMethod).toBe("online");
+    expect(normalized.tableToken).toBeNull();
+  });
+
+  it("treats a non-counter payment provider as online and an absent one as unknown", () => {
+    expect(normalizeCmsOrder({ ...legacy, payment: { provider: "zarinpal" } } as CmsOrder).paymentMethod).toBe("online");
+    expect(normalizeCmsOrder({ ...legacy } as CmsOrder).paymentMethod).toBeNull();
   });
 });
