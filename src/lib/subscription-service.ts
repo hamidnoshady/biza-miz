@@ -26,7 +26,7 @@
  * authoritative computation (plan base fee + recurring add-ons). No other
  * code path invents a renewal amount.
  */
-import { getPool, query, withoutTenantScope, withTenant, type PoolClient } from "./db";
+import { getPool, query, withoutTenantScope, withTenant, withTenantTransaction, type PoolClient } from "./db";
 import { chargeSubscriptionFeeTx, WalletInsufficientFundsError } from "./wallet-service";
 import {
   getBillingPlan,
@@ -70,6 +70,14 @@ export interface BusinessSubscription {
   lastRenewalAt: string | null;
   /** The paid prepayment term; 1 for legacy monthly subscriptions. */
   termMonths: PlanTermMonths;
+  /**
+   * A paid cross-plan purchase waiting for the running period to end. The
+   * current plan keeps serving until then; the renewal tick applies this
+   * without a second charge (ESH-193).
+   */
+  pendingPlanKey: string | null;
+  pendingTermMonths: PlanTermMonths | null;
+  pendingEffectiveAt: string | null;
 }
 
 /** Persian labels for the console UI. */
@@ -116,6 +124,9 @@ type SubscriptionRow = {
   cancelled_at: string | Date | null;
   last_renewal_at: string | Date | null;
   term_months: number;
+  pending_plan_key: string | null;
+  pending_term_months: number | null;
+  pending_effective_at: string | Date | null;
 }
 
 function toSubscription(row: SubscriptionRow): BusinessSubscription {
@@ -135,12 +146,21 @@ function toSubscription(row: SubscriptionRow): BusinessSubscription {
     cancelledAt: row.cancelled_at ? iso(row.cancelled_at) : null,
     lastRenewalAt: row.last_renewal_at ? iso(row.last_renewal_at) : null,
     termMonths: row.term_months === 3 || row.term_months === 12 ? row.term_months : 1,
+    pendingPlanKey: row.pending_plan_key ?? null,
+    pendingTermMonths:
+      row.pending_term_months === 3 || row.pending_term_months === 12
+        ? row.pending_term_months
+        : row.pending_term_months === 1
+          ? 1
+          : null,
+    pendingEffectiveAt: row.pending_effective_at ? iso(row.pending_effective_at) : null,
   };
 }
 
 const SUBSCRIPTION_COLUMNS = `s.business_id, b.name AS business_name, s.plan_key, s.status, s.started_at,
        s.current_period_start, s.current_period_end, s.trial_end, s.trial_started_at, s.grace_end,
-       s.cancel_at_period_end, s.auto_renew, s.cancelled_at, s.last_renewal_at, s.term_months`;
+       s.cancel_at_period_end, s.auto_renew, s.cancelled_at, s.last_renewal_at, s.term_months,
+       s.pending_plan_key, s.pending_term_months, s.pending_effective_at`;
 
 export async function getBusinessSubscription(businessId: string): Promise<BusinessSubscription | null> {
   const { rows } = await query<SubscriptionRow>(
@@ -175,8 +195,10 @@ export async function listSubscriptions(
 export interface ChangePlanResult {
   subscription: BusinessSubscription;
   plan: BillingPlan;
-  /** 'none' when the business was already on this plan. */
-  outcome: "created" | "changed" | "unchanged";
+  /** 'scheduled' means a paid cross-plan purchase waits for the period end. */
+  outcome: "created" | "changed" | "unchanged" | "scheduled";
+  /** Present when outcome is 'scheduled': the instant the new plan applies. */
+  scheduledFor?: string;
 }
 
 /**
@@ -290,6 +312,59 @@ export async function changeBusinessPlan(input: {
     } catch (err) {
       if (err instanceof PlanTransitionError) throw new SubscriptionError(err.code);
       throw err;
+    }
+
+    // ESH-193 — a paid *cross-plan* purchase while a period is running is
+    // scheduled for the paid-period boundary. Starting it at `now` would
+    // discard the time already paid for; charging a second time would bill the
+    // same day twice. The plan keeps serving, the purchase is recorded as
+    // pending, and the renewal tick applies it without another debit.
+    const targetTermMonths: PlanTermMonths =
+      input.termMonths ?? paymentTermMonths ?? existing?.termMonths ?? 1;
+    const carryingNow =
+      existing !== null &&
+      // A trial is not paid time: buying a plan during it must switch now (and
+      // clear the trial), which is the existing contract. Only a paid period is
+      // worth preserving to its boundary.
+      ["active", "past_due"].includes(existing.status) &&
+      new Date(existing.currentPeriodEnd).getTime() > now.getTime();
+    if (input.source === "purchase" && !samePlan && carryingNow) {
+      if (existing!.pendingPlanKey) throw new SubscriptionError("plan_change_pending");
+      await client.query(
+        `UPDATE business_subscriptions
+            SET pending_plan_key = $2,
+                pending_term_months = $3,
+                pending_effective_at = $4::timestamptz,
+                pending_payment_id = $5,
+                auto_renew = true,
+                updated_at = now()
+          WHERE business_id = $1`,
+        [input.businessId, plan.key, targetTermMonths, existing!.currentPeriodEnd, input.paymentId ?? null],
+      );
+      if (input.paymentId) {
+        await client.query(
+          `UPDATE billing_payments SET plan_activated_at = now()
+            WHERE id = $1 AND business_id = $2 AND plan_activated_at IS NULL`,
+          [input.paymentId, input.businessId],
+        );
+      }
+      await client.query("COMMIT");
+      const scheduledSubscription = await getBusinessSubscription(input.businessId);
+      if (!scheduledSubscription) throw new SubscriptionError("subscription_not_found");
+      billingLog("billing.subscription.transition", {
+        businessId: input.businessId,
+        planKey: plan.key,
+        source: input.source,
+        status: "scheduled",
+        effectiveAt: existing!.currentPeriodEnd,
+        termMonths: targetTermMonths,
+      });
+      return {
+        subscription: scheduledSubscription,
+        plan,
+        outcome: "scheduled",
+        scheduledFor: existing!.currentPeriodEnd,
+      };
     }
 
     // A same-plan purchase extends the billing period exactly once rather than
@@ -849,7 +924,112 @@ export type RenewalOutcome =
   | { status: "past_due" }
   | { status: "cancelled" }
   | { status: "expired" }
+  | { status: "pending_applied"; invoiceId: null }
   | { status: "nothing_due" };
+
+/**
+ * Apply the pending plan a paid cross-plan purchase scheduled.
+ *
+ * Idempotent and money-free: the purchase was settled when it was scheduled,
+ * so this only moves the subscription's plan/period. A second tick finds no
+ * pending row and returns `nothing_due`. The new period starts at the stored
+ * effective instant, which is the old paid period's end — no overlap, no gap
+ * in what was paid, and no retroactive repricing.
+ */
+async function applyPendingPlanChange(
+  subscription: BusinessSubscription,
+  now: Date,
+): Promise<RenewalOutcome> {
+  const businessId = subscription.businessId;
+  const result = await withTenantTransaction(businessId, async (client) => {
+    const { rows } = await client.query<{
+      pending_plan_key: string | null;
+      pending_term_months: number | null;
+      pending_effective_at: Date | string | null;
+    }>(
+      `SELECT pending_plan_key, pending_term_months, pending_effective_at
+         FROM business_subscriptions
+        WHERE business_id = $1
+        FOR UPDATE`,
+      [businessId],
+    );
+    const row = rows[0];
+    if (!row?.pending_plan_key || !row.pending_effective_at) return { applied: false as const };
+    const effectiveAt =
+      row.pending_effective_at instanceof Date
+        ? row.pending_effective_at.toISOString()
+        : new Date(row.pending_effective_at).toISOString();
+    if (effectiveAt > now.toISOString()) return { applied: false as const };
+
+    const termMonths: PlanTermMonths =
+      row.pending_term_months === 3 || row.pending_term_months === 12
+        ? row.pending_term_months
+        : row.pending_term_months === 1
+          ? 1
+          : subscription.termMonths;
+    const periodEnd = addCalendarMonths(effectiveAt, termMonths);
+    await client.query(
+      `UPDATE business_subscriptions
+          SET plan_key = $2,
+              term_months = $3,
+              status = 'active',
+              current_period_start = $4::timestamptz,
+              current_period_end = $5::timestamptz,
+              grace_end = NULL,
+              pending_plan_key = NULL,
+              pending_term_months = NULL,
+              pending_effective_at = NULL,
+              pending_payment_id = NULL,
+              last_renewal_at = now(),
+              updated_at = now()
+        WHERE business_id = $1`,
+      [businessId, row.pending_plan_key, termMonths, effectiveAt, periodEnd],
+    );
+    await client.query(`UPDATE businesses SET plan = $2, updated_at = now() WHERE id = $1`, [
+      businessId,
+      row.pending_plan_key,
+    ]);
+    return {
+      applied: true as const,
+      planKey: row.pending_plan_key,
+      effectiveAt,
+      periodEnd,
+      termMonths,
+    };
+  });
+
+  if (!result.applied) return { status: "nothing_due" };
+
+  billingLog("billing.subscription.transition", {
+    businessId,
+    planKey: result.planKey,
+    source: "scheduled_purchase",
+    status: "active",
+    effectiveAt: result.effectiveAt,
+    periodEnd: result.periodEnd,
+    termMonths: result.termMonths,
+  });
+
+  // The new plan's inclusions are granted from the boundary, not before it.
+  const { reconcileEntitlementsForPlanChange } = await import("./billing-plans-service");
+  await reconcileEntitlementsForPlanChange({ businessId, newPlanKey: result.planKey });
+  for (const feature of await listPlanFeatures(result.planKey)) {
+    if (feature.pricingModel === "included" || feature.pricingModel === "monthly") {
+      await grantEntitlement({
+        businessId,
+        featureKey: feature.featureKey,
+        source: "plan",
+        freeUntil: feature.freeUntil,
+        freeLimit: feature.freeLimit,
+      });
+    }
+  }
+  if (deploymentRole() !== "site") {
+    const { refreshEntitlementsForBusiness } = await import("./billing/entitlement/outbox-service");
+    void refreshEntitlementsForBusiness(businessId).catch(() => {});
+  }
+  return { status: "pending_applied", invoiceId: null };
+}
 
 /**
  * Renew one business's subscription for its next period, or finalize its
@@ -871,10 +1051,22 @@ export async function renewBusinessSubscription(
   if (lifecycleRows[0]?.ownership_kind !== "customer") return { status: "nothing_due" };
   const subscription = await getBusinessSubscription(businessId);
   if (!subscription) return { status: "nothing_due" };
+  const nowIso = now.toISOString();
+
+  // ESH-193: a paid cross-plan purchase scheduled for this boundary applies
+  // before any renewal decision. The period was paid at purchase time, so this
+  // path opens the next interval without an invoice or a second debit.
+  if (
+    subscription.pendingPlanKey &&
+    subscription.pendingEffectiveAt &&
+    subscription.pendingEffectiveAt <= nowIso
+  ) {
+    return applyPendingPlanChange(subscription, now);
+  }
+
   if (subscription.status === "cancelled" || subscription.status === "expired") {
     return { status: "nothing_due" };
   }
-  const nowIso = now.toISOString();
 
   // A past-due subscription whose grace window has closed expires (regardless
   // of auto_renew).
@@ -1090,6 +1282,7 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
   pastDue: number;
   expired: number;
   cancelled?: number;
+  pendingApplied?: number;
 }> {
   const started = Date.now();
   const nowIso = now.toISOString();
@@ -1114,6 +1307,7 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
   let pastDue = 0;
   let expired = 0;
   let cancelled = 0;
+  let pendingApplied = 0;
   for (const row of due) {
     try {
       await withTenant(row.business_id, async () => {
@@ -1122,6 +1316,7 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
         else if (outcome.status === "past_due") pastDue += 1;
         else if (outcome.status === "expired") expired += 1;
         else if (outcome.status === "cancelled") cancelled += 1;
+        else if (outcome.status === "pending_applied") pendingApplied += 1;
       });
     } catch (error) {
       console.error("subscription renewal tick failed for business:", row.business_id, error);
@@ -1137,7 +1332,7 @@ export async function runSubscriptionRenewalTick(now: Date = new Date()): Promis
   } catch (error) {
     console.error("purchase invoice repair failed:", error);
   }
-  const result = { checked: due.length, renewed, pastDue, expired, cancelled };
+  const result = { checked: due.length, renewed, pastDue, expired, cancelled, pendingApplied };
   billingLog("billing.renewal.tick", { ...result, durationMs: Date.now() - started });
   return result;
 }

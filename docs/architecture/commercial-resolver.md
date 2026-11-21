@@ -131,9 +131,18 @@ never activates or charges.
 - Proration is configuration (`none` default or `daily`). `daily` credits only
   the unserved days and charges the target for the same days; both periods use
   one denominator, so nothing overlaps and the elapsed past is never repriced.
-  The quote is available read-only (`plan_transition`); the *charging* path for
-  a cross-plan purchase is still the existing boundary behaviour and remains a
-  release-gated decision (see §11).
+  The quote is available read-only (`plan_transition`).
+- **A cross-plan purchase is deferred to the paid-period boundary.** While a
+  period is running, a purchase of a *different* plan records a pending plan
+  (`business_subscriptions.pending_*`), keeps the current plan serving, and
+  stamps the payment as fulfilled. The renewal tick applies the pending plan at
+  the boundary with no invoice and no second debit, opening the next period from
+  that instant. A second different pending target is refused
+  (`plan_change_pending`) because resolving it would need a refund/credit
+  decision. Immediate daily-credit charging is **not** wired; the quote shows
+  it but no money moves under that policy today. A purchase during a **trial**
+  is not deferred — a trial is not paid time — so it switches immediately and
+  clears the trial, exactly as before.
 - Setup is not repeated on reactivation; a lapsed period is closed, not
   re-billed.
 
@@ -177,7 +186,7 @@ The existing tenant quote route accepts one additional read-only kind:
 
 | Kind | Body | Result |
 | --- | --- | --- |
-| `plan_transition` | `{ kind: "plan_transition", planKey }` | `{ ok, quote, current, target, prorationPolicy, taxRateBps }` — an upgrade/downgrade quote under the configured policy. `current.creditBasis` says whether the credit is derived from a paid invoice or a labelled published-price estimate. It moves no money and changes no subscription; charging a transition remains a release-gated decision. |
+| `plan_transition` | `{ kind: "plan_transition", planKey }` | `{ ok, quote, current, target, prorationPolicy, taxRateBps }` - an upgrade/downgrade quote under the configured policy. `current.creditBasis` says whether the credit is derived from a paid invoice or a labelled published-price estimate. It moves no money and changes no subscription; the neutral policy's charge path is the deferred boundary change, and daily-credit charging is not wired. |
 
 `activate`, `reenable` and `term_purchase` are gated by
 `enforceCommercialServiceAccess`; `disable` is never blocked, and `settle`
@@ -204,14 +213,17 @@ gross, both discount components and tax without re-deriving a price.
 
 ## 10. Migration and rollout
 
-- `0309_commercial_resolver.sql` is additive: three to five new tables and one
-  widened `wallet_ledger.kind` check. No existing row, price or term changes.
+- `0309_commercial_resolver.sql` is additive: five new tables and one widened
+  `wallet_ledger.kind` check. No existing row, price or term changes.
+- `0310_pending_plan_change.sql` is additive too: four nullable pending-plan
+  columns and one partial index on `business_subscriptions`. A subscription
+  with no pending row behaves exactly as before.
 - Forward: run migrations, then nothing else — legacy tenants keep pricing.
   Enrolment is an explicit per-tenant write.
 - Rollback: drop `business_service_terms`, `business_commercial_policies`,
-  `service_term_offers`, `billing_plan_benefits`, `billing_policy_versions` and
-  restore the previous `wallet_ledger_kind_check`. No historical financial row
-  is rewritten.
+  `service_term_offers`, `billing_plan_benefits`, `billing_policy_versions`,
+  the four `pending_*` columns and the pending index, and restore the previous
+  `wallet_ledger_kind_check`. No historical financial row is rewritten.
 - A production migration rehearsal must use synthetic/sanitized data and is
   coordinated with #1381.
 
@@ -219,8 +231,8 @@ gross, both discount components and tax without re-deriving a price.
 
 | Gate | Status |
 | --- | --- |
-| Code complete | this change: resolver, service/usage pricing, terms, lifecycle, projection, tests |
-| Migration ready | `0309` written; production rehearsal **not run** |
+| Code complete | resolver, service/usage pricing, terms, lifecycle, projection, deferred boundary plan change and tests |
+| Migration ready | `0309` + `0310` written; production rehearsal **not run** |
 | Financial policy approved | **not yet** — discount rates, coupon stacking and provider pass-through remain configuration |
 | Deployed | **no** |
 | Tenant rollout | **not started** — no tenant is enrolled by this change |
@@ -240,6 +252,7 @@ Commands and outcomes, on a Windows development worktree with Postgres 16:
 | resolver pure suite after the final coverage additions | 45 passed |
 | `DATABASE_URL=… npx vitest run --config vitest.db.config.ts integration/commercial-resolver.integration.test.ts` | 23 passed, including 12-month terms, term-expiry back to rental, empty-wallet renewal skip, policy-change staleness and the read-only transition quote |
 | 11 billing DB suites (resolver, service activation, subscriptions, wallet, commercial, quote store, plan checkout, plan quote ×2, purchase fulfilment, tenant isolation) | 133 passed |
+| deferred plan change (`billing-subscriptions` + `plan-checkout` + `billing-commercial` + `billing-wallet`) | 30 passed, including schedule → boundary apply → replay with no invoice or second debit |
 | resolver + tenant-isolation suites | 40 passed, including the RLS census |
 | `npm run test:design` | 47 passed |
 | `npx eslint` on every changed file | clean |
