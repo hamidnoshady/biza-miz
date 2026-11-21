@@ -315,6 +315,26 @@ export interface CmsOrder {
   reference: string;
   status: "pending" | "paid" | "cancelled" | "refunded";
   /**
+   * The order **document**'s café block. The `order.submitted` event summary is
+   * flat instead, which is why `normalizeCmsOrder` merges the two before anything
+   * reads them.
+   */
+  cafe?: {
+    serviceMode?: "dine_in" | "takeaway" | null;
+    tableToken?: string | null;
+    tableLabel?: string | null;
+    checkoutRequestId?: string | null;
+    paymentChoice?: "counter" | "online" | null;
+    fulfillment?: string | null;
+  } | null;
+  /** The document's payment record; `provider` is `counter` or a gateway id. */
+  payment?: {
+    provider?: string | null;
+    mode?: string | null;
+    paidAt?: string | null;
+    reference?: string | null;
+  } | null;
+  /**
    * Legacy one-product shape. A café order carries `items` instead and leaves
    * these three to the first line (the CMS does that mirroring, ESH-150), so
    * existing single-product consumers keep working unchanged.
