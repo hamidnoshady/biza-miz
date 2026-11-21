@@ -127,6 +127,7 @@ jobs:
           git merge-base --is-ancestor $run.headSha "refs/tags/$tag"
           if ($LASTEXITCODE -ne 0) { throw "Tag $tag is not a descendant of the tested source $($run.headSha)" }
           Write-Host "::notice title=Release source::$($run.headSha) from $($run.headBranch)"
+          exit 0
 
       - name: Download and verify the accepted installer artifact
         env:
