@@ -346,13 +346,6 @@ function resolveOne(
   if (request.identity.kind === "access") {
     netRial = 0;
     explanation.code = "plan_included";
-  } else if (isTermPurchase) {
-    if (priceState === "unpublished") {
-      return { line: null, refusal: { benefitId: id, kind: request.identity.kind, code: "no_published_price" } };
-    }
-    netRial = grossRial;
-    explanation.code = "prepaid_term_purchase";
-    explanation.data = { termOffer: true };
   } else if (covered) {
     coveredByPrepaidTerm = true;
     netRial = 0;
@@ -393,6 +386,12 @@ function resolveOne(
     netRial = grossRial - discountRial;
     explanation.code = "plan_discounted";
     explanation.data = { discountBasisPoints: bps };
+  } else if (isTermPurchase) {
+    // A prepaid term is its own purchase: the published offer price is charged
+    // once, unless an approved inclusion/discount already covered it above.
+    netRial = grossRial;
+    explanation.code = "prepaid_term_purchase";
+    explanation.data = { termOffer: true };
   } else if (priceState === "free") {
     explanation.code = "published_free";
   } else if (includedQuantity > 0) {

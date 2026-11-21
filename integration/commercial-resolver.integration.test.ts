@@ -32,8 +32,10 @@ let access: typeof import("../src/lib/billing/resolver/access");
 let activation: typeof import("../src/lib/service-activation/activation-service");
 let pricing: typeof import("../src/lib/service-activation/pricing-service");
 let wallet: typeof import("../src/lib/wallet-service");
+let transitions: typeof import("../src/lib/billing/resolver/transition-service");
 
 const planKey = `resolver-${randomUUID().slice(0, 8)}`;
+const targetPlanKey = `resolver-target-${randomUUID().slice(0, 8)}`;
 let platformUserId: string;
 let legacyBusinessId: string;
 let enrolledBusinessId: string;
@@ -80,6 +82,7 @@ beforeAll(async () => {
   activation = await import("../src/lib/service-activation/activation-service");
   pricing = await import("../src/lib/service-activation/pricing-service");
   wallet = await import("../src/lib/wallet-service");
+  transitions = await import("../src/lib/billing/resolver/transition-service");
 
   platformUserId = randomUUID();
   legacyBusinessId = randomUUID();
@@ -96,6 +99,18 @@ beforeAll(async () => {
       `INSERT INTO billing_plans (key, name, monthly_price_rial, monthly_ai_credit_rial, status, sort_order)
        VALUES ($1, 'پلن آزمون', 1000000, 5000000, 'active', 1)`,
       [planKey],
+    );
+    // A second purchasable plan for the read-only transition quote.
+    await db.query(
+      `INSERT INTO billing_plans (key, name, monthly_price_rial, status, sort_order)
+       VALUES ($1, 'پلن مقصد', 1500000, 'active', 2)`,
+      [targetPlanKey],
+    );
+    await db.query(
+      `INSERT INTO billing_price_versions
+         (target_type, target_key, unit, unit_amount_rial, version, effective_from)
+       VALUES ('plan', $1, 'month', 1500000, 1, now() - interval '1 day')`,
+      [targetPlanKey],
     );
     for (const [id, name] of [
       [legacyBusinessId, "کسب‌وکار قدیمی"],
@@ -591,6 +606,277 @@ describe("prepaid term auto-renewal", () => {
       wallet.getWalletBalanceRial(legacyBusinessId),
     );
     expect(afterReplay).toBe(after);
+  });
+});
+
+describe("prepaid long terms and expiry", () => {
+  const identity = { kind: "app" as const, key: "website", runtimeInstanceId: "" };
+  let offerId: string;
+
+  beforeAll(async () => {
+    const offer = await db.withoutTenantScope("platform", async () => {
+      await db.query(
+        `INSERT INTO service_price_schedules
+           (service_kind, service_key, version, setup_mode, setup_fixed_rial,
+            hourly_rate_rial, published, effective_from)
+         VALUES ('app', 'website', 1, 'fixed', 0, 50000, true, now() - interval '1 day')`,
+      );
+      return db.query<{ id: string }>(
+        `INSERT INTO service_term_offers
+           (service_kind, service_key, term_months, version, price_rial, published, effective_from)
+         VALUES ('app', 'website', 12, 1, 4000000, true, now() - interval '1 day')
+         RETURNING id`,
+      );
+    });
+    offerId = offer.rows[0]!.id;
+    const activated = await activation.activateService({
+      businessId: enrolledBusinessId,
+      identity,
+    });
+    expect(activated.status).toBe("activated");
+  });
+
+  it("quotes a 12-month term in calendar months with monthly allowance windows", async () => {
+    const quote = await resolver.quoteServiceTerm({
+      businessId: enrolledBusinessId,
+      identity,
+      termMonths: 12,
+    });
+    expect(quote.ok).toBe(true);
+    expect(quote.offer?.id).toBe(offerId);
+    expect(quote.totals.netRial).toBe(4_000_000);
+    // Mid-month start touches 13 calendar months; a year of allowance is never
+    // granted up front.
+    expect(quote.allowancePeriods).toBeGreaterThanOrEqual(12);
+    const start = new Date(quote.offer!.periodStart);
+    const end = new Date(quote.offer!.periodEnd);
+    expect(end.getUTCFullYear()).toBe(start.getUTCFullYear() + 1);
+    expect(end.getUTCMonth()).toBe(start.getUTCMonth());
+
+    const purchased = await resolver.purchaseServiceTerm({
+      businessId: enrolledBusinessId,
+      identity,
+      termMonths: 12,
+      expectedOfferId: offerId,
+      expectedNetRial: 4_000_000,
+      actorPlatformUserId: platformUserId,
+    });
+    expect(purchased.status).toBe("purchased");
+    const count = await db.withTenant(enrolledBusinessId, () =>
+      db.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM business_service_terms
+          WHERE business_id = $1 AND service_key = 'website'`,
+        [enrolledBusinessId],
+      ),
+    );
+    expect(count.rows[0]!.count).toBe("1");
+  });
+
+  it("returns to hourly rental the moment the paid term ends", async () => {
+    const term = await db.withTenant(enrolledBusinessId, () =>
+      db.query<{ period_end: Date; activation_id: string }>(
+        `SELECT period_end, activation_id FROM business_service_terms
+          WHERE business_id = $1 AND service_key = 'website'
+          ORDER BY created_at DESC LIMIT 1`,
+        [enrolledBusinessId],
+      ),
+    );
+    const row = term.rows[0]!;
+    const end = new Date(row.period_end).getTime();
+    const from = new Date(end - 30 * 60_000).toISOString();
+    const to = new Date(end + 30 * 60_000).toISOString();
+    await db.withTenant(enrolledBusinessId, () =>
+      db.query(
+        `UPDATE service_activation_intervals
+            SET started_at = $2, last_settled_at = $2, ended_at = NULL
+          WHERE activation_id = $1 AND ended_at IS NULL`,
+        [row.activation_id, from],
+      ),
+    );
+
+    const settlement = await activation.settleServiceRuntime({
+      businessId: enrolledBusinessId,
+      identity,
+      now: new Date(to),
+    });
+    expect(settlement.status).toBe("settled");
+    // Half of the hour is covered by the term, half is ordinary rental at
+    // 50,000 Rial/hour — 25,000, not 50,000.
+    expect(settlement.amountRial).toBe(25_000);
+    expect(settlement.billedSeconds).toBe(3_600);
+  });
+});
+
+describe("prepaid renewal with an empty wallet", () => {
+  const identity = { kind: "workspace" as const, key: "projects", runtimeInstanceId: "" };
+  let offerId: string;
+
+  beforeAll(async () => {
+    const offer = await db.withoutTenantScope("platform", async () => {
+      await db.query(
+        `INSERT INTO service_price_schedules
+           (service_kind, service_key, version, setup_mode, setup_fixed_rial,
+            hourly_rate_rial, published, effective_from)
+         VALUES ('workspace', 'projects', 1, 'fixed', 0, 0, true, now() - interval '1 day')`,
+      );
+      return db.query<{ id: string }>(
+        `INSERT INTO service_term_offers
+           (service_kind, service_key, term_months, version, price_rial, published, effective_from)
+         VALUES ('workspace', 'projects', 1, 1, 1000000, true, now() - interval '1 day')
+         RETURNING id`,
+      );
+    });
+    offerId = offer.rows[0]!.id;
+
+    const activated = await activation.activateService({
+      businessId: otherBusinessId,
+      identity,
+    });
+    expect(activated.status).toBe("activated");
+
+    // An opted-in term that ended yesterday, and an empty wallet.
+    await db.withTenant(otherBusinessId, async () => {
+      await db.query(
+        `INSERT INTO business_service_terms
+           (business_id, activation_id, service_kind, service_key, term_months,
+            offer_id, price_rial, price_version, period_start, period_end,
+            status, auto_renew)
+         SELECT $1, a.id, 'workspace', 'projects', 1, $2, 1000000, 1,
+                now() - interval '2 months', now() - interval '1 day',
+                'active', true
+           FROM business_service_activations a
+          WHERE a.business_id = $1 AND a.service_kind = 'workspace'
+            AND a.service_key = 'projects' AND a.runtime_instance_id = ''`,
+        [otherBusinessId, offerId],
+      );
+      await db.query(`UPDATE business_wallets SET balance_rial = 0 WHERE business_id = $1`, [
+        otherBusinessId,
+      ]);
+    });
+  });
+
+  it("skips the renewal without a debit, a shorter term or a partial charge", async () => {
+    const before = await db.withTenant(otherBusinessId, () =>
+      db.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM business_service_terms
+          WHERE business_id = $1 AND service_key = 'projects'`,
+        [otherBusinessId],
+      ),
+    );
+    const run = await resolver.renewDueServiceTerms();
+    expect(run.renewed).toBe(0);
+    expect(run.skippedInsufficientCredit).toBeGreaterThanOrEqual(1);
+
+    const after = await db.withTenant(otherBusinessId, () =>
+      db.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM business_service_terms
+          WHERE business_id = $1 AND service_key = 'projects'`,
+        [otherBusinessId],
+      ),
+    );
+    expect(after.rows[0]!.count).toBe(before.rows[0]!.count);
+    const balance = await db.withTenant(otherBusinessId, () =>
+      wallet.getWalletBalanceRial(otherBusinessId),
+    );
+    expect(balance).toBe(0);
+  });
+});
+
+describe("policy change is stale at the charge boundary", () => {
+  it("reports a policy change between a term quote and purchase, then prices the inclusion", async () => {
+    const identity = { kind: "app" as const, key: "accounting", runtimeInstanceId: "" };
+    const quote = await resolver.quoteServiceTerm({
+      businessId: enrolledBusinessId,
+      identity,
+      termMonths: 3,
+    });
+    expect(quote.ok).toBe(true);
+    expect(quote.totals.netRial).toBeGreaterThan(0);
+
+    await db.withoutTenantScope("platform", async () => {
+      await db.query(
+        `INSERT INTO billing_policy_versions (version, status, note)
+         VALUES (2, 'active', 'سیاست دوم آزمون')
+         ON CONFLICT (version) DO NOTHING`,
+      );
+      await db.query(
+        `INSERT INTO billing_plan_benefits
+           (plan_key, benefit_id, benefit_kind, capability_key, service_kind, service_key,
+            meter_key, inclusion, discount_basis_points, charges_tariff_when_included,
+            provider_cost_policy, approved, policy_version)
+         VALUES ($1, 'service:app:accounting/enabled_time@services.activation',
+                 'enabled_time', 'services.activation', 'app', 'accounting',
+                 NULL, 'included', 0, false, NULL, true, 2)`,
+        [planKey],
+      );
+    });
+    await resolver.enrollCommercialPolicy({
+      businessId: enrolledBusinessId,
+      policyVersion: 2,
+      platformUserId,
+      note: "ارتقای سیاست آزمون",
+    });
+
+    const staleness = await resolver.serviceTermQuoteStaleness({
+      businessId: enrolledBusinessId,
+      identity,
+      quote,
+    });
+    expect(staleness).toBe("policy_changed");
+
+    const fresh = await resolver.quoteServiceTerm({
+      businessId: enrolledBusinessId,
+      identity,
+      termMonths: 3,
+    });
+    expect(fresh.ok).toBe(true);
+    expect(fresh.totals.netRial).toBe(0);
+  });
+});
+
+describe("read-only plan transition quote", () => {
+  it("quotes a boundary change under the neutral policy, labelled as a list-price basis", async () => {
+    const result = await transitions.readPlanTransitionQuote({
+      businessId: otherBusinessId,
+      targetPlanKey,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.prorationPolicy).toBe("none");
+    expect(result.quote?.explanation).toBe("at_period_end");
+    expect(result.quote?.newPeriod.start).toBe(result.current?.periodEnd);
+    expect(result.current?.creditBasis).toBe("published_price");
+    expect(result.target?.monthlyPriceRial).toBe(1_500_000);
+    expect(result.target?.priceVersion?.version).toBe(1);
+  });
+
+  it("uses the configured daily policy for an immediate prorated quote, then restores it", async () => {
+    await db.withoutTenantScope("platform", () =>
+      db.query(`UPDATE billing_commercial_settings SET proration_policy = 'daily'`),
+    );
+    try {
+      const result = await transitions.readPlanTransitionQuote({
+        businessId: otherBusinessId,
+        targetPlanKey,
+      });
+      expect(result.ok).toBe(true);
+      expect(result.prorationPolicy).toBe("daily");
+      expect(result.quote?.explanation).toBe("immediate_prorated");
+      expect(result.quote?.creditRial).toBeGreaterThan(0);
+      expect(result.quote?.netRial).toBeGreaterThan(0);
+    } finally {
+      await db.withoutTenantScope("platform", () =>
+        db.query(`UPDATE billing_commercial_settings SET proration_policy = 'none'`),
+      );
+    }
+  });
+
+  it("refuses the plan the business is already on", async () => {
+    const result = await transitions.readPlanTransitionQuote({
+      businessId: otherBusinessId,
+      targetPlanKey: planKey,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.refusal).toBe("same_plan");
   });
 });
 

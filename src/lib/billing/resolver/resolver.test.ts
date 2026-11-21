@@ -411,6 +411,42 @@ describe("prepaid service coverage", () => {
     });
     expect(resolved.refusals).toEqual([]);
   });
+
+  it("applies an approved inclusion to a prepaid term purchase instead of charging the offer again", () => {
+    const identity = serviceIdentity("enabled_time");
+    const resolved = resolveCommercialCharge({
+      requests: [
+        request({
+          identity,
+          quantity: 1,
+          price: price(5_000_000),
+          planBenefit: benefit(identity, "included"),
+          mode: "prepaid_term",
+          coverage: { start: AT, end: "2027-02-20T10:00:00.000Z" },
+        }),
+      ],
+    });
+    expect(resolved.ok).toBe(true);
+    expect(resolved.totals.netRial).toBe(0);
+    expect(resolved.lines[0]!.explanation.code).toBe("plan_included");
+  });
+
+  it("charges a prepaid term at its published offer once when nothing includes it", () => {
+    const identity = serviceIdentity("enabled_time");
+    const resolved = resolveCommercialCharge({
+      requests: [
+        request({
+          identity,
+          quantity: 1,
+          price: price(5_000_000),
+          mode: "prepaid_term",
+          coverage: { start: AT, end: "2027-02-20T10:00:00.000Z" },
+        }),
+      ],
+    });
+    expect(resolved.totals.netRial).toBe(5_000_000);
+    expect(resolved.lines[0]!.explanation.code).toBe("prepaid_term_purchase");
+  });
 });
 
 describe("overlap rejection", () => {

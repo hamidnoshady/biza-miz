@@ -131,6 +131,9 @@ never activates or charges.
 - Proration is configuration (`none` default or `daily`). `daily` credits only
   the unserved days and charges the target for the same days; both periods use
   one denominator, so nothing overlaps and the elapsed past is never repriced.
+  The quote is available read-only (`plan_transition`); the *charging* path for
+  a cross-plan purchase is still the existing boundary behaviour and remains a
+  release-gated decision (see §11).
 - Setup is not repeated on reactivation; a lapsed period is closed, not
   re-billed.
 
@@ -169,6 +172,12 @@ returns `commercial` (the projection above). No existing field changed.
 | --- | --- | --- |
 | `term_quote` | `{ termMonths: 1\|3\|12 }` | `{ quote }` — itemised, with offer period, allowance periods, wallet requirement and shortfall |
 | `term_purchase` | `{ termMonths, offerId, expectedNetRial, autoRenew? }` | `{ purchase }` or `409 term_stale|term_overlap|no_activation` or `402 insufficient_credit` |
+
+The existing tenant quote route accepts one additional read-only kind:
+
+| Kind | Body | Result |
+| --- | --- | --- |
+| `plan_transition` | `{ kind: "plan_transition", planKey }` | `{ ok, quote, current, target, prorationPolicy, taxRateBps }` — an upgrade/downgrade quote under the configured policy. `current.creditBasis` says whether the credit is derived from a paid invoice or a labelled published-price estimate. It moves no money and changes no subscription; charging a transition remains a release-gated decision. |
 
 `activate`, `reenable` and `term_purchase` are gated by
 `enforceCommercialServiceAccess`; `disable` is never blocked, and `settle`
@@ -227,9 +236,11 @@ Commands and outcomes, on a Windows development worktree with Postgres 16:
 | Command | Result |
 | --- | --- |
 | `npx tsc --noEmit` | clean |
-| `npx vitest run src/lib/billing/resolver src/lib/service-activation src/lib/mcp/server.test.ts src/lib/ai-plan-allowance.test.ts src/lib/billing/quote` | 140 passed |
-| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts` on the 11 billing suites (resolver, service activation, subscriptions, wallet, commercial, quote store, plan checkout, plan quote ×2, purchase fulfilment, tenant isolation) | 133 passed |
-| resolver + tenant-isolation suites (final code) | 40 passed, including the RLS census |
+| `npx vitest run src/lib/billing/resolver src/lib/service-activation src/lib/mcp/server.test.ts src/lib/ai-plan-allowance.test.ts src/lib/billing/quote` | 142 passed |
+| resolver pure suite after the final coverage additions | 45 passed |
+| `DATABASE_URL=… npx vitest run --config vitest.db.config.ts integration/commercial-resolver.integration.test.ts` | 23 passed, including 12-month terms, term-expiry back to rental, empty-wallet renewal skip, policy-change staleness and the read-only transition quote |
+| 11 billing DB suites (resolver, service activation, subscriptions, wallet, commercial, quote store, plan checkout, plan quote ×2, purchase fulfilment, tenant isolation) | 133 passed |
+| resolver + tenant-isolation suites | 40 passed, including the RLS census |
 | `npm run test:design` | 47 passed |
 | `npx eslint` on every changed file | clean |
 | `npm test` (whole repository) | 15,790 passed; failures limited to environment-only gates — WSL `bash` is a broken launcher for `ci/required-gate` (7), desktop installer/update tests need packaged artifacts (9), and three jsdom/compiler tests exceeded the 15s load threshold (both re-run green with a longer timeout: `client-bundle-boundary` 30s, `cheques-section` 72s) |
