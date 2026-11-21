@@ -62,10 +62,11 @@ the file host (see step 6).
 | Variable (Coolify, Central) | Type | Value |
 |---|---|---|
 | `DESKTOP_RELEASE_PUBLISH_TOKEN` | runtime secret | A long random value (at least 32 characters). Identical to the GitHub secret of the same name. Authorises release **registration** only. |
-| `DESKTOP_RELEASE_PUBLIC_KEY_PEM` | runtime variable | The RSA **public** key that matches the manifest signing key. Public key only. |
+| `DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM` | runtime variable | The Ed25519 **public** key that verifies schema 2 manifests. Public key only. |
+| `DESKTOP_RELEASE_PUBLIC_KEY_PEM` | runtime variable | Legacy RSA **public** key for schema 1 manifests. Public key only; keep while old clients exist. |
 | `DATABASE_URL` and the other existing variables | existing | Unchanged. |
 
-Never put these in the Central container: `DESKTOP_RELEASE_PRIVATE_KEY_PEM`, a GitHub PAT, a
+Never put these in the Central container: `DESKTOP_RELEASE_ED25519_PRIVATE_KEY_PEM`, `DESKTOP_RELEASE_PRIVATE_KEY_PEM`, a GitHub PAT, a
 Windows signing key or its provider credentials, a private storage key, or
 `COOLIFY_API_TOKEN`. Never add a `NEXT_PUBLIC_*` variable for any of them. The readiness check
 fails loudly if the first, the Coolify token or a secret-looking `NEXT_PUBLIC_*` name is present.
@@ -81,11 +82,12 @@ reviewers, and restrict deployment branches, so a release cannot be promoted wit
 | Name | Type | Value |
 |---|---|---|
 | `DESKTOP_RELEASE_REGISTRY_URL` | variable | `https://<central-public-domain>/api/desktop-releases/promote`. This is Central's API, **not** the Coolify API. |
-| `DESKTOP_RELEASE_PUBLIC_KEY_PEM` | variable | The same public key as in Coolify. It is embedded in the signed candidate. |
-| `WINDOWS_EXPECTED_SIGNER` | variable | The Authenticode publisher the installer must carry. |
-| `DESKTOP_RELEASE_PRIVATE_KEY_PEM` | secret | The manifest signing **private** key. GitHub only. |
+| `DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM` | variable | The same Ed25519 public key as in Coolify. |
+| `DESKTOP_RELEASE_PUBLIC_KEYS_JSON` | repository variable | The keyring embedded in `app.asar`; the build fails closed without it. |
+| `DESKTOP_RELEASE_ED25519_PRIVATE_KEY_PEM` | secret | The schema 2 manifest signing **private** key. GitHub only. |
+| `DESKTOP_RELEASE_PUBLIC_KEY_PEM` / `DESKTOP_RELEASE_PRIVATE_KEY_PEM` | variable / secret | Legacy RSA pair for schema 1 clients. Not used by the certificate-free workflow. |
 | `DESKTOP_RELEASE_PUBLISH_TOKEN` | secret | Exactly the value configured in Coolify. |
-| existing signing-provider credentials | secrets | Reuse the current Windows signing setup. There is no unsigned production fallback. |
+| `WINDOWS_SIGNING_PROVIDER`, `WINDOWS_EXPECTED_SIGNER`, `WINDOWS_EXPECTED_SIGNER_THUMBPRINT` | variables | Optional Authenticode path only (`windows-production-release.yml`). The certificate-free path (`windows-release.yml`) does not need them. |
 
 `publish.yml` has its own, unrelated values (`COOLIFY_API_TOKEN`, `PRODUCTION_HEALTH_URL`).
 Do not reuse them here, and do not reuse the publish token anywhere else. A test
@@ -94,10 +96,17 @@ other's credentials, or if the registry payload and Central's validator drift ap
 
 ## 4. Publishing a release (no EXE is ever uploaded by hand)
 
-1. A signed candidate is built and passes the Windows, signature and physical acceptance gates.
-2. An authorised operator runs `windows-production-release.yml` on the **exact verified
-   bytes**. It publishes `Bizamiz Setup X.Y.Z.exe` and the signed `release-manifest.json`
-   to a GitHub Release.
+**Certificate-free path (default).** `build-desktop-installer.yml` builds and accepts the version on
+`main`, then an authorised operator runs `windows-release.yml` with that run id. It reuses the
+accepted installer, generates and Ed25519-signs a schema 2 manifest, publishes the GitHub Release
+and registers Central. No Windows Authenticode certificate is required.
+
+**Optional Authenticode path.** A signed candidate is built and passes the Windows, signature and
+physical acceptance gates. An authorised operator runs `windows-production-release.yml` on the
+**exact verified bytes**.
+
+Both paths publish `Bizamiz Setup X.Y.Z.exe` and the signed `release-manifest.json` to a GitHub
+Release.
 3. The workflow calls `POST /api/desktop-releases/promote` with the Bearer publish token.
    Central verifies the manifest signature (production refuses without a configured public key)
    and stores immutable metadata. The release is **published / internal / 0 %** whatever the
