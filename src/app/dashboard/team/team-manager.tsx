@@ -2109,6 +2109,12 @@ function PhoneEditorDialog({
  * password changes the person's *platform* login everywhere they are a
  * member, and that deserves its own explicit press rather than riding along
  * with a PIN change.
+ *
+ * Your *own* PIN is not set here. The profile screen owns it (recent auth, the
+ * rotation audit, the device-trust revocation), and the duplicate field this
+ * dialog carried for the signed-in member could never succeed — the route
+ * wanted the *current* PIN and the form had no field for it, so the only answer
+ * was «خطای غیرمنتظره».
  */
 function CredentialsEditorDialog({
   member,
@@ -2121,6 +2127,8 @@ function CredentialsEditorDialog({
   onSaved: () => void;
 }) {
   const isPinMember = member.hasPin || (PIN_ROLES as readonly string[]).includes(member.role);
+  /** One door for your own PIN: «حساب کاربری من» (`/settings/profile`). */
+  const canResetPin = isPinMember && !isSelf;
   const [pin, setPin] = useState("");
   const [resetUrl, setResetUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2194,7 +2202,7 @@ function CredentialsEditorDialog({
         <ErrorBox>{error}</ErrorBox>
         {done ? <InfoBox>{done}</InfoBox> : null}
 
-        {isPinMember ? (
+        {canResetPin ? (
           <Field
             label={`رمز عددی جدید (${toPersianDigits(PIN_MIN_LENGTH)} تا ${toPersianDigits(PIN_MAX_LENGTH)} رقم)`}
             /* Issue #947 (TEAM-F03) — same wrong claim as the add form's, corrected the
@@ -2213,57 +2221,56 @@ function CredentialsEditorDialog({
           </Field>
         ) : null}
 
-        {member.hasLogin ? (
-          isSelf ? (
-            <InfoBox>
-              برای تغییر رمز عبور خودتان (با تأیید رمز فعلی و مدیریت نشست‌ها) به بخش{" "}
-              <Link
-                href="/settings/profile"
-                className="font-semibold text-primary underline underline-offset-4"
-              >
-                حساب کاربری من
-              </Link>{" "}
-              مراجعه کنید.
-            </InfoBox>
-          ) : (
-            <div className="space-y-3 rounded-xl border border-border/80 bg-muted/30 p-3 text-xs">
-              <p className="font-semibold text-foreground">بازیابی امن رمز عبور سراسری</p>
-              <p className="text-muted-foreground">
-                به‌دلایل امنیتی، مدیر کسب‌وکار نمی‌تواند رمز عبور سراسری کاربر دیگری را مستقیماً
-                تعیین کند. در صورت فراموشی رمز، لینک یک‌بارمصرف بازیابی صادر کنید تا خود کاربر رمز
-                جدیدش را ثبت نماید.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <SecondaryButton onClick={sendPasswordReset} disabled={busy}>
-                  ارسال لینک بازیابی رمز عبور
-                </SecondaryButton>
-                <SecondaryButton onClick={revokeSessions} disabled={busy}>
-                  خاتمه دادن به نشست‌های فعال
-                </SecondaryButton>
-              </div>
-              {resetUrl ? (
-                <div className="mt-2 space-y-1">
-                  <p className="text-muted-foreground">لینک یک‌بارمصرف بازیابی (معتبر به مدت محدود):</p>
-                  <input
-                    className={`${inputClass} font-mono text-xs`}
-                    dir="ltr"
-                    readOnly
-                    value={resetUrl}
-                    onFocus={(e) => e.currentTarget.select()}
-                  />
-                </div>
-              ) : null}
+        {isSelf ? (
+          <InfoBox>
+            رمز عددی و رمز عبور خودتان را از بخش{" "}
+            <Link
+              href="/settings/profile"
+              className="font-semibold text-primary underline underline-offset-4"
+            >
+              حساب کاربری من
+            </Link>{" "}
+            تغییر دهید؛ نشست‌های فعال و تأیید هویت هم همان‌جاست.
+          </InfoBox>
+        ) : member.hasLogin ? (
+          <div className="space-y-3 rounded-xl border border-border/80 bg-muted/30 p-3 text-xs">
+            <p className="font-semibold text-foreground">بازیابی امن رمز عبور سراسری</p>
+            <p className="text-muted-foreground">
+              به‌دلایل امنیتی، مدیر کسب‌وکار نمی‌تواند رمز عبور سراسری کاربر دیگری را مستقیماً
+              تعیین کند. در صورت فراموشی رمز، لینک یک‌بارمصرف بازیابی صادر کنید تا خود کاربر رمز
+              جدیدش را ثبت نماید.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <SecondaryButton onClick={sendPasswordReset} disabled={busy}>
+                ارسال لینک بازیابی رمز عبور
+              </SecondaryButton>
+              <SecondaryButton onClick={revokeSessions} disabled={busy}>
+                خاتمه دادن به نشست‌های فعال
+              </SecondaryButton>
             </div>
-          )
+            {resetUrl ? (
+              <div className="mt-2 space-y-1">
+                <p className="text-muted-foreground">لینک یک‌بارمصرف بازیابی (معتبر به مدت محدود):</p>
+                <input
+                  className={`${inputClass} font-mono text-xs`}
+                  dir="ltr"
+                  readOnly
+                  value={resetUrl}
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+              </div>
+            ) : null}
+          </div>
         ) : null}
 
-        {!isPinMember && !member.hasLogin ? (
+        {/* Self has no PIN form here, so the only member this can describe is someone else. */}
+        {!isPinMember && !member.hasLogin && !isSelf ? (
           <InfoBox>این عضو نه رمز عددی دارد و نه ورود ایمیلی؛ ابتدا نقش یا روش ورودش را در ویرایش عضو تعیین کنید.</InfoBox>
         ) : null}
 
         <DialogFooter>
           <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
-          {isPinMember ? (
+          {canResetPin ? (
             <PrimaryButton onClick={resetPin} disabled={busy || !pin}>
               ثبت رمز عددی
             </PrimaryButton>

@@ -399,31 +399,34 @@ describe("Issue #854 — P0.9 the last factor is a global question", () => {
   });
 });
 
-describe("Issue #854 — P1.7 self-service PIN rotation needs the current PIN", () => {
-  it("refuses a self-service rotation without proof and accepts an admin reset", async () => {
+describe("Issue #854 — P1.7 a signed-in member may rotate their own PIN", () => {
+  it("applies a self-service rotation from the session and still refuses an unchanged PIN", async () => {
     const seeded = await seedBusiness("Alpha");
     await dbLib.withTenant(seeded.businessId, () =>
       team.setPin(seeded.businessId, seeded.ownerId, "4821", seeded.ownerId),
     );
 
-    await expect(
-      dbLib.withTenant(seeded.businessId, () =>
-        team.setPin(seeded.businessId, seeded.ownerId, "9153", seeded.ownerId, {
-          selfService: true,
-          currentPinVerified: false,
-        }),
-      ),
-    ).rejects.toThrow("current_pin_required");
+    // No current PIN is owed: the session says who is rotating, and the member
+    // who forgot the PIN they were issued must still be able to replace it.
+    await dbLib.withTenant(seeded.businessId, () =>
+      team.setPin(seeded.businessId, seeded.ownerId, "9153", seeded.ownerId, { selfService: true }),
+    );
 
-    // The credential is untouched by the refusal.
     const { rows } = await db.query<{ secret_hash: string }>(
       `SELECT secret_hash FROM employee_credentials
         WHERE employee_id = $1 AND credential_type = 'pin' AND status = 'active'`,
       [seeded.ownerId],
     );
-    expect(await bcrypt.compare("4821", rows[0].secret_hash)).toBe(true);
+    expect(await bcrypt.compare("9153", rows[0].secret_hash)).toBe(true);
 
-    // An administrator reset is the path for a forgotten PIN: no proof needed.
+    // A "rotation" to the PIN already in place is still refused (F07)…
+    await expect(
+      dbLib.withTenant(seeded.businessId, () =>
+        team.setPin(seeded.businessId, seeded.ownerId, "9153", seeded.ownerId, { selfService: true }),
+      ),
+    ).rejects.toThrow("pin_unchanged");
+
+    // …and an administrator reset stays unconditional.
     await dbLib.withTenant(seeded.businessId, () =>
       team.setPin(seeded.businessId, seeded.ownerId, "7734", seeded.ownerId),
     );

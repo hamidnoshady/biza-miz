@@ -1251,8 +1251,6 @@ interface SelfPinStatus {
 
 const PIN_ERROR_MESSAGES: Record<string, string> = {
   invalid_pin: "رمز عددی باید ۴ تا ۱۲ رقم باشد.",
-  invalid_current_pin: "رمز عددی فعلی نادرست است.",
-  current_pin_required: "برای تغییر رمز عددی، ابتدا رمز عددی فعلی را وارد کنید.",
   pin_missing: "رمز عددی جدید را وارد کنید.",
   pin_confirmation_mismatch: "تکرار رمز عددی جدید یکسان نیست.",
   pin_unchanged: "رمز عددی جدید باید با رمز فعلی متفاوت باشد.",
@@ -1267,8 +1265,9 @@ const PIN_ERROR_MESSAGES: Record<string, string> = {
  * This is the half the Team screen must not own: an administrator reset exists
  * for somebody who has forgotten their PIN, but a member who simply wants a new
  * one should not have to ask an admin (and tell them the moment it changed).
- * The route behind this card verifies the current PIN and requires the session's
- * recent-authentication window, so an unlocked terminal is not enough.
+ * The route behind this card requires the session's recent-authentication
+ * window, so an unlocked terminal is not enough; the PIN they have forgotten is
+ * never asked for — being signed in as that member is the proof.
  *
  * #854 follow-up:
  *  - **F07** — `pin_unchanged` is refused server-side (against the member's
@@ -1294,7 +1293,6 @@ const PIN_INPUT_PROPS = {
 function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
   const [status, setStatus] = useState<SelfPinStatus | null>(null);
   const [open, setOpen] = useState(false);
-  const [currentPin, setCurrentPin] = useState("");
   const [newPin, setNewPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1321,10 +1319,6 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
       setError(PIN_ERROR_MESSAGES.pin_confirmation_mismatch);
       return;
     }
-    if (status?.hasPin && currentPin === newPin) {
-      setError(PIN_ERROR_MESSAGES.pin_unchanged);
-      return;
-    }
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -1333,7 +1327,6 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
       {
         method: "POST",
         body: JSON.stringify({
-          currentPin: status?.hasPin ? currentPin : undefined,
           newPin,
           confirmPin,
         }),
@@ -1356,7 +1349,6 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
       );
       return;
     }
-    setCurrentPin("");
     setNewPin("");
     setConfirmPin("");
     setOpen(false);
@@ -1412,16 +1404,6 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
             </div>
           ) : (
             <form onSubmit={submit} className="space-y-3">
-              {status.hasPin ? (
-                <Field label="رمز عددی فعلی">
-                  <input
-                    {...PIN_INPUT_PROPS}
-                    value={currentPin}
-                    onChange={(e) => setCurrentPin(normalizeSecurityDigits(e.target.value, 12))}
-                    className={inputClass}
-                  />
-                </Field>
-              ) : null}
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="رمز عددی جدید" hint={status.pinPolicyHint}>
                   <input
@@ -1443,14 +1425,13 @@ function SelfPinCard({ surface }: { surface?: CredentialSurface }) {
               <div className="flex gap-2">
                 <PrimaryButton
                   type="submit"
-                  disabled={busy || !newPin || !confirmPin || (status.hasPin && !currentPin)}
+                  disabled={busy || !newPin || !confirmPin}
                 >
                   {busy ? "در حال ذخیره…" : "ذخیرهٔ رمز عددی"}
                 </PrimaryButton>
                 <SecondaryButton
                   onClick={() => {
                     setOpen(false);
-                    setCurrentPin("");
                     setNewPin("");
                     setConfirmPin("");
                     setError(null);

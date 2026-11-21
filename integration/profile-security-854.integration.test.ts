@@ -1146,8 +1146,8 @@ describe("#854 F07 — a self-service PIN rotation must change the member's own 
     await signIn(cashier);
 
     for (const body of [
-      { currentPin: "4821", newPin: "4821", confirmPin: "4821" },
-      { currentPin: "۴۸۲۱", newPin: "۴۸۲۱", confirmPin: "۴۸۲۱" },
+      { newPin: "4821", confirmPin: "4821" },
+      { newPin: "۴۸۲۱", confirmPin: "۴۸۲۱" },
     ]) {
       const refused = await pinSelf(body);
       expect(refused.status).toBe(400);
@@ -1165,7 +1165,7 @@ describe("#854 F07 — a self-service PIN rotation must change the member's own 
 
     await expect(
       dbLib.withTenant(business.id, () =>
-        team.setPin(business.id, waiter.id, "4821", waiter.id, { selfService: true, currentPinVerified: true }),
+        team.setPin(business.id, waiter.id, "4821", waiter.id, { selfService: true }),
       ),
     ).rejects.toMatchObject({ message: "pin_unchanged", status: 400 });
 
@@ -1182,7 +1182,7 @@ describe("#854 F07 — a self-service PIN rotation must change the member's own 
     await setMemberPin(kitchen, "1357");
     await signIn(cashier);
 
-    const changed = await pinSelf({ currentPin: "4821", newPin: "1357", confirmPin: "1357" });
+    const changed = await pinSelf({ newPin: "1357", confirmPin: "1357" });
     expect(changed.status).toBe(200);
     expect(await pinWorks(cashier, "1357")).toBe(true);
     expect(await pinWorks(cashier, "4821")).toBe(false);
@@ -1198,7 +1198,7 @@ describe("#854 F07 — a self-service PIN rotation must change the member's own 
     await signIn(cashier);
     await failAuditFor("auth.self_pin_changed");
 
-    const failed = await pinSelf({ currentPin: "4821", newPin: "2468", confirmPin: "2468" });
+    const failed = await pinSelf({ newPin: "2468", confirmPin: "2468" });
     expect(failed.status).toBe(500);
     expect(failed.body).toMatchObject({ error: "credential_change_failed" });
     expect(await pinWorks(cashier, "4821")).toBe(true);
@@ -1270,7 +1270,7 @@ describe("#854 F11 — every surface the page marks read-only is refused by its 
 
     // The staff PIN is a till credential every profile may rotate locally.
     await signIn(owner);
-    expect((await pinSelf({ currentPin: "4821", newPin: "1357", confirmPin: "1357" })).status).toBe(200);
+    expect((await pinSelf({ newPin: "1357", confirmPin: "1357" })).status).toBe(200);
   });
 });
 
