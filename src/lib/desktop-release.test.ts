@@ -85,4 +85,32 @@ describe("release manifest validation", () => {
     expect(validateDesktopReleaseManifest({ ...manifest, installer: installerWithoutPin })).toEqual({ ok: false, error: "manifest_installer_thumbprint_missing" });
     expect(validateDesktopReleaseManifest({ ...manifest, installer: { ...manifest.installer, expectedPublisherThumbprint: "not-a-thumbprint-at-all" } })).toEqual({ ok: false, error: "manifest_installer_thumbprint_invalid" });
   });
+
+  it("accepts a schema 2 certificate-free manifest and rejects its missing identity", () => {
+    const v2 = {
+      ...manifest,
+      schemaVersion: 2,
+      appId: "bizamiz-desktop",
+      signatureAlgorithm: "ed25519",
+      signingKeyId: `sha256:${"b".repeat(64)}`,
+      releaseSequence: 1020,
+      platform: "win32",
+      architecture: "x64",
+      expiresAt: "2027-05-20T08:00:00.000Z",
+      manifestSignature: "A".repeat(88),
+      installer: { url: manifest.installer.url, sha256: manifest.installer.sha256, size: manifest.installer.size, signatureRequired: false },
+    };
+    expect(validateDesktopReleaseManifest(v2)).toMatchObject({
+      ok: true,
+      manifest: { schemaVersion: 2, signatureAlgorithm: "ed25519", installer: { signatureRequired: false } },
+    });
+    expect(validateDesktopReleaseManifest({ ...v2, appId: "other" })).toEqual({ ok: false, error: "manifest_app_identity_invalid" });
+    expect(validateDesktopReleaseManifest({ ...v2, signatureAlgorithm: "md5" })).toEqual({ ok: false, error: "manifest_algorithm_invalid" });
+    expect(validateDesktopReleaseManifest({ ...v2, signingKeyId: "" })).toEqual({ ok: false, error: "manifest_signing_key_invalid" });
+    expect(validateDesktopReleaseManifest({ ...v2, releaseSequence: 0 })).toEqual({ ok: false, error: "manifest_release_sequence_invalid" });
+    expect(validateDesktopReleaseManifest({ ...v2, platform: "darwin" })).toEqual({ ok: false, error: "manifest_platform_invalid" });
+    expect(validateDesktopReleaseManifest({ ...v2, architecture: "mips" })).toEqual({ ok: false, error: "manifest_architecture_invalid" });
+    expect(validateDesktopReleaseManifest({ ...v2, expiresAt: "2026-01-01T00:00:00.000Z" })).toEqual({ ok: false, error: "manifest_expiry_invalid" });
+    expect(validateDesktopReleaseManifest({ ...v2, schemaVersion: 3 })).toEqual({ ok: false, error: "manifest_schema_unsupported" });
+  });
 });
