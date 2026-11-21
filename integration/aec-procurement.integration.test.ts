@@ -401,7 +401,11 @@ describe("§18's flow", () => {
         title: "خرید ورق گالوانیزه",
         supplierPartyId: supplierB,
         valueRial: 4_500_000_000,
-        expectedDeliveryDate: "2026-11-20",
+        // A far-future date, not a fixed calendar day: a hardcoded date turns
+        // this step into a delayed commitment the morning after it is written,
+        // and the "drafts are proposals, not money" assertion below is about the
+        // drafts, not about today's date.
+        expectedDeliveryDate: "2030-01-01",
         requestId: request.id,
         rfqId: rfq.id,
         quotationId: quotationB.id,
