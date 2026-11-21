@@ -202,6 +202,11 @@ jobs:
           az logout
           az account clear
 
+      - name: Verify packaged release-manifest verification key
+        env:
+          REQUIRE_REAL_RELEASE_KEY: "1"
+        run: node scripts/verify-packaged-release-key.mjs electron/dist/win-unpacked/resources/app.asar electron/desktop-release-public-key.pem
+
       - name: Require valid expected-signer Authenticode and RFC3161 timestamps
         run: .\scripts\verify-windows-signatures.ps1 -ArtifactRoot electron\dist -Mode signed -ExpectedSigner $env:WINDOWS_EXPECTED_SIGNER -ExpectedThumbprint $env:WINDOWS_EXPECTED_SIGNER_THUMBPRINT -CandidateCommit $env:CANDIDATE_COMMIT -OutputPath windows-signature-verification.json
 
