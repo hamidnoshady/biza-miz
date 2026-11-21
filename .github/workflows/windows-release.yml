@@ -1,0 +1,317 @@
+name: windows-release
+
+# Certificate-free Desktop release path (issue #1463).
+#
+# Reuses the installer artifact that build-desktop-installer.yml already built
+# and accepted, generates a schema 2 manifest, signs it with the protected
+# Ed25519 release key, publishes the GitHub Release and registers Central.
+# No Windows Authenticode certificate is required. The manifest signature,
+# installer SHA-256/size and the pinned keyring in app.asar are the trust
+# anchors. windows-production-release.yml remains the optional Authenticode
+# path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version already recorded by build-desktop-installer (X.Y.Z)'
+        type: string
+        required: true
+      build_run_id:
+        description: 'Successful build-desktop-installer run id for this version'
+        type: string
+        required: true
+      channel:
+        description: 'Release channel'
+        type: choice
+        options: [stable, beta, internal]
+        default: stable
+        required: true
+      minimum_supported_version:
+        description: 'Oldest Desktop SemVer eligible for an in-place update'
+        type: string
+        default: '1.0.218'
+        required: true
+      migration_version:
+        description: 'Highest database migration number in this package'
+        type: string
+        required: true
+      release_sequence:
+        description: 'Monotonic per-channel sequence; empty = version encoded as number'
+        type: string
+        required: false
+        default: ''
+      release_notes:
+        description: 'Short release note'
+        type: string
+        required: true
+      expires_days:
+        description: 'Manifest freshness window in days (offline packages should use a long window)'
+        type: string
+        default: '180'
+        required: true
+      register_central:
+        description: 'Register the published release in Central'
+        type: choice
+        options: ['true', 'false']
+        default: 'true'
+        required: true
+
+concurrency:
+  group: windows-release-${{ inputs.channel }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+defaults:
+  run:
+    shell: powershell
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  BUILD_RUN_ID: ${{ inputs.build_run_id }}
+  RELEASE_CHANNEL: ${{ inputs.channel }}
+  MINIMUM_SUPPORTED_VERSION: ${{ inputs.minimum_supported_version }}
+  MIGRATION_VERSION: ${{ inputs.migration_version }}
+  RELEASE_SEQUENCE_INPUT: ${{ inputs.release_sequence }}
+  RELEASE_NOTE: ${{ inputs.release_notes }}
+  EXPIRES_DAYS: ${{ inputs.expires_days }}
+  REGISTER_CENTRAL: ${{ inputs.register_central }}
+  DESKTOP_RELEASE_PUBLIC_KEYS_JSON: ${{ vars.DESKTOP_RELEASE_PUBLIC_KEYS_JSON }}
+  DESKTOP_RELEASE_REGISTRY_URL: ${{ vars.DESKTOP_RELEASE_REGISTRY_URL }}
+
+jobs:
+  publish:
+    name: sign manifest and publish certificate-free release
+    runs-on: windows-latest
+    timeout-minutes: 45
+    environment: windows-production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Validate release inputs and the recorded version tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must be X.Y.Z' }
+          if ($env:MINIMUM_SUPPORTED_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'minimum_supported_version must be X.Y.Z' }
+          if ($env:MIGRATION_VERSION -notmatch '^\d+$') { throw 'migration_version must be a positive integer' }
+          if ($env:EXPIRES_DAYS -notmatch '^\d+$' -or [int]$env:EXPIRES_DAYS -lt 1) { throw 'expires_days must be a positive integer' }
+          if ($env:RELEASE_CHANNEL -notin @('stable','beta','internal')) { throw 'Unsupported channel' }
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEYS_JSON)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_PUBLIC_KEYS_JSON' }
+          $tag = if ($env:RELEASE_CHANNEL -eq 'stable') { "desktop-v$env:RELEASE_VERSION" } else { "desktop-$env:RELEASE_CHANNEL-v$env:RELEASE_VERSION" }
+          "DESKTOP_RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          git fetch --tags --quiet
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch tags' }
+          git rev-parse --verify "refs/tags/$tag" *> $null
+          if ($LASTEXITCODE -ne 0) { throw "Tag $tag has not been recorded by build-desktop-installer; refusing to create a new immutable version here" }
+          $existing = gh release view $tag --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0 -and $existing) { throw "Release $tag already exists; production promotion is immutable" }
+
+          $run = gh run view $env:BUILD_RUN_ID --json name,conclusion,headSha,headBranch,event,status | ConvertFrom-Json
+          if ($run.name -ne 'build-desktop-installer') { throw "Run $($env:BUILD_RUN_ID) is $($run.name), not build-desktop-installer" }
+          if ($run.conclusion -ne 'success' -or $run.status -ne 'completed') { throw "Run $($env:BUILD_RUN_ID) did not complete successfully" }
+          if ($run.headBranch -ne 'main') { throw "Run $($env:BUILD_RUN_ID) was built from $($run.headBranch), not main" }
+          "BUILD_SOURCE_SHA=$($run.headSha)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          git merge-base --is-ancestor $run.headSha "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw "Tag $tag is not a descendant of the tested source $($run.headSha)" }
+          Write-Host "::notice title=Release source::$($run.headSha) from $($run.headBranch)"
+
+      - name: Download and verify the accepted installer artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifact = "business-suite-desktop-installer-$env:RELEASE_VERSION"
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          gh run download $env:BUILD_RUN_ID -n $artifact -D artifact
+          if ($LASTEXITCODE -ne 0) { throw "Could not download $artifact" }
+          $installers = @(Get-ChildItem artifact -Recurse -File -Filter *.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one installer in $artifact, found $($installers.Count)" }
+          $installer = $installers[0]
+          $expectedName = "Bizamiz Setup $env:RELEASE_VERSION.exe"
+          if ($installer.Name -cne $expectedName) { throw "Installer is $($installer.Name), expected $expectedName" }
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "DESKTOP_INSTALLER_PATH=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DESKTOP_INSTALLER_NAME=$($installer.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DESKTOP_INSTALLER_SIZE=$($installer.Length)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DESKTOP_INSTALLER_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "::notice title=Installer accepted::$($installer.Name) $hash ($($installer.Length) bytes)"
+
+      - name: Generate the schema 2 release manifest
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sequence = if ([string]::IsNullOrWhiteSpace($env:RELEASE_SEQUENCE_INPUT)) {
+            $parts = $env:RELEASE_VERSION.Split('.')
+            ([int64]$parts[0] * 1000000) + ([int64]$parts[1] * 1000) + [int64]$parts[2]
+          } else {
+            [int64]$env:RELEASE_SEQUENCE_INPUT
+          }
+          if ($sequence -lt 1) { throw 'release_sequence must be positive' }
+          $releasedAt = [DateTime]::UtcNow
+          $expiresAt = $releasedAt.AddDays([int]$env:EXPIRES_DAYS)
+          $assetName = [uri]::EscapeDataString($env:DESKTOP_INSTALLER_NAME)
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:DESKTOP_RELEASE_TAG/$assetName"
+          $manifest = [ordered]@{
+            schemaVersion = 2
+            appId = 'bizamiz-desktop'
+            version = $env:RELEASE_VERSION
+            releaseSequence = $sequence
+            buildCommit = $env:BUILD_SOURCE_SHA
+            buildId = "build-run-$env:BUILD_RUN_ID"
+            channel = $env:RELEASE_CHANNEL
+            platform = 'win32'
+            architecture = 'x64'
+            releasedAt = $releasedAt.ToString('o')
+            expiresAt = $expiresAt.ToString('o')
+            minimumSupportedVersion = $env:MINIMUM_SUPPORTED_VERSION
+            mandatory = $false
+            installer = [ordered]@{
+              url = $url
+              sha256 = $env:DESKTOP_INSTALLER_SHA256
+              size = [int64]$env:DESKTOP_INSTALLER_SIZE
+              signatureRequired = $false
+            }
+            database = [ordered]@{
+              migrationVersion = [int]$env:MIGRATION_VERSION
+              minimumSchemaVersion = 1
+              maximumSchemaVersion = [int]$env:MIGRATION_VERSION
+              backupRequired = $true
+            }
+            releaseNotes = @($env:RELEASE_NOTE)
+            recovery = [ordered]@{ knownGoodVersion = $null; notes = 'Use the preserved pre-update backup; binary and database recovery are separate operator decisions.' }
+            signatureAlgorithm = 'ed25519'
+            signingKeyId = ''
+          }
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content release-manifest.json -Encoding UTF8
+          "RELEASE_SEQUENCE=$sequence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Sign and verify the manifest
+        env:
+          DESKTOP_RELEASE_ED25519_PRIVATE_KEY_PEM: ${{ secrets.DESKTOP_RELEASE_ED25519_PRIVATE_KEY_PEM }}
+          DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM: ${{ vars.DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_ED25519_PRIVATE_KEY_PEM)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_ED25519_PRIVATE_KEY_PEM' }
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM' }
+          node scripts/sign-desktop-release-manifest.mjs release-manifest.json
+          if ($LASTEXITCODE -ne 0) { throw 'Release manifest signing failed' }
+          node scripts/sign-desktop-release-manifest.mjs --verify release-manifest.json
+          if ($LASTEXITCODE -ne 0) { throw 'Release manifest signature verification failed' }
+          $manifestHash = (Get-FileHash -LiteralPath release-manifest.json -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$manifestHash  release-manifest.json" | Set-Content release-manifest.sha256 -Encoding ascii
+
+      - name: Publish the immutable GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $args = @(
+            'release','create',$env:DESKTOP_RELEASE_TAG,
+            $env:DESKTOP_INSTALLER_PATH,
+            'release-manifest.json',
+            'release-manifest.sha256',
+            '--title',"Bizamiz Desktop $env:RELEASE_VERSION ($env:RELEASE_CHANNEL)",
+            '--notes',"Certificate-free Desktop release. Installer SHA-256: $env:DESKTOP_INSTALLER_SHA256"
+          )
+          if ($env:RELEASE_CHANNEL -ne 'stable') { $args += '--prerelease' }
+          gh @args
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed' }
+
+      - name: Verify the published bytes and signature
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM: ${{ vars.DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh release view $env:DESKTOP_RELEASE_TAG --json isDraft,isPrerelease,tagName,assets | ConvertFrom-Json
+          if ($release.isDraft) { throw 'Published release is still a draft' }
+          if ($env:RELEASE_CHANNEL -eq 'stable' -and $release.isPrerelease) { throw 'Stable release was published as a prerelease' }
+          $names = @($release.assets | ForEach-Object { $_.name })
+          foreach ($required in @($env:DESKTOP_INSTALLER_NAME,'release-manifest.json','release-manifest.sha256')) {
+            if ($names -notcontains $required) { throw "Published release is missing $required" }
+          }
+          $verifyRoot = Join-Path $env:RUNNER_TEMP 'published-release'
+          New-Item -ItemType Directory -Path $verifyRoot -Force | Out-Null
+          gh release download $env:DESKTOP_RELEASE_TAG --pattern 'release-manifest.json' --pattern 'release-manifest.sha256' --pattern $env:DESKTOP_INSTALLER_NAME --dir $verifyRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the published release' }
+          $manifestPath = Join-Path $verifyRoot 'release-manifest.json'
+          $checksumPath = Join-Path $verifyRoot 'release-manifest.sha256'
+          $actualManifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $recordedManifestHash = ((Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+')[0]
+          if ($recordedManifestHash -cne $actualManifestHash) { throw 'Published manifest does not match release-manifest.sha256' }
+          node scripts/sign-desktop-release-manifest.mjs --verify $manifestPath
+          if ($LASTEXITCODE -ne 0) { throw 'Published manifest signature is invalid' }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $publishedInstaller = Join-Path $verifyRoot $env:DESKTOP_INSTALLER_NAME
+          $publishedHash = (Get-FileHash -LiteralPath $publishedInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($publishedHash -cne $env:DESKTOP_INSTALLER_SHA256) { throw 'Published installer bytes differ from the accepted artifact' }
+          if ($manifest.installer.sha256 -cne $publishedHash) { throw 'Published manifest does not describe the published installer' }
+          if ([int64]$manifest.installer.size -ne [int64]$env:DESKTOP_INSTALLER_SIZE) { throw 'Published manifest installer size is wrong' }
+          if ($manifest.signatureAlgorithm -ne 'ed25519' -or $manifest.signatureRequired -eq $true) { throw 'Published manifest is not certificate-free' }
+
+      - name: Register the release in Central
+        if: ${{ inputs.register_central == 'true' }}
+        env:
+          REGISTRY_TOKEN: ${{ secrets.DESKTOP_RELEASE_PUBLISH_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_REGISTRY_URL)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_REGISTRY_URL' }
+          if ([string]::IsNullOrWhiteSpace($env:REGISTRY_TOKEN)) { throw 'NOT CONFIGURED: DESKTOP_RELEASE_PUBLISH_TOKEN' }
+          $manifest = Get-Content release-manifest.json -Raw | ConvertFrom-Json
+          $payload = [ordered]@{
+            schemaVersion = 2
+            version = $manifest.version
+            buildCommit = $manifest.buildCommit
+            buildId = $manifest.buildId
+            channel = $manifest.channel
+            status = 'published'
+            rolloutState = 'internal'
+            rolloutPercentage = 0
+            minimumSupportedVersion = $manifest.minimumSupportedVersion
+            mandatory = $manifest.mandatory
+            installerUrl = $manifest.installer.url
+            installerSha256 = $manifest.installer.sha256
+            installerSize = $manifest.installer.size
+            manifestSignature = $manifest.manifestSignature
+            signatureAlgorithm = $manifest.signatureAlgorithm
+            signingKeyId = $manifest.signingKeyId
+            releaseSequence = $manifest.releaseSequence
+            platform = $manifest.platform
+            architecture = $manifest.architecture
+            releasedAt = $manifest.releasedAt
+            expiresAt = $manifest.expiresAt
+            signatureRequired = $false
+            expectedPublisher = $null
+            expectedPublisherThumbprint = $null
+            migrationVersion = $manifest.database.migrationVersion
+            minimumSchemaVersion = $manifest.database.minimumSchemaVersion
+            maximumSchemaVersion = $manifest.database.maximumSchemaVersion
+            releaseNotes = @($env:RELEASE_NOTE)
+            recoveryNotes = $manifest.recovery.notes
+            knownGoodReleaseId = $null
+          } | ConvertTo-Json -Depth 8
+          Invoke-RestMethod -Method Post -Uri $env:DESKTOP_RELEASE_REGISTRY_URL -Headers @{ Authorization = "Bearer $env:REGISTRY_TOKEN" } -ContentType 'application/json' -Body $payload | Out-Null
+
+      - name: Summary
+        run: |
+          $summary = @"
+          ## Certificate-free Desktop release $env:RELEASE_VERSION ($env:RELEASE_CHANNEL)
+
+          - Tag: ``$env:DESKTOP_RELEASE_TAG`` at ``$env:BUILD_SOURCE_SHA``
+          - Installer SHA-256: ``$env:DESKTOP_INSTALLER_SHA256``
+          - Manifest: Ed25519, sequence ``$env:RELEASE_SEQUENCE``, Authenticode not required
+          - Central registration: $env:REGISTER_CENTRAL (starts internal / 0% and must be promoted)
+          "@
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "$summary`n", (New-Object System.Text.UTF8Encoding($false)))
