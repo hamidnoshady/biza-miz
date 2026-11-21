@@ -47,6 +47,7 @@ import {
   resolveOrderCustomerId,
   upsertCustomerFromWoo,
   upsertProductFromWoo,
+  wooProductToIncoming,
 } from "./sync-service";
 import { markWooCustomerDeleted } from "../crm-external-identity";
 import { isUuid } from "../uuid";
@@ -59,9 +60,98 @@ import { parseTaxonomySnapshotEvent } from "./woo-taxonomy-snapshot";
 import type { WooCustomer, WooOrder, WooOrderLineItem, WooProduct, WooRefund } from "./woocommerce-client";
 import type { Industry } from "../industries";
 import { refundRestockIntent } from "./woo-refund-policy";
-import { shouldDeferWebhookForReconciliation } from "../import-reconciliation/entry-guards";
+import { findReconciliationRunForWebhook } from "../import-reconciliation/entry-guards";
+import {
+  completePartyDiscovery,
+  completeProductDiscovery,
+  stageParties,
+  stageProducts,
+} from "../import-reconciliation/service";
+import type { IncomingParty } from "../import-reconciliation/types";
 
 const zero = "0" as RialText;
+
+/** The reconciliation engine's view of a WooCommerce customer webhook. */
+export function wooCustomerToIncomingParty(customer: WooCustomer): IncomingParty {
+  const name =
+    [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim() ||
+    [customer.billing?.first_name, customer.billing?.last_name].filter(Boolean).join(" ").trim() ||
+    customer.email ||
+    `#${customer.id}`;
+  return {
+    domain: "party",
+    externalId: String(customer.id),
+    name,
+    phone: customer.billing?.phone ?? null,
+    email: customer.email ?? customer.billing?.email ?? null,
+    role: "customer",
+    fields: {
+      woo_customer_id: customer.id,
+      orders_count: customer.orders_count ?? null,
+      is_paying_customer: customer.is_paying_customer ?? null,
+    },
+  };
+}
+
+/**
+ * A first-handshake export finishes *after* its records have been queued. The
+ * records wait in the durable inbox while the reconciliation run owns the
+ * scope, so the completion marker is the point at which they can be staged in
+ * one bounded batch and handed to review. Nothing canonical is written here.
+ */
+export async function stageDeferredInboxForRun(
+  connection: ConnectionRow,
+  run: { id: string; domain: string; status: string },
+): Promise<{ staged: number; total: number }> {
+  if (run.status !== "discovering") return { staged: 0, total: 0 };
+  const topics =
+    run.domain === "product"
+      ? ["product.created", "product.updated"]
+      : run.domain === "party"
+        ? ["customer.created", "customer.updated"]
+        : [];
+  if (topics.length === 0) return { staged: 0, total: 0 };
+  const topicsParam = [connection.business_id, connection.id, topics, topics.map((topic) => `%.${topic}`)];
+  let afterId: string | null = null;
+  let staged = 0;
+  // Bounded, keyset-paged batches: a large first export must not be half
+  // reviewed because only the first page was staged.
+  for (let batch = 0; batch < 200; batch += 1) {
+    const params: unknown[] = [...topicsParam, afterId];
+    const { rows } = await query<{ id: string; event_topic: string; payload: Record<string, unknown> }>(
+      `SELECT id::text AS id, event_topic, payload
+         FROM integration_webhook_events
+        WHERE business_id = $1 AND connection_id = $2 AND status = 'deferred'
+          AND (event_topic = ANY($3::text[])
+               OR event_topic LIKE ANY($4::text[]))
+          AND ($5::text IS NULL OR id::text > $5)
+        ORDER BY id::text ASC
+        LIMIT 500`,
+      params,
+    );
+    if (rows.length === 0) break;
+
+    if (run.domain === "product") {
+      const incoming = rows.map((row) =>
+        wooProductToIncoming(row.payload as unknown as WooProduct, connection.currency_unit),
+      );
+      staged += (await stageProducts(connection.business_id, run.id, incoming)).staged;
+    } else {
+      const incoming = rows.map((row) =>
+        wooCustomerToIncomingParty(row.payload as unknown as WooCustomer),
+      );
+      staged += (await stageParties(connection.business_id, run.id, incoming)).staged;
+    }
+    afterId = rows[rows.length - 1].id;
+    if (rows.length < 500) break;
+  }
+
+  const { rows: countRows } = await query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM import_reconciliation_items WHERE run_id = $1 AND business_id = $2`,
+    [run.id, connection.business_id],
+  );
+  return { staged, total: Number(countRows[0]?.n ?? 0) };
+}
 
 /**
  * The industry-specific revenue/COGS/inventory accounts a retail trade posts
@@ -211,7 +301,37 @@ async function dispatchIngestEvent(
   const businessId = connection.business_id;
   const remoteId = event.payload?.id != null ? String(event.payload.id) : "";
   try {
-    if (await shouldDeferWebhookForReconciliation(businessId, connection.id, event.topic)) {
+    const reconciliationRun = await findReconciliationRunForWebhook(businessId, connection.id, event.topic);
+    if (reconciliationRun) {
+      // A completed first-handshake export is the point to move its buffered
+      // records into review. Records stay durable in the inbox; staging writes
+      // only reconciliation tables. If staging cannot finish, the run stays
+      // discovering and the marker stays deferred for the next attempt.
+      const isExportMarker =
+        event.topic.endsWith("catalogue.sync_completed") ||
+        event.topic.endsWith("customers.sync_completed");
+      if (isExportMarker && reconciliationRun.status === "discovering") {
+        try {
+          const { total } = await stageDeferredInboxForRun(connection, reconciliationRun);
+          if (total > 0) {
+            const actor = { userId: null, name: "سامانه" };
+            if (reconciliationRun.domain === "product") {
+              await completeProductDiscovery(businessId, reconciliationRun.id, actor);
+            } else if (reconciliationRun.domain === "party") {
+              await completePartyDiscovery(businessId, reconciliationRun.id, actor);
+            }
+          }
+        } catch (err) {
+          await writeIntegrationAudit({
+            businessId,
+            connectionId: connection.id,
+            action: "reconciliation.staging_failed",
+            entityType: event.topic,
+            remoteId,
+            error: (err as Error).message,
+          });
+        }
+      }
       await query(
         `UPDATE integration_webhook_events
             SET status = 'deferred', error = NULL, processed_at = NULL
@@ -465,20 +585,35 @@ export async function reprocessExistingIngestEvent(
 }
 
 export async function reprocessDeferredIngestEvents(connection: ConnectionRow): Promise<{ processed: number; failed: number }> {
-  const { rows } = await query<{ id: string }>(
-    `SELECT id
-       FROM integration_webhook_events
-      WHERE business_id = $1 AND connection_id = $2 AND status = 'deferred'
-      ORDER BY created_at ASC
-      LIMIT 500`,
-    [connection.business_id, connection.id],
-  );
   let processed = 0;
   let failed = 0;
-  for (const row of rows) {
-    const outcome = await reprocessExistingIngestEvent(connection, row.id);
-    if (outcome.status === "processed" || outcome.status === "duplicate") processed += 1;
-    if (outcome.status === "failed") failed += 1;
+  // A first export can be far larger than one page. Drain in bounded batches
+  // until the inbox is clear, but stop if a pass makes no progress (a paused
+  // connection re-defers the same rows) so a retry cannot spin forever.
+  for (let batch = 0; batch < 200; batch += 1) {
+    const { rows } = await query<{ id: string }>(
+      `SELECT id
+         FROM integration_webhook_events
+        WHERE business_id = $1 AND connection_id = $2 AND status = 'deferred'
+        ORDER BY created_at ASC
+        LIMIT 500`,
+      [connection.business_id, connection.id],
+    );
+    if (rows.length === 0) break;
+    let progressed = 0;
+    for (const row of rows) {
+      const outcome = await reprocessExistingIngestEvent(connection, row.id);
+      if (outcome.status === "processed" || outcome.status === "duplicate") {
+        processed += 1;
+        progressed += 1;
+      }
+      if (outcome.status === "failed") {
+        failed += 1;
+        progressed += 1;
+      }
+    }
+    if (progressed === 0) break;
+    if (rows.length < 500) break;
   }
   if (processed + failed > 0) {
     await writeIntegrationAudit({

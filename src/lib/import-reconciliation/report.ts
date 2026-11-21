@@ -86,6 +86,8 @@ export interface SafeReconciliationReport {
   };
   progress: RunSummary["progress"];
   counts: RunSummary["counts"];
+  /** Source events parked in the inbox, not yet staged as run items. */
+  bufferedEvents: number;
   items: SafeReconciliationReportItem[];
 }
 
@@ -113,6 +115,7 @@ export function buildReconciliationRunReport(
     },
     progress,
     counts,
+    bufferedEvents: summary.bufferedEvents,
     items: items.map((item) => {
       const snap = summarizeSnapshot(item.snapshot);
       return {

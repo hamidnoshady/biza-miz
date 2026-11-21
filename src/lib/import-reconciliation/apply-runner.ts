@@ -5,15 +5,17 @@
  */
 
 import Decimal from "decimal.js";
+import type { PoolClient } from "pg";
 import { withTenantTransaction } from "../db";
 import { getBusinessIndustry } from "../industry-guard";
 import { isRetailCatalogueIndustry } from "../industries";
-import { createItem } from "../items-service";
+import { createItem, createVariantChild } from "../items-service";
 import { createParty } from "../parties-service";
 import { getSetting, SETTING_KEYS } from "../settings";
 import { HOLOO_IMPORT_SOURCE_TYPE, postReconciledHolooVoucherOnClient } from "../integrations/holoo/journal-import-service";
 import type { HolooVoucherLine } from "../integrations/holoo/journal-plan";
 import { finalizeReconciledImportJob } from "../data-transfer/import-service";
+import { findActiveRunForConnection, hasNewSourceEventsForRun } from "./entry-guards";
 import {
   applyRun,
   createFinancialDocumentApplyHandler,
@@ -24,8 +26,10 @@ import {
   financialDocumentCanonicalToken,
   getRunSummary,
   inventoryCanonicalToken,
+  markRunStale,
   partyCanonicalToken,
   productCanonicalToken,
+  ReconciliationError,
   type ApplyHandler,
   type ReconciliationRun,
 } from "./service";
@@ -43,6 +47,51 @@ async function currentTokenForRun(run: ReconciliationRun): Promise<string> {
         return inventoryCanonicalToken(client, run);
     }
   });
+}
+
+/**
+ * A source's events are buffered while any run owns its scope. Once the last
+ * active run is applied, they can be replayed against the committed mappings.
+ * Draining is deliberately skipped while another run is still open.
+ */
+export async function releaseDeferredInboxIfClear(businessId: string, connectionId: string | null): Promise<void> {
+  if (!connectionId) return;
+  try {
+    if (await findActiveRunForConnection(businessId, connectionId)) return;
+    const [{ getConnection }, { reprocessDeferredIngestEvents }] = await Promise.all([
+      import("../integrations/connections-service"),
+      import("../integrations/webhook-ingest-service"),
+    ]);
+    const connection = await getConnection(businessId, connectionId);
+    if (connection) await reprocessDeferredIngestEvents(connection);
+  } catch {
+    // The reconcile has already committed. A failed drain must not turn a
+    // successful apply into an error; the rows stay deferred for the next pass.
+  }
+}
+
+/** The canonical id already committed for a source product (identity or mapping). */
+async function resolveCanonicalProductForExternalId(
+  ctx: { client: PoolClient; run: ReconciliationRun },
+  externalId: string,
+): Promise<string | null> {
+  const { rows } = await ctx.client.query<{ canonical_id: string }>(
+    `SELECT canonical_id::text AS canonical_id FROM source_identities
+      WHERE business_id = $1 AND source_key = $2 AND domain = 'product'
+        AND external_id = $3 AND retired_at IS NULL AND verified
+      LIMIT 1`,
+    [ctx.run.businessId, ctx.run.sourceKey, externalId],
+  );
+  if (rows[0]) return rows[0].canonical_id;
+  if (!ctx.run.connectionId) return null;
+  const { rows: mapped } = await ctx.client.query<{ local_id: string }>(
+    `SELECT local_id::text AS local_id FROM integration_mappings
+      WHERE business_id = $1 AND connection_id = $2::uuid
+        AND entity_type IN ('product', 'holoo_goods') AND remote_id = $3
+      LIMIT 1`,
+    [ctx.run.businessId, ctx.run.connectionId, externalId],
+  );
+  return mapped[0]?.local_id ?? null;
 }
 
 function parseOptionalBigInt(value: unknown): bigint | null {
@@ -76,6 +125,9 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
           priceRial?: string;
           unit?: string;
           stockQuantity?: string;
+          kind?: "simple" | "variant_parent" | "variant_child";
+          parentExternalId?: string | null;
+          variantOptions?: Record<string, string>;
           fields?: {
             unit?: string | null;
             reorderLevel?: number | string | null;
@@ -113,6 +165,50 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
           return { canonicalId: rows[0].id };
         }
         if (isRetail) {
+          const kind =
+            snap.kind === "variant_parent" || snap.kind === "variant_child" ? snap.kind : "simple";
+          if (kind === "variant_parent") {
+            // A variable product is a non-sellable container: no stock row and
+            // no price of its own. Its children carry those.
+            const item = await createItem(
+              {
+                locationId,
+                name,
+                sku: snap.sku ?? null,
+                kind: "variant_parent",
+                tracking: "none",
+              },
+              ctx.client,
+            );
+            return { canonicalId: item.id };
+          }
+          if (kind === "variant_child") {
+            const parentExternalId = (snap.parentExternalId ?? "").trim();
+            if (!parentExternalId) throw new Error("variant_parent_missing");
+            const parentItemId = await resolveCanonicalProductForExternalId(ctx, parentExternalId);
+            if (!parentItemId) throw new Error("variant_parent_unresolved");
+            const attributes = Object.entries(snap.variantOptions ?? {})
+              .filter(([attribute, value]) => attribute.trim() && value.trim())
+              .map(([attribute, value]) => ({ name: attribute, value }));
+            if (attributes.length === 0) throw new Error("variant_options_missing");
+            const item = await createVariantChild(
+              parentItemId,
+              locationId,
+              name,
+              snap.sku ?? null,
+              attributes,
+              ctx.client,
+            );
+            const price = snap.priceRial && /^\d+$/.test(snap.priceRial) && BigInt(snap.priceRial) > 0n ? snap.priceRial : null;
+            const qty = snap.stockQuantity && /^\d+(?:\.\d+)?$/.test(snap.stockQuantity) ? snap.stockQuantity : "0";
+            await ctx.client.query(
+              `INSERT INTO item_stock (item_id, quantity, unit_price)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (item_id) DO NOTHING`,
+              [item.id, qty, price],
+            );
+            return { canonicalId: item.id };
+          }
           const item = await createItem(
             {
               locationId,
@@ -421,6 +517,14 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
     });
   }
 
+  // The review is only valid for the source version it was built from. A
+  // product/customer/order event that arrived after staging means the source
+  // moved; send the approvals back to review instead of applying an old view.
+  if (await hasNewSourceEventsForRun(run)) {
+    await markRunStale(input.businessId, run.id, ["source_changed"]);
+    throw new ReconciliationError("preview_stale", { reasons: ["source_changed"] });
+  }
+
   const canonicalToken = await currentTokenForRun(run);
   const summary = await applyRun({
     businessId: input.businessId,
@@ -434,6 +538,11 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
     actor: input.actor,
   });
   const crossCheck = await crossCheckRun(input.businessId, run.id);
+  // An empty run proves nothing: do not let applying it release buffered
+  // source events past review.
+  if (summary.run.status === "applied" && (summary.counts?.read ?? 0) > 0) {
+    await releaseDeferredInboxIfClear(input.businessId, run.connectionId);
+  }
   if (summary.run.status === "applied" && run.sourceKind === "file" && run.sourceKey.startsWith("job:")) {
     await finalizeReconciledImportJob(input.businessId, run.id, {
       locationId: locationId ?? null,

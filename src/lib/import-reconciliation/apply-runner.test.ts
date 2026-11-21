@@ -4,6 +4,7 @@ const {
   mockWithTenantTransaction,
   mockGetBusinessIndustry,
   mockCreateItem,
+  mockCreateVariantChild,
   mockCreateParty,
   mockGetSetting,
   mockPostVoucher,
@@ -19,6 +20,7 @@ const {
   mockWithTenantTransaction: vi.fn(),
   mockGetBusinessIndustry: vi.fn(),
   mockCreateItem: vi.fn(),
+  mockCreateVariantChild: vi.fn(),
   mockCreateParty: vi.fn(),
   mockGetSetting: vi.fn(),
   mockPostVoucher: vi.fn(),
@@ -35,11 +37,18 @@ const {
 vi.mock("../db", () => ({
   withTenantTransaction: mockWithTenantTransaction,
 }));
+// The post-apply inbox drain opens no further work while another run owns the
+// connection; these tests cover the domain writers, not the drain itself.
+vi.mock("./entry-guards", () => ({
+  findActiveRunForConnection: vi.fn().mockResolvedValue({ id: "run-active", domain: "product", status: "in_review" }),
+  hasNewSourceEventsForRun: vi.fn().mockResolvedValue(false),
+}));
 vi.mock("../industry-guard", () => ({
   getBusinessIndustry: mockGetBusinessIndustry,
 }));
 vi.mock("../items-service", () => ({
   createItem: mockCreateItem,
+  createVariantChild: mockCreateVariantChild,
 }));
 vi.mock("../parties-service", () => ({
   createParty: mockCreateParty,
@@ -163,6 +172,111 @@ describe("applyReconciliationRunWithDomainHandlers domain writers", () => {
           ],
         }),
       }),
+    );
+  });
+
+  it("creates a variable parent as a container and a variation as its child", async () => {
+    mockGetBusinessIndustry.mockReset().mockResolvedValue("cosmetics");
+    mockGetRunSummary.mockResolvedValueOnce({
+      run: {
+        id: runId,
+        businessId: bizId,
+        locationId: locId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: "conn-1",
+        connectionId: "55555555-5555-4555-8555-555555555555",
+        sourceFingerprint: "fp",
+        policyVersion: 1,
+        scope: {},
+      },
+      counts: {},
+    });
+    mockCreateItem.mockResolvedValueOnce({ id: "parent-1" });
+    mockCreateVariantChild.mockResolvedValueOnce({ id: "child-1" });
+    const fakeClient = {
+      query: vi.fn().mockImplementation(async (sql: string) => {
+        if (sql.includes("SELECT industry FROM businesses")) return { rows: [{ industry: "cosmetics" }] };
+        if (sql.includes("SELECT canonical_id::text AS canonical_id FROM source_identities")) {
+          return { rows: [{ canonical_id: "parent-1" }] };
+        }
+        return { rows: [] };
+      }),
+    };
+    let parentResult: { canonicalId: string } | null = null;
+    let childResult: { canonicalId: string } | null = null;
+
+    mockApplyRun.mockImplementationOnce(async ({ handler }: { handler: ApplyHandler }) => {
+      parentResult = await handler.create!({
+        client: fakeClient as unknown as ApplyContext["client"],
+        run: {
+          id: runId,
+          businessId: bizId,
+          locationId: locId,
+          domain: "product",
+          sourceKey: "conn-1",
+          provider: "woocommerce",
+          connectionId: "55555555-5555-4555-8555-555555555555",
+        } as unknown as ApplyContext["run"],
+        item: {
+          id: 3,
+          externalType: "product",
+          externalKey: "10",
+          snapshot: { name: "تی‌شرت", sku: "TSHIRT", kind: "variant_parent" },
+        } as unknown as ApplyContext["item"],
+        canonicalId: null,
+        authorityOverrides: {},
+        idempotencyKey: `${runId}:3`,
+        actor,
+      });
+      childResult = await handler.create!({
+        client: fakeClient as unknown as ApplyContext["client"],
+        run: {
+          id: runId,
+          businessId: bizId,
+          locationId: locId,
+          domain: "product",
+          sourceKey: "conn-1",
+          provider: "woocommerce",
+          connectionId: "55555555-5555-4555-8555-555555555555",
+        } as unknown as ApplyContext["run"],
+        item: {
+          id: 4,
+          externalType: "product",
+          externalKey: "11",
+          snapshot: {
+            name: "تی‌شرت - قرمز",
+            sku: "TSHIRT-RED",
+            kind: "variant_child",
+            parentExternalId: "10",
+            variantOptions: { "رنگ": "قرمز" },
+            priceRial: "120000",
+            stockQuantity: "3",
+          },
+        } as unknown as ApplyContext["item"],
+        canonicalId: null,
+        authorityOverrides: {},
+        idempotencyKey: `${runId}:4`,
+        actor,
+      });
+      return { run: { id: runId, status: "applied" }, counts: {}, progress: {} };
+    });
+
+    await applyReconciliationRunWithDomainHandlers({ businessId: bizId, runId, locationId: locId, actor });
+    expect(parentResult).toEqual({ canonicalId: "parent-1" });
+    expect(mockCreateItem).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "variant_parent", sku: "TSHIRT" }),
+      fakeClient,
+    );
+    expect(childResult).toEqual({ canonicalId: "child-1" });
+    expect(mockCreateVariantChild).toHaveBeenCalledWith(
+      "parent-1",
+      locId,
+      "تی‌شرت - قرمز",
+      "TSHIRT-RED",
+      [{ name: "رنگ", value: "قرمز" }],
+      fakeClient,
     );
   });
 

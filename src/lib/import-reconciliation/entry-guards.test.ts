@@ -16,8 +16,12 @@ vi.mock("./service", () => ({
 }));
 
 import {
+  canPublishAnyConnectionOutbound,
   canPublishConnectionOutbound,
   checkManualProductOutboundGuard,
+  ensureFirstContactReconciliationGate,
+  findReconciliationRunForWebhook,
+  hasNewSourceEventsForRun,
   isOutboxFieldSuppressed,
   listSuppressedRemoteEditsForConnection,
   shouldDeferWebhookForReconciliation,
@@ -48,11 +52,93 @@ describe("import-reconciliation entry & outbound guards (#1118)", () => {
     });
     expect(await shouldDeferWebhookForReconciliation("biz-1", "conn-1", "product.updated")).toBe(true);
 
-    mockQuery.mockResolvedValueOnce({ rows: [] });
+    // Financial events check their own domain, then any run on the connection.
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
     expect(await shouldDeferWebhookForReconciliation("biz-1", "conn-1", "order.created")).toBe(false);
 
     expect(await shouldDeferWebhookForReconciliation("biz-1", "conn-1", "plugin.heartbeat")).toBe(false);
-    expect(mockQuery).toHaveBeenCalledTimes(2);
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+  });
+
+  it("makes an order wait behind a product/party run, not only a financial run", async () => {
+    // No financial run owns the order…
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      // …but the first-sync product run still owns the connection.
+      .mockResolvedValueOnce({ rows: [{ id: "run-1", domain: "product", status: "discovering" }] });
+
+    await expect(findReconciliationRunForWebhook("biz-1", "conn-1", "order.created")).resolves.toEqual({
+      id: "run-1",
+      domain: "product",
+      status: "discovering",
+    });
+
+    // A product topic only checks its own domain; it never consults "any run".
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await expect(findReconciliationRunForWebhook("biz-1", "conn-1", "product.updated")).resolves.toBeNull();
+    expect(mockQuery).toHaveBeenCalledTimes(3);
+  });
+
+  it("detects source events that arrived after the preview was staged", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ exists: true }] });
+    await expect(
+      hasNewSourceEventsForRun({
+        businessId: "biz-1",
+        domain: "product",
+        connectionId: "conn-1",
+        stagedAt: "2026-11-20T10:00:00.000Z",
+      }),
+    ).resolves.toBe(true);
+    const params = mockQuery.mock.calls[0]?.[1] as unknown[];
+    expect(params).toEqual([
+      "biz-1",
+      "conn-1",
+      "2026-11-20T10:00:00.000Z",
+      ["product.created", "product.updated", "catalogue.sync_completed"],
+      ["%.product.created", "%.product.updated", "%.catalogue.sync_completed"],
+    ]);
+
+    // File runs and domains with no inbox have no source-version signal here.
+    await expect(
+      hasNewSourceEventsForRun({
+        businessId: "biz-1",
+        domain: "product",
+        connectionId: null,
+        stagedAt: "2026-11-20T10:00:00.000Z",
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      hasNewSourceEventsForRun({
+        businessId: "biz-1",
+        domain: "inventory",
+        connectionId: "conn-1",
+        stagedAt: "2026-11-20T10:00:00.000Z",
+      }),
+    ).resolves.toBe(false);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the first-contact gate as discovering so a stage sweep can still populate it", async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ exists: true }] }) // product overlap
+      .mockResolvedValueOnce({ rows: [] }) // no existing run for product
+      .mockResolvedValueOnce({ rows: [{ exists: false }] }); // party has no overlap
+
+    const insert = vi.fn().mockResolvedValue({ rows: [] });
+    mockWithTenantTransaction.mockImplementationOnce(async (_businessId, fn: (client: unknown) => unknown) =>
+      fn({ query: insert }),
+    );
+
+    await expect(
+      ensureFirstContactReconciliationGate("biz-1", "conn-1", "loc-1"),
+    ).resolves.toEqual({ gatedDomains: ["product"] });
+    expect(insert).toHaveBeenCalledTimes(1);
+    const [sql] = insert.mock.calls[0] as [string];
+    expect(sql).toContain("INSERT INTO import_reconciliation_runs");
+    expect(sql).not.toMatch(/\bstatus\b/);
+    expect(sql).not.toContain("'staged'");
   });
 
   it("blocks connection outbound publication when source_of_truth is store or reconciliation is active", async () => {
@@ -72,6 +158,23 @@ describe("import-reconciliation entry & outbound guards (#1118)", () => {
     expect(
       await canPublishConnectionOutbound("biz-1", { id: "conn-1", source_of_truth: "two_way" }),
     ).toEqual({ allowed: true });
+  });
+
+  it("blocks the Holoo accounting channel behind any active run, not only a product one", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: "run-inv", domain: "inventory", status: "in_review" }] });
+    await expect(
+      canPublishAnyConnectionOutbound("biz-1", { id: "conn-1", source_of_truth: "pos" }),
+    ).resolves.toEqual({ allowed: false, reason: "reconciliation_active" });
+
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+    await expect(
+      canPublishAnyConnectionOutbound("biz-1", { id: "conn-1", source_of_truth: "two_way" }),
+    ).resolves.toEqual({ allowed: true });
+
+    // A store-owned connection never receives accounting pushes.
+    await expect(
+      canPublishAnyConnectionOutbound("biz-1", { id: "conn-1", source_of_truth: "store" }),
+    ).resolves.toEqual({ allowed: false, reason: "source_of_truth_store" });
   });
 
   it("suppresses outbox values matching rejected remote edits across aliases & formats", async () => {

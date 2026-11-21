@@ -74,6 +74,7 @@ interface ProgressView {
   label: string;
   fullyReconciled: boolean;
   remaining: number;
+  bufferedEvents?: number;
 }
 
 interface ItemView {
@@ -142,6 +143,7 @@ export function ReconciliationWizard({
   const [run, setRun] = useState<RunView | null>(null);
   const [counts, setCounts] = useState<CountsView | null>(null);
   const [progress, setProgress] = useState<ProgressView | null>(null);
+  const [bufferedEvents, setBufferedEvents] = useState(0);
   const [items, setItems] = useState<ItemView[]>([]);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
@@ -181,6 +183,7 @@ export function ReconciliationWizard({
       run: RunView;
       counts: CountsView;
       progress: ProgressView;
+      bufferedEvents?: number;
       items: ItemView[];
       nextCursor?: number | null;
       hasMore?: boolean;
@@ -193,6 +196,7 @@ export function ReconciliationWizard({
     setRun(res.data.run);
     setCounts(res.data.counts);
     setProgress(res.data.progress);
+    setBufferedEvents(res.data.bufferedEvents ?? 0);
     setItems(res.data.items ?? []);
     setNextCursor(res.data.nextCursor ?? null);
     setHasMore(Boolean(res.data.hasMore));
@@ -394,7 +398,17 @@ export function ReconciliationWizard({
             <KpiCard label="تطبیق امن" value={toPersianDigits(counts.proposedLinks)} />
             <KpiCard label="مورد جدید" value={toPersianDigits(counts.newRecords)} />
             <KpiCard label="اعمال‌شده" value={toPersianDigits(counts.applied)} />
+            {bufferedEvents > 0 ? (
+              <KpiCard label="رویداد منبع در انتظار" value={toPersianDigits(bufferedEvents)} />
+            ) : null}
           </KpiRow>
+
+          {bufferedEvents > 0 ? (
+            <InfoBox>
+              {toPersianDigits(bufferedEvents)} رویداد منبع تا پایان این تطبیق در صندوق ورودی نگه داشته شده و
+              پس از اعمال، به‌صورت ایمن پردازش می‌شود. تا آن زمان وضعیت این پرونده «تطبیق کامل» نیست.
+            </InfoBox>
+          ) : null}
 
           <SectionCard
             title="سیاست مرجع و عملیات"
@@ -440,6 +454,28 @@ export function ReconciliationWizard({
                 </Field>
               </div>
               <div className="flex flex-wrap gap-2">
+                {run.status === "discovering" && (run.domain === "product" || run.domain === "party") ? (
+                  <SecondaryButton
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      void postCommand({ action: "stage_deferred" }, "داده‌های بافر منبع خوانده شد.")
+                    }
+                  >
+                    خواندن داده‌های بافر منبع
+                  </SecondaryButton>
+                ) : null}
+                {counts.failed > 0 ? (
+                  <SecondaryButton
+                    type="button"
+                    disabled={busy || isTerminal}
+                    onClick={() =>
+                      void postCommand({ action: "retry_failed" }, "موارد ناموفق برای بررسی دوباره بازگشتند.")
+                    }
+                  >
+                    تلاش دوبارهٔ موارد ناموفق
+                  </SecondaryButton>
+                ) : null}
                 <SecondaryButton
                   type="button"
                   disabled={busy || isTerminal}
@@ -449,7 +485,7 @@ export function ReconciliationWizard({
                 </SecondaryButton>
                 <PrimaryButton
                   type="button"
-                  disabled={busy || isTerminal || counts.pending > 0}
+                  disabled={busy || isTerminal || counts.pending > 0 || counts.read === 0}
                   onClick={() => void postCommand({ action: "apply" }, "تطبیق با موفقیت اعمال شد.")}
                 >
                   اعمال نهایی تصمیم‌ها

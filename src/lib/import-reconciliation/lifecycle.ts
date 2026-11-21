@@ -312,6 +312,12 @@ export interface Progress {
    */
   fullyReconciled: boolean;
   remaining: number;
+  /**
+   * Source events parked in the durable inbox while a run owns the connection.
+   * They are not staged items yet, so they are reported separately and keep a
+   * run from calling itself fully reconciled.
+   */
+  bufferedEvents: number;
 }
 
 export function progressStage(input: {
@@ -319,9 +325,12 @@ export function progressStage(input: {
   counts: ReconciliationCounts;
   /** The post-apply cross-check of counts/identities/stock/totals has passed. */
   crossChecked: boolean;
+  /** Inbound source events parked behind this run, not yet staged. */
+  bufferedEvents?: number;
 }): Progress {
   const { runStatus, counts, crossChecked } = input;
-  const remaining = counts.pending + counts.approved + counts.failed;
+  const bufferedEvents = input.bufferedEvents ?? 0;
+  const remaining = counts.pending + counts.approved + counts.failed + bufferedEvents;
   const allTerminal = counts.read > 0 && remaining === 0;
 
   let stage: ProgressStage;
@@ -335,7 +344,13 @@ export function progressStage(input: {
 
   // Never claim a stronger stage than the run itself supports.
   if (stage === "reconciled" && runStatus !== "applied") stage = "acknowledged";
-  return { stage, label: PROGRESS_STAGE_LABELS[stage], fullyReconciled: stage === "reconciled", remaining };
+  return {
+    stage,
+    label: PROGRESS_STAGE_LABELS[stage],
+    fullyReconciled: stage === "reconciled",
+    remaining,
+    bufferedEvents,
+  };
 }
 
 // ---------------------------------------------------------------------------

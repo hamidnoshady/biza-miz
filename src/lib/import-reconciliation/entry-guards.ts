@@ -170,14 +170,67 @@ export function webhookTopicDomain(topic: string): ReconciliationDomain | null {
   return null;
 }
 
+const DOMAIN_EVENT_PATTERNS: Record<ReconciliationDomain, string[]> = {
+  product: ["product.created", "product.updated", "catalogue.sync_completed"],
+  party: ["customer.created", "customer.updated", "customers.sync_completed"],
+  financial_document: ["order.created", "order.updated", "order.restored", "refund.created", "orders.sync_completed"],
+  inventory: [],
+};
+
+/**
+ * True when the source sent a relevant event after this run's preview was
+ * staged. The durable inbox is the source's own version signal: applying a
+ * review while a newer product/customer/order event is unread would mean
+ * approving a snapshot that is no longer what the source says.
+ */
+export async function hasNewSourceEventsForRun(run: {
+  businessId: string;
+  domain: ReconciliationDomain;
+  connectionId: string | null;
+  stagedAt: string | null;
+}): Promise<boolean> {
+  if (!run.connectionId || !run.stagedAt) return false;
+  const patterns = DOMAIN_EVENT_PATTERNS[run.domain];
+  if (patterns.length === 0) return false;
+  const { rows } = await query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM integration_webhook_events
+        WHERE business_id = $1 AND connection_id = $2::uuid
+          AND created_at > $3::timestamptz
+          AND (event_topic = ANY($4::text[]) OR event_topic LIKE ANY($5::text[]))
+     ) AS exists`,
+    [run.businessId, run.connectionId, run.stagedAt, patterns, patterns.map((topic) => `%.${topic}`)],
+  );
+  return Boolean(rows[0]?.exists);
+}
+
+/**
+ * The run that owns an inbound webhook. Financial events (orders, refunds) wait
+ * behind *any* active run on the connection, not only a financial one: an order
+ * must not create a customer or relieve stock while the first-sync identity
+ * decisions for those domains are still open.
+ */
+export async function findReconciliationRunForWebhook(
+  businessId: string,
+  connectionId: string,
+  topic: string,
+): Promise<ActiveRunRef | null> {
+  const domain = webhookTopicDomain(topic);
+  if (!domain) return null;
+  const exact = await findActiveRunForConnection(businessId, connectionId, domain);
+  if (exact) return exact;
+  if (domain === "financial_document") {
+    return findActiveRunForConnection(businessId, connectionId);
+  }
+  return null;
+}
+
 export async function shouldDeferWebhookForReconciliation(
   businessId: string,
   connectionId: string,
   topic: string,
 ): Promise<boolean> {
-  const domain = webhookTopicDomain(topic);
-  if (!domain) return false;
-  return (await findActiveRunForConnection(businessId, connectionId, domain)) !== null;
+  return (await findReconciliationRunForWebhook(businessId, connectionId, topic)) !== null;
 }
 
 /**
@@ -246,6 +299,25 @@ export async function canPublishConnectionOutbound(
     return { allowed: false, reason: "source_of_truth_store" };
   }
   const activeRun = await findActiveRunForConnection(businessId, connection.id, "product");
+  if (activeRun) {
+    return { allowed: false, reason: "reconciliation_active" };
+  }
+  return { allowed: true };
+}
+
+/**
+ * Accounting-document channels (the Holoo push queue) must wait for *any* run
+ * on the connection to finish, not only a product run: a sale, receipt or
+ * purchase may depend on inventory/ledger ownership still under review.
+ */
+export async function canPublishAnyConnectionOutbound(
+  businessId: string,
+  connection: { id: string; source_of_truth?: string | null },
+): Promise<{ allowed: boolean; reason?: string }> {
+  if (connection.source_of_truth === "store") {
+    return { allowed: false, reason: "source_of_truth_store" };
+  }
+  const activeRun = await findActiveRunForConnection(businessId, connection.id);
   if (activeRun) {
     return { allowed: false, reason: "reconciliation_active" };
   }
@@ -326,15 +398,17 @@ export async function ensureFirstContactReconciliationGate(
   businessId: string,
   connectionId: string,
   locationId: string | null,
+  enabled: { product?: boolean; party?: boolean } = {},
 ): Promise<{ gatedDomains: ReconciliationDomain[] }> {
   const gatedDomains: ReconciliationDomain[] = [];
   for (const domain of ["product", "party"] as const) {
+    if (enabled[domain] === false) continue;
     const overlap = await hasCanonicalOverlapForDomain(businessId, domain, locationId);
     if (!overlap) continue;
     const { rows: existing } = await query<{ id: string }>(
       `SELECT id::text AS id FROM import_reconciliation_runs
         WHERE business_id = $1 AND connection_id = $2::uuid AND domain = $3
-          AND status IN ('staged', 'in_review', 'applying', 'partially_applied', 'applied')
+          AND status IN ('discovering', 'staged', 'in_review', 'applying', 'partially_applied', 'applied')
         LIMIT 1`,
       [businessId, connectionId, domain],
     );
@@ -347,10 +421,10 @@ export async function ensureFirstContactReconciliationGate(
       await client.query(
         `INSERT INTO import_reconciliation_runs
            (business_id, location_id, domain, source_kind, provider, source_key, connection_id,
-            import_mode, status, source_fingerprint, policy_version, scope, cursor, evidence,
+            import_mode, source_fingerprint, policy_version, scope, cursor, evidence,
             created_by_name)
          VALUES ($1, $2, $3, 'provider', 'woocommerce', $4, $5::uuid,
-                 'live_link', 'staged', $6, 1, '{}'::jsonb, '{}'::jsonb, $7::jsonb, 'سامانه')
+                 'live_link', $6, 1, '{}'::jsonb, '{}'::jsonb, $7::jsonb, 'سامانه')
          ON CONFLICT DO NOTHING`,
         [
           businessId,

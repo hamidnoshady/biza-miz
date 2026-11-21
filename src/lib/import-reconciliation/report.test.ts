@@ -51,7 +51,9 @@ describe("reconciliation non-sensitive report (#1118)", () => {
       label: "تطبیق کامل",
       fullyReconciled: true,
       remaining: 0,
+      bufferedEvents: 0,
     },
+    bufferedEvents: 0,
   };
 
   const items: StagedItem[] = [
@@ -90,6 +92,7 @@ describe("reconciliation non-sensitive report (#1118)", () => {
     expect(serialized).not.toContain("cs_456");
     expect(serialized).not.toContain("consumer_secret=xyz");
     expect(report.run.cutoverAuthority).toBe("books");
+    expect(report.bufferedEvents).toBe(0);
   });
 
   it("neutralises CSV formula prefixes in labels and outputs safe columns", () => {

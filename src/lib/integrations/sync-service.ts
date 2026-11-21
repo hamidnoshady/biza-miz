@@ -872,7 +872,7 @@ export async function resolveOrderCustomerId(
  * a child first simply lost it until the next run. `planWooCatalogueWrite`
  * makes ordering a property of the whole page instead.
  */
-function wooProductToIncoming(
+export function wooProductToIncoming(
   product: WooProduct,
   currencyUnit: ConnectionRow["currency_unit"],
 ): IncomingProduct {
@@ -885,6 +885,15 @@ function wooProductToIncoming(
       priceRial = undefined;
     }
   }
+  const shape = wooProductShape(inferWooProductType(product));
+  const variantOptions =
+    shape.itemKind === "variant_child"
+      ? Object.fromEntries(
+          (product.attributes ?? [])
+            .filter((attribute) => attribute.option != null && String(attribute.option).trim() !== "")
+            .map((attribute) => [attribute.name, String(attribute.option)]),
+        )
+      : undefined;
   return {
     domain: "product",
     externalId: String(product.id),
@@ -894,6 +903,15 @@ function wooProductToIncoming(
     stockQuantity: product.stock_quantity != null ? String(product.stock_quantity) : undefined,
     unit: undefined,
     brand: undefined,
+    // The remote shape decides the canonical kind. A variable product is a
+    // non-sellable container and a variation is its child — never two more
+    // "simple" items that would lose parent/child semantics.
+    kind: shape.itemKind,
+    parentExternalId:
+      shape.itemKind === "variant_child" && product.parent_id
+        ? String(product.parent_id)
+        : null,
+    variantOptions: variantOptions && Object.keys(variantOptions).length > 0 ? variantOptions : undefined,
     fields: {
       regular_price: product.regular_price ?? product.price ?? null,
       stock_quantity: product.stock_quantity ?? null,

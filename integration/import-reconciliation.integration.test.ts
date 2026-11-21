@@ -371,6 +371,18 @@ describe("product reconciliation against a populated catalogue", () => {
     expect(result.run.status).toBe("partially_applied");
     expect(result.progress.fullyReconciled).toBe(false);
 
+    // Safe recovery: the failed row returns to review, without losing the
+    // links that already applied or replaying a create blindly.
+    const retried = await asBusiness(retail.id, () => svc.retryFailedItems(retail.id, runId, actor));
+    expect(retried.retried).toBe(1);
+    expect(retried.run.status).toBe("in_review");
+    const afterRetry = await asBusiness(retail.id, () => svc.listItems(retail.id, runId, { status: "proposed" }));
+    expect(afterRetry.map((i) => i.externalKey)).toContain("w4");
+    expect(afterRetry.find((i) => i.externalKey === "w4")?.error).toBeNull();
+    const failedAfterRetry = await asBusiness(retail.id, () => svc.listItems(retail.id, runId, { status: "failed" }));
+    expect(failedAfterRetry).toEqual([]);
+    expect(await countItems(retail.locationId)).toBe(before);
+
     const identities = await db.query(
       `SELECT external_id, canonical_id, canonical_type, verified FROM source_identities WHERE business_id = $1 ORDER BY external_id`,
       [retail.id],
@@ -1220,11 +1232,16 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
     const ingestSvc = await import("../src/lib/integrations/webhook-ingest-service");
     const reportMod = await import("../src/lib/import-reconciliation/report");
 
-    // 1. First-contact gate creates staged product run when business already has canonical items
+    // 1. First-contact gate opens a discovering run when the business already has
+    // canonical items: it still has to be populated before it can be reviewed.
     const gate = await asBusiness(biz.id, () =>
       guards.ensureFirstContactReconciliationGate(biz.id, conn.id, biz.locationId),
     );
     expect(gate.gatedDomains).toContain("product");
+    const gateRun = await asBusiness(biz.id, () =>
+      guards.findActiveRunForConnection(biz.id, conn.id, "product"),
+    );
+    expect(gateRun?.status).toBe("discovering");
 
     // 2. Inbound webhook on product.updated while product run is active -> deferred in inbox without mutating item!
     const ingestOutcome = await asBusiness(biz.id, () =>
@@ -1253,6 +1270,34 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
       [inboxId],
     );
     expect(retriedInbox.rows[0]?.status).toBe("deferred");
+
+    // 3. Orders wait behind the product run too: a historical sale must not
+    // create a customer or relieve stock before product identity is reviewed.
+    const orderOutcome = await asBusiness(biz.id, () =>
+      ingestSvc.applyIngestEvent(conn as never, {
+        topic: "order.created",
+        deliveryId: "deliv-reconcile-order-1",
+        payload: { id: 555, status: "processing", total: "100000", line_items: [] },
+      }),
+    );
+    expect(orderOutcome).toEqual({ status: "deferred" });
+    const bufferedBeforeMarker = await asBusiness(biz.id, () => svc.getRunSummary(biz.id, gateRun!.id));
+    expect(bufferedBeforeMarker.bufferedEvents).toBeGreaterThanOrEqual(2);
+    expect(bufferedBeforeMarker.progress.fullyReconciled).toBe(false);
+
+    // 4. The catalogue export marker stages the buffered products in bounded
+    // batches and hands the run to review; no canonical item is written yet.
+    const markerOutcome = await asBusiness(biz.id, () =>
+      ingestSvc.applyIngestEvent(conn as never, {
+        topic: "catalogue.sync_completed",
+        deliveryId: "deliv-reconcile-marker-1",
+        payload: {},
+      }),
+    );
+    expect(markerOutcome).toEqual({ status: "deferred" });
+    const stagedGate = await asBusiness(biz.id, () => svc.getRunSummary(biz.id, gateRun!.id));
+    expect(stagedGate.run.status).not.toBe("discovering");
+    expect(stagedGate.counts.read).toBe(1);
 
     expect(guards.webhookTopicDomain("connector.product.updated")).toBe("product");
     expect(guards.webhookTopicDomain("customers.sync_completed")).toBe("party");
@@ -1533,5 +1578,157 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
     expect(appliedJrn.crossCheck.ok).toBe(true);
     const jeCount = await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM journal_entries WHERE business_id = $1`, [holooBiz.id]);
     expect(Number(jeCount.rows[0].n)).toBe(1);
+  });
+
+  it("creates a Woo variable parent as a container and its variation as a child", async () => {
+    const applyRunner = await import("../src/lib/import-reconciliation/apply-runner");
+    const biz = await seedBusiness("cosmetics", "تطبیق والد و فرزند ووکامرس");
+    const run = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: `woo-variants-${randomUUID()}`,
+        connectionId: null,
+        importMode: "live_link",
+        sourceFingerprint: "woo-variants-1",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () =>
+      svc.stageProducts(biz.id, run.id, [
+        {
+          domain: "product",
+          externalId: "900",
+          name: "تی‌شرت",
+          sku: "TSHIRT",
+          kind: "variant_parent",
+          fields: { woo_type: "variable" },
+        },
+        {
+          domain: "product",
+          externalId: "901",
+          name: "تی‌شرت - قرمز",
+          sku: "TSHIRT-RED",
+          kind: "variant_child",
+          parentExternalId: "900",
+          variantOptions: { "رنگ": "قرمز" },
+          priceRial: "120000",
+          stockQuantity: "2",
+          fields: { woo_type: "variation" },
+        },
+      ]),
+    );
+    const discovery = await asBusiness(biz.id, () => svc.completeProductDiscovery(biz.id, run.id, actor));
+    expect(discovery.gate.path).toBe("fast");
+
+    const applied = await asBusiness(biz.id, () =>
+      applyRunner.applyReconciliationRunWithDomainHandlers({
+        businessId: biz.id,
+        runId: run.id,
+        locationId: biz.locationId,
+        actor,
+      }),
+    );
+    expect(applied.summary.run.status).toBe("applied");
+    expect(applied.crossCheck.ok).toBe(true);
+
+    const rows = await db.query<{
+      id: string;
+      sku: string | null;
+      kind: string;
+      parent_item_id: string | null;
+    }>(
+      `SELECT id::text AS id, sku, kind, parent_item_id::text AS parent_item_id
+         FROM items WHERE location_id = $1 AND sku IN ('TSHIRT', 'TSHIRT-RED')
+        ORDER BY sku`,
+      [biz.locationId],
+    );
+    expect(rows.rows).toEqual([
+      expect.objectContaining({ sku: "TSHIRT", kind: "variant_parent", parent_item_id: null }),
+      expect.objectContaining({ sku: "TSHIRT-RED", kind: "variant_child" }),
+    ]);
+    const parent = rows.rows.find((row) => row.sku === "TSHIRT")!;
+    const child = rows.rows.find((row) => row.sku === "TSHIRT-RED")!;
+    expect(child.parent_item_id).toBe(parent.id);
+
+    const stock = await db.query<{ quantity: string; unit_price: string | null }>(
+      `SELECT quantity::text, unit_price::text FROM item_stock WHERE item_id = $1`,
+      [child.id],
+    );
+    expect(Number(stock.rows[0]?.quantity)).toBe(2);
+    expect(stock.rows[0]?.unit_price).toBe("120000");
+
+    const attrs = await db.query<{ name: string; value: string }>(
+      `SELECT name, value FROM item_variant_attributes WHERE item_id = $1`,
+      [child.id],
+    );
+    expect(attrs.rows).toEqual([{ name: "رنگ", value: "قرمز" }]);
+  });
+
+  it("refuses to apply a provider preview after a newer source event arrived", async () => {
+    const applyRunner = await import("../src/lib/import-reconciliation/apply-runner");
+    const biz = await seedBusiness("cosmetics", "تازگی منبع پیش از اعمال");
+    const connRes = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections
+         (business_id, location_id, name, provider, base_url, link_token_hash, link_token_ciphertext,
+          currency_unit, link_mode, status, source_of_truth)
+       VALUES ($1, $2, 'Woo Freshness', 'woocommerce', 'https://fresh.example.com', $3, 'enc-tok',
+               'rial', 'plugin', 'active', 'pos')
+       RETURNING id`,
+      [biz.id, biz.locationId, `fresh-hash-${randomUUID()}`],
+    );
+    const connId = connRes.rows[0].id;
+
+    const run = await asBusiness(biz.id, () =>
+      svc.openRun({
+        businessId: biz.id,
+        locationId: biz.locationId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: connId,
+        connectionId: connId,
+        importMode: "live_link",
+        sourceFingerprint: "woo-freshness-1",
+        actor,
+      }),
+    );
+    await asBusiness(biz.id, () =>
+      svc.stageProducts(biz.id, run.id, [product("fresh-1", "کالای تازه", "FRESH-1")]),
+    );
+    await asBusiness(biz.id, () => svc.completeProductDiscovery(biz.id, run.id, actor));
+
+    // A product event arrives while the owner is reviewing: the staged view is
+    // no longer what the source says.
+    await db.query(
+      `INSERT INTO integration_webhook_events
+         (business_id, connection_id, event_topic, remote_id, delivery_id, payload, created_at)
+       VALUES ($1, $2, 'product.updated', 'fresh-1', $3, '{}'::jsonb, now() + interval '5 seconds')`,
+      [biz.id, connId, `fresh-delivery-${randomUUID()}`],
+    );
+
+    await expect(
+      asBusiness(biz.id, () =>
+        applyRunner.applyReconciliationRunWithDomainHandlers({
+          businessId: biz.id,
+          runId: run.id,
+          locationId: biz.locationId,
+          actor,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "preview_stale" });
+
+    const summary = await asBusiness(biz.id, () => svc.getRunSummary(biz.id, run.id));
+    expect(summary.run.status).toBe("stale");
+    const items = await asBusiness(biz.id, () => svc.listItems(biz.id, run.id));
+    expect(items[0]?.status).toBe("proposed");
+    const itemsCount = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM items WHERE location_id = $1`,
+      [biz.locationId],
+    );
+    expect(Number(itemsCount.rows[0].n)).toBe(0);
   });
 });

@@ -472,6 +472,17 @@ export async function pluginHandshake(
         connection.business_id,
         connection.id,
         connection.location_id ?? null,
+        {
+          // Only gate a domain this plugin will actually send a historical
+          // export for; an older plugin with no export capability has no bulk
+          // history to reconcile and must not be left with an empty run.
+          product:
+            (handshakeRows[0]?.sync_products ?? true) &&
+            pluginSupportsJobType(capabilities, "catalogue_export"),
+          party:
+            (handshakeRows[0]?.sync_customers ?? true) &&
+            pluginSupportsJobType(capabilities, "customer_export"),
+        },
       );
       // Only the exports this plugin can actually apply. The lease query
       // filters by supported type, so an export queued past an older
