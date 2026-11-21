@@ -356,6 +356,19 @@ describe("certificate-free schema 2 manifests", () => {
       .toThrow("expected_publisher_missing");
   });
 
+  it("binds the optional Authenticode pin to the manifest signature", () => {
+    const installer = {
+      ...(v2().installer as Record<string, unknown>),
+      signatureRequired: true,
+      expectedPublisher: "Business Suite",
+      expectedPublisherThumbprint: "A".repeat(40),
+    };
+    const signed = v2({ installer });
+    expect(safeManifest(signed)).toMatchObject({ installer: { signatureRequired: true, expectedPublisher: "Business Suite" } });
+    expect(v2Engine().check({ ...signed, installer: { ...installer, expectedPublisher: "Other" } }))
+      .toMatchObject({ state: "failed", errorCode: "manifest_signature_invalid" });
+  });
+
   it("records the applied sequence only after a healthy post-update boot", () => {
     const updater = v2Engine("1.2.0");
     updater.state.state = "installing";

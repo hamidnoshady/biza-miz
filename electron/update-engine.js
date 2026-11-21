@@ -125,6 +125,10 @@ function canonicalManifestPayloadV2(manifest) {
       sha256: manifest.installer.sha256,
       size: manifest.installer.size,
       signatureRequired: manifest.installer.signatureRequired === true,
+      ...(manifest.installer.signatureRequired === true ? {
+        expectedPublisher: manifest.installer.expectedPublisher ?? null,
+        expectedPublisherThumbprint: manifest.installer.expectedPublisherThumbprint ?? null,
+      } : {}),
     },
     database: {
       migrationVersion: manifest.database.migrationVersion,
