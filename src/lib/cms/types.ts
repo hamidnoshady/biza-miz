@@ -283,7 +283,14 @@ export interface CmsProduct {
  */
 export interface CmsOrderItem {
   lineId?: string | null;
-  productId: string;
+  /**
+   * The CMS product id. A site key that reads the order with depth gets the
+   * relationship instead (`product: { id, title }`), and a café order written by
+   * Eshobe CMS only has that — so both are read (`lineProductId` in
+   * `cafe-order-intake-service.ts`).
+   */
+  productId?: string | null;
+  product?: string | { id: string; title?: string | null } | null;
   title?: string | null;
   quantity: number;
   /** Minor units, the CMS's own snapshot at checkout. */
@@ -291,6 +298,15 @@ export interface CmsOrderItem {
   total?: number | null;
   /** CMS modifier/option ids; mapped to `modifiers` rows by the intake. */
   modifierIds?: string[] | null;
+  /** The CMS's line snapshot, one row per selected option. */
+  modifiers?: Array<{
+    groupSourceId?: string | null;
+    optionSourceId?: string | null;
+    optionLabel?: string | null;
+    groupLabel?: string | null;
+    priceDelta?: number | null;
+    quantity?: number | null;
+  }> | null;
   note?: string | null;
 }
 
