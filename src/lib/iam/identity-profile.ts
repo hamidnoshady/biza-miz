@@ -180,7 +180,9 @@ export async function readNationalId(input: {
   await recordIdentityEvent({
     platformUserId: input.platformUserId,
     action: "national_id_read",
-    actorPlatformUserId: input.actorPlatformUserId ?? null,
+    /** NULL when a platform admin read it; the admin id below names them. */
+    actorPlatformUserId: self ? input.platformUserId : null,
+    actorPlatformAdminId: self ? null : (input.actorPlatformAdminId ?? null),
     actorBusinessId: input.actorBusinessId ?? null,
   });
   return { ok: true, nationalId };
@@ -211,16 +213,22 @@ async function recordIdentityEvent(event: {
   platformUserId: string;
   action: "national_id_set" | "national_id_cleared" | "national_id_read";
   actorPlatformUserId?: string | null;
+  /**
+   * The platform-admin realm is its own table, so the person column cannot
+   * name an administrative reader. Migration 0311 adds this actor.
+   */
+  actorPlatformAdminId?: string | null;
   actorBusinessId?: string | null;
 }): Promise<void> {
   await query(
     `INSERT INTO platform_identity_events
-       (platform_user_id, action, actor_platform_user_id, actor_business_id)
-     VALUES ($1, $2, $3, $4)`,
+       (platform_user_id, action, actor_platform_user_id, actor_platform_admin_id, actor_business_id)
+     VALUES ($1, $2, $3, $4, $5)`,
     [
       event.platformUserId,
       event.action,
       event.actorPlatformUserId ?? null,
+      event.actorPlatformAdminId ?? null,
       event.actorBusinessId ?? null,
     ],
   );
