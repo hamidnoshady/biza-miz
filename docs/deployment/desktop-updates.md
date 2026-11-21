@@ -3,6 +3,10 @@
 Desktop update identity is **SemVer**. A Git commit and build ID are provenance and are never
 compared to a version. Central's Docker SHA is exposed separately as Central runtime provenance.
 
+> **Two release paths exist.** The default is certificate-free:
+> `build-desktop-installer.yml` → `windows-release.yml` (see *Certificate-free release trust*
+> below). Steps 1-3 in the flow below describe the optional Authenticode path.
+
 ## End-to-end flow
 
 1. `windows-signed-candidate.yml` embeds `version`, `buildCommit`, `buildId` and `channel`, then
