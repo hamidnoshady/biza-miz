@@ -245,6 +245,7 @@ Commands and outcomes, on a Windows development worktree with Postgres 16:
 | `npx eslint` on every changed file | clean |
 | `npm test` (whole repository) | 15,790 passed; failures limited to environment-only gates — WSL `bash` is a broken launcher for `ci/required-gate` (7), desktop installer/update tests need packaged artifacts (9), and three jsdom/compiler tests exceeded the 15s load threshold (both re-run green with a longer timeout: `client-bundle-boundary` 30s, `cheques-section` 72s) |
 | Migration rehearsal on a synthetic database | 528 migrations applied; 0309 applied, reversed, re-applied, and re-applied again (idempotent). Legacy rows unchanged (`1` business, `2` ledger rows, `2` rows summing 5,300,000 Rial). Both tenant tables report `rowsecurity`; `service_term` is accepted by the wallet check and an unknown kind is rejected. No production data was used. |
+| GitHub CI (PR #1451, run `44883557428`) | unit, type check, ESLint, all six real-database integration shards, design, visual regression, production build and container: **pass**. The repository-CI repair that unblocked the AEC shard is PR #1452, green on run `44883681555`. |
 
 The build (`npm run build`) result is recorded in the issue report; it is a
 deployment gate, not part of this document's contract.
