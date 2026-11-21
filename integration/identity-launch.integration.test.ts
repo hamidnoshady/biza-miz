@@ -275,6 +275,52 @@ describe("national ID", () => {
     ).toEqual({ ok: false, error: "invalid_national_id" });
   });
 
+  it("lets an active platform admin read it and records which admin read it", async () => {
+    const identityId = await insertIdentity({ email: `r-${randomUUID()}@example.com`, passwordHash: "hash" });
+    await profile.setNationalId({
+      platformUserId: identityId,
+      nationalId: "0084575948",
+      actorPlatformUserId: identityId,
+    });
+
+    const { rows: admins } = await db.withoutTenantScope("platform", () =>
+      db.query<{ id: string }>(
+        `INSERT INTO platform_admins (email, password_hash, full_name, role)
+         VALUES ($1, 'x', 'پشتیبانی', 'support') RETURNING id`,
+        [`admin-${randomUUID()}@example.com`],
+      ),
+    );
+    const adminId = admins[0].id;
+
+    expect(
+      await profile.readNationalId({
+        platformUserId: identityId,
+        actorPlatformAdminId: adminId,
+        actorBusinessId: null,
+      }),
+    ).toEqual({ ok: true, nationalId: "0084575948" });
+
+    const { rows: events } = await db.withoutTenantScope("platform", () =>
+      db.query<{
+        action: string;
+        actor_platform_user_id: string | null;
+        actor_platform_admin_id: string | null;
+      }>(
+        `SELECT action, actor_platform_user_id, actor_platform_admin_id
+           FROM platform_identity_events
+          WHERE platform_user_id = $1 AND action = 'national_id_read'
+          ORDER BY id DESC LIMIT 1`,
+        [identityId],
+      ),
+    );
+    // The subject is the identity; the actor is the admin — never conflated.
+    expect(events[0]).toEqual({
+      action: "national_id_read",
+      actor_platform_user_id: null,
+      actor_platform_admin_id: adminId,
+    });
+  });
+
   it("clears both the ciphertext and the blind index", async () => {
     const identityId = await insertIdentity({ email: `q-${randomUUID()}@example.com`, passwordHash: "hash" });
     await profile.setNationalId({
