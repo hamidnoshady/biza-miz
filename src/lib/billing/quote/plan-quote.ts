@@ -40,6 +40,7 @@
  * import this module's types for its itemisation without pulling a pool in.
  */
 import { toPersianDigits } from "../../digits";
+import { addCalendarMonths } from "../resolver/calendar";
 
 /** The only prepayment terms the commercial launch sells (ESH-193). */
 export const PLAN_TERM_MONTHS = [1, 3, 12] as const;
@@ -168,24 +169,12 @@ export interface QuotePriceFacts {
 /**
  * Calendar-month addition with month-end clamping.
  *
- * UTC arithmetic is deliberate: the value is an instant, the caller owns the
- * business timezone, and a quote must not change because the server's local
- * zone differs from the tenant's.
+ * The implementation is the billing calendar's one copy
+ * (`billing/resolver/calendar.ts`): a plan term, a prepaid service term and an
+ * allowance period must not disagree about what "one month" means. Re-exported
+ * here because it was this module's published contract first.
  */
-export function addCalendarMonths(fromIso: string, months: number): string {
-  const from = new Date(fromIso);
-  if (Number.isNaN(from.getTime())) throw new Error("invalid_quote_start");
-  if (!Number.isInteger(months) || months <= 0) throw new Error("invalid_quote_term");
-  const day = from.getUTCDate();
-  const target = new Date(from.getTime());
-  target.setUTCDate(1);
-  target.setUTCMonth(target.getUTCMonth() + months);
-  const lastDayOfTargetMonth = new Date(
-    Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0),
-  ).getUTCDate();
-  target.setUTCDate(Math.min(day, lastDayOfTargetMonth));
-  return target.toISOString();
-}
+export { addCalendarMonths };
 
 /**
  * Build the itemised quote.

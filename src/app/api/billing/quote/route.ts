@@ -12,6 +12,7 @@ import {
   type QuoteLine,
 } from "@/lib/billing/quote/plan-quote";
 import { createPlanCheckoutQuote } from "@/lib/billing/quote/checkout-quote";
+import { readPlanTransitionQuote } from "@/lib/billing/resolver/transition-service";
 
 /**
  * Tenant-authorized quote endpoint using the SAME commercial calculator
@@ -130,6 +131,19 @@ export const POST = withTenantScope(async (req: Request) => {
         gatewayAllowed: true,
         note: quote.totals.netRial === 0 ? "رایگان — نیازی به پرداخت نیست" : undefined,
       });
+    }
+
+    if (kind === "plan_transition") {
+      // Read-only: the calculator's answer for an upgrade/downgrade, with the
+      // paid period, credit basis and configured policy made explicit. It
+      // moves no money; charging remains a release-gated decision.
+      const planKey = String(body.planKey ?? "");
+      if (!planKey) return NextResponse.json({ error: "plan_not_found" }, { status: 404 });
+      const transition = await readPlanTransitionQuote({
+        businessId: session.businessId,
+        targetPlanKey: planKey,
+      });
+      return NextResponse.json(transition, { status: transition.ok ? 200 : 409 });
     }
 
     if (kind === "topup") {

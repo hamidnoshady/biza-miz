@@ -147,6 +147,14 @@ export const EXEMPT_TABLES = new Set([
   // (billing_quotes, billing_coupon_redemptions) are FORCE RLS and stay in
   // the export.
   "billing_coupons",
+  // Migration 0309 — the resolver's global catalogues (ESH-193): reviewed
+  // policy versions, approved plan benefits and the published prepaid service
+  // term offers. None carries a business_id, like billing_plans. Their tenant
+  // halves (business_commercial_policies, business_service_terms) are FORCE RLS
+  // and stay in the export.
+  "billing_policy_versions",
+  "billing_plan_benefits",
+  "service_term_offers",
   "billing_invoice_counters",
   "billing_commercial_settings",
   "billing_service_credentials",

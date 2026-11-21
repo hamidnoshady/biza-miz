@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { isCafeCmsOrder } from "./cafe-order-intake-service";
-import type { CmsOrder } from "./types";
+import { isCafeCmsOrder, lineModifierIds, lineProductId } from "./cafe-order-intake-service";
+import type { CmsOrder, CmsOrderItem } from "./types";
 
 const legacy: CmsOrder = {
   id: "cms-1",
@@ -39,5 +39,32 @@ describe("isCafeCmsOrder", () => {
     expect(isCafeCmsOrder({ ...legacy, tableToken: "tqr_abc" })).toBe(true);
     // An explicit null is the legacy shape, not a café order.
     expect(isCafeCmsOrder({ ...legacy, tableToken: null, serviceMode: null })).toBe(false);
+  });
+});
+
+describe("café line identity", () => {
+  it("reads the CMS relationship as well as a flat productId", () => {
+    // What Eshobe CMS actually writes: the order line carries the relationship.
+    expect(lineProductId({ product: { id: "cms-product-1" }, quantity: 1 })).toBe("cms-product-1");
+    expect(lineProductId({ product: "cms-product-1", quantity: 1 })).toBe("cms-product-1");
+    expect(lineProductId({ productId: "cms-product-1", quantity: 1 })).toBe("cms-product-1");
+    // Nothing to map is an empty id, which the intake reports as product_id_required.
+    expect(lineProductId({ quantity: 1 })).toBe("");
+    expect(lineProductId({ product: { id: "  " }, quantity: 1 })).toBe("");
+  });
+
+  it("collects option ids from the CMS modifier snapshots without duplicates", () => {
+    const line: CmsOrderItem = {
+      product: { id: "p1" },
+      quantity: 1,
+      modifiers: [
+        { groupSourceId: "g1", optionSourceId: "option-a" },
+        { groupSourceId: "g2", optionSourceId: "option-b" },
+        { groupSourceId: "g1", optionSourceId: "option-a" },
+      ],
+      modifierIds: ["option-b", "option-c"],
+    };
+    expect([...lineModifierIds(line)].sort()).toEqual(["option-a", "option-b", "option-c"]);
+    expect(lineModifierIds({ quantity: 1 })).toEqual([]);
   });
 });

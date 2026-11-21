@@ -239,6 +239,7 @@ const KIND_LABELS: Record<string, string> = {
   free_promo: "استفادهٔ رایگان",
   service_setup: "راه‌اندازی سرویس",
   service_runtime: "اجارهٔ ساعتی سرویس",
+  service_term: "پیش‌پرداخت دورهٔ سرویس",
 };
 
 const SUB_STATUS_LABELS: Record<string, string> = {
