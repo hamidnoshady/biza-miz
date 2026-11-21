@@ -12,9 +12,13 @@ import {
   classifyDeviceConnectivity,
   compareSemVer,
   complianceWithFreshness,
+  DESKTOP_MANIFEST_ALGORITHMS,
+  DESKTOP_RELEASE_ARCHITECTURES,
+  DESKTOP_RELEASE_PLATFORMS,
   isDesktopReleaseChannel,
   isDesktopUpdateState,
   parseSemVer,
+  type DesktopManifestAlgorithm,
   type DesktopReleaseChannel,
   type DesktopReleaseManifest,
   type DesktopUpdateState,
@@ -48,6 +52,13 @@ interface ReleaseRow extends Record<string, unknown> {
   installer_sha256: string;
   installer_size: string | number;
   manifest_signature: string;
+  manifest_schema_version: number;
+  signature_algorithm: string | null;
+  signing_key_id: string | null;
+  release_sequence: string | number | null;
+  platform: string | null;
+  architecture: string | null;
+  manifest_expires_at: Date | string | null;
   signature_required: boolean;
   expected_publisher: string | null;
   expected_publisher_thumbprint: string | null;
@@ -80,8 +91,17 @@ function releaseNotes(value: unknown): string[] {
 }
 
 function rowToRelease(row: ReleaseRow): PlatformDesktopRelease {
+  const schemaVersion = row.manifest_schema_version === 2 ? 2 : 1;
   return {
     id: row.id,
+    schemaVersion,
+    appId: schemaVersion === 2 ? "bizamiz-desktop" : null,
+    signatureAlgorithm: schemaVersion === 2 ? (row.signature_algorithm as "ed25519" | "rsa-sha256" | null) : null,
+    signingKeyId: row.signing_key_id,
+    releaseSequence: row.release_sequence === null ? null : Number(row.release_sequence),
+    platform: row.platform,
+    architecture: row.architecture,
+    expiresAt: row.manifest_expires_at ? iso(row.manifest_expires_at) : null,
     manifestSignature: row.manifest_signature,
     version: row.version,
     buildCommit: row.build_commit,
@@ -118,6 +138,8 @@ const RELEASE_SELECT = `
   SELECT r.id,r.version,r.build_commit,r.build_id,r.channel,r.status,r.rollout_state,
          r.rollout_percentage,r.released_at,r.minimum_supported_version,r.mandatory,
          r.installer_url,r.installer_sha256,r.installer_size,r.manifest_signature,r.signature_required,
+         r.manifest_schema_version,r.signature_algorithm,r.signing_key_id,r.release_sequence,
+         r.platform,r.architecture,r.manifest_expires_at,
          r.expected_publisher,r.expected_publisher_thumbprint,r.migration_version,r.minimum_schema_version,
          r.maximum_schema_version,r.backup_required,r.release_notes,r.recovery_notes,
          kg.version AS known_good_version,r.created_at,r.updated_at
@@ -683,6 +705,7 @@ export async function businessDesktopCompliance(businessId: string, now: Date = 
 }
 
 export interface SaveDesktopReleaseInput {
+  schemaVersion: 1 | 2;
   version: string;
   buildCommit: string;
   buildId: string;
@@ -696,8 +719,16 @@ export interface SaveDesktopReleaseInput {
   installerSha256: string;
   installerSize: number;
   manifestSignature: string;
-  expectedPublisher: string;
-  expectedPublisherThumbprint: string;
+  signatureAlgorithm: "ed25519" | "rsa-sha256" | null;
+  signingKeyId: string | null;
+  releaseSequence: number | null;
+  platform: string | null;
+  architecture: string | null;
+  releasedAt: string | null;
+  expiresAt: string | null;
+  signatureRequired: boolean;
+  expectedPublisher: string | null;
+  expectedPublisherThumbprint: string | null;
   migrationVersion: number | null;
   minimumSchemaVersion: number | null;
   maximumSchemaVersion: number | null;
@@ -707,20 +738,30 @@ export interface SaveDesktopReleaseInput {
 }
 
 function releaseInputAsManifest(input: SaveDesktopReleaseInput): DesktopReleaseManifest {
+  const schemaVersion = input.schemaVersion;
   return {
+    schemaVersion,
+    appId: schemaVersion === 2 ? "bizamiz-desktop" : null,
+    signatureAlgorithm: input.signatureAlgorithm,
+    signingKeyId: input.signingKeyId,
+    releaseSequence: input.releaseSequence,
+    platform: input.platform,
+    architecture: input.architecture,
+    expiresAt: input.expiresAt,
     manifestSignature: input.manifestSignature,
     version: input.version,
     buildCommit: input.buildCommit,
     buildId: input.buildId,
     channel: input.channel,
-    releasedAt: new Date(0).toISOString(),
+    // Schema 1 does not sign releasedAt; schema 2 does, so use the exact value.
+    releasedAt: input.releasedAt ?? new Date(0).toISOString(),
     minimumSupportedVersion: input.minimumSupportedVersion,
     mandatory: input.mandatory,
     installer: {
       url: input.installerUrl,
       sha256: input.installerSha256,
       size: input.installerSize,
-      signatureRequired: true,
+      signatureRequired: input.signatureRequired,
       expectedPublisher: input.expectedPublisher,
       expectedPublisherThumbprint: input.expectedPublisherThumbprint,
     },
@@ -735,16 +776,42 @@ function releaseInputAsManifest(input: SaveDesktopReleaseInput): DesktopReleaseM
   };
 }
 
-function releaseManifestSignatureValid(input: SaveDesktopReleaseInput): boolean | null {
-  const configured = process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM?.replaceAll("\\n", "\n").trim();
-  if (!configured) return null;
+function releaseKeyId(publicKey: ReturnType<typeof createPublicKey>): string {
+  return `sha256:${createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("hex")}`;
+}
+
+function releaseVerificationKey(input: SaveDesktopReleaseInput): ReturnType<typeof createPublicKey> | null {
+  const algorithm = input.signatureAlgorithm ?? "rsa-sha256";
+  const inline = algorithm === "ed25519"
+    ? process.env.DESKTOP_RELEASE_ED25519_PUBLIC_KEY_PEM?.replaceAll("\\n", "\n").trim()
+    : process.env.DESKTOP_RELEASE_PUBLIC_KEY_PEM?.replaceAll("\\n", "\n").trim();
+  if (inline) return createPublicKey(inline);
+  const keyring = process.env.DESKTOP_RELEASE_PUBLIC_KEYS_JSON?.replaceAll("\\n", "\n").trim();
+  if (!keyring || !input.signingKeyId) return null;
   try {
-    return verifySignature(
-      "sha256",
-      Buffer.from(canonicalDesktopManifestPayload(releaseInputAsManifest(input))),
-      createPublicKey(configured),
-      Buffer.from(input.manifestSignature, "base64"),
-    );
+    const parsed = JSON.parse(keyring) as { keys?: Array<{ id?: unknown; algorithm?: unknown; publicKeyPem?: unknown }> };
+    const entry = Array.isArray(parsed.keys)
+      ? parsed.keys.find((item) => item.id === input.signingKeyId && item.algorithm === algorithm)
+      : null;
+    return entry && typeof entry.publicKeyPem === "string"
+      ? createPublicKey(entry.publicKeyPem.replaceAll("\\n", "\n"))
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function releaseManifestSignatureValid(input: SaveDesktopReleaseInput): boolean | null {
+  const publicKey = releaseVerificationKey(input);
+  if (!publicKey) return null;
+  try {
+    const algorithm = input.signatureAlgorithm ?? "rsa-sha256";
+    if (input.schemaVersion === 2 && input.signingKeyId !== releaseKeyId(publicKey)) return false;
+    const payload = Buffer.from(canonicalDesktopManifestPayload(releaseInputAsManifest(input)));
+    const signature = Buffer.from(input.manifestSignature, "base64");
+    return algorithm === "ed25519"
+      ? verifySignature(null, payload, publicKey, signature)
+      : verifySignature("sha256", payload, publicKey, signature);
   } catch {
     return false;
   }
@@ -801,15 +868,53 @@ export function validateDesktopReleaseInput(value: unknown):
   if (minimumSchemaVersion && maximumSchemaVersion && maximumSchemaVersion < minimumSchemaVersion) {
     return { ok: false, error: "invalid_schema_range" };
   }
+  const schemaVersion = body.schemaVersion === undefined ? 1 : body.schemaVersion;
+  if (schemaVersion !== 1 && schemaVersion !== 2) return { ok: false, error: "invalid_schema_version" };
+  const signatureAlgorithm = schemaVersion === 2
+    ? (DESKTOP_MANIFEST_ALGORITHMS.includes(body.signatureAlgorithm as DesktopManifestAlgorithm)
+      ? body.signatureAlgorithm as DesktopManifestAlgorithm
+      : null)
+    : null;
+  if (schemaVersion === 2 && !signatureAlgorithm) return { ok: false, error: "invalid_signature_algorithm" };
+  const signingKeyId = schemaVersion === 2 ? optionalText(body.signingKeyId, 200) : null;
+  if (schemaVersion === 2 && (!signingKeyId || !/^[A-Za-z0-9:+._-]{8,200}$/.test(signingKeyId))) {
+    return { ok: false, error: "invalid_signing_key_id" };
+  }
+  const releaseSequence = schemaVersion === 2 ? Number(body.releaseSequence) : null;
+  if (schemaVersion === 2 && (!Number.isSafeInteger(releaseSequence) || Number(releaseSequence) < 1)) {
+    return { ok: false, error: "invalid_release_sequence" };
+  }
+  const platform = schemaVersion === 2 ? optionalText(body.platform, 40) : null;
+  if (schemaVersion === 2 && !DESKTOP_RELEASE_PLATFORMS.includes(platform as "win32")) {
+    return { ok: false, error: "invalid_platform" };
+  }
+  const architecture = schemaVersion === 2 ? optionalText(body.architecture, 40) : null;
+  if (schemaVersion === 2 && !DESKTOP_RELEASE_ARCHITECTURES.includes(architecture as "x64" | "arm64" | "ia32")) {
+    return { ok: false, error: "invalid_architecture" };
+  }
+  const releasedAt = schemaVersion === 2 && typeof body.releasedAt === "string" && Number.isFinite(Date.parse(body.releasedAt))
+    ? new Date(body.releasedAt).toISOString()
+    : null;
+  if (schemaVersion === 2 && !releasedAt) return { ok: false, error: "invalid_released_at" };
+  const expiresAt = typeof body.expiresAt === "string" && body.expiresAt.trim() && Number.isFinite(Date.parse(body.expiresAt))
+    ? new Date(body.expiresAt).toISOString()
+    : null;
+  if (body.expiresAt !== undefined && body.expiresAt !== null && body.expiresAt !== "" && !expiresAt) {
+    return { ok: false, error: "invalid_expires_at" };
+  }
+  if (expiresAt && releasedAt && Date.parse(expiresAt) <= Date.parse(releasedAt)) {
+    return { ok: false, error: "invalid_expires_at" };
+  }
+  const signatureRequired = schemaVersion === 1 ? true : body.signatureRequired === true;
   const expectedPublisher = optionalText(body.expectedPublisher, 240);
-  if (!expectedPublisher) return { ok: false, error: "invalid_expected_publisher" };
-  // Issue #1000 - every release registered from now on pins the exact signing
-  // certificate. Rotation is a new signed release carrying the new thumbprint;
-  // it is never inferred from the certificate being inspected.
+  if (signatureRequired && !expectedPublisher) return { ok: false, error: "invalid_expected_publisher" };
+  // Issue #1000 - when Authenticode is requested, every release pins the exact
+  // signing certificate. Rotation is a new signed release carrying the new
+  // thumbprint; it is never inferred from the certificate being inspected.
   const expectedPublisherThumbprint = typeof body.expectedPublisherThumbprint === "string"
     ? body.expectedPublisherThumbprint.replace(/[\s:]/g, "").toUpperCase()
     : "";
-  if (!/^[0-9A-F]{40}$/.test(expectedPublisherThumbprint)) {
+  if (signatureRequired && !/^[0-9A-F]{40}$/.test(expectedPublisherThumbprint)) {
     return { ok: false, error: "invalid_expected_publisher_thumbprint" };
   }
   const notes = Array.isArray(body.releaseNotes)
@@ -822,12 +927,17 @@ export function validateDesktopReleaseInput(value: unknown):
     return { ok: false, error: "invalid_manifest_signature" };
   }
   const input: SaveDesktopReleaseInput = {
+    schemaVersion,
     version, buildCommit, buildId, channel: body.channel,
     status: body.status as ReleaseLifecycleStatus,
     rolloutState, rolloutPercentage,
     minimumSupportedVersion, mandatory: body.mandatory === true,
     installerUrl: installerUrl.toString(), installerSha256, installerSize,
-    manifestSignature, expectedPublisher, expectedPublisherThumbprint,
+    manifestSignature, signatureAlgorithm, signingKeyId, releaseSequence,
+    platform, architecture, releasedAt, expiresAt,
+    signatureRequired,
+    expectedPublisher: signatureRequired ? expectedPublisher : null,
+    expectedPublisherThumbprint: signatureRequired ? expectedPublisherThumbprint : null,
     migrationVersion, minimumSchemaVersion, maximumSchemaVersion,
     releaseNotes: notes.slice(0, 100), recoveryNotes: optionalText(body.recoveryNotes, 4_000),
     knownGoodReleaseId,
@@ -846,18 +956,24 @@ export async function createDesktopRelease(input: SaveDesktopReleaseInput, admin
       `INSERT INTO platform_releases
          (version,build_commit,build_id,channel,status,rollout_state,rollout_percentage,
           released_at,minimum_supported_version,mandatory,installer_url,installer_sha256,
-          installer_size,manifest_signature,signature_required,expected_publisher,expected_publisher_thumbprint,
+          installer_size,manifest_signature,manifest_schema_version,signature_algorithm,
+          signing_key_id,release_sequence,platform,architecture,manifest_expires_at,
+          signature_required,expected_publisher,expected_publisher_thumbprint,
           migration_version,minimum_schema_version,maximum_schema_version,backup_required,release_notes,
           recovery_notes,known_good_release_id,created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5='draft' THEN NULL ELSE now() END,
-               $8,$9,$10,$11,$12,$13,true,$14,$15,$16,$17,$18,true,$19,$20,$21,$22)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,
+               CASE WHEN $5='draft' THEN NULL ELSE COALESCE($31::timestamptz, now()) END,
+               $8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
+               $24,$25,$26,true,$27,$28,$29,$30)
        RETURNING id`,
       [input.version,input.buildCommit,input.buildId,input.channel,input.status,input.rolloutState,
         input.rolloutPercentage,input.minimumSupportedVersion,input.mandatory,input.installerUrl,
-        input.installerSha256,input.installerSize,input.manifestSignature,input.expectedPublisher,
-        input.expectedPublisherThumbprint,input.migrationVersion,
-        input.minimumSchemaVersion,input.maximumSchemaVersion,JSON.stringify(input.releaseNotes),
-        input.recoveryNotes,input.knownGoodReleaseId,adminId],
+        input.installerSha256,input.installerSize,input.manifestSignature,input.schemaVersion,
+        input.signatureAlgorithm,input.signingKeyId,input.releaseSequence,input.platform,input.architecture,
+        input.expiresAt,input.signatureRequired,input.expectedPublisher,input.expectedPublisherThumbprint,
+        input.migrationVersion,input.minimumSchemaVersion,input.maximumSchemaVersion,
+        JSON.stringify(input.releaseNotes),input.recoveryNotes,input.knownGoodReleaseId,adminId,
+        input.releasedAt],
     );
     const release = (await releaseRows()).find((item) => item.id === rows[0].id);
     if (!release) throw new Error("release_create_failed");

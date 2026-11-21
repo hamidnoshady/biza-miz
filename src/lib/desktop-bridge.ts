@@ -122,6 +122,14 @@ export interface DesktopUpdateState {
   installedVersion: string;
   target: {
     id?: string;
+    schemaVersion?: 1 | 2;
+    appId?: string | null;
+    signatureAlgorithm?: "ed25519" | "rsa-sha256" | null;
+    signingKeyId?: string | null;
+    releaseSequence?: number | null;
+    platform?: string | null;
+    architecture?: string | null;
+    expiresAt?: string | null;
     version: string;
     buildCommit: string;
     buildId: string;
@@ -129,8 +137,8 @@ export interface DesktopUpdateState {
     releasedAt: string;
     minimumSupportedVersion: string | null;
     mandatory: boolean;
-    installer: { url: string; sha256: string; size: number; signatureRequired: true; expectedPublisher: string | null; expectedPublisherThumbprint: string | null };
-    database: { migrationVersion: number | null; minimumSchemaVersion: number | null; maximumSchemaVersion: number | null; backupRequired: true };
+    installer: { url: string; sha256: string; size: number; signatureRequired: boolean; expectedPublisher: string | null; expectedPublisherThumbprint: string | null };
+    database: { migrationVersion: number | null; minimumSchemaVersion: number | null; maximumSchemaVersion: number | null; backupRequired: boolean };
     releaseNotes: string[];
     recovery: { knownGoodVersion: string | null; notes: string | null };
   } | null;
