@@ -17,6 +17,7 @@ import {
   type PlanTermMonths,
   type QuoteCoupon,
   type QuoteStackingPolicy,
+  addCalendarMonths,
 } from "./plan-quote";
 import { quotePlanSubscription } from "./plan-quote-service";
 import {
@@ -48,7 +49,8 @@ export type CheckoutQuoteResult =
         | "actor_not_found"
         | "coupon_reservation_missing"
         | CouponRefusal
-        | "coupon_capacity_unavailable";
+        | "coupon_capacity_unavailable"
+        | "plan_change_pending";
     };
 
 export async function createPlanCheckoutQuote(input: {
@@ -99,6 +101,23 @@ export async function createPlanCheckoutQuote(input: {
   });
   if (!quoted.ok) return quoted;
   const quote = quoted.quote;
+
+  // ESH-193 — a cross-plan purchase while a paid period is running starts at
+  // that period's end. The UI and the invoice snapshot therefore show the
+  // future interval, and `changeBusinessPlan` schedules the same instant. One
+  // pending change at a time is the rule; a second different target waits.
+  const deferral = await readPlanDeferral({
+    businessId: input.businessId,
+    targetPlanKey: input.planKey,
+    now,
+  });
+  if (deferral.conflict) return { ok: false, error: "plan_change_pending" };
+  if (deferral.startsAt) {
+    quote.period = {
+      start: deferral.startsAt,
+      end: addCalendarMonths(deferral.startsAt, input.termMonths),
+    };
+  }
 
   // The coupon is reserved only if it survived the no-stacking comparison.
   let reservationId: string | null = null;
@@ -170,4 +189,41 @@ async function readTaxRate(): Promise<number> {
   );
   const bps = Number(rows[0]?.tax_rate_bps ?? 0);
   return Number.isFinite(bps) && bps >= 0 && bps <= 10_000 ? Math.round(bps) / 10_000 : 0;
+}
+
+/**
+ * When must a cross-plan purchase start? At the end of the running paid period,
+ * so the customer keeps the time they already paid for. `conflict` is a second
+ * different pending target; buying it now would need a refund/credit decision.
+ */
+async function readPlanDeferral(input: {
+  businessId: string;
+  targetPlanKey: string;
+  now: Date;
+}): Promise<{ startsAt: string | null; conflict: boolean }> {
+  const { rows } = await query<{
+    plan_key: string;
+    status: string;
+    current_period_end: Date | string;
+    pending_plan_key: string | null;
+  }>(
+    `SELECT plan_key, status, current_period_end, pending_plan_key
+       FROM business_subscriptions
+      WHERE business_id = $1`,
+    [input.businessId],
+  );
+  const row = rows[0];
+  if (!row) return { startsAt: null, conflict: false };
+  // A trial is not a paid interval; switching during it is immediate.
+  if (!["active", "past_due"].includes(row.status)) {
+    return { startsAt: null, conflict: false };
+  }
+  if (row.plan_key === input.targetPlanKey) return { startsAt: null, conflict: false };
+  const periodEnd =
+    row.current_period_end instanceof Date
+      ? row.current_period_end.toISOString()
+      : new Date(row.current_period_end).toISOString();
+  if (periodEnd <= input.now.toISOString()) return { startsAt: null, conflict: false };
+  if (row.pending_plan_key) return { startsAt: null, conflict: true };
+  return { startsAt: periodEnd, conflict: false };
 }

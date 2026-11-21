@@ -22,6 +22,12 @@ import {
   type ServiceIdentity,
 } from "@/lib/service-activation/catalog";
 import { wizardProgress, wizardStepsFor } from "@/lib/service-activation/wizard";
+import {
+  enforceCommercialServiceAccess,
+  resolveCommercialAvailability,
+} from "@/lib/billing/resolver/access";
+import { purchaseServiceTerm, quoteServiceTerm } from "@/lib/billing/resolver/service";
+import { isServiceTermMonths } from "@/lib/billing/resolver/prepaid";
 
 interface Ctx {
   params: Promise<{ kind: string; key: string }>;
@@ -46,19 +52,23 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const runtimeInstanceId = url.searchParams.get("runtimeInstanceId")?.trim() || "";
   const fullIdentity: ServiceIdentity = { ...identity, runtimeInstanceId };
 
-  const [activation, quote, policy, wizard, journal, runtime] = await Promise.all([
+  const [activation, quote, policy, wizard, journal, runtime, commercial] = await Promise.all([
     getServiceActivation(session.businessId, fullIdentity),
     quoteService(session.businessId, fullIdentity),
     effectiveRetentionPolicy(session.businessId, identity.kind, identity.key),
     getServiceWizardState(session.businessId, fullIdentity),
     listServicePurgeJournal(session.businessId),
     listServiceRuntimeSummary(session.businessId),
+    // #1380's UI contract: every availability axis stays separate, plus the
+    // published prepaid term offers for this service (never a guessed price).
+    resolveCommercialAvailability({ businessId: session.businessId, identity: fullIdentity }),
   ]);
 
   return NextResponse.json({
     identity: fullIdentity,
     activation,
     quote,
+    commercial,
     retentionPolicy: policy,
     purgePlan: servicePurgePlan(identity.kind, identity.key),
     wizard,
@@ -72,7 +82,13 @@ export const GET = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   });
 });
 
-type ServiceAction = "activate" | "disable" | "reenable" | "settle";
+type ServiceAction =
+  | "activate"
+  | "disable"
+  | "reenable"
+  | "settle"
+  | "term_quote"
+  | "term_purchase";
 
 /**
  * Enable / disable / re-enable one service.
@@ -97,6 +113,10 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
     action?: unknown;
     requestId?: unknown;
     runtimeInstanceId?: unknown;
+    termMonths?: unknown;
+    offerId?: unknown;
+    expectedNetRial?: unknown;
+    autoRenew?: unknown;
   };
   try {
     body = await request.json();
@@ -105,7 +125,14 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   }
 
   const action = body.action;
-  if (action !== "activate" && action !== "disable" && action !== "reenable" && action !== "settle") {
+  if (
+    action !== "activate" &&
+    action !== "disable" &&
+    action !== "reenable" &&
+    action !== "settle" &&
+    action !== "term_quote" &&
+    action !== "term_purchase"
+  ) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   const fullIdentity: ServiceIdentity = {
@@ -116,6 +143,62 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const requestId = typeof body.requestId === "string" ? body.requestId.slice(0, 200) : null;
   const businessId = session.businessId;
   const actorUserId = session.sub;
+
+  // ESH-193: commercial availability is checked at this server boundary, not
+  // only in the UI, for the actions that can start or extend a paid service.
+  // `disable` and `settle` stay reachable: stopping a service must never be
+  // blocked, and settlement already refuses to bill beyond the wallet.
+  const gated = action === "activate" || action === "reenable" || action === "term_purchase";
+  if (gated) {
+    const access = await enforceCommercialServiceAccess({
+      businessId,
+      identity: fullIdentity,
+      intent: action === "activate" || action === "reenable" ? "activate" : "use",
+    });
+    if (!access.allowed) {
+      return NextResponse.json(
+        {
+          error: access.reason,
+          commercial: access.availability,
+          shortfallRial: access.walletShortfallRial,
+        },
+        { status: access.reason === "unpaid_service" ? 402 : 409 },
+      );
+    }
+  }
+
+  if (action === "term_quote" || action === "term_purchase") {
+    const termMonths = body.termMonths;
+    if (!isServiceTermMonths(termMonths)) {
+      return NextResponse.json({ error: "invalid_term" }, { status: 400 });
+    }
+    if (action === "term_quote") {
+      const quote = await quoteServiceTerm({ businessId, identity: fullIdentity, termMonths });
+      return NextResponse.json({ quote }, { status: quote.ok ? 200 : 409 });
+    }
+    const offerId = typeof body.offerId === "string" ? body.offerId : "";
+    const expectedNetRial = Number(body.expectedNetRial);
+    if (!offerId || !Number.isSafeInteger(expectedNetRial) || expectedNetRial < 0) {
+      return NextResponse.json({ error: "bad_request" }, { status: 400 });
+    }
+    const purchase = await purchaseServiceTerm({
+      businessId,
+      identity: fullIdentity,
+      termMonths,
+      expectedOfferId: offerId,
+      expectedNetRial,
+      actorPlatformUserId: session.platformUserId ?? null,
+      autoRenew: body.autoRenew === true,
+    });
+    if (purchase.status === "purchased") return NextResponse.json({ purchase });
+    if (purchase.status === "insufficient_credit") {
+      return NextResponse.json(
+        { error: "insufficient_credit", requiredRial: purchase.requiredRial, balanceRial: purchase.balanceRial },
+        { status: 402 },
+      );
+    }
+    return NextResponse.json({ error: purchase.reason }, { status: 409 });
+  }
 
   // Wizard completion is a server-side activation precondition, not just a
   // client-side courtesy. Without it a caller could POST directly, take the

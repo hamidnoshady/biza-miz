@@ -89,6 +89,11 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'api_keys.created_by': 'platform API credentials',
   'auth_password_resets.membership_id': 'account security lifecycle',
   'billing_payments.created_by_user_id': 'platform billing',
+  // ESH-193 — the resolver's two attribution columns. Both name the global
+  // person who made a commercial decision; the financial record is the wallet
+  // ledger row, so a member delete must not be blocked by either.
+  'business_commercial_policies.enrolled_by': 'commercial policy enrolment decision',
+  'business_service_terms.purchased_by': 'prepaid service term purchase attribution',
   'business_day_closures.reopened_by': 'business-day window state; the close/reopen itself is in audit_log and shift authorship is flagged on employee_shifts',
   'business_service_wizard_state.updated_by':
     'service setup wizard authorship; the activation itself is audited in service_activation_events and the platform audit log',

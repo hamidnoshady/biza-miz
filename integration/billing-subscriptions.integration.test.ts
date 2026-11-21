@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
+import { addCalendarMonths } from "../src/lib/billing/quote/plan-quote";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) throw new Error("DATABASE_URL is required for database integration tests");
@@ -282,6 +283,76 @@ describe("changeBusinessPlan", () => {
       const entitlements = await plans.listEntitlements(BID);
       expect(entitlements.some((e) => e.featureKey === "reporting" && e.source === "plan")).toBe(true);
     });
+  });
+
+  it("schedules a paid cross-plan purchase to the boundary, applies it once, and never charges twice", async () => {
+    const scheduledBusiness = "abababab-abab-4bab-8bab-abababababab";
+    await db.query(
+      `INSERT INTO businesses (id, name, slug, plan) VALUES ($1, 'کافه زمان‌بندی', 'scheduled-cafe', 'pro')`,
+      [scheduledBusiness],
+    );
+    const periodEnd = new Date(Date.now() + 10 * 86_400_000).toISOString();
+    await db.query(
+      `INSERT INTO business_subscriptions
+         (business_id, plan_key, status, current_period_start, current_period_end, auto_renew)
+       VALUES ($1, 'pro', 'active', now(), $2::timestamptz, true)`,
+      [scheduledBusiness, periodEnd],
+    );
+
+    const scheduled = await dbLib.withTenant(scheduledBusiness, () =>
+      subs.changeBusinessPlan({ businessId: scheduledBusiness, planKey: "business", source: "purchase" }),
+    );
+    expect(scheduled.outcome).toBe("scheduled");
+    expect(scheduled.scheduledFor).toBe(periodEnd);
+    expect(scheduled.subscription.planKey).toBe("pro");
+    expect(scheduled.subscription.currentPeriodEnd).toBe(periodEnd);
+    expect(scheduled.subscription.pendingPlanKey).toBe("business");
+    expect(scheduled.subscription.pendingTermMonths).toBe(1);
+    // The plan the business actually runs on does not move before the boundary.
+    const before = await db.query<{ plan: string }>(`SELECT plan FROM businesses WHERE id = $1`, [scheduledBusiness]);
+    expect(before.rows[0]!.plan).toBe("pro");
+
+    // A second pending target is refused: resolving it would need a refund or
+    // credit decision, which this path deliberately does not invent.
+    await expect(
+      dbLib.withTenant(scheduledBusiness, () =>
+        subs.changeBusinessPlan({ businessId: scheduledBusiness, planKey: "business", source: "purchase" }),
+      ),
+    ).rejects.toMatchObject({ message: "plan_change_pending" });
+
+    // Before the boundary nothing is due.
+    const early = await dbLib.withTenant(scheduledBusiness, () =>
+      subs.renewBusinessSubscription(scheduledBusiness, new Date()),
+    );
+    expect(early.status).toBe("nothing_due");
+
+    // At the boundary the pending plan applies with no invoice and no debit.
+    const applied = await dbLib.withTenant(scheduledBusiness, () =>
+      subs.renewBusinessSubscription(scheduledBusiness, new Date(periodEnd)),
+    );
+    expect(applied.status).toBe("pending_applied");
+    const after = await dbLib.withTenant(scheduledBusiness, () =>
+      subs.getBusinessSubscription(scheduledBusiness),
+    );
+    expect(after?.planKey).toBe("business");
+    expect(after?.pendingPlanKey).toBeNull();
+    expect(after?.currentPeriodStart).toBe(periodEnd);
+    expect(after?.currentPeriodEnd).toBe(addCalendarMonths(periodEnd, 1));
+    const invoices = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM billing_invoices WHERE business_id = $1`,
+      [scheduledBusiness],
+    );
+    expect(invoices.rows[0]!.count).toBe("0");
+
+    // A replayed boundary tick finds nothing pending and bills nothing.
+    const replay = await dbLib.withTenant(scheduledBusiness, () =>
+      subs.renewBusinessSubscription(scheduledBusiness, new Date(periodEnd)),
+    );
+    expect(["nothing_due", "pending_applied"]).toContain(replay.status);
+    const again = await dbLib.withTenant(scheduledBusiness, () =>
+      subs.getBusinessSubscription(scheduledBusiness),
+    );
+    expect(again?.currentPeriodEnd).toBe(addCalendarMonths(periodEnd, 1));
   });
 });
 

@@ -11,7 +11,7 @@ import {
 } from "./auth-edge";
 import { appForApiPath } from "./app-availability";
 import { isAppAvailable } from "./app-availability-service";
-import { appServiceActivationState } from "./service-activation/app-gate-service";
+import { appServiceActivationState, appServiceCommercialRestriction } from "./service-activation/app-gate-service";
 import { serviceGateDecision } from "./service-activation/app-gate";
 import { query, withoutTenantScope } from "./db";
 import { sessionStatus } from "./employee";
@@ -456,8 +456,15 @@ export function withTenantScope<Args extends unknown[]>(
         // does not lock the app.
         if (request && app && MUTATING_METHODS.has(request.method)) {
           let activationState;
+          let unpaid = false;
           try {
             activationState = await appServiceActivationState(session.businessId, app);
+            // ESH-193: only an explicitly enrolled tenant whose paid service is
+            // suspended is restricted. This is one extra query only in the
+            // suspension state, and it is false for every legacy business.
+            if (activationState === "suspended_insufficient_credit") {
+              unpaid = await appServiceCommercialRestriction(session.businessId, app);
+            }
           } catch {
             // A failed read is not "no activation row". Fail closed with a
             // retryable 503, rather than letting the mutation slip past an
@@ -467,10 +474,20 @@ export function withTenantScope<Args extends unknown[]>(
               { status: 503 },
             );
           }
-          const decision = serviceGateDecision({ method: request.method, app, state: activationState });
+          const decision = serviceGateDecision({
+            method: request.method,
+            app,
+            state: activationState,
+            unpaid,
+          });
           if (decision) {
             return NextResponse.json(
-              { error: decision.error, app: decision.app, state: decision.state },
+              {
+                error: decision.error,
+                app: decision.app,
+                state: decision.state,
+                ...(decision.error === "service_unpaid" ? { topUpUrl: "/settings/billing" } : {}),
+              },
               { status: decision.status },
             );
           }

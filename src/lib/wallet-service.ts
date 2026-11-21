@@ -39,7 +39,9 @@ export type LedgerKind =
   // the per-enabled-hour availability debit. Both spend the same wallet; they
   // are separate kinds only so the statement line names the service charge.
   | "service_setup"
-  | "service_runtime";
+  | "service_runtime"
+  // ESH-193 - the prepaid service term debit (1/3/12 calendar months).
+  | "service_term";
 
 export interface WalletSummary {
   businessId: string;

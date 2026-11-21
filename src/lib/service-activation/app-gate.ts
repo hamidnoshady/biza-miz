@@ -39,6 +39,14 @@ export const SERVICE_GATE_ERROR = "service_disabled";
 export const SERVICE_GATE_STATUS = 403;
 
 /**
+ * ESH-193 — the unpaid-service refusal, for an explicitly enrolled tenant only.
+ * 402 matches the wallet's insufficient-credit answer, because paying the
+ * service (never browsing previews) is what clears it.
+ */
+export const SERVICE_UNPAID_ERROR = "service_unpaid";
+export const SERVICE_UNPAID_STATUS = 402;
+
+/**
  * The states that lock an app's mutating surface.
  *
  * Derived from the state catalogue rather than listed again: every state the
@@ -57,7 +65,7 @@ export function serviceGateBlocks(state: ServiceState | string | null | undefine
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export interface ServiceGateDecision {
-  error: typeof SERVICE_GATE_ERROR;
+  error: typeof SERVICE_GATE_ERROR | typeof SERVICE_UNPAID_ERROR;
   status: number;
   /** Which app the request was for — the console and the client both need it. */
   app: string;
@@ -69,14 +77,28 @@ export interface ServiceGateDecision {
  *
  * `state` is the caller's activation state for `app`, or null when the business
  * has never activated it (the common case, and never a block).
+ *
+ * `unpaid` is the ESH-193 overlay: an *explicitly enrolled* tenant whose paid
+ * service is suspended for insufficient credit. It is supplied only when the
+ * caller has already established enrolment; a legacy tenant never reaches it,
+ * so no-row grandfathering is preserved.
  */
 export function serviceGateDecision(input: {
   method: string;
   app: string | null;
   state: ServiceState | string | null | undefined;
+  unpaid?: boolean;
 }): ServiceGateDecision | null {
   if (!input.app) return null;
   if (!MUTATING_METHODS.has(input.method.toUpperCase())) return null;
+  if (input.unpaid) {
+    return {
+      error: SERVICE_UNPAID_ERROR,
+      status: SERVICE_UNPAID_STATUS,
+      app: input.app,
+      state: String(input.state ?? "suspended_insufficient_credit"),
+    };
+  }
   if (!serviceGateBlocks(input.state)) return null;
   return {
     error: SERVICE_GATE_ERROR,
