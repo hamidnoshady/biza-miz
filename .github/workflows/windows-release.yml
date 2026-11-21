@@ -149,6 +149,27 @@ jobs:
           "DESKTOP_INSTALLER_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "::notice title=Installer accepted::$($installer.Name) $hash ($($installer.Length) bytes)"
 
+      - name: Verify the build acceptance evidence for those exact bytes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path evidence | Out-Null
+          gh run download $env:BUILD_RUN_ID -n business-suite-desktop-size-report -D evidence
+          if ($LASTEXITCODE -ne 0) { throw 'The build acceptance evidence artifact is missing' }
+          $signature = Get-ChildItem evidence -Recurse -File -Filter 'windows-signature-verification.json' | Select-Object -First 1
+          if (-not $signature) { throw 'windows-signature-verification.json is missing' }
+          $signatureJson = Get-Content -LiteralPath $signature.FullName -Raw | ConvertFrom-Json
+          if ($signatureJson.mode -ne 'unsigned-development' -or $signatureJson.passed -ne $true) { throw 'The build did not pass its declared signature posture' }
+          if ($signatureJson.commit -cne $env:BUILD_SOURCE_SHA) { throw 'Signature evidence is not bound to the tested source' }
+          $scan = Get-ChildItem evidence -Recurse -File -Filter 'desktop-release-scan.json' | Select-Object -First 1
+          if (-not $scan) { throw 'desktop-release-scan.json is missing' }
+          $scanJson = Get-Content -LiteralPath $scan.FullName -Raw | ConvertFrom-Json
+          if ($scanJson.ok -ne $true) { throw 'The packaged release scan did not pass' }
+          if ($scanJson.installer.sha256 -cne $env:DESKTOP_INSTALLER_SHA256) { throw 'The scanned installer is not the downloaded artifact' }
+          if ([int64]$scanJson.installer.bytes -ne [int64]$env:DESKTOP_INSTALLER_SIZE) { throw 'The scanned installer size is not the downloaded artifact' }
+          Write-Host "::notice title=Acceptance evidence verified::scan and signature reports are bound to the installer bytes"
+
       - name: Generate the schema 2 release manifest
         run: |
           $ErrorActionPreference = 'Stop'
