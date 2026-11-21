@@ -157,6 +157,7 @@ jobs:
       - name: Embed protected release-manifest verification key
         run: |
           $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEYS_JSON)) { throw "NOT CONFIGURED: DESKTOP_RELEASE_PUBLIC_KEYS_JSON" }
           $key = $env:DESKTOP_RELEASE_PUBLIC_KEY_PEM.Replace('\\n', "`n").Trim()
           [IO.File]::WriteAllText("${{ github.workspace }}\electron\desktop-release-public-key.pem", "$key`n", [Text.UTF8Encoding]::new($false))
           if (-not [string]::IsNullOrWhiteSpace($env:DESKTOP_RELEASE_PUBLIC_KEYS_JSON)) {
