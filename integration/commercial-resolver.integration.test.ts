@@ -487,14 +487,19 @@ describe("prepaid service terms", () => {
     expect(quote.ok).toBe(true);
 
     await db.withoutTenantScope("platform", async () => {
+      // Both windows are moved an hour into the past deliberately: the database
+      // clock can run ahead of the test process's `new Date()`, and a boundary
+      // sitting exactly on "now" would let the old offer look effective for the
+      // purchase's own timestamp (the same clock-skew trap quoted in
+      // quote-store.integration.test.ts).
       await db.query(
-        `UPDATE service_term_offers SET effective_until = now()
+        `UPDATE service_term_offers SET effective_until = now() - interval '1 hour'
           WHERE service_kind = 'app' AND service_key = 'accounting' AND term_months = 3`,
       );
       await db.query(
         `INSERT INTO service_term_offers
            (service_kind, service_key, term_months, version, price_rial, published, effective_from)
-         VALUES ('app', 'accounting', 3, 2, 6500000, true, now())`,
+         VALUES ('app', 'accounting', 3, 2, 6500000, true, now() - interval '1 hour')`,
       );
     });
     const stale = await resolver.purchaseServiceTerm({
