@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1291**. Rows: tenant **119**, platform **23**.
+Route files scanned: **1291**. Rows: tenant **119**, platform **24**.
 
 ## Summary of remaining gaps
 
@@ -169,7 +169,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (in
 
 Each tool carries a per-tool \`platformCan\` capability re-checked on every call; step-up rules mirror the tenant ones (billing/credits/restore/access/secrets/mass mutation/deletion/financial posting/large exports).
 
-Counts — covered: 6 · partial: 0 · MCP gap: 0 · backend gap: 0 · n/a (infra): 2 · duplicate surface: 0 · route-only (by design): 15
+Counts — covered: 7 · partial: 0 · MCP gap: 0 · backend gap: 0 · n/a (infra): 2 · duplicate surface: 0 · route-only (by design): 15
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -194,6 +194,7 @@ Counts — covered: 6 · partial: 0 · MCP gap: 0 · backend gap: 0 · n/a (infr
 | Platform — Security | Audit log, support tickets, admins, platform sessions, pairing<br>_batch BK: the audit log rides audit.read, bug reports ride audit.read like the route, the support desk rides support.manage with the credential's own admin stamped on replies (never a payload-claimed id). Batch BN2: platform-admin deactivation/reactivation rides admins.manage (same console PATCH service and guards, including the no-self-deactivate rule). The rest of the auth/pairing/admins surface stays route-only by design — those lanes require the console's recent-auth step-up or mint access_ | get_bug_report, get_support_ticket, list_audit_log, list_bug_reports, list_support_tickets | reply_support_ticket | triage_support_ticket | set_platform_admin_active | — | — | none (capability-managed); step-up | get_bug_report, get_support_ticket, list_audit_log, list_bug_reports, list_support_tickets, reply_support_ticket, triage_support_ticket, set_platform_admin_active | integration/platform-admin.integration.test.ts | route-only (by design) |
 | Platform — Content | Knowledge base (platform), media config<br>_batch BN: builder verbs write through knowledge-service exactly like the console (same delete guards, create-or-update by presence of a passed id); media stays on the credential-shaped register (provider config)_ | list_kb_articles | save_kb_article, save_kb_category, save_kb_tag | save_kb_article, save_kb_category, save_kb_tag | delete_kb_article, delete_kb_category, delete_kb_tag | — | — | none (capability-managed); step-up | list_kb_articles, save_kb_article, save_kb_category, save_kb_tag, save_kb_article, save_kb_category, save_kb_tag, delete_kb_article, delete_kb_category, delete_kb_tag | integration/platform-knowledge.integration.test.ts | covered |
 | Platform — MCP | MCP connections management (console UI + management API)<br>_the management plane of this very feature; mint/list/revoke exist as HTTP+UI, not MCP verbs_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |
+| Platform — Content | Tour Studio authoring, publication and revision history<br>_platform-owned tours are managed through the existing Tour Studio service; tools require knowledge.manage, validate content and versions server-side, and audit every mutation_ | get_guided_tour, list_guided_tours | save_guided_tour | save_guided_tour | archive_guided_tour, delete_draft_guided_tour, publish_guided_tour, rollback_guided_tour | — | — | none (capability-managed) | get_guided_tour, list_guided_tours, save_guided_tour, save_guided_tour, archive_guided_tour, delete_draft_guided_tour, publish_guided_tour, rollback_guided_tour | src/app/api/platform/knowledge/tours/route.test.ts + src/lib/mcp/platform-mcp.tours.test.ts | covered |
 | Platform — Company | Platform's own company surfaces (CRM, growth, workspace, websites, reports, setup)<br>_the operator-of-record business; its rows use the *tenant* suite, not the platform realm_ | (route only) | (route only) | (route only) | (route only) | — | crm.view, growth.view, ledger.post, ledger.view, team.manage, website.manage, website.view, workspace.manage | — | — | — | n/a (infra) |
 | Platform — Search & reports | Cross-business search/reporting<br>_the read half is the row's whole purpose; the write columns the shared platform/businesses prefix pulls in belong to the platform.biz-directory and platform.biz-lifecycle rows (batch BB-style split, same as config.data)_ | get_business_identity, list_businesses | (route only) | (route only) | (route only) | — | — | — | get_business_identity, list_businesses | — | route-only (by design) |
 
