@@ -55,6 +55,16 @@ if (!rootDatabaseUrl) {
   throw new Error("DATABASE_URL is required for database integration tests");
 }
 
+/**
+ * A calendar date `days` from today, so a fixture that means "due, not late"
+ * cannot quietly turn into "overdue" as the clock moves past a literal date.
+ */
+function isoDaysFromToday(days: number): string {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 let databaseName: string;
 let db: Client;
 let dbLib: typeof import("../src/lib/db");
@@ -401,7 +411,9 @@ describe("§18's flow", () => {
         title: "خرید ورق گالوانیزه",
         supplierPartyId: supplierB,
         valueRial: 4_500_000_000,
-        expectedDeliveryDate: "2026-11-20",
+        // Due in a week, not a literal date: §18's delay warning is about the
+        // clock, and this fixture is about committed money.
+        expectedDeliveryDate: isoDaysFromToday(7),
         requestId: request.id,
         rfqId: rfq.id,
         quotationId: quotationB.id,
