@@ -70,6 +70,11 @@ describe("the team screen sends what the API accepts", () => {
     expect(TEAM_MANAGER).toContain("send_password_reset");
     expect(TEAM_MANAGER).toContain("revoke_sessions");
     expect(TEAM_MANAGER).not.toContain("JSON.stringify({ password })");
+    // Your own PIN has one door: the profile. The dialog's duplicate field for
+    // the signed-in member could only ever answer the route's proof requirement
+    // with «خطای غیرمنتظره» — it asked for a current PIN it never collected.
+    expect(TEAM_MANAGER).toContain("const canResetPin = isPinMember && !isSelf;");
+    expect(TEAM_MANAGER).toContain("رمز عددی و رمز عبور خودتان را از بخش");
     // The route is the one that decides owner-vs-self rules; the screen must
     // not invent its own write path.
     expect(CREDENTIALS_API).toContain("body.pin !== undefined");

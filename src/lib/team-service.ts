@@ -2118,13 +2118,13 @@ export async function setPin(
   pin: string,
   actorId: string | null,
   /**
-   * Issue #854 (P1.7): the proof the caller offered when rotating a PIN they
-   * already own. An *administrator* reset does not need it (that is the point
-   * of an admin reset — a member who forgot their PIN has no proof to give),
-   * but a self-service rotation must show the current PIN, so holding an
-   * unlocked terminal is not enough to take the credential over. `null` means
-   * "this caller is not rotating their own PIN"; `undefined` means "self-service
-   * without proof", which is refused before any write.
+   * `selfService` means the member is rotating *their own* PIN from a signed-in
+   * session. The session is the proof, so the current PIN is never owed: asking
+   * for it made the credential unreachable for exactly the member who had
+   * forgotten the one they were issued. The flag still makes this a *rotation* —
+   * the new PIN must differ from the stored one, and the change is audited under
+   * the member's own action. An *administrator* reset (somebody else's row)
+   * leaves it false and is audited under its own action.
    *
    * `beforeCommit` (#854 follow-up F07) runs on the rotation's own client after
    * every write and before COMMIT, so a caller can add its own audit row to the
@@ -2132,7 +2132,6 @@ export async function setPin(
    */
   options: {
     selfService?: boolean;
-    currentPinVerified?: boolean;
     beforeCommit?: (client: PoolClient) => Promise<void>;
   } = {},
 ): Promise<void> {
@@ -2147,10 +2146,6 @@ export async function setPin(
   if (options.selfService && !maySelfServiceWrite(profile, "staff_pin")) {
     throw new TeamError("login_managed_by_cloud", 409);
   }
-  if (options.selfService && options.currentPinVerified !== true) {
-    throw new TeamError("current_pin_required", 403);
-  }
-
   const pinHash = await bcrypt.hash(pin, BCRYPT_COST);
 
   const client = await getPool().connect();

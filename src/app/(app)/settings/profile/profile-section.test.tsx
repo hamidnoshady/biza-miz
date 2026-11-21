@@ -557,42 +557,45 @@ describe("#854 F08 / F07 — the PIN card", () => {
   async function openPinForm() {
     fireEvent.click(await screen.findByRole("button", { name: "تغییر رمز عددی" }));
     return {
-      current: (await screen.findByLabelText("رمز عددی فعلی")) as HTMLInputElement,
-      next: screen.getByLabelText(/^رمز عددی جدید/) as HTMLInputElement,
+      next: (await screen.findByLabelText(/^رمز عددی جدید/)) as HTMLInputElement,
       confirm: screen.getByLabelText("تکرار رمز عددی جدید") as HTMLInputElement,
     };
   }
 
-  it("masks all three fields, keeps the numeric keyboard, and normalises Persian digits", async () => {
+  it("asks for no current PIN, masks the two fields and normalises Persian digits", async () => {
     mount();
     const fields = await openPinForm();
-    for (const input of [fields.current, fields.next, fields.confirm]) {
+    for (const input of [fields.next, fields.confirm]) {
       expect(input.type).toBe("password");
       expect(input.inputMode).toBe("numeric");
       expect(input.getAttribute("autocomplete")).toBe("off");
     }
+    // A member who has forgotten the PIN they were issued can still replace it:
+    // the session is the proof, so «رمز عددی فعلی» is not asked for.
+    expect(screen.queryByLabelText("رمز عددی فعلی")).toBeNull();
     fireEvent.change(fields.next, { target: { value: "۵۶٧۸" } });
     expect(fields.next.value).toBe("5678");
   });
 
-  it("refuses an unchanged PIN before sending anything", async () => {
+  it("sends only the new PIN", async () => {
+    routes["POST /api/auth/pin/self"] = () => json(200, { ok: true, hasPin: true });
     mount();
     const fields = await openPinForm();
-    fireEvent.change(fields.current, { target: { value: "4821" } });
-    fireEvent.change(fields.next, { target: { value: "4821" } });
-    fireEvent.change(fields.confirm, { target: { value: "4821" } });
+    fireEvent.change(fields.next, { target: { value: "1357" } });
+    fireEvent.change(fields.confirm, { target: { value: "1357" } });
     fireEvent.click(screen.getByRole("button", { name: "ذخیرهٔ رمز عددی" }));
-    await screen.findByText("رمز عددی جدید باید با رمز فعلی متفاوت باشد.");
-    expect(posts("/api/auth/pin/self")).toHaveLength(0);
+    await screen.findByText("رمز عددی شما تغییر کرد. از این پس با رمز عددی جدید وارد می‌شوید.");
+    expect(posts("/api/auth/pin/self").map((r) => r.body)).toEqual([
+      { newPin: "1357", confirmPin: "1357" },
+    ]);
   });
 
   it("translates the server's pin_unchanged", async () => {
     routes["POST /api/auth/pin/self"] = () => json(400, { error: "pin_unchanged" });
     mount();
     const fields = await openPinForm();
-    fireEvent.change(fields.current, { target: { value: "4821" } });
-    fireEvent.change(fields.next, { target: { value: "1357" } });
-    fireEvent.change(fields.confirm, { target: { value: "1357" } });
+    fireEvent.change(fields.next, { target: { value: "4821" } });
+    fireEvent.change(fields.confirm, { target: { value: "4821" } });
     fireEvent.click(screen.getByRole("button", { name: "ذخیرهٔ رمز عددی" }));
     await screen.findByText("رمز عددی جدید باید با رمز فعلی متفاوت باشد.");
   });
@@ -601,12 +604,11 @@ describe("#854 F08 / F07 — the PIN card", () => {
     let attempts = 0;
     routes["POST /api/auth/pin/self"] = (body) => {
       attempts += 1;
-      expect(body).toEqual({ currentPin: "4821", newPin: "1357", confirmPin: "1357" });
+      expect(body).toEqual({ newPin: "1357", confirmPin: "1357" });
       return attempts === 1 ? json(403, { error: "recent_auth_required" }) : json(200, { ok: true, hasPin: true });
     };
     mount();
     const fields = await openPinForm();
-    fireEvent.change(fields.current, { target: { value: "4821" } });
     fireEvent.change(fields.next, { target: { value: "1357" } });
     fireEvent.change(fields.confirm, { target: { value: "1357" } });
     fireEvent.click(screen.getByRole("button", { name: "ذخیرهٔ رمز عددی" }));

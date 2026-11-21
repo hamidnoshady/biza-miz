@@ -27,8 +27,7 @@ import {
 } from "@/lib/login-lockout-service";
 import { PASSWORD_LOCKOUT_POLICY } from "@/lib/login-lockout";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
-import { readSelfCredentialState, verifySelfPin } from "@/lib/self-credentials";
-import { auditLoginFailure, checkLoginLockout } from "@/lib/employee-service";
+import { readSelfCredentialState } from "@/lib/self-credentials";
 import { authErrorMessage, AUTH_ERROR_CODES } from "@/lib/auth-contracts";
 
 /**
@@ -36,7 +35,8 @@ import { authErrorMessage, AUTH_ERROR_CODES } from "@/lib/auth-contracts";
  *
  * Per Issue #809 (Findings 2 & 3):
  *   - **PIN (`body.pin`)**: tenant-local (`employee_credentials`), may be set by
- *     `team.manage` or self.
+ *     `team.manage` or self. A member's own write is authorised by the session —
+ *     no current PIN is asked for, so a forgotten one can still be replaced.
  *   - **Password (`body.password`)**: global (`platform_users`), allowed ONLY
  *     for `isSelf` after verifying `currentPassword`. A tenant administrator in
  *     Business A is strictly forbidden from directly choosing/overwriting
@@ -73,8 +73,6 @@ export const PUT = withTenantScope(
     let body: {
       action?: string;
       pin?: string;
-      /** Issue #854 (P1.7) — proof required when rotating your own PIN. */
-      currentPin?: string;
       password?: string;
       currentPassword?: string;
       confirmPassword?: string;
@@ -146,58 +144,25 @@ export const PUT = withTenantScope(
           return NextResponse.json({ error: "invalid_pin" }, { status: 400 });
         }
 
-        let currentPinVerified = false;
         /**
-         * A first-time PIN has nothing to prove against.
+         * The signed-in session is the proof.
          *
-         * The self branch below used to demand `currentPin` on *every* self
-         * write, which made it impossible for an owner who has never had a PIN
-         * to create one — exactly the step the setup wizard and the desktop's
-         * first-run pairing need ("ask for a PIN at the end"). The proof is
-         * only owed when a PIN already exists and is being replaced; the
-         * `/api/auth/pin/self` route already draws the line in that place.
+         * A member replacing *their own* PIN used to have to type the current
+         * one here as well — which the Team dialog never had a field for, so
+         * the only answer was `current_pin_required` under «خطای غیرمنتظره»,
+         * and a member who had forgotten the PIN they were issued could not
+         * change it anywhere. Changing your own PIN now has one door
+         * (`/settings/profile`) and is authorised by being signed in as that
+         * member; an administrator reset of somebody else's PIN never needed the
+         * proof either. `selfService` still makes it a rotation: an unchanged
+         * PIN is refused and the change is audited as the member's own.
          */
         const selfHasPin = isSelf
           ? (await readSelfCredentialState(session.businessId, session.sub))?.hasPin === true
           : false;
-        if (isSelf && selfHasPin) {
-          const offered = String(body.currentPin ?? "");
-          if (!offered) {
-            return NextResponse.json(
-              {
-                error: "current_pin_required",
-                message: "برای تغییر رمز عددی خود، رمز فعلی را وارد کنید.",
-              },
-              { status: 403 },
-            );
-          }
-          const lockout = await checkLoginLockout(session.businessId, session.sub);
-          if (lockout.locked) {
-            return NextResponse.json(
-              { error: "account_locked", lockedUntil: lockout.lockedUntil },
-              { status: 423 },
-            );
-          }
-          currentPinVerified = await verifySelfPin(
-            session.businessId,
-            session.sub,
-            toLatinDigits(offered),
-          );
-          if (!currentPinVerified) {
-            await auditLoginFailure(session.businessId, session.sub, "invalid_pin_rotation");
-            return NextResponse.json(
-              { error: "invalid_current_pin", message: "رمز عددی فعلی نادرست است." },
-              { status: 401 },
-            );
-          }
-          if (pin === toLatinDigits(offered)) {
-            return NextResponse.json({ error: "pin_unchanged" }, { status: 400 });
-          }
-        }
 
         await setPin(session.businessId, id, pin, session.sub, {
           selfService: isSelf && selfHasPin,
-          currentPinVerified,
         });
         return NextResponse.json({ ok: true });
       }
