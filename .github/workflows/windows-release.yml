@@ -149,6 +149,14 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           "DESKTOP_INSTALLER_PATH=$($installer.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "DESKTOP_INSTALLER_NAME=$($installer.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # GitHub stores release asset names with spaces replaced by dots. Use
+          # the stored name for the manifest URL, the upload and verification so
+          # the published manifest can never point at a 404.
+          $assetName = $installer.Name -replace ' ', '.'
+          $assetPath = Join-Path (Split-Path -Parent $installer.FullName) $assetName
+          Copy-Item -LiteralPath $installer.FullName -Destination $assetPath -Force
+          "DESKTOP_INSTALLER_ASSET_NAME=$assetName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DESKTOP_INSTALLER_ASSET_PATH=$assetPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "DESKTOP_INSTALLER_SIZE=$($installer.Length)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "DESKTOP_INSTALLER_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "::notice title=Installer accepted::$($installer.Name) $hash ($($installer.Length) bytes)"
@@ -186,7 +194,7 @@ jobs:
           if ($sequence -lt 1) { throw 'release_sequence must be positive' }
           $releasedAt = [DateTime]::UtcNow
           $expiresAt = $releasedAt.AddDays([int]$env:EXPIRES_DAYS)
-          $assetName = [uri]::EscapeDataString($env:DESKTOP_INSTALLER_NAME)
+          $assetName = [uri]::EscapeDataString($env:DESKTOP_INSTALLER_ASSET_NAME)
           $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:DESKTOP_RELEASE_TAG/$assetName"
           $manifest = [ordered]@{
             schemaVersion = 2
@@ -244,7 +252,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $args = @(
             'release','create',$env:DESKTOP_RELEASE_TAG,
-            $env:DESKTOP_INSTALLER_PATH,
+            $env:DESKTOP_INSTALLER_ASSET_PATH,
             'release-manifest.json',
             'release-manifest.sha256',
             '--title',"Bizamiz Desktop $env:RELEASE_VERSION ($env:RELEASE_CHANNEL)",
@@ -264,12 +272,12 @@ jobs:
           if ($release.isDraft) { throw 'Published release is still a draft' }
           if ($env:RELEASE_CHANNEL -eq 'stable' -and $release.isPrerelease) { throw 'Stable release was published as a prerelease' }
           $names = @($release.assets | ForEach-Object { $_.name })
-          foreach ($required in @($env:DESKTOP_INSTALLER_NAME,'release-manifest.json','release-manifest.sha256')) {
+          foreach ($required in @($env:DESKTOP_INSTALLER_ASSET_NAME,'release-manifest.json','release-manifest.sha256')) {
             if ($names -notcontains $required) { throw "Published release is missing $required" }
           }
           $verifyRoot = Join-Path $env:RUNNER_TEMP 'published-release'
           New-Item -ItemType Directory -Path $verifyRoot -Force | Out-Null
-          gh release download $env:DESKTOP_RELEASE_TAG --pattern 'release-manifest.json' --pattern 'release-manifest.sha256' --pattern $env:DESKTOP_INSTALLER_NAME --dir $verifyRoot
+          gh release download $env:DESKTOP_RELEASE_TAG --pattern 'release-manifest.json' --pattern 'release-manifest.sha256' --pattern $env:DESKTOP_INSTALLER_ASSET_NAME --dir $verifyRoot
           if ($LASTEXITCODE -ne 0) { throw 'Could not download the published release' }
           $manifestPath = Join-Path $verifyRoot 'release-manifest.json'
           $checksumPath = Join-Path $verifyRoot 'release-manifest.sha256'
@@ -279,7 +287,7 @@ jobs:
           node scripts/sign-desktop-release-manifest.mjs --verify $manifestPath
           if ($LASTEXITCODE -ne 0) { throw 'Published manifest signature is invalid' }
           $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-          $publishedInstaller = Join-Path $verifyRoot $env:DESKTOP_INSTALLER_NAME
+          $publishedInstaller = Join-Path $verifyRoot $env:DESKTOP_INSTALLER_ASSET_NAME
           $publishedHash = (Get-FileHash -LiteralPath $publishedInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($publishedHash -cne $env:DESKTOP_INSTALLER_SHA256) { throw 'Published installer bytes differ from the accepted artifact' }
           if ($manifest.installer.sha256 -cne $publishedHash) { throw 'Published manifest does not describe the published installer' }
