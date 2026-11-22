@@ -56,9 +56,10 @@ export function KitchenWorkflowSettings() {
           <span className="block text-sm">روش آماده‌سازی سفارش</span>
           <select className={inputClass} value={workflow} disabled={busy || saved === null}
             onChange={(event) => {
-              setWorkflow(event.currentTarget.value === "ready_on_send" ? "ready_on_send" : "kitchen_team");
+              setWorkflow(event.currentTarget.value as KitchenWorkflow);
             }}>
             <option value="kitchen_team">تغییر وضعیت توسط تیم آشپزخانه</option>
+            <option value="manage_from_orders">آماده‌سازی از بخش سفارش‌ها</option>
             <option value="ready_on_send">آماده هنگام ثبت سفارش</option>
           </select>
         </label>

@@ -1,6 +1,7 @@
 "use client";
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
+import { Button } from "@/components/ui/button";
 /**
  * The whole of an order — meta, lines, add-ons, discount, tender, and the
  * closed-order amendment panel — in one dialog over the orders screen.
@@ -303,6 +304,9 @@ export function OrderDetailModal({
   const [orderLoaded, setOrderLoaded] = useState(false);
   const loadRequest = useRef(0);
   const [items, setItems] = useState<OrderItemRow[]>([]);
+  const [manageKitchenFromOrders, setManageKitchenFromOrders] = useState(false);
+  const [showKitchenHandoff, setShowKitchenHandoff] = useState(false);
+  const [kitchenActionItem, setKitchenActionItem] = useState<string | null>(null);
   const [modifiers, setModifiers] = useState<ModifierRow[]>([]);
   const [payments, setPayments] = useState<PaymentRow[]>([]);
   const [menu, setMenu] = useState<MenuData | null>(null);
@@ -404,6 +408,8 @@ export function OrderDetailModal({
         items: OrderItemRow[];
         modifiers: ModifierRow[];
         payments: PaymentRow[];
+        manageKitchenFromOrders?: boolean;
+        showKitchenHandoff?: boolean;
         error?: string;
       }>(`/api/orders/${orderId}`);
       if (requestId !== loadRequest.current) return { ok: false };
@@ -414,6 +420,8 @@ export function OrderDetailModal({
       setOrder(data.order);
       setSelectedTableId(data.order.table_id ?? "");
       setItems(data.items);
+      setManageKitchenFromOrders(data.manageKitchenFromOrders === true);
+      setShowKitchenHandoff(data.showKitchenHandoff === true);
       setModifiers(data.modifiers);
       setPayments(data.payments ?? []);
       // An order that already names a customer keeps naming them: the credit
@@ -1073,6 +1081,32 @@ export function OrderDetailModal({
    * with the controls on their own row beneath, and a single table row from
    * `md` up, on the columns the header above it uses.
    */
+  async function moveKitchenLine(item: OrderItemRow) {
+    const status = item.status === "sent" ? "preparing"
+      : item.status === "preparing" ? "ready"
+      : item.status === "ready" ? "served"
+      : null;
+    if (!status || kitchenActionItem !== null) return;
+    const epoch = modalEpoch.current;
+    setKitchenActionItem(item.id);
+    try {
+      const result = await api<{ error?: string }>(`/api/kitchen/items/${item.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      if (epoch !== modalEpoch.current) return;
+      if (!result.ok && result.data.error !== "stale_status") {
+        setError(errorMessage(result.data.error));
+      } else {
+        await load();
+      }
+    } catch {
+      if (epoch === modalEpoch.current) setError("به‌روزرسانی وضعیت آماده‌سازی انجام نشد.");
+    } finally {
+      setKitchenActionItem((current) => current === item.id ? null : current);
+    }
+  }
+
   function renderLine(it: OrderItemRow) {
     const addOns = addOnsByItem.get(it.id) ?? [];
     const voided = it.status === "voided";
@@ -1101,6 +1135,18 @@ export function OrderDetailModal({
           >
             {it.name_snapshot}
           </p>
+          {((manageKitchenFromOrders && (it.status === "sent" || it.status === "preparing")) ||
+            (showKitchenHandoff && it.status === "ready")) ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy || kitchenActionItem !== null}
+              onClick={() => void moveKitchenLine(it)}
+            >
+              {it.status === "sent" ? "شروع آماده‌سازی" : it.status === "preparing" ? "آماده شد" : "تحویل شد"}
+            </Button>
+          ) : null}
           <p className="mt-1 text-xs text-muted-foreground">
             {money.format(breakdown.unit)} هر واحد
             {addOns.length > 0 ? (

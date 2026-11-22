@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requirePermissions, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { isModuleEnabled } from "@/lib/industry-guard";
-import { getKitchenWorkflow } from "@/lib/kitchen-workflow";
+import { getKitchenWorkflow, isKitchenWorkflow } from "@/lib/kitchen-workflow";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 
@@ -27,7 +27,7 @@ export const PUT = withTenantScope(async (request: Request) => {
 
   const body: { workflow?: unknown } | null = await request.json().catch(() => null);
   const workflow = body?.workflow;
-  if (workflow !== "kitchen_team" && workflow !== "ready_on_send") {
+  if (!isKitchenWorkflow(workflow)) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   await query(
