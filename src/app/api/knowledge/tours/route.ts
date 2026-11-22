@@ -37,10 +37,17 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const published = await publishedToursForPage(page.key).catch(() => []);
   const candidates = pageTourCandidates(page.key, published);
   const viewer = await tourViewerFor(guard.session.businessId, guard.membership.permissions, candidates);
-  const tours = candidates.flatMap((tour) => {
+  const eligibleTours = candidates.flatMap((tour) => {
     const visible = tourForViewer(tour, viewer);
     return visible ? [visible] : [];
   });
+  // On Accounting Overview, an eligible Studio walkthrough replaces the
+  // built-in choices in the panel. Keep those choices as the fallback for
+  // members who have no eligible published walkthrough.
+  const studioTours = page.route === "/accounting/overview"
+    ? eligibleTours.filter((tour) => published.some((entry) => entry.id === tour.id))
+    : [];
+  const tours = studioTours.length > 0 ? studioTours : eligibleTours;
   const progress = await loadTourProgress(
     guard.session.businessId,
     guard.session.sub,
