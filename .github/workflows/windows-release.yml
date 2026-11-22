@@ -114,8 +114,8 @@ jobs:
 
           git fetch --tags --quiet
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch tags' }
-          git rev-parse --verify "refs/tags/$tag" *> $null
-          if ($LASTEXITCODE -ne 0) { throw "Tag $tag has not been recorded by build-desktop-installer; refusing to create a new immutable version here" }
+          $recordedTag = git tag --list "$tag"
+          if (-not $recordedTag) { throw "Tag $tag has not been recorded by build-desktop-installer; refusing to create a new immutable version here" }
           $existingReleases = gh release list --limit 200 --json tagName | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Could not list releases' }
           if (@($existingReleases | Where-Object { $_.tagName -ceq $tag }).Count -gt 0) {
