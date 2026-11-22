@@ -191,6 +191,20 @@ its own signature, the SHA-256 check, the origin check, the backup or the releas
 }
 ```
 
+### Timestamp precision (load-bearing)
+
+`releasedAt` and `expiresAt` are part of the canonical payload and are compared
+as **strings**, not instants. Central stores them as `timestamptz` and the
+Desktop canonicalizes whatever it is handed, so both must be the exact ISO
+millisecond form (`2026-11-22T07:26:49.714Z`).
+
+`scripts/sign-desktop-release-manifest.mjs` pins them before signing. Without
+that, PowerShell's `[DateTime]::ToString('o')` (seven fractional digits) yields a
+manifest that verifies as published and fails after the database round trip:
+registration answers `invalid_manifest_signature`, and an installed app rejects
+the manifest Central serves. Such a release cannot be repaired without
+re-signing — publish a new version instead.
+
 Every field except `manifestSignature` is canonicalised and signed. Schema 1 remains byte-for-byte
 compatible for already signed RSA manifests.
 
