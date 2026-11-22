@@ -72,6 +72,8 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'platform_email_verifications.platform_user_id': 'sign-in security (email proof token)',
   'platform_identity_events.platform_user_id': 'identity PII audit',
   'platform_identity_events.actor_platform_user_id': 'identity PII audit',
+  'platform_signup_requests.platform_user_id':
+    'pending signup proof; the resolved identity is not member history',
 
   'accounting_dimension_settings.updated_by': 'dimension config',
   'aec_project_profiles.project_manager_user_id': 'project staffing assignment',
