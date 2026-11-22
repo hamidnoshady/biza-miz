@@ -67,6 +67,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     note: "authentication and delivery infrastructure only; no business operation or MCP tool surface",
     status: "n/a (infra)",
   },
+  {
+    id: "integrations.mcp-outbound",
+    module: "Integrations",
+    entity: "External MCP servers (outbound)",
+    routes: ["integrations/mcp-servers"],
+    note: "issue #1473: a tenant admin registers an external MCP server its assistant may call. Route-only by design — exposing registration as an MCP tool would let one connected client register another and turn Bizamiz into a proxy",
+    status: "route-only (by design)",
+    test: "integration/mcp-outbound.integration.test.ts",
+  },
   // ============================ Accounting (ledger + banking) ============================
   {
     id: "accounting.historical-invoices",

@@ -156,6 +156,7 @@ import { isFeatureEnabled } from "./features";
 import { INDUSTRY_LABELS, type Industry } from "./industries";
 import { industryProfile, labelFor as industryLabelFor } from "./industry-profile";
 import { canUseAiTool, SYSTEM_AI_READ_PERMISSIONS } from "./ai-capabilities";
+import { callExternalMcpTool, isExternalMcpToolName } from "./mcp/outbound/service";
 import { PERMISSIONS, type Permission } from "./permissions";
 import { buildGenUiBlocks, genUiSource } from "./ai-genui";
 import { normalizeOptionalIsoDate } from "./iso-date";
@@ -1578,6 +1579,22 @@ export async function runReadTool(
   // jobs, while user-facing calls must never omit this argument.
   if (permissions && !canUseAiTool(name, permissions)) {
     return { ok: false, data: { error: "دسترسی لازم برای این ابزار را ندارید." } };
+  }
+  /**
+   * External MCP tools (issue #1473) are dispatched before the domain switch:
+   * their names are built from a tenant's registered server, so they have no
+   * entry in the static catalogue. The permission gate above already applied
+   * `ai.use` through `canUseAiTool`, and `callExternalMcpTool` re-checks the
+   * server row, the per-tool allowlist and the tool's existence on every call —
+   * a catalogue entry is never treated as authority.
+   */
+  if (isExternalMcpToolName(name)) {
+    return callExternalMcpTool({
+      actorUserId,
+      args: args ?? {},
+      businessId,
+      name,
+    });
   }
   /**
    * Whether a business-wide (branch-aggregating) answer may be given.
