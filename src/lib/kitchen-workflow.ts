@@ -123,3 +123,35 @@ export async function archiveShiftKitchenTickets(
     [shift.locationId, orders.rows.map((row) => row.id), shift.endedAt],
   );
 }
+
+export async function previewShiftKitchenClose(shift: {
+  businessId: string; locationId: string; employeeId: string; startedAt: string;
+}): Promise<{ ready: number; unfinished: number; balanceDue: number } | null> {
+  const { rows: settings } = await query<{ value: unknown }>(
+    "SELECT value FROM settings WHERE business_id = $1 AND location_id = $2 AND key = 'kitchen.clearAfterShift'",
+    [shift.businessId, shift.locationId],
+  );
+  if (settings[0]?.value !== true) return null;
+  const { rows } = await query<{ ready: number; unfinished: number; balanceDue: number }>(
+    `WITH visible AS (
+       SELECT o.id,
+              bool_and(oi.status = 'ready' AND oi.ready_at IS NOT NULL) AS ready,
+              o.total + COALESCE(o.tip_amount, 0) > COALESCE((
+                SELECT SUM(p.amount) FROM payments p WHERE p.order_id = o.id
+                  AND p.location_id = o.location_id AND p.method <> 'credit'
+              ), 0) AS due
+         FROM orders o JOIN order_items oi ON oi.order_id = o.id AND oi.location_id = o.location_id
+        WHERE o.location_id = $1 AND o.opened_by = $2 AND o.opened_at >= $3
+          AND o.opened_at < now() AND o.status IN ('open', 'held', 'completed')
+          AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
+          AND oi.status IN ('pending', 'sent', 'preparing', 'ready')
+          AND oi.kitchen_archived_at IS NULL AND (oi.kitchen_clear_at IS NULL OR oi.kitchen_clear_at > now())
+        GROUP BY o.id
+     )
+     SELECT COUNT(*) FILTER (WHERE ready)::int AS ready,
+            COUNT(*) FILTER (WHERE NOT ready)::int AS unfinished,
+            COUNT(*) FILTER (WHERE due)::int AS "balanceDue" FROM visible`,
+    [shift.locationId, shift.employeeId, shift.startedAt],
+  );
+  return rows[0] ?? null;
+}

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { api, errorMessage, inputClass } from "@/app/dashboard/ui";
 import { SectionCard } from "@/app/dashboard/page-chrome";
 import { DOC_TYPE_LABELS } from "@/lib/print-template";
-import { LEGACY_PRINT_BEHAVIOR, PRINT_POLICY_KEYS, type PrintBehavior, type PrintMode, type PrintNotifications, type PrintPolicy } from "@/lib/printing/behavior";
+import { LEGACY_PRINT_BEHAVIOR, PRINT_POLICY_KEYS, parsePrintPolicy, type PrintBehavior, type PrintMode, type PrintNotifications, type PrintPolicy } from "@/lib/printing/behavior";
 
 const labels = {
   ...DOC_TYPE_LABELS,
@@ -31,6 +31,10 @@ export function PrintBehaviorPanel() {
       if (controller.signal.aborted) return;
       if (!result.ok) {
         setFailure(errorMessage(result.data.error));
+        return;
+      }
+      if (!parsePrintPolicy(result.data.defaults) || !parsePrintPolicy(result.data.overrides)) {
+        setFailure("پاسخ تنظیمات چاپ معتبر نیست.");
         return;
       }
       setServer(result.data);

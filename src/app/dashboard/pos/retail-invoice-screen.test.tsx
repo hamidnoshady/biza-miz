@@ -236,7 +236,7 @@ describe("RetailInvoiceScreen — submitting a sale", () => {
     const [printerArg, orderArg, optsArg] = printSaleReceipt.mock.calls[0];
     expect(printerArg).toBe(null);
     expect(orderArg).toBe("order-9");
-    expect(optsArg).toEqual({ requestId: "invoice:order-9" });
+    expect(optsArg).toEqual({ requestId: "invoice:order-9", automatic: true });
 
     // …and the screen never fetches a document to print any more: the whole
     // `?view=print` client-side build path is gone.
