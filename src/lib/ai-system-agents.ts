@@ -42,6 +42,7 @@ import { query } from "./db";
 import type { ActionType } from "./ai";
 import type { AppKey } from "./apps";
 import type { AiRuntimeMode } from "./ai-runtime-modes";
+import { firstRetiredAiRuntimeMode } from "./ai-runtime-modes-shared";
 
 export type SystemAgentState = "draft" | "published" | "retired";
 
@@ -142,6 +143,12 @@ export function validateAgentInput(input: CreateAgentInput): string | null {
   const key = normalizeAgentKey(input.agentKey);
   if (!isValidAgentKey(key)) return "کلید ایجنت باید انگلیسی، ۲ تا ۶۴ نویسه و با حرف یا عدد شروع شود.";
   if (!input.name.trim()) return "نام ایجنت لازم است.";
+  // Issue #1367 — Deep Research is retired; a new agent configuration cannot
+  // name it. A second guard behind the route, so another caller of this module
+  // cannot store the retired mode either.
+  if (firstRetiredAiRuntimeMode([...(input.allowedModes ?? []), input.defaultMode])) {
+    return "پژوهش عمیق بازنشسته شده است؛ حالت خودکار، سریع یا تفکر عمیق را انتخاب کنید.";
+  }
   if ((input.allowedActions?.length ?? 0) > 0 && !(input.instructions ?? "").trim()) {
     return "ایجنتی که اجازهٔ عملیات اجرایی دارد باید دستورالعمل داشته باشد.";
   }

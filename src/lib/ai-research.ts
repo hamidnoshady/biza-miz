@@ -25,9 +25,20 @@
  * What this module does NOT do: choose a provider, route, retry, or run a
  * second gateway. It asks LiteLLM once per round through the same
  * `ai-gateway.ts` every other turn uses.
+ *
+ * Issue #1367 — the workflow is retired for NEW execution. `createResearchRun`,
+ * `approveResearchRun` and `runResearchRun` each refuse before writing or
+ * spending, and the read paths below (`getResearchRun`, `listResearchRuns`,
+ * `listResearchSources`) are deliberately unchanged so historical runs, their
+ * sourced findings and their settlement rows stay readable. The retirement is
+ * one policy module (`ai-research-retirement.ts`), not a scatter of UI flags.
  */
 import { randomUUID } from "node:crypto";
 import { query } from "./db";
+import {
+  RESEARCH_EXECUTION_RETIRED,
+  RESEARCH_RETIRED_ERROR,
+} from "./ai-research-retirement";
 import { chatCompletionsUrl, type AiConfig } from "./ai";
 import { parseResponseCostHeader } from "./ai-gateway";
 import { retrieveTenantKnowledge } from "./ai-knowledge-gateway";
@@ -142,6 +153,11 @@ export type CreateResearchResult =
  * already approved — a run never starts on creation by accident.
  */
 export async function createResearchRun(input: CreateResearchRunInput): Promise<CreateResearchResult> {
+  // Issue #1367 — the retirement is enforced here, in the only writer, rather
+  // than in the route: a future caller cannot create a run by importing this
+  // module, and the route's 410 is a second, explicit answer rather than the
+  // boundary itself.
+  if (RESEARCH_EXECUTION_RETIRED) return { ok: false, error: RESEARCH_RETIRED_ERROR };
   const question = input.question.trim();
   if (question.length < 8) return { ok: false, error: "research_question_too_short" };
   if (!input.costApproved) return { ok: false, error: "research_cost_not_approved" };
@@ -252,6 +268,10 @@ export async function approveResearchRun(input: {
   businessId: string;
   userId: string;
 }): Promise<{ ok: true; run: ResearchRun } | { ok: false; error: string }> {
+  // Issue #1367 — an approval is what opens the spending environment, so it is
+  // refused before the run is even read. A pending run created before the
+  // retirement therefore cannot be started through any path.
+  if (RESEARCH_EXECUTION_RETIRED) return { ok: false, error: RESEARCH_RETIRED_ERROR };
   const run = await getResearchRun({ id: input.id, businessId: input.businessId });
   if (!run) return { ok: false, error: "research_not_found" };
   if (run.status !== "awaiting_approval") return { ok: false, error: "research_not_awaiting_approval" };
@@ -311,6 +331,11 @@ export async function runResearchRun(input: {
   /** The business's read tools for this user, already permission-filtered. */
   toolNames: string[];
 }): Promise<{ ok: true; outcome: RunResearchOutcome } | { ok: false; error: string }> {
+  // Issue #1367 — the last line of defence for money: even an already-approved
+  // run cannot reach a provider while the workflow is retired. This is checked
+  // before the run is read, so it costs nothing and cannot be raced by editing a
+  // status row first.
+  if (RESEARCH_EXECUTION_RETIRED) return { ok: false, error: RESEARCH_RETIRED_ERROR };
   const run = await getResearchRun({ id: input.id, businessId: input.businessId });
   if (!run) return { ok: false, error: "research_not_found" };
   // Expiry is checked BEFORE the status, and the order is load-bearing.

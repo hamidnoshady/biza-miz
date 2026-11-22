@@ -7,7 +7,9 @@
  * live source of truth. Its layers, in order:
  *
  *   1. platform base policy        `base`
- *   2. runtime mode prompt         `mode:<auto|instant|deep_research>`
+ *   2. runtime mode prompt         `mode:<auto|instant|thinking>` (the retired
+ *                                  `mode:deep_research` scope is kept for
+ *                                  historical versions only)
  *   3. system agent prompt         `agent:<agent_key>`
  *   4. business-type fragment      `business_type:<industry>`
  *   5. app-context fragment        `app:<app_key>`

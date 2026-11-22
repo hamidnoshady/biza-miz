@@ -144,8 +144,10 @@ export default function PlatformAiPromptsPage() {
   const published = forScope.find((version) => version.state === "published") ?? null;
   const activeScope = scopes.find((entry) => entry.key === scope);
   const visibleScopes = scopes.filter((entry) => `${entry.label} ${entry.key}`.toLowerCase().includes(search.trim().toLowerCase()));
-  const isResearch = scope === "mode:deep_research";
-  const draftMode = isResearch ? undefined : /^mode:(auto|instant|thinking)$/.exec(scope)?.[1] ?? "auto";
+  // Issue #1367 — the retired research scope is no longer offered, so the draft
+  // tester only needs the live mode scopes. Historical versions of the retired
+  // scope remain readable through the API.
+  const draftMode = /^mode:(auto|instant|thinking)$/.exec(scope)?.[1] ?? "auto";
 
   function edit(version: PromptVersion | null) {
     setEditing(version);
@@ -226,7 +228,7 @@ export default function PlatformAiPromptsPage() {
         {published?.publishedAt && ` · ${dateFormat.format(new Date(published.publishedAt))}`}
         {published?.publishedBy && <> · <bdi>{published.publishedBy}</bdi></>}
       </p>
-      {!isResearch && <Button variant="ghost" disabled={!!busy} onClick={() => void showPreview()}>نمایش پرامپت ترکیب‌شده</Button>}
+      <Button variant="ghost" disabled={!!busy} onClick={() => void showPreview()}>نمایش پرامپت ترکیب‌شده</Button>
       {preview && <section aria-label="پرامپت ترکیب‌شده" className="my-3 space-y-2">
         <p className="text-xs text-muted-foreground">پیش‌نمایش لایه‌های منتشرشده برای زمینهٔ انتخابی</p>
         <ul className="flex flex-wrap gap-2 text-xs">

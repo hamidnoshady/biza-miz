@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformCapability } from "@/lib/platform-auth";
 import {
+  firstRetiredAiRuntimeMode,
+  type AiRuntimeMode,
+} from "@/lib/ai-runtime-modes-shared";
+import {
   createAgentAssignment,
   createSystemAgent,
   listAgentAssignments,
@@ -42,6 +46,12 @@ export const POST = async (request: NextRequest) => {
   const action = body?.action;
 
   if (action === "create") {
+    // Issue #1367 — Deep Research is retired: a new agent may not be configured
+    // to run in it. The refusal is explicit, not a silent filter, so the
+    // operator knows the value was not saved.
+    if (firstRetiredAiRuntimeMode([...asStringArray(body?.allowedModes), body?.defaultMode])) {
+      return retiredModeRefused();
+    }
     const input = {
       agentKey: String(body?.agentKey ?? ""),
       name: String(body?.name ?? ""),
@@ -54,12 +64,9 @@ export const POST = async (request: NextRequest) => {
       requiredPermissions: asStringArray(body?.requiredPermissions),
       allowedTools: asStringArray(body?.allowedTools),
       allowedActions: asStringArray(body?.allowedActions),
-      allowedModes: asStringArray(body?.allowedModes) as ("auto" | "instant" | "thinking" | "deep_research")[],
+      allowedModes: asStringArray(body?.allowedModes) as AiRuntimeMode[],
       defaultMode: (typeof body?.defaultMode === "string" ? body.defaultMode : null) as
-        | "auto"
-        | "instant"
-        | "thinking"
-        | "deep_research"
+        | AiRuntimeMode
         | null,
       suggestionCards: Array.isArray(body?.suggestionCards)
         ? (body.suggestionCards as AgentSuggestionCard[])
@@ -79,6 +86,17 @@ export const POST = async (request: NextRequest) => {
 
   if (action === "update") {
     if (typeof body?.id !== "string") return NextResponse.json({ error: "id_required" }, { status: 400 });
+    // Only an explicit attempt to store the retired mode is refused. An update
+    // that does not touch the mode fields leaves an older agent's stored values
+    // exactly as they are — history is preserved, not rewritten.
+    if (
+      firstRetiredAiRuntimeMode([
+        ...(Array.isArray(body?.allowedModes) ? asStringArray(body.allowedModes) : []),
+        ...(typeof body?.defaultMode === "string" ? [body.defaultMode] : []),
+      ])
+    ) {
+      return retiredModeRefused();
+    }
     const agent = await updateSystemAgent({
       id: body.id,
       patch: {
@@ -93,13 +111,10 @@ export const POST = async (request: NextRequest) => {
         allowedTools: body?.allowedTools ? asStringArray(body.allowedTools) : undefined,
         allowedActions: body?.allowedActions ? asStringArray(body.allowedActions) : undefined,
         allowedModes: body?.allowedModes
-          ? (asStringArray(body.allowedModes) as ("auto" | "instant" | "thinking" | "deep_research")[])
+          ? (asStringArray(body.allowedModes) as AiRuntimeMode[])
           : undefined,
         defaultMode: (typeof body?.defaultMode === "string" ? body.defaultMode : undefined) as
-          | "auto"
-          | "instant"
-          | "thinking"
-          | "deep_research"
+          | AiRuntimeMode
           | undefined,
         suggestionCards: Array.isArray(body?.suggestionCards)
           ? (body.suggestionCards as AgentSuggestionCard[])
@@ -131,6 +146,11 @@ export const POST = async (request: NextRequest) => {
   }
 
   if (action === "assign") {
+    // Issue #1367 — an assignment's preferred mode is how a suggestion card
+    // reaches the composer, so it may not name a retired workflow.
+    if (firstRetiredAiRuntimeMode([body?.preferredMode])) {
+      return retiredModeRefused();
+    }
     const assignment = await createAgentAssignment({
       agentId: String(body?.agentId ?? ""),
       businessId: typeof body?.businessId === "string" ? body.businessId : null,
@@ -141,9 +161,7 @@ export const POST = async (request: NextRequest) => {
       requiredApps: asStringArray(body?.requiredApps),
       requiredFeatures: asStringArray(body?.requiredFeatures),
       preferredMode: (typeof body?.preferredMode === "string" ? body.preferredMode : null) as
-        | "auto"
-        | "instant"
-        | "deep_research"
+        | AiRuntimeMode
         | null,
       createdBy: guard.session.email,
     });
@@ -165,4 +183,16 @@ export const POST = async (request: NextRequest) => {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((entry) => String(entry)) : [];
+}
+
+/** Issue #1367 — the single answer for a configuration that names the retired mode. */
+function retiredModeRefused(): NextResponse {
+  return NextResponse.json(
+    {
+      error: "mode_retired",
+      message:
+        "حالت پژوهش عمیق بازنشسته شده است؛ برای پیکربندی تازه از حالت‌های خودکار، سریع یا تفکر عمیق استفاده کنید.",
+    },
+    { status: 400 },
+  );
 }
