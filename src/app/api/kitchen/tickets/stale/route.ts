@@ -99,11 +99,11 @@ export const POST = withTenantScope(async (request: Request) => {
             RETURNING oi.order_id
          )
          SELECT COUNT(DISTINCT order_id)::int AS count FROM archived`,
-        [location.id, orderIds, session.userId],
+        [location.id, orderIds, session.sub],
       );
       return rows[0]?.count ?? 0;
     },
-    { locationId: location.id, userId: session.userId },
+    { locationId: location.id, userId: session.sub },
   );
 
   return NextResponse.json({ archivedCount });
