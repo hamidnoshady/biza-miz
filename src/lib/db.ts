@@ -426,6 +426,15 @@ export async function withTenantTransaction<T>(
  *     (`platform_users`, which carries no `business_id` to scope by) on
  *     behalf of a membership already verified to belong to the caller's own
  *     business, e.g. team-service.ts's credential reset;
+ *
+ *   - **signup** — the phone-first public registration door (#1385). A visitor
+ *     has no session and, until their SMS code is redeemed, no identity or
+ *     business either, so there is nothing to scope to. The bypass covers only
+ *     the pending-proof row (`platform_signup_requests`), the one canonical
+ *     `platform_users` insert the proof authorises, and reads of a verified
+ *     legacy membership phone used to refuse a duplicate identity. It never
+ *     writes a business, membership, wallet, subscription or charge, and it
+ *     cannot select a business from the request.
  *   - **employee-session-auth** — re-checking an `employee_sessions` row
  *     (Phase 20 Wave 2) is still active, from `getSession()`, which runs
  *     this check before `enterTenantScope` has been called for the request —
@@ -618,13 +627,13 @@ export async function withoutTenantScope<T>(reason: string, fn: () => Promise<T>
  */
 export async function withoutTenantScopeTransaction<T>(
   reason: string,
-  fn: () => Promise<T>,
+  fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
   return withoutTenantScope(reason, async () => {
     const client = await getPool().connect();
     try {
       await client.query("BEGIN");
-      const result = await runPinned(client, fn);
+      const result = await runPinned(client, () => fn(client));
       await client.query("COMMIT");
       return result;
     } catch (error) {

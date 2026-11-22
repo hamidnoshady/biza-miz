@@ -401,6 +401,11 @@ describe("every tenant table is protected", () => {
       // Migration 0187: global release catalogue; device telemetry is tenant-scoped.
       "platform_releases",
       "platform_restore_runs",
+      // Migration 0312 — a phone-first signup proof in flight (#1385): the
+      // names, normalised number and hashed request token for a person who has
+      // no identity or business yet. Platform-only, no business_id, never in a
+      // tenant export.
+      "platform_signup_requests",
       // Phase 24 — the deployment-wide SMS gateway credentials (Kavenegar) the
       // MFA challenge sends through. A singleton with no business_id, the same
       // shape as platform_ai_config: one account, configured once by a

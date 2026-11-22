@@ -305,6 +305,10 @@ export const EXEMPT_TABLES = new Set([
   // in `users`, which remains tenant-protected and exported.
   "platform_email_verifications",
   "platform_identity_events",
+  // Migration 0312 — a phone-first signup proof in flight (#1385). It exists
+  // before any identity or business does, so it has no `business_id`; it is
+  // `platform_only` under FORCE RLS and must never ride in a tenant export.
+  "platform_signup_requests",
   "backup_key_versions",
   "tenant_backup_business_policy",
   "tenant_backup_restore_approvals",

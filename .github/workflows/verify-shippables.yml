@@ -442,7 +442,15 @@ jobs:
           # so this gate stops flapping build to build while still catching a real leak — an
           # accidental node_modules, build cache or source maps is tens to hundreds of MiB and
           # still trips it immediately.
-          if ($bytes -gt 300MB) { throw "Staged runtime $mib MiB exceeds 300 MiB budget" }
+          #
+          # 2026-11-22 — #1385's phone-first signup added two pre-session API routes
+          # (`/api/auth/signup/request|verify`) and two entry pages (`/signup`, `/onboarding`).
+          # The desktop-shell run measured 301.9 MiB (run 44999252692), i.e. 1.9 MiB of real
+          # route/page manifest growth with no package delta. Budget moves 300 -> 304 MiB on
+          # owner instruction (Hamid, 2026-11-22) with ~2.1 MiB of headroom, the same reviewed
+          # reason as the moves above: restoring working headroom for real API surface, not
+          # relaxing the runaway detector.
+          if ($bytes -gt 304MB) { throw "Staged runtime $mib MiB exceeds 304 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

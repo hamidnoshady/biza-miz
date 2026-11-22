@@ -63,6 +63,84 @@ export type PhoneClaimResult =
       error: PhoneClaimRefusal | "phone_taken" | "identity_missing" | "identity_phone_locked";
     };
 
+export type CreateVerifiedIdentityResult =
+  | { ok: true; platformUserId: string; created: boolean }
+  | { ok: false; error: "invalid_name" | PhoneClaimRefusal | "identity_conflict" };
+
+/**
+ * Create the one canonical personal identity for a number its owner just
+ * proved, or read back the identity that won a concurrent race.
+ *
+ * This is the only creation door for a phone-first person. It deliberately
+ * writes no business, membership, wallet or subscription: a verified person can
+ * exist before they own a business (#1384), and #1385's signup must not
+ * provision one as a side effect of proving a number.
+ *
+ * The insert is a single statement so the partial unique index
+ * (`idx_platform_users_verified_phone`) is the authority on ownership. If a
+ * concurrent redemption won, `ON CONFLICT DO NOTHING` returns no row and the
+ * winner is read back by the same verified-phone predicate; two identities can
+ * never both result from one number.
+ *
+ * Callers that need this atomic with an OTP redemption should invoke it inside
+ * their `withoutTenantScopeTransaction`; ambient `query` then pins it to that
+ * transaction and a later failure rolls the identity back with the challenge.
+ */
+export async function createVerifiedPersonalIdentity(input: {
+  fullName: string;
+  phone: string | null | undefined;
+}): Promise<CreateVerifiedIdentityResult> {
+  const fullName = String(input.fullName ?? "").trim();
+  if (!fullName || fullName.length > 200) {
+    return { ok: false, error: "invalid_name" };
+  }
+
+  const prepared = preparePhoneClaim(input.phone);
+  if (!prepared.ok) return prepared;
+
+  try {
+    const { rows } = await withoutTenantScope("identity", () =>
+      query<{ id: string }>(
+        `INSERT INTO platform_users (email, password_hash, full_name, phone_e164, phone_verified_at)
+         VALUES (NULL, NULL, $1, $2, now())
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+        [fullName, prepared.phoneE164],
+      ),
+    );
+    if (rows[0]) return { ok: true, platformUserId: rows[0].id, created: true };
+
+    const { rows: winners } = await withoutTenantScope("identity", () =>
+      query<{ id: string }>(
+        `SELECT id FROM platform_users
+          WHERE phone_e164 = $1 AND phone_verified_at IS NOT NULL
+          LIMIT 2`,
+        [prepared.phoneE164],
+      ),
+    );
+    if (winners.length === 1) {
+      return { ok: true, platformUserId: winners[0].id, created: false };
+    }
+    return { ok: false, error: "identity_conflict" };
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      // The index rejected the write between the INSERT and the read below.
+      const { rows } = await withoutTenantScope("identity", () =>
+        query<{ id: string }>(
+          `SELECT id FROM platform_users
+            WHERE phone_e164 = $1 AND phone_verified_at IS NOT NULL
+            LIMIT 2`,
+          [prepared.phoneE164],
+        ),
+      );
+      return rows.length === 1
+        ? { ok: true, platformUserId: rows[0].id, created: false }
+        : { ok: false, error: "identity_conflict" };
+    }
+    throw error;
+  }
+}
+
 /**
  * Record a number as verified for this global person.
  *
