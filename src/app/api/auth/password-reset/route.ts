@@ -23,7 +23,10 @@ export async function GET(request: NextRequest) {
   }
 
   return NextResponse.json({
+    // Either may be null for a phone-only identity (#1386); the page shows the
+    // one that exists and never a full number.
     email: preview.email,
+    phoneMasked: preview.phoneMasked,
     subjectRealm: preview.subjectRealm,
     expiresAt: preview.expiresAt,
     status: preview.status,

@@ -347,7 +347,10 @@ export async function changeOwnPassword(params: {
 export async function issuePasswordResetToken(params: {
   subjectRealm: PasswordSubjectRealm;
   subjectId: string;
-  email: string;
+  /** NULL for a phone-only identity: the link travels by SMS. */
+  email: string | null;
+  /** The canonical verified phone the link is delivered to. */
+  phoneE164?: string | null;
   membershipId?: string | null;
   createdById?: string | null;
   ttlMs?: number;
@@ -368,14 +371,16 @@ export async function issuePasswordResetToken(params: {
 
     const { rows } = await query<{ id: string }>(
       `INSERT INTO auth_password_resets
-         (subject_realm, subject_id, membership_id, email, token_hash, expires_at, created_by_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (subject_realm, subject_id, membership_id, email, phone_e164,
+          token_hash, expires_at, created_by_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id`,
       [
         params.subjectRealm,
         params.subjectId,
         params.membershipId ?? null,
-        params.email.trim().toLowerCase(),
+        params.email ? params.email.trim().toLowerCase() : null,
+        params.phoneE164 ?? null,
         tokenHash,
         expiresAt,
         params.createdById ?? null,
@@ -390,9 +395,18 @@ export interface PasswordResetPreview {
   id: string;
   subjectRealm: PasswordSubjectRealm;
   subjectId: string;
-  email: string;
+  /** NULL when the identity is phone-only (#1386). */
+  email: string | null;
+  /** Masked delivery number, for a phone-only identity's preview. */
+  phoneMasked: string | null;
   expiresAt: string;
   status: "pending" | "expired" | "used" | "revoked";
+}
+
+/** `+989***0001`-shaped; never the full number on a pre-session screen. */
+function maskRecipientPhone(e164: string | null): string | null {
+  if (!e164) return null;
+  return e164.length > 8 ? `+${e164.slice(1, 4)}***${e164.slice(-4)}` : "***";
 }
 
 export async function previewPasswordResetToken(
@@ -406,12 +420,13 @@ export async function previewPasswordResetToken(
       id: string;
       subject_realm: PasswordSubjectRealm;
       subject_id: string;
-      email: string;
+      email: string | null;
+      phone_e164: string | null;
       expires_at: Date;
       used_at: Date | null;
       revoked_at: Date | null;
     }>(
-      `SELECT id, subject_realm, subject_id, email::text AS email,
+      `SELECT id, subject_realm, subject_id, email::text AS email, phone_e164,
               expires_at, used_at, revoked_at
          FROM auth_password_resets
         WHERE token_hash = $1`,
@@ -430,6 +445,7 @@ export async function previewPasswordResetToken(
       subjectRealm: row.subject_realm,
       subjectId: row.subject_id,
       email: row.email,
+      phoneMasked: maskRecipientPhone(row.phone_e164),
       expiresAt: new Date(row.expires_at).toISOString(),
       status,
     };
@@ -446,13 +462,14 @@ interface PasswordResetRow {
   id: string;
   subject_realm: PasswordSubjectRealm;
   subject_id: string;
-  email: string;
+  email: string | null;
+  phone_e164: string | null;
   expires_at: Date;
   used_at: Date | null;
   revoked_at: Date | null;
 }
 
-const RESET_ROW_SELECT = `SELECT id, subject_realm, subject_id, email::text AS email,
+const RESET_ROW_SELECT = `SELECT id, subject_realm, subject_id, email::text AS email, phone_e164,
         expires_at, used_at, revoked_at`;
 
 /**
@@ -469,7 +486,13 @@ async function applyPasswordResetRow(
   client: { query: (text: string, params?: unknown[]) => Promise<{ rows: unknown[] }> },
   row: PasswordResetRow,
   passwordHash: string,
-): Promise<{ subjectRealm: PasswordSubjectRealm; subjectId: string; email: string; tokenVersion: number }> {
+): Promise<{
+  subjectRealm: PasswordSubjectRealm;
+  subjectId: string;
+  email: string | null;
+  phoneE164: string | null;
+  tokenVersion: number;
+}> {
   let tokenVersion = 1;
   if (row.subject_realm === "platform_user") {
     const updated = (await client.query(
@@ -547,6 +570,7 @@ async function applyPasswordResetRow(
     subjectRealm: row.subject_realm,
     subjectId: row.subject_id,
     email: row.email,
+    phoneE164: row.phone_e164,
     tokenVersion,
   };
 }
@@ -748,7 +772,7 @@ export async function consumePasswordResetToken(params: {
       ok: true;
       subjectRealm: PasswordSubjectRealm;
       subjectId: string;
-      email: string;
+      email: string | null;
       tokenVersion: number;
     }
   | {
@@ -806,10 +830,13 @@ export async function consumePasswordResetToken(params: {
       const applied = await applyPasswordResetRow(client, row, passwordHash);
       await client.query("COMMIT");
 
-      await clearAuthLockout(
-        row.subject_realm === "platform_user" ? "tenant_password" : "platform_admin",
-        row.email,
-      );
+      const lockoutKey = row.email ?? row.phone_e164;
+      if (lockoutKey) {
+        await clearAuthLockout(
+          row.subject_realm === "platform_user" ? "tenant_password" : "platform_admin",
+          lockoutKey,
+        );
+      }
 
       return { ok: true, ...applied };
     } catch (err) {
@@ -844,10 +871,11 @@ export async function consumePasswordResetToken(params: {
 export async function issueDeliveredPasswordReset(params: {
   subjectRealm: PasswordSubjectRealm;
   subjectId: string;
-  email: string;
+  /** NULL for a phone-only identity (#1386). */
+  email: string | null;
   membershipId?: string | null;
   createdById?: string | null;
-  /** The verified number the link will be sent to. */
+  /** The canonical verified number the link will be sent to. */
   phoneE164: string;
   /** Absolute origin to build the link from. */
   origin: string;
@@ -856,6 +884,7 @@ export async function issueDeliveredPasswordReset(params: {
     subjectRealm: params.subjectRealm,
     subjectId: params.subjectId,
     email: params.email,
+    phoneE164: params.phoneE164,
     membershipId: params.membershipId,
     createdById: params.createdById,
     // Short-lived: the credential travels over SMS, so the window it is
