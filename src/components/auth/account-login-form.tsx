@@ -1,20 +1,21 @@
 "use client";
 
 /**
- * The cloud account door: email **or** mobile number + password, then the
- * second factor, then the optional «اعتماد به این دستگاه برای ۷ روز».
+ * The cloud account door: verified mobile number (or a legacy email) +
+ * password is the default, then the second factor, then the optional
+ * «اعتماد به این دستگاه برای ۷ روز».
  *
  * This is the cloud deployment's primary way in (the hybrid/offline install
- * keeps its PIN-only door). Two things it adds over the owner-only `/admin`
- * form:
+ * keeps its PIN-only door). Two deliberate things it offers:
  *
- *  - **Phone as an identifier.** A member may type their verified mobile
- *    number instead of their email; `/api/auth/login` resolves either.
- *  - **A way out when the password is forgotten.** «رمز عبورم را فراموش
- *    کردهام» switches to a one-time code sent to the member's phone, which is
- *    the same phone-OTP exchange the staff door already uses. It mints a real
- *    session on verify, so a forgotten password no longer means a locked-out
- *    owner.
+ *  - **Phone as the default identifier.** A member types their verified mobile
+ *    number; `/api/auth/login` resolves either a number or a legacy email, so
+ *    existing email accounts keep working without a second form.
+ *  - **Two distinct one-time-code journeys.** «ورود با کد یک‌بارمصرف» is the
+ *    passwordless **login** (a correct code mints a session). «رمز عبورم را
+ *    فراموش کرده‌ام» is **recovery** (a purpose-bound code lets the member set
+ *    a new password and never mints a session). They are separate server
+ *    purposes and separate screens; conflating them was the pre-#1386 bug.
  *
  * Everything below the fields is the existing contract: the MFA interstitial
  * (`MfaStep`), the business picker for a member of several businesses, the
@@ -38,6 +39,7 @@ import {
   PhoneOtpStep,
   type PhoneOtpSendSpec,
 } from "@/components/auth/phone-otp-step";
+import { PhonePasswordRecovery } from "@/components/auth/phone-password-recovery";
 import { loginErrorMessage, TRUSTED_DEVICE_DAYS } from "@/lib/login-contract";
 import { networkErrorMessage, useLoginRequest } from "@/components/auth/use-login-request";
 import { toPersianDigits } from "@/lib/digits";
@@ -62,14 +64,14 @@ interface LoginResponse {
 
 export function AccountLoginForm({
   onStaffPin,
-  identifierLabel = "ایمیل یا شمارهٔ موبایل",
+  identifierLabel = "شمارهٔ موبایل",
   identifierType = "text",
   defaultNext = "/dashboard",
   trustDeviceDefault = true,
 }: {
   /** Shown only on a door that also offers the PIN roster (the cloud login). */
   onStaffPin?: () => void;
-  /** `/admin` keeps its historical "ایمیل" label; the cloud door names both. */
+  /** `/admin` keeps its historical "ایمیل" label; the cloud door names the phone. */
   identifierLabel?: string;
   identifierType?: "text" | "email";
   /** Where a successful sign-in lands when no `?next=` was carried. */
@@ -88,6 +90,7 @@ export function AccountLoginForm({
   const [password, setPassword] = useState("");
   const [rememberDevice, setRememberDevice] = useState(trustDeviceDefault);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const { busy, send } = useLoginRequest();
 
   const [pending, setPending] = useState<{
@@ -98,8 +101,11 @@ export function AccountLoginForm({
   const { selection, capture, clear } = useBusinessSelection();
   const [graceNotice, setGraceNotice] = useState<{ daysLeft: number | null } | null>(null);
 
-  /** The forgotten-password path: a code to the member's own phone. */
-  const [otpMode, setOtpMode] = useState(false);
+  /**
+   * `password` is the default. `otp` is the passwordless **login**; `recovery`
+   * replaces the password and returns here. They are never the same screen.
+   */
+  const [mode, setMode] = useState<"password" | "otp" | "recovery">("password");
   const [otpPhone, setOtpPhone] = useState("");
   const [otpSpec, setOtpSpec] = useState<PhoneOtpSendSpec | null>(null);
   const [otpSent, setOtpSent] = useState<{ token: string; maskedPhone: string | null } | null>(null);
@@ -109,9 +115,16 @@ export function AccountLoginForm({
     router.refresh();
   }
 
+  /** A typed identifier that is an email stays empty for the phone field. */
+  function typedPhone(): string {
+    const value = identifier.trim();
+    return value.includes("@") ? "" : value;
+  }
+
   async function submit(e: React.FormEvent | null, businessId?: string) {
     e?.preventDefault();
     setError(null);
+    setNotice(null);
 
     const outcome = await send<LoginResponse>((signal) =>
       fetch("/api/auth/login", {
@@ -157,6 +170,7 @@ export function AccountLoginForm({
     const phone = otpPhone.trim();
     if (!phone) return;
     setError(null);
+    setNotice(null);
     setOtpSent(null);
     const spec: PhoneOtpSendSpec = { kind: "phone", phone };
     setOtpSpec(spec);
@@ -189,9 +203,9 @@ export function AccountLoginForm({
   }
 
   // -------------------------------------------------------------------------
-  // Forgotten password → one-time code
+  // Passwordless login — a separate primary method, not "forgot password".
   // -------------------------------------------------------------------------
-  if (otpMode) {
+  if (mode === "otp") {
     if (otpSent && otpSpec) {
       return (
         <PhoneOtpStep
@@ -220,7 +234,7 @@ export function AccountLoginForm({
           <h2 className="text-base font-bold">ورود با کد یک‌بارمصرف</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             شمارهٔ موبایل تأییدشدهٔ خود را وارد کنید تا کد ورود پیامک شود. با این روش
-            نیازی به رمز عبور نیست.
+            نیازی به رمز عبور نیست و همین یک کد شما را وارد می‌کند.
           </p>
         </div>
         {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
@@ -246,7 +260,7 @@ export function AccountLoginForm({
           <button
             type="button"
             onClick={() => {
-              setOtpMode(false);
+              setMode("password");
               setError(null);
             }}
             className="rounded text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline outline-none focus-visible:ring focus-visible:ring-ring/50"
@@ -255,6 +269,27 @@ export function AccountLoginForm({
           </button>
         </div>
       </form>
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Password recovery — proves the phone, replaces the password, no session.
+  // -------------------------------------------------------------------------
+  if (mode === "recovery") {
+    return (
+      <PhonePasswordRecovery
+        initialPhone={typedPhone()}
+        onDone={() => {
+          setMode("password");
+          setPassword("");
+          setError(null);
+          setNotice("رمز عبور شما تغییر کرد. اکنون با رمز جدید وارد شوید.");
+        }}
+        onCancel={() => {
+          setMode("password");
+          setError(null);
+        }}
+      />
     );
   }
 
@@ -330,8 +365,12 @@ export function AccountLoginForm({
   }
 
   // -------------------------------------------------------------------------
-  // Identifier + password
+  // Identifier + password (the default)
   // -------------------------------------------------------------------------
+  const legacyEmailHint =
+    identifierType === "email"
+      ? null
+      : "حساب‌های قدیمی می‌توانند به‌جای شمارهٔ موبایل، ایمیل خود را وارد کنند.";
   return (
     <form onSubmit={submit} className="space-y-4">
       <div>
@@ -342,12 +381,16 @@ export function AccountLoginForm({
           id="identifier"
           type={identifierType}
           dir="ltr"
+          inputMode={identifierType === "email" ? "email" : "text"}
           autoComplete="username"
           required
           value={identifier}
           onChange={(e) => setIdentifier(e.target.value)}
           className="w-full rounded-lg border border-input px-3 py-2 text-start focus:border-primary focus:outline-none"
         />
+        {legacyEmailHint ? (
+          <p className="mt-1 text-xs text-muted-foreground">{legacyEmailHint}</p>
+        ) : null}
       </div>
       <div>
         <label htmlFor="password" className="mb-1 block text-sm text-muted-foreground">
@@ -379,6 +422,11 @@ export function AccountLoginForm({
           </span>
         </span>
       </label>
+      {notice ? (
+        <p role="status" className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
+          {notice}
+        </p>
+      ) : null}
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       <button
         type="submit"
@@ -387,26 +435,41 @@ export function AccountLoginForm({
       >
         {busy ? "در حال ورود…" : "ورود"}
       </button>
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="space-y-2 border-t border-border pt-3">
         <button
           type="button"
           onClick={() => {
-            setOtpMode(true);
+            setOtpPhone(typedPhone());
+            setMode("otp");
             setError(null);
+            setNotice(null);
           }}
-          className="rounded text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline outline-none focus-visible:ring focus-visible:ring-ring/50"
+          className="w-full rounded-lg border border-input py-2.5 text-sm font-semibold transition hover:bg-primary/10 outline-none focus-visible:ring focus-visible:ring-ring/50"
         >
-          رمز عبورم را فراموش کرده‌ام
+          ورود با کد یک‌بارمصرف پیامکی
         </button>
-        {onStaffPin ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <button
             type="button"
-            onClick={onStaffPin}
+            onClick={() => {
+              setMode("recovery");
+              setError(null);
+              setNotice(null);
+            }}
             className="rounded text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline outline-none focus-visible:ring focus-visible:ring-ring/50"
           >
-            ورود کارکنان با پین
+            رمز عبورم را فراموش کرده‌ام
           </button>
-        ) : null}
+          {onStaffPin ? (
+            <button
+              type="button"
+              onClick={onStaffPin}
+              className="rounded text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline outline-none focus-visible:ring focus-visible:ring-ring/50"
+            >
+              ورود کارکنان با پین
+            </button>
+          ) : null}
+        </div>
       </div>
     </form>
   );

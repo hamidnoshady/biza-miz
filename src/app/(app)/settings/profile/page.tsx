@@ -108,6 +108,7 @@ export default async function ProfilePage() {
          * of the credential read returning nothing.
          */
         canUseMfa={credentials?.hasGlobalIdentity ?? isPasswordRole(member.role)}
+        hasPassword={credentials?.hasPassword ?? true}
         credentialSurfaces={{
           global_password: describeCredentialSurface(deployment.profile, "global_password"),
           login_phone: describeCredentialSurface(deployment.profile, "login_phone"),

@@ -41,6 +41,8 @@ export interface SelfCredentialState extends StepUpAvailability {
 
 interface CredentialRow extends Record<string, unknown> {
   platform_user_id: string | null;
+  /** NULL for a passwordless identity; the presence check is `!== null`. */
+  password_hash: string | null;
   pin_hash: string | null;
   phone_verified_at: Date | null;
   confirmed_mfa: string[] | null;
@@ -62,6 +64,7 @@ export async function readSelfCredentialState(
 ): Promise<SelfCredentialState | null> {
   const { rows } = await query<CredentialRow>(
     `SELECT u.platform_user_id,
+            p.password_hash,
             coalesce(ec.secret_hash, u.pin_hash) AS pin_hash,
             u.phone_verified_at,
             (SELECT array_agg(e.method::text)
@@ -79,6 +82,7 @@ export async function readSelfCredentialState(
                 AND r.subject_id = u.platform_user_id
                 AND r.used_at IS NULL) AS unused_recovery_codes
        FROM users u
+       LEFT JOIN platform_users p ON p.id = u.platform_user_id
        LEFT JOIN LATERAL (
          SELECT secret_hash FROM employee_credentials
           WHERE employee_id = u.id AND business_id = u.business_id
@@ -104,7 +108,14 @@ export async function readSelfCredentialState(
     membershipId,
     businessId,
     hasGlobalIdentity,
-    hasPassword: hasGlobalIdentity,
+    /*
+     * #1386 — a global identity is not necessarily a password identity. A
+     * phone-only account created by the #1385 signup has no hash until it asks
+     * for one, and the Profile card / step-up picker must not offer a password
+     * door that would always refuse. The old `hasGlobalIdentity` shortcut did
+     * exactly that.
+     */
+    hasPassword: hasGlobalIdentity && row.password_hash !== null,
     hasPin: row.pin_hash !== null,
     hasTotp: confirmed.includes("totp"),
     hasSms: confirmed.includes("sms_otp"),

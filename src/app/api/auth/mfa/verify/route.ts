@@ -77,11 +77,12 @@ export async function POST(request: NextRequest) {
   return withoutTenantScope("login", async () => {
     const { rows: users } = await query<{
       id: string;
-      email: string;
+      email: string | null;
+      phone_e164: string | null;
       full_name: string;
       token_version: number;
     }>(
-      `SELECT id, email::text AS email, full_name, token_version
+      `SELECT id, email::text AS email, phone_e164, full_name, token_version
          FROM platform_users
         WHERE id = $1 AND is_active = true`,
       [payload.sub],
@@ -90,6 +91,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
     const user = users[0];
+    // #1386 — the lockout key the password/OTP doors use. A phone-only
+    // identity has no email, and `identityKeyFor` cannot hash null.
+    const lockoutKey = user.email ?? user.phone_e164 ?? user.id;
 
     // Issue #809 (Finding 8 — P1): Enforce account lockout BEFORE checking the
     // MFA code so a valid 5-minute pending token cannot bypass an active lockout.
@@ -102,7 +106,7 @@ export async function POST(request: NextRequest) {
 
     const lockout = await checkAuthLockout(
       payload.authRealm,
-      user.email,
+      lockoutKey,
       PASSWORD_LOCKOUT_POLICY,
     );
     if (lockout.locked) {
@@ -153,11 +157,11 @@ export async function POST(request: NextRequest) {
     });
 
     if (detail.outcome === "rejected") {
-      await recordAuthFailure(payload.authRealm, user.email);
+      await recordAuthFailure(payload.authRealm, lockoutKey);
       return NextResponse.json({ error: "invalid_code" }, { status: 401 });
     }
 
-    await recordAuthSuccess(payload.authRealm, user.email);
+    await recordAuthSuccess(payload.authRealm, lockoutKey);
 
     const remainingRecoveryCodes = await countRemainingRecoveryCodes(
       "platform_user",

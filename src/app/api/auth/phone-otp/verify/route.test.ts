@@ -41,6 +41,7 @@ type AnyFn = ReturnType<typeof vi.fn>;
 const mocks = vi.hoisted(() => ({
   verifyPhonePendingToken: vi.fn() as AnyFn,
   verifyEmployeePhoneOtp: vi.fn() as AnyFn,
+  signPhonePendingToken: vi.fn(async () => "pending-token") as AnyFn,
   stampPhoneVerified: vi.fn(async () => {}) as AnyFn,
   checkLoginLockout: vi.fn(async () => ({ locked: false, lockedUntil: null })) as AnyFn,
   auditLoginFailure: vi.fn(async () => {}) as AnyFn,
@@ -49,6 +50,7 @@ const mocks = vi.hoisted(() => ({
   resolveDeviceId: vi.fn(async () => null) as AnyFn,
   query: vi.fn() as AnyFn,
   withTenant: vi.fn(async (_id: string, fn: () => Promise<unknown>) => fn()) as AnyFn,
+  withoutTenantScope: vi.fn(async (_r: string, fn: () => Promise<unknown>) => fn()) as AnyFn,
   signSession: vi.fn(async () => "signed-session") as AnyFn,
   signMfaPendingToken: vi.fn(async () => "mfa-pending") as AnyFn,
   getAccountMfaEnrolments: vi.fn(async () => [] as unknown[]) as AnyFn,
@@ -58,19 +60,41 @@ const mocks = vi.hoisted(() => ({
   getMfaPolicy: vi.fn(async () => ({ requireForManagers: false })) as AnyFn,
   mfaAppliesToRole: vi.fn(() => false) as AnyFn,
   distinctSecondFactorMethods: vi.fn(() => [] as string[]) as AnyFn,
-  enrolmentRequirement: vi.fn(() => "none" as string) as AnyFn,
-  shouldChallengeMfaOnLogin: vi.fn(() => false) as AnyFn,
+  enrolmentRequirement: vi.fn(() => "not_required" as string) as AnyFn,
   graceDaysRemaining: vi.fn(() => null as number | null) as AnyFn,
   issueTrustedDevice: vi.fn(async () => ({ token: "tdev_new", expiresAt: new Date() })) as AnyFn,
   verifyTrustedDevice: vi.fn(async () => ({ trusted: false, reason: "missing" })) as AnyFn,
+  phoneDerivedSubject: vi.fn(async () => "phone-subject") as AnyFn,
+  redeemOtpChallenge: vi.fn(async () => ({ ok: true })) as AnyFn,
+}));
+
+vi.mock("@/lib/otp-challenge", () => ({
+  // The real helper folds Persian/Arabic-Indic digits first; this stand-in
+  // does the same so the route's boundary behaviour is what is under test.
+  normalizeOtpCode: (value: unknown) => {
+    if (typeof value !== "string") return null;
+    const latin = value
+      .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+      .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+      .replace(/[\s-]/g, "");
+    return /^\d{6}$/.test(latin) ? latin : null;
+  },
+  phoneDerivedSubject: mocks.phoneDerivedSubject,
+  redeemOtpChallenge: mocks.redeemOtpChallenge,
 }));
 
 vi.mock("@/lib/phone-otp", () => ({
+  PENDING_PHONE_REALM: "phone_pending",
   verifyPhonePendingToken: mocks.verifyPhonePendingToken,
   verifyEmployeePhoneOtp: mocks.verifyEmployeePhoneOtp,
+  signPhonePendingToken: mocks.signPhonePendingToken,
   stampPhoneVerified: mocks.stampPhoneVerified,
 }));
-vi.mock("@/lib/db", () => ({ query: mocks.query, withTenant: mocks.withTenant }));
+vi.mock("@/lib/db", () => ({
+  query: mocks.query,
+  withTenant: mocks.withTenant,
+  withoutTenantScope: mocks.withoutTenantScope,
+}));
 vi.mock("@/lib/employee-service", () => ({
   checkLoginLockout: mocks.checkLoginLockout,
   auditLoginFailure: mocks.auditLoginFailure,
@@ -94,7 +118,6 @@ vi.mock("@/lib/mfa", () => ({
   graceDaysRemaining: mocks.graceDaysRemaining,
   mfaAppliesToRole: mocks.mfaAppliesToRole,
   MFA_GRACE_DAYS_TENANT: 14,
-  shouldChallengeMfaOnLogin: mocks.shouldChallengeMfaOnLogin,
 }));
 vi.mock("@/lib/mfa-policy", () => ({ getMfaPolicy: mocks.getMfaPolicy }));
 vi.mock("@/lib/mfa-service", () => ({
@@ -148,6 +171,15 @@ beforeEach(() => {
   for (const fn of Object.values(mocks)) (fn as AnyFn).mockClear();
   mocks.verifyPhonePendingToken.mockResolvedValue(boundPayload());
   mocks.verifyEmployeePhoneOtp.mockResolvedValue(true);
+  // Per-test defaults for the assurance inputs; individual tests override.
+  mocks.mfaAppliesToRole.mockReturnValue(false);
+  mocks.distinctSecondFactorMethods.mockReturnValue([]);
+  mocks.enrolmentRequirement.mockReturnValue("not_required");
+  mocks.getAccountMfaEnrolments.mockResolvedValue([]);
+  mocks.getMfaGracePeriod.mockResolvedValue(null);
+  mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "missing" });
+  mocks.redeemOtpChallenge.mockResolvedValue({ ok: true });
+  mocks.phoneDerivedSubject.mockResolvedValue("phone-subject");
   // A member row with no linked global identity, so the MFA branch is skipped
   // and the response is the plain session.
   mocks.query.mockResolvedValue({
@@ -331,8 +363,8 @@ describe("the seven-day trusted-device offer", () => {
     });
     mocks.mfaAppliesToRole.mockReturnValue(true);
     mocks.getAccountMfaEnrolments.mockResolvedValue([{ method: "totp", confirmed_at: new Date() }]);
+    mocks.distinctSecondFactorMethods.mockReturnValue(["totp"]);
     mocks.enrolmentRequirement.mockReturnValue("required");
-    mocks.shouldChallengeMfaOnLogin.mockReturnValue(true);
 
     const res = await POST(request("123456", { trustDevice: true }));
     const body = await res.json();
@@ -415,8 +447,8 @@ describe("trusted-device exemption before MFA (gap 3)", () => {
     });
     mocks.mfaAppliesToRole.mockReturnValue(true);
     mocks.getAccountMfaEnrolments.mockResolvedValue([{ method: "totp", confirmed_at: new Date() }]);
+    mocks.distinctSecondFactorMethods.mockReturnValue(["totp"]);
     mocks.enrolmentRequirement.mockReturnValue("required");
-    mocks.shouldChallengeMfaOnLogin.mockReturnValue(true);
   }
 
   it("waives the MFA challenge for a device this member has trusted", async () => {
@@ -492,5 +524,161 @@ describe("trusted-device exemption before MFA (gap 3)", () => {
     expect(res.status).toBe(200);
     expect(mocks.issueTrustedDevice).not.toHaveBeenCalled();
     expect(res.cookies.get("pos_trusted_device")).toBeUndefined();
+  });
+});
+
+/**
+ * #1386 — the approved routine-OTP policy.
+ *
+ * The old rule challenged whenever *any* confirmed enrolment existed, which made
+ * an SMS-only account see the same factor twice (or a dead end, because the
+ * distinct-method list was empty). The new rule keeps stronger factors and
+ * privileged roles, and drops only the duplicate.
+ */
+describe("#1386 — routine OTP is the whole ceremony unless a stronger factor is due", () => {
+  function identityMember(role: string) {
+    mocks.query.mockResolvedValue({
+      rows: [
+        {
+          id: USER,
+          business_id: BUSINESS,
+          business_slug: "test",
+          business_subdomain: "test",
+          location_id: null,
+          role,
+          full_name: "آزمون",
+          platform_user_id: "99999999-9999-4999-8999-999999999999",
+          identity_active: true,
+          token_version: 1,
+        },
+      ],
+      rowCount: 1,
+    });
+  }
+
+  it("does not ask an SMS-only cashier for a second SMS code", async () => {
+    identityMember("cashier");
+    mocks.getAccountMfaEnrolments.mockResolvedValue([
+      { method: "sms_otp", confirmed_at: new Date() },
+    ]);
+    // The route derives distinct factors itself; the vetted helper returns no
+    // distinct method because SMS is the credential that opened the door.
+    mocks.distinctSecondFactorMethods.mockReturnValue([]);
+
+    const res = await POST(request("123456"));
+    const body = await res.json();
+
+    expect(body.mfaRequired).toBeUndefined();
+    expect(res.cookies.get("pos_session")?.value).toBeTruthy();
+    // No trust query was spent when no stronger factor could be due.
+    expect(mocks.verifyTrustedDevice).not.toHaveBeenCalled();
+  });
+
+  it("still asks for an enrolled TOTP on a new device", async () => {
+    identityMember("cashier");
+    mocks.getAccountMfaEnrolments.mockResolvedValue([
+      { method: "totp", confirmed_at: new Date() },
+    ]);
+    mocks.distinctSecondFactorMethods.mockReturnValue(["totp"]);
+
+    const res = await POST(request("123456"));
+    const body = await res.json();
+
+    expect(body.mfaRequired).toBe(true);
+    expect(body.mfaMethod).toBe("totp");
+    expect(res.cookies.get("pos_session")).toBeUndefined();
+  });
+
+  it("still requires a distinct factor from a privileged account holding only SMS", async () => {
+    identityMember("owner");
+    mocks.mfaAppliesToRole.mockReturnValue(true);
+    mocks.getAccountMfaEnrolments.mockResolvedValue([
+      { method: "sms_otp", confirmed_at: new Date() },
+    ]);
+    mocks.distinctSecondFactorMethods.mockReturnValue([]);
+
+    const res = await POST(request("123456"));
+    const body = await res.json();
+
+    expect(body.mfaRequired).toBe(true);
+    expect(body.availableMethods).toEqual([]);
+    expect(res.cookies.get("pos_session")).toBeUndefined();
+  });
+});
+
+describe("#1386 — multi-business OTP selection happens after proof", () => {
+  it("returns the business list and a selection token only after the code redeemed", async () => {
+    mocks.verifyPhonePendingToken.mockResolvedValue(
+      boundPayload({
+        sub: null,
+        businessId: "00000000-0000-0000-0000-000000000000",
+        candidatePhone: PHONE,
+        multiBusiness: true,
+        otpProven: false,
+      }),
+    );
+    mocks.query.mockResolvedValue({
+      rows: [{ id: USER, business_id: BUSINESS, business_name: "Alpha" }],
+    });
+    mocks.signPhonePendingToken.mockResolvedValue("selection-token");
+
+    const res = await POST(request("123456"));
+    const body = await res.json();
+
+    expect(mocks.redeemOtpChallenge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        purpose: "login",
+        code: "123456",
+        expectedPhoneE164: PHONE,
+      }),
+    );
+    expect(body.needsBusinessSelection).toBe(true);
+    expect(body.businesses).toEqual([{ id: BUSINESS, name: "Alpha" }]);
+    expect(body.selectionToken).toBe("selection-token");
+    // A selection is not a session.
+    expect(res.cookies.get("pos_session")).toBeUndefined();
+
+    // #1386 — the list is the proven global identity's memberships, not every
+    // membership that happens to carry the number.
+    const sqls = mocks.query.mock.calls.map((call) => String(call[0]));
+    expect(sqls.some((sql) => sql.includes("FROM platform_users"))).toBe(true);
+    expect(sqls.some((sql) => sql.includes("u.platform_user_id = $1"))).toBe(true);
+  });
+
+  it("spends the proven selection token on a membership that holds the number", async () => {
+    mocks.verifyPhonePendingToken.mockResolvedValue(
+      boundPayload({
+        sub: null,
+        businessId: "00000000-0000-0000-0000-000000000000",
+        candidatePhone: PHONE,
+        multiBusiness: true,
+        otpProven: true,
+      }),
+    );
+    mocks.query.mockResolvedValue({
+      rows: [
+        {
+          id: USER,
+          business_id: BUSINESS,
+          business_slug: "test",
+          business_subdomain: "test",
+          location_id: null,
+          role: "cashier",
+          full_name: "آزمون",
+          phone_e164: PHONE,
+          platform_user_id: null,
+          identity_active: true,
+          token_version: 1,
+        },
+      ],
+      rowCount: 1,
+    });
+
+    const res = await POST(request("", { businessId: BUSINESS }));
+
+    expect(res.status).toBe(200);
+    expect(res.cookies.get("pos_session")?.value).toBeTruthy();
+    // The selection token means no second SMS was asked for.
+    expect(mocks.verifyEmployeePhoneOtp).not.toHaveBeenCalled();
   });
 });
