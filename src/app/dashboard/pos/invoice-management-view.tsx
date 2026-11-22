@@ -338,7 +338,7 @@ export function InvoiceManagementView({ canVoidInvoice = false }: { canVoidInvoi
                           <button
                             type="button"
                             data-tour-id="pos.invoice-history-details"
-                        onClick={() => openInvoice(row.id)}
+                            onClick={() => openInvoice(row.id)}
                             className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-border px-3 text-xs font-semibold text-foreground transition-colors hover:border-amber-300 hover:bg-amber-50 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10"
                           >
                             <EyeIcon aria-hidden="true" className="size-4" />
@@ -369,6 +369,7 @@ export function InvoiceManagementView({ canVoidInvoice = false }: { canVoidInvoi
                       </div>
                       <button
                         type="button"
+                        data-tour-id="pos.invoice-history-details"
                         onClick={() => openInvoice(row.id)}
                         className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-border px-3 text-xs font-semibold text-foreground transition-colors hover:border-amber-300 hover:bg-amber-50 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10"
                       >
