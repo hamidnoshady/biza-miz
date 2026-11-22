@@ -997,19 +997,16 @@ export function OrderDetailModal({
       const receiptRequestId = `receipt:${targetOrderId}`;
       // The payment is already recorded, so the server's receipt is the settled
       // bill — including the tip that was just stored with it.
-      const issue = (id: string) => printSaleReceipt(null, targetOrderId, { requestId: id });
-      void issue(receiptRequestId).then((result) => {
-        if (!result.ok && result.error !== "printer_not_configured") {
+      const issue = (id: string, automatic = false) => printSaleReceipt(null, targetOrderId, { requestId: id, automatic });
+      void issue(receiptRequestId, true).then((result) => {
+        if (!result.ok && !result.skipped && !result.notificationsMuted && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ پرداخت با موفقیت ثبت شده است.", {
             action: { label: "چاپ دوباره", onClick: () => void issue(`${receiptRequestId}:retry`) },
           });
         }
-        if (
-          draftOpensDrawer(paymentDraft, paymentMethods) &&
-          result.supportsDrawer &&
-          result.printerId
-        ) {
-          void kickDrawer(result.printerId);
+        if (draftOpensDrawer(paymentDraft, paymentMethods)) {
+          if (result.skipped) void kickDrawer(null);
+          else if (result.supportsDrawer && result.printerId) void kickDrawer(result.printerId);
         }
       });
       await load();

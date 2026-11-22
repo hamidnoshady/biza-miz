@@ -1029,3 +1029,7 @@ describe("Woo remote-only order-to-print security", () => {
     expect(loader.loadPrintDocument).not.toHaveBeenCalled();
   });
 });
+vi.mock("@/lib/printing/behavior-service", () => ({
+  loadPrintBehavior: vi.fn().mockResolvedValue({ defaults: {}, overrides: {}, effective: {} }),
+}));
+

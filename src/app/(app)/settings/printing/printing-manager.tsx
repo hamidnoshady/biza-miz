@@ -33,6 +33,7 @@ import { PrintHistoryPanel } from "./history-panel";
 import { TemplateDesigner } from "./template-designer";
 import { TemplateGallery } from "./template-gallery";
 import { usePrintIdentity, useSavedTemplates, type SavedTemplateRow } from "./use-printing";
+import { PrintBehaviorPanel } from "./behavior-panel";
 
 type Tab = "printers" | "templates" | "rules" | "history";
 
@@ -179,6 +180,7 @@ export function PrintingManager({ labelsOnly = false, canPrint = true }: { label
     <div className="space-y-4">
       <ErrorBox>{error || (saved.error ? "فهرست قالب‌های مجاز خوانده نشد؛ پس از بررسی دسترسی دوباره تلاش کنید." : "")}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
+      {!labelsOnly && tab === "rules" ? <PrintBehaviorPanel /> : null}
 
       {!labelsOnly ? <TabBar idPrefix="printing" label="بخش‌های چاپ" tabs={TABS} active={tab} onChange={setTab} /> : null}
       {saved.error ? <Button type="button" variant="outline" onClick={() => void saved.reload()}>تلاش دوباره</Button> : null}

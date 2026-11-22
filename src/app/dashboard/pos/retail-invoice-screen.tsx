@@ -516,14 +516,17 @@ export function RetailInvoiceScreen({
       // every later reprint use — and renders it. The sale's own rows are the
       // only source, so the first print cannot drift from a later reprint of
       // the same sale (see src/lib/retail-invoice/print-data.ts's header).
-      const issue = (requestId: string) => printSaleReceipt(null, invoice.orderId, { requestId });
-      void issue(receiptRequestId).then((result) => {
-        if (!result.ok && result.error !== "printer_not_configured") {
+      const issue = (requestId: string, automatic = false) => printSaleReceipt(null, invoice.orderId, { requestId, automatic });
+      void issue(receiptRequestId, true).then((result) => {
+        if (!result.ok && !result.skipped && !result.notificationsMuted && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ فاکتور با موفقیت ثبت شده است.", {
             action: { label: "چاپ دوباره", onClick: () => void issue(`${receiptRequestId}:retry`) },
           });
         }
-        if (openedDrawer && result.supportsDrawer && result.printerId) void kickDrawer(result.printerId);
+        if (openedDrawer) {
+          if (result.skipped) void kickDrawer(null);
+          else if (result.supportsDrawer && result.printerId) void kickDrawer(result.printerId);
+        }
       });
     } else {
       // Which failure is this (issue #913 item 2)? A 4xx means the server
