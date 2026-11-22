@@ -15,6 +15,7 @@ import { getOnlinePlatformsConfig } from "@/lib/online-platforms-service";
 import { commissionAmountFor } from "@/lib/online-platforms-calculation";
 import { lockOpenOrder } from "@/lib/order-lock";
 import { recordOrderState } from "@/lib/order-state-sync";
+import { archivePaidKitchenTicket } from "@/lib/kitchen-workflow";
 import { paymentFailureFor } from "@/lib/order-payment-errors";
 import { rialBigInt, rialText, type RialText } from "@/lib/inventory-exact";
 import {
@@ -380,6 +381,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       actorUserId: session.sub,
       actorRole: session.role,
     });
+    await archivePaidKitchenTicket(client, location.id, id);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");

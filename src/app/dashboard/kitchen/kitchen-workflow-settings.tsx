@@ -7,11 +7,13 @@ import type { KitchenWorkflow } from "@/lib/kitchen-workflow";
 import { SectionCard } from "../page-chrome";
 import { api, errorMessage, inputClass } from "../ui";
 
-type Response = { workflow?: KitchenWorkflow; error?: string };
+type Response = { workflow?: KitchenWorkflow; clearAfterPayment?: boolean; error?: string };
 
 export function KitchenWorkflowSettings() {
   const [workflow, setWorkflow] = useState<KitchenWorkflow>("kitchen_team");
   const [saved, setSaved] = useState<KitchenWorkflow | null>(null);
+  const [clearAfterPayment, setClearAfterPayment] = useState(false);
+  const [savedClearAfterPayment, setSavedClearAfterPayment] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,6 +24,8 @@ export function KitchenWorkflowSettings() {
       if (result.ok && result.data.workflow) {
         setWorkflow(result.data.workflow);
         setSaved(result.data.workflow);
+        setClearAfterPayment(result.data.clearAfterPayment === true);
+        setSavedClearAfterPayment(result.data.clearAfterPayment === true);
       } else {
         setError(errorMessage(result.data.error));
       }
@@ -35,13 +39,14 @@ export function KitchenWorkflowSettings() {
     try {
       const result = await api<Response>("/api/kitchen/workflow", {
         method: "PUT",
-        body: JSON.stringify({ workflow }),
+        body: JSON.stringify({ workflow, clearAfterPayment }),
       });
       if (!result.ok || !result.data.workflow) {
         setError(errorMessage(result.data.error));
         return;
       }
       setSaved(result.data.workflow);
+      setSavedClearAfterPayment(result.data.clearAfterPayment === true);
       toast.success("روش آماده‌سازی سفارش‌های این شعبه ذخیره شد.");
     } finally {
       setBusy(false);
@@ -63,7 +68,13 @@ export function KitchenWorkflowSettings() {
             <option value="ready_on_send">آماده هنگام ثبت سفارش</option>
           </select>
         </label>
-        <Button type="button" disabled={busy || saved === null || saved === workflow} onClick={() => void save()}>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={clearAfterPayment} disabled={busy || saved === null}
+            onChange={(event) => setClearAfterPayment(event.currentTarget.checked)} />
+          خروج سفارش آماده از صف پس از پرداخت کامل
+        </label>
+        <Button type="button" disabled={busy || saved === null ||
+          (saved === workflow && savedClearAfterPayment === clearAfterPayment)} onClick={() => void save()}>
           ذخیره
         </Button>
       </div>

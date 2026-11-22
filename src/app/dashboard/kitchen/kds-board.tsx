@@ -49,6 +49,7 @@ interface StaleTicket {
   order_status: "open" | "held" | "completed";
   item_count: number;
   archived_at?: string;
+  reason?: string;
 }
 
 interface Modifier {
@@ -1124,7 +1125,8 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                     {" · "}
                     {toPersianDigits(String(ticket.item_count))} ردیف
                     {ticket.archived_at ? (
-                      <>{" · بایگانی دستی سفارش قدیمی · "}{formatJalali(new Date(ticket.archived_at), { withMonthName: true })}</>
+                      <>{" · "}{ticket.reason === "paid" ? "پرداخت کامل" : "بایگانی دستی سفارش قدیمی"}{" · "}
+                        {formatJalali(new Date(ticket.archived_at), { withMonthName: true })}</>
                     ) : null}
                   </li>
                 ))}

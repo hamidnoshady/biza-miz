@@ -14,7 +14,13 @@ export const GET = withTenantScope(async () => {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
   const workflow = await getKitchenWorkflow(session.businessId, location.id);
-  return NextResponse.json({ workflow }, { headers: { "Cache-Control": "no-store" } });
+  const { rows } = await query<{ value: unknown }>(
+    "SELECT value FROM settings WHERE business_id = $1 AND location_id = $2 AND key = 'kitchen.clearAfterPayment'",
+    [session.businessId, location.id],
+  );
+  return NextResponse.json({ workflow, clearAfterPayment: rows[0]?.value === true }, {
+    headers: { "Cache-Control": "no-store" },
+  });
 });
 
 export const PUT = withTenantScope(async (request: Request) => {
@@ -25,17 +31,18 @@ export const PUT = withTenantScope(async (request: Request) => {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
-  const body: { workflow?: unknown } | null = await request.json().catch(() => null);
+  const body: { workflow?: unknown; clearAfterPayment?: unknown } | null = await request.json().catch(() => null);
   const workflow = body?.workflow;
-  if (!isKitchenWorkflow(workflow)) {
+  if (!isKitchenWorkflow(workflow) || typeof body?.clearAfterPayment !== "boolean") {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
   await query(
     `INSERT INTO settings (business_id, location_id, key, value)
-     VALUES ($1, $2, 'kitchen.workflow', to_jsonb($3::text))
+     VALUES ($1, $2, 'kitchen.workflow', to_jsonb($3::text)),
+            ($1, $2, 'kitchen.clearAfterPayment', to_jsonb($4::boolean))
      ON CONFLICT (business_id, location_id, key)
      DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-    [session.businessId, location.id, workflow],
+    [session.businessId, location.id, workflow, body.clearAfterPayment],
   );
-  return NextResponse.json({ workflow });
+  return NextResponse.json({ workflow, clearAfterPayment: body.clearAfterPayment });
 });

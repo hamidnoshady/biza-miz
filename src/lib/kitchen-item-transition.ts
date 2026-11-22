@@ -3,6 +3,7 @@ import { enqueueCafeKitchenState } from "./cms/cafe-order-state-delivery";
 import { recordOrderState } from "./order-state-sync";
 import { canKitchenBump, canMarkServed, type OrderItemStatus } from "./order-item-status";
 import type { OrderStateActor } from "./order-state-sync";
+import { archivePaidKitchenTicket } from "./kitchen-workflow";
 
 export type KitchenItemTransitionResult =
   | { kind: "updated"; orderId: string }
@@ -76,6 +77,9 @@ export async function transitionKitchenItem(input: {
           : ({ kind: "missing" } as const);
       }
       await enqueueCafeKitchenState(client, item.order_id);
+      if (input.to === "ready") {
+        await archivePaidKitchenTicket(client, input.locationId, item.order_id);
+      }
       if (input.syncActor) {
         await recordOrderState(client, {
           locationId: input.locationId,
