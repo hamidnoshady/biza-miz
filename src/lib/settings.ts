@@ -26,6 +26,15 @@ export const SETTING_KEYS = {
   /** UiInteractionSettings v1 — business-wide operational gesture and accessibility defaults. */
   uiInteraction: "ui.interaction.v1",
   /**
+   * FinancialRatioMapping (src/lib/financial-ratios-service.ts) —
+   * `{ interestExpenseAccountCodes: string[] }`. The seeded charts have no
+   * interest-expense account, so the ratio report asks the business to name its
+   * own once instead of guessing one from a code block or a name. Absent means
+   * "not mapped", which the report shows as an unavailable interest-coverage
+   * ratio with that reason — never a fabricated zero.
+   */
+  financialRatioMapping: "reports.financial_ratio_mapping",
+  /**
    * AgencyProfileSetting (src/lib/agency.ts) — the operating profile an
    * advertising agency works as (issue #1128): one of eight presets inside the
    * single `advertising_agency` industry key. It decides which Workspace
