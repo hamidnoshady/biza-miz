@@ -42,6 +42,13 @@ interface TicketItem {
   priority: KitchenTicketPriority;
 }
 
+interface StaleTicket {
+  order_id: string;
+  order_number: number;
+  order_status: "open" | "held" | "completed";
+  item_count: number;
+}
+
 interface Modifier {
   order_item_id: string;
   name_snapshot: string;
@@ -487,7 +494,27 @@ function DetailPlaceholder() {
   );
 }
 
-export function KdsBoard() {
+export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean }) {
+  const [showStaleReview, setShowStaleReview] = useState(false);
+  const [staleTickets, setStaleTickets] = useState<StaleTicket[] | null>(null);
+  const [staleError, setStaleError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canReviewStale || !showStaleReview) return;
+    let cancelled = false;
+
+    void api<{ tickets: StaleTicket[] }>("/api/kitchen/tickets/stale")
+      .then(({ tickets }) => {
+        if (!cancelled) setStaleTickets(tickets);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setStaleError(errorMessage(error));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [canReviewStale, showStaleReview]);
   const [items, setItems] = useState<TicketItem[]>([]);
   const [modifiers, setModifiers] = useState<Modifier[]>([]);
   const [now, setNow] = useState(() => Date.now());
@@ -953,6 +980,20 @@ export function KdsBoard() {
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <KnowledgeHelpButton section="kitchen" />
+            {canReviewStale ? (
+              <Button
+                type="button"
+                variant="outline"
+                aria-expanded={showStaleReview}
+                onClick={() => {
+                  setStaleTickets(null);
+                  setStaleError(null);
+                  setShowStaleReview(!showStaleReview);
+                }}
+              >
+                بررسی سفارش‌های قدیمی
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="outline"
@@ -986,6 +1027,33 @@ export function KdsBoard() {
           </div>
         </div>
       </header>
+
+      {canReviewStale && showStaleReview ? (
+        <section className={`${cardClass} space-y-2 p-4`}>
+          <h2 className="font-semibold">سفارش‌های مانده در صف آشپزخانه از ۶۰ روز پیش</h2>
+          {staleError ? <p role="alert">{staleError}</p> : null}
+          {!staleError && staleTickets === null ? (
+            <p role="status">در حال دریافت سفارش‌ها…</p>
+          ) : null}
+          {staleTickets?.length === 0 ? <p>سفارش قدیمی در صف این شعبه وجود ندارد.</p> : null}
+          {staleTickets?.length ? (
+            <>
+              <p>{toPersianDigits(String(staleTickets.length))} سفارش</p>
+              <ul className="max-h-80 space-y-1 overflow-auto">
+                {staleTickets.map((ticket) => (
+                  <li key={ticket.order_id} className="text-sm">
+                    سفارش {toPersianDigits(String(ticket.order_number))}
+                    {" · "}
+                    {ticket.order_status === "completed" ? "تکمیل‌شده" : "نیازمند بررسی"}
+                    {" · "}
+                    {toPersianDigits(String(ticket.item_count))} ردیف در صف
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </section>
+      ) : null}
 
       {queueStale ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-medium text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200" role="alert">
