@@ -503,12 +503,17 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     if (!canReviewStale || !showStaleReview) return;
     let cancelled = false;
 
-    void api<{ tickets: StaleTicket[] }>("/api/kitchen/tickets/stale")
-      .then(({ tickets }) => {
-        if (!cancelled) setStaleTickets(tickets);
+    void api<{ tickets?: StaleTicket[]; error?: string }>("/api/kitchen/tickets/stale")
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        if (ok && Array.isArray(data.tickets)) {
+          setStaleTickets(data.tickets);
+        } else {
+          setStaleError(errorMessage(data.error));
+        }
       })
-      .catch((error: unknown) => {
-        if (!cancelled) setStaleError(errorMessage(error));
+      .catch(() => {
+        if (!cancelled) setStaleError("دریافت سفارش‌های قدیمی انجام نشد.");
       });
 
     return () => {
