@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
+import { LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, InfoBox, inputClass } from "@/app/dashboard/ui";
 import { Button } from "@/components/ui/button";
 
@@ -280,7 +280,7 @@ export function ExternalMcpPanel() {
         </div>
       </div>
 
-      {loading ? <p className="text-sm text-muted-foreground">در حال دریافت…</p> : null}
+      {loading ? <LoadingSkeleton label="در حال دریافت سرورها…" rows={2} /> : null}
       {!loading && servers.length === 0 ? (
         <p className="text-sm text-muted-foreground">هنوز سروری ثبت نشده است.</p>
       ) : null}
