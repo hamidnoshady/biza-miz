@@ -9,8 +9,8 @@ Thinking** — are unchanged.
 This document is the policy the code implements. The single source of truth for
 the vocabulary and the API contract is
 [`src/lib/ai-research-retirement.ts`](../../src/lib/ai-research-retirement.ts);
-the server-only flag read lives in
-[`src/lib/ai-research-retirement-server.ts`](../../src/lib/ai-research-retirement-server.ts).
+the in-flight policy is
+[`src/lib/ai-research-reconcile.ts`](../../src/lib/ai-research-reconcile.ts).
 
 ## 1. Why retirement rather than deletion
 
