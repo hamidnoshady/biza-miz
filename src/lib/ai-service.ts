@@ -19,6 +19,7 @@ import {
   PROJECT_ACTION_TYPES,
 } from "./ai";
 import { runReadTool, type FloorReadScope, type ToolResult } from "./ai-tools";
+import { externalToolsForTurn } from "./mcp/outbound/service";
 import { explicitlyRequestedPageNavigation } from "./ai-navigation-intent";
 import { listExpenseCategoryAccounts } from "./expense-service";
 import { validateInputRequest, type InputRequestSpec } from "./ai-input-protocol";
@@ -806,7 +807,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
         opts.permissions,
       )
     : opts.actionTypes;
-  const catalogue = toolDefinitions(mode, {
+  const staticCatalogue = toolDefinitions(mode, {
     hasAttachment,
     actionTypes: permissionActionTypes,
     retrieval: retrievalReady,
@@ -816,6 +817,18 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     // Issue #808 §8 — the wizard surface follows the business's own step list.
     industry: promptContext.industry,
   }).filter((tool) => allowActions || tool.function.name !== "propose_action");
+  /**
+   * External MCP tools (issue #1473). Only the in-app assistant gets them: an
+   * inbound MCP connection must never be able to relay a call to another server,
+   * so `src/lib/mcp/tools.ts` builds its catalogue without this list. A failed
+   * lookup is not fatal — the turn proceeds with the built-in tools rather than
+   * failing because a tenant's registered server is unreachable.
+   */
+  const externalCatalogue = businessId
+    ? await externalToolsForTurn(businessId, { toolAllowlist: opts.toolAllowlist }).catch(() => [])
+    : [];
+  const catalogue =
+    externalCatalogue.length > 0 ? [...staticCatalogue, ...externalCatalogue] : staticCatalogue;
   // Issue #812 §11 — App Focus narrows the catalogue the model can see, not
   // just the prompt. `routeTools` returns null for "no focus", so an unfocused
   // turn is byte-for-byte what it was before.
