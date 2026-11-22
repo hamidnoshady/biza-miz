@@ -114,10 +114,13 @@ jobs:
 
           git fetch --tags --quiet
           if ($LASTEXITCODE -ne 0) { throw 'Could not fetch tags' }
-          git rev-parse --verify "refs/tags/$tag" *> $null
-          if ($LASTEXITCODE -ne 0) { throw "Tag $tag has not been recorded by build-desktop-installer; refusing to create a new immutable version here" }
-          $existing = gh release view $tag --json tagName 2>$null
-          if ($LASTEXITCODE -eq 0 -and $existing) { throw "Release $tag already exists; production promotion is immutable" }
+          $recordedTag = git tag --list "$tag"
+          if (-not $recordedTag) { throw "Tag $tag has not been recorded by build-desktop-installer; refusing to create a new immutable version here" }
+          $existingReleases = gh release list --limit 200 --json tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list releases' }
+          if (@($existingReleases | Where-Object { $_.tagName -ceq $tag }).Count -gt 0) {
+            throw "Release $tag already exists; production promotion is immutable"
+          }
 
           $run = gh run view $env:BUILD_RUN_ID --json name,conclusion,headSha,headBranch,event,status | ConvertFrom-Json
           if ($run.name -ne 'build-desktop-installer') { throw "Run $($env:BUILD_RUN_ID) is $($run.name), not build-desktop-installer" }
