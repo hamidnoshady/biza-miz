@@ -2402,15 +2402,14 @@ export async function requestMemberPasswordReset(
   deliveredTo: string;
   channel: "sms";
   expiresAt: string;
-  email: string;
+  /** NULL for a phone-only identity (#1386). */
+  email: string | null;
 }> {
   const { rows } = await query<{
     platform_user_id: string | null;
     email: string | null;
-    phone_e164: string | null;
-    phone_verified_at: Date | null;
   }>(
-    `SELECT platform_user_id, email::text AS email, phone_e164, phone_verified_at
+    `SELECT platform_user_id, email::text AS email
        FROM users
       WHERE id = $1 AND business_id = $2`,
     [userId, businessId],
@@ -2419,54 +2418,41 @@ export async function requestMemberPasswordReset(
   if (!member) throw new TeamError("not_found", 404);
   if (!member.platform_user_id) throw new TeamError("no_login", 409);
 
-  let email = member.email;
-  if (!email) {
-    email = await withoutTenantScope("identity", async () => {
-      const p = await query<{ email: string }>(
-        `SELECT email::text AS email FROM platform_users WHERE id = $1`,
-        [member.platform_user_id],
-      );
-      return p.rows[0]?.email ?? null;
-    });
-  }
-  if (!email) throw new TeamError("no_login", 409);
+  const identity = await withoutTenantScope("identity", async () => {
+    const p = await query<{
+      email: string | null;
+      phone_e164: string | null;
+      phone_verified_at: Date | null;
+    }>(
+      `SELECT email::text AS email, phone_e164, phone_verified_at
+         FROM platform_users WHERE id = $1`,
+      [member.platform_user_id],
+    );
+    return p.rows[0] ?? null;
+  });
+  if (!identity) throw new TeamError("no_login", 409);
+
+  const email = identity.email ?? member.email ?? null;
 
   /**
-   * Issue #854 (P0.3) — the delivery channel.
+   * Issue #854 (P0.3) + #1386 — the delivery channel.
    *
    * The reset token is a credential that changes the shared
    * `platform_users` password, so it may only travel to the **account holder**.
    * There is no mail transport in this system, which leaves the one channel the
-   * holder and nobody else reads: a **verified** phone number. The verified
-   * number may live on any of their memberships (they might be a cashier here
-   * and the accountant there), so the search spans the identity — but a number
-   * that has merely been *typed by an administrator* does not count, because
-   * possession of it was never proven.
+   * holder and nobody else reads: a **verified** phone number.
    *
-   * When there is no verified number anywhere, the recovery is refused. The
-   * tempting fallback — return the link to the administrator who asked — is
-   * exactly the takeover this finding describes, so it is not available.
+   * #1386 narrows this to the canonical **global** number. A business
+   * administrator can move an employee's membership phone to a number they
+   * hold and prove it; if that number could receive the global reset link, the
+   * administrator would own the person's recovery channel — exactly the
+   * takeover #854 closed. The global number is written only by the person-side
+   * verified doors (#1384). An identity that has no global number yet is
+   * refused (`no_verified_channel`) rather than falling back to a membership
+   * phone; it can still use the email-based self-service reset.
    */
-  const verifiedPhone =
-    member.phone_e164 && member.phone_verified_at ? member.phone_e164 : null;
-  const phoneFromOtherMembership = verifiedPhone
-    ? null
-    : await withoutTenantScope("identity", async () => {
-        const { rows: phones } = await query<{ phone_e164: string }>(
-          `SELECT u.phone_e164
-             FROM users u
-            WHERE u.platform_user_id = $1
-              AND u.phone_e164 IS NOT NULL
-              AND u.phone_verified_at IS NOT NULL
-              AND u.is_active = true
-            ORDER BY (u.business_id = $2) DESC, u.phone_verified_at DESC
-            LIMIT 1`,
-          [member.platform_user_id, businessId],
-        );
-        return phones[0]?.phone_e164 ?? null;
-      });
-
-  const deliveryPhone = verifiedPhone ?? phoneFromOtherMembership;
+  const deliveryPhone =
+    identity.phone_e164 && identity.phone_verified_at ? identity.phone_e164 : null;
   if (!deliveryPhone) throw new TeamError("no_verified_channel", 409);
 
   const delivered = await issueDeliveredPasswordReset({

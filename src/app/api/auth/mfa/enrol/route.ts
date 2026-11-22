@@ -38,14 +38,18 @@ export async function POST(request: NextRequest) {
   }
 
   return withoutTenantScope("platform", async () => {
-    const { rows: users } = await query<{ email: string }>(
-      `SELECT email::text AS email FROM platform_users WHERE id = $1 AND is_active = true`,
+    const { rows: users } = await query<{ email: string | null; phone_e164: string | null }>(
+      `SELECT email::text AS email, phone_e164
+         FROM platform_users WHERE id = $1 AND is_active = true`,
       [payload.sub],
     );
     if (users.length === 0) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
-    const email = users[0].email;
+    // #1386 — the same lockout/rate-limit key the password door uses. A
+    // phone-only identity has no email, so falling back to the verified number
+    // keeps this surface usable instead of hashing null.
+    const email = users[0].email ?? users[0].phone_e164 ?? payload.sub;
 
     const lockout = await checkAuthLockout(payload.authRealm, email, PASSWORD_LOCKOUT_POLICY);
     if (lockout.locked) {

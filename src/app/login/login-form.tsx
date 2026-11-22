@@ -171,7 +171,11 @@ export default function LoginForm() {
       <div className={`w-full max-w-sm ${cardClass} p-8`}>
         <h1 className="mb-1 text-center text-xl font-bold">بیزامیز</h1>
         <p className="mb-6 text-center text-sm text-muted-foreground">
-          {pinOnly ? "ورود سریع" : roster ? "ورود کارکنان" : "ورود به حساب"}
+          {pinOnly
+            ? "ورود سریع"
+            : roster
+              ? "ورود کارکنان"
+              : "ورود با شمارهٔ موبایل و رمز عبور"}
         </p>
 
         {pinOnly && trusted ? (
@@ -193,7 +197,7 @@ export default function LoginForm() {
               onClick={() => setCloudView("auto")}
               className="mx-auto mt-4 block text-center text-xs text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
             >
-              ← بازگشت به ورود با ایمیل یا شمارهٔ موبایل
+              ← بازگشت به ورود با شمارهٔ موبایل و رمز عبور
             </button>
           </>
         ) : (

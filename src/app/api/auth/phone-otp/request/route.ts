@@ -174,10 +174,36 @@ export async function POST(request: NextRequest) {
 
   if (businessId) {
     return withTenant(businessId, async () => {
+      /*
+       * #1386 — the canonical global identity wins over a membership phone.
+       *
+       * A business administrator can move an employee's `users.phone_e164` and
+       * prove it with an OTP they receive; that must not become a login
+       * credential for a person whose *global* number is somewhere else. When
+       * the membership is linked to a global identity that holds a verified
+       * number, only that number may open this door. A membership with no
+       * global identity (legacy PIN staff) or whose identity has no global
+       * number yet keeps the old behaviour.
+       */
       const { rows } = await query<MemberRow>(
-        `SELECT id, full_name, phone_e164 FROM users
-          WHERE business_id = $1 AND phone_e164 = $2 AND is_active
-            AND phone_verified_at IS NOT NULL`,
+        `SELECT u.id, u.full_name, u.phone_e164
+           FROM users u
+           JOIN businesses b ON b.id = u.business_id
+           LEFT JOIN platform_users p ON p.id = u.platform_user_id
+          WHERE u.business_id = $1 AND u.is_active AND b.status = 'active'
+            AND (
+              (
+                u.platform_user_id IS NOT NULL
+                AND p.is_active = true
+                AND p.phone_e164 = $2
+                AND p.phone_verified_at IS NOT NULL
+              )
+              OR (
+                u.phone_e164 = $2
+                AND u.phone_verified_at IS NOT NULL
+                AND (u.platform_user_id IS NULL OR p.phone_e164 IS NULL)
+              )
+            )`,
         [businessId, phone],
       );
       const member = rows[0];
@@ -226,19 +252,47 @@ export async function POST(request: NextRequest) {
   // bypass.
   if (error === "business_required") {
     return withoutTenantScope("login", async () => {
-      const { rows } = await query<{ id: string }>(
-        `SELECT u.id
-           FROM users u
+      /*
+       * #1386 — resolve the canonical global identity first. Only when the
+       * number belongs to no global identity do we fall back to the legacy
+       * membership phone (a PIN-era membership, or one whose global identity
+       * has no verified number yet). Two global identities claiming one number
+       * is refused rather than guessed, exactly as the password door does.
+       */
+      const { rows: global } = await query<{ id: string }>(
+        `SELECT DISTINCT p.id
+           FROM platform_users p
+           JOIN users u ON u.platform_user_id = p.id
            JOIN businesses b ON b.id = u.business_id
-          WHERE u.phone_e164 = $1 AND u.is_active
-            AND u.phone_verified_at IS NOT NULL
-            AND b.status = 'active'`,
+          WHERE p.phone_e164 = $1 AND p.phone_verified_at IS NOT NULL AND p.is_active
+            AND u.is_active AND b.status = 'active'`,
         [phone],
       );
+      if (global.length > 1) return antiEnumerationResponse(phone);
+
+      let known = global.length === 1;
+      if (!known) {
+        const { rows: legacy } = await query<{ id: string }>(
+          `SELECT u.id
+             FROM users u
+             JOIN businesses b ON b.id = u.business_id
+             LEFT JOIN platform_users p ON p.id = u.platform_user_id
+            WHERE u.phone_e164 = $1 AND u.is_active
+              AND u.phone_verified_at IS NOT NULL
+              AND b.status = 'active'
+              AND (
+                u.platform_user_id IS NULL
+                OR (p.is_active = true AND p.phone_e164 IS NULL)
+              )`,
+          [phone],
+        );
+        known = legacy.length > 0;
+      }
+
       // Unknown number and known number are answered identically — including
       // the "no SMS was sent" part, which is why the challenge is only minted
       // on the hit path and the miss path returns the same token shape.
-      if (rows.length === 0) return antiEnumerationResponse(phone);
+      if (!known) return antiEnumerationResponse(phone);
 
       const subject = await phoneDerivedSubject(phone);
       const limit = await checkPhoneOtpRateLimit(`phone:${phone}`);

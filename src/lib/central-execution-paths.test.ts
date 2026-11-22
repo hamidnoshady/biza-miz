@@ -15,6 +15,7 @@ describe("public and bearer cloud API execution targets", () => {
       "/api/connections/mcp/consent", "/api/well-known/oauth-authorization-server/x",
       "/.well-known/oauth-protected-resource", "/api/cms/revalidate", "/api/cms/order-events", "/api/pairing/redeem", "/api/pairing/activate",
       "/api/local-activation/cloud",
+      "/api/desktop-releases/promote",
       "/mcp/consent",
     ]) expect(isCentralExecutionPath(path), path).toBe(true);
   });

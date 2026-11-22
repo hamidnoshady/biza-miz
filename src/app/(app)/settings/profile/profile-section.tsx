@@ -51,6 +51,12 @@ export interface ProfileSectionProps {
    * #854 P1.2 the old hard-coded `["owner","manager"]` list got wrong.
    */
   canUseMfa?: boolean;
+  /**
+   * #1386 — whether this global identity already holds a password. A phone-first
+   * account may have none, and the card then offers to create one instead of
+   * asking for a current password it cannot have.
+   */
+  hasPassword?: boolean;
   /** `apply`-only deployments render the cloud-owned cards read-only (P1.15). */
   credentialSurfaces?: Partial<Record<CredentialFieldName, CredentialSurface>>;
   /** #854 follow-up (F13): active vs home branch, server-resolved. */
@@ -86,6 +92,7 @@ export function ProfileSection({
   role,
   isOwner,
   canUseMfa = true,
+  hasPassword = true,
   credentialSurfaces = {},
   branch = null,
   showBiometric = true,
@@ -213,8 +220,16 @@ export function ProfileSection({
         </div>
       </SectionCard>
 
-      {email ? (
-        <SelfPasswordCard surface={credentialSurfaces.global_password} />
+      {/*
+        #1386 — a global identity may be phone-only. The card follows the
+        identity, not the presence of an email, and asks for a current password
+        only when one exists.
+      */}
+      {canUseMfa ? (
+        <SelfPasswordCard
+          surface={credentialSurfaces.global_password}
+          hasPassword={hasPassword}
+        />
       ) : null}
 
       <SelfPhoneCard surface={credentialSurfaces.login_phone} />
@@ -280,7 +295,13 @@ const PASSWORD_ERROR_MESSAGES: Record<string, string> = {
   password_blank: "رمز عبور نمی‌تواند فقط فاصله باشد.",
 };
 
-function SelfPasswordCard({ surface }: { surface?: CredentialSurface }) {
+function SelfPasswordCard({
+  surface,
+  hasPassword,
+}: {
+  surface?: CredentialSurface;
+  hasPassword: boolean;
+}) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -334,31 +355,39 @@ function SelfPasswordCard({ surface }: { surface?: CredentialSurface }) {
     setNewPassword("");
     setConfirmPassword("");
     setNotice(
-      "رمز عبور شما با موفقیت تغییر یافت و سایر نشست‌های فعال در همهٔ دستگاه‌ها بسته شدند.",
+      hasPassword
+        ? "رمز عبور شما با موفقیت تغییر یافت و سایر نشست‌های فعال در همهٔ دستگاه‌ها بسته شدند."
+        : "رمز عبور برای حساب شما تعیین شد. از این پس می‌توانید با شمارهٔ موبایل و رمز عبور وارد شوید.",
     );
   }
 
   return (
     <SectionCard
-      title="تغییر رمز عبور"
-      description="تغییر رمز عبور سراسری شما بلافاصله تمام نشست‌های دیگر را در همهٔ دستگاه‌ها باطل می‌کند."
+      title={hasPassword ? "تغییر رمز عبور" : "تعیین رمز عبور"}
+      description={
+        hasPassword
+          ? "تغییر رمز عبور سراسری شما بلافاصله تمام نشست‌های دیگر را در همهٔ دستگاه‌ها باطل می‌کند."
+          : "حساب شما هنوز رمز عبور ندارد. با تعیین رمز، ورود با شمارهٔ موبایل و رمز عبور ممکن می‌شود."
+      }
     >
       <ErrorBox>{error}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
       <CloudManagedNotice surface={surface} />
       {readOnly ? null : (
       <form onSubmit={submit} className="space-y-4">
-        <Field label="رمز عبور فعلی">
-          <input
-            type="password"
-            dir="ltr"
-            required
-            autoComplete="current-password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            className={inputClass}
-          />
-        </Field>
+        {hasPassword ? (
+          <Field label="رمز عبور فعلی">
+            <input
+              type="password"
+              dir="ltr"
+              required
+              autoComplete="current-password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              className={inputClass}
+            />
+          </Field>
+        ) : null}
         <div className="grid gap-3 sm:grid-cols-2">
           <Field
             label="رمز عبور جدید"
@@ -391,9 +420,13 @@ function SelfPasswordCard({ surface }: { surface?: CredentialSurface }) {
         <div className="flex justify-end">
           <PrimaryButton
             type="submit"
-            disabled={busy || !currentPassword || !lengthOk || !matchOk}
+            disabled={busy || (hasPassword && !currentPassword) || !lengthOk || !matchOk}
           >
-            {busy ? "در حال ذخیره…" : "تغییر رمز عبور"}
+            {busy
+              ? "در حال ذخیره…"
+              : hasPassword
+                ? "تغییر رمز عبور"
+                : "تعیین رمز عبور"}
           </PrimaryButton>
         </div>
       </form>

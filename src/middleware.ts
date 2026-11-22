@@ -64,6 +64,10 @@ const CENTRAL_EXECUTION_PATHS = [
   // and its approval live on the central runtime, never on a site process.
   "/api/desktop-enroll",
   "/desktop-enroll",
+  // The desktop release pipeline posts an Ed25519-signed manifest with a bearer
+  // token of its own. It has no tenant session, so middleware must let it reach
+  // the route's authorization instead of answering 401 first.
+  "/api/desktop-releases/promote",
   "/api/server-sync/config/generate-token",
   "/api/peer/backup",
   "/api/v1",
@@ -351,6 +355,13 @@ const PUBLIC_PATHS = [
   // and folding one into the other's prefix would let a future edit to the
   // redemption entry silently un-publish the request endpoint.
   "/api/auth/password-reset/request",
+  // #1386 — phone-native password recovery. Both halves are pre-session by
+  // definition (the caller cannot sign in), and the only credential is the
+  // purpose-bound `password_recovery` SMS code. They are listed separately
+  // from `/api/auth/phone-otp/*` because a recovery code must never be
+  // interchangeable with a login code.
+  "/api/auth/password-recovery/request",
+  "/api/auth/password-recovery/verify",
   // Issue #854 follow-up — finishing an *unconfirmed* sign-out. The sign-out
   // route clears the session cookie on every answer, so when it could not end
   // the session's row, the retry necessarily arrives with no session at all.
@@ -576,6 +587,10 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   // sign-in mutations behind the Origin check rather than being callable
   // cross-site.
   "/api/auth/password-reset/request",
+  // #1386 — phone-native recovery sends an SMS and redeems a code, both
+  // browser-driven and session-less, so they carry the same Origin rule.
+  "/api/auth/password-recovery/request",
+  "/api/auth/password-recovery/verify",
   // ESH-200 (#1385) — public signup is browser-driven and pre-session. The
   // request half can send an SMS, so a cross-site POST must be refused before
   // it becomes a way to make a victim's browser spend a code; the verify half
@@ -898,6 +913,11 @@ const AUTH_RATE_LIMITED_PATHS = [
   // phone-otp.ts; this per-IP bucket is the outer ceiling.
   "/api/auth/phone-otp/request",
   "/api/auth/phone-otp/verify",
+  // #1386 — password recovery spends SMS credit and guesses a 6-digit code
+  // without a session, like the login OTP pair above. It shares the per-IP
+  // bucket; the per-number limiter lives in `password-recovery.ts`.
+  "/api/auth/password-recovery/request",
+  "/api/auth/password-recovery/verify",
   "/api/platform/auth/mfa/challenge",
   "/api/platform/auth/mfa/verify",
   "/api/platform/auth/mfa/enrol",
