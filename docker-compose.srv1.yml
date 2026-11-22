@@ -98,6 +98,7 @@ services:
       # Traefik's dynamic.yml — see archive/deploy/docker-compose.srv1.yml for
       # the exact block, which this stack does not change.
       ROOT_DOMAIN: ${ROOT_DOMAIN:-pos.eshobe.com}
+      ADDITIONAL_ROOT_DOMAINS: ${ADDITIONAL_ROOT_DOMAINS:-}
       SUBDOMAIN_ROUTING: ${SUBDOMAIN_ROUTING:-on}
       PLATFORM_BASE_URL: ${PLATFORM_BASE_URL:-https://pos.eshobe.com}
       # The website manager's other half (docs/integrations/eshobe-cms-integration.md). The

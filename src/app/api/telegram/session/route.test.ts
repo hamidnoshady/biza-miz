@@ -49,8 +49,9 @@ vi.mock("@/lib/db", () => ({
 vi.mock("@/lib/host-resolution", () => ({ resolveBusinessByLabel: mocks.resolveBusiness }));
 vi.mock("@/lib/host", () => ({
   businessHost: (label: string, root: string) => `${label}.${root}`,
+  configuredRootDomains: () => ["example.com"],
   hostRoutingEnabled: () => true,
-  parseHost: () => ({ kind: "business", label: "store" }),
+  parseHostAny: () => ({ kind: "business", label: "store", root: "example.com" }),
   requestHost: () => "store.example.com",
 }));
 vi.mock("@/lib/deployment-role", () => ({ deploymentRole: mocks.deploymentRole }));

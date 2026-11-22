@@ -1,12 +1,14 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import {
+  configuredRootDomains,
   hostRoutingEnabled,
-  parseHost,
+  parseHostAny,
   preferredProto,
+  primaryRootDomain,
   requestHost,
-  rootDomain as configuredRootDomain,
   swapHostLabel,
+  type HostEnv,
 } from "@/lib/host";
 import { resolveBusinessByLabel } from "@/lib/host-resolution";
 import { endedSupportSessionClaims, getSession } from "@/lib/auth";
@@ -36,16 +38,17 @@ export default async function LoginPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   if (hostRoutingEnabled()) {
-    const rootDomain = configuredRootDomain();
+    const roots = configuredRootDomains(process.env as HostEnv);
+    const primaryRoot = primaryRootDomain(process.env as HostEnv);
     const headerList = await headers();
-    const host = parseHost(requestHost(headerList), rootDomain);
+    const host = parseHostAny(requestHost(headerList), roots);
 
     if (host.kind === "business") {
       const business = await resolveBusinessByLabel(host.label);
       if (business?.viaAlias) {
         const proto = preferredProto(headerList.get("x-forwarded-proto"), "https");
         const forwardedHost = headerList.get("x-forwarded-host") ?? headerList.get("host");
-        redirect(`${proto}://${swapHostLabel(forwardedHost, business.subdomain, rootDomain)}/login`);
+        redirect(`${proto}://${swapHostLabel(forwardedHost, business.subdomain, host.root || primaryRoot)}/login`);
       }
     }
   }

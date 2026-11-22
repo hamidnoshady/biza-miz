@@ -141,6 +141,23 @@ describe("resolveHandoffOrigin — host tenancy on (Cloud)", () => {
     expect(result).toEqual({ ok: true, origin: `https://acme.${ROOT}` });
   });
 
+  it("keeps the browser's own root during a multi-root migration", () => {
+    const result = resolveHandoffOrigin(cloudCtx({
+      env: { ROOT_DOMAIN: "app.eshobe.com", ADDITIONAL_ROOT_DOMAINS: "app.bizamiz.ir" },
+      hostHeader: "admin.app.bizamiz.ir",
+      requestRoot: "app.bizamiz.ir",
+    }));
+    expect(result).toEqual({ ok: true, origin: "https://acme.app.bizamiz.ir" });
+  });
+
+  it("uses the primary root when no request root is supplied", () => {
+    const result = resolveHandoffOrigin(cloudCtx({
+      env: { ROOT_DOMAIN: "app.eshobe.com", ADDITIONAL_ROOT_DOMAINS: "app.bizamiz.ir" },
+      hostHeader: "admin.app.eshobe.com",
+    }));
+    expect(result).toEqual({ ok: true, origin: "https://acme.app.eshobe.com" });
+  });
+
   it("keeps a non-default external port and drops the scheme default", () => {
     expect(resolveHandoffOrigin(cloudCtx({ hostHeader: `admin.${ROOT}:8443` }))).toEqual({
       ok: true,

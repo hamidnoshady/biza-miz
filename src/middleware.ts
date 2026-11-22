@@ -31,11 +31,14 @@ import { deploymentRole } from "@/lib/deployment-role";
 import { supportMutationAllowed } from "@/lib/support-session";
 import {
   ADMIN_HOST_LABEL,
+  configuredRootDomains,
   hostRoutingEnabled,
-  parseHost,
+  parseHostAny,
   preferredProto,
+  primaryRootDomain,
   requestHost,
   swapHostLabel,
+  type HostEnv,
   type ParsedHost,
 } from "@/lib/host";
 
@@ -1167,7 +1170,7 @@ async function handlePlatformAdmin(
   request: NextRequest,
   pathname: string,
   host: ParsedHost | null,
-  rootDomain: string,
+  hostRoot: string,
   requestHeaders: Headers,
 ): Promise<NextResponse | null> {
   if (isPlatformRealmPath(pathname)) {
@@ -1176,13 +1179,13 @@ async function handlePlatformAdmin(
 
     // Phase 23: the console lives on admin.{root} and nowhere else. Serving it
     // from a tenant's origin would put the super-admin realm inside that
-    // tenant's browser origin — the exact sharing this wave removes — so the
+    // tenant's browser origin - the exact sharing this wave removes - so the
     // request is moved to the console's own host rather than answered here.
     if (host && host.kind !== "admin") {
       return redirectToLabel(
         request,
         ADMIN_HOST_LABEL,
-        rootDomain,
+        hostRoot,
         `${request.nextUrl.pathname}${request.nextUrl.search}`,
       );
     }
@@ -1227,7 +1230,7 @@ async function handlePlatformAdmin(
 function redirectToLabel(
   request: NextRequest,
   label: string,
-  rootDomain: string,
+  hostRoot: string,
   pathAndQuery: string,
   status?: number,
 ): NextResponse {
@@ -1237,7 +1240,7 @@ function redirectToLabel(
     request.headers.get("x-forwarded-proto"),
     request.nextUrl.protocol,
   );
-  const target = swapHostLabel(hostHeader, label, rootDomain);
+  const target = swapHostLabel(hostHeader, label, hostRoot);
   return NextResponse.redirect(`${proto}://${target}${pathAndQuery}`, status);
 }
 
@@ -1372,7 +1375,7 @@ function handleHostIsolation(
 function handleLegacyPathRedirect(
   request: NextRequest,
   pathname: string,
-  rootDomain: string,
+  hostRoot: string,
   sessionSlug: string | undefined,
   sessionSubdomain: string | undefined,
 ): NextResponse | null {
@@ -1394,7 +1397,7 @@ function handleLegacyPathRedirect(
   // very business already carries the translation; otherwise only the
   // database has it, so the Node-runtime resolver does the lookup.
   if (sessionSlug && sessionSubdomain && sessionSlug === slug) {
-    return redirectToLabel(request, sessionSubdomain, rootDomain, next, 301);
+    return redirectToLabel(request, sessionSubdomain, hostRoot, next, 301);
   }
   return toHostResolver(request, next, slug);
 }
@@ -1461,7 +1464,8 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
   // Read once per request. A deployment with a ROOT_DOMAIN is host-routed;
   // `SUBDOMAIN_ROUTING=off` is the escape hatch for one whose wildcard
   // certificate is not issuing yet (see subdomainRoutingEnabled).
-  const rootDomain = process.env.ROOT_DOMAIN?.trim() ?? "";
+  const roots = configuredRootDomains(process.env as HostEnv);
+  const primaryRoot = primaryRootDomain(process.env as HostEnv);
   const hostRouting = hostRoutingEnabled();
   // The real `Host` header by default, never `x-forwarded-host`: this drives
   // the isolation decision, and a forwarded header is client-supplied unless a
@@ -1472,9 +1476,15 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
   // `TRUST_FORWARDED_HOST=on` inverts that, for a managed platform whose edge
   // routes by hostname and hands the container an internal name instead — see
   // `trustForwardedHost` for what that costs and when it is the only option.
-  const host = hostRouting
-    ? parseHost(requestHost(request.headers), rootDomain)
+  const parsedHost = hostRouting
+    ? parseHostAny(requestHost(request.headers), roots)
     : null;
+  const host = parsedHost;
+  // Redirects must stay on the root the browser is actually using. During a
+  // migration app.eshobe.com and app.bizamiz.ir both serve the same deployment;
+  // a hard-coded primary here would move old-domain users and drop their
+  // host-scoped session.
+  const hostRoot = parsedHost?.root || primaryRoot;
 
   // ---- A hostname nobody vouches for ----------------------------------------
   //
@@ -1505,7 +1515,7 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
     request,
     pathname,
     host,
-    rootDomain,
+    hostRoot,
     requestHeaders,
   );
   if (platformResponse) return platformResponse;
@@ -1546,7 +1556,7 @@ async function handle(request: NextRequest, requestHeaders: Headers) {
     const legacyRedirect = handleLegacyPathRedirect(
       request,
       pathname,
-      rootDomain,
+      hostRoot,
       claims?.businessSlug,
       claims?.businessSubdomain,
     );

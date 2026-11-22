@@ -38,7 +38,15 @@
  * so the deployment matrix in `public-origin.test.ts` runs without a server,
  * a proxy, or a database.
  */
-import { parseHost, resolveRequestHost, trustForwardedHost, type HostEnv } from "./host";
+import {
+  configuredRootDomains,
+  parseHost,
+  parseHostAny,
+  primaryRootDomain,
+  resolveRequestHost,
+  trustForwardedHost,
+  type HostEnv,
+} from "./host";
 import { validateSubdomain } from "./slug";
 import { deploymentRole } from "./deployment-role";
 
@@ -182,6 +190,12 @@ export interface HandoffOriginContext {
   requestProtocol: string;
   /** The internal company's subdomain when host tenancy is on; null in single-host mode. */
   tenantSubdomain: string | null;
+  /**
+   * The configured root the request actually arrived on. During a migration
+   * both `app.eshobe.com` and `app.bizamiz.ir` are valid; the handoff must stay
+   * on the browser's own root so its host-scoped cookie still applies.
+   */
+  requestRoot?: string;
 }
 
 export type HandoffOriginResult =
@@ -201,14 +215,19 @@ const ROOT_DOMAIN_PATTERN =
 function validatedRootDomain(
   env: PublicOriginEnv,
   allowLocal: boolean,
+  requestRoot?: string,
 ): { ok: true; root: string } | { ok: false; code: HandoffOriginFailure } {
-  const raw = (env.ROOT_DOMAIN ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+  const raw = normalizeRootDomainForHandoff(requestRoot || primaryRootDomain(env));
   if (!raw) return { ok: false, code: "root_domain_missing" };
   if (!ROOT_DOMAIN_PATTERN.test(raw)) return { ok: false, code: "root_domain_invalid" };
   if (!allowLocal && classifyHostname(raw) !== "public") {
     return { ok: false, code: "root_domain_internal" };
   }
   return { ok: true, root: raw };
+}
+
+function normalizeRootDomainForHandoff(value: string): string {
+  return value.trim().toLowerCase().replace(/^\.+|\.+$/g, "");
 }
 
 /**
@@ -300,17 +319,14 @@ export function resolveHandoffOrigin(ctx: HandoffOriginContext): HandoffOriginRe
       }
     }
     if (ctx.tenantSubdomain === null) return { ok: true, origin: explicit.origin };
-    // Host tenancy: the pin must name this deployment's root zone (its apex,
-    // console, or a tenant), and the tenant host is rebuilt under the root so
-    // a pin naming one business cannot capture another's handoff.
-    const root = validatedRootDomain(ctx.env, ctx.allowLocal);
-    if (!root.ok) return root;
-    if (parseHost(explicit.hostname, root.root).kind === "unknown") {
-      return { ok: false, code: "public_origin_invalid" };
-    }
+    // Host tenancy: the pin must name one of this deployment's root zones (its
+    // apex, console, or a tenant), and the tenant host is rebuilt under that
+    // root so a pin naming one business cannot capture another's handoff.
+    const pin = parseHostAny(explicit.hostname, configuredRootDomains(ctx.env));
+    if (pin.kind === "unknown") return { ok: false, code: "public_origin_invalid" };
     const label = validatedLabel(ctx.tenantSubdomain);
     if (!label.ok) return label;
-    return { ok: true, origin: tenantOrigin(explicit.scheme, label.label, root.root, explicit.port) };
+    return { ok: true, origin: tenantOrigin(explicit.scheme, label.label, pin.root, explicit.port) };
   }
 
   const scheme = resolveScheme(ctx.forwardedProto, ctx.requestProtocol);
@@ -342,7 +358,7 @@ export function resolveHandoffOrigin(ctx: HandoffOriginContext): HandoffOriginRe
     return { ok: true, origin: joinOrigin(scheme, hostname, port) };
   }
 
-  const root = validatedRootDomain(ctx.env, ctx.allowLocal);
+  const root = validatedRootDomain(ctx.env, ctx.allowLocal, ctx.requestRoot);
   if (!root.ok) return root;
   const label = validatedLabel(ctx.tenantSubdomain);
   if (!label.ok) return label;
@@ -391,14 +407,21 @@ export function handoffOriginContext(
   tenantSubdomain: string | null,
   env: PublicOriginEnv = process.env as PublicOriginEnv,
 ): HandoffOriginContext {
+  const hostHeader = request.headers.get("host") ?? request.nextUrl.host ?? null;
+  const forwardedHost = request.headers.get("x-forwarded-host");
+  const parsed = parseHostAny(
+    resolveRequestHost(hostHeader, forwardedHost, env),
+    configuredRootDomains(env),
+  );
   return {
     env,
     allowLocal: localOriginsAllowed(),
-    hostHeader: request.headers.get("host") ?? request.nextUrl.host ?? null,
-    forwardedHost: request.headers.get("x-forwarded-host"),
+    hostHeader,
+    forwardedHost,
     forwardedProto: request.headers.get("x-forwarded-proto"),
     requestProtocol: request.nextUrl.protocol,
     tenantSubdomain,
+    requestRoot: parsed.root || primaryRootDomain(env),
   };
 }
 

@@ -32,7 +32,7 @@ import {
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { getJwtSecret } from "./jwt-secret";
-import { parseHost, preferredProto } from "./host";
+import { configuredRootDomains, parseHostAny, preferredProto, type HostEnv } from "./host";
 import { BRAND_NAME_FA } from "./brand";
 
 /** Long enough for a fingerprint/face prompt; short enough that a stale token is useless. */
@@ -102,9 +102,9 @@ export function expectedOriginsFor(
   const configured = expectedOrigin();
   const base = Array.isArray(configured) ? configured : [configured];
 
-  const root = process.env.ROOT_DOMAIN?.trim() ?? "";
+  const roots = configuredRootDomains(process.env as HostEnv);
   const host = (hostHeader ?? "").trim().toLowerCase().replace(/\.$/, "");
-  if (!root || !host || parseHost(host, root).kind === "unknown") return configured;
+  if (roots.length === 0 || !host || parseHostAny(host, roots).kind === "unknown") return configured;
 
   const derived = `${preferredProto(forwardedProto, fallbackProto)}://${host}`;
   return base.includes(derived) ? configured : [...base, derived];
