@@ -369,6 +369,52 @@ describe("submitted café order → one POS order", () => {
     expect(rows[0].count).toBe("0");
   });
 
+  describe("buyer identity", () => {
+    /**
+     * A visitor is resolved by phone across the whole business, and that match
+     * can be a staff party — the owner ordering from their own table is the
+     * production case (`ESH-45982210`). `createOrder` refuses a sale attached to
+     * a non-customer party (#1446), so passing it through failed the order with
+     * `customer_role_required` and the till never saw it.
+     */
+    it("a phone that matches a staff party makes a guest sale, not a refused order", async () => {
+      const parties = await import("../src/lib/parties-service");
+      await parties.createParty(
+        tenant.businessId,
+        { roles: ["Employee"], displayName: "کارمند شیفت", phone: "09120000000" },
+        { locationId: tenant.locationId },
+      );
+
+      const order = cmsOrder(tenant);
+      const result = await intake(tenant, order);
+      expect(result.created).toBe(true);
+
+      const { rows } = await db.query<{ customer_id: string | null; note: string }>(
+        "SELECT customer_id, note FROM orders WHERE id = $1",
+        [result.orderId],
+      );
+      expect(rows[0].customer_id).toBeNull();
+      // The buyer is still identifiable at the till without a party link.
+      expect(rows[0].note).toContain("09120000000");
+    });
+
+    it("a phone that matches a customer party still attaches that customer", async () => {
+      const parties = await import("../src/lib/parties-service");
+      const customer = await parties.createParty(
+        tenant.businessId,
+        { roles: ["Customer"], displayName: "سارا", phone: "09120000000" },
+        { locationId: tenant.locationId },
+      );
+
+      const { orderId } = await intake(tenant, cmsOrder(tenant));
+      const { rows } = await db.query<{ customer_id: string | null }>(
+        "SELECT customer_id FROM orders WHERE id = $1",
+        [orderId],
+      );
+      expect(rows[0].customer_id).toBe(customer.id);
+    });
+  });
+
   describe("staff decision", () => {
     it("accept dispatches the exact line set once, and only after approval", async () => {
       const { orderId } = await intake(tenant, cmsOrder(tenant));
