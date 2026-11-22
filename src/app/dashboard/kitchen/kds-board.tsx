@@ -47,6 +47,7 @@ interface StaleTicket {
   order_number: number;
   order_status: "open" | "held" | "completed";
   item_count: number;
+  archived_at?: string;
 }
 
 interface Modifier {
@@ -496,6 +497,10 @@ function DetailPlaceholder() {
 
 export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean }) {
   const [showStaleReview, setShowStaleReview] = useState(false);
+  const [showKitchenHistory, setShowKitchenHistory] = useState(false);
+  const [reviewRevision, setReviewRevision] = useState(0);
+  const [selectedStaleIds, setSelectedStaleIds] = useState<string[]>([]);
+  const [archivingStale, setArchivingStale] = useState(false);
   const [staleTickets, setStaleTickets] = useState<StaleTicket[] | null>(null);
   const [staleError, setStaleError] = useState<string | null>(null);
 
@@ -503,7 +508,7 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     if (!canReviewStale || !showStaleReview) return;
     let cancelled = false;
 
-    void api<{ tickets?: StaleTicket[]; error?: string }>("/api/kitchen/tickets/stale")
+    void api<{ tickets?: StaleTicket[]; error?: string }>(showKitchenHistory ? "/api/kitchen/tickets/stale?view=history" : "/api/kitchen/tickets/stale")
       .then(({ ok, data }) => {
         if (cancelled) return;
         if (ok && Array.isArray(data.tickets)) {
@@ -519,7 +524,7 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     return () => {
       cancelled = true;
     };
-  }, [canReviewStale, showStaleReview]);
+  }, [canReviewStale, reviewRevision, showKitchenHistory, showStaleReview]);
   const [items, setItems] = useState<TicketItem[]>([]);
   const [modifiers, setModifiers] = useState<Modifier[]>([]);
   const [now, setNow] = useState(() => Date.now());
@@ -971,6 +976,32 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     setSoundAlerts(false);
   }
 
+  async function archiveStaleTickets() {
+    if (!window.confirm("سفارش‌های انتخاب‌شده از صف آشپزخانه بایگانی شوند؟ وضعیت سفارش و پرداخت تغییر نمی‌کند.")) return;
+
+    setArchivingStale(true);
+    setStaleError(null);
+    try {
+      const result = await api<{ archivedCount?: number; error?: string }>("/api/kitchen/tickets/stale", {
+        method: "POST",
+        body: JSON.stringify({ orderIds: selectedStaleIds }),
+      });
+      if (!result.ok) {
+        setStaleError(errorMessage(result.data.error));
+        return;
+      }
+      setSelectedStaleIds([]);
+      setStaleTickets(null);
+      setReviewRevision((revision) => revision + 1);
+      toast.success(`${toPersianDigits(String(result.data.archivedCount ?? 0))} سفارش بایگانی شد.`);
+      void load({ showRefresh: true });
+    } catch {
+      setStaleError("بایگانی سفارش‌ها انجام نشد.");
+    } finally {
+      setArchivingStale(false);
+    }
+  }
+
   return (
     <PageShell className="space-y-4">
       <header className={`${cardClass} p-4`}>
@@ -990,9 +1021,11 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                 type="button"
                 variant="outline"
                 aria-expanded={showStaleReview}
+                disabled={archivingStale}
                 onClick={() => {
                   setStaleTickets(null);
                   setStaleError(null);
+                  setSelectedStaleIds([]);
                   setShowStaleReview(!showStaleReview);
                 }}
               >
@@ -1035,23 +1068,54 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
 
       {canReviewStale && showStaleReview ? (
         <section className={`${cardClass} space-y-2 p-4`}>
-          <h2 className="font-semibold">سفارش‌های مانده در صف آشپزخانه از ۶۰ روز پیش</h2>
+          <h2 className="font-semibold">
+            {showKitchenHistory ? "تاریخچه آشپزخانه" : "سفارش‌های مانده در صف آشپزخانه از ۶۰ روز پیش"}
+          </h2>
+          <Button type="button" variant="outline" disabled={archivingStale} onClick={() => {
+            setStaleTickets(null);
+            setStaleError(null);
+            setSelectedStaleIds([]);
+            setShowKitchenHistory(!showKitchenHistory);
+          }}>
+            {showKitchenHistory ? "بررسی سفارش‌های قدیمی" : "تاریخچه آشپزخانه"}
+          </Button>
+          {!showKitchenHistory && staleTickets?.length ? (
+            <Button type="button" variant="outline" disabled={archivingStale || selectedStaleIds.length === 0}
+              onClick={() => void archiveStaleTickets()}>
+              بایگانی انتخاب‌شده‌ها
+            </Button>
+          ) : null}
           {staleError ? <p role="alert">{staleError}</p> : null}
           {!staleError && staleTickets === null ? (
             <p role="status">در حال دریافت سفارش‌ها…</p>
           ) : null}
-          {staleTickets?.length === 0 ? <p>سفارش قدیمی در صف این شعبه وجود ندارد.</p> : null}
+          {staleTickets?.length === 0 ? <p>{showKitchenHistory ? "تاریخچه این شعبه خالی است." : "سفارش قدیمی در صف این شعبه وجود ندارد."}</p> : null}
           {staleTickets?.length ? (
             <>
-              <p>{toPersianDigits(String(staleTickets.length))} سفارش</p>
+              <p>{toPersianDigits(String(staleTickets.length))} سفارش در این فهرست</p>
               <ul className="max-h-80 space-y-1 overflow-auto">
                 {staleTickets.map((ticket) => (
-                  <li key={ticket.order_id} className="text-sm">
+                  <li key={ticket.archived_at ? `${ticket.order_id}:${ticket.archived_at}` : ticket.order_id} className="text-sm">
+                    {!showKitchenHistory ? (
+                      <input type="checkbox" className="me-2" disabled={archivingStale}
+                        aria-label={`انتخاب سفارش ${toPersianDigits(String(ticket.order_number))}`}
+                        checked={selectedStaleIds.includes(ticket.order_id)}
+                        onChange={(event) => {
+                          const checked = event.currentTarget.checked;
+                          setSelectedStaleIds((ids) => checked
+                            ? [...ids, ticket.order_id]
+                            : ids.filter((id) => id !== ticket.order_id));
+                        }}
+                      />
+                    ) : null}
                     سفارش {toPersianDigits(String(ticket.order_number))}
                     {" · "}
                     {ticket.order_status === "completed" ? "تکمیل‌شده" : "نیازمند بررسی"}
                     {" · "}
-                    {toPersianDigits(String(ticket.item_count))} ردیف در صف
+                    {toPersianDigits(String(ticket.item_count))} ردیف
+                    {ticket.archived_at ? (
+                      <>{" · بایگانی دستی سفارش قدیمی · "}{formatJalali(new Date(ticket.archived_at), { withMonthName: true })}</>
+                    ) : null}
                   </li>
                 ))}
               </ul>
