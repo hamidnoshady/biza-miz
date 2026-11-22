@@ -320,6 +320,11 @@ const PUBLIC_PATHS = [
   "/api/auth/signup/request",
   "/api/auth/signup/verify",
   "/onboarding",
+  // ESH-202 (#1387) — the short onboarding API is reached with the same
+  // encrypted continuation, not a tenant session (none can exist before the
+  // business does). The handler re-validates it against the database on every
+  // request and never accepts a person/business id from the body.
+  "/api/onboarding",
   // Phase 13: an invitee has no session and no membership of the inviting
   // business yet — the single-use token in the link is the credential.
   "/invite",
@@ -597,6 +602,10 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   // is the credential exchange that follows it.
   "/api/auth/signup/request",
   "/api/auth/signup/verify",
+  // ESH-202 (#1387) — the continuation is the credential, but these are still
+  // browser-driven pre-session mutations: a cross-site POST must not be able to
+  // save another person's draft or confirm provisioning for them.
+  "/api/onboarding",
   // Issue #854 follow-up — the sign-out retry is session-less for the reason
   // given in PUBLIC_PATHS; a cross-site POST to it must still be refused, even
   // though all it could ever do is end a session the browser already left.

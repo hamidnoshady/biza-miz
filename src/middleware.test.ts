@@ -113,6 +113,22 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/api/auth/phone-otp/verify")).toBe(true);
   });
 
+  it("lets the verified-person onboarding continuation through without a tenant session", () => {
+    // ESH-202 / #1387. The person has an identity and no business, so there is
+    // no tenant session to require; the handler re-validates the encrypted
+    // continuation against the database. The prefix also covers every step API.
+    expect(isPublicPath("/onboarding")).toBe(true);
+    expect(isPublicPath("/api/onboarding")).toBe(true);
+    expect(isPublicPath("/api/onboarding/step")).toBe(true);
+    expect(isPublicPath("/api/onboarding/logo")).toBe(true);
+    expect(isPublicPath("/api/onboarding/submit")).toBe(true);
+    // A prefix-shaped decoy is not a second entrance.
+    expect(isPublicPath("/api/onboardingx")).toBe(false);
+    // These are browser-driven state changes, so the Origin check still applies.
+    expect(isBrowserLoginMutationPath("/api/onboarding/step")).toBe(true);
+    expect(isBrowserLoginMutationPath("/api/onboarding/submit")).toBe(true);
+  });
+
   it("keeps the authenticated phone self-service gated, and the sibling routes too", () => {
     // Opening the login door must not open the account-settings one. These
     // act on a signed-in member's own number and have a session to require.

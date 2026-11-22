@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1302**. Rows: tenant **120**, platform **24**.
+Route files scanned: **1306**. Rows: tenant **121**, platform **24**.
 
 ## Summary of remaining gaps
 
@@ -41,7 +41,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 26
+Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 27
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -157,6 +157,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (in
 | Cross-cutting | unauthenticated liveness probe (api/health)<br>_session-/DB-less liveness; listed in PUBLIC_PATHS so middleware doesn't bounce probes into host resolution. Not an AI-callable surface._ | (route only) | — | — | — | — | — | — | — | — | n/a (infra) |
 | Cross-cutting | Content-Security-Policy violation reports (api/csp-report)<br>_browser-posted CSP violation reports (issue #1003): session-less, logs a sanitized line and answers 204. Not an AI-callable surface._ | — | (route only) | — | — | — | — | — | — | — | n/a (infra) |
 | Cross-cutting | tenant auth/session endpoints (login, MFA, OTP, webauthn, step-up, switch business) + OAuth discovery metadata<br>_credential exchange surface — never an AI-callable verb_ | (route only) | (route only) | — | (route only) | — | — | — | — | — | n/a (infra) |
+| Cross-cutting | Short post-signup business onboarding (industry, basics, logo, optional profile, confirmation)<br>_ESH-202 / #1387 — a verified person has no tenant yet, so the encrypted onboarding continuation is the only credential. It creates the first business through the canonical provisioning service and hands off to the existing /setup wizard; it selects no app and charges nothing, and no tenant AI client can reach it._ | (route only) | (route only) | — | (route only) | — | — | — | — | integration/short-onboarding.integration.test.ts | route-only (by design) |
 | Cross-cutting | CMS edit-modal sign-in (one-time CMS admin address for the iframe)<br>_mints a browser sign-in for a human editor; an AI client has no iframe to open_ | — | (route only) | — | — | — | cms.content_manage, cms.publish | — | — | — | n/a (infra) |
 | Verticals | Jewelry (items, stones, custom orders, buy-back, layaway, consignors, prices, reports)<br>_AL1 catalog + AL2 money lanes + AM directory close-out: every money verb (sale / buy-back / installment / payout / settle / gold price record) steps up on every call — the whole vertical deals in gold and cash; consignor directory is create-only in the UI too (no PATCH/DELETE routes exist), so the MCP surface matches it exactly_ | list_jewelry_items | jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add | jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay | jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode; step-up (always approve) | list_jewelry_items, jewelry.buyback.create, jewelry.consignor.create, jewelry.item.create, jewelry.layaway.create, jewelry.price.record, jewelry.stone.add, jewelry.item.consign, jewelry.item.update, jewelry.layaway.pay, jewelry.consignor.payout, jewelry.item.sell, jewelry.layaway.complete, jewelry.stone.delete | integration/jewelry.integration.test.ts | covered |
 | Verticals | Cosmetics (rot management, suppliers, reports)<br>_AN closes the write surface except expired-batch write-offs: those destroy value deliberately and stay in-app like inventory.waste.log (no MCP verb anywhere for value-destructive writedowns)_ | get_near_expiry_items, list_cosmetic_brands, list_cosmetic_items | cosmetics.batch.receive, cosmetics.brand.create, cosmetics.item.create, cosmetics.matrix.create | cosmetics.profile.update, cosmetics.stock.update, cosmetics.tester.open | — | — | inventory.adjust, inventory.view, reports.view | connection mode | get_near_expiry_items, list_cosmetic_brands, list_cosmetic_items, cosmetics.batch.receive, cosmetics.brand.create, cosmetics.item.create, cosmetics.matrix.create, cosmetics.profile.update, cosmetics.stock.update, cosmetics.tester.open | integration/cosmetics.integration.test.ts | covered |

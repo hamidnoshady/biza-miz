@@ -9,7 +9,7 @@ import {
   isLogoMimeType,
 } from "@/lib/business-logo-rules";
 import { INDUSTRY_LABELS, type Industry } from "@/lib/industries";
-import { api, ErrorBox, errorMessage, Field, inputClass, PrimaryButton, SecondaryButton, SetupDataSkeleton, StepShell } from "../ui";
+import { api, ErrorBox, errorMessage, Field, InfoBox, inputClass, PrimaryButton, SecondaryButton, SetupDataSkeleton, StepShell } from "../ui";
 import { nextPath, stepsFor } from "../steps";
 import { useSetupIndustry } from "../industry-context";
 
@@ -55,6 +55,7 @@ export default function BusinessStep() {
   const [logoError, setLogoError] = useState("");
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [prefilled, setPrefilled] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -65,7 +66,10 @@ export default function BusinessStep() {
           setError("بارگذاری اطلاعات کسب‌وکار ممکن نشد.");
           return;
         }
-        if (data.business?.name) setBusinessName(data.business.name);
+        if (data.business?.name) {
+          setBusinessName(data.business.name);
+          setPrefilled(true);
+        }
         if (data.location) {
           setLocationName(data.location.name);
           setAddress(data.location.address ?? "");
@@ -172,6 +176,14 @@ export default function BusinessStep() {
     >
       <form onSubmit={submit} className="max-w-xl">
         <ErrorBox>{error}</ErrorBox>
+        {prefilled ? (
+          <div className="mb-5">
+            <InfoBox>
+              این اطلاعات از ثبت اولیهٔ شما آمده و فقط برای بررسی و ویرایش نمایش داده شده است.
+              نام، نوع کسب‌وکار، شعبه، اطلاعات تماس و لوگو دوباره از شما پرسیده نمی‌شود.
+            </InfoBox>
+          </div>
+        ) : null}
 
         <Field label="نام کسب‌وکار *">
           <input

@@ -394,6 +394,10 @@ describe("every tenant table is protected", () => {
       // Phase 37 — singleton message provider config + rates (no business_id;
       // the business side of messaging billing is RLS-protected).
       "platform_message_config",
+      // Migration 0316 — the short onboarding draft (#1387): progress for a
+      // verified person who has no business yet. Platform-only, no business_id,
+      // never in a tenant export.
+      "platform_onboarding_drafts",
       // Migration 0130 — singleton payment gateway config (Zarinpal merchant
       // id etc.), no business_id; the business side of billing is RLS-protected.
       "platform_payment_config",
