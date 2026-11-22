@@ -224,8 +224,9 @@ per-business origins the browser actually sends.)
 
 - **Existing devices** keep `remoteUrl=https://app.eshobe.com`; updates continue
   because Central remains served there.
-- **New devices** pair to `https://app.bizamiz.ir`; update the placeholder in
-  Settings → Server sync in a later build.
+- **New devices** pair to `<label>.app.bizamiz.ir` (or whatever host the owner is
+  signed in at — the panel derives the address from the request, see “Hybrid
+  sites and paired desktops” below).
 - **Release registration** (GitHub `windows-production` environment):
   `DESKTOP_RELEASE_REGISTRY_URL=https://app.bizamiz.ir/api/desktop-releases/promote`
   — `/api/health` on the new host is already 200 (2026-11-22), so only the
@@ -235,6 +236,65 @@ per-business origins the browser actually sends.)
 - Installer downloads are from GitHub; the domain change does not affect them.
 - To move one device, change Settings → Server sync → remote URL to
   `https://app.bizamiz.ir` (same token), test it, then roll out gradually.
+
+## Hybrid sites and paired desktops
+
+Three different things are easy to conflate. Only one is affected by the root
+change, and not in the way it looks.
+
+| Thing | Where the address lives | Effect of Phase 2 |
+|---|---|---|
+| Desktop paired to a hosted business | the desktop’s own config; Central stores no URL | none — the old host is still served |
+| Hybrid site paired to Central | `local_cloud_activations.cloud_origin` **on the site** | none — `app.eshobe.com` still answers |
+| Business on a custom domain | its DNS and host record | independent of either root |
+
+### The pairing address follows the request
+
+`desktop-link-service.ts` builds the address the owner copies into the desktop
+from the request that rendered the panel, never from `PLATFORM_BASE_URL`:
+
+```ts
+address: originFromHeaders(headers) // "this request's own origin, never a configured constant"
+```
+
+An owner signed in at `<label>.app.eshobe.com` still gets that address; one on
+`<label>.app.bizamiz.ir` gets the new one, which is valid because the wildcard
+exists. Codes are business + location scoped — `pairing-service.ts` looks up
+`business_id`/`location_id`/`code_hash` — so a code issued on one root redeems on
+the other.
+
+### Central stores no device URL
+
+`devices` and `site_devices` have no host, origin or URL column at all; the
+address lives in the desktop app. A root change cannot rewrite what is not
+stored, so no device row needs editing on Central (verified 2026-11-22: 0
+`devices`, 12 `site_devices` identities, none with an address).
+
+### The hybrid site → Central link
+
+The site keeps Central’s origin in `local_cloud_activations.cloud_origin` in its
+**own** database (0 rows on Central, by design). It is probed as
+`${cloudOrigin}/api/health`. A site still pointing at `app.eshobe.com` keeps
+working because that root is served and not redirected.
+
+### What the Phase 3 redirect breaks
+
+- the desktop’s host-scoped session/token is not sent to the new origin;
+- a 301/302 can be replayed as `GET` on a POST; 308 keeps the method but still
+  crosses origins;
+- server-to-server sync would redirect on every poll and hide failures.
+
+Before enabling the 301, re-point or exempt:
+
+- re-issue a pairing code while signed in at the new host, then re-pair (or edit
+  Settings → Server sync);
+- `repairOrReenrollLocalInstallation`
+  (`src/lib/local-activation-site-service.ts`) to move a site’s `cloud_origin`;
+- or keep an explicit no-redirect rule in the proxy for the hosts and API paths
+  desktops use.
+
+Inventory first: the 12 `site_devices` rows, every hybrid site’s `cloud_origin`,
+and each desktop’s configured address.
 
 ## Integrations to update
 
@@ -452,5 +512,8 @@ Pending:
 - [ ] passkey decision recorded and applied (see WebAuthn above)
 - [ ] company/impersonation handoff stays on the browser’s root
 - [ ] desktop health/update check on the old URL still works
+- [ ] hybrid inventory done before the redirect: every `cloud_origin` and paired
+      desktop address re-pointed or exempted (see “Hybrid sites and paired
+      desktops”)
 - [ ] `DESKTOP_RELEASE_REGISTRY_URL` points at the new host and a registration
       succeeds
