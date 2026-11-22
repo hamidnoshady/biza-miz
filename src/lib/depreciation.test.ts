@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   addMonthsToPeriodKey,
   depreciableBase,
+  depreciationCharge,
   depreciationPeriodOfDate,
   disposalOutcome,
   monthlyDepreciation,
+  monthsBetweenPeriodKeys,
+  normaliseDepreciationMethod,
   parseDepreciationPeriodKey,
   planDepreciation,
+  projectDepreciationSchedule,
   reconcileFixedAssetRegister,
   scheduleEndPeriodKey,
   validateFixedAsset,
@@ -307,5 +311,285 @@ describe("reconcileFixedAssetRegister", () => {
     expect(reconcileFixedAssetRegister(base).status).toBe("reconciled");
     expect(reconcileFixedAssetRegister({ ...base, ledgerCost: 90n }).status).toBe("difference");
     expect(reconcileFixedAssetRegister({ ...base, ledgerAccumulated: 41n }).status).toBe("difference");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Depreciation methods and projected schedules — issue #1325.
+// ---------------------------------------------------------------------------
+
+describe("normaliseDepreciationMethod", () => {
+  it("defaults every legacy shape to straight-line with no parameters", () => {
+    expect(normaliseDepreciationMethod({})).toEqual({
+      ok: true,
+      config: {
+        method: "straight_line",
+        decliningBalanceRateBps: null,
+        decliningBalanceSwitchPolicy: "none",
+        totalCapacityUnits: null,
+        capacityUnitLabel: null,
+      },
+    });
+  });
+
+  it("requires a positive annual rate for declining-balance and a positive capacity for units-of-production", () => {
+    expect(normaliseDepreciationMethod({ method: "declining_balance" }).ok).toBe(false);
+    expect(normaliseDepreciationMethod({ method: "declining_balance", decliningBalanceRateBps: 0 }).ok).toBe(false);
+    expect(normaliseDepreciationMethod({ method: "units_of_production" }).ok).toBe(false);
+    expect(normaliseDepreciationMethod({ method: "units_of_production", totalCapacityUnits: -1 }).ok).toBe(false);
+    expect(normaliseDepreciationMethod({ method: "average" }).ok).toBe(false);
+  });
+
+  it("clears parameters that do not belong to the selected method", () => {
+    const result = normaliseDepreciationMethod({
+      method: "straight_line",
+      decliningBalanceRateBps: 2500,
+      totalCapacityUnits: 1000,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      config: { method: "straight_line", decliningBalanceRateBps: null, totalCapacityUnits: null },
+    });
+  });
+});
+
+describe("monthsBetweenPeriodKeys", () => {
+  it("counts calendar months across Jalali year boundaries", () => {
+    expect(monthsBetweenPeriodKeys("1405-01", "1405-12")).toBe(11);
+    expect(monthsBetweenPeriodKeys("1405-12", "1406-01")).toBe(1);
+    expect(monthsBetweenPeriodKeys("1405-03", "1405-01")).toBe(-2);
+  });
+});
+
+describe("depreciationCharge (declining balance)", () => {
+  const base = {
+    cost: 1_200_000,
+    salvageValue: 0,
+    usefulLifeMonths: 12,
+    method: "declining_balance" as const,
+    decliningBalanceRateBps: 2500,
+    decliningBalanceSwitchPolicy: "none" as const,
+    inServiceDate: "2026-04-01",
+    periodKey: "1405-01",
+    openingAccumulated: 0,
+    finalSalvageValue: 0,
+  };
+
+  it("charges the annual rate on the opening carrying amount, one twelfth per month", () => {
+    // 1,200,000 × 25% ÷ 12 = 25,000.
+    expect(depreciationCharge(base)).toBe(25_000);
+  });
+
+  it("never charges against a carrying amount already at the residual floor", () => {
+    expect(depreciationCharge({ ...base, cost: 100, openingAccumulated: 100 })).toBe(0);
+  });
+
+  it("switches to straight-line when that charge is larger, and not otherwise", () => {
+    // Late in a 12-month schedule (2 months left): opening carrying 200.
+    // Declining: 200 × 100% ÷ 12 = 16.67 → 17. Straight line: 200 ÷ 2 = 100.
+    const late = {
+      ...base,
+      cost: 1200,
+      decliningBalanceRateBps: 10_000,
+      openingAccumulated: 1000,
+      periodKey: "1405-11",
+    };
+    expect(depreciationCharge({ ...late, decliningBalanceSwitchPolicy: "none" })).toBe(17);
+    expect(depreciationCharge({ ...late, decliningBalanceSwitchPolicy: "straight_line" })).toBe(100);
+  });
+});
+
+describe("planDepreciation — declining balance", () => {
+  const schedule = {
+    cost: 1_200_000,
+    salvageValue: 0,
+    usefulLifeMonths: 12,
+    inServiceDate: "2026-04-01",
+    method: "declining_balance" as const,
+    decliningBalanceRateBps: 2500,
+    decliningBalanceSwitchPolicy: "none" as const,
+  };
+  const base = {
+    schedule,
+    finalSalvageValue: 0,
+    finalUsefulLifeMonths: 12,
+    postedPeriodKeys: [] as string[],
+    accumulatedSoFar: 0,
+    today: "2026-04-20",
+  };
+
+  it("prices the first month from the opening carrying amount", () => {
+    expect(planDepreciation({ ...base, periodKey: "1405-01" })).toMatchObject({ ok: true, amount: 25_000 });
+  });
+
+  it("prices a catch-up month from the live postings before it, not from today's total", () => {
+    const posted = {
+      ...base,
+      postedPeriodKeys: ["1405-01"],
+      accumulatedSoFar: 25_000,
+      postedPostings: [{ periodKey: "1405-01", amount: 25_000 }],
+      today: "2026-06-20",
+    };
+    // Opening carrying 1,175,000 → 1,175,000 × 25% ÷ 12 = 24,479.17 → 24,479.
+    expect(planDepreciation({ ...posted, periodKey: "1405-02" })).toMatchObject({ ok: true, amount: 24_479 });
+  });
+
+  it("stops at the lifetime cap and never goes below the residual value", () => {
+    const almostDone = {
+      ...base,
+      postedPeriodKeys: ["1405-01"],
+      accumulatedSoFar: 1_199_900,
+      postedPostings: [{ periodKey: "1405-01", amount: 1_199_900 }],
+      today: "2026-06-20",
+    };
+    const capped = planDepreciation({ ...almostDone, periodKey: "1405-02" });
+    expect(capped.ok).toBe(true);
+    if (capped.ok) {
+      expect(capped.amount).toBeGreaterThan(0);
+      expect(capped.amount).toBeLessThanOrEqual(100);
+    }
+    expect(
+      planDepreciation({
+        ...base,
+        postedPeriodKeys: ["1405-01", "1405-02"],
+        accumulatedSoFar: 1_200_000,
+        postedPostings: [
+          { periodKey: "1405-01", amount: 1_199_900 },
+          { periodKey: "1405-02", amount: 100 },
+        ],
+        periodKey: "1405-03",
+        today: "2026-07-01",
+      }),
+    ).toEqual({ ok: false, error: "fully_depreciated" });
+  });
+});
+
+describe("planDepreciation — units of production", () => {
+  const schedule = {
+    cost: 100,
+    salvageValue: 0,
+    usefulLifeMonths: 3,
+    inServiceDate: "2026-04-01",
+    method: "units_of_production" as const,
+    totalCapacityUnits: 3,
+  };
+  const base = {
+    schedule,
+    finalSalvageValue: 0,
+    finalUsefulLifeMonths: 3,
+    postedPeriodKeys: [] as string[],
+    accumulatedSoFar: 0,
+    today: "2026-07-01",
+  };
+
+  it("charges actual production at the approved per-unit rate", () => {
+    expect(planDepreciation({ ...base, periodKey: "1405-01", unitsProduced: 1 })).toMatchObject({
+      ok: true,
+      amount: 33,
+    });
+  });
+
+  it("absorbs the rounding remainder in the month that reaches capacity", () => {
+    const third = {
+      ...base,
+      postedPeriodKeys: ["1405-01", "1405-02"],
+      accumulatedSoFar: 66,
+      postedPostings: [
+        { periodKey: "1405-01", amount: 33, unitsProduced: 1 },
+        { periodKey: "1405-02", amount: 33, unitsProduced: 1 },
+      ],
+    };
+    expect(planDepreciation({ ...third, periodKey: "1405-03", unitsProduced: 1 })).toMatchObject({
+      ok: true,
+      amount: 34,
+    });
+  });
+
+  it("refuses missing capacity, missing units, zero production and over-capacity production", () => {
+    expect(planDepreciation({ ...base, periodKey: "1405-01", unitsProduced: 1, schedule: { ...schedule, totalCapacityUnits: null } })).toEqual({
+      ok: false,
+      error: "capacity_required",
+    });
+    expect(planDepreciation({ ...base, periodKey: "1405-01" })).toEqual({
+      ok: false,
+      error: "production_units_required",
+    });
+    expect(planDepreciation({ ...base, periodKey: "1405-01", unitsProduced: 0 })).toEqual({
+      ok: false,
+      error: "fully_depreciated",
+    });
+    expect(planDepreciation({ ...base, periodKey: "1405-01", unitsProduced: 4 })).toEqual({
+      ok: false,
+      error: "production_exceeds_capacity",
+    });
+  });
+});
+
+describe("projectDepreciationSchedule", () => {
+  it("separates posted months from forecasts, chains carrying amounts and lands exactly", () => {
+    const { rows, totals } = projectDepreciationSchedule({
+      asset: { cost: 100, salvageValue: 0, usefulLifeMonths: 3, inServiceDate: "2026-04-01" },
+      livePostings: [{ periodKey: "1405-01", amount: 33 }],
+      todayPeriodKey: "1405-01",
+    });
+    expect(rows.map((r) => r.status)).toEqual(["posted", "forecast", "forecast"]);
+    expect(rows.map((r) => r.depreciation)).toEqual([33, 33, 34]);
+    expect(rows.map((r) => r.openingCarrying)).toEqual([100, 67, 34]);
+    expect(rows.map((r) => r.closingCarrying)).toEqual([67, 34, 0]);
+    expect(totals.postedDepreciation).toBe(33);
+    expect(totals.forecastDepreciation).toBe(67);
+    expect(totals.accumulated).toBe(100);
+    expect(totals.remainingDepreciableBase).toBe(0);
+    expect(totals.closingCarrying).toBe(0);
+  });
+
+  it("honours a forecast horizon inside the schedule", () => {
+    const { rows } = projectDepreciationSchedule({
+      asset: { cost: 1200, salvageValue: 0, usefulLifeMonths: 12, inServiceDate: "2026-04-01" },
+      livePostings: [],
+      todayPeriodKey: "1405-01",
+      throughPeriodKey: "1405-03",
+    });
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.status === "forecast")).toBe(true);
+  });
+
+  it("forecasts declining balance without ever passing the residual floor", () => {
+    const { rows, totals } = projectDepreciationSchedule({
+      asset: {
+        cost: 1200,
+        salvageValue: 200,
+        usefulLifeMonths: 12,
+        inServiceDate: "2026-04-01",
+        method: "declining_balance",
+        decliningBalanceRateBps: 5000,
+        decliningBalanceSwitchPolicy: "straight_line",
+      },
+      livePostings: [],
+      todayPeriodKey: "1405-01",
+    });
+    expect(rows).toHaveLength(12);
+    expect(totals.accumulated).toBe(1000);
+    expect(totals.closingCarrying).toBe(200);
+    expect(rows.every((r) => r.closingCarrying >= 200)).toBe(true);
+  });
+
+  it("prices a units-of-production forecast from the production plan and closes at capacity", () => {
+    const { rows, totals } = projectDepreciationSchedule({
+      asset: {
+        cost: 100,
+        salvageValue: 0,
+        usefulLifeMonths: 3,
+        inServiceDate: "2026-04-01",
+        method: "units_of_production",
+        totalCapacityUnits: 3,
+      },
+      livePostings: [],
+      projectedUnits: { "1405-01": 1, "1405-02": 1, "1405-03": 1 },
+      todayPeriodKey: "1405-01",
+    });
+    expect(rows.map((r) => r.depreciation)).toEqual([33, 33, 34]);
+    expect(rows.map((r) => r.unitsProduced)).toEqual([1, 1, 1]);
+    expect(totals.accumulated).toBe(100);
   });
 });

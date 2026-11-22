@@ -87,6 +87,12 @@ export interface FixedAssetRow {
   assetAccountId?: string | null;
   assetAccountCode?: string | null;
   status: "active" | "disposed";
+  /** Accountant-selected method (issue #1325); absent on legacy payloads = straight-line. */
+  depreciationMethod?: "straight_line" | "declining_balance" | "units_of_production";
+  decliningBalanceRateBps?: number | null;
+  decliningBalanceSwitchPolicy?: "none" | "straight_line";
+  totalCapacityUnits?: number | null;
+  capacityUnitLabel?: string | null;
   disposalKind?: "sale" | "retirement" | "write_off" | null;
   disposalDate?: string | null;
   disposalProceeds?: number | null;
@@ -218,6 +224,30 @@ const DISPOSAL_KIND_LABELS: Record<NonNullable<FixedAssetRow["disposalKind"]>, s
   write_off: "حذف از دفاتر",
 };
 
+const DEPRECIATION_METHOD_LABELS: Record<
+  NonNullable<FixedAssetRow["depreciationMethod"]>,
+  string
+> = {
+  straight_line: "خط مستقیم",
+  declining_balance: "نزولی (مانده نزولی)",
+  units_of_production: "مقدار تولید",
+};
+
+/** The method as the accountant reads it, parameters included. */
+function methodSummary(asset: FixedAssetRow): string {
+  const method = asset.depreciationMethod ?? "straight_line";
+  if (method === "declining_balance") {
+    const percent = asset.decliningBalanceRateBps ? asset.decliningBalanceRateBps / 100 : 0;
+    const policy = asset.decliningBalanceSwitchPolicy === "straight_line" ? "تبدیل به خط مستقیم" : "بدون تبدیل";
+    return `${DEPRECIATION_METHOD_LABELS.declining_balance} — ${toPersianDigits(percent)}٪ سالانه، ${policy}`;
+  }
+  if (method === "units_of_production") {
+    const capacity = asset.totalCapacityUnits ? toPersianDigits(asset.totalCapacityUnits) : "—";
+    return `${DEPRECIATION_METHOD_LABELS.units_of_production} — ظرفیت ${capacity} ${asset.capacityUnitLabel ?? "واحد"}`;
+  }
+  return DEPRECIATION_METHOD_LABELS.straight_line;
+}
+
 function resolveErrorMessage(code: string | undefined): string {
   if (!code) return "خطای غیرمنتظره رخ داد.";
   if (ERROR_TRANSLATIONS[code]) return ERROR_TRANSLATIONS[code];
@@ -319,6 +349,8 @@ export function FixedAssetsSection({
   const [archiveTarget, setArchiveTarget] = useState<FixedAssetRow | null>(null);
   const [reverseTarget, setReverseTarget] = useState<{ asset: FixedAssetRow; entry: DepreciationHistoryItem } | null>(null);
   const [dimensionsTarget, setDimensionsTarget] = useState<FixedAssetRow | null>(null);
+  const [scheduleTarget, setScheduleTarget] = useState<FixedAssetRow | null>(null);
+  const [portfolioScheduleOpen, setPortfolioScheduleOpen] = useState(false);
   const [journalPeekTarget, setJournalPeekTarget] = useState<{ entryId: string; title: string } | null>(null);
 
   // A single catalogue for the register's dimension pickers (edit dialog). The
@@ -592,14 +624,25 @@ export function FixedAssetsSection({
                 دارایی‌های ثابت ثبت‌شده
               </h2>
             </div>
-            <a
-              href={exportHref}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              title="دریافت اکسل کل داده‌های فیلترشده — کامل و بدون سقف ردیف: دفتر اموال، برنامه استهلاک، برنامه باقیمانده، واگذاری‌ها، انتقال‌ها، تغییر برآوردها، خلاصهٔ دسته‌ها و شعب و گزارش حرکت"
-            >
-              <FileDownIcon className="size-3.5" />
-              <span>دریافت اکسل</span>
-            </a>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPortfolioScheduleOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title="برنامهٔ استهلاک ثبت‌شده و پیش‌بینی‌شدهٔ کل دارایی‌های فیلترشده"
+              >
+                <TrendingDownIcon className="size-3.5" />
+                <span>برنامهٔ پیش‌بینی</span>
+              </button>
+              <a
+                href={exportHref}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                title="دریافت اکسل کل داده‌های فیلترشده — کامل و بدون سقف ردیف: دفتر اموال، برنامه استهلاک، برنامه باقیمانده، برنامهٔ پیش‌بینی‌شده، واگذاری‌ها، انتقال‌ها، تغییر برآوردها، خلاصهٔ دسته‌ها و شعب و گزارش حرکت"
+              >
+                <FileDownIcon className="size-3.5" />
+                <span>دریافت اکسل</span>
+              </a>
+            </div>
           </div>
 
           {/* Search, Filter & Sort Toolbar — server-backed */}
@@ -760,6 +803,7 @@ export function FixedAssetsSection({
                               <span className="ms-2 text-xs font-normal text-muted-foreground">— {a.category}</span>
                             ) : null}
                           </div>
+                          <p className="mt-0.5 text-xs text-muted-foreground">{methodSummary(a)}</p>
                         </Td>
                         <Td nowrap muted>
                           {toPersianDigits(formatJalali(a.acquisitionDate))}
@@ -799,6 +843,7 @@ export function FixedAssetsSection({
                             canManage={!readOnly}
                             onDepreciate={() => setDepreciateTarget(a)}
                             onHistory={() => setHistoryTarget(a)}
+                            onSchedule={() => setScheduleTarget(a)}
                             onDispose={() => setDisposeTarget(a)}
                             onTransfer={() => setTransferTarget(a)}
                             onEstimate={() => setEstimateTarget(a)}
@@ -837,6 +882,7 @@ export function FixedAssetsSection({
                           {a.acquisitionSource ? (
                             <p className="mt-0.5 text-xs text-muted-foreground">بهای دارایی: {ACQUISITION_SOURCE_LABELS[a.acquisitionSource]}</p>
                           ) : null}
+                          <p className="mt-0.5 text-xs text-muted-foreground">روش استهلاک: {methodSummary(a)}</p>
                         </div>
                         <div>
                           <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
@@ -889,6 +935,14 @@ export function FixedAssetsSection({
                           <HistoryIcon className="size-3.5" />
                           <span>تاریخچه</span>
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => setScheduleTarget(a)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground dark:hover:bg-stone-800/60"
+                        >
+                          <CalculatorIcon className="size-3.5" />
+                          <span>برنامه استهلاک</span>
+                        </button>
                         {readOnly ? null : (
                           <AssetActions
                             asset={a}
@@ -897,6 +951,7 @@ export function FixedAssetsSection({
                             compact={false}
                             onDepreciate={() => setDepreciateTarget(a)}
                             onHistory={() => setHistoryTarget(a)}
+                            onSchedule={() => setScheduleTarget(a)}
                             onDispose={() => setDisposeTarget(a)}
                             onTransfer={() => setTransferTarget(a)}
                             onEstimate={() => setEstimateTarget(a)}
@@ -1038,6 +1093,16 @@ export function FixedAssetsSection({
       ) : null}
 
       {/* Default-dimensions edit (prospective only; history untouched). */}
+      {/* Asset-level projected schedule: posted vs forecast. */}
+      {scheduleTarget ? (
+        <DepreciationScheduleModal asset={scheduleTarget} onClose={() => setScheduleTarget(null)} />
+      ) : null}
+
+      {/* Portfolio projected schedule over the register's current filters. */}
+      {portfolioScheduleOpen ? (
+        <PortfolioScheduleModal filters={filterParams()} onClose={() => setPortfolioScheduleOpen(false)} />
+      ) : null}
+
       {dimensionsTarget ? (
         <AssetDimensionsDialog
           asset={dimensionsTarget}
@@ -1085,6 +1150,15 @@ function AssetForm({
   const [cost, setCost] = useState("");
   const [salvageValue, setSalvageValue] = useState("");
   const [usefulLifeMonths, setUsefulLifeMonths] = useState("");
+  // Depreciation method — the accountant's choice (issue #1325).
+  const [depreciationMethod, setDepreciationMethod] = useState<
+    "straight_line" | "declining_balance" | "units_of_production"
+  >("straight_line");
+  /** Annual declining-balance rate, as a percentage (25 = 25% per year). */
+  const [decliningRatePercent, setDecliningRatePercent] = useState("");
+  const [decliningSwitchPolicy, setDecliningSwitchPolicy] = useState<"none" | "straight_line">("none");
+  const [totalCapacityUnits, setTotalCapacityUnits] = useState("");
+  const [capacityUnitLabel, setCapacityUnitLabel] = useState("");
   const [inServiceDate, setInServiceDate] = useState("");
   const [acquisitionSource, setAcquisitionSource] = useState<NonNullable<FixedAssetRow["acquisitionSource"]> | "post_now">("unlinked");
   const [acquisitionEntryId, setAcquisitionEntryId] = useState("");
@@ -1189,6 +1263,18 @@ function AssetForm({
     if (salvageRial >= costRial) return onError("ارزش اسقاط باید کمتر از بهای تمام‌شده باشد.");
     const monthsNum = Number(usefulLifeMonths);
     if (!Number.isInteger(monthsNum) || monthsNum <= 0) return onError("عمر مفید باید یک عدد صحیح مثبت (حداقل ۱ ماه) باشد.");
+    if (depreciationMethod === "declining_balance") {
+      const percent = Number(decliningRatePercent);
+      if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
+        return onError("نرخ سالانهٔ استهلاک نزولی باید عددی بزرگ‌تر از صفر و حداکثر ۱۰۰ درصد باشد.");
+      }
+    }
+    if (depreciationMethod === "units_of_production") {
+      const capacity = Number(totalCapacityUnits);
+      if (!Number.isInteger(capacity) || capacity <= 0) {
+        return onError("ظرفیت کل تأییدشده باید عدد صحیح مثبت باشد.");
+      }
+    }
     if (inServiceDate && inServiceDate < acquisitionDate) return onError("تاریخ بهره‌برداری نمی‌تواند پیش از تاریخ خرید باشد.");
     if (acquisitionSource === "journal" && !acquisitionEntryId) return onError("برای اتصال به سند خرید، یک سند را انتخاب کنید.");
     if (acquisitionSource === "post_now" && !acquisitionAccountId) {
@@ -1220,6 +1306,15 @@ function AssetForm({
         notes: notes.trim() || null,
         assetAccountId: assetAccountId || null,
         dimensions: dimensionPayload(assetDimensions) ?? null,
+        depreciationMethod,
+        decliningBalanceRateBps:
+          depreciationMethod === "declining_balance" ? Math.round(Number(decliningRatePercent) * 100) : null,
+        decliningBalanceSwitchPolicy:
+          depreciationMethod === "declining_balance" ? decliningSwitchPolicy : null,
+        totalCapacityUnits:
+          depreciationMethod === "units_of_production" ? Number(totalCapacityUnits) : null,
+        capacityUnitLabel:
+          depreciationMethod === "units_of_production" ? capacityUnitLabel.trim() || null : null,
       }),
     });
     setIsSubmitting(false);
@@ -1233,6 +1328,11 @@ function AssetForm({
     setCost("");
     setSalvageValue("");
     setUsefulLifeMonths("");
+    setDepreciationMethod("straight_line");
+    setDecliningRatePercent("");
+    setDecliningSwitchPolicy("none");
+    setTotalCapacityUnits("");
+    setCapacityUnitLabel("");
     setInServiceDate("");
     setAcquisitionSource("unlinked");
     setAcquisitionEntryId("");
@@ -1259,8 +1359,8 @@ function AssetForm({
           ثبت دارایی ثابت جدید
         </h2>
         <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">
-          استهلاک به روش خط مستقیم محاسبه می‌شود؛ ثبت دارایی به‌تنهایی سندی صادر نمی‌کند — مشخص کنید بهای آن کجا در دفاتر آمده
-          است و استهلاک هر دوره را جداگانه ثبت کنید.
+          روش استهلاک را حسابدار انتخاب می‌کند (خط مستقیم، نزولی یا مقدار تولید)؛ ثبت دارایی به‌تنهایی سندی صادر نمی‌کند —
+          مشخص کنید بهای آن کجا در دفاتر آمده است و استهلاک هر دوره را جداگانه ثبت کنید.
         </p>
       </header>
 
@@ -1382,6 +1482,75 @@ function AssetForm({
               disabled={busy || isSubmitting}
             />
           </Field>
+
+          <Field label="روش استهلاک" hint="انتخاب حسابدار؛ تغییر آن بعداً فقط آینده‌نگر است">
+            <select
+              className={inputClass}
+              value={depreciationMethod}
+              onChange={(e) => setDepreciationMethod(e.target.value as typeof depreciationMethod)}
+              disabled={busy || isSubmitting}
+            >
+              <option value="straight_line">خط مستقیم</option>
+              <option value="declining_balance">نزولی (مانده نزولی)</option>
+              <option value="units_of_production">مقدار تولید</option>
+            </select>
+          </Field>
+
+          {depreciationMethod === "declining_balance" ? (
+            <>
+              <Field label="نرخ سالانهٔ استهلاک نزولی (٪)" hint="روی مانده دفتری ابتدای هر ماه اعمال می‌شود">
+                <PersianNumberInput
+                  className={inputClass}
+                  dir="ltr"
+                  inputMode="numeric"
+                  value={decliningRatePercent}
+                  onChange={(e) => setDecliningRatePercent(e.target.value)}
+                  placeholder="مثلاً ۲۵"
+                  disabled={busy || isSubmitting}
+                />
+              </Field>
+              <Field
+                label="سیاست تغییر به خط مستقیم"
+                hint="اگر خط مستقیم روی باقی‌مانده از نرخ نزولی بیشتر شود، همان مبلغ بزرگ‌تر ثبت می‌شود"
+              >
+                <select
+                  className={inputClass}
+                  value={decliningSwitchPolicy}
+                  onChange={(e) => setDecliningSwitchPolicy(e.target.value as typeof decliningSwitchPolicy)}
+                  disabled={busy || isSubmitting}
+                >
+                  <option value="none">بدون تبدیل (ماه آخر تسویه می‌شود)</option>
+                  <option value="straight_line">تبدیل به خط مستقیم</option>
+                </select>
+              </Field>
+            </>
+          ) : null}
+
+          {depreciationMethod === "units_of_production" ? (
+            <>
+              <Field label="ظرفیت کل تأییدشده" hint="کل مقدار تولید یا کارکرد تأییدشده تا پایان عمر دارایی">
+                <PersianNumberInput
+                  className={inputClass}
+                  dir="ltr"
+                  inputMode="numeric"
+                  value={totalCapacityUnits}
+                  onChange={(e) => setTotalCapacityUnits(e.target.value)}
+                  placeholder="مثلاً ۵۰۰۰۰۰"
+                  disabled={busy || isSubmitting}
+                />
+              </Field>
+              <Field label="واحد ظرفیت" hint="مثلاً عدد، کیلوگرم یا ساعت کارکرد">
+                <input
+                  className={inputClass}
+                  value={capacityUnitLabel}
+                  onChange={(e) => setCapacityUnitLabel(e.target.value)}
+                  placeholder="عدد"
+                  maxLength={40}
+                  disabled={busy || isSubmitting}
+                />
+              </Field>
+            </>
+          ) : null}
 
           <Field label={`بهای تمام‌شده (${money.unitLabel})`} hint="مبلغ پرداختی یا بهای خرید">
             <PersianNumberInput
@@ -1611,6 +1780,7 @@ function AssetActions({
   compact = true,
   onDepreciate,
   onHistory,
+  onSchedule,
   onDispose,
   onTransfer,
   onEstimate,
@@ -1624,6 +1794,7 @@ function AssetActions({
   compact?: boolean;
   onDepreciate: () => void;
   onHistory: () => void;
+  onSchedule: () => void;
   onDispose: () => void;
   onTransfer: () => void;
   onEstimate: () => void;
@@ -1672,6 +1843,16 @@ function AssetActions({
         >
           <HistoryIcon className="size-3.5" />
           <span>تاریخچه</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onSchedule}
+          className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground dark:hover:bg-stone-800/60"
+          title="برنامهٔ استهلاک ثبت‌شده و پیش‌بینی‌شده"
+        >
+          <CalculatorIcon className="size-3.5" />
+          <span>برنامه</span>
         </button>
 
         {canManage ? (
@@ -1765,6 +1946,15 @@ function AssetActions({
         </button>
       ) : null}
 
+      <button
+        type="button"
+        onClick={onSchedule}
+        disabled={busy}
+        className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      >
+        برنامه استهلاک
+      </button>
+
       {!disposed && !archived ? (
         <>
           <button
@@ -1850,8 +2040,10 @@ function DepreciateDialog({
   const [periodYear, setPeriodYear] = useState(today.jy);
   const [periodMonth, setPeriodMonth] = useState(today.jm);
   const [entryDate, setEntryDate] = useState("");
+  const [unitsProduced, setUnitsProduced] = useState("");
   const [localError, setLocalError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const method = asset.depreciationMethod ?? "straight_line";
   const periodKey = `${periodYear}-${String(periodMonth).padStart(2, "0")}`;
   const monthDisabled = (jy: number, jm: number) =>
     (jy === today.jy && jm > today.jm) || (inService != null && (jy < inService.jy || (jy === inService.jy && jm < inService.jm)));
@@ -1861,7 +2053,11 @@ function DepreciateDialog({
   const periodsPosted = asset.depreciationCount ?? 0;
   const isFinalScheduledPeriod = periodsPosted + 1 >= asset.usefulLifeMonths;
   const regularMonthly = Math.round(depreciableBase / asset.usefulLifeMonths);
-  const calculatedPeriodAmount = isFinalScheduledPeriod ? remaining : Math.min(regularMonthly, remaining);
+  const calculatedPeriodAmount =
+    method === "straight_line" ? (isFinalScheduledPeriod ? remaining : Math.min(regularMonthly, remaining)) : 0;
+  const unitsNumber = Number(unitsProduced);
+  const unitsValid = Number.isInteger(unitsNumber) && unitsNumber > 0;
+  const canPost = remaining > 0 && (method === "units_of_production" ? unitsValid : true);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -1871,6 +2067,10 @@ function DepreciateDialog({
       setLocalError("این ماه پیش از بهره‌برداری دارایی یا در آینده است.");
       return;
     }
+    if (method === "units_of_production" && !unitsValid) {
+      setLocalError("برای روش مقدار تولید، مقدار تولید این دوره (عدد صحیح مثبت) الزامی است.");
+      return;
+    }
 
     setSubmitting(true);
     const { ok, data } = await api<{ amount?: number; error?: string }>(`/api/ledger/fixed-assets/${asset.id}/depreciate`, {
@@ -1878,6 +2078,7 @@ function DepreciateDialog({
       body: JSON.stringify({
         periodKey,
         entryDate: entryDate || undefined,
+        unitsProduced: method === "units_of_production" ? unitsNumber : undefined,
       }),
     });
     setSubmitting(false);
@@ -1931,6 +2132,10 @@ function DepreciateDialog({
               دوره {toPersianDigits(periodsPosted + 1)} از {toPersianDigits(asset.usefulLifeMonths)}
             </p>
           </div>
+          <div className="col-span-2 border-t border-border pt-2">
+            <span className="text-xs text-muted-foreground">روش استهلاک:</span>
+            <p className="font-semibold text-foreground">{methodSummary(asset)}</p>
+          </div>
         </div>
       </div>
 
@@ -1977,10 +2182,35 @@ function DepreciateDialog({
         </Field>
 
         {/* Amount and ledger posting notice */}
+        {method === "units_of_production" ? (
+          <Field
+            label={`مقدار تولید این دوره (${asset.capacityUnitLabel ?? "واحد"})`}
+            hint={`ظرفیت تأییدشده: ${toPersianDigits(asset.totalCapacityUnits ?? 0)} — مبلغ بر اساس نرخ هر واحد و باقی‌مانده محاسبه می‌شود`}
+          >
+            <PersianNumberInput
+              className={inputClass}
+              dir="ltr"
+              inputMode="numeric"
+              value={unitsProduced}
+              onChange={(e) => setUnitsProduced(e.target.value)}
+              placeholder="مثلاً ۱۲۰۰"
+              disabled={busy || submitting}
+            />
+          </Field>
+        ) : null}
+
         <div className="rounded-xl border border-amber-500/20 bg-amber-50/60 p-3 text-xs dark:bg-amber-500/10">
           <div className="flex items-center justify-between font-semibold text-foreground">
-            <span>مبلغ استهلاک این دوره:</span>
-            <span className="text-sm tabular-nums text-amber-800 dark:text-amber-300">{money.format(calculatedPeriodAmount)}</span>
+            <span>{method === "straight_line" ? "مبلغ استهلاک این دوره:" : "مبلغ استهلاک:"}</span>
+            <span className="text-sm tabular-nums text-amber-800 dark:text-amber-300">
+              {method === "straight_line"
+                ? money.format(calculatedPeriodAmount)
+                : method === "units_of_production"
+                  ? unitsValid
+                    ? `بر اساس ${toPersianDigits(unitsNumber)} ${asset.capacityUnitLabel ?? "واحد"}`
+                    : "در انتظار مقدار تولید"
+                  : "در زمان ثبت بر اساس مانده دفتری محاسبه می‌شود"}
+            </span>
           </div>
           <p className="mt-1.5 text-muted-foreground">
             سند حسابداری در شعبهٔ دارایی ({asset.locationName ?? "بدون شعبه"}) صادر خواهد شد: بدهکار{" "}
@@ -1993,7 +2223,7 @@ function DepreciateDialog({
           <SecondaryButton onClick={onClose} disabled={busy || submitting}>
             انصراف
           </SecondaryButton>
-          <PrimaryButton disabled={busy || submitting || monthDisabled(periodYear, periodMonth) || calculatedPeriodAmount <= 0}>
+          <PrimaryButton disabled={busy || submitting || monthDisabled(periodYear, periodMonth) || !canPost}>
             {submitting ? "در حال ثبت سند…" : "ثبت و صدور سند"}
           </PrimaryButton>
         </div>
@@ -2769,12 +2999,36 @@ function EstimateDialog({
   const money = useMoney();
   const [usefulLifeMonths, setUsefulLifeMonths] = useState("");
   const [salvageValue, setSalvageValue] = useState("");
+  // Method change (issue #1325) — prospective, exactly like a life revision.
+  const [method, setMethod] = useState<"straight_line" | "declining_balance" | "units_of_production">(
+    asset.depreciationMethod ?? "straight_line",
+  );
+  const [decliningRatePercent, setDecliningRatePercent] = useState(
+    asset.decliningBalanceRateBps ? String(asset.decliningBalanceRateBps / 100) : "",
+  );
+  const [switchPolicy, setSwitchPolicy] = useState<"none" | "straight_line">(
+    asset.decliningBalanceSwitchPolicy ?? "none",
+  );
+  const [capacityUnits, setCapacityUnits] = useState(
+    asset.totalCapacityUnits ? String(asset.totalCapacityUnits) : "",
+  );
+  const [capacityUnitLabel, setCapacityUnitLabel] = useState(asset.capacityUnitLabel ?? "");
   const [reason, setReason] = useState("");
   const [localError, setLocalError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const posted = asset.depreciationCount ?? 0;
   const remainingBase = Math.max(0, asset.cost - asset.salvageValue - asset.accumulatedDepreciation);
+  const currentMethod = asset.depreciationMethod ?? "straight_line";
+  const methodChanged =
+    method !== currentMethod ||
+    (method === "declining_balance" &&
+      (Math.round(Number(decliningRatePercent) * 100) !== (asset.decliningBalanceRateBps ?? null) ||
+        switchPolicy !== (asset.decliningBalanceSwitchPolicy ?? "none"))) ||
+    (method === "units_of_production" &&
+      (Number(capacityUnits) !== (asset.totalCapacityUnits ?? null) ||
+        (capacityUnitLabel.trim() || null) !== (asset.capacityUnitLabel ?? null)));
+  const hasAnyChange = methodChanged || !!usefulLifeMonths.trim() || !!salvageValue.trim();
 
   let newLife: number | null = null;
   let newSalvage: number | null = null;
@@ -2798,10 +3052,22 @@ function EstimateDialog({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLocalError("");
-    if (!usefulLifeMonths.trim() && !salvageValue.trim()) {
-      return setLocalError("حداقل یکی از عمر مفید یا ارزش اسقاط جدید را وارد کنید.");
+    if (!hasAnyChange) {
+      return setLocalError("حداقل یکی از عمر مفید، ارزش اسقاط یا روش استهلاک را تغییر دهید.");
     }
     if (!reason.trim()) return setLocalError("ذکر دلیل تغییر برآورد الزامی است.");
+    if (method === "declining_balance") {
+      const percent = Number(decliningRatePercent);
+      if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
+        return setLocalError("نرخ سالانهٔ استهلاک نزولی باید عددی بزرگ‌تر از صفر و حداکثر ۱۰۰ درصد باشد.");
+      }
+    }
+    if (method === "units_of_production") {
+      const capacity = Number(capacityUnits);
+      if (!Number.isInteger(capacity) || capacity <= 0) {
+        return setLocalError("ظرفیت کل تأییدشده باید عدد صحیح مثبت باشد.");
+      }
+    }
 
     setSubmitting(true);
     const { ok, data } = await api<{ error?: string }>(`/api/ledger/fixed-assets/${asset.id}/estimate`, {
@@ -2809,6 +3075,13 @@ function EstimateDialog({
       body: JSON.stringify({
         usefulLifeMonths: newLife ?? undefined,
         salvageValue: newSalvage !== null && newSalvage >= 0 ? newSalvage : undefined,
+        depreciationMethod: method,
+        decliningBalanceRateBps:
+          method === "declining_balance" ? Math.round(Number(decliningRatePercent) * 100) : undefined,
+        decliningBalanceSwitchPolicy: method === "declining_balance" ? switchPolicy : undefined,
+        totalCapacityUnits: method === "units_of_production" ? Number(capacityUnits) : undefined,
+        capacityUnitLabel:
+          method === "units_of_production" ? capacityUnitLabel.trim() || undefined : undefined,
         reason: reason.trim(),
       }),
     });
@@ -2872,6 +3145,72 @@ function EstimateDialog({
           />
         </Field>
 
+        <Field label="روش استهلاک" hint={`روش فعلی: ${DEPRECIATION_METHOD_LABELS[currentMethod]}`}>
+          <select
+            className={inputClass}
+            value={method}
+            onChange={(e) => setMethod(e.target.value as typeof method)}
+            disabled={busy || submitting}
+          >
+            <option value="straight_line">خط مستقیم</option>
+            <option value="declining_balance">نزولی (مانده نزولی)</option>
+            <option value="units_of_production">مقدار تولید</option>
+          </select>
+        </Field>
+
+        {method === "declining_balance" ? (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="نرخ سالانهٔ استهلاک نزولی (٪)">
+              <PersianNumberInput
+                className={inputClass}
+                dir="ltr"
+                inputMode="numeric"
+                value={decliningRatePercent}
+                onChange={(e) => setDecliningRatePercent(e.target.value)}
+                placeholder="مثلاً ۲۵"
+                disabled={busy || submitting}
+              />
+            </Field>
+            <Field label="سیاست تغییر به خط مستقیم">
+              <select
+                className={inputClass}
+                value={switchPolicy}
+                onChange={(e) => setSwitchPolicy(e.target.value as typeof switchPolicy)}
+                disabled={busy || submitting}
+              >
+                <option value="none">بدون تبدیل</option>
+                <option value="straight_line">تبدیل به خط مستقیم</option>
+              </select>
+            </Field>
+          </div>
+        ) : null}
+
+        {method === "units_of_production" ? (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="ظرفیت کل تأییدشده">
+              <PersianNumberInput
+                className={inputClass}
+                dir="ltr"
+                inputMode="numeric"
+                value={capacityUnits}
+                onChange={(e) => setCapacityUnits(e.target.value)}
+                placeholder="مثلاً ۵۰۰۰۰۰"
+                disabled={busy || submitting}
+              />
+            </Field>
+            <Field label="واحد ظرفیت">
+              <input
+                className={inputClass}
+                value={capacityUnitLabel}
+                onChange={(e) => setCapacityUnitLabel(e.target.value)}
+                placeholder="عدد"
+                maxLength={40}
+                disabled={busy || submitting}
+              />
+            </Field>
+          </div>
+        ) : null}
+
         <Field label="دلیل تغییر برآورد" hint="برای رسیدگی حسابداری الزامی است">
           <input
             className={inputClass}
@@ -2899,7 +3238,7 @@ function EstimateDialog({
           <SecondaryButton onClick={onClose} disabled={busy || submitting}>
             انصراف
           </SecondaryButton>
-          <PrimaryButton disabled={busy || submitting || (!usefulLifeMonths.trim() && !salvageValue.trim()) || !reason.trim()}>
+          <PrimaryButton disabled={busy || submitting || !hasAnyChange || !reason.trim()}>
             {submitting ? "در حال ثبت…" : "ثبت تغییر برآورد"}
           </PrimaryButton>
         </div>
@@ -3195,6 +3534,345 @@ function AssetDimensionsDialog({
           </PrimaryButton>
         </div>
       </form>
+    </OverlayDialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Projected depreciation schedules — issue #1325.
+//
+// Posted months come from the register's live depreciation rows; forecast
+// months are the approved method's arithmetic and create nothing. The two are
+// labelled on every row so a reader can never mistake a forecast for a posting.
+// ---------------------------------------------------------------------------
+
+interface DepreciationScheduleRowView {
+  periodKey: string;
+  label: string;
+  status: "posted" | "forecast";
+  method: NonNullable<FixedAssetRow["depreciationMethod"]>;
+  openingCarrying: number;
+  depreciation: number;
+  closingCarrying: number;
+  accumulated: number;
+  remainingDepreciableBase: number;
+  unitsProduced: number | null;
+}
+
+interface DepreciationScheduleTotalsView {
+  cost: number;
+  salvageValue: number;
+  depreciableBase: number;
+  postedDepreciation: number;
+  forecastDepreciation: number;
+  accumulated: number;
+  closingCarrying: number;
+  remainingDepreciableBase: number;
+  postedPeriods: number;
+  forecastPeriods: number;
+}
+
+interface DepreciationScheduleResponse {
+  asset: FixedAssetRow;
+  rows: DepreciationScheduleRowView[];
+  totals: DepreciationScheduleTotalsView;
+  todayPeriodKey: string;
+  throughPeriodKey: string;
+  forecastUnitsPerPeriod: number | null;
+  cumulativeUnitsProduced: number | null;
+}
+
+interface PortfolioScheduleResponse {
+  assets: { asset: FixedAssetRow; totals: DepreciationScheduleTotalsView; forecastUnitsPerPeriod: number | null }[];
+  periods: { periodKey: string; label: string; posted: number; forecast: number; accumulated: number }[];
+  totals: {
+    assets: number;
+    cost: number;
+    salvageValue: number;
+    depreciableBase: number;
+    postedDepreciation: number;
+    forecastDepreciation: number;
+    accumulated: number;
+    closingCarrying: number;
+    remainingDepreciableBase: number;
+  };
+  reconciliation: FixedAssetReconciliationView;
+  todayPeriodKey: string;
+  throughPeriodKey: string;
+}
+
+function ScheduleTotals({ totals, money }: { totals: DepreciationScheduleTotalsView; money: ReturnType<typeof useMoney> }) {
+  return (
+    <div className="grid grid-cols-2 gap-2 rounded-xl border border-border/80 bg-muted/60 p-3 text-xs sm:grid-cols-4">
+      <div>
+        <p className="text-muted-foreground">استهلاک ثبت‌شده</p>
+        <p className="mt-0.5 font-semibold tabular-nums text-foreground">{money.format(totals.postedDepreciation)}</p>
+      </div>
+      <div>
+        <p className="text-muted-foreground">پیش‌بینی (بدون سند)</p>
+        <p className="mt-0.5 font-semibold tabular-nums text-amber-800 dark:text-amber-300">
+          {money.format(totals.forecastDepreciation)}
+        </p>
+      </div>
+      <div>
+        <p className="text-muted-foreground">باقیماندهٔ قابل استهلاک</p>
+        <p className="mt-0.5 font-semibold tabular-nums text-foreground">{money.format(totals.remainingDepreciableBase)}</p>
+      </div>
+      <div>
+        <p className="text-muted-foreground">ارزش دفتری پایانی</p>
+        <p className="mt-0.5 font-semibold tabular-nums text-foreground">{money.format(totals.closingCarrying)}</p>
+      </div>
+    </div>
+  );
+}
+
+function DepreciationScheduleModal({ asset, onClose }: { asset: FixedAssetRow; onClose: () => void }) {
+  const money = useMoney();
+  const [data, setData] = useState<DepreciationScheduleResponse | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    api<DepreciationScheduleResponse & { error?: string }>(`/api/ledger/fixed-assets/${asset.id}/schedule`).then(
+      ({ ok, data: payload }) => {
+        if (!alive) return;
+        if (ok) setData(payload as DepreciationScheduleResponse);
+        else setError(resolveErrorMessage((payload as { error?: string }).error));
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [asset.id]);
+
+  return (
+    <OverlayDialog
+      headingId="depreciation-schedule-heading"
+      onClose={onClose}
+      className={`${overlayPanelClass} max-h-[90vh] w-full max-w-6xl overflow-y-auto p-4 sm:p-6`}
+    >
+      <header className="mb-4 flex items-start justify-between gap-3 border-b border-border pb-4">
+        <div>
+          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">برنامهٔ استهلاک</p>
+          <h3 id="depreciation-schedule-heading" className="mt-1 text-lg font-bold text-foreground">
+            برنامهٔ استهلاک «{asset.name}»
+          </h3>
+          <p className="mt-1 text-xs text-muted-foreground">روش: {methodSummary(data?.asset ?? asset)}</p>
+        </div>
+        <Button type="button" variant="ghost" size="sm" onClick={onClose} aria-label="بستن">
+          <XIcon className="size-4" />
+        </Button>
+      </header>
+
+      <ErrorBox>{error}</ErrorBox>
+      <p className="mb-4 rounded-xl border border-amber-500/20 bg-amber-50/60 p-3 text-xs leading-5 text-muted-foreground dark:bg-amber-500/10">
+        ردیف‌های «ثبت‌شده» سند حسابداری دارند و تاریخ واقعی‌اند. ردیف‌های «پیش‌بینی» فقط محاسبه‌اند: هیچ سندی صادر نمی‌کنند و در
+        ترازنامه یا صورت سود و زیان اثری ندارند. تغییر برآورد یا روش، فقط همین پیش‌بینی را بازمحاسبه می‌کند و سابقهٔ ثبت‌شده دست
+        نمی‌خورد.
+      </p>
+
+      {data === null ? (
+        <LoadingSkeleton rows={6} />
+      ) : data.rows.length === 0 ? (
+        <EmptyState title="برنامه‌ای برای نمایش نیست">این دارایی هنوز در دورهٔ استهلاک خود قرار نگرفته است.</EmptyState>
+      ) : (
+        <div className="space-y-4">
+          <ScheduleTotals totals={data.totals} money={money} />
+          {data.forecastUnitsPerPeriod !== null ? (
+            <p className="text-xs text-muted-foreground">
+              پیش‌بینی مقدار تولید هر ماه: {toPersianDigits(data.forecastUnitsPerPeriod)} {data.asset.capacityUnitLabel ?? "واحد"} —
+              تولید ثبت‌شده تا امروز: {toPersianDigits(data.cumulativeUnitsProduced ?? 0)} از {toPersianDigits(data.asset.totalCapacityUnits ?? 0)}
+            </p>
+          ) : null}
+          <div className="max-h-[52vh] overflow-auto rounded-xl border border-border">
+            <DataTable caption="برنامهٔ استهلاک دارایی">
+              <DataTableHead>
+                <tr>
+                  <Th>دوره</Th>
+                  <Th>وضعیت</Th>
+                  <Th numeric>مانده ابتدایی</Th>
+                  <Th numeric>استهلاک دوره</Th>
+                  <Th numeric>استهلاک انباشته</Th>
+                  <Th numeric>مانده پایانی</Th>
+                  <Th numeric>باقیمانده قابل استهلاک</Th>
+                  {asset.depreciationMethod === "units_of_production" ? <Th numeric>مقدار تولید</Th> : null}
+                </tr>
+              </DataTableHead>
+              <DataTableBody>
+                {data.rows.map((row) => (
+                  <DataTableRow key={row.periodKey} className={row.status === "posted" ? undefined : "bg-muted/40"}>
+                    <Td nowrap>{periodKeyLabel(row.periodKey)}</Td>
+                    <Td nowrap>
+                      <StatusBadge tone={row.status === "posted" ? "positive" : "neutral"}>
+                        {row.status === "posted" ? "ثبت‌شده" : "پیش‌بینی"}
+                      </StatusBadge>
+                    </Td>
+                    <Td numeric nowrap>{money.format(row.openingCarrying)}</Td>
+                    <Td numeric nowrap className={row.status === "forecast" ? "text-amber-800 dark:text-amber-300" : undefined}>
+                      {money.format(row.depreciation)}
+                    </Td>
+                    <Td numeric nowrap>{money.format(row.accumulated)}</Td>
+                    <Td numeric nowrap>{money.format(row.closingCarrying)}</Td>
+                    <Td numeric nowrap>{money.format(row.remainingDepreciableBase)}</Td>
+                    {asset.depreciationMethod === "units_of_production" ? (
+                      <Td numeric nowrap>{row.unitsProduced === null ? "—" : toPersianDigits(row.unitsProduced)}</Td>
+                    ) : null}
+                  </DataTableRow>
+                ))}
+              </DataTableBody>
+            </DataTable>
+          </div>
+        </div>
+      )}
+    </OverlayDialog>
+  );
+}
+
+function PortfolioScheduleModal({ filters, onClose }: { filters: URLSearchParams; onClose: () => void }) {
+  const money = useMoney();
+  const [data, setData] = useState<PortfolioScheduleResponse | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    api<PortfolioScheduleResponse & { error?: string }>(`/api/ledger/fixed-assets/schedule?${filters.toString()}`).then(
+      ({ ok, data: payload }) => {
+        if (!alive) return;
+        if (ok) setData(payload as PortfolioScheduleResponse);
+        else setError(resolveErrorMessage((payload as { error?: string }).error));
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [filters]);
+
+  const exportHref = `/api/ledger/fixed-assets/export?${filters.toString()}`;
+
+  return (
+    <OverlayDialog
+      headingId="portfolio-schedule-heading"
+      onClose={onClose}
+      className={`${overlayPanelClass} max-h-[90vh] w-full max-w-6xl overflow-y-auto p-4 sm:p-6`}
+    >
+      <header className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+        <div>
+          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">برنامهٔ استهلاک مجموعه</p>
+          <h3 id="portfolio-schedule-heading" className="mt-1 text-lg font-bold text-foreground">
+            پیش‌بینی استهلاک دارایی‌های فیلترشده
+          </h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {toPersianDigits(data?.totals.assets ?? 0)} دارایی — از {data?.todayPeriodKey ?? "—"} تا {data?.throughPeriodKey ?? "—"}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <a
+            href={exportHref}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <FileDownIcon className="size-3.5" />
+            <span>دریافت اکسل</span>
+          </a>
+          <Button type="button" variant="ghost" size="sm" onClick={onClose} aria-label="بستن">
+            <XIcon className="size-4" />
+          </Button>
+        </div>
+      </header>
+
+      <ErrorBox>{error}</ErrorBox>
+      <p className="mb-4 rounded-xl border border-amber-500/20 bg-amber-50/60 p-3 text-xs leading-5 text-muted-foreground dark:bg-amber-500/10">
+        مبالغ «ثبت‌شده» از اسناد واقعی دفتر اموال می‌آیند؛ ستون «پیش‌بینی» فقط محاسبه است و هیچ سندی صادر نمی‌کند. جمع‌ها هرگز از
+        بهای تمام‌شده منهای ارزش اسقاط بیشتر نمی‌شوند.
+      </p>
+
+      {data === null ? (
+        <LoadingSkeleton rows={6} />
+      ) : data.assets.length === 0 ? (
+        <EmptyState title="دارایی فعالی با این فیلترها نیست">فیلترها را بازتر کنید یا دارایی جدیدی ثبت کنید.</EmptyState>
+      ) : (
+        <div className="space-y-5">
+          <div className="grid grid-cols-2 gap-2 rounded-xl border border-border/80 bg-muted/60 p-3 text-xs sm:grid-cols-4">
+            <div>
+              <p className="text-muted-foreground">بهای تمام‌شده</p>
+              <p className="mt-0.5 font-semibold tabular-nums text-foreground">{money.format(data.totals.cost)}</p>
+            </div>
+            <div>
+              <p className="text-muted-foreground">استهلاک ثبت‌شده</p>
+              <p className="mt-0.5 font-semibold tabular-nums text-foreground">{money.format(data.totals.postedDepreciation)}</p>
+            </div>
+            <div>
+              <p className="text-muted-foreground">پیش‌بینی (بدون سند)</p>
+              <p className="mt-0.5 font-semibold tabular-nums text-amber-800 dark:text-amber-300">
+                {money.format(data.totals.forecastDepreciation)}
+              </p>
+            </div>
+            <div>
+              <p className="text-muted-foreground">باقیماندهٔ قابل استهلاک</p>
+              <p className="mt-0.5 font-semibold tabular-nums text-foreground">
+                {money.format(data.totals.remainingDepreciableBase)}
+              </p>
+            </div>
+          </div>
+
+          <section aria-labelledby="portfolio-periods-heading">
+            <h4 id="portfolio-periods-heading" className="mb-2 text-sm font-semibold text-foreground">
+              استهلاک به تفکیک ماه
+            </h4>
+            <div className="max-h-[36vh] overflow-auto rounded-xl border border-border">
+              <DataTable caption="استهلاک ماهانهٔ مجموعه">
+                <DataTableHead>
+                  <tr>
+                    <Th>دوره</Th>
+                    <Th numeric>ثبت‌شده</Th>
+                    <Th numeric>پیش‌بینی</Th>
+                    <Th numeric>انباشتهٔ تجمعی</Th>
+                  </tr>
+                </DataTableHead>
+                <DataTableBody>
+                  {data.periods.map((p) => (
+                    <DataTableRow key={p.periodKey}>
+                      <Td nowrap>{periodKeyLabel(p.periodKey)}</Td>
+                      <Td numeric nowrap>{money.format(p.posted)}</Td>
+                      <Td numeric nowrap className="text-amber-800 dark:text-amber-300">{money.format(p.forecast)}</Td>
+                      <Td numeric nowrap>{money.format(p.accumulated)}</Td>
+                    </DataTableRow>
+                  ))}
+                </DataTableBody>
+              </DataTable>
+            </div>
+          </section>
+
+          <section aria-labelledby="portfolio-assets-heading">
+            <h4 id="portfolio-assets-heading" className="mb-2 text-sm font-semibold text-foreground">
+              خلاصهٔ هر دارایی
+            </h4>
+            <div className="max-h-[32vh] overflow-auto rounded-xl border border-border">
+              <DataTable caption="خلاصهٔ برنامهٔ استهلاک هر دارایی">
+                <DataTableHead>
+                  <tr>
+                    <Th>دارایی</Th>
+                    <Th>روش</Th>
+                    <Th numeric>استهلاک ثبت‌شده</Th>
+                    <Th numeric>پیش‌بینی</Th>
+                    <Th numeric>باقیمانده</Th>
+                  </tr>
+                </DataTableHead>
+                <DataTableBody>
+                  {data.assets.map((row) => (
+                    <DataTableRow key={row.asset.id}>
+                      <Td nowrap>{row.asset.code ? `${row.asset.code} — ${row.asset.name}` : row.asset.name}</Td>
+                      <Td nowrap muted>{DEPRECIATION_METHOD_LABELS[row.asset.depreciationMethod ?? "straight_line"]}</Td>
+                      <Td numeric nowrap>{money.format(row.totals.postedDepreciation)}</Td>
+                      <Td numeric nowrap className="text-amber-800 dark:text-amber-300">{money.format(row.totals.forecastDepreciation)}</Td>
+                      <Td numeric nowrap>{money.format(row.totals.remainingDepreciableBase)}</Td>
+                    </DataTableRow>
+                  ))}
+                </DataTableBody>
+              </DataTable>
+            </div>
+          </section>
+        </div>
+      )}
     </OverlayDialog>
   );
 }

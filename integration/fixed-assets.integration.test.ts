@@ -2757,3 +2757,160 @@ describe("depreciation for a business that is not a café", () => {
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+describe("depreciation methods and projected schedules (issue #1325)", () => {
+  it("keeps a legacy asset on straight-line and produces identical arithmetic", async () => {
+    const keys = recentPeriodKeys(2);
+    // A row written the way every asset existed before migration 0316: no
+    // method columns at all. The defaults must mean straight-line.
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO fixed_assets
+         (business_id, location_id, name, acquisition_date, cost, salvage_value, useful_life_months, created_by)
+       VALUES ($1, $2, 'دارایی پیش از ارتقا', $3, 1200000, 0, 12, $4) RETURNING id`,
+      [biz.id, biz.locationA, acquisitionDateFor(keys[0]), owner.id],
+    );
+    const legacyId = rows[0].id;
+    const { rows: stored } = await db.query<{ depreciation_method: string; declining_balance_rate_bps: number | null }>(
+      `SELECT depreciation_method, declining_balance_rate_bps FROM fixed_assets WHERE id = $1`,
+      [legacyId],
+    );
+    expect(stored[0]).toEqual({ depreciation_method: "straight_line", declining_balance_rate_bps: null });
+
+    const posted = await post(legacyId, { periodKey: keys[0] });
+    expect(posted.amount).toBe(100_000); // 1,200,000 ÷ 12, exactly as before
+    expect(posted.method).toBe("straight_line");
+    expect((await fixedAssetsService.getFixedAssetWithDepreciation(biz.id, legacyId)).fixedAsset.depreciationMethod).toBe(
+      "straight_line",
+    );
+  });
+
+  it("posts declining balance with a method snapshot on the register row", async () => {
+    const keys = recentPeriodKeys(2);
+    const asset = await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationA,
+      name: "دستگاه نزولی",
+      acquisitionDate: acquisitionDateFor(keys[0]),
+      cost: 1_200_000,
+      salvageValue: 200_000,
+      usefulLifeMonths: 12,
+      createdBy: owner.id,
+      depreciationMethod: "declining_balance",
+      decliningBalanceRateBps: 2500,
+      decliningBalanceSwitchPolicy: "none",
+    });
+    expect(asset.depreciationMethod).toBe("declining_balance");
+    expect(asset.decliningBalanceRateBps).toBe(2500);
+
+    const first = await post(asset.id, { periodKey: keys[0] });
+    expect(first.amount).toBe(25_000); // 1,200,000 × 25% ÷ 12
+    expect(first.method).toBe("declining_balance");
+    const { rows } = await db.query<{ method: string; units_produced: string | null }>(
+      `SELECT method, units_produced::text AS units_produced
+         FROM fixed_asset_depreciation_entries WHERE id = $1`,
+      [first.depreciationEntryId],
+    );
+    expect(rows[0]).toEqual({ method: "declining_balance", units_produced: null });
+  });
+
+  it("posts units of production from approved capacity and actual usage, refusing invalid usage", async () => {
+    const keys = recentPeriodKeys(2);
+    const asset = await fixedAssetsService.createFixedAsset({
+      businessId: biz.id,
+      locationId: biz.locationA,
+      name: "خط تولید",
+      acquisitionDate: acquisitionDateFor(keys[0]),
+      cost: 1_000_000,
+      salvageValue: 0,
+      usefulLifeMonths: 12,
+      createdBy: owner.id,
+      depreciationMethod: "units_of_production",
+      totalCapacityUnits: 1000,
+      capacityUnitLabel: "عدد",
+    });
+
+    const first = await fixedAssetsService.postDepreciation({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      periodKey: keys[0],
+      unitsProduced: 250,
+      createdBy: owner.id,
+    });
+    expect(first.amount).toBe(250_000); // 1,000,000 ÷ 1000 × 250
+    expect(first.unitsProduced).toBe(250);
+
+    await expect(post(asset.id, { periodKey: keys[1] })).rejects.toThrow("production_units_required");
+    await expect(
+      fixedAssetsService.postDepreciation({
+        businessId: biz.id,
+        fixedAssetId: asset.id,
+        periodKey: keys[1],
+        unitsProduced: 800,
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow("production_exceeds_capacity");
+  });
+
+  it("projects future months without creating a single journal entry", async () => {
+    const keys = recentPeriodKeys(1);
+    const asset = await createAsset({ cost: 1200, usefulLifeMonths: 12, acquisitionDate: acquisitionDateFor(keys[0]) });
+    await post(asset.id, { periodKey: keys[0] });
+
+    const { rows: before } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM journal_entries WHERE business_id = $1`,
+      [biz.id],
+    );
+    const schedule = await fixedAssetsService.getFixedAssetDepreciationSchedule(biz.id, asset.id);
+    expect(schedule.rows[0]).toMatchObject({ status: "posted", depreciation: 100 });
+    expect(schedule.rows.some((r) => r.status === "forecast")).toBe(true);
+    expect(schedule.totals.postedDepreciation).toBe(100);
+    expect(schedule.totals.projectedDepreciation).toBe(1200);
+    expect(schedule.totals.remainingDepreciableBase).toBe(0);
+
+    const { rows: after } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM journal_entries WHERE business_id = $1`,
+      [biz.id],
+    );
+    expect(after[0].n).toBe(before[0].n);
+  });
+
+  it("applies a method change prospectively and preserves the posted method snapshot", async () => {
+    const keys = recentPeriodKeys(2);
+    const asset = await createAsset({
+      cost: 1_200_000,
+      usefulLifeMonths: 12,
+      acquisitionDate: acquisitionDateFor(keys[0]),
+    });
+    const straightLine = await post(asset.id, { periodKey: keys[0] });
+    expect(straightLine.amount).toBe(100_000);
+
+    const { estimateChange } = await fixedAssetsService.changeFixedAssetEstimate({
+      businessId: biz.id,
+      fixedAssetId: asset.id,
+      depreciationMethod: "declining_balance",
+      decliningBalanceRateBps: 2500,
+      // `none` keeps the declining charge; with this short 12-month life the
+      // switch policy would (correctly) choose straight-line immediately.
+      decliningBalanceSwitchPolicy: "none",
+      reason: "تصمیم حسابدار برای روش نزولی",
+      createdBy: owner.id,
+    });
+    expect(estimateChange).toMatchObject({
+      oldMethod: "straight_line",
+      newMethod: "declining_balance",
+      newDecliningBalanceRateBps: 2500,
+    });
+
+    const next = await post(asset.id, { periodKey: keys[1] });
+    expect(next.method).toBe("declining_balance");
+    // Opening carrying 1,100,000 × 25% ÷ 12 = 22,916.67 → 22,917.
+    expect(next.amount).toBe(22_917);
+
+    const { rows } = await db.query<{ method: string }>(
+      `SELECT method FROM fixed_asset_depreciation_entries WHERE id = $1`,
+      [straightLine.depreciationEntryId],
+    );
+    expect(rows[0].method).toBe("straight_line");
+  });
+});
