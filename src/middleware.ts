@@ -64,6 +64,10 @@ const CENTRAL_EXECUTION_PATHS = [
   // and its approval live on the central runtime, never on a site process.
   "/api/desktop-enroll",
   "/desktop-enroll",
+  // The desktop release pipeline posts an Ed25519-signed manifest with a bearer
+  // token of its own. It has no tenant session, so middleware must let it reach
+  // the route's authorization instead of answering 401 first.
+  "/api/desktop-releases/promote",
   "/api/server-sync/config/generate-token",
   "/api/peer/backup",
   "/api/v1",
