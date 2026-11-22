@@ -615,6 +615,11 @@ export function aiActionPermission(type: ActionType): Permission | null {
 }
 
 export function canUseAiTool(name: string, permissions: ReadonlySet<Permission>): boolean {
+  // External MCP tools (#1473) are built per tenant, so they cannot have a static
+  // entry in the map. `ai.use` is the floor; whether the *server* is enabled, and
+  // whether the tool is in its allowlist, is decided by the dispatcher against the
+  // database — the capability registry must not become the only check.
+  if (name.startsWith("mcp_") && name.includes("__")) return permissions.has(PERMISSIONS.aiUse);
   const required = aiToolPermission(name);
   return required !== null && permissions.has(required);
 }

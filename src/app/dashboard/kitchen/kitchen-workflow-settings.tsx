@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import type { KitchenWorkflow } from "@/lib/kitchen-workflow";
-import { SectionCard } from "../page-chrome";
+import { LoadingSkeleton, SectionCard } from "../page-chrome";
 import { api, errorMessage, inputClass } from "../ui";
 
 type Response = {
@@ -75,6 +75,7 @@ export function KitchenWorkflowSettings() {
   return (
     <SectionCard>
       <h2 className="font-semibold">آماده‌سازی سفارش‌های این شعبه</h2>
+      {!error && saved === null ? <LoadingSkeleton rows={3} /> : null}
       <div className="flex flex-wrap items-end gap-2">
         <label className="space-y-1">
           <span className="block text-sm">روش آماده‌سازی سفارش</span>
@@ -114,7 +115,6 @@ export function KitchenWorkflowSettings() {
         <p className="text-sm text-muted-foreground">اقلام جدید صندوق با وضعیت آماده ثبت می‌شوند. پرداخت در بخش سفارش‌ها انجام می‌شود.</p>
       ) : null}
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-      {!error && saved === null ? <p role="status" className="text-sm">در حال دریافت تنظیمات…</p> : null}
     </SectionCard>
   );
 }

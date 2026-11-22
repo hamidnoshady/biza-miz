@@ -13,6 +13,7 @@ import { HolooPanel } from "./holoo-panel";
 import { ServerSyncPanel } from "./server-sync-panel";
 import { ApiTokensPanel } from "./api-tokens-panel";
 import { McpPanel } from "./mcp-panel";
+import { ExternalMcpPanel } from "./external-mcp-panel";
 import { TelegramPanel } from "./telegram-panel";
 
 /**
@@ -83,7 +84,13 @@ export function ConnectionsManager({
           {active === "woocommerce" ? <WpConnectionPanel canRotateTokens={canRotateTokens} /> : null}
           {active === "website" ? <CmsConnectionPanel /> : null}
           {active === "holoo" ? <HolooPanel /> : null}
-          {active === "mcp" ? <McpPanel /> : null}
+          {active === "mcp" ? (
+            <div className="space-y-6">
+              <McpPanel />
+              {/* The other direction: servers this assistant may call (#1473). */}
+              <ExternalMcpPanel />
+            </div>
+          ) : null}
           {active === "api" ? <ApiTokensPanel /> : null}
           {active === "telegram" ? <TelegramPanel /> : null}
         </FeatureLock>
