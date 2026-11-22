@@ -12,6 +12,7 @@ import type { AccountingSectionKey } from "./accounting-routes";
 export function accountingSectionNeedsAccountList(section: AccountingSectionKey): boolean {
   return (
     section === "manual" ||
+    section === "recurring-vouchers" ||
     section === "expenses" ||
     section === "fixed-assets" ||
     section === "shareholders" ||

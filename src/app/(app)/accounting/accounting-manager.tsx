@@ -67,6 +67,10 @@ const ManualEntrySection = dynamic(
   () => import("./manual-entry-section").then((mod) => mod.ManualEntrySection),
   { loading: () => <SectionCardSkeleton rows={4} /> },
 );
+const RecurringVouchersSection = dynamic(
+  () => import("./recurring-vouchers-section").then((mod) => mod.RecurringVouchersSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
 const FiscalPeriodsSection = dynamic(
   () => import("./fiscal-periods-section").then((mod) => mod.FiscalPeriodsSection),
   { loading: () => <SectionCardSkeleton rows={4} /> },
@@ -549,6 +553,15 @@ export function AccountingManager({
               canApprove={canApproveLedger}
               canPropose={canProposeLedger}
               currentUserId={currentUserId}
+            />
+          ) : null}
+          {section === "recurring-vouchers" ? (
+            <RecurringVouchersSection
+              accounts={accounts ?? []}
+              busy={busy}
+              run={run}
+              refreshKey={refreshKey}
+              canPropose={canProposeLedger}
             />
           ) : null}
           {section === "expenses" ? (

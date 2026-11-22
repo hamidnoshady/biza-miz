@@ -11,11 +11,12 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1299**. Rows: tenant **120**, platform **24**.
+Route files scanned: **1302**. Rows: tenant **121**, platform **24**.
 
 ## Summary of remaining gaps
 
-### Tenant (17)
+### Tenant (18)
+- **accounting.recurring-vouchers** (Accounting · Recurring journal voucher templates) — MCP gap
 - **accounting.currencies** (Accounting · Currencies and exchange rates) — MCP gap
 - **accounting.multicurrency** (Accounting · Multi-currency entries, settlements and revaluations) — MCP gap
 - **accounting.opening-balances** (Accounting · Opening balances & fiscal carry-forward) — MCP gap
@@ -41,7 +42,7 @@ _none_
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 26
+Counts — covered: 62 · partial: 3 · MCP gap: 15 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 26
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -51,6 +52,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 14 · backend gap: 0 · n/a (in
 | Accounting | Shareholder ownership, capital, distributions & GL reconciliation<br>_cloud-authoritative legal ownership and financial facts; sensitive Party data and legally consequential posting remain in the permissioned human UI, with mirror journals for corrections_ | (route only) | (route only) | (route only) | (route only) | — | ledger.post, shareholders.capital_post, shareholders.capital_reverse, shareholders.distributions_approve, shareholders.distributions_manage, shareholders.distributions_pay, shareholders.distributions_reverse, shareholders.manage | — | — | integration/shareholder-accounting.integration.test.ts | route-only (by design) |
 | Accounting | Chart of accounts<br>_account history rides list_audit_log {entity: account} — same service, stricter gate is the audit screen's own teamManage_ | get_account_statement, list_accounts | account.create | account.disable, account.update | account.delete | — | accounts.edit, ledger.view | connection mode | get_account_statement, list_accounts, account.create, account.disable, account.update, account.delete | integration/chart-of-accounts.integration.test.ts | covered |
 | Accounting | Journal entries<br>_manual drafts are intentionally one lane — humans and the assistant both draft through the same parseManualDraftPayload pipeline (journal.manual.propose); reversal makes a new mirrored entry, never an edit_ | list_journal_entries, list_manual_journal_drafts | journal.manual.propose | — | journal.draft.approve, journal.draft.reject, journal.entry.reverse | — | ledger.approve, ledger.propose, ledger.view | connection mode; step-up (always approve) | list_journal_entries, list_manual_journal_drafts, journal.manual.propose, journal.draft.approve, journal.draft.reject, journal.entry.reverse | integration/ledger-reports.integration.test.ts | covered |
+| Accounting | Recurring journal voucher templates<br>_landed on main after this map's batch; no MCP verb yet — a due occurrence only ever creates a manual-journal draft, and approving it stays the human journal.draft.approve step_ | (route only) | (route only) | (route only) | — | — | ledger.propose, ledger.view | — | — | — | MCP gap |
 | Accounting | Currencies and exchange rates<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | (route only) | (route only) | — | ledger.post, ledger.view, settings.manage | — | — | — | MCP gap |
 | Accounting | Multi-currency entries, settlements and revaluations<br>_landed on main after this map's batch; no MCP verb yet_ | (route only) | (route only) | — | (route only) | — | ledger.post, ledger.view | — | — | — | MCP gap |
 | Accounting | Opening balances & fiscal carry-forward<br>_landed on main after this map's batch; no MCP verb yet — approving and posting an opening document stays a human act_ | (route only) | (route only) | (route only) | (route only) | (route only) | ledger.approve, ledger.post, ledger.view | — | — | — | MCP gap |
