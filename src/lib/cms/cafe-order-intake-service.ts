@@ -124,6 +124,31 @@ function buyerNote(order: CmsOrder): string {
   return parts.join(" · ");
 }
 
+/**
+ * The party this website sale may be attached to, or null.
+ *
+ * `reconcileExternalIdentity` resolves a visitor by phone across the whole
+ * business, and that match is not necessarily a customer: the owner ordering
+ * from their own table matches their *staff* party. Passing that id straight
+ * through made the order unsavable — `createOrder` refuses any sale attached to
+ * a non-customer party (#1446) — so a legitimate order failed with
+ * `customer_role_required` and never appeared on the till (production
+ * `ESH-45982210`).
+ *
+ * A staff party therefore makes the sale a guest sale rather than a failure:
+ * the buyer's name and phone already ride on the order note, and the till can
+ * link the person to the order afterwards.
+ */
+async function saleCustomerId(businessId: string, partyId: string | null): Promise<string | null> {
+  if (!partyId) return null;
+  const { rows } = await query<{ roles: string[] | null }>(
+    `SELECT roles FROM parties WHERE id = $1 AND business_id = $2`,
+    [partyId, businessId],
+  );
+  const roles = rows[0]?.roles ?? [];
+  return roles.includes("customer") ? partyId : null;
+}
+
 interface MappedLine {
   menuItemId: string;
   quantity: number;
@@ -334,6 +359,7 @@ export async function intakeSubmittedCafeOrder(
 
   const clientRequestId = `cms-cafe:${connection.id}:${order.id}`;
   const note = buyerNote(order);
+  const customerId = await saleCustomerId(businessId, customer.partyId);
 
   if (resolved) {
     const created = await createDineInOrderFromTableQr({
@@ -344,7 +370,7 @@ export async function intakeSubmittedCafeOrder(
       note,
       openedBy: null,
       clientRequestId,
-      customerId: customer.partyId,
+      customerId,
       holdKitchenDispatch: true,
       openedAt: openedAtFor(order),
       actorRole: "cashier",
@@ -368,7 +394,7 @@ export async function intakeSubmittedCafeOrder(
     type: "takeaway",
     tableId: null,
     tableQrTokenId: null,
-    customerId: customer.partyId,
+    customerId,
     guestCount: null,
     note,
     discount: { type: null },
