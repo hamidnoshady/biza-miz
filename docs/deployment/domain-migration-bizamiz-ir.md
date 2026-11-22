@@ -1,17 +1,22 @@
 # Domain migration: `app.eshobe.com` → `app.bizamiz.ir`
 
-Status: **Phase 1 live** (2026-11-22). `app.eshobe.com` is still the primary
-`ROOT_DOMAIN`; `app.bizamiz.ir` and `admin.app.bizamiz.ir` serve the same
-deployment. Phase 2 (the flip) is pending approval. Existing customers stay on
-`*.app.eshobe.com` until they move.
+Status: **Phase 2 live** (2026-11-22). `app.bizamiz.ir` is now `ROOT_DOMAIN`;
+`app.eshobe.com` is still fully served as `ADDITIONAL_ROOT_DOMAINS`. **No redirect
+is in place yet** — each root keeps its own sessions. Phase 3 (redirect and
+retire) is blocked until every customer, session and device has moved.
 
 ## Current production (verified 2026-11-22)
 
-- Central: `https://app.eshobe.com` (`/api/health` 200)
-- New root (alias): `https://app.bizamiz.ir` (`/api/health` 200, valid TLS)
-- Console: `admin.app.eshobe.com`; new console: `admin.app.bizamiz.ir` (200)
-- `ROOT_DOMAIN=app.eshobe.com`, `ADDITIONAL_ROOT_DOMAINS=app.bizamiz.ir`
-- Businesses: `<business>.app.eshobe.com`
+- Primary root: `https://app.bizamiz.ir` (`/api/health` 200, wildcard TLS)
+- Legacy root: `https://app.eshobe.com` (`/api/health` 200, unchanged)
+- Business hosts: `<label>.app.bizamiz.ir` and `<label>.app.eshobe.com` serve the
+  same business; `/api/host/resolve` returns `canonicalUrl: null` for both, so
+  neither root is redirected to the other
+- Console: `admin.app.bizamiz.ir`; legacy `admin.app.eshobe.com`
+- `ROOT_DOMAIN=app.bizamiz.ir`
+- `ADDITIONAL_ROOT_DOMAINS=app.eshobe.com`
+- `PLATFORM_BASE_URL=https://app.bizamiz.ir`
+- `WEBAUTHN_RP_ID=app.eshobe.com` (see WebAuthn below)
 - Deployed image: `sha-34c6eb5` (`:latest`), the multi-root build
 - `pos.eshobe.com` is **not** the live root (503); do not migrate it.
 
@@ -51,10 +56,11 @@ In the ArvanCloud zone the record names are relative to `bizamiz.ir`:
 Both are **DNS-only** (`cloud=false`): ArvanCloud must not proxy them, or the
 original `Host` header and the ACME challenge are lost.
 
-The wildcard row is only needed once per-business hosts go live
-(`SUBDOMAIN_ROUTING` on). While production runs single-host, `app` + `admin.app`
-are enough; a wildcard also needs a DNS-01 wildcard certificate, which is more
-moving parts than the cutover needs today.
+Businesses are host-scoped, so the wildcard is required for Phase 2: `*` (record
+name `*.app`) is a DNS-only A record, and the `bizamiz-tenants` router asks the
+`arvan` resolver for `app.bizamiz.ir` + `*.app.bizamiz.ir`. Without it, every
+`<label>.app.bizamiz.ir` link — including invitations and emails built from the
+primary root — would be NXDOMAIN.
 
 ### TLS
 
@@ -127,6 +133,8 @@ Old behaviour is unchanged. Verify:
 
 ### Phase 2 — make `app.bizamiz.ir` primary
 
+Applied 2026-11-22.
+
 ```text
 ROOT_DOMAIN=app.bizamiz.ir
 ADDITIONAL_ROOT_DOMAINS=app.eshobe.com
@@ -136,17 +144,49 @@ PLATFORM_BASE_URL=https://app.bizamiz.ir
 New links, new tenants and new emails use `app.bizamiz.ir`. Old hosts still
 resolve and old sessions/cookies stay on `app.eshobe.com`.
 
+Coolify stores these Laravel-encrypted, so a raw SQL `UPDATE` corrupts them. Use
+the UI/API, or update through the model inside the Coolify container:
+
+```bash
+docker cp update-env.php coolify:/tmp/update-env.php
+docker exec coolify php /tmp/update-env.php      # $svc->environment_variables()->...->save()
+docker exec -u root coolify rm -f /tmp/update-env.php
+```
+
+Then sync the service `.env` and recreate only the app:
+
+```bash
+cd /data/coolify/services/<uuid>
+docker compose -p <uuid> -f docker-compose.yml up -d --no-deps app
+```
+
+Startup takes ~90s under `tsx`; the first 502/503 is not a failure.
+
 Do not set `PUBLIC_ORIGIN=https://app.bizamiz.ir` during the transition: that pin
 would move old-domain handoffs to the new domain and lose the host-scoped
 session. The handoff now preserves the request root.
 
 ### Phase 3 — retire the old root
 
-After every customer and device has moved:
+Not started. A redirect is **not** safe yet, even though the wildcard exists:
+
+- **Sessions are host-only.** A redirect from `app.eshobe.com` to
+  `app.bizamiz.ir` (and from every `<label>.app.eshobe.com`) drops the cookie, so
+  all ~500 employee sessions and ~57 admin sessions must log in again. That is a
+  scheduled maintenance action, not a deploy.
+- **Passkeys.** With `WEBAUTHN_RP_ID=app.eshobe.com`, moving users to the new
+  domain disables their passkeys until the RP ID is switched and they re-enrol.
+- **Desktop devices** still pair to `https://app.eshobe.com`; their remote URL
+  must be moved (or redirected) first.
+- **Business aliases**: `business_subdomain_aliases` rows still point at old
+  hosts and should be reviewed.
+
+When those are done:
 
 - remove `app.eshobe.com` from `ADDITIONAL_ROOT_DOMAINS`
 - remove its DNS records and certificate
-- optionally 301 `app.eshobe.com` → `app.bizamiz.ir`
+- add the 301 `app.eshobe.com` → `app.bizamiz.ir` (and `<label>.app.eshobe.com`
+  → `<label>.app.bizamiz.ir`) in the proxy, not in the app
 
 ## WebAuthn / passkeys
 
@@ -161,6 +201,13 @@ WEBAUTHN_RP_ID=app.eshobe.com
 
 New-domain users use password/PIN until the old root is retired. After that,
 switch to `WEBAUTHN_RP_ID=app.bizamiz.ir` and require passkey re-enrolment.
+
+> **Phase 2 makes this user-visible.** `app.bizamiz.ir` is now the primary root,
+> but the RP ID is still `app.eshobe.com`, so passkey registration and login on
+> the new domain fail the browser’s RP check (the user falls back to password).
+> Switching the RP ID fixes the new domain and **invalidates every passkey
+> registered on the old one** — verify each passkey holder can log in with a
+> password before flipping it.
 A future per-request RP ID change can support both without this limitation.
 
 `WEBAUTHN_ORIGIN` can list both origins:
@@ -388,16 +435,21 @@ Verified on 2026-11-22 with the multi-root image `sha-34c6eb5`:
 - [x] `https://app.eshobe.com/api/health` 200 (unchanged)
 - [x] `https://admin.app.bizamiz.ir/platform/login` 200, valid TLS
 - [x] `https://admin.app.eshobe.com` 200 (unchanged)
+- [x] `*.app.bizamiz.ir` wildcard resolves; `<label>.app.bizamiz.ir` serves the
+      same business as `<label>.app.eshobe.com`
 - [x] `/`, `/admin`, `/platform` on either root stay on that root (no cross-root
       redirect)
 - [x] no `eshobe.com` references in the HTML served on the new root
+- [x] Phase 2 applied: `ROOT_DOMAIN=app.bizamiz.ir`,
+      `ADDITIONAL_ROOT_DOMAINS=app.eshobe.com`,
+      `PLATFORM_BASE_URL=https://app.bizamiz.ir`
 
 Pending:
 
-- [ ] a business resolves on both roots (`<label>.app.bizamiz.ir` needs the
-      wildcard record and certificate, so after subdomain routing is enabled)
-- [ ] old employee session still valid on `<label>.app.eshobe.com`
+- [ ] old employee session still valid on `<label>.app.eshobe.com` (needs a real
+      browser session, not a curl)
 - [ ] new employee login works on `<label>.app.bizamiz.ir`
+- [ ] passkey decision recorded and applied (see WebAuthn above)
 - [ ] company/impersonation handoff stays on the browser’s root
 - [ ] desktop health/update check on the old URL still works
 - [ ] `DESKTOP_RELEASE_REGISTRY_URL` points at the new host and a registration
