@@ -20,10 +20,14 @@ import {
 import {
   getPlatformAiMode,
   isAiRuntimeModeAvailable,
-  normalizeAiRuntimeMode,
+  resolveRequestedAiRuntimeMode,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes";
 import { isPlatformAiConfigured, logAiRuntimeUnavailable } from "@/lib/ai-config";
+import {
+  researchRetiredBody,
+  RESEARCH_RETIRED_STATUS,
+} from "@/lib/ai-research-retirement";
 import { applyRuntimeModeAlias, resolveAiConfigFor } from "@/lib/ai-runtime";
 import {
   AiWalletInsufficientError,
@@ -116,7 +120,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     /** Phase 36c — a free-form custom task description, wins over `task`. */
     customTask?: unknown;
     /** Product-facing routing mode; provider aliases never reach the tenant. */
-    /** Issue #812 §7 — one of auto | instant | thinking | deep_research. */
+    /** Issue #812 §7 — one of auto | instant | thinking; `deep_research` is retired and refused. */
     runtimeMode?: unknown;
     /** Optional app focus, which only narrows prompt/tool context. */
     appFocus?: unknown;
@@ -151,15 +155,23 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (guard.error) return guard.error;
   const session = guard.session;
   const effectivePermissions = guard.membership?.permissions ?? new Set();
-  // Auto, Fast and Thinking are distinct gateway profiles; Research is separate.
-  const runtimeMode: AiRuntimeMode = normalizeAiRuntimeMode(body.runtimeMode);
+  // Issue #1367 — an explicit `deep_research` request is refused rather than
+  // remapped. Turning it into Auto or Thinking would answer a different
+  // question than the caller asked, and would hide a client that still believes
+  // the workflow exists. Unknown/unrelated values keep the old, harmless
+  // behaviour of normalizing to Auto.
+  const requestedMode = resolveRequestedAiRuntimeMode(body.runtimeMode);
+  if (!requestedMode.ok) {
+    return NextResponse.json(researchRetiredBody(), { status: RESEARCH_RETIRED_STATUS });
+  }
+  // Auto, Fast and Thinking are distinct gateway profiles; Research is retired.
+  const runtimeMode: AiRuntimeMode = requestedMode.mode;
   // Issue #812 §3/§5/§6 — the mode's own row is read once and used twice: its
   // `is_active` decides whether the mode is offered at all, and its
   // `model_alias` decides which LiteLLM deployment the turn routes to. Reading
   // it once means the offer and the route can never disagree.
   const modeRow = await getPlatformAiMode(runtimeMode);
-  const deepResearchEnabled = modeRow.is_active;
-  if (!modeRow.is_active || !isAiRuntimeModeAvailable(runtimeMode, deepResearchEnabled)) {
+  if (!modeRow.is_active || !isAiRuntimeModeAvailable(runtimeMode)) {
     return NextResponse.json(
       { error: "mode_unavailable", mode: runtimeMode, message: "حالت انتخاب‌شده توسط مدیر پلتفرم فعال نشده است." },
       { status: 409 },
@@ -619,10 +631,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
               locationId,
               userId: session.sub,
               // §12 — the issue's named attribution, as columns. A mode is not
-              // decoration: `auto`, `instant` and `deep_research` resolve
-              // different LiteLLM aliases and therefore different prices, so a
-              // usage report that cannot slice by mode cannot explain its own
-              // numbers. The same holds for the system agent and the suggestion
+              // decoration: `auto`, `instant` and `thinking` resolve different
+              // LiteLLM aliases and therefore different prices, so a usage
+              // report that cannot slice by mode cannot explain its own numbers.
+              // Historical `deep_research` settlements keep the same column. The same holds for the system agent and the suggestion
               // card that invoked it.
               runtimeMode,
               systemAgentId: agentCard?.agentId ?? null,

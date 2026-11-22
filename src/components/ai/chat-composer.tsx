@@ -20,7 +20,6 @@ import {
   BrainCircuitIcon,
   SparklesIcon,
   ZapIcon,
-  FlaskConicalIcon,
   LayersIcon,
   PenLineIcon,
   PlusIcon,
@@ -163,14 +162,15 @@ export function ChatComposer({
   const availableTasks = resolveAvailablePresetTasks(mode, eligibleTaskIds);
   const currentTask = resolveCurrentTaskSummary(task, customTask);
   const activeRuntimeMode = workspaceContext?.runtimeMode ?? "auto";
+  // Issue #1367 — only the three chat modes are selectable, so only their icons
+  // exist here. A retired stored value (if one ever reaches this component)
+  // falls back to the Thinking glyph; it is never offered in the menu below.
   const ActiveRuntimeIcon =
     activeRuntimeMode === "auto"
       ? SparklesIcon
       : activeRuntimeMode === "instant"
         ? ZapIcon
-        : activeRuntimeMode === "thinking"
-          ? BrainCircuitIcon
-          : FlaskConicalIcon;
+        : BrainCircuitIcon;
 
   const focusOptions =
     workspaceContext?.accessibleFocuses &&
@@ -843,10 +843,8 @@ export function ChatComposer({
               value={activeRuntimeMode}
               disabled={busy}
               onValueChange={(value) => {
-                if (value === "deep_research") {
-                  workspaceContext.onDeepResearchOpen?.();
-                  return;
-                }
+                // Issue #1367 — the picker offers exactly Auto, Fast and
+                // Thinking. Anything else is ignored rather than routed.
                 if (AI_CHAT_MODES.includes(value as (typeof AI_CHAT_MODES)[number])) {
                   workspaceContext.onRuntimeModeChange(value as AiRuntimeMode);
                 }
@@ -894,23 +892,12 @@ export function ChatComposer({
                     );
                   })}
                 </SelectGroup>
-                <SelectSeparator />
-                <SelectItem
-                  value="deep_research"
-                  disabled={
-                    !workspaceContext.deepResearchEnabled ||
-                    !workspaceContext.onDeepResearchOpen
-                  }
-                  className="py-2"
-                  title="پژوهش چندمرحله‌ای و هزینه‌دار؛ پیش از اجرا سقف هزینه را تأیید می‌کنید"
-                >
-                  <span className="inline-flex min-w-0 items-center gap-2">
-                    <FlaskConicalIcon className="size-4 shrink-0 text-primary" aria-hidden="true" />
-                    <span className="text-xs font-semibold">
-                      {AI_MODE_LABELS.deep_research}
-                    </span>
-                  </span>
-                </SelectItem>
+                {/*
+                  Issue #1367 — the separate Deep Research item (and its
+                  separator) is gone: it created a new spending workflow from a
+                  mode picker, which is not a mode. The three chat modes above
+                  are the whole list.
+                */}
               </SelectContent>
             </Select>
           ) : null}

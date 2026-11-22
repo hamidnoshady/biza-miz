@@ -69,11 +69,9 @@ const ICONS: Record<AiPanelIconName, LucideIcon> = {
 function AiPanelBody({
   section,
   canAutoApply,
-  deepResearchEnabled,
 }: {
   section: AiPanelSectionKey;
   canAutoApply: boolean;
-  deepResearchEnabled: boolean;
 }) {
   switch (section) {
     case "memory":
@@ -87,7 +85,8 @@ function AiPanelBody({
     case "activity":
       return <AiAutopilotActivity />;
     case "research":
-      return <AiResearchPanel deepResearchEnabled={deepResearchEnabled} />;
+      // Issue #1367 — retired workflow: history only, no create or approve.
+      return <AiResearchPanel />;
     case "usage":
       return <UsageDashboard />;
   }
@@ -97,7 +96,6 @@ export function AiManagementSheet({
   section,
   canAutoApply,
   allowedSections,
-  deepResearchEnabled = true,
   onSectionChange,
   onClose,
 }: {
@@ -107,8 +105,6 @@ export function AiManagementSheet({
   canAutoApply: boolean;
   /** Per-section permission filter; defaults to all sections when omitted. */
   allowedSections?: readonly AiPanelSectionKey[];
-  /** Whether platform Deep Research is currently enabled. */
-  deepResearchEnabled?: boolean;
   onSectionChange: (key: AiPanelSectionKey) => void;
   onClose: () => void;
 }) {
@@ -139,7 +135,7 @@ export function AiManagementSheet({
         <SheetHeader className="shrink-0 border-b border-border/80 px-4 py-3">
           <SheetTitle>مدیریت دستیار هوشمند</SheetTitle>
           <SheetDescription>
-            حافظه، همکاران، اتوماسیون‌ها، پژوهش و هزینهٔ دستیار — همان گفت‌وگو، یک قدم فراتر.
+            حافظه، همکاران، اتوماسیون‌ها، تاریخچهٔ پژوهش و هزینهٔ دستیار — همان گفت‌وگو، یک قدم فراتر.
           </SheetDescription>
         </SheetHeader>
 
@@ -173,7 +169,6 @@ export function AiManagementSheet({
             <AiPanelBody
               section={active.key}
               canAutoApply={canAutoApply}
-              deepResearchEnabled={deepResearchEnabled}
             />
           </div>
         </div>

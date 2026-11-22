@@ -541,11 +541,13 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   // path and the scope is validated against it, so ownership is the
   // authorization; the write path additionally takes `ai.manage`.
   "ai/memory": "lists/creates/deletes this business's durable memory — session business is the authorization",
-  // Issue #812 §5 — Deep Research. The run's business id is the session's own
-  // on every path, and approving one re-reads it before the environment opens.
-  "ai/research": "lists/creates Deep Research runs for the caller's business — session business is the authorization",
+  // Issue #812 §5 — Deep Research. Issue #1367 — the workflow is retired; the
+  // list route is a read-only history behind `ai.use` and the approve route
+  // refuses before reading a run. Authorization is the capability, not the
+  // run's business id.
+  "ai/research": "lists the caller's own historical Deep Research runs — `ai.use` + session business is the authorization",
   "ai/research/[id]/approve":
-    "approves and runs a Deep Research run — session business is the authorization",
+    "refuses retired approvals; `ai.use` is checked before the retirement answer",
 };
 
 /** True for the super-admin console's own routes, which use the platform guards. */
@@ -801,6 +803,14 @@ describe("every API route is guarded", () => {
           // Session-scoped AI history needs the fresh, revocation-aware guard.
           expect(src).toMatch(/requirePlatformAdmin\(/);
           expect(src).toMatch(/withPlatformScope\(/);
+        } else if (key === "ai/research" || key === "ai/research/[id]/approve") {
+          // Issue #1367 — the retired Deep Research routes are still
+          // capability-guarded, and this branch pins the real guard rather than
+          // a comment that merely mentions `getSession()`. A caller without
+          // `ai.use` must be refused before the retirement answer, so history
+          // stays private and a revoked capability cannot read its own old runs.
+          expect(src).toMatch(/withTenantScope\(/);
+          expect(src).toMatch(/requirePermission\(PERMISSIONS\.aiUse\)/);
         } else {
           expect(src).toMatch(/getSession\(/);
         }

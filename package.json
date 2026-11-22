@@ -48,6 +48,7 @@
     "media:reconcile-orphans": "tsx scripts/media-reconcile-orphans.ts",
     "personnel:reconcile": "tsx scripts/reconcile-personnel-files.ts",
     "workspace:approvals": "tsx scripts/workspace-approval-report.ts",
+    "research:retire": "tsx scripts/retire-deep-research.ts",
     "db:normalize-phones": "tsx scripts/normalize-customer-phones.ts",
     "db:encrypt-fields": "tsx scripts/encrypt-fields.ts",
     "db:encrypt-ai-secrets": "tsx scripts/encrypt-ai-gateway-secrets.ts",

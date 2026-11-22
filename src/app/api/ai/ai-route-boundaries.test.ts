@@ -97,13 +97,14 @@ const getResearchRun = vi.fn();
 const approveResearchRun = vi.fn();
 const createResearchRun = vi.fn();
 const runResearchRun = vi.fn();
+const listResearchRuns = vi.fn();
 vi.mock("@/lib/ai-research", () => ({
   getResearchRun: (...args: unknown[]) => getResearchRun(...args),
   approveResearchRun: (...args: unknown[]) => approveResearchRun(...args),
   createResearchRun: (...args: unknown[]) => createResearchRun(...args),
   runResearchRun: (...args: unknown[]) => runResearchRun(...args),
   listResearchSources: vi.fn(async () => []),
-  listResearchRuns: vi.fn(async () => []),
+  listResearchRuns: (...args: unknown[]) => listResearchRuns(...args),
 }));
 
 // `filterAiToolsByPermissions` stays a spy over the real implementation: the
@@ -269,6 +270,7 @@ beforeEach(() => {
   });
   approveResearchRun.mockResolvedValue({ ok: true, run: { id: "run-1", status: "running" } });
   createResearchRun.mockResolvedValue({ ok: true, run: { id: "run-1" } });
+  listResearchRuns.mockResolvedValue([]);
   runResearchRun.mockResolvedValue({
     ok: true,
     outcome: {
@@ -358,50 +360,57 @@ describe("§10 — /api/ai/memory honours the project's own access rules", () =>
   });
 });
 
-describe("§5 — /api/ai/research gates on explicit cost approval", () => {
-  it("refuses to create a run until the member has seen the estimate", async () => {
-    const { POST } = await import("./research/route");
-    const res = await POST(
-      jsonRequest("http://localhost/api/ai/research", "POST", {
-        question: "چرا حاشیهٔ سود کم شد؟",
-        costApproved: false,
-        maxRounds: 4,
-      }),
-    );
-
-    expect(res.status).toBe(402);
-    const body = await res.json();
-    expect(body.error).toBe("research_cost_not_approved");
-    // The figure the member is being asked about is the server's own product of
-    // the platform's caps, so it cannot be talked down by the client.
-    expect(body.estimatedMaxCostUsd).toBeGreaterThan(0);
-    expect(body.maxRounds).toBe(4);
-    // And nothing was created.
-    expect(createResearchRun).not.toHaveBeenCalled();
-  });
-
-  it("clamps a client's round and cap requests to the platform's bounds", async () => {
+describe("§5 / issue #1367 — /api/ai/research is read-only history", () => {
+  it("refuses a direct POST with the stable retired code and creates nothing", async () => {
     const { POST } = await import("./research/route");
     const res = await POST(
       jsonRequest("http://localhost/api/ai/research", "POST", {
         question: "چرا حاشیهٔ سود کم شد؟",
         costApproved: true,
-        maxRounds: 9999,
-        spendCapUsd: 9999,
+        maxRounds: 4,
+        spendCapUsd: 1,
       }),
     );
-    expect(res.status).toBe(201);
-    const input = createResearchRun.mock.calls[0][0] as Record<string, number>;
-    expect(input.maxRounds).toBe(12);
-    expect(input.spendCapUsd).toBe(100);
+
+    expect(res.status).toBe(410);
+    await expect(res.json()).resolves.toMatchObject({
+      error: "research_retired",
+      supersededBy: ["auto", "instant", "thinking"],
+    });
+    // The service is never called, so no row and no spend can exist.
+    expect(createResearchRun).not.toHaveBeenCalled();
   });
 
-  it("refuses a question too short to research", async () => {
-    const { POST } = await import("./research/route");
-    const res = await POST(
-      jsonRequest("http://localhost/api/ai/research", "POST", { question: "چرا", costApproved: true }),
-    );
-    expect(res.status).toBe(400);
+  it("still answers a GET from the caller's own historical runs", async () => {
+    const { GET } = await import("./research/route");
+    const res = await GET();
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      runs: [],
+      retired: true,
+      supersededBy: ["auto", "instant", "thinking"],
+    });
+    // Scoped to the session's business AND the member's own runs.
+    expect(listResearchRuns).toHaveBeenCalledWith({
+      businessId: SESSION.businessId,
+      userId: SESSION.sub,
+    });
+  });
+
+  it("refuses both POST and GET without ai.use", async () => {
+    asCaller([]);
+    const { GET, POST } = await import("./research/route");
+
+    expect((await GET()).status).toBe(403);
+    expect(
+      (
+        await POST(
+          jsonRequest("http://localhost/api/ai/research", "POST", { question: "سؤال آزمایشی کافی" }),
+        )
+      ).status,
+    ).toBe(403);
+    expect(listResearchRuns).not.toHaveBeenCalled();
     expect(createResearchRun).not.toHaveBeenCalled();
   });
 });
@@ -457,8 +466,8 @@ describe("§12 — a widget run cannot widen its caller's permissions", () => {
   });
 });
 
-describe("§12 — /api/ai/research/[id]/approve is a capability, not a membership", () => {
-  it("asks for ai.use before it reads the run's business id", async () => {
+describe("§12 / issue #1367 — /api/ai/research/[id]/approve is retired and authorized", () => {
+  it("asks for ai.use before it answers, even with the retirement", async () => {
     const { POST } = await import("./research/[id]/approve/route");
     asCaller([PERMISSIONS.aiManage]);
 
@@ -472,60 +481,35 @@ describe("§12 — /api/ai/research/[id]/approve is a capability, not a membersh
     expect(res.status).toBeGreaterThanOrEqual(400);
   });
 
-  it("refuses an approval when Superadmin has switched the mode off", async () => {
-    // A run created while Deep Research was on must not be startable after it
-    // was turned off. The switch has to mean something on the spending side.
+  it("refuses a direct approval of a pending run without reading or spending", async () => {
+    // A run created before the retirement is still `awaiting_approval` in the
+    // table. A direct POST must not open its environment.
     const { POST } = await import("./research/[id]/approve/route");
-    getPlatformAiMode.mockResolvedValue({ ...MODE, is_active: false, model_alias: "" });
 
     const res = await POST(
       jsonRequest("http://localhost/api/ai/research/run-1/approve", "POST", {}),
       { params: Promise.resolve({ id: "run-1" }) },
     );
-    expect(res.status).toBe(409);
-    await expect(res.json()).resolves.toMatchObject({ error: "mode_unavailable" });
+    expect(res.status).toBe(410);
+    await expect(res.json()).resolves.toMatchObject({ error: "research_retired" });
+    expect(getResearchRun).not.toHaveBeenCalled();
+    expect(approveResearchRun).not.toHaveBeenCalled();
+    expect(gateAiTurn).not.toHaveBeenCalled();
+    expect(runResearchRun).not.toHaveBeenCalled();
+    expect(settleAiTurn).not.toHaveBeenCalled();
   });
 
-  it("narrows the run's tool catalogue to what the approver may already call", async () => {
-    // Deep Research is a bigger budget, not a wider permission. The catalogue is
-    // filtered through the caller's effective permissions, so a run cannot read
-    // a surface its approver could not have read themselves.
+  it("is still refused without ai.use, before any retirement answer", async () => {
+    asCaller([]);
     const { POST } = await import("./research/[id]/approve/route");
 
     const res = await POST(
       jsonRequest("http://localhost/api/ai/research/run-1/approve", "POST", {}),
       { params: Promise.resolve({ id: "run-1" }) },
     );
-    expect(res.status).toBe(200);
-
-    const [tools, passed] = filterAiToolsByPermissions.mock.calls.at(-1)!;
-    expect(tools.length).toBe(3);
-    expect(passed).toBeInstanceOf(Set);
-    // `ai.use` + `ai.manage` buys the always-on turn tool and the reporting
-    // tools — nothing else. Re-running the real filter over the same inputs is
-    // what proves the narrowing happened rather than being assumed.
-    const surviving = filterAiToolsByPermissions
-      .getMockImplementation()!(tools as never, passed as never)
-      .map((tool: { function: { name: string } }) => tool.function.name);
-    expect(surviving).toEqual(["propose_action", "get_ar_aging", "run_report"]);
-  });
-
-  it("settles a run that could not execute, so a failed environment is not free", async () => {
-    const { POST } = await import("./research/[id]/approve/route");
-    runResearchRun.mockResolvedValue({ ok: false, error: "research_not_running" });
-
-    const res = await POST(
-      jsonRequest("http://localhost/api/ai/research/run-1/approve", "POST", {}),
-      { params: Promise.resolve({ id: "run-1" }) },
-    );
-    expect(res.status).toBe(500);
-    expect(settleAiTurn).toHaveBeenCalledTimes(1);
-    const attribution = (settleAiTurn.mock.calls[0][0] as { attribution: Record<string, unknown> })
-      .attribution;
-    // A failed run keeps its attribution: §16 says a failed environment is not
-    // a free one, and the same rule applies to its reporting.
-    expect(attribution.researchRunId).toBe("run-1");
-    expect(attribution.runtimeMode).toBe("deep_research");
+    expect(res.status).toBe(403);
+    expect(gateAiTurn).not.toHaveBeenCalled();
+    expect(settleAiTurn).not.toHaveBeenCalled();
   });
 });
 

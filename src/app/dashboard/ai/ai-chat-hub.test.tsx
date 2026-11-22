@@ -101,7 +101,6 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
         canManageAi={true}
         canAutoApply={false}
         allowedPanelSections={["memory", "usage"]}
-        deepResearchEnabled={true}
         eligibleTaskIds={["general", "sales", "accounting", "customers"]}
         starterPrompts={starterPrompts}
         accessibleFocuses={["all", "workspace", "accounting"]}
@@ -141,8 +140,8 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     expect(screen.getByRole("option", { name: /خودکار/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /سریع/ })).toBeTruthy();
     expect(screen.getByRole("option", { name: /تفکر عمیق/ })).toBeTruthy();
-    const deepResearchOption = screen.getByRole("option", { name: /پژوهش عمیق/ });
-    expect(deepResearchOption.getAttribute("aria-disabled")).toBe("true");
+    // Issue #1367 — Deep Research is not a fourth mode and has no menu item.
+    expect(screen.queryByRole("option", { name: /پژوهش عمیق/ })).toBeNull();
     fireEvent.keyDown(modeSelect, { key: "Escape" });
     expect(within(composerBox as HTMLElement).queryByLabelText("تنظیمات این پیام")).toBeNull();
     expect(within(composerBox as HTMLElement).queryByLabelText("جست‌وجو در گزارش‌ها و گفتگوهای قبلی")).toBeNull();
@@ -234,7 +233,6 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
         canManageAi={false}
         canAutoApply={false}
         allowedPanelSections={[]}
-        deepResearchEnabled={false}
         eligibleTaskIds={["general"]}
         accessibleFocuses={["all"]}
       />,
@@ -270,7 +268,6 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
         canManageAi={true}
         canAutoApply={false}
         allowedPanelSections={["memory"]}
-        deepResearchEnabled={true}
         eligibleTaskIds={["general", "sales", "accounting"]}
         accessibleFocuses={["all", "workspace", "accounting"]}
         industry="architecture_construction"
@@ -323,43 +320,32 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     expect(textarea.value).toBe("پیش‌نویس تستی من");
   });
 
-  it("opens the cost-approved Deep Research panel from the mode selector without changing the chat runtime mode", async () => {
+  it("issue #1367 — offers no Deep Research entry in the mode selector and opens read-only history from its bookmark", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
         ok: true,
         status: 200,
-        json: async () => ({ runs: [] }),
+        json: async () => ({ runs: [], retired: true }),
       })) as unknown as typeof fetch,
     );
+    currentSearchParams = new URLSearchParams({ aiPanel: "research" });
 
     render(
       <AiChatHub
         canManageAi={false}
         canAutoApply={false}
         allowedPanelSections={["research"]}
-        deepResearchEnabled={true}
       />,
     );
 
-    const modeSelect = screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ });
-    fireEvent.click(modeSelect);
-    const deepResearchOption = screen.getByRole("option", { name: /پژوهش عمیق/ });
-    expect(deepResearchOption.getAttribute("aria-disabled")).toBeNull();
-    fireEvent.click(deepResearchOption);
-
-    expect(replaceMock).toHaveBeenCalledWith(
-      expect.stringContaining("aiPanel=research"),
-      { scroll: false },
-    );
-    expect(screen.getByRole("heading", { name: "پژوهش عمیق" })).toBeTruthy();
-    // The open panel is modal, so the composer behind it is hidden from the
-    // accessibility tree; read its trigger directly to prove the chat runtime
-    // mode is still Auto rather than matching `mode=deep_research`.
-    const composerBox = document.querySelector("[data-composer-box]") as HTMLElement;
-    expect(
-      composerBox.querySelector('[aria-label="حالت پاسخ‌گویی: خودکار"]'),
-    ).toBeTruthy();
+    // The retired Deep Research entry is not a mode and has no menu item; the
+    // first composer test pins the picker's three options.
+    //
+    // The old bookmark still lands on the member's own history, read-only.
+    expect(screen.getByRole("heading", { name: "تاریخچهٔ پژوهش عمیق" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /ساخت پژوهش/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /تأیید و اجرا/ })).toBeNull();
     expect(replaceMock.mock.calls.some(([url]) => String(url).includes("mode=deep_research"))).toBe(false);
   });
 
@@ -382,7 +368,6 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
         canManageAi={false}
         canAutoApply={false}
         allowedPanelSections={[]}
-        deepResearchEnabled={false}
         eligibleTaskIds={["general"]}
         accessibleFocuses={["all"]}
       />,
@@ -430,7 +415,6 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
         onAppFocusChange={vi.fn()}
         runtimeMode="auto"
         onRuntimeModeChange={vi.fn()}
-        deepResearchEnabled={false}
         projectId={null}
         onProjectChange={vi.fn()}
       />,
@@ -572,7 +556,6 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
         section="usage"
         canAutoApply={false}
         allowedSections={["usage"]}
-        deepResearchEnabled={false}
         onSectionChange={vi.fn()}
         onClose={vi.fn()}
       />,
@@ -590,78 +573,58 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     expect(memContainer.textContent).not.toContain("«دانش»");
   });
 
-  it("handles HTTP 402 research_cost_not_approved in AiResearchPanel by showing the inline cost-approval step", async () => {
-    const fetchMock = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-      if (!init || init.method !== "POST") {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ runs: [] }),
-        } as Response;
-      }
-      const body = JSON.parse(String(init.body)) as { costApproved?: boolean };
-      if (!body.costApproved) {
-        return {
-          ok: false,
-          status: 402,
-          json: async () => ({
-            error: "research_cost_not_approved",
-            estimatedMaxCostUsd: 0.45,
-          }),
-        } as Response;
-      }
-      return {
-        ok: true,
-        status: 201,
-        json: async () => ({
-          run: {
+  it("issue #1367 — AiResearchPanel is read-only: it shows a historical run and offers no create or approve control", async () => {
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        retired: true,
+        runs: [
+          {
             id: "run-1",
             question: "تحلیل جامع فروش سه ماه گذشته",
-            status: "awaiting_approval",
-            roundsUsed: 0,
+            status: "succeeded",
+            roundsUsed: 2,
             maxRounds: 4,
             estimatedMaxCostUsd: 0.45,
             spendCapUsd: 1,
-            actualCostUsd: 0,
-            findings: [],
-            answer: null,
+            actualCostUsd: 0.12,
+            answer: "فروش شعبهٔ مرکزی بیشتر بود.",
+            findings: [{ claim: "فروش مرکزی بیشتر بود", sourceRefs: ["tool:run_report"] }],
+            sources: [
+              {
+                kind: "tool",
+                ref: "tool:run_report",
+                title: "گزارش فروش",
+                count: 3,
+              },
+            ],
             error: null,
           },
-        }),
-      } as Response;
-    });
+        ],
+      }),
+    }));
     vi.stubGlobal("fetch", fetchMock);
 
-    render(<AiResearchPanel deepResearchEnabled={true} />);
-
-    const textarea = screen.getByPlaceholderText(/فروش سه ماه گذشته/);
-    await act(async () => {
-      fireEvent.change(textarea, {
-        target: { value: "تحلیل جامع فروش سه ماه گذشته به تفکیک شعبه" },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /ساخت پژوهش/ }));
-    });
+    render(<AiResearchPanel />);
 
     await waitFor(() => {
-      expect(screen.getByText(/حداکثر هزینهٔ تخمینی این پژوهش: \$0\.45/)).toBeTruthy();
+      expect(screen.getByText("فروش شعبهٔ مرکزی بیشتر بود.")).toBeTruthy();
     });
 
-    const approveCostBtn = screen.getByRole("button", {
-      name: /تأیید سقف هزینه و ثبت پژوهش/,
-    });
-    await act(async () => {
-      fireEvent.click(approveCostBtn);
-    });
+    // The retirement is stated, and no control can create or start a run.
+    expect(screen.getByText(/پژوهش عمیق بازنشسته شده است/)).toBeTruthy();
+    expect(screen.queryByPlaceholderText(/فروش سه ماه گذشته/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /ساخت پژوهش/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /تأیید و اجرا/ })).toBeNull();
 
+    // History itself is still checkable: the sourced findings are reachable.
+    fireEvent.click(screen.getByRole("button", { name: "نمایش منابع" }));
+    expect(screen.getAllByText(/tool:run_report/).length).toBeGreaterThan(0);
+
+    // Only the read endpoint was touched.
     expect(
-      fetchMock.mock.calls.some(([, init]) => {
-        if (!init?.body) return false;
-        const parsed = JSON.parse(String(init.body)) as { costApproved?: boolean };
-        return parsed.costApproved === true;
-      }),
+      fetchMock.mock.calls.every(([url]) => String(url) === "/api/ai/research"),
     ).toBe(true);
   });
 
@@ -714,7 +677,6 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
         canManageAi={false}
         canAutoApply={false}
         allowedPanelSections={[]}
-        deepResearchEnabled={false}
         eligibleTaskIds={["general", "inventory"]}
         accessibleFocuses={["all", "accounting"]}
         industry="wholesale"

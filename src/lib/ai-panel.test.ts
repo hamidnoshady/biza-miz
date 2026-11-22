@@ -76,20 +76,26 @@ describe("AI panel role gate", () => {
     expect(canManageAi(usageOnly, "usage")).toBe(true);
     expect(canManageAi(usageOnly, "memory")).toBe(false);
     expect(canManageAi(usageOnly, "automations")).toBe(false);
-    expect(resolveAllowedAiPanelSections(usageOnly, { deepResearchEnabled: false })).toEqual([
-      "usage",
-    ]);
-    expect(resolveAllowedAiPanelSections(usageOnly, { deepResearchEnabled: true })).toEqual([
-      "research",
-      "usage",
-    ]);
+    // Issue #1367 — the research section is the caller's own read-only history,
+    // so `ai.use` is enough, exactly like the API it reads.
+    expect(canManageAi(usageOnly, "research")).toBe(true);
+    expect(resolveAllowedAiPanelSections(usageOnly)).toEqual(["research", "usage"]);
 
     const automationsOnly = new Set(["ai.use", "ai.automations.manage"]);
-    expect(
-      resolveAllowedAiPanelSections(automationsOnly, { deepResearchEnabled: false }),
-    ).toEqual(["automations"]);
+    expect(resolveAllowedAiPanelSections(automationsOnly)).toEqual([
+      "automations",
+      "research",
+    ]);
 
     const fullManage = new Set(["ai.use", "ai.manage"]);
     expect(resolveAllowedAiPanelSections(fullManage)).toEqual([...AI_PANEL_SECTION_KEYS]);
+  });
+
+  it("keeps research history out for a member with no assistant capability", () => {
+    // History is read-only, not public: without `ai.use` there is nothing to
+    // read and the section is not offered.
+    const noAssistant = new Set(["menu.view"]);
+    expect(canManageAi(noAssistant, "research")).toBe(false);
+    expect(resolveAllowedAiPanelSections(noAssistant)).toEqual([]);
   });
 });

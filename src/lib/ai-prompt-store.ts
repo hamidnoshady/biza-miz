@@ -67,11 +67,12 @@ export const PROMPT_SCOPES: readonly { key: string; label: string; hint: string 
     label: "حالت تفکر عمیق",
     hint: "پرامپت حالت تفکر عمیق با مدل جداگانه؛ بدون راه‌اندازی پژوهش هزینه‌دار.",
   },
-  {
-    key: modePromptScope("deep_research"),
-    label: "پژوهش عمیق",
-    hint: "لایهٔ دوم پرامپت برای پژوهش عمیق؛ هر عدد باید منبع داشته باشد.",
-  },
+  // Issue #1367 — `mode:deep_research` is deliberately NOT offered here any
+  // more: the workflow is retired and this list is the console's "new work"
+  // surface. Existing versions of that scope are still in
+  // `ai_prompt_versions`, still returned by `listPromptVersions()`, and
+  // `isPromptScopeKey()` still accepts the key, so history remains recoverable
+  // by an operator without the console inviting a new publish.
   ...ENABLED_INDUSTRIES.map((industry) => ({
     key: businessTypePromptScope(industry),
     label: INDUSTRY_LABELS[industry],

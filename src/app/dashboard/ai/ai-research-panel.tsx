@@ -3,42 +3,49 @@
 /**
  * Issue #812 §5 — «پژوهش عمیق», the cost-approved isolated workflow's tenant
  * surface.
+ * Issue #1367 — the workflow is retired; this panel is its **read-only
+ * history**.
  *
- * The three-step shape is the point, and the panel refuses to collapse it:
+ * The distinction matters more than it looks:
  *
- *   1. ask      — write the question, see the estimated maximum cost
- *   2. approve  — explicitly agree to that cost
- *   3. read     — the grounded result, with its sources attached
+ *  - There is no create field, no cost-approval step and no approve button any
+ *    more. The retirement is enforced server-side as well, so removing them
+ *    here is honest UI, not a security boundary.
+ *  - What a member already ran stays exactly as it was: the question, the
+ *    status, the actual cost the business was charged, the grounded answer, its
+ *    sources and its findings. A result that cannot be checked is not a result.
+ *  - A run that was waiting for approval cannot be started now, and says so
+ *    instead of showing a button that would fail.
+ *  - Nothing here is remapped onto the Thinking chat mode: Deep Research has its
+ *    own history and its own costs, and pretending otherwise would rewrite what
+ *    happened.
  *
- * There is no "just run it" button. A Deep Research run spends real money on a
- * model call, so the approval step is the product, not friction to be removed.
- * The estimate is computed by the server from the platform's own caps and shown
- * before approval, so what the member agrees to is what the system will spend
- * against.
- *
- * Every finished run keeps its sources visible after the environment expires —
- * a result that cannot be checked is not a result.
+ * The data comes from `GET /api/ai/research`, which stays scoped to the caller's
+ * own runs in this business and refuses without `ai.use`.
  */
 import { useCallback, useEffect, useState } from "react";
-import { BookOpenIcon, SearchIcon } from "lucide-react";
-import { toast } from "sonner";
+import { BookOpenIcon, RotateCcwIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { EmptyState, LoadingSkeleton, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
-import { Field, InfoBox, api, inputClass } from "@/app/dashboard/ui";
+import {
+  EmptyState,
+  LoadingSkeleton,
+  SectionCard,
+  StatusBadge,
+} from "@/app/dashboard/page-chrome";
+import { ErrorBox, api } from "@/app/dashboard/ui";
 import type {
   ResearchFinding,
   ResearchRun,
   ResearchSource,
   ResearchStatus,
 } from "@/lib/ai-research-shared";
-import {
-  RESEARCH_DEFAULT_MAX_ROUNDS,
-  RESEARCH_DEFAULT_SPEND_CAP_USD,
-} from "@/lib/ai-research-shared";
 
-const STATUS_LABELS: Record<ResearchStatus, { label: string; tone: "neutral" | "active" | "positive" | "danger" }> = {
-  awaiting_approval: { label: "در انتظار تأیید هزینه", tone: "active" },
-  running: { label: "در حال اجرا", tone: "active" },
+const STATUS_LABELS: Record<
+  ResearchStatus,
+  { label: string; tone: "neutral" | "active" | "positive" | "danger" }
+> = {
+  awaiting_approval: { label: "در انتظار تأیید هزینه (اجرای تازه ممکن نیست)", tone: "neutral" },
+  running: { label: "در حال اجرا در زمان بازنشستگی", tone: "neutral" },
   succeeded: { label: "پایان‌یافته", tone: "positive" },
   failed: { label: "ناموفق", tone: "danger" },
   cancelled: { label: "لغو شده", tone: "neutral" },
@@ -50,28 +57,17 @@ function money(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
-export function AiResearchPanel({
-  deepResearchEnabled = true,
-}: {
-  deepResearchEnabled?: boolean;
-} = {}) {
+export function AiResearchPanel() {
   const [runs, setRuns] = useState<ResearchRun[]>([]);
-  const [question, setQuestion] = useState("");
-  const [maxRounds, setMaxRounds] = useState(String(RESEARCH_DEFAULT_MAX_ROUNDS));
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [pendingEstimate, setPendingEstimate] = useState<{
-    question: string;
-    maxRounds: number;
-    estimatedMaxCostUsd: number;
-  } | null>(null);
-  const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [sources, setSources] = useState<ResearchSource[]>([]);
 
   const load = useCallback(async () => {
+    setFailed(false);
     const { ok, data } = await api<{ runs: ResearchRun[] }>("/api/ai/research");
     if (ok) setRuns(data.runs ?? []);
+    else setFailed(true);
     setLoading(false);
   }, []);
 
@@ -79,194 +75,66 @@ export function AiResearchPanel({
     void load();
   }, [load]);
 
-  async function create(costApproved = false) {
-    if (!deepResearchEnabled) {
-      toast.error(researchErrorMessage("research_disabled"));
-      return;
-    }
-    if (question.trim().length < 8) {
-      toast.error("سؤال کوتاه است؛ کمی دقیق‌تر بنویسید.");
-      return;
-    }
-    const rounds = Math.max(1, Math.min(12, Number(maxRounds) || RESEARCH_DEFAULT_MAX_ROUNDS));
-    setCreating(true);
-    // Step 1 asks without approving: the server answers with the estimate it
-    // computed from its own caps, and only a second, explicit call approves.
-    const { ok, data } = await api<{ error?: string; estimatedMaxCostUsd?: number; run?: ResearchRun }>(
-      "/api/ai/research",
-      {
-        method: "POST",
-        body: JSON.stringify({ question: question.trim(), maxRounds: rounds, costApproved }),
-      },
-    );
-    setCreating(false);
-    if (ok && data.run) {
-      setPendingEstimate(null);
-      setQuestion("");
-      toast.success("پژوهش ساخته شد؛ برای شروع باید هزینهٔ آن را تأیید کنید.");
-      void load();
-      return;
-    }
-    if (
-      (ok || data.error === "research_cost_not_approved") &&
-      typeof data.estimatedMaxCostUsd === "number"
-    ) {
-      setPendingEstimate({
-        question: question.trim(),
-        maxRounds: rounds,
-        estimatedMaxCostUsd: data.estimatedMaxCostUsd,
-      });
-      toast.message(
-        `بازهٔ هزینهٔ این پژوهش حدود ${money(data.estimatedMaxCostUsd)} است. برای ثبت پژوهش سقف هزینه را تأیید کنید.`,
-      );
-      return;
-    }
-    toast.error(researchErrorMessage(data.error ?? ""));
-  }
-
-  async function approve(run: ResearchRun) {
-    if (!window.confirm(`هزینهٔ تخمینی این پژوهش ${money(run.estimatedMaxCostUsd)} است. تأیید و شروع می‌کنید؟`)) {
-      return;
-    }
-    setApprovingId(run.id);
-    const { ok, data } = await api<{ error?: string; run?: ResearchRun; sources?: ResearchSource[] }>(
-      `/api/ai/research/${run.id}/approve`,
-      { method: "POST" },
-    );
-    setApprovingId(null);
-    if (!ok) {
-      toast.error(researchErrorMessage(data.error ?? ""));
-      return;
-    }
-    if (data.run) setOpenId(data.run.id);
-    if (data.sources) setSources(data.sources);
-    toast.success("پژوهش اجرا شد.");
-    void load();
-  }
+  if (loading) return <LoadingSkeleton rows={3} />;
 
   return (
     <div className="space-y-4">
-      <InfoBox>
-        پژوهش عمیق یک کار جداگانه و هزینه‌دار است: سؤال شما را در چند دور بررسی می‌کند، هر عدد را به منبعش
-        ارجاع می‌دهد و نتیجه را همراه شواهد نگه می‌دارد. پیش از شروع، حداکثر هزینهٔ آن به شما نشان داده می‌شود و
-        بدون تأیید شما اجرا نمی‌شود.
-      </InfoBox>
-
-      {!deepResearchEnabled ? (
-        <InfoBox>
-          پژوهش عمیق در حال حاضر روی این سکو فعال نیست. پس از فعال‌سازی توسط مدیر پلتفرم می‌توانید پژوهش جدید ثبت کنید.
-        </InfoBox>
-      ) : null}
-
-      <SectionCard title="پژوهش جدید">
-        <div className="space-y-3">
-          <Field label="سؤال">
-            <textarea
-              className={inputClass}
-              rows={3}
-              disabled={!deepResearchEnabled || creating}
-              value={question}
-              onChange={(event) => {
-                setQuestion(event.target.value);
-                if (pendingEstimate) setPendingEstimate(null);
-              }}
-              placeholder="مثلاً: فروش سه ماه گذشته را به تفکیک شعبه و دستهٔ کالا با ذکر منابع گزارش کن."
-            />
-          </Field>
-          <Field label="حداکثر دورهای بررسی">
-            <input
-              className={inputClass}
-              inputMode="numeric"
-              disabled={!deepResearchEnabled || creating}
-              value={maxRounds}
-              onChange={(event) => {
-                setMaxRounds(event.target.value);
-                if (pendingEstimate) setPendingEstimate(null);
-              }}
-            />
-          </Field>
-          {pendingEstimate ? (
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/80 bg-muted/40 p-3 text-xs">
-              <span className="font-medium text-foreground">
-                حداکثر هزینهٔ تخمینی این پژوهش: {money(pendingEstimate.estimatedMaxCostUsd)}
-              </span>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  disabled={creating}
-                  onClick={() => setPendingEstimate(null)}
-                >
-                  انصراف
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={creating}
-                  onClick={() => void create(true)}
-                >
-                  تأیید سقف هزینه و ثبت پژوهش
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <div className="flex justify-end">
-              <Button
-                type="button"
-                size="sm"
-                className="gap-1.5"
-                disabled={!deepResearchEnabled || creating}
-                onClick={() => void create(false)}
-              >
-                <SearchIcon className="size-4" aria-hidden="true" />
-                ساخت پژوهش
-              </Button>
-            </div>
-          )}
-        </div>
+      <SectionCard title="تاریخچهٔ پژوهش‌های پیشین">
+        <p className="text-sm leading-6 text-muted-foreground">
+          پژوهش عمیق بازنشسته شده است و پژوهش تازه‌ای ثبت یا اجرا نمی‌شود. پژوهش‌های قبلی شما با نتیجه، منابع و
+          هزینهٔ ثبت‌شده فقط خواندنی باقی می‌مانند. برای پرسش‌های تازه از حالت‌های خودکار، سریع یا تفکر عمیق
+          استفاده کنید.
+        </p>
       </SectionCard>
 
-      {loading ? (
-        <LoadingSkeleton rows={3} />
+      {failed ? (
+        <ErrorBox>
+          خواندن تاریخچهٔ پژوهش انجام نشد.{" "}
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="gap-1.5"
+            onClick={() => {
+              setLoading(true);
+              void load();
+            }}
+          >
+            <RotateCcwIcon className="size-3.5" aria-hidden="true" />
+            تلاش دوباره
+          </Button>
+        </ErrorBox>
       ) : runs.length === 0 ? (
-        <EmptyState>هنوز پژوهشی نداشته‌اید.</EmptyState>
+        <EmptyState>پژوهشی برای نمایش ثبت نشده است.</EmptyState>
       ) : (
         <div className="space-y-3">
           {runs.map((run) => {
-            const status = STATUS_LABELS[run.status];
+            const status = STATUS_LABELS[run.status] ?? {
+              label: "وضعیت نامشخص",
+              tone: "neutral" as const,
+            };
             const open = openId === run.id;
+            const sources: ResearchSource[] = run.sources ?? [];
+            const findings: ResearchFinding[] = run.findings ?? [];
             return (
               <SectionCard key={run.id} title={run.question}>
                 <div className="space-y-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-                    <StatusBadge tone="neutral">دورهای استفاده‌شده: {run.roundsUsed.toLocaleString("fa-IR")}</StatusBadge>
+                    <StatusBadge tone="neutral">
+                      دورهای استفاده‌شده: {run.roundsUsed.toLocaleString("fa-IR")}
+                    </StatusBadge>
                     <StatusBadge tone="neutral">سقف هزینه: {money(run.spendCapUsd)}</StatusBadge>
                     {run.actualCostUsd > 0 && (
-                      <StatusBadge tone="neutral">هزینهٔ واقعی: {money(run.actualCostUsd)}</StatusBadge>
+                      <StatusBadge tone="neutral">
+                        هزینهٔ ثبت‌شده: {money(run.actualCostUsd)}
+                      </StatusBadge>
                     )}
                   </div>
 
-                  {run.status === "awaiting_approval" && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm text-muted-foreground">
-                        حداکثر هزینهٔ تخمینی: {money(run.estimatedMaxCostUsd)}
-                      </span>
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={approvingId === run.id}
-                        onClick={() => approve(run)}
-                      >
-                        {approvingId === run.id ? "در حال اجرا…" : "تأیید و اجرا"}
-                      </Button>
-                    </div>
-                  )}
-
-                  {run.answer && (
+                  {run.answer ? (
                     <div className="space-y-2">
-                      <p className="text-sm leading-6 text-foreground whitespace-pre-wrap">{run.answer}</p>
+                      <p className="whitespace-pre-wrap text-sm leading-6 text-foreground">{run.answer}</p>
                       {open && (
                         <div className="space-y-1 rounded-md border border-border/70 p-2">
                           <p className="text-xs font-semibold text-muted-foreground">منابع</p>
@@ -275,28 +143,50 @@ export function AiResearchPanel({
                           ) : (
                             <ul className="space-y-0.5">
                               {sources.map((source) => (
-                                <li key={`${source.kind}:${source.ref}`} className="text-xs text-muted-foreground">
-                                  <BookOpenIcon className="me-1 inline size-3" aria-hidden="true" />
-                                  {source.title} — {source.ref} ({source.count.toLocaleString("fa-IR")} مورد)
+                                <li
+                                  key={`${source.kind}:${source.ref}`}
+                                  className="text-xs text-muted-foreground"
+                                >
+                                  <BookOpenIcon
+                                    className="me-1 inline size-3"
+                                    aria-hidden="true"
+                                  />
+                                  {source.title} — {source.ref} (
+                                  {source.count.toLocaleString("fa-IR")} مورد)
                                 </li>
                               ))}
                             </ul>
                           )}
-                          {(run.findings as ResearchFinding[]).length > 0 && (
+                          {findings.length > 0 && (
                             <ul className="mt-2 space-y-1">
-                              {(run.findings as ResearchFinding[]).map((finding, index) => (
-                                <li key={`${finding.claim}-${index}`} className="text-xs leading-5 text-foreground">
-                                  • {finding.claim} <span className="text-muted-foreground">({finding.sourceRefs.join("، ")})</span>
+                              {findings.map((finding, index) => (
+                                <li
+                                  key={`${finding.claim}-${index}`}
+                                  className="text-xs leading-5 text-foreground"
+                                >
+                                  • {finding.claim}{" "}
+                                  <span className="text-muted-foreground">
+                                    ({finding.sourceRefs.join("، ")})
+                                  </span>
                                 </li>
                               ))}
                             </ul>
                           )}
                         </div>
                       )}
-                      <Button type="button" size="sm" variant="ghost" onClick={() => setOpenId(open ? null : run.id)}>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setOpenId(open ? null : run.id)}
+                      >
                         {open ? "بستن منابع" : "نمایش منابع"}
                       </Button>
                     </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      این پژوهش نتیجهٔ ثبت‌شده‌ای ندارد.
+                    </p>
                   )}
 
                   {run.error && <p className="text-xs text-destructive">{run.error}</p>}
@@ -308,27 +198,4 @@ export function AiResearchPanel({
       )}
     </div>
   );
-}
-
-export function researchErrorMessage(code: string): string {
-  switch (code) {
-    case "research_disabled":
-      return "پژوهش عمیق روی این سکو فعال نیست.";
-    case "research_question_too_short":
-      return "سؤال کوتاه است؛ دقیق‌تر بنویسید.";
-    case "research_cost_not_approved":
-      return "هزینهٔ پژوهش تأیید نشده است.";
-    case "research_not_found":
-      return "پژوهش پیدا نشد.";
-    case "research_not_awaiting_approval":
-      return "این پژوهش در انتظار تأیید هزینه نیست.";
-    case "research_environment_expired":
-      return "محیط این پژوهش منقضی شده است.";
-    case "insufficient_credit":
-      return "اعتبار هوش مصنوعی این کسب‌وکار کافی نیست.";
-    case "ai_disabled":
-      return "سرویس هوش مصنوعی در دسترس نیست.";
-    default:
-      return "انجام نشد.";
-  }
 }

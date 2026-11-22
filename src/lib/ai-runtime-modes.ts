@@ -2,7 +2,8 @@
  * Issue #812 §7 — the three user-facing AI runtime modes.
  *
  * The three chat profiles are `auto`, `instant` (Fast) and `thinking`.
- * Deep Research remains a separately approved and budgeted workflow.
+ * Deep Research was a separately approved workflow and is retired (issue #1367):
+ * its value is kept for historical rows only and is never selectable.
  * Thinking now uses a real independently managed LiteLLM model alias.
  *
  * The load-bearing rule: **mode selection changes the actual LiteLLM model
@@ -21,6 +22,7 @@ import type { AiConfig } from "./ai";
 import {
   AI_RUNTIME_MODES,
   DEFAULT_AI_MODE,
+  isRetiredAiRuntimeMode,
   isAiRuntimeModeAvailable,
   type AiRuntimeMode,
 } from "./ai-runtime-modes-shared";
@@ -29,13 +31,18 @@ import {
 // working. A CLIENT component should import them from
 // `./ai-runtime-modes-shared`; this module reaches the database.
 export {
+  AI_CHAT_MODES,
   AI_MODE_HINTS,
   AI_MODE_LABELS,
+  AI_RETIRED_MODES,
   AI_RUNTIME_MODES,
   DEFAULT_AI_MODE,
+  firstRetiredAiRuntimeMode,
   isAiRuntimeMode,
   isAiRuntimeModeAvailable,
+  isRetiredAiRuntimeMode,
   normalizeAiRuntimeMode,
+  resolveRequestedAiRuntimeMode,
   type AiRuntimeMode,
 } from "./ai-runtime-modes-shared";
 
@@ -77,7 +84,9 @@ export async function listPlatformAiModes(): Promise<PlatformAiModeRow[]> {
   return AI_RUNTIME_MODES.map((mode) => ({
     mode_key: mode,
     model_alias: "",
-    is_active: mode !== "deep_research",
+    // Issue #1367 — a retired mode never starts active, even on a deployment
+    // that has never opened the console.
+    is_active: !isRetiredAiRuntimeMode(mode),
     temperature: null,
     max_output_tokens: null,
     prompt_scope_key: `mode:${mode}`,
@@ -91,7 +100,7 @@ export async function getPlatformAiMode(mode: AiRuntimeMode): Promise<PlatformAi
     modes.find((row) => row.mode_key === mode) ?? {
       mode_key: mode,
       model_alias: "",
-      is_active: mode !== "deep_research",
+      is_active: !isRetiredAiRuntimeMode(mode),
       temperature: null,
       max_output_tokens: null,
       prompt_scope_key: `mode:${mode}`,

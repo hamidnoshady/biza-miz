@@ -1,46 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformCapability } from "@/lib/platform-auth";
+import { getResearchPlatformSettings } from "@/lib/ai-control-plane";
 import {
-  getResearchPlatformSettings,
-  updateResearchPlatformSettings,
-} from "@/lib/ai-control-plane";
+  researchRetiredBody,
+  RESEARCH_RETIRED_STATUS,
+} from "@/lib/ai-research-retirement";
 
 /**
  * Issue #812 §6 — the Deep Research platform switches.
+ * Issue #1367 — read-only; writes are retired.
  *
- * Every cap here is a hard ceiling the workflow enforces server-side, not a
- * default the UI suggests: enabled/disabled, the LiteLLM alias, max context,
- * max rounds, environment TTL, max spend per run, minimum data readiness and
- * the external-web policy. A tenant cannot change any of them, and the chat
- * route refuses a `deep_research` turn outright when `enabled` is false.
+ * `GET` stays so an operator or an audit can still read the historical caps a
+ * run was created under (enabled flag, alias, max rounds, TTL, spend cap). It
+ * never exposes a secret and never changes anything.
+ *
+ * `PUT` is gone: there is no new run for a cap to apply to, and letting the
+ * console keep editing a retired workflow's budget would be a control that
+ * promises something it cannot do. The refusal is `410 research_retired` with
+ * the same body every retired endpoint returns.
  */
 export const GET = async () => {
   const guard = await requirePlatformCapability("ai.read");
   if (guard.error) return guard.error;
-  return NextResponse.json({ settings: await getResearchPlatformSettings() });
+  return NextResponse.json({
+    settings: await getResearchPlatformSettings(),
+    // Additive: marks the payload as historical so a client does not render a
+    // live editor for a retired workflow.
+    retired: true,
+  });
 };
 
-export const PUT = async (request: NextRequest) => {
+export const PUT = async (_request: NextRequest) => {
   const guard = await requirePlatformCapability("ai.config.manage");
   if (guard.error) return guard.error;
-
-  const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-  if (!body) return NextResponse.json({ error: "bad_request" }, { status: 400 });
-
-  try {
-    const settings = await updateResearchPlatformSettings({
-      enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
-      modelAlias: typeof body.modelAlias === "string" ? body.modelAlias : undefined,
-      maxRounds: typeof body.maxRounds === "number" ? body.maxRounds : undefined,
-      maxContextBytes: typeof body.maxContextBytes === "number" ? body.maxContextBytes : undefined,
-      ttlHours: typeof body.ttlHours === "number" ? body.ttlHours : undefined,
-      maxSpendRial: typeof body.maxSpendRial === "number" ? body.maxSpendRial : undefined,
-      minDataReadiness: typeof body.minDataReadiness === "number" ? body.minDataReadiness : undefined,
-      externalWeb: typeof body.externalWeb === "boolean" ? body.externalWeb : undefined,
-    });
-    return NextResponse.json({ settings });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "update_failed";
-    return NextResponse.json({ error: message }, { status: 400 });
-  }
+  return NextResponse.json(researchRetiredBody(), { status: RESEARCH_RETIRED_STATUS });
 };

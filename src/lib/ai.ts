@@ -3727,7 +3727,8 @@ const WIZARD_STEP_LABELS: Record<string, string> = {
 // from one long function:
 //
 //   1. platform base policy        — non-negotiable, Superadmin-owned
-//   2. runtime mode prompt         — auto / instant / deep_research (§7)
+//   2. runtime mode prompt         — auto / instant / thinking (§7; retired
+//                                    deep_research retained for history only)
 //   3. system agent prompt         — only when an assigned agent is invoked (§9)
 //   4. business-type fragment      — the industry this business runs (§8)
 //   5. app-context fragments       — mode/app behaviour and grounding rules
@@ -3779,6 +3780,9 @@ export function runtimeModeLines(ctx: PromptContext): string[] {
         "حالت تفکر عمیق: مسئله را دقیق و گام‌به‌گام تحلیل کن، فرض‌های مهم را بررسی کن و پیش از نتیجه‌گیری شواهد ابزارها را با هم تطبیق بده. عملیات تجاری همچنان نیازمند تأیید کاربر هستند.",
       ];
     case "deep_research":
+      // Issue #1367 — retired. No new turn reaches this branch (the chat route
+      // refuses the value), but the text stays so a historical prompt
+      // composition can still be reconstructed from its layer keys.
       return [
         "حالت پژوهش عمیق: این پاسخ باید مستند باشد. هر عددی که می‌گویی باید منبع داشته باشد (کدام ابزار، کدام بازه، کدام رکورد) و هر نتیجه را به منبعش ارجاع بده. اگر داده برای یک بخش کافی نبود، همان بخش را ناقص علامت بزن و حدس نزن.",
       ];
