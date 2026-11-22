@@ -68,6 +68,7 @@ export interface SyncEventResult {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 interface OrderCreatePayload {
+  readyOnSend?: boolean;
   orderId?: string;
   itemIds?: unknown[];
   type?: "dine_in" | "takeaway" | "delivery";
@@ -181,6 +182,9 @@ async function dispatch(
       openedAt: origin === "remote" && Number.isFinite(Date.parse(event.occurredAt)) ? event.occurredAt : null,
       actorRole: actor.role,
       recordSyncEvent: false,
+      replayReadyOnSend: origin === "remote" && typeof payload.readyOnSend === "boolean"
+        ? payload.readyOnSend
+        : undefined,
       delivery:
         payload.type === "delivery" && payload.delivery
           ? {

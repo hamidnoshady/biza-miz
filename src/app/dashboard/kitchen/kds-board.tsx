@@ -24,6 +24,7 @@ import { KnowledgeHelpButton } from "../knowledge-help";
 import { api, errorMessage } from "../ui";
 import { cardClass, PageShell } from "../page-chrome";
 import { cn } from "@/lib/utils";
+import { KitchenWorkflowSettings } from "./kitchen-workflow-settings";
 
 interface TicketItem {
   id: string;
@@ -497,6 +498,7 @@ function DetailPlaceholder() {
 
 export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean }) {
   const [showStaleReview, setShowStaleReview] = useState(false);
+  const [showWorkflowSettings, setShowWorkflowSettings] = useState(false);
   const [showKitchenHistory, setShowKitchenHistory] = useState(false);
   const [reviewRevision, setReviewRevision] = useState(0);
   const [selectedStaleIds, setSelectedStaleIds] = useState<string[]>([]);
@@ -1017,6 +1019,12 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <KnowledgeHelpButton section="kitchen" />
             {canReviewStale ? (
+              <Button type="button" variant="outline" aria-expanded={showWorkflowSettings}
+                onClick={() => setShowWorkflowSettings((open) => !open)}>
+                تنظیمات آشپزخانه
+              </Button>
+            ) : null}
+            {canReviewStale ? (
               <Button
                 type="button"
                 variant="outline"
@@ -1065,6 +1073,8 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
           </div>
         </div>
       </header>
+
+      {canReviewStale && showWorkflowSettings ? <KitchenWorkflowSettings /> : null}
 
       {canReviewStale && showStaleReview ? (
         <section className={`${cardClass} space-y-2 p-4`}>
