@@ -139,6 +139,13 @@ async function seedTwoBusinessesWithSharedManager() {
     [sharedPassHash],
   );
   const sharedPlatformUserId = sharedIdentity.rows[0].id;
+  // #1386 — the global verified number is the only channel for a *global*
+  // password reset. The membership phone below is deliberately not enough.
+  await db.query(
+    `UPDATE platform_users SET phone_e164 = $2, phone_verified_at = now()
+      WHERE id = $1`,
+    [sharedPlatformUserId, SHARED_MANAGER_PHONE],
+  );
 
   const ownerAPassHash = await bcrypt.hash("OwnerAPass!123", 10);
   const ownerAIdentity = await db.query<{ id: string }>(
@@ -315,6 +322,35 @@ describe("Issue #809 — P0 cross-tenant password overwrite protection & tenant 
       newPassword: "AnotherPass!789",
     });
     expect(replay).toEqual({ ok: false, error: "token_used" });
+  });
+
+  it("#1386 delivers a global reset to a phone-only identity with no email", async () => {
+    const seeded = await seedTwoBusinessesWithSharedManager();
+
+    await db.query(`UPDATE users SET email = NULL WHERE id = $1`, [seeded.memberAId]);
+    await db.query(`UPDATE platform_users SET email = NULL WHERE id = $1`, [
+      seeded.sharedPlatformUserId,
+    ]);
+
+    const issued = await dbLib.withTenant(seeded.bizAId, () =>
+      team.requestMemberPasswordReset(seeded.bizAId, seeded.memberAId, seeded.ownerAId, {
+        origin: "https://app.example.com",
+      }),
+    );
+
+    expect(issued.email).toBeNull();
+    expect(issued.channel).toBe("sms");
+    expect(issued.deliveredTo).toBe("+989***0000");
+    expect(sms.sent).toHaveLength(1);
+    expect(sms.sent[0].phone).toBe(SHARED_MANAGER_PHONE);
+
+    const { rows } = await db.query<{ email: string | null; phone_e164: string | null }>(
+      `SELECT email::text AS email, phone_e164
+         FROM auth_password_resets
+        WHERE subject_realm = 'platform_user' AND subject_id = $1`,
+      [seeded.sharedPlatformUserId],
+    );
+    expect(rows[0]).toMatchObject({ email: null, phone_e164: SHARED_MANAGER_PHONE });
   });
 });
 

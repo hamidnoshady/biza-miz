@@ -14,8 +14,9 @@ import {
   recordAuthFailure,
   recordAuthSuccess,
 } from "@/lib/login-lockout-service";
-import { changeOwnPassword } from "@/lib/password-reset";
+import { changeOwnPassword, setInitialPasswordForPlatformUser } from "@/lib/password-reset";
 import { AUTH_ERROR_CODES, authErrorMessage } from "@/lib/auth-contracts";
+import { requireRecentAuth } from "@/lib/recent-auth";
 import { describeCredentialSurface } from "@/lib/credential-authority";
 import {
   SELF_CREDENTIAL_AUDIT_ACTIONS,
@@ -87,15 +88,6 @@ export const POST = withTenantScope(async (request: NextRequest) => {
    * for. `confirmPassword` is validated server-side because a confirmation the
    * server does not check is a browser decoration, not an invariant.
    */
-  if (!currentPassword) {
-    return NextResponse.json(
-      {
-        error: AUTH_ERROR_CODES.missingCurrentPassword,
-        message: authErrorMessage(AUTH_ERROR_CODES.missingCurrentPassword),
-      },
-      { status: 400 },
-    );
-  }
   if (!newPassword) {
     return NextResponse.json(
       {
@@ -115,14 +107,38 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     );
   }
 
-  const { rows } = await query<{ email: string | null }>(
-    `SELECT email::text AS email FROM users WHERE id = $1 AND business_id = $2`,
-    [session.sub, session.businessId],
+  const platformUserId = session.platformUserId;
+  /*
+   * #1386 — read the global identity, not the membership's email. A phone-only
+   * identity has no email at all, and the password door counts its lockout
+   * under the E.164 number. `password_hash` is also the only honest answer to
+   * "is this a password account", which `hasGlobalIdentity` is not.
+   */
+  const { rows: identities } = await query<{
+    email: string | null;
+    phone_e164: string | null;
+    password_hash: string | null;
+  }>(
+    `SELECT email::text AS email, phone_e164, password_hash
+       FROM platform_users
+      WHERE id = $1 AND is_active = true`,
+    [platformUserId],
   );
-  const email = rows[0]?.email ?? null;
+  const identity = identities[0];
+  if (!identity) {
+    return NextResponse.json(
+      { error: "no_login", message: authErrorMessage("no_login") },
+      { status: 409 },
+    );
+  }
+  const lockoutKey = identity.email ?? identity.phone_e164;
 
-  if (email) {
-    const lockout = await checkAuthLockout("tenant_password", email, PASSWORD_LOCKOUT_POLICY);
+  if (lockoutKey) {
+    const lockout = await checkAuthLockout(
+      "tenant_password",
+      lockoutKey,
+      PASSWORD_LOCKOUT_POLICY,
+    );
     if (lockout.locked) {
       return NextResponse.json(
         { error: "account_locked", lockedUntil: lockout.lockedUntil },
@@ -131,7 +147,73 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     }
   }
 
-  const platformUserId = session.platformUserId;
+  /*
+   * A passwordless identity creates its first password here. There is no
+   * current password to prove, so the session itself is the proof — and a
+   * recent one: creating a credential from a long-idle browser is a
+   * credential change and must be stepped up.
+   */
+  if (identity.password_hash === null) {
+    const recentAuthError = requireRecentAuth(session);
+    if (recentAuthError) return recentAuthError;
+
+    let created: Awaited<ReturnType<typeof setInitialPasswordForPlatformUser>>;
+    try {
+      created = await setInitialPasswordForPlatformUser({
+        platformUserId,
+        newPassword,
+        lockoutKey: lockoutKey ?? platformUserId,
+        keepEmployeeSessionId: session.employeeSessionId ?? null,
+      });
+    } catch (err) {
+      console.error(
+        "initial password creation rolled back:",
+        err instanceof Error ? err.message : "unknown error",
+      );
+      return NextResponse.json(
+        {
+          error: AUTH_ERROR_CODES.credentialChangeFailed,
+          message: authErrorMessage(AUTH_ERROR_CODES.credentialChangeFailed),
+        },
+        { status: 500 },
+      );
+    }
+    if (!created.ok) {
+      return NextResponse.json(
+        {
+          error:
+            created.error === "password_strength" ? created.detail : created.error,
+        },
+        { status: 400 },
+      );
+    }
+
+    const res = NextResponse.json({
+      ok: true,
+      tokenVersion: created.tokenVersion,
+      created: true,
+    });
+    res.cookies.set(
+      SESSION_COOKIE,
+      await signSession({
+        ...session,
+        tokenVersion: created.tokenVersion,
+        recentAuthAt: Math.floor(Date.now() / 1000),
+      }),
+      sessionCookieOptions(session),
+    );
+    return res;
+  }
+
+  if (!currentPassword) {
+    return NextResponse.json(
+      {
+        error: AUTH_ERROR_CODES.missingCurrentPassword,
+        message: authErrorMessage(AUTH_ERROR_CODES.missingCurrentPassword),
+      },
+      { status: 400 },
+    );
+  }
   // A holder rather than a `let`: the token is minted inside the transaction
   // hook, and control-flow narrowing does not follow assignments in callbacks.
   const issued: { token: string | null } = { token: null };
@@ -142,9 +224,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       subjectId: platformUserId,
       currentPassword,
       newPassword,
+      lockoutKey: lockoutKey ?? platformUserId,
       keepEmployeeSessionId: session.employeeSessionId ?? null,
       beforeCommit: async ({ tokenVersion, revokedSessions }) => {
-        if (email) await recordAuthSuccess("tenant_password", email);
+        if (lockoutKey) await recordAuthSuccess("tenant_password", lockoutKey);
         await recordSecurityAudit(
           {
             realm: "tenant",
@@ -184,7 +267,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   if (!result.ok) {
     if (result.error === "invalid_current_password") {
-      if (email) await recordAuthFailure("tenant_password", email);
+      if (lockoutKey) await recordAuthFailure("tenant_password", lockoutKey);
       return NextResponse.json(
         {
           error: AUTH_ERROR_CODES.invalidCurrentPassword,

@@ -23,8 +23,8 @@ import {
   graceDaysRemaining,
   mfaAppliesToRole,
   MFA_GRACE_DAYS_TENANT,
-  shouldChallengeMfaOnLogin,
 } from "@/lib/mfa";
+import { decideOtpAssurance } from "@/lib/login-assurance";
 import { getMfaPolicy } from "@/lib/mfa-policy";
 import {
   auditTrustedDeviceLogin,
@@ -59,11 +59,19 @@ interface MemberRow extends Record<string, unknown> {
 /**
  * Phase 42 — the second half of the phone-OTP door.
  *
- * Issue #809 (Finding 1 — P0): Phone OTP is primary authentication only.
- * For Owner/Manager accounts (or any account with enrolled MFA), phone OTP
- * must evaluate the same MFA policy as password login and require a DISTINCT
- * second factor (`totp` or recovery code — never counting the same SMS OTP
- * as both primary and second factor) before minting the tenant session.
+ * #1386 (owner-approved, superseding the routine-login half of #809/#854):
+ * the SMS OTP is the **primary** credential and completes a routine sign-in by
+ * itself. It is never counted again as the second factor. A distinct factor is
+ * still required when:
+ *
+ *  - the membership's role is covered by mandatory MFA (`owner`/`admin`, or a
+ *    manager/accountant the business opted in) and no trusted-device exemption
+ *    applies;
+ *  - the account holds an enrolled TOTP and this is a new/untrusted device;
+ *  - the account has no factor yet and the grace window has closed.
+ *
+ * `decideOtpAssurance` is the one place that decides this; the password door
+ * keeps `shouldChallengeMfaOnLogin` unchanged.
  */
 export async function POST(request: NextRequest) {
   let body: { code?: string; deviceToken?: string; businessId?: string; trustDevice?: boolean };
@@ -113,6 +121,13 @@ export async function POST(request: NextRequest) {
        * id the client supplied — so a selection token cannot be spent on a
        * membership that does not hold this phone.
        */
+      /*
+       * #1386 — the selection is spent on the *proven global identity's*
+       * membership, not on any membership that happens to carry the number.
+       * A membership whose linked identity holds a different global number is
+       * not admissible; a legacy membership (no global identity, or one with
+       * no global number yet) stays compatible.
+       */
       const { rows } = await query<MemberRow>(
         `SELECT u.id, u.business_id, b.slug::text AS business_slug,
                 b.subdomain::text AS business_subdomain, u.location_id,
@@ -121,9 +136,21 @@ export async function POST(request: NextRequest) {
            FROM users u
            JOIN businesses b ON b.id = u.business_id
            LEFT JOIN platform_users p ON p.id = u.platform_user_id
-          WHERE u.business_id = $1 AND u.phone_e164 = $2
-            AND u.phone_verified_at IS NOT NULL
-            AND u.is_active AND b.status = 'active'`,
+          WHERE u.business_id = $1
+            AND u.is_active AND b.status = 'active'
+            AND (
+              (
+                u.platform_user_id IS NOT NULL
+                AND p.is_active = true
+                AND p.phone_e164 = $2
+                AND p.phone_verified_at IS NOT NULL
+              )
+              OR (
+                u.phone_e164 = $2
+                AND u.phone_verified_at IS NOT NULL
+                AND (u.platform_user_id IS NULL OR p.phone_e164 IS NULL)
+              )
+            )`,
         [chosenBusinessId, provenPhone],
       );
       const member = rows[0];
@@ -177,19 +204,48 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: "invalid_code" }, { status: 401 });
       }
 
-      const { rows } = await query<{
+      /*
+       * #1386 — resolve the canonical global identity first, then list *its*
+       * memberships. The pre-#1386 query listed every membership carrying the
+       * number, which could mix two different people's businesses and let a
+       * business-controlled membership phone stand in for a global identity.
+       * Legacy memberships (no global identity, or an identity with no global
+       * number yet) keep the old lookup.
+       */
+      const { rows: global } = await query<{ id: string }>(
+        `SELECT id FROM platform_users
+          WHERE phone_e164 = $1 AND phone_verified_at IS NOT NULL AND is_active = true`,
+        [candidate],
+      );
+      if (global.length > 1) {
+        // Ambiguous number: refuse rather than guess whose memberships to show.
+        return NextResponse.json({ error: "invalid_code" }, { status: 401 });
+      }
+
+      const memberships = await query<{
         id: string;
         business_id: string;
         business_name: string;
       }>(
-        `SELECT u.id, u.business_id, b.name AS business_name
-           FROM users u
-           JOIN businesses b ON b.id = u.business_id
-          WHERE u.phone_e164 = $1 AND u.is_active
-            AND u.phone_verified_at IS NOT NULL
-            AND b.status = 'active'`,
-        [candidate],
+        global.length === 1
+          ? `SELECT u.id, u.business_id, b.name AS business_name
+               FROM users u
+               JOIN businesses b ON b.id = u.business_id
+              WHERE u.platform_user_id = $1 AND u.is_active
+                AND b.status = 'active'
+              ORDER BY b.name`
+          : `SELECT u.id, u.business_id, b.name AS business_name
+               FROM users u
+               JOIN businesses b ON b.id = u.business_id
+               LEFT JOIN platform_users p ON p.id = u.platform_user_id
+              WHERE u.phone_e164 = $1 AND u.is_active
+                AND u.phone_verified_at IS NOT NULL
+                AND b.status = 'active'
+                AND (u.platform_user_id IS NULL OR p.phone_e164 IS NULL)
+              ORDER BY b.name`,
+        [global.length === 1 ? global[0].id : candidate],
       );
+      const rows = memberships.rows;
 
       const [first] = rows;
       if (!first) {
@@ -360,103 +416,120 @@ async function completePhoneLogin(
       const activeEnrolments = filterActiveMfaEnrolments(allEnrolments);
       const distinctMethods = distinctSecondFactorMethods(activeEnrolments, "phone_otp");
 
-      if (requiresMfa || activeEnrolments.length > 0) {
-        let graceUntil = await getMfaGracePeriod("platform_user", member.platform_user_id);
-        const hasGraceRecord = graceUntil !== null;
+      // Grace bookkeeping is unchanged: a privileged account with no factor at
+      // all gets its window marked, and the door says how long is left.
+      let graceUntil = await getMfaGracePeriod("platform_user", member.platform_user_id);
+      const hasGraceRecord = graceUntil !== null;
 
-        if (requiresMfa && !hasGraceRecord && activeEnrolments.length === 0) {
-          await markMfaGracePeriod(
-            "platform_user",
-            member.platform_user_id,
-            MFA_GRACE_DAYS_TENANT,
-          );
-          graceUntil = await getMfaGracePeriod("platform_user", member.platform_user_id);
-        }
+      if (requiresMfa && !hasGraceRecord && activeEnrolments.length === 0) {
+        await markMfaGracePeriod(
+          "platform_user",
+          member.platform_user_id,
+          MFA_GRACE_DAYS_TENANT,
+        );
+        graceUntil = await getMfaGracePeriod("platform_user", member.platform_user_id);
+      }
 
-        const req = enrolmentRequirement({
-          hasPrimary: activeEnrolments.length > 0,
-          graceUntil,
-          hasGraceRecord,
-          role: member.role,
-        });
+      const req = enrolmentRequirement({
+        hasPrimary: activeEnrolments.length > 0,
+        graceUntil,
+        hasGraceRecord,
+        role: member.role,
+      });
 
-        const challengeDue = shouldChallengeMfaOnLogin({
-          hasConfirmedEnrolment: activeEnrolments.length > 0,
-          appliesToRole: requiresMfa,
-          requirement: req,
-        });
-
-        /*
-         * Issue #885, gap 3 — a device this member already trusted skips the
-         * *routine* second-factor challenge, and only that.
-         *
-         * What this deliberately does not do:
-         *  - it does not substitute for the primary factor. The OTP was
-         *    redeemed above, before this line, so possession of the number is
-         *    already proven;
-         *  - it does not satisfy the distinct-factor rule. A waived challenge
-         *    is not a completed second factor, so nothing downstream may count
-         *    it as one;
-         *  - it does not cover step-up for sensitive actions, which is a
-         *    separate `requireRecentAuth` check on the routes that need it.
-         *
-         * Scoped to this business and this membership, and consulted only when
-         * a challenge is actually due — otherwise it is a query for nothing.
-         */
-        const deviceTrust = challengeDue
-          ? await verifyTrustedDevice({
-              businessId: member.business_id,
-              userId: member.id,
-              token: options.trustedDeviceToken ?? null,
-            })
-          : null;
-        mfaWaivedByTrust = challengeDue && deviceTrust?.trusted === true;
-
-        if (challengeDue && !mfaWaivedByTrust) {
-          const mfaToken = await signMfaPendingToken({
-            sub: member.platform_user_id,
-            method: distinctMethods[0] ?? null,
-            authRealm: "tenant_password",
+      /*
+       * #1386 — the approved OTP assurance policy.
+       *
+       * The old rule was `shouldChallengeMfaOnLogin`, which challenged whenever
+       * any confirmed enrolment existed. That is right for a password but not
+       * for OTP: an account whose only factor is SMS was asked for the same
+       * factor twice. The new rule keeps stronger factors and privileged roles
+       * and drops only the duplicate.
+       *
+       * Trust is read whenever a challenge *could* be due, because the policy
+       * needs to know whether the existing explicit exemption applies. It is
+       * scoped to this business and membership and is never a substitute for
+       * the OTP itself, which was redeemed above.
+       */
+      const trustCouldMatter = requiresMfa || distinctMethods.length > 0;
+      const deviceTrust = trustCouldMatter
+        ? await verifyTrustedDevice({
             businessId: member.business_id,
-            primaryAuth: "phone_otp",
-            /**
-             * Issue #854 (GAP 8) — the verified completion context rides the
-             * signed token. `/api/auth/mfa/verify` commits the deferred stamps
-             * from these fields alone (never from the request body), and only
-             * after the second factor passes; an abandoned ceremony therefore
-             * still commits nothing.
-             */
-            phoneCompletion: {
-              membershipId: member.id,
-              provenPhone: options.attachPhone ?? member.phone_e164,
-              attachPhone: options.attachPhone,
-            },
-          });
+            userId: member.id,
+            token: options.trustedDeviceToken ?? null,
+          })
+        : null;
+      const trusted = deviceTrust?.trusted === true;
 
-          return NextResponse.json({
-            mfaRequired: true,
-            mfaState: req,
-            mfaToken,
-            mfaMethod: distinctMethods[0] ?? null,
-            availableMethods: distinctMethods,
-            primaryAuth: "phone_otp",
-            /*
-             * Issue #885 — the ceremony is not over, so no trust is granted
-             * here. The choice is echoed back so the MFA step can carry the
-             * member's intent forward and register it only if that last factor
-             * actually completes.
-             */
-            ...(options.wantsTrust ? { trustOffered: true } : {}),
-          });
-        }
+      const decision = decideOtpAssurance({
+        role: member.role,
+        policy: mfaPolicy,
+        distinctFactors: distinctMethods,
+        hasConfirmedEnrolment: activeEnrolments.length > 0,
+        requirement: req,
+        deviceTrusted: trusted,
+      });
 
-        if (requiresMfa && req === "grace") {
-          graceNotice = {
-            mfaState: "grace",
-            graceUntil: graceUntil ? new Date(graceUntil).toISOString() : null,
-            graceDaysLeft: graceDaysRemaining(graceUntil),
-          };
-        }
+      /*
+       * A waiver is only recorded when this device would have been challenged
+       * without its trust. That keeps the audit row honest and, with the
+       * `!mfaWaivedByTrust` guard below, stops a login from re-minting trust it
+       * did not earn by completing the factor.
+       */
+      const withoutTrust = decideOtpAssurance({
+        role: member.role,
+        policy: mfaPolicy,
+        distinctFactors: distinctMethods,
+        hasConfirmedEnrolment: activeEnrolments.length > 0,
+        requirement: req,
+        deviceTrusted: false,
+      });
+      mfaWaivedByTrust = withoutTrust.challengeRequired && !decision.challengeRequired;
+
+      if (decision.challengeRequired) {
+        const mfaToken = await signMfaPendingToken({
+          sub: member.platform_user_id,
+          method: distinctMethods[0] ?? null,
+          authRealm: "tenant_password",
+          businessId: member.business_id,
+          primaryAuth: "phone_otp",
+          /**
+           * Issue #854 (GAP 8) — the verified completion context rides the
+           * signed token. `/api/auth/mfa/verify` commits the deferred stamps
+           * from these fields alone (never from the request body), and only
+           * after the second factor passes; an abandoned ceremony therefore
+           * still commits nothing.
+           */
+          phoneCompletion: {
+            membershipId: member.id,
+            provenPhone: options.attachPhone ?? member.phone_e164,
+            attachPhone: options.attachPhone,
+          },
+        });
+
+        return NextResponse.json({
+          mfaRequired: true,
+          mfaState: req,
+          mfaToken,
+          mfaMethod: distinctMethods[0] ?? null,
+          availableMethods: distinctMethods,
+          primaryAuth: "phone_otp",
+          /*
+           * Issue #885 — the ceremony is not over, so no trust is granted
+           * here. The choice is echoed back so the MFA step can carry the
+           * member's intent forward and register it only if that last factor
+           * actually completes.
+           */
+          ...(options.wantsTrust ? { trustOffered: true } : {}),
+        });
+      }
+
+      if (requiresMfa && req === "grace") {
+        graceNotice = {
+          mfaState: "grace",
+          graceUntil: graceUntil ? new Date(graceUntil).toISOString() : null,
+          graceDaysLeft: graceDaysRemaining(graceUntil),
+        };
       }
     }
 

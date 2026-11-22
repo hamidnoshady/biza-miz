@@ -319,6 +319,14 @@ export const SECURITY_AUDIT_ACTIONS = {
   trustedDeviceGranted: "auth.trusted_device_granted",
   trustedDeviceLogin: "auth.trusted_device_login",
   trustedDeviceRevoked: "auth.trusted_device_revoked",
+  /**
+   * #1386 — a password was replaced after the account holder proved control of
+   * their verified phone with a purpose-bound `password_recovery` code. Filed
+   * in the platform realm because recovery runs before any business is chosen.
+   */
+  passwordRecoveredByPhone: "auth.password_recovered_by_phone",
+  /** A passwordless identity created its first password from a recent session. */
+  passwordCreatedSelf: "auth.password_created_self",
   // Issue #976 Phase 1 — link challenges are short-lived and hashed, while
   // link/unlink records identify only the existing platform identity. The
   // Telegram numeric account id and every bearer token remain out of payloads.

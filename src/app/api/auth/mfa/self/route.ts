@@ -228,11 +228,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   return withoutTenantScope("identity", async () => {
-    const { rows } = await query<{ email: string }>(
-      `SELECT email::text AS email FROM platform_users WHERE id = $1`,
+    const { rows } = await query<{ email: string | null; phone_e164: string | null }>(
+      `SELECT email::text AS email, phone_e164 FROM platform_users WHERE id = $1`,
       [subjectId],
     );
-    const email = rows[0]?.email;
+    // #1386 — a phone-only identity still owns its MFA factors. The value is a
+    // label/rate-limit key on these surfaces, so the verified number is a
+    // faithful stand-in when there is no email.
+    const email = rows[0]?.email ?? rows[0]?.phone_e164;
     if (!email) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
     if (action === "regenerate_recovery_codes") {

@@ -186,6 +186,18 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/password-reset/request":
     "forgotten-password initiation — pre-session by definition; non-enumerating single-shape " +
     "response, per-address rate limit, and delivery only to the address on file",
+  // #1386 — the phone-native recovery pair. Both are pre-session by definition
+  // (the caller cannot sign in), the first sends only to the verified number on
+  // file, the second only accepts a purpose-bound `password_recovery` code, and
+  // neither mints a session or reveals whether a number has an account.
+  "auth/password-recovery/request":
+    "phone-native password recovery (issue #1386) — pre-session by definition; neutral " +
+    "response for known/unknown numbers, per-number rate limit, SMS only to the verified " +
+    "number on file, and the code is purpose-bound and cannot be used to log in",
+  "auth/password-recovery/verify":
+    "phone-native password recovery redemption (issue #1386) — the purpose-bound " +
+    "`password_recovery` code is the credential; a successful redemption replaces the " +
+    "password and revokes sessions/trust but never mints a session of its own",
   "auth/company-handoff": "one-use platform-company staff handoff; token is the credential before the tenant cookie exists",
   "website/leads": "public form intake authenticated by a hashed, site-scoped bearer credential with durable rate limiting and idempotency",
   "auth/impersonate-handoff":

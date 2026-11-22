@@ -14,7 +14,10 @@ import {
 } from "../dashboard/ui";
 
 interface ResetPreview {
-  email: string;
+  /** NULL for a phone-only identity (#1386). */
+  email: string | null;
+  /** Masked delivery number for the same case. */
+  phoneMasked: string | null;
   subjectRealm: "platform_user" | "platform_admin";
   expiresAt: string;
   status: "pending" | "expired" | "used" | "revoked";
@@ -108,8 +111,13 @@ function ResetPasswordInner() {
         </div>
       ) : preview && preview.status === "pending" ? (
         <>
-          <Field label="ایمیل حساب">
-            <input className={inputClass} dir="ltr" readOnly value={preview.email} />
+          <Field label={preview.email ? "ایمیل حساب" : "شمارهٔ موبایل حساب"}>
+            <input
+              className={inputClass}
+              dir="ltr"
+              readOnly
+              value={preview.email ?? preview.phoneMasked ?? "—"}
+            />
           </Field>
           <Field label="رمز عبور جدید (حداقل ۸ نویسه)">
             <input
