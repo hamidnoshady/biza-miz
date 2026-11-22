@@ -209,7 +209,7 @@ export function InvoiceManagementView({ canVoidInvoice = false }: { canVoidInvoi
               فهرست فاکتورهای ثبت‌شدهٔ این شعبه؛ جست‌وجو، فیلتر روش پرداخت، مشاهدهٔ جزئیات و چاپ مجدد.
             </p>
           </div>
-          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <div data-tour-id="pos.invoice-history-tools" className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
             <button
               type="button"
               onClick={() => setRefreshKey((key) => key + 1)}
@@ -244,7 +244,7 @@ export function InvoiceManagementView({ canVoidInvoice = false }: { canVoidInvoi
 
         <ErrorBox>{error}</ErrorBox>
 
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+        <div data-tour-id="pos.invoice-history-filters" className="mt-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
           <div className="flex flex-wrap gap-1.5" role="group" aria-label="روش پرداخت">
             <button type="button" aria-pressed={method === ""} className={chipClass(method === "")} onClick={() => setMethod("")}>همه</button>
             <button type="button" aria-pressed={method === "cash"} className={chipClass(method === "cash")} onClick={() => setMethod("cash")}>نقدی</button>
@@ -268,7 +268,7 @@ export function InvoiceManagementView({ canVoidInvoice = false }: { canVoidInvoi
           </div>
         </div>
 
-        <div className="mt-3 grid gap-3 sm:grid-cols-2 sm:max-w-md">
+        <div data-tour-id="pos.invoice-history-dates" className="mt-3 grid gap-3 sm:grid-cols-2 sm:max-w-md">
           <label className="block">
             <span className="mb-1.5 block text-xs text-muted-foreground">از تاریخ</span>
             <JalaliDatePicker value={dateFrom} onChange={setDateFrom} placeholder="از ابتدا" ariaLabel="از تاریخ" />
@@ -279,7 +279,7 @@ export function InvoiceManagementView({ canVoidInvoice = false }: { canVoidInvoi
           </label>
         </div>
 
-        <div className="relative mt-4" aria-busy={loading}>
+        <div data-tour-id="pos.invoice-history-rows" className="relative mt-4" aria-busy={loading}>
           {loading && rows ? (
             <div
               role="status"
@@ -337,7 +337,8 @@ export function InvoiceManagementView({ canVoidInvoice = false }: { canVoidInvoi
                         <td className="py-3 pe-4">
                           <button
                             type="button"
-                            onClick={() => openInvoice(row.id)}
+                            data-tour-id="pos.invoice-history-details"
+                        onClick={() => openInvoice(row.id)}
                             className="inline-flex min-h-10 items-center gap-1.5 rounded-lg border border-border px-3 text-xs font-semibold text-foreground transition-colors hover:border-amber-300 hover:bg-amber-50 dark:hover:border-amber-500/40 dark:hover:bg-amber-500/10"
                           >
                             <EyeIcon aria-hidden="true" className="size-4" />
