@@ -28,6 +28,7 @@ export const GET = withTenantScope(async () => {
       WHERE oi.location_id = $1 AND o.status IN ('open', 'held', 'completed')
         AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
         AND oi.status IN ('sent', 'preparing', 'ready')
+        AND oi.kitchen_archived_at IS NULL
       ORDER BY oi.sent_to_kitchen_at ASC NULLS LAST`,
     [location.id],
   );
@@ -43,7 +44,8 @@ export const GET = withTenantScope(async () => {
        JOIN orders o ON o.id = oi.order_id
       WHERE oi.location_id = $1 AND o.status IN ('open', 'held', 'completed')
         AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
-        AND oi.status IN ('sent', 'preparing', 'ready')`,
+        AND oi.status IN ('sent', 'preparing', 'ready')
+        AND oi.kitchen_archived_at IS NULL`,
     [location.id],
   );
 
