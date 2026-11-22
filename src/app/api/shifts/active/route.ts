@@ -3,6 +3,7 @@ import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getActiveShift, shiftCashSummary } from "@/lib/shift-service";
 import { reconcileDrawer } from "@/lib/shift-cashup";
+import { previewShiftKitchenClose } from "@/lib/kitchen-workflow";
 
 /**
  * The caller's own current shift (or null), plus a running cash summary — for
@@ -32,5 +33,11 @@ export const GET = withTenantScope(async () => {
     cashSummary,
     expectedCash: drawer.expectedCash,
     branchId: shift.locationId,
+    kitchenClose: shift.locationId ? await previewShiftKitchenClose({
+      businessId: session.businessId,
+      locationId: shift.locationId,
+      employeeId: shift.employeeId,
+      startedAt: shift.startedAt,
+    }) : null,
   });
 });

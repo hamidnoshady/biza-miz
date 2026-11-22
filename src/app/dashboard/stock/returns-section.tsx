@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 /**
  * Issue #918 — the «حواله بازگشت» tab: a first-class return-voucher editor
  * plus the posted vouchers' register.
@@ -1083,7 +1085,7 @@ function ReturnRegister({ reloadKey }: { reloadKey: number }) {
   useEffect(() => {
     if (!printData) return;
     const clear = () => setPrintData(null);
-    const timer = window.setTimeout(() => window.print(), 60);
+    const timer = window.setTimeout(() => void printBrowserDocument("inventory_document"), 60);
     window.addEventListener("afterprint", clear);
     return () => {
       window.clearTimeout(timer);

@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 /**
  * Accounting → «انتقال وجه» (issue #862).
  *
@@ -739,7 +741,7 @@ export function TransfersSection({
                 >
                   مشاهدهٔ سند حسابداری
                 </SecondaryButton>
-                <SecondaryButton onClick={() => window.print()}>
+                <SecondaryButton onClick={() => void printBrowserDocument("accounting_document")}>
                   <PrinterIcon className="size-4" aria-hidden="true" />
                   چاپ / PDF
                 </SecondaryButton>

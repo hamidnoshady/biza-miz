@@ -26,6 +26,7 @@ import {
   LegacySnapshotNotRepresentable,
   PAIRING_REQUIRES_NEWER_CLIENT,
   PAIRING_SNAPSHOT_VERSION,
+  SNAPSHOT_BRANCH_SETTING_KEYS,
   accountNeedsNewerClient,
   type PairingSnapshot,
 } from "./pairing-snapshot";
@@ -930,10 +931,12 @@ export async function buildPairingSnapshot(
            FROM payment_methods WHERE business_id = $1 ORDER BY sort_order, name`,
       [businessId],
     ),
-    query<{ key: string; value: unknown }>(
-      `SELECT key, value FROM settings
-          WHERE business_id = $1 AND location_id IS NULL AND key = ANY($2::text[])`,
-      [businessId, SNAPSHOT_SETTING_KEYS],
+    query<{ key: string; value: unknown; location_id: string | null }>(
+      `SELECT key, value, location_id FROM settings
+          WHERE business_id = $1
+            AND ((location_id IS NULL AND key = ANY($2::text[]))
+              OR (location_id = $3 AND key = ANY($4::text[])))`,
+      [businessId, SNAPSHOT_SETTING_KEYS, locationId, SNAPSHOT_BRANCH_SETTING_KEYS],
     ),
     effectiveFeatures(businessId),
   ]);
@@ -1105,7 +1108,8 @@ export async function buildPairingSnapshot(
       opensDrawer: method.opens_drawer,
       requiresReference: method.requires_reference,
     })),
-    settings: settingRes.rows.map((s) => ({ key: s.key, value: s.value })),
+    settings: settingRes.rows.filter((s) => s.location_id == null).map((s) => ({ key: s.key, value: s.value })),
+    branchSettings: settingRes.rows.filter((s) => s.location_id === locationId).map((s) => ({ key: s.key, value: s.value })),
     dataClassification: PAIRING_DATA_CLASSIFICATION,
     features,
     syncToken,
@@ -1195,4 +1199,5 @@ const SNAPSHOT_SETTING_KEYS = [
   SETTING_KEYS.costing,
   SETTING_KEYS.tax,
   SETTING_KEYS.pricing,
+  "printing.behavior",
 ];

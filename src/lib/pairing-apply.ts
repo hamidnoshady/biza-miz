@@ -575,6 +575,17 @@ async function insertSettings(
     );
   }
 
+  if (snapshot.branchSettings?.length) {
+    await client.query(
+      `INSERT INTO settings (business_id, location_id, key, value)
+       SELECT $1, $2, k, v::jsonb
+       FROM unnest($3::text[], $4::text[]) AS t(k, v)
+       ON CONFLICT (business_id, location_id, key) DO UPDATE SET value = EXCLUDED.value`,
+      [snapshot.business.id, snapshot.location.id, snapshot.branchSettings.map((s) => s.key),
+        snapshot.branchSettings.map((s) => JSON.stringify(s.value))],
+    );
+  }
+
   const owned: Array<[string, unknown]> = [
     [SETTING_KEYS.deploymentProfile, { profile: "hybrid", pairedAt }],
     [

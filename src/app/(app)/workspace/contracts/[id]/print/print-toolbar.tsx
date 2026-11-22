@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 import { useState } from "react";
 import { FileDownIcon, PrinterIcon } from "lucide-react";
 
@@ -73,7 +75,7 @@ export function PrintToolbar({
         ) : null}
         <button
           type="button"
-          onClick={() => window.print()}
+          onClick={() => void printBrowserDocument("contract")}
           className="inline-flex h-10 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
         >
           <PrinterIcon className="me-1.5 size-4" aria-hidden />

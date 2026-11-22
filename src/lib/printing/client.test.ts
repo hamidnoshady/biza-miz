@@ -83,6 +83,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("business print behavior", () => {
+  it("skips an automatic receipt when the branch allows manual printing only", async () => {
+    const { calls } = mockFetch({
+      "/api/settings/print-behavior": () => respondJson({
+        effective: { receipt: { mode: "manual", notifications: "all" } },
+      }),
+    });
+    const result = await printSaleReceipt(null, ORDER_ID, { automatic: true });
+    expect(result).toMatchObject({ ok: false, skipped: true, error: "print_disabled" });
+    expect(calls.map((call) => call.url)).toEqual(["/api/settings/print-behavior"]);
+  });
+});
+
 describe("connector health", () => {
   it("reports a healthy current connector", async () => {
     mockFetch({

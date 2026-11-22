@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 /**
  * Accounting → «حساب‌های مالی» (issue #862).
  *
@@ -849,7 +851,7 @@ export function FinancialAccountsSection({
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
-              <SecondaryButton onClick={() => window.print()}>
+              <SecondaryButton onClick={() => void printBrowserDocument("report")}>
                 <PrinterIcon className="size-4" aria-hidden="true" />
                 {card?.nextCursor || cardCursors.length ? "چاپ این صفحه" : "چاپ / PDF"}
               </SecondaryButton>
