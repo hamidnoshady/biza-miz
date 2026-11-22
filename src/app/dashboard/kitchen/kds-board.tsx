@@ -1125,7 +1125,10 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                     {" · "}
                     {toPersianDigits(String(ticket.item_count))} ردیف
                     {ticket.archived_at ? (
-                      <>{" · "}{ticket.reason === "paid" ? "پرداخت کامل" : "بایگانی دستی سفارش قدیمی"}{" · "}
+                      <>{" · "}{ticket.reason === "paid" ? "پرداخت کامل"
+                        : ticket.reason === "timer" ? "پایان زمان نگهداری"
+                          : ticket.reason === "shift" ? "بستن شیفت"
+                          : "بایگانی دستی سفارش قدیمی"}{" · "}
                         {formatJalali(new Date(ticket.archived_at), { withMonthName: true })}</>
                     ) : null}
                   </li>

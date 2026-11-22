@@ -40,7 +40,7 @@ import { recordOrderState, type OrderStateActor } from "./order-state-sync";
 import { discountPercentForControl, normalizeVoidReason } from "./order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
 import { enqueueKitchenDispatch } from "./kitchen-dispatch";
-import { getKitchenWorkflow } from "./kitchen-workflow";
+import { getKitchenWorkflow, scheduleKitchenTicket } from "./kitchen-workflow";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -642,6 +642,7 @@ export async function createOrder(
       );
     }
 
+    if (readyOnSend) await scheduleKitchenTicket(client, input.locationId, orderId);
     if (businessId && !input.holdKitchenDispatch) {
       await enqueueKitchenDispatch(client, {
         businessId,
@@ -799,6 +800,7 @@ export async function addItemsToOrder(
         item.modifiers,
       );
     }
+    await scheduleKitchenTicket(client, input.locationId, input.orderId);
     if (businessId) {
       await enqueueKitchenDispatch(client, {
         businessId,

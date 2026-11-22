@@ -11,7 +11,8 @@ const activeLines = `
    AND o.status IN ('open', 'held', 'completed')
    AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
    AND oi.status IN ('sent', 'preparing', 'ready')
-   AND oi.kitchen_archived_at IS NULL`;
+   AND oi.kitchen_archived_at IS NULL
+   AND (oi.kitchen_clear_at IS NULL OR oi.kitchen_clear_at > now())`;
 
 const staleOrder = `
   GROUP BY o.id, o.order_number, o.status
@@ -32,14 +33,18 @@ export const GET = withTenantScope(async (request: Request) => {
   const { rows: tickets } = await query(
     history
       ? `SELECT o.id AS order_id, o.order_number, o.status AS order_status,
-                COUNT(*)::int AS item_count, oi.kitchen_archived_at AS archived_at,
-                oi.kitchen_archived_by AS archived_by, oi.kitchen_archive_reason AS reason
+                COUNT(*)::int AS item_count, entry.archived_at,
+                oi.kitchen_archived_by AS archived_by, entry.reason
            FROM order_items oi
            JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
-          WHERE oi.location_id = $1 AND oi.kitchen_archived_at IS NOT NULL
-          GROUP BY o.id, o.order_number, o.status, oi.kitchen_archived_at,
-                   oi.kitchen_archived_by, oi.kitchen_archive_reason
-          ORDER BY oi.kitchen_archived_at DESC, o.id
+           CROSS JOIN LATERAL (
+             SELECT COALESCE(oi.kitchen_archived_at, oi.kitchen_clear_at) AS archived_at,
+                    COALESCE(oi.kitchen_archive_reason, 'timer') AS reason
+           ) entry
+          WHERE oi.location_id = $1 AND entry.archived_at <= now()
+          GROUP BY o.id, o.order_number, o.status, entry.archived_at,
+                   oi.kitchen_archived_by, entry.reason
+          ORDER BY entry.archived_at DESC, o.id
           LIMIT 100`
       : `SELECT o.id AS order_id, o.order_number, o.status AS order_status,
                 COUNT(*)::int AS item_count
@@ -95,6 +100,7 @@ export const POST = withTenantScope(async (request: Request) => {
              FROM eligible
             WHERE oi.order_id = eligible.id AND oi.location_id = $1
               AND oi.kitchen_archived_at IS NULL
+              AND (oi.kitchen_clear_at IS NULL OR oi.kitchen_clear_at > now())
               AND oi.status IN ('sent', 'preparing', 'ready')
             RETURNING oi.order_id
          )

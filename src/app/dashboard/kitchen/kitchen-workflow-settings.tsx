@@ -7,13 +7,25 @@ import type { KitchenWorkflow } from "@/lib/kitchen-workflow";
 import { SectionCard } from "../page-chrome";
 import { api, errorMessage, inputClass } from "../ui";
 
-type Response = { workflow?: KitchenWorkflow; clearAfterPayment?: boolean; error?: string };
+type Response = {
+  workflow?: KitchenWorkflow;
+  clearAfterPayment?: boolean;
+  clearAfterMinutes?: number | null;
+  clearAfterShift?: boolean;
+  error?: string;
+};
 
 export function KitchenWorkflowSettings() {
   const [workflow, setWorkflow] = useState<KitchenWorkflow>("kitchen_team");
   const [saved, setSaved] = useState<KitchenWorkflow | null>(null);
   const [clearAfterPayment, setClearAfterPayment] = useState(false);
   const [savedClearAfterPayment, setSavedClearAfterPayment] = useState(false);
+  const [clearAfterMinutes, setClearAfterMinutes] = useState("");
+  const [savedClearAfterMinutes, setSavedClearAfterMinutes] = useState("");
+  const [clearAfterShift, setClearAfterShift] = useState(false);
+  const [savedClearAfterShift, setSavedClearAfterShift] = useState(false);
+  const minutes = clearAfterMinutes === "" ? null : Number(clearAfterMinutes);
+  const validMinutes = minutes === null || (Number.isInteger(minutes) && minutes >= 1 && minutes <= 1440);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,6 +38,11 @@ export function KitchenWorkflowSettings() {
         setSaved(result.data.workflow);
         setClearAfterPayment(result.data.clearAfterPayment === true);
         setSavedClearAfterPayment(result.data.clearAfterPayment === true);
+        const savedMinutes = result.data.clearAfterMinutes == null ? "" : String(result.data.clearAfterMinutes);
+        setClearAfterMinutes(savedMinutes);
+        setSavedClearAfterMinutes(savedMinutes);
+        setClearAfterShift(result.data.clearAfterShift === true);
+        setSavedClearAfterShift(result.data.clearAfterShift === true);
       } else {
         setError(errorMessage(result.data.error));
       }
@@ -39,7 +56,7 @@ export function KitchenWorkflowSettings() {
     try {
       const result = await api<Response>("/api/kitchen/workflow", {
         method: "PUT",
-        body: JSON.stringify({ workflow, clearAfterPayment }),
+        body: JSON.stringify({ workflow, clearAfterPayment, clearAfterMinutes: minutes, clearAfterShift }),
       });
       if (!result.ok || !result.data.workflow) {
         setError(errorMessage(result.data.error));
@@ -47,6 +64,8 @@ export function KitchenWorkflowSettings() {
       }
       setSaved(result.data.workflow);
       setSavedClearAfterPayment(result.data.clearAfterPayment === true);
+      setSavedClearAfterMinutes(result.data.clearAfterMinutes == null ? "" : String(result.data.clearAfterMinutes));
+      setSavedClearAfterShift(result.data.clearAfterShift === true);
       toast.success("روش آماده‌سازی سفارش‌های این شعبه ذخیره شد.");
     } finally {
       setBusy(false);
@@ -73,8 +92,21 @@ export function KitchenWorkflowSettings() {
             onChange={(event) => setClearAfterPayment(event.currentTarget.checked)} />
           خروج سفارش آماده از صف پس از پرداخت کامل
         </label>
-        <Button type="button" disabled={busy || saved === null ||
-          (saved === workflow && savedClearAfterPayment === clearAfterPayment)} onClick={() => void save()}>
+        <label className="space-y-1">
+          <span className="block text-sm">خروج خودکار پس از آماده‌شدن (دقیقه)</span>
+          <input type="number" min={1} max={1440} step={1} placeholder="خاموش"
+            className={inputClass} value={clearAfterMinutes} disabled={busy || saved === null}
+            onChange={(event) => setClearAfterMinutes(event.currentTarget.value)} />
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={clearAfterShift} disabled={busy || saved === null}
+            onChange={(event) => setClearAfterShift(event.currentTarget.checked)} />
+          خروج سفارش آماده هنگام بستن شیفت مربوط
+        </label>
+        <Button type="button" disabled={busy || saved === null || !validMinutes ||
+          (saved === workflow && savedClearAfterPayment === clearAfterPayment &&
+            savedClearAfterMinutes === clearAfterMinutes && savedClearAfterShift === clearAfterShift)}
+          onClick={() => void save()}>
           ذخیره
         </Button>
       </div>
