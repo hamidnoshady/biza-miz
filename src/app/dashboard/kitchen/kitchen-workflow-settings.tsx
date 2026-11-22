@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import type { KitchenWorkflow } from "@/lib/kitchen-workflow";
 import { LoadingSkeleton, SectionCard } from "../page-chrome";
 import { api, errorMessage, inputClass } from "../ui";
@@ -95,7 +96,7 @@ export function KitchenWorkflowSettings() {
         </label>
         <label className="space-y-1">
           <span className="block text-sm">خروج خودکار پس از آماده‌شدن (دقیقه)</span>
-          <input type="number" min={1} max={1440} step={1} placeholder="خاموش"
+          <PersianNumberInput min={1} max={1440} step={1} inputMode="numeric" placeholder="خاموش"
             className={inputClass} value={clearAfterMinutes} disabled={busy || saved === null}
             onChange={(event) => setClearAfterMinutes(event.currentTarget.value)} />
         </label>

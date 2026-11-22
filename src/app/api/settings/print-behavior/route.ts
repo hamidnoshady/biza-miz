@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { getSession, requirePermission, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
-import { PERMISSIONS } from "@/lib/permissions";
+import { isAbsoluteRole, PERMISSIONS } from "@/lib/permissions";
+import type { Role } from "@/lib/auth-edge";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { parsePrintPolicy } from "@/lib/printing/behavior";
 import { loadPrintBehavior } from "@/lib/printing/behavior-service";
 
-function canEditDefaults(session: { role: string; locationId?: string | null }): boolean {
-  return session.role === "owner" && !session.locationId;
+function canEditDefaults(session: { role: Role; locationId?: string | null }): boolean {
+  return isAbsoluteRole(session.role) && !session.locationId;
 }
 
 export const GET = withTenantScope(async () => {

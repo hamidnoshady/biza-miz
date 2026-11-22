@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { query } from "./db";
 import { transitionKitchenItem } from "./kitchen-item-transition";
 
+const { queryMock } = vi.hoisted(() => ({ queryMock: vi.fn() }));
+
 vi.mock("./db", () => ({
-  query: vi.fn(),
-  withTenantTransaction: vi.fn(async (_businessId: string, operation: () => Promise<unknown>) => operation()),
+  query: queryMock,
+  withTenantTransaction: vi.fn(
+    async (_businessId: string, operation: (client: { query: typeof queryMock }) => Promise<unknown>) =>
+      operation({ query: queryMock }),
+  ),
 }));
 
 vi.mock("./cms/cafe-order-state-delivery", () => ({ enqueueCafeKitchenState: vi.fn() }));
 
-const queryMock = vi.mocked(query);
 const input = {
   businessId: "biz-1",
   locationId: "loc-1",
