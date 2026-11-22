@@ -177,6 +177,26 @@ describe("published Studio tours", () => {
     expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", [expectedId]);
   });
 
+  it.each([
+    ["cosmetics", STUDIO_ID],
+    ["food_service", "accounting.pos.order-ticket"],
+  ])("lists the applicable POS tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/pos";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ordersCreate, PERMISSIONS.paymentsTake]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/pos",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", [expectedId]);
+  });
+
   it("plays a published tour back and records its progress", async () => {
     mocks.publishedById.mockResolvedValue(studio);
     const res = await getTour(req(`/api/knowledge/tours/${STUDIO_ID}`), ctx(STUDIO_ID));
