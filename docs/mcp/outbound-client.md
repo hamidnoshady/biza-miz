@@ -10,17 +10,25 @@ server. A module that does both is one bug away from being a proxy, and a proxy 
 what an attacker wants: the SSRF guard below assumes the egress path is only ever
 reached with a URL an operator named.
 
-## What exists today
+Implemented for issue #1473 (the second half of #1126 §B).
+
+## What exists
 
 | Piece | File | State |
 | --- | --- | --- |
-| URL + DNS policy (SSRF guard) | `src/lib/mcp/outbound/guard.ts` | done, 49 tests |
-| Streamable HTTP JSON-RPC client | `src/lib/mcp/outbound/client.ts` | done, 15 tests |
-| Registry table, encryption, admin API | — | **not implemented** |
-| Agent tool wiring (expose discovered tools to a turn) | — | **not implemented** |
-| Execution audit | — | **not implemented** |
+| URL + DNS policy (SSRF guard) | `src/lib/mcp/outbound/guard.ts` | done — 49 tests |
+| Streamable HTTP JSON-RPC client | `src/lib/mcp/outbound/client.ts` | done — 15 tests |
+| Tool-name mapping | `src/lib/mcp/outbound/naming.ts` | done |
+| Registry, credential encryption, discovery, invocation, audit | `src/lib/mcp/outbound/service.ts` | done |
+| Tenant tables + RLS | `migrations/0313_mcp_external_servers.sql` | done, `up` verified on a full migration run |
+| Management API | `src/app/api/integrations/mcp-servers/**` | done |
+| Panel | `src/app/(app)/settings/connections/external-mcp-panel.tsx` | done, in the MCP tab |
+| Agent wiring | `src/lib/ai-service.ts`, `src/lib/ai-tools.ts`, `src/lib/ai-capabilities.ts` | done |
+| Execution audit | `mcp_external_calls` | done |
 
-64 unit tests, `npx vitest run src/lib/mcp/outbound`.
+Tests: 76 unit (`src/lib/mcp/outbound`, `src/lib/ai-external-tools.test.ts`), 8
+integration (`integration/mcp-outbound.integration.test.ts`), plus the existing
+`tenant-isolation` suite which now also covers the two new tables.
 
 ## Using the client
 
@@ -35,96 +43,96 @@ const client = new OutboundMcpClient({
   policy: outboundPolicyFromEnv(),
 });
 
-const info = await client.initialize();     // protocol + server self-description
-const tools = await client.listTools();     // JSON Schema, passed through untouched
+const info = await client.initialize();
+const tools = await client.listTools();
 const result = await client.callTool("findPages", { limit: 5 });
 ```
 
-`callTool` returns the MCP result as sent — `content`, `isError`,
-`structuredContent`. A refused operation from a well-behaved server arrives as
-`isError: true` with HTTP 200, so callers must inspect both the transport outcome
-and the payload.
+Applications use the service layer instead of the client directly:
+`createExternalMcpServer`, `discoverExternalMcpServer`, `externalToolsForTurn`,
+`callExternalMcpTool`.
 
 ## Configuration
 
 | Variable | Meaning |
 | --- | --- |
 | `MCP_OUTBOUND_ALLOWED_HOSTS` | Comma-separated `host` or `host:port` allowlist. **Empty refuses every outbound MCP call.** A bare host means the default HTTPS port only. |
-| `MCP_OUTBOUND_ALLOW_LOOPBACK_HTTP` | `true` permits `http://` for an explicitly allowlisted loopback entry (`localhost:4010`). Development only. |
+| `MCP_OUTBOUND_ALLOW_LOOPBACK_HTTP` | `true` permits `http://` for an explicitly allowlisted loopback entry. Development only. |
+| `INTEGRATIONS_ENCRYPTION_KEY` | 64 hex characters; the key the bearer credential is encrypted under. Falls back to `JWT_SECRET` (SHA-256) as the WooCommerce and AI-gateway credentials do. Rotating it orphans stored ciphertexts — re-enter them. |
 
-Both are read per request, not at module load, so a policy change needs no restart
-of a long-lived process and a test can set them.
+All three are read per call. A policy change needs no restart of a long-running
+process, and an existing row cannot outrun the allowlist.
+
+## Operator flow
+
+1. **Connections → MCP → «سرورهای MCP خارجی»**.
+2. Fill in a slug (`acme-cms`), a label, the server URL and, if the server requires
+   one, its bearer key. The key is written once and never returned.
+3. **تست اتصال** — runs `initialize` + `tools/list`, stores the discovered tools and
+   shows the count. A failure is recorded on the row as `lastError` (bounded, no
+   credential) so the next person sees why.
+4. Optionally untick tools. An empty selection means "every discovered tool"; the
+   first untick turns it into an explicit set.
+5. Enable the server. Only then does its tool list reach a model turn.
+
+For an Eshobe CMS:
+
+- URL: `https://<cms-control-plane-host>/api/mcp`
+- Key: an MCP key minted there (**یکپارچه‌سازی → کلیدهای MCP**), whose owner is a
+  member of the site the assistant should act on.
+- The host must be in `MCP_OUTBOUND_ALLOWED_HOSTS`.
+
+## How a call is authorised
+
+Three independent gates, all re-evaluated at call time:
+
+1. `ai.use` — `canUseAiTool` recognises the `mcp_` prefix and requires the assistant
+   permission; a member without it never sees the tool in a turn.
+2. The **server row** — enabled, still present, and its URL still passes the guard.
+3. The **per-tool allowlist** — empty means all discovered, otherwise the remote
+   tool must be named.
+
+The agent's own `allowed_tools` narrows the catalogue a turn is built from, and the
+tenant/app/permission intersection in `runAgentTurn` applies exactly as it does to a
+built-in tool. There is no second catalogue and no bypass flag.
+
+Inbound MCP connections (`/api/mcp` server) never see outbound tools: `src/lib/mcp/tools.ts`
+builds its catalogue from Bizamiz's own tools only, so a third-party client cannot
+relay through Bizamiz to another server.
 
 ## Threat model
 
-The guard is layered, and each layer exists because the one before it is
-insufficient:
-
 1. **Allowlist by host.** Nothing is resolved or contacted unless the operator named
-   the host. This is what makes DNS rebinding uninteresting, and it is why the
-   allowlist is configuration rather than a column a request can influence.
+   the host. This is what makes DNS rebinding uninteresting.
 2. **Literal addresses refused.** `https://127.0.0.1/`, `https://[::1]/` and
    `https://169.254.169.254/` never reach the network, allowlisted or not.
-3. **Every resolved address checked.** `lookup(all: true)`, and *any* private answer
-   refuses the whole request — a hostile name commonly returns one public and one
-   private record.
-4. **No redirects.** `redirect: "error"`. One 302 from an allowed host to the
-   metadata service would otherwise walk past layers 1–3.
-5. **No URL credentials, no fragments, scheme pinned to HTTPS.** `https://user:pass@host`
-   is a secret in a string that ends up in logs.
-6. **Bounded work.** 15 s default timeout, 512 KiB default response cap (declared
-   `Content-Length` checked before reading, actual bytes after), 250 tools, 10
-   pagination pages.
+3. **Every resolved address checked.** `lookup(all: true)`; any private answer
+   refuses the whole request.
+4. **No redirects.** `redirect: "error"`.
+5. **No URL credentials, no fragments, HTTPS-only** (loopback HTTP behind the dev
+   flag).
+6. **Bounded work.** 15 s timeout, 512 KiB response cap, 250 tools, 10 pages.
+7. **Credential never returned.** Encrypted at rest (`v1.<iv>.<ciphertext>.<tag>`),
+   absent from every read shape, and never copied into an error, an audit row or a
+   log line.
 
-Residual risk, stated rather than hidden: layer 3 resolves the name and the client
-resolves it again when it connects, so a TTL-0 record that flips in between can
-still win a race. Layer 1 is the mitigation — the name has to be one the operator
-chose — and it is why the allowlist is not optional.
+Residual risk, stated rather than hidden: resolve-then-connect is a TOCTOU window
+and the allowlist is the mitigation. Layer 1 is not optional.
 
-Error messages come from a closed set plus a truncated server sentence. Status
-codes, RPC codes and the origin may appear; the bearer token, request headers and
-response bodies never do, because a transport error is logged far more often than
-it is read.
+## Audit
 
-## What the rest of the work needs
+`mcp_external_calls` gets one row per invocation: server, tool, `ok` / `refused` /
+`failed`, duration, error code. Deliberately **no arguments and no result** — an
+external CMS tool can return a customer's record, and an audit trail is not a second
+copy of the tenant's data. `refused` (the server answered and said no) is separate
+from `failed` (transport) because only one of the two is worth retrying.
 
-The remaining half is a product surface, and it must be built inside this repo's
-existing shapes rather than beside them.
+## Deliberately out of scope
 
-1. **Table** `mcp_external_servers` (tenant table, forced RLS like every other):
-   `business_id`, `slug`, `label`, `url`, `auth_kind` (`none` | `bearer`),
-   `bearer_token_enc bytea` (POSFLD1 envelope, business DEK — register the column in
-   `encrypted-columns.ts`), `enabled`, `allowed_tools text[]` (empty = all discovered),
-   `last_discovered_at`, `last_error`, timestamps. Add to `TENANT_TABLES`.
-2. **Service** `src/lib/mcp/outbound/service.ts`: CRUD, credential encryption via
-   `field-crypto`, discovery cache, `callExternalTool` that opens a client, calls,
-   and records an audit row. The credential is write-only over the API and never
-   returned.
-3. **Admin surface**: a panel beside the existing MCP connections tab —
-   url, credential, "test connection" (runs `initialize` + `tools/list` and shows
-   the negotiated protocol and tool count), enable/disable, allowlist of discovered
-   tools. Seeds from `MCP_OUTBOUND_ALLOWED_HOSTS`, never overrides it.
-4. **Agent wiring** — the part that needs the approval `ai-system-agents.ts`
-   records. External tools must enter the *same* intersection, never a parallel one:
-   - a permission key (for example `ai.externalTools.use`) added to
-     `AI_TOOL_PERMISSION_MAP` semantics, so `filterAiToolsByPermissions` still drops
-     anything unregistered;
-   - tool names namespaced per server (`mcp_<serverSlug>__<tool>`) and only for
-     servers the tenant enabled *and* the agent's `allowed_tools` names;
-   - dispatch in `runReadTool` that re-checks permission, re-checks the server is
-     enabled for this business, calls the client, and returns `ToolResult`.
-5. **Audit**: one row per external call — server, tool, status, duration, truncated
-   error. Never arguments or results in full: a CMS tool can return a customer's
-   data, and an audit trail is not a second copy of the tenant's database.
-6. **Docs**: extend this file with the operator guide and the agent example.
-
-Until 1–5 exist, a tenant cannot register a server and an agent cannot call one.
-The transport being finished does not make the feature available, and nothing in the
-UI or the catalogue should imply otherwise.
-
-## Why the direction is explicit
-
-`Phase-34` deliberately made "mint a credential" and "attach a tool provider" two
-different acts: a `pospmcp_` token exposes Bizamiz's server to a client, and it
-cannot cause Bizamiz to start calling out. Keeping that invariant means the inbound
-credential and the outbound registry share no table, no service and no route.
+- **OAuth to external servers.** A bearer key covers the CMS case; OAuth is a
+  decision for when a server that requires it exists.
+- **Automatic execution.** External tools are ordinary read tools: the model asks,
+  the dispatcher calls, the result comes back into the turn.
+- **An outbound client in `eshobe-cms`.** The CMS side is the server; it has no
+  requirement to dial out, and its own allowlist/credential store would be a second
+  egress path to secure.
