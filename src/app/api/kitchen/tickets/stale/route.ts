@@ -1,43 +1,110 @@
 import { NextResponse } from "next/server";
-import { requirePermission, withTenantScope } from "@/lib/auth";
-import { query } from "@/lib/db";
+import { requirePermissions, withTenantScope } from "@/lib/auth";
+import { query, withTenantTransaction } from "@/lib/db";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveActiveLocation } from "@/lib/setup-state";
 
-interface StaleTicket {
-  order_id: string;
-  order_number: number;
-  order_status: "open" | "held" | "completed";
-  item_count: number;
-}
+const activeLines = `
+  FROM order_items oi
+  JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
+ WHERE oi.location_id = $1
+   AND o.status IN ('open', 'held', 'completed')
+   AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
+   AND oi.status IN ('sent', 'preparing', 'ready')
+   AND oi.kitchen_archived_at IS NULL`;
 
-export const GET = withTenantScope(async () => {
-  const { error: kitchenError } = await requirePermission(PERMISSIONS.kitchenView);
-  if (kitchenError) return kitchenError;
+const staleOrder = `
+  GROUP BY o.id, o.order_number, o.status
+ HAVING COUNT(oi.sent_to_kitchen_at) = COUNT(*)
+    AND MAX(oi.sent_to_kitchen_at) <= now() - interval '60 days'`;
 
-  const { session, error } = await requirePermission(PERMISSIONS.settingsManage);
+const permissions = [PERMISSIONS.kitchenView, PERMISSIONS.settingsManage] as const;
+const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+
+export const GET = withTenantScope(async (request: Request) => {
+  const { session, error } = await requirePermissions(...permissions);
   if (error) return error;
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ tickets: [] });
+  const history = new URL(request.url).searchParams.get("view") === "history";
 
-  // Only review tickets currently eligible for the live board. A newly sent
-  // item keeps the whole ticket out of the stale preview.
-  const { rows: tickets } = await query<StaleTicket>(
-    `SELECT o.id AS order_id, o.order_number, o.status AS order_status,
-            COUNT(*)::int AS item_count
-       FROM order_items oi
-       JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
-      WHERE oi.location_id = $1
-        AND o.status IN ('open', 'held', 'completed')
-        AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
-        AND oi.status IN ('sent', 'preparing', 'ready')
-      GROUP BY o.id, o.order_number, o.status
-     HAVING COUNT(oi.sent_to_kitchen_at) = COUNT(*)
-        AND MAX(oi.sent_to_kitchen_at) <= now() - interval '60 days'
-      ORDER BY MAX(oi.sent_to_kitchen_at), o.id`,
+  const { rows: tickets } = await query(
+    history
+      ? `SELECT o.id AS order_id, o.order_number, o.status AS order_status,
+                COUNT(*)::int AS item_count, oi.kitchen_archived_at AS archived_at,
+                oi.kitchen_archived_by AS archived_by, oi.kitchen_archive_reason AS reason
+           FROM order_items oi
+           JOIN orders o ON o.id = oi.order_id AND o.location_id = oi.location_id
+          WHERE oi.location_id = $1 AND oi.kitchen_archived_at IS NOT NULL
+          GROUP BY o.id, o.order_number, o.status, oi.kitchen_archived_at,
+                   oi.kitchen_archived_by, oi.kitchen_archive_reason
+          ORDER BY oi.kitchen_archived_at DESC, o.id
+          LIMIT 100`
+      : `SELECT o.id AS order_id, o.order_number, o.status AS order_status,
+                COUNT(*)::int AS item_count
+           ${activeLines}
+           ${staleOrder}
+          ORDER BY MAX(oi.sent_to_kitchen_at), o.id
+          LIMIT 100`,
     [location.id],
   );
 
   return NextResponse.json({ tickets }, { headers: { "Cache-Control": "no-store" } });
+});
+
+export const POST = withTenantScope(async (request: Request) => {
+  const { session, error } = await requirePermissions(...permissions);
+  if (error) return error;
+
+  const location = await resolveActiveLocation(session);
+  if (!location) return NextResponse.json({ error: "NOT_FOUND" }, { status: 404 });
+
+  const body: { orderIds?: unknown } | null = await request.json().catch(() => null);
+  const orderIds = body?.orderIds;
+  if (
+    !Array.isArray(orderIds) ||
+    orderIds.length === 0 ||
+    orderIds.length > 100 ||
+    !orderIds.every((id) => typeof id === "string" && uuid.test(id))
+  ) {
+    return NextResponse.json({ error: "INVALID_INPUT" }, { status: 400 });
+  }
+
+  const archivedCount = await withTenantTransaction(
+    session.businessId,
+    async () => {
+      // Match the parent lock taken by order mutations and kitchen transitions.
+      await query(
+        `SELECT id FROM orders
+          WHERE location_id = $1 AND id = ANY($2::uuid[])
+          ORDER BY id FOR UPDATE`,
+        [location.id, orderIds],
+      );
+
+      const { rows } = await query<{ count: number }>(
+        `WITH eligible AS (
+           SELECT o.id
+           ${activeLines}
+             AND o.id = ANY($2::uuid[])
+           ${staleOrder}
+         ), archived AS (
+           UPDATE order_items oi
+              SET kitchen_archived_at = now(), kitchen_archived_by = $3,
+                  kitchen_archive_reason = 'stale_manual'
+             FROM eligible
+            WHERE oi.order_id = eligible.id AND oi.location_id = $1
+              AND oi.kitchen_archived_at IS NULL
+              AND oi.status IN ('sent', 'preparing', 'ready')
+            RETURNING oi.order_id
+         )
+         SELECT COUNT(DISTINCT order_id)::int AS count FROM archived`,
+        [location.id, orderIds, session.userId],
+      );
+      return rows[0]?.count ?? 0;
+    },
+    { locationId: location.id, userId: session.userId },
+  );
+
+  return NextResponse.json({ archivedCount });
 });
