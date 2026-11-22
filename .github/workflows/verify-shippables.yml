@@ -450,7 +450,18 @@ jobs:
           # owner instruction (Hamid, 2026-11-22) with ~2.1 MiB of headroom, the same reviewed
           # reason as the moves above: restoring working headroom for real API surface, not
           # relaxing the runaway detector.
-          if ($bytes -gt 304MB) { throw "Staged runtime $mib MiB exceeds 304 MiB budget" }
+          # 2026-11-22 — merging PR #1477 (kitchen ticket lifecycle and business
+          # printing controls) onto a main that already carried #1482 measured
+          # 318,941,635 B = 304.166 MiB in 7,045 files (run 45054114377) against
+          # 316,426,625 B = 301.768 MiB on the branch's previous main base (run
+          # 45043874523): +2.40 MiB, of which +1.90 MiB is the two new API route
+          # bundles (`/api/kitchen/workflow`, `/api/settings/print-behavior`),
+          # +0.23 MiB the client-reference manifests they add and no package
+          # delta (node_modules unchanged at 50.56 MiB). Budget moves 304 -> 308
+          # MiB on owner instruction (Hamid, 2026-11-22) with ~3.8 MiB of
+          # headroom, the same reviewed reason as the moves above: restoring
+          # working headroom for real API surface, not relaxing the gate.
+          if ($bytes -gt 308MB) { throw "Staged runtime $mib MiB exceeds 308 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.
