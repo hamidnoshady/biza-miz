@@ -93,8 +93,10 @@ export const AI_PANEL_SECTIONS: readonly AiPanelSection[] = [
   },
   {
     key: "research",
-    label: "پژوهش عمیق",
-    description: "پژوهش‌های جداگانه، هزینه‌ای و نتیجه‌های مستندشده",
+    // Issue #1367 — history only. The entry stays so an old `?aiPanel=research`
+    // bookmark lands on the member's own read-only runs instead of 404ing.
+    label: "تاریخچهٔ پژوهش عمیق",
+    description: "پژوهش‌های پیشین، نتیجه‌ها و منابع آن‌ها؛ فقط خواندنی و بدون اجرای تازه",
     icon: "research",
   },
   {
@@ -133,12 +135,11 @@ export function aiPanelHref(key: AiPanelSectionKey): string {
  * - `memory`, `coworkers`, `activity`: `ai.manage`
  * - `automations`: `ai.automations.manage` or `ai.manage`
  * - `usage`: `ai.usage.view` or `ai.manage`
- * - `research`: `ai.manage` (or `ai.use` when `deepResearchEnabled` is true)
+ * - `research`: `ai.use` (read-only historical runs) or `ai.manage`
  */
 export function canManageAi(
   effective: ReadonlySet<Permission | string> | readonly (Permission | string)[] | string,
   key?: AiPanelSectionKey,
-  options?: { deepResearchEnabled?: boolean },
 ): boolean {
   if (typeof effective !== "string") {
     const permissions = effective instanceof Set ? effective : new Set(effective);
@@ -160,10 +161,11 @@ export function canManageAi(
       case "usage":
         return hasManage || permissions.has(PERMISSIONS.aiUsageView);
       case "research":
-        return (
-          hasManage ||
-          (Boolean(options?.deepResearchEnabled) && permissions.has(PERMISSIONS.aiUse))
-        );
+        // Issue #1367 — the section is the caller's own read-only history, and
+        // `GET /api/ai/research` is scoped to `user_id` behind `ai.use`, so the
+        // panel gate matches the API instead of requiring a management right
+        // for data the member produced.
+        return hasManage || permissions.has(PERMISSIONS.aiUse);
       default:
         return false;
     }
@@ -177,9 +179,6 @@ export function canManageAi(
  */
 export function resolveAllowedAiPanelSections(
   effective: ReadonlySet<Permission | string> | readonly (Permission | string)[] | string,
-  options?: { deepResearchEnabled?: boolean },
 ): AiPanelSectionKey[] {
-  return AI_PANEL_SECTION_KEYS.filter((key) =>
-    canManageAi(effective, key, options),
-  );
+  return AI_PANEL_SECTION_KEYS.filter((key) => canManageAi(effective, key));
 }

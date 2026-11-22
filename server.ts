@@ -139,6 +139,9 @@ app.prepare().then(async () => {
   const { runQueueRetentionTick, QUEUE_RETENTION_TICK_INTERVAL_MS } = await import(
     "./src/lib/integrations/queue-retention"
   );
+  const { runSignupRetentionTick, SIGNUP_RETENTION_TICK_INTERVAL_MS } = await import(
+    "./src/lib/iam/signup-retention"
+  );
   const { runWebsiteSyncTick, WEBSITE_SYNC_TICK_INTERVAL_MS } = await import("./src/lib/website/sync-service");
   const { runCrmScoringTick, CRM_SCORING_TICK_INTERVAL_MS } = await import(
     "./src/lib/crm-scoring-freshness"
@@ -447,6 +450,15 @@ app.prepare().then(async () => {
   const queueRetentionTick = () =>
     runQueueRetentionTick().catch((err) => console.error("queue retention tick failed:", err));
   scheduleCentralTick(queueRetentionTick, QUEUE_RETENTION_TICK_INTERVAL_MS, 180_000);
+
+  // ESH-200 (#1385): signup proofs are a support record, not a customer
+  // archive. This sweep marks long-expired live requests consumed and deletes
+  // consumed rows after 30 days, leaving one redacted audit row per pass.
+  const signupRetentionTick = () =>
+    runSignupRetentionTick().catch((err) =>
+      console.error("signup retention tick failed:", err),
+    );
+  scheduleCentralTick(signupRetentionTick, SIGNUP_RETENTION_TICK_INTERVAL_MS, 240_000);
 
   // Issue #866: taxpayer invoices. Central, like the Woo outbox: the books are
   // authoritative there. Each pass sends due records, inquires the ones awaiting

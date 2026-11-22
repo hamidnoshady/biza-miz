@@ -76,7 +76,7 @@ export interface AiTurnAttribution {
   metadata?: Record<string, unknown>;
   // Issue #812 §12 — per-turn attribution, carried as columns on the
   // settlement row so usage can be sliced by them. See `AiSettlementInput`.
-  /** The runtime mode in force: `auto`, `instant` or `deep_research`. */
+  /** The runtime mode in force: `auto`, `instant` or `thinking` (historical rows may carry `deep_research`). */
   runtimeMode?: string | null;
   /** The Superadmin system agent invoked, if the turn ran as one. */
   systemAgentId?: string | null;

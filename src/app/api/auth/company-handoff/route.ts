@@ -4,7 +4,7 @@ import { withTenantTransaction } from "@/lib/db";
 import { createSession } from "@/lib/employee-service";
 import { platformCompanyLog, redeemCompanyHandoff } from "@/lib/platform-company";
 import { platformAudit } from "@/lib/platform-auth";
-import { hostRoutingEnabled, parseHost, requestHost, rootDomain } from "@/lib/host";
+import { configuredRootDomains, hostRoutingEnabled, parseHostAny, requestHost, type HostEnv } from "@/lib/host";
 import {
   handoffOriginContext,
   resolveHandoffOrigin,
@@ -56,7 +56,7 @@ export async function GET(request: NextRequest) {
   if (!token) {
     return withHandoffHeaders(NextResponse.json({ error: "missing_token" }, { status: 400 }));
   }
-  const parsed = hostRoutingEnabled() ? parseHost(requestHost(request.headers), rootDomain()) : null;
+  const parsed = hostRoutingEnabled() ? parseHostAny(requestHost(request.headers), configuredRootDomains(process.env as HostEnv)) : null;
   if (parsed && parsed.kind !== "business") {
     return withHandoffHeaders(NextResponse.json({ error: "wrong_origin" }, { status: 400 }));
   }

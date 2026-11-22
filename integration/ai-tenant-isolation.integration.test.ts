@@ -272,53 +272,58 @@ describe("tenant memory cannot cross the boundary", () => {
 });
 
 describe("a Deep Research run's id is not an open door", () => {
+  /**
+   * Issue #1367 — creation is retired, so history is inserted the way the
+   * pre-retirement workflow wrote it. The read boundary is exactly what these
+   * tests are about, and it must not weaken because writing is closed.
+   */
+  async function seedRun(businessId: string, userId: string): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO ai_research_runs
+         (business_id, user_id, question, status, environment_id, expires_at)
+       VALUES ($1,$2,$3,'succeeded',$4, now() + interval '24 hours')
+       RETURNING id`,
+      [businessId, userId, "چرا حاشیهٔ سود کم شد؟", `research-env-${randomUUID()}`],
+    );
+    return rows[0].id;
+  }
+
   it("re-checks the run's business on read, so a leaked id is a dead id", async () => {
     // Beta is handed ALPHA's run id — the shape a leaked id would take, whether
     // it came from a log line, a URL or a mistake in a report. The read must
     // refuse it rather than trusting the id.
-    const created = await dbLib.withTenant(alpha.businessId, () =>
-      research.createResearchRun({
-        businessId: alpha.businessId,
-        userId: alpha.userId,
-        question: "چرا حاشیهٔ سود کم شد؟",
-        costApproved: true,
-      }),
+    const runId = await seedRun(alpha.businessId, alpha.userId);
+    await db.query(
+      `INSERT INTO ai_research_sources (run_id, business_id, kind, ref, title, record_count)
+       VALUES ($1,$2,'knowledge','knowledge:alpha','دانش آلفا',1)`,
+      [runId, alpha.businessId],
     );
-    expect(created.ok).toBe(true);
-    if (!created.ok) return;
 
     const betaReading = await dbLib.withTenant(beta.businessId, () =>
-      research.getResearchRun({ id: created.run.id, businessId: beta.businessId }),
+      research.getResearchRun({ id: runId, businessId: beta.businessId }),
     );
     expect(betaReading).toBeNull();
 
     // And the run's sources are equally unreachable.
     const betaSources = await dbLib.withTenant(beta.businessId, () =>
-      research.listResearchSources(created.run.id, beta.businessId),
+      research.listResearchSources(runId, beta.businessId),
     );
     expect(betaSources).toEqual([]);
 
     // Alpha can still read its own run — the boundary is a boundary, not a lock.
     const alphaReading = await dbLib.withTenant(alpha.businessId, () =>
-      research.getResearchRun({ id: created.run.id, businessId: alpha.businessId }),
+      research.getResearchRun({ id: runId, businessId: alpha.businessId }),
     );
-    expect(alphaReading?.id).toBe(created.run.id);
+    expect(alphaReading?.id).toBe(runId);
+    const alphaSources = await dbLib.withTenant(alpha.businessId, () =>
+      research.listResearchSources(runId, alpha.businessId),
+    );
+    expect(alphaSources).toHaveLength(1);
   });
 
   it("lists only the caller's own runs", async () => {
-    for (const [biz, user] of [
-      [alpha, alpha.userId],
-      [beta, beta.userId],
-    ] as const) {
-      await dbLib.withTenant(biz.businessId, () =>
-        research.createResearchRun({
-          businessId: biz.businessId,
-          userId: user,
-          question: "پرسش دربارهٔ فروش این کسب‌وکار",
-          costApproved: true,
-        }),
-      );
-    }
+    const alphaRunId = await seedRun(alpha.businessId, alpha.userId);
+    const betaRunId = await seedRun(beta.businessId, beta.userId);
 
     const alphaRuns = await dbLib.withTenant(alpha.businessId, () =>
       research.listResearchRuns({ businessId: alpha.businessId, userId: alpha.userId }),
@@ -329,6 +334,8 @@ describe("a Deep Research run's id is not an open door", () => {
 
     expect(alphaRuns).toHaveLength(1);
     expect(betaRuns).toHaveLength(1);
+    expect(alphaRuns[0].id).toBe(alphaRunId);
+    expect(betaRuns[0].id).toBe(betaRunId);
     expect(alphaRuns[0].id).not.toBe(betaRuns[0].id);
   });
 });

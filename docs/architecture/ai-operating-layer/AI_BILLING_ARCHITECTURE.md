@@ -121,10 +121,13 @@ The refusal is the one code `ai_credit_required` with the message
   business-default readiness and includes entitlement, key source/status, alias and sync errors.
   The old UI bookmark `/platform/ai/gateway` redirects here; `/api/platform/ai/gateway` remains
   the active API.
-- **`/platform/ai/modes`, `/platform/ai/prompts`, `/platform/ai/agents`, `/platform/ai/research`
+- **`/platform/ai/modes`, `/platform/ai/prompts`, `/platform/ai/agents`
   and `/platform/ai/widgets`** — current runtime mode mappings, prompt versions, system-agent
-  assignments, research caps and platform widgets. `/platform/ai/prompts` is active; it is not the
-  retired prompt-fragment manager.
+  assignments and platform widgets. `/platform/ai/prompts` is active; it is not the
+  retired prompt-fragment manager. Issue #1367 retired Deep Research: the old
+  `/platform/ai/research` tab is gone and the URL redirects to `/platform/ai/modes`; its
+  historical caps stay readable at `GET /api/platform/ai/research` for audit. See
+  [deep-research-retirement.md](../deep-research-retirement.md).
 - **Plan/Billing** — customer price, monthly AI allowance, wallet balance, top-ups, overage and
   monetisation. AI settlements still flow through `ai_wallet_settlements`, `business_wallets` and
   `ai_plan_allowance_usage`.

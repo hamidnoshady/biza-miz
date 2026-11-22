@@ -1,12 +1,23 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   AI_RUNTIME_MODES,
   AI_CHAT_MODES,
+  AI_RETIRED_MODES,
   DEFAULT_AI_MODE,
+  firstRetiredAiRuntimeMode,
   isAiRuntimeMode,
+  isAiRuntimeModeAvailable,
+  isRetiredAiRuntimeMode,
   normalizeAiRuntimeMode,
+  resolveRequestedAiRuntimeMode,
 } from "./ai-runtime-modes-shared";
 import { estimateResearchMaxCostUsd } from "./ai-research-shared";
+import {
+  RESEARCH_EXECUTION_RETIRED,
+  RESEARCH_SUPERSEDED_BY,
+  researchRetiredBody,
+} from "./ai-research-retirement";
 import {
   MAX_MEMORY_CHARS,
   renderMemoryForPrompt,
@@ -31,18 +42,46 @@ function entry(overrides: Partial<AiMemoryEntry> = {}): AiMemoryEntry {
   };
 }
 
-describe("Superadmin AI profiles and separate Deep Research mode", () => {
-  it("offers three chat profiles and retains Deep Research as a separate workflow", () => {
+describe("Superadmin AI profiles and the retired Deep Research mode", () => {
+  it("offers exactly three chat profiles and keeps the retired value only for history", () => {
     expect(AI_CHAT_MODES).toEqual(["auto", "instant", "thinking"]);
+    // Issue #1367 — the value survives so stored rows resolve; it is not a
+    // selectable mode and never becomes one through a settings row.
+    expect(AI_RETIRED_MODES).toEqual(["deep_research"]);
     expect(AI_RUNTIME_MODES).toEqual(["auto", "instant", "thinking", "deep_research"]);
+    for (const mode of AI_CHAT_MODES) {
+      expect(isAiRuntimeModeAvailable(mode)).toBe(true);
+    }
+    expect(isAiRuntimeModeAvailable("deep_research")).toBe(false);
   });
 
-  it("preserves Thinking as a distinct profile and rejects retired modes", () => {
+  it("preserves Thinking as a distinct profile and rejects retired modes for new work", () => {
     expect(normalizeAiRuntimeMode("thinking")).toBe("thinking");
     expect(normalizeAiRuntimeMode("analytical")).toBe("auto");
     expect(normalizeAiRuntimeMode(undefined)).toBe(DEFAULT_AI_MODE);
     expect(normalizeAiRuntimeMode("instant")).toBe("instant");
+    // Normalization is a storage/display helper: a stored retired value keeps
+    // its identity so history is never rewritten into Thinking or Auto.
     expect(normalizeAiRuntimeMode("deep_research")).toBe("deep_research");
+    expect(isRetiredAiRuntimeMode("deep_research")).toBe(true);
+    expect(isRetiredAiRuntimeMode("thinking")).toBe(false);
+    expect(firstRetiredAiRuntimeMode(["auto", "deep_research"])).toBe("deep_research");
+    expect(firstRetiredAiRuntimeMode(["auto", "instant", "thinking"])).toBeNull();
+  });
+
+  it("refuses a requested retired mode instead of remapping it", () => {
+    // Issue #1367 — the chat route's decision, tested where it is made.
+    expect(resolveRequestedAiRuntimeMode("deep_research")).toEqual({
+      ok: false,
+      reason: "retired",
+    });
+    expect(resolveRequestedAiRuntimeMode("thinking")).toEqual({
+      ok: true,
+      mode: "thinking",
+    });
+    // Unknown values keep the old fallback; only the retired one is an error.
+    expect(resolveRequestedAiRuntimeMode("analytical")).toEqual({ ok: true, mode: "auto" });
+    expect(resolveRequestedAiRuntimeMode(undefined)).toEqual({ ok: true, mode: "auto" });
   });
 
   it("rejects unknown modes", () => {
@@ -50,6 +89,27 @@ describe("Superadmin AI profiles and separate Deep Research mode", () => {
     expect(isAiRuntimeMode("")).toBe(false);
     expect(isAiRuntimeMode(null)).toBe(false);
     expect(isAiRuntimeMode("auto")).toBe(true);
+  });
+});
+
+describe("issue #1367 — the retirement policy", () => {
+  it("is a constant, with no environment switch that could re-open spending", () => {
+    expect(RESEARCH_EXECUTION_RETIRED).toBe(true);
+    const service = readFileSync("src/lib/ai-research.ts", "utf8");
+    // The three spending paths — create, approve, execute — all guard on it.
+    expect(service.match(/RESEARCH_EXECUTION_RETIRED/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    // No runtime knob: a flag that restores a retired spending workflow is a
+    // bypass by another name. Rollback is a revert, not an env value.
+    expect(service).not.toMatch(/AI_RESEARCH_RETIRED|isResearchExecutionRetired/);
+  });
+
+  it("names the stable code and the three modes a caller should use instead", () => {
+    const body = researchRetiredBody();
+    expect(body.error).toBe("research_retired");
+    expect(body.message).toContain("بازنشسته");
+    // Never a silent remap: the client is told what replaced the workflow.
+    expect(body.supersededBy).toEqual(RESEARCH_SUPERSEDED_BY);
+    expect(RESEARCH_SUPERSEDED_BY).toEqual(["auto", "instant", "thinking"]);
   });
 });
 

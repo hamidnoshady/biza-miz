@@ -26,7 +26,6 @@ import { TenantAiIdentity } from "@/components/ai/persistent-tenant-ai";
 import { TenantAssistantFrame } from "@/components/ai/tenant-assistant-frame";
 import { accessibleNavItemsFor } from "@/lib/tenant-navigation";
 export { navItemsFor, accessibleNavItemsFor } from "@/lib/tenant-navigation";
-import { getPlatformAiMode } from "@/lib/ai-runtime-modes";
 import { canManageAi, resolveAllowedAiPanelSections } from "@/lib/ai-panel";
 import { resolveAccessibleFocuses, resolveEligibleTasks, resolveStarterPrompts, resolveTenantTaskFeatures } from "@/lib/ai-tasks";
 import { isAppUsable } from "@/lib/app-availability";
@@ -172,10 +171,9 @@ export async function WorkspaceShell({
   // model supplies the actor's permissions or enabled app set.
   const aiLocked = await featureLockedForPage(session.businessId, "ai_assistant");
   const aiEnabled = !aiLocked && features.ai_assistant !== false && permissions.has(PERMISSIONS.aiUse);
-  const researchMode = aiEnabled
-    ? await getPlatformAiMode("deep_research").catch(() => ({ is_active: false }))
-    : { is_active: false };
-  const deepResearchEnabled = Boolean(researchMode.is_active);
+  // Issue #1367 — Deep Research is retired for new execution, so the shared
+  // shell no longer resolves its platform switch at all. Historical runs stay
+  // readable through the assistant's management panel.
   const taskFeatures = resolveTenantTaskFeatures(features, {
     industry,
     usableApps: {
@@ -191,10 +189,9 @@ export async function WorkspaceShell({
     : [];
   const accessibleFocuses = aiEnabled ? resolveAccessibleFocuses(eligibility) : [];
   const aiChatProps = {
-    canManageAi: canManageAi(permissions, undefined, { deepResearchEnabled }),
+    canManageAi: canManageAi(permissions),
     canAutoApply: member.role === "owner",
-    allowedPanelSections: resolveAllowedAiPanelSections(permissions, { deepResearchEnabled }),
-    deepResearchEnabled,
+    allowedPanelSections: resolveAllowedAiPanelSections(permissions),
     eligibleTaskIds,
     starterPrompts: aiEnabled ? resolveStarterPrompts({
       ...eligibility, eligibleTaskIds, accessibleFocuses, count: 3,

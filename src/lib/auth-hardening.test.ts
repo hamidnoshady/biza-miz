@@ -32,6 +32,9 @@ describe("OTP purposes", () => {
      * no account, and their code must never be redeemable in a sign-in, a step-up
      * or a password recovery — nor may those codes sign a contract. Same table,
      * same hashing, separate purpose.
+     *
+     * `signup` (#1385) is the ninth: it proves a number for a person who does
+     * not exist yet, so no login/change/recovery ceremony may spend it.
      */
     expect([...OTP_PURPOSES]).toEqual([
       "login",
@@ -42,6 +45,7 @@ describe("OTP purposes", () => {
       "step_up_sms",
       "password_recovery",
       "contract_signing",
+      "signup",
     ]);
     expect(isOtpPurpose("login")).toBe(true);
     expect(isOtpPurpose("mfaLogin")).toBe(false);

@@ -3,7 +3,7 @@ import bcrypt from "bcryptjs";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
 import { createSession } from "@/lib/employee-service";
-import { hostRoutingEnabled, parseHost, requestHost, rootDomain } from "@/lib/host";
+import { configuredRootDomains, hostRoutingEnabled, parseHostAny, requestHost, type HostEnv } from "@/lib/host";
 import { resolveBusinessByLabel } from "@/lib/host-resolution";
 import {
   checkAuthLockout,
@@ -79,7 +79,7 @@ async function loginHostBusinessId(
 ): Promise<{ businessId: string | null; error: string | null }> {
   if (!hostRoutingEnabled()) return { businessId: null, error: null };
 
-  const parsed = parseHost(host, rootDomain());
+  const parsed = parseHostAny(host, configuredRootDomains(process.env as HostEnv));
   if (parsed.kind !== "business") return { businessId: null, error: "wrong_origin" };
 
   const business = await resolveBusinessByLabel(parsed.label);

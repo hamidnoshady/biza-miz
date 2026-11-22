@@ -3,7 +3,7 @@ import { createSession } from "@/lib/employee-service";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
 import { resolveBusinessByLabel } from "@/lib/host-resolution";
-import { businessHost, hostRoutingEnabled, parseHost, requestHost } from "@/lib/host";
+import { businessHost, configuredRootDomains, hostRoutingEnabled, parseHostAny, requestHost, type HostEnv } from "@/lib/host";
 import { deploymentRole } from "@/lib/deployment-role";
 import {
   consumeTelegramInitData,
@@ -93,15 +93,16 @@ export async function POST(request: NextRequest) {
       bot.reason === "configuration_incomplete" ? 503 : 404);
   }
 
-  const rootDomain = process.env.ROOT_DOMAIN?.trim() ?? "";
-  const parsedHost = parseHost(requestHost(request.headers), rootDomain);
+  const roots = configuredRootDomains(process.env as HostEnv);
+  const parsedHost = parseHostAny(requestHost(request.headers), roots);
+  const requestRoot = parsedHost.root || roots[0] || "";
   if (parsedHost.kind !== "business") return json({ error: "business_host_required" }, 400);
   const business = await resolveBusinessByLabel(parsedHost.label);
   if (!business || business.status === "archived") return json({ error: "business_unavailable" }, 404);
   if (business.viaAlias) {
     return json({
       error: "canonical_host_required",
-      canonicalUrl: `https://${businessHost(business.subdomain, rootDomain)}/telegram`,
+      canonicalUrl: `https://${businessHost(business.subdomain, requestRoot)}/telegram`,
     }, 409);
   }
   if (business.status !== "active") return json({ error: "business_unavailable" }, 403);

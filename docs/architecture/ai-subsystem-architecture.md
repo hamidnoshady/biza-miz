@@ -56,8 +56,11 @@ exists:
 
 The control plane is split by responsibility: `/platform/ai` owns gateway connection/fleet and
 business/branch key lifecycle; `/platform/ai/modes` owns mode aliases; `/platform/ai/prompts`
-owns versioned prompts; `/platform/ai/agents` owns system agents/assignments;
-`/platform/ai/research` owns research limits; and `/platform/ai/widgets` owns suggested widgets.
+owns versioned prompts; `/platform/ai/agents` owns system agents/assignments; and
+`/platform/ai/widgets` owns suggested widgets. The separate Deep Research tab is retired
+(issue #1367): `/platform/ai/research` now redirects to `/platform/ai/modes`, and the platform
+research API is read-only for audit — see
+[deep-research-retirement.md](deep-research-retirement.md).
 `/platform/ai/prompts` is an active linked route and must not be redirected. The old
 `/platform/ai/gateway` page bookmark redirects to `/platform/ai`; the separate
 `/api/platform/ai/gateway` API remains active. Tenant provider settings at `/dashboard/ai/settings`
@@ -65,12 +68,17 @@ and `/ai/settings` redirect to the dashboard.
 
 ## Runtime modes — three, and only three
 
-`auto`, `instant`, `deep_research`. The vocabulary lives in
+`auto`, `instant`, `thinking`. The vocabulary lives in
 `src/lib/ai-runtime-modes-shared.ts`, which is **database-free on purpose**:
 client components import that file, and importing `ai-runtime-modes.ts` from a
 `"use client"` file reaches `src/lib/db.ts` and fails
-`client-bundle-boundary.test.ts`. A stored `thinking` value normalizes to
-`auto` rather than silently doing nothing.
+`client-bundle-boundary.test.ts`. Unknown values normalize to `auto`.
+
+Issue #1367 retired the separate `deep_research` workflow, which was **never** a
+fourth chat mode. Its value is kept in `AI_RUNTIME_MODES`/`AI_MODE_LABELS` only
+so historical rows resolve; it is not in `AI_CHAT_MODES`, `isAiRuntimeModeAvailable`
+returns false for it, and an explicit request for it is refused (`410
+research_retired`) instead of being remapped to Auto or Thinking.
 
 Each mode names a LiteLLM alias in `platform_ai_modes` (seeded by migration
 0203, editable at `/platform/ai/modes`). A blank alias means "the gateway's
@@ -159,35 +167,32 @@ The Superadmin AI playground accepts `{"decisionSmoke":"support-triage-v1"}` as 
 
 The smoke test is disabled by default. To enable it on a validation deployment, set `TYPESAFE_DECISION_SMOKE_ENABLED=1`, inject the platform credential as `TYPESAFE_DECISION_SMOKE_KEY`, and set `TYPESAFE_DECISION_SMOKE_MODEL` to the exact provider model version expected in the response. The designated platform provider account bears the smoke-test cost. The response includes an opaque request ID, the validated result and whether the expected classification matched. The test never takes a tenant ID, conversation or other caller-provided decision input.
 
-## Deep Research — the isolated workflow
+## Deep Research — retired (issue #1367)
 
-`src/lib/ai-research.ts` + `ai-research-shared.ts`. Superadmin controls every
-cap at `/platform/ai/research`: enabled/disabled, the alias, max context bytes,
-max rounds, environment TTL, max spend per run, minimum data readiness, and the
-external-web policy. A tenant cannot change any of them, and the chat route
-refuses a `deep_research` turn outright while `enabled` is false (409
-`mode_unavailable`).
+Deep Research was a separate cost-approved, multi-round workflow
+(`src/lib/ai-research.ts` + `ai-research-shared.ts`), never a chat mode with a
+bigger budget. It is retired for **new** execution; the run rows, sourced
+findings and settlement rows stay exactly as they were. The full policy, API
+error contract, in-flight reconciliation and rollout/rollback notes are in
+[deep-research-retirement.md](deep-research-retirement.md).
 
-The run is a separate cost-approved workflow, not a chat mode with a bigger
-budget:
+The short version:
 
-1. `POST /api/ai/research` creates a run in `awaiting_approval` carrying the
-   **estimated maximum cost**, computed server-side from the platform's own
-   caps — never read from the request.
-2. `POST /api/ai/research/[id]/approve` is the human approval. It re-reads the
-   run's business id before the environment opens, gates the wallet, and only
-   then runs.
-3. The run is bounded: a round cap, a spend cap checked after every round, and
-   an environment TTL. When it stops — at the cap or otherwise — the cost is
-   settled exactly once through the same `settleAiTurn` every other turn uses.
-4. A second approval for an already-approved run is refused. Re-approving is
-   how a run spends twice.
-
-**Deep Research is a bigger budget, not a wider permission.** The approve route
-filters the tool catalogue through `filterAiToolsByPermissions` with the
-approver's own effective set — the same helper chat uses. It also takes
-`ai.use` explicitly, because `getSession()` only proves the caller belongs to
-the business.
+1. The three chat modes — `auto`, `instant`, `thinking` — are unchanged. No run
+   is reinterpreted as Thinking.
+2. `POST /api/ai/research`, `POST /api/ai/research/[id]/approve` and
+   `PUT /api/platform/ai/research` answer `410 research_retired`; the service
+   functions (`createResearchRun`, `approveResearchRun`, `runResearchRun`) refuse
+   too, so no caller can spend by importing them.
+3. `GET /api/ai/research` remains the member's own read-only history behind
+   `ai.use`; `GET /api/platform/ai/research` remains the historical caps for
+   audit behind `ai.read`.
+4. The platform tab is gone from `ai-console-nav.tsx`, the tenant composer only
+   offers the three modes, and `?aiPanel=research` opens a read-only history
+   panel.
+5. Stored agent modes and prompt versions that name `deep_research` are left
+   untouched (history); new configuration writes naming it are refused with
+   `400 mode_retired`, and the prompt console no longer offers the scope.
 
 ## Managed knowledge retrieval — external endpoint, no local vector store
 

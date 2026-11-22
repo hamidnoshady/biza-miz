@@ -13,7 +13,7 @@ import type { AiAppFocus } from "@/components/ai/use-ai-chat";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   AI_CHAT_MODES,
-  isAiRuntimeModeAvailable,
+  AI_MODE_LABELS,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
 import { cn } from "@/lib/utils";
@@ -29,9 +29,6 @@ export interface AiWorkspaceContextProps {
   accessibleFocuses?: readonly AiAppFocus[];
   runtimeMode: AiRuntimeMode;
   onRuntimeModeChange: (value: AiRuntimeMode) => void;
-  /** Open the dedicated cost-approved Deep Research workflow. */
-  onDeepResearchOpen?: () => void;
-  deepResearchEnabled?: boolean;
   projectId: string | null;
   onProjectChange: (projectId: string | null) => void;
   onProjectNameChange?: (name: string | null) => void;
@@ -49,12 +46,7 @@ export const APP_FOCUS_OPTIONS: ReadonlyArray<{ value: AiAppFocus; label: string
   { value: "website", label: "وب‌سایت" },
 ];
 
-export const RUNTIME_MODE_LABELS: Record<AiRuntimeMode, string> = {
-  auto: "خودکار",
-  instant: "سریع",
-  thinking: "تفکر عمیق",
-  deep_research: "پژوهش عمیق",
-};
+export const RUNTIME_MODE_LABELS: Record<AiRuntimeMode, string> = AI_MODE_LABELS;
 
 export function useAiWorkspaceProjects({
   canSelectProject = true,
@@ -128,7 +120,6 @@ export function AiWorkspaceContext({
   accessibleFocuses,
   runtimeMode,
   onRuntimeModeChange,
-  deepResearchEnabled = false,
   projectId,
   onProjectChange,
   onProjectNameChange,
@@ -197,9 +188,7 @@ export function AiWorkspaceContext({
             runtimeMode !== "auto" && "border-primary/40 bg-primary/10 text-primary",
           )}
         >
-          {AI_CHAT_MODES.filter((mode) =>
-            isAiRuntimeModeAvailable(mode, deepResearchEnabled),
-          ).map((mode) => (
+          {AI_CHAT_MODES.map((mode) => (
             <option key={mode} value={mode}>
               {`حالت: ${RUNTIME_MODE_LABELS[mode]}`}
             </option>

@@ -27,6 +27,11 @@ vi.mock("@/lib/auth", () => ({
   withTenantScope: <A extends unknown[]>(handler: (...args: A) => unknown) => handler,
 }));
 
+vi.mock("@/lib/features", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/features")>(),
+  effectiveFeatures: vi.fn().mockResolvedValue({ ledger: true }),
+}));
+
 vi.mock("@/lib/industry-guard", () => ({ getBusinessIndustry: mocks.industry }));
 
 // The super-admin catalogue (migration 0288) is a database read; the routes are
@@ -150,6 +155,26 @@ describe("published Studio tours", () => {
     expect(body.tours).toHaveLength(1);
     expect(body.tours[0]).toMatchObject({ id: STUDIO_ID, title: "مرکز آموزش", stepCount: 2 });
     expect(mocks.publishedForPage).toHaveBeenCalledWith(BASELINE_PAGE);
+  });
+
+  it.each([
+    ["cosmetics", STUDIO_ID],
+    ["food_service", "accounting.overview.ledger"],
+  ])("lists the applicable Accounting Overview tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/overview";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/overview",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", [expectedId]);
   });
 
   it("plays a published tour back and records its progress", async () => {

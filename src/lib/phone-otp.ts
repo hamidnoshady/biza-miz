@@ -395,14 +395,21 @@ export async function consumeSelfPhoneChallenges(
 
 export async function checkPhoneOtpRateLimit(
   identityKey: string,
+  /**
+   * The attempt realm to count. `phone_otp` is the login door; `signup` (#1385)
+   * is the public registration door. Separated so a burst of signup attempts
+   * for one number cannot consume the login budget for the same number, and
+   * neither door can raise the other's ceiling.
+   */
+  realm: "phone_otp" | "signup" = "phone_otp",
 ): Promise<{ allowed: true } | { allowed: false; retryAfterMs: number }> {
   const now = new Date();
   const { rows } = await withoutTenantScope("platform", () =>
     query<{ created_at: Date }>(
       `SELECT created_at FROM auth_login_attempts
-        WHERE realm = 'phone_otp' AND identity_key = $1
+        WHERE realm = $2 AND identity_key = $1
         ORDER BY created_at DESC LIMIT 20`,
-      [identityKey],
+      [identityKey, realm],
     ),
   );
 

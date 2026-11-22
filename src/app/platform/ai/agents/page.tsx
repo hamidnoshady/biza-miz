@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, Button, Card, Field, InfoBox, inputClass, useCan } from "../../ui";
 import { AiConsoleNav } from "../ai-console-nav";
+import { AI_CHAT_MODES, AI_MODE_LABELS } from "@/lib/ai-runtime-modes-shared";
 
 interface SystemAgent {
   id: string;
@@ -288,12 +289,29 @@ export default function PlatformAiAgentsPage() {
               />
             </Field>
             <Field label="حالت ترجیحی">
-              <input
+              {/*
+                Issue #1367 — the picker offers only the three live chat modes.
+                An older assignment that still stores the retired value is shown
+                as such rather than silently rewritten.
+              */}
+              <select
                 className={inputClass}
-                dir="ltr"
                 value={assignmentForm.preferredMode}
                 onChange={(event) => setAssignmentForm({ ...assignmentForm, preferredMode: event.target.value })}
-              />
+              >
+                <option value="">بدون حالت ترجیحی</option>
+                {AI_CHAT_MODES.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {AI_MODE_LABELS[mode]}
+                  </option>
+                ))}
+                {assignmentForm.preferredMode &&
+                !(AI_CHAT_MODES as readonly string[]).includes(assignmentForm.preferredMode) ? (
+                  <option value={assignmentForm.preferredMode}>
+                    {assignmentForm.preferredMode} (بازنشسته)
+                  </option>
+                ) : null}
+              </select>
             </Field>
             <Field label="مجوزهای لازم (با فاصله)">
               <input

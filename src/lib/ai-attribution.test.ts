@@ -82,19 +82,20 @@ describe("issue #812 §12 — the attribution columns exist", () => {
 
 describe("issue #812 §12 — every spending surface attributes its spend", () => {
   const chat = readFileSync("src/app/api/ai/chat/route.ts", "utf8");
-  const research = readFileSync("src/app/api/ai/research/[id]/approve/route.ts", "utf8");
+  const researchApprove = readFileSync("src/app/api/ai/research/[id]/approve/route.ts", "utf8");
   const widgetRun = readFileSync("src/app/api/ai/widgets/[id]/run/route.ts", "utf8");
 
   it("types every settlement with a request type the table accepts", () => {
     // The CHECK list from 0153, plus `deep_research` from 0208. Anything else
-    // is a settlement that will be rejected at INSERT.
+    // is a settlement that will be rejected at INSERT. `deep_research` stays in
+    // the list after the retirement because its historical settlement rows are
+    // still in the table and still reconcile.
     const allowed = [
       "chat", "vision", "ocr", "media_detect", "proactive", "autopilot",
       "coworker", "agent", "automation", "embedding", "deep_research", "other",
     ];
     for (const [name, src] of [
       ["chat", chat],
-      ["research approve", research],
       ["widget run", widgetRun],
     ] as const) {
       const types = [...src.matchAll(/requestType:\s*"([^"]+)"/g)].map((m) => m[1]);
@@ -124,13 +125,17 @@ describe("issue #812 §12 — every spending surface attributes its spend", () =
     }
   });
 
-  it("attributes a Deep Research settlement by its run on BOTH paths", () => {
-    const settlements = research.split("attribution: {").slice(1);
-    expect(settlements.length).toBeGreaterThanOrEqual(2);
-    for (const block of settlements) {
-      expect(block, "every research settlement names its run").toMatch(/researchRunId/);
-      expect(block, "every research settlement names its mode").toMatch(/runtimeMode:\s*"deep_research"/);
-    }
+  it("issue #1367 — the retired approve route can neither spend nor settle", () => {
+    // The route used to be the Deep Research spending surface, so its removal
+    // is asserted at the source level as well as in the route tests: a stray
+    // gate/settle/provider call left behind would be a bypass that no button
+    // controls. Historical settlements remain untouched in the table.
+    expect(researchApprove).not.toMatch(/settleAiTurn\s*\(/);
+    expect(researchApprove).not.toMatch(/gateAiTurn\s*\(/);
+    expect(researchApprove).not.toMatch(/runResearchRun\s*\(/);
+    expect(researchApprove).not.toMatch(/approveResearchRun\s*\(/);
+    expect(researchApprove).toMatch(/researchRetiredBody\(\)/);
+    expect(researchApprove).toMatch(/RESEARCH_RETIRED_STATUS/);
   });
 
   it("types a widget run as chat on both paths, so its cost lands in one slice", () => {

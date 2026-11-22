@@ -681,7 +681,7 @@ export interface AiSettlementInput {
   // Issue #812 §12 — per-turn attribution. Columns, not metadata keys, because
   // the usage report groups on them and a typo in a jsonb key is a silent NULL
   // group forever.
-  /** The runtime mode in force: `auto`, `instant` or `deep_research`. */
+  /** The runtime mode in force: `auto`, `instant` or `thinking` (historical rows may carry `deep_research`). */
   runtimeMode?: string | null;
   /** The Superadmin system agent invoked, if the turn ran as one. */
   systemAgentId?: string | null;

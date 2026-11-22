@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  configuredRootDomains,
   hostDebugEnabled,
   businessHost,
   leadingHostLabel,
   normalizeHost,
+  normalizeRootDomain,
   parseHost,
+  parseHostAny,
   preferredProto,
+  primaryRootDomain,
   resolveRequestHost,
   subdomainRoutingEnabled,
   swapHostLabel,
@@ -324,5 +328,34 @@ describe("hostDebugEnabled", () => {
     for (const value of ["on", "ON", " true ", "1"]) {
       expect(hostDebugEnabled({ NODE_ENV: "production", HOST_RESOLVE_DEBUG: value }), value).toBe(true);
     }
+  });
+});
+
+describe("multi-root migration", () => {
+  const OLD = "app.eshobe.com";
+  const NEW = "app.bizamiz.ir";
+  const env = { ROOT_DOMAIN: OLD, ADDITIONAL_ROOT_DOMAINS: NEW };
+
+  it("treats ROOT_DOMAIN as primary and normalises the aliases", () => {
+    expect(normalizeRootDomain(" .App.Bizamiz.IR. ")).toBe("app.bizamiz.ir");
+    expect(configuredRootDomains(env)).toEqual([OLD, NEW]);
+    expect(configuredRootDomains({ ROOT_DOMAIN: ` ${OLD}. `, ADDITIONAL_ROOT_DOMAINS: ` ${NEW}. , ${OLD} ,, ` })).toEqual([OLD, NEW]);
+    expect(primaryRootDomain(env)).toBe(OLD);
+    expect(primaryRootDomain({ ADDITIONAL_ROOT_DOMAINS: NEW })).toBe(NEW);
+  });
+
+  it("resolves the same tenant label under both roots and reports which matched", () => {
+    expect(parseHostAny(`acme.${OLD}`, configuredRootDomains(env))).toEqual({ kind: "business", label: "acme", root: OLD });
+    expect(parseHostAny(`acme.${NEW}`, configuredRootDomains(env))).toEqual({ kind: "business", label: "acme", root: NEW });
+    expect(parseHostAny(`admin.${NEW}`, configuredRootDomains(env))).toEqual({ kind: "admin", label: "admin", root: NEW });
+    expect(parseHostAny(NEW, configuredRootDomains(env))).toEqual({ kind: "apex", label: "", root: NEW });
+    expect(parseHostAny("acme.example.net", configuredRootDomains(env))).toEqual({ kind: "unknown", label: "", root: "" });
+  });
+
+  it("keeps host routing on when only an additional root is declared", () => {
+    expect(subdomainRoutingEnabled({ ROOT_DOMAIN: OLD, ADDITIONAL_ROOT_DOMAINS: NEW })).toBe(true);
+    expect(subdomainRoutingEnabled({ ADDITIONAL_ROOT_DOMAINS: NEW })).toBe(true);
+    expect(subdomainRoutingEnabled({ ROOT_DOMAIN: OLD, ADDITIONAL_ROOT_DOMAINS: NEW, SUBDOMAIN_ROUTING: "off" })).toBe(false);
+    expect(subdomainRoutingEnabled({})).toBe(false);
   });
 });

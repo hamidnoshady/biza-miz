@@ -20,7 +20,7 @@
  * laptop — there is no host label to read, and `resolveMcpTenant` falls back to
  * the install's sole business. See `resolveSoleBusiness`.
  */
-import { hostRoutingEnabled, parseHost, preferredProto, requestHost, rootDomain } from "../host";
+import { configuredRootDomains, hostRoutingEnabled, parseHost, parseHostAny, preferredProto, requestHost, type HostEnv } from "../host";
 import { resolveBusinessByLabel, resolveSoleBusiness, type ResolvedBusinessHost } from "../host-resolution";
 import { classifyHostname, splitHostPort } from "../public-origin";
 
@@ -77,7 +77,7 @@ export async function resolveMcpTenant(headers: Headers): Promise<McpTenantResol
     // this every register/authorize/token call on such a deployment answered
     // "ambiguous" and no standard MCP client could connect. A label that names
     // an active business is decisive; anything else keeps the old fallback.
-    const label = labelledBusinessHost(requestHost(headers), rootDomain());
+    const label = labelledBusinessHostInRoots(requestHost(headers), configuredRootDomains(process.env as HostEnv));
     if (label) {
       const business = await resolveBusinessByLabel(label);
       if (business && business.status === "active") return { ok: true, business };
@@ -87,7 +87,7 @@ export async function resolveMcpTenant(headers: Headers): Promise<McpTenantResol
     return sole.status === "active" ? { ok: true, business: sole } : { ok: false, reason: "suspended" };
   }
 
-  const parsed = parseHost(requestHost(headers), rootDomain());
+  const parsed = parseHostAny(requestHost(headers), configuredRootDomains(process.env as HostEnv));
   if (parsed.kind !== "business") return { ok: false, reason: "not_a_business_host" };
 
   const business = await resolveBusinessByLabel(parsed.label);
@@ -133,6 +133,15 @@ export function labelledBusinessHost(
   root: string | null | undefined,
 ): string | null {
   const parsed = parseHost(host, root);
+  return parsed.kind === "business" ? parsed.label : null;
+}
+
+/** The same label question against every configured root during a migration. */
+export function labelledBusinessHostInRoots(
+  host: string | null | undefined,
+  roots: readonly string[],
+): string | null {
+  const parsed = parseHostAny(host, roots);
   return parsed.kind === "business" ? parsed.label : null;
 }
 

@@ -86,8 +86,6 @@ export interface AiChatHubProps {
   canAutoApply?: boolean;
   /** Per-section management permissions resolved on the server. */
   allowedPanelSections?: readonly AiPanelSectionKey[];
-  /** Safe server-derived flag indicating whether platform Deep Research is active. */
-  deepResearchEnabled?: boolean;
   /** Task IDs eligible for this tenant's industry, modules, features, and permissions. */
   eligibleTaskIds?: readonly AiTaskId[];
   /** Server-resolved starter prompts for the default welcome state. */
@@ -104,7 +102,6 @@ export function AiChatHub({
   canManageAi = false,
   canAutoApply = false,
   allowedPanelSections,
-  deepResearchEnabled = false,
   eligibleTaskIds,
   starterPrompts,
   accessibleFocuses,
@@ -126,11 +123,12 @@ export function AiChatHub({
   const resolveValidMode = useCallback(
     (raw: string | null): AiRuntimeMode => {
       const normalized = normalizeAiRuntimeMode(raw);
-      return isAiRuntimeModeAvailable(normalized, deepResearchEnabled)
-        ? normalized
-        : "auto";
+      // Issue #1367 — a bookmarked `?mode=deep_research` degrades to Auto in the
+      // composer (it is a view state, not a request). The API is where an
+      // explicit retired request is refused rather than remapped.
+      return isAiRuntimeModeAvailable(normalized) ? normalized : "auto";
     },
-    [deepResearchEnabled],
+    [],
   );
 
   const effectiveAccessibleFocuses = useMemo<
@@ -253,10 +251,6 @@ export function AiChatHub({
   const canOpenManagement =
     allowedPanelSections !== undefined
       ? allowedPanelSections.length > 0
-      : canManageAi;
-  const canOpenDeepResearch =
-    allowedPanelSections !== undefined
-      ? allowedPanelSections.includes("research")
       : canManageAi;
   const defaultPanelSection: AiPanelSectionKey =
     allowedPanelSections && allowedPanelSections.length > 0
@@ -734,7 +728,7 @@ export function AiChatHub({
                 onClick={() => openPanel(panelSection ?? defaultPanelSection)}
                 aria-expanded={panelSection !== null}
                 aria-label="مدیریت دستیار"
-                title="مدیریت دستیار: حافظه، همکاران، اتوماسیون‌ها، پژوهش و مصرف"
+                title="مدیریت دستیار: حافظه، همکاران، اتوماسیون‌ها، تاریخچهٔ پژوهش و مصرف"
                 className="gap-1.5 px-2.5 text-foreground sm:px-3"
               >
                 <Settings2Icon className="size-4 shrink-0" aria-hidden="true" />
@@ -778,7 +772,6 @@ export function AiChatHub({
           section={panelSection}
           canAutoApply={canAutoApply}
           allowedSections={allowedPanelSections}
-          deepResearchEnabled={deepResearchEnabled}
           onSectionChange={openPanel}
           onClose={closePanel}
         />
@@ -955,10 +948,6 @@ export function AiChatHub({
                 accessibleFocuses: effectiveAccessibleFocuses,
                 runtimeMode,
                 onRuntimeModeChange: updateRuntimeMode,
-                onDeepResearchOpen: canOpenDeepResearch
-                  ? () => openPanel("research")
-                  : undefined,
-                deepResearchEnabled,
                 projectId: canSelectProject ? activeProjectId : null,
                 onProjectChange: changeProject,
                 canSelectProject,
