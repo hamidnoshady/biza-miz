@@ -140,6 +140,18 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "setup/signup":
     "self-service business registration — creates the tenant a session would otherwise be scoped to; " +
     "refuses with 403 unless ALLOW_PUBLIC_SIGNUP is explicitly enabled",
+  // ESH-200 / #1385 — phone-first public registration. Both halves run before
+  // any identity exists: `request` mints and sends a signup-purpose OTP,
+  // `verify` redeems it and creates the one personal identity. Neither takes a
+  // business id, neither mints a tenant session, and both refuse with 403
+  // unless the public signup switch is on.
+  "auth/signup/request":
+    "public phone-first registration — sends a signup-purpose OTP to a number that may not " +
+    "have an identity yet; per-number and per-IP limited, non-enumerating response",
+  "auth/signup/verify":
+    "public phone-first registration — redeems the signup-purpose OTP and creates/links exactly " +
+    "one personal identity; no tenant is created and an already-redeemed request is idempotent " +
+    "only for the browser holding its request token",
   // Issue #908 — the public contract-signing session. The caller is an external
   // signatory with no account, so no session can exist by definition; the
   // per-recipient token in the path is the credential (256 bits, HMAC-hashed at

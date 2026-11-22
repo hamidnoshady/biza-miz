@@ -304,6 +304,15 @@ const PUBLIC_PATHS = [
   // would otherwise be scoped to, so it cannot require one. Refuses with 403
   // unless ALLOW_PUBLIC_SIGNUP is set.
   "/api/setup/signup",
+  // ESH-200 (#1385) — the phone-first public door. Signup has no session by
+  // definition: the number being proven is the credential. `/onboarding` is
+  // reached with the encrypted, short-lived continuation cookie, not a tenant
+  // session, because a person without a business has nothing to scope one to.
+  // Both routes enforce the public-signup switch server-side.
+  "/signup",
+  "/api/auth/signup/request",
+  "/api/auth/signup/verify",
+  "/onboarding",
   // Phase 13: an invitee has no session and no membership of the inviting
   // business yet — the single-use token in the link is the credential.
   "/invite",
@@ -564,6 +573,12 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   // sign-in mutations behind the Origin check rather than being callable
   // cross-site.
   "/api/auth/password-reset/request",
+  // ESH-200 (#1385) — public signup is browser-driven and pre-session. The
+  // request half can send an SMS, so a cross-site POST must be refused before
+  // it becomes a way to make a victim's browser spend a code; the verify half
+  // is the credential exchange that follows it.
+  "/api/auth/signup/request",
+  "/api/auth/signup/verify",
   // Issue #854 follow-up — the sign-out retry is session-less for the reason
   // given in PUBLIC_PATHS; a cross-site POST to it must still be refused, even
   // though all it could ever do is end a session the browser already left.
@@ -860,6 +875,11 @@ const AUTH_RATE_LIMITED_PATHS = [
   // per-IP bucket as every other credential exchange rather than going
   // unlimited.
   "/api/setup/signup",
+  // ESH-200 (#1385) — public registration spends SMS credit and verifies a
+  // six-digit code from a pre-session caller. The per-number send budget lives
+  // in public-signup.ts (`signup` realm); this is the outer per-IP ceiling.
+  "/api/auth/signup/request",
+  "/api/auth/signup/verify",
   // Phase 24 — the tenant/platform MFA interstitial (see PUBLIC_PATHS above):
   // `verify` checks a 6-digit TOTP/SMS code or a 10-code recovery list against
   // a pending login, and `enrol` is reachable with the same bearer token.

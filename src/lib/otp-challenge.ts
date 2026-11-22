@@ -1,5 +1,5 @@
 /**
- * Issue #854 (P0.7 / P0.8 / P1.17) — one purpose-bound, atomically consumed OTP
+ * Issue #854 (P0.7 / P0.8 / P1.17) â€” one purpose-bound, atomically consumed OTP
  * challenge.
  *
  * Before this module there were three near-identical "look at the newest live
@@ -18,7 +18,7 @@
  * The shape below fixes all three by making the challenge a *transaction*:
  * `(subject, purpose, candidate phone)` is the identity, `consumed_at` is the
  * one transition every redemption goes through, and the whole read-verify-consume
- * runs inside a single `SELECT … FOR UPDATE` so a racing request blocks rather
+ * runs inside a single `SELECT â€¦ FOR UPDATE` so a racing request blocks rather
  * than reads stale state.
  *
  * Everything here is deliberately not imported by anything that renders: the
@@ -27,6 +27,7 @@
  * `otp-challenge.test.ts`.
  */
 import { createHmac, randomInt, timingSafeEqual } from "node:crypto";
+import type { PoolClient } from "pg";
 import { getPool, query, withoutTenantScope } from "./db";
 import { getRealmSecret } from "./jwt-secret";
 import { toLatinDigits } from "./digits";
@@ -37,7 +38,7 @@ import { toLatinDigits } from "./digits";
 
 /**
  * What a challenge authorises. A code minted for one purpose is refused for
- * any other — that is what stops an enrolment SMS from being spendable as a
+ * any other â€” that is what stops an enrolment SMS from being spendable as a
  * login, and a login SMS from being spendable as a phone change.
  */
 export const OTP_PURPOSES = [
@@ -56,11 +57,19 @@ export const OTP_PURPOSES = [
   /** Tenant-triggered, account-holder-completed password recovery. */
   "password_recovery",
   /**
-   * Issue #908 — proving the mobile number of a contract signer who may not have
+   * Issue #908 â€” proving the mobile number of a contract signer who may not have
    * an account at all. Keyed on the signer id in the `contract_signer` realm, so
    * a code minted here can never be spent as a login, and vice versa.
    */
   "contract_signing",
+  /**
+   * ESH-200 (#1385) â€” proving a number for a *new* personal identity. Distinct
+   * from `login` so a signup code cannot authenticate an existing account and a
+   * login code cannot create one; keyed on the signup request id in the
+   * `platform_signup` realm. Migration 0312 grows the database constraint to
+   * match this list.
+   */
+  "signup",
 ] as const;
 
 export type OtpPurpose = (typeof OTP_PURPOSES)[number];
@@ -77,8 +86,8 @@ export const OTP_MAX_ATTEMPTS = 5;
 /**
  * The canonical shape of a submitted code: exactly six Latin digits.
  *
- * Persian/Arabic-Indic digits are normalised first (#854 P2.23) — a member
- * reading «۱۲۳۴۵۶» off an SMS app and typing it into a numeric keypad should
+ * Persian/Arabic-Indic digits are normalised first (#854 P2.23) â€” a member
+ * reading Â«Û±Û²Û³Û´ÛµÛ¶Â» off an SMS app and typing it into a numeric keypad should
  * not be told their code is invalid, and the PIN path already normalised.
  */
 export function normalizeOtpCode(input: unknown): string | null {
@@ -111,7 +120,7 @@ export function challengeIsLive(
 // ---------------------------------------------------------------------------
 
 /**
- * HMAC of the code under the platform realm secret — the same key `jwt-secret`
+ * HMAC of the code under the platform realm secret â€” the same key `jwt-secret`
  * hands the MFA interstitial, so a leaked `mfa_challenges` row yields nothing
  * without the deployment secret.
  */
@@ -135,7 +144,7 @@ export interface IssueOtpChallengeInput {
   subjectId: string;
   purpose: OtpPurpose;
   /** null for subjects that are not tenant-scoped (platform admins). */
-  /** The exact number this code is being sent to — bound into the challenge. */
+  /** The exact number this code is being sent to â€” bound into the challenge. */
   candidatePhoneE164?: string | null;
   /** Test seam; production always mints randomly. */
   code?: string;
@@ -175,7 +184,7 @@ export async function issueOtpChallenge(
     /**
      * No `business_id`: `mfa_challenges` is exempt from RLS on purpose
      * (migration 0021 / `tenant-tables.ts`) because a challenge is minted
-     * before any business has been established — the row is keyed by the
+     * before any business has been established â€” the row is keyed by the
      * subject and the phone it was sent to, and the tenant is resolved by the
      * caller *after* proof (`integration/tenant-isolation.integration.test.ts`
      * asserts an exempt table carries no tenant column).
@@ -239,104 +248,127 @@ export async function redeemOtpChallenge(input: {
   try {
     await client.query("BEGIN");
     await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
-
-    const { rows } = await client.query<{
-      id: string;
-      hashed_otp: string;
-      attempts: number;
-      expires_at: Date;
-      consumed_at: Date | null;
-      candidate_phone_e164: string | null;
-    }>(
-      `SELECT id, hashed_otp, attempts, expires_at, consumed_at, candidate_phone_e164
-         FROM mfa_challenges
-        WHERE subject_realm = $1 AND subject_id = $2 AND purpose = $3
-          AND consumed_at IS NULL
-        ORDER BY created_at DESC
-        LIMIT 1
-        FOR UPDATE`,
-      [input.subjectRealm, input.subjectId, input.purpose],
-    );
-
-    const challenge = rows[0];
-    if (!challenge) {
-      await client.query("COMMIT");
-      return { ok: false, reason: "no_challenge" };
-    }
-
-    if (challenge.expires_at.getTime() <= Date.now()) {
-      // Expired: consume it so it cannot be offered again, and say why.
-      await client.query(`UPDATE mfa_challenges SET consumed_at = now() WHERE id = $1`, [
-        challenge.id,
-      ]);
-      await client.query("COMMIT");
-      return { ok: false, reason: "expired" };
-    }
-
-    if (challenge.attempts >= OTP_MAX_ATTEMPTS) {
-      await client.query(`UPDATE mfa_challenges SET consumed_at = now() WHERE id = $1`, [
-        challenge.id,
-      ]);
-      await client.query("COMMIT");
-      return { ok: false, reason: "attempts_exhausted" };
-    }
-
-    // The binding (P0.8). Refused before the code is compared: the answer must
-    // not distinguish "right code, wrong number" from "wrong code" to a caller
-    // that only holds one of the two.
-    if (
-      input.expectedPhoneE164 !== undefined &&
-      input.expectedPhoneE164 !== null &&
-      challenge.candidate_phone_e164 !== null &&
-      challenge.candidate_phone_e164 !== input.expectedPhoneE164
-    ) {
-      await client.query(
-        `UPDATE mfa_challenges SET attempts = attempts + 1 WHERE id = $1`,
-        [challenge.id],
-      );
-      await client.query("COMMIT");
-      return { ok: false, reason: "wrong_phone" };
-    }
-
-    if (!(await codeMatches(input.code, challenge.hashed_otp))) {
-      const next = challenge.attempts + 1;
-      const exhausted = next >= OTP_MAX_ATTEMPTS;
-      await client.query(
-        `UPDATE mfa_challenges
-            SET attempts = $2,
-                consumed_at = CASE WHEN $3 THEN now() ELSE consumed_at END
-          WHERE id = $1`,
-        [challenge.id, next, exhausted],
-      );
-      await client.query("COMMIT");
-      return {
-        ok: false,
-        reason: exhausted ? "attempts_exhausted" : "wrong_code",
-        attemptsRemaining: Math.max(0, OTP_MAX_ATTEMPTS - next),
-      };
-    }
-
-    // The one transition. Conditional so a challenge already consumed by a
-    // racing request cannot be consumed twice even if the lock were lost.
-    const { rowCount } = await client.query(
-      `UPDATE mfa_challenges SET consumed_at = now()
-        WHERE id = $1 AND consumed_at IS NULL`,
-      [challenge.id],
-    );
+    const result = await redeemOtpChallengeOnClient(client, input);
     await client.query("COMMIT");
-    if (!rowCount) return { ok: false, reason: "no_challenge" };
-
-    return {
-      ok: true,
-      challengeId: challenge.id,
-      candidatePhoneE164: challenge.candidate_phone_e164,
-    };
+    return result;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
     client.release();
   }
+}
+
+/**
+ * The same redemption, on a transaction the caller already owns.
+ *
+ * #1385 needs the code check and the identity write to be one commit: a code
+ * that has been consumed but whose identity insert then failed would trap the
+ * person (the retry has no live challenge) exactly the way the acceptance
+ * criteria forbid. The caller therefore opens the transaction, locks the
+ * signup request row, and calls this with the same client, so a failure rolls
+ * both the consumption and the identity back together.
+ *
+ * The caller must already have the platform bypass enabled on the connection
+ * (`withoutTenantScopeTransaction` does). This function issues no BEGIN/COMMIT
+ * and never releases the client.
+ */
+export async function redeemOtpChallengeOnClient(
+  client: PoolClient,
+  input: {
+    subjectRealm: string;
+    subjectId: string;
+    purpose: OtpPurpose;
+    code: string;
+    /** When provided, must equal the challenge's stored candidate phone. */
+    expectedPhoneE164?: string | null;
+  },
+): Promise<OtpRedeemResult> {
+  const { rows } = await client.query<{
+    id: string;
+    hashed_otp: string;
+    attempts: number;
+    expires_at: Date;
+    consumed_at: Date | null;
+    candidate_phone_e164: string | null;
+  }>(
+    `SELECT id, hashed_otp, attempts, expires_at, consumed_at, candidate_phone_e164
+       FROM mfa_challenges
+      WHERE subject_realm = $1 AND subject_id = $2 AND purpose = $3
+        AND consumed_at IS NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+      FOR UPDATE`,
+    [input.subjectRealm, input.subjectId, input.purpose],
+  );
+
+  const challenge = rows[0];
+  if (!challenge) {
+    return { ok: false, reason: "no_challenge" };
+  }
+
+  if (challenge.expires_at.getTime() <= Date.now()) {
+    // Expired: consume it so it cannot be offered again, and say why.
+    await client.query(`UPDATE mfa_challenges SET consumed_at = now() WHERE id = $1`, [
+      challenge.id,
+    ]);
+    return { ok: false, reason: "expired" };
+  }
+
+  if (challenge.attempts >= OTP_MAX_ATTEMPTS) {
+    await client.query(`UPDATE mfa_challenges SET consumed_at = now() WHERE id = $1`, [
+      challenge.id,
+    ]);
+    return { ok: false, reason: "attempts_exhausted" };
+  }
+
+  // The binding (P0.8). Refused before the code is compared: the answer must
+  // not distinguish "right code, wrong number" from "wrong code" to a caller
+  // that only holds one of the two.
+  if (
+    input.expectedPhoneE164 !== undefined &&
+    input.expectedPhoneE164 !== null &&
+    challenge.candidate_phone_e164 !== null &&
+    challenge.candidate_phone_e164 !== input.expectedPhoneE164
+  ) {
+    await client.query(
+      `UPDATE mfa_challenges SET attempts = attempts + 1 WHERE id = $1`,
+      [challenge.id],
+    );
+    return { ok: false, reason: "wrong_phone" };
+  }
+
+  if (!(await codeMatches(input.code, challenge.hashed_otp))) {
+    const next = challenge.attempts + 1;
+    const exhausted = next >= OTP_MAX_ATTEMPTS;
+    await client.query(
+      `UPDATE mfa_challenges
+          SET attempts = $2,
+              consumed_at = CASE WHEN $3 THEN now() ELSE consumed_at END
+        WHERE id = $1`,
+      [challenge.id, next, exhausted],
+    );
+    return {
+      ok: false,
+      reason: exhausted ? "attempts_exhausted" : "wrong_code",
+      attemptsRemaining: Math.max(0, OTP_MAX_ATTEMPTS - next),
+    };
+  }
+
+  // The one transition. Conditional so a challenge already consumed by a
+  // racing request cannot be consumed twice even if the lock were lost.
+  const { rowCount } = await client.query(
+    `UPDATE mfa_challenges SET consumed_at = now()
+      WHERE id = $1 AND consumed_at IS NULL`,
+    [challenge.id],
+  );
+  if (!rowCount) return { ok: false, reason: "no_challenge" };
+
+  return {
+    ok: true,
+    challengeId: challenge.id,
+    candidatePhoneE164: challenge.candidate_phone_e164,
+  };
 }
 
 /**
@@ -353,7 +385,7 @@ export async function liveChallengePhone(input: {
 }): Promise<{
   challengeId: string;
   candidatePhoneE164: string | null;
-  /** When the code was sent — the resend cooldown counts from here (P2.25). */
+  /** When the code was sent â€” the resend cooldown counts from here (P2.25). */
   createdAt: Date;
   expiresAt: Date;
 } | null> {
@@ -408,7 +440,7 @@ export async function consumeAllChallenges(input: {
  * several businesses and naming them before the code is verified would be a free
  * membership oracle (issue #854 P1.18). The challenge is instead keyed on the
  * number itself, so there is exactly one code and exactly one attempt budget for
- * the phone — rather than one per candidate member, which would multiply the
+ * the phone â€” rather than one per candidate member, which would multiply the
  * guesses an attacker gets.
  *
  * Keyed with the platform realm secret, so the derived id is not reversible to
