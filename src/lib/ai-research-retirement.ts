@@ -39,8 +39,12 @@ export const RESEARCH_RETIRED_STATUS = 410;
  * on purpose: the only way to un-retire is to ship code that says so, and the
  * three checks that depend on it (`createResearchRun`, `approveResearchRun`,
  * `runResearchRun`) are covered by tests that would fail if it flipped.
+ *
+ * Typed as `boolean` rather than the literal `true` so the guarded code below
+ * each check stays ordinary, type-checked code rather than being narrowed away
+ * as statically unreachable.
  */
-export const RESEARCH_EXECUTION_RETIRED = true;
+export const RESEARCH_EXECUTION_RETIRED: boolean = true;
 
 /** The three chat modes that remain, in the order the composer shows them. */
 export const RESEARCH_SUPERSEDED_BY = ["auto", "instant", "thinking"] as const;
