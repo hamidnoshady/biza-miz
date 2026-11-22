@@ -456,7 +456,7 @@ export function ServerSyncPanel() {
                 className={inputClass}
                 value={remoteUrl}
                 onChange={(e) => setRemoteUrl(e.target.value)}
-                placeholder="https://pos.eshobe.com"
+                placeholder="https://app.bizamiz.ir"
                 dir="ltr"
               />
             </Field>
@@ -977,3 +977,4 @@ function SyncStatusPanels({
     </>
   );
 }
+

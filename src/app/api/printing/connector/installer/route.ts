@@ -3,9 +3,10 @@ import { requirePermission, withTenantScope } from "@/lib/auth";
 import { resolveDeploymentRole, type DeploymentEnv } from "@/lib/deployment-role";
 import {
   businessHost,
+  configuredRootDomains,
+  parseHostAny,
   preferredProto,
   requestHost,
-  rootDomain,
   subdomainRoutingEnabled,
   type HostEnv,
 } from "@/lib/host";
@@ -84,7 +85,9 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // Either way the result contains no fabricated `{label}.{domain}` and no
   // attacker-supplied value: every origin is either database-verified or is
   // the one address the operator demonstrably browses on.
-  const root = rootDomain();
+  const roots = configuredRootDomains(process.env as HostEnv);
+  const parsedHost = parseHostAny(host, roots);
+  const root = parsedHost.root || roots[0] || "";
   const requestPort = host.match(/:(\d+)$/)?.[1];
   const labelOrigin = (label: string) =>
     `${protocol}://${businessHost(label, root ?? "")}${requestPort ? `:${requestPort}` : ""}`;

@@ -22,8 +22,10 @@
  */
 import {
   ADMIN_HOST_LABEL,
-  parseHost,
+  configuredRootDomains,
+  parseHostAny,
   preferredProto,
+  primaryRootDomain,
   resolveRequestHost,
   subdomainRoutingEnabled,
 } from "../host";
@@ -70,6 +72,7 @@ export const PLATFORM_MCP_ENDPOINT_FALLBACK = `https://YOUR-PLATFORM-HOST${PLATF
 /** Just the variables the endpoint derivation reads, so it stays pure. */
 export interface PlatformMcpEndpointEnv {
   ROOT_DOMAIN?: string;
+  ADDITIONAL_ROOT_DOMAINS?: string;
   SUBDOMAIN_ROUTING?: string;
   TRUST_FORWARDED_HOST?: string;
   PLATFORM_BASE_URL?: string;
@@ -145,8 +148,8 @@ export function resolvePlatformMcpEndpoint(
   const host = resolveRequestHost(request.host, request.forwardedHost, env).trim();
 
   if (subdomainRoutingEnabled(env)) {
-    const root = (env.ROOT_DOMAIN ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
-    const parsed = parseHost(host, root);
+    const parsed = parseHostAny(host, configuredRootDomains(env));
+    const root = parsed.root || primaryRootDomain(env);
     if (parsed.kind === "admin" && host) {
       const origin = `${proto}://${host}`;
       if (isLoopbackHost(host)) warnings.push("loopback");

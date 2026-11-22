@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, sessionCookieOptions, signSession, type Role } from "@/lib/auth";
-import { hostRoutingEnabled, parseHost, requestHost, rootDomain } from "@/lib/host";
+import { configuredRootDomains, hostRoutingEnabled, parseHostAny, requestHost, type HostEnv } from "@/lib/host";
 import {
   handoffOriginContext,
   resolveHandoffOrigin,
@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
     return withHandoffHeaders(NextResponse.json({ error: "missing_token" }, { status: 400 }));
   }
 
-  const parsedHost = hostRoutingEnabled() ? parseHost(requestHost(request.headers), rootDomain()) : null;
+  const parsedHost = hostRoutingEnabled() ? parseHostAny(requestHost(request.headers), configuredRootDomains(process.env as HostEnv)) : null;
   if (parsedHost && parsedHost.kind !== "business") {
     return withHandoffHeaders(NextResponse.json({ error: "wrong_origin" }, { status: 400 }));
   }

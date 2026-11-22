@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { query, withoutTenantScope } from "@/lib/db";
-import { businessHost } from "@/lib/host";
+import {
+  businessHost,
+  configuredRootDomains,
+  parseHostAny,
+  primaryRootDomain,
+  requestHost,
+  type HostEnv,
+} from "@/lib/host";
 import { membershipBlockedReason, membershipsForPlatformUser } from "@/lib/memberships";
 import { isPasswordRole } from "@/lib/team";
 import {
@@ -54,7 +61,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "missing_credentials" }, { status: 400 });
   }
 
-  const rootDomain = process.env.ROOT_DOMAIN?.trim() ?? "";
+  const roots = configuredRootDomains(process.env as HostEnv);
+  const primaryRoot = primaryRootDomain(process.env as HostEnv);
+  const rootDomain = parseHostAny(requestHost(request.headers), roots).root || primaryRoot;
 
   return withoutTenantScope("login", async () => {
     const { rows } = await query<PlatformUserRow>(

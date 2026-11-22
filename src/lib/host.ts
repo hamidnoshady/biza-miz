@@ -172,14 +172,63 @@ export function preferredProto(forwardedProto: string | null | undefined, fallba
 export interface HostEnv {
   SUBDOMAIN_ROUTING?: string;
   ROOT_DOMAIN?: string;
+  /**
+   * Extra roots served by the same deployment during a domain migration, e.g.
+   * `ROOT_DOMAIN=app.bizamiz.ir` with
+   * `ADDITIONAL_ROOT_DOMAINS=app.eshobe.com`. `ROOT_DOMAIN` remains the primary
+   * (the one new links are built on); additional roots keep old bookmarks,
+   * cookies and tenant hosts working until every customer has moved.
+   */
+  ADDITIONAL_ROOT_DOMAINS?: string;
   TRUST_FORWARDED_HOST?: string;
+}
+
+/** Lowercase, strip leading/trailing dots and whitespace. */
+export function normalizeRootDomain(value: string | null | undefined): string {
+  return (value ?? "").trim().toLowerCase().replace(/^\.+|\.+$/g, "");
+}
+
+/** The primary root first, then every configured alias root, deduplicated. */
+export function configuredRootDomains(env: HostEnv): string[] {
+  const roots = [
+    env.ROOT_DOMAIN,
+    ...(env.ADDITIONAL_ROOT_DOMAINS ?? "").split(","),
+  ]
+    .map(normalizeRootDomain)
+    .filter(Boolean);
+  return [...new Set(roots)];
+}
+
+/** The root new links are built on. Falls back to the first configured root. */
+export function primaryRootDomain(env: HostEnv): string {
+  const primary = normalizeRootDomain(env.ROOT_DOMAIN);
+  if (primary) return primary;
+  return configuredRootDomains(env)[0] ?? "";
+}
+
+/**
+ * Parse a host against every configured root, returning the root that
+ * matched. `parseHost` stays the single-root primitive so existing callers and
+ * tests keep their exact contract.
+ */
+export function parseHostAny(
+  host: string | null | undefined,
+  roots: readonly string[],
+): ParsedHost & { root: string } {
+  for (const root of roots) {
+    const normalized = normalizeRootDomain(root);
+    if (!normalized) continue;
+    const parsed = parseHost(host, normalized);
+    if (parsed.kind !== "unknown") return { ...parsed, root: normalized };
+  }
+  return { kind: "unknown", label: "", root: "" };
 }
 
 /** The values that turn the switch off; everything else (including unset) is on. */
 const ROUTING_OFF = new Set(["off", "false", "0", "no"]);
 
 export function subdomainRoutingEnabled(env: HostEnv): boolean {
-  if (!env.ROOT_DOMAIN?.trim()) return false;
+  if (configuredRootDomains(env).length === 0) return false;
   return !ROUTING_OFF.has(env.SUBDOMAIN_ROUTING?.trim().toLowerCase() ?? "");
 }
 

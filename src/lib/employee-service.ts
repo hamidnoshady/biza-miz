@@ -21,7 +21,7 @@ import type { AuthenticationResponseJSON, AuthenticatorTransportFuture, Registra
 import { getPool, isPinnedToTransaction, query, withTenantTransaction, withoutTenantScope } from "./db";
 import { isUuid } from "./uuid";
 import { isSessionLoginMethod, type SessionLoginMethod } from "./session-contract";
-import { hostRoutingEnabled, leadingHostLabel, parseHost, rootDomain } from "./host";
+import { configuredRootDomains, hostRoutingEnabled, leadingHostLabel, parseHostAny, type HostEnv } from "./host";
 import { postgresDateToIso } from "./jalali";
 import { resolveBusinessByLabel } from "./host-resolution";
 import { isValidPin } from "./team";
@@ -967,7 +967,7 @@ export async function resolveLoginBusinessId(body: {
   host?: string | null;
 }): Promise<{ businessId: string | null; error: string | null }> {
   if (hostRoutingEnabled()) {
-    const parsed = parseHost(body.host, rootDomain());
+    const parsed = parseHostAny(body.host, configuredRootDomains(process.env as HostEnv));
     if (parsed.kind !== "business") return { businessId: null, error: "unknown_business" };
     const business = await resolveBusinessByLabel(parsed.label);
     // An alias host (a business's old name after a rename) must not mint a

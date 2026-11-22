@@ -22,12 +22,14 @@
  * the Edge middleware imports this module too.
  */
 import {
+  configuredRootDomains,
   hostRoutingEnabled,
-  parseHost,
+  parseHostAny,
   preferredProto,
+  primaryRootDomain,
   requestHost,
-  rootDomain as configuredRootDomain,
   swapHostLabel,
+  type HostEnv,
   type ParsedHost,
 } from "./host";
 
@@ -75,9 +77,10 @@ export async function resolveRootLanding(
 ): Promise<RootLanding> {
   // Phase 23 — middleware runs on Edge and cannot reach Postgres, so "which
   // business is this host, and is it an old name?" has to be answered here.
-  const rootDomain = configuredRootDomain();
+  const roots = configuredRootDomains(process.env as HostEnv);
+  const primaryRoot = primaryRootDomain(process.env as HostEnv);
   if (hostRoutingEnabled()) {
-    const host = parseHost(requestHost(headers), rootDomain);
+    const host = parseHostAny(requestHost(headers), roots);
 
     // The apex has no tenant to show. It is a signpost to the business hosts.
     if (host.kind === "apex") return { kind: "directory" };
@@ -103,7 +106,7 @@ export async function resolveRootLanding(
         const forwardedHost = headers.get("x-forwarded-host") ?? headers.get("host");
         return {
           kind: "redirect",
-          location: `${proto}://${swapHostLabel(forwardedHost, business.subdomain, rootDomain)}/`,
+          location: `${proto}://${swapHostLabel(forwardedHost, business.subdomain, host.root || primaryRoot)}/`,
         };
       }
     }

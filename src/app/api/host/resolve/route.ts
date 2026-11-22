@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   businessHost,
+  configuredRootDomains,
   hostDebugEnabled,
   hostRoutingEnabled,
-  parseHost,
+  parseHostAny,
+  primaryRootDomain,
   requestHost,
   trustForwardedHost,
   type HostEnv,
@@ -37,9 +39,10 @@ import { resolveBusinessByLabel } from "@/lib/host-resolution";
  * `hostDebugEnabled`).
  */
 export async function GET(request: NextRequest) {
-  const rootDomain = process.env.ROOT_DOMAIN?.trim() ?? "";
+  const roots = configuredRootDomains(process.env as HostEnv);
+  const rootDomain = primaryRootDomain(process.env as HostEnv);
   const used = request.nextUrl.searchParams.get("host") ?? requestHost(request.headers);
-  const parsed = parseHost(used, rootDomain);
+  const parsed = parseHostAny(used, roots);
 
   const debug =
     request.nextUrl.searchParams.get("debug") === "1" && hostDebugEnabled(process.env)
@@ -77,7 +80,7 @@ export async function GET(request: NextRequest) {
       // Set when the caller arrived on an old host: the current origin to go
       // to instead. Null on the canonical host, so a client can redirect on
       // truthiness without comparing strings itself.
-      canonicalUrl: business.viaAlias ? `https://${businessHost(business.subdomain, rootDomain)}` : null,
+      canonicalUrl: business.viaAlias ? `https://${businessHost(business.subdomain, parsed.root || rootDomain)}` : null,
     },
   });
 }

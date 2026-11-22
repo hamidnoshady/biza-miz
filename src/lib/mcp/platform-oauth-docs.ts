@@ -20,7 +20,7 @@
  * path-inserted shape does not leak into the URLs a client calls.
  */
 import { BRAND_NAME_EN } from "../brand";
-import { hostRoutingEnabled, parseHost, requestHost, rootDomain } from "../host";
+import { configuredRootDomains, hostRoutingEnabled, parseHostAny, requestHost, type HostEnv } from "../host";
 import { PLATFORM_MCP_PATH } from "./platform-client-config";
 import { SUPPORTED_CODE_CHALLENGE_METHODS } from "./oauth";
 
@@ -32,7 +32,7 @@ export const PLATFORM_OAUTH_BASE = `${PLATFORM_MCP_PATH}/oauth`;
 /** Whether a request arrived on the console's own host. */
 export function isPlatformAdminHost(headers: Headers): boolean {
   if (!hostRoutingEnabled()) return false;
-  return parseHost(requestHost(headers), rootDomain()).kind === "admin";
+  return parseHostAny(requestHost(headers), configuredRootDomains(process.env as HostEnv)).kind === "admin";
 }
 
 /**
