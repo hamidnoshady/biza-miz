@@ -2127,17 +2127,20 @@ async function executePlatformTool(
         const existingId = (arg.record?.id as string | undefined) ?? arg.id;
         if (existingId) {
           await adminUpdateKbCategory(existingId, input as never, connection.adminId);
-          await platformAuditSafe(connection, existingId, tool.name, "ok", { action: "knowledge_category.update" });
+          await platformAuditSafe(connection, null, tool.name, "ok", {
+            action: "knowledge_category.update",
+            categoryId: existingId,
+          });
           return { ok: true, id: existingId };
         }
         const id = await adminCreateKbCategory(input as never, connection.adminId);
-        await platformAuditSafe(connection, id, tool.name, "ok", { action: "knowledge_category.create" });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_category.create", categoryId: id });
         return { ok: true, id };
       }
       case "delete_kb_category": {
         if (!arg.id) throw new Error("missing_fields");
         await adminDeleteKbCategory(arg.id);
-        await platformAuditSafe(connection, arg.id, tool.name, "ok", { action: "knowledge_category.delete" });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_category.delete", categoryId: arg.id });
         return { ok: true, id: arg.id };
       }
       case "save_kb_tag": {
@@ -2145,17 +2148,17 @@ async function executePlatformTool(
         const existingId = (arg.record?.id as string | undefined) ?? arg.id;
         if (existingId) {
           await adminUpdateKbTag(existingId, input as never, connection.adminId);
-          await platformAuditSafe(connection, existingId, tool.name, "ok", { action: "knowledge_tag.update" });
+          await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_tag.update", tagId: existingId });
           return { ok: true, id: existingId };
         }
         const id = await adminCreateKbTag(input as never, connection.adminId);
-        await platformAuditSafe(connection, id, tool.name, "ok", { action: "knowledge_tag.create" });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_tag.create", tagId: id });
         return { ok: true, id };
       }
       case "delete_kb_tag": {
         if (!arg.id) throw new Error("missing_fields");
         await adminDeleteKbTag(arg.id);
-        await platformAuditSafe(connection, arg.id, tool.name, "ok", { action: "knowledge_tag.delete" });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_tag.delete", tagId: arg.id });
         return { ok: true, id: arg.id };
       }
       case "save_kb_article": {
@@ -2163,17 +2166,20 @@ async function executePlatformTool(
         const existingId = (arg.record?.id as string | undefined) ?? arg.id;
         if (existingId) {
           await adminUpdateKbArticle(existingId, input as never, connection.adminId);
-          await platformAuditSafe(connection, existingId, tool.name, "ok", { action: "knowledge_article.update" });
+          await platformAuditSafe(connection, null, tool.name, "ok", {
+            action: "knowledge_article.update",
+            articleId: existingId,
+          });
           return { ok: true, id: existingId };
         }
         const id = await adminCreateKbArticle(input as never, connection.adminId);
-        await platformAuditSafe(connection, id, tool.name, "ok", { action: "knowledge_article.create" });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_article.create", articleId: id });
         return { ok: true, id };
       }
       case "delete_kb_article": {
         if (!arg.id) throw new Error("missing_fields");
         await adminDeleteKbArticle(arg.id);
-        await platformAuditSafe(connection, arg.id, tool.name, "ok", { action: "knowledge_article.delete" });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_article.delete", articleId: arg.id });
         return { ok: true, id: arg.id };
       }
       case "list_guided_tours": {
@@ -2199,8 +2205,9 @@ async function executePlatformTool(
         const parsed = parseStudioTourInput(arg.record);
         if (!parsed.ok) throw new Error(`${parsed.error}: ${parsed.detail}`);
         const saved = await saveStudioTour(parsed.input, connection.adminId, arg.expectedVersion ?? null);
-        await platformAuditSafe(connection, saved.id, tool.name, "ok", {
+        await platformAuditSafe(connection, null, tool.name, "ok", {
           action: saved.created ? "knowledge_tour.create" : "knowledge_tour.save",
+          tourId: saved.id,
           tourKey: parsed.input.tourKey,
           version: saved.version,
         });
@@ -2210,8 +2217,9 @@ async function executePlatformTool(
         const id = requireTourId(arg.tourId);
         const version = requirePositiveVersion(arg.version, "version");
         const tour = await publishStudioTour(id, connection.adminId, version);
-        await platformAuditSafe(connection, id, tool.name, "ok", {
+        await platformAuditSafe(connection, null, tool.name, "ok", {
           action: "knowledge_tour.publish",
+          tourId: id,
           tourKey: tour.tourKey,
           version: tour.publishedVersion,
         });
@@ -2221,8 +2229,9 @@ async function executePlatformTool(
         const id = requireTourId(arg.tourId);
         const toVersion = requirePositiveVersion(arg.toVersion, "toVersion");
         const tour = await rollbackStudioTour(id, toVersion, connection.adminId);
-        await platformAuditSafe(connection, id, tool.name, "ok", {
+        await platformAuditSafe(connection, null, tool.name, "ok", {
           action: "knowledge_tour.rollback",
+          tourId: id,
           tourKey: tour.tourKey,
           restoredFrom: toVersion,
           version: tour.publishedVersion,
@@ -2232,8 +2241,9 @@ async function executePlatformTool(
       case "archive_guided_tour": {
         const id = requireTourId(arg.tourId);
         const tour = await archiveStudioTour(id, connection.adminId);
-        await platformAuditSafe(connection, id, tool.name, "ok", {
+        await platformAuditSafe(connection, null, tool.name, "ok", {
           action: "knowledge_tour.archive",
+          tourId: id,
           tourKey: tour.tourKey,
         });
         return { ok: true, tour };
@@ -2241,7 +2251,7 @@ async function executePlatformTool(
       case "delete_draft_guided_tour": {
         const id = requireTourId(arg.tourId);
         await deleteStudioTourDraft(id);
-        await platformAuditSafe(connection, id, tool.name, "ok", { action: "knowledge_tour.delete_draft" });
+        await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_tour.delete_draft", tourId: id });
         return { ok: true, id };
       }
       case "list_cms_sites": {
@@ -2284,8 +2294,9 @@ async function executePlatformTool(
           role: "site",
           siteId: result.id,
         });
-        await platformAuditSafe(connection, result.id, tool.name, "ok", {
+        await platformAuditSafe(connection, null, tool.name, "ok", {
           action: "platform_cms.site.provision",
+          siteId: result.id,
           domain,
         });
         // The console refreshes the site mirror after a provision so the new
@@ -2438,8 +2449,9 @@ async function executePlatformTool(
           actorAdminId: connection.adminId,
         });
         if (!updated.ok) throw new Error(updated.error);
-        await platformAuditSafe(connection, arg.adminId, tool.name, "ok", {
+        await platformAuditSafe(connection, null, tool.name, "ok", {
           action: "platform_admin.update",
+          adminId: arg.adminId,
           isActive: arg.active,
         });
         return { ok: true, admin: updated.admin };

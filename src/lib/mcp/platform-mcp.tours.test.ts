@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   rollbackTour: vi.fn(),
   archiveTour: vi.fn(),
   deleteDraft: vi.fn(),
-  audit: vi.fn(async () => {}),
+  audit: vi.fn(async (_entry: { businessId?: string | null; payload?: Record<string, unknown> }) => {}),
 }));
 
 vi.mock("../db", () => ({
@@ -127,6 +127,21 @@ describe("platform MCP guided-tour management", () => {
       .toEqual({ ok: true, tour });
     expect((await callPlatformMcpTool(connection, "delete_draft_guided_tour", { tourId: tour.id })).data)
       .toEqual({ ok: true, id: tour.id });
+
+    // The tour row id belongs in the payload, never in `business_id`: that
+    // column is a foreign key into `businesses`, so a tour id there made every
+    // one of these audit writes fail on 23503 and reach the log unattributed.
+    for (const call of mocks.audit.mock.calls) {
+      expect(call[0].businessId ?? null).toBeNull();
+    }
+    expect(mocks.audit).toHaveBeenCalledWith(expect.objectContaining({
+      businessId: null,
+      payload: expect.objectContaining({ action: "knowledge_tour.publish", tourId: tour.id }),
+    }));
+    expect(mocks.audit).toHaveBeenCalledWith(expect.objectContaining({
+      businessId: null,
+      payload: expect.objectContaining({ action: "knowledge_tour.delete_draft", tourId: tour.id }),
+    }));
 
     expect(mocks.saveTour).toHaveBeenCalledWith(expect.objectContaining({ tourKey: content.tourKey }), "admin-1", 2);
     expect(mocks.publishTour).toHaveBeenCalledWith(tour.id, "admin-1", 2);
