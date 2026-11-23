@@ -21,6 +21,11 @@ const profile: SiteProfile = {
   },
   features: { ai_assistant: false, reservations: true },
   apps: { growth: { state: "maintenance", note: null, availableFrom: null } },
+  settings: {
+    tax: { defaultRate: 9 },
+    pricing: { defaultMarginPercent: 35, overheadMode: "automatic" },
+    orderControls: { cashierDiscountLimitPercent: 10 },
+  },
 };
 
 describe("validateSiteProfile", () => {
@@ -64,6 +69,43 @@ describe("validateSiteProfile", () => {
     const newer = { ...profile, features: { ...profile.features, brand_new_flag: true } };
     expect(validateSiteProfile(newer)?.features).toEqual({ ...profile.features, brand_new_flag: true });
   });
+
+  it("carries the cloud-owned business settings, clearing only what it sends as null", () => {
+    const cleared = {
+      ...profile,
+      settings: { ...profile.settings, pricing: null },
+    };
+    expect(validateSiteProfile(cleared)?.settings).toEqual({
+      tax: { defaultRate: 9 },
+      pricing: null,
+      orderControls: { cashierDiscountLimitPercent: 10 },
+    });
+
+    // An older cloud may send a subset; what it does not mention must be left
+    // exactly as it was on the till.
+    const partial = { ...profile, settings: { tax: { defaultRate: 10 } } };
+    expect(validateSiteProfile(partial)?.settings).toEqual({ tax: { defaultRate: 10 } });
+
+    // A cloud that predates settings replication sends no block at all.
+    const { settings: _absent, ...withoutSettings } = profile;
+    expect(validateSiteProfile(withoutSettings)?.settings).toBeUndefined();
+  });
+
+  it("refuses a malformed or oversized setting instead of applying a wrong tax rate", () => {
+    const bad = [
+      { ...profile, settings: "tax" },
+      { ...profile, settings: { tax: 9 } },
+      { ...profile, settings: { tax: [] } },
+      { ...profile, settings: { tax: { defaultRate: "9" }, orderControls: "none" } },
+      { ...profile, settings: { tax: { blob: "x".repeat(20_000) } } },
+    ];
+    for (const raw of bad) expect(validateSiteProfile(raw)).toBeNull();
+  });
+
+  it("drops a setting field this desktop does not know, and keeps the rest", () => {
+    const newer = { ...profile, settings: { ...profile.settings, loyalty: { earnRate: 1 } } };
+    expect(validateSiteProfile(newer)?.settings).toEqual(profile.settings);
+  });
 });
 
 describe("siteProfileHash", () => {
@@ -71,6 +113,11 @@ describe("siteProfileHash", () => {
     const reordered = { ...profile, features: { reservations: true, ai_assistant: false } };
     expect(siteProfileHash(reordered)).toBe(siteProfileHash(profile));
     expect(siteProfileHash({ ...profile, features: { ...profile.features, ai_assistant: true } })).not.toBe(siteProfileHash(profile));
+  });
+
+  it("changes when a replicated setting changes", () => {
+    const changedTax = { ...profile, settings: { ...profile.settings, tax: { defaultRate: 10 } } };
+    expect(siteProfileHash(changedTax)).not.toBe(siteProfileHash(profile));
   });
 });
 
