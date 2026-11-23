@@ -2865,7 +2865,7 @@ describe("depreciation methods and projected schedules (issue #1325)", () => {
     expect(schedule.rows[0]).toMatchObject({ status: "posted", depreciation: 100 });
     expect(schedule.rows.some((r) => r.status === "forecast")).toBe(true);
     expect(schedule.totals.postedDepreciation).toBe(100);
-    expect(schedule.totals.projectedDepreciation).toBe(1200);
+    expect(schedule.totals.postedDepreciation + schedule.totals.forecastDepreciation).toBe(1200);
     expect(schedule.totals.remainingDepreciableBase).toBe(0);
 
     const { rows: after } = await db.query<{ n: number }>(

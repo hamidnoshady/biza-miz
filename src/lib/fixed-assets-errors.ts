@@ -70,14 +70,8 @@ export const FIXED_ASSET_ERROR_TRANSLATIONS: Record<string, string> = {
   export_too_large: "حجم داده‌های فیلترشده از سقف مجاز هر برگهٔ اکسل (حدود یک میلیون ردیف) بیشتر است؛ فیلترها را محدودتر کنید (دسته، شعبه یا بازهٔ تاریخ).",
   invalid_cursor: "نشانهٔ صفحه‌بندی نامعتبر است؛ فهرست را از ابتدا بارگذاری کنید.",
   // depreciation methods and projected schedules (issue #1325)
-  invalid_depreciation_method: "روش استهلاک انتخاب‌شده معتبر نیست.",
-  invalid_declining_rate: "نرخ سالانهٔ استهلاک نزولی باید عدد صحیح بین ۱ تا ۱۰۰۰۰ (یک‌صدم درصد) باشد.",
-  invalid_switch_policy: "سیاست تغییر روش نزولی معتبر نیست.",
   capacity_required: "برای روش مقدار تولید، ظرفیت کل تأییدشده باید عدد صحیح مثبت باشد.",
-  capacity_unit_label_too_long: "واحد اندازه‌گیری ظرفیت بیش از حد طولانی است.",
   production_units_required: "برای روش مقدار تولید، مقدار تولید این دوره (عدد صحیح نامنفی) الزامی است.",
   production_exceeds_capacity: "جمع مقدار تولید از ظرفیت کل تأییدشده بیشتر می‌شود؛ ابتدا ظرفیت را با یک تغییر برآورد آینده‌نگر اصلاح کنید.",
-  no_production_units: "برای این دوره مقدار تولیدی ثبت نشده است؛ استهلاک روش مقدار تولید با صفر تولید محاسبه نمی‌شود.",
-  method_parameters_required: "پارامترهای روش استهلاک انتخاب‌شده کامل نیست.",
   invalid_schedule_range: "بازهٔ دوره‌های برنامهٔ استهلاک معتبر نیست.",
 };

@@ -935,14 +935,6 @@ export function FixedAssetsSection({
                           <HistoryIcon className="size-3.5" />
                           <span>تاریخچه</span>
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => setScheduleTarget(a)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground dark:hover:bg-stone-800/60"
-                        >
-                          <CalculatorIcon className="size-3.5" />
-                          <span>برنامه استهلاک</span>
-                        </button>
                         {readOnly ? null : (
                           <AssetActions
                             asset={a}
@@ -3568,8 +3560,6 @@ interface DepreciationScheduleTotalsView {
   accumulated: number;
   closingCarrying: number;
   remainingDepreciableBase: number;
-  postedPeriods: number;
-  forecastPeriods: number;
 }
 
 interface DepreciationScheduleResponse {

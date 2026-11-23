@@ -113,14 +113,6 @@ export interface DepreciationMethodConfig {
   capacityUnitLabel: string | null;
 }
 
-export const DEFAULT_DEPRECIATION_METHOD: DepreciationMethodConfig = {
-  method: "straight_line",
-  decliningBalanceRateBps: null,
-  decliningBalanceSwitchPolicy: "none",
-  totalCapacityUnits: null,
-  capacityUnitLabel: null,
-};
-
 /**
  * Validates a chosen method and its parameters. Persian messages, matching
  * `validateFixedAsset`'s contract (empty = valid). A method's parameters are
@@ -638,24 +630,18 @@ export interface DepreciationScheduleTotals {
   cost: number;
   salvageValue: number;
   depreciableBase: number;
-  openingCarrying: number;
   postedDepreciation: number;
   forecastDepreciation: number;
-  projectedDepreciation: number;
   accumulated: number;
   closingCarrying: number;
   remainingDepreciableBase: number;
-  postedPeriods: number;
-  forecastPeriods: number;
 }
 
 export function projectDepreciationSchedule(input: {
   asset: DepreciableAsset & MethodBearingSchedule & { inServiceDate: string };
   /** Only LIVE (non-reversed) postings — a reversal is absent, exactly as `planDepreciation` sees it. */
   livePostings: (DepreciationPostingFact & { method?: DepreciationMethod | null; entryId?: string | null; journalEntryId?: string | null; periodLabel?: string | null })[];
-  /** Forecast units for a month (UoP); the accountant's production plan. */
-  projectedUnits?: Record<string, number> | null;
-  /** Fallback forecast units for future months when `projectedUnits` has no entry. */
+  /** Forecast units per future month for a units-of-production asset. */
   forecastUnitsPerPeriod?: number | null;
   /** The last month to project (inclusive); defaults to the schedule's end. */
   throughPeriodKey?: string | null;
@@ -673,15 +659,11 @@ export function projectDepreciationSchedule(input: {
     cost,
     salvageValue: salvage,
     depreciableBase: base,
-    openingCarrying: cost,
     postedDepreciation: 0,
     forecastDepreciation: 0,
-    projectedDepreciation: 0,
     accumulated: 0,
     closingCarrying: cost,
     remainingDepreciableBase: base,
-    postedPeriods: 0,
-    forecastPeriods: 0,
   });
   if (!startPeriod || !endKey) return { rows: [], totals: emptyTotals() };
 
@@ -715,9 +697,7 @@ export function projectDepreciationSchedule(input: {
       postedDepreciation += amount;
     } else if (rowMethod === "units_of_production") {
       const capacity = method.totalCapacityUnits ?? 0;
-      const planned =
-        input.projectedUnits?.[key] ??
-        (key > input.todayPeriodKey ? Math.max(0, input.forecastUnitsPerPeriod ?? 0) : 0);
+      const planned = key > input.todayPeriodKey ? Math.max(0, input.forecastUnitsPerPeriod ?? 0) : 0;
       units = Math.max(0, Math.trunc(planned));
       if (capacity > 0 && units > 0) {
         amount = Math.round((units * base) / capacity);
@@ -775,15 +755,11 @@ export function projectDepreciationSchedule(input: {
       cost,
       salvageValue: salvage,
       depreciableBase: base,
-      openingCarrying: cost,
       postedDepreciation,
       forecastDepreciation,
-      projectedDepreciation: postedDepreciation + forecastDepreciation,
       accumulated,
       closingCarrying: Math.max(0, cost - accumulated),
       remainingDepreciableBase: Math.max(0, base - accumulated),
-      postedPeriods: rows.filter((r) => r.status === "posted").length,
-      forecastPeriods: rows.filter((r) => r.status === "forecast").length,
     },
   };
 }

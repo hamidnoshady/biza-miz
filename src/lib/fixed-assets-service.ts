@@ -851,10 +851,12 @@ export async function createFixedAsset(params: {
     totalCapacityUnits: params.totalCapacityUnits,
     capacityUnitLabel: params.capacityUnitLabel,
   });
-  if (!method.ok) errors.push(...method.errors);
+  if (!method.ok) {
+    errors.push(...method.errors);
+    throw new FixedAssetError(errors.join(" "));
+  }
+  const methodConfig = method.config;
   if (errors.length > 0) throw new FixedAssetError(errors.join(" "));
-  const methodConfig = method.ok ? method.config : null;
-  if (!methodConfig) throw new FixedAssetError("invalid_depreciation_method");
   // Posting the acquisition and linking an existing entry are two different
   // provenances; asking for both is a client bug, refused loudly.
   if (params.acquisition && params.acquisitionEntryId) {
@@ -2318,8 +2320,7 @@ export async function changeFixedAssetEstimate(params: {
     // A method change is a prospective estimate change like any other: the
     // new method (and its parameters) apply from the current period forward;
     // posted rows keep the method they were priced with.
-    const desiredMethod =
-      params.depreciationMethod?.trim() || (methodRequested ? asset.method.method : asset.method.method);
+    const desiredMethod = params.depreciationMethod?.trim() || asset.method.method;
     const normalisedMethod = normaliseDepreciationMethod({
       method: desiredMethod,
       decliningBalanceRateBps:
@@ -2597,7 +2598,7 @@ function postingFactsFor(rows: SchedulePostingRow[], fixedAssetId: string) {
  * approved capacity spread over the remaining scheduled months. Null for the
  * other methods.
  */
-export function forecastUnitsPerPeriodFor(asset: FixedAsset, cumulativeUnits: number, todayPeriodKey: string): number | null {
+function forecastUnitsPerPeriodFor(asset: FixedAsset, cumulativeUnits: number, todayPeriodKey: string): number | null {
   if (asset.depreciationMethod !== "units_of_production" || !asset.totalCapacityUnits) return null;
   const endKey = scheduleEndPeriodKey(asset.inServiceDate, asset.usefulLifeMonths);
   if (!endKey) return null;

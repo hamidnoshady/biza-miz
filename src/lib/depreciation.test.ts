@@ -585,8 +585,9 @@ describe("projectDepreciationSchedule", () => {
         totalCapacityUnits: 3,
       },
       livePostings: [],
-      projectedUnits: { "1405-01": 1, "1405-02": 1, "1405-03": 1 },
-      todayPeriodKey: "1405-01",
+      forecastUnitsPerPeriod: 1,
+      // Before the in-service month: the whole schedule is still a forecast.
+      todayPeriodKey: "1404-12",
     });
     expect(rows.map((r) => r.depreciation)).toEqual([33, 33, 34]);
     expect(rows.map((r) => r.unitsProduced)).toEqual([1, 1, 1]);
