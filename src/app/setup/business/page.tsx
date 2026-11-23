@@ -185,7 +185,7 @@ export default function BusinessStep() {
           </div>
         ) : null}
 
-        <Field label="نام کسب‌وکار *">
+        <Field label="نام کسب‌وکار (الزامی)">
           <input
             className={inputClass}
             value={businessName}
@@ -204,7 +204,7 @@ export default function BusinessStep() {
           />
         </Field>
 
-        <Field label="نام شعبهٔ اول *" hint="شعبه‌های بعدی را بعداً می‌توانید اضافه کنید.">
+        <Field label="نام شعبهٔ اول (الزامی)" hint="شعبه‌های بعدی را بعداً می‌توانید اضافه کنید.">
           <input
             className={inputClass}
             value={locationName}

@@ -21,6 +21,9 @@ import {
   SecondaryButton,
   SetupDataSkeleton,
 } from "../ui";
+import { nextPath, stepIndex, stepsFor } from "../steps";
+import { toPersianDigits } from "@/lib/digits";
+import { useSetupIndustry } from "../industry-context";
 
 interface WizardResponse {
   wizard: {
@@ -43,6 +46,7 @@ interface WizardResponse {
  */
 export default function AppSetupStep() {
   const router = useRouter();
+  const industry = useSetupIndustry();
   const [data, setData] = useState<SetupAppCatalogData | null>(null);
   const [activeKey, setActiveKey] = useState<AppKey | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
@@ -51,6 +55,13 @@ export default function AppSetupStep() {
   const [fieldFault, setFieldFault] = useState<{ field: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const finishing = useRef(false);
+  // The wizard position, so this custom multi-app screen still tells the owner
+  // where it sits in the whole sequence (the sidebar is not the only answer).
+  const wizardSteps = useMemo(
+    () => stepsFor(industry, data?.selected ?? null),
+    [industry, data?.selected],
+  );
+  const wizardPosition = stepIndex("app_setup", wizardSteps) + 1;
 
   const selected = useMemo(
     () => (data?.cards ?? []).filter((card) => card.selected),
@@ -127,7 +138,9 @@ export default function AppSetupStep() {
         if (status === 0) return;
         return;
       }
-      router.push("/setup/finish");
+      // Issue #1535 / ESH-218 — the optional import step follows the selected
+      // apps' setup and precedes Accounting's configuration steps.
+      router.push(nextPath("app_setup", stepsFor(industry, data?.selected ?? null)));
     } finally {
       setBusy(false);
       finishing.current = false;
@@ -219,7 +232,7 @@ export default function AppSetupStep() {
           اضافه کنید.
         </InfoBox>
         <PrimaryButton type="button" onClick={() => void finishAll()} disabled={busy}>
-          ادامه به پایان راه‌اندازی
+          ادامه به ورود اطلاعات اولیه
         </PrimaryButton>
       </div>
     );
@@ -238,10 +251,11 @@ export default function AppSetupStep() {
       <header className="mb-7 border-b border-border pb-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
-            برنامهٔ {activeCard.label} — برنامهٔ {appPosition} از {selected.length}
+            مرحلهٔ {toPersianDigits(wizardPosition)} از {toPersianDigits(wizardSteps.length)} — برنامهٔ{" "}
+            {activeCard.label} ({toPersianDigits(appPosition)} از {toPersianDigits(selected.length)})
           </p>
           <span className="text-xs text-muted-foreground">
-            {stepNumber} از {steps.length} پرسش
+            پرسش {toPersianDigits(stepNumber)} از {toPersianDigits(steps.length)}
           </span>
         </div>
         <h1 className="text-2xl font-bold tracking-tight text-foreground">
@@ -310,7 +324,7 @@ export default function AppSetupStep() {
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <PrimaryButton type="button" onClick={nextApp} disabled={busy}>
-              {lastApp ? "ادامه به پایان راه‌اندازی" : "برنامهٔ بعد"}
+              {lastApp ? "ادامه به ورود اطلاعات اولیه" : "برنامهٔ بعد"}
             </PrimaryButton>
             <SecondaryButton onClick={() => router.push("/setup/apps")}>
               تغییر انتخاب برنامه‌ها

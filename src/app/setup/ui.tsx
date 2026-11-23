@@ -196,17 +196,21 @@ export function PrimaryButton({
   disabled,
   onClick,
   type = "submit",
+  ariaPressed,
 }: {
   children: React.ReactNode;
   disabled?: boolean;
   onClick?: () => void;
   type?: "submit" | "button";
+  /** For toggle-style actions (select/deselect an app), so state is announced. */
+  ariaPressed?: boolean;
 }) {
   return (
     <Button
       type={type}
       onClick={onClick}
       disabled={disabled}
+      aria-pressed={ariaPressed}
       className="px-5 font-semibold"
     >
       {children}
@@ -277,6 +281,7 @@ export function StepShell({
   children,
   showSkip,
   showNext,
+  steps: stepsOverride,
 }: {
   step: WizardStep;
   description: React.ReactNode;
@@ -284,10 +289,16 @@ export function StepShell({
   showSkip?: boolean;
   /** steps whose forms don't auto-advance (menu, users, …) get a plain next button */
   showNext?: boolean;
+  /**
+   * The exact sequence this business walks, when the caller already knows it
+   * (it also depends on the saved app selection). Also keeps the step counter
+   * and progress bar consistent with the sidebar's list.
+   */
+  steps?: ReturnType<typeof stepsFor>;
 }) {
   const router = useRouter();
   const industry = useSetupIndustry();
-  const steps = stepsFor(industry);
+  const steps = stepsOverride ?? stepsFor(industry);
   const meta = STEPS[stepIndex(step)];
   const back = prevPath(step, steps);
   const [skipping, setSkipping] = useState(false);
@@ -325,11 +336,24 @@ export function StepShell({
   return (
     <div>
       <header className="mb-7 border-b border-border pb-6">
-        <div className="mb-4 flex items-center justify-between gap-4">
-          <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
-            مرحلهٔ {toPersianDigits(currentIndex + 1)} از{" "}
-            {toPersianDigits(steps.length)}
-          </p>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+              مرحلهٔ {toPersianDigits(currentIndex + 1)} از{" "}
+              {toPersianDigits(steps.length)}
+            </p>
+            {/* Required/optional is stated on the step itself, not only in the
+                sidebar badge, so the owner knows before filling the form. */}
+            <span
+              className={
+                meta.optional
+                  ? "rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground"
+                  : "rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
+              }
+            >
+              {meta.optional ? "اختیاری" : "الزامی"}
+            </span>
+          </div>
           <span className="text-xs text-muted-foreground">
             {toPersianDigits(progress)}٪ پیشرفت
           </span>
@@ -337,9 +361,11 @@ export function StepShell({
         <div
           className="mb-5 h-1.5 overflow-hidden rounded-full bg-muted"
           role="progressbar"
+          aria-label={`پیشرفت راه‌اندازی: مرحلهٔ ${toPersianDigits(currentIndex + 1)} از ${toPersianDigits(steps.length)}`}
           aria-valuenow={progress}
           aria-valuemin={0}
           aria-valuemax={100}
+          aria-valuetext={`${toPersianDigits(progress)} درصد`}
         >
           <div
             className="h-full rounded-full bg-amber-500 dark:bg-amber-400 transition-[width] duration-500"
@@ -372,7 +398,7 @@ export function StepShell({
               type="button"
               onClick={skip}
               disabled={skipping}
-              className="text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline disabled:opacity-50"
+              className="rounded-lg px-1 text-sm text-muted-foreground underline-offset-4 transition-colors hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50"
             >
               فعلاً رد شدن از این مرحله
             </button>
