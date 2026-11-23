@@ -274,6 +274,25 @@ describe("published Studio tours", () => {
   });
 
   it.each([
+    ["cosmetics", STUDIO_ID, ["cosmetics"]],
+    ["cosmetics", "accounting.cosmetics.page", ["accessories"]],
+  ])("lists the applicable two-tab Cosmetics tour for %s", async (industry, expectedId, studioIndustries) => {
+    const pageKey = "page:/accounting/cosmetics";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/cosmetics",
+      eligibility: { industries: studioIndustries },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
     ["cosmetics", STUDIO_ID],
     ["accessories", "accounting.products.reports"],
   ])("lists the applicable product-reports tour for %s", async (industry, expectedId) => {
