@@ -41,6 +41,7 @@ export function AppSettingsPanel({
       {/* A compact index prevents a long settings page becoming a scroll hunt. */}
       <nav
         aria-label={navigationLabel}
+        data-tour-id="page.section-nav"
         className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 [scrollbar-width:thin]"
       >
         {groups.map((group) => (

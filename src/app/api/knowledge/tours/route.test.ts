@@ -197,6 +197,576 @@ describe("published Studio tours", () => {
     expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", [expectedId]);
   });
 
+  it.each([
+    ["cosmetics", STUDIO_ID],
+    ["food_service", "accounting.products.list"],
+  ])("lists the applicable Products tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/products";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/products",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["cosmetics", STUDIO_ID],
+    ["food_service", "accounting.products.new"],
+  ])("lists the applicable add-product tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/products/new";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryAdjust]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/products/new",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["cosmetics", STUDIO_ID],
+    ["food_service", "accounting.products.prices"],
+  ])("lists the applicable product-prices tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/products/prices";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/products/prices",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["cosmetics", STUDIO_ID],
+    ["food_service", "accounting.products.attributes"],
+  ])("lists the applicable product-attributes tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/products/attributes";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/products/attributes",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["cosmetics", STUDIO_ID, ["cosmetics"]],
+    ["cosmetics", "accounting.cosmetics.page", ["accessories"]],
+  ])("lists the applicable two-tab Cosmetics tour for %s", async (industry, expectedId, studioIndustries) => {
+    const pageKey = "page:/accounting/cosmetics";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/cosmetics",
+      eligibility: { industries: studioIndustries },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["cosmetics", STUDIO_ID],
+    ["accessories", "accounting.products.reports"],
+  ])("lists the applicable product-reports tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/products/reports";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/products/reports",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["cosmetics", STUDIO_ID],
+    ["food_service", "accounting.products.barcode-templates"],
+  ])("lists the applicable weighted barcode-templates tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/products/barcode-templates";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/products/barcode-templates",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.directory.page"],
+  ])("lists the accounting-directory %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/directory";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/directory",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.ledger.page"],
+  ])("lists the accounting-ledger %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/ledger";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/ledger",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.trial-balance.list"],
+  ])("lists the trial-balance %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/trial-balance";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/trial-balance",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.entries.list"],
+  ])("lists the journal-entries %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/entries";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/entries",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.vouchers.list"],
+  ])("lists the vouchers %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/vouchers";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/vouchers",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.manual.page"],
+  ])("lists the manual-entry %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/manual";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/manual",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.multicurrency.list"],
+  ])("lists the multicurrency %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/multicurrency";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/multicurrency",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.chart-of-accounts.list"],
+  ])("lists the chart-of-accounts %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/chart-of-accounts";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/chart-of-accounts",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.dimensions.list"],
+  ])("lists the accounting-dimensions %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/dimensions";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/dimensions",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.receivables.walkthrough"],
+  ])("lists the receivables %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/receivables";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/receivables",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.installments.list"],
+  ])("lists the installments %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/installments";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/installments",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.cheques.page"],
+  ])("lists the cheques %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/cheques";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/cheques",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.receipts.list"],
+  ])("lists the receipts and payments %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/receipts";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/receipts",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.financial-accounts.page"],
+  ])("lists the financial-accounts %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/financial-accounts";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/financial-accounts",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.transfers.page"],
+  ])("lists the transfers %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/transfers";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/transfers",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.expenses.list"],
+  ])("lists the expenses %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/expenses";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/expenses",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.reconciliation.list"],
+  ])("lists the reconciliation %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/reconciliation";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/reconciliation",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.fixed-assets.list"],
+  ])("lists the fixed-assets %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/fixed-assets";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/fixed-assets",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["shareholders.view"], ["shareholders.view", "ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["shareholders.view"], ["ledger.view"], "accounting.shareholders.list"],
+  ])("lists the shareholders %s", async (_caseName, studioPermissions, memberPermissions, expectedId) => {
+    const pageKey = "page:/accounting/shareholders";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member(memberPermissions));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/shareholders",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.fiscal-periods.list"],
+  ])("lists the fiscal-periods %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/fiscal-periods";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/fiscal-periods",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.vat.page"],
+  ])("lists the VAT-report %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/vat";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/vat",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["payroll.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.payroll.list"],
+  ])("lists the payroll %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/payroll";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.payrollView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/payroll",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["eligible Studio tour", ["ledger.view", "reports.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.financial-reports.page"],
+  ])("lists the financial-reports %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/financial-reports";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView, PERMISSIONS.reportsView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/financial-reports",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
   it("plays a published tour back and records its progress", async () => {
     mocks.publishedById.mockResolvedValue(studio);
     const res = await getTour(req(`/api/knowledge/tours/${STUDIO_ID}`), ctx(STUDIO_ID));
