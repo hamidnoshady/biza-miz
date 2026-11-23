@@ -1044,6 +1044,100 @@ describe("orders", () => {
     expect(echoed.rowCount).toBe(0);
   });
 
+  it("adopts a duplicate employee party by its membership key instead of conflicting (issue #1446)", async () => {
+    const employeeUserId = randomUUID();
+    const cloudPartyId = randomUUID();
+    const sitePartyId = randomUUID();
+    const makeUser = () =>
+      query(
+        `INSERT INTO users (id, business_id, location_id, role, full_name, password_hash, is_active)
+         VALUES ($1, $2, $3, 'cashier', 'Sync Employee', 'test-hash', true)`,
+        [employeeUserId, biz.businessId, biz.locationId],
+      );
+    const makeParty = (id: string, name: string) =>
+      query(
+        `INSERT INTO parties (id, business_id, role, roles, name, employee_user_id)
+         VALUES ($1, $2, 'employee', ARRAY['employee']::text[], $3, $4)`,
+        [id, biz.businessId, name, employeeUserId],
+      );
+
+    // Two installs independently created a personnel file for one membership:
+    // different UUIDs, same employee_user_id. The unique index makes them
+    // mutually exclusive, so the old merge could only record a conflict.
+    await onCentral(() => withTenant(biz.businessId, makeUser));
+    await withTenant(biz.businessId, makeUser);
+    await onCentral(() => withTenant(biz.businessId, () => makeParty(cloudPartyId, "Cloud Employee")));
+    await withTenant(biz.businessId, () => makeParty(sitePartyId, "Site Employee"));
+
+    const partiesForEmployee = () =>
+      withTenant(biz.businessId, () =>
+        query<{
+          id: string;
+          name: string;
+          is_active: boolean;
+          merged_into_id: string | null;
+          employee_user_id: string | null;
+        }>(
+          `SELECT id, name, is_active, merged_into_id, employee_user_id
+             FROM parties
+            WHERE business_id = $1 AND (id = ANY($2::uuid[]) OR employee_user_id = $3)`,
+          [biz.businessId, [cloudPartyId, sitePartyId], employeeUserId],
+        ),
+      );
+    const conflicts = () =>
+      withTenant(biz.businessId, () =>
+        query<{ row_id: string; status: string }>(
+          "SELECT row_id, status FROM sync_master_conflicts WHERE business_id = $1 AND table_name = 'parties'",
+          [biz.businessId],
+        ),
+      );
+    const oneActivePerson = (rows: Awaited<ReturnType<typeof partiesForEmployee>>["rows"]) =>
+      rows.filter((row) => row.employee_user_id === employeeUserId).length === 1 &&
+      rows.filter((row) => row.is_active).length === 1;
+
+    await syncUntil(async () => {
+      const [desktop, cloud] = [await partiesForEmployee(), await onCentral(partiesForEmployee)];
+      return (
+        oneActivePerson(desktop.rows) &&
+        oneActivePerson(cloud.rows) &&
+        cloud.rows.some((row) => row.id === sitePartyId && row.merged_into_id === cloudPartyId)
+      );
+    });
+
+    const desktop = (await partiesForEmployee()).rows;
+    const cloud = (await onCentral(partiesForEmployee)).rows;
+    // Each side keeps the UUID it already had as the person, and the peer's
+    // UUID that actually arrived is archived as an alias pointing at it. One
+    // active personnel file per side, and no ninth conflict on the same fact.
+    expect(desktop.filter((row) => row.is_active)).toHaveLength(1);
+    expect(desktop.find((row) => row.is_active)?.id).toBe(sitePartyId);
+    expect(cloud.filter((row) => row.is_active)).toHaveLength(1);
+    expect(cloud.find((row) => row.is_active)?.id).toBe(cloudPartyId);
+    expect(cloud.find((row) => row.id === sitePartyId)?.merged_into_id).toBe(cloudPartyId);
+    expect((await conflicts()).rows).toEqual([]);
+    expect((await onCentral(conflicts)).rows).toEqual([]);
+
+    // A later edit under the cloud's own UUID is redirected to the adopted
+    // winner; the site now receives the cloud's UUID for the first time and
+    // keeps it as an alias, so nothing is written onto a second active file.
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query("UPDATE parties SET name = 'Renamed By Cloud' WHERE id = $1", [cloudPartyId]),
+      ),
+    );
+    await syncUntil(async () => {
+      const rows = (await partiesForEmployee()).rows;
+      return (
+        rows.some((row) => row.name === "Renamed By Cloud") &&
+        rows.some((row) => row.id === cloudPartyId && row.merged_into_id === sitePartyId)
+      );
+    });
+    const afterEdit = (await partiesForEmployee()).rows;
+    expect(afterEdit.filter((row) => row.is_active)).toHaveLength(1);
+    expect(afterEdit.find((row) => row.is_active)?.name).toBe("Renamed By Cloud");
+    expect(afterEdit.find((row) => row.id === cloudPartyId)?.merged_into_id).toBe(sitePartyId);
+  });
+
   it("acknowledges a cloud purchase instead of waiting forever for a supplier the desktop never gets (Phase 46)", async () => {
     const clientEventId = randomUUID();
     await onCentral(() =>

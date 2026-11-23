@@ -513,9 +513,17 @@ the receiver merges field by field (the later edit of each field wins; edits to
 different fields both survive). Values each side derives for itself never
 merge: stock average cost and carrying value, table occupancy, CRM scores and
 ciphertext (the plaintext crosses and is re-encrypted under the receiver's
-key). A change that cannot merge — two rows created independently with the
-same unique name, a delete the other side's history blocks — is recorded as a
-master conflict and listed on the sync panel.
+key). A change that cannot merge - two rows created independently with the
+same unique name, a delete the other side's history blocks - is recorded as a
+master conflict and listed on the sync panel. One exception is adopted rather
+than conflicted: a party that arrives under a different UUID but the same
+`employee_user_id` is the same membership's personnel file
+(`idx_parties_employee_user` makes that an invariant), so the receiver keeps
+its own UUID as the person, applies the peer's fields to it, and keeps the
+peer's UUID as an archived alias (`merged_into_id`) for orders and events that
+already reference it. Later edits under either UUID are redirected to the
+winner, which is what stops issue #1446's duplicate employee parties from
+blocking the queue again.
 
 **AEC (issue #799 §26)** — the architecture/engineering/construction registers
 are classified rather than assumed. `src/lib/aec-sync-classification.ts` puts
