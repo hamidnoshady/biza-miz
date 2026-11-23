@@ -18,7 +18,9 @@ import { isUuid } from "@/lib/uuid";
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.ledgerView);
   if (error) return error;
-  return NextResponse.json(await listOpeningSets(session.businessId));
+  // The list rides in a `{ sets }` envelope — the shape the workspace reads
+  // (`opening-balances-section.tsx`), like every other ledger list route.
+  return NextResponse.json({ sets: await listOpeningSets(session.businessId) });
 });
 
 export const POST = withTenantScope(async (request: NextRequest) => {

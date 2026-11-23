@@ -564,3 +564,17 @@ describe("issue #867 — the permission matrix of every new route", () => {
     });
   }
 });
+
+describe("GET /api/ledger/opening-balances — the list envelope", () => {
+  it("answers { sets } — the shape the opening-balances workspace reads", async () => {
+    mocks.requirePermission.mockResolvedValue({ session, error: null });
+    serviceMocks.listOpeningSets.mockResolvedValue([openingSet.set]);
+
+    const response = await ((await import("./opening-balances/route")).GET as unknown as (
+      req: NextRequest,
+    ) => Promise<Response>)(request("/api/ledger/opening-balances"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ sets: [openingSet.set] });
+  });
+});
