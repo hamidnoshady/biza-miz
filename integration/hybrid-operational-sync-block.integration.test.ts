@@ -369,15 +369,17 @@ describe("operational sync block state", () => {
     }));
 
     // The gate is closed and the block is recorded by the same call the desktop
-    // would make every 30 s — the pairing step is what refuses here, which is
-    // precisely the case that used to skip the tick without leaving a trace.
+    // would make every 30 s. A transport failure of the *credential probe* no
+    // longer closes it by itself (only a refusal does — a real revocation
+    // answers 401/403 on push/pull); with the whole cloud unreachable the IAM
+    // plane is what legitimately holds the tick back, and it is still reported.
     const gate = await dbLib.withTenant(tenant.businessId, () =>
       syncLib.runOperationalSyncGate(tenant.businessId),
     );
     expect(gate.ready).toBe(false);
-    expect(gate.reason).toBe("credential_unsettled");
+    expect(gate.reason).toBe("iam_failed");
     expect(gate.siteDeviceId).toBe(tenant.deviceId);
-    expect(gate.error).toContain("fetch failed");
+    expect(gate.error ?? "").toMatch(/fetch failed|unreachable/i);
 
     const row = await readRow(tenant);
     expect(row).toBeNull();

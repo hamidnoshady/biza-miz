@@ -1387,6 +1387,13 @@ export interface StagedCredentialOutcome {
    * two look identical while demanding opposite fixes.
    */
   error: string | null;
+  /**
+   * True when the probe never got an answer: DNS, TCP, TLS, a timeout or a 5xx.
+   * The credential was not refused, so the gate must not treat "we could not ask"
+   * as "the cloud revoked us" — the still-valid credential is proven on the next
+   * push/pull, where a real revocation answers 401/403.
+   */
+  transient?: boolean;
 }
 
 /**
@@ -1410,7 +1417,13 @@ export async function refreshStagedSiteCredentialAttempt(
       },
     );
     if (!response.ok) {
-      return { ready: false, error: `credential_rotation_http_${response.status}` };
+      // A refused credential is a revocation (401/403); a 5xx is the cloud
+      // having a bad moment and must not be read as one.
+      return {
+        ready: false,
+        error: `credential_rotation_http_${response.status}`,
+        transient: response.status >= 500,
+      };
     }
     const handoff = (await response.json()) as {
       pending?: boolean;
@@ -1433,6 +1446,11 @@ export async function refreshStagedSiteCredentialAttempt(
   } catch (error) {
     return {
       ready: false,
+      // The probe never reached the cloud. Not evidence of a revocation (see
+      // `transient` on StagedCredentialOutcome): the tick keeps moving data with
+      // the credential it already holds, and a genuinely revoked one is refused
+      // by push/pull with 401/403.
+      transient: true,
       error: error instanceof Error ? error.message : String(error),
     };
   }
@@ -1622,19 +1640,34 @@ export async function runOperationalSyncGate(businessId: string): Promise<Operat
           : { ready: false, reason: "not_configured", siteDeviceId, error: ack.error };
       }
       const credential = await refreshStagedSiteCredentialAttempt(businessId);
-      if (!credential.ready) {
+      /*
+       * A probe that never got an answer does not close the gate. The security
+       * plane exists to apply a revocation or a rotation *before* business data,
+       * and neither is known here: the cloud was unreachable, not refusing. The
+       * credential in hand is still what push/pull authenticate with, and a
+       * genuine revocation answers 401/403 there — which is the block that
+       * actually means something. Treating "we could not ask" as "we are not
+       * trusted" is what held this install's whole queue back for days while
+       * every other endpoint on the same host answered.
+       */
+      if (!credential.ready && !credential.transient) {
         return paired
           ? {
               ready: false,
               reason: "credential_unsettled",
               siteDeviceId,
-              // Whatever the rotation step actually hit — an unreachable host,
-              // a refused answer, a hand-off still waiting to be closed — is
-              // what the block record shows, because that is what the owner has
-              // to act on.
+              // Whatever the rotation step actually hit — a refused answer, a
+              // hand-off still waiting to be closed — is what the block record
+              // shows, because that is what the owner has to act on.
               error: credential.error ?? "site_credential_rotation_pending",
             }
           : { ready: false, reason: "not_configured", siteDeviceId, error: null };
+      }
+      if (!credential.ready && credential.transient) {
+        console.error(
+          `site credential probe unreachable for business ${businessId}; ` +
+            `continuing with the current credential: ${credential.error ?? "unknown"}`,
+        );
       }
     } catch (err) {
       // Preserved from the step this replaced: a throw here is not proof the

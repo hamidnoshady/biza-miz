@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withTenantScope, requireRole } from "@/lib/auth";
 import { reconcileDeferredSyncEvents } from "@/lib/sync-events";
-import { updateSyncDeadLetter } from "@/lib/server-sync";
+import {
+  runOperationalSyncGate,
+  runServerPull,
+  runServerPush,
+  updateSyncDeadLetter,
+} from "@/lib/server-sync";
+import { runMasterSync } from "@/lib/master-sync-transport";
 import { resolveMasterConflict } from "@/lib/master-sync-service";
 
 /** Owner-only operational controls; event payloads and credentials never leave the server. */
@@ -13,7 +19,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       | "retry-deferred"
       | "retry-dead-letter"
       | "discard-dead-letter"
-      | "resolve-master-conflict";
+      | "resolve-master-conflict"
+      | "sync-now";
     id?: number;
     note?: string;
   };
@@ -21,6 +28,29 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  /*
+   * Issue #1115 F1/F3 — the only owner control that actually moves data.
+   * The security gate runs first, exactly as the 30 s tick does, so a click can
+   * never bypass a revocation; everything after it is the same master → push →
+   * pull order, run once, with its outcome returned instead of a blanket
+   * «انجام شد». A blocked gate answers 409 and names the step.
+   */
+  if (body.action === "sync-now") {
+    const gate = await runOperationalSyncGate(session.businessId);
+    if (!gate.ready) {
+      return NextResponse.json(
+        { error: `sync_blocked: ${gate.reason}`, blocked: gate.reason },
+        { status: 409 },
+      );
+    }
+    const master = await runMasterSync(session.businessId).catch((error) => ({
+      status: "error" as const,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    const push = await runServerPush(session.businessId);
+    const pull = await runServerPull(session.businessId);
+    return NextResponse.json({ ok: true, master, push, pull });
   }
   if (body.action === "retry-deferred") {
     return NextResponse.json({ ok: true, reconciliation: await reconcileDeferredSyncEvents(session.businessId, 200) });
