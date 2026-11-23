@@ -673,12 +673,12 @@ describe("published Studio tours", () => {
   });
 
   it.each([
-    ["eligible Studio tour", ["shareholders.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.shareholders.list"],
-  ])("lists the shareholders %s", async (_caseName, studioPermissions, expectedId) => {
+    ["eligible Studio tour", ["shareholders.view"], ["shareholders.view", "ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["shareholders.view"], ["ledger.view"], "accounting.shareholders.list"],
+  ])("lists the shareholders %s", async (_caseName, studioPermissions, memberPermissions, expectedId) => {
     const pageKey = "page:/accounting/shareholders";
     mocks.industry.mockResolvedValue("cosmetics");
-    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.requireMember.mockResolvedValue(member(memberPermissions));
     mocks.publishedForPage.mockResolvedValue([{
       ...studio,
       pageKey,
