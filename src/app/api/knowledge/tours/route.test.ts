@@ -596,6 +596,25 @@ describe("published Studio tours", () => {
     expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
   });
 
+  it.each([
+    ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
+    ["built-in fallback", ["team.manage"], "accounting.transfers.page"],
+  ])("lists the transfers %s", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/transfers";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.ledgerView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/transfers",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
   it("plays a published tour back and records its progress", async () => {
     mocks.publishedById.mockResolvedValue(studio);
     const res = await getTour(req(`/api/knowledge/tours/${STUDIO_ID}`), ctx(STUDIO_ID));
