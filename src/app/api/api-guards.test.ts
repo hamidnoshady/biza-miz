@@ -159,23 +159,15 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "atomically consumes the proof and stamps only the address it was issued for",
   // ESH-202 / #1387 — short business onboarding. A verified person has no
   // tenant session yet, so the encrypted, short-lived continuation is the
-  // credential. Every handler re-resolves it against `platform_users`; no
+  // credential. Every action re-resolves it against `platform_users`; no
   // person/business id is accepted from the body, and provisioning happens only
-  // on the explicit submit route.
-  "onboarding":
-    "short post-signup onboarding state — authenticated by the encrypted onboarding continuation, " +
-    "re-validated against the live identity; it returns only that identity's own draft and never " +
-    "a national ID or email-proof token",
-  "onboarding/step":
-    "short post-signup onboarding progress — same continuation-only credential; idempotent upserts " +
-    "on the caller's own draft, with email/national-ID writes delegated to the #1384 services",
-  "onboarding/logo":
-    "short post-signup onboarding logo — same continuation-only credential; uses the canonical logo " +
-    "size/mime/signature validation before storing the draft record",
-  "onboarding/submit":
-    "short post-signup onboarding provisioning — same continuation-only credential; revalidates the " +
-    "industry and required business name, locks the draft, and calls the canonical provisioning " +
-    "service exactly once after the owner's explicit confirmation",
+  // on the explicit `action: "submit"`.
+  onboarding:
+    "short post-signup onboarding state and actions — GET reads only the caller's own draft; " +
+    "POST action=step idempotently upserts progress and delegates email/national-ID writes to the " +
+    "#1384 services; POST multipart action=logo applies the canonical logo validation; DELETE " +
+    "removes the draft logo; POST action=submit revalidates the industry and required business name, " +
+    "locks the draft, and calls the canonical provisioning service exactly once",
   // Issue #908 — the public contract-signing session. The caller is an external
   // signatory with no account, so no session can exist by definition; the
   // per-recipient token in the path is the credential (256 bits, HMAC-hashed at

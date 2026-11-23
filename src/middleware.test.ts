@@ -119,14 +119,10 @@ describe("isPublicPath", () => {
     // continuation against the database. The prefix also covers every step API.
     expect(isPublicPath("/onboarding")).toBe(true);
     expect(isPublicPath("/api/onboarding")).toBe(true);
-    expect(isPublicPath("/api/onboarding/step")).toBe(true);
-    expect(isPublicPath("/api/onboarding/logo")).toBe(true);
-    expect(isPublicPath("/api/onboarding/submit")).toBe(true);
     // A prefix-shaped decoy is not a second entrance.
     expect(isPublicPath("/api/onboardingx")).toBe(false);
-    // These are browser-driven state changes, so the Origin check still applies.
-    expect(isBrowserLoginMutationPath("/api/onboarding/step")).toBe(true);
-    expect(isBrowserLoginMutationPath("/api/onboarding/submit")).toBe(true);
+    // The mutations are browser-driven, so the Origin check still applies.
+    expect(isBrowserLoginMutationPath("/api/onboarding")).toBe(true);
   });
 
   it("lets an email proof be opened and redeemed without a session", () => {

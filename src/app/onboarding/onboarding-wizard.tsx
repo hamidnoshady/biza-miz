@@ -154,10 +154,10 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
         emailVerification?: "sent" | "unavailable" | "failed";
         error?: string;
         next?: string;
-      }>("/api/onboarding/step", {
+      }>("/api/onboarding", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ action: "step", ...payload }),
       });
       if (status === 401) {
         goLogin();
@@ -257,13 +257,14 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
     setSaveState("saving");
     try {
       const form = new FormData();
+      form.append("action", "logo");
       form.append("file", file);
       const { ok, status, data } = await callJson<{
         ok?: boolean;
         logo?: BusinessLogo;
         draft?: OnboardingDraft;
         error?: string;
-      }>("/api/onboarding/logo", { method: "POST", body: form });
+      }>("/api/onboarding", { method: "POST", body: form });
       if (status === 401) {
         goLogin();
         return;
@@ -293,7 +294,7 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
         ok?: boolean;
         draft?: OnboardingDraft;
         error?: string;
-      }>("/api/onboarding/logo", { method: "DELETE" });
+      }>("/api/onboarding", { method: "DELETE" });
       if (status === 401) {
         goLogin();
         return;
@@ -329,7 +330,11 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
         signedIn?: boolean;
         next?: string;
         error?: string;
-      }>("/api/onboarding/submit", { method: "POST" });
+      }>("/api/onboarding", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "submit" }),
+      });
       if (status === 401) {
         goLogin();
         return;

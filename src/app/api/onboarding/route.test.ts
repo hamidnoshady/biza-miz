@@ -1,5 +1,5 @@
 /**
- * ESH-202 / #1387 — the onboarding API's continuation guard.
+ * ESH-202 / #1387 — the onboarding API's continuation guard and action switch.
  *
  * These pin the door rather than the database service: an invalid/expired
  * continuation is a 401 with no draft, a live one returns that identity's state,
@@ -12,6 +12,8 @@ const readOnboardingIdentity = vi.hoisted(() => vi.fn());
 const loadOnboardingState = vi.hoisted(() => vi.fn());
 const saveOnboardingStep = vi.hoisted(() => vi.fn());
 const submitOnboarding = vi.hoisted(() => vi.fn());
+const saveOnboardingLogo = vi.hoisted(() => vi.fn());
+const removeOnboardingLogo = vi.hoisted(() => vi.fn());
 
 vi.mock("next/headers", () => ({
   cookies: async () => ({ get: () => ({ value: "onboarding-token" }) }),
@@ -24,11 +26,11 @@ vi.mock("@/lib/onboarding", () => ({
   loadOnboardingState,
   saveOnboardingStep,
   submitOnboarding,
+  saveOnboardingLogo,
+  removeOnboardingLogo,
 }));
 
-import { GET } from "./route";
-import { POST as saveStep } from "./step/route";
-import { POST as submit } from "./submit/route";
+import { DELETE, GET, POST } from "./route";
 
 const STATE = {
   identity: {
@@ -54,11 +56,23 @@ const STATE = {
   provisioned: false,
 };
 
+function post(body: unknown) {
+  return POST(
+    new Request("http://localhost/api/onboarding", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
 beforeEach(() => {
   readOnboardingIdentity.mockReset();
   loadOnboardingState.mockReset();
   saveOnboardingStep.mockReset();
   submitOnboarding.mockReset();
+  saveOnboardingLogo.mockReset();
+  removeOnboardingLogo.mockReset();
 });
 
 describe("the onboarding state API", () => {
@@ -94,12 +108,45 @@ describe("the onboarding state API", () => {
   });
 });
 
-describe("the onboarding submit API", () => {
-  it("requires the continuation before provisioning anything", async () => {
+describe("the onboarding mutation API", () => {
+  it("requires the continuation before accepting any action", async () => {
     readOnboardingIdentity.mockResolvedValue(null);
-    const response = await submit(
-      new Request("http://localhost/api/onboarding/submit", { method: "POST" }),
-    );
+    const response = await post({ action: "step", step: "industry", industry: "food_service" });
+    expect(response.status).toBe(401);
+    expect(saveOnboardingStep).not.toHaveBeenCalled();
+    expect(submitOnboarding).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown action", async () => {
+    readOnboardingIdentity.mockResolvedValue("11111111-1111-4111-8111-111111111111");
+    const response = await post({ action: "delete_everything" });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "invalid_action" });
+  });
+
+  it("saves a step and maps the step-specific status", async () => {
+    readOnboardingIdentity.mockResolvedValue("11111111-1111-4111-8111-111111111111");
+
+    saveOnboardingStep.mockResolvedValue({ ok: true, draft: STATE.draft });
+    const saved = await post({ action: "step", step: "industry", industry: "food_service" });
+    expect(saved.status).toBe(200);
+    await expect(saved.json()).resolves.toMatchObject({ ok: true, draft: STATE.draft });
+
+    saveOnboardingStep.mockResolvedValue({ ok: false, error: "email_taken" });
+    const failed = await post({ action: "step", step: "profile", email: "taken@example.invalid" });
+    expect(failed.status).toBe(409);
+  });
+
+  it("rejects a step without a step name", async () => {
+    readOnboardingIdentity.mockResolvedValue("11111111-1111-4111-8111-111111111111");
+    const response = await post({ action: "step" });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "invalid_step" });
+  });
+
+  it("requires the continuation before provisioning", async () => {
+    readOnboardingIdentity.mockResolvedValue(null);
+    const response = await post({ action: "submit" });
     expect(response.status).toBe(401);
     expect(submitOnboarding).not.toHaveBeenCalled();
   });
@@ -108,9 +155,7 @@ describe("the onboarding submit API", () => {
     readOnboardingIdentity.mockResolvedValue("11111111-1111-4111-8111-111111111111");
     submitOnboarding.mockResolvedValue({ ok: false, error: "missing_business_name" });
 
-    const response = await submit(
-      new Request("http://localhost/api/onboarding/submit", { method: "POST" }),
-    );
+    const response = await post({ action: "submit" });
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "missing_business_name" });
   });
@@ -119,52 +164,26 @@ describe("the onboarding submit API", () => {
     readOnboardingIdentity.mockResolvedValue("11111111-1111-4111-8111-111111111111");
     submitOnboarding.mockResolvedValue({ ok: false, error: "memberships_exist" });
 
-    const response = await submit(
-      new Request("http://localhost/api/onboarding/submit", { method: "POST" }),
-    );
+    const response = await post({ action: "submit" });
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({
       error: "memberships_exist",
       next: "/login",
     });
   });
-});
 
-describe("the onboarding step API", () => {
-  it("requires the continuation before accepting any step body", async () => {
+  it("removes the draft logo only for a live continuation", async () => {
     readOnboardingIdentity.mockResolvedValue(null);
-    const response = await saveStep(
-      new Request("http://localhost/api/onboarding/step", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ step: "industry", industry: "food_service" }),
-      }),
-    );
-    expect(response.status).toBe(401);
-    expect(saveOnboardingStep).not.toHaveBeenCalled();
-  });
+    expect((await DELETE()).status).toBe(401);
+    expect(removeOnboardingLogo).not.toHaveBeenCalled();
 
-  it("rejects a missing step and a failed step with its own status", async () => {
     readOnboardingIdentity.mockResolvedValue("11111111-1111-4111-8111-111111111111");
-
-    const missing = await saveStep(
-      new Request("http://localhost/api/onboarding/step", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      }),
+    removeOnboardingLogo.mockResolvedValue(STATE.draft);
+    const response = await DELETE();
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, draft: STATE.draft });
+    expect(removeOnboardingLogo).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
     );
-    expect(missing.status).toBe(400);
-    await expect(missing.json()).resolves.toEqual({ error: "invalid_step" });
-
-    saveOnboardingStep.mockResolvedValue({ ok: false, error: "email_taken" });
-    const failed = await saveStep(
-      new Request("http://localhost/api/onboarding/step", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ step: "profile", email: "taken@example.invalid" }),
-      }),
-    );
-    expect(failed.status).toBe(409);
   });
 });
