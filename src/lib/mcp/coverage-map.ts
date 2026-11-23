@@ -1510,9 +1510,16 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
       listDetail: ["list_businesses", "get_business_identity"],
       create: ["provision_business"],
       update: ["update_business", "rename_business_subdomain"],
-      lifecycle: ["set_business_status", "reset_business", "hard_delete_business", "list_provision_devices"],
+      lifecycle: [
+        "set_business_status",
+        "archive_business",
+        "restore_archived_business",
+        "reset_business",
+        "hard_delete_business",
+        "list_provision_devices",
+      ],
     },
-    note: "batch BM: reset/delete keep the console's typed-confirmation protocol (businessDestructivePhrase) and the protected-internal-business guard, stepUp-marked, owner-only like the routes; the DELETE lane's audit payload snapshots the dying tenant like the console's",
+    note: "batch BM + issue #1431: reset/delete keep the console's typed-confirmation protocol (businessDestructivePhrase) and the protected-internal-business guard, stepUp-marked, owner-only like the routes; suspend/reactivate keep their historic active<->suspended behavior but can no longer cross the archive boundary; archive/restore reuse the console transition table and conditional status setter, require exactly one explicit businessId, a stale-state expectedStatus, a target-specific typed phrase, confirm:true and an idempotencyKey (a replay returns the original outcome), and audit actor/connection/before/after/correlation id. The DELETE lane's audit payload snapshots the dying tenant like the console's",
     test: "integration/platform-mcp.integration.test.ts",
   },
   {
