@@ -16,6 +16,7 @@
 import type { PoolClient } from "pg";
 import { getPool, query } from "../db";
 import { enqueueKitchenDispatch } from "../kitchen-dispatch";
+import { recordKitchenTicketCreated } from "../kitchen-alert-service";
 import { recordOrderAudit } from "../order-control-service";
 import type { Role } from "../auth-edge";
 
@@ -42,6 +43,7 @@ export type CafeApprovalResult =
 
 interface LockedOrder {
   id: string;
+  order_number: string;
   status: string;
   origin: string;
   cms_connection_id: string | null;
@@ -99,10 +101,11 @@ export async function decideCafeOrderApproval(
       [input.orderId, input.decision, input.actor.userId, reason],
     );
 
-    const dispatchedItemIds =
+    const dispatched =
       input.decision === "accepted"
         ? await enqueueDispatch(client, input, locked)
-        : [];
+        : { itemIds: [] as string[], items: [] as { name: string; quantity: number }[] };
+    const dispatchedItemIds = dispatched.itemIds;
 
     // The customer's order page must show the decision even when the CMS is
     // down at the moment the cashier presses the button: the row is written
@@ -140,6 +143,20 @@ export async function decideCafeOrderApproval(
     });
 
     await client.query("COMMIT");
+    // #1047 — a website order becomes visible to the kitchen only when staff
+    // accept it (`createOrder` deliberately held its notification while the
+    // order awaited approval). Queue the same shared event here, after the
+    // acceptance is durable, so the KDS and the phone hear about the same fact.
+    if (input.decision === "accepted" && dispatchedItemIds.length > 0) {
+      await recordKitchenTicketCreated({
+        businessId: input.businessId,
+        locationId: input.locationId,
+        orderId: locked.id,
+        orderNumber: Number(locked.order_number),
+        items: dispatched.items,
+        itemIds: dispatchedItemIds,
+      });
+    }
     return { ok: true, changed: true, state: input.decision, dispatchedItemIds };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -155,7 +172,7 @@ async function lockOrder(
   orderId: string,
 ): Promise<LockedOrder | null> {
   const { rows } = await client.query<LockedOrder>(
-    `SELECT id, status, origin, cms_connection_id, cms_order_id,
+    `SELECT id, order_number::text AS order_number, status, origin, cms_connection_id, cms_order_id,
             website_approval_state, website_approval_reason
        FROM orders
       WHERE id = $1 AND location_id = $2
@@ -174,20 +191,26 @@ async function enqueueDispatch(
   client: PoolClient,
   input: CafeApprovalInput,
   order: LockedOrder,
-): Promise<string[]> {
-  const { rows } = await client.query<{ id: string }>(
-    `SELECT id FROM order_items WHERE order_id = $1 ORDER BY created_at, id`,
+): Promise<{ itemIds: string[]; items: { name: string; quantity: number }[] }> {
+  const { rows } = await client.query<{ id: string; name_snapshot: string; quantity: number }>(
+    `SELECT id, name_snapshot, quantity
+       FROM order_items
+      WHERE order_id = $1
+      ORDER BY created_at, id`,
     [order.id],
   );
   const itemIds = rows.map((row) => row.id);
-  if (itemIds.length === 0) return [];
+  if (itemIds.length === 0) return { itemIds: [], items: [] };
   await enqueueKitchenDispatch(client, {
     businessId: input.businessId,
     locationId: input.locationId,
     orderId: order.id,
     itemIds,
   });
-  return itemIds;
+  return {
+    itemIds,
+    items: rows.map((row) => ({ name: row.name_snapshot, quantity: row.quantity })),
+  };
 }
 
 function cleanReason(raw: string | null | undefined): string | null {

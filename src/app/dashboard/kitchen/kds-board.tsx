@@ -13,10 +13,28 @@ import {
 } from "@/lib/kitchen-priority";
 import { formatJalali } from "@/lib/jalali";
 import {
-  DEFAULT_TICKET_AGING_MINUTES,
   ORDER_ITEM_STATUS_LABELS,
   ticketAgeMinutes,
 } from "@/lib/order-item-status";
+import {
+  DEFAULT_KITCHEN_ALERT_THRESHOLDS,
+  DEFAULT_KITCHEN_SOUND_PREFERENCES,
+  diffKitchenAgingStages,
+  diffKitchenAlerts,
+  kitchenAgingStage,
+  kitchenSoundEnabledFor,
+  parseKitchenAlertThresholds,
+  parseKitchenSoundPreferences,
+  type KitchenAlertBaseline,
+  type KitchenAlertThresholds,
+  type KitchenAgingStage,
+  type KitchenSoundEventKey,
+  type KitchenSoundPreferences,
+} from "@/lib/kitchen-alerts";
+import {
+  kitchenPrintFailureText,
+  subscribeKitchenPrintFailures,
+} from "@/lib/kitchen-alert-events";
 import { type KitchenQueueStatus } from "@/lib/kitchen-priority";
 import { apiOrQueue, useOfflineQueue } from "../offline-queue";
 import { useRealtime, type RealtimeLifecycle } from "../use-realtime";
@@ -25,6 +43,7 @@ import { api, errorMessage } from "../ui";
 import { cardClass, PageShell } from "../page-chrome";
 import { cn } from "@/lib/utils";
 import { KitchenWorkflowSettings } from "./kitchen-workflow-settings";
+import { KitchenAlertSettings } from "./kitchen-alert-settings";
 
 interface TicketItem {
   id: string;
@@ -143,6 +162,45 @@ function formatUpdatedAt(timestamp: number): string {
   );
 }
 
+const THRESHOLD_CACHE_KEY = "kds.alert-thresholds";
+
+/**
+ * A cold boot with no network still needs the branch's last-known thresholds.
+ * This is only a cache: the authoritative GET overwrites it as soon as the
+ * server answers, and a corrupt entry falls back to the platform default.
+ */
+function readCachedThresholds(): KitchenAlertThresholds | null {
+  try {
+    const raw = window.localStorage.getItem(THRESHOLD_CACHE_KEY);
+    if (!raw) return null;
+    return parseKitchenAlertThresholds(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedThresholds(thresholds: KitchenAlertThresholds): void {
+  try {
+    window.localStorage.setItem(THRESHOLD_CACHE_KEY, JSON.stringify(thresholds));
+  } catch {
+    // Private browsing/storage denial must not prevent use of the KDS.
+  }
+}
+
+function agingStageLabel(stage: KitchenAgingStage): string {
+  if (stage === "overdue") return "از آستانه گذشته";
+  if (stage === "approaching") return "نزدیک آستانه";
+  return "در محدوده";
+}
+
+const ALERT_TONE_FREQUENCY: Record<KitchenSoundEventKey, number> = {
+  newTicket: 880,
+  addedItems: 988,
+  aging: 660,
+  connection: 440,
+  printFailure: 330,
+};
+
 const PRIORITY_META: Record<
   KitchenTicketPriority["tier"],
   { label: string; className: string }
@@ -256,16 +314,20 @@ function TicketCard({
   now,
   selected,
   onSelect,
-  agingThreshold,
+  thresholds,
 }: {
   ticket: Ticket;
   now: number;
   selected: boolean;
   onSelect: () => void;
-  agingThreshold: number;
+  thresholds: KitchenAlertThresholds;
 }) {
   const status = ticket.status;
-  const late = ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold;
+  const stage = kitchenAgingStage(
+    ticketAgeMinutes(ticket.earliestSentAt, now),
+    thresholds,
+  );
+  const late = stage === "overdue";
 
   return (
     <article
@@ -304,9 +366,20 @@ function TicketCard({
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
           <span
-            className={`font-medium ${late ? "text-destructive" : "text-muted-foreground"}`}
+            className={`font-medium ${late ? "text-destructive" : stage === "approaching" ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground"}`}
           >
             {formatElapsed(ticket.earliestSentAt, now)}
+          </span>
+          <span
+            className={`rounded-xl border px-2 py-0.5 text-xs font-semibold ${
+              stage === "overdue"
+                ? "border-destructive/30 bg-destructive/5 text-destructive"
+                : stage === "approaching"
+                  ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-300"
+                  : "border-border bg-muted text-muted-foreground"
+            }`}
+          >
+            {agingStageLabel(stage)}
           </span>
           <span className="text-muted-foreground">
             {toPersianDigits(ticket.items.length)} قلم
@@ -334,7 +407,7 @@ function TicketDetails({
   batchingStatus,
   onBump,
   onBatch,
-  agingThreshold,
+  thresholds,
 }: {
   ticket: Ticket;
   now: number;
@@ -343,10 +416,14 @@ function TicketDetails({
   batchingStatus: "preparing" | "ready" | null;
   onBump: (itemId: string, status: "preparing" | "ready") => void;
   onBatch: (status: "preparing" | "ready") => void;
-  agingThreshold: number;
+  thresholds: KitchenAlertThresholds;
 }) {
   const status = ticket.status;
-  const late = ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold;
+  const stage = kitchenAgingStage(
+    ticketAgeMinutes(ticket.earliestSentAt, now),
+    thresholds,
+  );
+  const late = stage === "overdue";
 
   return (
     <section
@@ -379,6 +456,9 @@ function TicketDetails({
             className={`mt-1 font-semibold ${late ? "text-destructive" : "text-foreground/80"}`}
           >
             {formatElapsed(ticket.earliestSentAt, now)}
+            <span className="mt-1 block text-xs font-medium text-muted-foreground">
+              {agingStageLabel(stage)} · آستانهٔ تأخیر {toPersianDigits(thresholds.overdueMinutes)} دقیقه
+            </span>
           </dd>
         </div>
         <div>
@@ -535,10 +615,24 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
   const [orderTypeFilter, setOrderTypeFilter] = useState<OrderTypeFilter>("all");
   const [ageFilter, setAgeFilter] = useState<TicketAgeFilter>("all");
   const [readyForPickupOnly, setReadyForPickupOnly] = useState(false);
-  const [agingThreshold, setAgingThreshold] = useState(DEFAULT_TICKET_AGING_MINUTES);
-  const [soundAlerts, setSoundAlerts] = useState(false);
+  const [showAlertSettings, setShowAlertSettings] = useState(false);
+  // The cache is a cold-boot fallback; the authoritative branch GET replaces
+  // it below and the scan/notification producers read the same stored value.
+  const [thresholds, setThresholds] = useState<KitchenAlertThresholds>(
+    () => readCachedThresholds() ?? DEFAULT_KITCHEN_ALERT_THRESHOLDS,
+  );
+  const [canEditThresholds, setCanEditThresholds] = useState(false);
+  const [thresholdsWarning, setThresholdsWarning] = useState<string | null>(null);
+  const [soundPreferences, setSoundPreferences] = useState<KitchenSoundPreferences>(
+    () => ({
+      ...DEFAULT_KITCHEN_SOUND_PREFERENCES,
+      events: { ...DEFAULT_KITCHEN_SOUND_PREFERENCES.events },
+    }),
+  );
+  const [soundBlocked, setSoundBlocked] = useState(false);
   const [audioReady, setAudioReady] = useState(false);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const [printFailureNotice, setPrintFailureNotice] = useState<string | null>(null);
   const [batchingStatus, setBatchingStatus] = useState<"preparing" | "ready" | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -554,9 +648,16 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
   const loadInFlight = useRef<Promise<void> | null>(null);
   const loadRef = useRef<((options?: { showRefresh?: boolean }) => Promise<void>) | null>(null);
   const queuedLoad = useRef(false);
-  const seenOrderIds = useRef<Set<string> | null>(null);
-  const seenAgingTicketIds = useRef<Set<string> | null>(null);
+  const alertBaseline = useRef<KitchenAlertBaseline | null>(null);
+  const agingBaseline = useRef<Map<string, KitchenAgingStage> | null>(null);
+  const agingThresholdSignature = useRef("");
+  const connectionState = useRef<{ connected: boolean | null }>({ connected: null });
+  const staleAlertShown = useRef(false);
   const audioContext = useRef<AudioContext | null>(null);
+  // The realtime lifecycle callback is registered before the audio callbacks
+  // are declared; a ref lets it play the latest opt-in tone without putting a
+  // not-yet-initialised binding in a hook dependency array.
+  const playAlertToneRef = useRef<(event: KitchenSoundEventKey) => void>(() => {});
 
   const load = useCallback(
     ({ showRefresh = false }: { showRefresh?: boolean } = {}): Promise<void> => {
@@ -626,7 +727,16 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
       [load],
     ),
     useCallback((status: RealtimeLifecycle) => {
+      const previous = connectionState.current;
+      connectionState.current = { connected: status.connected };
       setRealtimeConnected(status.connected);
+      if (!status.connected && previous.connected === true) {
+        toast.warning("اتصال زندهٔ آشپزخانه قطع شد؛ صف تا اتصال مجدد به‌روز نمی‌شود.");
+        playAlertToneRef.current("connection");
+      } else if (status.connected && previous.connected === false) {
+        toast.success("اتصال زنده دوباره برقرار شد.");
+        playAlertToneRef.current("connection");
+      }
       if (status.recovery) {
         setSnapshotStale(true);
         void load({ showRefresh: true });
@@ -654,12 +764,52 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(
+    () => () => {
+      void audioContext.current?.close().catch(() => {});
+    },
+    [],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void api<{ thresholds?: unknown; canEdit?: boolean; error?: string }>("/api/kitchen/alerts")
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        const parsed = parseKitchenAlertThresholds(data.thresholds);
+        if (ok && parsed) {
+          setThresholds(parsed);
+          writeCachedThresholds(parsed);
+          setCanEditThresholds(data.canEdit === true);
+          setThresholdsWarning(null);
+          return;
+        }
+        if (!ok) {
+          setThresholdsWarning(
+            "آستانه‌های این شعبه از سرور خوانده نشد؛ آخرین مقدار ذخیره‌شده یا پیش‌فرض نمایش داده می‌شود.",
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setThresholdsWarning(
+            "آستانه‌های این شعبه از سرور خوانده نشد؛ آخرین مقدار ذخیره‌شده یا پیش‌فرض نمایش داده می‌شود.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     try {
-      const storedSound = window.localStorage.getItem("kds.sound-alerts");
-      const storedAge = Number(window.localStorage.getItem("kds.aging-threshold"));
-      setSoundAlerts(storedSound === "true");
-      if ([10, 15, 20, 30].includes(storedAge)) setAgingThreshold(storedAge);
+      const legacySound = window.localStorage.getItem("kds.sound-alerts");
+      const raw = window.localStorage.getItem("kds.sound-preferences");
+      const parsed = parseKitchenSoundPreferences(raw ? JSON.parse(raw) : null);
+      // `kds.sound-alerts` predates the per-event matrix; honour an explicit
+      // legacy "on" choice rather than silently muting an existing device.
+      setSoundPreferences(legacySound === "true" ? { ...parsed, enabled: true } : parsed);
     } catch {
       // Private browsing/storage denial must not prevent use of the KDS.
     } finally {
@@ -670,45 +820,97 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
   useEffect(() => {
     if (!preferencesLoaded) return;
     try {
-      window.localStorage.setItem("kds.sound-alerts", String(soundAlerts));
-      window.localStorage.setItem("kds.aging-threshold", String(agingThreshold));
+      window.localStorage.setItem("kds.sound-alerts", String(soundPreferences.enabled));
+      window.localStorage.setItem("kds.sound-preferences", JSON.stringify(soundPreferences));
     } catch {
       // Preferences are optional; inaccessible storage falls back to defaults.
     }
-  }, [agingThreshold, preferencesLoaded, soundAlerts]);
+  }, [preferencesLoaded, soundPreferences]);
 
-  const playAlertTone = useCallback(() => {
+  /**
+   * Create/resume the audio context only from a user gesture (or after the
+   * operator has already opted in). A denied/suspended context is a visible
+   * state, not a silent failure: the visual alerts stay on either way.
+   */
+  const ensureAudio = useCallback(async (): Promise<boolean> => {
+    if (typeof window === "undefined") return false;
+    const AudioCtor =
+      window.AudioContext ??
+      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtor) {
+      setSoundBlocked(true);
+      setAudioReady(false);
+      return false;
+    }
+    try {
+      let context = audioContext.current;
+      if (!context || context.state === "closed") {
+        context = new AudioCtor();
+        audioContext.current = context;
+      }
+      if (context.state === "suspended") await context.resume();
+      if (context.state !== "running") {
+        setSoundBlocked(true);
+        setAudioReady(false);
+        return false;
+      }
+      setAudioReady(true);
+      setSoundBlocked(false);
+      return true;
+    } catch {
+      setSoundBlocked(true);
+      setAudioReady(false);
+      return false;
+    }
+  }, []);
+
+  const playTone = useCallback((event: KitchenSoundEventKey): boolean => {
     const context = audioContext.current;
-    if (!context) return;
-    if (context.state === "suspended") void context.resume().catch(() => {});
+    if (!context || context.state !== "running") return false;
     try {
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.type = "sine";
-      oscillator.frequency.value = 880;
+      oscillator.frequency.value = ALERT_TONE_FREQUENCY[event];
       gain.gain.value = 0.04;
       oscillator.connect(gain);
       gain.connect(context.destination);
       oscillator.start();
       oscillator.stop(context.currentTime + 0.16);
+      return true;
     } catch {
       // Browser audio policy/device failures should never block queue updates.
+      return false;
     }
   }, []);
 
+  const playAlertTone = useCallback(
+    (event: KitchenSoundEventKey) => {
+      if (!kitchenSoundEnabledFor(soundPreferences, event)) return;
+      if (!playTone(event)) setSoundBlocked(true);
+    },
+    [playTone, soundPreferences],
+  );
+  playAlertToneRef.current = playAlertTone;
+
   useEffect(() => {
     if (lastUpdatedAt === null) return;
-    const currentIds = new Set(items.map((item) => item.order_id));
-    if (seenOrderIds.current === null) {
-      seenOrderIds.current = currentIds;
-      return;
+    const diff = diffKitchenAlerts(alertBaseline.current, items);
+    alertBaseline.current = diff.next;
+    if (diff.alerts.length === 0) return;
+
+    const newTickets = diff.alerts.filter((alert) => alert.kind === "new_ticket");
+    const addedItems = diff.alerts.filter((alert) => alert.kind === "items_added");
+    if (newTickets.length > 0) {
+      toast.info(`${toPersianDigits(newTickets.length)} سفارش تازه به صف آشپزخانه رسید.`);
+      playAlertTone("newTicket");
     }
-    const added = [...currentIds].filter((id) => !seenOrderIds.current?.has(id));
-    seenOrderIds.current = currentIds;
-    if (added.length === 0) return;
-    toast.info(`${toPersianDigits(added.length)} سفارش تازه به صف آشپزخانه رسید.`);
-    if (soundAlerts) playAlertTone();
-  }, [items, lastUpdatedAt, playAlertTone, soundAlerts]);
+    if (addedItems.length > 0) {
+      const lineCount = addedItems.reduce((count, alert) => count + alert.itemIds.length, 0);
+      toast.info(`${toPersianDigits(lineCount)} قلم تازه به سفارش‌های موجود اضافه شد.`);
+      playAlertTone("addedItems");
+    }
+  }, [items, lastUpdatedAt, playAlertTone]);
 
   const modifiersByItem = useMemo(() => {
     const byItem = new Map<string, string[]>();
@@ -776,7 +978,7 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
         const priority = priorityForKitchenTicket(
           { status: status as KitchenQueueStatus, sentAt: earliestSentAt },
           now,
-          agingThreshold,
+          thresholds.overdueMinutes,
         );
         return {
           key,
@@ -793,34 +995,48 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
       .sort((left, right) =>
         compareKitchenTicketPriority(left.priority, right.priority),
       );
-  }, [agingThreshold, ticketGroups, now]);
+  }, [thresholds.overdueMinutes, ticketGroups, now]);
 
+  const thresholdSignature = `${thresholds.approachingMinutes ?? "off"}:${thresholds.overdueMinutes}`;
+  useEffect(() => {
+    if (agingThresholdSignature.current === thresholdSignature) return;
+    // A threshold change reclassifies existing tickets. Re-baseline instead of
+    // firing one alert per open ticket as if every one just became late.
+    agingThresholdSignature.current = thresholdSignature;
+    agingBaseline.current = null;
+  }, [thresholdSignature]);
 
   useEffect(() => {
     if (lastUpdatedAt === null) return;
-    const agedIds = new Set(
-      tickets
-        .filter((ticket) => ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold)
-        .map((ticket) => ticket.key),
-    );
-    if (seenAgingTicketIds.current === null) {
-      seenAgingTicketIds.current = agedIds;
-      return;
+    const currentStages = new Map<string, KitchenAgingStage>();
+    for (const ticket of tickets) {
+      currentStages.set(
+        ticket.key,
+        kitchenAgingStage(ticketAgeMinutes(ticket.earliestSentAt, now), thresholds),
+      );
     }
-    const newlyAged = [...agedIds].filter((id) => !seenAgingTicketIds.current?.has(id));
-    seenAgingTicketIds.current = agedIds;
-    if (newlyAged.length === 0) return;
-    toast.info(`${toPersianDigits(newlyAged.length)} سفارش از آستانهٔ تأخیر عبور کرد.`);
-    if (soundAlerts) playAlertTone();
-  }, [agingThreshold, lastUpdatedAt, now, playAlertTone, soundAlerts, tickets]);
+    const diff = diffKitchenAgingStages(agingBaseline.current, currentStages);
+    agingBaseline.current = diff.next;
+    if (diff.alerts.length === 0) return;
+    const overdue = diff.alerts.filter((alert) => alert.stage === "overdue").length;
+    toast.info(
+      overdue > 0
+        ? `${toPersianDigits(overdue)} سفارش از آستانهٔ تأخیر عبور کرد.`
+        : `${toPersianDigits(diff.alerts.length)} سفارش به آستانهٔ تأخیر نزدیک شد.`,
+    );
+    playAlertTone("aging");
+  }, [lastUpdatedAt, now, playAlertTone, thresholds, tickets]);
   const metadataFilteredTickets = useMemo(() => tickets.filter((ticket) => {
     if (orderTypeFilter !== "all" && ticket.orderType !== orderTypeFilter) return false;
-    const aging = ticketAgeMinutes(ticket.earliestSentAt, now) >= agingThreshold;
+    const aging = kitchenAgingStage(
+      ticketAgeMinutes(ticket.earliestSentAt, now),
+      thresholds,
+    ) === "overdue";
     if (ageFilter === "aging" && !aging) return false;
     if (ageFilter === "within" && aging) return false;
     if (readyForPickupOnly && !ticket.items.some((item) => item.status === "ready")) return false;
     return true;
-  }), [ageFilter, agingThreshold, now, orderTypeFilter, readyForPickupOnly, tickets]);
+  }), [ageFilter, now, orderTypeFilter, readyForPickupOnly, thresholds, tickets]);
 
   const visibleTickets = useMemo(
     () => filter === "all"
@@ -881,8 +1097,95 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
           : queueStale
             ? "صف آشپزخانه قدیمی است؛ اتصال یا همگام‌سازی را بررسی کنید"
             : lastUpdatedAt
-              ? `به‌روزرسانی ${formatUpdatedAt(lastUpdatedAt)}`
+              ? `زنده · به‌روزرسانی ${formatUpdatedAt(lastUpdatedAt)}`
               : "در حال دریافت صف";
+
+  const connectionTone = !isOnline
+    ? "bg-destructive"
+    : pendingCount > 0 || realtimeConnected === false || queueStale
+      ? "bg-amber-500 dark:bg-amber-400"
+      : "bg-emerald-500 dark:bg-emerald-500";
+
+  const dataStaleWhileLive =
+    isOnline &&
+    realtimeConnected !== false &&
+    lastUpdatedAt !== null &&
+    now - lastUpdatedAt > 60_000;
+
+  useEffect(() => {
+    if (dataStaleWhileLive && !staleAlertShown.current) {
+      toast.warning("دادهٔ صف آشپزخانه قدیمی است؛ برای دریافت تصویر تازه به‌روزرسانی کنید.");
+      playAlertTone("connection");
+    }
+    staleAlertShown.current = dataStaleWhileLive;
+  }, [dataStaleWhileLive, playAlertTone]);
+
+  useEffect(
+    () =>
+      subscribeKitchenPrintFailures((detail) => {
+        // The workspace-level print worker owns the shared print notification
+        // (it already respects `printing.behavior.notifications`). The KDS adds
+        // its own opt-in tone and a persistent local line so a screen reader
+        // user who missed the toast still has the state.
+        playAlertTone("printFailure");
+        setPrintFailureNotice(kitchenPrintFailureText(detail));
+      }),
+    [playAlertTone],
+  );
+
+  async function saveThresholds(next: KitchenAlertThresholds): Promise<{ ok: boolean; error?: string }> {
+    const result = await api<{ thresholds?: unknown; error?: string }>("/api/kitchen/alerts", {
+      method: "PUT",
+      body: JSON.stringify({ thresholds: next }),
+    });
+    if (!result.ok) return { ok: false, error: errorMessage(result.data.error) };
+    const parsed = parseKitchenAlertThresholds(result.data.thresholds);
+    if (!parsed) return { ok: false, error: "پاسخ تنظیمات آستانه معتبر نیست." };
+    setThresholds(parsed);
+    writeCachedThresholds(parsed);
+    setThresholdsWarning(null);
+    return { ok: true };
+  }
+
+  async function toggleSound() {
+    if (soundPreferences.enabled && audioReady) {
+      setSoundPreferences((current) => ({ ...current, enabled: false }));
+      void audioContext.current?.close().catch(() => {});
+      audioContext.current = null;
+      setAudioReady(false);
+      setSoundBlocked(false);
+      return;
+    }
+    // Enabled-from-storage but not yet unlocked in this page: the button says
+    // «فعال‌سازی», so this click must resume the context rather than mute.
+    const ready = await ensureAudio();
+    if (!ready) {
+      setSoundPreferences((current) => ({ ...current, enabled: false }));
+      toast.warning(
+        "پخش صدا در این مرورگر مسدود است؛ هشدارهای بصری همچنان نمایش داده می‌شوند.",
+      );
+      return;
+    }
+    setSoundPreferences((current) => ({ ...current, enabled: true }));
+    playTone("newTicket");
+  }
+
+  function toggleSoundEvent(event: KitchenSoundEventKey) {
+    setSoundPreferences((current) => ({
+      ...current,
+      events: { ...current.events, [event]: !current.events[event] },
+    }));
+  }
+
+  async function testSound() {
+    if (!(await ensureAudio())) {
+      toast.warning(
+        "پخش صدا در این مرورگر مسدود است؛ هشدارهای بصری همچنان نمایش داده می‌شوند.",
+      );
+      return;
+    }
+    playTone("newTicket");
+  }
 
   async function bump(itemId: string, status: "preparing" | "ready") {
     setBumpingItemId(itemId);
@@ -958,27 +1261,6 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     }
   }
 
-  function toggleSoundAlerts() {
-    if (!soundAlerts || !audioContext.current) {
-      if (typeof window.AudioContext === "function") {
-        try {
-          audioContext.current ??= new window.AudioContext();
-          void audioContext.current.resume().catch(() => {});
-          setAudioReady(true);
-          playAlertTone();
-        } catch {
-          // Visual toast remains available if audio is unsupported.
-        }
-      }
-      setSoundAlerts(true);
-      return;
-    }
-    void audioContext.current.close().catch(() => {});
-    audioContext.current = null;
-    setAudioReady(false);
-    setSoundAlerts(false);
-  }
-
   async function archiveStaleTickets() {
     if (!window.confirm("سفارش‌های انتخاب‌شده از صف آشپزخانه بایگانی شوند؟ وضعیت سفارش و پرداخت تغییر نمی‌کند.")) return;
 
@@ -1019,6 +1301,15 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <KnowledgeHelpButton section="kitchen" />
+            <Button
+              type="button"
+              variant="outline"
+              aria-expanded={showAlertSettings}
+              onClick={() => setShowAlertSettings((open) => !open)}
+              className="min-h-[48px] shrink-0"
+            >
+              اعلان‌ها و صدا
+            </Button>
             {canReviewStale ? (
               <Button type="button" variant="outline" aria-expanded={showWorkflowSettings}
                 onClick={() => setShowWorkflowSettings((open) => !open)}>
@@ -1044,11 +1335,11 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
             <Button
               type="button"
               variant="outline"
-              aria-pressed={soundAlerts}
-              onClick={toggleSoundAlerts}
+              aria-pressed={soundPreferences.enabled}
+              onClick={() => void toggleSound()}
               className="min-h-[48px] shrink-0"
             >
-              {soundAlerts
+              {soundPreferences.enabled
                 ? audioReady ? "هشدار صوتی روشن" : "فعال‌سازی صدای هشدار"
                 : "هشدار صوتی خاموش"}
             </Button>
@@ -1058,7 +1349,7 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
               aria-live="polite"
             >
               <span
-                className={`size-2.5 shrink-0 rounded-full ${isOnline && pendingCount === 0 ? "bg-emerald-500 dark:bg-emerald-500" : "bg-amber-500 dark:bg-amber-400"}`}
+                className={`size-2.5 shrink-0 rounded-full ${connectionTone}`}
                 aria-hidden="true"
               />
               <span className="truncate">{syncLabel}</span>
@@ -1074,6 +1365,48 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
           </div>
         </div>
       </header>
+
+      {soundBlocked ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-medium text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200"
+        >
+          <span>
+            پخش صدا در این مرورگر مسدود شده است؛ هشدارهای بصری همچنان نمایش داده
+            می‌شوند.
+          </span>
+          <Button type="button" variant="outline" className="min-h-[44px]" onClick={() => void toggleSound()}>
+            تلاش دوباره برای صدا
+          </Button>
+        </div>
+      ) : null}
+
+      {printFailureNotice ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm font-medium text-red-800 dark:text-red-200"
+        >
+          <span>{printFailureNotice}</span>
+          <Button type="button" variant="outline" className="min-h-[44px]" onClick={() => setPrintFailureNotice(null)}>
+            بستن
+          </Button>
+        </div>
+      ) : null}
+
+      {showAlertSettings ? (
+        <KitchenAlertSettings
+          canEditThresholds={canEditThresholds}
+          thresholds={thresholds}
+          thresholdsWarning={thresholdsWarning}
+          soundPreferences={soundPreferences}
+          soundBlocked={soundBlocked}
+          audioReady={audioReady}
+          onToggleSound={() => void toggleSound()}
+          onToggleSoundEvent={toggleSoundEvent}
+          onTestSound={() => void testSound()}
+          onSaveThresholds={saveThresholds}
+        />
+      ) : null}
 
       {canReviewStale && showWorkflowSettings ? <KitchenWorkflowSettings /> : null}
 
@@ -1212,12 +1545,25 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
             <option value="within">زیر آستانهٔ تأخیر</option>
           </select>
         </label>
-        <label className="grid min-w-36 gap-1 text-xs font-semibold text-muted-foreground">
-          هشدار تأخیر پس از
-          <select value={agingThreshold} onChange={(event) => setAgingThreshold(Number(event.target.value))} className="min-h-[44px] rounded-lg border border-border bg-background px-3 text-sm text-foreground">
-            {[10, 15, 20, 30].map((minutes) => <option key={minutes} value={minutes}>{toPersianDigits(minutes)} دقیقه</option>)}
-          </select>
-        </label>
+        <div className="grid min-w-44 gap-1 text-xs font-semibold text-muted-foreground">
+          آستانهٔ تأخیر این شعبه
+          <div className="flex min-h-[44px] flex-wrap items-center gap-2 rounded-lg border border-border bg-muted px-3 text-sm text-foreground">
+            <span>{toPersianDigits(thresholds.overdueMinutes)} دقیقه</span>
+            {thresholds.approachingMinutes !== null ? (
+              <span className="text-xs text-muted-foreground">
+                · نزدیک از {toPersianDigits(thresholds.approachingMinutes)}
+              </span>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              className="min-h-[44px] px-2 text-xs"
+              onClick={() => setShowAlertSettings(true)}
+            >
+              تنظیم
+            </Button>
+          </div>
+        </div>
         <Button
           type="button"
           variant="outline"
@@ -1305,7 +1651,7 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                           now={now}
                           selected={selectedTicket?.key === ticket.key}
                           onSelect={() => setSelectedKey(ticket.key)}
-                          agingThreshold={agingThreshold}
+                          thresholds={thresholds}
                         />
                         {selectedTicket?.key === ticket.key ? (
                           <div className="mt-3 md:hidden">
@@ -1317,7 +1663,7 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                               batchingStatus={batchingStatus}
                               onBump={bump}
                               onBatch={(status) => void batchBump(ticket, status)}
-                              agingThreshold={agingThreshold}
+                              thresholds={thresholds}
                             />
                           </div>
                         ) : null}
@@ -1340,7 +1686,7 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                   batchingStatus={batchingStatus}
                   onBump={bump}
                   onBatch={(status) => void batchBump(selectedTicket, status)}
-                  agingThreshold={agingThreshold}
+                  thresholds={thresholds}
                 />
               </div>
             ) : (

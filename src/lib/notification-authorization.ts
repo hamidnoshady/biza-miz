@@ -18,6 +18,9 @@ export const NOTIFICATION_PERMISSIONS: Record<string, Permission[]> = {
   "shift.cash_variance": ["reports.view", "ledger.view"],
   "business_day.closed": ["reports.view", "ledger.view"],
   "order.voided": ["orders.view"],
+  "kitchen.ticket_created": ["kitchen.view"],
+  "kitchen.items_added": ["kitchen.view"],
+  "kitchen.ticket_aged": ["kitchen.view"],
   "payment.refunded": ["payments.refund", "ledger.view"],
   "inventory.low_stock": ["inventory.view"],
   "backup.failed": ["backup.manage"],
@@ -123,6 +126,12 @@ export async function canReceiveNotification(
     if (!(await effectiveAppAvailability(businessId)).accounting.usable) return false;
     const industry = await getBusinessIndustry(businessId);
     if (group === "inventory" && (!industry || !hasModule(industry, "inventory"))) return false;
+    // #1047 — kitchen events are F&B-only. The catalogue must not offer a
+    // restaurant alert to a trade whose profile has no kitchen module, even if
+    // a custom grant names `kitchen.view`.
+    if (event.event_key.startsWith("kitchen.") && (!industry || !hasModule(industry, "kitchen"))) {
+      return false;
+    }
   }
   if (event.location_id) {
     const { rows } = await query<{ id: string }>(

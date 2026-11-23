@@ -157,6 +157,8 @@ app.prepare().then(async () => {
     LOW_STOCK_SCAN_INTERVAL_MS,
     runAecOverdueScanTick,
     AEC_OVERDUE_SCAN_INTERVAL_MS,
+    runKitchenAgingScanTick,
+    KITCHEN_AGING_SCAN_INTERVAL_MS,
   } = await import("./src/lib/notification-scans");
   // OpenObserve integration (docs/deployment/openobserve.md): taps console.* and
   // records errors/slow requests. No-op unless OPENOBSERVE_URL +
@@ -659,6 +661,14 @@ app.prepare().then(async () => {
   const aecOverdueScan = () =>
     runAecOverdueScanTick().catch((err) => console.error("AEC overdue scan failed:", err));
   scheduleBackgroundTick(aecOverdueScan, AEC_OVERDUE_SCAN_INTERVAL_MS, 240_000);
+
+  // Issue #1047 — kitchen ticket age is also a fact the passage of time creates.
+  // One minute matches the KDS's own age redraw, so the shared notification and
+  // the screen cannot disagree about when "approaching" began. The scan is a
+  // no-op for trades without the kitchen module.
+  const kitchenAgingScan = () =>
+    runKitchenAgingScanTick().catch((err) => console.error("kitchen aging scan failed:", err));
+  scheduleBackgroundTick(kitchenAgingScan, KITCHEN_AGING_SCAN_INTERVAL_MS, 50_000);
 
   // Phase 37: drain the SMS/email marketing outbox. Producers only enqueue —
   // an owner clicking "send" must never wait on (or fail because of) an SMTP or
