@@ -1207,6 +1207,59 @@ describe("site profile", () => {
     expect(desktop.rows[0]).toEqual({ start: 1080, day: "2026-09-29" });
   });
 
+  it("brings the cloud's tax rate, pricing policy and order controls to the till", async () => {
+    const writeCloudSetting = (key: string, value: unknown) =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query(
+            `INSERT INTO settings (business_id, location_id, key, value)
+             VALUES ($1, NULL, $2, $3::jsonb)
+             ON CONFLICT (business_id, location_id, key) DO UPDATE SET value = EXCLUDED.value`,
+            [biz.businessId, key, JSON.stringify(value)],
+          ),
+        ),
+      );
+    const deleteCloudSetting = (key: string) =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query("DELETE FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2", [
+            biz.businessId,
+            key,
+          ]),
+        ),
+      );
+    const readDesktop = (key: string) =>
+      withTenant(biz.businessId, () =>
+        query<{ value: unknown }>(
+          "SELECT value FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2",
+          [biz.businessId, key],
+        ),
+      );
+
+    await writeCloudSetting("tax.config", { defaultRate: 9 });
+    await writeCloudSetting("pricing.config", { defaultMarginPercent: 35, overheadMode: "manual" });
+    await writeCloudSetting("orders.controls", { cashierDiscountLimitPercent: 10 });
+    await syncProfile();
+
+    expect((await readDesktop("tax.config")).rows[0]?.value).toEqual({ defaultRate: 9 });
+    expect((await readDesktop("pricing.config")).rows[0]?.value).toEqual({
+      defaultMarginPercent: 35,
+      overheadMode: "manual",
+    });
+    expect((await readDesktop("orders.controls")).rows[0]?.value).toEqual({
+      cashierDiscountLimitPercent: 10,
+    });
+
+    // A later cloud edit reaches the till; a setting the cloud removes is
+    // removed locally too, so an offline bill cannot keep using a rate the
+    // business has since cleared.
+    await writeCloudSetting("tax.config", { defaultRate: 10 });
+    await deleteCloudSetting("pricing.config");
+    await syncProfile();
+    expect((await readDesktop("tax.config")).rows[0]?.value).toEqual({ defaultRate: 10 });
+    expect((await readDesktop("pricing.config")).rows).toHaveLength(0);
+  });
+
   it("follows the cloud's switches: the assistant on, then off, and an app under maintenance", async () => {
     const setAssistant = (enabled: boolean) =>
       onCentral(() =>
