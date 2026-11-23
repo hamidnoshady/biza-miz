@@ -13,6 +13,7 @@ import type { ReactNode } from "react";
 import { useRef } from "react";
 import { cn } from "@/lib/utils";
 import { radioMoveForKey, radioTargetIndex } from "@/lib/radio-keys";
+import type { TourAnchor } from "@/lib/tours";
 import { cardClass } from "./page-chrome-styles";
 
 export interface Tab<K extends string> {
@@ -38,6 +39,7 @@ export function TabBar<K extends string>({
   active,
   onChange,
   className,
+  tourAnchor,
 }: {
   /** Prefixes the button and panel ids, so two strips can coexist on a page. */
   idPrefix: string;
@@ -46,6 +48,8 @@ export function TabBar<K extends string>({
   active: K;
   onChange: (key: K) => void;
   className?: string;
+  /** Optional stable target when this tab strip is the page's guided-tour navigation. */
+  tourAnchor?: TourAnchor;
 }) {
   const buttonsRef = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -53,6 +57,7 @@ export function TabBar<K extends string>({
     <div
       role="tablist"
       aria-label={label}
+      data-tour-id={tourAnchor}
       className={cn(cardClass, "p-2", className)}
     >
       <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
