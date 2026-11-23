@@ -6,7 +6,10 @@
  * existing statements read: every input it hands the engine is compared with
  * `getProfitAndLoss` / `getBalanceSheet` over the same range and scope, and the
  * branch, dimension, opening-balance and re-posting cases are exercised against
- * posted entries.
+ * posted entries. Issue #1324 also asks the subledger questions to agree with
+ * the reports that already own them, so the trade receivable, trade payable and
+ * inventory inputs are reconciled against A/R aging, A/P aging and the
+ * inventory-valuation report as of the same date.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -28,6 +31,8 @@ let db: Client;
 let dbLib: typeof import("../src/lib/db");
 let reportsService: typeof import("../src/lib/reports-service");
 let ratioService: typeof import("../src/lib/financial-ratios-service");
+let arService: typeof import("../src/lib/ar-service");
+let apService: typeof import("../src/lib/ap-service");
 
 const biz = { id: "", loc1: "", loc2: "", costCenter: "" };
 const acct = {
@@ -68,6 +73,8 @@ beforeAll(async () => {
   dbLib = await import("../src/lib/db");
   reportsService = await import("../src/lib/reports-service");
   ratioService = await import("../src/lib/financial-ratios-service");
+  arService = await import("../src/lib/ar-service");
+  apService = await import("../src/lib/ap-service");
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
 }, 120_000);
@@ -89,6 +96,9 @@ beforeEach(async () => {
   await db.query("DELETE FROM settings");
   await db.query("DELETE FROM journal_lines");
   await db.query("DELETE FROM journal_entries");
+  await db.query("DELETE FROM stock_movements");
+  await db.query("DELETE FROM inventory_lots");
+  await db.query("DELETE FROM inventory_events");
   await db.query("DELETE FROM accounting_dimension_values");
   await db.query("DELETE FROM businesses");
 
@@ -190,6 +200,37 @@ beforeEach(async () => {
     ],
     biz.loc2,
   );
+
+  // The stock ledger behind the journal's inventory movement: 10 units received
+  // at 100,000 (the opening 1,000,000) and 6 consumed at cost (the February COGS
+  // of 600,000), leaving one open lot worth the 400,000 the 1300 account
+  // carries. The valuation report reads these rows and the ratios read the
+  // journal, so a comparable fixture has to agree on both sides — as a real
+  // posting does, because it writes both.
+  const stockItem = await db.query<{ id: string }>(
+    `INSERT INTO inventory_items (location_id, name, unit, avg_cost, carrying_value_rial)
+     VALUES ($1, 'Flour', 'kg', 100000, 400000) RETURNING id`,
+    [biz.loc1],
+  );
+  const stockEvent = await db.query<{ id: string }>(
+    `INSERT INTO inventory_events (business_id, location_id, event_type, source_type, costing_version, posting_status)
+     VALUES ($1, $2, 'purchase_receipt', 'fixture', 2, 'posted') RETURNING id`,
+    [biz.id, biz.loc1],
+  );
+  const stockItemId = stockItem.rows[0].id;
+  const stockEventId = stockEvent.rows[0].id;
+  await db.query(
+    `INSERT INTO stock_movements (location_id, inventory_item_id, type, quantity, unit_cost, cost_value_rial, source_type, inventory_event_id)
+     VALUES ($1, $2, 'purchase', 10, 100000, 1000000, 'fixture', $3),
+            ($1, $2, 'sale', -6, 100000, 600000, 'fixture', $3)`,
+    [biz.loc1, stockItemId, stockEventId],
+  );
+  await db.query(
+    `INSERT INTO inventory_lots (location_id, inventory_item_id, remaining_qty, unit_cost, source_type, inventory_event_id,
+       original_quantity, original_value_rial, remaining_value_rial)
+     VALUES ($1, $2, 4, 100000, 'fixture', $3, 10, 1000000, 400000)`,
+    [biz.loc1, stockItemId, stockEventId],
+  );
 });
 
 async function post(
@@ -233,6 +274,68 @@ async function report(overrides: Partial<Parameters<typeof ratioService.getFinan
     ...overrides,
   });
 }
+
+/** The inventory-valuation standard report, summed the way its screen and chart read it. */
+async function inventoryValuation(scope: Parameters<typeof reportsService.runStandardReportRows>[2]) {
+  const rows = await reportsService.runStandardReportRows("inventory_valuation", biz.id, scope);
+  return {
+    items: rows.length,
+    value: rows.reduce((sum, row) => sum + Number(row.valuation ?? 0), 0),
+  };
+}
+
+describe("subledger and inventory reports reconcile to the same books", () => {
+  it("agrees with A/R aging and A/P aging as of the period end", async () => {
+    const result = await report();
+    const ar = await arService.getArAging(biz.id, TO);
+    const ap = await apService.getApAging(biz.id, TO);
+
+    expect(ar.asOfDate).toBe(TO);
+    expect(ap.asOfDate).toBe(TO);
+    expect(input(result, "tradeReceivables")).toBe(ar.totals.total);
+    expect(input(result, "tradePayables")).toBe(ap.totals.total);
+    expect(ar.totals.total).toBe(1_500_000);
+    expect(ap.totals.total).toBe(700_000);
+
+    // The same comparison at an earlier period boundary: the March receipt and
+    // the March payment are not in the aging yet, and the ratios must not see
+    // them either.
+    const earlier = await report({ dateTo: "2025-02-28" });
+    const arEarlier = await arService.getArAging(biz.id, "2025-02-28");
+    const apEarlier = await apService.getApAging(biz.id, "2025-02-28");
+    expect(input(earlier, "tradeReceivables")).toBe(arEarlier.totals.total);
+    expect(input(earlier, "tradePayables")).toBe(apEarlier.totals.total);
+    expect(input(earlier, "tradeReceivables")).toBe(2_000_000);
+    expect(input(earlier, "tradePayables")).toBe(1_000_000);
+
+    // The aging reports are business-wide by construction (no branch argument),
+    // so the reconciliation is at that scope. Every A/R and A/P line here is on
+    // branch one; branch two genuinely has none.
+    const secondBranch = await report({ scope: branchScope(biz.loc2) });
+    expect(input(secondBranch, "tradeReceivables")).toBe(0);
+    expect(input(secondBranch, "tradePayables")).toBe(0);
+  });
+
+  it("agrees with the inventory-valuation report at the period end", async () => {
+    const result = await report();
+    const valuation = await inventoryValuation(BUSINESS_WIDE_SCOPE);
+    expect(input(result, "inventory")).toBe(400_000);
+    expect(valuation.items).toBe(1);
+    expect(valuation.value).toBe(input(result, "inventory"));
+
+    // The valuation view carries `location_id`, so unlike the aging reports it
+    // reconciles in branch scope too — on the branch that holds the stock, and
+    // as an honest zero on the branch that holds none.
+    const firstBranch = await report({ scope: branchScope(biz.loc1) });
+    expect(input(firstBranch, "inventory")).toBe(
+      (await inventoryValuation(branchScope(biz.loc1))).value,
+    );
+    const secondBranch = await report({ scope: branchScope(biz.loc2) });
+    expect(input(secondBranch, "inventory")).toBe(
+      (await inventoryValuation(branchScope(biz.loc2))).value,
+    );
+  });
+});
 
 describe("inputs reconcile to the existing statements", () => {
   beforeEach(async () => {

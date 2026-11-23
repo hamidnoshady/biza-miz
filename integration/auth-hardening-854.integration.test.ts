@@ -185,17 +185,22 @@ async function seedBusiness(name: string, options: { ownerPhone?: string | null 
     [businessId],
   );
 
+  // #1386 — the canonical **global** verified number is the recovery channel,
+  // so it belongs to the identity. A membership phone (below) is deliberately
+  // not seeded: an employer-controlled number must never receive the credential
+  // to the person's global password.
   const identity = await db.query<{ id: string }>(
-    `INSERT INTO platform_users (email, password_hash, full_name)
-     VALUES ($1, $2, 'Owner') RETURNING id`,
-    [ownerEmail, await bcrypt.hash(ownerPassword, 10)],
+    `INSERT INTO platform_users (email, password_hash, full_name, phone_e164, phone_verified_at)
+     VALUES ($1, $2, 'Owner', $3, CASE WHEN $3::text IS NULL THEN NULL ELSE now() END)
+     RETURNING id`,
+    [ownerEmail, await bcrypt.hash(ownerPassword, 10), options.ownerPhone ?? null],
   );
 
   const owner = await db.query<{ id: string }>(
-    `INSERT INTO users (business_id, platform_user_id, role, full_name, email, phone_e164, phone_verified_at)
-     VALUES ($1, $2, 'owner', 'Owner', $3, $4, CASE WHEN $4::text IS NULL THEN NULL ELSE now() END)
+    `INSERT INTO users (business_id, platform_user_id, role, full_name, email)
+     VALUES ($1, $2, 'owner', 'Owner', $3)
      RETURNING id`,
-    [businessId, identity.rows[0].id, ownerEmail, options.ownerPhone ?? null],
+    [businessId, identity.rows[0].id, ownerEmail],
   );
 
   return {
@@ -265,11 +270,14 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
     expect(sms.sent).toHaveLength(0);
   });
 
-  it("accepts a verified number held on one of the identity's other memberships", async () => {
+  it("never sends a global reset to a number held on one of the identity's memberships (#1386)", async () => {
     /**
-     * The person may be a cashier here and the accountant there. The channel
-     * belongs to the *identity*, so it is searched across active memberships —
-     * still only ever a number whose possession was proven.
+     * The person may be a cashier here and the accountant there, and a business
+     * administrator can prove a number they hold on that membership. Accepting
+     * it would hand the administrator the recovery channel for the person's
+     * global password — the takeover #854 closed. #1386 keys recovery on the
+     * canonical `platform_users.phone_e164`, so a membership-only number is
+     * refused rather than used.
      */
     const alpha = await seedBusiness("Alpha", { ownerPhone: null });
     const beta = await seedBusiness("Beta", { ownerPhone: null });
@@ -280,13 +288,29 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
       [beta.businessId, alpha.ownerPlatformUserId, alpha.ownerEmail],
     );
 
+    await expect(
+      dbLib.withTenant(alpha.businessId, () =>
+        team.requestMemberPasswordReset(alpha.businessId, alpha.ownerId, alpha.ownerId, {
+          origin: "https://app.example.com",
+        }),
+      ),
+    ).rejects.toThrow("no_verified_channel");
+    expect(sms.sent).toHaveLength(0);
+
+    // Once the identity itself holds a verified global number, that number is
+    // the recipient — still never the membership's.
+    await db.query(
+      `UPDATE platform_users SET phone_e164 = '+989121110003', phone_verified_at = now() WHERE id = $1`,
+      [alpha.ownerPlatformUserId],
+    );
     const issued = await dbLib.withTenant(alpha.businessId, () =>
       team.requestMemberPasswordReset(alpha.businessId, alpha.ownerId, alpha.ownerId, {
         origin: "https://app.example.com",
       }),
     );
-    expect(issued.deliveredTo).toBe("+989***0002");
-    expect(sms.sent[0].phone).toBe("+989121110002");
+    expect(issued.deliveredTo).toBe("+989***0003");
+    expect(sms.sent).toHaveLength(1);
+    expect(sms.sent[0].phone).toBe("+989121110003");
   });
 });
 
