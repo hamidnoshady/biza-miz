@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { loadPrintBehavior } from "@/lib/printing/behavior-service";
+import { printBehaviorFor } from "@/lib/printing/behavior";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { PAPERS } from "@/lib/print-template";
@@ -192,6 +194,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // different document, not for a different printer.
   if (parsed.source.kind === "document" && !documentTypesFor(parsed.source.document).includes(documentType)) {
     return NextResponse.json({ ok: false, error: "document_type_mismatch" }, { status: 409 });
+  }
+  if (parsed.source.kind === "document") {
+    const policy = await loadPrintBehavior(session.businessId, location.id);
+    const behavior = printBehaviorFor(policy.effective, documentType);
+    const automatic = (body as { automatic?: unknown }).automatic === true;
+    if (behavior.mode === "disabled" || (automatic && behavior.mode === "manual")) {
+      return NextResponse.json({ ok: false, error: "print_disabled" }, { status: 409 });
+    }
   }
   // A sample print has no connection id, but it still exercises a Woo-specific
   // document/template. Do not let a printing-only member bypass the live Woo

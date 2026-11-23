@@ -40,6 +40,7 @@ import { recordOrderState, type OrderStateActor } from "./order-state-sync";
 import { discountPercentForControl, normalizeVoidReason } from "./order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
 import { enqueueKitchenDispatch } from "./kitchen-dispatch";
+import { getKitchenWorkflow, scheduleKitchenTicket } from "./kitchen-workflow";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -196,6 +197,8 @@ export interface CreateOrderInput {
   actorRole?: Role;
   /** False only while applying an event already present in the sync inbox. */
   recordSyncEvent?: boolean;
+  /** Resolved by the originating server for an authenticated peer replay. */
+  replayReadyOnSend?: boolean;
   /**
    * Skip the kitchen dispatch enqueue for this order (ESH-146).
    *
@@ -601,6 +604,8 @@ export async function createOrder(
       });
     }
 
+    const readyOnSend = !input.holdKitchenDispatch && (input.replayReadyOnSend ??
+      Boolean(businessId && await getKitchenWorkflow(businessId, input.locationId, client) === "ready_on_send"));
     const lineIds: string[] = [];
     for (const [index, item] of preparedItems.entries()) {
       // Submitting the order *is* "send to kitchen": items land as 'sent'
@@ -609,8 +614,10 @@ export async function createOrder(
       // entered the order (issue #913 item 11), like `unit_price` — the
       // category's live rate must not reprice a bill that already quoted it.
       const { rows: itemRows } = await client.query<{ id: string }>(
-        `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
-         VALUES (coalesce($8::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6, $7, 'sent', now(), $9) RETURNING id`,
+        `INSERT INTO order_items (id, location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot, ready_at)
+         VALUES (coalesce($8::uuid, gen_random_uuid()), $1, $2, $3, $4, $5, $6, $7,
+                 CASE WHEN $10::boolean THEN 'ready'::order_item_status ELSE 'sent'::order_item_status END,
+                 now(), $9, CASE WHEN $10 THEN now() END) RETURNING id`,
         [
           input.locationId,
           orderId,
@@ -621,6 +628,7 @@ export async function createOrder(
           item.note,
           input.itemIds?.[index] ?? null,
           cartLines[index]?.taxRatePercent ?? 0,
+          readyOnSend,
         ],
       );
       const orderItemId = itemRows[0].id;
@@ -634,6 +642,7 @@ export async function createOrder(
       );
     }
 
+    if (readyOnSend) await scheduleKitchenTicket(client, input.locationId, orderId);
     if (businessId && !input.holdKitchenDispatch) {
       await enqueueKitchenDispatch(client, {
         businessId,
@@ -664,6 +673,7 @@ export async function createOrder(
           // The lines' own ids, so the peer creates the very same lines and a
           // later order.state.synced finds them (migration 0190).
           itemIds: lineIds,
+          readyOnSend,
           delivery: input.delivery ?? null,
           // The business-request identity rides along so a peer's replay
           // dedupes on the SAME key the till used, not on the outbox event id
@@ -758,12 +768,16 @@ export async function addItemsToOrder(
         }
       : { type: null };
 
+    const readyOnSend = Boolean(businessId &&
+      await getKitchenWorkflow(businessId, input.locationId, client) === "ready_on_send");
     const itemIds: string[] = [];
     for (const [index, item] of preparedItems.entries()) {
       // Tax frozen at the moment the line joins the order (issue #913 item 11).
       const { rows: itemRows } = await client.query<{ id: string }>(
-        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'sent', now(), $8) RETURNING id`,
+        `INSERT INTO order_items (location_id, order_id, menu_item_id, name_snapshot, unit_price, quantity, note, status, sent_to_kitchen_at, tax_rate_snapshot, ready_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7,
+                 CASE WHEN $9::boolean THEN 'ready'::order_item_status ELSE 'sent'::order_item_status END,
+                 now(), $8, CASE WHEN $9 THEN now() END) RETURNING id`,
         [
           input.locationId,
           input.orderId,
@@ -773,6 +787,7 @@ export async function addItemsToOrder(
           item.quantity,
           item.note,
           cartLines[index]?.taxRatePercent ?? 0,
+          readyOnSend,
         ],
       );
       const orderItemId = itemRows[0].id;
@@ -785,6 +800,7 @@ export async function addItemsToOrder(
         item.modifiers,
       );
     }
+    await scheduleKitchenTicket(client, input.locationId, input.orderId);
     if (businessId) {
       await enqueueKitchenDispatch(client, {
         businessId,

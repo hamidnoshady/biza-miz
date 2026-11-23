@@ -29,6 +29,8 @@ import type { DocType, PaperKey } from "../print-template";
 import { CONNECTOR_PROTOCOL_VERSION, CONNECTOR_PORT } from "./connector-release";
 import { validPageGeometry, type PageGeometry } from "./page-geometry";
 import type { PrintDocumentRef, WooPrintDocumentRef, PrintSampleJob } from "./document-request";
+import { defaultDocumentTypeFor } from "./document-request";
+import { readCurrentPrintBehavior } from "./behavior-client";
 import { classifyDeliveryError, classifyDeliveryOutcome, type PrinterErrorCode } from "./errors";
 import type { PrinterPurpose, PrinterTarget } from "./types";
 import type { DesktopPrintingBridge } from "../desktop-bridge";
@@ -311,6 +313,8 @@ export async function sendRawToPrinter(target: PrinterTarget, bytes: Uint8Array)
 
 export interface PrintResult {
   ok: boolean;
+  skipped?: boolean;
+  notificationsMuted?: boolean;
   error?: PrinterErrorCode;
   detail?: string;
   /** True when the delivery outcome was ambiguous (e.g. timeout after bytes were sent). */
@@ -371,7 +375,7 @@ export function subscribePrintProgress(listener: ProgressListener): () => void {
   return () => progressListeners.delete(listener);
 }
 
-function reportProgress(state: PrintProgress | null): void {
+function publishPrintProgress(state: PrintProgress | null): void {
   for (const listener of progressListeners) listener(state);
 }
 
@@ -487,6 +491,7 @@ export async function printJob(
     templateId?: string | null;
     templateKey?: string | null;
     connectionId?: string | null;
+    automatic?: boolean;
   } = {},
 ): Promise<PrintResult> {
   const key = opts.requestId;
@@ -494,7 +499,22 @@ export async function printJob(
     const existing = inflightPrints.get(key);
     if (existing) return existing;
   }
-  const run = executePrintJob(printerId, payload, opts.title ?? "چاپ", opts);
+  const run = (async () => {
+    const type = "document" in payload ? opts.documentType ?? defaultDocumentTypeFor(payload.document) : undefined;
+    const behavior = opts.automatic && type ? await readCurrentPrintBehavior(type) : undefined;
+    if (behavior && behavior.mode !== "automatic") {
+      return { ok: false, skipped: true, notificationsMuted: true, error: "print_disabled" } satisfies PrintResult;
+    }
+    const result = await executePrintJob(printerId, payload, opts.title ?? "چاپ", {
+      ...opts,
+      notifications: behavior?.notifications,
+    });
+    if (opts.automatic && result.error === "print_disabled") {
+      return { ...result, skipped: true, notificationsMuted: true };
+    }
+    if (behavior?.notifications === "off") return { ...result, notificationsMuted: true };
+    return result;
+  })();
   if (!key) return run;
   inflightPrints.set(key, run);
   try {
@@ -508,8 +528,15 @@ async function executePrintJob(
   printerId: string | null,
   payload: PrintRequestPayload,
   title: string,
-  opts: { requestId?: string; documentType?: DocType; templateId?: string | null; templateKey?: string | null; connectionId?: string | null },
+  opts: {
+    requestId?: string; documentType?: DocType; templateId?: string | null; templateKey?: string | null;
+    connectionId?: string | null; automatic?: boolean; notifications?: "all" | "failures" | "off";
+  },
 ): Promise<PrintResult> {
+  const reportProgress = (state: PrintProgress) => {
+    if (opts.notifications === "off" || (opts.notifications === "failures" && state.phase !== "failed")) return;
+    publishPrintProgress(state);
+  };
   reportProgress({ phase: "preparing", title });
 
   async function requestRender(extra: {
@@ -542,6 +569,7 @@ async function executePrintJob(
             connectionId: opts.connectionId || undefined,
             printRequestId: extra.requestIdOverride ?? opts.requestId,
             documentType: opts.documentType,
+            automatic: opts.automatic,
             ...payload,
           }),
           signal: controller.signal,
@@ -868,7 +896,7 @@ export async function testPrintDraft(
 export function printSaleReceipt(
   printerId: string | null,
   orderId: string,
-  opts: { requestId?: string; title?: string; templateId?: string | null } = {},
+  opts: { requestId?: string; title?: string; templateId?: string | null; automatic?: boolean } = {},
 ): Promise<PrintResult> {
   return printJob(
     printerId,
@@ -894,7 +922,7 @@ export function printSaleInvoice(
 export function printKitchenTicket(
   printerId: string | null,
   orderId: string,
-  opts: { requestId?: string; title?: string; itemIds?: string[] } = {},
+  opts: { requestId?: string; title?: string; itemIds?: string[]; automatic?: boolean } = {},
 ): Promise<PrintResult> {
   return printJob(
     printerId,
@@ -928,7 +956,7 @@ export function printTemplateSample(
 }
 
 /** Open the till drawer through the printer it is wired to (ESC p). */
-export function kickDrawer(printerId: string): Promise<PrintResult> {
+export function kickDrawer(printerId: string | null): Promise<PrintResult> {
   return printJob(printerId, { job: { type: "drawer-kick" } }, { title: "بازکردن کشو" });
 }
 

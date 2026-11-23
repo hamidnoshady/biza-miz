@@ -335,6 +335,29 @@ function parseState(payload: Record<string, unknown>): OrderStatePayload {
       throw new OrderStateTerminal("invalid_order_state");
     }
   }
+  /*
+   * A website-origin order carries "" where the till sends null (the CMS intake
+   * has no table, no customer, no cashier). Binding that to a uuid column is a
+   * Postgres cast error — `invalid input syntax for type uuid: ""` — which
+   * dead-lettered a real, valid open order and, worse, was the only thing the
+   * operator ever saw of it. An empty string is "no value" everywhere a uuid is
+   * expected, so it becomes null here rather than reaching a cast.
+   */
+  const uuidOrNull = (value: unknown): string | null =>
+    typeof value === "string" && UUID.test(value) ? value : null;
+  state.order.tableId = uuidOrNull(state.order.tableId);
+  state.order.customerId = uuidOrNull(state.order.customerId);
+  state.order.openedBy = uuidOrNull(state.order.openedBy);
+  state.order.closedBy = uuidOrNull(state.order.closedBy);
+  if (state.order.tableSessionId !== undefined) {
+    state.order.tableSessionId = uuidOrNull(state.order.tableSessionId);
+  }
+  for (const item of state.items) {
+    item.menuItemId = uuidOrNull(item.menuItemId);
+    for (const modifier of item.modifiers) {
+      modifier.modifierId = uuidOrNull(modifier.modifierId);
+    }
+  }
   return state;
 }
 

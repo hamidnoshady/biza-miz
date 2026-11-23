@@ -11,6 +11,11 @@ export interface JournalLine {
   accountId: string;
   /** Registered account explicitly used by this money leg, when known. */
   financialAccountId?: string | null;
+  /**
+   * The counterparty this leg belongs to, when the document names one.
+   * Optional: most legs carry no party, and every pre-existing caller omits it.
+   */
+  partyId?: string | null;
   debit: Rial;
   credit: Rial;
   /**

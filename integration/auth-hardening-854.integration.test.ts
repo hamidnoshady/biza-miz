@@ -170,7 +170,10 @@ interface Seed {
   ownerPassword: string;
 }
 
-async function seedBusiness(name: string, options: { ownerPhone?: string | null } = {}): Promise<Seed> {
+async function seedBusiness(
+  name: string,
+  options: { ownerPhone?: string | null; identityPhone?: string | null } = {},
+): Promise<Seed> {
   const slug = `${name.toLowerCase()}-${randomUUID().slice(0, 8)}`;
   const ownerEmail = `owner-${randomUUID().slice(0, 8)}@example.com`;
   const ownerPassword = "owner-password-854";
@@ -185,22 +188,18 @@ async function seedBusiness(name: string, options: { ownerPhone?: string | null 
     [businessId],
   );
 
-  // #1386 — the canonical **global** verified number is the recovery channel,
-  // so it belongs to the identity. A membership phone (below) is deliberately
-  // not seeded: an employer-controlled number must never receive the credential
-  // to the person's global password.
   const identity = await db.query<{ id: string }>(
     `INSERT INTO platform_users (email, password_hash, full_name, phone_e164, phone_verified_at)
      VALUES ($1, $2, 'Owner', $3, CASE WHEN $3::text IS NULL THEN NULL ELSE now() END)
      RETURNING id`,
-    [ownerEmail, await bcrypt.hash(ownerPassword, 10), options.ownerPhone ?? null],
+    [ownerEmail, await bcrypt.hash(ownerPassword, 10), options.identityPhone ?? null],
   );
 
   const owner = await db.query<{ id: string }>(
-    `INSERT INTO users (business_id, platform_user_id, role, full_name, email)
-     VALUES ($1, $2, 'owner', 'Owner', $3)
+    `INSERT INTO users (business_id, platform_user_id, role, full_name, email, phone_e164, phone_verified_at)
+     VALUES ($1, $2, 'owner', 'Owner', $3, $4, CASE WHEN $4::text IS NULL THEN NULL ELSE now() END)
      RETURNING id`,
-    [businessId, identity.rows[0].id, ownerEmail],
+    [businessId, identity.rows[0].id, ownerEmail, options.ownerPhone ?? null],
   );
 
   return {
@@ -216,7 +215,10 @@ async function seedBusiness(name: string, options: { ownerPhone?: string | null 
 
 describe("Issue #854 — P0.3 no tenant administrator ever receives a usable reset credential", () => {
   it("sends the link to the holder's verified phone and returns only a masked target", async () => {
-    const seeded = await seedBusiness("Alpha", { ownerPhone: "+989121110001" });
+    // The channel is the canonical *identity* number (0302 / #1384), not a
+    // membership phone the administrator could re-point, so the seed proves
+    // the global one is what the credential travels to.
+    const seeded = await seedBusiness("Alpha", { identityPhone: "+989121110001" });
 
     const issued = await dbLib.withTenant(seeded.businessId, () =>
       team.requestMemberPasswordReset(seeded.businessId, seeded.ownerId, seeded.ownerId, {
@@ -270,14 +272,14 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
     expect(sms.sent).toHaveLength(0);
   });
 
-  it("never sends a global reset to a number held on one of the identity's memberships (#1386)", async () => {
+  it("refuses a number verified only on a membership, never the identity (0302 / #1386)", async () => {
     /**
-     * The person may be a cashier here and the accountant there, and a business
-     * administrator can prove a number they hold on that membership. Accepting
-     * it would hand the administrator the recovery channel for the person's
-     * global password — the takeover #854 closed. #1386 keys recovery on the
-     * canonical `platform_users.phone_e164`, so a membership-only number is
-     * refused rather than used.
+     * A membership phone is the administrator's to re-point, so it cannot carry
+     * the global reset credential — that would hand the administrator the
+     * person's recovery channel, the takeover #854 closed. 0302 keeps the
+     * canonical `platform_users` number as the only eligible one; a person with
+     * verified membership phones and no global number is refused rather than
+     * silently downgraded to a lesser channel.
      */
     const alpha = await seedBusiness("Alpha", { ownerPhone: null });
     const beta = await seedBusiness("Beta", { ownerPhone: null });

@@ -449,7 +449,7 @@ describe("the taxpayer register on the ledger workspace", () => {
 });
 
 describe("the ledger tool divisions", () => {
-  it("gives every ledger tool exactly one division, and the tool set is exactly these twenty-three", () => {
+  it("gives every ledger tool exactly one division, and the tool set is exactly these twenty-four", () => {
     // The contract, written out: a tool added or dropped must change this list
     // on purpose. The tool set is derived from the divisions, so this is the one
     // place the membership is pinned — not a second copy of it.
@@ -457,8 +457,10 @@ describe("the ledger tool divisions", () => {
     // Issue #862 added the two money-container tools («حساب‌های مالی»,
     // «انتقال وجه») to the funds division, beside the payments they are the
     // counterparts of.
+    // Issue #1323 added «اسناد دوره‌ای» beside the manual journal it drafts
+    // into, so the books division carries one more tool.
     const expected = [
-      "trial-balance", "entries", "vouchers", "manual", "multicurrency", "chart-of-accounts", "dimensions",
+      "trial-balance", "entries", "vouchers", "manual", "recurring-vouchers", "multicurrency", "chart-of-accounts", "dimensions",
       "receivables", "payables", "installments", "cheques",
       "receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets",
       "shareholders", "fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll",
@@ -470,7 +472,7 @@ describe("the ledger tool divisions", () => {
     // The order inside each division is what the page and the in-page rail
     // show, so it is pinned too: the rail's siblings follow this order.
     expect(LEDGER_WORKSPACE_SUBGROUPS.map((subGroup) => subGroup.keys)).toEqual([
-      ["trial-balance", "entries", "vouchers", "manual", "multicurrency", "chart-of-accounts", "dimensions"],
+      ["trial-balance", "entries", "vouchers", "manual", "recurring-vouchers", "multicurrency", "chart-of-accounts", "dimensions"],
       ["receivables", "payables", "installments", "cheques"],
       ["receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets"],
       ["shareholders"],

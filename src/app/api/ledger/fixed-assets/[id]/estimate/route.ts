@@ -9,10 +9,11 @@ interface Ctx {
 }
 
 /**
- * Changes an asset's useful life or salvage value *prospectively* (issue
- * #833): posted periods are never rewritten; the change and the remaining
- * schedule it implies are recorded together, with a mandatory reason, and
- * every later period spreads what was left over the life that was left.
+ * Changes an asset's useful life, salvage value or depreciation method
+ * *prospectively* (issues #833, #1325): posted periods are never rewritten;
+ * the change and the remaining schedule it implies are recorded together,
+ * with a mandatory reason, and every later period spreads what was left over
+ * the life that was left under the newly approved method.
  */
 export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   const { session, error } = await requirePermission(PERMISSIONS.financeAssetsManage);
@@ -20,7 +21,16 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
 
   const { id } = await ctx.params;
   if (!isUuid(id)) return NextResponse.json({ error: "fixed_asset_not_found" }, { status: 404 });
-  let body: { usefulLifeMonths?: number; salvageValue?: number; reason?: string };
+  let body: {
+    usefulLifeMonths?: number;
+    salvageValue?: number;
+    depreciationMethod?: string;
+    decliningBalanceRateBps?: number;
+    decliningBalanceSwitchPolicy?: string;
+    totalCapacityUnits?: number;
+    capacityUnitLabel?: string;
+    reason?: string;
+  };
   try {
     body = await request.json();
   } catch {
@@ -36,6 +46,21 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
       fixedAssetId: id,
       usefulLifeMonths: body.usefulLifeMonths === undefined || body.usefulLifeMonths === null ? null : Number(body.usefulLifeMonths),
       salvageValue: body.salvageValue === undefined || body.salvageValue === null ? null : Number(body.salvageValue),
+      depreciationMethod:
+        typeof body.depreciationMethod === "string" && body.depreciationMethod.trim()
+          ? body.depreciationMethod
+          : null,
+      decliningBalanceRateBps:
+        body.decliningBalanceRateBps === undefined || body.decliningBalanceRateBps === null
+          ? null
+          : Number(body.decliningBalanceRateBps),
+      decliningBalanceSwitchPolicy:
+        typeof body.decliningBalanceSwitchPolicy === "string" ? body.decliningBalanceSwitchPolicy : null,
+      totalCapacityUnits:
+        body.totalCapacityUnits === undefined || body.totalCapacityUnits === null
+          ? null
+          : Number(body.totalCapacityUnits),
+      capacityUnitLabel: typeof body.capacityUnitLabel === "string" ? body.capacityUnitLabel : null,
       reason: String(body.reason ?? ""),
       createdBy: session.sub,
     });

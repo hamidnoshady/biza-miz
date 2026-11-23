@@ -13,5 +13,5 @@ export default async function KitchenPage() {
   const permissions = access?.permissions ?? new Set<string>();
   if (!permissions.has(PERMISSIONS.kitchenView)) redirect("/dashboard");
 
-  return <KdsBoard />;
+  return <KdsBoard canReviewStale={permissions.has(PERMISSIONS.settingsManage)} />;
 }

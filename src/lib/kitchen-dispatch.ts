@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { deploymentRole } from "./deployment-role";
 import { readDeploymentProfile } from "./deployment-mode";
+import { loadPrintBehavior } from "./printing/behavior-service";
+import { printBehaviorFor } from "./printing/behavior";
 
 export type KitchenDispatchOwner = "local_runtime" | "hybrid_site" | "cloud_station";
 
@@ -33,6 +35,8 @@ export async function enqueueKitchenDispatch(
   const profile = await readDeploymentProfile(input.businessId);
   const ownerMode = kitchenDispatchOwner(profile.profile, deploymentRole());
   if (!ownerMode) return null;
+  const policy = await loadPrintBehavior(input.businessId, input.locationId, client);
+  if (printBehaviorFor(policy.effective, "kitchen").mode !== "automatic") return null;
 
   const canonicalIds = [...new Set(input.itemIds)].sort();
   if (canonicalIds.length !== input.itemIds.length) {

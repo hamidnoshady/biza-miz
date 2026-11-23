@@ -468,6 +468,20 @@ app.prepare().then(async () => {
     runTaxInvoiceTick().catch((err) => console.error("tax invoice tick failed:", err));
   scheduleCentralTick(taxInvoiceTick, TAX_INVOICE_TICK_INTERVAL_MS, 110_000);
 
+  // Issue #1323 — recurring journal voucher templates. Each pass claims the
+  // dates that have come due and creates *drafts* only; approval stays on the
+  // existing manual-journal queue. Central, because the books are
+  // authoritative there, and safe to run concurrently: the per-template lock
+  // and the occurrence/draft unique keys make a second worker a no-op.
+  const { runRecurringVoucherTick, RECURRING_VOUCHER_TICK_INTERVAL_MS } = await import(
+    "./src/lib/recurring-voucher-tick"
+  );
+  const recurringVoucherTick = () =>
+    runRecurringVoucherTick().catch((err) =>
+      console.error("recurring voucher tick failed:", err),
+    );
+  scheduleCentralTick(recurringVoucherTick, RECURRING_VOUCHER_TICK_INTERVAL_MS, 95_000);
+
   // Phase 38 (issue #381): push product/stock/price changes to the business's
   // website through website_outbox — the WooCommerce tick's shape exactly
   // (bypass to enumerate, withTenant per business, one business's failure
