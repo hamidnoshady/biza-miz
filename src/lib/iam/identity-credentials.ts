@@ -115,25 +115,6 @@ export async function setIdentityEmail(input: {
   }
 }
 
-/** Whether a fresh proof still needs to be minted for the current address. */
-export async function hasLiveEmailVerification(platformUserId: string): Promise<boolean> {
-  const { rows } = await withoutTenantScope("identity", () =>
-    query<{ live: boolean }>(
-      `SELECT EXISTS (
-          SELECT 1 FROM platform_email_verifications v
-            JOIN platform_users p ON p.id = v.platform_user_id
-           WHERE v.platform_user_id = $1
-             AND v.consumed_at IS NULL
-             AND v.expires_at > now()
-             AND p.email = v.email
-             AND p.email_verified_at IS NULL
-        ) AS live`,
-      [platformUserId],
-    ),
-  );
-  return rows[0]?.live === true;
-}
-
 export type IssueEmailVerificationResult =
   | { ok: true; token: string; expiresAt: string; email: string }
   | { ok: false; error: "identity_missing" | "email_missing" };

@@ -267,6 +267,11 @@ const PUBLIC_PATHS = [
   // page returns only frozen-content/PDF hashes and completion metadata, never
   // contract or signer identifiers, so it is public like the signer token page.
   "/verify/contract",
+  // ESH-199 / #1384 follow-up — the email proof is opened from a mail link,
+  // where no session exists. The single-use token is the credential; the page
+  // renders a confirm action and the POST below redeems it.
+  "/verify/email",
+  "/api/auth/email/verify",
   // First-run flow: /welcome bootstraps an empty install; the state endpoint
   // answers "needsBootstrap" (and nothing more) without a session.
   "/welcome",
@@ -606,6 +611,9 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   // browser-driven pre-session mutations: a cross-site POST must not be able to
   // save another person's draft or confirm provisioning for them.
   "/api/onboarding",
+  // ESH-199 / #1384 follow-up — the email proof is redeemed by a browser POST
+  // from the confirmation page, so it carries the same Origin rule.
+  "/api/auth/email/verify",
   // Issue #854 follow-up — the sign-out retry is session-less for the reason
   // given in PUBLIC_PATHS; a cross-site POST to it must still be refused, even
   // though all it could ever do is end a session the browser already left.

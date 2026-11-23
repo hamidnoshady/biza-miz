@@ -22,11 +22,14 @@ import {
 } from "./industries";
 import { isStoredLogo, type BusinessLogo } from "./business-logo";
 import {
-  hasLiveEmailVerification,
   issueEmailVerification,
   normalizeIdentityEmail,
   setIdentityEmail,
 } from "./iam/identity-credentials";
+import {
+  sendIdentityEmailVerification,
+  type IdentityEmailDeliveryOutcome,
+} from "./iam/identity-email-delivery";
 import {
   clearNationalId,
   hasNationalId,
@@ -91,7 +94,12 @@ export type SaveStepInput = {
 };
 
 export type SaveStepResult =
-  | { ok: true; draft: OnboardingDraft }
+  | {
+      ok: true;
+      draft: OnboardingDraft;
+      /** Present on the profile step when an email proof was minted. */
+      emailVerification?: IdentityEmailDeliveryOutcome;
+    }
   | {
       ok: false;
       error:
@@ -259,6 +267,7 @@ export async function saveOnboardingStep(
     if (!identity) return { ok: false as const, error: "identity_missing" as const };
 
     const current = await readDraft(platformUserId);
+    let emailVerification: IdentityEmailDeliveryOutcome | undefined;
 
     if (input.step === "industry") {
       const industry = text(input.industry);
@@ -359,13 +368,20 @@ export async function saveOnboardingStep(
             };
           }
           // A changed address always needs a fresh proof (the 0305 trigger
-          // cleared the old stamp). Re-saving the same address must not rotate
-          // a token the owner may already have in their inbox.
-          if (
-            saved.changed ||
-            (!identity.email_verified_at && !(await hasLiveEmailVerification(platformUserId)))
-          ) {
-            await issueEmailVerification({ platformUserId });
+          // cleared the old stamp). An unverified address is re-proved on save
+          // too, so a person whose first mail did not arrive can retry by
+          // saving the step again.
+          if (saved.changed || !identity.email_verified_at) {
+            const issued = await issueEmailVerification({ platformUserId });
+            if (!issued.ok) {
+              return { ok: false as const, error: "invalid_email" as const };
+            }
+            emailVerification = (
+              await sendIdentityEmailVerification({
+                to: issued.email,
+                token: issued.token,
+              })
+            ).outcome;
           }
         }
       }
@@ -411,7 +427,11 @@ export async function saveOnboardingStep(
     }
 
     const next = await readDraft(platformUserId);
-    return { ok: true as const, draft: draftFromRow(next) };
+    return {
+      ok: true as const,
+      draft: draftFromRow(next),
+      ...(emailVerification ? { emailVerification } : {}),
+    };
   });
 }
 

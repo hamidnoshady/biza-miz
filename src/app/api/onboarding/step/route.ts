@@ -50,5 +50,9 @@ export async function POST(request: Request) {
             : 400;
     return noStore(result, { status });
   }
-  return noStore({ ok: true, draft: result.draft });
+  return noStore({
+    ok: true,
+    draft: result.draft,
+    ...(result.emailVerification ? { emailVerification: result.emailVerification } : {}),
+  });
 }

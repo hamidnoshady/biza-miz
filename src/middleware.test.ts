@@ -129,6 +129,13 @@ describe("isPublicPath", () => {
     expect(isBrowserLoginMutationPath("/api/onboarding/submit")).toBe(true);
   });
 
+  it("lets an email proof be opened and redeemed without a session", () => {
+    expect(isPublicPath("/verify/email/opaque-token")).toBe(true);
+    expect(isPublicPath("/api/auth/email/verify")).toBe(true);
+    expect(isBrowserLoginMutationPath("/api/auth/email/verify")).toBe(true);
+    expect(isPublicPath("/api/auth/email/verifyx")).toBe(false);
+  });
+
   it("keeps the authenticated phone self-service gated, and the sibling routes too", () => {
     // Opening the login door must not open the account-settings one. These
     // act on a signed-in member's own number and have a session to require.

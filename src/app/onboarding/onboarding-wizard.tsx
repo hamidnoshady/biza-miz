@@ -113,6 +113,7 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
   const [email, setEmail] = useState(initialState.identity.email ?? "");
   const [nationalId, setNationalId] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  const [emailNotice, setEmailNotice] = useState("");
   const fileInput = useRef<HTMLInputElement | null>(null);
 
   const step = STEP_ORDER[stepIndex];
@@ -150,6 +151,7 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
       const { ok, status, data } = await callJson<{
         ok?: boolean;
         draft?: OnboardingDraft;
+        emailVerification?: "sent" | "unavailable" | "failed";
         error?: string;
         next?: string;
       }>("/api/onboarding/step", {
@@ -167,6 +169,17 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
         return false;
       }
       setDraft(data.draft);
+      if (data.emailVerification === "sent") {
+        setEmailNotice("پیوند تأیید به ایمیل شما ارسال شد.");
+      } else if (data.emailVerification === "unavailable") {
+        setEmailNotice(
+          "ایمیل ثبت شد؛ اما ارسال ایمیل تأیید در این نصب پیکربندی نشده است. برای استفادهٔ حساس، تأیید لازم است.",
+        );
+      } else if (data.emailVerification === "failed") {
+        setEmailNotice(
+          "ایمیل ثبت شد؛ اما ارسال پیام تأیید ناموفق بود. می‌توانید دوباره ذخیره کنید یا بعداً از بخش امنیت حساب تلاش کنید.",
+        );
+      }
       setSaveState("saved");
       return true;
     } catch {
@@ -551,6 +564,11 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
                   placeholder="name@example.com"
                 />
               </Field>
+              {emailNotice ? (
+                <p className="mb-4 rounded-lg bg-muted/60 px-3 py-2 text-xs leading-5 text-muted-foreground" role="status">
+                  {emailNotice}
+                </p>
+              ) : null}
               <Field
                 label="کد ملی"
                 hint={
