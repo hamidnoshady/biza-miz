@@ -55,6 +55,11 @@ export interface DraftLineInput {
   accountId: string;
   debit: number;
   credit: number;
+  /**
+   * The counterparty this leg belongs to, when the document names one.
+   * Optional and carried through to `journal_lines.party_id` on approval.
+   */
+  partyId?: string | null;
   /** Optional accounting dimensions (issue #868). Checked when the draft is written AND again at approval. */
   dimensions?: LineDimensions | null;
 }
@@ -213,6 +218,7 @@ interface DraftLineRow extends Record<string, unknown> {
   account_name: string;
   debit: string;
   credit: string;
+  party_id: string | null;
   cost_center_id: string | null;
   profit_center_id: string | null;
   department_id: string | null;
@@ -235,7 +241,7 @@ async function attachLines(
    * id because that one is an identity bigint.
    */
   const lineSelect = `SELECT dl.draft_id, dl.account_id, a.code AS account_code, a.name AS account_name, dl.debit::text AS debit, dl.credit::text AS credit,
-                  dl.cost_center_id, dl.profit_center_id, dl.department_id, dl.detail_dimension_id
+                  dl.party_id, dl.cost_center_id, dl.profit_center_id, dl.department_id, dl.detail_dimension_id
            FROM journal_entry_draft_lines dl
            JOIN accounts a ON a.id = dl.account_id
            JOIN journal_entry_drafts d ON d.id = dl.draft_id
@@ -253,6 +259,7 @@ async function attachLines(
       accountName: l.account_name,
       debit: Number(l.debit),
       credit: Number(l.credit),
+      partyId: l.party_id,
       dimensions: dimensionsFromColumns(l),
     });
     linesByDraft.set(l.draft_id, list);
@@ -354,7 +361,7 @@ export async function createDraft(params: {
   entryDate?: string | null;
   memo: string;
   lines: DraftLineInput[];
-  createdBy: string;
+  createdBy: string | null;
   /** Client-supplied dedupe key; a retry with the same key returns the first draft. */
   idempotencyKey?: string | null;
   /**
@@ -468,9 +475,9 @@ export async function createDraft(params: {
       const dims = dimensionColumnValues(l.dimensions);
       await client.query(
         `INSERT INTO journal_entry_draft_lines
-           (draft_id, account_id, debit, credit, line_no, cost_center_id, profit_center_id, department_id, detail_dimension_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [draftId, l.accountId, l.debit, l.credit, index, dims.cost_center_id, dims.profit_center_id, dims.department_id, dims.detail_dimension_id],
+           (draft_id, account_id, debit, credit, line_no, party_id, cost_center_id, profit_center_id, department_id, detail_dimension_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [draftId, l.accountId, l.debit, l.credit, index, l.partyId ?? null, dims.cost_center_id, dims.profit_center_id, dims.department_id, dims.detail_dimension_id],
       );
     }
     await client.query("COMMIT");
@@ -555,6 +562,14 @@ export async function rejectDraft(params: {
         reason,
       ],
     );
+    // Settled *before* the draft is deleted: `occurrences.draft_id` is
+    // `ON DELETE SET NULL`, so after the delete there is no row left to point
+    // at the decision.
+    await settleRecurringOccurrencesForDraft(client, {
+      businessId: params.businessId,
+      draftId: params.draftId,
+      reason: "draft_rejected",
+    });
     const { rowCount } = await client.query(
       `DELETE FROM journal_entry_drafts WHERE id = $1 AND business_id = $2`,
       [params.draftId, params.businessId],
@@ -570,17 +585,78 @@ export async function rejectDraft(params: {
   }
 }
 
+/**
+ * Close the recurring-voucher occurrence that produced this draft, in the same
+ * transaction as the decision.
+ *
+ * Approval moves it to `posted` and records the journal entry; a rejection or
+ * withdrawal moves it to `skipped` with the reason. Writing it here — rather
+ * than in a route-level follow-up — is what keeps «approved» and «occurrence
+ * posted» from disagreeing after a crash between the two.
+ */
+async function settleRecurringOccurrencesForDraft(
+  client: Pick<PoolClient, "query">,
+  params: {
+    businessId: string;
+    draftId: string;
+    entryId?: string | null;
+    reason?: string | null;
+  },
+): Promise<void> {
+  const status = params.entryId ? "posted" : "skipped";
+  const { rows } = await client.query<{ id: string; template_id: string }>(
+    `UPDATE recurring_journal_occurrences
+        SET status = $3,
+            entry_id = coalesce($4::uuid, entry_id),
+            posted_at = CASE WHEN $3 = 'posted' THEN now() ELSE posted_at END,
+            held_reason = $5,
+            updated_at = now()
+      WHERE business_id = $1 AND draft_id = $2 AND status <> 'posted'
+      RETURNING id, template_id`,
+    [params.businessId, params.draftId, status, params.entryId ?? null, params.reason ?? null],
+  );
+  for (const row of rows) {
+    await client.query(
+      `INSERT INTO recurring_journal_occurrence_events
+         (business_id, template_id, occurrence_id, action, actor_user_id, detail)
+       VALUES ($1, $2, $3, $4, NULL, $5)`,
+      [
+        params.businessId,
+        row.template_id,
+        row.id,
+        status === "posted" ? "occurrence_posted" : "occurrence_skipped",
+        { draftId: params.draftId, entryId: params.entryId ?? null, reason: params.reason ?? null },
+      ],
+    );
+  }
+}
+
 /** Discards a draft — it never had any financial effect, so unlike a posted entry there's nothing to keep visible. */
 export async function deleteDraft(
   businessId: string,
   id: string,
 ): Promise<void> {
   if (!isUuid(id)) throw new ManualJournalError("draft_not_found", 404);
-  const { rowCount } = await query(
-    `DELETE FROM journal_entry_drafts WHERE id = $1 AND business_id = $2`,
-    [id, businessId],
-  );
-  if (!rowCount) throw new ManualJournalError("draft_not_found", 404);
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await settleRecurringOccurrencesForDraft(client, {
+      businessId,
+      draftId: id,
+      reason: "draft_deleted",
+    });
+    const { rowCount } = await client.query(
+      `DELETE FROM journal_entry_drafts WHERE id = $1 AND business_id = $2`,
+      [id, businessId],
+    );
+    if (!rowCount) throw new ManualJournalError("draft_not_found", 404);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /** Approves a draft: posts it as a real journal entry (through the normal fiscal-period-checked path) and removes the draft. */
@@ -665,6 +741,13 @@ export async function approveDraft(params: {
         ],
       );
     }
+    // Settled *before* the draft is deleted — see `rejectDraft` for why the
+    // order is load-bearing (`draft_id ON DELETE SET NULL`).
+    await settleRecurringOccurrencesForDraft(client, {
+      businessId: params.businessId,
+      draftId: params.draftId,
+      entryId: entryId ?? null,
+    });
     const { rowCount } = await client.query(
       `DELETE FROM journal_entry_drafts WHERE id = $1 AND business_id = $2`,
       [params.draftId, params.businessId],

@@ -60,6 +60,7 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   { key: "entries", label: "دفتر روزنامه" },
   { key: "vouchers", label: "اسناد و شماره‌گذاری" },
   { key: "manual", label: "ثبت سند دستی" },
+  { key: "recurring-vouchers", label: "اسناد دوره‌ای" },
   { key: "expenses", label: "هزینه‌ها" },
   { key: "fiscal-periods", label: "دوره‌های مالی" },
   { key: "opening-balances", label: "ترازات افتتاحیه" },

@@ -168,7 +168,7 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
   {
     key: "ledger-books",
     label: "دفتر و اسناد",
-    keys: ["trial-balance", "entries", "vouchers", "manual", "multicurrency", "chart-of-accounts", "dimensions"],
+    keys: ["trial-balance", "entries", "vouchers", "manual", "recurring-vouchers", "multicurrency", "chart-of-accounts", "dimensions"],
   },
   {
     key: "ledger-receivables",
