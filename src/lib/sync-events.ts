@@ -19,6 +19,7 @@ import type { Role } from "./auth";
 import { PERMISSIONS, type Permission } from "./permissions";
 import { authorizeSyncReplay } from "./sync-replay-auth";
 import { orderStateReplayPermissions } from "./order-state-replay-auth";
+import { notifyOrderNumberConflict, orderStateOrderNumber } from "./order-state-sync";
 import type { CartItemInput } from "./order-cart";
 import { addItemsToOrder, createOrder } from "./order-mutations";
 import type { DiscountInput } from "./orders";
@@ -75,6 +76,12 @@ function uuidOrNull(value: unknown): string | null {
 interface OrderCreatePayload {
   readyOnSend?: boolean;
   orderId?: string;
+  /**
+   * The number the creating side rang the order up under (migration 0318).
+   * Absent from records written by builds that predate leases; the receiver
+   * then allocates from its own sequence, which is exactly the old behaviour.
+   */
+  orderNumber?: unknown;
   itemIds?: unknown[];
   type?: "dine_in" | "takeaway" | "delivery";
   tableId?: string;
@@ -177,6 +184,16 @@ async function dispatch(
         typeof payload.orderId === "string"
           ? payload.orderId
           : event.clientEventId,
+      // The number the sender already printed (migration 0318). It came out of
+      // a block this install reserved from the cloud, so the receiver can
+      // store it verbatim instead of minting a second number for the same bill.
+      orderNumber:
+        typeof payload.orderNumber === "number" || typeof payload.orderNumber === "string"
+          ? payload.orderNumber
+          : null,
+      // This runs inside the sync engine's transaction: mint from the block
+      // already on disk, never start a cloud call while the event row is held.
+      leaseRenewal: "none",
       // The sender's line ids (migration 0190); absent from an offline-queued
       // phone payload, which the order-state reconciliation then covers.
       itemIds: Array.isArray(payload.itemIds)
@@ -203,7 +220,27 @@ async function dispatch(
             }
           : null,
     });
-    if (!result.ok) return { error: result.error };
+    if (!result.ok) {
+      /*
+       * A replayed bill whose number is already taken on this side. No rewrite:
+       * tell the owner (the dead letter is raised by the legacy refusal path
+       * after its bounded retries) and keep the refusal so the queue does not
+       * pretend the event delivered.
+       */
+      if (result.error === "order_number_conflict") {
+        await notifyOrderNumberConflict({
+          businessId: actor.businessId,
+          locationId,
+          orderId: typeof payload.orderId === "string" ? payload.orderId : null,
+          orderNumber:
+            typeof payload.orderNumber === "number" || typeof payload.orderNumber === "string"
+              ? payload.orderNumber
+              : null,
+          clientEventId: event.clientEventId,
+        });
+      }
+      return { error: result.error };
+    }
     broadcast(locationId, { type: "order.created", orderId: result.data.id });
     return { data: result.data };
   }
@@ -1002,6 +1039,22 @@ async function applyTransactionalSyncEvent(
           source: metadata.deadLetterSource,
         });
         await client.query("COMMIT");
+        /*
+         * A pulled order that cannot keep its own number is not a retry
+         * problem — the bill exists on the sender as #N and here as something
+         * else would be a lie. The dead letter is the record; this tells the
+         * owner, once per (order, number), so it is not discovered by a
+         * receipt that disagrees with the cloud.
+         */
+        if (code === "order_number_conflict" && definition.type === "order.state.synced") {
+          await notifyOrderNumberConflict({
+            businessId: scope.businessId,
+            locationId,
+            orderId: typeof event.payload.orderId === "string" ? event.payload.orderId : null,
+            orderNumber: orderStateOrderNumber(event.payload),
+            clientEventId: event.clientEventId,
+          });
+        }
         return {
           clientEventId: event.clientEventId,
           ok: false,

@@ -49,6 +49,7 @@ import { accrueCommissionForLine } from "./commission-service";
 import { earnPoints } from "./loyalty-service";
 import { evaluatePromotions, type AppliedPromotion, type PromotionItem } from "./promotions";
 import { routeOrderTenders } from "./order-payment-routing-service";
+import { allocateOrderNumber, resolveOrderNumberSource } from "./order-number-service";
 import type { PaymentSettlement } from "./payment-methods";
 import { normalizeClientRequestId, retailInvoiceRequestFingerprint } from "./checkout-idempotency";
 import { listPromotions } from "./promotions-service";
@@ -500,16 +501,13 @@ export async function createRetailInvoice(
     }
   }
 
-  // Same counter every F&B order uses (order-mutations.ts), so a business's
-  // invoice numbers and order numbers are one sequence per branch and can
-  // never collide.
-  const { rows: counter } = await client.query<{ next_number: string }>(
-    `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, 2)
-     ON CONFLICT (location_id) DO UPDATE SET next_number = order_number_counters.next_number + 1
-     RETURNING next_number - 1 AS next_number`,
-    [input.locationId],
-  );
-  const orderNumber = Number(counter[0].next_number);
+  // The same per-location allocator every F&B order uses (migration 0318), so
+  // a business's invoice numbers and order numbers are one sequence per branch
+  // and can never collide — including across the cloud and a paired till.
+  const orderNumber = await allocateOrderNumber(client, {
+    locationId: input.locationId,
+    source: await resolveOrderNumberSource(client, input.businessId),
+  });
 
   // Opened, filled, then completed — in that order, and not because it reads
   // nicely: `guard_order_item_mutation` (migration 0014) refuses to add a line

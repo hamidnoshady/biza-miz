@@ -141,6 +141,8 @@ async function centralFetch(input: string | URL | Request, init?: RequestInit): 
         return (await import("../src/app/api/server-sync/digest/route")).POST(request);
       case "/api/server-sync/site-profile":
         return (await import("../src/app/api/server-sync/site-profile/route")).GET(request);
+      case "/api/server-sync/order-number-lease":
+        return (await import("../src/app/api/server-sync/order-number-lease/route")).POST(request);
       case "/api/pairing/acknowledge":
         return Response.json({ ok: true });
       default:
@@ -970,6 +972,39 @@ describe("orders", () => {
     expect((await onCentral(bill)).rows[0]).toEqual(desktopBill);
   });
 
+  it("keeps the till's own number on the cloud for the same bill (migration 0318)", async () => {
+    const created = await withTenant(biz.businessId, () =>
+      createOrder({
+        locationId: biz.locationId,
+        type: "takeaway",
+        discount: { type: null },
+        items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
+        openedBy: biz.ownerId,
+        actorRole: "owner",
+      }),
+    );
+    if (!created.ok) throw new Error(created.error);
+    const orderId = created.data.id;
+    const tillNumber = await withTenant(biz.businessId, async () => {
+      const { rows } = await query<{ order_number: string }>(
+        "SELECT order_number::text FROM orders WHERE id = $1",
+        [orderId],
+      );
+      return rows[0].order_number;
+    });
+
+    const readCloudNumber = () =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query<{ order_number: string }>("SELECT order_number::text FROM orders WHERE id = $1", [orderId]),
+        ),
+      );
+    await syncUntil(async () => (await readCloudNumber()).rows[0] !== undefined);
+    // The number is part of the bill: the cloud stores the sender's, it does
+    // not mint a second one and it does not renumber the pulled order.
+    expect((await readCloudNumber()).rows[0].order_number).toBe(tillNumber);
+  });
+
   it("delivers a bill rung up in the cloud to the branch", async () => {
     const orderId = await onCentral(async () => {
       const created = await withTenant(biz.businessId, () =>
@@ -985,15 +1020,23 @@ describe("orders", () => {
       if (!created.ok) throw new Error(created.error);
       return created.data.id;
     });
+    const cloudNumber = (await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query<{ order_number: string }>("SELECT order_number::text FROM orders WHERE id = $1", [orderId]),
+      ),
+    )).rows[0].order_number;
 
     await syncRound();
 
     const onDesktop = () =>
       withTenant(biz.businessId, () =>
-        query<{ status: string }>("SELECT status::text FROM orders WHERE id = $1", [orderId]),
+        query<{ status: string; order_number: string }>(
+          "SELECT status::text, order_number::text FROM orders WHERE id = $1",
+          [orderId],
+        ),
       );
     await syncUntil(async () => (await onDesktop()).rows[0]?.status === "open");
-    expect((await onDesktop()).rows[0]?.status).toBe("open");
+    expect((await onDesktop()).rows[0]).toEqual({ status: "open", order_number: cloudNumber });
     // Replayed here, so it is not queued to go back up.
     const echoed = await withTenant(biz.businessId, () =>
       query("SELECT 1 FROM sync_events WHERE client_event_id = $1 AND origin = 'local'", [orderId]),

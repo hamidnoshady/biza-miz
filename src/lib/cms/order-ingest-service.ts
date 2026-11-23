@@ -22,6 +22,7 @@ import {
 } from "../industries";
 import type { RialText } from "../inventory-exact";
 import { routeWebsitePayment, type OrderPaymentSourceSnapshot } from "../order-payment-routing-service";
+import { allocateOrderNumber, resolveOrderNumberSource } from "../order-number-service";
 import type { WebsiteConnectionRow } from "../website/connection-service";
 import { cmsMinorToRial } from "./order-money";
 import { sellOnlineRetailLine } from "../retail-online-sale-service";
@@ -357,13 +358,13 @@ async function importPaidCmsOrder(connection: WebsiteConnectionRow, order: CmsOr
       return prior[0].imported_order_id;
     }
 
-    const { rows: counter } = await client.query<{ next_number: string }>(
-      `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, 2)
-       ON CONFLICT (location_id) DO UPDATE SET next_number = order_number_counters.next_number + 1
-       RETURNING next_number - 1 AS next_number`,
-      [locationId],
-    );
-    const orderNumber = Number(counter[0].next_number);
+    // The cloud's own sequence (migration 0318). A website order and a till's
+    // bill draw from the same per-location numbers; the till's leased block is
+    // already reserved, so there is no second counter to drift against.
+    const orderNumber = await allocateOrderNumber(client, {
+      locationId,
+      source: await resolveOrderNumberSource(client, businessId),
+    });
     const note = buyer.note ? `${buyer.name} — ${buyer.note}` : `مشتری: ${buyer.name}`;
 
     const title =

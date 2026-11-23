@@ -173,7 +173,7 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
             return { rows: [{ id: tid === table6Id ? session6Id : session5Id }] };
           }
           if (normalized.includes("next_number")) {
-            return { rows: [{ next_number: String(nextOrderNumber) }] };
+            return { rows: [{ number: String(nextOrderNumber) }] };
           }
           if (normalized.startsWith("INSERT INTO order_items")) {
             return { rows: [{ id: "item-C-1" }] };

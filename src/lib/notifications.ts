@@ -90,6 +90,11 @@ export const NOTIFICATION_EVENT_KEYS = [
   // gate is deliberate (a suspension must land before the orders queued behind
   // it); a block nobody could see for nine days is not.
   "sync.operational_blocked",
+  // Migration 0318 — a pulled bill could not keep its own number. The
+  // allocator exists to make this impossible; when it still happens (an old
+  // till's block, a hand-edited row), a person must see it instead of the
+  // number being quietly rewritten.
+  "sync.order_number_conflict",
   // Issue #1149 — a WordPress plugin that has stopped calling. Its cron can die
   // without a single error anywhere; the silence is the only evidence.
   //
@@ -314,6 +319,19 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     defaultSeverity: "important",
     defaultRoles: ["owner"],
     perLocation: false,
+    hasAmount: false,
+  },
+  "sync.order_number_conflict": {
+    key: "sync.order_number_conflict",
+    group: "system",
+    label: "شمارهٔ سفارش تکراری در همگام‌سازی",
+    description:
+      "وقتی سفارشی که از دستگاه دیگر می‌رسد شماره‌ای دارد که روی این دستگاه برای سفارش دیگری ثبت شده است. شماره بازنویسی نمی‌شود؛ سفارش در صف همگام‌سازی به‌عنوان نامهٔ مرده ثبت می‌شود.",
+    // One bill at one branch, so a branch rule can target it; `important`
+    // because a receipt and the cloud already disagree about the number.
+    defaultSeverity: "important",
+    defaultRoles: ["owner"],
+    perLocation: true,
     hasAmount: false,
   },
   "integrations.plugin_stale": {

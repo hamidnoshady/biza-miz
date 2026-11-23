@@ -35,6 +35,7 @@
  * live checkout uses.
  */
 import type { PoolClient } from "pg";
+import { allocateOrderNumber, resolveOrderNumberSource } from "../../order-number-service";
 import { businessDateOf } from "../../business-day";
 import { deductForOrder } from "../../inventory-service";
 import { rialText, type RialText } from "../../inventory-exact";
@@ -132,13 +133,12 @@ export async function recordImportedSale(
   if (!resolved.ok) throw new ImportedSaleError(resolved.error, resolved.status);
   const totals = computeOrderTotals(resolved.cartLines, { type: null, value: 0 }, 0);
 
-  const { rows: counter } = await client.query<{ next_number: string }>(
-    `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, 2)
-     ON CONFLICT (location_id) DO UPDATE SET next_number = order_number_counters.next_number + 1
-     RETURNING next_number - 1 AS next_number`,
-    [locationId],
-  );
-  const orderNumber = Number(counter[0].next_number);
+  // The branch's ordinary allocator (migration 0318): imported history shares
+  // the one per-location sequence, so it can never shadow a live bill.
+  const orderNumber = await allocateOrderNumber(client, {
+    locationId,
+    source: await resolveOrderNumberSource(client, businessId),
+  });
 
   // Opened, filled, then completed — in that order, because
   // `guard_order_item_mutation` (migration 0014) refuses a line on an order
