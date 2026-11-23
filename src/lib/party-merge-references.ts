@@ -227,6 +227,34 @@ export const PARTY_REFERENCES: readonly PartyReference[] = [
                   WHERE je.business_id = $1 AND jl.party_id = $2`,
   },
   {
+    // Recurring vouchers (issue #1323). A draft line's party is the same
+    // attribution the approved entry will carry, so it follows the person
+    // exactly like `journal_lines.party_id` above. Parent-scoped: a draft line
+    // is tenanted by its draft.
+    table: "journal_entry_draft_lines",
+    column: "party_id",
+    scope: "parent",
+    parent: { table: "journal_entry_drafts", childColumn: "draft_id", parentColumn: "id" },
+    disposition: "move",
+    reason:
+      "The attribution a draft will post on approval; leaving it on the archived record would undo the merge the moment somebody approves the draft.",
+  },
+  {
+    // Recurring vouchers (issue #1323). A template line is a future-facing
+    // instruction, not a record of the past, so it moves with the person.
+    table: "recurring_journal_template_lines",
+    column: "party_id",
+    scope: "parent",
+    parent: {
+      table: "recurring_journal_templates",
+      childColumn: "template_id",
+      parentColumn: "id",
+    },
+    disposition: "move",
+    reason:
+      "A template line names the counterparty of a future occurrence; the next generated draft must resolve to the surviving party, never to an archived record.",
+  },
+  {
     // Multicurrency (issue #863). The lot trail's denormalized copy of the
     // same attribution; it must keep agreeing with the settlement document
     // and the lot line it points at, so it follows the same merge.

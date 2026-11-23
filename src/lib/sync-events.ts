@@ -67,6 +67,11 @@ export interface SyncEventResult {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/** A uuid field that may arrive as "" from a CMS-originated payload. */
+function uuidOrNull(value: unknown): string | null {
+  return typeof value === "string" && UUID_PATTERN.test(value) ? value : null;
+}
+
 interface OrderCreatePayload {
   readyOnSend?: boolean;
   orderId?: string;
@@ -153,8 +158,10 @@ async function dispatch(
     const result = await createOrder({
       locationId,
       type: payload.type,
-      tableId: payload.tableId ?? null,
-      customerId: payload.customerId ?? null,
+      // The CMS intake sends "" for "no table" / "no customer" where the till
+      // sends null; a bare uuid cast rejects it (see order-state-sync parseState).
+      tableId: uuidOrNull(payload.tableId) ?? null,
+      customerId: uuidOrNull(payload.customerId) ?? null,
       guestCount: Number.isFinite(payload.guestCount)
         ? Number(payload.guestCount)
         : null,

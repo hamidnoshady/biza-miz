@@ -111,6 +111,9 @@ CREATE POLICY platform_only ON platform_onboarding_drafts FOR ALL
 -- #1384 audited national-ID writes/reads and email proof issue/consume. The
 -- optional profile step can also set or clear the address itself, which is a
 -- sensitive identity change and must be visible to the subject.
+-- Extend the list without dropping the repair actions 0306 / 0307 added: an
+-- install that already recorded a cleared phone or national-ID pair still
+-- holds those rows, and the new predicate must accept them.
 ALTER TABLE platform_identity_events
     DROP CONSTRAINT IF EXISTS platform_identity_events_action_check;
 ALTER TABLE platform_identity_events
@@ -120,6 +123,8 @@ ALTER TABLE platform_identity_events
         'national_id_read',
         'email_verification_issued',
         'email_verified',
+        'phone_backfill_cleared',
+        'national_id_pair_cleared',
         'email_changed',
         'email_cleared'
     ));

@@ -1078,8 +1078,13 @@ waste, trial balance) becomes a suite an accountant can actually close a year on
 - **Manual journals** — draft → review → post, reversal rather than deletion, and an approval
   permission (`ledger.approve`) distinct from proposing one (`ledger.propose`). Each draft keeps
   its proposer, its branch, its business-local accounting date and — once decided — its
-  approver or the reviewer who rejected it and why. Recurring journal templates were
-  deliberately deferred by Phase 16 and are **not** implemented.
+  approver or the reviewer who rejected it and why. **Recurring journal voucher templates**
+  (issue #1323) sit beside this workflow: a template with fixed balanced lines and a
+  weekly/monthly/quarterly/yearly Jalali-calendar schedule creates one *draft* per due date
+  (never a posting), under a deterministic idempotency key and a per-template lock. Approval
+  still requires `ledger.approve`; the register shows upcoming, drafted, posted, skipped and
+  held occurrences and holds a locked period or an archived account with an actionable reason.
+  Recurring *expenses* remain unimplemented (`expenses` has no cadence column).
 - **Chart-of-accounts customisation** and **VAT/tax reporting** (output vs. input VAT, net
   payable position).
 

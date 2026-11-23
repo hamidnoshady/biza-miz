@@ -34,6 +34,10 @@ export const ACCOUNTING_SECTION_KEYS = [
   // document (issue #867), beside the journal it numbers.
   "vouchers",
   "manual",
+  // «اسناد دوره‌ای» — recurring voucher templates. Each occurrence becomes a
+  // manual-journal draft, so the section sits beside «ثبت سند دستی» rather than
+  // beside the journal itself (issue #1323).
+  "recurring-vouchers",
   "expenses",
   "fiscal-periods",
   // «ترازات افتتاحیه» — the accountant's opening-balance workspace, beside

@@ -80,6 +80,15 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
     'the membership this draft created once; the membership row itself is the member history',
 
   'accounting_dimension_settings.updated_by': 'dimension config',
+  // Issue #1323 — recurring journal voucher templates. A template is a
+  // scheduling rule, not a financial record: deleting a member nulls the
+  // attribution and leaves the template, its versions and its occurrence
+  // history intact (the drafts and posted entries it produced are separate,
+  // already-classified records).
+  'recurring_journal_templates.owner_user_id': 'recurring voucher template setup',
+  'recurring_journal_templates.created_by': 'recurring voucher template setup',
+  'recurring_journal_template_versions.actor_user_id': 'recurring voucher template history',
+  'recurring_journal_occurrence_events.actor_user_id': 'recurring voucher scheduler audit',
   'aec_project_profiles.project_manager_user_id': 'project staffing assignment',
   'ai_automations.authorized_by': 'AI automation setup',
   'ai_automations.created_by': 'AI automation setup',

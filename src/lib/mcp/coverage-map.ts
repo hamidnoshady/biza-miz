@@ -114,6 +114,13 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/ledger-reports.integration.test.ts",
   },
   {
+    id: "accounting.recurring-vouchers",
+    module: "Accounting",
+    entity: "Recurring journal voucher templates",
+    routes: ["ledger/recurring"],
+    note: "landed on main after this map's batch; no MCP verb yet — a due occurrence only ever creates a manual-journal draft, and approving it stays the human journal.draft.approve step",
+  },
+  {
     id: "accounting.currencies",
     module: "Accounting",
     entity: "Currencies and exchange rates",

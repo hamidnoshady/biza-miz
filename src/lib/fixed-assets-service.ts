@@ -45,13 +45,21 @@ import {
   addMonthsToPeriodKey,
   depreciationPeriodOfDate,
   disposalOutcome,
+  monthsBetweenPeriodKeys,
+  normaliseDepreciationMethod,
   parseDepreciationPeriodKey,
+  projectDepreciationSchedule,
   FIXED_ASSET_SERIAL_MAX_LENGTH,
   FIXED_ASSET_USEFUL_LIFE_MAX_MONTHS,
   planDepreciation,
   reconcileFixedAssetRegister,
   scheduleEndPeriodKey,
   validateFixedAsset,
+  type DecliningBalanceSwitchPolicy,
+  type DepreciationMethod,
+  type DepreciationMethodConfig,
+  type DepreciationScheduleRow,
+  type DepreciationScheduleTotals,
   type FixedAssetReconciliation,
 } from "./depreciation";
 import {
@@ -127,6 +135,15 @@ export interface FixedAsset {
   profitCenterId?: string | null;
   departmentId?: string | null;
   detailDimensionId?: string | null;
+  /** The accountant-selected method that prices future periods (issue #1325). */
+  depreciationMethod: DepreciationMethod;
+  /** Annual declining-balance rate in basis points; NULL for other methods. */
+  decliningBalanceRateBps: number | null;
+  /** Declining-balance switch rule; `none` for other methods. */
+  decliningBalanceSwitchPolicy: DecliningBalanceSwitchPolicy;
+  /** Approved lifetime capacity; NULL for other methods. */
+  totalCapacityUnits: number | null;
+  capacityUnitLabel: string | null;
   /** Derived, never stored: the live entries consumed the depreciable base. */
   fullyDepreciated?: boolean;
 }
@@ -171,6 +188,13 @@ export interface FixedAssetEstimateChange {
   newUsefulLifeMonths: number;
   oldSalvageValue: number;
   newSalvageValue: number;
+  /** Method before/after the change — equal for a life/salvage-only revision. */
+  oldMethod: DepreciationMethod;
+  newMethod: DepreciationMethod;
+  oldDecliningBalanceRateBps: number | null;
+  newDecliningBalanceRateBps: number | null;
+  oldTotalCapacityUnits: number | null;
+  newTotalCapacityUnits: number | null;
   remainingLifeMonths: number;
   remainingBase: number;
   reason: string;
@@ -213,6 +237,11 @@ interface FixedAssetRow extends Record<string, unknown> {
   profit_center_id: string | null;
   department_id: string | null;
   detail_dimension_id: string | null;
+  depreciation_method: DepreciationMethod;
+  declining_balance_rate_bps: number | null;
+  declining_balance_switch_policy: DecliningBalanceSwitchPolicy;
+  total_capacity_units: string | null;
+  capacity_unit_label: string | null;
 }
 
 // One SELECT of the register with every dimension the page, the filters and
@@ -246,7 +275,9 @@ const FIXED_ASSET_SELECT = `
          fa.disposal_reason, fa.archived_at::text AS archived_at,
          COALESCE(live.accumulated, 0)::text AS accumulated_depreciation,
          COALESCE(live.periods, 0)::int AS depreciation_count,
-         fa.cost_center_id, fa.profit_center_id, fa.department_id, fa.detail_dimension_id${FIXED_ASSET_FROM}`;
+         fa.cost_center_id, fa.profit_center_id, fa.department_id, fa.detail_dimension_id,
+         fa.depreciation_method, fa.declining_balance_rate_bps, fa.declining_balance_switch_policy,
+         fa.total_capacity_units::text AS total_capacity_units, fa.capacity_unit_label${FIXED_ASSET_FROM}`;
 
 function toFixedAsset(r: FixedAssetRow): FixedAsset {
   const cost = Number(r.cost);
@@ -290,6 +321,11 @@ function toFixedAsset(r: FixedAssetRow): FixedAsset {
     profitCenterId: (r.profit_center_id as string | null) ?? null,
     departmentId: (r.department_id as string | null) ?? null,
     detailDimensionId: (r.detail_dimension_id as string | null) ?? null,
+    depreciationMethod: (r.depreciation_method as DepreciationMethod) ?? "straight_line",
+    decliningBalanceRateBps: r.declining_balance_rate_bps ?? null,
+    decliningBalanceSwitchPolicy: (r.declining_balance_switch_policy as DecliningBalanceSwitchPolicy) ?? "none",
+    totalCapacityUnits: r.total_capacity_units === null ? null : Number(r.total_capacity_units),
+    capacityUnitLabel: r.capacity_unit_label ?? null,
     fullyDepreciated: accumulatedDepreciation >= cost - salvageValue,
   };
 }
@@ -682,6 +718,12 @@ export async function getFixedAssetWithDepreciation(
     new_useful_life_months: number;
     old_salvage_value: string;
     new_salvage_value: string;
+    old_method: DepreciationMethod;
+    new_method: DepreciationMethod;
+    old_declining_balance_rate_bps: number | null;
+    new_declining_balance_rate_bps: number | null;
+    old_total_capacity_units: string | null;
+    new_total_capacity_units: string | null;
     remaining_life_months: number;
     remaining_base: string;
     reason: string;
@@ -690,6 +732,10 @@ export async function getFixedAssetWithDepreciation(
     `SELECT c.id, c.changed_at::text AS changed_at, c.effective_period_key,
             c.old_useful_life_months, c.new_useful_life_months,
             c.old_salvage_value::text AS old_salvage_value, c.new_salvage_value::text AS new_salvage_value,
+            c.old_method, c.new_method,
+            c.old_declining_balance_rate_bps, c.new_declining_balance_rate_bps,
+            c.old_total_capacity_units::text AS old_total_capacity_units,
+            c.new_total_capacity_units::text AS new_total_capacity_units,
             c.remaining_life_months, c.remaining_base::text AS remaining_base, c.reason,
             u.full_name AS changed_by_name
        FROM fixed_asset_estimate_changes c
@@ -740,6 +786,12 @@ export async function getFixedAssetWithDepreciation(
       newUsefulLifeMonths: c.new_useful_life_months,
       oldSalvageValue: Number(c.old_salvage_value),
       newSalvageValue: Number(c.new_salvage_value),
+      oldMethod: c.old_method ?? "straight_line",
+      newMethod: c.new_method ?? "straight_line",
+      oldDecliningBalanceRateBps: c.old_declining_balance_rate_bps ?? null,
+      newDecliningBalanceRateBps: c.new_declining_balance_rate_bps ?? null,
+      oldTotalCapacityUnits: c.old_total_capacity_units === null ? null : Number(c.old_total_capacity_units),
+      newTotalCapacityUnits: c.new_total_capacity_units === null ? null : Number(c.new_total_capacity_units),
       remainingLifeMonths: c.remaining_life_months,
       remainingBase: Number(c.remaining_base),
       reason: c.reason,
@@ -784,8 +836,26 @@ export async function createFixedAsset(params: {
   assetAccountId?: string | null;
   /** Default accounting dimensions carried on every automatic posting this asset produces (acquisition, depreciation, disposal). */
   dimensions?: LineDimensions | null;
+  /** The accountant's method selection (issue #1325); absent = straight-line. */
+  depreciationMethod?: string | null;
+  decliningBalanceRateBps?: number | null;
+  decliningBalanceSwitchPolicy?: string | null;
+  totalCapacityUnits?: number | null;
+  capacityUnitLabel?: string | null;
 }): Promise<FixedAsset> {
   const errors = validateFixedAsset(params);
+  const method = normaliseDepreciationMethod({
+    method: params.depreciationMethod,
+    decliningBalanceRateBps: params.decliningBalanceRateBps,
+    decliningBalanceSwitchPolicy: params.decliningBalanceSwitchPolicy,
+    totalCapacityUnits: params.totalCapacityUnits,
+    capacityUnitLabel: params.capacityUnitLabel,
+  });
+  if (!method.ok) {
+    errors.push(...method.errors);
+    throw new FixedAssetError(errors.join(" "));
+  }
+  const methodConfig = method.config;
   if (errors.length > 0) throw new FixedAssetError(errors.join(" "));
   // Posting the acquisition and linking an existing entry are two different
   // provenances; asking for both is a client bug, refused loudly.
@@ -883,8 +953,11 @@ export async function createFixedAsset(params: {
           useful_life_months, acquisition_source, acquisition_entry_id, created_by,
           code, category, serial_number, vendor_party_id, custodian_party_id,
           purchase_reference, notes, asset_account_id, idempotency_key,
-          cost_center_id, profit_center_id, department_id, detail_dimension_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+          cost_center_id, profit_center_id, department_id, detail_dimension_id,
+          depreciation_method, declining_balance_rate_bps, declining_balance_switch_policy,
+          total_capacity_units, capacity_unit_label)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
+               $25,$26,$27,$28,$29)
        RETURNING id`,
       [
         params.businessId,
@@ -911,6 +984,11 @@ export async function createFixedAsset(params: {
         dimCols.profit_center_id,
         dimCols.department_id,
         dimCols.detail_dimension_id,
+        methodConfig.method,
+        methodConfig.decliningBalanceRateBps,
+        methodConfig.decliningBalanceSwitchPolicy,
+        methodConfig.totalCapacityUnits,
+        methodConfig.capacityUnitLabel,
       ],
     );
     id = rows[0].id;
@@ -1408,6 +1486,8 @@ interface LockedAsset {
   profitCenterId: string | null;
   departmentId: string | null;
   detailDimensionId: string | null;
+  /** Current approved depreciation method and its parameters (issue #1325). */
+  method: DepreciationMethodConfig;
 }
 
 function lockedAssetDimensions(a: LockedAsset): LineDimensions {
@@ -1438,12 +1518,19 @@ async function lockAsset(client: PoolClient, businessId: string, fixedAssetId: s
     profit_center_id: string | null;
     department_id: string | null;
     detail_dimension_id: string | null;
+    depreciation_method: DepreciationMethod;
+    declining_balance_rate_bps: number | null;
+    declining_balance_switch_policy: DecliningBalanceSwitchPolicy;
+    total_capacity_units: string | null;
+    capacity_unit_label: string | null;
   }>(
     `SELECT id, name, location_id, cost::text AS cost, salvage_value::text AS salvage_value,
             useful_life_months,
             COALESCE(in_service_date, acquisition_date)::text AS in_service_date,
             status, archived_at::text AS archived_at, asset_account_id,
-            cost_center_id, profit_center_id, department_id, detail_dimension_id
+            cost_center_id, profit_center_id, department_id, detail_dimension_id,
+            depreciation_method, declining_balance_rate_bps, declining_balance_switch_policy,
+            total_capacity_units::text AS total_capacity_units, capacity_unit_label
        FROM fixed_assets WHERE business_id = $1 AND id = $2 FOR UPDATE`,
     [businessId, fixedAssetId],
   );
@@ -1464,6 +1551,13 @@ async function lockAsset(client: PoolClient, businessId: string, fixedAssetId: s
     profitCenterId: r.profit_center_id,
     departmentId: r.department_id,
     detailDimensionId: r.detail_dimension_id,
+    method: {
+      method: r.depreciation_method,
+      decliningBalanceRateBps: r.declining_balance_rate_bps,
+      decliningBalanceSwitchPolicy: r.declining_balance_switch_policy,
+      totalCapacityUnits: r.total_capacity_units === null ? null : Number(r.total_capacity_units),
+      capacityUnitLabel: r.capacity_unit_label,
+    },
   };
 }
 
@@ -1477,6 +1571,13 @@ interface LiveDepreciationPosting {
   /** Canonical `YYYY-MM`; legacy free-text rows resolve by their entry date. */
   periodKey: string;
   amount: number;
+  /** Units the posting charged (units-of-production only). */
+  unitsProduced: number | null;
+  /** The method that priced it — a snapshot, so a later policy change does not rewrite it. */
+  method: DepreciationMethod;
+  entryId: string;
+  journalEntryId: string | null;
+  periodLabel: string;
 }
 
 /** Live (non-reversed) depreciation state, read under the asset's lock. */
@@ -1484,14 +1585,33 @@ async function liveDepreciation(
   client: PoolClient,
   fixedAssetId: string,
 ): Promise<{ periodKeys: string[]; accumulated: number; entryDates: string[]; postings: LiveDepreciationPosting[] }> {
-  const { rows } = await client.query<{ period_key: string | null; entry_date: string; amount: string }>(
-    `SELECT period_key, entry_date::text AS entry_date, amount::text AS amount
-       FROM fixed_asset_depreciation_entries WHERE fixed_asset_id = $1 AND reversed_at IS NULL`,
+  const { rows } = await client.query<{
+    id: string;
+    period_key: string | null;
+    period_label: string;
+    entry_date: string;
+    amount: string;
+    units_produced: string | null;
+    method: DepreciationMethod;
+    journal_entry_id: string | null;
+  }>(
+    `SELECT d.id, d.period_key, d.period_label, d.entry_date::text AS entry_date, d.amount::text AS amount,
+            d.units_produced::text AS units_produced, d.method,
+            je.id AS journal_entry_id
+       FROM fixed_asset_depreciation_entries d
+       LEFT JOIN journal_entries je
+         ON je.source_type = 'fixed_asset_depreciation' AND je.source_id = d.id AND je.reverses_entry_id IS NULL
+      WHERE d.fixed_asset_id = $1 AND d.reversed_at IS NULL`,
     [fixedAssetId],
   );
   const postings = rows.map((r) => ({
     periodKey: r.period_key ?? depreciationPeriodOfDate(r.entry_date)?.key ?? r.entry_date,
     amount: Number(r.amount),
+    unitsProduced: r.units_produced === null ? null : Number(r.units_produced),
+    method: r.method ?? "straight_line",
+    entryId: r.id,
+    journalEntryId: r.journal_entry_id,
+    periodLabel: r.period_label,
   }));
   return {
     periodKeys: postings.map((p) => p.periodKey),
@@ -1519,8 +1639,24 @@ async function scheduleContextForPeriod(
   asset: LockedAsset,
   targetPeriodKey: string,
 ): Promise<{
-  schedule: { cost: number; salvageValue: number; usefulLifeMonths: number; inServiceDate: string };
-  final: { salvageValue: number; usefulLifeMonths: number };
+  schedule: {
+    cost: number;
+    salvageValue: number;
+    usefulLifeMonths: number;
+    inServiceDate: string;
+    method: DepreciationMethod;
+    decliningBalanceRateBps: number | null;
+    decliningBalanceSwitchPolicy: DecliningBalanceSwitchPolicy;
+    totalCapacityUnits: number | null;
+  };
+  final: {
+    salvageValue: number;
+    usefulLifeMonths: number;
+    method: DepreciationMethod;
+    decliningBalanceRateBps: number | null;
+    decliningBalanceSwitchPolicy: DecliningBalanceSwitchPolicy;
+    totalCapacityUnits: number | null;
+  };
 }> {
   interface ChangeRow {
     effective_period_key: string;
@@ -1528,10 +1664,23 @@ async function scheduleContextForPeriod(
     new_useful_life_months: number;
     old_salvage_value: string;
     new_salvage_value: string;
+    old_method: DepreciationMethod;
+    new_method: DepreciationMethod;
+    old_declining_balance_rate_bps: number | null;
+    new_declining_balance_rate_bps: number | null;
+    old_declining_balance_switch_policy: DecliningBalanceSwitchPolicy;
+    new_declining_balance_switch_policy: DecliningBalanceSwitchPolicy;
+    old_total_capacity_units: string | null;
+    new_total_capacity_units: string | null;
   }
   const { rows } = await client.query<ChangeRow>(
     `SELECT effective_period_key, old_useful_life_months, new_useful_life_months,
-            old_salvage_value::text AS old_salvage_value, new_salvage_value::text AS new_salvage_value
+            old_salvage_value::text AS old_salvage_value, new_salvage_value::text AS new_salvage_value,
+            old_method, new_method,
+            old_declining_balance_rate_bps, new_declining_balance_rate_bps,
+            old_declining_balance_switch_policy, new_declining_balance_switch_policy,
+            old_total_capacity_units::text AS old_total_capacity_units,
+            new_total_capacity_units::text AS new_total_capacity_units
        FROM fixed_asset_estimate_changes WHERE fixed_asset_id = $1
       ORDER BY effective_period_key ASC, created_at ASC`,
     [asset.id],
@@ -1544,6 +1693,14 @@ async function scheduleContextForPeriod(
     if (change.effective_period_key <= targetPeriodKey) applicable = change;
   }
 
+  const final = {
+    salvageValue: asset.salvageValue,
+    usefulLifeMonths: asset.usefulLifeMonths,
+    method: asset.method.method,
+    decliningBalanceRateBps: asset.method.decliningBalanceRateBps,
+    decliningBalanceSwitchPolicy: asset.method.decliningBalanceSwitchPolicy,
+    totalCapacityUnits: asset.method.totalCapacityUnits,
+  };
   if (!rows.length) {
     return {
       schedule: {
@@ -1551,8 +1708,12 @@ async function scheduleContextForPeriod(
         salvageValue: asset.salvageValue,
         usefulLifeMonths: asset.usefulLifeMonths,
         inServiceDate: asset.inServiceDate,
+        method: final.method,
+        decliningBalanceRateBps: final.decliningBalanceRateBps,
+        decliningBalanceSwitchPolicy: final.decliningBalanceSwitchPolicy,
+        totalCapacityUnits: final.totalCapacityUnits,
       },
-      final: { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths },
+      final,
     };
   }
   if (!applicable) {
@@ -1565,8 +1726,13 @@ async function scheduleContextForPeriod(
         salvageValue: Number(first.old_salvage_value),
         usefulLifeMonths: first.old_useful_life_months,
         inServiceDate: asset.inServiceDate,
+        method: first.old_method,
+        decliningBalanceRateBps: first.old_declining_balance_rate_bps,
+        decliningBalanceSwitchPolicy: first.old_declining_balance_switch_policy,
+        totalCapacityUnits:
+          first.old_total_capacity_units === null ? null : Number(first.old_total_capacity_units),
       },
-      final: { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths },
+      final,
     };
   }
   return {
@@ -1575,8 +1741,13 @@ async function scheduleContextForPeriod(
       salvageValue: Number(applicable.new_salvage_value),
       usefulLifeMonths: applicable.new_useful_life_months,
       inServiceDate: asset.inServiceDate,
+      method: applicable.new_method,
+      decliningBalanceRateBps: applicable.new_declining_balance_rate_bps,
+      decliningBalanceSwitchPolicy: applicable.new_declining_balance_switch_policy,
+      totalCapacityUnits:
+        applicable.new_total_capacity_units === null ? null : Number(applicable.new_total_capacity_units),
     },
-    final: { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths },
+    final,
   };
 }
 
@@ -1647,12 +1818,16 @@ export async function postDepreciation(params: {
   periodKey?: string | null;
   periodLabel?: string | null;
   entryDate?: string | null;
+  /** Units produced this period — required by the units-of-production method. */
+  unitsProduced?: number | null;
   createdBy: string | null;
 }): Promise<{
   amount: number;
   periodKey: string;
   periodLabel: string;
   entryDate: string;
+  method: DepreciationMethod;
+  unitsProduced: number | null;
   /** The register's own row for this posting — what a reversal undoes. */
   depreciationEntryId: string;
   journalEntryId: string | null;
@@ -1686,8 +1861,19 @@ export async function postDepreciation(params: {
             salvageValue: asset.salvageValue,
             usefulLifeMonths: asset.usefulLifeMonths,
             inServiceDate: asset.inServiceDate,
+            method: asset.method.method,
+            decliningBalanceRateBps: asset.method.decliningBalanceRateBps,
+            decliningBalanceSwitchPolicy: asset.method.decliningBalanceSwitchPolicy,
+            totalCapacityUnits: asset.method.totalCapacityUnits,
           },
-          final: { salvageValue: asset.salvageValue, usefulLifeMonths: asset.usefulLifeMonths },
+          final: {
+            salvageValue: asset.salvageValue,
+            usefulLifeMonths: asset.usefulLifeMonths,
+            method: asset.method.method,
+            decliningBalanceRateBps: asset.method.decliningBalanceRateBps,
+            decliningBalanceSwitchPolicy: asset.method.decliningBalanceSwitchPolicy,
+            totalCapacityUnits: asset.method.totalCapacityUnits,
+          },
         };
 
     // Everything live is what the plan sees: the duplicate-month check, the
@@ -1699,6 +1885,10 @@ export async function postDepreciation(params: {
       finalUsefulLifeMonths: context.final.usefulLifeMonths,
       postedPeriodKeys: live.periodKeys,
       accumulatedSoFar: live.accumulated,
+      // The posting facts make declining-balance openings and cumulative
+      // production exact even when months are posted out of order.
+      postedPostings: live.postings,
+      unitsProduced: params.unitsProduced ?? null,
       periodKey: params.periodKey,
       entryDate: params.entryDate,
       today,
@@ -1709,13 +1899,16 @@ export async function postDepreciation(params: {
     }
     const label = memoLabel || plan.period.label;
 
+    const pricingMethod = context.schedule.method;
+    const pricingUnits =
+      pricingMethod === "units_of_production" ? Math.max(0, Math.trunc(params.unitsProduced ?? 0)) : null;
     let depreciationEntryId: string;
     try {
       const { rows } = await client.query<{ id: string }>(
         `INSERT INTO fixed_asset_depreciation_entries
-           (fixed_asset_id, period_key, period_label, entry_date, amount, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-        [asset.id, plan.period.key, label, plan.entryDate, plan.amount, params.createdBy],
+           (fixed_asset_id, period_key, period_label, entry_date, amount, method, units_produced, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [asset.id, plan.period.key, label, plan.entryDate, plan.amount, pricingMethod, pricingUnits, params.createdBy],
       );
       depreciationEntryId = rows[0].id;
     } catch (err) {
@@ -1763,6 +1956,8 @@ export async function postDepreciation(params: {
       periodKey: plan.period.key,
       periodLabel: label,
       entryDate: plan.entryDate,
+      method: pricingMethod,
+      unitsProduced: pricingUnits,
       depreciationEntryId,
       journalEntryId,
     };
@@ -2086,6 +2281,12 @@ export async function changeFixedAssetEstimate(params: {
   fixedAssetId: string;
   usefulLifeMonths?: number | null;
   salvageValue?: number | null;
+  /** The new approved method, or (when only parameters change) omitted. */
+  depreciationMethod?: string | null;
+  decliningBalanceRateBps?: number | null;
+  decliningBalanceSwitchPolicy?: string | null;
+  totalCapacityUnits?: number | null;
+  capacityUnitLabel?: string | null;
   reason: string;
   createdBy: string | null;
 }): Promise<{ fixedAsset: FixedAsset; estimateChange: FixedAssetEstimateChange }> {
@@ -2098,7 +2299,15 @@ export async function changeFixedAssetEstimate(params: {
 
     const wantsLife = params.usefulLifeMonths ?? null;
     const wantsSalvage = params.salvageValue ?? null;
-    if (wantsLife === null && wantsSalvage === null) throw new FixedAssetError("estimate_change_required");
+    const methodRequested =
+      (typeof params.depreciationMethod === "string" && params.depreciationMethod.trim() !== "") ||
+      params.decliningBalanceRateBps != null ||
+      (typeof params.decliningBalanceSwitchPolicy === "string" && params.decliningBalanceSwitchPolicy.trim() !== "") ||
+      params.totalCapacityUnits != null ||
+      (typeof params.capacityUnitLabel === "string" && params.capacityUnitLabel.trim() !== "");
+    if (wantsLife === null && wantsSalvage === null && !methodRequested) {
+      throw new FixedAssetError("estimate_change_required");
+    }
     if (wantsLife !== null && (!Number.isInteger(wantsLife) || wantsLife <= 0 || wantsLife > FIXED_ASSET_USEFUL_LIFE_MAX_MONTHS)) {
       throw new FixedAssetError("invalid_useful_life");
     }
@@ -2107,7 +2316,48 @@ export async function changeFixedAssetEstimate(params: {
     }
     const newLife = wantsLife ?? asset.usefulLifeMonths;
     const newSalvage = wantsSalvage ?? asset.salvageValue;
-    if (newLife === asset.usefulLifeMonths && newSalvage === asset.salvageValue) {
+
+    // A method change is a prospective estimate change like any other: the
+    // new method (and its parameters) apply from the current period forward;
+    // posted rows keep the method they were priced with.
+    const desiredMethod = params.depreciationMethod?.trim() || asset.method.method;
+    const normalisedMethod = normaliseDepreciationMethod({
+      method: desiredMethod,
+      decliningBalanceRateBps:
+        params.decliningBalanceRateBps != null
+          ? params.decliningBalanceRateBps
+          : desiredMethod === asset.method.method
+            ? asset.method.decliningBalanceRateBps
+            : null,
+      decliningBalanceSwitchPolicy:
+        params.decliningBalanceSwitchPolicy != null && params.decliningBalanceSwitchPolicy.trim() !== ""
+          ? params.decliningBalanceSwitchPolicy
+          : desiredMethod === asset.method.method
+            ? asset.method.decliningBalanceSwitchPolicy
+            : "none",
+      totalCapacityUnits:
+        params.totalCapacityUnits != null
+          ? params.totalCapacityUnits
+          : desiredMethod === asset.method.method
+            ? asset.method.totalCapacityUnits
+            : null,
+      capacityUnitLabel:
+        params.capacityUnitLabel != null
+          ? params.capacityUnitLabel
+          : desiredMethod === asset.method.method
+            ? asset.method.capacityUnitLabel
+            : null,
+    });
+    if (!normalisedMethod.ok) throw new FixedAssetError(normalisedMethod.errors.join(" "));
+    const nextMethod = normalisedMethod.config;
+    const currentMethod = asset.method;
+    const methodUnchanged =
+      nextMethod.method === currentMethod.method &&
+      nextMethod.decliningBalanceRateBps === currentMethod.decliningBalanceRateBps &&
+      nextMethod.decliningBalanceSwitchPolicy === currentMethod.decliningBalanceSwitchPolicy &&
+      nextMethod.totalCapacityUnits === currentMethod.totalCapacityUnits &&
+      nextMethod.capacityUnitLabel === currentMethod.capacityUnitLabel;
+    if (newLife === asset.usefulLifeMonths && newSalvage === asset.salvageValue && methodUnchanged) {
       throw new FixedAssetError("estimate_unchanged");
     }
 
@@ -2138,15 +2388,34 @@ export async function changeFixedAssetEstimate(params: {
     if (!effectivePeriod) throw new FixedAssetError("invalid_period");
 
     await client.query(
-      `UPDATE fixed_assets SET useful_life_months = $3, salvage_value = $4 WHERE business_id = $1 AND id = $2`,
-      [params.businessId, asset.id, newLife, newSalvage],
+      `UPDATE fixed_assets
+          SET useful_life_months = $3, salvage_value = $4,
+              depreciation_method = $5, declining_balance_rate_bps = $6,
+              declining_balance_switch_policy = $7, total_capacity_units = $8,
+              capacity_unit_label = $9
+        WHERE business_id = $1 AND id = $2`,
+      [
+        params.businessId,
+        asset.id,
+        newLife,
+        newSalvage,
+        nextMethod.method,
+        nextMethod.decliningBalanceRateBps,
+        nextMethod.decliningBalanceSwitchPolicy,
+        nextMethod.totalCapacityUnits,
+        nextMethod.capacityUnitLabel,
+      ],
     );
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO fixed_asset_estimate_changes
          (fixed_asset_id, effective_period_key, old_useful_life_months, new_useful_life_months,
           old_salvage_value, new_salvage_value, periods_posted_at_change, remaining_life_months,
-          remaining_base, accumulated_at_change, snapshot_period_keys, reason, changed_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
+          remaining_base, accumulated_at_change, snapshot_period_keys, reason, changed_by,
+          old_method, new_method, old_declining_balance_rate_bps, new_declining_balance_rate_bps,
+          old_declining_balance_switch_policy, new_declining_balance_switch_policy,
+          old_total_capacity_units, new_total_capacity_units)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+       RETURNING id`,
       [
         asset.id,
         effectivePeriod.key,
@@ -2164,6 +2433,14 @@ export async function changeFixedAssetEstimate(params: {
         live.periodKeys,
         reason,
         params.createdBy,
+        currentMethod.method,
+        nextMethod.method,
+        currentMethod.decliningBalanceRateBps,
+        nextMethod.decliningBalanceRateBps,
+        currentMethod.decliningBalanceSwitchPolicy,
+        nextMethod.decliningBalanceSwitchPolicy,
+        currentMethod.totalCapacityUnits,
+        nextMethod.totalCapacityUnits,
       ],
     );
 
@@ -2273,6 +2550,285 @@ export async function archiveFixedAsset(params: {
     client.release();
   }
   return { fixedAsset: (await getFixedAssetWithDepreciation(params.businessId, params.fixedAssetId)).fixedAsset };
+}
+
+// ---------------------------------------------------------------------------
+// Projected depreciation schedules — issue #1325.
+//
+// The schedule is a READ of the same facts the posting path uses: live
+// depreciation rows (reversed ones absent), the current approved method and
+// its effective-dated history, and the asset's in-service month. Forecast rows
+// are pure arithmetic and never write anything — they cannot reach the trial
+// balance because no journal service is involved.
+//
+// Units-of-production forecasts need a production plan. When the caller gives
+// none, the projection assumes the remaining approved capacity is produced
+// evenly over the remaining scheduled months — deterministic, explicit, and
+// replaced the moment the accountant records actual production.
+// ---------------------------------------------------------------------------
+
+interface SchedulePostingRow extends Record<string, unknown> {
+  fixed_asset_id: string;
+  id: string;
+  period_key: string | null;
+  period_label: string;
+  entry_date: string;
+  amount: string;
+  units_produced: string | null;
+  method: DepreciationMethod;
+  journal_entry_id: string | null;
+}
+
+function postingFactsFor(rows: SchedulePostingRow[], fixedAssetId: string) {
+  return rows
+    .filter((r) => r.fixed_asset_id === fixedAssetId)
+    .map((r) => ({
+      periodKey: r.period_key ?? depreciationPeriodOfDate(r.entry_date)?.key ?? r.entry_date,
+      amount: Number(r.amount),
+      unitsProduced: r.units_produced === null ? null : Number(r.units_produced),
+      method: r.method,
+      entryId: r.id,
+      journalEntryId: r.journal_entry_id,
+      periodLabel: r.period_label,
+    }));
+}
+
+/**
+ * The forecast production rate for a units-of-production asset: remaining
+ * approved capacity spread over the remaining scheduled months. Null for the
+ * other methods.
+ */
+function forecastUnitsPerPeriodFor(asset: FixedAsset, cumulativeUnits: number, todayPeriodKey: string): number | null {
+  if (asset.depreciationMethod !== "units_of_production" || !asset.totalCapacityUnits) return null;
+  const endKey = scheduleEndPeriodKey(asset.inServiceDate, asset.usefulLifeMonths);
+  if (!endKey) return null;
+  const remainingUnits = Math.max(0, asset.totalCapacityUnits - cumulativeUnits);
+  const remainingMonths = Math.max(1, monthsBetweenPeriodKeys(todayPeriodKey, endKey) + 1);
+  return Math.ceil(remainingUnits / remainingMonths);
+}
+
+function projectAssetSchedule(
+  asset: FixedAsset,
+  postingRows: SchedulePostingRow[],
+  todayPeriodKey: string,
+  throughPeriodKey: string | null,
+) {
+  const facts = postingFactsFor(postingRows, asset.id);
+  const cumulativeUnits = facts.reduce((sum, p) => sum + (p.unitsProduced ?? 0), 0);
+  const forecastUnitsPerPeriod = forecastUnitsPerPeriodFor(asset, cumulativeUnits, todayPeriodKey);
+  return projectDepreciationSchedule({
+    asset: {
+      cost: asset.cost,
+      salvageValue: asset.salvageValue,
+      usefulLifeMonths: asset.usefulLifeMonths,
+      inServiceDate: asset.inServiceDate,
+      method: asset.depreciationMethod,
+      decliningBalanceRateBps: asset.decliningBalanceRateBps,
+      decliningBalanceSwitchPolicy: asset.decliningBalanceSwitchPolicy,
+      totalCapacityUnits: asset.totalCapacityUnits,
+    },
+    livePostings: facts,
+    forecastUnitsPerPeriod,
+    throughPeriodKey,
+    todayPeriodKey,
+  });
+}
+
+export interface FixedAssetDepreciationScheduleView {
+  asset: FixedAsset;
+  rows: DepreciationScheduleRow[];
+  totals: DepreciationScheduleTotals;
+  todayPeriodKey: string;
+  throughPeriodKey: string;
+  /** Units the UoP forecast assumes per month; null for the other methods. */
+  forecastUnitsPerPeriod: number | null;
+  cumulativeUnitsProduced: number | null;
+}
+
+/** The asset-level projected schedule: posted history plus forecasts. */
+export async function getFixedAssetDepreciationSchedule(
+  businessId: string,
+  id: string,
+  options: { throughPeriodKey?: string | null } = {},
+): Promise<FixedAssetDepreciationScheduleView> {
+  if (!isUuid(id)) throw new FixedAssetError("fixed_asset_not_found", 404);
+  const { rows } = await query<FixedAssetRow>(`${FIXED_ASSET_SELECT} WHERE fa.business_id = $1 AND fa.id = $2`, [
+    businessId,
+    id,
+  ]);
+  if (!rows[0]) throw new FixedAssetError("fixed_asset_not_found", 404);
+  const asset = toFixedAsset(rows[0]);
+
+  const todayPeriod = depreciationPeriodOfDate(await businessToday(businessId));
+  const todayPeriodKey = todayPeriod?.key ?? "";
+  const requested = options.throughPeriodKey?.trim() || null;
+  if (requested && !parseDepreciationPeriodKey(requested)) throw new FixedAssetError("invalid_schedule_range");
+
+  const { rows: postingRows } = await query<SchedulePostingRow>(
+    `SELECT d.fixed_asset_id, d.id, d.period_key, d.period_label, d.entry_date::text AS entry_date,
+            d.amount::text AS amount, d.units_produced::text AS units_produced, d.method,
+            je.id AS journal_entry_id
+       FROM fixed_asset_depreciation_entries d
+       LEFT JOIN journal_entries je
+         ON je.source_type = 'fixed_asset_depreciation' AND je.source_id = d.id AND je.reverses_entry_id IS NULL
+      WHERE d.fixed_asset_id = $1 AND d.reversed_at IS NULL
+      ORDER BY d.entry_date ASC, d.created_at ASC`,
+    [asset.id],
+  );
+  const projected = projectAssetSchedule(asset, postingRows, todayPeriodKey, requested);
+  const cumulativeUnitsProduced =
+    asset.depreciationMethod === "units_of_production"
+      ? postingFactsFor(postingRows, asset.id).reduce((sum, p) => sum + (p.unitsProduced ?? 0), 0)
+      : null;
+  const endKey = scheduleEndPeriodKey(asset.inServiceDate, asset.usefulLifeMonths) ?? todayPeriodKey;
+  return {
+    asset,
+    ...projected,
+    todayPeriodKey,
+    throughPeriodKey: requested && requested < endKey ? requested : endKey,
+    forecastUnitsPerPeriod: forecastUnitsPerPeriodFor(asset, cumulativeUnitsProduced ?? 0, todayPeriodKey),
+    cumulativeUnitsProduced,
+  };
+}
+
+export interface PortfolioDepreciationScheduleView {
+  assets: { asset: FixedAsset; totals: DepreciationScheduleTotals; forecastUnitsPerPeriod: number | null }[];
+  periods: { periodKey: string; label: string; posted: number; forecast: number; accumulated: number }[];
+  totals: {
+    assets: number;
+    cost: number;
+    salvageValue: number;
+    depreciableBase: number;
+    postedDepreciation: number;
+    forecastDepreciation: number;
+    accumulated: number;
+    closingCarrying: number;
+    remainingDepreciableBase: number;
+  };
+  reconciliation: FixedAssetReconciliation;
+  todayPeriodKey: string;
+  throughPeriodKey: string;
+}
+
+/**
+ * The portfolio schedule over the register's own filters (search, status,
+ * category, branch, acquisition window) — the same selection the register and
+ * its export use, so the three can never disagree about which assets the
+ * filter admitted. Disposed and archived assets are excluded from the
+ * forecast; their posted history is already in the ledger and the register's
+ * reconciliation.
+ */
+export async function getPortfolioDepreciationSchedule(
+  businessId: string,
+  filters: FixedAssetListFilters = {},
+  options: { throughPeriodKey?: string | null } = {},
+): Promise<PortfolioDepreciationScheduleView> {
+  const requested = options.throughPeriodKey?.trim() || null;
+  if (requested && !parseDepreciationPeriodKey(requested)) throw new FixedAssetError("invalid_schedule_range");
+  const todayPeriodKey = depreciationPeriodOfDate(await businessToday(businessId))?.key ?? "";
+  const endKey = requested ?? addMonthsToPeriodKey(todayPeriodKey, 11);
+
+  const { clause, params } = fixedAssetWhere(filters);
+  params[0] = businessId;
+  const { rows: registerRows } = await query<FixedAssetRow & Record<string, unknown>>(
+    `${FIXED_ASSET_SELECT} WHERE ${clause} AND fa.status = 'active' AND fa.archived_at IS NULL
+     ORDER BY fa.code NULLS LAST, fa.name`,
+    params,
+  );
+  const assets = registerRows.map(toFixedAsset);
+  if (assets.length === 0) {
+    return {
+      assets: [],
+      periods: [],
+      totals: {
+        assets: 0,
+        cost: 0,
+        salvageValue: 0,
+        depreciableBase: 0,
+        postedDepreciation: 0,
+        forecastDepreciation: 0,
+        accumulated: 0,
+        closingCarrying: 0,
+        remainingDepreciableBase: 0,
+      },
+      reconciliation: await getFixedAssetReconciliation(businessId),
+      todayPeriodKey,
+      throughPeriodKey: endKey,
+    };
+  }
+
+  const ids = assets.map((a) => a.id);
+  const { rows: postingRows } = await query<SchedulePostingRow>(
+    `SELECT d.fixed_asset_id, d.id, d.period_key, d.period_label, d.entry_date::text AS entry_date,
+            d.amount::text AS amount, d.units_produced::text AS units_produced, d.method,
+            je.id AS journal_entry_id
+       FROM fixed_asset_depreciation_entries d
+       LEFT JOIN journal_entries je
+         ON je.source_type = 'fixed_asset_depreciation' AND je.source_id = d.id AND je.reverses_entry_id IS NULL
+      WHERE d.fixed_asset_id = ANY($1) AND d.reversed_at IS NULL
+      ORDER BY d.entry_date ASC, d.created_at ASC`,
+    [ids],
+  );
+
+  const periods = new Map<string, { label: string; posted: number; forecast: number; accumulated: number }>();
+  const totals = {
+    assets: assets.length,
+    cost: 0,
+    salvageValue: 0,
+    depreciableBase: 0,
+    postedDepreciation: 0,
+    forecastDepreciation: 0,
+    accumulated: 0,
+    closingCarrying: 0,
+    remainingDepreciableBase: 0,
+  };
+  const perAsset: PortfolioDepreciationScheduleView["assets"] = [];
+  let actualThrough = endKey;
+
+  for (const asset of assets) {
+    const projected = projectAssetSchedule(asset, postingRows, todayPeriodKey, endKey);
+    const facts = postingFactsFor(postingRows, asset.id);
+    const cumulativeUnits = facts.reduce((sum, p) => sum + (p.unitsProduced ?? 0), 0);
+    perAsset.push({
+      asset,
+      totals: projected.totals,
+      forecastUnitsPerPeriod: forecastUnitsPerPeriodFor(asset, cumulativeUnits, todayPeriodKey),
+    });
+    for (const row of projected.rows) {
+      const bucket = periods.get(row.periodKey) ?? { label: row.label, posted: 0, forecast: 0, accumulated: 0 };
+      if (row.status === "posted") bucket.posted += row.depreciation;
+      else bucket.forecast += row.depreciation;
+      periods.set(row.periodKey, bucket);
+    }
+    totals.cost += projected.totals.cost;
+    totals.salvageValue += projected.totals.salvageValue;
+    totals.depreciableBase += projected.totals.depreciableBase;
+    totals.postedDepreciation += projected.totals.postedDepreciation;
+    totals.forecastDepreciation += projected.totals.forecastDepreciation;
+    totals.accumulated += projected.totals.accumulated;
+    totals.closingCarrying += projected.totals.closingCarrying;
+    totals.remainingDepreciableBase += projected.totals.remainingDepreciableBase;
+    if (projected.rows.length > 0 && projected.rows[projected.rows.length - 1].periodKey > actualThrough) {
+      actualThrough = projected.rows[projected.rows.length - 1].periodKey;
+    }
+  }
+
+  let running = 0;
+  const periodRows = [...periods.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([periodKey, bucket]) => {
+      running += bucket.posted + bucket.forecast;
+      return { periodKey, label: bucket.label, posted: bucket.posted, forecast: bucket.forecast, accumulated: running };
+    });
+
+  return {
+    assets: perAsset,
+    periods: periodRows,
+    totals,
+    reconciliation: await getFixedAssetReconciliation(businessId),
+    todayPeriodKey,
+    throughPeriodKey: actualThrough,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2741,6 +3297,29 @@ export async function fixedAssetsExportSheets(
         .map(([group, g]) => ({ group, ...g })),
     } satisfies SheetData;
   };
+  // ------------------------------------------------------------- projected schedule
+  // The portfolio projection over the same filter: one row per Jalali month,
+  // with posted and forecast amounts side by side. Forecast columns are
+  // arithmetic only — no journal is posted, and the ledger never sees them.
+  const projection = await getPortfolioDepreciationSchedule(businessId, filters, {
+    throughPeriodKey: addMonthsToPeriodKey(currentPeriodKey || today.slice(0, 7), 11),
+  });
+  sheets.push({
+    name: "برنامهٔ پیش‌بینی‌شده",
+    columns: [
+      { key: "period", label: "دوره" },
+      { key: "posted", label: "استهلاک ثبت‌شده", type: "money" },
+      { key: "forecast", label: "استهلاک پیش‌بینی‌شده (بدون سند)", type: "money" },
+      { key: "accumulated", label: "استهلاک انباشتهٔ تجمعی", type: "money" },
+    ],
+    rows: projection.periods.map((p) => ({
+      period: `${p.periodKey} (${p.label})`,
+      posted: p.posted,
+      forecast: p.forecast,
+      accumulated: p.accumulated,
+    })),
+  });
+
   sheets.push(summaryOf((a) => a.category ?? "", "دسته"));
   sheets.push(summaryOf((a) => a.locationName ?? "", "شعبه"));
 

@@ -105,6 +105,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     assetAccountId?: string | null;
     /** Default accounting dimensions (issue #868): cost_center / profit_center / department / detail -> value id. */
     dimensions?: Record<string, string | null> | null;
+    /** Accountant-selected depreciation method (issue #1325); absent = straight-line. */
+    depreciationMethod?: string;
+    decliningBalanceRateBps?: number;
+    decliningBalanceSwitchPolicy?: string;
+    totalCapacityUnits?: number;
+    capacityUnitLabel?: string;
   };
   try {
     body = await request.json();
@@ -160,6 +166,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       notes: typeof body.notes === "string" ? body.notes : null,
       assetAccountId: typeof body.assetAccountId === "string" && body.assetAccountId ? body.assetAccountId : null,
       dimensions: body.dimensions && typeof body.dimensions === "object" ? body.dimensions : null,
+      depreciationMethod: typeof body.depreciationMethod === "string" ? body.depreciationMethod : null,
+      decliningBalanceRateBps:
+        body.decliningBalanceRateBps === undefined || body.decliningBalanceRateBps === null
+          ? null
+          : Number(body.decliningBalanceRateBps),
+      decliningBalanceSwitchPolicy:
+        typeof body.decliningBalanceSwitchPolicy === "string" ? body.decliningBalanceSwitchPolicy : null,
+      totalCapacityUnits:
+        body.totalCapacityUnits === undefined || body.totalCapacityUnits === null
+          ? null
+          : Number(body.totalCapacityUnits),
+      capacityUnitLabel: typeof body.capacityUnitLabel === "string" ? body.capacityUnitLabel : null,
     });
     return NextResponse.json({ fixedAsset }, { status: 201 });
   } catch (err) {
