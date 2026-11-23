@@ -4,11 +4,14 @@
  * orchestration (posting, tracking which periods have already been
  * depreciated, disposal) lives in fixed-assets-service.ts.
  *
- * Straight-line only for v1 — the simplest default, matching every other
- * phase's "start simple, revisit if asked" pattern; no declining-balance or
- * units-of-production yet. Disposals and reversals are service concerns
- * (`disposeFixedAsset` / `reverseDepreciation`); this module only prices a
- * month and decides whether a month is eligible at all.
+ * Three methods (issue #1325): straight-line (unchanged default),
+ * declining-balance with an explicit annual rate and a documented switch
+ * rule, and units-of-production on approved capacity and actual usage. The
+ * method is chosen by the accountant and recorded on the asset (and on each
+ * posting, as a snapshot of what priced it); changes are prospective. Disposals
+ * and reversals are service concerns (`disposeFixedAsset` /
+ * `reverseDepreciation`); this module only prices a month and decides whether
+ * a month is eligible at all.
  *
  * ## The schedule model (issue #833 review follow-up)
  *
@@ -39,6 +42,167 @@ export interface DepreciableAsset {
   cost: number;
   salvageValue: number;
   usefulLifeMonths: number;
+}
+
+// ---------------------------------------------------------------------------
+// Depreciation methods — issue #1325.
+//
+// `straight_line` is the default and its arithmetic is byte-for-byte what it
+// was before this module supported anything else. The other two are opt-in per
+// asset (or per effective-dated estimate change) by an accountant:
+//
+//   * `declining_balance` charges a fixed ANNUAL rate (basis points) against
+//     the opening carrying amount, one twelfth per Jalali month:
+//         charge = opening carrying × rate ÷ 12
+//     `decliningBalanceSwitchPolicy` decides what happens as the carrying
+//     amount falls:
+//       - `none` — keep the declining charge for every month; the final open
+//         month of the schedule still absorbs whatever remains, so the asset
+//         lands exactly on cost − salvage by the end of its useful life (the
+//         truing-up is a schedule rule, not a mid-life change of method).
+//       - `straight_line` — from the first month where straight-line over the
+//         remaining months (on the remaining carrying amount above salvage)
+//         is at least the declining charge, charge that larger straight-line
+//         amount instead. This is the common "DB with switch to SL" policy and
+//         it exhausts the depreciable base smoothly by the schedule's end.
+//
+//   * `units_of_production` charges approved total capacity and actual usage:
+//         per-unit rate = (cost − final salvage) ÷ approved total capacity
+//         charge        = round(period units × per-unit rate)
+//     The month in which cumulative production reaches capacity absorbs the
+//     rounding remainder exactly. A period with no production charges nothing
+//     (and is not an error); a period that would push cumulative production
+//     past capacity is refused rather than silently over-depreciating.
+//
+// Every method is bounded by the same lifetime cap: the sum of all live
+// postings may never exceed cost − final salvage, and no method can take the
+// carrying amount below the residual value.
+// ---------------------------------------------------------------------------
+
+export type DepreciationMethod = "straight_line" | "declining_balance" | "units_of_production";
+
+export const DEPRECIATION_METHODS: readonly DepreciationMethod[] = [
+  "straight_line",
+  "declining_balance",
+  "units_of_production",
+];
+
+/** `none` keeps the declining charge; `straight_line` switches when SL is ≥ DB. */
+export type DecliningBalanceSwitchPolicy = "none" | "straight_line";
+
+export const DECLINING_BALANCE_SWITCH_POLICIES: readonly DecliningBalanceSwitchPolicy[] = [
+  "none",
+  "straight_line",
+];
+
+/** Annual declining-balance rate limits, in basis points (10000 = 100% p.a.). */
+export const DECLINING_BALANCE_RATE_MIN_BPS = 1;
+export const DECLINING_BALANCE_RATE_MAX_BPS = 10_000;
+
+/** Approved total production capacity and its unit, e.g. 500_000 «عدد». */
+export const CAPACITY_UNIT_LABEL_MAX_LENGTH = 40;
+
+export interface DepreciationMethodConfig {
+  method: DepreciationMethod;
+  /** Annual rate in basis points; required for declining-balance, NULL otherwise. */
+  decliningBalanceRateBps: number | null;
+  /** Required for declining-balance; ignored by the other methods. */
+  decliningBalanceSwitchPolicy: DecliningBalanceSwitchPolicy;
+  /** Approved lifetime capacity; required for units-of-production, NULL otherwise. */
+  totalCapacityUnits: number | null;
+  capacityUnitLabel: string | null;
+}
+
+/**
+ * Validates a chosen method and its parameters. Persian messages, matching
+ * `validateFixedAsset`'s contract (empty = valid). A method's parameters are
+ * cleared when they do not apply, so a method change never leaves a stale rate
+ * or capacity behind on the asset row.
+ */
+export function normaliseDepreciationMethod(input: {
+  method?: string | null;
+  decliningBalanceRateBps?: number | null;
+  decliningBalanceSwitchPolicy?: string | null;
+  totalCapacityUnits?: number | null;
+  capacityUnitLabel?: string | null;
+}): { ok: true; config: DepreciationMethodConfig } | { ok: false; errors: string[] } {
+  const method = (input.method?.trim() || "straight_line") as DepreciationMethod;
+  if (!DEPRECIATION_METHODS.includes(method)) {
+    return { ok: false, errors: ["روش استهلاک انتخاب‌شده معتبر نیست."] };
+  }
+  const errors: string[] = [];
+  const rate = input.decliningBalanceRateBps ?? null;
+  const policy = (input.decliningBalanceSwitchPolicy?.trim() || "none") as DecliningBalanceSwitchPolicy;
+  const capacity = input.totalCapacityUnits ?? null;
+  const unitLabel = input.capacityUnitLabel?.trim() || null;
+
+  if (method === "declining_balance") {
+    if (
+      rate === null ||
+      !Number.isInteger(rate) ||
+      rate < DECLINING_BALANCE_RATE_MIN_BPS ||
+      rate > DECLINING_BALANCE_RATE_MAX_BPS
+    ) {
+      errors.push("نرخ سالانهٔ استهلاک نزولی باید عدد صحیح بین ۱ تا ۱۰۰۰۰ (یک‌صدم درصد) باشد.");
+    }
+    if (!DECLINING_BALANCE_SWITCH_POLICIES.includes(policy)) {
+      errors.push("سیاست تغییر روش نزولی معتبر نیست.");
+    }
+  }
+  if (method === "units_of_production") {
+    if (capacity === null || !Number.isSafeInteger(capacity) || capacity <= 0) {
+      errors.push("برای روش مقدار تولید، ظرفیت کل تأییدشده باید عدد صحیح مثبت باشد.");
+    }
+    if (unitLabel && unitLabel.length > CAPACITY_UNIT_LABEL_MAX_LENGTH) {
+      errors.push("واحد اندازه‌گیری ظرفیت بیش از حد طولانی است.");
+    }
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    config: {
+      method,
+      decliningBalanceRateBps: method === "declining_balance" ? rate : null,
+      decliningBalanceSwitchPolicy: method === "declining_balance" ? policy : "none",
+      totalCapacityUnits: method === "units_of_production" ? capacity : null,
+      capacityUnitLabel: method === "units_of_production" ? unitLabel : null,
+    },
+  };
+}
+
+/** The method config carried by a schedule (or a posting's snapshot). */
+export interface MethodBearingSchedule {
+  method?: DepreciationMethod | null;
+  decliningBalanceRateBps?: number | null;
+  decliningBalanceSwitchPolicy?: DecliningBalanceSwitchPolicy | null;
+  totalCapacityUnits?: number | null;
+}
+
+/** Resolves absent method data to straight-line — every legacy row's meaning. */
+export function methodOf(schedule: MethodBearingSchedule): DepreciationMethodConfig {
+  const method = schedule.method && DEPRECIATION_METHODS.includes(schedule.method)
+    ? schedule.method
+    : "straight_line";
+  return {
+    method,
+    decliningBalanceRateBps: method === "declining_balance" ? schedule.decliningBalanceRateBps ?? null : null,
+    decliningBalanceSwitchPolicy:
+      method === "declining_balance"
+        ? schedule.decliningBalanceSwitchPolicy === "straight_line"
+          ? "straight_line"
+          : "none"
+        : "none",
+    totalCapacityUnits: method === "units_of_production" ? schedule.totalCapacityUnits ?? null : null,
+    capacityUnitLabel: null,
+  };
+}
+
+/** Whole months from `from` to `to` (both `YYYY-MM`); negative when reversed. */
+export function monthsBetweenPeriodKeys(from: string, to: string): number {
+  const a = parseDepreciationPeriodKey(from);
+  const b = parseDepreciationPeriodKey(to);
+  if (!a || !b) return 0;
+  return b.jy * 12 + b.jm - (a.jy * 12 + a.jm);
 }
 
 /** Field limits shared by the service, the routes and the UI forms (issue #833). */
@@ -191,12 +355,23 @@ export type DepreciationRefusal =
   | "period_beyond_schedule"
   | "period_in_future"
   | "period_already_depreciated"
-  | "fully_depreciated";
+  | "fully_depreciated"
+  /* method-specific refusals (issue #1325) */
+  | "capacity_required"
+  | "production_units_required"
+  | "production_exceeds_capacity";
 
 /** One estimate schedule's parameters — the original, or one change's revision. */
-export interface DepreciationSchedule extends DepreciableAsset {
+export interface DepreciationSchedule extends DepreciableAsset, MethodBearingSchedule {
   /** The month sequence's anchor: the schedule runs from the in-service month. */
   inServiceDate: string;
+}
+
+/** A live posting as the schedule sees it: its month, amount and (UoP) units. */
+export interface DepreciationPostingFact {
+  periodKey: string;
+  amount: number;
+  unitsProduced?: number | null;
 }
 
 export interface DepreciationPlanInput {
@@ -220,6 +395,16 @@ export interface DepreciationPlanInput {
   postedPeriodKeys: string[];
   /** Live accumulated depreciation — the sum of exactly those postings. */
   accumulatedSoFar: number;
+  /**
+   * The live postings themselves. Optional for callers that post months in
+   * chronological order (the legacy shape); when present they are the source
+   * of the opening carrying amount (declining-balance) and of cumulative
+   * production (units-of-production), so out-of-order catch-up posting stays
+   * exact.
+   */
+  postedPostings?: DepreciationPostingFact[] | null;
+  /** Units produced in the period being posted — required for units-of-production. */
+  unitsProduced?: number | null;
   /** Requested Jalali month; when absent it is the month of `entryDate`, else of `today`. */
   periodKey?: string | null;
   /** Requested document date; when absent the month's last day, or today inside the current month. */
@@ -292,6 +477,34 @@ export function planDepreciation(input: DepreciationPlanInput): DepreciationPlan
   const remainingTotal = input.schedule.cost - input.finalSalvageValue - input.accumulatedSoFar;
   if (remainingTotal <= 0) return { ok: false, error: "fully_depreciated" };
 
+  const facts = input.postedPostings ?? null;
+  const unitsBefore = facts
+    ? facts.filter((p) => p.periodKey < period.key).reduce((sum, p) => sum + (p.unitsProduced ?? 0), 0)
+    : 0;
+  const method = methodOf(input.schedule);
+
+  // Units-of-production is usage-driven, not calendar-driven: the month's own
+  // production prices it, the approved capacity bounds it, and nothing is
+  // absorbed on a "last open month" rule (a capacity that is not exhausted by
+  // the schedule's end is an estimate to revise, not a rounding remainder).
+  if (method.method === "units_of_production") {
+    const capacity = method.totalCapacityUnits;
+    if (!capacity || capacity <= 0) return { ok: false, error: "capacity_required" };
+    const units = input.unitsProduced;
+    if (units === null || units === undefined || !Number.isSafeInteger(units) || units < 0) {
+      return { ok: false, error: "production_units_required" };
+    }
+    if (unitsBefore + units > capacity) return { ok: false, error: "production_exceeds_capacity" };
+    if (units === 0) return { ok: false, error: "fully_depreciated" };
+    const base = input.schedule.cost - input.finalSalvageValue;
+    let amount = Math.round((units * base) / capacity);
+    // The month that reaches capacity absorbs the per-unit rounding exactly.
+    if (unitsBefore + units >= capacity) amount = remainingTotal;
+    amount = Math.min(amount, remainingTotal);
+    if (amount <= 0) return { ok: false, error: "fully_depreciated" };
+    return { ok: true, period, entryDate, amount };
+  }
+
   const posted = new Set(input.postedPeriodKeys);
   let isLastOpenMonth = true;
   for (let key = addMonthsToPeriodKey(period.key, 1); finalEnd && key <= finalEnd; key = addMonthsToPeriodKey(key, 1)) {
@@ -301,13 +514,254 @@ export function planDepreciation(input: DepreciationPlanInput): DepreciationPlan
     }
   }
 
+  // Declining balance prices from the carrying amount at the START of the
+  // requested month, which the live postings before it determine — a catch-up
+  // month is priced as if the schedule had been followed, not from today's
+  // total. Without the posting facts the caller is posting chronologically, so
+  // the live accumulated total is that opening amount.
+  const openingAccumulated = facts
+    ? facts.filter((p) => p.periodKey < period.key).reduce((sum, p) => sum + p.amount, 0)
+    : input.accumulatedSoFar;
+
+  const charge = depreciationCharge({
+    cost: input.schedule.cost,
+    salvageValue: input.schedule.salvageValue,
+    usefulLifeMonths: input.schedule.usefulLifeMonths,
+    method: method.method,
+    decliningBalanceRateBps: method.decliningBalanceRateBps,
+    decliningBalanceSwitchPolicy: method.decliningBalanceSwitchPolicy,
+    inServiceDate: input.schedule.inServiceDate,
+    periodKey: period.key,
+    openingAccumulated,
+    finalSalvageValue: input.finalSalvageValue,
+  });
+
   // The last open month of the final schedule absorbs whatever is left —
   // rounding, corrections, everything — so the schedule lands exactly.
-  const amount = isLastOpenMonth
-    ? remainingTotal
-    : Math.min(monthlyDepreciation(input.schedule), remainingTotal);
+  const amount = isLastOpenMonth ? remainingTotal : Math.min(charge, remainingTotal);
   if (amount <= 0) return { ok: false, error: "fully_depreciated" };
   return { ok: true, period, entryDate, amount };
+}
+
+/**
+ * One period's charge under the time-based methods (straight-line or
+ * declining-balance). Never negative, never past the lifetime cap — the caller
+ * applies that cap with the live accumulated total. Units-of-production is
+ * priced by `planDepreciation`/`projectDepreciationSchedule`, where the month's
+ * production is known.
+ */
+export function depreciationCharge(input: {
+  cost: number;
+  /** The governing schedule's salvage (used by straight-line). */
+  salvageValue: number;
+  usefulLifeMonths: number;
+  method: DepreciationMethod;
+  decliningBalanceRateBps?: number | null;
+  decliningBalanceSwitchPolicy?: DecliningBalanceSwitchPolicy | null;
+  /** The governing schedule's in-service date (the schedule's anchor). */
+  inServiceDate: string;
+  /** The period being priced, for the remaining-months switch test. */
+  periodKey: string;
+  /** Accumulated live depreciation strictly before the period. */
+  openingAccumulated: number;
+  /** The lifetime residual floor (the final schedule's salvage). */
+  finalSalvageValue: number;
+}): number {
+  if (input.method === "units_of_production") return 0;
+  const openingCarrying = Math.max(0, input.cost - input.openingAccumulated);
+  if (input.method === "declining_balance") {
+    const bps = input.decliningBalanceRateBps ?? 0;
+    // bps is an ANNUAL rate in hundredths of a percent: /10000 /12 = /120000.
+    const declining = (openingCarrying * bps) / 120_000;
+    if (input.decliningBalanceSwitchPolicy !== "straight_line") return Math.max(0, Math.round(declining));
+    // The switch compares the declining charge with straight-line over the
+    // months remaining in the governing schedule (this month through the last
+    // scheduled month, inclusive) on the remaining carrying amount above the
+    // residual value — the standard "larger of the two" switch rule.
+    const endKey = scheduleEndPeriodKey(input.inServiceDate, input.usefulLifeMonths);
+    const remaining = endKey ? Math.max(1, monthsBetweenPeriodKeys(input.periodKey, endKey) + 1) : 1;
+    const straightLine = Math.max(0, openingCarrying - input.finalSalvageValue) / remaining;
+    return Math.max(0, Math.round(Math.max(declining, straightLine)));
+  }
+  return Math.max(0, Math.round((input.cost - input.salvageValue) / input.usefulLifeMonths));
+}
+
+// ---------------------------------------------------------------------------
+// Projected depreciation schedule — issue #1325.
+//
+// One row per Jalali month from the in-service month to the schedule's end
+// (or an earlier requested horizon). A month with a live posting is `posted`
+// and carries that posting's amount — historical truth, never recomputed. A
+// month without one is `forecast`: the amount the approved method would charge
+// if it were posted today. Forecast rows are pure arithmetic; they never create
+// a journal entry and nothing in the ledger reads them.
+//
+// The rows chain opening carrying amount → period depreciation → accumulated
+// → closing carrying amount, so the accountant sees the same arithmetic the
+// posting path uses. `remainingDepreciableBase` is cost − accumulated − the
+// residual floor, never negative.
+// ---------------------------------------------------------------------------
+
+export interface DepreciationScheduleRow {
+  periodKey: string;
+  label: string;
+  startsOn: string;
+  endsOn: string;
+  /** `posted` = a live journaled posting; `forecast` = projection only. */
+  status: "posted" | "forecast";
+  method: DepreciationMethod;
+  /** Carrying amount at the start of the month (cost − live accumulated before it). */
+  openingCarrying: number;
+  depreciation: number;
+  /** Carrying amount after this month. */
+  closingCarrying: number;
+  accumulated: number;
+  /** Cost − accumulated − residual value, floored at zero. */
+  remainingDepreciableBase: number;
+  /** Units of production charged in the month, when the method uses them. */
+  unitsProduced: number | null;
+  /** The register row / journal entry behind a posted month. */
+  entryId: string | null;
+  journalEntryId: string | null;
+  periodLabel: string | null;
+}
+
+export interface DepreciationScheduleTotals {
+  cost: number;
+  salvageValue: number;
+  depreciableBase: number;
+  postedDepreciation: number;
+  forecastDepreciation: number;
+  accumulated: number;
+  closingCarrying: number;
+  remainingDepreciableBase: number;
+}
+
+export function projectDepreciationSchedule(input: {
+  asset: DepreciableAsset & MethodBearingSchedule & { inServiceDate: string };
+  /** Only LIVE (non-reversed) postings — a reversal is absent, exactly as `planDepreciation` sees it. */
+  livePostings: (DepreciationPostingFact & { method?: DepreciationMethod | null; entryId?: string | null; journalEntryId?: string | null; periodLabel?: string | null })[];
+  /** Forecast units per future month for a units-of-production asset. */
+  forecastUnitsPerPeriod?: number | null;
+  /** The last month to project (inclusive); defaults to the schedule's end. */
+  throughPeriodKey?: string | null;
+  /** The month the business is in — rows after it are future months. */
+  todayPeriodKey: string;
+}): { rows: DepreciationScheduleRow[]; totals: DepreciationScheduleTotals } {
+  const cost = input.asset.cost;
+  const salvage = input.asset.salvageValue;
+  const base = Math.max(0, cost - salvage);
+  const method = methodOf(input.asset);
+  const startPeriod = depreciationPeriodOfDate(input.asset.inServiceDate);
+  const endKey = scheduleEndPeriodKey(input.asset.inServiceDate, input.asset.usefulLifeMonths);
+
+  const emptyTotals = (): DepreciationScheduleTotals => ({
+    cost,
+    salvageValue: salvage,
+    depreciableBase: base,
+    postedDepreciation: 0,
+    forecastDepreciation: 0,
+    accumulated: 0,
+    closingCarrying: cost,
+    remainingDepreciableBase: base,
+  });
+  if (!startPeriod || !endKey) return { rows: [], totals: emptyTotals() };
+
+  const through =
+    input.throughPeriodKey && input.throughPeriodKey < endKey ? input.throughPeriodKey : endKey;
+  if (through < startPeriod.key) return { rows: [], totals: emptyTotals() };
+
+  const postedByKey = new Map(input.livePostings.map((p) => [p.periodKey, p]));
+  const rows: DepreciationScheduleRow[] = [];
+  let accumulated = 0;
+  let cumulativeUnits = 0;
+  let postedDepreciation = 0;
+  let forecastDepreciation = 0;
+
+  for (let key = startPeriod.key; key <= through; key = addMonthsToPeriodKey(key, 1)) {
+    const period = parseDepreciationPeriodKey(key);
+    if (!period) break;
+    const openingCarrying = Math.max(0, cost - accumulated);
+    const remainingBefore = Math.max(0, base - accumulated);
+    if (remainingBefore <= 0) break;
+
+    const posted = postedByKey.get(key);
+    const rowMethod = posted?.method ?? method.method;
+    let amount: number;
+    let units: number | null = null;
+
+    if (posted) {
+      amount = posted.amount;
+      units = posted.unitsProduced ?? null;
+      if (units !== null) cumulativeUnits += units;
+      postedDepreciation += amount;
+    } else if (rowMethod === "units_of_production") {
+      const capacity = method.totalCapacityUnits ?? 0;
+      const planned = key > input.todayPeriodKey ? Math.max(0, input.forecastUnitsPerPeriod ?? 0) : 0;
+      units = Math.max(0, Math.trunc(planned));
+      if (capacity > 0 && units > 0) {
+        amount = Math.round((units * base) / capacity);
+        if (cumulativeUnits + units >= capacity) amount = remainingBefore;
+      } else {
+        amount = 0;
+      }
+      cumulativeUnits += units;
+      amount = Math.min(Math.max(0, amount), remainingBefore);
+      forecastDepreciation += amount;
+    } else {
+      amount = depreciationCharge({
+        cost,
+        salvageValue: salvage,
+        usefulLifeMonths: input.asset.usefulLifeMonths,
+        method: rowMethod,
+        decliningBalanceRateBps: method.decliningBalanceRateBps,
+        decliningBalanceSwitchPolicy: method.decliningBalanceSwitchPolicy,
+        inServiceDate: input.asset.inServiceDate,
+        periodKey: key,
+        openingAccumulated: accumulated,
+        finalSalvageValue: salvage,
+      });
+      // The schedule's last month absorbs whatever rounding is left, exactly
+      // as a posting for that month would (the time-based methods must land on
+      // cost − residual by the end of the useful life).
+      if (key === endKey) amount = remainingBefore;
+      amount = Math.min(Math.max(0, amount), remainingBefore);
+      forecastDepreciation += amount;
+    }
+
+    accumulated += amount;
+    rows.push({
+      periodKey: key,
+      label: period.label,
+      startsOn: period.startsOn,
+      endsOn: period.endsOn,
+      status: posted ? "posted" : "forecast",
+      method: rowMethod,
+      openingCarrying,
+      depreciation: amount,
+      closingCarrying: Math.max(0, cost - accumulated),
+      accumulated,
+      remainingDepreciableBase: Math.max(0, base - accumulated),
+      unitsProduced: units,
+      entryId: posted?.entryId ?? null,
+      journalEntryId: posted?.journalEntryId ?? null,
+      periodLabel: posted?.periodLabel ?? null,
+    });
+  }
+
+  return {
+    rows,
+    totals: {
+      cost,
+      salvageValue: salvage,
+      depreciableBase: base,
+      postedDepreciation,
+      forecastDepreciation,
+      accumulated,
+      closingCarrying: Math.max(0, cost - accumulated),
+      remainingDepreciableBase: Math.max(0, base - accumulated),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

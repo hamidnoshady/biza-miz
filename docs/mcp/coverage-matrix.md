@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1305**. Rows: tenant **121**, platform **24**.
+Route files scanned: **1307**. Rows: tenant **121**, platform **24**.
 
 ## Summary of remaining gaps
 
