@@ -36,7 +36,8 @@ export interface ExportRequest {
     | "cash_flow"
     | "business_overview"
     | "trial_balance"
-    | "shift_orders";
+    | "shift_orders"
+    | "financial_ratios";
   /**
    * The config the screen is showing, sent verbatim — a structured type like
    * the builder's `BuilderConfig` is fine here; the route validates it again.
@@ -56,6 +57,9 @@ export interface ExportRequest {
   scope?: "branch" | "business-wide";
   /** The shift screen's own query string; only read by the `shift_orders` kind. */
   query?: string;
+  /** The accounting-dimension filter the ratio screen was showing; only read by `financial_ratios`. */
+  dimensionKind?: string;
+  dimensionValue?: string;
 }
 
 /** POSTs /api/reports/export and triggers a browser download of the returned file. */

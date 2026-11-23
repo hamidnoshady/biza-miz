@@ -39,6 +39,7 @@ export default async function ReportsPage() {
       <ReportsManager
         capabilities={reportCapabilities(permissions)}
         canExplain={permissions.has(PERMISSIONS.reportsExport) && features.ai_assistant}
+        canUseDimensions={permissions.has(PERMISSIONS.ledgerView)}
       />
     </PageShell>
   );

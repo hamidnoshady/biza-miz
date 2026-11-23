@@ -298,6 +298,21 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
       ),
     ).rejects.toThrow("no_verified_channel");
     expect(sms.sent).toHaveLength(0);
+
+    // Once the identity itself holds a verified global number, that number is
+    // the recipient — still never the membership's.
+    await db.query(
+      `UPDATE platform_users SET phone_e164 = '+989121110003', phone_verified_at = now() WHERE id = $1`,
+      [alpha.ownerPlatformUserId],
+    );
+    const issued = await dbLib.withTenant(alpha.businessId, () =>
+      team.requestMemberPasswordReset(alpha.businessId, alpha.ownerId, alpha.ownerId, {
+        origin: "https://app.example.com",
+      }),
+    );
+    expect(issued.deliveredTo).toBe("+989***0003");
+    expect(sms.sent).toHaveLength(1);
+    expect(sms.sent[0].phone).toBe("+989121110003");
   });
 });
 

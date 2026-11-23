@@ -28,6 +28,8 @@ import {
 import { renderReportLedgerHtml, renderReportTableHtml, type ReportPdfBusinessInfo } from "@/lib/report-pdf-template";
 import { renderHtmlToPdf } from "@/lib/pdf-render";
 import { getTrialBalance } from "@/lib/ledger-reports-service";
+import { getFinancialRatios } from "@/lib/financial-ratios-service";
+import { parseDimensionFilter } from "@/lib/accounting-dimensions";
 import type { AccountType } from "@/lib/coa-template";
 import { isValidIsoDate } from "@/lib/iso-date";
 import {
@@ -73,7 +75,8 @@ interface ExportBody {
     | "cash_flow"
     | "business_overview"
     | "trial_balance"
-    | "shift_orders";
+    | "shift_orders"
+    | "financial_ratios";
   config?: ReportConfig;
   dateFrom?: string;
   dateTo?: string;
@@ -91,6 +94,9 @@ interface ExportBody {
    * uses — so an export can never widen or reinterpret what was on screen.
    */
   query?: string;
+  /** The accounting-dimension filter the ratio screen was showing. */
+  dimensionKind?: string;
+  dimensionValue?: string;
 }
 
 async function getBusinessInfo(businessId: string): Promise<ReportPdfBusinessInfo> {
@@ -177,6 +183,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const kind = body.kind ?? "chart";
   const validKinds = new Set<NonNullable<ExportBody["kind"]>>([
     "chart", "pnl", "balance_sheet", "cash_flow", "business_overview", "trial_balance", "shift_orders",
+    "financial_ratios",
   ]);
   if (!validKinds.has(kind)) return NextResponse.json({ error: "invalid_kind" }, { status: 400 });
   if (body.title !== undefined && typeof body.title !== "string") {
@@ -206,7 +213,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // the export cannot drift from the screen's own rule about which reports have
   // a business-wide form.
   const standardKey = EXPORT_KIND_STANDARD_KEY[kind];
-  if (requestedScope === "business-wide" && !(standardKey && isConsolidatedStandardReport(standardKey))) {
+  if (
+    requestedScope === "business-wide" &&
+    kind !== "financial_ratios" &&
+    !(standardKey && isConsolidatedStandardReport(standardKey))
+  ) {
     return NextResponse.json(
       { error: "scope_not_supported", message: "این خروجی فقط برای یک شعبه ساخته می‌شود." },
       { status: 400 },
@@ -594,6 +605,102 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         dateTo: parsed.filters.dateTo,
       },
     );
+  }
+
+  if (kind === "financial_ratios") {
+    // The same read the screen performs, with the same scope, dates and
+    // dimension filter — so every figure in the file is a figure the screen
+    // showed, and the two cannot drift apart.
+    if (!body.dateFrom || !body.dateTo) {
+      return NextResponse.json({ error: "invalid_report_scope" }, { status: 400 });
+    }
+    const parsedDimension = parseDimensionFilter(body.dimensionKind, body.dimensionValue);
+    if (!parsedDimension.ok) {
+      return NextResponse.json({ error: "invalid_dimension" }, { status: 400 });
+    }
+    if (parsedDimension.filter) {
+      const ledgerAccess = await requirePermission(PERMISSIONS.ledgerView);
+      if (ledgerAccess.error) return ledgerAccess.error;
+    }
+    const resolved = await resolveScope();
+    if (!resolved.ok) return reportScopeDenialResponse(resolved.reason);
+
+    const report = await getFinancialRatios(session.businessId, {
+      dateFrom: body.dateFrom,
+      dateTo: body.dateTo,
+      scope: resolved.scope,
+      dimension: parsedDimension.filter,
+      compare: false,
+      trendPeriods: 0,
+    });
+    const title = body.title?.trim() || "تحلیل مالی و نسبت‌ها";
+    const statusLabels = {
+      available: "محاسبه‌شده",
+      unavailable: "ناموجود",
+      not_applicable: "قابل محاسبه نیست",
+    } as const;
+    const unitLabels = { ratio: "نسبت", percent: "درصد", days: "روز" } as const;
+    const rows: Record<string, unknown>[] = [];
+    for (const group of report.groups) {
+      for (const ratio of group.ratios) {
+        rows.push({
+          group: group.label,
+          item: ratio.label,
+          display: ratio.display ?? "—",
+          numeric: ratio.value,
+          unit: unitLabels[ratio.unit],
+          status: statusLabels[ratio.status],
+          note: ratio.reasonText ?? "",
+          formula: ratio.formula,
+        });
+      }
+    }
+    for (const input of report.inputs) {
+      rows.push({
+        group: "ورودی محاسبه",
+        item: input.label,
+        display:
+          input.value === null
+            ? "—"
+            : input.unit === "days"
+              ? toPersianDigits(input.value)
+              : moneyExportCell(input.value, unit, format),
+        numeric: input.value,
+        unit: input.unit === "days" ? "روز" : unit === "rial" ? "ریال" : "تومان",
+        status: input.value === null ? "ناموجود" : "محاسبه‌شده",
+        note: "",
+        formula: "",
+      });
+    }
+    for (const warning of report.warnings) {
+      rows.push({
+        group: "هشدار داده",
+        item: warning,
+        display: "—",
+        numeric: null,
+        unit: "",
+        status: "",
+        note: "",
+        formula: "",
+      });
+    }
+    const table: ReportTable = {
+      columns: [
+        { key: "group", label: "گروه" },
+        { key: "item", label: "نسبت / ورودی" },
+        { key: "display", label: "مقدار" },
+        { key: "numeric", label: "مقدار عددی" },
+        { key: "unit", label: "واحد" },
+        { key: "status", label: "وضعیت" },
+        { key: "note", label: "دلیل / توضیح" },
+        { key: "formula", label: "فرمول" },
+      ],
+      rows,
+    };
+    return respondWithTable(table, title, format, session.businessId, {
+      dateFrom: body.dateFrom,
+      dateTo: body.dateTo,
+    });
   }
 
   if (kind === "business_overview") {
