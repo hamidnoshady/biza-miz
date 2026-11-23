@@ -12,6 +12,7 @@
  * `unavailable` and can still finish onboarding; the address simply stays
  * unverified, which is exactly what the UI says.
  */
+import { BRAND_NAME_FA } from "../brand";
 import { platformBaseUrl } from "../deployment-role";
 import { resolveMessageConfig } from "../messaging-billing";
 import { SmtpMessageProvider } from "../messaging/providers/smtp";
@@ -37,7 +38,7 @@ export function identityEmailVerificationMessage(verificationUrl: string): {
   body: string;
 } {
   return {
-    subject: "تأیید ایمیل حساب بیزامیز",
+    subject: `تأیید ایمیل حساب ${BRAND_NAME_FA}`,
     body: [
       "برای تأیید این ایمیل در حساب بیزامیز، این پیوند را باز کنید:",
       verificationUrl,
