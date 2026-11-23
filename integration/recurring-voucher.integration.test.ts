@@ -589,3 +589,82 @@ describe("tenant isolation", () => {
     expect(otherOccurrences).toBe(0);
   });
 });
+
+describe("party attribution", () => {
+  /** A party that belongs to a different business than `biz`. */
+  async function foreignParty(): Promise<string> {
+    const other = await db.query<{ id: string }>(
+      "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
+      [`party-other-${randomUUID().slice(0, 8)}`],
+    );
+    const party = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, role) VALUES ($1, 'Foreign supplier', 'supplier') RETURNING id",
+      [other.rows[0].id],
+    );
+    return party.rows[0].id;
+  }
+
+  it("refuses a template whose line names another business's party", async () => {
+    const partyId = await foreignParty();
+    const { rows: before } = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM recurring_journal_templates",
+    );
+
+    await expect(
+      recurring.createRecurringTemplate({
+        businessId: biz.id,
+        actorId: user.id,
+        input: input({
+          lines: [
+            { accountId: acct.expense, debit: 1_000_000, credit: 0, partyId },
+            { accountId: acct.cash, debit: 0, credit: 1_000_000 },
+          ],
+        }),
+      }),
+    ).rejects.toThrow("unknown_party");
+
+    const { rows: after } = await db.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM recurring_journal_templates",
+    );
+    expect(after[0].n).toBe(before[0].n);
+  });
+
+  it("holds an occurrence instead of drafting it when its snapshot names another business's party", async () => {
+    const own = await db.query<{ id: string }>(
+      "INSERT INTO parties (business_id, name, role) VALUES ($1, 'Own supplier', 'supplier') RETURNING id",
+      [biz.id],
+    );
+    const { id } = await recurring.createRecurringTemplate({
+      businessId: biz.id,
+      actorId: user.id,
+      input: input({
+        frequency: "yearly",
+        lines: [
+          { accountId: acct.expense, debit: 1_000_000, credit: 0, partyId: own.rows[0].id },
+          { accountId: acct.cash, debit: 0, credit: 1_000_000 },
+        ],
+      }),
+    });
+
+    // Bypass the write-time check the way a restore or an older row could: put
+    // the other business's party straight onto the template line.
+    await db.query(
+      "UPDATE recurring_journal_template_lines SET party_id = $2 WHERE template_id = $1",
+      [id, await foreignParty()],
+    );
+
+    const result = await recurring.generateForTemplate({
+      businessId: biz.id,
+      templateId: id,
+      asOfDate: iso(1404, 6, 31),
+    });
+    expect(result.occurrences).toEqual([
+      { id: expect.any(String), scheduledDate: iso(1404, 6, 31), status: "failed" },
+    ]);
+
+    const [occurrence] = await occurrenceRows(id);
+    expect(occurrence.held_reason).toBe("unknown_party");
+    expect(occurrence.draft_id).toBeNull();
+    expect(await draftCount()).toBe(0);
+  });
+});

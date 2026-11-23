@@ -930,6 +930,30 @@ async function markOccurrence(
 }
 
 /**
+ * The last gate before a draft exists: every party on a line must belong to
+ * this business.
+ *
+ * `createRecurringTemplate`/`updateRecurringTemplate` already reject a foreign
+ * party, but generation reads `lines_snapshot` — data that outlives that write
+ * (an old row, a restore, a future writer) — and `createDraft` never looks at
+ * `parties.business_id`. So the occurrence is held instead of handing the draft
+ * a counterparty that belongs to another tenant.
+ */
+async function partyHoldFor(
+  businessId: string,
+  lines: { partyId: string | null }[],
+): Promise<"unknown_party" | null> {
+  const partyIds = [...new Set(lines.map((line) => line.partyId).filter((id): id is string => !!id))];
+  if (partyIds.length === 0) return null;
+  if (partyIds.some((id) => !isUuid(id))) return "unknown_party";
+  const { rows } = await query<{ id: string }>(
+    `SELECT id FROM parties WHERE business_id = $1 AND id = ANY($2::uuid[])`,
+    [businessId, partyIds],
+  );
+  return rows.length === partyIds.length ? null : "unknown_party";
+}
+
+/**
  * Turn one claimed occurrence into a draft.
  *
  * Safe to call repeatedly: the draft's deterministic idempotency key makes the
@@ -969,6 +993,24 @@ async function materializeOccurrence(params: {
       action: "occurrence_held",
       actorUserId: null,
       detail: { code: hold, scheduledDate: occurrence.scheduled_date },
+    });
+    return { status: "failed", duplicate: false };
+  }
+
+  const partyHold = await partyHoldFor(businessId, occurrence.lines_snapshot);
+  if (partyHold) {
+    await markOccurrence(businessId, occurrence.id, {
+      status: "failed",
+      lastError: partyHold,
+      heldReason: partyHold,
+    });
+    await insertEvent(null, {
+      businessId,
+      templateId: occurrence.template_id,
+      occurrenceId: occurrence.id,
+      action: "occurrence_held",
+      actorUserId: null,
+      detail: { code: partyHold, scheduledDate: occurrence.scheduled_date },
     });
     return { status: "failed", duplicate: false };
   }
