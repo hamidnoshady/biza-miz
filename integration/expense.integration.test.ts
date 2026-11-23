@@ -1053,10 +1053,17 @@ describe("the register's own semantics (issue #832 §2, §5, §6, §9, §11, §1
 });
 
 /**
- * §18, asserted where it can be: there is no recurring-expense machinery to
+ * §18, asserted where it can be: there is no recurring-*expense* machinery to
  * schedule, so documentation claiming it is the defect, and the register must
  * not grow one by accident. `expenses` has no cadence column and the schema has
- * no template table — the two things a recurring implementation would need.
+ * no recurring expense template table — the two things a recurring expense
+ * implementation would need.
+ *
+ * Issue #1323 added recurring *journal voucher* tables
+ * (`recurring_journal_templates` and its register), which is a different
+ * accounting semantic: it drafts a hand-composed journal and never creates or
+ * schedules an `expenses` row. This assertion is therefore about the expense
+ * register specifically, not about the word «recurring» anywhere in the schema.
  */
 describe("recurring expenses remain unimplemented (issue #832 §18)", () => {
   it("has no recurring-expense schema to claim", async () => {
@@ -1067,7 +1074,7 @@ describe("recurring expenses remain unimplemented (issue #832 §18)", () => {
     expect(rows).toEqual([]);
     const tables = await db.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables
-        WHERE table_schema = 'public' AND table_name ~ 'recur'`,
+        WHERE table_schema = 'public' AND table_name ~ 'recurring_(expense|expenses|expense_template)'`,
     );
     expect(tables.rows).toEqual([]);
   });

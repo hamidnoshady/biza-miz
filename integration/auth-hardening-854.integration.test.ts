@@ -170,7 +170,10 @@ interface Seed {
   ownerPassword: string;
 }
 
-async function seedBusiness(name: string, options: { ownerPhone?: string | null } = {}): Promise<Seed> {
+async function seedBusiness(
+  name: string,
+  options: { ownerPhone?: string | null; identityPhone?: string | null } = {},
+): Promise<Seed> {
   const slug = `${name.toLowerCase()}-${randomUUID().slice(0, 8)}`;
   const ownerEmail = `owner-${randomUUID().slice(0, 8)}@example.com`;
   const ownerPassword = "owner-password-854";
@@ -186,9 +189,10 @@ async function seedBusiness(name: string, options: { ownerPhone?: string | null 
   );
 
   const identity = await db.query<{ id: string }>(
-    `INSERT INTO platform_users (email, password_hash, full_name)
-     VALUES ($1, $2, 'Owner') RETURNING id`,
-    [ownerEmail, await bcrypt.hash(ownerPassword, 10)],
+    `INSERT INTO platform_users (email, password_hash, full_name, phone_e164, phone_verified_at)
+     VALUES ($1, $2, 'Owner', $3, CASE WHEN $3::text IS NULL THEN NULL ELSE now() END)
+     RETURNING id`,
+    [ownerEmail, await bcrypt.hash(ownerPassword, 10), options.identityPhone ?? null],
   );
 
   const owner = await db.query<{ id: string }>(
@@ -211,7 +215,10 @@ async function seedBusiness(name: string, options: { ownerPhone?: string | null 
 
 describe("Issue #854 — P0.3 no tenant administrator ever receives a usable reset credential", () => {
   it("sends the link to the holder's verified phone and returns only a masked target", async () => {
-    const seeded = await seedBusiness("Alpha", { ownerPhone: "+989121110001" });
+    // The channel is the canonical *identity* number (0302 / #1384), not a
+    // membership phone the administrator could re-point, so the seed proves
+    // the global one is what the credential travels to.
+    const seeded = await seedBusiness("Alpha", { identityPhone: "+989121110001" });
 
     const issued = await dbLib.withTenant(seeded.businessId, () =>
       team.requestMemberPasswordReset(seeded.businessId, seeded.ownerId, seeded.ownerId, {
@@ -265,11 +272,14 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
     expect(sms.sent).toHaveLength(0);
   });
 
-  it("accepts a verified number held on one of the identity's other memberships", async () => {
+  it("refuses a number verified only on a membership, never the identity (0302 / #1386)", async () => {
     /**
-     * The person may be a cashier here and the accountant there. The channel
-     * belongs to the *identity*, so it is searched across active memberships —
-     * still only ever a number whose possession was proven.
+     * A membership phone is the administrator's to re-point, so it cannot carry
+     * the global reset credential — that would hand the administrator the
+     * person's recovery channel, the takeover #854 closed. 0302 keeps the
+     * canonical `platform_users` number as the only eligible one; a person with
+     * verified membership phones and no global number is refused rather than
+     * silently downgraded to a lesser channel.
      */
     const alpha = await seedBusiness("Alpha", { ownerPhone: null });
     const beta = await seedBusiness("Beta", { ownerPhone: null });
@@ -280,13 +290,14 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
       [beta.businessId, alpha.ownerPlatformUserId, alpha.ownerEmail],
     );
 
-    const issued = await dbLib.withTenant(alpha.businessId, () =>
-      team.requestMemberPasswordReset(alpha.businessId, alpha.ownerId, alpha.ownerId, {
-        origin: "https://app.example.com",
-      }),
-    );
-    expect(issued.deliveredTo).toBe("+989***0002");
-    expect(sms.sent[0].phone).toBe("+989121110002");
+    await expect(
+      dbLib.withTenant(alpha.businessId, () =>
+        team.requestMemberPasswordReset(alpha.businessId, alpha.ownerId, alpha.ownerId, {
+          origin: "https://app.example.com",
+        }),
+      ),
+    ).rejects.toThrow("no_verified_channel");
+    expect(sms.sent).toHaveLength(0);
   });
 });
 

@@ -2762,7 +2762,7 @@ describe("depreciation for a business that is not a café", () => {
 describe("depreciation methods and projected schedules (issue #1325)", () => {
   it("keeps a legacy asset on straight-line and produces identical arithmetic", async () => {
     const keys = recentPeriodKeys(2);
-    // A row written the way every asset existed before migration 0316: no
+    // A row written the way every asset existed before migration 0317: no
     // method columns at all. The defaults must mean straight-line.
     const { rows } = await db.query<{ id: string }>(
       `INSERT INTO fixed_assets
