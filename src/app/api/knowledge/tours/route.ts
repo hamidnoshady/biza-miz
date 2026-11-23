@@ -44,7 +44,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // On Accounting Overview and POS, an eligible Studio walkthrough replaces the
   // built-in choices in the panel. Keep those choices as the fallback for
   // members who have no eligible published walkthrough.
-  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new";
+  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new" || page.route === "/accounting/products/prices";
   const studioTours = preferStudio
     ? eligibleTours.filter((tour) => published.some((entry) => entry.id === tour.id))
     : [];
