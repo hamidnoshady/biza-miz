@@ -780,6 +780,25 @@ type SyncEventRow = {
  */
 export const MAX_PUSH_ATTEMPTS = 20;
 
+/**
+ * A refusal that means "one of the master rows this event names has not reached
+ * the central server yet" is not poison — it is an ordering problem between two
+ * feeds that run in the same tick. Master data is pushed before operational
+ * events, so the missing row is normally one change away; waiting the ordinary
+ * 30 s → 15 min exponential backoff turns that into a sale that arrives an hour
+ * late, and the poison counter would dead-letter a perfectly good sale after ten
+ * minutes of retries.
+ *
+ * These codes are treated as a dependency wait: retry on the next master-feed
+ * tick (30 s), leave `push_attempts` alone, and never quarantine on them.
+ */
+const DEPENDENCY_REFUSAL = /(?:^|[:\s])(?:customer_not_found|supplier_required|menu_item_not_found|item_not_found|table_not_found|dependency_missing)(?:$|[:\s])/i;
+
+export function isDependencyRefusal(message: string | null | undefined): boolean {
+  if (!message) return false;
+  return DEPENDENCY_REFUSAL.test(message);
+}
+
 export type PushResult =
   | { status: "disabled" }
   | { status: "backoff"; until: string }
@@ -992,6 +1011,14 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
     const refusedIds = refused.map(Number);
     const refusedMessages = refused.map((id) => refusedErrors.get(id) ?? "remote_apply_failed");
     /*
+     * A dependency wait is not a refusal in the poison sense (see
+     * isDependencyRefusal): it is offered again after the 30 s the master feed
+     * runs on, its attempt counter is untouched, and it can never be
+     * quarantined by this path. Every other refusal keeps the bounded
+     * exponential backoff and the MAX_PUSH_ATTEMPTS quarantine described below.
+     */
+    const refusedDependencies = refusedMessages.map((message) => isDependencyRefusal(message));
+    /*
      * Issue #1446 — a permanent remote refusal used to be retried forever: the
      * row never reached `sync_event_dead_letters`, `pushed_at` stayed NULL and
      * the health screen could only count it as "refused" with no terminal
@@ -1013,19 +1040,29 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
       permanently_refused: boolean;
     }>(
       `UPDATE sync_events se
-          SET push_attempts = se.push_attempts + 1,
+          SET push_attempts = CASE
+                WHEN refused.dependency THEN se.push_attempts
+                ELSE se.push_attempts + 1
+              END,
               next_push_at = CASE
+                WHEN refused.dependency THEN now() + interval '30 seconds'
                 WHEN se.push_attempts + 1 >= $3 THEN NULL
                 ELSE now() + make_interval(secs => least(900, 30 * power(2, least(se.push_attempts, 10))))
               END,
-              error = CASE WHEN se.push_attempts + 1 >= $3 THEN refused.error ELSE se.error END,
-              dead_lettered_at = CASE WHEN se.push_attempts + 1 >= $3 THEN now() ELSE se.dead_lettered_at END
-         FROM unnest($1::bigint[], $2::text[]) AS refused(id, error)
+              error = CASE
+                WHEN NOT refused.dependency AND se.push_attempts + 1 >= $3 THEN refused.error
+                ELSE se.error
+              END,
+              dead_lettered_at = CASE
+                WHEN NOT refused.dependency AND se.push_attempts + 1 >= $3 THEN now()
+                ELSE se.dead_lettered_at
+              END
+         FROM unnest($1::bigint[], $2::text[], $4::boolean[]) AS refused(id, error, dependency)
         WHERE se.id = refused.id
       RETURNING se.id, se.location_id, se.client_event_id::text, se.event_type,
                 se.schema_version, se.payload, se.error,
-                (se.push_attempts >= $3) AS permanently_refused`,
-      [refusedIds, refusedMessages, MAX_PUSH_ATTEMPTS],
+                (se.push_attempts >= $3 AND NOT refused.dependency) AS permanently_refused`,
+      [refusedIds, refusedMessages, MAX_PUSH_ATTEMPTS, refusedDependencies],
     );
     for (const row of refusedRows.filter((entry) => entry.permanently_refused)) {
       await query(
@@ -1055,12 +1092,29 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
   const lastId = Math.max(afterId, ...delivered.map(Number));
   if (firstFailure) {
     if (delivered.length > 0) {
+      /*
+       * The queue moved: most rows were accepted and one is being retried (a
+       * missing master row, a business refusal). That is a row-level fact, not
+       * a transport failure, so it must not write `lastPushError` — that field
+       * is what the connection banner reads, and one refused sale used to turn
+       * every screen into «همگام‌سازی متوقف است» while data kept flowing.
+       * The refused count stays visible in the health card (sync-health-service
+       * counts `push_attempts > 0` rows) and the log keeps the refusal text.
+       */
       await setSetting(businessId, SETTING_KEYS.serverSyncState, {
         ...(await getServerSyncState(businessId)),
         lastPushedEventId: lastId,
+        lastPushSuccessAt: new Date().toISOString(),
+        lastPushError: null,
         pushFailures: 0,
         pushNextAttemptAt: null,
       } satisfies ServerSyncState);
+      await query(
+        `INSERT INTO server_sync_log (business_id, direction, status, events_count, error, last_event_id)
+         VALUES ($1, 'push', 'error', $2, $3, $4)`,
+        [businessId, delivered.length, firstFailure, lastId],
+      );
+      return { status: "error", error: firstFailure };
     }
     return fail(firstFailure, false);
   }

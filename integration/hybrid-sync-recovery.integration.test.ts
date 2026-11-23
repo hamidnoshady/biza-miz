@@ -360,7 +360,10 @@ describe("issue #1446 — push refusal reaches a terminal, retryable dead letter
       if (url.endsWith("/api/server-sync/push")) {
         return new Response(
           JSON.stringify({
-            results: [{ clientEventId, ok: false, error: "customer_not_found" }],
+            // A business refusal, not a missing master row: this is the class
+            // that still has to reach a terminal state (see the dependency case
+            // below, which must never be quarantined).
+            results: [{ clientEventId, ok: false, error: "invalid_order_type" }],
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -387,7 +390,7 @@ describe("issue #1446 — push refusal reaches a terminal, retryable dead letter
         [shop.locationId, clientEventId],
       );
       expect(row.rows[0].pushed_at).toBeNull(); // never delivered
-      expect(row.rows[0].error).toContain("customer_not_found");
+      expect(row.rows[0].error).toContain("invalid_order_type");
       expect(row.rows[0].next_push_at).toBeNull(); // no longer retried forever
       expect(row.rows[0].push_attempts).toBe(serverSync.MAX_PUSH_ATTEMPTS);
 
@@ -396,7 +399,7 @@ describe("issue #1446 — push refusal reaches a terminal, retryable dead letter
         [shop.businessId, clientEventId],
       );
       expect(dead.rows[0]?.status).toBe("open");
-      expect(dead.rows[0]?.error_code).toContain("customer_not_found");
+      expect(dead.rows[0]?.error_code).toContain("invalid_order_type");
 
       const health = await dbLib.withTenant(shop.businessId, () =>
         healthService.getSyncHealth(shop.businessId),
@@ -431,6 +434,88 @@ describe("issue #1446 — push refusal reaches a terminal, retryable dead letter
           String(input).endsWith("/api/server-sync/retry-events"),
         ),
       ).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a missing-master-row refusal retryable and never quarantines it", async () => {
+    const shop = await makeShop("Dependency Shop");
+    const clientEventId = randomUUID();
+    // Already at the cap: before this fix the very next refusal would have
+    // dead-lettered a sale that was only waiting for its customer row.
+    await owner.query(
+      `INSERT INTO sync_events
+         (location_id, client_event_id, event_type, payload, occurred_at,
+          actor_user_id, actor_role, origin, scope, schema_version,
+          applied_at, push_attempts)
+       VALUES ($1, $2, 'order.create', '{"type":"takeaway"}'::jsonb, now(),
+               $3, 'owner', 'local', 'location', 1, now(), $4)`,
+      [shop.locationId, clientEventId, shop.ownerId, serverSync.MAX_PUSH_ATTEMPTS - 1],
+    );
+    await dbLib.withTenant(shop.businessId, () =>
+      serverSync.setServerSyncConfig(shop.businessId, {
+        remoteUrl: "https://central.example.com",
+        token: `test-site-token-${clientEventId}`,
+        enabled: true,
+        locationId: shop.locationId,
+      }),
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        if (String(input).endsWith("/api/server-sync/push")) {
+          return new Response(
+            JSON.stringify({
+              results: [{ clientEventId, ok: false, error: "customer_not_found" }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    try {
+      const result = await dbLib.withTenant(shop.businessId, () =>
+        serverSync.runServerPush(shop.businessId),
+      );
+      expect(result.status).toBe("error");
+
+      const row = await owner.query<{
+        pushed_at: Date | null;
+        error: string | null;
+        next_push_at: Date | null;
+        push_attempts: number;
+      }>(
+        "SELECT pushed_at, error, next_push_at, push_attempts FROM sync_events WHERE location_id = $1 AND client_event_id = $2",
+        [shop.locationId, clientEventId],
+      );
+      expect(row.rows[0].pushed_at).toBeNull();
+      // The attempt counter is untouched: a dependency wait is not poison.
+      expect(row.rows[0].push_attempts).toBe(serverSync.MAX_PUSH_ATTEMPTS - 1);
+      expect(row.rows[0].error).toBeNull();
+      // Offered again on the master feed's own 30 s cadence, not in 15 minutes.
+      const waitMs = row.rows[0].next_push_at
+        ? row.rows[0].next_push_at.getTime() - Date.now()
+        : Number.NaN;
+      expect(waitMs).toBeGreaterThan(0);
+      expect(waitMs).toBeLessThanOrEqual(2 * 60_000);
+
+      const dead = await owner.query<{ status: string }>(
+        "SELECT status FROM sync_event_dead_letters WHERE business_id = $1 AND client_event_id = $2",
+        [shop.businessId, clientEventId],
+      );
+      expect(dead.rows[0]?.status).toBeUndefined();
+
+      const health = await dbLib.withTenant(shop.businessId, () =>
+        healthService.getSyncHealth(shop.businessId),
+      );
+      expect(health.unsent).toBe(1); // still queued, honestly reported
+      expect(health.openDeadLetters).toBe(0);
     } finally {
       vi.unstubAllGlobals();
     }
