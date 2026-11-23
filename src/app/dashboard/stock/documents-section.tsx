@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 /**
  * Phase 42b — «رسید و حواله‌های انبار»: the ledger of the RETAIL warehouse's
  * own documents. Filters by kind (رسید/حواله) and warehouse, plus a debounced
@@ -237,7 +239,7 @@ export function DocumentsSection() {
     if (!printData) return;
     // Let the portal paint, then hand over to the browser's print/PDF dialog
     // and drop the sheet when it closes.
-    const timer = window.setTimeout(() => window.print(), 60);
+    const timer = window.setTimeout(() => void printBrowserDocument("inventory_document"), 60);
     const clear = () => setPrintData(null);
     window.addEventListener("afterprint", clear);
     return () => {

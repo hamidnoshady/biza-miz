@@ -36,6 +36,7 @@ export function KitchenDispatchAgent({ enabled }: { enabled: boolean }) {
           const result = await printKitchenTicket(null, job.orderId, {
             requestId: job.requestId,
             itemIds: job.itemIds,
+            automatic: true,
           });
           const ack = await fetch("/api/printing/kitchen-dispatch", {
             method: "PATCH",
@@ -49,7 +50,7 @@ export function KitchenDispatchAgent({ enabled }: { enabled: boolean }) {
               ambiguous: result.ambiguous,
             }),
           });
-          if (!result.ok && !alerted.current.has(job.dispatchId)) {
+          if (!result.ok && !result.skipped && !result.notificationsMuted && !alerted.current.has(job.dispatchId)) {
             alerted.current.add(job.dispatchId);
             toast.warning(
               result.ambiguous

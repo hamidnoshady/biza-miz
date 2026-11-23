@@ -303,6 +303,11 @@ export interface SnapshotSetting {
   value: unknown;
 }
 
+export const SNAPSHOT_BRANCH_SETTING_KEYS: readonly string[] = [
+  "kitchen.workflow", "kitchen.clearAfterPayment", "kitchen.clearAfterMinutes",
+  "kitchen.clearAfterShift", "printing.behavior",
+];
+
 export interface PairingSnapshot {
   version: number;
   business: {
@@ -378,6 +383,7 @@ export interface PairingSnapshot {
   };
   paymentMethods: SnapshotPaymentMethod[];
   settings: SnapshotSetting[];
+  branchSettings?: SnapshotSetting[];
   dataClassification: PairingDataClassification;
   features: Record<string, boolean>;
   /** Plaintext, delivered once — the local install stores only its hash via setServerSyncConfig. */
@@ -665,6 +671,15 @@ export function validateSnapshot(raw: unknown): SnapshotValidation {
   for (const setting of raw.settings) {
     if (!isObject(setting)) return fail;
     if (typeof setting.key !== "string" || !setting.key) return fail;
+  }
+  if (raw.branchSettings !== undefined) {
+    if (!Array.isArray(raw.branchSettings)) return fail;
+    const keys = new Set<string>();
+    for (const setting of raw.branchSettings) {
+      if (!isObject(setting) || typeof setting.key !== "string" ||
+        !SNAPSHOT_BRANCH_SETTING_KEYS.includes(setting.key) || keys.has(setting.key)) return fail;
+      keys.add(setting.key);
+    }
   }
 
   if (!isObject(raw.features)) return fail;

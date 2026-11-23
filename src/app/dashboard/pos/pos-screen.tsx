@@ -1083,15 +1083,16 @@ export function PosScreen({
 
     if (paid && printOrderId) {
       const receiptRequestId = `receipt:${printOrderId}`;
-      const receipt = (requestId: string) => printSaleReceipt(null, printOrderId, { requestId });
-      void receipt(receiptRequestId).then((result) => {
-        if (!result.ok && result.error !== "printer_not_configured") {
+      const receipt = (requestId: string, automatic = false) => printSaleReceipt(null, printOrderId, { requestId, automatic });
+      void receipt(receiptRequestId, true).then((result) => {
+        if (!result.ok && !result.skipped && !result.notificationsMuted && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ سفارش با موفقیت ثبت شده است.", {
             action: { label: "چاپ دوباره", onClick: () => void receipt(`${receiptRequestId}:retry`) },
           });
         }
-        if (draftOpensDrawer(paymentDraft, paymentMethods) && result.supportsDrawer && result.printerId) {
-          void kickDrawer(result.printerId);
+        if (draftOpensDrawer(paymentDraft, paymentMethods)) {
+          if (result.skipped) void kickDrawer(null);
+          else if (result.supportsDrawer && result.printerId) void kickDrawer(result.printerId);
         }
       });
     }

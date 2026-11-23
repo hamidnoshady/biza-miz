@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 /**
  * Phase 42b — the «خرید» tab: the purchase-receiving form and the purchase
  * history, extracted from the former retail stock workspace (Phase 27
@@ -411,7 +413,7 @@ function PurchaseHistory({
       win.document.write(html);
       win.document.close();
       win.focus();
-      win.print();
+      void printBrowserDocument("inventory_document", win);
     },
     [money],
   );

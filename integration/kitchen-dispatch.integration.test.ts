@@ -127,3 +127,46 @@ describe("transactional kitchen dispatch idempotency", () => {
     expect(rows.find((row) => row.id === deltaJob)?.item_ids).not.toEqual(expect.arrayContaining(firstIds));
   });
 });
+
+describe("automatic Kitchen clearing", () => {
+  it("schedules the entire ticket only after its last line is ready, and keeps expired history when another line arrives", async () => {
+    const { businessId, locationId, orderId } = await seedOrder();
+    const { scheduleKitchenTicket } = await import("../src/lib/kitchen-workflow");
+    await db.query(
+      "INSERT INTO settings (business_id, location_id, key, value) VALUES ($1,$2,'kitchen.clearAfterMinutes','5')",
+      [businessId, locationId],
+    );
+    const { rows: [first] } = await db.query<{ id: string }>(
+      `INSERT INTO order_items (location_id, order_id, name_snapshot, unit_price, status, ready_at)
+       VALUES ($1,$2,'First',100,'ready',now() - interval '10 minutes') RETURNING id`,
+      [locationId, orderId],
+    );
+    const { rows: [last] } = await db.query<{ id: string }>(
+      `INSERT INTO order_items (location_id, order_id, name_snapshot, unit_price, status)
+       VALUES ($1,$2,'Last',100,'sent') RETURNING id`,
+      [locationId, orderId],
+    );
+    await scheduleKitchenTicket(db, locationId, orderId);
+    expect((await db.query("SELECT kitchen_clear_at FROM order_items WHERE id=$1", [first.id])).rows[0].kitchen_clear_at).toBeNull();
+    await db.query("UPDATE order_items SET status='ready', ready_at=now() - interval '8 minutes' WHERE id=$1", [last.id]);
+    await scheduleKitchenTicket(db, locationId, orderId);
+    const { rows: expired } = await db.query<{ kitchen_clear_at: Date }>(
+      "SELECT kitchen_clear_at FROM order_items WHERE order_id=$1 AND kitchen_clear_at <= now()",
+      [orderId],
+    );
+    expect(expired).toHaveLength(2);
+    expect(expired[0].kitchen_clear_at).toEqual(expired[1].kitchen_clear_at);
+    await db.query(
+      "INSERT INTO order_items (location_id,order_id,name_snapshot,unit_price,status) VALUES ($1,$2,'New',100,'sent')",
+      [locationId, orderId],
+    );
+    await scheduleKitchenTicket(db, locationId, orderId);
+    const { rows } = await db.query(
+      "SELECT kitchen_clear_at, status FROM order_items WHERE order_id=$1 ORDER BY name_snapshot",
+      [orderId],
+    );
+    expect(rows.map((row) => row.status)).toEqual(["ready", "ready", "sent"]);
+    expect(rows.slice(0, 2).map((row) => row.kitchen_clear_at)).toEqual(expired.map((row) => row.kitchen_clear_at));
+    expect(rows[2].kitchen_clear_at).toBeNull();
+  });
+});

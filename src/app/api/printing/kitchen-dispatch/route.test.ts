@@ -12,6 +12,9 @@ vi.mock("@/lib/auth", () => ({
   withTenantScope: (handler: (request?: NextRequest) => Promise<Response>) => handler,
 }));
 vi.mock("@/lib/db", () => ({ query: vi.fn() }));
+vi.mock("@/lib/printing/behavior-service", () => ({
+  loadPrintBehavior: vi.fn().mockResolvedValue({ defaults: {}, overrides: {}, effective: {} }),
+}));
 vi.mock("@/lib/setup-state", () => ({ resolveActiveLocation: vi.fn() }));
 vi.mock("@/lib/deployment-mode", () => ({ readDeploymentProfile: vi.fn() }));
 vi.mock("@/lib/deployment-role", () => ({ deploymentRole: vi.fn() }));

@@ -34,6 +34,7 @@ describe("KitchenDispatchAgent", () => {
     expect(printKitchenTicket).toHaveBeenCalledWith(null, "order-1", {
       requestId: "kitchen-dispatch:dispatch-1",
       itemIds: ["line-2", "line-3"],
+      automatic: true,
     });
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({
       dispatchId: "dispatch-1",

@@ -123,7 +123,7 @@ describe("print / PDF / export and the register's P2 filters (#923)", () => {
     for (const [name, content] of lists) {
       expect(content, `${name} must portal the print sheet`).toMatch(/createPortal\(/);
       expect(content, `${name} must mark the sheet for the print rule`).toMatch(/id="print-sheet-root"/);
-      expect(content, `${name} must trigger the browser's print dialog`).toMatch(/window\.print\(\)/);
+      expect(content, `${name} must trigger the browser's print dialog`).toMatch(/printBrowserDocument\(|window\.print\(\)/);
     }
   });
 
