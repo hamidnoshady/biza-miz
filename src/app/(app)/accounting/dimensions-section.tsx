@@ -291,7 +291,7 @@ export function DimensionsSection({ canManage }: { canManage: boolean }) {
 
   return (
     <div className="space-y-6">
-      <TabBar idPrefix="dimensions" label="بخش‌های ابعاد حسابداری" tabs={TABS} active={tab} onChange={setTab} />
+      <TabBar idPrefix="dimensions" label="بخش‌های ابعاد حسابداری" tabs={TABS} active={tab} onChange={setTab} tourAnchor="page.section-nav" />
 
       <TabPanel idPrefix="dimensions" active={tab}>
         {tab === "manage" ? (
