@@ -767,6 +767,26 @@ describe("published Studio tours", () => {
     expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
   });
 
+  it.each([
+    ["eligible Studio tour", [PERMISSIONS.reportsView], STUDIO_ID],
+    ["built-in fallback", [PERMISSIONS.reportsManage], "accounting.reports.page"],
+  ])("lists the business-reports %s without duplicating the legacy tour", async (_caseName, studioPermissions, expectedId) => {
+    const pageKey = "page:/accounting/reports";
+    mocks.industry.mockResolvedValue("cosmetics");
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.reportsView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/reports",
+      eligibility: { permissions: studioPermissions },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", [expectedId]);
+  });
+
   it("plays a published tour back and records its progress", async () => {
     mocks.publishedById.mockResolvedValue(studio);
     const res = await getTour(req(`/api/knowledge/tours/${STUDIO_ID}`), ctx(STUDIO_ID));
