@@ -74,6 +74,10 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'platform_identity_events.actor_platform_user_id': 'identity PII audit',
   'platform_signup_requests.platform_user_id':
     'pending signup proof; the resolved identity is not member history',
+  'platform_onboarding_drafts.platform_user_id':
+    'short onboarding progress for a person who has no tenant yet; not member history',
+  'platform_onboarding_drafts.provisioned_user_id':
+    'the membership this draft created once; the membership row itself is the member history',
 
   'accounting_dimension_settings.updated_by': 'dimension config',
   // Issue #1323 — recurring journal voucher templates. A template is a

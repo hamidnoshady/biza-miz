@@ -435,6 +435,14 @@ export async function withTenantTransaction<T>(
  *     legacy membership phone used to refuse a duplicate identity. It never
  *     writes a business, membership, wallet, subscription or charge, and it
  *     cannot select a business from the request.
+ *   - **onboarding** — ESH-202 / #1387's short post-signup draft. A verified
+ *     person has no tenant yet, so there is nothing to scope their own progress
+ *     to. The bypass covers only `platform_onboarding_drafts` (keyed on the
+ *     identity from the signed continuation), the identity read/write the
+ *     optional profile step performs through #1384's services, and the one
+ *     canonical provisioning call after the person confirms. It never accepts a
+ *     person, business or membership id from the request.
+ *
  *   - **employee-session-auth** — re-checking an `employee_sessions` row
  *     (Phase 20 Wave 2) is still active, from `getSession()`, which runs
  *     this check before `enterTenantScope` has been called for the request —

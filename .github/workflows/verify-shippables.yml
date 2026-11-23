@@ -461,7 +461,17 @@ jobs:
           # MiB on owner instruction (Hamid, 2026-11-22) with ~3.8 MiB of
           # headroom, the same reviewed reason as the moves above: restoring
           # working headroom for real API surface, not relaxing the gate.
-          if ($bytes -gt 308MB) { throw "Staged runtime $mib MiB exceeds 308 MiB budget" }
+          # 2026-11-23 — #1387's short onboarding staged 323,505,204 B =
+          # 308.519 MiB in 7,076 files (run 45197366031), i.e. +4.35 MiB over
+          # the 304.166 MiB main base: three new pages (`/onboarding`,
+          # `/setup/business`, `/verify/email/[token]`), the wizard's
+          # client-reference manifests, and two pre-session API route bundles
+          # (`/api/onboarding`, `/api/auth/email/verify`). No package delta
+          # (node_modules unchanged at 50.56 MiB). Budget moves 308 -> 312 MiB
+          # on owner instruction (Hamid, 2026-11-23) with ~3.5 MiB of headroom,
+          # the same reviewed reason as the moves above: restoring working
+          # headroom for real API surface, not relaxing the runaway detector.
+          if ($bytes -gt 312MB) { throw "Staged runtime $mib MiB exceeds 312 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the
       # manifest are the numbers a failed budget otherwise never shows.

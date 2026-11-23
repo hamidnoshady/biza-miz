@@ -152,6 +152,22 @@ const PUBLIC_ROUTES: Record<string, string> = {
     "public phone-first registration — redeems the signup-purpose OTP and creates/links exactly " +
     "one personal identity; no tenant is created and an already-redeemed request is idempotent " +
     "only for the browser holding its request token",
+  // ESH-199 / #1384 follow-up — redeeming a delivered email proof. The
+  // single-use token in the body is the credential; there is no session yet.
+  "auth/email/verify":
+    "email proof redemption — the single-use, hashed, address-bound token is the credential; it " +
+    "atomically consumes the proof and stamps only the address it was issued for",
+  // ESH-202 / #1387 — short business onboarding. A verified person has no
+  // tenant session yet, so the encrypted, short-lived continuation is the
+  // credential. Every action re-resolves it against `platform_users`; no
+  // person/business id is accepted from the body, and provisioning happens only
+  // on the explicit `action: "submit"`.
+  onboarding:
+    "short post-signup onboarding state and actions — GET reads only the caller's own draft; " +
+    "POST action=step idempotently upserts progress and delegates email/national-ID writes to the " +
+    "#1384 services; POST multipart action=logo applies the canonical logo validation; DELETE " +
+    "removes the draft logo; POST action=submit revalidates the industry and required business name, " +
+    "locks the draft, and calls the canonical provisioning service exactly once",
   // Issue #908 — the public contract-signing session. The caller is an external
   // signatory with no account, so no session can exist by definition; the
   // per-recipient token in the path is the credential (256 bits, HMAC-hashed at

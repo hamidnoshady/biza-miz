@@ -1376,6 +1376,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     note: "credential exchange surface — never an AI-callable verb",
   },
   {
+    id: "misc.short-onboarding",
+    module: "Cross-cutting",
+    entity: "Short post-signup business onboarding (industry, basics, logo, optional profile, confirmation)",
+    routes: ["onboarding"],
+    status: "route-only (by design)",
+    note: "ESH-202 / #1387 — a verified person has no tenant yet, so the encrypted onboarding continuation is the only credential. It creates the first business through the canonical provisioning service and hands off to the existing /setup wizard; it selects no app and charges nothing, and no tenant AI client can reach it.",
+    test: "integration/short-onboarding.integration.test.ts",
+  },
+  {
     id: "misc.cms-embed",
     module: "Cross-cutting",
     entity: "CMS edit-modal sign-in (one-time CMS admin address for the iframe)",

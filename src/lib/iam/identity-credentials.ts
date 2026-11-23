@@ -28,6 +28,93 @@ import { query, withoutTenantScope, withoutTenantScopeTransaction } from "../db"
 
 const TOKEN_TTL_MINUTES = 24 * 60;
 
+export type SetIdentityEmailResult =
+  | { ok: true; email: string | null; changed: boolean }
+  | { ok: false; error: "identity_missing" | "forbidden" | "invalid_email" | "email_taken" };
+
+/**
+ * The canonical form of an address typed by the person, or null when the value
+ * cannot be an address at all. Lower-cased because `platform_users.email` is
+ * `citext`; the same rule every login/provisioning door already uses is kept
+ * here so the optional profile step cannot introduce a looser one.
+ */
+export function normalizeIdentityEmail(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const email = value.trim().toLowerCase();
+  if (!email || email.length > 254) return null;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+}
+
+/**
+ * Set or clear the global identity's email from the person's own session.
+ *
+ * The address is not a credential by itself: changing it clears
+ * `email_verified_at` (the 0305 trigger) and consumes any live proof, so a new
+ * address can never inherit the old one's verification. A non-null actor must
+ * be the subject — a business administrator cannot change another person's
+ * recovery address.
+ */
+export async function setIdentityEmail(input: {
+  platformUserId: string;
+  email: string | null | undefined;
+  actorPlatformUserId: string;
+  actorBusinessId?: string | null;
+}): Promise<SetIdentityEmailResult> {
+  if (input.actorPlatformUserId !== input.platformUserId) {
+    return { ok: false, error: "forbidden" };
+  }
+  const clearing = input.email === null || input.email === undefined || input.email === "";
+  const email = clearing ? null : normalizeIdentityEmail(input.email);
+  if (!clearing && !email) return { ok: false, error: "invalid_email" };
+
+  try {
+    return await withoutTenantScopeTransaction("identity", async () => {
+      const { rows } = await query<{ email: string | null }>(
+        `SELECT email::text AS email FROM platform_users WHERE id = $1 FOR UPDATE`,
+        [input.platformUserId],
+      );
+      const identity = rows[0];
+      if (!identity) return { ok: false as const, error: "identity_missing" as const };
+
+      const current = identity.email ? identity.email.toLowerCase() : null;
+      if (current === email) return { ok: true as const, email, changed: false };
+
+      if (email) {
+        await query(
+          `UPDATE platform_users
+              SET email = $2, updated_at = now()
+            WHERE id = $1`,
+          [input.platformUserId, email],
+        );
+        await recordIdentityEvent({
+          platformUserId: input.platformUserId,
+          action: "email_changed",
+          actorPlatformUserId: input.actorPlatformUserId,
+          actorBusinessId: input.actorBusinessId ?? null,
+        });
+      } else {
+        await query(
+          `UPDATE platform_users
+              SET email = NULL, updated_at = now()
+            WHERE id = $1`,
+          [input.platformUserId],
+        );
+        await recordIdentityEvent({
+          platformUserId: input.platformUserId,
+          action: "email_cleared",
+          actorPlatformUserId: input.actorPlatformUserId,
+          actorBusinessId: input.actorBusinessId ?? null,
+        });
+      }
+
+      return { ok: true as const, email, changed: true };
+    });
+  } catch (error) {
+    if (isUniqueViolation(error)) return { ok: false, error: "email_taken" };
+    throw error;
+  }
+}
+
 export type IssueEmailVerificationResult =
   | { ok: true; token: string; expiresAt: string; email: string }
   | { ok: false; error: "identity_missing" | "email_missing" };
@@ -181,7 +268,11 @@ export async function hasVerifiedEmail(platformUserId: string): Promise<boolean>
 
 async function recordIdentityEvent(event: {
   platformUserId: string;
-  action: "email_verification_issued" | "email_verified";
+  action:
+    | "email_verification_issued"
+    | "email_verified"
+    | "email_changed"
+    | "email_cleared";
   actorPlatformUserId?: string | null;
   actorBusinessId?: string | null;
 }): Promise<void> {
@@ -195,5 +286,13 @@ async function recordIdentityEvent(event: {
       event.actorPlatformUserId ?? null,
       event.actorBusinessId ?? null,
     ],
+  );
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "23505"
   );
 }

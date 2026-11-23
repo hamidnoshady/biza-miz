@@ -7,6 +7,11 @@ import type { RouteClass } from "./types";
 export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   health: keys("platform.health"),
   auth: keys("platform.auth"),
+  // ESH-202 (#1387) — the short post-signup onboarding is the same
+  // authentication/identity plane as signup/login: it creates the first
+  // business but charges nothing and selects no app, so it belongs with
+  // `platform.auth` rather than a customer capability.
+  onboarding: keys("platform.auth"),
   sessions: keys("platform.auth"),
   host: keys("platform.host"),
   "well-known": keys("platform.discovery"),
