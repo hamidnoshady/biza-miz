@@ -549,8 +549,11 @@ describe("issue #1446 — the security gate stays closed on an unreachable crede
         serverSync.runOperationalSyncGate(shop.businessId),
       );
       expect(gate.ready).toBe(false);
-      expect(gate.reason).toBe("credential_unsettled");
-      expect(gate.error).toContain("ENOTFOUND");
+      // A transport failure of the credential probe is not a credential block
+      // any more; with the whole cloud unreachable the IAM plane is what holds
+      // the tick back, and it still reports why.
+      expect(gate.reason).toBe("iam_failed");
+      expect(gate.error ?? "").toMatch(/ENOTFOUND|fetch failed|unreachable/i);
 
       vi.stubGlobal(
         "fetch",
