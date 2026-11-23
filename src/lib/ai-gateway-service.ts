@@ -44,6 +44,7 @@ import {
   validateGatewayInput,
   virtualKeyAlias,
   classifyKeyDeleteResponse,
+  classifyKeyUpdateResponse,
   keyAbsentSignal,
   type AiGatewayConfig,
   type AiGatewayInput,
@@ -1241,7 +1242,14 @@ export async function provisionVirtualKey(
       // proxy itself enforces on it.
       body: { key: existing.virtualKey, key_alias: alias },
     });
-    if (!ok(res.status)) {
+    const update = classifyKeyUpdateResponse({ status: res.status, body: res.body });
+    if (update.outcome === "absent") {
+      // The proxy says this credential does not exist (a LiteLLM database
+      // restored from an older backup forgets every tenant key at once). The
+      // row is remembering a dead identity, so drop it and mint a replacement
+      // below instead of surfacing a sync error that only "rotate" could fix.
+      await clearVirtualKey(input.businessId, loc);
+    } else if (update.outcome === "unconfirmed") {
       const error = asError(res.status, res.body);
       return storeVirtualKey({
         businessId: input.businessId,
@@ -1250,13 +1258,14 @@ export async function provisionVirtualKey(
         keyAlias: alias,
         syncError: joinGatewayDetail(error.message, error.detail),
       });
+    } else {
+      return storeVirtualKey({
+        businessId: input.businessId,
+        locationId: loc,
+        virtualKey: existing.virtualKey,
+        keyAlias: alias,
+      });
     }
-    return storeVirtualKey({
-      businessId: input.businessId,
-      locationId: loc,
-      virtualKey: existing.virtualKey,
-      keyAlias: alias,
-    });
   }
 
   const res = await gatewayRequest(config, keyGenerateUrl(config.baseUrl), {

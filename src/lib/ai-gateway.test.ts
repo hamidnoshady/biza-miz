@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildGatewayRuntime,
   classifyKeyDeleteResponse,
+  classifyKeyUpdateResponse,
   defaultGatewayConfig,
   emptyBusinessGateway,
   gatewayErrorText,
@@ -647,6 +648,42 @@ describe("classifying a /key/delete response (issue #757 §A)", () => {
       expect(classifyKeyDeleteResponse({ status, body: { deleted_keys: ["sk-a"] }, target: "sk-a" })).toMatchObject({
         outcome: "unconfirmed",
       });
+    }
+  });
+});
+
+describe("classifying a /key/update response", () => {
+  // The console's "sync" refreshes a key the platform already stores. When the
+  // proxy has forgotten that key (a LiteLLM database restored from an older
+  // backup), only a 404 that is explicitly *about the key* may tell the
+  // service to drop the dead identity and mint a replacement.
+  it("treats a 2xx as a refreshed identity", () => {
+    expect(classifyKeyUpdateResponse({ status: 200, body: { key_alias: "pos-a" } })).toMatchObject({
+      outcome: "updated",
+    });
+  });
+
+  it("reports absence only on a 404 that is about the key itself", () => {
+    expect(
+      classifyKeyUpdateResponse({ status: 404, body: { error: { message: "Key not found." } } }),
+    ).toMatchObject({ outcome: "absent" });
+    expect(classifyKeyUpdateResponse({ status: 404, body: { error: "No keys found" } })).toMatchObject({
+      outcome: "absent",
+    });
+  });
+
+  it("stays unconfirmed on a 404 that says nothing about the key", () => {
+    expect(classifyKeyUpdateResponse({ status: 404, body: { detail: "Not Found" } })).toMatchObject({
+      outcome: "unconfirmed",
+    });
+    expect(classifyKeyUpdateResponse({ status: 404, body: null })).toMatchObject({ outcome: "unconfirmed" });
+  });
+
+  it("never reports absence on an auth failure or a server error", () => {
+    for (const status of [401, 403, 500, 502, 0]) {
+      expect(
+        classifyKeyUpdateResponse({ status, body: { error: { message: "Key not found." } } }),
+      ).toMatchObject({ outcome: "unconfirmed" });
     }
   });
 });

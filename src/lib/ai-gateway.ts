@@ -587,6 +587,40 @@ export function classifyKeyDeleteResponse(input: {
   return { outcome: "unconfirmed", reason: `دروازه پاسخ خطا داد (${status})؛ حذف تأیید نشد.` };
 }
 
+export type KeyUpdateClassification =
+  | { outcome: "updated" }
+  | { outcome: "absent"; reason: string }
+  | { outcome: "unconfirmed"; reason: string };
+
+/**
+ * Decide what LiteLLM's `/key/update` answer means for ONE stored credential.
+ *
+ * The console's "sync" action refreshes a key it already remembers. When the
+ * proxy answers a 404 that is explicitly about the key ("Key not found."), the
+ * local row is remembering a credential the proxy has forgotten — a LiteLLM
+ * database restored from an older backup does exactly that to every tenant at
+ * once. That case is *not* a sync error: the caller may drop the dead identity
+ * and mint a replacement, the same way rotation already does after a confirmed
+ * revoke. A 404 that is really a missing route (`{"detail": "Not Found"}`),
+ * and every other status, stays `unconfirmed` — absence is only ever based on
+ * the proxy saying so about this key.
+ */
+export function classifyKeyUpdateResponse(input: { status: number; body: unknown }): KeyUpdateClassification {
+  const { status, body } = input;
+  if (status >= 200 && status < 300) return { outcome: "updated" };
+  if (status === 404) {
+    const absent = keyAbsentSignal(body);
+    if (absent) {
+      return { outcome: "absent", reason: "LiteLLM گفت این کلید در دروازه وجود ندارد." };
+    }
+    return {
+      outcome: "unconfirmed",
+      reason: "دروازه ۴۰۴ داد اما دربارهٔ وضعیت همین کلید توضیحی نداد؛ به‌روزرسانی تأیید نشد.",
+    };
+  }
+  return { outcome: "unconfirmed", reason: `دروازه پاسخ خطا داد (${status})؛ به‌روزرسانی تأیید نشد.` };
+}
+
 // ---------------------------------------------------------------------------
 // The operator-facing error vocabulary
 // ---------------------------------------------------------------------------
