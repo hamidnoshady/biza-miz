@@ -41,10 +41,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const visible = tourForViewer(tour, viewer);
     return visible ? [visible] : [];
   });
-  // On Accounting Overview, an eligible Studio walkthrough replaces the
+  // On Accounting Overview and POS, an eligible Studio walkthrough replaces the
   // built-in choices in the panel. Keep those choices as the fallback for
   // members who have no eligible published walkthrough.
-  const studioTours = page.route === "/accounting/overview"
+  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos";
+  const studioTours = preferStudio
     ? eligibleTours.filter((tour) => published.some((entry) => entry.id === tour.id))
     : [];
   const tours = studioTours.length > 0 ? studioTours : eligibleTours;

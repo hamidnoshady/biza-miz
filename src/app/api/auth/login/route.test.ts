@@ -245,6 +245,96 @@ describe("password login — device trust waives the second factor only (gap 4)"
   });
 });
 
+describe("#1386 — phone is the default identifier", () => {
+  it("normalises Persian digits to E.164 before the identity lookup", async () => {
+    mocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("p.phone_e164")) {
+        expect(params).toEqual(["+989121234567"]);
+        return { rows: [{ ...IDENTITY }] };
+      }
+      return { rows: [] };
+    });
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true });
+
+    const res = await POST(postLogin({ identifier: "۰۹۱۲۱۲۳۴۵۶۷" }));
+
+    expect(res.status).toBe(200);
+    expect(issuedSession(res)).toBe(true);
+  });
+
+  it("answers an unknown phone like a wrong password", async () => {
+    mocks.query.mockImplementation(async () => ({ rows: [] }));
+
+    const res = await POST(postLogin({ identifier: "09129999999" }));
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "invalid_credentials" });
+    expect(issuedSession(res)).toBe(false);
+  });
+
+  it("refuses an ambiguous verified number instead of guessing an identity", async () => {
+    mocks.query.mockImplementation(async () => ({
+      rows: [
+        { ...IDENTITY, id: "platform-1" },
+        { ...IDENTITY, id: "platform-2" },
+      ],
+    }));
+
+    const res = await POST(postLogin({ identifier: "09121234567" }));
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "invalid_credentials" });
+    expect(issuedSession(res)).toBe(false);
+  });
+
+  it("keeps a legacy email/password account working", async () => {
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true });
+
+    const res = await POST(postLogin());
+
+    expect(res.status).toBe(200);
+    expect(issuedSession(res)).toBe(true);
+  });
+
+  it("reveals memberships only after identity authentication, then signs into the chosen one", async () => {
+    const ALPHA = "11111111-1111-4111-8111-111111111111";
+    const BETA = "22222222-2222-4222-8222-222222222222";
+    mocks.membershipsForPlatformUser.mockResolvedValue([
+      { ...MEMBERSHIP, businessId: ALPHA, businessName: "Alpha", businessSlug: "alpha" },
+      {
+        ...MEMBERSHIP,
+        businessId: BETA,
+        businessName: "Beta",
+        businessSlug: "beta",
+        userId: "user-2",
+      },
+    ]);
+    mocks.getAccountMfaEnrolments.mockResolvedValue([]);
+    mocks.getMfaPolicy.mockResolvedValue({ requireForManagers: false });
+
+    // Before the password is proven, no membership list exists at all.
+    mocks.bcryptCompare.mockResolvedValueOnce(false);
+    const refused = await POST(postLogin({ email: "manager@alpha.test" }));
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toEqual({ error: "invalid_credentials" });
+
+    // Proven identity + two usable memberships: a selection, never a session.
+    mocks.bcryptCompare.mockResolvedValue(true);
+    const selection = await POST(postLogin({ businessId: null }));
+    const selectionBody = await selection.json();
+    expect(selectionBody.needsBusinessSelection).toBe(true);
+    expect(selectionBody.businesses.map((b: { id: string }) => b.id)).toEqual([ALPHA, BETA]);
+    expect(issuedSession(selection)).toBe(false);
+
+    // The chosen membership is the one the session is scoped to.
+    const chosen = await POST(postLogin({ businessId: BETA }));
+    const chosenBody = await chosen.json();
+    expect(chosen.status).toBe(200);
+    expect(chosenBody.business.id).toBe(BETA);
+    expect(issuedSession(chosen)).toBe(true);
+  });
+});
+
 describe("password login — trusted devices are visible and lockout takes them back (#885)", () => {
   it("records a trusted-device login before it issues the session", async () => {
     const expiresAt = new Date("2026-10-25T00:00:00Z");

@@ -1083,15 +1083,16 @@ export function PosScreen({
 
     if (paid && printOrderId) {
       const receiptRequestId = `receipt:${printOrderId}`;
-      const receipt = (requestId: string) => printSaleReceipt(null, printOrderId, { requestId });
-      void receipt(receiptRequestId).then((result) => {
-        if (!result.ok && result.error !== "printer_not_configured") {
+      const receipt = (requestId: string, automatic = false) => printSaleReceipt(null, printOrderId, { requestId, automatic });
+      void receipt(receiptRequestId, true).then((result) => {
+        if (!result.ok && !result.skipped && !result.notificationsMuted && result.error !== "printer_not_configured") {
           toast.warning("چاپ رسید انجام نشد؛ سفارش با موفقیت ثبت شده است.", {
             action: { label: "چاپ دوباره", onClick: () => void receipt(`${receiptRequestId}:retry`) },
           });
         }
-        if (draftOpensDrawer(paymentDraft, paymentMethods) && result.supportsDrawer && result.printerId) {
-          void kickDrawer(result.printerId);
+        if (draftOpensDrawer(paymentDraft, paymentMethods)) {
+          if (result.skipped) void kickDrawer(null);
+          else if (result.supportsDrawer && result.printerId) void kickDrawer(result.printerId);
         }
       });
     }
@@ -2782,6 +2783,7 @@ function CheckoutActions({
     <>
       <button
         type="button"
+        data-tour-id="pos.checkout-pay"
         onClick={onPay}
         disabled={disabled}
         className="mt-3 flex min-h-14 w-full items-center justify-center gap-2 rounded-xl bg-amber-500 dark:bg-amber-400 px-4 text-sm font-bold text-amber-950 transition duration-200 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 disabled:opacity-55 motion-reduce:transition-none"
@@ -2791,6 +2793,7 @@ function CheckoutActions({
       </button>
       <button
         type="button"
+        data-tour-id="pos.checkout-open"
         onClick={onOpenOrder}
         disabled={disabled}
         className="mt-2 min-h-12 w-full rounded-xl border border-border/80 bg-card px-4 text-sm font-semibold text-muted-foreground transition duration-200 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/45 dark:focus-visible:ring-amber-400/45 disabled:opacity-55 motion-reduce:transition-none"

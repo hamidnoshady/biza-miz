@@ -141,8 +141,8 @@ export const GET = withTenantScope(async () => {
       dead_letters: string;
     }>(
       `SELECT
-         count(*) FILTER (WHERE se.origin='local')::text AS outbound,
-         count(*) FILTER (WHERE se.origin='remote' AND se.applied_at IS NULL)::text AS inbound,
+         count(*) FILTER (WHERE se.origin='local' AND se.dead_lettered_at IS NULL)::text AS outbound,
+         count(*) FILTER (WHERE se.origin='remote' AND se.applied_at IS NULL AND se.dead_lettered_at IS NULL)::text AS inbound,
          (SELECT count(*) FROM sync_domain_effects WHERE business_id=$1 AND status='deferred')::text AS deferred,
          (SELECT count(*) FROM sync_events se2 JOIN locations l2 ON l2.id=se2.location_id
             WHERE l2.business_id=$1 AND se2.scope='location' AND se2.error='conflict')::text AS conflicts,

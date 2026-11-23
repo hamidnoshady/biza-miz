@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { RefreshCwIcon, PrinterIcon } from "lucide-react";
@@ -737,7 +739,7 @@ export function TrialBalanceSection({
                 disabled={loading}
               />
             ) : null}
-            <SecondaryButton onClick={() => window.print()} disabled={!data || loading}>
+            <SecondaryButton onClick={() => void printBrowserDocument("report")} disabled={!data || loading}>
               <PrinterIcon aria-hidden="true" className="me-1.5 size-4" />
               چاپ
             </SecondaryButton>

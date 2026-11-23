@@ -11,8 +11,10 @@ interface Ctx {
 }
 
 /**
- * Posts one Jalali month's straight-line depreciation for this asset
- * (`periodKey` = `YYYY-MM`).
+ * Posts one Jalali month's depreciation for this asset (`periodKey` =
+ * `YYYY-MM`) under the asset's approved method — straight-line,
+ * declining-balance, or units-of-production (`unitsProduced` is then
+ * required).
  *
  * The journal entry's branch is the asset's own location — never the
  * operator's currently active one (issue #833): an asset registered at Branch
@@ -25,7 +27,13 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
 
   const { id } = await ctx.params;
   if (!isUuid(id)) return NextResponse.json({ error: "fixed_asset_not_found" }, { status: 404 });
-  let body: { periodKey?: string; periodLabel?: string; entryDate?: string };
+  let body: {
+    periodKey?: string;
+    periodLabel?: string;
+    entryDate?: string;
+    /** Units produced this period; required for the units-of-production method. */
+    unitsProduced?: number;
+  };
   try {
     body = await request.json();
   } catch {
@@ -42,6 +50,8 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
       periodKey: typeof body.periodKey === "string" ? body.periodKey : null,
       periodLabel: typeof body.periodLabel === "string" ? body.periodLabel : null,
       entryDate: body.entryDate,
+      unitsProduced:
+        body.unitsProduced === undefined || body.unitsProduced === null ? null : Number(body.unitsProduced),
       createdBy: session.sub,
     });
     return NextResponse.json(result);

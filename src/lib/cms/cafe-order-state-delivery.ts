@@ -14,6 +14,8 @@ type Delivery = {
   cms_order_id: string;
   site_id: string;
   state: Fulfillment | "counter_payment" | "counter_refund";
+  /** The staff member's words when they refused the order, printed on the receipt. */
+  reason: string | null;
   payment_amount: string | null;
   payment_currency: "IRR" | "IRT" | null;
   payment_reference: string | null;
@@ -99,7 +101,14 @@ async function send(event: Delivery): Promise<{ error: string; permanent: boolea
       reference: event.payment_reference,
     };
   } else {
-    body = { kind: "fulfillment", fulfillment: event.state };
+    // A rejection is the only fulfillment the guest can act on, and only if it
+    // says why. The CMS stores it beside the state and the receipt prints it.
+    const reason = event.reason?.trim();
+    body = {
+      kind: "fulfillment",
+      fulfillment: event.state,
+      ...(event.state === "rejected" && reason ? { reason } : {}),
+    };
   }
 
   const start = Date.now();

@@ -1,7 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { getPool, query, withoutTenantScope, withoutTenantScopeTransaction } from "./db";
-import { clearAuthLockout } from "./login-lockout-service";
+import { clearAuthLockout, identityKeyFor } from "./login-lockout-service";
+import {
+  SECURITY_AUDIT_ACTIONS,
+  recordSecurityAudit,
+} from "./security-audit";
 
 export const MIN_PASSWORD_LENGTH = 8;
 export const MAX_PASSWORD_LENGTH = 128;
@@ -213,6 +217,11 @@ export async function changeOwnPassword(params: {
   subjectId: string;
   currentPassword: string;
   newPassword: string;
+  /**
+   * #1386 — the identifier the password door counts lockout under. Defaults to
+   * the identity's email, then its verified phone for a phone-only identity.
+   */
+  lockoutKey?: string | null;
   keepEmployeeSessionId?: string | null;
   keepAdminSessionId?: string | null;
   /**
@@ -236,8 +245,14 @@ export async function changeOwnPassword(params: {
 
   return withoutTenantScope("identity", async () => {
     const table = params.subjectRealm === "platform_user" ? "platform_users" : "platform_admins";
-    const { rows } = await query<{ email: string; password_hash: string | null }>(
-      `SELECT email::text AS email, password_hash
+    const { rows } = await query<{
+      email: string | null;
+      phone_e164: string | null;
+      password_hash: string | null;
+    }>(
+      `SELECT email::text AS email,
+              ${params.subjectRealm === "platform_user" ? "phone_e164" : "NULL::text AS phone_e164"},
+              password_hash
          FROM ${table}
         WHERE id = $1 AND is_active = true`,
       [params.subjectId],
@@ -279,7 +294,8 @@ export async function changeOwnPassword(params: {
           endImpersonation: true,
         });
         revokedSessions = revoked.revokedEmployeeSessions;
-        await clearAuthLockout("tenant_password", subject.email);
+        const lockoutKey = params.lockoutKey ?? subject.email ?? subject.phone_e164;
+        if (lockoutKey) await clearAuthLockout("tenant_password", lockoutKey);
         // Issue #885 — a changed password takes back every trusted device, in
         // this transaction, exactly as a reset does. The trust was earned by a
         // login that proved the old password, so the member's own change is
@@ -311,7 +327,7 @@ export async function changeOwnPassword(params: {
           );
         }
 
-        await clearAuthLockout("platform_admin", subject.email);
+        if (subject.email) await clearAuthLockout("platform_admin", subject.email);
       }
 
       if (params.beforeCommit) await params.beforeCommit({ tokenVersion, revokedSessions });
@@ -331,7 +347,10 @@ export async function changeOwnPassword(params: {
 export async function issuePasswordResetToken(params: {
   subjectRealm: PasswordSubjectRealm;
   subjectId: string;
-  email: string;
+  /** NULL for a phone-only identity: the link travels by SMS. */
+  email: string | null;
+  /** The canonical verified phone the link is delivered to. */
+  phoneE164?: string | null;
   membershipId?: string | null;
   createdById?: string | null;
   ttlMs?: number;
@@ -352,14 +371,16 @@ export async function issuePasswordResetToken(params: {
 
     const { rows } = await query<{ id: string }>(
       `INSERT INTO auth_password_resets
-         (subject_realm, subject_id, membership_id, email, token_hash, expires_at, created_by_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (subject_realm, subject_id, membership_id, email, phone_e164,
+          token_hash, expires_at, created_by_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id`,
       [
         params.subjectRealm,
         params.subjectId,
         params.membershipId ?? null,
-        params.email.trim().toLowerCase(),
+        params.email ? params.email.trim().toLowerCase() : null,
+        params.phoneE164 ?? null,
         tokenHash,
         expiresAt,
         params.createdById ?? null,
@@ -374,9 +395,18 @@ export interface PasswordResetPreview {
   id: string;
   subjectRealm: PasswordSubjectRealm;
   subjectId: string;
-  email: string;
+  /** NULL when the identity is phone-only (#1386). */
+  email: string | null;
+  /** Masked delivery number, for a phone-only identity's preview. */
+  phoneMasked: string | null;
   expiresAt: string;
   status: "pending" | "expired" | "used" | "revoked";
+}
+
+/** `+989***0001`-shaped; never the full number on a pre-session screen. */
+function maskRecipientPhone(e164: string | null): string | null {
+  if (!e164) return null;
+  return e164.length > 8 ? `+${e164.slice(1, 4)}***${e164.slice(-4)}` : "***";
 }
 
 export async function previewPasswordResetToken(
@@ -390,12 +420,13 @@ export async function previewPasswordResetToken(
       id: string;
       subject_realm: PasswordSubjectRealm;
       subject_id: string;
-      email: string;
+      email: string | null;
+      phone_e164: string | null;
       expires_at: Date;
       used_at: Date | null;
       revoked_at: Date | null;
     }>(
-      `SELECT id, subject_realm, subject_id, email::text AS email,
+      `SELECT id, subject_realm, subject_id, email::text AS email, phone_e164,
               expires_at, used_at, revoked_at
          FROM auth_password_resets
         WHERE token_hash = $1`,
@@ -414,6 +445,7 @@ export async function previewPasswordResetToken(
       subjectRealm: row.subject_realm,
       subjectId: row.subject_id,
       email: row.email,
+      phoneMasked: maskRecipientPhone(row.phone_e164),
       expiresAt: new Date(row.expires_at).toISOString(),
       status,
     };
@@ -430,13 +462,14 @@ interface PasswordResetRow {
   id: string;
   subject_realm: PasswordSubjectRealm;
   subject_id: string;
-  email: string;
+  email: string | null;
+  phone_e164: string | null;
   expires_at: Date;
   used_at: Date | null;
   revoked_at: Date | null;
 }
 
-const RESET_ROW_SELECT = `SELECT id, subject_realm, subject_id, email::text AS email,
+const RESET_ROW_SELECT = `SELECT id, subject_realm, subject_id, email::text AS email, phone_e164,
         expires_at, used_at, revoked_at`;
 
 /**
@@ -453,7 +486,13 @@ async function applyPasswordResetRow(
   client: { query: (text: string, params?: unknown[]) => Promise<{ rows: unknown[] }> },
   row: PasswordResetRow,
   passwordHash: string,
-): Promise<{ subjectRealm: PasswordSubjectRealm; subjectId: string; email: string; tokenVersion: number }> {
+): Promise<{
+  subjectRealm: PasswordSubjectRealm;
+  subjectId: string;
+  email: string | null;
+  phoneE164: string | null;
+  tokenVersion: number;
+}> {
   let tokenVersion = 1;
   if (row.subject_realm === "platform_user") {
     const updated = (await client.query(
@@ -531,8 +570,192 @@ async function applyPasswordResetRow(
     subjectRealm: row.subject_realm,
     subjectId: row.subject_id,
     email: row.email,
+    phoneE164: row.phone_e164,
     tokenVersion,
   };
+}
+
+/**
+ * #1386 — replace a password after the caller proved control of the verified
+ * phone with a purpose-bound `password_recovery` OTP.
+ *
+ * This is the phone-native counterpart of the token reset above and keeps the
+ * same invariants, in one transaction:
+ *
+ *  - the new bcrypt hash is written and `token_version` increments together;
+ *  - every active `employee_sessions` row for the identity is revoked;
+ *  - active support impersonations end;
+ *  - trusted devices earned under the old password are revoked;
+ *  - the password lockout for the identifier the password door uses is cleared;
+ *  - the security audit row commits with the change or not at all.
+ *
+ * It intentionally does **not** create a session. Recovering a password proves
+ * the phone, but the member still signs in afterwards like everyone else.
+ */
+export async function replacePlatformUserPassword(params: {
+  platformUserId: string;
+  newPassword: string;
+  /** The identifier the password door counts lockout under (email, else phone). */
+  lockoutKey: string;
+  auditAction: string;
+  auditPayload?: Record<string, unknown>;
+  /** Keep the caller's current session row (a self-service change from this browser). */
+  keepEmployeeSessionId?: string | null;
+  /**
+   * A first-password creation: fail closed if another writer set a password
+   * between the route's read and this UPDATE. Never overwrite an existing
+   * credential without proving it.
+   */
+  requirePasswordless?: boolean;
+}): Promise<
+  | { ok: true; tokenVersion: number; revokedSessions: number }
+  | { ok: false; error: "password_strength"; detail: PasswordStrengthError }
+  | { ok: false; error: "not_found" }
+> {
+  const strength = validatePasswordStrength(params.newPassword);
+  if (!strength.ok) {
+    return { ok: false, error: "password_strength", detail: strength.error };
+  }
+
+  const passwordHash = await bcrypt.hash(params.newPassword, BCRYPT_COST);
+  const lockoutIdentityKey = await identityKeyFor(params.lockoutKey);
+
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    // These tables are global by design; the reviewed bypass is set on the
+    // transaction's own connection rather than assumed from ambient scope.
+    await client.query("SELECT set_config('app.rls_bypass', 'on', true)");
+
+    const { rows } = await client.query<{ token_version: number }>(
+      `UPDATE platform_users
+          SET password_hash = $2,
+              token_version = token_version + 1,
+              updated_at = now()
+        WHERE id = $1 AND is_active = true
+          AND ($3::boolean IS NOT TRUE OR password_hash IS NULL)
+        RETURNING token_version`,
+      [params.platformUserId, passwordHash, params.requirePasswordless === true],
+    );
+    const updated = rows[0];
+    if (!updated) {
+      await client.query("ROLLBACK");
+      return { ok: false, error: "not_found" };
+    }
+
+    const { rowCount } = await client.query(
+      `UPDATE employee_sessions es
+          SET revoked_at = now()
+         FROM users u
+        WHERE es.employee_id = u.id
+          AND u.platform_user_id = $1
+          AND es.revoked_at IS NULL
+          AND ($2::uuid IS NULL OR es.id <> $2::uuid)`,
+      [params.platformUserId, params.keepEmployeeSessionId ?? null],
+    );
+
+    await client.query(
+      `UPDATE impersonation_grants ig
+          SET revoked_at = now()
+         FROM users u
+        WHERE ig.user_id = u.id
+          AND u.platform_user_id = $1
+          AND ig.ended_at IS NULL
+          AND ig.revoked_at IS NULL`,
+      [params.platformUserId],
+    );
+
+    await client.query(
+      `UPDATE trusted_devices
+          SET revoked_at = now(), revoked_reason = 'password_reset'
+        WHERE platform_user_id = $1 AND revoked_at IS NULL`,
+      [params.platformUserId],
+    );
+
+    // Same key the password door counts failures under, in the same
+    // transaction as the credential change.
+    await client.query(
+      `INSERT INTO auth_login_attempts (realm, identity_key, outcome)
+       VALUES ('tenant_password', $1, 'unlocked')`,
+      [lockoutIdentityKey],
+    );
+
+    await recordSecurityAudit(
+      {
+        realm: "platform",
+        action: params.auditAction,
+        entity: "platform_user",
+        entityId: params.platformUserId,
+        payload: {
+          tokenVersion: updated.token_version,
+          // `revokedSessions` is a count, not a credential.
+          revokedSessions: rowCount ?? 0,
+          // `platform_audit_log.platform_admin_id` has an FK to platform_admins,
+          // and this actor is a tenant identity, so the id travels in the
+          // payload/entity instead of that column.
+          platformUserId: params.platformUserId,
+          ...(params.auditPayload ?? {}),
+        },
+      },
+      { query: (text, values) => client.query(text, values) },
+    );
+
+    await client.query("COMMIT");
+    return {
+      ok: true,
+      tokenVersion: updated.token_version,
+      revokedSessions: rowCount ?? 0,
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * #1386 — recovery after a purpose-bound `password_recovery` OTP.
+ *
+ * A thin, named wrapper around the atomic replacement above so the audit action
+ * and the "this was recovery" fact cannot drift between callers.
+ */
+export async function resetPasswordForVerifiedPhone(params: {
+  platformUserId: string;
+  newPassword: string;
+  lockoutKey: string;
+}): ReturnType<typeof replacePlatformUserPassword> {
+  return replacePlatformUserPassword({
+    ...params,
+    auditAction: SECURITY_AUDIT_ACTIONS.passwordRecoveredByPhone,
+    auditPayload: { method: "phone_otp", recovery: true },
+  });
+}
+
+/**
+ * #1386 — a passwordless identity creating its first password.
+ *
+ * There is no current password to prove; the caller must already hold a
+ * recent-auth session (the route enforces `requireRecentAuth`). Everything else
+ * — version bump, session revocation, trust revocation, lockout clear and the
+ * audit row — is the same unit as a change or a reset.
+ */
+export async function setInitialPasswordForPlatformUser(params: {
+  platformUserId: string;
+  newPassword: string;
+  lockoutKey: string;
+  keepEmployeeSessionId?: string | null;
+}): ReturnType<typeof replacePlatformUserPassword> {
+  return replacePlatformUserPassword({
+    ...params,
+    auditAction: SECURITY_AUDIT_ACTIONS.passwordCreatedSelf,
+    // "firstSet", not "firstPassword": the audit payload refuses key names
+    // that look like a credential (security-audit's secret-free rule).
+    auditPayload: { firstSet: true },
+    // Race-safe: another request may have set a password between the route's
+    // read and this write. Refuse rather than overwrite without proof.
+    requirePasswordless: true,
+  });
 }
 
 /**
@@ -549,7 +772,7 @@ export async function consumePasswordResetToken(params: {
       ok: true;
       subjectRealm: PasswordSubjectRealm;
       subjectId: string;
-      email: string;
+      email: string | null;
       tokenVersion: number;
     }
   | {
@@ -607,10 +830,13 @@ export async function consumePasswordResetToken(params: {
       const applied = await applyPasswordResetRow(client, row, passwordHash);
       await client.query("COMMIT");
 
-      await clearAuthLockout(
-        row.subject_realm === "platform_user" ? "tenant_password" : "platform_admin",
-        row.email,
-      );
+      const lockoutKey = row.email ?? row.phone_e164;
+      if (lockoutKey) {
+        await clearAuthLockout(
+          row.subject_realm === "platform_user" ? "tenant_password" : "platform_admin",
+          lockoutKey,
+        );
+      }
 
       return { ok: true, ...applied };
     } catch (err) {
@@ -645,10 +871,11 @@ export async function consumePasswordResetToken(params: {
 export async function issueDeliveredPasswordReset(params: {
   subjectRealm: PasswordSubjectRealm;
   subjectId: string;
-  email: string;
+  /** NULL for a phone-only identity (#1386). */
+  email: string | null;
   membershipId?: string | null;
   createdById?: string | null;
-  /** The verified number the link will be sent to. */
+  /** The canonical verified number the link will be sent to. */
   phoneE164: string;
   /** Absolute origin to build the link from. */
   origin: string;
@@ -657,6 +884,7 @@ export async function issueDeliveredPasswordReset(params: {
     subjectRealm: params.subjectRealm,
     subjectId: params.subjectId,
     email: params.email,
+    phoneE164: params.phoneE164,
     membershipId: params.membershipId,
     createdById: params.createdById,
     // Short-lived: the credential travels over SMS, so the window it is

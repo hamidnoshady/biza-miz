@@ -112,6 +112,23 @@ if (!manifestPath) throw new Error("Usage: sign-desktop-release-manifest.mjs [--
 const manifest = JSON.parse((await readFile(manifestPath, "utf8")).replace(/^\uFEFF/, ""));
 const algorithm = algorithmOf(manifest);
 
+// Central stores both timestamps as `timestamptz` and the Desktop canonicalizes
+// the strings it receives, so a manifest can only verify after the round trip
+// if those strings survive it. PowerShell's `[DateTime]::ToString('o')` emits
+// seven fractional digits; Postgres and `Date#toISOString` return three, which
+// changes the canonical payload and invalidates the signature. Pin the exact
+// ISO millisecond form before signing (verify-only must read published bytes
+// unchanged, so this never applies there).
+if (!verifyOnly) {
+  for (const field of ["releasedAt", "expiresAt"]) {
+    const value = manifest[field];
+    if (typeof value !== "string" || value === "") continue;
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) throw new Error(`${field} is not a valid timestamp`);
+    manifest[field] = new Date(parsed).toISOString();
+  }
+}
+
 // Issue #1000 - the production pipeline reads the manifest back from the
 // published release and verifies it against the same public key the Desktop
 // embeds, so an unsigned or truncated upload cannot be registered in Central.

@@ -69,4 +69,9 @@ export const FIXED_ASSET_ERROR_TRANSLATIONS: Record<string, string> = {
   // the export's own honesty (issue #833): the xlsx format ceiling, not a policy cap.
   export_too_large: "حجم داده‌های فیلترشده از سقف مجاز هر برگهٔ اکسل (حدود یک میلیون ردیف) بیشتر است؛ فیلترها را محدودتر کنید (دسته، شعبه یا بازهٔ تاریخ).",
   invalid_cursor: "نشانهٔ صفحه‌بندی نامعتبر است؛ فهرست را از ابتدا بارگذاری کنید.",
+  // depreciation methods and projected schedules (issue #1325)
+  capacity_required: "برای روش مقدار تولید، ظرفیت کل تأییدشده باید عدد صحیح مثبت باشد.",
+  production_units_required: "برای روش مقدار تولید، مقدار تولید این دوره (عدد صحیح نامنفی) الزامی است.",
+  production_exceeds_capacity: "جمع مقدار تولید از ظرفیت کل تأییدشده بیشتر می‌شود؛ ابتدا ظرفیت را با یک تغییر برآورد آینده‌نگر اصلاح کنید.",
+  invalid_schedule_range: "بازهٔ دوره‌های برنامهٔ استهلاک معتبر نیست.",
 };

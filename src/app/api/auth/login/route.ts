@@ -148,7 +148,14 @@ export async function POST(request: NextRequest) {
              FROM platform_users p
              LEFT JOIN users u ON u.platform_user_id = p.id
             WHERE (p.phone_e164 = $1 AND p.phone_verified_at IS NOT NULL)
-               OR (u.phone_e164 = $1 AND u.phone_verified_at IS NOT NULL)`,
+               -- Legacy compatibility only while the identity has no canonical
+               -- global number. A verified membership phone must not become a
+               -- second global identifier once #1384 has one.
+               OR (
+                 p.phone_e164 IS NULL
+                 AND u.phone_e164 = $1
+                 AND u.phone_verified_at IS NOT NULL
+               )`,
           [phone],
         );
 

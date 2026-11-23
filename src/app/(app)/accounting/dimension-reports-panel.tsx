@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 /**
  * «گزارش‌های ابعاد» — the four views a person reads a dimension by:
  *
@@ -397,7 +399,7 @@ export function DimensionReportsPanel({
               <DownloadIcon aria-hidden="true" />
               خروجی CSV
             </Button>
-            <SecondaryButton onClick={() => window.print()} disabled={!table || loading}>
+            <SecondaryButton onClick={() => void printBrowserDocument("report")} disabled={!table || loading}>
               <PrinterIcon aria-hidden="true" className="size-4" />
               چاپ
             </SecondaryButton>
