@@ -22,11 +22,29 @@ export interface SiteProfileLocation {
   isActive: boolean;
 }
 
+/**
+ * The business settings the cloud owns and the till must not drift from while
+ * it sells offline. They travel as the stored JSON objects, not as re-derived
+ * values, so the same rate/control the cloud's screens show is what an offline
+ * bill uses. `null` clears the local copy; an absent field is left alone (an
+ * older cloud that does not send it yet).
+ */
+export const SITE_PROFILE_SETTING_FIELDS = ["tax", "pricing", "orderControls"] as const;
+export type SiteProfileSettingField = (typeof SITE_PROFILE_SETTING_FIELDS)[number];
+export type SiteProfileSettings = Partial<
+  Record<SiteProfileSettingField, Record<string, unknown> | null>
+>;
+
+/** One setting's JSON may not be larger than this; a broken cloud cannot bloat the till. */
+export const MAX_SITE_PROFILE_SETTING_BYTES = 16_384;
+
 export interface SiteProfile {
   schemaVersion: 1;
   location: SiteProfileLocation;
   features: Record<string, boolean>;
   apps: Partial<Record<AppKey, AppAvailabilityRecord>>;
+  /** Absent when the cloud predates settings replication; every field is optional. */
+  settings?: SiteProfileSettings;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -88,7 +106,34 @@ export function validateSiteProfile(raw: unknown): SiteProfile | null {
     if (!(APP_KEYS as readonly string[]).includes(key) || !isAppAvailabilityState(record.state)) continue;
     apps[key as AppKey] = { state: record.state, note: record.note, availableFrom: from };
   }
-  return { schemaVersion: 1, location, features, apps };
+
+  let settings: SiteProfileSettings | undefined;
+  if (raw.settings !== undefined) {
+    if (!isRecord(raw.settings)) return null;
+    settings = {};
+    for (const field of SITE_PROFILE_SETTING_FIELDS) {
+      // A field this profile version does not carry is left alone, which is
+      // what lets a newer cloud add a fourth setting without an older till
+      // clearing it.
+      if (!(field in raw.settings)) continue;
+      const value = raw.settings[field];
+      if (value === null) {
+        settings[field] = null;
+        continue;
+      }
+      if (!isRecord(value)) return null;
+      if (JSON.stringify(value).length > MAX_SITE_PROFILE_SETTING_BYTES) return null;
+      settings[field] = value;
+    }
+  }
+
+  return {
+    schemaVersion: 1,
+    location,
+    features,
+    apps,
+    ...(settings ? { settings } : {}),
+  };
 }
 
 function canonical(value: unknown): unknown {
