@@ -17,6 +17,7 @@ import { isSiteLocalRoute } from "@/lib/site-routes";
 import { OfflineBanner } from "./offline-banner";
 import { BackupHealthNotice } from "./backup-health-notice";
 import { SetupWalletNotice } from "./setup-wallet-notice";
+import { SetupImportNotice } from "./setup-import-notice";
 import { PullToRefresh } from "@/components/pull-to-refresh";
 import { NavigationPendingIndicator } from "@/components/navigation/navigation-pending";
 import { TourProvider } from "@/components/tours/tour-provider";
@@ -61,6 +62,7 @@ function DashboardMainFrame({
         <OfflineBanner />
         {showBackupHealth ? <BackupHealthNotice /> : null}
         {pathname === "/dashboard" ? <SetupWalletNotice /> : null}
+        {pathname === "/dashboard" ? <SetupImportNotice /> : null}
         <div className="relative min-h-0 flex-1">{children}</div>
       </div>
     );
@@ -72,6 +74,7 @@ function DashboardMainFrame({
       <OfflineBanner />
       {showBackupHealth ? <BackupHealthNotice /> : null}
       {pathname === "/dashboard" ? <SetupWalletNotice /> : null}
+      {pathname === "/dashboard" ? <SetupImportNotice /> : null}
       <PullToRefresh className="relative flex-1 overflow-y-auto overscroll-y-contain p-2 pb-[calc(var(--app-bottom-nav)+2rem)] md:p-4 md:pb-4">
         {children}
       </PullToRefresh>

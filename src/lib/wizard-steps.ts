@@ -20,6 +20,12 @@ export const WIZARD_STEPS = [
   // because those are Accounting's setup and only apply when it was selected.
   "apps",
   "app_setup",
+  // Issue #1535 / ESH-218 — «ورود اطلاعات اولیه»: an optional, resumable
+  // import of the business's existing records. It follows the selected apps'
+  // setup (because what can be imported depends on which apps were chosen) and
+  // precedes Accounting's own configuration steps. Optional by contract: a
+  // zero-app or empty-catalogue business finishes without it.
+  "import",
   "accounts",
   "costing",
   "tax",
@@ -39,6 +45,7 @@ export const OPTIONAL_STEPS: WizardStep[] = [
   // choice and every selected app's own answers.
   "apps",
   "app_setup",
+  "import",
   "users",
   "hardware",
   "backup",

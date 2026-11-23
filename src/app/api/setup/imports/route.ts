@@ -1,0 +1,146 @@
+import { NextResponse } from "next/server";
+import type { CatalogueEntity } from "@/app/(app)/settings/transfer/data-transfer-ui";
+import { withTenantScope } from "@/lib/auth";
+import { memberAccessFor } from "@/lib/member-access";
+import { PERMISSIONS } from "@/lib/permissions";
+import { requireManager } from "@/lib/setup-state";
+import { getBusinessIndustry } from "@/lib/industry-guard";
+import { getSetting, SETTING_KEYS } from "@/lib/settings";
+import { normalizeSelectedApps } from "@/lib/setup-apps";
+import {
+  DATA_MODULE_LABELS,
+} from "@/lib/data-transfer/types";
+import {
+  defaultExportFields,
+  entitiesForIndustry,
+  findEntity,
+  isImportable,
+} from "@/lib/data-transfer/registry";
+import { listImportJobs } from "@/lib/data-transfer/import-service";
+import {
+  setupImportCandidates,
+  setupImportSessionState,
+  setupImportSummary,
+  type SetupImportsData,
+  type SetupImportSession,
+} from "@/lib/setup-imports";
+
+/**
+ * The optional «ورود اطلاعات اولیه» step's read model (issue #1535 / ESH-218).
+ *
+ * GET only. There is deliberately no write here: uploading, mapping, previewing
+ * and approving all go through the existing `/api/data/*` Data Transfer routes,
+ * which already own validation, reconciliation, idempotency and permissions.
+ * The wizard composes that engine; it does not wrap it in a second one.
+ *
+ * Two facts are computed here rather than trusted from the client:
+ *  - which registered types this business/member may import, from the same
+ *    registry and permission set the settings screen uses; and
+ *  - each stored job's *onboarding* state, so a staged or partial import can
+ *    never be reported as applied.
+ */
+export const GET = withTenantScope(async () => {
+  const { session, error } = await requireManager();
+  if (error) return error;
+
+  const [industry, selectionRecord, access] = await Promise.all([
+    getBusinessIndustry(session.businessId),
+    getSetting<unknown>(session.businessId, SETTING_KEYS.setupSelectedApps),
+    memberAccessFor(session),
+  ]);
+  const granted = access?.permissions ?? new Set<string>();
+  const selectedApps =
+    selectionRecord == null ? null : normalizeSelectedApps(selectionRecord);
+  const canImport = granted.has(PERMISSIONS.dataImport);
+
+  const definitions = entitiesForIndustry(industry ?? null);
+  const candidates = setupImportCandidates(
+    definitions.map((entity) => ({
+      key: entity.key,
+      module: entity.module,
+      label: entity.label,
+      description: entity.description,
+      importable: isImportable(entity),
+      granted:
+        canImport &&
+        Boolean(entity.importPermission) &&
+        granted.has(entity.importPermission!),
+    })),
+    selectedApps,
+  );
+
+  // The catalogue handed to the shared ImportSection: only types that are both
+  // available in this wizard and permitted for this member. The screen renders
+  // what comes back, so it can never offer an import its route would refuse.
+  const availableKeys = new Set(
+    candidates.filter((candidate) => candidate.available).map((candidate) => candidate.key),
+  );
+  const entities: CatalogueEntity[] = definitions
+    .filter((entity) => availableKeys.has(entity.key))
+    .map((entity) => ({
+      key: entity.key,
+      module: entity.module,
+      moduleLabel: DATA_MODULE_LABELS[entity.module],
+      label: entity.label,
+      description: entity.description,
+      locationScoped: entity.locationScoped === true,
+      canExport: granted.has(entity.exportPermission),
+      canImport: true,
+      defaultExportFields: defaultExportFields(entity),
+      duplicateRules: (entity.duplicateRules ?? []).map((rule) => ({
+        key: rule.key,
+        label: rule.label,
+        fields: [...rule.fields],
+      })),
+      fields: entity.fields.map((field) => ({
+        key: field.key,
+        label: field.label,
+        type: field.type,
+        required: field.required === true,
+        readOnly: field.readOnly === true,
+        exportDefault: field.exportDefault === true,
+        hint: field.hint ?? null,
+        options: field.options
+          ? field.options.map((option) => ({ value: option.value, label: option.label }))
+          : null,
+        relation: field.relation
+          ? {
+              entity: field.relation.entity,
+              label: field.relation.label,
+              onMissing: field.relation.onMissing,
+            }
+          : null,
+      })),
+    }));
+
+  const jobs = canImport
+    ? await listImportJobs(session.businessId, { limit: 50 })
+    : [];
+  const sessions: SetupImportSession[] = jobs.map((job) => ({
+    id: job.id,
+    entityKey: job.entityKey,
+    entityLabel: findEntity(job.entityKey)?.label ?? job.entityKey,
+    state: setupImportSessionState(job),
+    status: job.status,
+    fileName: job.fileName,
+    createdAt: job.createdAt,
+    totalRows: job.totalRows,
+    validRows: job.validRows,
+    errorRows: job.errorRows,
+    createdRows: job.createdRows,
+    updatedRows: job.updatedRows,
+    skippedRows: job.skippedRows,
+    failedRows: job.failedRows,
+    error: job.error,
+  }));
+
+  const body: SetupImportsData & { entities: CatalogueEntity[] } = {
+    selectedApps,
+    canImport,
+    candidates,
+    entities,
+    sessions,
+    summary: setupImportSummary(sessions.map((entry) => entry.state)),
+  };
+  return NextResponse.json(body);
+});

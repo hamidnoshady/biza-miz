@@ -30,6 +30,7 @@ const FNB_ORDER = [
   "business",
   "apps",
   "app_setup",
+  "import",
   "accounts",
   "costing",
   "tax",
@@ -153,6 +154,19 @@ describe("wizardStepsForIndustry", () => {
     );
     expect(wizardStepsForIndustry("advertising_agency")).not.toContain("aec_profile");
     expect(requiredStepsForIndustry("advertising_agency")).toEqual(["business", "accounts", "tax"]);
+  });
+
+  it("places the optional import step after app setup and before Accounting's configuration", () => {
+    // Issue #1535 / ESH-218: what may be imported depends on the selected apps,
+    // so the step cannot precede the gallery; and it is never a requirement of
+    // Finish, so it is absent from every required set.
+    for (const industry of INDUSTRIES) {
+      const steps = wizardStepsForIndustry(industry);
+      expect(steps.indexOf("import"), industry).toBe(steps.indexOf("app_setup") + 1);
+      expect(steps.indexOf("import"), industry).toBeLessThan(steps.indexOf("accounts"));
+      expect(requiredStepsForIndustry(industry), industry).not.toContain("import");
+    }
+    expect(OPTIONAL_STEPS).toContain("import");
   });
 
   it("derives required steps as everything that is not optional", () => {

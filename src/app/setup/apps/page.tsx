@@ -164,7 +164,9 @@ export default function AppsStep() {
                 {isSelected ? (
                   <span className="flex items-center gap-1 rounded-full bg-primary/10 px-2 py-1 text-xs font-semibold text-primary">
                     <CheckIcon className="size-3.5" aria-hidden="true" />
-                    انتخاب‌شده
+                    {card.activation?.active
+                      ? "فعال"
+                      : "انتخاب‌شده — در انتظار پرداخت"}
                   </span>
                 ) : null}
               </div>
@@ -209,6 +211,13 @@ export default function AppsStep() {
                 </p>
               ) : null}
 
+              {!card.selectable && card.pricing ? (
+                <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-muted-foreground">
+                  <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+                  {REASON_LABEL[card.unavailableReason ?? "availability"]}
+                </p>
+              ) : null}
+
               <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-4">
                 <span className="text-xs text-muted-foreground">
                   {disabled ? "غیرقابل انتخاب" : "بدون کسر از کیف پول"}
@@ -217,6 +226,7 @@ export default function AppsStep() {
                   type="button"
                   onClick={() => toggle(card)}
                   disabled={disabled && !isSelected}
+                  ariaPressed={isSelected}
                 >
                   {isSelected ? "برداشتن انتخاب" : "انتخاب برای راه‌اندازی"}
                 </PrimaryButton>
