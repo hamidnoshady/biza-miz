@@ -275,6 +275,25 @@ describe("published Studio tours", () => {
 
   it.each([
     ["cosmetics", STUDIO_ID],
+    ["accessories", "accounting.products.reports"],
+  ])("lists the applicable product-reports tour for %s", async (industry, expectedId) => {
+    const pageKey = "page:/accounting/products/reports";
+    mocks.industry.mockResolvedValue(industry);
+    mocks.requireMember.mockResolvedValue(member([PERMISSIONS.inventoryView]));
+    mocks.publishedForPage.mockResolvedValue([{
+      ...studio,
+      pageKey,
+      route: "/accounting/products/reports",
+      eligibility: { industries: ["cosmetics"] },
+    }]);
+
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    const body = await res.json();
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+  });
+
+  it.each([
+    ["cosmetics", STUDIO_ID],
     ["food_service", "accounting.products.barcode-templates"],
   ])("lists the applicable weighted barcode-templates tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/barcode-templates";
