@@ -199,7 +199,7 @@ describe("published Studio tours", () => {
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["food_service", "accounting.products.list"],
+    ["accessories", "accounting.products.list"],
   ])("lists the applicable Products tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products";
     mocks.industry.mockResolvedValue(industry);
@@ -218,7 +218,7 @@ describe("published Studio tours", () => {
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["food_service", "accounting.products.new"],
+    ["accessories", "accounting.products.new"],
   ])("lists the applicable add-product tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/new";
     mocks.industry.mockResolvedValue(industry);
@@ -237,7 +237,7 @@ describe("published Studio tours", () => {
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["food_service", "accounting.products.prices"],
+    ["accessories", "accounting.products.prices"],
   ])("lists the applicable product-prices tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/prices";
     mocks.industry.mockResolvedValue(industry);
@@ -256,7 +256,7 @@ describe("published Studio tours", () => {
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["food_service", "accounting.products.attributes"],
+    ["accessories", "accounting.products.attributes"],
   ])("lists the applicable product-attributes tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/attributes";
     mocks.industry.mockResolvedValue(industry);
@@ -313,7 +313,7 @@ describe("published Studio tours", () => {
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["food_service", "accounting.products.barcode-templates"],
+    ["accessories", "accounting.products.barcode-templates"],
   ])("lists the applicable weighted barcode-templates tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/barcode-templates";
     mocks.industry.mockResolvedValue(industry);
