@@ -34,9 +34,12 @@ const event = {
   attempts: 1,
 };
 
-function claim(state: "counter_payment" | "counter_refund") {
+function claim(
+  state: "counter_payment" | "counter_refund" | "accepted" | "rejected",
+  extra: Record<string, unknown> = {},
+) {
   query
-    .mockResolvedValueOnce({ rows: [{ ...event, state }] })
+    .mockResolvedValueOnce({ rows: [{ ...event, state, ...extra }] })
     .mockResolvedValueOnce({ rows: [{ site_id: "site" }] })
     .mockImplementationOnce(finishDelivery);
 }
@@ -80,5 +83,46 @@ describe("CMS counter payment delivery", () => {
     expect(finishDelivery).toHaveBeenCalledWith(expect.any(String), [
       event.id, event.lease_token, "amount_mismatch", true, expect.any(Number),
     ]);
+  });
+});
+
+describe("CMS café fulfillment delivery", () => {
+  it("sends the staff member's reason with a rejection, trimmed", async () => {
+    claim("rejected", { reason: "  نداریم  " });
+    cmsRequest.mockResolvedValueOnce({ ok: true, result: "applied" });
+
+    await runCafeOrderStateDeliveryTick();
+
+    expect(cmsRequest).toHaveBeenCalledWith(undefined, {
+      path: "/api/site/cafe-orders/order/state",
+      method: "PATCH",
+      body: { kind: "fulfillment", fulfillment: "rejected", reason: "نداریم" },
+    });
+  });
+
+  it("never attaches a reason to a state that is not a rejection", async () => {
+    claim("accepted", { reason: "نگه دار" });
+    cmsRequest.mockResolvedValueOnce({ ok: true, result: "applied" });
+
+    await runCafeOrderStateDeliveryTick();
+
+    expect(cmsRequest).toHaveBeenCalledWith(undefined, {
+      path: "/api/site/cafe-orders/order/state",
+      method: "PATCH",
+      body: { kind: "fulfillment", fulfillment: "accepted" },
+    });
+  });
+
+  it("sends a rejection with no reason when the row has none", async () => {
+    claim("rejected", { reason: null });
+    cmsRequest.mockResolvedValueOnce({ ok: true, result: "applied" });
+
+    await runCafeOrderStateDeliveryTick();
+
+    expect(cmsRequest).toHaveBeenCalledWith(undefined, {
+      path: "/api/site/cafe-orders/order/state",
+      method: "PATCH",
+      body: { kind: "fulfillment", fulfillment: "rejected" },
+    });
   });
 });
