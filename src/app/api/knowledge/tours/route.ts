@@ -41,10 +41,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const visible = tourForViewer(tour, viewer);
     return visible ? [visible] : [];
   });
-  // On Accounting Overview, POS, Manual Entry, Cosmetics, Directory, Ledger, Trial Balance,
-  // Journal Entries, Vouchers and product-workspace pages, an eligible Studio tour replaces built-in choices.
+  // On Accounting Overview, POS, Manual Entry, Multicurrency, Cosmetics, Directory,
+  // Ledger, Trial Balance, Journal Entries, Vouchers and product-workspace pages, an eligible Studio tour replaces built-in choices.
   // Keep those choices as the fallback when no published Studio tour applies.
-  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new" || page.route === "/accounting/products/prices" || page.route === "/accounting/products/attributes" || page.route === "/accounting/products/barcode-templates" || page.route === "/accounting/products/reports" || page.route === "/accounting/cosmetics" || page.route === "/accounting/directory" || page.route === "/accounting/ledger" || page.route === "/accounting/trial-balance" || page.route === "/accounting/entries" || page.route === "/accounting/vouchers" || page.route === "/accounting/manual";
+  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new" || page.route === "/accounting/products/prices" || page.route === "/accounting/products/attributes" || page.route === "/accounting/products/barcode-templates" || page.route === "/accounting/products/reports" || page.route === "/accounting/cosmetics" || page.route === "/accounting/directory" || page.route === "/accounting/ledger" || page.route === "/accounting/trial-balance" || page.route === "/accounting/entries" || page.route === "/accounting/vouchers" || page.route === "/accounting/manual" || page.route === "/accounting/multicurrency";
   const studioTours = preferStudio
     ? eligibleTours.filter((tour) => published.some((entry) => entry.id === tour.id))
     : [];
