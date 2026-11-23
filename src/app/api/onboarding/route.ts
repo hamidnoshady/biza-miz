@@ -108,7 +108,12 @@ export async function DELETE() {
   return noStore({ ok: true, draft });
 }
 
-function stepError(result: Exclude<Awaited<ReturnType<typeof saveOnboardingStep>>, { ok: true }>): NextResponse {
+type SaveStepFailure = Extract<
+  Awaited<ReturnType<typeof saveOnboardingStep>>,
+  { ok: false }
+>;
+
+function stepError(result: SaveStepFailure): NextResponse {
   const status =
     result.error === "identity_missing"
       ? 401
