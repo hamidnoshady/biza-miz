@@ -355,7 +355,8 @@ export function ServerSyncPanel() {
       | "retry-deferred"
       | "retry-dead-letter"
       | "discard-dead-letter"
-      | "resolve-master-conflict",
+      | "resolve-master-conflict"
+      | "sync-now",
     id?: number,
   ) {
     setBusy(true);
@@ -370,6 +371,9 @@ export function ServerSyncPanel() {
         deadLettered: number;
         failed: number;
       } | null;
+      master?: { status: string; pushed?: number; pulled?: number; error?: string };
+      push?: { status: string; pushed?: number; error?: string };
+      pull?: { status: string; pulled?: number; error?: string };
     }>("/api/server-sync/reconcile", {
       method: "POST",
       body: JSON.stringify({ action, id }),
@@ -386,7 +390,21 @@ export function ServerSyncPanel() {
      * counts; say them, and say when there was nothing to do.
      */
     const summary = data.reconciliation;
-    if (action === "resolve-master-conflict") {
+    if (action === "sync-now") {
+      const pushed = data.push?.pushed ?? 0;
+      const pulled = data.pull?.pulled ?? 0;
+      const master =
+        (data.master?.pushed ?? 0) + (data.master?.pulled ?? 0);
+      const failed = [data.master, data.push, data.pull].some(
+        (step) => step?.status === "error",
+      );
+      setNotice(
+        `همگام‌سازی انجام شد — ${toPersianDigits(String(pushed))} ارسال، ` +
+          `${toPersianDigits(String(pulled))} دریافت، ` +
+          `${toPersianDigits(String(master))} تغییر مشتری/منو` +
+          (failed ? " (بخشی ناموفق — جزئیات در وضعیت زیر)" : "."),
+      );
+    } else if (action === "resolve-master-conflict") {
       setNotice("این مورد به‌عنوان رسیدگی‌شده ثبت شد.");
     } else if (!summary || summary.attempted === 0) {
       setNotice("موردی برای آشتی‌سازی نبود.");
@@ -598,6 +616,7 @@ export function ServerSyncPanel() {
           health={health}
           conflicts={masterConflicts}
           busy={busy}
+          onSyncNow={() => reconcile("sync-now")}
           onResolve={(id) => reconcile("resolve-master-conflict", id)}
         />
       ) : null}
@@ -660,11 +679,13 @@ function SyncHealthCard({
   health,
   conflicts,
   busy,
+  onSyncNow,
   onResolve,
 }: {
   health: SyncHealthView;
   conflicts: MasterConflictView[];
   busy: boolean;
+  onSyncNow: () => Promise<void>;
   onResolve: (id: number) => Promise<void>;
 }) {
   const Box = health.level === "error" ? ErrorBox : InfoBox;
@@ -681,6 +702,16 @@ function SyncHealthCard({
             </ul>
           ) : null}
         </Box>
+        {/*
+          * Issue #1115 F1/F3 — the control the owner expected «به‌روزرسانی» to be.
+          * It runs one real master → push → pull round and answers with what each
+          * direction did; a closed security gate answers 409 and names the step.
+          */}
+        <div>
+          <SecondaryButton onClick={() => void onSyncNow()} disabled={busy}>
+            همگام‌سازی اکنون (ارسال و دریافت)
+          </SecondaryButton>
+        </div>
         <div>
           <StatusRow label="تغییرات در انتظار ارسال" value={toPersianDigits(String(health.unsent))} />
           <StatusRow label="قدیمی‌ترین تغییر ارسال‌نشده" value={health.oldestUnsentAt ? formatTime(health.oldestUnsentAt) : "—"} />
