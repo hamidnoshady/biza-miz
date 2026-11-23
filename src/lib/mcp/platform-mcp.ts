@@ -2332,7 +2332,7 @@ async function executePlatformTool(
       }
       case "run_backup_now": {
         const result = await runPlatformBackupNow(connection.adminId);
-        await platformAuditSafe(connection, "platform", tool.name, "ok", {
+        await platformAuditSafe(connection, null, tool.name, "ok", {
           action: "backup.run_now",
           local: result.local.status,
           cloud: result.cloud.status,
@@ -2349,7 +2349,7 @@ async function executePlatformTool(
           artifact: typeof arg.artifact === "string" ? arg.artifact : null,
           mode,
         });
-        await platformAuditSafe(connection, "platform", tool.name, proof.status, {
+        await platformAuditSafe(connection, null, tool.name, proof.status, {
           action: "platform_backup.cloud.verify",
           artifact: proof.artifact,
           verifyMode: proof.verifyMode,

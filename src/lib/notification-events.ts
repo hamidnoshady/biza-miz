@@ -8,7 +8,7 @@
  * cycles through the tenant/feature/AI graph. Nothing here imports anything but
  * `db` and the pure catalogue.
  */
-import { query } from "./db";
+import { query, withTenant } from "./db";
 import type { NotificationEventKey, NotificationSeverity } from "./notifications";
 
 export interface RecordNotificationInput {
@@ -45,26 +45,36 @@ export interface RecordNotificationInput {
  *
  * `ON CONFLICT DO NOTHING` against the `(business_id, dedupe_key)` UNIQUE is
  * the whole idempotency story — a retried request produces one notification.
+ *
+ * The write is scoped to the business it names. Several producers are ticks
+ * that hold a platform bypass (or no scope at all) by the time they enqueue —
+ * a failed backup drill notifies after its lock callback has returned, for
+ * example — and `notification_events` is FORCE RLS, so an unscoped INSERT is
+ * rejected outright. Entering `withTenant` here (rather than trusting every
+ * caller) keeps the bypass out of a tenant table's write path and makes the
+ * notification a fact of the business it belongs to.
  */
 export async function recordNotification(input: RecordNotificationInput): Promise<boolean> {
   try {
-    const result = await query(
-      `INSERT INTO notification_events
-         (business_id, location_id, event_key, severity, title, body, url, amount_rial, dedupe_key, payload)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
-       ON CONFLICT (business_id, dedupe_key) DO NOTHING`,
-      [
-        input.businessId,
-        input.locationId,
-        input.eventKey,
-        input.severity,
-        input.title.slice(0, 200),
-        (input.body ?? "").slice(0, 500),
-        input.url ?? "/dashboard",
-        input.amountRial ?? null,
-        input.dedupeKey.slice(0, 200),
-        JSON.stringify(input.payload ?? {}),
-      ],
+    const result = await withTenant(input.businessId, () =>
+      query(
+        `INSERT INTO notification_events
+           (business_id, location_id, event_key, severity, title, body, url, amount_rial, dedupe_key, payload)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+         ON CONFLICT (business_id, dedupe_key) DO NOTHING`,
+        [
+          input.businessId,
+          input.locationId,
+          input.eventKey,
+          input.severity,
+          input.title.slice(0, 200),
+          (input.body ?? "").slice(0, 500),
+          input.url ?? "/dashboard",
+          input.amountRial ?? null,
+          input.dedupeKey.slice(0, 200),
+          JSON.stringify(input.payload ?? {}),
+        ],
+      ),
     );
     return (result.rowCount ?? 0) > 0;
   } catch (error) {

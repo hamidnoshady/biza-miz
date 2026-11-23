@@ -43,7 +43,7 @@
  * JWT realms have — and `recordSecurityAudit` takes the realm from the caller
  * rather than guessing it from the ids.
  */
-import { isPinnedToTransaction, query } from "./db";
+import { isPinnedToTransaction, query, withoutTenantScope } from "./db";
 
 /**
  * The minimum a writer needs from a connection.
@@ -204,7 +204,15 @@ export async function recordSecurityAudit(
       await write(executor);
       return;
     }
-    await runWithRetry("security audit (platform)", () => write(poolExecutor()));
+    // `platform_audit_log` is platform-owned and protected by FORCE RLS
+    // (migration 0228): a row with no business attribution is invisible to —
+    // and rejected from — a connection with no scope, which is exactly what a
+    // background tick has. Entering the documented `platform` bypass is what
+    // makes the standalone write land; an explicit transaction executor above
+    // already carries the console's own bypass.
+    await runWithRetry("security audit (platform)", () =>
+      withoutTenantScope("platform", () => write(poolExecutor())),
+    );
     return;
   }
 
