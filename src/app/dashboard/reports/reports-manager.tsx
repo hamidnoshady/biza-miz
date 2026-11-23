@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { SectionNav } from "../section-nav";
 import { BranchOverviewSection } from "./branch-overview-section";
+import { FinancialRatiosSection } from "./financial-ratios-section";
 import { ReportBuilderSection } from "./report-builder-section";
 import { ShiftOrdersSection } from "./shift-orders-section";
 import { StandardReportsSection } from "./standard-reports-section";
@@ -24,9 +25,12 @@ import { reportsTabsForCapabilities, resolveReportsTab, type ReportsTabKey } fro
 export function ReportsManager({
   capabilities,
   canExplain,
+  canUseDimensions,
 }: {
   capabilities: ReportCapabilities;
   canExplain: boolean;
+  /** `ledger.view` — the ratio report's dimension filter and account mapping. */
+  canUseDimensions: boolean;
 }) {
   const searchParams = useSearchParams();
   const requestedTab = searchParams.get("tab");
@@ -68,6 +72,14 @@ export function ReportsManager({
           canExport={capabilities.canExportReports}
           canBusinessWide={capabilities.canViewBusinessWide}
           canManageSavedReports={capabilities.canManageSavedReports}
+        />
+      ) : null}
+      {tab === "ratios" ? (
+        <FinancialRatiosSection
+          canExport={capabilities.canExportReports}
+          canBusinessWide={capabilities.canViewBusinessWide}
+          canUseDimensions={canUseDimensions}
+          canManageMapping={capabilities.canManageSavedReports}
         />
       ) : null}
       {tab === "dashboard" ? (
