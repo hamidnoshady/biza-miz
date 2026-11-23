@@ -122,7 +122,7 @@ function stepError(result: Exclude<Awaited<ReturnType<typeof saveOnboardingStep>
 
 async function uploadLogo(request: Request, platformUserId: string): Promise<NextResponse> {
   const form = await request.formData().catch(() => null);
-  if (form?.get("action") !== "logo") {
+  if (!form || form.get("action") !== "logo") {
     return noStore({ error: "invalid_action" }, { status: 400 });
   }
   const file = form.get("file");

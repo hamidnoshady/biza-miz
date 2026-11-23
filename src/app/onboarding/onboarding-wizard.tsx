@@ -157,7 +157,7 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
       }>("/api/onboarding", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "step", ...payload }),
+        body: JSON.stringify({ ...payload, action: "step" }),
       });
       if (status === 401) {
         goLogin();
