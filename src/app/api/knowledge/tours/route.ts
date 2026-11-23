@@ -41,10 +41,10 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const visible = tourForViewer(tour, viewer);
     return visible ? [visible] : [];
   });
-  // On Accounting Overview, POS, Cosmetics, Directory and product-workspace
+  // On Accounting Overview, POS, Cosmetics, Directory, Ledger and product-workspace
   // pages, an eligible Studio walkthrough replaces built-in choices in the panel.
   // Keep those choices as the fallback when no published Studio tour applies.
-  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new" || page.route === "/accounting/products/prices" || page.route === "/accounting/products/attributes" || page.route === "/accounting/products/barcode-templates" || page.route === "/accounting/products/reports" || page.route === "/accounting/cosmetics" || page.route === "/accounting/directory";
+  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new" || page.route === "/accounting/products/prices" || page.route === "/accounting/products/attributes" || page.route === "/accounting/products/barcode-templates" || page.route === "/accounting/products/reports" || page.route === "/accounting/cosmetics" || page.route === "/accounting/directory" || page.route === "/accounting/ledger";
   const studioTours = preferStudio
     ? eligibleTours.filter((tour) => published.some((entry) => entry.id === tour.id))
     : [];
