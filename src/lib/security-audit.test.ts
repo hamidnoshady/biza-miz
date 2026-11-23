@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const db = vi.hoisted(() => ({
   pinned: false,
   statements: [] as Array<{ text: string; params?: unknown[] }>,
+  bypasses: [] as string[],
 }));
 
 vi.mock("./db", () => ({
@@ -16,6 +17,10 @@ vi.mock("./db", () => ({
     db.statements.push({ text, params });
     return { rows: [], rowCount: 1 };
   }),
+  withoutTenantScope: async (reason: string, fn: () => Promise<unknown>) => {
+    db.bypasses.push(reason);
+    return fn();
+  },
 }));
 
 import {
@@ -29,6 +34,7 @@ import {
 beforeEach(() => {
   db.pinned = false;
   db.statements.length = 0;
+  db.bypasses.length = 0;
 });
 
 describe("transactionAuditExecutor", () => {
@@ -55,6 +61,39 @@ describe("transactionAuditExecutor", () => {
       tokenVersion: 7,
       revokedSessions: 2,
     });
+  });
+});
+
+describe("platform realm audit", () => {
+  it("writes a standalone platform row under the documented platform bypass", async () => {
+    // Regression: a background tick (signup retention) has no request scope,
+    // and `platform_audit_log` is FORCE RLS. Without the bypass the INSERT was
+    // rejected with 42501 and the sweep's accountability row was lost.
+    await recordSecurityAudit({
+      realm: "platform",
+      action: "auth.signup.retention_sweep",
+      entity: "platform_signup_request",
+      payload: { expiredMarked: 0, deleted: 0 },
+    });
+
+    expect(db.bypasses).toEqual(["platform"]);
+    expect(db.statements).toHaveLength(1);
+    expect(db.statements[0].text).toMatch(/INSERT INTO platform_audit_log/);
+  });
+
+  it("does not wrap a caller-supplied transaction executor in a fresh bypass", async () => {
+    db.pinned = true;
+    await recordSecurityAudit(
+      {
+        realm: "platform",
+        action: "auth.signup.retention_sweep",
+        entity: "platform_signup_request",
+      },
+      transactionAuditExecutor(),
+    );
+
+    expect(db.bypasses).toEqual([]);
+    expect(db.statements).toHaveLength(1);
   });
 });
 

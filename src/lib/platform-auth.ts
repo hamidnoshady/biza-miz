@@ -323,23 +323,54 @@ export async function platformAudit(entry: {
   userAgent?: string | null;
 }, transaction?: { query: (sql: string, values: unknown[]) => Promise<unknown> }): Promise<void> {
   const execute = transaction ? transaction.query.bind(transaction) : query;
-  await execute(
-    `INSERT INTO platform_audit_log
-       (platform_admin_id, business_id, action, entity, entity_id, payload, ip_address, user_agent)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [
-      entry.adminId,
-      entry.businessId ?? null,
-      entry.action,
-      entry.entity ?? null,
-      entry.entityId ?? null,
-      entry.payload ? JSON.stringify(entry.payload) : null,
-      entry.ipAddress ?? null,
-      entry.userAgent ?? null,
-    ],
-  ).catch((err) => {
+  const insert = (businessId: string | null) =>
+    execute(
+      `INSERT INTO platform_audit_log
+         (platform_admin_id, business_id, action, entity, entity_id, payload, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        entry.adminId,
+        businessId,
+        entry.action,
+        entry.entity ?? null,
+        entry.entityId ?? null,
+        entry.payload ? JSON.stringify(entry.payload) : null,
+        entry.ipAddress ?? null,
+        entry.userAgent ?? null,
+      ],
+    );
+
+  try {
+    await insert(entry.businessId ?? null);
+  } catch (err) {
+    // The attribution column is optional by schema (`ON DELETE SET NULL`) and
+    // `entity_id`/payload still name the subject. A caller can legitimately
+    // name a business that no longer exists — an MCP client replaying a stale
+    // id, or a delete that committed between the listing and the action — and
+    // losing the whole audit row (the one thing that must never happen) is a
+    // worse outcome than filing it unattributed.
+    //
+    // Only the standalone write can recover: a failed statement aborts the
+    // caller's transaction, so a second INSERT there is already doomed and the
+    // real failure must surface.
+    if (!transaction && entry.businessId && isMissingBusinessAttribution(err)) {
+      try {
+        await insert(null);
+        return;
+      } catch (retryErr) {
+        console.error("platformAudit failed:", retryErr);
+        throw retryErr;
+      }
+    }
     // Phase 24 Wave 5: "make platform-audit write failures loud instead of swallowed"
     console.error("platformAudit failed:", err);
     throw err;
-  });
+  }
+}
+
+/** `businesses` has no row for the attribution we were given (FK 23503). */
+function isMissingBusinessAttribution(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { code, constraint } = error as { code?: unknown; constraint?: unknown };
+  return code === "23503" && constraint === "platform_audit_log_business_id_fkey";
 }
