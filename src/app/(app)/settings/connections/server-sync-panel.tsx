@@ -351,24 +351,53 @@ export function ServerSyncPanel() {
   }
 
   async function reconcile(
-    action: "retry-deferred" | "retry-dead-letter" | "discard-dead-letter",
+    action:
+      | "retry-deferred"
+      | "retry-dead-letter"
+      | "discard-dead-letter"
+      | "resolve-master-conflict",
     id?: number,
   ) {
     setBusy(true);
     setError("");
-    const { ok, data } = await api<{ error?: string }>(
-      "/api/server-sync/reconcile",
-      {
-        method: "POST",
-        body: JSON.stringify({ action, id }),
-      },
-    );
+    setNotice("");
+    const { ok, data } = await api<{
+      error?: string;
+      reconciliation?: {
+        attempted: number;
+        applied: number;
+        deferred: number;
+        deadLettered: number;
+        failed: number;
+      } | null;
+    }>("/api/server-sync/reconcile", {
+      method: "POST",
+      body: JSON.stringify({ action, id }),
+    });
     setBusy(false);
     if (!ok) {
       setError(errorMessage(data.error));
       return;
     }
-    setNotice("عملیات آشتی‌سازی انجام شد.");
+    /*
+     * Issue #1115 F2 — the panel used to say «عملیات آشتی‌سازی انجام شد»
+     * whenever the request returned 2xx, so a run that re-applied nothing read
+     * exactly like one that cleared the backlog. The route already returns the
+     * counts; say them, and say when there was nothing to do.
+     */
+    const summary = data.reconciliation;
+    if (action === "resolve-master-conflict") {
+      setNotice("این مورد به‌عنوان رسیدگی‌شده ثبت شد.");
+    } else if (!summary || summary.attempted === 0) {
+      setNotice("موردی برای آشتی‌سازی نبود.");
+    } else {
+      setNotice(
+        `آشتی‌سازی: ${toPersianDigits(String(summary.attempted))} مورد بررسی شد — ` +
+          `${toPersianDigits(String(summary.applied))} اعمال شد، ` +
+          `${toPersianDigits(String(summary.deferred))} در انتظار پیش‌نیاز، ` +
+          `${toPersianDigits(String(summary.deadLettered + summary.failed))} ناموفق.`,
+      );
+    }
     await load();
   }
 
@@ -564,7 +593,14 @@ export function ServerSyncPanel() {
         </form>
       </SectionCard>
 
-      {health ? <SyncHealthCard health={health} conflicts={masterConflicts} /> : null}
+      {health ? (
+        <SyncHealthCard
+          health={health}
+          conflicts={masterConflicts}
+          busy={busy}
+          onResolve={(id) => reconcile("resolve-master-conflict", id)}
+        />
+      ) : null}
 
       <SyncStatusPanels
         syncState={syncState}
@@ -620,7 +656,17 @@ const MASTER_CONFLICT_LABELS: Record<string, string> = {
  * Migration 0190: the two questions an owner actually has — is it moving, and
  * do the desktop and the central server agree on the money.
  */
-function SyncHealthCard({ health, conflicts }: { health: SyncHealthView; conflicts: MasterConflictView[] }) {
+function SyncHealthCard({
+  health,
+  conflicts,
+  busy,
+  onResolve,
+}: {
+  health: SyncHealthView;
+  conflicts: MasterConflictView[];
+  busy: boolean;
+  onResolve: (id: number) => Promise<void>;
+}) {
   const Box = health.level === "error" ? ErrorBox : InfoBox;
   return (
     <SectionCard title="سلامت همگام‌سازی">
@@ -675,11 +721,23 @@ function SyncHealthCard({ health, conflicts }: { health: SyncHealthView; conflic
         {conflicts.length > 0 ? (
           <div>
             <p className="text-sm font-medium">ادغام‌نشده‌ها</p>
-            <ul className="mt-1 space-y-1 text-sm">
+            {/*
+              * Issue #1115 F4 — the card used to list these rows and stop
+              * there, so a permanently quarantined customer or category had no
+              * way to be closed from the product. `resolve-master-conflict`
+              * acknowledges the row after the operator has reconciled the data;
+              * it never merges parties or rewrites either side.
+              */}
+            <ul className="mt-1 space-y-2 text-sm">
               {conflicts.map((conflict) => (
-                <li key={conflict.id}>
-                  {MASTER_TABLE_LABELS[conflict.table] ?? conflict.table} —{" "}
-                  {MASTER_CONFLICT_LABELS[conflict.errorCode] ?? "ادغام ممکن نبود"} ({formatTime(conflict.lastSeenAt)})
+                <li key={conflict.id} className="flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    {MASTER_TABLE_LABELS[conflict.table] ?? conflict.table} —{" "}
+                    {MASTER_CONFLICT_LABELS[conflict.errorCode] ?? "ادغام ممکن نبود"} ({formatTime(conflict.lastSeenAt)})
+                  </span>
+                  <SecondaryButton onClick={() => void onResolve(conflict.id)} disabled={busy}>
+                    رسیدگی شد
+                  </SecondaryButton>
                 </li>
               ))}
             </ul>
@@ -713,7 +771,11 @@ function SyncStatusPanels({
   replicationContract: ReplicationContractView | null;
   busy: boolean;
   onReconcile: (
-    action: "retry-deferred" | "retry-dead-letter" | "discard-dead-letter",
+    action:
+      | "retry-deferred"
+      | "retry-dead-letter"
+      | "discard-dead-letter"
+      | "resolve-master-conflict",
     id?: number,
   ) => Promise<void>;
 }) {

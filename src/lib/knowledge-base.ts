@@ -131,6 +131,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/accounting/entries", "دفتر روزنامه"],
     ["/accounting/vouchers", "اسناد و شماره‌گذاری"],
     ["/accounting/manual", "ثبت سند دستی"],
+    ["/accounting/recurring-vouchers", "اسناد دوره‌ای"],
     ["/accounting/expenses", "هزینه‌ها"],
     ["/accounting/fiscal-periods", "دوره‌های مالی"],
     ["/accounting/opening-balances", "ترازات افتتاحیه"],

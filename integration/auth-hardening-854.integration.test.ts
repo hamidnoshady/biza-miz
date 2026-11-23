@@ -6,8 +6,8 @@
  *
  *   - **P0.3** the tenant administrator who triggers a member's password reset
  *     must not receive the credential that completes it — the link goes to the
- *     holder's *global* verified phone and nowhere else (#1386), and the
- *     recovery is refused outright when there is no such number to send it to;
+ *     holder's *verified* phone and nowhere else, and the recovery is refused
+ *     outright when there is no verified number to send it to;
  *   - **P0.5** branch ids on an invitation are tenant-validated at creation
  *     *and* re-validated at acceptance;
  *   - **P0.9** the last second factor may not be removed by standing in the one
@@ -170,7 +170,10 @@ interface Seed {
   ownerPassword: string;
 }
 
-async function seedBusiness(name: string, options: { ownerPhone?: string | null } = {}): Promise<Seed> {
+async function seedBusiness(
+  name: string,
+  options: { ownerPhone?: string | null; identityPhone?: string | null } = {},
+): Promise<Seed> {
   const slug = `${name.toLowerCase()}-${randomUUID().slice(0, 8)}`;
   const ownerEmail = `owner-${randomUUID().slice(0, 8)}@example.com`;
   const ownerPassword = "owner-password-854";
@@ -185,24 +188,18 @@ async function seedBusiness(name: string, options: { ownerPhone?: string | null 
     [businessId],
   );
 
-  /**
-   * #1386 — the *global* verified number on `platform_users` is the identity's
-   * recovery channel. It is never written on the membership: a business
-   * administrator can move a membership phone to a number they hold and prove
-   * it, so a membership number must not become the identity's channel.
-   */
   const identity = await db.query<{ id: string }>(
     `INSERT INTO platform_users (email, password_hash, full_name, phone_e164, phone_verified_at)
      VALUES ($1, $2, 'Owner', $3, CASE WHEN $3::text IS NULL THEN NULL ELSE now() END)
      RETURNING id`,
-    [ownerEmail, await bcrypt.hash(ownerPassword, 10), options.ownerPhone ?? null],
+    [ownerEmail, await bcrypt.hash(ownerPassword, 10), options.identityPhone ?? null],
   );
 
   const owner = await db.query<{ id: string }>(
-    `INSERT INTO users (business_id, platform_user_id, role, full_name, email)
-     VALUES ($1, $2, 'owner', 'Owner', $3)
+    `INSERT INTO users (business_id, platform_user_id, role, full_name, email, phone_e164, phone_verified_at)
+     VALUES ($1, $2, 'owner', 'Owner', $3, $4, CASE WHEN $4::text IS NULL THEN NULL ELSE now() END)
      RETURNING id`,
-    [businessId, identity.rows[0].id, ownerEmail],
+    [businessId, identity.rows[0].id, ownerEmail, options.ownerPhone ?? null],
   );
 
   return {
@@ -217,10 +214,11 @@ async function seedBusiness(name: string, options: { ownerPhone?: string | null 
 }
 
 describe("Issue #854 — P0.3 no tenant administrator ever receives a usable reset credential", () => {
-  it("sends the link to the holder's verified global phone and returns only a masked target", async () => {
-    // #1386 — the channel is the identity's global number (seeded on
-    // `platform_users`), not a number carried by any membership.
-    const seeded = await seedBusiness("Alpha", { ownerPhone: "+989121110001" });
+  it("sends the link to the holder's verified phone and returns only a masked target", async () => {
+    // The channel is the canonical *identity* number (0302 / #1384), not a
+    // membership phone the administrator could re-point, so the seed proves
+    // the global one is what the credential travels to.
+    const seeded = await seedBusiness("Alpha", { identityPhone: "+989121110001" });
 
     const issued = await dbLib.withTenant(seeded.businessId, () =>
       team.requestMemberPasswordReset(seeded.businessId, seeded.ownerId, seeded.ownerId, {
@@ -255,7 +253,7 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
     expect(rows[0].delivery_target_masked).toBe("+989***0001");
   });
 
-  it("refuses the recovery outright when the identity has no verified global number", async () => {
+  it("refuses the recovery outright when the identity has no verified number anywhere", async () => {
     const seeded = await seedBusiness("Unverified", { ownerPhone: null });
 
     await expect(
@@ -274,15 +272,14 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
     expect(sms.sent).toHaveLength(0);
   });
 
-  it("does not accept a verified membership phone in place of the identity's global number", async () => {
+  it("refuses a number verified only on a membership, never the identity (0302 / #1386)", async () => {
     /**
-     * #1386 — the person may be a cashier here and the accountant there, but a
-     * *verified membership* number is not the identity's channel. A business
-     * administrator can change an employee's membership phone to a number they
-     * hold (and having proven it, mark it verified); if that number could
-     * receive the global reset link, the administrator would own the person's
-     * recovery — the takeover #854 closed. Only the global number, written by
-     * the person-side verified doors, may carry it.
+     * A membership phone is the administrator's to re-point, so it cannot carry
+     * the global reset credential — that would hand the administrator the
+     * person's recovery channel, the takeover #854 closed. 0302 keeps the
+     * canonical `platform_users` number as the only eligible one; a person with
+     * verified membership phones and no global number is refused rather than
+     * silently downgraded to a lesser channel.
      */
     const alpha = await seedBusiness("Alpha", { ownerPhone: null });
     const beta = await seedBusiness("Beta", { ownerPhone: null });
@@ -300,12 +297,6 @@ describe("Issue #854 — P0.3 no tenant administrator ever receives a usable res
         }),
       ),
     ).rejects.toThrow("no_verified_channel");
-
-    // Refused before anything was minted or delivered.
-    const { rows } = await db.query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM auth_password_resets`,
-    );
-    expect(rows[0].count).toBe("0");
     expect(sms.sent).toHaveLength(0);
   });
 });

@@ -12,6 +12,7 @@
 import {
   LayersIcon,
   BarChart3Icon,
+  CalendarClockIcon,
   CalendarDaysIcon,
   CalculatorIcon,
   CircleIcon,
@@ -45,6 +46,7 @@ export const ACCOUNTING_SECTION_ICONS: Record<AccountingSectionKey, LucideIcon> 
   entries: ClipboardListIcon,
   vouchers: HashIcon,
   manual: ClipboardListIcon,
+  "recurring-vouchers": CalendarClockIcon,
   expenses: CircleIcon,
   "fiscal-periods": CalendarDaysIcon,
   "opening-balances": LandmarkIcon,
