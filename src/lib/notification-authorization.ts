@@ -23,6 +23,9 @@ export const NOTIFICATION_PERMISSIONS: Record<string, Permission[]> = {
   "backup.failed": ["backup.manage"],
   "backup.drill_failed": ["backup.manage"],
   "sync.operational_blocked": ["settings.manage"],
+  // The bill is also an order, so a member must be able to see it as well as
+  // reach the dead-letter panel that explains it.
+  "sync.order_number_conflict": ["orders.view", "settings.manage"],
   "integrations.plugin_stale": ["integrations.manage"],
   "integrations.plugin_cron_delayed": ["integrations.manage"],
   "integrations.plugin_cron_failed": ["integrations.manage"],

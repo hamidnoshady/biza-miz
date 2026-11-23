@@ -18,6 +18,7 @@ import * as industryGuard from "@/lib/industry-guard";
 import * as setupState from "@/lib/setup-state";
 import * as businessDayService from "@/lib/business-day-service";
 import * as invoiceService from "@/lib/retail-invoice-service";
+import * as orderNumbers from "@/lib/order-number-service";
 import * as outboxProducer from "@/lib/integrations/holoo/outbox-producer";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -42,6 +43,10 @@ vi.mock("@/lib/retail-invoice-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/retail-invoice-service")>();
   return { ...actual, createRetailInvoice: vi.fn() };
 });
+vi.mock("@/lib/order-number-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/order-number-service")>();
+  return { ...actual, ensureOrderNumberLease: vi.fn() };
+});
 
 const fakeClient = { query: vi.fn().mockResolvedValue({ rows: [] }), release: vi.fn() };
 
@@ -61,6 +66,12 @@ beforeEach(() => {
   vi.mocked(businessDayService.getBusinessDayStatus).mockResolvedValue(null as never);
   vi.mocked(db.getPool).mockReturnValue({ connect: async () => fakeClient } as never);
   vi.mocked(outboxProducer.enqueueHolooSaleForOrder).mockResolvedValue(undefined as never);
+  vi.mocked(orderNumbers.ensureOrderNumberLease).mockResolvedValue({
+    source: "sequence",
+    remaining: null,
+    renewed: false,
+    error: null,
+  });
   vi.mocked(invoiceService.createRetailInvoice).mockResolvedValue({
     orderId: "order-1",
     orderNumber: 1,

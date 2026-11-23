@@ -37,6 +37,13 @@ import { randomUUID } from "node:crypto";
 import type { Role } from "./auth";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import { recordOrderState, type OrderStateActor } from "./order-state-sync";
+import {
+  allocateOrderNumber,
+  ensureOrderNumberLease,
+  OrderNumberLeaseExhausted,
+  resolveOrderNumberSource,
+} from "./order-number-service";
+import { isOrderNumberValue } from "./order-number-lease";
 import { discountPercentForControl, normalizeVoidReason } from "./order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
 import { enqueueKitchenDispatch } from "./kitchen-dispatch";
@@ -193,6 +200,20 @@ export interface CreateOrderInput {
    * to the moment the peer happened to receive it.
    */
   openedAt?: string | null;
+  /**
+   * The number the order was rung up under on the side that created it. Set
+   * only when replaying a peer's `order.create`: it is the number already on
+   * the guest's receipt, so the receiver stores it verbatim rather than
+   * minting a second one. A direct sale leaves this unset and the allocator
+   * issues one.
+   */
+  orderNumber?: number | string | null;
+  /**
+   * Replays run inside the sync engine's transaction, so they mint from the
+   * lease this install already holds and never call the cloud while that
+   * transaction holds its locks. The sync tick renews the block outside it.
+   */
+  leaseRenewal?: "auto" | "none";
   /** Actor role is persisted with the outbox event for permission-safe replay. */
   actorRole?: Role;
   /** False only while applying an event already present in the sync inbox. */
@@ -421,6 +442,25 @@ export async function createOrder(
   const requestFingerprint = clientRequestId ? orderRequestFingerprint(input) : null;
   const requestedOrderId = input.orderId ?? randomUUID();
 
+  /*
+   * A paired till sells from the block of numbers it leased (migration 0318).
+   * The renewal is a cloud call, so it happens BEFORE this transaction starts
+   * — never while it holds a row lock. It is a no-op unless the business is
+   * hybrid and the block is at its low watermark; a failed renewal is not fatal
+   * while numbers remain, and `allocateOrderNumber` below is the authority on
+   * that.
+   */
+  if (businessId && input.leaseRenewal !== "none") {
+    try {
+      await ensureOrderNumberLease(businessId, { locationId: input.locationId });
+    } catch (error) {
+      // The renewal is advisory: `allocateOrderNumber` below still has every
+      // number in the current block. A settings read or a pool hiccup must not
+      // be the reason a sale cannot be rung up.
+      console.error("order-number lease renewal failed:", error);
+    }
+  }
+
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
@@ -475,13 +515,33 @@ export async function createOrder(
     const pricedAt = new Date();
     const totals = computeOrderTotals(cartLines, input.discount, deliveryFee, promotions, pricedAt);
 
-    const { rows: counter } = await client.query<{ next_number: string }>(
-      `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, 2)
-       ON CONFLICT (location_id) DO UPDATE SET next_number = order_number_counters.next_number + 1
-       RETURNING next_number - 1 AS next_number`,
-      [input.locationId],
-    );
-    const orderNumber = Number(counter[0].next_number);
+    /*
+     * Issue 0318 — one authority per location. A replayed order keeps the
+     * number its receipt already shows; a local sale mints from this side's
+     * sequence (Local/Cloud) or from the leased block (Hybrid). The number is
+     * never rewritten to dodge a collision: a taken number is a real fact that
+     * belongs in a dead letter, not something to paper over.
+     */
+    let orderNumber: number;
+    if (input.orderNumber !== undefined && input.orderNumber !== null) {
+      const external = Number(input.orderNumber);
+      if (!isOrderNumberValue(external)) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "invalid_order_number", status: 400 };
+      }
+      const { rows: taken } = await client.query(
+        "SELECT 1 FROM orders WHERE location_id = $1 AND order_number = $2::bigint",
+        [input.locationId, external],
+      );
+      if (taken.length > 0) {
+        await client.query("ROLLBACK");
+        return { ok: false, error: "order_number_conflict", status: 409 };
+      }
+      orderNumber = external;
+    } else {
+      const source = businessId ? await resolveOrderNumberSource(client, businessId) : "sequence";
+      orderNumber = await allocateOrderNumber(client, { locationId: input.locationId, source });
+    }
 
     let tableSessionId: string | null = null;
     if (input.type === "dine_in" && tableId) {
@@ -664,6 +724,9 @@ export async function createOrder(
         payload: {
           orderId,
           type: input.type,
+          // The number this side rang it up under. Without it the peer minted
+          // its own and the two receipts disagreed for the same bill (0318).
+          orderNumber,
           tableId,
           customerId,
           guestCount: input.guestCount ?? null,
@@ -697,6 +760,22 @@ export async function createOrder(
     };
   } catch (err) {
     await client.query("ROLLBACK");
+    // This till's block ran out and the cloud could not grant the next one.
+    // Refused, not numbered from a range that may belong to another install.
+    if (err instanceof OrderNumberLeaseExhausted) {
+      return { ok: false, error: "order_number_lease_exhausted", status: 503 };
+    }
+    // A replayed order whose number was taken between the check above and the
+    // INSERT. Keep it a named conflict rather than a generic 500: the sync
+    // layer turns this into an alert, never into a rewritten number.
+    if (
+      err instanceof Error &&
+      "code" in err &&
+      (err as { code?: string }).code === "23505" &&
+      (err as { constraint?: string }).constraint === "orders_location_id_order_number_key"
+    ) {
+      return { ok: false, error: "order_number_conflict", status: 409 };
+    }
     if (
       clientRequestId &&
       err instanceof Error &&

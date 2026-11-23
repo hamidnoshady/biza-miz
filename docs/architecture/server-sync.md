@@ -279,6 +279,43 @@ surface read healthy.
   }` closes the episode when its own run converged, so a successful repair is
   not contradicted by a stale row for up to 30 s.
 
+## Order numbers: one cloud sequence, blocks leased to the till (migration 0318)
+
+A location's order numbers come from **one authority**, never from a counter
+each replica advances on its own. `order_number_sequence` is the cloud's
+per-location counter; `order_number_lease` records the blocks of it a paired
+till has reserved.
+
+- **A paired till leases, then mints locally.** When its block reaches
+  `ORDER_NUMBER_LEASE_LOW_WATERMARK` (20 of 200 left), the sync tick calls
+  `POST /api/server-sync/order-number-lease` and stores the granted block. It
+  then mints inside the block with a local `UPDATE`, so selling never needs the
+  cloud; only the next block does, and it is fetched before the current one is
+  exhausted. The old block's tail is consumed before the new one, so an
+  ordinary renewal leaves no gap. `highestLocalOrderNumber` rides on the request
+  so the block starts above a sale that landed while the previous push was in
+  flight.
+- **The cloud's own bills draw from the same sequence.** POS orders rung up in
+  the cloud, website/CMS and WooCommerce orders, retail invoices and imported
+  sales all call `allocateOrderNumber`; a lease reserves its whole range out of
+  that sequence, so a cloud-created bill can never land inside a till's block.
+  A `local` install (no peer) uses the sequence directly.
+- **A pulled order is never renumbered.** `order.create` carries the sender's
+  `orderNumber`, and `order.state.synced` carries it in the bill itself. The
+  receiver stores that number verbatim. A genuine collision is terminal: the
+  event is dead-lettered with `order_number_conflict` and
+  `sync.order_number_conflict` alerts the owner — the number is not rewritten to
+  dodge it. This replaced the old "taken → take this side's next" fallback,
+  which is how a till's #820 was stored in the cloud as #821.
+- **Renewal is not a gate.** A failed renewal is reported and retried after a
+  minute; the till keeps selling from the numbers it holds. Only a completely
+  exhausted block refuses a new bill (`order_number_lease_exhausted`), rather
+  than borrowing a number another install may own.
+- **Upgrade.** The migration seeds every location from both
+  `order_number_counters` and its highest existing order number, so an install
+  continues where it was. `order_number_counters` is left in place for older
+  desktop builds during rollout; no new code writes it.
+
 ## Event transport
 
 On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):

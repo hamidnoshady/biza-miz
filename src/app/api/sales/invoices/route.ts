@@ -21,6 +21,7 @@ import { rialText } from "@/lib/inventory-exact";
 import { enqueueHolooSaleForOrder } from "@/lib/integrations/holoo/outbox-producer";
 import { ledgerSettlementFor, type PaymentSettlement } from "@/lib/payment-methods";
 import { OrderPaymentRoutingError } from "@/lib/order-payment-routing-service";
+import { ensureOrderNumberLease } from "@/lib/order-number-service";
 import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { holdsPermission } from "@/app/api/automotive/guard";
@@ -271,6 +272,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       }
     }
   }
+
+  // A paired till sells retail invoices from its leased block too (0318), so
+  // renew the block before this transaction takes a number. Advisory: the
+  // current block still works if the renewal cannot be attempted.
+  await ensureOrderNumberLease(session.businessId, { locationId: location.id }).catch((error) => {
+    console.error("order-number lease renewal failed:", error);
+  });
 
   const client = await getPool().connect();
   try {
