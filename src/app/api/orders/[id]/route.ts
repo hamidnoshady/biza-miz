@@ -17,6 +17,7 @@ import { tomanText } from "@/lib/ai-labels";
 import { toPersianDigits } from "@/lib/digits";
 import { discountPercentForControl, normalizeVoidReason } from "@/lib/order-controls";
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "@/lib/order-control-service";
+import { getKitchenWorkflow } from "@/lib/kitchen-workflow";
 
 const isUuid = (v: unknown): v is string =>
   typeof v === "string" &&
@@ -47,7 +48,15 @@ export const GET = withTenantScope(async (_request: NextRequest, context: { para
 
   const detail = await getOrderDetail(location.id, id);
   if (!detail) return NextResponse.json({ error: "order_not_found" }, { status: 404 });
-  return NextResponse.json(detail);
+  const kitchenWorkflow = await getKitchenWorkflow(session.businessId, location.id);
+  const kitchenAccess = kitchenWorkflow === "manage_from_orders"
+    ? await requirePermission(PERMISSIONS.kitchenView)
+    : null;
+  return NextResponse.json({
+    ...detail,
+    manageKitchenFromOrders: kitchenAccess?.session != null,
+    showKitchenHandoff: kitchenWorkflow !== "kitchen_team",
+  });
 });
 
 /** Update note/discount, customer/table or void an open order. */

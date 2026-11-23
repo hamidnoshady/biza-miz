@@ -7,6 +7,8 @@ import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { deploymentRole } from "@/lib/deployment-role";
 import { kitchenDispatchOwner } from "@/lib/kitchen-dispatch";
 import { classifyDeliveryOutcome, PRINTER_ERROR_MESSAGES, type PrinterErrorCode } from "@/lib/printing/errors";
+import { printBehaviorFor } from "@/lib/printing/behavior";
+import { loadPrintBehavior } from "@/lib/printing/behavior-service";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_BATCH = 10;
@@ -23,6 +25,10 @@ export const GET = withTenantScope(async () => {
   if (error) return error;
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ jobs: [] });
+  const policy = await loadPrintBehavior(session.businessId, location.id);
+  if (printBehaviorFor(policy.effective, "kitchen").mode !== "automatic") {
+    return NextResponse.json({ jobs: [] });
+  }
   const profile = await readDeploymentProfile(session.businessId);
   const ownerMode = kitchenDispatchOwner(profile.profile, deploymentRole());
   if (!ownerMode) return NextResponse.json({ jobs: [] });
@@ -100,7 +106,8 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
     ...(errorCode ? { error: errorCode } : {}),
     ambiguous: body.ambiguous === true,
   });
-  const retryable = delivery === "not_delivered" || delivery === "connector_unavailable";
+  const disabled = errorCode === "print_disabled";
+  const retryable = !disabled && (delivery === "not_delivered" || delivery === "connector_unavailable");
   try {
     const { rows } = await query<{ id: string }>(
       `UPDATE kitchen_dispatch_jobs
@@ -118,7 +125,7 @@ export const PATCH = withTenantScope(async (request: NextRequest) => {
         location.id,
         body.claimToken,
         session.sub,
-        body.handedOff ? "handed_off" : retryable ? "pending" : "ambiguous",
+        body.handedOff ? "handed_off" : disabled ? "failed" : retryable ? "pending" : "ambiguous",
         body.handedOff ? null : errorCode ?? "print_failed",
       ],
     );

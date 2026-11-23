@@ -1,5 +1,7 @@
 "use client";
 
+import { printBrowserDocument } from "@/lib/printing/behavior-client";
+
 /**
  * Phase 42b — the «گزارش» tab: low-stock and dead-stock reports.
  * Hardened for #917: warehouse-aware, paginated, exact valuation, retry-safe.
@@ -308,7 +310,7 @@ export function ReportsSection() {
   };
 
   const handleRetry = () => fetchReports();
-  const handlePrint = useCallback(() => window.print(), []);
+  const handlePrint = useCallback(() => void printBrowserDocument("report"), []);
 
   // --- Full filtered export (not just current page) ---
   const fetchFullRows = useCallback(async (type: "low" | "dead"): Promise<ReportRow[]> => {

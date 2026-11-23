@@ -23,6 +23,7 @@ export type PrinterErrorCode =
   | "invalid_printer"
   | "not_in_browser"
   | "printer_not_configured"
+  | "print_disabled"
   | "incompatible_printer"
   | "spooler_rejected"
   | "job_timeout"
@@ -70,6 +71,7 @@ export const PRINTER_ERROR_MESSAGES: Record<PrinterErrorCode, string> = {
   invalid_printer: "تنظیمات چاپگر کامل نیست؛ چاپگر را دوباره وصل کنید.",
   not_in_browser: "چاپ فقط از داخل برنامه ممکن است.",
   printer_not_configured: "برای این سند چاپگری تنظیم نشده است.",
+  print_disabled: "چاپ این سند در تنظیمات کسب‌وکار غیرفعال شده است.",
   incompatible_printer: "این چاپگر برای این نوع سند مناسب نیست.",
   spooler_rejected: "ویندوز این کار چاپ را نپذیرفت.",
   job_timeout: "ارسال به چاپگر بیش از حد طول کشید؛ پیش از چاپ دوباره، خروجی چاپگر را بررسی کنید.",

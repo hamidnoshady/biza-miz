@@ -6,6 +6,9 @@ import { enqueueKitchenDispatch, kitchenDispatchOwner } from "./kitchen-dispatch
 
 vi.mock("./deployment-mode", () => ({ readDeploymentProfile: vi.fn() }));
 vi.mock("./deployment-role", () => ({ deploymentRole: vi.fn() }));
+vi.mock("./printing/behavior-service", () => ({
+  loadPrintBehavior: vi.fn().mockResolvedValue({ defaults: {}, overrides: {}, effective: {} }),
+}));
 
 const profileMock = vi.mocked(readDeploymentProfile);
 const roleMock = vi.mocked(deploymentRole);
