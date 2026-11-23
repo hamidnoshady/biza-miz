@@ -84,5 +84,8 @@ keystore.properties
 # Disposable local/browser fixtures (may contain generated test credentials)
 .cache/
 
+# Browser-acceptance failure artifacts (scripts/e2e-kitchen-batch.mjs)
+test-results/
+
 # Scratch narrow-typecheck configs (whole-project tsc OOMs in sandboxes)
 tsconfig.wave*.json
