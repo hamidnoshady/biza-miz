@@ -1498,7 +1498,7 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
       update: ["update_business", "rename_business_subdomain"],
       lifecycle: ["reset_business", "hard_delete_business"],
     },
-    note: "batch BM: provisioning mirrors the console form (subdomain required in English, owner activation on, industry wizard rule via issue #840, AI key attempt audited on success) with the credential's admin as createdBy; owner-profile edits ride the access/identity tier and stay console-side",
+    note: "batch BM: provisioning mirrors the console form (subdomain required in English, owner activation on, industry wizard rule via issue #840, AI key attempt audited on success) with the credential's admin as createdBy; owner-profile edits ride the access/identity tier and stay console-side. Issue #1430: list_businesses exposes the console's full directory filter set (search/status/plan/industry/created range/activity/sort/pagination) through queryBusinesses, and rejects invalid arguments rather than silently widening them",
     test: "integration/platform-mcp.integration.test.ts",
   },
   {
@@ -1518,11 +1518,13 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
   {
     id: "platform.biz-owner",
     module: "Platform — Tenants",
-    entity: "Owner & impersonation",
+    entity: "Owner & manager profiles; impersonation",
     routes: ["platform/businesses", "platform/impersonation"],
-    status: "route-only (by design)",
-    note: "owner credential resets and impersonation sessions (start/handoff/resume/close) are the access/identity tier — an impersonation token is a key to someone else's business, so these lanes never cross the chat channel, same doctrine as the tenant config.team row",
-    test: "integration/platform-business-management.integration.test.ts",
+    ops: {
+      listDetail: ["get_business_owner_profile"],
+    },
+    note: "issue #1430: the profile READ rides the console's own GET/route gate (businesses.read) and returns the same DTO — name, email, membership state, safe MFA state and cross-business reach, never a credential — with otherBusinesses filtered to the credential's bridge list; profile PATCH, membership/MFA changes, role grants and impersonation sessions are the access/identity tier and stay console-side",
+    test: "integration/platform-mcp.integration.test.ts + integration/platform-business-management.integration.test.ts",
   },
   {
     id: "platform.biz-features",
