@@ -66,6 +66,14 @@ function post(body: unknown) {
   );
 }
 
+function postForm(fields: Record<string, string | File>) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.append(key, value);
+  return POST(new Request("http://localhost/api/onboarding", { method: "POST", body: form }));
+}
+
+const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 beforeEach(() => {
   readOnboardingIdentity.mockReset();
   loadOnboardingState.mockReset();
@@ -170,6 +178,56 @@ describe("the onboarding mutation API", () => {
       error: "memberships_exist",
       next: "/login",
     });
+  });
+
+  it("passes the email delivery outcome through the step response", async () => {
+    readOnboardingIdentity.mockResolvedValue("11111111-1111-4111-8111-111111111111");
+    saveOnboardingStep.mockResolvedValue({
+      ok: true,
+      draft: STATE.draft,
+      emailVerification: "sent",
+    });
+
+    const response = await post({ action: "step", step: "profile", email: "a@example.invalid" });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      emailVerification: "sent",
+    });
+  });
+
+  it("requires the explicit logo action and validates the uploaded file", async () => {
+    readOnboardingIdentity.mockResolvedValue("11111111-1111-4111-8111-111111111111");
+
+    const noAction = await postForm({
+      file: new File([PNG_SIGNATURE], "logo.png", { type: "image/png" }),
+    });
+    expect(noAction.status).toBe(400);
+    await expect(noAction.json()).resolves.toEqual({ error: "invalid_action" });
+
+    const wrongType = await postForm({
+      action: "logo",
+      file: new File([PNG_SIGNATURE], "logo.txt", { type: "text/plain" }),
+    });
+    expect(wrongType.status).toBe(400);
+    await expect(wrongType.json()).resolves.toEqual({ error: "invalid_logo" });
+    expect(saveOnboardingLogo).not.toHaveBeenCalled();
+
+    saveOnboardingLogo.mockResolvedValue(STATE.draft);
+    const valid = await postForm({
+      action: "logo",
+      file: new File([PNG_SIGNATURE], "logo.png", { type: "image/png" }),
+    });
+    expect(valid.status).toBe(201);
+    await expect(valid.json()).resolves.toMatchObject({ ok: true, draft: STATE.draft });
+    expect(saveOnboardingLogo).toHaveBeenCalledTimes(1);
+    const [platformUserId, logo] = saveOnboardingLogo.mock.calls[0] as [
+      string,
+      { mimeType: string; dataUrl: string },
+    ];
+    expect(platformUserId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(logo.mimeType).toBe("image/png");
+    expect(logo.dataUrl.startsWith("data:image/png;base64,")).toBe(true);
   });
 
   it("removes the draft logo only for a live continuation", async () => {
