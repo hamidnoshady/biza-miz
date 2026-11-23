@@ -558,7 +558,10 @@ function OnboardingWizardLoaded({ initialState }: { initialState: OnboardingStat
                   className={inputClass}
                   type="email"
                   value={email}
-                  onChange={(event) => setEmail(event.target.value)}
+                  onChange={(event) => {
+                    setEmail(event.target.value);
+                    setEmailNotice("");
+                  }}
                   dir="ltr"
                   autoComplete="email"
                   placeholder="name@example.com"
