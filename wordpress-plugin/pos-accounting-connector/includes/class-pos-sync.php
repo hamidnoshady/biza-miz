@@ -572,6 +572,14 @@ class POS_Connector_Sync {
 		} finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
 	}
 
+	/** Media in the inbound connector is a source reference, never an inline file. */
+	public static function source_media_url( $url ) {
+		if ( ! is_string( $url ) || strlen( $url ) > 4096 || ! preg_match( '~\Ahttps?://~i', $url ) ) {
+			return '';
+		}
+		return esc_url_raw( $url, array( 'http', 'https' ) );
+	}
+
 	private static function build_content_payload( $post ) {
 		$payload = array(
 			'id'            => (int) $post->ID,
@@ -596,11 +604,11 @@ class POS_Connector_Sync {
 			$file = get_attached_file( $post->ID );
 			$payload['filename'] = $file ? wp_basename( $file ) : '';
 			$payload['filesize'] = $file && is_file( $file ) ? filesize( $file ) : null;
-			$payload['source_url'] = wp_get_attachment_url( $post->ID ) ?: '';
+			$payload['source_url'] = self::source_media_url( wp_get_attachment_url( $post->ID ) );
 			$payload['mime_type']  = $post->post_mime_type;
 			$metadata = wp_get_attachment_metadata( $post->ID );
 			$thumb = wp_get_attachment_image_src( $post->ID, 'thumbnail' );
-			$payload['media_details'] = array( 'width' => isset( $metadata['width'] ) ? (int) $metadata['width'] : null, 'height' => isset( $metadata['height'] ) ? (int) $metadata['height'] : null, 'sizes' => array( 'thumbnail' => array( 'source_url' => $thumb ? $thumb[0] : '' ) ) );
+			$payload['media_details'] = array( 'width' => isset( $metadata['width'] ) ? (int) $metadata['width'] : null, 'height' => isset( $metadata['height'] ) ? (int) $metadata['height'] : null, 'sizes' => array( 'thumbnail' => array( 'source_url' => $thumb ? self::source_media_url( $thumb[0] ) : '' ) ) );
 			$payload['media_type'] = strtok( (string) $post->post_mime_type, '/' ) ?: 'file';
 			$payload['alt_text']   = get_post_meta( $post->ID, '_wp_attachment_image_alt', true );
 			// Only present on the file this store received from a
@@ -616,7 +624,9 @@ class POS_Connector_Sync {
 		} else {
 			// Excerpt/content are delivered raw so the manager's editor can
 			// round-trip them; rendered HTML lives on the public site.
-			$payload['content']     = $post->post_content;
+			if ( empty( pos_connector_settings()['on_demand_post_body'] ) || ! in_array( $post->post_type, array( 'post', 'page' ), true ) ) {
+				$payload['content'] = $post->post_content;
+			}
 			$payload['excerpt']     = $post->post_excerpt;
 			// The publish instant in UTC, so the app can show a scheduled post's
 			// own time instead of guessing it from the modification date.
@@ -1292,12 +1302,12 @@ class POS_Connector_Sync {
 			$images   = array();
 		$image_id = $product->get_image_id();
 		if ( $image_id ) {
-			$src      = wp_get_attachment_url( $image_id );
+			$src      = self::source_media_url( wp_get_attachment_url( $image_id ) );
 			$alt      = get_post_meta( $image_id, '_wp_attachment_image_alt', true );
 			$images[] = array( 'id' => $image_id, 'src' => $src ? $src : '', 'alt' => $alt ? $alt : '', 'position' => 0 );
 		}
 		foreach ( $product->get_gallery_image_ids() as $idx => $gallery_id ) {
-			$src    = wp_get_attachment_url( $gallery_id );
+			$src    = self::source_media_url( wp_get_attachment_url( $gallery_id ) );
 			$alt    = get_post_meta( $gallery_id, '_wp_attachment_image_alt', true );
 			$images[] = array( 'id' => $gallery_id, 'src' => $src ? $src : '', 'alt' => $alt ? $alt : '', 'position' => $idx + 1 );
 		}
@@ -1340,6 +1350,11 @@ class POS_Connector_Sync {
 				'terms'            => $all_terms,
 				'images'           => $images,
 		);
+
+		if ( ! empty( pos_connector_settings()['on_demand_product_body'] ) ) {
+			unset( $payload['description'], $payload['short_description'] );
+			$payload['description_digest'] = hash( 'sha256', wp_json_encode( array( $description, $short_desc ) ) );
+		}
 
 		if ( $parent_id ) {
 			$payload['parent_id'] = $parent_id;
@@ -1664,10 +1679,14 @@ class POS_Connector_Sync {
 		$total  = 0;
 		$failed = 0;
 		$rounds = 0;
+		$payload_bytes = 0;
+		$stored_bytes = 0;
 		$error  = '';
 		do {
 			$phase   = self::push_queue( $client );
 			++$rounds;
+			$payload_bytes += (int) ( $phase['counts']['payloadBytes'] ?? 0 );
+			$stored_bytes += (int) ( $phase['counts']['storedBytes'] ?? 0 );
 			$total  += (int) $phase['counts']['sent'];
 			$failed += (int) $phase['counts']['failed'];
 			if ( ( $rank[ $phase['status'] ] ?? 0 ) > $rank[ $status ] ) {
@@ -1686,7 +1705,7 @@ class POS_Connector_Sync {
 			'push',
 			$status,
 			( microtime( true ) - $started_at ) * 1000,
-			array( 'sent' => $total, 'failed' => $failed, 'rounds' => $rounds ),
+			array( 'sent' => $total, 'failed' => $failed, 'rounds' => $rounds, 'payloadBytes' => $payload_bytes, 'storedBytes' => $stored_bytes ),
 			$error
 		);
 	}
@@ -1696,7 +1715,7 @@ class POS_Connector_Sync {
 	 * bounded slice now and continues from its saved place in later cron
 	 * events; the fast lane ships what it queues.
 	 */
-	public static function run_resync_products() {
+	public static function run_resync_products( $force = false ) {
 		$settings = pos_connector_settings();
 		if ( empty( $settings['enabled'] ) || empty( $settings['sync_products'] ) ) {
 			return;
@@ -1709,7 +1728,7 @@ class POS_Connector_Sync {
 		if ( empty( $settings['sync_products'] ) ) {
 			return;
 		}
-		self::export_products();
+		self::export_products( null, false, $force );
 		pos_connector_update_settings( array( 'last_products_sweep_at' => current_time( 'mysql', true ) ) );
 	}
 
@@ -1839,6 +1858,7 @@ class POS_Connector_Sync {
 				'orders_export',
 				'content_export',
 				'post_upsert',
+				'post_body_read',
 				'media_create',
 				'media_update',
 				// Issue #939: re-send only the taxonomy tree.
@@ -2040,6 +2060,8 @@ class POS_Connector_Sync {
 					'sync_orders'    => ! empty( $connection['syncOrders'] ),
 					'sync_products'  => ! empty( $connection['syncProducts'] ),
 					'sync_customers' => ! empty( $connection['syncCustomers'] ),
+					'on_demand_post_body' => ! empty( $response['data']['protocol']['onDemandPostBody'] ),
+					'on_demand_product_body' => ! empty( $response['data']['protocol']['onDemandProductBody'] ),
 					'apply_stock'    => ! empty( $connection['pushStock'] ),
 					'apply_prices'   => ! empty( $connection['pushPrices'] ),
 				)
@@ -2070,6 +2092,8 @@ class POS_Connector_Sync {
 		$events = array();
 		$by_id  = array();
 		$bytes  = 0;
+		$stored_bytes = 0;
+		$decode_failures = 0;
 		foreach ( $rows as $row ) {
 			// The app refuses a body over 2 MB outright (413 payload_too_large),
 			// and it refuses the *whole* batch — so a fixed count of 50 rows was
@@ -2080,17 +2104,34 @@ class POS_Connector_Sync {
 			// Fill the batch by size instead, always sending at least one row so
 			// a single oversized event is reported against itself (and backs off)
 			// rather than jamming the queue behind it.
-			$size = strlen( (string) $row['payload'] ) + 128;
+			$json = POS_Connector_Queue::unpack_payload( (string) $row['payload'] );
+			if ( false === $json ) {
+				if ( POS_Connector_Queue::seal_for_delivery( $row ) ) {
+					POS_Connector_Queue::mark_failed( (int) $row['id'], 'queue_payload_decode_failed' );
+					++$decode_failures;
+				}
+				continue;
+			}
+			$size = strlen( $json ) + 128;
 			if ( $events && $bytes + $size > self::PUSH_BATCH_BYTES ) {
 				break;
 			}
+			if ( ! POS_Connector_Queue::seal_for_delivery( $row ) ) {
+				continue;
+			}
 			$bytes   += $size;
+			$stored_bytes += strlen( (string) $row['payload'] );
 			$events[] = array(
 				'topic'      => $row['topic'],
 				'deliveryId' => $row['delivery_id'],
-				'payload'    => json_decode( $row['payload'], true ),
+				'payload'    => json_decode( $json, true ),
 			);
 			$by_id[ $row['delivery_id'] ] = (int) $row['id'];
+		}
+
+		if ( ! $events ) {
+			$status = $decode_failures > 0 ? POS_Connector_Health::PHASE_FAILED : POS_Connector_Health::PHASE_EMPTY;
+			return POS_Connector_Health::phase( 'push', $status, ( microtime( true ) - $started ) * 1000, array( 'sent' => 0, 'failed' => $decode_failures, 'batched' => 0 ), $decode_failures ? 'queue_payload_decode_failed' : '' );
 		}
 
 		$response = $client->post( '/api/integrations/wordpress/events', array( 'events' => $events ) );
@@ -2105,19 +2146,21 @@ class POS_Connector_Sync {
 				'push',
 				POS_Connector_Health::PHASE_FAILED,
 				( microtime( true ) - $started ) * 1000,
-				array( 'sent' => 0, 'failed' => count( $by_id ), 'batched' => count( $by_id ) ),
+				array( 'sent' => 0, 'failed' => count( $by_id ) + $decode_failures, 'batched' => count( $by_id ), 'payloadBytes' => $bytes - 128 * count( $by_id ), 'storedBytes' => $stored_bytes ),
 				$response['error']
 			);
 		}
 
 		$sent   = array();
-		$failed = 0;
-		$error  = '';
+		$failed = $decode_failures;
+		$error  = $decode_failures ? 'queue_payload_decode_failed' : '';
+		$unacknowledged = $by_id;
 		foreach ( (array) ( isset( $response['data']['results'] ) ? $response['data']['results'] : array() ) as $result ) {
 			$delivery_id = isset( $result['deliveryId'] ) ? $result['deliveryId'] : '';
-			if ( ! isset( $by_id[ $delivery_id ] ) ) {
+			if ( ! isset( $unacknowledged[ $delivery_id ] ) ) {
 				continue;
 			}
+			unset( $unacknowledged[ $delivery_id ] );
 			// "duplicate" is a success: the app already has this event, which is
 			// exactly what a retry after a timeout is supposed to discover.
 				if ( isset( $result['status'] ) && in_array( $result['status'], array( 'processed', 'duplicate', 'deferred' ), true ) ) {
@@ -2131,6 +2174,13 @@ class POS_Connector_Sync {
 			}
 		}
 
+		foreach ( $unacknowledged as $id ) {
+			++$failed;
+			POS_Connector_Queue::mark_failed( $id, 'missing_delivery_ack' );
+		}
+		if ( $unacknowledged && '' === $error ) {
+			$error = 'missing_delivery_ack';
+		}
 		POS_Connector_Queue::mark_sent( $sent );
 		POS_Connector_Log::info( 'push', sprintf( 'ارسال‌شده: %d، ناموفق: %d', count( $sent ), $failed ) );
 		// A batch the app rejected row by row is delivered but not applied in
@@ -2140,7 +2190,7 @@ class POS_Connector_Sync {
 			'push',
 			$status,
 			( microtime( true ) - $started ) * 1000,
-			array( 'sent' => count( $sent ), 'failed' => $failed, 'batched' => count( $by_id ) ),
+			array( 'sent' => count( $sent ), 'failed' => $failed, 'batched' => count( $by_id ), 'payloadBytes' => $bytes - 128 * count( $by_id ), 'storedBytes' => $stored_bytes ),
 			$error
 		);
 	}
@@ -2229,7 +2279,15 @@ class POS_Connector_Sync {
 				if ( is_array( $outcome ) ) {
 					$ack['result'] = $outcome;
 				}
-				$results[]     = $ack;
+				if ( 'post_body_read' === $type ) {
+					// A large editor body must not make the other jobs' ACK batch fail.
+					$read_ack = $client->post( '/api/integrations/wordpress/jobs/ack', array( 'results' => array( $ack ) ) );
+					if ( ! $read_ack['ok'] ) {
+						throw new Exception( $read_ack['error'] );
+					}
+				} else {
+					$results[] = $ack;
+				}
 				++$applied;
 			} catch ( Throwable $e ) {
 				$ack['status'] = 'failed';
@@ -2740,6 +2798,31 @@ class POS_Connector_Sync {
 				// full catalogue sweep `catalogue_export` would run.
 				self::enqueue_taxonomy_snapshot();
 				return;
+
+			case 'post_body_read':
+				$post_type = $payload['postType'] ?? '';
+				if ( 'product' === $post_type ) {
+					$product = ! empty( $payload['postId'] ) ? wc_get_product( (int) $payload['postId'] ) : null;
+					if ( ! $product ) {
+						return array( 'error' => 'post_not_found' );
+					}
+					$modified = $product->get_date_modified();
+					$answer = array(
+						'content' => (string) $product->get_description(),
+						'shortDescription' => (string) $product->get_short_description(),
+						'modified' => $modified ? $modified->date( DATE_ATOM ) : null,
+					);
+					$encoded = wp_json_encode( $answer );
+					return false === $encoded || strlen( $encoded ) > 1500000 ? array( 'error' => 'post_body_too_large' ) : $answer;
+				}
+				$post = ! empty( $payload['postId'] ) ? get_post( (int) $payload['postId'] ) : null;
+				if ( ! in_array( $post_type, array( 'post', 'page' ), true ) || ! $post || $post_type !== $post->post_type ) {
+					return array( 'error' => 'post_not_found' );
+				}
+				$modified = $post->post_modified ? mysql2date( DATE_ATOM, $post->post_modified ) : null;
+				$answer = array( 'content' => (string) $post->post_content, 'modified' => $modified );
+				$encoded = wp_json_encode( $answer );
+				return false === $encoded || strlen( $encoded ) > 1500000 ? array( 'error' => 'post_body_too_large' ) : $answer;
 
 			case 'post_upsert':
 				self::apply_post_upsert( $payload );
@@ -3350,7 +3433,7 @@ class POS_Connector_Sync {
 	 *                             (callers that are themselves inside a time budget).
 	 * @return int Products and variations queued so far.
 	 */
-	public static function export_products( $sync_id = null, $defer = false ) {
+	public static function export_products( $sync_id = null, $defer = false, $force = true ) {
 		if ( null === $sync_id || '' === $sync_id ) {
 			foreach ( self::pending_product_exports() as $running_id => $running ) {
 				if ( time() - (int) ( isset( $running['started_at'] ) ? $running['started_at'] : 0 ) < self::PRODUCT_EXPORT_MAX_AGE_SECONDS ) {
@@ -3362,6 +3445,7 @@ class POS_Connector_Sync {
 			$sync_id = wp_generate_uuid4();
 			$state   = array(
 				'phase'      => 'parents',
+				'force'      => (bool) $force,
 				'cursor'     => 0,
 				'parents'    => 0,
 				'variations' => 0,
@@ -3468,7 +3552,7 @@ class POS_Connector_Sync {
 					if ( 'variation' === $product->get_type() ) {
 						$state['deferred'][] = (int) $product->get_id();
 					} else {
-						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
+						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ), ! isset( $state['force'] ) || $state['force'] );
 						++$state['parents'];
 					}
 				}
@@ -3494,7 +3578,7 @@ class POS_Connector_Sync {
 				remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 				foreach ( $children as $variation ) {
 					$state['cursor'] = max( (int) $state['cursor'], (int) $variation->get_id() );
-					POS_Connector_Queue::enqueue( 'product.updated', $variation->get_id(), self::product_payload( $variation ) );
+					POS_Connector_Queue::enqueue( 'product.updated', $variation->get_id(), self::product_payload( $variation ), ! isset( $state['force'] ) || $state['force'] );
 					++$state['variations'];
 				}
 				if ( count( $children ) < self::PRODUCT_EXPORT_BATCH ) {
@@ -3509,7 +3593,7 @@ class POS_Connector_Sync {
 				foreach ( $slice as $variation_id ) {
 					$product = wc_get_product( $variation_id );
 					if ( $product ) {
-						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
+						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ), ! isset( $state['force'] ) || $state['force'] );
 						++$state['variations'];
 					}
 				}
@@ -3556,7 +3640,7 @@ class POS_Connector_Sync {
 				self::run();
 				return;
 			case 'products':
-				self::run_resync_products();
+				self::run_resync_products( true );
 				return;
 			case 'orders':
 				self::run_resync_orders();

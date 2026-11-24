@@ -12,6 +12,7 @@ class POS_Media_Create_Test extends WP_UnitTestCase {
 	 */
 	public static function wpSetUpBeforeClass( $factory ) {
 		global $wpdb;
+		POS_Connector_Log::install_table();
 		if ( ! POS_Connector_Queue::maybe_install() ) {
 			throw new RuntimeException( 'Queue fixture installation failed: ' . POS_Connector_Queue::last_install_error() );
 		}
@@ -35,6 +36,7 @@ class POS_Media_Create_Test extends WP_UnitTestCase {
 	public static function wpTearDownAfterClass() {
 		global $wpdb;
 		$wpdb->query( 'DROP TABLE IF EXISTS ' . POS_Connector_Queue::table_name() );
+		$wpdb->query( 'DROP TABLE IF EXISTS ' . POS_Connector_Log::table_name() );
 	}
 
 	public function test_hook_payload_precedes_meta_but_fresh_confirmation_and_retry_include_it() {
@@ -68,8 +70,10 @@ class POS_Media_Create_Test extends WP_UnitTestCase {
 			$apply->invoke( null, 'new-test', $payload );
 			$this->assertArrayNotHasKey( 'operation_id', $hook_payload );
 			$this->assertGreaterThan( 0, $attachment_id );
-			$read = static function () use ( $wpdb, $table, $attachment_id ) {
-				return json_decode( $wpdb->get_var( $wpdb->prepare( "SELECT payload FROM {$table} WHERE topic = 'content.updated' AND remote_id = %s AND status = 'pending' ORDER BY id DESC LIMIT 1", 'attachment:' . $attachment_id ) ), true );
+			$read = function () use ( $wpdb, $table, $attachment_id ) {
+				$stored = $wpdb->get_var( $wpdb->prepare( "SELECT payload FROM {$table} WHERE topic = 'content.updated' AND remote_id = %s AND status = 'pending' ORDER BY id DESC LIMIT 1", 'attachment:' . $attachment_id ) );
+				$this->assertIsString( $stored, 'Expected a pending attachment confirmation.' );
+				return json_decode( POS_Connector_Queue::unpack_payload( $stored ), true, 512, JSON_THROW_ON_ERROR );
 			};
 			$this->assertSame( $operation, $read()['operation_id'] );
 			$this->assertSame( $attachment_id, (int) $read()['id'] );
@@ -179,7 +183,8 @@ class POS_Media_Create_Test extends WP_UnitTestCase {
 			$export->invoke( null );
 			$table = POS_Connector_Queue::table_name();
 			$json = $wpdb->get_var( $wpdb->prepare( "SELECT payload FROM {$table} WHERE remote_id LIKE %s ORDER BY id DESC LIMIT 1", 'snapshot:%:' . $id ) );
-			$payload = json_decode( $json, true );
+			$this->assertIsString( $json, 'Expected a pending snapshot attachment event.' );
+			$payload = json_decode( POS_Connector_Queue::unpack_payload( $json ), true, 512, JSON_THROW_ON_ERROR );
 			$this->assertSame( 'Concurrently committed title', $payload['title']['raw'] );
 			$this->assertGreaterThan( (int) $payload['snapshot']['boundary'], (int) $payload['revision'] );
 		} finally { clean_post_cache( $id ); wp_delete_attachment( $id, true ); }

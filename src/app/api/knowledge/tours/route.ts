@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { knowledgePage } from "@/lib/knowledge-base";
-import { pageTourCandidates } from "@/lib/tour-baseline";
+import { pageTourCandidates, STUDIO_ONLY_PAGE_KEYS } from "@/lib/tour-baseline";
 import { publishedToursForPage } from "@/lib/tour-studio-service";
 import { tourForViewer, tourSummary } from "@/lib/tours";
 import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
@@ -15,11 +15,11 @@ import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
  * steps that apply to THEM. The response carries titles, counts and the caller's own progress —
  * never step copy or anchors; those come with `GET …/[tourId]` at start.
  *
- * Which catalogue answers for a page is decided in `tour-baseline.ts`: the
- * authored tours when the page has them (and nothing at all when the member is
- * not eligible for one), otherwise the page's automatic baseline tour — so
- * every registered page's «آموزش» button has something behind it without a
- * second help button or a hand-written entry per page.
+ * Which catalogue answers for a page is decided in `tour-baseline.ts`: a
+ * published Tour Studio catalogue owns Studio-only pages, code-authored tours
+ * own their pages, and the automatic baseline serves otherwise-uncovered
+ * pages. A Studio-only page with no eligible publication returns no tour while
+ * the independent Knowledge Base article remains available in the same modal.
  *
  * Separate from `/api/knowledge` on purpose: the article half of the modal
  * must keep working when this lookup fails, so neither depends on the other.
@@ -41,18 +41,14 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const visible = tourForViewer(tour, viewer);
     return visible ? [visible] : [];
   });
-  // On Accounting Overview, POS, Manual Entry, Multicurrency, Chart of Accounts,
-  // Dimensions, Receivables, Installments, Cheques, Receipts, Financial Accounts,
-  // Transfers, Expenses, Reconciliation, Fixed Assets, Shareholders, Fiscal Periods,
-  // Cosmetics, Directory, Ledger, Trial Balance, Journal Entries, Vouchers, VAT,
-  // Payroll, Business Reports, Financial Reports, Accounting Settings and product-workspace pages, an eligible Studio tour
-  // replaces built-in choices.
+  // On Accounting workspaces and Studio-only CRM Overview, Directory, Deals and
+  // Briefs pages, an eligible Studio tour replaces built-in choices.
   // Keep those choices as the fallback when no published Studio tour applies.
-  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new" || page.route === "/accounting/products/prices" || page.route === "/accounting/products/attributes" || page.route === "/accounting/products/barcode-templates" || page.route === "/accounting/products/reports" || page.route === "/accounting/cosmetics" || page.route === "/accounting/directory" || page.route === "/accounting/ledger" || page.route === "/accounting/trial-balance" || page.route === "/accounting/entries" || page.route === "/accounting/vouchers" || page.route === "/accounting/manual" || page.route === "/accounting/multicurrency" || page.route === "/accounting/chart-of-accounts" || page.route === "/accounting/dimensions" || page.route === "/accounting/receivables" || page.route === "/accounting/installments" || page.route === "/accounting/cheques" || page.route === "/accounting/receipts" || page.route === "/accounting/financial-accounts" || page.route === "/accounting/transfers" || page.route === "/accounting/expenses" || page.route === "/accounting/reconciliation" || page.route === "/accounting/fixed-assets" || page.route === "/accounting/shareholders" || page.route === "/accounting/fiscal-periods" || page.route === "/accounting/vat" || page.route === "/accounting/payroll" || page.route === "/accounting/reports" || page.route === "/accounting/settings" || page.route === "/accounting/financial-reports" || page.route === "/crm/overview";
+  const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new" || page.route === "/accounting/products/prices" || page.route === "/accounting/products/attributes" || page.route === "/accounting/products/barcode-templates" || page.route === "/accounting/products/reports" || page.route === "/accounting/cosmetics" || page.route === "/accounting/directory" || page.route === "/accounting/ledger" || page.route === "/accounting/trial-balance" || page.route === "/accounting/entries" || page.route === "/accounting/vouchers" || page.route === "/accounting/manual" || page.route === "/accounting/multicurrency" || page.route === "/accounting/chart-of-accounts" || page.route === "/accounting/dimensions" || page.route === "/accounting/receivables" || page.route === "/accounting/installments" || page.route === "/accounting/cheques" || page.route === "/accounting/receipts" || page.route === "/accounting/financial-accounts" || page.route === "/accounting/transfers" || page.route === "/accounting/expenses" || page.route === "/accounting/reconciliation" || page.route === "/accounting/fixed-assets" || page.route === "/accounting/shareholders" || page.route === "/accounting/fiscal-periods" || page.route === "/accounting/vat" || page.route === "/accounting/payroll" || page.route === "/accounting/reports" || page.route === "/accounting/settings" || page.route === "/accounting/financial-reports" || STUDIO_ONLY_PAGE_KEYS.has(page.key);
   const studioTours = preferStudio
     ? eligibleTours.filter((tour) => published.some((entry) => entry.id === tour.id))
     : [];
-  const tours = page.route === "/crm/overview"
+  const tours = STUDIO_ONLY_PAGE_KEYS.has(page.key)
     ? studioTours
     : studioTours.length > 0
       ? studioTours

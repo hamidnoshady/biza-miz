@@ -193,6 +193,28 @@ export async function GET(request: NextRequest) {
     return answer({ pending: rows.length > 0 });
   }
 
+  /*
+   * A website/CMS-origin event is written by no person, so its `actor_user_id`
+   * is null. Sending that as `""` made the desktop bind an empty string to a
+   * uuid column and dead-letter a valid order (22P02) — every CMS order was
+   * lost on the till until someone re-applied it by hand. The branch's owner
+   * stands in on the wire: the desktop's replay auth needs a member it can
+   * resolve, and the bill still belongs to this business. Resolved once per
+   * page only when an actor-less event is actually in it.
+   */
+  const fallbackActor = rows.some((r) => !r.actor_user_id)
+    ? await withTenant(businessId, async () => {
+        const owners = await query<{ id: string }>(
+          `SELECT id FROM users
+            WHERE business_id = $1 AND role = 'owner' AND is_active
+            ORDER BY created_at
+            LIMIT 1`,
+          [businessId],
+        );
+        return owners.rows[0]?.id ?? null;
+      })
+    : null;
+
   // `id` is the site's pull cursor and it validates it with
   // Number.isSafeInteger. node-postgres returns bigint as a string, and sending
   // that string through made the site reject every event it was offered as
@@ -208,7 +230,7 @@ export async function GET(request: NextRequest) {
       r.occurred_at instanceof Date
         ? r.occurred_at.toISOString()
         : r.occurred_at,
-    actorUserId: r.actor_user_id ?? "",
+    actorUserId: r.actor_user_id || fallbackActor || "",
     actorRole: r.actor_role ?? "cashier",
     businessId,
     siteDeviceId: r.site_device_id,

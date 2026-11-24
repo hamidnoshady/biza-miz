@@ -776,14 +776,11 @@ export async function syncWpContentRest(
 
   for (const collection of collections) {
     const seen = new Set<string>();
-    // Posts and pages are asked for with `context: edit` first: that is the
-    // only context that carries `content.raw`, the round-trippable HTML the
-    // manager's editor needs (a `view` pull exposes only `content.rendered`,
-    // which must never be written back — see `mirroredContent`). A key whose
-    // user cannot edit posts refuses the context, and the pull retries with
-    // `view` so the mirror still arrives, minus the editable content. Media
-    // uses edit context too: only a complete private/trash collection can
-    // authoritatively reconcile missing attachment mappings.
+    // Post/page bodies are fetched by the editor on demand. Keep edit context
+    // for the complete list of drafts and private records and for raw titles.
+    const fields: Record<string, string> = collection.wpType === "attachment" ? {} : {
+      _fields: "id,status,slug,link,date,date_gmt,modified,modified_gmt,title,excerpt,author,categories,tags,featured_media",
+    };
     let context: "edit" | "view" = "edit";
     let page = 1;
     for (;;) {
@@ -794,6 +791,7 @@ export async function syncWpContentRest(
           ...(context === "edit" ? { status: collection.status } : {}),
           per_page: 100,
           page,
+          ...fields,
         });
       } catch (err) {
         if (context === "edit" && page === 1) {
@@ -801,7 +799,7 @@ export async function syncWpContentRest(
           // edit context. Keep the mirror available while marking body content
           // non-editable rather than failing the whole synchronization.
           context = "view";
-          result = await client.wpListPage(collection.endpoint, { context, per_page: 100, page });
+          result = await client.wpListPage(collection.endpoint, { context, per_page: 100, page, ...fields });
         } else {
           throw err;
         }
@@ -812,8 +810,10 @@ export async function syncWpContentRest(
       for (const item of items) {
         const remoteId = remoteContentId(item.id);
         if (!remoteId) continue;
+        const metadata = { ...item };
+        if (collection.wpType !== "attachment") delete metadata.content;
         await upsertWpContent(connection, {
-          ...item,
+          ...metadata,
           // Pin sparse/proxied responses to the collection being fetched.
           type: collection.wpType,
         } as unknown as WpContentPayload);

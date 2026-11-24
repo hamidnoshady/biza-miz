@@ -5,10 +5,10 @@ import { createSession } from "@/lib/employee-service";
 import {
   EmailPasswordMismatchError,
   provisionBusiness,
-  publicSignupEnabled,
   validateProvisionBody,
   type ProvisionRequestBody,
 } from "@/lib/business-provisioning";
+import { loadSignupGate, signupGateError } from "@/lib/iam/signup-controls";
 import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
 
 /**
@@ -27,8 +27,15 @@ import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
  * second business). The Owner signs in at /login.
  */
 export async function POST(request: NextRequest) {
-  if (!publicSignupEnabled()) {
-    return NextResponse.json({ error: "signup_disabled" }, { status: 403 });
+  // Issue #1388 — the legacy email signup is a public registration entry point
+  // too, so it enforces the same runtime control (with the environment gate as
+  // the fallback) as the phone-first door. Hiding the form is never enough.
+  const gate = await loadSignupGate();
+  if (!gate.enabled) {
+    return NextResponse.json(
+      { error: signupGateError(gate.reason), reason: gate.reason },
+      { status: 403 },
+    );
   }
 
   let body: ProvisionRequestBody;

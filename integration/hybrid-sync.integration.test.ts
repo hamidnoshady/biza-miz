@@ -1044,6 +1044,44 @@ describe("orders", () => {
     expect(echoed.rowCount).toBe(0);
   });
 
+  it("delivers a website order whose event has no actor, instead of dead-lettering it", async () => {
+    // A CMS checkout writes order.create with openedBy: null — there is no till
+    // user behind it. The cloud used to serialise that actor as "", which the
+    // desktop cast to uuid (22P02) and dead-lettered, so the order never
+    // appeared on the till.
+    const orderId = await onCentral(async () => {
+      const created = await withTenant(biz.businessId, () =>
+        createOrder({
+          locationId: biz.locationId,
+          type: "takeaway",
+          discount: { type: null },
+          items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
+          openedBy: null,
+          actorRole: "cashier",
+        }),
+      );
+      if (!created.ok) throw new Error(created.error);
+      return created.data.id;
+    });
+
+    await syncRound();
+
+    const onDesktop = () =>
+      withTenant(biz.businessId, () =>
+        query<{ status: string }>("SELECT status::text FROM orders WHERE id = $1", [orderId]),
+      );
+    await syncUntil(async () => (await onDesktop()).rows[0]?.status === "open");
+    expect((await onDesktop()).rows[0]?.status).toBe("open");
+
+    const dead = await withTenant(biz.businessId, () =>
+      query(
+        "SELECT 1 FROM sync_event_dead_letters WHERE business_id = $1 AND client_event_id = $2 AND status = 'open'",
+        [biz.businessId, orderId],
+      ),
+    );
+    expect(dead.rowCount).toBe(0);
+  });
+
   it("adopts a duplicate employee party by its membership key instead of conflicting (issue #1446)", async () => {
     const employeeUserId = randomUUID();
     const cloudPartyId = randomUUID();
@@ -1352,6 +1390,82 @@ describe("site profile", () => {
     await syncProfile();
     expect((await readDesktop("tax.config")).rows[0]?.value).toEqual({ defaultRate: 10 });
     expect((await readDesktop("pricing.config")).rows).toHaveLength(0);
+  });
+
+  it("brings the cloud's print behavior to the till at both scopes", async () => {
+    const writePrint = (locationId: string | null, policy: unknown) =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query(
+            `INSERT INTO settings (business_id, location_id, key, value)
+             VALUES ($1, $2, 'printing.behavior', $3::jsonb)
+             ON CONFLICT (business_id, location_id, key) DO UPDATE SET value = EXCLUDED.value`,
+            [biz.businessId, locationId, JSON.stringify(policy)],
+          ),
+        ),
+      );
+    const readDesktopPrint = () =>
+      withTenant(biz.businessId, () =>
+        query<{ location_id: string | null; value: unknown }>(
+          "SELECT location_id, value FROM settings WHERE business_id = $1 AND key = 'printing.behavior'",
+          [biz.businessId],
+        ),
+      );
+
+    await writePrint(null, { receipt: { mode: "manual", notifications: "failures" } });
+    await writePrint(biz.locationId, { kitchen: { mode: "disabled", notifications: "off" } });
+    await syncProfile();
+
+    const applied = await readDesktopPrint();
+    expect(applied.rows.find((row) => row.location_id === null)?.value).toEqual({
+      receipt: { mode: "manual", notifications: "failures" },
+    });
+    expect(applied.rows.find((row) => row.location_id === biz.locationId)?.value).toEqual({
+      kitchen: { mode: "disabled", notifications: "off" },
+    });
+
+    // Deleting the branch override on the cloud clears only the branch row: the
+    // business default stays, which is what the till's inheritance shows.
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query(
+          "DELETE FROM settings WHERE business_id = $1 AND location_id = $2 AND key = 'printing.behavior'",
+          [biz.businessId, biz.locationId],
+        ),
+      ),
+    );
+    await syncProfile();
+    const cleared = await readDesktopPrint();
+    expect(cleared.rows.filter((row) => row.location_id === biz.locationId)).toHaveLength(0);
+    expect(cleared.rows.find((row) => row.location_id === null)?.value).toEqual({
+      receipt: { mode: "manual", notifications: "failures" },
+    });
+  });
+
+  it("asks the cloud on a forced refresh, not from the tick's gate", async () => {
+    // One ordinary tick starts the 30-second gate.
+    await syncProfile();
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query(
+          `INSERT INTO settings (business_id, location_id, key, value)
+           VALUES ($1, NULL, 'tax.config', '{"defaultRate": 12}'::jsonb)
+           ON CONFLICT (business_id, location_id, key) DO UPDATE SET value = EXCLUDED.value`,
+          [biz.businessId],
+        ),
+      ),
+    );
+    const forced = await withTenant(biz.businessId, () =>
+      runSiteProfileSync(biz.businessId, new Date(), { force: true }),
+    );
+    expect(forced.lastError).toBeNull();
+    const rate = await withTenant(biz.businessId, () =>
+      query<{ value: unknown }>(
+        "SELECT value FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = 'tax.config'",
+        [biz.businessId],
+      ),
+    );
+    expect(rate.rows[0]?.value).toEqual({ defaultRate: 12 });
   });
 
   it("follows the cloud's switches: the assistant on, then off, and an app under maintenance", async () => {

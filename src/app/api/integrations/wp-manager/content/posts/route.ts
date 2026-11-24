@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requestWpEditorBody } from "@/lib/integrations/wp-editor-body";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { wooClientFor } from "@/lib/integrations/connections-service";
@@ -8,11 +9,12 @@ import {
   enqueueWpPostUpsert,
   findWpContentCreateRequest,
   getWpContent,
+  mirroredContent,
   upsertWpContent,
   type WpContentPayload,
 } from "@/lib/integrations/wp-content-service";
 import { isFutureSchedule, toWordPressGmt } from "@/lib/wp-schedule";
-import { pluginSupportsFeaturedMedia, pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
+import { pluginSupportsFeaturedMedia, pluginSupportsJobType, pluginSupportsPostSchedule } from "@/lib/integrations/plugin-capabilities";
 import {
   MAX_POST_CATEGORIES,
   MAX_POST_TAGS,
@@ -37,7 +39,7 @@ export const GET = withTenantScope(async (request: Request) => {
   if (postType !== "post" && postType !== "page") {
     return NextResponse.json({ error: "invalid_content_type" }, { status: 400 });
   }
-  if (!/^[1-9]\d*$/.test(remoteId)) {
+  if (!/^[1-9]\d*$/.test(remoteId) || !Number.isSafeInteger(Number(remoteId))) {
     return NextResponse.json({ error: "invalid_id" }, { status: 400 });
   }
 
@@ -47,6 +49,36 @@ export const GET = withTenantScope(async (request: Request) => {
   }
   const row = await getWpContent(session.businessId, connectionId, postType, remoteId);
   if (!row) return NextResponse.json({ error: "post_not_found" }, { status: 404 });
+  if (connection.link_mode === "rest_api") {
+    try {
+      const endpoint = postType === "post" ? "posts" : "pages";
+      const source = await wooClientFor(connection).wpGetPost(endpoint, Number(remoteId));
+      const modified = remoteContentTimestamp(source);
+      if (modified !== null && contentTimestamp(row.remoteUpdatedAt) !== modified) {
+        return NextResponse.json({ error: "content_version_conflict" }, { status: 409 });
+      }
+      return NextResponse.json({ row: { ...row, content: mirroredContent(source.content) } });
+    } catch {
+      return NextResponse.json({ row: { ...row, content: null } });
+    }
+  }
+  if (connection.link_mode === "plugin" && row.content === null
+    && pluginSupportsJobType(connection.plugin_capabilities, "post_body_read")) {
+    if (connection.status === "paused") {
+      return NextResponse.json({ error: "connection_paused" }, { status: 409 });
+    }
+    const answer = await requestWpEditorBody(session.businessId, connection.id, postType, remoteId);
+    if (answer) {
+      if (answer.error === "post_not_found") return NextResponse.json({ error: answer.error }, { status: 404 });
+      if (answer.error === "post_body_too_large") return NextResponse.json({ error: answer.error }, { status: 413 });
+      const modified = contentTimestamp(answer.modified);
+      if (typeof answer.content !== "string" || modified === null || modified !== contentTimestamp(row.remoteUpdatedAt)) {
+        return NextResponse.json({ error: "content_version_conflict" }, { status: 409 });
+      }
+      return NextResponse.json({ row: { ...row, content: answer.content } });
+    }
+    return NextResponse.json({ pending: true }, { status: 202, headers: { "Cache-Control": "no-store" } });
+  }
   return NextResponse.json({ row });
 });
 
@@ -73,6 +105,7 @@ const FIELD_LIMITS: Partial<Record<(typeof CONTENT_FIELDS)[number], number>> = {
 };
 
 function contentTimestamp(raw: unknown, assumeUtc = false): number | null {
+  if (raw instanceof Date) return Number.isFinite(raw.getTime()) ? raw.getTime() : null;
   if (typeof raw !== "string" || !raw.trim()) return null;
   const text = raw.trim();
   const normalized = assumeUtc && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(text) ? `${text}Z` : text;

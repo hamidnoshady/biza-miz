@@ -32,7 +32,7 @@ class POS_Connector_Queue {
 	 * unique — the same product legitimately has a `sent` row from yesterday and
 	 * a `pending` one from today, and two `sent` rows once it is sent twice.
 	 */
-	const DB_VERSION = 2;
+	const DB_VERSION = 3;
 
 	/** Set when `install_table()` fails so admin notices can surface `$wpdb->last_error`. */
 	private static $last_install_error = '';
@@ -111,6 +111,8 @@ class POS_Connector_Queue {
 				remote_id VARCHAR(64) NOT NULL DEFAULT '',
 				delivery_id VARCHAR(64) NOT NULL,
 				payload LONGTEXT NOT NULL,
+				payload_fingerprint CHAR(64) NOT NULL DEFAULT '',
+				sealed TINYINT UNSIGNED NOT NULL DEFAULT 0,
 				status VARCHAR(16) NOT NULL DEFAULT 'pending',
 				attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0,
 				last_error TEXT NULL,
@@ -121,12 +123,16 @@ class POS_Connector_Queue {
 				UNIQUE KEY delivery_id (delivery_id),
 				KEY topic_remote_status (topic, remote_id, status),
 				KEY status_created (status, created_at),
+				KEY status_updated (status, updated_at),
+				KEY topic_remote_id (topic, remote_id, id),
 				KEY due_lookup (status, available_at)
 			) {$charset};"
 		);
 
-		if ( ! self::table_exists() ) {
-			self::$last_install_error = $wpdb->last_error ? (string) $wpdb->last_error : __( 'جدول صف ساخته نشد.', 'pos-accounting-connector' );
+		$install_error = (string) $wpdb->last_error;
+		$columns = self::table_exists() ? $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) : array();
+		if ( ! in_array( 'payload_fingerprint', $columns, true ) || ! in_array( 'sealed', $columns, true ) ) {
+			self::$last_install_error = $install_error ?: ( $wpdb->last_error ?: 'queue_schema_upgrade_incomplete' );
 			return false;
 		}
 		return true;
@@ -140,7 +146,7 @@ class POS_Connector_Queue {
 	 * that each cost a round trip to say the same thing. An already-sent row is
 	 * never touched — it is the record that the earlier state *was* delivered.
 	 */
-	public static function enqueue( $topic, $remote_id, array $payload ) {
+	public static function enqueue( $topic, $remote_id, array $payload, $force = false ) {
 		if ( ! self::table_exists() && ! self::maybe_install() ) {
 			POS_Connector_Log::error(
 				'queue',
@@ -158,26 +164,67 @@ class POS_Connector_Queue {
 		$table = self::table_name();
 		$now   = current_time( 'mysql', true );
 
-		$existing = $wpdb->get_var(
+		$encoded = wp_json_encode( $payload );
+		if ( false === $encoded ) {
+			return 0;
+		}
+
+		$fingerprint = '';
+		$is_content_state = 'content.updated' === $topic && ! isset( $payload['_snapshot_id'] )
+			&& ! isset( $payload['revision'] ) && ! isset( $payload['operation_id'] );
+		$is_taxonomy_state = 'catalogue.taxonomy_terms' === $topic && ! isset( $payload['snapshot_id'] );
+		if ( $is_content_state || $is_taxonomy_state || in_array( $topic, array( 'product.updated', 'customer.updated', 'order.updated' ), true ) ) {
+			// WooCommerce can advance its save timestamp without changing any
+			// catalogue data consumed by Bizamiz.
+			if ( 'product.updated' === $topic || $is_content_state ) {
+				unset( $payload['date_modified'] );
+			}
+			if ( $is_taxonomy_state ) {
+				unset( $payload['generated_at'] );
+			}
+			$fingerprint = hash( 'sha256', wp_json_encode( $payload ) );
+		}
+ 
+		$encoded = self::pack_payload( $encoded );
+
+		$existing = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT id FROM {$table} WHERE topic = %s AND remote_id = %s AND status = 'pending' LIMIT 1",
+				"SELECT id, status, sealed, attempts, payload_fingerprint FROM {$table}
+				 WHERE topic = %s AND remote_id = %s ORDER BY id DESC LIMIT 1",
 				$topic,
 				(string) $remote_id
-			)
+			),
+			ARRAY_A
 		);
 
-		if ( $existing ) {
-			$wpdb->update(
+		if ( $existing && ! $force && '' !== $fingerprint
+			&& $fingerprint === $existing['payload_fingerprint'] ) {
+			return (int) $existing['id'];
+		}
+
+		$financial = in_array( $topic, array( 'order.created', 'order.updated', 'refund.created' ), true );
+		if ( ! $financial && $existing && 'pending' === $existing['status'] && ! $existing['sealed'] && ! $existing['attempts'] ) {
+			$updated = $wpdb->update(
 				$table,
 				array(
-					'payload'    => wp_json_encode( $payload ),
-					'updated_at' => $now,
+					'payload'             => $encoded,
+					'payload_fingerprint' => $fingerprint,
+					'updated_at'          => $now,
 				),
-				array( 'id' => $existing ),
-				array( '%s', '%s' ),
-				array( '%d' )
+				array( 'id' => $existing['id'], 'status' => 'pending', 'sealed' => 0, 'attempts' => 0 ),
+				array( '%s', '%s', '%s' ),
+				array( '%d', '%s', '%d', '%d' )
 			);
-			return (int) $existing;
+			if ( false === $updated ) {
+				return 0;
+			}
+			if ( $updated || $wpdb->get_var( $wpdb->prepare(
+				"SELECT id FROM {$table} WHERE id = %d AND status = 'pending' AND BINARY payload = %s",
+				$existing['id'],
+				$encoded
+			) ) ) {
+				return (int) $existing['id'];
+			}
 		}
 
 		$wpdb->insert(
@@ -186,16 +233,45 @@ class POS_Connector_Queue {
 				'topic'       => $topic,
 				'remote_id'   => (string) $remote_id,
 				'delivery_id' => wp_generate_uuid4(),
-				'payload'     => wp_json_encode( $payload ),
+				'payload'     => $encoded,
+				'payload_fingerprint' => $fingerprint,
 				'status'       => 'pending',
 				'attempts'     => 0,
 				'created_at'   => $now,
 				'updated_at'   => $now,
 				'available_at' => $now,
 			),
-			array( '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s', '%s' )
+			array( '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s', '%s' )
 		);
 		return (int) $wpdb->insert_id;
+	}
+
+	/**
+	 * Store compressible text compactly while it is waiting for delivery.
+	 * A prefix outside JSON syntax makes the format backwards compatible.
+	 */
+	public static function pack_payload( $json ) {
+		if ( strlen( $json ) < 512 || ! function_exists( 'gzencode' ) ) {
+			return $json;
+		}
+		$compressed = gzencode( $json, 3 );
+		if ( false === $compressed ) {
+			return $json;
+		}
+		$packed = 'gzip:' . base64_encode( $compressed );
+		return strlen( $packed ) < strlen( $json ) ? $packed : $json;
+	}
+
+	/** Old queue rows already contain the plain JSON ready for delivery. */
+	public static function unpack_payload( $stored ) {
+		if ( 0 !== strpos( $stored, 'gzip:' ) ) {
+			return $stored;
+		}
+		if ( ! function_exists( 'gzdecode' ) ) {
+			return false;
+		}
+		$compressed = base64_decode( substr( $stored, 5 ), true );
+		return false === $compressed ? false : @gzdecode( $compressed );
 	}
 
 	/**
@@ -211,13 +287,50 @@ class POS_Connector_Queue {
 		$now   = current_time( 'mysql', true );
 		return $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT * FROM {$table}
-					WHERE status = 'pending' AND available_at <= %s
-					ORDER BY id ASC LIMIT %d",
+				"SELECT candidate.* FROM {$table} candidate
+					WHERE candidate.status = 'pending' AND candidate.available_at <= %s
+						AND (candidate.topic NOT IN ('product.updated', 'customer.updated', 'order.created', 'order.updated', 'content.updated', 'catalogue.taxonomy_terms') OR NOT EXISTS (
+							SELECT 1 FROM {$table} earlier
+							WHERE earlier.remote_id = candidate.remote_id
+								AND (earlier.topic = candidate.topic OR (
+									earlier.topic IN ('order.created', 'order.updated')
+									AND candidate.topic IN ('order.created', 'order.updated')
+								))
+								AND earlier.status = 'pending' AND earlier.id < candidate.id
+						))
+					ORDER BY candidate.id ASC LIMIT %d",
 				$now,
 				$limit
 			),
 			ARRAY_A
+		);
+	}
+
+	/** Measure queued payloads without printing any customer data. */
+	public static function payload_storage_by_topic() {
+		if ( ! self::table_exists() ) {
+			return array();
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$rows = $wpdb->get_results(
+			"SELECT status, topic, COUNT(*) AS row_count, SUM(OCTET_LENGTH(payload)) AS stored_bytes
+			 FROM {$table} GROUP BY status, topic ORDER BY status, topic",
+			ARRAY_A
+		);
+		if ( '' !== $wpdb->last_error ) {
+			return null;
+		}
+		return array_map(
+			static function ( $row ) {
+				return array(
+					'status'      => $row['status'],
+					'topic'       => $row['topic'],
+					'rows'        => (int) $row['row_count'],
+					'storedBytes' => (int) $row['stored_bytes'],
+				);
+			},
+			$rows
 		);
 	}
 
@@ -237,6 +350,24 @@ class POS_Connector_Queue {
 		);
 	}
 
+	/**
+	 * Freeze a delivery ID before sending it. If checkout or a WooCommerce
+	 * hook changed the selected snapshot, the worker reads it again later.
+	 */
+	public static function seal_for_delivery( array $row ) {
+		if ( ! empty( $row['sealed'] ) ) {
+			return true;
+		}
+		global $wpdb;
+		$table = self::table_name();
+		return 1 === $wpdb->query( $wpdb->prepare(
+			"UPDATE {$table} SET sealed = 1
+			 WHERE id = %d AND status = 'pending' AND sealed = 0 AND BINARY payload = %s",
+			$row['id'],
+			$row['payload']
+		) );
+	}
+
 	public static function mark_sent( array $ids ) {
 		if ( empty( $ids ) ) {
 			return;
@@ -247,7 +378,7 @@ class POS_Connector_Queue {
 		$params       = array_merge( array( current_time( 'mysql', true ) ), array_map( 'intval', $ids ) );
 		$wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET status = 'sent', last_error = NULL, updated_at = %s WHERE id IN ({$placeholders})",
+				"UPDATE {$table} SET status = 'sent', payload = '', last_error = NULL, updated_at = %s WHERE status = 'pending' AND id IN ({$placeholders})",
 				$params
 			)
 		);
@@ -294,13 +425,14 @@ class POS_Connector_Queue {
 						status = %s,
 						available_at = %s,
 						updated_at = %s
-					WHERE id = %d",
+					WHERE id = %d AND status = 'pending' AND attempts = %d",
 				$next['attempts'],
 				(string) $error,
 				$next['status'],
 				$available,
 				current_time( 'mysql', true ),
-				(int) $id
+				(int) $id,
+				$before
 			)
 		);
 	}
@@ -543,7 +675,7 @@ class POS_Connector_Queue {
 		$table = self::table_name();
 		$wpdb->query(
 			$wpdb->prepare(
-				"DELETE FROM {$table} WHERE status = 'sent' AND updated_at < %s",
+				"DELETE FROM {$table} WHERE status = 'sent' AND updated_at < %s ORDER BY updated_at, id LIMIT 1000",
 				gmdate( 'Y-m-d H:i:s', time() - 30 * DAY_IN_SECONDS )
 			)
 		);

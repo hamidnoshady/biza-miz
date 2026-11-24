@@ -126,11 +126,14 @@ export function ProductContentSheet({
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
-      const result = await api<{ product: ContentProduct; canWrite: boolean; error?: string }>(
-        `/api/integrations/connections/${connectionId}/store/products/${remoteId}`,
-        { signal },
-      );
-      if (result.aborted) return;
+      const url = `/api/integrations/connections/${connectionId}/store/products/${remoteId}`;
+      let result = await api<{ product?: ContentProduct; pending?: boolean; canWrite?: boolean; error?: string }>(url, { signal });
+      for (let attempt = 0; attempt < 39 && result.ok && result.data.pending && !signal?.aborted; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (signal?.aborted) return;
+        result = await api(url, { signal });
+      }
+      if (result.aborted || signal?.aborted) return;
       if (!result.ok || !result.data?.product) {
         setError(describeReadError(String(result.data?.error ?? "")));
         setLoading(false);

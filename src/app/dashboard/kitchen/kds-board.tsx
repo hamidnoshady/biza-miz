@@ -15,6 +15,7 @@ import { formatJalali } from "@/lib/jalali";
 import {
   ORDER_ITEM_STATUS_LABELS,
   ticketAgeMinutes,
+  type OrderItemStatus,
 } from "@/lib/order-item-status";
 import {
   DEFAULT_KITCHEN_ALERT_THRESHOLDS,
@@ -36,7 +37,7 @@ import {
   subscribeKitchenPrintFailures,
 } from "@/lib/kitchen-alert-events";
 import { type KitchenQueueStatus } from "@/lib/kitchen-priority";
-import { apiOrQueue, useOfflineQueue } from "../offline-queue";
+import { apiOrQueue, enqueueAction, useOfflineQueue } from "../offline-queue";
 import { useRealtime, type RealtimeLifecycle } from "../use-realtime";
 import { KnowledgeHelpButton } from "../knowledge-help";
 import { api, errorMessage } from "../ui";
@@ -44,6 +45,16 @@ import { cardClass, PageShell } from "../page-chrome";
 import { cn } from "@/lib/utils";
 import { KitchenWorkflowSettings } from "./kitchen-workflow-settings";
 import { KitchenAlertSettings } from "./kitchen-alert-settings";
+import {
+  KitchenBatchActionDialog,
+  type BatchActionStatus,
+  type BatchCandidate,
+} from "./batch-action-dialog";
+import {
+  KitchenBatchResultPanel,
+  type KitchenBatchOutcome,
+  type KitchenBatchOutcomeItem,
+} from "./batch-result-panel";
 
 interface TicketItem {
   id: string;
@@ -85,6 +96,35 @@ interface KitchenTicketsResponse {
 
 interface ApiError {
   error?: string;
+}
+
+interface BatchApiItem {
+  itemId: string;
+  outcome: "applied" | "already_applied" | "conflict" | "ineligible" | "missing";
+  currentStatus: OrderItemStatus | null;
+  nameSnapshot: string | null;
+  quantity: number | null;
+}
+
+interface BatchApiResponse extends ApiError {
+  orderId?: string;
+  requestedStatus?: BatchActionStatus;
+  items?: BatchApiItem[];
+  summary?: {
+    total: number;
+    applied: number;
+    alreadyApplied: number;
+    conflict: number;
+    ineligible: number;
+    missing: number;
+  };
+}
+
+interface BatchDialogState {
+  orderId: string;
+  orderNumber: number;
+  status: BatchActionStatus;
+  items: BatchCandidate[];
 }
 
 type TicketStatus = TicketItem["status"];
@@ -404,7 +444,7 @@ function TicketDetails({
   now,
   modifiersByItem,
   bumpingItemId,
-  batchingStatus,
+  batchBusy,
   onBump,
   onBatch,
   thresholds,
@@ -413,9 +453,9 @@ function TicketDetails({
   now: number;
   modifiersByItem: Map<string, string[]>;
   bumpingItemId: string | null;
-  batchingStatus: "preparing" | "ready" | null;
+  batchBusy: boolean;
   onBump: (itemId: string, status: "preparing" | "ready") => void;
-  onBatch: (status: "preparing" | "ready") => void;
+  onBatch: (status: BatchActionStatus) => void;
   thresholds: KitchenAlertThresholds;
 }) {
   const status = ticket.status;
@@ -485,31 +525,29 @@ function TicketDetails({
           <Button
             type="button"
             variant="outline"
-            disabled={batchingStatus !== null || bumpingItemId !== null}
+            disabled={batchBusy || bumpingItemId !== null}
             onClick={() => onBatch("preparing")}
             className="mt-3 min-h-[52px] w-full"
           >
-            {batchingStatus === "preparing" ? "در حال شروع اقلام جدید…" : "شروع آماده‌سازی همهٔ اقلام جدید"}
+            شروع آماده‌سازی همهٔ اقلام جدید
           </Button>
         ) : null}
         {ticket.items.some((item) => item.status === "preparing") ? (
           <Button
             type="button"
             variant="outline"
-            disabled={batchingStatus !== null || bumpingItemId !== null}
+            disabled={batchBusy || bumpingItemId !== null}
             onClick={() => onBatch("ready")}
             className="mt-2 min-h-[52px] w-full"
           >
-            {batchingStatus === "ready" ? "در حال آماده‌کردن همه…" : "علامت‌گذاری همهٔ اقلام در حال آماده‌سازی به‌عنوان آماده"}
+            علامت‌گذاری همهٔ اقلام در حال آماده‌سازی به‌عنوان آماده
           </Button>
         ) : null}
         <ul className="mt-3 divide-y divide-border">
           {ticket.items.map((item) => {
             const next = NEXT_STATUS[item.status];
             const modifiers = modifiersByItem.get(item.id) ?? [];
-            const waitingForUpdate = bumpingItemId === item.id ||
-              (batchingStatus === "preparing" && item.status === "sent") ||
-              (batchingStatus === "ready" && item.status === "preparing");
+            const waitingForUpdate = bumpingItemId === item.id;
 
             return (
               <li key={item.id} className="py-4 first:pt-0 last:pb-0">
@@ -633,7 +671,10 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
   const [audioReady, setAudioReady] = useState(false);
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [printFailureNotice, setPrintFailureNotice] = useState<string | null>(null);
-  const [batchingStatus, setBatchingStatus] = useState<"preparing" | "ready" | null>(null);
+  const [batchDialog, setBatchDialog] = useState<BatchDialogState | null>(null);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [batchOutcome, setBatchOutcome] = useState<KitchenBatchOutcome | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -1221,44 +1262,118 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     }
   }
 
-  async function batchBump(ticket: Ticket, status: "preparing" | "ready") {
+  function requestBatch(ticket: Ticket, status: BatchActionStatus) {
     const expected = status === "preparing" ? "sent" : "preparing";
     const eligible = ticket.items.filter((item) => item.status === expected);
     if (eligible.length === 0) return;
-    setBatchingStatus(status);
+    setBatchError(null);
     setMutationMessage(null);
-    let applied = 0;
-    let queued = 0;
-    let failed = 0;
+    setBatchDialog({
+      orderId: ticket.key,
+      orderNumber: ticket.orderNumber,
+      status,
+      items: eligible.map((item) => ({
+        id: item.id,
+        name_snapshot: item.name_snapshot,
+        quantity: item.quantity,
+        status: item.status,
+      })),
+    });
+  }
+
+  async function submitBatch(itemIds: string[]) {
+    const dialog = batchDialog;
+    if (!dialog || itemIds.length === 0) return;
+    setBatchSubmitting(true);
+    setBatchError(null);
+
     try {
-      for (const item of eligible) {
-        try {
-          const result = await apiOrQueue<ApiError>(
-            `/api/kitchen/items/${item.id}`,
-            { method: "PATCH", body: { status } },
-            {
+      const result = await api<BatchApiResponse>(
+        `/api/kitchen/tickets/${dialog.orderId}/batch`,
+        {
+          method: "POST",
+          body: JSON.stringify({ status: dialog.status, itemIds }),
+        },
+      );
+
+      if (!result.ok && result.status === 0 && !result.aborted) {
+        // The request never reached the server. Reuse the canonical per-item
+        // offline queue (the same event the single-line action queues), and
+        // say "queued" — never claim a server-side transition.
+        const queued: string[] = [];
+        const failed: string[] = [];
+        for (const itemId of itemIds) {
+          try {
+            await enqueueAction({
               type: "order_item.status",
-              payload: { itemId: item.id, status },
+              payload: { itemId, status: dialog.status },
+              occurredAt: new Date().toISOString(),
               description: "به‌روزرسانی گروهی وضعیت آشپزخانه",
-            },
-          );
-          if (!result.ok) failed += 1;
-          else if (result.queued) queued += 1;
-          else applied += 1;
-        } catch {
-          failed += 1;
+            });
+            queued.push(itemId);
+          } catch {
+            failed.push(itemId);
+          }
         }
+        if (queued.length > 0) {
+          const selected = dialog.items.filter((item) => queued.includes(item.id));
+          setBatchOutcome({
+            orderNumber: dialog.orderNumber,
+            status: dialog.status,
+            queued: true,
+            items: selected.map<KitchenBatchOutcomeItem>((item) => ({
+              itemId: item.id,
+              outcome: "queued",
+              currentStatus: item.status,
+              nameSnapshot: item.name_snapshot,
+              quantity: item.quantity,
+            })),
+          });
+        }
+        if (failed.length > 0) {
+          setBatchError(
+            `${toPersianDigits(failed.length)} قلم در صف همگام‌سازی ثبت نشد؛ دوباره تلاش کنید.`,
+          );
+          return;
+        }
+        setBatchDialog(null);
+        return;
       }
-      const parts = [
-        applied ? `${toPersianDigits(applied)} اعمال شد` : "",
-        queued ? `${toPersianDigits(queued)} در صف همگام‌سازی` : "",
-        failed ? `${toPersianDigits(failed)} انجام نشد؛ وضعیت هر قلم را بررسی کنید` : "",
-      ].filter(Boolean);
-      setMutationMessage(parts.join("، "));
-      if (applied > 0) await load();
+
+      if (!result.ok) {
+        setBatchError(errorMessage(result.data.error));
+        // The ticket changed under us (or the session/location is gone):
+        // refresh the authoritative snapshot before the operator retries.
+        await load({ showRefresh: true });
+        return;
+      }
+
+      const items = (result.data.items ?? []).map<KitchenBatchOutcomeItem>((item) => ({
+        itemId: item.itemId,
+        outcome: item.outcome,
+        currentStatus: item.currentStatus,
+        nameSnapshot: item.nameSnapshot,
+        quantity: item.quantity,
+      }));
+      setBatchOutcome({
+        orderNumber: dialog.orderNumber,
+        status: dialog.status,
+        queued: false,
+        items,
+      });
+      setBatchDialog(null);
+      await load({ showRefresh: true });
+    } catch {
+      setBatchError("ثبت اقدام گروهی ممکن نشد. دوباره تلاش کنید.");
     } finally {
-      setBatchingStatus(null);
+      setBatchSubmitting(false);
     }
+  }
+
+  function closeBatchDialog(open: boolean) {
+    if (open || batchSubmitting) return;
+    setBatchDialog(null);
+    setBatchError(null);
   }
 
   async function archiveStaleTickets() {
@@ -1510,6 +1625,13 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
         </p>
       ) : null}
 
+      {batchOutcome ? (
+        <KitchenBatchResultPanel
+          outcome={batchOutcome}
+          onDismiss={() => setBatchOutcome(null)}
+        />
+      ) : null}
+
       {nextTicket ? (
         <button
           type="button"
@@ -1660,9 +1782,9 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                               now={now}
                               modifiersByItem={modifiersByItem}
                               bumpingItemId={bumpingItemId}
-                              batchingStatus={batchingStatus}
+                              batchBusy={batchSubmitting}
                               onBump={bump}
-                              onBatch={(status) => void batchBump(ticket, status)}
+                              onBatch={(status) => requestBatch(ticket, status)}
                               thresholds={thresholds}
                             />
                           </div>
@@ -1683,9 +1805,9 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                   now={now}
                   modifiersByItem={modifiersByItem}
                   bumpingItemId={bumpingItemId}
-                  batchingStatus={batchingStatus}
+                  batchBusy={batchSubmitting}
                   onBump={bump}
-                  onBatch={(status) => void batchBump(selectedTicket, status)}
+                  onBatch={(status) => requestBatch(selectedTicket, status)}
                   thresholds={thresholds}
                 />
               </div>
@@ -1695,6 +1817,19 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
           </aside>
         </div>
       )}
+
+      {batchDialog ? (
+        <KitchenBatchActionDialog
+          open
+          action={batchDialog.status}
+          orderNumber={batchDialog.orderNumber}
+          items={batchDialog.items}
+          busy={batchSubmitting}
+          error={batchError}
+          onOpenChange={closeBatchDialog}
+          onConfirm={(itemIds) => void submitBatch(itemIds)}
+        />
+      ) : null}
     </PageShell>
   );
 }

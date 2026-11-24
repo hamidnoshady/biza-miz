@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
   const result = await verifySignupOtp(body);
   if (!result.ok) {
     const status =
-      result.error === "signup_disabled"
+      result.error === "signup_disabled" || result.error === "signup_maintenance"
         ? 403
         : result.error === "account_ambiguous"
           ? 409

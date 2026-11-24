@@ -309,6 +309,12 @@ export const EXEMPT_TABLES = new Set([
   // before any identity or business does, so it has no `business_id`; it is
   // `platform_only` under FORCE RLS and must never ride in a tenant export.
   "platform_signup_requests",
+  // Migration 0320 — issue #1388's runtime registration control (a singleton
+  // with no tenant column) and its facts-only funnel ledger, whose optional
+  // business attribution is scoped like platform_audit_log. Neither is part of
+  // a tenant export.
+  "platform_signup_settings",
+  "platform_signup_events",
   // Migration 0316 — the short onboarding draft (#1387). Keyed on the global
   // person before a business exists, so it has no tenant column; a draft is the
   // person's own progress and must not appear in any tenant export.

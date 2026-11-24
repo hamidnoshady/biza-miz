@@ -92,6 +92,7 @@ describe("POST /api/auth/signup/verify", () => {
   it("maps invalid, ambiguous and unavailable outcomes without leaking an OTP", async () => {
     const cases = [
       [{ ok: false, error: "signup_disabled" }, 403],
+      [{ ok: false, error: "signup_maintenance" }, 403],
       [{ ok: false, error: "invalid_code" }, 401],
       [{ ok: false, error: "account_ambiguous" }, 409],
       [{ ok: false, error: "account_unavailable" }, 409],

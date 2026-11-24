@@ -175,10 +175,13 @@ class POS_Connector_CLI {
 	 * : Also ping the panel. A successful ping is a CONNECTION test only; it
 	 * proves the address and the token, never that the scheduler runs.
 	 *
-	 * ## EXAMPLES
+	 * [--queue-bytes]
+	 * : Include a scan of payload byte totals by topic and status with --json.
+	 *
+	  * ## EXAMPLES
 	 *
 	 *     wp pos-connector doctor
-	 *     wp pos-connector doctor --json
+	 *     wp pos-connector doctor --json --queue-bytes
 	 *
 	 * @subcommand doctor
 	 */
@@ -272,6 +275,10 @@ class POS_Connector_CLI {
 				'next'     => $next ? gmdate( 'c', (int) $next ) : null,
 				'schedule' => wp_get_schedule( $hook ) ? wp_get_schedule( $hook ) : null,
 			);
+		}
+
+		if ( isset( $assoc_args['queue-bytes'], $assoc_args['json'] ) ) {
+			$report['queue']['payloadStorageByTopic'] = POS_Connector_Queue::payload_storage_by_topic();
 		}
 
 		if ( isset( $assoc_args['ping'] ) ) {

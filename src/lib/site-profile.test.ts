@@ -25,6 +25,8 @@ const profile: SiteProfile = {
     tax: { defaultRate: 9 },
     pricing: { defaultMarginPercent: 35, overheadMode: "automatic" },
     orderControls: { cashierDiscountLimitPercent: 10 },
+    printDefaults: { receipt: { mode: "manual", notifications: "failures" } },
+    printBranch: { kitchen: { mode: "automatic", notifications: "all" } },
   },
 };
 
@@ -79,6 +81,8 @@ describe("validateSiteProfile", () => {
       tax: { defaultRate: 9 },
       pricing: null,
       orderControls: { cashierDiscountLimitPercent: 10 },
+      printDefaults: { receipt: { mode: "manual", notifications: "failures" } },
+      printBranch: { kitchen: { mode: "automatic", notifications: "all" } },
     });
 
     // An older cloud may send a subset; what it does not mention must be left
@@ -98,6 +102,12 @@ describe("validateSiteProfile", () => {
       { ...profile, settings: { tax: [] } },
       { ...profile, settings: { tax: { defaultRate: "9" }, orderControls: "none" } },
       { ...profile, settings: { tax: { blob: "x".repeat(20_000) } } },
+      // A print policy with a mode/notification the printer cannot act on, or a
+      // document type it does not know, would silently change automatic printing.
+      { ...profile, settings: { printDefaults: { receipt: { mode: "loud", notifications: "all" } } } },
+      { ...profile, settings: { printBranch: { kitchen: { mode: "manual", notifications: "sometimes" } } } },
+      { ...profile, settings: { printBranch: { nosuchdoc: { mode: "manual", notifications: "off" } } } },
+      { ...profile, settings: { printDefaults: "receipt" } },
     ];
     for (const raw of bad) expect(validateSiteProfile(raw)).toBeNull();
   });

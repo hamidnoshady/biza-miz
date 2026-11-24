@@ -99,6 +99,197 @@ Hovers are quiet washes, never overlays or zooms. Motion is short, eased and fun
    one-off classes at call sites. The rest of `src/components/**` (AI chat, auth, bug
    report, feature lock) is tenant-facing and speaks this language.
 
+## Navigation architecture — the shell map
+
+This section describes the navigation that already exists. It adds no destination,
+changes no permission and moves no route. The measured inventory behind it is
+[`design/route-audit.md`](design/route-audit.md) §3 (findings N1–N4); the manual
+browser checks and their results are recorded in
+[`design/navigation-verification.md`](design/navigation-verification.md).
+
+Read the two registries as the answer to two different questions:
+
+- `src/lib/app-shells.ts` (`APP_SHELLS`) answers **"whose menu owns this route?"**
+- `src/lib/apps.ts` answers **"which product owns this module?"**
+
+`src/lib/industry-profile.ts` answers a third: **"does this trade have it?"** Keep
+them separate. A shell is not a permission gate, and an app registry entry is not
+a menu.
+
+### The four application shells
+
+| App key | Prefix | Sidebar label | Menu component | Menu source |
+| --- | --- | --- | --- | --- |
+| `accounting` | `/accounting` | حسابداری | `AccountingAppNav` | `accounting-nav.ts` + adopted business `navItems` |
+| `growth` | `/growth` | رشد و بازاریابی | `GrowthAppNav` | `growth-nav.ts` |
+| `crm` | `/crm` | ارتباط با مشتری | `CrmAppNav` | `crm-nav.ts` |
+| `website` | `/websites` | مدیریت وب‌سایت | `WebsiteAppNav` | `website-nav.ts` (CMS + WP groups) |
+
+- **One owner per route.** `appShellForPathname` matches whole path segments and
+  lets the longest prefix win, so `/growthlab` is not inside `/growth`, and a
+  nested shell can answer for its own pages. `isInsideAnyAppShell` keeps every
+  app-owned href out of the flat business nav: a page reachable from two menus
+  is a page whose active state disagrees with itself.
+- **The app home is its overview.** A bare prefix (`/accounting`, `/crm`,
+  `/growth`, `/websites`) is a permission-aware redirect to `…/overview`, not a
+  second front page. Never link the bare prefix as the app's home.
+- **The sidebar slot has three filling orders** (`dashboard-sidebar.tsx`):
+  My Workspace (`isWorkspacePathname`) → that workspace's contextual nav; an app
+  route → the app's nav from `app-shell-nav.ts`; everything else → the workspace
+  rail. A registered shell with no renderer falls back to the rail rather than a
+  stale flat menu — a programming error, not a design.
+- **Website Management is one shell with two managers.** The app menu draws the
+  CMS group and the WordPress group as two labelled groups; it is one app door
+  with two rooms, not two apps. The manager shells (`cms-manager-shell.tsx`,
+  `wp-app-shell.tsx`) render their own `PageShell` + `PageHeader` one level
+  below, which is why the app is not missing the shared frame.
+
+### App switcher and sidebar boundaries
+
+There is **no in-app app-switcher dropdown**. The app switcher is the workspace
+rail — «دستیار هوشمند»، «میز کار من» and the four app launchers — and it is
+drawn only on routes no app owns (`/dashboard`, `/settings`, `/media`,
+`/knowledge`, `/support`, `/petty-cash`). My Workspace (`/workspace`) is the
+one shared area with its own contextual menu (`WorkspaceAppNav`) instead of the
+rail. Inside an app the app's own menu replaces the rail in the same slot;
+«بازگشت به میز کار» (`/dashboard`) is the way out, so owning a sidebar never
+traps the member in the app.
+
+Consequences to preserve:
+
+- Switching from one app to another is deliberately **two hops**: back to the
+  workspace, then launch the other app. Do not add a second app switcher inside
+  the app sidebar in this pass; it would duplicate the rail and put two "where
+  am I" answers on one screen.
+- The mobile header names the owning app as its fallback title
+  (`fallbackLabel={appShell?.shell.label}`), so a deep app page is not titled
+  «داشبورد».
+- The mobile bottom bar is built from the **flattened business nav**
+  (`flattenNav` + `resolveBottomNavHrefs`) and is hidden on `/dashboard` and
+  `/workspace`; inside an app it therefore offers pinned business pages, not the
+  app's sections. The app menu — in the drawer — is the complete section list.
+- The workspace rail, the app menus and the bottom bar all close the phone
+  drawer on navigation, and `CloseDrawerOnNavigate` also watches `pathname` so
+  the browser's Back button closes a drawer no click handler saw.
+
+### Active-route state (one rule, three layers)
+
+`navHrefIsActive` in `src/lib/app-routes.ts` is the generic rule:
+
+- `/dashboard` and `/workspace` are **exact** destinations — a prefix match would
+  make Home active throughout another workspace;
+- the My Workspace overview also matches the workspace home;
+- a `?tab=` href matches its pathname **and that tab only**, ignoring unrelated
+  query parameters (so a `?party=` deep link does not unlight «مشتریان»);
+- every other bare href is active on its whole path prefix.
+
+`bestNavMatch` in `src/lib/nav-tree.ts` applies "longest href wins" for the
+mobile header and the bottom bar, so a sub-section is named by its own entry and
+exactly one bottom-bar tab lights up.
+
+Accounting layers its own route data on top, once, in
+`workspaceEntryIsActive` (`accounting-workspace.ts`):
+
+- the ledger row («فضای کار حسابداری») owns its landing page **and** the ledger
+  tool routes it launches, but not sales, inventory, directory or reports;
+- a directory row with a `?view=` is current only while that view is showing;
+  the parent «اشخاص» is current only when no view is set;
+- the products hub is **exact** — `/accounting/products` — because its child
+  pages are destinations of their own; each child matches its own prefix.
+
+CRM and Growth use `isCrmSectionPathname` / `isGrowthSectionPathname`, which are
+pathname rules: an app section owns what nests under it (a person file such as
+`/crm/persons/<id>` belongs to «مشتریان» / `directory`, not to a permanent
+detail-page row).
+
+### SectionNav is an in-page menu, not route navigation
+
+`SectionNav` (`src/app/dashboard/section-nav.tsx`) is the primitive for **several
+sub-screens behind one route** — تنظیمات، the inventory managers, گزارش‌ها,
+اتصال‌ها, the industry managers. It is not a router and not a nav registry:
+
+- `variant="strip"` is the shared `TabBar` pill strip from `md` up; `variant="rail"`
+  is a sticky 280px menu card beside the panel from `lg` up, for menus too long
+  to read as pills.
+- Below its breakpoint it is a **drill-down, not a collapsible disclosure**: the
+  menu *is* the page until a section is chosen; choosing one replaces the list
+  with that section under a «بازگشت» control. This is the "expand/collapse"
+  behaviour to test — there is no chevron, no `aria-expanded` and no nested
+  panel to remember.
+- In the list variants (mobile list, `rail`) the active item is a `<button>` with
+  `aria-current="page"` and the amber selected skin. The desktop `strip` is a real
+  `role="tablist"`: one roving Tab stop, `aria-selected`, and Left/Right/Home/End
+  move the selection and focus. Do not expect one widget's semantics from the other.
+- A SectionNav click changes client state, and changes the URL only where the
+  screen itself wires the section to the address — settings pushes
+  `/settings/<tab>`, while an industry manager keeps the section in state. Do not
+  assume a SectionNav click creates a history entry.
+- `open`/`onOpenChange` exist so a screen that deep-links straight into a
+  section can start in the drilled-down state on a phone.
+- SectionNav is **not** how an app's main menu is drawn. CRM, Growth, Accounting
+  and Website Management put their sections in the sidebar; replacing that with a
+  SectionNav is the "fix" this document forbids.
+
+### CRM_SUB_SECTIONS — declared non-navs
+
+`CRM_SUB_SECTIONS` (`crm-nav.ts`) is `duplicates`, `reconciliation`,
+`automations`. Each is a real route with its own permission gate and its own
+bookmark. They are **not** rail rows: «کیفیت داده» opens the data-quality
+questions together, CRM settings links «اتوماسیون‌ها», and the command field
+finds it by name. Absence from the rail is an information-architecture decision,
+**not** a statement that the member lacks permission — which is why it is a
+declared list rather than a silent omission. Do not "restore" them to the rail
+screen by screen.
+
+### Standalone settings, detail and action routes
+
+- `/settings/profile`, `/settings/billing`, `/settings/subscription` and
+  `/settings/connections` are real directories beside the tab body. They are
+  reached from the platform user menu, not from the settings rail, and must not
+  be duplicated as rail rows.
+- Detail routes are destinations of a row, never menu items: `[id]` pages,
+  `contracts/[id]/print`, `wp/[shopId]`, a CRM person file. Their owning section
+  stays active while the detail is open.
+- `/accounting/products/new` is the **create action** for the products hub, not a
+  sub-section of it. The products workspace has five child routes —
+  `new`, `prices`, `attributes`, `barcode-templates`, `reports` — and the menu
+  lists all five as child destinations beside the hub. Route-file counts
+  therefore understate the app (finding N1); key coverage on nav entries, never
+  on `page.tsx` files.
+- The Superadmin console (`src/app/platform/**`) is a separate identity with its
+  own navigation and `ui.tsx`. It is not a fifth app shell, is excluded from the
+  tenant design lints on purpose and has no visual baselines yet (finding N2).
+  Give it its own documented pass; do not apply tenant chrome to it.
+
+### `/dashboard` behaviour
+
+`/dashboard` is the platform home and the AI assistant surface, not an app and
+not a redirect. Its active state is exact. `/overview`, `/ai`,
+`/dashboard/overview` and `/dashboard/ai` are retired addresses answered by
+`legacyAssistantTarget` and `LEGACY_PREFIX_MAP`; an `aiPanel` query opens a
+management section (`/dashboard?aiPanel=<key>`). The assistant is the launch
+point for every workspace and app; do not add it to an app's menu as a section.
+
+### Intentional non-navigation routes and exceptions
+
+- **Growth's supporting routes (N3).** Fourteen route files answer ten rail
+  destinations. `marketing-targets`, `marketing-assignments`,
+  `marketing-touchpoints`, `torob/[shopId]` and `commission/runs` are reached
+  from their parent section; they are not orphans and do not need rail rows.
+- **Legacy redirects and API routes are not screens.** Former `/dashboard/*`
+  addresses are rows in `LEGACY_PREFIX_MAP`, never a second `page.tsx`. A test
+  string that proves a non-route stays a non-route is not a dead nav link.
+- **Mobile launcher coverage (N4).** The bottom bar and the app launcher resolve
+  destinations from the flattened nav **by href**. A section added to an app's
+  menu but not to `tenant-navigation.ts` would work at its URL yet be invisible
+  to those two surfaces. No such case exists in the measured tree; when adding a
+  page, add it to the nav source, not only to the app menu.
+- **Operational surfaces own their chrome.** POS, orders queue, floor, kitchen,
+  waiter, delivery and reservations are the approved dense variation described
+  under "When an operational variation is allowed". They are exempt from the
+  primitive lint by path. They are not drift and must not be "fixed" into
+  `PageHeader` pages.
+
 ## Foundations
 
 ### Canvas and surfaces

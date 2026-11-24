@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 const m = vi.hoisted(() => ({
   connection: vi.fn(),
+  query: vi.fn(),
   getContent: vi.fn(),
   enqueue: vi.fn(),
   findCreate: vi.fn(),
@@ -18,6 +19,7 @@ const m = vi.hoisted(() => ({
   getPost: vi.fn(),
 }));
 
+vi.mock("@/lib/db", () => ({ query: m.query }));
 vi.mock("@/lib/auth", () => ({
   requirePermission: async () => ({ session: { businessId: "tenant", sub: "user" }, error: null }),
   withTenantScope: (fn: unknown) => fn,
@@ -29,10 +31,11 @@ vi.mock("@/lib/integrations/wp-content-service", () => ({
   enqueueWpPostUpsert: m.enqueue,
   findWpContentCreateRequest: m.findCreate,
   getWpContent: m.getContent,
+  mirroredContent: (field: { raw?: string } | undefined) => field?.raw ?? null,
   upsertWpContent: m.upsert,
 }));
 
-import { POST } from "./route";
+import { GET, POST } from "./route";
 
 const CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 const REQUEST_ID = "22222222-2222-4222-8222-222222222222";
@@ -321,5 +324,61 @@ describe("featured image", () => {
     const response = await POST(post({ id: "77", expectedRemoteUpdatedAt: VERSION, featuredMediaId: 501 }));
     expect(response.status).toBe(200);
     expect(m.client.mock.calls[0][1]).toMatchObject({ featured_media: 501 });
+  });
+});
+
+
+describe("on-demand REST editor content", () => {
+  const detailRequest = () => new Request(`http://test/api?connectionId=${CONNECTION_ID}&type=post&id=42`);
+
+  it("reads the raw body for a single version-matched post", async () => {
+    m.connection.mockResolvedValue({ provider: "woocommerce", link_mode: "rest_api" });
+    m.getContent.mockResolvedValue({ remoteUpdatedAt: "2026-11-20T12:00:00Z", content: null });
+    m.getPost.mockResolvedValue({ modified_gmt: "2026-11-20T12:00:00", content: { raw: "<!-- wp:paragraph -->" } });
+    const response = await GET(detailRequest());
+    expect(m.getPost).toHaveBeenCalledWith("posts", 42);
+    expect((await response.json()).row.content).toBe("<!-- wp:paragraph -->");
+  });
+
+  it("rejects a live body whose version differs from the mirrored fields", async () => {
+    m.connection.mockResolvedValue({ provider: "woocommerce", link_mode: "rest_api" });
+    m.getContent.mockResolvedValue({ remoteUpdatedAt: "2026-11-20T12:00:00Z", content: null });
+    m.getPost.mockResolvedValue({ modified_gmt: "2026-11-20T12:01:00", content: { raw: "newer body" } });
+    expect((await GET(detailRequest())).status).toBe(409);
+  });
+
+  it("preserves the plugin editor path", async () => {
+    m.getContent.mockResolvedValue({ content: "legacy plugin body" });
+    expect((await (await GET(detailRequest())).json()).row.content).toBe("legacy plugin body");
+    expect(m.getPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("on-demand plugin editor content", () => {
+  const detail = () => new Request(`http://test/api?connectionId=${CONNECTION_ID}&type=post&id=42`);
+
+  beforeEach(() => {
+    m.connection.mockResolvedValue({ id: CONNECTION_ID, provider: "woocommerce", link_mode: "plugin",
+      status: "active", plugin_capabilities: { jobTypes: ["post_body_read"] } });
+    m.getContent.mockResolvedValue({ content: null, remoteUpdatedAt: "2026-11-20T12:00:00Z" });
+    m.query.mockReset().mockResolvedValue({ rows: [] });
+  });
+
+  it("queues one tenant-scoped read when there is no answer", async () => {
+    const response = await GET(detail());
+    expect(response.status).toBe(202);
+    expect(m.query.mock.calls[1]?.[1]).toEqual(["tenant", CONNECTION_ID, "post:42", "post", 42]);
+  });
+
+  it("consumes a fresh version-matched body without enqueuing again", async () => {
+    m.query.mockResolvedValueOnce({ rows: [{ answer: { content: "", modified: "2026-11-20T12:00:00Z" } }] });
+    const response = await GET(detail());
+    expect((await response.json()).row.content).toBe("");
+    expect(m.query).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the editor closed on a version mismatch", async () => {
+    m.query.mockResolvedValueOnce({ rows: [{ answer: { content: "fresh", modified: "2026-11-20T12:01:00Z" } }] });
+    expect((await GET(detail())).status).toBe(409);
   });
 });

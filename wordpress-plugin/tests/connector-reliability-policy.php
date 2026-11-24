@@ -314,11 +314,26 @@ check( 1 === preg_match( '/private static \$table_present = null;/', $queue_sour
 check( 1 === substr_count( $queue_source, "SHOW TABLES LIKE" ), 'and keeps only one SHOW TABLES call in the class' );
 check( false !== strpos( $queue_source, 'KEY topic_remote_status (topic, remote_id, status)' ), 'the de-duplication read has an index of its own columns, in its own order' );
 check( false === strpos( $queue_source, 'UNIQUE KEY topic_remote_status' ), 'and it is not unique: a product legitimately has a sent row and a pending one' );
-check( false !== strpos( $queue_source, "WHERE topic = %s AND remote_id = %s AND status = 'pending'" ), 'the read the index serves is still the same read' );
+check( false !== strpos( $queue_source, 'KEY topic_remote_id (topic, remote_id, id)' ), 'latest-version lookup has a matching index' );
+check( false !== strpos( $queue_source, 'WHERE topic = %s AND remote_id = %s ORDER BY id DESC LIMIT 1' ), 'duplicate detection checks the newest version of the entity' );
+check( false !== strpos( $queue_source, 'earlier.id < candidate.id' ), 'an older pending product version precedes a later one' );
+check( false !== strpos( $queue_source, "SET status = 'sent', payload = ''" ), 'successful acknowledgement clears the stored body' );
+check( false !== strpos( $queue_source, "AND sealed = 0 AND BINARY payload = %s" ), 'delivery freezes the exact snapshot selected by the worker' );
 
 // `ensure_schedules()` on `init` is the other per-request question.
 check( false !== strpos( $main_source, 'function pos_connector_schedules_due_for_check()' ), 'the schedule check is throttled' );
 check( 1 === preg_match( '/function pos_connector_ensure_schedules\( \$force = false \)\s*\{\s*if \( ! \$force && ! pos_connector_schedules_due_for_check\(\) \)/s', $main_source ), 'and ensure_schedules consults the throttle first' );
 check( false !== strpos( $main_source, 'pos_connector_ensure_schedules( true );' ), 'activation forces it, so a fresh install is armed immediately' );
+
+require dirname( __DIR__ ) . '/pos-accounting-connector/includes/class-pos-queue.php';
+$legacy = '{"id":42}';
+check( $legacy === POS_Connector_Queue::unpack_payload( $legacy ), 'legacy pending JSON remains deliverable' );
+$json = json_encode( array( 'description' => str_repeat( 'WooCommerce product description. ', 400 ) ) );
+$packed = POS_Connector_Queue::pack_payload( $json );
+if ( function_exists( 'gzencode' ) && function_exists( 'gzdecode' ) ) {
+	check( strlen( $packed ) < strlen( $json ) / 4, 'compressible queued text uses less than a quarter of its original storage' );
+	check( false === POS_Connector_Queue::unpack_payload( 'gzip:invalid!' ), 'invalid stored data cannot be delivered' );
+}
+check( $json === POS_Connector_Queue::unpack_payload( $packed ), 'packed delivery restores the exact original JSON' );
 
 echo $assertions . " reliability-policy assertions passed\n";
