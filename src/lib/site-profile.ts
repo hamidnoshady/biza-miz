@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { isAppAvailabilityState, type AppAvailabilityRecord } from "./app-availability";
 import { APP_KEYS, type AppKey } from "./apps";
 import { TIMEZONE_RE, timezoneIsResolvable } from "./platform-backup";
+import { parsePrintPolicy } from "./printing/behavior";
 import { nextAttemptAt } from "./sync-backoff";
 import { isUuid } from "./uuid";
 
@@ -29,8 +30,25 @@ export interface SiteProfileLocation {
  * bill uses. `null` clears the local copy; an absent field is left alone (an
  * older cloud that does not send it yet).
  */
-export const SITE_PROFILE_SETTING_FIELDS = ["tax", "pricing", "orderControls"] as const;
+export const SITE_PROFILE_SETTING_FIELDS = [
+  "tax",
+  "pricing",
+  "orderControls",
+  /*
+   * `printing.behavior` is two scopes, not one: the cloud's print screen edits
+   * the business defaults (`location_id IS NULL`) and this branch's overrides
+   * (`location_id = <branch>`), and the till's own screen shows the same
+   * inheritance. They travel separately so an edit at either scope lands on the
+   * till that prints the bills; a single merged copy would make the till's
+   * "reset to default" meaningless.
+   */
+  "printDefaults",
+  "printBranch",
+] as const;
 export type SiteProfileSettingField = (typeof SITE_PROFILE_SETTING_FIELDS)[number];
+
+/** Settings whose JSON is a `PrintPolicy` (src/lib/printing/behavior.ts), not free-form. */
+const PRINT_POLICY_SETTING_FIELDS: ReadonlySet<SiteProfileSettingField> = new Set(["printDefaults", "printBranch"]);
 export type SiteProfileSettings = Partial<
   Record<SiteProfileSettingField, Record<string, unknown> | null>
 >;
@@ -122,6 +140,9 @@ export function validateSiteProfile(raw: unknown): SiteProfile | null {
         continue;
       }
       if (!isRecord(value)) return null;
+      // A policy the printer cannot read is not a policy: refuse it instead of
+      // landing a row that silently turns automatic printing off.
+      if (PRINT_POLICY_SETTING_FIELDS.has(field) && !parsePrintPolicy(value)) return null;
       if (JSON.stringify(value).length > MAX_SITE_PROFILE_SETTING_BYTES) return null;
       settings[field] = value;
     }

@@ -9,6 +9,7 @@ import {
 } from "@/lib/server-sync";
 import { runMasterSync } from "@/lib/master-sync-transport";
 import { resolveMasterConflict } from "@/lib/master-sync-service";
+import { runSiteProfileSync } from "@/lib/site-profile-service";
 
 /** Owner-only operational controls; event payloads and credentials never leave the server. */
 export const POST = withTenantScope(async (request: NextRequest) => {
@@ -44,13 +45,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         { status: 409 },
       );
     }
+    /*
+     * The branch profile first, as the tick does: it carries the tax rate,
+     * pricing policy, order controls and the print behavior the cloud owns, and
+     * the bills pulled below land on the cloud's business day. Forced, because
+     * the operator asked now and the tick's 30-second gate is not an answer.
+     */
+    const profile = await runSiteProfileSync(session.businessId, new Date(), { force: true });
     const master = await runMasterSync(session.businessId).catch((error) => ({
       status: "error" as const,
       error: error instanceof Error ? error.message : String(error),
     }));
     const push = await runServerPush(session.businessId);
     const pull = await runServerPull(session.businessId);
-    return NextResponse.json({ ok: true, master, push, pull });
+    return NextResponse.json({ ok: true, profile, master, push, pull });
   }
   if (body.action === "retry-deferred") {
     return NextResponse.json({ ok: true, reconciliation: await reconcileDeferredSyncEvents(session.businessId, 200) });
