@@ -123,9 +123,21 @@ describe("GET /api/knowledge/tours", () => {
     expect((await res.json()).tours).toEqual([]);
     expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", []);
   });
+  it("offers no CRM Directory tour when Tour Studio has no publication", async () => {
+    const pageKey = "page:/crm/directory";
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours).toEqual([]);
+    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", []);
+  });
 
   it("offers no CRM Overview fallback when the Studio lookup fails", async () => {
     const pageKey = "page:/crm/overview";
+    mocks.publishedForPage.mockRejectedValue(new Error("database unavailable"));
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours).toEqual([]);
+  });
+  it("offers no CRM Directory fallback when the Studio lookup fails", async () => {
+    const pageKey = "page:/crm/directory";
     mocks.publishedForPage.mockRejectedValue(new Error("database unavailable"));
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     expect((await res.json()).tours).toEqual([]);
@@ -165,6 +177,12 @@ describe("published Studio tours", () => {
   it("offers only the published CRM Overview Studio tour", async () => {
     const pageKey = "page:/crm/overview";
     mocks.publishedForPage.mockResolvedValue([{ ...studio, pageKey, route: "/crm/overview" }]);
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours.map((tour: { id: string }) => tour.id)).toEqual([STUDIO_ID]);
+  });
+  it("offers only the published CRM Directory Studio tour", async () => {
+    const pageKey = "page:/crm/directory";
+    mocks.publishedForPage.mockResolvedValue([{ ...studio, pageKey, route: "/crm/directory" }]);
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     expect((await res.json()).tours.map((tour: { id: string }) => tour.id)).toEqual([STUDIO_ID]);
   });
@@ -842,13 +860,24 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
     const legacy = await getTour(req("/api/knowledge/tours/crm.navigation.overview"), ctx("crm.navigation.overview"));
     const baselineId = baselineTourIdForRoute("/crm/overview");
     const baseline = await getTour(req(`/api/knowledge/tours/${baselineId}`), ctx(baselineId));
+    const directoryBaselineId = baselineTourIdForRoute("/crm/directory");
+    const directoryBaseline = await getTour(
+      req(`/api/knowledge/tours/${directoryBaselineId}`),
+      ctx(directoryBaselineId),
+    );
     expect(legacy.status).toBe(404);
     expect(baseline.status).toBe(404);
+    expect(directoryBaseline.status).toBe(404);
   });
 
   it("fails closed for CRM Overview playback when Tour Studio is unavailable", async () => {
     mocks.publishedById.mockRejectedValue(new Error("database unavailable"));
     const res = await getTour(req("/api/knowledge/tours/crm.overview"), ctx("crm.overview"));
+    expect(res.status).toBe(404);
+  });
+  it("fails closed for CRM Directory playback when Tour Studio is unavailable", async () => {
+    mocks.publishedById.mockRejectedValue(new Error("database unavailable"));
+    const res = await getTour(req("/api/knowledge/tours/crm.directory"), ctx("crm.directory"));
     expect(res.status).toBe(404);
   });
 
