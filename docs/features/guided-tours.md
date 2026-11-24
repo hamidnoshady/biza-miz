@@ -5,10 +5,9 @@ existing «آموزش» button. There is no second help button: the button's one
 offers **تور تعاملی صفحه** (when the page has a tour the member may use) and
 **راهنمای پایگاه دانش** (the article / external learning page, unchanged).
 
-The button never leads to a dead end: a page with no authored tour gets an
-**automatic baseline tour** derived from the Knowledge registry
-(`src/lib/tour-baseline.ts`). That is the owner's 2026-11-06 decision — one
-shared, metadata-driven system rather than a hand-written tour per page.
+Tour Studio is the source for member tours on every registered page. A member
+sees an eligible published revision. The written guide remains available when
+a page has no publication or the published tour does not apply to that member.
 
 This document covers what ships and the rules the next slices must keep. Cross-page
 tours, the platform/app navigation overviews, the Learning Center, staff
@@ -23,7 +22,7 @@ same system; the remaining editorial and operational work is listed at the end.
 | Popover placement and spotlight geometry (pure) | `src/lib/tour-geometry.ts` |
 | Progress storage, row lock | `src/lib/tours-service.ts`, migration `0259_tour_member_progress.sql` |
 | API | `GET /api/knowledge/tours?page=`, `GET /api/knowledge/tours/[tourId]`, `POST /api/knowledge/tours/[tourId]/progress` |
-| Automatic baseline tours (pure) | `src/lib/tour-baseline.ts` |
+| Historical baseline audit and fixtures | `src/lib/tour-baseline.ts` |
 | Verified-action whitelist (pure) | `src/lib/tour-verifiers.ts` |
 | Verified-action evidence (storage) | `src/lib/tour-evidence-service.ts`, migration `0289_tour_action_evidence.sql` |
 | Verified-action API | `POST /api/knowledge/tours/[tourId]/verify` |
@@ -39,25 +38,19 @@ same system; the remaining editorial and operational work is listed at the end.
 | Staff learning report | `GET /api/knowledge/learning-assignments` (`team.manage`) |
 | Recommendations | `src/lib/learning-recommendations.ts` (pure), `learning-recommendation-service.ts`, `GET /api/knowledge/recommendations`, assistant tool `recommend_learning` |
 | Offline delivery | `src/lib/tour-progress-queue.ts`, flushed by the provider on open/online |
-| Tours | the catalogue below, in `TOURS`, plus one automatic baseline per registered page |
+| Tours | Published revisions in Tour Studio |
 
-## Which pages have a tour
+## Page coverage and tour IDs
 
-Every page in the canonical Knowledge registry (`KNOWLEDGE_PAGES`) — that is,
-every page that can carry an «آموزش» icon — answers with a tour. Two catalogues
-answer, and `tour-baseline.ts` decides which one owns a page:
+Publish at least one tour in Studio for each canonical Knowledge registry page.
+Use per-tour and per-step eligibility for industry, permissions, feature flags
+and inventory costing. When moving an existing tour into Studio, retain its
+tour key and stable step IDs when practical so existing progress and learning
+paths can refer to the same lesson.
 
-- **authored** (`TOURS` below): a reviewed, step-by-step walkthrough. It owns
-  its page outright: an eligible member gets it, an ineligible member gets
-  nothing (a baseline "about" a screen whose instructions are gated would
-  describe screens they may not be allowed to see).
-- **baseline** (`tour-baseline.ts`): an automatic, read-only introduction
-  derived from the page's own metadata, for every page no authored tour owns.
-
-Where one route draws different screens there is one authored tour per screen,
-and their eligibility rules are disjoint (`tours.test.ts` proves a member is
-never offered two, or the wrong one, for any trade, costing system, permission
-set or feature state).
+The following table records IDs and eligibility of the original code catalogue
+for migration and support reference. Studio publication determines current
+availability.
 
 | Page | Tour id | Offered when |
 |---|---|---|
@@ -82,57 +75,12 @@ profile (`salesModel`, `hasSellableCatalogue`, the `inventory`/`stock`
 modules), never listed by hand, so a new trade lands in the right group by what
 it is; `tours.test.ts` fails if a trade ends up with no till or inventory tour.
 
-## Automatic baseline tours
+## Legacy records
 
-`baselineTourForPage(page)` builds a tour from what the registry already knows —
-the canonical route, the page label and the navigation group it is filed under
-(the same grouping the Knowledge Center and the super-admin page picker show) —
-plus any **declared safe region**: a registered `data-tour-id` anchor an owning
-shared component really renders. It is a normal `TourDefinition`: same runtime,
-same overlay, same `tour_member_progress` row, same rules. Nothing about
-progress had to change.
-
-```
-intro    explain    what this page is, in its group
-region.* spotlight  each declared region (see below)
-where    explain    its canonical route and that only what the member sees is described
-learn    explain    where the written guide is, and that an authored tour will replace this intro
-```
-
-Rules that make it honest and universal:
-
-- **No catalogue entry, no PR.** A page added to `KNOWLEDGE_PAGES` gets basic
-  guidance immediately. `tour-baseline.test.ts` builds a page that exists only
-  in the test and proves the result is a valid tour.
-- **Nothing guessed.** Without a declared region the tour is explanation-only —
-  no highlight, no selector, no DOM heuristic. A page is *never* reported as
-  missing: "no authored tour yet" shows as a baseline row in the coverage
-  audit, which is the editorial backlog.
-- **One guide per page.** `pageTourCandidates(pageKey)` returns the authored
-  tours when the page has any, otherwise exactly one baseline. `tourDefinitionById`
-  applies the same rule to playbacks and progress writes, so a baseline id for
-  an authored page is unknown (404) rather than a second, competing tour.
-- **Ids are namespaced and stable.** `baseline.<route>` (e.g.
-  `baseline.accounting.orders`), so a baseline id can never collide with — or be
-  mistaken for — a hand-authored one, and progress survives a copy change.
-- **Declared regions, not discovered ones.** `PAGE_TOUR_REGIONS` maps a page key
-  (or `"*"` for every baseline page) to `{ anchor, title, body }`, and
-  `PAGE_TOUR_REGION_PREFIXES` does the same once for a whole app. Today the
-  shared declarations are `page.header` on `PageHeader`, `app.section-nav` on
-  the CRM/Growth/Websites sidebar, `accounting.section-nav` on Accounting's own
-  sidebar, `page.section-nav` on the in-page menu, `page.table` on the shared
-  table frame and `page.filters` on the shared search/filter row — all data
-  attributes, no visual change. That is why 95 of 101 pages now have a real
-  spotlight: one declaration covers every page that renders the same shell. A
-  page can reword a shared region without showing it twice. `tours.test.ts`
-  fails when a `data-tour-id` in the source is not registered in `TOUR_ANCHORS`,
-  so a declared region can never point at a selector nobody renders. A page that
-  does not render a declared region degrades that step to its explanation after
-  three seconds — the overlay's normal rule — so it is never a stuck highlight.
-- **Not an authorization input.** A baseline describes the page's label, group
-  and route — metadata that ships in the client bundle (`KNOWLEDGE_PAGES`) — and
-  never a control, a figure or a permission-gated instruction. Authored tours
-  keep deciding eligibility on the server, step by step.
+Historical progress and assignments keep their original IDs. Member list,
+playback, event, verification, progress and recommendation routes resolve
+published Studio definitions. An assignment to a retired ID can still appear
+in a staff report as unavailable.
 
 ## Tour Studio (super-admin authoring)
 
@@ -159,10 +107,9 @@ deployment (migration 0288):
   open with an explanation, and eligibility naming a permission, trade, flag or
   rule the runtime does not know. A stored tour is validated again before it is
   served, so a row left behind by a renamed page is skipped rather than shown.
-- **Precedence.** A published tour with a code tour's id replaces it; a published
-  tour with a new id joins that page's catalogue; a page with none still falls
-  back to its automatic baseline. `tourCoverage(tours, regions, published)` counts
-  published tours as `advanced` coverage, and the console lists both.
+- **Publication.** The console reports coverage from the page’s published
+  Studio records. Members play the published revision while an editor works
+  on a newer draft.
 - **Templates and preview.** `TOUR_STUDIO_TEMPLATES` offers three reviewed
   presets (standard intro, list page, section/menu); inserting one generates
   fresh step ids, so it can be used twice. «پیش‌نمایش مراحل» walks the authored
@@ -355,32 +302,12 @@ at-least-once. The provider queues client-legitimate events (`start`,
 
 ## Coverage audit
 
-`tourCoverage()` (pure) lists **every** registered page exactly once with
-`advanced` or `baseline`, its primary tour, step count, spotlight count, action
-and hand-off counts and the anchors it points at. It separates:
+Compare the canonical page registry with published records in Tour Studio.
+Check the selected page’s publication status, spotlights, verified action
+steps and navigation targets before enabling a tour for an audience.
 
-- **spotlight coverage** — pages whose own tour points at a region other than
-  the universal `page.header`;
-- **explanation-only coverage** — pages that still rely on a baseline or a
-  header-only spotlight (the editorial backlog);
-- **contract problems** — an anchor nobody registers, a region for a page that
-  does not exist, an authored tour attached to an unregistered page, a
-  duplicate or colliding id;
-- **uncovered pages** and **stale tours**, listed explicitly rather than hidden.
-
-`npm run tours:audit` prints the report (grouped like the console, `--json`,
-`--check` exits non-zero on a contract problem or an uncovered page) and
-`tour-baseline.test.ts` asserts the live registry is clean, so CI catches a new
-page that escaped baseline coverage or an anchor contract break without a
-browser. Current figures on this commit: **101 registered pages, 100 advanced,
-1 baseline, 105 authored tours, 574 offered steps** (257 spotlight steps, 11
-verified actions, 10 hand-offs), **96 pages with a page-specific spotlight, 5
-header-only/explanation-only pages, 0 uncovered pages, 0 stale tours, 0 contract
-problems**. The five app groups now derive a real section-navigation spotlight
-from one prefix declaration, so every page in Accounting, CRM, Growth, Websites
-and Settings points at the menu it actually uses. It distinguishes **content coverage** (this report) from **learning
-progress** (`tour_member_progress`) and from **business setup readiness**
-(`setup.progress`) on purpose.
+`npm run tours:audit` is an offline check of historical catalogue fixtures and
+registered anchors. Live coverage comes from the Studio catalogue.
 
 ## Eligibility, in one place
 
@@ -422,11 +349,9 @@ instead of trapping the member.
 
 ## Rules
 
-- **Two catalogues, one shape.** `TOURS` is reviewed like any source file and
-  versioned by `version`; the console publishes to the same `TourDefinition`
-  shape (migration 0288) and a published tour replaces a code tour with the same
-  id. Neither path is privileged in the runtime: the member API composes them in
-  `pageTourCandidates`, and the baseline answers only when both are empty.
+- **Studio publication owns playback.** The member API resolves published
+  Studio revisions for list, playback, event and verification requests and
+  applies eligibility before returning content or accepting progress.
 - **Anchors are `data-tour-id`**, registered in `TOUR_ANCHORS`. Never target a
   class, a label or a DOM position. `tours.test.ts` fails when a registered
   anchor is missing from the source or a source anchor is unregistered. Put the
@@ -463,10 +388,6 @@ instead of trapping the member.
 
 ## Remaining known limitations
 
-- **Editorial coverage**: 1 page still relies on its automatic baseline — the
-  Learning Center itself, kept as the live fallback canary. Every workflow page
-  now has an authored tour; 96 of 101 pages have a page-specific spotlight; 5
-  remain header-only.
 - **Tour Studio** authors explanations, spotlights, verified actions, hand-offs
   and cross-page navigation, and offers reusable step templates plus a
   step-sequence preview. The panel exposes permission, `withoutPermissions`,

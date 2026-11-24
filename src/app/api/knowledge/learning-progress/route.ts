@@ -4,7 +4,6 @@ import { findActiveDeviceId } from "@/lib/device-service";
 import { readTrustedDeviceToken, verifyTrustedDevice } from "@/lib/trusted-device";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { KNOWLEDGE_PAGES } from "@/lib/knowledge-base";
-import { pageTourCandidates } from "@/lib/tour-baseline";
 import { publishedTours } from "@/lib/tour-studio-service";
 import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
 import { tourForViewer, tourProgressView } from "@/lib/tours";
@@ -95,25 +94,12 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   // ------------------------------------------------------------------
   // 1. Gather every tour the member could be offered across all pages.
   // ------------------------------------------------------------------
-  const allCandidates: Array<{ pageKey: string; tour: TourDefinition }> = [];
   const published = await publishedTours().catch(() => []);
-  for (const page of KNOWLEDGE_PAGES) {
-    const publishedForPage = published.filter((tour) => tour.pageKey === page.key);
-    const candidates = pageTourCandidates(page.key, publishedForPage);
-    for (const tour of candidates) {
-      allCandidates.push({ pageKey: page.key, tour });
-    }
-  }
-
-  // 2. Build the viewer once — feature flags and costing system are read
-  //    only if some tour on some page actually asks about them.
-  const viewer = await tourViewerFor(businessId, permissions, allCandidates.map((c) => c.tour));
-
-  // 3. Narrow to what this member may see, collect tour IDs.
+  const viewer = await tourViewerFor(businessId, permissions, published);
   const eligibleTours: Array<{ pageKey: string; tour: TourDefinition }> = [];
-  for (const { pageKey, tour } of allCandidates) {
+  for (const tour of published) {
     const visible = tourForViewer(tour, viewer);
-    if (visible) eligibleTours.push({ pageKey, tour: visible });
+    if (visible) eligibleTours.push({ pageKey: tour.pageKey, tour: visible });
   }
 
   const tourProgress = await loadTourProgress(

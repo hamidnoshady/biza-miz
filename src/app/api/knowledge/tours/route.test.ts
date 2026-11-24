@@ -5,9 +5,7 @@
  * eligibility and refuses anything but the five known events, and the
  * client can never name a step it was not given.
  *
- * The automatic baseline tours are exercised here too: a registered page with
- * no authored tour answers with its baseline tour through the same two routes,
- * and a baseline id for a page the authored catalogue owns is unknown.
+ * Both routes serve published Studio revisions and reject retired fallback IDs.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
@@ -49,6 +47,7 @@ vi.mock("@/lib/tours-service", async (importOriginal) => {
 });
 
 import { baselineTourIdForRoute } from "@/lib/tour-baseline";
+import { tourById } from "@/lib/tours";
 import { GET as listTours } from "./route";
 import { GET as getTour } from "./[tourId]/route";
 import { POST as postProgress } from "./[tourId]/progress/route";
@@ -84,8 +83,13 @@ beforeEach(() => {
   mocks.industry.mockResolvedValue("cosmetics");
   mocks.loadProgress.mockResolvedValue(new Map());
   mocks.record.mockResolvedValue({ ok: true, progress: null });
-  mocks.publishedForPage.mockResolvedValue([]);
-  mocks.publishedById.mockResolvedValue(null);
+  const publication = tourById(TOUR)!;
+  mocks.publishedForPage.mockImplementation(async (pageKey: string) =>
+    pageKey === publication.pageKey ? [publication] : [],
+  );
+  mocks.publishedById.mockImplementation(async (id: string) =>
+    id === publication.id ? publication : null,
+  );
 });
 
 describe("GET /api/knowledge/tours", () => {
@@ -199,18 +203,13 @@ describe("GET /api/knowledge/tours", () => {
     expect((await res.json()).tours).toEqual([]);
   });
 
-  it("offers the automatic baseline tour on a page with no authored tour", async () => {
-    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(BASELINE_PAGE)}`));
-    const body = await res.json();
-    expect(body.tours).toHaveLength(1);
-    expect(body.tours[0]).toMatchObject({
-      id: BASELINE_TOUR,
-      route: "/knowledge",
-      stepCount: 4,
-      progress: { status: "not_started" },
-    });
-    expect(JSON.stringify(body)).not.toContain("tour-id");
-    expect(body.tours[0].steps).toBeUndefined();
+  it("leaves both authored and baseline-only pages empty without a published revision", async () => {
+    mocks.publishedForPage.mockResolvedValue([]);
+    for (const pageKey of [PAGE, BASELINE_PAGE]) {
+      const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+      expect(res.status).toBe(200);
+      expect((await res.json()).tours).toEqual([]);
+    }
   });
 });
 
@@ -282,7 +281,7 @@ describe("published Studio tours", () => {
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["food_service", "accounting.overview.ledger"],
+    ["food_service", null],
   ])("lists the applicable Accounting Overview tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/overview";
     mocks.industry.mockResolvedValue(industry);
@@ -296,13 +295,13 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
-    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", [expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
+    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["food_service", "accounting.pos.order-ticket"],
+    ["food_service", null],
   ])("lists the applicable POS tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/pos";
     mocks.industry.mockResolvedValue(industry);
@@ -316,13 +315,13 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
-    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", [expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
+    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["accessories", "accounting.products.list"],
+    ["accessories", null],
   ])("lists the applicable Products tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products";
     mocks.industry.mockResolvedValue(industry);
@@ -336,12 +335,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["accessories", "accounting.products.new"],
+    ["accessories", null],
   ])("lists the applicable add-product tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/new";
     mocks.industry.mockResolvedValue(industry);
@@ -355,12 +354,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["accessories", "accounting.products.prices"],
+    ["accessories", null],
   ])("lists the applicable product-prices tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/prices";
     mocks.industry.mockResolvedValue(industry);
@@ -374,12 +373,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["accessories", "accounting.products.attributes"],
+    ["accessories", null],
   ])("lists the applicable product-attributes tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/attributes";
     mocks.industry.mockResolvedValue(industry);
@@ -393,12 +392,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["cosmetics", STUDIO_ID, ["cosmetics"]],
-    ["cosmetics", "accounting.cosmetics.page", ["accessories"]],
+    ["cosmetics", null, ["accessories"]],
   ])("lists the applicable two-tab Cosmetics tour for %s", async (industry, expectedId, studioIndustries) => {
     const pageKey = "page:/accounting/cosmetics";
     mocks.industry.mockResolvedValue(industry);
@@ -412,12 +411,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["accessories", "accounting.products.reports"],
+    ["accessories", null],
   ])("lists the applicable product-reports tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/reports";
     mocks.industry.mockResolvedValue(industry);
@@ -431,12 +430,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["cosmetics", STUDIO_ID],
-    ["accessories", "accounting.products.barcode-templates"],
+    ["accessories", null],
   ])("lists the applicable weighted barcode-templates tour for %s", async (industry, expectedId) => {
     const pageKey = "page:/accounting/products/barcode-templates";
     mocks.industry.mockResolvedValue(industry);
@@ -450,12 +449,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.directory.page"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the accounting-directory %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/directory";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -469,12 +468,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.ledger.page"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the accounting-ledger %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/ledger";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -488,12 +487,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.trial-balance.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the trial-balance %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/trial-balance";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -507,12 +506,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.entries.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the journal-entries %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/entries";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -526,12 +525,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.vouchers.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the vouchers %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/vouchers";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -545,12 +544,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.manual.page"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the manual-entry %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/manual";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -564,12 +563,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.multicurrency.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the multicurrency %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/multicurrency";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -583,12 +582,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.chart-of-accounts.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the chart-of-accounts %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/chart-of-accounts";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -602,12 +601,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.dimensions.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the accounting-dimensions %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/dimensions";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -621,12 +620,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.receivables.walkthrough"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the receivables %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/receivables";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -640,12 +639,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.installments.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the installments %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/installments";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -659,12 +658,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.cheques.page"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the cheques %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/cheques";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -678,12 +677,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.receipts.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the receipts and payments %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/receipts";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -697,12 +696,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.financial-accounts.page"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the financial-accounts %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/financial-accounts";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -716,12 +715,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.transfers.page"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the transfers %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/transfers";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -735,12 +734,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.expenses.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the expenses %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/expenses";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -754,12 +753,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.reconciliation.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the reconciliation %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/reconciliation";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -773,12 +772,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.fixed-assets.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the fixed-assets %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/fixed-assets";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -792,12 +791,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["shareholders.view"], ["shareholders.view", "ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["shareholders.view"], ["ledger.view"], "accounting.shareholders.list"],
+    ["ineligible Studio publication", ["shareholders.view"], ["ledger.view"], null],
   ])("lists the shareholders %s", async (_caseName, studioPermissions, memberPermissions, expectedId) => {
     const pageKey = "page:/accounting/shareholders";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -811,12 +810,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.fiscal-periods.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the fiscal-periods %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/fiscal-periods";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -830,12 +829,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.vat.page"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the VAT-report %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/vat";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -849,12 +848,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["payroll.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.payroll.list"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the payroll %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/payroll";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -868,12 +867,12 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it.each([
     ["eligible Studio tour", ["ledger.view", "reports.view"], STUDIO_ID],
-    ["built-in fallback", ["team.manage"], "accounting.financial-reports.page"],
+    ["ineligible Studio publication", ["team.manage"], null],
   ])("lists the financial-reports %s", async (_caseName, studioPermissions, expectedId) => {
     const pageKey = "page:/accounting/financial-reports";
     mocks.industry.mockResolvedValue("cosmetics");
@@ -887,7 +886,7 @@ describe("published Studio tours", () => {
 
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     const body = await res.json();
-    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual([expectedId]);
+    expect(body.tours.map((tour: { id: string }) => tour.id)).toEqual(expectedId === null ? [] : [expectedId]);
   });
 
   it("plays a published tour back and records its progress", async () => {
@@ -912,15 +911,16 @@ describe("published Studio tours", () => {
     });
   });
 
-  it("still answers when the console catalogue cannot be read", async () => {
-    // The button must not break because the database is unavailable: the code
-    // catalogue and the baseline are the fallback.
+  it("fails closed for list, playback and writes when Studio is unavailable", async () => {
     mocks.publishedForPage.mockRejectedValue(new Error("database down"));
     mocks.publishedById.mockRejectedValue(new Error("database down"));
     const list = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(PAGE)}`));
-    expect((await list.json()).tours).toHaveLength(1);
+    expect((await list.json()).tours).toEqual([]);
     const play = await getTour(req(`/api/knowledge/tours/${TOUR}`), ctx(TOUR));
-    expect(play.status).toBe(200);
+    expect(play.status).toBe(404);
+    const write = await postProgress(post({ event: "start" }), ctx(TOUR));
+    expect(write.status).toBe(404);
+    expect(mocks.record).not.toHaveBeenCalled();
   });
 
   it("never serves a draft: an unpublished id is indistinguishable from an unknown one", async () => {
@@ -1021,19 +1021,12 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
     expect(res.status).toBe(404);
   });
 
-  it("plays back a baseline tour, and refuses one for a page the authored catalogue owns", async () => {
-    const res = await getTour(req(`/api/knowledge/tours/${BASELINE_TOUR}`), ctx(BASELINE_TOUR));
-    const body = await res.json();
-    expect(res.status).toBe(200);
-    expect(body.tour.id).toBe(BASELINE_TOUR);
-    expect(body.tour.steps.length).toBe(4);
-    expect(body.progress.status).toBe("not_started");
-    // The baseline's page header is still a real step; this page has no
-    // section rail, so the header is its only declared region.
-
-    const shadowed = baselineTourIdForRoute("/accounting/products");
-    const refused = await getTour(req(`/api/knowledge/tours/${shadowed}`), ctx(shadowed));
-    expect(refused.status).toBe(404);
+  it("rejects baseline and code-only IDs for playback", async () => {
+    mocks.publishedById.mockResolvedValue(null);
+    for (const id of [BASELINE_TOUR, baselineTourIdForRoute("/accounting/products"), TOUR]) {
+      const res = await getTour(req(`/api/knowledge/tours/${id}`), ctx(id));
+      expect(res.status).toBe(404);
+    }
   });
 
   it("answers an ineligible and an unknown tour identically", async () => {
