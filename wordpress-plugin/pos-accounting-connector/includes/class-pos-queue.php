@@ -304,6 +304,34 @@ class POS_Connector_Queue {
 		);
 	}
 
+	/** Measure queued payloads without printing any customer data. */
+	public static function payload_storage_by_topic() {
+		if ( ! self::table_exists() ) {
+			return array();
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$rows = $wpdb->get_results(
+			"SELECT status, topic, COUNT(*) AS row_count, SUM(OCTET_LENGTH(payload)) AS stored_bytes
+			 FROM {$table} GROUP BY status, topic ORDER BY status, topic",
+			ARRAY_A
+		);
+		if ( '' !== $wpdb->last_error ) {
+			return null;
+		}
+		return array_map(
+			static function ( $row ) {
+				return array(
+					'status'      => $row['status'],
+					'topic'       => $row['topic'],
+					'rows'        => (int) $row['row_count'],
+					'storedBytes' => (int) $row['stored_bytes'],
+				);
+			},
+			$rows
+		);
+	}
+
 	/** How many rows are waiting their turn, for the admin screen's summary. */
 	public static function deferred_count() {
 		if ( ! self::table_exists() ) {
