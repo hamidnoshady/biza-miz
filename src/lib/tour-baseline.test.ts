@@ -187,6 +187,7 @@ describe("automatic baseline tours", () => {
     expect(pageTourCandidates(pageKey, [studio])).toEqual([studio]);
     expect(tourDefinitionById("crm.briefs.list")).toBeUndefined();
     expect(tourDefinitionById("crm.briefs.list", [studio])).toEqual(studio);
+    expect(tourDefinitionById("crm.directory.first-customer")).toBeDefined();
     expect(tourDefinitionById(baselineTourIdForRoute("/crm/briefs"))).toBeUndefined();
   });
 
