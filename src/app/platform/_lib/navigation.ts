@@ -48,6 +48,9 @@ export const NAV_GROUPS: NavGroup[] = [
         href: "/platform/businesses",
         alsoActive: ["/platform/businesses/"],
       },
+      // Issue #1388 — public registration, authentication SMS and the signup
+      // funnel. Read by every admin role; the controls inside re-check.
+      { label: "ثبت‌نام و ورود", href: "/platform/signup", cap: "signup.read" },
       { label: "پشتیبانی", href: "/platform/support", cap: "support.manage" },
       { label: "نشست‌های فعال", href: "/platform/support/sessions", cap: "businesses.read" },
       { label: "صندوق نصب‌های محلی", href: "/platform/cloud-exceptions", cap: "support.manage" },

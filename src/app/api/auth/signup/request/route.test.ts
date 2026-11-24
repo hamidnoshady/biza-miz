@@ -56,6 +56,9 @@ describe("POST /api/auth/signup/request", () => {
   it("maps every refusal to a safe status and keeps validation generic", async () => {
     const cases = [
       [{ ok: false, error: "signup_disabled" }, 403],
+      // Issue #1388 — a maintenance pause is a distinct public code but the
+      // same status; the screen supplies its own recovery copy.
+      [{ ok: false, error: "signup_maintenance" }, 403],
       [{ ok: false, error: "invalid_name" }, 400],
       [{ ok: false, error: "invalid_phone" }, 400],
       [{ ok: false, error: "rate_limited", retryAfterMs: 30_000 }, 429],

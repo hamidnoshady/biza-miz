@@ -1556,6 +1556,15 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     note: "the key-maker POST lane mints device-pairing links — a short-lived ops credential into the business — and the read half is the provision-lifecycle row's list_provision_devices; minting ops keys stays in the console, same doctrine as the other connection-provisioning tiers",
   },
   {
+    id: "platform.signup-controls",
+    module: "Platform — Growth",
+    entity: "Public registration controls, authentication SMS and signup funnel",
+    routes: ["platform/signup"],
+    status: "route-only (by design)",
+    note: "issue #1388: flipping public registration or pausing it for maintenance is a consequential platform control that must be a named human act with an audit row carrying the old and new values; the account inspector returns a person's contact details — masked by default, unmasked only for an owner and audited. No MCP verb: an assistant must not open public registration, pause it, or unmask an identity, and the funnel it would read is already available to the console's operators.",
+    test: "src/lib/iam/signup-controls.test.ts + src/app/api/platform/signup/route.test.ts",
+  },
+  {
     id: "platform.billing-plans",
     module: "Platform — Billing",
     entity: "Plans & packages (features, rates, settings)",

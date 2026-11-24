@@ -57,6 +57,14 @@ export type PlatformCapability =
   /** @deprecated Use the specific backup.* capability; equals read+run+verify. */
   | "backup.manage"
   | "tenant_backup.read"
+  // Issue #1388 — public registration, authentication SMS and the signup /
+  // onboarding funnel. Reading them is support work like every other read;
+  // flipping the registration control is operations; revealing a masked phone
+  // or email is the one irreversible privacy act, so it is owner-only and
+  // audited on every use.
+  | "signup.read"
+  | "signup.manage"
+  | "signup.inspect"
   // Issue #903 §10 — the tenant-backup surface is split by trust, exactly like
   // the platform backup capabilities above. Reading metadata is support work;
   // proving an artifact, fetching its bytes, restoring it and changing the
@@ -196,6 +204,11 @@ const READ: PlatformCapability[] = [
   "backup.read",
   // Metadata only; grants neither archive export nor any tenant mutation.
   "tenant_backup.read",
+  // Issue #1388 — the funnel, registration status and authentication-SMS
+  // readiness are read by any admin role; none of them carries a phone, email
+  // or code, and the account lookup is masked unless the caller holds the
+  // owner-only `signup.inspect`.
+  "signup.read",
   // Billing reads (rates, invoices, subscription state) ride along for every
   // role — exactly what the billing GET routes allowed when they only checked
   // a login.
@@ -259,6 +272,9 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
     // capabilities they used to ride (billing.manage / backup.manage).
     "messaging.manage",
     "media.manage",
+    // Issue #1388 — an engineer may pause registration for maintenance or
+    // close the door during an incident. The audit row names them.
+    "signup.manage",
   ],
   owner: [
     ...READ,
@@ -295,6 +311,10 @@ const CAPABILITIES: Record<PlatformAdminRole, PlatformCapability[]> = {
     "cms.manage",
     "messaging.manage",
     "media.manage",
+    // Issue #1388 — the owner holds the registration control and the audited
+    // unmasked inspection of one account's contact details.
+    "signup.manage",
+    "signup.inspect",
     "security.manage",
     "backup.restore",
     // Issue #903 §10 — the tenant-backup counterparts, owner-only: downloading a

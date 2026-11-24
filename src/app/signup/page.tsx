@@ -28,7 +28,11 @@ type Step = "details" | "code";
 const SIGNUP_ERRORS: Record<string, string> = {
   invalid_name: "نام و نام خانوادگی را کامل وارد کنید.",
   invalid_phone: "شمارهٔ موبایل معتبر نیست. نمونه: ۰۹۱۲۱۲۳۴۵۶۷",
-  signup_disabled: "ثبت‌نام عمومی در حال حاضر غیرفعال است.",
+  signup_disabled: "ثبت‌نام عمومی در حال حاضر غیرفعال است. اگر فکر می‌کنید اشتباهی رخ داده، با پشتیبانی تماس بگیرید.",
+  // Issue #1388 — a maintenance pause is its own state with recovery guidance,
+  // never the same sentence as an administratively disabled door.
+  signup_maintenance:
+    "ثبت‌نام عمومی موقتاً برای تعمیرات متوقف شده است. لطفاً کمی بعد دوباره تلاش کنید. حساب قبلی شما دست‌نخورده است.",
   rate_limited: "درخواست‌های زیاد از این شماره. کمی بعد دوباره تلاش کنید.",
   sms_dispatch_failed: "ارسال پیامک انجام نشد. لطفاً دوباره تلاش کنید.",
   invalid_code: "کد وارد‌شده درست یا معتبر نیست.",
