@@ -128,45 +128,44 @@ describe("transactional kitchen dispatch idempotency", () => {
   });
 });
 
-describe("automatic Kitchen clearing", () => {
-  it("schedules the entire ticket only after its last line is ready, and keeps expired history when another line arrives", async () => {
+describe("business-day kitchen archival", () => {
+  it("archives older queue lines and leaves today's work and other branches in place", async () => {
     const { businessId, locationId, orderId } = await seedOrder();
-    const { scheduleKitchenTicket } = await import("../src/lib/kitchen-workflow");
+    const other = await seedOrder();
+    const { archivePastKitchenTickets } = await import("../src/lib/kitchen-workflow");
     await db.query(
-      "INSERT INTO settings (business_id, location_id, key, value) VALUES ($1,$2,'kitchen.clearAfterMinutes','5')",
-      [businessId, locationId],
+      "UPDATE locations SET timezone = 'Asia/Tehran', business_day_start_minutes = 360 WHERE id IN ($1, $2)",
+      [locationId, other.locationId],
     );
-    const { rows: [first] } = await db.query<{ id: string }>(
-      `INSERT INTO order_items (location_id, order_id, name_snapshot, unit_price, status, ready_at)
-       VALUES ($1,$2,'First',100,'ready',now() - interval '10 minutes') RETURNING id`,
-      [locationId, orderId],
+    const { rows: [boundary] } = await db.query<{ cutoff: Date }>(
+      "SELECT app_business_day_start(now(), timezone, business_day_start_minutes) AS cutoff FROM locations WHERE id = $1",
+      [locationId],
     );
-    const { rows: [last] } = await db.query<{ id: string }>(
-      `INSERT INTO order_items (location_id, order_id, name_snapshot, unit_price, status)
-       VALUES ($1,$2,'Last',100,'sent') RETURNING id`,
-      [locationId, orderId],
-    );
-    await scheduleKitchenTicket(db, locationId, orderId);
-    expect((await db.query("SELECT kitchen_clear_at FROM order_items WHERE id=$1", [first.id])).rows[0].kitchen_clear_at).toBeNull();
-    await db.query("UPDATE order_items SET status='ready', ready_at=now() - interval '8 minutes' WHERE id=$1", [last.id]);
-    await scheduleKitchenTicket(db, locationId, orderId);
-    const { rows: expired } = await db.query<{ kitchen_clear_at: Date }>(
-      "SELECT kitchen_clear_at FROM order_items WHERE order_id=$1 AND kitchen_clear_at <= now()",
-      [orderId],
-    );
-    expect(expired).toHaveLength(2);
-    expect(expired[0].kitchen_clear_at).toEqual(expired[1].kitchen_clear_at);
     await db.query(
-      "INSERT INTO order_items (location_id,order_id,name_snapshot,unit_price,status) VALUES ($1,$2,'New',100,'sent')",
-      [locationId, orderId],
+      `INSERT INTO order_items (location_id, order_id, name_snapshot, unit_price, status, sent_to_kitchen_at)
+       VALUES ($1,$2,'Old sent',100,'sent',$3::timestamptz - interval '1 second'),
+              ($1,$2,'Old preparing',100,'preparing',$3::timestamptz - interval '1 day'),
+              ($1,$2,'Old ready',100,'ready',$3::timestamptz - interval '60 days'),
+              ($1,$2,'Boundary',100,'sent',$3),
+              ($4,$5,'Other branch',100,'sent',$3::timestamptz - interval '1 day')`,
+      [locationId, orderId, boundary.cutoff, other.locationId, other.orderId],
     );
-    await scheduleKitchenTicket(db, locationId, orderId);
-    const { rows } = await db.query(
-      "SELECT kitchen_clear_at, status FROM order_items WHERE order_id=$1 ORDER BY name_snapshot",
-      [orderId],
+    await archivePastKitchenTickets(businessId, locationId, db);
+    const readLines = () => db.query(
+      `SELECT name_snapshot, status, kitchen_archived_at, kitchen_archive_reason FROM order_items
+        WHERE order_id IN ($1, $2) ORDER BY name_snapshot`,
+      [orderId, other.orderId],
     );
-    expect(rows.map((row) => row.status)).toEqual(["ready", "ready", "sent"]);
-    expect(rows.slice(0, 2).map((row) => row.kitchen_clear_at)).toEqual(expired.map((row) => row.kitchen_clear_at));
-    expect(rows[2].kitchen_clear_at).toBeNull();
+    const { rows } = await readLines();
+    expect(rows.map((row) => [row.name_snapshot, row.status, row.kitchen_archive_reason])).toEqual([
+      ["Boundary", "sent", null],
+      ["Old preparing", "preparing", "business_day"],
+      ["Old ready", "ready", "business_day"],
+      ["Old sent", "sent", "business_day"],
+      ["Other branch", "sent", null],
+    ]);
+    await archivePastKitchenTickets(businessId, locationId, db);
+    expect((await readLines()).rows).toEqual(rows);
+    expect((await db.query("SELECT status FROM orders WHERE id = $1", [orderId])).rows[0].status).toBe("open");
   });
 });

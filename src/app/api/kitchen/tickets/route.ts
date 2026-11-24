@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
+import { archivePastKitchenTickets } from "@/lib/kitchen-workflow";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { rankKitchenQueue, type KitchenQueueEntry } from "@/lib/kitchen-priority";
 
@@ -17,6 +18,8 @@ export const GET = withTenantScope(async () => {
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ items: [] });
 
+  await archivePastKitchenTickets(session.businessId, location.id);
+
   const { rows: rawItems } = await query<KitchenQueueEntry & Record<string, unknown>>(
     `SELECT oi.id, oi.order_id, oi.name_snapshot, oi.quantity, oi.status, oi.note,
             oi.sent_to_kitchen_at, oi.ready_at,
@@ -29,7 +32,6 @@ export const GET = withTenantScope(async () => {
         AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
         AND oi.status IN ('sent', 'preparing', 'ready')
         AND oi.kitchen_archived_at IS NULL
-        AND (oi.kitchen_clear_at IS NULL OR oi.kitchen_clear_at > now())
       ORDER BY oi.sent_to_kitchen_at ASC NULLS LAST`,
     [location.id],
   );
@@ -46,8 +48,7 @@ export const GET = withTenantScope(async () => {
       WHERE oi.location_id = $1 AND o.status IN ('open', 'held', 'completed')
         AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
         AND oi.status IN ('sent', 'preparing', 'ready')
-        AND oi.kitchen_archived_at IS NULL
-        AND (oi.kitchen_clear_at IS NULL OR oi.kitchen_clear_at > now())`,
+        AND oi.kitchen_archived_at IS NULL`,
     [location.id],
   );
 

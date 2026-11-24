@@ -54,7 +54,6 @@ interface CashSummary {
 }
 
 interface ActiveShiftResponse {
-  kitchenClose?: { ready: number; unfinished: number; balanceDue: number } | null;
   shift: Shift | null;
   cashSummary?: CashSummary;
   expectedCash?: number | null;
@@ -194,7 +193,6 @@ function ShiftModal({
   /** The running expectation, read from the server; shown, never copied into the input. */
   const [expectedCash, setExpectedCash] = useState<number | null>(null);
   const [summary, setSummary] = useState<CashSummary | null>(null);
-  const [kitchenClose, setKitchenClose] = useState<ActiveShiftResponse["kitchenClose"]>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   /**
    * One key per close attempt, reused if the same button is pressed again after
@@ -245,7 +243,6 @@ function ShiftModal({
       if (cancelled || !ok) return;
       setExpectedCash(data.expectedCash ?? null);
       setSummary(data.cashSummary ?? null);
-      setKitchenClose(data.kitchenClose ?? null);
     })();
     return () => {
       cancelled = true;
@@ -375,13 +372,6 @@ function ShiftModal({
                   </dd>
                 </div>
               </dl>
-            ) : null}
-            {shift && kitchenClose ? (
-              <InfoBox>
-                با بستن شیفت، {toPersianDigits(kitchenClose.ready)} سفارش آماده از صف آشپزخانه خارج می‌شود.
-                {" "}{toPersianDigits(kitchenClose.unfinished)} سفارش در حال آماده‌سازی در صف می‌ماند.
-                {" "}{toPersianDigits(kitchenClose.balanceDue)} سفارشِ این صف ماندهٔ پرداخت دارد.
-              </InfoBox>
             ) : null}
             <ErrorBox>{error}</ErrorBox>
             <Field

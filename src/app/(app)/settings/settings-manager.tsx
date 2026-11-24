@@ -61,7 +61,10 @@ import { ShiftHistorySettings } from "./shift-history-settings";
 import { TaxSettings } from "./tax-settings";
 import { CloudSyncSettings } from "./cloud-sync-settings";
 import { DesktopUpdateSettings } from "./desktop-update-settings";
-import { cardClass } from "@/app/dashboard/page-chrome";
+import { hasModule } from "@/lib/industry-profile";
+import { KitchenNotificationSettings } from "./kitchen-notification-settings";
+import { KitchenWorkflowSettings } from "./kitchen-workflow-settings";
+import { cardClass, TabBar, TabPanel } from "@/app/dashboard/page-chrome";
 
 interface SettingsManagerProps {
   tabs: ResolvedSettingsTab[];
@@ -126,6 +129,23 @@ const SETTINGS_GROUPS: Array<{ label: string; keys: SettingsTabKey[] }> = [
   // security one, and burying it under either is how people fail to find it.
   { label: "داده‌ها", keys: ["data-transfer"] },
 ];
+
+function OrderSettings({ canManageKitchen }: { canManageKitchen: boolean }) {
+  const [tab, setTab] = useState<"general" | "fulfillment">("general");
+  if (!canManageKitchen) return <OrderControlsSettings />;
+
+  return (
+    <div className="space-y-4">
+      <TabBar idPrefix="order-settings" label="تنظیمات سفارش" tabs={[
+        { key: "general", label: "عمومی" },
+        { key: "fulfillment", label: "آماده‌سازی سفارش" },
+      ]} active={tab} onChange={setTab} />
+      <TabPanel idPrefix="order-settings" active={tab}>
+        {tab === "fulfillment" ? <KitchenWorkflowSettings /> : <OrderControlsSettings />}
+      </TabPanel>
+    </div>
+  );
+}
 
 /**
  * The platform settings area's sections.
@@ -258,7 +278,10 @@ export function SettingsManager({
       {activeTab === "pricing" ? (isProductWorkspaceIndustry(industry) ? <RetailPricingSettings /> : <PricingSettings />) : null}
       {activeTab === "online-platforms" ? <OnlinePlatformsSettings /> : null}
       {activeTab === "payment-methods" ? <PaymentMethodsSettings /> : null}
-      {activeTab === "orders" ? <OrderControlsSettings /> : null}
+      {activeTab === "orders" ? (
+        <OrderSettings canManageKitchen={hasModule(industry, "kitchen") &&
+          Boolean(permissions?.includes(PERMISSIONS.kitchenView) && permissions.includes(PERMISSIONS.settingsManage))} />
+      ) : null}
       {activeTab === "accounts" ? <AccountsSettings /> : null}
       {activeTab === "team" ? (
         <TeamManager currentUserId={currentUserId} role={role} permissions={permissions} />
@@ -280,7 +303,14 @@ export function SettingsManager({
         </div>
       ) : null}
       {activeTab === "desktop" ? <DesktopUpdateSettings /> : null}
-      {activeTab === "notifications" ? <NotificationSettings /> : null}
+      {activeTab === "notifications" ? (
+        <div className="space-y-5">
+          {hasModule(industry, "kitchen") && permissions?.includes(PERMISSIONS.kitchenView)
+            ? <KitchenNotificationSettings />
+            : null}
+          <NotificationSettings />
+        </div>
+      ) : null}
       {activeTab === "shifts" ? (
         <div className="space-y-6">
           <BusinessDaySettings />

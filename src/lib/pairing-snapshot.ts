@@ -304,8 +304,7 @@ export interface SnapshotSetting {
 }
 
 export const SNAPSHOT_BRANCH_SETTING_KEYS: readonly string[] = [
-  "kitchen.workflow", "kitchen.clearAfterPayment", "kitchen.clearAfterMinutes",
-  "kitchen.clearAfterShift", "printing.behavior",
+  "kitchen.workflow", "printing.behavior",
 ];
 
 export interface PairingSnapshot {

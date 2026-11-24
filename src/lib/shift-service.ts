@@ -36,7 +36,6 @@ import { getPool, query } from "./db";
 import { postgresDateToIso } from "./jalali";
 import type { Role } from "./auth";
 import { recordShiftAdjustmentSyncEvent, recordShiftSyncEvent } from "./shift-sync";
-import { archiveShiftKitchenTickets } from "./kitchen-workflow";
 import { isUuid } from "./uuid";
 import { isValidIsoDate } from "./iso-date";
 import {
@@ -1080,15 +1079,6 @@ async function closeShiftRow(
       orderCount: cashup.orderCount,
       reason: cashup.reason,
     });
-    if (shift.locationId && shift.endedAt) {
-      await archiveShiftKitchenTickets(client, {
-        businessId,
-        locationId: shift.locationId,
-        employeeId: shift.employeeId,
-        startedAt: shift.startedAt,
-        endedAt: shift.endedAt,
-      });
-    }
     await client.query("COMMIT");
     committed = { shift, cashSummary, reconciliation, cashup };
   } catch (err) {

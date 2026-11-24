@@ -2,6 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { KitchenNotificationSettings } from "@/app/(app)/settings/kitchen-notification-settings";
 import { KdsBoard } from "./kds-board";
 import { useRealtime } from "../use-realtime";
 
@@ -399,29 +400,20 @@ describe("KdsBoard operational controls", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("keeps sound opt-in and persists a deliberate operator choice", async () => {
+  it("keeps the settings controls off the kitchen board", async () => {
     render(<KdsBoard />);
-    const toggle = await screen.findByRole("button", { name: "هشدار صوتی خاموش" });
-    fireEvent.click(toggle);
-    await waitFor(() => expect(localStorage.getItem("kds.sound-alerts")).toBe("true"));
-    expect(screen.getByRole("button", { name: /هشدار صوتی روشن|فعال‌سازی صدای هشدار/ })).not.toBeNull();
+    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۱"));
+    expect(screen.queryByRole("button", { name: /اعلان‌ها و صدا|تنظیمات آشپزخانه|بررسی سفارش‌های قدیمی/ })).toBeNull();
   });
 
   it("falls back to visual alerts when the browser denies autoplay", async () => {
     installAudioContext("suspended", "suspended");
+    localStorage.setItem("kds.sound-alerts", "true");
     const state = installApi();
     render(<KdsBoard />);
-    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۱"));
-
-    fireEvent.click(screen.getByRole("button", { name: "هشدار صوتی خاموش" }));
-    await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toContain("پخش صدا در این مرورگر مسدود"),
-    );
-    expect(mocks.toastWarning).toHaveBeenCalledWith(
-      expect.stringContaining("پخش صدا در این مرورگر مسدود"),
-    );
-    expect(localStorage.getItem("kds.sound-alerts")).toBe("false");
-
+    const unlock = await screen.findByRole("button", { name: "فعال‌سازی صدا" });
+    fireEvent.click(unlock);
+    expect(localStorage.getItem("kds.sound-alerts")).toBe("true");
     state.items = [...initialItems, line("order-4", "line-4", "sent", 4, "dine_in", 1)];
     await act(async () => {
       realtimeCallbacks()[0]({ type: "order.created" });
@@ -563,10 +555,8 @@ describe("KdsBoard operational controls", () => {
 
   it("saves branch thresholds from the alerts panel and keeps the settings separate", async () => {
     installApi(initialItems, defaultThresholds);
-    render(<KdsBoard />);
-    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۱"));
-
-    fireEvent.click(screen.getByRole("button", { name: "اعلان‌ها و صدا" }));
+    render(<KitchenNotificationSettings />);
+    await screen.findByRole("button", { name: "ذخیرهٔ آستانه‌ها" });
     await waitFor(() =>
       expect(document.body.textContent).toContain("اعلان‌ها، صدا و چاپ آشپزخانه"),
     );

@@ -798,6 +798,11 @@ app.prepare().then(async () => {
   const { pruneExpiredWooSnapshots } = await import("./src/lib/printing/woo-history-service");
   scheduleBackgroundTick(pruneExpiredWooSnapshots, 60 * 60 * 1000, 90_000);
 
+  const { runKitchenArchiveTick } = await import("./src/lib/kitchen-workflow");
+  const kitchenArchiveTick = () =>
+    runKitchenArchiveTick().catch((error) => console.error("Kitchen archive tick failed", error));
+  scheduleBackgroundTick(kitchenArchiveTick, 60_000, 30_000);
+
   const requestListener = (req: IncomingMessage, res: ServerResponse) => {
     const t0 = Date.now();
     const parsed = parseRequestUrl(req.url ?? "/");

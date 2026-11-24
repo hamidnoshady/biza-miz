@@ -18,19 +18,14 @@ import {
   type OrderItemStatus,
 } from "@/lib/order-item-status";
 import {
-  DEFAULT_KITCHEN_ALERT_THRESHOLDS,
-  DEFAULT_KITCHEN_SOUND_PREFERENCES,
   diffKitchenAgingStages,
   diffKitchenAlerts,
   kitchenAgingStage,
   kitchenSoundEnabledFor,
-  parseKitchenAlertThresholds,
-  parseKitchenSoundPreferences,
   type KitchenAlertBaseline,
-  type KitchenAlertThresholds,
   type KitchenAgingStage,
+  type KitchenAlertThresholds,
   type KitchenSoundEventKey,
-  type KitchenSoundPreferences,
 } from "@/lib/kitchen-alerts";
 import {
   kitchenPrintFailureText,
@@ -43,8 +38,7 @@ import { KnowledgeHelpButton } from "../knowledge-help";
 import { api, errorMessage } from "../ui";
 import { cardClass, PageShell } from "../page-chrome";
 import { cn } from "@/lib/utils";
-import { KitchenWorkflowSettings } from "./kitchen-workflow-settings";
-import { KitchenAlertSettings } from "./kitchen-alert-settings";
+import { useKitchenAlertThresholds, useKitchenSound } from "./use-kitchen-alert-settings";
 import {
   KitchenBatchActionDialog,
   type BatchActionStatus,
@@ -71,15 +65,6 @@ interface TicketItem {
   table_id: string | null;
   table_name: string | null;
   priority: KitchenTicketPriority;
-}
-
-interface StaleTicket {
-  order_id: string;
-  order_number: number;
-  order_status: "open" | "held" | "completed";
-  item_count: number;
-  archived_at?: string;
-  reason?: string;
 }
 
 interface Modifier {
@@ -202,44 +187,11 @@ function formatUpdatedAt(timestamp: number): string {
   );
 }
 
-const THRESHOLD_CACHE_KEY = "kds.alert-thresholds";
-
-/**
- * A cold boot with no network still needs the branch's last-known thresholds.
- * This is only a cache: the authoritative GET overwrites it as soon as the
- * server answers, and a corrupt entry falls back to the platform default.
- */
-function readCachedThresholds(): KitchenAlertThresholds | null {
-  try {
-    const raw = window.localStorage.getItem(THRESHOLD_CACHE_KEY);
-    if (!raw) return null;
-    return parseKitchenAlertThresholds(JSON.parse(raw));
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedThresholds(thresholds: KitchenAlertThresholds): void {
-  try {
-    window.localStorage.setItem(THRESHOLD_CACHE_KEY, JSON.stringify(thresholds));
-  } catch {
-    // Private browsing/storage denial must not prevent use of the KDS.
-  }
-}
-
 function agingStageLabel(stage: KitchenAgingStage): string {
   if (stage === "overdue") return "از آستانه گذشته";
   if (stage === "approaching") return "نزدیک آستانه";
   return "در محدوده";
 }
-
-const ALERT_TONE_FREQUENCY: Record<KitchenSoundEventKey, number> = {
-  newTicket: 880,
-  addedItems: 988,
-  aging: 660,
-  connection: 440,
-  printFailure: 330,
-};
 
 const PRIORITY_META: Record<
   KitchenTicketPriority["tier"],
@@ -615,37 +567,7 @@ function DetailPlaceholder() {
   );
 }
 
-export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean }) {
-  const [showStaleReview, setShowStaleReview] = useState(false);
-  const [showWorkflowSettings, setShowWorkflowSettings] = useState(false);
-  const [showKitchenHistory, setShowKitchenHistory] = useState(false);
-  const [reviewRevision, setReviewRevision] = useState(0);
-  const [selectedStaleIds, setSelectedStaleIds] = useState<string[]>([]);
-  const [archivingStale, setArchivingStale] = useState(false);
-  const [staleTickets, setStaleTickets] = useState<StaleTicket[] | null>(null);
-  const [staleError, setStaleError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!canReviewStale || !showStaleReview) return;
-    let cancelled = false;
-
-    void api<{ tickets?: StaleTicket[]; error?: string }>(showKitchenHistory ? "/api/kitchen/tickets/stale?view=history" : "/api/kitchen/tickets/stale")
-      .then(({ ok, data }) => {
-        if (cancelled) return;
-        if (ok && Array.isArray(data.tickets)) {
-          setStaleTickets(data.tickets);
-        } else {
-          setStaleError(errorMessage(data.error));
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setStaleError("دریافت سفارش‌های قدیمی انجام نشد.");
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [canReviewStale, reviewRevision, showKitchenHistory, showStaleReview]);
+export function KdsBoard() {
   const [items, setItems] = useState<TicketItem[]>([]);
   const [modifiers, setModifiers] = useState<Modifier[]>([]);
   const [now, setNow] = useState(() => Date.now());
@@ -653,23 +575,8 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
   const [orderTypeFilter, setOrderTypeFilter] = useState<OrderTypeFilter>("all");
   const [ageFilter, setAgeFilter] = useState<TicketAgeFilter>("all");
   const [readyForPickupOnly, setReadyForPickupOnly] = useState(false);
-  const [showAlertSettings, setShowAlertSettings] = useState(false);
-  // The cache is a cold-boot fallback; the authoritative branch GET replaces
-  // it below and the scan/notification producers read the same stored value.
-  const [thresholds, setThresholds] = useState<KitchenAlertThresholds>(
-    () => readCachedThresholds() ?? DEFAULT_KITCHEN_ALERT_THRESHOLDS,
-  );
-  const [canEditThresholds, setCanEditThresholds] = useState(false);
-  const [thresholdsWarning, setThresholdsWarning] = useState<string | null>(null);
-  const [soundPreferences, setSoundPreferences] = useState<KitchenSoundPreferences>(
-    () => ({
-      ...DEFAULT_KITCHEN_SOUND_PREFERENCES,
-      events: { ...DEFAULT_KITCHEN_SOUND_PREFERENCES.events },
-    }),
-  );
-  const [soundBlocked, setSoundBlocked] = useState(false);
-  const [audioReady, setAudioReady] = useState(false);
-  const [preferencesLoaded, setPreferencesLoaded] = useState(false);
+  const { thresholds } = useKitchenAlertThresholds();
+  const { soundPreferences, soundBlocked, setSoundBlocked, audioReady, ensureAudio, playTone } = useKitchenSound();
   const [printFailureNotice, setPrintFailureNotice] = useState<string | null>(null);
   const [batchDialog, setBatchDialog] = useState<BatchDialogState | null>(null);
   const [batchSubmitting, setBatchSubmitting] = useState(false);
@@ -694,7 +601,6 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
   const agingThresholdSignature = useRef("");
   const connectionState = useRef<{ connected: boolean | null }>({ connected: null });
   const staleAlertShown = useRef(false);
-  const audioContext = useRef<AudioContext | null>(null);
   // The realtime lifecycle callback is registered before the audio callbacks
   // are declared; a ref lets it play the latest opt-in tone without putting a
   // not-yet-initialised binding in a hook dependency array.
@@ -803,126 +709,6 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 15_000);
     return () => clearInterval(timer);
-  }, []);
-
-  useEffect(
-    () => () => {
-      void audioContext.current?.close().catch(() => {});
-    },
-    [],
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    void api<{ thresholds?: unknown; canEdit?: boolean; error?: string }>("/api/kitchen/alerts")
-      .then(({ ok, data }) => {
-        if (cancelled) return;
-        const parsed = parseKitchenAlertThresholds(data.thresholds);
-        if (ok && parsed) {
-          setThresholds(parsed);
-          writeCachedThresholds(parsed);
-          setCanEditThresholds(data.canEdit === true);
-          setThresholdsWarning(null);
-          return;
-        }
-        if (!ok) {
-          setThresholdsWarning(
-            "آستانه‌های این شعبه از سرور خوانده نشد؛ آخرین مقدار ذخیره‌شده یا پیش‌فرض نمایش داده می‌شود.",
-          );
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setThresholdsWarning(
-            "آستانه‌های این شعبه از سرور خوانده نشد؛ آخرین مقدار ذخیره‌شده یا پیش‌فرض نمایش داده می‌شود.",
-          );
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    try {
-      const legacySound = window.localStorage.getItem("kds.sound-alerts");
-      const raw = window.localStorage.getItem("kds.sound-preferences");
-      const parsed = parseKitchenSoundPreferences(raw ? JSON.parse(raw) : null);
-      // `kds.sound-alerts` predates the per-event matrix; honour an explicit
-      // legacy "on" choice rather than silently muting an existing device.
-      setSoundPreferences(legacySound === "true" ? { ...parsed, enabled: true } : parsed);
-    } catch {
-      // Private browsing/storage denial must not prevent use of the KDS.
-    } finally {
-      setPreferencesLoaded(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!preferencesLoaded) return;
-    try {
-      window.localStorage.setItem("kds.sound-alerts", String(soundPreferences.enabled));
-      window.localStorage.setItem("kds.sound-preferences", JSON.stringify(soundPreferences));
-    } catch {
-      // Preferences are optional; inaccessible storage falls back to defaults.
-    }
-  }, [preferencesLoaded, soundPreferences]);
-
-  /**
-   * Create/resume the audio context only from a user gesture (or after the
-   * operator has already opted in). A denied/suspended context is a visible
-   * state, not a silent failure: the visual alerts stay on either way.
-   */
-  const ensureAudio = useCallback(async (): Promise<boolean> => {
-    if (typeof window === "undefined") return false;
-    const AudioCtor =
-      window.AudioContext ??
-      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtor) {
-      setSoundBlocked(true);
-      setAudioReady(false);
-      return false;
-    }
-    try {
-      let context = audioContext.current;
-      if (!context || context.state === "closed") {
-        context = new AudioCtor();
-        audioContext.current = context;
-      }
-      if (context.state === "suspended") await context.resume();
-      if (context.state !== "running") {
-        setSoundBlocked(true);
-        setAudioReady(false);
-        return false;
-      }
-      setAudioReady(true);
-      setSoundBlocked(false);
-      return true;
-    } catch {
-      setSoundBlocked(true);
-      setAudioReady(false);
-      return false;
-    }
-  }, []);
-
-  const playTone = useCallback((event: KitchenSoundEventKey): boolean => {
-    const context = audioContext.current;
-    if (!context || context.state !== "running") return false;
-    try {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.value = ALERT_TONE_FREQUENCY[event];
-      gain.gain.value = 0.04;
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start();
-      oscillator.stop(context.currentTime + 0.16);
-      return true;
-    } catch {
-      // Browser audio policy/device failures should never block queue updates.
-      return false;
-    }
   }, []);
 
   const playAlertTone = useCallback(
@@ -1174,60 +960,6 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     [playAlertTone],
   );
 
-  async function saveThresholds(next: KitchenAlertThresholds): Promise<{ ok: boolean; error?: string }> {
-    const result = await api<{ thresholds?: unknown; error?: string }>("/api/kitchen/alerts", {
-      method: "PUT",
-      body: JSON.stringify({ thresholds: next }),
-    });
-    if (!result.ok) return { ok: false, error: errorMessage(result.data.error) };
-    const parsed = parseKitchenAlertThresholds(result.data.thresholds);
-    if (!parsed) return { ok: false, error: "پاسخ تنظیمات آستانه معتبر نیست." };
-    setThresholds(parsed);
-    writeCachedThresholds(parsed);
-    setThresholdsWarning(null);
-    return { ok: true };
-  }
-
-  async function toggleSound() {
-    if (soundPreferences.enabled && audioReady) {
-      setSoundPreferences((current) => ({ ...current, enabled: false }));
-      void audioContext.current?.close().catch(() => {});
-      audioContext.current = null;
-      setAudioReady(false);
-      setSoundBlocked(false);
-      return;
-    }
-    // Enabled-from-storage but not yet unlocked in this page: the button says
-    // «فعال‌سازی», so this click must resume the context rather than mute.
-    const ready = await ensureAudio();
-    if (!ready) {
-      setSoundPreferences((current) => ({ ...current, enabled: false }));
-      toast.warning(
-        "پخش صدا در این مرورگر مسدود است؛ هشدارهای بصری همچنان نمایش داده می‌شوند.",
-      );
-      return;
-    }
-    setSoundPreferences((current) => ({ ...current, enabled: true }));
-    playTone("newTicket");
-  }
-
-  function toggleSoundEvent(event: KitchenSoundEventKey) {
-    setSoundPreferences((current) => ({
-      ...current,
-      events: { ...current.events, [event]: !current.events[event] },
-    }));
-  }
-
-  async function testSound() {
-    if (!(await ensureAudio())) {
-      toast.warning(
-        "پخش صدا در این مرورگر مسدود است؛ هشدارهای بصری همچنان نمایش داده می‌شوند.",
-      );
-      return;
-    }
-    playTone("newTicket");
-  }
-
   async function bump(itemId: string, status: "preparing" | "ready") {
     setBumpingItemId(itemId);
     setMutationMessage(null);
@@ -1376,32 +1108,6 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
     setBatchError(null);
   }
 
-  async function archiveStaleTickets() {
-    if (!window.confirm("سفارش‌های انتخاب‌شده از صف آشپزخانه بایگانی شوند؟ وضعیت سفارش و پرداخت تغییر نمی‌کند.")) return;
-
-    setArchivingStale(true);
-    setStaleError(null);
-    try {
-      const result = await api<{ archivedCount?: number; error?: string }>("/api/kitchen/tickets/stale", {
-        method: "POST",
-        body: JSON.stringify({ orderIds: selectedStaleIds }),
-      });
-      if (!result.ok) {
-        setStaleError(errorMessage(result.data.error));
-        return;
-      }
-      setSelectedStaleIds([]);
-      setStaleTickets(null);
-      setReviewRevision((revision) => revision + 1);
-      toast.success(`${toPersianDigits(String(result.data.archivedCount ?? 0))} سفارش بایگانی شد.`);
-      void load({ showRefresh: true });
-    } catch {
-      setStaleError("بایگانی سفارش‌ها انجام نشد.");
-    } finally {
-      setArchivingStale(false);
-    }
-  }
-
   return (
     <PageShell className="space-y-4">
       <header className={`${cardClass} p-4`}>
@@ -1416,48 +1122,6 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
             <KnowledgeHelpButton section="kitchen" />
-            <Button
-              type="button"
-              variant="outline"
-              aria-expanded={showAlertSettings}
-              onClick={() => setShowAlertSettings((open) => !open)}
-              className="min-h-[48px] shrink-0"
-            >
-              اعلان‌ها و صدا
-            </Button>
-            {canReviewStale ? (
-              <Button type="button" variant="outline" aria-expanded={showWorkflowSettings}
-                onClick={() => setShowWorkflowSettings((open) => !open)}>
-                تنظیمات آشپزخانه
-              </Button>
-            ) : null}
-            {canReviewStale ? (
-              <Button
-                type="button"
-                variant="outline"
-                aria-expanded={showStaleReview}
-                disabled={archivingStale}
-                onClick={() => {
-                  setStaleTickets(null);
-                  setStaleError(null);
-                  setSelectedStaleIds([]);
-                  setShowStaleReview(!showStaleReview);
-                }}
-              >
-                بررسی سفارش‌های قدیمی
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="outline"
-              aria-pressed={soundPreferences.enabled}
-              onClick={() => void toggleSound()}
-              className="min-h-[48px] shrink-0"
-            >
-              {soundPreferences.enabled
-                ? audioReady ? "هشدار صوتی روشن" : "فعال‌سازی صدای هشدار"
-                : "هشدار صوتی خاموش"}
-            </Button>
             <p
               className="flex min-h-11 min-w-0 items-center gap-2 text-sm text-muted-foreground"
               role="status"
@@ -1481,7 +1145,7 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
         </div>
       </header>
 
-      {soundBlocked ? (
+      {soundPreferences.enabled && (soundBlocked || !audioReady) ? (
         <div
           role="alert"
           className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm font-medium text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-200"
@@ -1490,8 +1154,8 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
             پخش صدا در این مرورگر مسدود شده است؛ هشدارهای بصری همچنان نمایش داده
             می‌شوند.
           </span>
-          <Button type="button" variant="outline" className="min-h-[44px]" onClick={() => void toggleSound()}>
-            تلاش دوباره برای صدا
+          <Button type="button" variant="outline" className="min-h-[44px]" onClick={() => void ensureAudio()}>
+            فعال‌سازی صدا
           </Button>
         </div>
       ) : null}
@@ -1506,85 +1170,6 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
             بستن
           </Button>
         </div>
-      ) : null}
-
-      {showAlertSettings ? (
-        <KitchenAlertSettings
-          canEditThresholds={canEditThresholds}
-          thresholds={thresholds}
-          thresholdsWarning={thresholdsWarning}
-          soundPreferences={soundPreferences}
-          soundBlocked={soundBlocked}
-          audioReady={audioReady}
-          onToggleSound={() => void toggleSound()}
-          onToggleSoundEvent={toggleSoundEvent}
-          onTestSound={() => void testSound()}
-          onSaveThresholds={saveThresholds}
-        />
-      ) : null}
-
-      {canReviewStale && showWorkflowSettings ? <KitchenWorkflowSettings /> : null}
-
-      {canReviewStale && showStaleReview ? (
-        <section className={`${cardClass} space-y-2 p-4`}>
-          <h2 className="font-semibold">
-            {showKitchenHistory ? "تاریخچه آشپزخانه" : "سفارش‌های مانده در صف آشپزخانه از ۶۰ روز پیش"}
-          </h2>
-          <Button type="button" variant="outline" disabled={archivingStale} onClick={() => {
-            setStaleTickets(null);
-            setStaleError(null);
-            setSelectedStaleIds([]);
-            setShowKitchenHistory(!showKitchenHistory);
-          }}>
-            {showKitchenHistory ? "بررسی سفارش‌های قدیمی" : "تاریخچه آشپزخانه"}
-          </Button>
-          {!showKitchenHistory && staleTickets?.length ? (
-            <Button type="button" variant="outline" disabled={archivingStale || selectedStaleIds.length === 0}
-              onClick={() => void archiveStaleTickets()}>
-              بایگانی انتخاب‌شده‌ها
-            </Button>
-          ) : null}
-          {staleError ? <p role="alert">{staleError}</p> : null}
-          {!staleError && staleTickets === null ? (
-            <p role="status">در حال دریافت سفارش‌ها…</p>
-          ) : null}
-          {staleTickets?.length === 0 ? <p>{showKitchenHistory ? "تاریخچه این شعبه خالی است." : "سفارش قدیمی در صف این شعبه وجود ندارد."}</p> : null}
-          {staleTickets?.length ? (
-            <>
-              <p>{toPersianDigits(String(staleTickets.length))} سفارش در این فهرست</p>
-              <ul className="max-h-80 space-y-1 overflow-auto">
-                {staleTickets.map((ticket) => (
-                  <li key={ticket.archived_at ? `${ticket.order_id}:${ticket.archived_at}` : ticket.order_id} className="text-sm">
-                    {!showKitchenHistory ? (
-                      <input type="checkbox" className="me-2" disabled={archivingStale}
-                        aria-label={`انتخاب سفارش ${toPersianDigits(String(ticket.order_number))}`}
-                        checked={selectedStaleIds.includes(ticket.order_id)}
-                        onChange={(event) => {
-                          const checked = event.currentTarget.checked;
-                          setSelectedStaleIds((ids) => checked
-                            ? [...ids, ticket.order_id]
-                            : ids.filter((id) => id !== ticket.order_id));
-                        }}
-                      />
-                    ) : null}
-                    سفارش {toPersianDigits(String(ticket.order_number))}
-                    {" · "}
-                    {ticket.order_status === "completed" ? "تکمیل‌شده" : "نیازمند بررسی"}
-                    {" · "}
-                    {toPersianDigits(String(ticket.item_count))} ردیف
-                    {ticket.archived_at ? (
-                      <>{" · "}{ticket.reason === "paid" ? "پرداخت کامل"
-                        : ticket.reason === "timer" ? "پایان زمان نگهداری"
-                          : ticket.reason === "shift" ? "بستن شیفت"
-                          : "بایگانی دستی سفارش قدیمی"}{" · "}
-                        {formatJalali(new Date(ticket.archived_at), { withMonthName: true })}</>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </>
-          ) : null}
-        </section>
       ) : null}
 
       {queueStale ? (
@@ -1676,14 +1261,6 @@ export function KdsBoard({ canReviewStale = false }: { canReviewStale?: boolean 
                 · نزدیک از {toPersianDigits(thresholds.approachingMinutes)}
               </span>
             ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              className="min-h-[44px] px-2 text-xs"
-              onClick={() => setShowAlertSettings(true)}
-            >
-              تنظیم
-            </Button>
           </div>
         </div>
         <Button
