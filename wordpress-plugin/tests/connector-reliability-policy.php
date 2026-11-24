@@ -325,4 +325,15 @@ check( false !== strpos( $main_source, 'function pos_connector_schedules_due_for
 check( 1 === preg_match( '/function pos_connector_ensure_schedules\( \$force = false \)\s*\{\s*if \( ! \$force && ! pos_connector_schedules_due_for_check\(\) \)/s', $main_source ), 'and ensure_schedules consults the throttle first' );
 check( false !== strpos( $main_source, 'pos_connector_ensure_schedules( true );' ), 'activation forces it, so a fresh install is armed immediately' );
 
+require dirname( __DIR__ ) . '/pos-accounting-connector/includes/class-pos-queue.php';
+$legacy = '{"id":42}';
+check( $legacy === POS_Connector_Queue::unpack_payload( $legacy ), 'legacy pending JSON remains deliverable' );
+$json = json_encode( array( 'description' => str_repeat( 'WooCommerce product description. ', 400 ) ) );
+$packed = POS_Connector_Queue::pack_payload( $json );
+if ( function_exists( 'gzencode' ) && function_exists( 'gzdecode' ) ) {
+	check( strlen( $packed ) < strlen( $json ) / 4, 'compressible queued text uses less than a quarter of its original storage' );
+	check( false === POS_Connector_Queue::unpack_payload( 'gzip:invalid!' ), 'invalid stored data cannot be delivered' );
+}
+check( $json === POS_Connector_Queue::unpack_payload( $packed ), 'packed delivery restores the exact original JSON' );
+
 echo $assertions . " reliability-policy assertions passed\n";
