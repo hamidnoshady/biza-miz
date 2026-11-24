@@ -788,6 +788,32 @@ describe("relationship handling", () => {
 
 describe("the workspace import policy (issue #907 F02)", () => {
   /*
+   * Issue #1110 — these adapters write My Workspace rows, so the fixture must
+   * be a business type that actually has the area. The F&B fixture above is
+   * deliberately not eligible; the refusal is asserted separately with it.
+   */
+  beforeAll(async () => {
+    await db.query(`UPDATE businesses SET industry = 'architecture_construction' WHERE id = $1`, [
+      biz.id,
+    ]);
+  });
+  afterAll(async () => {
+    await db.query(`UPDATE businesses SET industry = 'food_service' WHERE id = $1`, [biz.id]);
+  });
+
+  it("refuses a Workspace entity for an ineligible business type", async () => {
+    await expect(
+      uploadCsv(
+        "workspace.contracts",
+        "عنوان قرارداد,وضعیت\nپیمان ممنوع,پیش‌نویس\n",
+        {},
+        other.id,
+        other.locationId,
+      ),
+    ).rejects.toThrow("workspace_not_available");
+  });
+
+  /*
    * An importer is a second door into the same tables, so it owes the same
    * domain rules: the value must be one the domain knows, and a state the
    * approval engine owns is not a field a spreadsheet can grant. Both are
