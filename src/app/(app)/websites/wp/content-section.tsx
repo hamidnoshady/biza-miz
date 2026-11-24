@@ -649,10 +649,18 @@ function PostEditor({
     setContentEditable(false);
     setLoadError("");
     const query = new URLSearchParams({ connectionId, type, id: row.remoteId });
-    void api<{ row: ContentDetail; error?: string }>(
-      `/api/integrations/wp-manager/content/posts?${query.toString()}`,
-      { signal: controller.signal },
-    ).then((response) => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    async function load() {
+      const response = await api<{ row?: ContentDetail; pending?: boolean; error?: string }>(
+        `/api/integrations/wp-manager/content/posts?${query.toString()}`,
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || response.aborted) return;
+      if (response.ok && response.data.pending && ++attempts < 40) {
+        retry = setTimeout(() => void load(), 3000);
+        return;
+      }
       if (response.aborted) return;
       if (!response.ok) {
         setLoadError(errorMessageOrRaw(response.data?.error) || "خواندن متن فعلی ممکن نشد.");
@@ -685,8 +693,12 @@ function PostEditor({
       setVersionConflict(false);
       setInitial(next);
       setValues(next);
-    });
-    return () => controller.abort();
+    }
+    void load();
+    return () => {
+      controller.abort();
+      clearTimeout(retry);
+    };
   }, [connectionId, type, row, loadAttempt]);
 
   useEffect(() => {
