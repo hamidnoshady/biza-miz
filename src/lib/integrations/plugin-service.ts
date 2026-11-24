@@ -550,6 +550,7 @@ export async function pluginHandshake(
         // never `done`. Older plugins simply never send either.
         leaseTokenAck: true,
         onDemandPostBody: true,
+        onDemandProductBody: true,
         skippedAck: true,
         // Phase 38: operations as well as numbers. A plugin that predates
         // these acks unknown types as done, so advertising them is safe; a
