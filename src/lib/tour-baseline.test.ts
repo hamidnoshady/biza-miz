@@ -191,6 +191,28 @@ describe("automatic baseline tours", () => {
     expect(tourDefinitionById(baselineTourIdForRoute("/crm/briefs"))).toBeUndefined();
   });
 
+  it("keeps CRM Proposals Studio-only, including direct playback by its legacy id", () => {
+    const pageKey = "page:/crm/proposals";
+    const studio: TourDefinition = {
+      id: "crm.proposals.list",
+      version: 2,
+      pageKey,
+      route: "/crm/proposals",
+      title: "پیشنهاد قیمت",
+      description: "از استودیو",
+      eligibility: {},
+      steps: [{ id: "intro", kind: "explain", title: "شروع", body: "." }],
+    };
+
+    expect(STUDIO_ONLY_PAGE_KEYS.has(pageKey)).toBe(true);
+    expect(TOURS.some((tour) => tour.id === "crm.proposals.list")).toBe(false);
+    expect(pageTourCandidates(pageKey)).toEqual([]);
+    expect(pageTourCandidates(pageKey, [studio])).toEqual([studio]);
+    expect(tourDefinitionById("crm.proposals.list")).toBeUndefined();
+    expect(tourDefinitionById("crm.proposals.list", [studio])).toEqual(studio);
+    expect(tourDefinitionById(baselineTourIdForRoute("/crm/proposals"))).toBeUndefined();
+  });
+
   it("resolves a baseline id to its page for playback and progress writes", () => {
     const page = KNOWLEDGE_PAGES.find((candidate) => toursForPage(candidate.key).length === 0)!;
     const id = baselineTourIdForRoute(page.route);
@@ -295,8 +317,8 @@ describe("the coverage audit", () => {
     // A registered page can never silently escape coverage: every page has a
     // tour, and the report distinguishes a real spotlight from a plain
     // explanation instead of counting both as "covered".
-    expect(report.uncoveredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs"]);
-    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs"]);
+    expect(report.uncoveredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs", "page:/crm/proposals"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs", "page:/crm/proposals"]);
     expect(report.staleTourIds).toEqual([]);
     expect(report.spotlightPages).toBeGreaterThan(0);
     expect(report.explanationOnlyPages).toBe(
@@ -322,11 +344,11 @@ describe("the coverage audit", () => {
     expect(report.editorialGaps).toEqual(
       report.pages.filter((row) => row.kind === "baseline").map((row) => row.pageKey),
     );
-    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs", "page:/crm/proposals"]);
     expect(report.authoredTours).toBe(TOURS.length);
   });
 
-  it("marks CRM Overview, Directory and Briefs as requiring Studio publication, with no fallback tours", () => {
+  it("marks CRM Overview, Directory, Briefs and Proposals as requiring Studio publication, with no fallback tours", () => {
     for (const pageKey of STUDIO_ONLY_PAGE_KEYS) {
       const crm = report.pages.find((row) => row.pageKey === pageKey)!;
       expect(crm).toMatchObject({
