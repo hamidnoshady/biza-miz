@@ -141,6 +141,8 @@ async function centralFetch(input: string | URL | Request, init?: RequestInit): 
         return (await import("../src/app/api/server-sync/digest/route")).POST(request);
       case "/api/server-sync/site-profile":
         return (await import("../src/app/api/server-sync/site-profile/route")).GET(request);
+      case "/api/server-sync/order-number-lease":
+        return (await import("../src/app/api/server-sync/order-number-lease/route")).POST(request);
       case "/api/pairing/acknowledge":
         return Response.json({ ok: true });
       default:
@@ -970,6 +972,39 @@ describe("orders", () => {
     expect((await onCentral(bill)).rows[0]).toEqual(desktopBill);
   });
 
+  it("keeps the till's own number on the cloud for the same bill (migration 0318)", async () => {
+    const created = await withTenant(biz.businessId, () =>
+      createOrder({
+        locationId: biz.locationId,
+        type: "takeaway",
+        discount: { type: null },
+        items: [{ menuItemId: biz.menuItemId, quantity: 1 }],
+        openedBy: biz.ownerId,
+        actorRole: "owner",
+      }),
+    );
+    if (!created.ok) throw new Error(created.error);
+    const orderId = created.data.id;
+    const tillNumber = await withTenant(biz.businessId, async () => {
+      const { rows } = await query<{ order_number: string }>(
+        "SELECT order_number::text FROM orders WHERE id = $1",
+        [orderId],
+      );
+      return rows[0].order_number;
+    });
+
+    const readCloudNumber = () =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query<{ order_number: string }>("SELECT order_number::text FROM orders WHERE id = $1", [orderId]),
+        ),
+      );
+    await syncUntil(async () => (await readCloudNumber()).rows[0] !== undefined);
+    // The number is part of the bill: the cloud stores the sender's, it does
+    // not mint a second one and it does not renumber the pulled order.
+    expect((await readCloudNumber()).rows[0].order_number).toBe(tillNumber);
+  });
+
   it("delivers a bill rung up in the cloud to the branch", async () => {
     const orderId = await onCentral(async () => {
       const created = await withTenant(biz.businessId, () =>
@@ -985,20 +1020,122 @@ describe("orders", () => {
       if (!created.ok) throw new Error(created.error);
       return created.data.id;
     });
+    const cloudNumber = (await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query<{ order_number: string }>("SELECT order_number::text FROM orders WHERE id = $1", [orderId]),
+      ),
+    )).rows[0].order_number;
 
     await syncRound();
 
     const onDesktop = () =>
       withTenant(biz.businessId, () =>
-        query<{ status: string }>("SELECT status::text FROM orders WHERE id = $1", [orderId]),
+        query<{ status: string; order_number: string }>(
+          "SELECT status::text, order_number::text FROM orders WHERE id = $1",
+          [orderId],
+        ),
       );
     await syncUntil(async () => (await onDesktop()).rows[0]?.status === "open");
-    expect((await onDesktop()).rows[0]?.status).toBe("open");
+    expect((await onDesktop()).rows[0]).toEqual({ status: "open", order_number: cloudNumber });
     // Replayed here, so it is not queued to go back up.
     const echoed = await withTenant(biz.businessId, () =>
       query("SELECT 1 FROM sync_events WHERE client_event_id = $1 AND origin = 'local'", [orderId]),
     );
     expect(echoed.rowCount).toBe(0);
+  });
+
+  it("adopts a duplicate employee party by its membership key instead of conflicting (issue #1446)", async () => {
+    const employeeUserId = randomUUID();
+    const cloudPartyId = randomUUID();
+    const sitePartyId = randomUUID();
+    const makeUser = () =>
+      query(
+        `INSERT INTO users (id, business_id, location_id, role, full_name, password_hash, is_active)
+         VALUES ($1, $2, $3, 'cashier', 'Sync Employee', 'test-hash', true)`,
+        [employeeUserId, biz.businessId, biz.locationId],
+      );
+    const makeParty = (id: string, name: string) =>
+      query(
+        `INSERT INTO parties (id, business_id, role, roles, name, employee_user_id)
+         VALUES ($1, $2, 'employee', ARRAY['employee']::text[], $3, $4)`,
+        [id, biz.businessId, name, employeeUserId],
+      );
+
+    // Two installs independently created a personnel file for one membership:
+    // different UUIDs, same employee_user_id. The unique index makes them
+    // mutually exclusive, so the old merge could only record a conflict.
+    await onCentral(() => withTenant(biz.businessId, makeUser));
+    await withTenant(biz.businessId, makeUser);
+    await onCentral(() => withTenant(biz.businessId, () => makeParty(cloudPartyId, "Cloud Employee")));
+    await withTenant(biz.businessId, () => makeParty(sitePartyId, "Site Employee"));
+
+    const partiesForEmployee = () =>
+      withTenant(biz.businessId, () =>
+        query<{
+          id: string;
+          name: string;
+          is_active: boolean;
+          merged_into_id: string | null;
+          employee_user_id: string | null;
+        }>(
+          `SELECT id, name, is_active, merged_into_id, employee_user_id
+             FROM parties
+            WHERE business_id = $1 AND (id = ANY($2::uuid[]) OR employee_user_id = $3)`,
+          [biz.businessId, [cloudPartyId, sitePartyId], employeeUserId],
+        ),
+      );
+    const conflicts = () =>
+      withTenant(biz.businessId, () =>
+        query<{ row_id: string; status: string }>(
+          "SELECT row_id, status FROM sync_master_conflicts WHERE business_id = $1 AND table_name = 'parties'",
+          [biz.businessId],
+        ),
+      );
+    const oneActivePerson = (rows: Awaited<ReturnType<typeof partiesForEmployee>>["rows"]) =>
+      rows.filter((row) => row.employee_user_id === employeeUserId).length === 1 &&
+      rows.filter((row) => row.is_active).length === 1;
+
+    await syncUntil(async () => {
+      const [desktop, cloud] = [await partiesForEmployee(), await onCentral(partiesForEmployee)];
+      return (
+        oneActivePerson(desktop.rows) &&
+        oneActivePerson(cloud.rows) &&
+        cloud.rows.some((row) => row.id === sitePartyId && row.merged_into_id === cloudPartyId)
+      );
+    });
+
+    const desktop = (await partiesForEmployee()).rows;
+    const cloud = (await onCentral(partiesForEmployee)).rows;
+    // Each side keeps the UUID it already had as the person, and the peer's
+    // UUID that actually arrived is archived as an alias pointing at it. One
+    // active personnel file per side, and no ninth conflict on the same fact.
+    expect(desktop.filter((row) => row.is_active)).toHaveLength(1);
+    expect(desktop.find((row) => row.is_active)?.id).toBe(sitePartyId);
+    expect(cloud.filter((row) => row.is_active)).toHaveLength(1);
+    expect(cloud.find((row) => row.is_active)?.id).toBe(cloudPartyId);
+    expect(cloud.find((row) => row.id === sitePartyId)?.merged_into_id).toBe(cloudPartyId);
+    expect((await conflicts()).rows).toEqual([]);
+    expect((await onCentral(conflicts)).rows).toEqual([]);
+
+    // A later edit under the cloud's own UUID is redirected to the adopted
+    // winner; the site now receives the cloud's UUID for the first time and
+    // keeps it as an alias, so nothing is written onto a second active file.
+    await onCentral(() =>
+      withTenant(biz.businessId, () =>
+        query("UPDATE parties SET name = 'Renamed By Cloud' WHERE id = $1", [cloudPartyId]),
+      ),
+    );
+    await syncUntil(async () => {
+      const rows = (await partiesForEmployee()).rows;
+      return (
+        rows.some((row) => row.name === "Renamed By Cloud") &&
+        rows.some((row) => row.id === cloudPartyId && row.merged_into_id === sitePartyId)
+      );
+    });
+    const afterEdit = (await partiesForEmployee()).rows;
+    expect(afterEdit.filter((row) => row.is_active)).toHaveLength(1);
+    expect(afterEdit.find((row) => row.is_active)?.name).toBe("Renamed By Cloud");
+    expect(afterEdit.find((row) => row.id === cloudPartyId)?.merged_into_id).toBe(sitePartyId);
   });
 
   it("acknowledges a cloud purchase instead of waiting forever for a supplier the desktop never gets (Phase 46)", async () => {
@@ -1162,6 +1299,59 @@ describe("site profile", () => {
       ),
     );
     expect(desktop.rows[0]).toEqual({ start: 1080, day: "2026-09-29" });
+  });
+
+  it("brings the cloud's tax rate, pricing policy and order controls to the till", async () => {
+    const writeCloudSetting = (key: string, value: unknown) =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query(
+            `INSERT INTO settings (business_id, location_id, key, value)
+             VALUES ($1, NULL, $2, $3::jsonb)
+             ON CONFLICT (business_id, location_id, key) DO UPDATE SET value = EXCLUDED.value`,
+            [biz.businessId, key, JSON.stringify(value)],
+          ),
+        ),
+      );
+    const deleteCloudSetting = (key: string) =>
+      onCentral(() =>
+        withTenant(biz.businessId, () =>
+          query("DELETE FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2", [
+            biz.businessId,
+            key,
+          ]),
+        ),
+      );
+    const readDesktop = (key: string) =>
+      withTenant(biz.businessId, () =>
+        query<{ value: unknown }>(
+          "SELECT value FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2",
+          [biz.businessId, key],
+        ),
+      );
+
+    await writeCloudSetting("tax.config", { defaultRate: 9 });
+    await writeCloudSetting("pricing.config", { defaultMarginPercent: 35, overheadMode: "manual" });
+    await writeCloudSetting("orders.controls", { cashierDiscountLimitPercent: 10 });
+    await syncProfile();
+
+    expect((await readDesktop("tax.config")).rows[0]?.value).toEqual({ defaultRate: 9 });
+    expect((await readDesktop("pricing.config")).rows[0]?.value).toEqual({
+      defaultMarginPercent: 35,
+      overheadMode: "manual",
+    });
+    expect((await readDesktop("orders.controls")).rows[0]?.value).toEqual({
+      cashierDiscountLimitPercent: 10,
+    });
+
+    // A later cloud edit reaches the till; a setting the cloud removes is
+    // removed locally too, so an offline bill cannot keep using a rate the
+    // business has since cleared.
+    await writeCloudSetting("tax.config", { defaultRate: 10 });
+    await deleteCloudSetting("pricing.config");
+    await syncProfile();
+    expect((await readDesktop("tax.config")).rows[0]?.value).toEqual({ defaultRate: 10 });
+    expect((await readDesktop("pricing.config")).rows).toHaveLength(0);
   });
 
   it("follows the cloud's switches: the assistant on, then off, and an app under maintenance", async () => {

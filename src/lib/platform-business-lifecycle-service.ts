@@ -174,7 +174,7 @@ function lifecycleBusinessView(
  * Scoped by platform admin so a retry keeps working across connection
  * rotation, while a key minted by a different actor can never read — or
  * replay — someone else's outcome. The partial expression index added by
- * migration 0318 makes this the cheap path rather than a full audit scan.
+ * migration 0319 makes this the cheap path rather than a full audit scan.
  */
 async function findLifecycleReplay(
   adminId: string,

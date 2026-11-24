@@ -54,17 +54,21 @@ Each tick, at most once per sync interval (30 s) however often a wake-up runs
 it — after master data and **before** push/pull, so the bills pulled in
 the same tick land on the cloud's business day — the desktop also reads
 `GET /api/server-sync/site-profile` (bearer, the credential names the branch):
-the branch row (name, address, phone, timezone, business-day start, active)
-and the effective feature switches and app availability. It applies the
-profile in one transaction on every successful fetch (the apply is idempotent;
-the hash only decides whether the state records a new `appliedAt`), writes each
-app's state as a per-business override so the desktop's global catalogue is
-never rewritten, and keeps the last copy offline (`site-profile-service.ts`).
-App keys, availability states and feature keys this desktop does not know yet
-(a newer cloud) are skipped rather than rejected. A failure is recorded in its
-own setting, `server_sync.site_profile_state`, backs off, and is shown as its
-own line («تنظیمات شعبه از ابر») on the sync panel; it never blocks push or
-pull and does not change the overall sync badge.
+the branch row (name, address, phone, timezone, business-day start, active),
+the effective feature switches and app availability, and the business settings
+the till sells offline with — `tax.config` (VAT default), `pricing.config`
+(margin/overhead policy) and `orders.controls` (discount/void limits). It
+applies the profile in one transaction on every successful fetch (the apply is
+idempotent; the hash only decides whether the state records a new `appliedAt`),
+writes each app's state as a per-business override so the desktop's global
+catalogue is never rewritten, and keeps the last copy offline
+(`site-profile-service.ts`). A setting sent as `null` is cleared locally; one
+the cloud does not mention is left alone, so an older cloud cannot wipe a
+till's copies. App keys, availability states and feature keys this desktop does
+not know yet (a newer cloud) are skipped rather than rejected. A failure is
+recorded in its own setting, `server_sync.site_profile_state`, backs off, and is
+shown as its own line («تنظیمات شعبه از ابر») on the sync panel; it never blocks
+push or pull and does not change the overall sync badge.
 
 **Rollout: deploy the cloud first.** The shift events (`shift.opened@1`,
 `shift.closed@1`) record on both sides. A desktop still on an older version
@@ -279,6 +283,43 @@ surface read healthy.
   }` closes the episode when its own run converged, so a successful repair is
   not contradicted by a stale row for up to 30 s.
 
+## Order numbers: one cloud sequence, blocks leased to the till (migration 0318)
+
+A location's order numbers come from **one authority**, never from a counter
+each replica advances on its own. `order_number_sequence` is the cloud's
+per-location counter; `order_number_lease` records the blocks of it a paired
+till has reserved.
+
+- **A paired till leases, then mints locally.** When its block reaches
+  `ORDER_NUMBER_LEASE_LOW_WATERMARK` (20 of 200 left), the sync tick calls
+  `POST /api/server-sync/order-number-lease` and stores the granted block. It
+  then mints inside the block with a local `UPDATE`, so selling never needs the
+  cloud; only the next block does, and it is fetched before the current one is
+  exhausted. The old block's tail is consumed before the new one, so an
+  ordinary renewal leaves no gap. `highestLocalOrderNumber` rides on the request
+  so the block starts above a sale that landed while the previous push was in
+  flight.
+- **The cloud's own bills draw from the same sequence.** POS orders rung up in
+  the cloud, website/CMS and WooCommerce orders, retail invoices and imported
+  sales all call `allocateOrderNumber`; a lease reserves its whole range out of
+  that sequence, so a cloud-created bill can never land inside a till's block.
+  A `local` install (no peer) uses the sequence directly.
+- **A pulled order is never renumbered.** `order.create` carries the sender's
+  `orderNumber`, and `order.state.synced` carries it in the bill itself. The
+  receiver stores that number verbatim. A genuine collision is terminal: the
+  event is dead-lettered with `order_number_conflict` and
+  `sync.order_number_conflict` alerts the owner — the number is not rewritten to
+  dodge it. This replaced the old "taken → take this side's next" fallback,
+  which is how a till's #820 was stored in the cloud as #821.
+- **Renewal is not a gate.** A failed renewal is reported and retried after a
+  minute; the till keeps selling from the numbers it holds. Only a completely
+  exhausted block refuses a new bill (`order_number_lease_exhausted`), rather
+  than borrowing a number another install may own.
+- **Upgrade.** The migration seeds every location from both
+  `order_number_counters` and its highest existing order number, so an install
+  continues where it was. `order_number_counters` is left in place for older
+  desktop builds during rollout; no new code writes it.
+
 ## Event transport
 
 On the site, `runServerSyncTick()` (`src/lib/server-sync.ts`, every 30 s):
@@ -476,9 +517,17 @@ the receiver merges field by field (the later edit of each field wins; edits to
 different fields both survive). Values each side derives for itself never
 merge: stock average cost and carrying value, table occupancy, CRM scores and
 ciphertext (the plaintext crosses and is re-encrypted under the receiver's
-key). A change that cannot merge — two rows created independently with the
-same unique name, a delete the other side's history blocks — is recorded as a
-master conflict and listed on the sync panel.
+key). A change that cannot merge - two rows created independently with the
+same unique name, a delete the other side's history blocks - is recorded as a
+master conflict and listed on the sync panel. One exception is adopted rather
+than conflicted: a party that arrives under a different UUID but the same
+`employee_user_id` is the same membership's personnel file
+(`idx_parties_employee_user` makes that an invariant), so the receiver keeps
+its own UUID as the person, applies the peer's fields to it, and keeps the
+peer's UUID as an archived alias (`merged_into_id`) for orders and events that
+already reference it. Later edits under either UUID are redirected to the
+winner, which is what stops issue #1446's duplicate employee parties from
+blocking the queue again.
 
 **AEC (issue #799 §26)** — the architecture/engineering/construction registers
 are classified rather than assumed. `src/lib/aec-sync-classification.ts` puts

@@ -649,6 +649,10 @@ describe("issue #1446 — master conflict retries are bounded and never starve l
       [employeeUser, shop.businessId, shop.locationId],
     );
     await makeParty(shop, "employee", { employeeUserId: employeeUser });
+    const localEmployee = await owner.query<{ id: string }>(
+      "SELECT id FROM parties WHERE business_id = $1 AND employee_user_id = $2",
+      [shop.businessId, employeeUser],
+    );
     const incomingParty = randomUUID();
     const duplicate = await dbLib.withTenant(shop.businessId, () =>
       masterSync.applyMasterChanges(shop.businessId, [
@@ -657,7 +661,7 @@ describe("issue #1446 — master conflict retries are bounded and never starve l
           rowId: incomingParty,
           deleted: false,
           rowHlc: hlc,
-          clocks: {},
+          clocks: { name: hlc },
           row: {
             id: incomingParty,
             business_id: shop.businessId,
@@ -673,12 +677,34 @@ describe("issue #1446 — master conflict retries are bounded and never starve l
         },
       ]),
     );
-    expect(duplicate.outcomes[0]).toBe("conflict");
+    // Natural-key adoption (issue #1446): the membership's existing, local
+    // personnel file is the person; the peer's UUID is kept as an archived
+    // alias so an order that already references it still resolves. The outcome
+    // is `noop` when every incoming field is older than the local row (the
+    // person was already adopted) and `applied` when one moved.
+    expect(["applied", "noop"]).toContain(duplicate.outcomes[0]);
+    const adopted = await owner.query<{
+      id: string;
+      name: string;
+      is_active: boolean;
+      merged_into_id: string | null;
+    }>(
+      `SELECT id, name, is_active, merged_into_id FROM parties
+        WHERE business_id = $1 AND (id = $2 OR employee_user_id = $3)`,
+      [shop.businessId, incomingParty, employeeUser],
+    );
+    expect(adopted.rows.find((row) => row.is_active)).toMatchObject({
+      id: localEmployee.rows[0].id,
+    });
+    expect(adopted.rows.find((row) => row.id === incomingParty)).toMatchObject({
+      is_active: false,
+      merged_into_id: localEmployee.rows[0].id,
+    });
     const identity = await owner.query<{ error_code: string }>(
       "SELECT error_code FROM sync_master_conflicts WHERE business_id = $1 AND row_id = $2",
       [shop.businessId, incomingParty],
     );
-    expect(identity.rows[0]?.error_code).toBe("employee_party_identity_conflict");
+    expect(identity.rows).toEqual([]);
 
     // An operator acknowledgement is audited and closes that conflict.
     const resolved = await dbLib.withTenant(shop.businessId, () =>

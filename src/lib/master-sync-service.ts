@@ -26,6 +26,7 @@ import { planMasterMerge, type LocalMasterState, type MasterChange } from "./mas
 import { identityColumns, phoneColumns } from "./parties-service";
 import { purgeMirroredMediaObject } from "./media-mirror";
 import { hlcNode, isHlc, maxHlc, ZERO_HLC } from "./sync-hlc";
+import { isUuid } from "./uuid";
 
 /** A change as it crosses the wire: the merge input plus where it came from. */
 export interface MasterFeedChange extends MasterChange {
@@ -475,6 +476,106 @@ async function recordConflict(
   return rows[0]?.attempts ?? 1;
 }
 
+interface PartyAdoption {
+  /** An incoming id this side does not hold, to keep as an archived alias of `winnerId`. */
+  alias: { id: string; winnerId: string; name: string; role: string; roles: string[] } | null;
+  change: MasterFeedChange;
+}
+
+const PARTY_ROLES = new Set(["customer", "employee", "supplier"]);
+
+/** Follow one or more merge/tombstone links to the row that actually holds the person. */
+async function followPartyAlias(
+  client: PoolClient,
+  businessId: string,
+  startId: string,
+): Promise<string> {
+  let id = startId;
+  for (let hop = 0; hop < 4; hop += 1) {
+    const { rows } = await client.query<{ merged_into_id: string | null }>(
+      "SELECT merged_into_id FROM parties WHERE business_id = $1 AND id = $2",
+      [businessId, id],
+    );
+    const next = rows[0]?.merged_into_id;
+    if (!next || next === id) break;
+    id = next;
+  }
+  return id;
+}
+
+/**
+ * A party is identified by two things: its UUID and, for a membership, its
+ * `employee_user_id`. Two installs that independently created a personnel file
+ * for the same membership hold two UUIDs for one person, and
+ * `idx_parties_employee_user` makes them mutually exclusive — so a strict
+ * UUID-keyed merge can only record a conflict (issue #1446).
+ *
+ * Adoption means: the local row with that natural key is the person, the
+ * incoming row is applied to it, and the incoming UUID is kept as an archived
+ * alias (`merged_into_id`) so an order or event that already references it
+ * still resolves. Future changes for the alias are redirected to the winner,
+ * on both sides. This is the one merge the sync tick may perform by itself,
+ * because the natural key is a database invariant rather than a guess: one
+ * membership has one personnel file.
+ */
+async function resolvePartyMasterTarget(
+  client: PoolClient,
+  businessId: string,
+  change: MasterFeedChange,
+): Promise<PartyAdoption> {
+  if (change.table !== "parties") return { change, alias: null };
+  const { rows: local } = await client.query<{ id: string; merged_into_id: string | null }>(
+    "SELECT id, merged_into_id FROM parties WHERE business_id = $1 AND id = $2",
+    [businessId, change.rowId],
+  );
+  let targetId = change.rowId;
+  let alias: PartyAdoption["alias"] = null;
+
+  if (local[0]?.merged_into_id) {
+    // This id is already an alias on this side; the person lives at its target.
+    targetId = await followPartyAlias(client, businessId, local[0].merged_into_id);
+  } else if (!local[0] && !change.deleted && change.row) {
+    const employee = change.row.employee_user_id;
+    if (typeof employee === "string" && isUuid(employee)) {
+      const { rows: holder } = await client.query<{ id: string; merged_into_id: string | null }>(
+        `SELECT id, merged_into_id FROM parties
+          WHERE business_id = $1 AND employee_user_id = $2
+          LIMIT 1`,
+        [businessId, employee],
+      );
+      const held = holder[0];
+      if (held) {
+        targetId = held.merged_into_id
+          ? await followPartyAlias(client, businessId, held.merged_into_id)
+          : held.id;
+        if (targetId !== change.rowId) {
+          const name = typeof change.row.name === "string" ? change.row.name.trim() : "";
+          const role =
+            typeof change.row.role === "string" && PARTY_ROLES.has(change.row.role)
+              ? change.row.role
+              : "customer";
+          const roles = Array.isArray(change.row.roles)
+            ? change.row.roles.filter(
+                (entry): entry is string => typeof entry === "string" && PARTY_ROLES.has(entry),
+              )
+            : [];
+          if (name) alias = { id: change.rowId, winnerId: targetId, name, role, roles };
+        }
+      }
+    }
+  }
+
+  if (targetId === change.rowId) return { change, alias };
+  return {
+    change: {
+      ...change,
+      rowId: targetId,
+      row: change.row ? { ...change.row, id: targetId } : change.row,
+    },
+    alias,
+  };
+}
+
 async function applyOne(
   client: PoolClient,
   businessId: string,
@@ -487,6 +588,32 @@ async function applyOne(
   const config = masterTableConfig(change.table);
   const meta = columnsByTable.get(change.table);
   if (!config || !meta) throw new MergeConflict("unknown_table", `table ${String(change.table)} is not synchronised`);
+
+  /*
+   * Issue #1446 — adopt a duplicate party by its natural key before the
+   * UUID-keyed merge runs. The alias is written first so even an all-stale
+   * change (a noop against the winner) still gives the peer's id a local row
+   * to resolve. It is archived and carries no natural key/accounting code, so
+   * it cannot block the winner's unique indexes.
+   */
+  const adoption = await resolvePartyMasterTarget(client, businessId, change);
+  change = adoption.change;
+  if (adoption.alias) {
+    await client.query(
+      `INSERT INTO parties (id, business_id, name, role, roles, is_active, merged_into_id)
+       VALUES ($1, $2, $3, $4, $5::text[], false, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        adoption.alias.id,
+        businessId,
+        adoption.alias.name,
+        adoption.alias.role,
+        adoption.alias.roles,
+        adoption.alias.winnerId,
+      ],
+    );
+  }
+
   const pk = splitRowKey(config, String(change.rowId));
   if (!pk) throw new MergeConflict("invalid_row_id", String(change.rowId));
   if (!isHlc(change.rowHlc) || Object.values(change.clocks ?? {}).some((clock) => !isHlc(clock))) {

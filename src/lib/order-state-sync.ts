@@ -29,6 +29,9 @@ import { deploymentRole } from "./deployment-role";
 import { appendSyncOutboxEvent } from "./sync-outbox";
 import { ensureSessionForTable } from "./table-session-service";
 import { isHlc } from "./sync-hlc";
+import { toPersianDigits } from "./digits";
+import { notificationDedupeKey } from "./notifications";
+import { recordNotification } from "./notification-events";
 
 export interface OrderStateActor {
   userId: string;
@@ -293,6 +296,55 @@ export const STRAY_LINE_REASON = "همگام‌سازی — این ردیف در
 /** Thrown for an order state that can never apply; the sync engine dead-letters it. */
 export class OrderStateTerminal extends Error {}
 
+/** The sender's order number from an `order.state.synced` payload, when it carries one. */
+export function orderStateOrderNumber(payload: Record<string, unknown>): number | string | null {
+  const order = (payload as { order?: { orderNumber?: unknown } }).order;
+  const value = order?.orderNumber;
+  return typeof value === "number" || typeof value === "string" ? value : null;
+}
+
+/**
+ * Tell the owner that a pulled bill could not keep its own number — the one
+ * case the allocator is supposed to make impossible, and therefore one a person
+ * must see rather than a number quietly rewritten. The dead letter carries the
+ * machine detail; this is the sentence on their phone.
+ *
+ * Deduped on the bill's identity, so a retried event or a re-queued dead letter
+ * produces one notification, not one per attempt.
+ */
+export async function notifyOrderNumberConflict(params: {
+  businessId: string;
+  locationId: string;
+  orderId: string | null;
+  orderNumber: number | string | null;
+  clientEventId: string;
+}): Promise<void> {
+  const number = params.orderNumber === null ? null : String(params.orderNumber);
+  await recordNotification({
+    businessId: params.businessId,
+    locationId: params.locationId,
+    eventKey: "sync.order_number_conflict",
+    severity: "important",
+    title: "شمارهٔ سفارش تکراری در همگام‌سازی",
+    body:
+      (number ? `سفارش شمارهٔ ${toPersianDigits(number)} ` : "یک سفارش ") +
+      "با شماره‌ای رسید که روی این دستگاه برای سفارش دیگری ثبت شده است. " +
+      "شماره بازنویسی نشد؛ سفارش در صف همگام‌سازی به‌عنوان نامهٔ مرده ثبت شد. " +
+      "برای بررسی به «اتصال و همگام‌سازی» بروید.",
+    url: "/settings/cloud-sync",
+    dedupeKey: notificationDedupeKey(
+      "sync.order_number_conflict",
+      params.orderId ?? params.clientEventId,
+      number ?? "unknown",
+    ),
+    payload: {
+      orderId: params.orderId,
+      orderNumber: number,
+      clientEventId: params.clientEventId,
+    },
+  });
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ORDER_TYPES = new Set(["dine_in", "takeaway", "delivery"]);
 /** An order still being rung up; `held` is a parked one. */
@@ -420,51 +472,64 @@ export async function applyOrderState(
   const openedBy = order.openedBy && users.has(order.openedBy) ? order.openedBy : null;
 
   if (!local) {
-    // Keep the sender's number when it is free here, so a receipt reads the
-    // same on both sides; otherwise take this side's next one.
+    /*
+     * Never renumber a pulled order (migration 0318).
+     *
+     * The number is part of the document: it is on the guest's receipt, on the
+     * sender's report and in the sender's journal description. The old code
+     * kept the sender's number when it was free here and otherwise took this
+     * side's next one, which is how a till's #820 became the cloud's #821 for
+     * the same sale. The allocator now reserves each till's numbers before it
+     * uses them, so a collision is a genuine anomaly, not an expected race: it
+     * is dead-lettered and alerted instead of being silently rewritten.
+     */
     const { rows: taken } = await client.query(
       "SELECT 1 FROM orders WHERE location_id = $1 AND order_number = $2::bigint",
       [params.locationId, order.orderNumber],
     );
-    let orderNumber = order.orderNumber;
-    if (taken.length > 0) {
-      const { rows: counter } = await client.query<{ next_number: string }>(
-        `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, 2)
-         ON CONFLICT (location_id) DO UPDATE SET next_number = order_number_counters.next_number + 1
-         RETURNING (next_number - 1)::text AS next_number`,
-        [params.locationId],
-      );
-      orderNumber = counter[0].next_number;
-    } else {
+    if (taken.length > 0) throw new OrderStateTerminal("order_number_conflict");
+
+    try {
+      await client.query("SAVEPOINT order_number_insert");
       await client.query(
-        `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, $2::bigint + 1)
-         ON CONFLICT (location_id) DO UPDATE
-           SET next_number = greatest(order_number_counters.next_number, EXCLUDED.next_number)`,
-        [params.locationId, orderNumber],
+        `INSERT INTO orders (id, location_id, order_number, type, status, table_id, customer_id, guest_count,
+                             note, discount_type, discount_value, opened_at, opened_by, promotion_ids)
+         VALUES ($1, $2, $3::bigint, $4::order_type, 'open', $5, $6, $7, $8, $9, $10::numeric, $11::timestamptz, $12, $13::jsonb)`,
+        [
+          orderId,
+          params.locationId,
+          order.orderNumber,
+          order.type,
+          tableId,
+          order.customerId,
+          order.guestCount,
+          order.note,
+          order.discountType,
+          order.discountValue,
+          order.openedAt,
+          openedBy,
+          // The origin's frozen promotion eligibility (issue #913 item 4) —
+          // undefined in states from before the snapshot existed, which stays null.
+          Array.isArray(order.promotionIds) ? JSON.stringify(order.promotionIds) : null,
+        ],
       );
+      await client.query("RELEASE SAVEPOINT order_number_insert");
+    } catch (error) {
+      // The check above and the INSERT are separate statements; a concurrent
+      // local sale can take the number between them. The unique index is the
+      // final word, and it is a conflict, not a transient database failure.
+      // Only the number's own constraint means that: a duplicate primary key
+      // is a different race and stays retryable.
+      const violation = error as { code?: string; constraint?: string };
+      if (
+        violation.code === "23505" &&
+        violation.constraint === "orders_location_id_order_number_key"
+      ) {
+        await client.query("ROLLBACK TO SAVEPOINT order_number_insert");
+        throw new OrderStateTerminal("order_number_conflict");
+      }
+      throw error;
     }
-    await client.query(
-      `INSERT INTO orders (id, location_id, order_number, type, status, table_id, customer_id, guest_count,
-                           note, discount_type, discount_value, opened_at, opened_by, promotion_ids)
-       VALUES ($1, $2, $3::bigint, $4::order_type, 'open', $5, $6, $7, $8, $9, $10::numeric, $11::timestamptz, $12, $13::jsonb)`,
-      [
-        orderId,
-        params.locationId,
-        orderNumber,
-        order.type,
-        tableId,
-        order.customerId,
-        order.guestCount,
-        order.note,
-        order.discountType,
-        order.discountValue,
-        order.openedAt,
-        openedBy,
-        // The origin's frozen promotion eligibility (issue #913 item 4) —
-        // undefined in states from before the snapshot existed, which stays null.
-        Array.isArray(order.promotionIds) ? JSON.stringify(order.promotionIds) : null,
-      ],
-    );
   } else {
     // opened_at too: an order.create replayed before this fix, or by an older
     // peer, carries the replay's clock, and the bill belongs to the shift and

@@ -95,11 +95,19 @@ export function ImportSection({
   entities,
   cataloguePermitted = false,
   initialEntityKey = "",
+  resumeJobId = null,
   onJobQueued,
 }: {
   entities: CatalogueEntity[] | null;
   cataloguePermitted?: boolean;
   initialEntityKey?: string;
+  /**
+   * A saved job to reopen (issue #1535 / ESH-218). The first-run wizard lists
+   * its staged sessions and resumes one through this same mapping/preview UI
+   * rather than shipping a second importer. Only `pending`/`ready` jobs are
+   * resumable; anything already queued or received is reported as such.
+   */
+  resumeJobId?: string | null;
   onJobQueued: () => void;
 }) {
   const importable = useMemo(
@@ -128,6 +136,7 @@ export function ImportSection({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [reconcileRunId, setReconcileRunId] = useState<string | null>(null);
+  const resumedJobRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (initialEntityKey === CATALOGUE_IMPORT_ENTITY_KEY && cataloguePermitted) {
@@ -234,6 +243,51 @@ export function ImportSection({
     },
     [],
   );
+
+  // Resume one saved job through the existing mapping/preview path. Guarded by
+  // a ref so a re-render (or a parent state change) never reloads it twice.
+  useEffect(() => {
+    if (!resumeJobId || !entities || resumedJobRef.current === resumeJobId) return;
+    resumedJobRef.current = resumeJobId;
+    let cancelled = false;
+    setBusy("preview");
+    setError("");
+    setNotice("");
+    void api<{ job: ImportJobView; error?: string }>(`/api/data/imports/${resumeJobId}`)
+      .then(async ({ ok, data }) => {
+        if (cancelled) return;
+        if (!ok) {
+          setError(dataError(data.error));
+          return;
+        }
+        if (data.job.status !== "pending" && data.job.status !== "ready") {
+          setNotice(
+            "این ورود اطلاعات دیگر در انتظار تأیید نیست؛ وضعیت آن را در تاریخچه ببینید.",
+          );
+          return;
+        }
+        setEntityKey(data.job.entityKey);
+        setJob(data.job);
+        setColumns(data.job.sourceColumns);
+        setMapping(data.job.mapping.columns);
+        const options = data.job.options as Record<string, unknown>;
+        setDuplicateRule(String(options.duplicateRule ?? ""));
+        setDuplicateStrategy(String(options.duplicateStrategy ?? "skip"));
+        setValidOnly(options.validOnly !== false);
+        setMoneyUnit(String(options.moneyUnit ?? "toman"));
+        setRelationStrategy(
+          (options.relationStrategy as Record<string, string> | undefined) ?? {},
+        );
+        setNotice("پیش‌نویس ذخیره‌شدهٔ این ورود اطلاعات بازیابی شد؛ بازبینی و تأیید کنید.");
+        await refreshPreview(data.job.id, data.job.mapping.columns, options);
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resumeJobId, entities, refreshPreview]);
 
   function currentOptions(): Record<string, unknown> {
     return {

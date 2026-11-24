@@ -120,6 +120,7 @@ export const SYNC_EVENT_REGISTRY = [
     dependencyErrors: [],
     payloadFields: [
       "orderId",
+      "orderNumber",
       "type",
       "tableId",
       "customerId",

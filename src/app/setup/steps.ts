@@ -35,6 +35,13 @@ export const STEPS: StepMeta[] = [
     short: "راه‌اندازی برنامه",
     optional: true,
   },
+  {
+    id: "import",
+    path: "/setup/import",
+    title: "ورود اطلاعات اولیه",
+    short: "ورود اطلاعات",
+    optional: true,
+  },
   { id: "accounts", path: "/setup/accounts", title: "سرفصل حساب‌ها", short: "حساب‌ها" },
   { id: "costing", path: "/setup/costing", title: "روش قیمت‌گذاری موجودی", short: "قیمت‌گذاری" },
   { id: "tax", path: "/setup/tax", title: "تنظیم مالیات", short: "مالیات" },

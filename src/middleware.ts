@@ -52,6 +52,10 @@ const CENTRAL_EXECUTION_PATHS = [
   "/api/server-sync/master",
   "/api/server-sync/digest",
   "/api/server-sync/site-profile",
+  // Migration 0318 — a paired till reserves its next block of order numbers
+  // from the cloud's per-location sequence. Bearer site credential; the
+  // credential, never the body, names the branch and install.
+  "/api/server-sync/order-number-lease",
   // Phase 46 — «ورود با حساب ابری»: the cloud half (the page the desktop opens
   // in the browser, its code-minting POST, the install's redemption and the
   // embedded pane's session hand-off). The desktop half lives under
@@ -410,6 +414,10 @@ const PUBLIC_PATHS = [
   "/api/server-sync/master",
   "/api/server-sync/digest",
   "/api/server-sync/site-profile",
+  // Migration 0318 — the same site bearer credential reserves the next block
+  // of order numbers for this branch. No session exists for a paired till's
+  // allocator call.
+  "/api/server-sync/order-number-lease",
   // The IAM control plane a paired desktop reconciles before every sync tick
   // (src/lib/iam/sync.ts): snapshot, events and status are read with the site
   // bearer credential, and commands/detach are posted with it — each route
@@ -1000,6 +1008,7 @@ const SYNC_TOKEN_RATE_LIMITED_PATHS = [
   "/api/server-sync/master",
   "/api/server-sync/digest",
   "/api/server-sync/site-profile",
+  "/api/server-sync/order-number-lease",
   "/api/server-sync/desktop-login",
 ];
 

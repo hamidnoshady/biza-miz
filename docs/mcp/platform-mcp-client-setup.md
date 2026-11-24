@@ -206,6 +206,34 @@ so the two records always join without relying on timestamps.
 tenant; the only authorized way out of the archive is
 `restore_archived_business` with `business.archive`.
 
+## Business directory and owner-profile reads
+
+Two read-only tools cover the Business Control Center (issue #1430); both require
+`businesses.read`, the same capability as their console screens, and every call is
+audited.
+
+- **`list_businesses`** takes the console directory's own filters: `search`,
+  `status`, `plan`, `industry`, `createdFrom`/`createdTo` (`YYYY-MM-DD`,
+  inclusive), `activity` (`active` = has orders, `idle` = none), `sort` +
+  `sortDir`, and `page`/`pageSize` (`page` 1–1,000,000; `pageSize` 1–100,
+  default 20). It calls the console's
+  `queryBusinesses`, so rows, totals, status counts and order are the same as
+  `/platform/businesses`. Invalid values are refused with
+  `error: "invalid_arguments"` — never dropped, because dropping a filter would
+  widen a tenant list. The legacy `limit`/`offset` pair still works but cannot be
+  combined with `page`/`pageSize`.
+- **`get_business_owner_profile`** reads one explicitly selected business's
+  owner/manager profiles (optionally narrowed by `membershipId`): name, email,
+  membership state, branch access, safe MFA state — method, OTP phone,
+  confirmation and unused recovery-code count, never a secret or credential — and
+  cross-business reach. When the credential is limited to a business list,
+  `otherBusinesses` is filtered to that list; `membershipCount` stays the
+  identity's true count because it describes the person, not another tenant.
+  A missing business answers `found: false`; it is not an error. Profile PATCH,
+  name/email/phone edits, membership/MFA changes and role grants remain
+  console-only.
+
+
 ## Proxy / CDN notes
 
 - Pass `Authorization` through untouched. A 401 to a client that *sent* a

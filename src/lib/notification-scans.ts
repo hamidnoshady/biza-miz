@@ -48,6 +48,8 @@ import { delayedCommitments } from "./aec-procurement-service";
 import { overdueRegisters } from "./aec-rfi-service";
 import { overdueSiteIssues } from "./aec-site-service";
 import { getBusinessIndustry } from "./industry-guard";
+import { hasModule } from "./industry-profile";
+import { scanKitchenTicketAging } from "./kitchen-alert-service";
 import { formatJalali } from "./jalali";
 
 /**
@@ -572,5 +574,51 @@ export async function runAecOverdueScanTick(): Promise<number> {
     return queued;
   } finally {
     aecScanInFlight = false;
+  }
+}
+
+/**
+ * Ticket age becomes a fact by time passing, not by a write, so the KDS has no
+ * single mutation to hang a notification on. One minute is the cadence the KDS
+ * worker itself already uses to redraw ages; slower than that makes an
+ * "approaching" alert arrive after the pass has already noticed.
+ */
+export const KITCHEN_AGING_SCAN_INTERVAL_MS = 60_000;
+
+let kitchenAgingScanInFlight = false;
+
+export async function runKitchenAgingScanTick(): Promise<number> {
+  if (kitchenAgingScanInFlight) return 0;
+  kitchenAgingScanInFlight = true;
+  try {
+    const businessIds = await withoutTenantScope("platform", async () => {
+      const { rows } = await query<{ id: string }>(
+        "SELECT id FROM businesses WHERE status = 'active' ORDER BY id",
+      );
+      return rows.map((row) => row.id);
+    });
+
+    let queued = 0;
+    for (const businessId of businessIds) {
+      try {
+        if (!(await isAppServiceOperational(businessId, "accounting"))) continue;
+        // Kitchen is an F&B module. A trade without it must not be scanned,
+        // even if a legacy settings row still names a kitchen threshold.
+        const industry = await getBusinessIndustry(businessId);
+        if (!industry || !hasModule(industry, "kitchen")) continue;
+        queued += await withTenant(businessId, () => scanKitchenTicketAging(businessId));
+      } catch (error) {
+        const failure = safeScanError(error);
+        notificationScanLog("kitchen-aging-scan", "error", "business_scan_failed", {
+          businessId,
+          operation: "scan_kitchen_ticket_aging",
+          errorName: failure.name,
+          errorCode: failure.code,
+        });
+      }
+    }
+    return queued;
+  } finally {
+    kitchenAgingScanInFlight = false;
   }
 }

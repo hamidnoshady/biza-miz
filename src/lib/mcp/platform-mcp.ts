@@ -128,6 +128,20 @@ import {
 } from "../app-availability-service";
 import { appForKey } from "../apps";
 import { updatePlatformAdmin } from "../platform-service";
+// Issue #1430 — the Business Control Center's read-only MCP surface. The
+// directory query itself stays in queryBusinesses; this module only validates
+// arguments and keeps owner-profile cross-business hints inside the
+// credential's bridge scope.
+import { listBusinessOwnerProfiles } from "../platform-owner-profile";
+import {
+  PlatformMcpInputError,
+  parseBusinessDirectoryQuery,
+  parseMembershipId,
+  scopeOwnerProfileForCredential,
+  BUSINESS_DIRECTORY_FILTER_ENUMS,
+  BUSINESS_DIRECTORY_MAX_PAGE,
+  BUSINESS_DIRECTORY_MAX_PAGE_SIZE,
+} from "./platform-business-tools";
 // Batch BN — support content (the platform's own knowledge base), the CMS
 // fleet's read lanes, the backup backup/restore console's safe verbs, and the
 // system/observability dials. All service-backed; credential-shaped lanes
@@ -459,6 +473,15 @@ interface PlatformToolInput {
   q?: string;
   page?: number;
   pageSize?: number;
+  // Issue #1430 — the Business Control Center's directory filters.
+  /** "active" = has orders; "idle" = none. */
+  activity?: string;
+  /** One of `BUSINESS_SORT_VALUES`; see ../business-sort. */
+  sort?: string;
+  /** "asc" | "desc"; omitted = the sort key's natural default. */
+  sortDir?: string;
+  /** Narrows an owner-profile read to one membership of the named business. */
+  membershipId?: string;
   // Batch BL — billing lanes.
   planKey?: string;
   name?: string;
@@ -555,7 +578,7 @@ export interface PlatformMcpTool {
   stepUp?: boolean;
   inputSchema: {
     type: "object";
-    properties: Record<string, { type: string; enum?: string[]; description?: string }>;
+    properties: Record<string, { type: string; enum?: readonly string[]; description?: string }>;
     required?: string[];
   };
 }
@@ -596,16 +619,74 @@ async function tenantBackupServiceHealthSafe(): Promise<Record<string, unknown> 
 export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
   {
     name: "list_businesses",
-    description: "Search the business directory by name, status or plan.",
+    description:
+      "Search the Business Control Center directory. Supports the console's own filters: free text " +
+      "(name, slug, subdomain), status, plan, industry, created-from/to (ISO dates, inclusive), " +
+      "activity (has orders / none), sort + direction, and bounded pagination. Results, totals and " +
+      "status counts come from the same service the console uses.",
     capability: "businesses.read",
     bridged: false,
     inputSchema: {
       type: "object",
       properties: {
-        search: { type: "string", description: "Name or phone fragment." },
-        status: { type: "string", enum: ["active", "suspended", "archived"] },
-        limit: { type: "number" },
-        offset: { type: "number" },
+        search: {
+          type: "string",
+          description: "Name, slug or subdomain fragment (case-insensitive).",
+        },
+        status: {
+          type: "string",
+          enum: BUSINESS_DIRECTORY_FILTER_ENUMS.status,
+          description: "Lifecycle status.",
+        },
+        plan: { type: "string", description: "Exact plan key, e.g. \"pro\"." },
+        industry: {
+          type: "string",
+          enum: BUSINESS_DIRECTORY_FILTER_ENUMS.industry,
+          description: "Business industry key.",
+        },
+        createdFrom: {
+          type: "string",
+          description: "Inclusive lower bound on creation date, YYYY-MM-DD (the console's wire date).",
+        },
+        createdTo: {
+          type: "string",
+          description: "Inclusive upper bound on creation date, YYYY-MM-DD.",
+        },
+        activity: {
+          type: "string",
+          enum: BUSINESS_DIRECTORY_FILTER_ENUMS.activity,
+          description: "\"active\" = has at least one order; \"idle\" = none.",
+        },
+        sort: {
+          type: "string",
+          enum: BUSINESS_DIRECTORY_FILTER_ENUMS.sort,
+          description:
+            "Sort key. \"newest\"/\"oldest\" are the console's legacy created-date aliases; " +
+            "otherwise the key's natural direction applies unless sortDir is set.",
+        },
+        sortDir: {
+          type: "string",
+          enum: BUSINESS_DIRECTORY_FILTER_ENUMS.sortDir,
+          description: "asc or desc.",
+        },
+        page: {
+          type: "number",
+          description: `1-based page, 1–${BUSINESS_DIRECTORY_MAX_PAGE}. Default 1.`,
+        },
+        pageSize: {
+          type: "number",
+          description: `Rows per page, 1–${BUSINESS_DIRECTORY_MAX_PAGE_SIZE}. Default 20.`,
+        },
+        limit: {
+          type: "number",
+          description:
+            "Deprecated alias for pageSize. Do not combine with page/pageSize.",
+        },
+        offset: {
+          type: "number",
+          description:
+            "Deprecated row offset; translated to a page. Do not combine with page/pageSize.",
+        },
       },
     },
   },
@@ -617,6 +698,27 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
     inputSchema: {
       type: "object",
       properties: { businessId: { type: "string" } },
+      required: ["businessId"],
+    },
+  },
+  {
+    name: "get_business_owner_profile",
+    description:
+      "Read the owner/manager profile of ONE explicitly selected business: name, email, membership " +
+      "status, branch access, safe MFA state (method, OTP phone, confirmation and unused recovery-code " +
+      "count — never a secret) and cross-business reach. Same DTO and businesses.read gate as the " +
+      "console. Read-only: profile edits, membership/MFA changes and role grants do not exist here.",
+    capability: "businesses.read",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string", description: "Exactly one business to read." },
+        membershipId: {
+          type: "string",
+          description: "Optional membership id to read one profile instead of all owner/managers.",
+        },
+      },
       required: ["businessId"],
     },
   },
@@ -1666,6 +1768,19 @@ export async function callPlatformMcpTool(
     });
     return { text: JSON.stringify(data, null, 2), data };
   } catch (err) {
+    if (err instanceof PlatformMcpInputError) {
+      // Issue #1430 — an invalid filter is refused in the caller's language.
+      // It must never fall through to a 500 that reads as "the directory is
+      // broken", and the audit row records the refusal like any other denial.
+      await platformAuditSafe(connection, targets[0] ?? null, tool.name, "invalid_arguments", {
+        message: err.message,
+        targets: targets.length > 0 ? targets : undefined,
+      });
+      return {
+        text: `invalid arguments: ${err.message}`,
+        data: { error: "invalid_arguments", message: err.message },
+      };
+    }
     await platformAuditSafe(connection, targets[0] ?? null, tool.name, "failed", {
       message: err instanceof Error ? err.message : String(err),
       targets,
@@ -1699,17 +1814,41 @@ async function executePlatformTool(
   return withoutTenantScope(`platform-mcp tool ${tool.name}`, async () => {
     switch (tool.name) {
       case "list_businesses": {
-        const result = await queryBusinesses({
-          search: arg.search,
-          status: arg.status as "active" | "suspended" | "archived" | undefined,
-          page: Math.floor((arg.offset ?? 0) / Math.max(1, arg.limit ?? 50)) + 1,
-          pageSize: Math.min(arg.limit ?? 50, 100),
-        });
-        return result;
+        // Issue #1430 — validate the console's filter vocabulary strictly, then
+        // run the console's own query. No second query engine, no silently
+        // widened filter.
+        return await queryBusinesses(parseBusinessDirectoryQuery(arg));
       }
       case "get_business_identity": {
         for (const id of targets) results[id] = await getBusinessIdentity(id);
         return { perBusiness: results };
+      }
+      case "get_business_owner_profile": {
+        // "One explicitly selected business" is the contract: batching this
+        // read would make `membershipId` ambiguous and turn a scoped operator
+        // into a directory sweep.
+        if (targets.length !== 1) {
+          throw new PlatformMcpInputError(
+            "get_business_owner_profile reads exactly one business: pass businessId (or a single businessIds entry).",
+          );
+        }
+        const businessId = targets[0];
+        const membershipId = parseMembershipId(arg.membershipId);
+        // Missing business is an answer, not a crash: `found` distinguishes
+        // "no such tenant" from "tenant exists but has no owner/manager row".
+        const business = await getBusiness(businessId);
+        const profiles = business ? await listBusinessOwnerProfiles(businessId) : [];
+        const selected = membershipId
+          ? profiles.filter((profile) => profile.membershipId === membershipId)
+          : profiles;
+        return {
+          businessId,
+          found: Boolean(business),
+          ...(membershipId ? { membershipId } : {}),
+          profiles: selected.map((profile) =>
+            scopeOwnerProfileForCredential(profile, connection.businessIds),
+          ),
+        };
       }
       case "list_feature_flags":
         return { flags: await listFeatureFlags() };

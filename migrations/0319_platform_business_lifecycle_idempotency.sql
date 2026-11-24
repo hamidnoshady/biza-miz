@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0318_platform_business_lifecycle_idempotency.sql — issue #1431.
+-- 0319_platform_business_lifecycle_idempotency.sql — issue #1431.
 --
 -- The Superadmin MCP archive/restore tools make the audit trail their durable
 -- idempotency ledger: a retry with the same actor + key reads the original

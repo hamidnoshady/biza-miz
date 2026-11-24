@@ -48,6 +48,8 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
   const steps = stepsFor(industry, selectedApps).filter(
     (s) => s.id !== "backup" || siteInstall,
   );
+  const completedCount = steps.filter((step) => Boolean(done[step.id])).length;
+  const percent = steps.length > 0 ? Math.round((completedCount / steps.length) * 100) : 0;
 
   if (!loaded) {
     return (
@@ -71,12 +73,38 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
 
   return (
     <nav
+      aria-label="مراحل راه‌اندازی کسب‌وکار"
       className={
         compact
           ? "flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none]"
           : "space-y-1"
       }
     >
+      {!compact ? (
+        <div className="mb-3 rounded-xl bg-muted/60 p-3">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>
+              {toPersianDigits(completedCount)} از {toPersianDigits(steps.length)} مرحله
+              تکمیل شده
+            </span>
+            <span className="tabular-nums">{toPersianDigits(percent)}٪</span>
+          </div>
+          <div
+            className="mt-2 h-1 overflow-hidden rounded-full bg-muted"
+            role="progressbar"
+            aria-label="پیشرفت کلی راه‌اندازی"
+            aria-valuenow={percent}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuetext={`${toPersianDigits(percent)} درصد`}
+          >
+            <div
+              className="h-full rounded-full bg-amber-500 transition-[width] duration-500 dark:bg-amber-400"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+        </div>
+      ) : null}
       {steps.map((s, i) => {
         const active = pathname === s.path;
         const isDone = Boolean(done[s.id]);
@@ -90,16 +118,17 @@ export function StepNav({ compact = false }: { compact?: boolean }) {
             key={s.id}
             href={s.path}
             aria-current={active ? "step" : undefined}
-            className={`flex min-h-10 items-center gap-2 whitespace-nowrap rounded-xl px-3 py-2 text-sm transition-colors ${
+            className={`flex min-h-10 items-center gap-2 whitespace-nowrap rounded-xl px-3 py-2 text-sm transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none ${
               active
                 ? "bg-amber-100 font-semibold text-amber-950 dark:bg-amber-500/20 dark:text-amber-200"
                 : "text-muted-foreground hover:bg-muted hover:text-foreground"
             }`}
           >
             <span
+              aria-label={isDone ? "تکمیل‌شده" : undefined}
               className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] ${
                 isDone
-                  ? "bg-emerald-700 dark:bg-emerald-500/80 text-white"
+                  ? "bg-emerald-700 text-white dark:bg-emerald-500/80"
                   : active
                     ? "bg-primary text-primary-foreground"
                     : "bg-muted text-muted-foreground"

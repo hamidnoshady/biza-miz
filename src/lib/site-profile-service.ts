@@ -13,14 +13,33 @@ import type { ServerSyncConfig } from "./server-sync-config";
 import { getSetting, setSetting, SETTING_KEYS } from "./settings";
 import {
   EMPTY_SITE_PROFILE_STATE,
+  MAX_SITE_PROFILE_SETTING_BYTES,
+  SITE_PROFILE_SETTING_FIELDS,
   siteProfileFailed,
   siteProfileHash,
   siteProfileSucceeded,
   validateSiteProfile,
   type SiteProfile,
+  type SiteProfileSettingField,
   type SiteProfileState,
 } from "./site-profile";
 import { attemptDue } from "./sync-backoff";
+
+/**
+ * The wire field ↔ `settings.key` map. The wire names are the profile's own;
+ * the keys are what every offline read already queries.
+ */
+const SITE_PROFILE_SETTING_KEYS: Record<SiteProfileSettingField, string> = {
+  tax: SETTING_KEYS.tax,
+  pricing: SETTING_KEYS.pricing,
+  orderControls: SETTING_KEYS.orderControls,
+};
+
+function settingRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return JSON.stringify(record).length <= MAX_SITE_PROFILE_SETTING_BYTES ? record : null;
+}
 
 /** The cloud's side. Null when the branch is not this business's. */
 export async function buildSiteProfile(businessId: string, locationId: string): Promise<SiteProfile | null> {
@@ -39,7 +58,16 @@ export async function buildSiteProfile(businessId: string, locationId: string): 
   );
   const row = rows[0];
   if (!row) return null;
-  const [features, availability] = await Promise.all([effectiveFeatures(businessId), effectiveAppAvailability(businessId)]);
+  const [features, availability, settingRows] = await Promise.all([
+    effectiveFeatures(businessId),
+    effectiveAppAvailability(businessId),
+    query<{ key: string; value: unknown }>(
+      `SELECT key, value FROM settings
+        WHERE business_id = $1 AND location_id IS NULL AND key = ANY($2::text[])`,
+      [businessId, Object.values(SITE_PROFILE_SETTING_KEYS)],
+    ),
+  ]);
+  const stored = new Map(settingRows.rows.map((entry) => [entry.key, entry.value]));
   return {
     schemaVersion: 1,
     location: {
@@ -54,6 +82,12 @@ export async function buildSiteProfile(businessId: string, locationId: string): 
     features,
     apps: Object.fromEntries(
       Object.values(availability).map((app) => [app.app, { state: app.state, note: app.note, availableFrom: app.availableFrom }]),
+    ),
+    settings: Object.fromEntries(
+      SITE_PROFILE_SETTING_FIELDS.map((field) => [
+        field,
+        settingRecord(stored.get(SITE_PROFILE_SETTING_KEYS[field])),
+      ]),
     ),
   };
 }
@@ -104,6 +138,33 @@ export async function applySiteProfile(businessId: string, locationId: string, p
         apps.map(([, record]) => record!.availableFrom),
       ],
     );
+    /*
+     * Business settings the cloud owns (0318 follow-up): the till prices and
+     * controls offline sales with the same tax rate, pricing policy and order
+     * controls the cloud's screens show. `null` clears the local copy, and an
+     * absent field is left alone for a cloud that does not send it yet.
+     */
+    if (profile.settings) {
+      for (const field of SITE_PROFILE_SETTING_FIELDS) {
+        if (!(field in profile.settings)) continue;
+        const value = profile.settings[field];
+        const key = SITE_PROFILE_SETTING_KEYS[field];
+        if (value === null) {
+          await client.query(
+            `DELETE FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2`,
+            [businessId, key],
+          );
+          continue;
+        }
+        await client.query(
+          `INSERT INTO settings (business_id, location_id, key, value)
+           VALUES ($1, NULL, $2, $3::jsonb)
+           ON CONFLICT (business_id, location_id, key)
+           DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+          [businessId, key, JSON.stringify(value)],
+        );
+      }
+    }
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});

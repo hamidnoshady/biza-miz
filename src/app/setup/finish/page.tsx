@@ -3,12 +3,17 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { cardClass } from "@/app/dashboard/page-chrome";
+import { StatusBadge, cardClass } from "@/app/dashboard/page-chrome";
 import { useMoney } from "@/components/money/money-context";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { isValidPin } from "@/lib/pin-policy";
 import type { AppKey } from "@/lib/apps";
 import type { SetupAppCatalogData } from "@/lib/setup-apps";
+import {
+  SETUP_IMPORT_STATE_LABELS,
+  SETUP_IMPORT_STATE_TONE,
+  type SetupImportsData,
+} from "@/lib/setup-imports";
 import { api, ErrorBox, errorMessage, InfoBox, inputClass, PrimaryButton, SetupDataSkeleton } from "../ui";
 import { catalogueHrefFor } from "@/lib/wizard-steps";
 import { stepsFor } from "../steps";
@@ -41,6 +46,7 @@ export default function FinishPage() {
   const money = useMoney();
   const [state, setState] = useState<StateResponse | null>(null);
   const [apps, setApps] = useState<SetupAppCatalogData | null>(null);
+  const [imports, setImports] = useState<SetupImportsData | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [completed, setCompleted] = useState(false);
@@ -56,7 +62,10 @@ export default function FinishPage() {
       api<StateResponse>("/api/setup/state"),
       api<SetupAppCatalogData>("/api/setup/apps"),
       api<{ users?: { id: string; role: string; has_pin: boolean }[] }>("/api/setup/users"),
-    ]).then(([stateResult, appsResult, usersResult]) => {
+      // Optional import sessions are summarised here as *information*, never as
+      // a Finish requirement (issue #1535 / ESH-218).
+      api<SetupImportsData>("/api/setup/imports"),
+    ]).then(([stateResult, appsResult, usersResult, importsResult]) => {
       if (stateResult.ok) {
         setState(stateResult.data);
         setCompleted(Boolean(stateResult.data.progress?.completedAt));
@@ -64,6 +73,7 @@ export default function FinishPage() {
         setError("بارگذاری وضعیت راه‌اندازی ممکن نشد.");
       }
       if (appsResult.ok) setApps(appsResult.data);
+      if (importsResult.ok) setImports(importsResult.data);
       const ownerRow = usersResult.ok
         ? usersResult.data.users?.find((row) => row.role === "owner")
         : undefined;
@@ -281,6 +291,57 @@ export default function FinishPage() {
                 شروع هزینه فقط بعد از فعال‌سازی تأییدشده و با موجودی کافی کیف پول
                 است. مبلغ راه‌اندازی یک‌بار برای هر برنامه کسر می‌شود و هفت روز
                 استفادهٔ رایگان ایجاد نمی‌کند.
+              </p>
+            ) : null}
+          </section>
+
+          <section className={`${cardClass} mb-6 p-5`} aria-label="ورود اطلاعات اولیه">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="font-semibold text-foreground">
+                  ورود اطلاعات اولیه <span className="text-xs font-normal text-muted-foreground">(اختیاری)</span>
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {imports && imports.summary.total > 0
+                    ? "وضعیت واقعی جلسه‌های ورود اطلاعات؛ هیچ‌کدام برای پایان راه‌اندازی الزامی نیستند."
+                    : "هنوز اطلاعاتی وارد نشده است. ورود اطلاعات اختیاری است و هر زمان می‌توانید ادامه دهید."}
+                </p>
+              </div>
+              <Link href="/setup/import" className="text-xs text-primary hover:underline">
+                {imports && imports.summary.total > 0
+                  ? "ادامه یا بازبینی ورود اطلاعات"
+                  : "ورود اطلاعات"}
+              </Link>
+            </div>
+
+            {imports && imports.sessions.length > 0 ? (
+              <ul className="divide-y divide-border rounded-xl border border-border">
+                {imports.sessions.slice(0, 5).map((session) => (
+                  <li
+                    key={session.id}
+                    className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 text-sm"
+                  >
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-foreground">{session.entityLabel}</span>
+                      <StatusBadge tone={SETUP_IMPORT_STATE_TONE[session.state]}>
+                        {SETUP_IMPORT_STATE_LABELS[session.state]}
+                      </StatusBadge>
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {toPersianDigits(session.createdRows)} ساخته‌شده،{" "}
+                      {toPersianDigits(session.updatedRows)} به‌روزشده،{" "}
+                      {toPersianDigits(session.failedRows)} ناموفق
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {imports && imports.summary.unfinished > 0 ? (
+              <p className="mt-3 rounded-lg border border-amber-600/30 bg-amber-500/5 px-3 py-2 text-xs leading-5 text-foreground">
+                {toPersianDigits(imports.summary.unfinished)} جلسه هنوز به تأیید یا
+                بازبینی نیاز دارد؛ ثبت آن‌ها در پایان راه‌اندازی دخالتی ندارد و از
+                داشبورد هم قابل ادامه است.
               </p>
             ) : null}
           </section>

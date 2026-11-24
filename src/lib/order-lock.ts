@@ -2,6 +2,8 @@ import type { PoolClient } from "pg";
 
 export interface LockedOpenOrder {
   id: string;
+  /** bigint in Postgres; text keeps the wire value exact for an integer order label. */
+  order_number: string;
   status: "open";
   type: "dine_in" | "takeaway" | "delivery";
   table_id: string | null;
@@ -37,7 +39,8 @@ export async function lockOpenOrder(
   orderId: string,
 ): Promise<LockOpenOrderResult> {
   const { rows } = await client.query<LockedOpenOrder & { status: string }>(
-    `SELECT id, status, type, table_id, table_session_id, customer_id, guest_count, subtotal::text, discount::text, discount_type,
+    `SELECT id, order_number::text AS order_number, status, type, table_id, table_session_id,
+            customer_id, guest_count, subtotal::text, discount::text, discount_type,
             discount_value::text, service_charge::text, tax::text, total::text, note
        FROM orders
       WHERE id = $1 AND location_id = $2

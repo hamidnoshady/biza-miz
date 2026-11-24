@@ -14,6 +14,7 @@ import { NextResponse } from "next/server";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
 import { notifyPaymentReceived } from "../kavenegar/lookup-triggers";
 import { readOrderPaymentRouting, routeWebsitePayment, type OrderPaymentSourceSnapshot } from "../order-payment-routing-service";
+import { allocateOrderNumber, resolveOrderNumberSource } from "../order-number-service";
 import { WELL_KNOWN_CODES } from "../coa-template";
 import { accountIdsByCode, postExactCogsEntry, postExactJournalEntry } from "../ledger-service";
 import { deductForOrder } from "../inventory-service";
@@ -928,13 +929,13 @@ async function ingestFnBOrder(connection: ConnectionRow, order: WooOrder): Promi
       return;
     }
 
-    const { rows: counter } = await client.query<{ next_number: string }>(
-      `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, 2)
-       ON CONFLICT (location_id) DO UPDATE SET next_number = order_number_counters.next_number + 1
-       RETURNING next_number - 1 AS next_number`,
-      [locationId],
-    );
-    const orderNumber = Number(counter[0].next_number);
+    // The cloud's one per-location sequence (migration 0318): a WooCommerce
+    // sale, a CMS order and a bill rung up here share it, and a paired till's
+    // leased block is already reserved out of it.
+    const orderNumber = await allocateOrderNumber(client, {
+      locationId,
+      source: await resolveOrderNumberSource(client, businessId),
+    });
 
     // Insert as 'open' first — the order_items financial guard (migration
     // 0014) rejects item inserts against a non-open order. The order is
@@ -1154,13 +1155,10 @@ async function ingestRetailOrder(
       return;
     }
 
-    const { rows: counter } = await client.query<{ next_number: string }>(
-      `INSERT INTO order_number_counters (location_id, next_number) VALUES ($1, 2)
-       ON CONFLICT (location_id) DO UPDATE SET next_number = order_number_counters.next_number + 1
-       RETURNING next_number - 1 AS next_number`,
-      [locationId],
-    );
-    const orderNumber = Number(counter[0].next_number);
+    const orderNumber = await allocateOrderNumber(client, {
+      locationId,
+      source: await resolveOrderNumberSource(client, businessId),
+    });
 
     // The sale's own instant, not the import's — see online-order-document-service.ts.
     const remoteCreatedAt = wooOrderInstant(order.date_created_gmt, order.date_created);

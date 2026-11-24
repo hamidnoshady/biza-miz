@@ -42,6 +42,7 @@ import { refreshAppUpdateStatus } from "./app-update";
 import { expireStalePairingSessions } from "./pairing-service";
 import { runMasterSync } from "./master-sync-transport";
 import { runSiteProfileSync } from "./site-profile-service";
+import { ensureOrderNumberLease } from "./order-number-service";
 import { runAutomotiveStockSync } from "./automotive-stock-service";
 import { runDriftCheck } from "./sync-health-service";
 import { attemptDue, nextAttemptAt } from "./sync-backoff";
@@ -1569,6 +1570,14 @@ export async function acknowledgePendingPairing(
   delete activated.pairingSessionId;
   delete activated.installationId;
   await setServerSyncConfig(businessId, activated);
+  /*
+   * Migration 0318 — the first block of order numbers, before the first sale.
+   * Pairing is the one moment the cloud is certainly reachable, and without a
+   * block the till would have to refuse its first bill until the next tick
+   * happened to renew one. `ensureOrderNumberLease` is a no-op for a business
+   * that is not hybrid and never throws for a cloud-side failure.
+   */
+  await ensureOrderNumberLease(businessId);
   return { status: "ok" };
 }
 
@@ -1762,6 +1771,21 @@ export async function runServerSyncTick(): Promise<void> {
     } catch (err) {
       console.error(
         `master-data sync failed for business ${row.business_id}:`,
+        err,
+      );
+    }
+    /*
+     * Migration 0318 — keep the till's block of order numbers ahead of its
+     * sales. The allocator itself runs locally and needs no cloud; only this
+     * renewal does, and it is a no-op until the current block reaches its low
+     * watermark. Before push/pull on purpose: a lease granted now is already
+     * on disk when the bills below arrive.
+     */
+    try {
+      await withTenant(row.business_id, () => ensureOrderNumberLease(row.business_id));
+    } catch (err) {
+      console.error(
+        `order-number lease renewal failed for business ${row.business_id}:`,
         err,
       );
     }

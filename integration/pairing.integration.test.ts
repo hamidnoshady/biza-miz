@@ -402,13 +402,18 @@ describe("pairing round trip", () => {
       installationId,
     });
 
-    let sent: { pairingSessionId?: string; installationId?: string; token?: string } = {};
+    let requests: Array<{ url: string; body: Record<string, unknown>; token?: string }> = [];
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (_url, init) => {
-      sent = {
-        ...JSON.parse(String(init?.body)),
-        token: new Headers(init?.headers).get("authorization")?.slice("Bearer ".length),
-      };
+    globalThis.fetch = async (url, init) => {
+      const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      requests = [
+        ...requests,
+        {
+          url: href,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+          token: new Headers(init?.headers).get("authorization")?.slice("Bearer ".length),
+        },
+      ];
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     };
     try {
@@ -418,15 +423,22 @@ describe("pairing round trip", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
-    expect(sent).toEqual({
+    // Pairing now also asks for the first order-number block (migration 0318),
+    // so identify the acknowledgement by its URL rather than "the last call".
+    const ack = requests.find((request) => request.url.endsWith("/api/pairing/acknowledge"));
+    expect(ack?.body).toEqual({
       pairingSessionId: repair.pairingSessionId,
       installationId,
-      token: repair.snapshot.syncToken,
     });
+    expect(ack?.token).toBe(repair.snapshot.syncToken);
 
     await useDatabase(serverDb);
     await expect(
-      acknowledgePairingSession(sent.pairingSessionId!, sent.installationId!, sent.token!),
+      acknowledgePairingSession(
+        ack!.body.pairingSessionId as string,
+        ack!.body.installationId as string,
+        ack!.token!,
+      ),
     ).resolves.toEqual({ ok: true, state: "completed" });
     const device = await withoutTenantScope("pairing-redeem", () =>
       query<{ status: string }>("SELECT status FROM site_devices WHERE id=$1", [repair.snapshot.siteDevice.id]),
