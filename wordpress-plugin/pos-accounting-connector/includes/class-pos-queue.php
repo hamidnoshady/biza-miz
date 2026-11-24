@@ -32,7 +32,7 @@ class POS_Connector_Queue {
 	 * unique — the same product legitimately has a `sent` row from yesterday and
 	 * a `pending` one from today, and two `sent` rows once it is sent twice.
 	 */
-	const DB_VERSION = 2;
+	const DB_VERSION = 3;
 
 	/** Set when `install_table()` fails so admin notices can surface `$wpdb->last_error`. */
 	private static $last_install_error = '';
@@ -111,6 +111,8 @@ class POS_Connector_Queue {
 				remote_id VARCHAR(64) NOT NULL DEFAULT '',
 				delivery_id VARCHAR(64) NOT NULL,
 				payload LONGTEXT NOT NULL,
+				payload_fingerprint CHAR(64) NOT NULL DEFAULT '',
+				sealed TINYINT UNSIGNED NOT NULL DEFAULT 0,
 				status VARCHAR(16) NOT NULL DEFAULT 'pending',
 				attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0,
 				last_error TEXT NULL,
@@ -121,6 +123,8 @@ class POS_Connector_Queue {
 				UNIQUE KEY delivery_id (delivery_id),
 				KEY topic_remote_status (topic, remote_id, status),
 				KEY status_created (status, created_at),
+				KEY status_updated (status, updated_at),
+				KEY topic_remote_id (topic, remote_id, id),
 				KEY due_lookup (status, available_at)
 			) {$charset};"
 		);
@@ -140,7 +144,7 @@ class POS_Connector_Queue {
 	 * that each cost a round trip to say the same thing. An already-sent row is
 	 * never touched — it is the record that the earlier state *was* delivered.
 	 */
-	public static function enqueue( $topic, $remote_id, array $payload ) {
+	public static function enqueue( $topic, $remote_id, array $payload, $force = false ) {
 		if ( ! self::table_exists() && ! self::maybe_install() ) {
 			POS_Connector_Log::error(
 				'queue',
@@ -158,26 +162,56 @@ class POS_Connector_Queue {
 		$table = self::table_name();
 		$now   = current_time( 'mysql', true );
 
-		$existing = $wpdb->get_var(
+		$encoded = wp_json_encode( $payload );
+		if ( false === $encoded ) {
+			return 0;
+		}
+
+		$fingerprint = '';
+		if ( 'product.updated' === $topic ) {
+			// WooCommerce can advance its save timestamp without changing any
+			// catalogue data consumed by Bizamiz.
+			unset( $payload['date_modified'] );
+			$fingerprint = hash( 'sha256', wp_json_encode( $payload ) );
+		}
+
+		$existing = $wpdb->get_row(
 			$wpdb->prepare(
-				"SELECT id FROM {$table} WHERE topic = %s AND remote_id = %s AND status = 'pending' LIMIT 1",
+				"SELECT id, status, sealed, attempts, payload_fingerprint FROM {$table}
+				 WHERE topic = %s AND remote_id = %s ORDER BY id DESC LIMIT 1",
 				$topic,
 				(string) $remote_id
-			)
+			),
+			ARRAY_A
 		);
 
-		if ( $existing ) {
-			$wpdb->update(
+		if ( $existing && ! $force && '' !== $fingerprint && 'failed' !== $existing['status']
+			&& $fingerprint === $existing['payload_fingerprint'] ) {
+			return (int) $existing['id'];
+		}
+
+		if ( $existing && 'pending' === $existing['status'] && ! $existing['sealed'] && ! $existing['attempts'] ) {
+			$updated = $wpdb->update(
 				$table,
 				array(
-					'payload'    => wp_json_encode( $payload ),
-					'updated_at' => $now,
+					'payload'             => $encoded,
+					'payload_fingerprint' => $fingerprint,
+					'updated_at'          => $now,
 				),
-				array( 'id' => $existing ),
-				array( '%s', '%s' ),
-				array( '%d' )
+				array( 'id' => $existing['id'], 'status' => 'pending', 'sealed' => 0, 'attempts' => 0 ),
+				array( '%s', '%s', '%s' ),
+				array( '%d', '%s', '%d', '%d' )
 			);
-			return (int) $existing;
+			if ( false === $updated ) {
+				return 0;
+			}
+			if ( $updated || $wpdb->get_var( $wpdb->prepare(
+				"SELECT id FROM {$table} WHERE id = %d AND status = 'pending' AND BINARY payload = %s",
+				$existing['id'],
+				$encoded
+			) ) ) {
+				return (int) $existing['id'];
+			}
 		}
 
 		$wpdb->insert(
@@ -186,14 +220,15 @@ class POS_Connector_Queue {
 				'topic'       => $topic,
 				'remote_id'   => (string) $remote_id,
 				'delivery_id' => wp_generate_uuid4(),
-				'payload'     => wp_json_encode( $payload ),
+				'payload'     => $encoded,
+				'payload_fingerprint' => $fingerprint,
 				'status'       => 'pending',
 				'attempts'     => 0,
 				'created_at'   => $now,
 				'updated_at'   => $now,
 				'available_at' => $now,
 			),
-			array( '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s', '%s' )
+			array( '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s', '%s' )
 		);
 		return (int) $wpdb->insert_id;
 	}
@@ -237,6 +272,24 @@ class POS_Connector_Queue {
 		);
 	}
 
+	/**
+	 * Freeze a delivery ID before sending it. If checkout or a WooCommerce
+	 * hook changed the selected snapshot, the worker reads it again later.
+	 */
+	public static function seal_for_delivery( array $row ) {
+		if ( ! empty( $row['sealed'] ) ) {
+			return true;
+		}
+		global $wpdb;
+		$table = self::table_name();
+		return 1 === $wpdb->query( $wpdb->prepare(
+			"UPDATE {$table} SET sealed = 1
+			 WHERE id = %d AND status = 'pending' AND sealed = 0 AND BINARY payload = %s",
+			$row['id'],
+			$row['payload']
+		) );
+	}
+
 	public static function mark_sent( array $ids ) {
 		if ( empty( $ids ) ) {
 			return;
@@ -247,7 +300,7 @@ class POS_Connector_Queue {
 		$params       = array_merge( array( current_time( 'mysql', true ) ), array_map( 'intval', $ids ) );
 		$wpdb->query(
 			$wpdb->prepare(
-				"UPDATE {$table} SET status = 'sent', last_error = NULL, updated_at = %s WHERE id IN ({$placeholders})",
+				"UPDATE {$table} SET status = 'sent', payload = '', last_error = NULL, updated_at = %s WHERE status = 'pending' AND id IN ({$placeholders})",
 				$params
 			)
 		);
@@ -294,13 +347,14 @@ class POS_Connector_Queue {
 						status = %s,
 						available_at = %s,
 						updated_at = %s
-					WHERE id = %d",
+					WHERE id = %d AND status = 'pending' AND attempts = %d",
 				$next['attempts'],
 				(string) $error,
 				$next['status'],
 				$available,
 				current_time( 'mysql', true ),
-				(int) $id
+				(int) $id,
+				$before
 			)
 		);
 	}
@@ -543,7 +597,7 @@ class POS_Connector_Queue {
 		$table = self::table_name();
 		$wpdb->query(
 			$wpdb->prepare(
-				"DELETE FROM {$table} WHERE status = 'sent' AND updated_at < %s",
+				"DELETE FROM {$table} WHERE status = 'sent' AND updated_at < %s ORDER BY updated_at, id LIMIT 1000",
 				gmdate( 'Y-m-d H:i:s', time() - 30 * DAY_IN_SECONDS )
 			)
 		);
