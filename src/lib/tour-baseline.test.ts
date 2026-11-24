@@ -295,8 +295,8 @@ describe("the coverage audit", () => {
     // A registered page can never silently escape coverage: every page has a
     // tour, and the report distinguishes a real spotlight from a plain
     // explanation instead of counting both as "covered".
-    expect(report.uncoveredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals"]);
-    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals"]);
+    expect(report.uncoveredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs"]);
     expect(report.staleTourIds).toEqual([]);
     expect(report.spotlightPages).toBeGreaterThan(0);
     expect(report.explanationOnlyPages).toBe(
@@ -322,11 +322,11 @@ describe("the coverage audit", () => {
     expect(report.editorialGaps).toEqual(
       report.pages.filter((row) => row.kind === "baseline").map((row) => row.pageKey),
     );
-    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals", "page:/crm/briefs"]);
     expect(report.authoredTours).toBe(TOURS.length);
   });
 
-  it("marks CRM Overview and Directory as requiring Studio publication, with no fallback tours", () => {
+  it("marks CRM Overview, Directory and Briefs as requiring Studio publication, with no fallback tours", () => {
     for (const pageKey of STUDIO_ONLY_PAGE_KEYS) {
       const crm = report.pages.find((row) => row.pageKey === pageKey)!;
       expect(crm).toMatchObject({
