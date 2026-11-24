@@ -737,32 +737,41 @@ describe("relationship handling", () => {
   });
 
   it("imports with a warning when the strategy is warn", async () => {
-    await db.query(
-      `INSERT INTO parties (business_id, name, roles) VALUES ($1, 'شرکت الف', ARRAY['customer']::text[])`,
-      [biz.id],
-    );
-    const { job } = await uploadCsv(
-      "workspace.projects",
-      "نام پروژه,کارفرما\nویلا A01,کارفرمای ناموجود\n",
-      { relationStrategy: { partyName: "warn" } },
-    );
-    const result = await asBusiness(biz.id, () =>
-      importService.runImportJob(biz.id, job.id, {
-        locationId: biz.locationId,
-        actorUserId: null,
-        actorName: actor.actorName,
-      }),
-    );
-    expect(result.created).toBe(1);
-    const { rows } = await db.query<{ party_id: string | null }>(
-      `SELECT party_id FROM ai_projects WHERE business_id = $1`,
-      [biz.id],
-    );
-    expect(rows[0].party_id).toBeNull();
-    const stored = await asBusiness(biz.id, () =>
-      importService.listImportRows(biz.id, job.id, {}),
-    );
-    expect(stored.rows[0].messages.some((m) => m.message.includes("کارفرما"))).toBe(true);
+    // Issue #1110 — workspace.projects is a My Workspace entity, so this
+    // fixture must be an eligible business type for the duration of the test.
+    await db.query(`UPDATE businesses SET industry = 'architecture_construction' WHERE id = $1`, [
+      biz.id,
+    ]);
+    try {
+      await db.query(
+        `INSERT INTO parties (business_id, name, roles) VALUES ($1, 'شرکت الف', ARRAY['customer']::text[])`,
+        [biz.id],
+      );
+      const { job } = await uploadCsv(
+        "workspace.projects",
+        "نام پروژه,کارفرما\nویلا A01,کارفرمای ناموجود\n",
+        { relationStrategy: { partyName: "warn" } },
+      );
+      const result = await asBusiness(biz.id, () =>
+        importService.runImportJob(biz.id, job.id, {
+          locationId: biz.locationId,
+          actorUserId: null,
+          actorName: actor.actorName,
+        }),
+      );
+      expect(result.created).toBe(1);
+      const { rows } = await db.query<{ party_id: string | null }>(
+        `SELECT party_id FROM ai_projects WHERE business_id = $1`,
+        [biz.id],
+      );
+      expect(rows[0].party_id).toBeNull();
+      const stored = await asBusiness(biz.id, () =>
+        importService.listImportRows(biz.id, job.id, {}),
+      );
+      expect(stored.rows[0].messages.some((m) => m.message.includes("کارفرما"))).toBe(true);
+    } finally {
+      await db.query(`UPDATE businesses SET industry = 'food_service' WHERE id = $1`, [biz.id]);
+    }
   });
 
   it("resolves an existing parent by name rather than duplicating it", async () => {
