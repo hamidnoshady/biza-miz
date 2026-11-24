@@ -270,6 +270,7 @@ export const STUDIO_ONLY_PAGE_KEYS: ReadonlySet<string> = new Set([
   "page:/crm/deals",
   "page:/crm/briefs",
   "page:/crm/proposals",
+  "page:/crm/client-campaigns",
 ]);
 
 export function pageTourCandidates(
@@ -309,12 +310,13 @@ export function tourDefinitionById(
   const studio = published.find((tour) => tour.id === id);
   if (studio) return studio;
   const authored = tourById(id);
-  // CRM Deals, Briefs and Proposals code-tour ids are retired; published
-  // Studio content may still use those ids, but the code catalogue must never serve them.
+  // CRM Deals, Briefs, Proposals and Client Campaigns code-tour ids are retired;
+  // published Studio content may still use them, but code must never serve them.
   if (
     authored?.pageKey === "page:/crm/deals" ||
     authored?.pageKey === "page:/crm/briefs" ||
-    authored?.pageKey === "page:/crm/proposals"
+    authored?.pageKey === "page:/crm/proposals" ||
+    authored?.pageKey === "page:/crm/client-campaigns"
   ) {
     return undefined;
   }
