@@ -549,6 +549,7 @@ export async function pluginHandshake(
         // did not apply (its local policy switch is off) is acked `skipped`,
         // never `done`. Older plugins simply never send either.
         leaseTokenAck: true,
+        onDemandPostBody: true,
         skippedAck: true,
         // Phase 38: operations as well as numbers. A plugin that predates
         // these acks unknown types as done, so advertising them is safe; a
@@ -570,6 +571,7 @@ export async function pluginHandshake(
           // operations an older plugin acks as unknown-and-done.
           "content_export",
           "post_upsert",
+          "post_body_read",
           "media_create",
           // Issue #939 — re-send only the taxonomy tree. Producers gate it on
           // the plugin's advertised set; an older plugin gets the full
@@ -943,6 +945,7 @@ export async function pluginAckJobs(
                   payload = CASE WHEN entity_type='product_publish' THEN payload || jsonb_build_object('__ackRemoteId',$4::text)
                     || CASE WHEN payload->>'__catalogueMetadataOnly'='true' AND $5::jsonb ? 'taxonomy'
                       THEN jsonb_build_object('__catalogueTaxonomyAck',$5::jsonb->'taxonomy') ELSE '{}'::jsonb END
+                    WHEN entity_type='post_body_read' THEN payload || jsonb_build_object('answer', $5::jsonb)
                     ELSE payload END,
                   leased_until = NULL, lease_token = NULL, updated_at = now()
             WHERE id = $1 AND connection_id = $2 AND ${ackFenceSql("$3")}
