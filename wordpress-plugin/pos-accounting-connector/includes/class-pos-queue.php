@@ -129,8 +129,10 @@ class POS_Connector_Queue {
 			) {$charset};"
 		);
 
-		if ( ! self::table_exists() ) {
-			self::$last_install_error = $wpdb->last_error ? (string) $wpdb->last_error : __( 'جدول صف ساخته نشد.', 'pos-accounting-connector' );
+		$install_error = (string) $wpdb->last_error;
+		$columns = self::table_exists() ? $wpdb->get_col( "SHOW COLUMNS FROM {$table}" ) : array();
+		if ( ! in_array( 'payload_fingerprint', $columns, true ) || ! in_array( 'sealed', $columns, true ) ) {
+			self::$last_install_error = $install_error ?: ( $wpdb->last_error ?: 'queue_schema_upgrade_incomplete' );
 			return false;
 		}
 		return true;
