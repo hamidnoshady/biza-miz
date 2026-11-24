@@ -25,6 +25,7 @@ import { KNOWLEDGE_PAGES } from "./knowledge-base";
 import {
   PAGE_TOUR_REGIONS,
   PAGE_TOUR_REGION_PREFIXES,
+  STUDIO_ONLY_PAGE_KEYS,
   baselineTourForPage,
   baselineTourIdForRoute,
   regionsForPage,
@@ -105,8 +106,6 @@ function anchorsOf(tour: TourDefinition): string[] {
  * The report. Both parameters exist so a test can audit an injected catalogue
  * and region map — the defaults are the live registry and declarations.
  */
-const STUDIO_ONLY_PAGE_KEYS = new Set(["page:/crm/overview"]);
-
 export function tourCoverage(
   tours: readonly TourDefinition[] = TOURS,
   regions: Readonly<Record<string, readonly PageTourRegion[]>> = PAGE_TOUR_REGIONS,
