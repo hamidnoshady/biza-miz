@@ -1573,7 +1573,8 @@ describe("the content mirror pulls over the WordPress REST API (rest mode)", () 
     expect(rows.find((r) => r.remoteId === "3002")?.title).toBe("درباره…");
     expect(rows.find((r) => r.remoteId === "3003")?.mimeType).toBe("image/png");
     expect(rows.some((r) => r.remoteId === "3999")).toBe(false);
-    expect((await content.getWpContent(biz.id, biz.restConnId, "post", "3001"))?.content).toContain("wp:paragraph");
+    expect(String(calls.find((call) => call.type === "posts")?.query._fields).split(",")).not.toContain("content");
+    expect((await content.getWpContent(biz.id, biz.restConnId, "post", "3001"))?.content).toBeNull();
   });
 
   it("keeps paging when a WordPress host omits X-WP-TotalPages", async () => {
