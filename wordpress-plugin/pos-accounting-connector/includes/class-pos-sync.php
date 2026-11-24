@@ -2084,6 +2084,9 @@ class POS_Connector_Sync {
 			if ( $events && $bytes + $size > self::PUSH_BATCH_BYTES ) {
 				break;
 			}
+			if ( ! POS_Connector_Queue::seal_for_delivery( $row ) ) {
+				continue;
+			}
 			$bytes   += $size;
 			$events[] = array(
 				'topic'      => $row['topic'],
@@ -2091,6 +2094,10 @@ class POS_Connector_Sync {
 				'payload'    => json_decode( $row['payload'], true ),
 			);
 			$by_id[ $row['delivery_id'] ] = (int) $row['id'];
+		}
+
+		if ( ! $events ) {
+			return POS_Connector_Health::phase( 'push', POS_Connector_Health::PHASE_EMPTY, ( microtime( true ) - $started ) * 1000, array( 'sent' => 0, 'failed' => 0, 'batched' => 0 ) );
 		}
 
 		$response = $client->post( '/api/integrations/wordpress/events', array( 'events' => $events ) );
@@ -3468,7 +3475,7 @@ class POS_Connector_Sync {
 					if ( 'variation' === $product->get_type() ) {
 						$state['deferred'][] = (int) $product->get_id();
 					} else {
-						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
+						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ), true );
 						++$state['parents'];
 					}
 				}
@@ -3494,7 +3501,7 @@ class POS_Connector_Sync {
 				remove_filter( 'posts_where', array( __CLASS__, 'export_id_cursor_where' ) );
 				foreach ( $children as $variation ) {
 					$state['cursor'] = max( (int) $state['cursor'], (int) $variation->get_id() );
-					POS_Connector_Queue::enqueue( 'product.updated', $variation->get_id(), self::product_payload( $variation ) );
+					POS_Connector_Queue::enqueue( 'product.updated', $variation->get_id(), self::product_payload( $variation ), true );
 					++$state['variations'];
 				}
 				if ( count( $children ) < self::PRODUCT_EXPORT_BATCH ) {
@@ -3509,7 +3516,7 @@ class POS_Connector_Sync {
 				foreach ( $slice as $variation_id ) {
 					$product = wc_get_product( $variation_id );
 					if ( $product ) {
-						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ) );
+						POS_Connector_Queue::enqueue( 'product.updated', $product->get_id(), self::product_payload( $product ), true );
 						++$state['variations'];
 					}
 				}
