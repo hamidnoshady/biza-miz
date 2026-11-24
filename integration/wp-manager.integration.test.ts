@@ -2650,35 +2650,32 @@ describe("one-shot WordPress editor reads", () => {
   it("leases, fences, acknowledges and consumes a body without keeping a copy", async () => {
     const { requestWpEditorBody } = await import("../src/lib/integrations/wp-editor-body");
     const connectionId = await makeConnection("plugin", "Editor Reads Store");
-    try {
-      const stored = await connections.getConnection(biz.id, connectionId);
-      expect(stored).toBeTruthy();
-      const connection = { ...stored!, plugin_capabilities: { jobTypes: ["post_body_read"], leaseTokenAck: true } };
-      const read = () => requestWpEditorBody(biz.id, connectionId, "product", "55");
-      await expect(read()).resolves.toBeNull();
-      await expect(read()).resolves.toBeNull();
-      const pull = await (await plugin.pluginPullJobs(connection)).json() as {
-        jobs: { id: string; type: string; leaseToken: string; payload: unknown }[];
-      };
-      expect(pull.jobs).toHaveLength(1);
-      const [job] = pull.jobs;
-      expect(job.type).toBe("post_body_read");
-      expect(job.payload).toEqual({ postId: 55, postType: "product" });
-      expect(job.leaseToken).toBeTruthy();
+    // The suite drops its disposable database, including append-only audit entries.
+    const stored = await connections.getConnection(biz.id, connectionId);
+    expect(stored).toBeTruthy();
+    const connection = { ...stored!, plugin_capabilities: { jobTypes: ["post_body_read"], leaseTokenAck: true } };
+    const read = () => requestWpEditorBody(biz.id, connectionId, "product", "55");
+    await expect(read()).resolves.toBeNull();
+    await expect(read()).resolves.toBeNull();
+    const pull = await (await plugin.pluginPullJobs(connection)).json() as {
+      jobs: { id: string; type: string; leaseToken: string; payload: unknown }[];
+    };
+    expect(pull.jobs).toHaveLength(1);
+    const [job] = pull.jobs;
+    expect(job.type).toBe("post_body_read");
+    expect(job.payload).toEqual({ postId: 55, postType: "product" });
+    expect(job.leaseToken).toBeTruthy();
 
-      const payload = { content: "<p>WordPress source</p>", shortDescription: "", modified: "2026-11-20T12:00:00Z" };
-      await plugin.pluginAckJobs(connection, [
-        { id: job.id, status: "done", leaseToken: randomUUID(), result: payload },
-      ]);
-      await expect(read()).resolves.toBeNull();
-      await plugin.pluginAckJobs(connection, [
-        { id: job.id, status: "done", leaseToken: job.leaseToken, result: payload },
-      ]);
-      await expect(read()).resolves.toEqual(payload);
-      const rows = await db.query("SELECT id FROM integration_outbox_events WHERE id = $1", [job.id]);
-      expect(rows.rowCount).toBe(0);
-    } finally {
-      await db.query("DELETE FROM integration_connections WHERE id = $1", [connectionId]);
-    }
+    const payload = { content: "<p>WordPress source</p>", shortDescription: "", modified: "2026-11-20T12:00:00Z" };
+    await plugin.pluginAckJobs(connection, [
+      { id: job.id, status: "done", leaseToken: randomUUID(), result: payload },
+    ]);
+    await expect(read()).resolves.toBeNull();
+    await plugin.pluginAckJobs(connection, [
+      { id: job.id, status: "done", leaseToken: job.leaseToken, result: payload },
+    ]);
+    await expect(read()).resolves.toEqual(payload);
+    const rows = await db.query("SELECT id FROM integration_outbox_events WHERE id = $1", [job.id]);
+    expect(rows.rowCount).toBe(0);
   });
 });
