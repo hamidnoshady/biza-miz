@@ -589,6 +589,26 @@ export async function updateSyncDeadLetter(
     }
 
     if (row.source === "server_pull") {
+      /*
+       * A pulled event that was dead-lettered has a terminal
+       * `sync_domain_effects` row (and usually a `sync_events` row with the
+       * same error). `applySyncEvent` treats a dead-lettered effect as a
+       * duplicate and never re-applies it, so the retry must reopen both rows
+       * first — the same reset the `domain` branch already does. Without this,
+       * the operator's retry answered `ok` but did nothing.
+       */
+      await client.query(
+        `UPDATE sync_domain_effects SET status='deferred',error_code=NULL,updated_at=now()
+          WHERE business_id=$1 AND client_event_id=$2::uuid`,
+        [businessId, row.client_event_id],
+      );
+      if (row.location_id) {
+        await client.query(
+          `UPDATE sync_events SET error=NULL,dead_lettered_at=NULL,deferred_until=now()
+            WHERE location_id=$1 AND client_event_id=$2::uuid`,
+          [row.location_id, row.client_event_id],
+        );
+      }
       await client.query(
         `UPDATE sync_event_dead_letters SET retry_count=retry_count+1,last_seen_at=now()
           WHERE id=$1 AND business_id=$2`,
@@ -644,12 +664,18 @@ export async function updateSyncDeadLetter(
   await requestRemoteEventRetry(businessId, [row.client_event_id]).catch(() => {});
 
   if (row.source !== "server_pull") return true;
+  /*
+   * A pulled event with no recorded actor (a CMS/website origin event, or a
+   * legacy row written before the actor column was carried) cannot be replayed
+   * as `userId: ""`: the inbox insert binds a uuid column and fails with
+   * 22P02. The owner pressing retry is the actor of this replay.
+   */
   let result: SyncEventResult;
   try {
     result = await applySyncEvent(
       row.location_id ?? "",
       {
-        userId: row.actor_user_id ?? "",
+        userId: row.actor_user_id || actorId,
         role: (row.actor_role ?? "cashier") as import("./auth").Role,
       },
       {
