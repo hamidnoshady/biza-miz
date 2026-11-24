@@ -102,3 +102,61 @@ export function resolveRequestedAiRuntimeMode(value: unknown): AiRuntimeModeRequ
   if (isRetiredAiRuntimeMode(value)) return { ok: false, reason: "retired" };
   return { ok: true, mode: normalizeAiRuntimeMode(value) };
 }
+
+/**
+ * Issue #1546 (Fast truthfulness) — why the picker cannot offer a mode.
+ *
+ * These are machine codes, never provider detail: no alias, deployment,
+ * credential or settings row travels to the browser. The picker turns a code
+ * into a sentence and the chat route refuses the same mode at send time, so the
+ * offer and the refusal can never disagree.
+ */
+export type AiModeUnavailableReason = "disabled" | "fast_alias_not_configured";
+
+/** One line the mode picker shows instead of offering an unusable mode. */
+export const AI_MODE_UNAVAILABLE_HINTS: Record<AiModeUnavailableReason, string> = {
+  disabled: "این حالت توسط مدیر پلتفرم فعال نشده است.",
+  fast_alias_not_configured: "هنوز روی یک مدل تندپاسخ پیکربندی نشده است.",
+};
+
+/** One chat mode as the picker should render it. */
+export interface AiModeAvailability {
+  mode: AiRuntimeMode;
+  available: boolean;
+  reason: AiModeUnavailableReason | null;
+}
+
+export function isAiChatMode(value: unknown): value is (typeof AI_CHAT_MODES)[number] {
+  return typeof value === "string" && (AI_CHAT_MODES as readonly string[]).includes(value);
+}
+
+function isModeUnavailableReason(value: unknown): value is AiModeUnavailableReason {
+  return value === "disabled" || value === "fast_alias_not_configured";
+}
+
+/**
+ * Reads the `/api/ai/modes` payload for the picker.
+ *
+ * Anything unreadable degrades to "available": discovery is an aid, and an older
+ * or broken response must not hide a working mode. The server's refusal at send
+ * time remains the backstop, so failing open here is safe.
+ */
+export function normalizeAiModeAvailability(raw: unknown): AiModeAvailability[] | null {
+  if (!Array.isArray(raw)) return null;
+  const parsed = new Map<AiRuntimeMode, AiModeAvailability>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    if (!isAiChatMode(record.mode)) continue;
+    const available = record.available !== false;
+    let reason: AiModeUnavailableReason | null = null;
+    if (!available) {
+      reason = isModeUnavailableReason(record.reason) ? record.reason : "disabled";
+    }
+    parsed.set(record.mode, { mode: record.mode, available, reason });
+  }
+  if (parsed.size === 0) return null;
+  return AI_CHAT_MODES.map(
+    (mode) => parsed.get(mode) ?? { mode, available: true, reason: null },
+  );
+}

@@ -21,7 +21,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { applyRuntimeModeAlias } from "./ai-runtime";
-import { modeAliasConfigured } from "./ai-runtime-modes";
+import { modeAliasConfigured, modeAvailability } from "./ai-runtime-modes";
 
 const BASE = { model: "gpt-4o-mini", embeddingModel: "text-embedding-3-small" };
 
@@ -85,6 +85,33 @@ describe("issue #812 §3/§7 — a mode's alias decides the model", () => {
     for (const blank of ["", "   ", null]) {
       expect(modeAliasConfigured({ model_alias: blank })).toBe(false);
     }
+  });
+
+  it("issue #1546 — modeAvailability is the one offer/refusal decision", () => {
+    // The picker disables a mode on this answer and the chat route refuses on
+    // the same answer, so a deployment cannot offer what a turn would reject.
+    expect(modeAvailability({ model_alias: "pos-instant", is_active: true }, "instant")).toEqual({
+      available: true,
+      reason: null,
+    });
+    expect(modeAvailability({ model_alias: "", is_active: true }, "instant")).toEqual({
+      available: false,
+      reason: "fast_alias_not_configured",
+    });
+    expect(modeAvailability({ model_alias: "pos-thinking", is_active: false }, "thinking")).toEqual({
+      available: false,
+      reason: "disabled",
+    });
+    // Auto does not need an alias of its own: blank means the gateway default.
+    expect(modeAvailability({ model_alias: "", is_active: true }, "auto")).toEqual({
+      available: true,
+      reason: null,
+    });
+    // A retired mode is never offered, whatever the console row says.
+    expect(modeAvailability({ model_alias: "x", is_active: true }, "deep_research")).toEqual({
+      available: false,
+      reason: "disabled",
+    });
   });
 
   it("leaves the rest of the config untouched", () => {

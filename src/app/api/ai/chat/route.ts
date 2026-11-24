@@ -19,8 +19,7 @@ import {
 } from "@/lib/ai-prompt-resolver";
 import {
   getPlatformAiMode,
-  isAiRuntimeModeAvailable,
-  modeAliasConfigured,
+  modeAvailability,
   resolveRequestedAiRuntimeMode,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes";
@@ -172,17 +171,22 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // `model_alias` decides which LiteLLM deployment the turn routes to. Reading
   // it once means the offer and the route can never disagree.
   const modeRow = await getPlatformAiMode(runtimeMode);
-  if (!modeRow.is_active || !isAiRuntimeModeAvailable(runtimeMode)) {
+  // Issue #1546 — one decision serves both surfaces: `/api/ai/modes` renders it
+  // in the picker (disabling an unusable mode before it is chosen) and this
+  // route refuses the same mode here, as the backstop for a crafted body or a
+  // picker that loaded before the platform changed the configuration.
+  const availability = modeAvailability(modeRow, runtimeMode);
+  if (!availability.available && availability.reason === "disabled") {
     return NextResponse.json(
       { error: "mode_unavailable", mode: runtimeMode, message: "حالت انتخاب‌شده توسط مدیر پلتفرم فعال نشده است." },
       { status: 409 },
     );
   }
-  // Issue #1546 — Fast is only truthful when it names its own LiteLLM alias.
-  // A blank alias resolves to the gateway's default chat model, i.e. Auto with
-  // a different label, so the turn is refused with a clear reason instead of
-  // silently taking the slow route and still reporting «سریع».
-  if (runtimeMode === "instant" && !modeAliasConfigured(modeRow)) {
+  // Fast is only truthful when it names its own LiteLLM alias. A blank alias
+  // resolves to the gateway's default chat model, i.e. Auto with a different
+  // label, so the turn is refused with a clear reason instead of silently taking
+  // the slow route and still reporting «سریع».
+  if (!availability.available) {
     console.error("ai fast mode unavailable", {
       businessId: session.businessId,
       reason: "fast_alias_not_configured",

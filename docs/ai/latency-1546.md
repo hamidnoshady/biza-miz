@@ -88,7 +88,7 @@ the sections nobody mentioned (payroll, projects, workspace, growth).
 | Diagnostics (`src/lib/ai-latency.ts`) | One `ai.turn.latency` JSON line per turn, keyed by the application `requestId` that settlement and audit already carry. Per round: TTFT, generation time, round total, input/output tokens, tools called (names only), protocol fallback. Per turn: model alias, mode, tool-schema count, offered sections, round count, totals, cost, deadline hit, outcome. No prompt, argument, result, credential or record has a field to travel in. |
 | Whole-turn deadline (`ai-service.ts`) | `TURN_DEADLINE_MS = 90_000`. Each round takes `min(60 s, remaining)`, and a turn that runs out fails with `ai_turn_deadline` (a partial-result state), not a silent hang. Cancellation reports `ai_cancelled`; a plain slow provider reports `ai_timeout`. No retry was added for generations or tool execution — routing/fallbacks stay LiteLLM's, per `docs/architecture/ai-subsystem-architecture.md`. |
 | Tool progress (`src/lib/ai-tool-progress.ts`, chat SSE) | `tool` events with `running` / `completed` / `failed`, a server-built Persian label derived from the tool's section, and the round number. Rendered under the streaming bubble with `role="status"` / `aria-live="polite"`, RTL inherited; cleared on `done`/`error`; cancellation and error states unchanged. The shared SDK adapter (`sdkToolsFrom`) emits the same events through its `onToolProgress` hook, so an SDK caller cannot invent a second protocol. |
-| Fast mode | If `platform_ai_modes.model_alias` for `instant` is blank, `/api/ai/chat` now answers `409 mode_unavailable` with `reason: "fast_alias_not_configured"` and a Persian explanation instead of silently routing to the Auto model. |
+| Fast mode | If `platform_ai_modes.model_alias` for `instant` is blank, `/api/ai/chat` now answers `409 mode_unavailable` with `reason: "fast_alias_not_configured"` and a Persian explanation instead of silently routing to the Auto model. The picker learns the same answer from `/api/ai/modes` and disables Fast before it can be chosen (section 7). |
 
 ## 4. Blocked criteria
 
@@ -127,9 +127,9 @@ producing a number it did not measure.
    (e.g. `pos-instant`).
 2. In the Superadmin console (`/platform/ai/modes`), set the `instant` row's
    alias to that alias and keep it active.
-3. Leave the alias blank to keep Fast **unavailable** — the chat route refuses
-   it with a clear reason instead of serving the Auto model under a faster
-   label.
+3. Leave the alias blank to keep Fast **unavailable** — the picker disables it
+   with the reason, and the chat route refuses it as the backstop, instead of
+   serving the Auto model under a faster label.
 
 No credential is stored in the repository; the gateway and virtual keys remain
 in the platform configuration/secret store.
@@ -153,6 +153,24 @@ Not run here: `npm run test:db` (needs a Postgres instance) and `npm run test:vi
   and key exist.
 - Fast deployment verification, then the ≤5 s p95 TTFT criterion.
 - Independent-capacity benchmark, only with approved credentials and budget.
-- The mode picker still lists Fast before a turn starts; the refusal arrives on
-  send. Hiding it needs a tenant-facing availability read, which is a UI change
-  and was left out of this latency fix.
+- Real p50/p95 verification of the Fast route once its alias exists.
+
+## 7. Fast-mode truthfulness in the picker (issue #1546 follow-up)
+
+The refusal at send time was only half the fix: a member could still pick «سریع»,
+wait for a send, and then be told it does not exist. The picker now asks the
+server which modes this deployment actually configured.
+
+| Piece | Where |
+| --- | --- |
+| Availability decision | `modeAvailability(row, mode)` in `src/lib/ai-runtime-modes.ts`: retired or `is_active = false` → `disabled`; Fast with a blank alias → `fast_alias_not_configured`; otherwise ready. |
+| Tenant read | `GET /api/ai/modes` (`src/app/api/ai/modes/route.ts`), on `ai.use` (using the assistant is not administering it). Returns `{ modes: [{ mode, available, reason }] }` with `Cache-Control: no-store`. No alias, deployment, temperature or credential is in the payload. |
+| Same decision both ways | The chat route refuses a turn on `modeAvailability` and this route renders it, so an offer and a refusal cannot disagree. The 409 stays the backstop for a crafted body or a picker that loaded before the platform changed the setting. |
+| Picker | `useAiModeAvailability` (`src/components/ai/use-ai-mode-availability.ts`) starts every mode available and replaces that with the server's answer; a failed or unreadable response keeps the optimistic default rather than hiding a working mode. `ChatComposer` renders an unavailable mode as a disabled option with the Persian reason; `AiChatHub` falls back to Auto when the selected or URL-restored mode is unavailable, and `AiWorkspaceContext`'s native select follows the same rule. |
+
+Checks for this follow-up: `tsc --noEmit` pass; focused suites
+(`api/ai/modes/route`, `ai-runtime-modes-shared`, `ai-runtime-mode-aliases`,
+`api/ai/chat/route`, `ai-chat-hub`, `ai-permission-matrix`, `api-guards`,
+`mcp/registry`, `persistent-tenant-ai`, `tenant-assistant-frame`) — 11 files,
+**96 tests passed**; ESLint on every touched file, exit 0. `docs/mcp/coverage-matrix.md`
+regenerated for the new route (1315 routes, 0 unclassified).

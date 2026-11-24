@@ -55,6 +55,8 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
       value: 1366,
     });
     window.HTMLElement.prototype.scrollTo = vi.fn();
+    // Radix Select scrolls its highlighted item into view; jsdom has no layout.
+    Element.prototype.scrollIntoView = vi.fn();
   });
 
   afterEach(() => {
@@ -318,6 +320,100 @@ describe("Issue #905 — AI Chat Hub, Clean Composer (+ Menu), Left History Pane
     fireEvent.click(await screen.findByRole("menuitemradio", { name: "برج ساحلی" }));
     expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("project=p-1"), { scroll: false });
     expect(textarea.value).toBe("پیش‌نویس تستی من");
+  });
+
+  it("issue #1546 — disables Fast in the picker when the deployment has not configured it", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/api/ai/modes")) {
+        return {
+          ok: true,
+          json: async () => ({
+            modes: [
+              { mode: "auto", available: true, reason: null },
+              { mode: "instant", available: false, reason: "fast_alias_not_configured" },
+              { mode: "thinking", available: true, reason: null },
+            ],
+          }),
+        } as Response;
+      }
+      if (url.startsWith("/api/ai/projects")) {
+        return { ok: true, json: async () => ({ projects: [] }) } as Response;
+      }
+      if (url.startsWith("/api/ai/conversations")) {
+        return { ok: true, json: async () => ({ conversations: [], hasMore: false, nextCursor: null }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <AiChatHub
+        canManageAi={true}
+        canAutoApply={false}
+        allowedPanelSections={["memory"]}
+        eligibleTaskIds={["general", "sales", "accounting"]}
+        accessibleFocuses={["all", "workspace", "accounting"]}
+        industry="architecture_construction"
+      />,
+    );
+
+    const modeSelect = screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ });
+    fireEvent.click(modeSelect);
+    const fast = await screen.findByRole("option", { name: /سریع/ });
+    // Disabled, with the reason shown — not offered and then refused at send.
+    expect(fast.getAttribute("aria-disabled")).toBe("true");
+    expect(fast.textContent).toContain("پیکربندی نشده");
+
+    // Auto and Thinking remain selectable.
+    fireEvent.click(screen.getByRole("option", { name: "تفکر عمیق" }));
+    expect(screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: تفکر عمیق/ })).toBeTruthy();
+    expect(replaceMock).toHaveBeenCalledWith(expect.stringContaining("mode=thinking"), { scroll: false });
+  });
+
+  it("issue #1546 — a restored ?mode=instant falls back to Auto when Fast is unavailable", async () => {
+    currentSearchParams = new URLSearchParams("mode=instant");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.startsWith("/api/ai/modes")) {
+          return {
+            ok: true,
+            json: async () => ({
+              modes: [
+                { mode: "auto", available: true, reason: null },
+                { mode: "instant", available: false, reason: "fast_alias_not_configured" },
+                { mode: "thinking", available: true, reason: null },
+              ],
+            }),
+          } as Response;
+        }
+        if (url.startsWith("/api/ai/projects")) {
+          return { ok: true, json: async () => ({ projects: [] }) } as Response;
+        }
+        if (url.startsWith("/api/ai/conversations")) {
+          return { ok: true, json: async () => ({ conversations: [], hasMore: false, nextCursor: null }) } as Response;
+        }
+        return { ok: true, json: async () => ({}) } as Response;
+      }),
+    );
+
+    render(
+      <AiChatHub
+        canManageAi={true}
+        canAutoApply={false}
+        allowedPanelSections={["memory"]}
+        eligibleTaskIds={["general", "sales", "accounting"]}
+        accessibleFocuses={["all", "workspace", "accounting"]}
+        industry="architecture_construction"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: /حالت پاسخ‌گویی: خودکار/ })).toBeTruthy();
+    });
+    expect(replaceMock.mock.calls.at(-1)?.[0]).not.toContain("mode=instant");
   });
 
   it("issue #1367 — offers no Deep Research entry in the mode selector and opens read-only history from its bookmark", async () => {

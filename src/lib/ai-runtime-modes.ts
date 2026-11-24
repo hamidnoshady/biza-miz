@@ -24,6 +24,7 @@ import {
   DEFAULT_AI_MODE,
   isRetiredAiRuntimeMode,
   isAiRuntimeModeAvailable,
+  type AiModeUnavailableReason,
   type AiRuntimeMode,
 } from "./ai-runtime-modes-shared";
 
@@ -118,6 +119,28 @@ export async function getPlatformAiMode(mode: AiRuntimeMode): Promise<PlatformAi
  */
 export function modeAliasConfigured(row: { model_alias?: string | null }): boolean {
   return Boolean(row.model_alias?.trim());
+}
+
+/**
+ * Issue #1546 — the single decision about whether a chat mode may be offered.
+ *
+ * `/api/ai/modes` renders it in the picker and the chat route refuses a turn on
+ * it, so the offer and the refusal cannot disagree. A retired mode is never
+ * offered; a mode switched off in the console is never offered; Fast also needs
+ * its own alias, because a blank one resolves to the gateway's default model —
+ * Auto under a faster-sounding label.
+ */
+export function modeAvailability(
+  row: { model_alias?: string | null; is_active?: boolean | null },
+  mode: AiRuntimeMode,
+): { available: boolean; reason: AiModeUnavailableReason | null } {
+  if (!isAiRuntimeModeAvailable(mode) || row.is_active === false) {
+    return { available: false, reason: "disabled" };
+  }
+  if (mode === "instant" && !modeAliasConfigured(row)) {
+    return { available: false, reason: "fast_alias_not_configured" };
+  }
+  return { available: true, reason: null };
 }
 
 /** What a turn actually goes out with, once the mode has been applied. */

@@ -46,6 +46,7 @@ import { cn } from "@/lib/utils";
 import { useFeatureLocked } from "@/components/feature-lock";
 import { ChatComposer } from "@/components/ai/chat-composer";
 import { usePersistentTenantAiChat } from "@/components/ai/persistent-tenant-ai";
+import { useAiModeAvailability } from "@/components/ai/use-ai-mode-availability";
 import { ChatBubble } from "@/components/ai/chat-bubble";
 import { animateStaggerIn } from "@/components/ai/chat-animations";
 import { useStickyScroll } from "@/components/ai/use-sticky-scroll";
@@ -248,6 +249,10 @@ export function AiChatHub({
   sharedRuntimeModeRef.current = sharedChat?.runtimeMode ?? null;
   const chat = sharedChat ?? localChat;
 
+  // Issue #1546 — which modes this deployment actually configured. The composer
+  // disables the rest instead of offering them and meeting a refusal at send.
+  const { modes: modeAvailability } = useAiModeAvailability();
+
   const canOpenManagement =
     allowedPanelSections !== undefined
       ? allowedPanelSections.length > 0
@@ -402,6 +407,17 @@ export function AiChatHub({
     },
     [replaceParams, resolveValidMode, setRuntimeMode],
   );
+
+  // Issue #1546 — a mode can stop being offered after the page loaded (or be
+  // restored from `?mode=instant` on a deployment that has no Fast alias).
+  // Fall back to Auto rather than leaving a disabled mode selected; the server
+  // refusal still covers anything chosen before this arrives.
+  useEffect(() => {
+    const unavailable = modeAvailability.some(
+      (entry) => entry.mode === runtimeMode && !entry.available,
+    );
+    if (unavailable) updateRuntimeMode("auto");
+  }, [modeAvailability, runtimeMode, updateRuntimeMode]);
 
   // Normalize and sync URL parameters (`focus`, `mode`, `widgets`) when URL changes.
   useEffect(() => {
@@ -948,6 +964,7 @@ export function AiChatHub({
                 accessibleFocuses: effectiveAccessibleFocuses,
                 runtimeMode,
                 onRuntimeModeChange: updateRuntimeMode,
+                modeAvailability,
                 projectId: canSelectProject ? activeProjectId : null,
                 onProjectChange: changeProject,
                 canSelectProject,
