@@ -33,6 +33,7 @@ export async function POST(request: NextRequest) {
   if (result.ok) return respond(result, 200);
   switch (result.error) {
     case "signup_disabled":
+    case "signup_maintenance":
       return respond(result, 403);
     case "rate_limited":
       return respond(result, 429);

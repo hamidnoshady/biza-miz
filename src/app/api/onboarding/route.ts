@@ -22,6 +22,8 @@ import {
   isValidLogo,
 } from "@/lib/business-logo";
 import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
+import { loadSignupGate, signupGateError } from "@/lib/iam/signup-controls";
+import { recordSignupEvent } from "@/lib/iam/signup-events";
 
 function noStore(body: unknown, init?: ResponseInit): NextResponse {
   const res = NextResponse.json(body, init);
@@ -147,6 +149,24 @@ async function uploadLogo(request: Request, platformUserId: string): Promise<Nex
 }
 
 async function submit(request: Request, platformUserId: string): Promise<NextResponse> {
+  // Issue #1388 — a maintenance pause or an administrative disable covers the
+  // complete public signup flow, including the provisioning act at its end.
+  // The draft survives, so the person can resume once registration reopens.
+  const gate = await loadSignupGate();
+  if (!gate.enabled) {
+    return noStore(
+      {
+        error: signupGateError(gate.reason),
+        reason: gate.reason,
+        next: "/signup",
+        message:
+          gate.reason === "maintenance"
+            ? "ثبت‌نام موقتاً متوقف شده است. پیشرفت شما ذخیره شده و پس از بازشدن دوباره ادامه می‌دهید."
+            : "ساخت کسب‌وکار در حال حاضر ممکن نیست. برای راهنمایی با پشتیبانی تماس بگیرید.",
+      },
+      { status: 403 },
+    );
+  }
   const result = await submitOnboarding(platformUserId);
   if (!result.ok) {
     const status =
@@ -168,6 +188,18 @@ async function submit(request: Request, platformUserId: string): Promise<NextRes
     // Canonical post-provisioning hook used by the existing signup/bootstrap
     // doors. It is best-effort and owns no tenant data of its own.
     await autoProvisionBusinessVirtualKey(result.businessId);
+    // Issue #1388 — the funnel's two closing facts. Best-effort and ids only;
+    // a retry of an already-provisioned draft does not double count.
+    await recordSignupEvent({
+      event: "onboarding_completed",
+      platformUserId,
+      businessId: result.businessId,
+    });
+    await recordSignupEvent({
+      event: "business_provisioned",
+      platformUserId,
+      businessId: result.businessId,
+    });
   }
 
   const userAgent = request.headers.get("user-agent");

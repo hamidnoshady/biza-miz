@@ -43,6 +43,7 @@ import {
 } from "./business-provisioning";
 import { SETTING_KEYS, setSetting } from "./settings";
 import { maskPhoneE164 } from "./phone-otp";
+import { recordSignupEvent } from "./iam/signup-events";
 
 export const ONBOARDING_STEPS = ["industry", "basics", "logo", "profile"] as const;
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
@@ -284,6 +285,11 @@ export async function saveOnboardingStep(
                 updated_at = now()`,
         [platformUserId, industry],
       );
+      // Issue #1388 — "onboarding started" is the first saved step of a draft
+      // that did not exist before, not every edit of that step.
+      if (!current) {
+        await recordSignupEvent({ event: "onboarding_started", platformUserId });
+      }
     } else if (input.step === "basics") {
       const industry = isEnabledIndustry(current?.industry)
         ? current.industry

@@ -53,7 +53,8 @@ import {
 import { checkPhoneOtpRateLimit, maskPhoneE164 } from "../phone-otp";
 import { resolveSmsProvider } from "../sms-config";
 import { KavenegarError } from "../sms-kavenegar";
-import { publicSignupEnabled } from "../business-provisioning";
+import { loadSignupGate, signupGateError } from "./signup-controls";
+import { recordSignupEvent, type SignupFailureCategory } from "./signup-events";
 import { recordSecurityAudit, transactionAuditExecutor } from "../security-audit";
 import {
   createVerifiedPersonalIdentity,
@@ -75,6 +76,8 @@ export const SIGNUP_NAME_MAX = 100;
 /** Every failure a public caller may see is deliberately generic. */
 export type SignupError =
   | "signup_disabled"
+  /** Issue #1388 — the administrative maintenance pause, distinct copy from a disabled door. */
+  | "signup_maintenance"
   | "invalid_name"
   | "invalid_phone"
   | "invalid_code"
@@ -166,7 +169,7 @@ export type SignupRequestResult =
       expiresInSeconds: number;
       resendAfterSeconds: number;
     }
-  | { ok: false; error: "signup_disabled" | "invalid_name" | "invalid_phone" }
+  | { ok: false; error: "signup_disabled" | "signup_maintenance" | "invalid_name" | "invalid_phone" }
   | { ok: false; error: "rate_limited"; retryAfterMs: number }
   | { ok: false; error: "sms_dispatch_failed"; message?: string };
 
@@ -198,15 +201,22 @@ export async function requestSignupOtp(
     sendOtp?: (phoneE164: string, code: string) => Promise<void>;
   } = {},
 ): Promise<SignupRequestResult> {
-  if (!publicSignupEnabled()) return { ok: false, error: "signup_disabled" };
+  // Issue #1388 — the runtime control (with the environment gate as its
+  // documented fallback) is enforced here, before a name or number is even
+  // validated, so a disabled door cannot be used as a validation oracle.
+  const gate = await loadSignupGate();
+  if (!gate.enabled) return { ok: false, error: signupGateError(gate.reason) };
 
   const validated = validateSignupDetails(body);
   if (!validated.ok) return validated;
   const { details } = validated;
 
+  await recordSignupEvent({ event: "otp_requested" });
+
   const identityKey = signupRateLimitKey(details.phoneE164);
   const limit = await checkPhoneOtpRateLimit(identityKey, "signup");
   if (!limit.allowed) {
+    await recordSignupEvent({ event: "otp_failed", failureCategory: "rate_limited" });
     await auditBestEffort({
       action: "auth.signup.rate_limited",
       payload: { scope: "request", retryAfterSeconds: Math.ceil(limit.retryAfterMs / 1000) },
@@ -345,6 +355,7 @@ export async function requestSignupOtp(
     entityId: issued.requestId,
     payload: { maskedPhone: maskPhoneE164(details.phoneE164) },
   });
+  await recordSignupEvent({ event: "otp_sent" });
 
   return {
     ok: true,
@@ -365,6 +376,13 @@ async function failPendingRequest(
     requestId,
     error: error instanceof Error ? error.message : "unknown",
   });
+  const failureCategory: SignupFailureCategory =
+    error instanceof Error && error.message === "sms_not_configured"
+      ? "sms_not_configured"
+      : error instanceof KavenegarError
+        ? "provider_failure"
+        : "unknown";
+  await recordSignupEvent({ event: "otp_failed", failureCategory });
   try {
     await withoutTenantScopeTransaction("signup", async () => {
       await consumeAllChallenges({
@@ -443,7 +461,8 @@ export async function verifySignupOtp(body: {
   code?: unknown;
   requestToken?: unknown;
 }): Promise<SignupVerifyResult> {
-  if (!publicSignupEnabled()) return { ok: false, error: "signup_disabled" };
+  const gate = await loadSignupGate();
+  if (!gate.enabled) return { ok: false, error: signupGateError(gate.reason) };
 
   const validated = validateSignupDetails(body);
   if (!validated.ok) {
@@ -586,6 +605,16 @@ export async function verifySignupOtp(body: {
         },
         transactionAuditExecutor(),
       );
+      await recordSignupEvent({
+        event: "otp_verified",
+        platformUserId: resolution.platformUserId,
+      });
+      if (resolution.created) {
+        await recordSignupEvent({
+          event: "account_created",
+          platformUserId: resolution.platformUserId,
+        });
+      }
 
       return {
         ok: true as const,
@@ -597,6 +626,10 @@ export async function verifySignupOtp(body: {
     });
   } catch (error) {
     if (error instanceof SignupResolutionError) {
+      await recordSignupEvent({
+        event: "otp_failed",
+        failureCategory: error.signupError,
+      });
       await auditBestEffort({
         action: "auth.signup.verify_failed",
         entity: "platform_signup_request",
@@ -608,6 +641,11 @@ export async function verifySignupOtp(body: {
   }
 
   if (!outcome.ok) {
+    const failureCategory: SignupFailureCategory =
+      outcome.error === "account_ambiguous" || outcome.error === "account_unavailable"
+        ? outcome.error
+        : "invalid_code";
+    await recordSignupEvent({ event: "otp_failed", failureCategory });
     await auditBestEffort({
       action: "auth.signup.verify_failed",
       entity: "platform_signup_request",

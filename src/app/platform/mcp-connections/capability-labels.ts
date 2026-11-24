@@ -20,6 +20,9 @@ export const PLATFORM_CAPABILITY_LABELS: Record<PlatformCapability, string> = {
   "features.write": "تغییر پرچم‌های ویژگی",
   "backup.manage": "عملیات پشتیبان‌گیری (خواندن، اجرا، راستی‌آزمایی)",
   "tenant_backup.read": "خواندن پشتیبان‌های کسب‌وکارها",
+  "signup.read": "خواندن وضعیت ثبت‌نام و قیف ورود",
+  "signup.manage": "مدیریت ثبت‌نام عمومی و حالت تعمیرات",
+  "signup.inspect": "نمایش جزئیات تماس یک حساب ثبت‌نامی",
   "tenant_backup.verify": "راستی‌آزمایی بسته‌های پشتیبان کسب‌وکار",
   "tenant_backup.download": "دریافت بسته پشتیبان یک کسب‌وکار",
   "tenant_backup.restore": "بازگردانی داده یک کسب‌وکار",
@@ -106,4 +109,6 @@ export const POWERFUL_PLATFORM_CAPABILITIES: ReadonlySet<string> = new Set([
   "support.assist.control",
   "updates.manage",
   "ai.config.manage",
+  // Issue #1388 — unmasking a person's phone/email is a privacy action.
+  "signup.inspect",
 ]);

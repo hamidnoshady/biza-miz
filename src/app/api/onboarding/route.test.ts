@@ -29,6 +29,21 @@ vi.mock("@/lib/onboarding", () => ({
   saveOnboardingLogo,
   removeOnboardingLogo,
 }));
+// Issue #1388 — the provisioning act now also checks the public-registration
+// gate. These tests are about the continuation/action switch, so the gate is
+// open here; its refusal paths have their own test in ./signup-gate.test.ts.
+vi.mock("@/lib/iam/signup-controls", () => ({
+  loadSignupGate: async () => ({
+    enabled: true,
+    reason: "enabled",
+    source: "runtime",
+    controls: null,
+    readable: true,
+  }),
+  signupGateError: (reason: string) =>
+    reason === "maintenance" ? "signup_maintenance" : "signup_disabled",
+}));
+vi.mock("@/lib/iam/signup-events", () => ({ recordSignupEvent: vi.fn() }));
 
 import { DELETE, GET, POST } from "./route";
 
