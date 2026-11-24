@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { query } from "@/lib/db";
+import { requestWpEditorBody } from "@/lib/integrations/wp-editor-body";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { wooClientFor } from "@/lib/integrations/connections-service";
@@ -67,15 +67,7 @@ export const GET = withTenantScope(async (request: Request) => {
     if (connection.status === "paused") {
       return NextResponse.json({ error: "connection_paused" }, { status: 409 });
     }
-    const requestKey = `${postType}:${remoteId}`;
-    const { rows } = await query<{ answer: { content?: unknown; modified?: unknown; error?: unknown } }>(
-      `DELETE FROM integration_outbox_events
-        WHERE business_id = $1 AND connection_id = $2 AND entity_type = 'post_body_read'
-          AND remote_id = $3 AND status = 'sent'
-        RETURNING CASE WHEN sent_at > now() - interval '5 minutes' THEN payload->'answer' END AS answer`,
-      [session.businessId, connection.id, requestKey],
-    );
-    const answer = rows[0]?.answer;
+    const answer = await requestWpEditorBody(session.businessId, connection.id, postType, remoteId);
     if (answer) {
       if (answer.error === "post_not_found") return NextResponse.json({ error: answer.error }, { status: 404 });
       if (answer.error === "post_body_too_large") return NextResponse.json({ error: answer.error }, { status: 413 });
@@ -85,14 +77,6 @@ export const GET = withTenantScope(async (request: Request) => {
       }
       return NextResponse.json({ row: { ...row, content: answer.content } });
     }
-    await query(
-      `INSERT INTO integration_outbox_events (business_id, connection_id, entity_type, remote_id, payload)
-       VALUES ($1, $2, 'post_body_read', $3, jsonb_build_object('postType', $4::text, 'postId', $5::bigint))
-       ON CONFLICT (connection_id, entity_type, remote_id) DO UPDATE SET
-         status = 'pending', attempts = 0, next_attempt_at = now(), last_error = NULL, updated_at = now()
-       WHERE integration_outbox_events.status = 'dead'`,
-      [session.businessId, connection.id, requestKey, postType, Number(remoteId)],
-    );
     return NextResponse.json({ pending: true }, { status: 202, headers: { "Cache-Control": "no-store" } });
   }
   return NextResponse.json({ row });
