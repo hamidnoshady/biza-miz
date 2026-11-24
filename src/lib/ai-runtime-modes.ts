@@ -20,10 +20,12 @@
 import { query } from "./db";
 import type { AiConfig } from "./ai";
 import {
+  AI_CHAT_MODES,
   AI_RUNTIME_MODES,
   DEFAULT_AI_MODE,
   isRetiredAiRuntimeMode,
   isAiRuntimeModeAvailable,
+  type AiModeAvailability,
   type AiRuntimeMode,
 } from "./ai-runtime-modes-shared";
 
@@ -60,12 +62,30 @@ type PlatformAiModeRowInput = Omit<PlatformAiModeRow, "temperature"> & {
   temperature: string | number | null;
 } & Record<string, unknown>;
 
+/** The row a mode has before the console ever wrote one. */
+function defaultPlatformAiModeRow(mode: AiRuntimeMode): PlatformAiModeRow {
+  return {
+    mode_key: mode,
+    model_alias: "",
+    // Issue #1367 — a retired mode never starts active, even on a deployment
+    // that has never opened the console.
+    is_active: !isRetiredAiRuntimeMode(mode),
+    temperature: null,
+    max_output_tokens: null,
+    prompt_scope_key: `mode:${mode}`,
+  };
+}
+
 /**
  * The three configured modes. Falls back to sensible defaults when the table
  * has never been written, so a deployment that has not opened the console yet
  * behaves exactly as it did before.
+ *
+ * This is the RUNTIME read (snake_case rows, tolerant of a missing table). The
+ * super-admin console's read is `listPlatformAiModeSettings` in
+ * `ai-control-plane.ts`; the two are deliberately named apart.
  */
-export async function listPlatformAiModes(): Promise<PlatformAiModeRow[]> {
+export async function listPlatformAiModeRows(): Promise<PlatformAiModeRow[]> {
   try {
     const { rows } = await query<PlatformAiModeRowInput>(
       `SELECT mode_key, model_alias, is_active, temperature, max_output_tokens, prompt_scope_key
@@ -81,30 +101,48 @@ export async function listPlatformAiModes(): Promise<PlatformAiModeRow[]> {
   } catch (err) {
     console.error("platform AI modes unavailable; using defaults", err);
   }
-  return AI_RUNTIME_MODES.map((mode) => ({
-    mode_key: mode,
-    model_alias: "",
-    // Issue #1367 — a retired mode never starts active, even on a deployment
-    // that has never opened the console.
-    is_active: !isRetiredAiRuntimeMode(mode),
-    temperature: null,
-    max_output_tokens: null,
-    prompt_scope_key: `mode:${mode}`,
-  }));
+  return AI_RUNTIME_MODES.map(defaultPlatformAiModeRow);
 }
 
 /** One mode's configuration, or the default when it is absent. */
 export async function getPlatformAiMode(mode: AiRuntimeMode): Promise<PlatformAiModeRow> {
-  const modes = await listPlatformAiModes();
-  return (
-    modes.find((row) => row.mode_key === mode) ?? {
-      mode_key: mode,
-      model_alias: "",
-      is_active: !isRetiredAiRuntimeMode(mode),
-      temperature: null,
-      max_output_tokens: null,
-      prompt_scope_key: `mode:${mode}`,
-    }
+  const modes = await listPlatformAiModeRows();
+  return modes.find((row) => row.mode_key === mode) ?? defaultPlatformAiModeRow(mode);
+}
+
+/**
+ * Issue #1546 — the single decision about whether a chat mode may be offered.
+ *
+ * `/api/ai/modes` renders it in the picker and the chat route refuses a turn on
+ * it, so the offer and the refusal cannot disagree. A retired mode is never
+ * offered; a mode switched off in the console is never offered; Fast also needs
+ * its own alias, because a blank one resolves to the gateway's default chat
+ * model — Auto under a faster-sounding label.
+ */
+export function modeAvailability(
+  row: { model_alias?: string | null; is_active?: boolean | null },
+  mode: AiRuntimeMode,
+): AiModeAvailability {
+  if (!isAiRuntimeModeAvailable(mode) || row.is_active === false) {
+    return { mode, available: false, reason: "disabled" };
+  }
+  if (mode === "instant" && !row.model_alias?.trim()) {
+    return { mode, available: false, reason: "fast_alias_not_configured" };
+  }
+  return { mode, available: true, reason: null };
+}
+
+/**
+ * The three chat modes with `modeAvailability` applied, in picker order. A mode
+ * the settings table has no row for is decided from the same default row the
+ * runtime read would use, so the endpoints and a turn cannot disagree.
+ */
+export function aiModeAvailability(
+  rows: readonly PlatformAiModeRow[],
+): AiModeAvailability[] {
+  const byMode = new Map(rows.map((row) => [row.mode_key, row]));
+  return AI_CHAT_MODES.map((mode) =>
+    modeAvailability(byMode.get(mode) ?? defaultPlatformAiModeRow(mode), mode),
   );
 }
 

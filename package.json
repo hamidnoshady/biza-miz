@@ -15,6 +15,7 @@
     "start": "NODE_ENV=production tsx server.ts",
     "deploy:verify": "node scripts/verify-production-deploy.mjs",
     "lint": "eslint . --max-warnings=0",
+    "bench:ai-latency": "node scripts/ai-latency-benchmark.mjs",
     "test": "vitest run",
     "test:db": "vitest run --config vitest.db.config.ts",
     "test:design": "vitest run src/app/dashboard/design-lint.test.ts src/app/design-lint.test.ts src/app/dashboard/primitive-lint.test.ts src/app/loading-coverage.test.ts src/app/reference-screenshots.test.ts",

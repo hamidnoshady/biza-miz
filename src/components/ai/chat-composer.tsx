@@ -55,6 +55,8 @@ import {
 import {
   AI_CHAT_MODES,
   AI_MODE_LABELS,
+  AI_MODE_UNAVAILABLE_HINTS,
+  unavailableModeReason,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
 import { AiCrossLibraryPicker } from "./ai-cross-library-picker";
@@ -877,15 +879,33 @@ export function ChatComposer({
                         : value === "instant"
                           ? ZapIcon
                           : BrainCircuitIcon;
+                    // Issue #1546 — an unconfigured mode is disabled with its
+                    // reason, and the chat route still refuses it as the backstop.
+                    const unavailableReason = unavailableModeReason(
+                      workspaceContext?.modeAvailability,
+                      value,
+                    );
                     return (
-                      <SelectItem key={value} value={value} className="py-2">
-                        <span className="inline-flex min-w-0 items-center gap-2">
+                      <SelectItem
+                        key={value}
+                        value={value}
+                        className="py-2"
+                        disabled={unavailableReason !== null}
+                      >
+                        <span className="inline-flex min-w-0 items-start gap-2">
                           <Icon
-                            className="size-4 shrink-0 text-muted-foreground"
+                            className="mt-0.5 size-4 shrink-0 text-muted-foreground"
                             aria-hidden="true"
                           />
-                          <span className="text-xs font-semibold">
-                            {AI_MODE_LABELS[value]}
+                          <span className="flex min-w-0 flex-col gap-0.5">
+                            <span className="text-xs font-semibold">
+                              {AI_MODE_LABELS[value]}
+                            </span>
+                            {unavailableReason ? (
+                              <span className="text-[10px] font-normal text-muted-foreground">
+                                {AI_MODE_UNAVAILABLE_HINTS[unavailableReason]}
+                              </span>
+                            ) : null}
                           </span>
                         </span>
                       </SelectItem>

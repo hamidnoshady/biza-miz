@@ -15,6 +15,7 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createUIMessageStream, createUIMessageStreamResponse, generateText, isStepCount, jsonSchema, streamText, tool, type UIMessage, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
 import type { OpenAiTool } from "./ai";
+import { toolProgressEvent, type AiToolProgressEvent } from "./ai-tool-progress";
 
 export interface GatewayModelSettings {
   baseUrl: string;
@@ -45,10 +46,17 @@ export function assertSdkModelIsGatewayBound(model: LanguageModel): void {
  * Turns the app's existing OpenAI-style tool declarations into SDK tools whose
  * `execute` is the app's own executor. The declarations stay the single source
  * of truth, so a tool added to `ai.ts` is not described twice.
+ *
+ * Issue #1546 — `hooks.onToolProgress` is the shared way an SDK caller surfaces
+ * "a tool is running / finished / failed" to its stream. It is the same
+ * vocabulary and the same label helper the tenant loop uses, so an SDK-based
+ * surface cannot invent a second progress protocol (and cannot leak arguments:
+ * the event carries a server-built label only).
  */
 export function sdkToolsFrom(
   declared: readonly OpenAiTool[],
   execute: (name: string, args: Record<string, unknown>) => Promise<string>,
+  hooks?: { onToolProgress?: (event: AiToolProgressEvent) => void; round?: number },
 ): ToolSet {
   const tools: ToolSet = {};
   for (const declaration of declared) {
@@ -58,7 +66,15 @@ export function sdkToolsFrom(
       inputSchema: jsonSchema(parameters as Parameters<typeof jsonSchema>[0]),
       execute: async (input: unknown) => {
         const args = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
-        return execute(name, args);
+        hooks?.onToolProgress?.(toolProgressEvent(name, "running", hooks.round ?? 1));
+        try {
+          const output = await execute(name, args);
+          hooks?.onToolProgress?.(toolProgressEvent(name, "completed", hooks.round ?? 1));
+          return output;
+        } catch (error) {
+          hooks?.onToolProgress?.(toolProgressEvent(name, "failed", hooks.round ?? 1));
+          throw error;
+        }
       },
     });
   }

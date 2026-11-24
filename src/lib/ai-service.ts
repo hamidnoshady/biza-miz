@@ -39,7 +39,13 @@ import {
 } from "./ai-capabilities";
 import type { Permission } from "./permissions";
 import type { AppKey } from "./apps";
-import { routeTools } from "./ai-tool-routing";
+import { routeTools, toolGroupsOf } from "./ai-tool-routing";
+import { toolProgressEvent, type AiToolProgressEvent } from "./ai-tool-progress";
+import {
+  logAiTurnDiagnostics,
+  recordRound,
+  startTurnDiagnostics,
+} from "./ai-latency";
 import { parseGenUiBlocks, type GenUiBlock } from "./ai-genui";
 import {
   buildReceiptExtractionPrompt,
@@ -224,6 +230,17 @@ export type ReadToolRunner = (
 
 const MAX_TOOL_ROUNDS = 6;
 const REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * Issue #1546 — the whole-turn budget. Before this, the only limit was the
+ * 60 s per-round timeout times six rounds, so a slow turn could occupy the
+ * request for ~6 minutes with no user-visible end. Every round now takes the
+ * smaller of its own timeout and what is left of this budget, and a turn that
+ * runs out returns a clear partial-result error instead of a silent hang.
+ * Provider retries/fallbacks stay LiteLLM's job (see
+ * docs/architecture/ai-subsystem-architecture.md); the application retries no
+ * generation and no tool execution.
+ */
+const TURN_DEADLINE_MS = 90_000;
 
 function providerHeaders(config: AiConfig): Record<string, string> {
   return {
@@ -238,6 +255,8 @@ function providerHeaders(config: AiConfig): Record<string, string> {
 interface ProviderStreamCallbacks {
   onDelta?: (content: string) => void;
   onToolCalls?: () => void;
+  /** Issue #1546 — safe, label-only progress for the tools this turn runs. */
+  onToolProgress?: (event: AiToolProgressEvent) => void;
 }
 
 interface ProviderStreamDelta {
@@ -297,7 +316,9 @@ async function readStreamingProviderResponse(
   response: Response,
   messages: ProviderMessage[],
   callbacks: ProviderStreamCallbacks,
-): Promise<ProviderResult> {
+  /** Issue #1546 — marks the first generated token for the round's TTFT. */
+  onFirstActivity?: () => void,
+): Promise<Omit<ProviderResult, "timings" | "protocolFallback">> {
   if (!response.body) throw new AiError("ai_provider", "پاسخ جریانی سرویس هوش مصنوعی نامعتبر بود.");
 
   const reader = response.body.getReader();
@@ -321,6 +342,7 @@ async function readStreamingProviderResponse(
     if (!delta) return;
 
     if (typeof delta.content === "string" && delta.content) {
+      onFirstActivity?.();
       content += delta.content;
       callbacks.onDelta?.(delta.content);
     }
@@ -328,6 +350,7 @@ async function readStreamingProviderResponse(
     if (!delta.tool_calls?.length) return;
     if (!sawToolCalls) {
       sawToolCalls = true;
+      onFirstActivity?.();
       // A provider normally emits no natural-language content in a tool turn.
       // If one does, the client clears the provisional text before the next,
       // final response begins.
@@ -383,11 +406,15 @@ async function readStreamingProviderResponse(
   };
 }
 
-/** One completed provider round: its message, tokens, and any gateway cost. */
+/** One completed provider round: its message, tokens, gateway cost and timing. */
 interface ProviderResult {
   message: ProviderMessage;
   usage: AiTokenUsage;
   costUsd: number | null;
+  /** Issue #1546 — how long the round took and how long its first token took. */
+  timings: { ttftMs: number | null; totalMs: number };
+  /** The stream_options protocol retry fired; not a generation retry. */
+  protocolFallback: boolean;
 }
 
 async function callProvider(
@@ -397,9 +424,18 @@ async function callProvider(
   stream?: ProviderStreamCallbacks,
   requestId?: string,
   parentSignal?: AbortSignal,
+  /** Issue #1546 — the whole-turn budget this round must fit inside. */
+  budget?: { roundTimeoutMs: number; turnDeadlineAt: number },
 ): Promise<ProviderResult> {
+  const startedAt = performance.now();
+  let firstActivityAt: number | null = null;
+  const markFirstActivity = () => {
+    if (firstActivityAt === null) firstActivityAt = performance.now();
+  };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const roundTimeoutMs = Math.max(1, Math.min(REQUEST_TIMEOUT_MS, budget?.roundTimeoutMs ?? REQUEST_TIMEOUT_MS));
+  const timer = setTimeout(() => controller.abort(), roundTimeoutMs);
+  let protocolFallback = false;
   const signal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
   const url = chatCompletionsUrl(config.baseUrl);
   const toolErrors = validateOpenAiTools(tools);
@@ -471,10 +507,25 @@ async function callProvider(
         body: JSON.stringify(fallbackBody),
         signal,
       });
+      protocolFallback = true;
     }
   } catch (err) {
     clearTimeout(timer);
     if (err instanceof Error && err.name === "AbortError") {
+      // Issue #1546 — the three abort causes are different states to a member
+      // and to the ledger, so they are not folded into one "timeout".
+      if (parentSignal?.aborted) {
+        throw new AiError("ai_cancelled", "پاسخ‌گویی لغو شد.", undefined, undefined, requestDiagnostics);
+      }
+      if (budget && Date.now() >= budget.turnDeadlineAt - 500) {
+        throw new AiError(
+          "ai_turn_deadline",
+          "زمان مجاز این پاسخ تمام شد؛ آنچه آماده شد ارسال می‌شود و پاسخ کامل نیست.",
+          undefined,
+          undefined,
+          requestDiagnostics,
+        );
+      }
       throw new AiError("ai_timeout", "پاسخ سرویس هوش مصنوعی به‌موقع نرسید.", undefined, undefined, requestDiagnostics);
     }
     throw new AiError("ai_network", "اتصال به سرویس هوش مصنوعی برقرار نشد.", undefined, undefined, requestDiagnostics);
@@ -498,7 +549,16 @@ async function callProvider(
   }
 
   if (stream && res.headers.get("content-type")?.includes("text/event-stream")) {
-    return readStreamingProviderResponse(res, messages, stream);
+    const result = await readStreamingProviderResponse(res, messages, stream, markFirstActivity);
+    const totalMs = performance.now() - startedAt;
+    return {
+      ...result,
+      timings: {
+        ttftMs: firstActivityAt === null ? null : Math.round(firstActivityAt - startedAt),
+        totalMs: Math.round(totalMs),
+      },
+      protocolFallback,
+    };
   }
 
   const json = (await res.json()) as {
@@ -512,6 +572,9 @@ async function callProvider(
     message,
     usage: providerUsage(json.usage, fallbackUsage(messages, textOf(message.content))),
     costUsd: responseCostUsd(res),
+    // A non-streamed round has no separate first-token moment to observe.
+    timings: { ttftMs: Math.round(performance.now() - startedAt), totalMs: Math.round(performance.now() - startedAt) },
+    protocolFallback,
   };
 }
 
@@ -774,6 +837,13 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    */
   appFocus?: AppKey | null;
   /**
+   * Issue #1546 — the turn's existing task lens (`AiTaskId`). It is only a
+   * routing hint for which tool groups to offer; it grants nothing.
+   */
+  task?: string | null;
+  /** Issue #1546 — the product mode, recorded in the latency diagnostics only. */
+  runtimeMode?: string;
+  /**
    * Phase F pt.2 — the turn's conversation belongs to a project, so
    * project-scoped actions (project.memory.add) join `propose_action`'s enum.
    * The ambient project id is injected by the caller, never by the model.
@@ -829,10 +899,20 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     : [];
   const catalogue =
     externalCatalogue.length > 0 ? [...staticCatalogue, ...externalCatalogue] : staticCatalogue;
-  // Issue #812 §11 — App Focus narrows the catalogue the model can see, not
-  // just the prompt. `routeTools` returns null for "no focus", so an unfocused
-  // turn is byte-for-byte what it was before.
-  const appRouted = opts.appFocus ? routeTools(catalogue.map((tool) => tool.function.name), [opts.appFocus]) : null;
+  // Issue #812 §11 / #1546 — App Focus narrows the catalogue the model can see,
+  // not just the prompt, and the turn's own words + task lens choose which
+  // sections of that app are worth paying for. `routeTools` returns null for
+  // "no focus", so an unfocused turn is byte-for-byte what it was before.
+  const appRouted = opts.appFocus
+    ? routeTools(
+        catalogue.map((tool) => tool.function.name),
+        [opts.appFocus],
+        {
+          task: opts.task ?? null,
+          message: [...messages].reverse().find((message) => message.role === "user")?.content ?? null,
+        },
+      )
+    : null;
   const appNarrowed = appRouted
     ? catalogue.filter((tool) => appRouted.includes(tool.function.name))
     : catalogue;
@@ -856,6 +936,26 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
       ? (name, args) =>
           runReadTool(name, args, businessId, floorScope, opts.actorUserId, opts.permissions)
       : null);
+  // Issue #1546 — one privacy-safe diagnostics record per turn, keyed by the
+  // same application request id the settlement and audit rows carry.
+  const turnStartedAt = performance.now();
+  // Wall-clock deadline so `callProvider` can compare it with `Date.now()`;
+  // durations keep using `performance.now()` so they are monotonic.
+  const turnDeadlineAt = Date.now() + TURN_DEADLINE_MS;
+  const turnDiagnostics = startTurnDiagnostics({
+    requestId: opts.requestId,
+    model: config.model,
+    mode: opts.runtimeMode,
+    toolSchemaCount: tools.length,
+    toolGroups: toolGroupsOf(tools.map((tool) => tool.function.name)),
+    startedAt: turnStartedAt,
+  });
+  function finishTurnDiagnostics() {
+    turnDiagnostics.totalMs = Math.round(performance.now() - turnStartedAt);
+    turnDiagnostics.costUsd = costUsd;
+    logAiTurnDiagnostics(turnDiagnostics);
+  }
+
   const usage: AiTokenUsage = { inputTokens: 0, outputTokens: 0 };
   let costUsd: number | null = null;
   const toolTrace: AgentToolCallTrace[] = [];
@@ -878,8 +978,23 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
   // leaves carrying what it cost, and `settleAiTurn`'s per-request-id
   // idempotency keeps the eventual settlement single.
   try {
-    return await runToolLoop();
+    const reply = await runToolLoop();
+    turnDiagnostics.outcome = reply.proposedAction
+      ? "proposed"
+      : reply.inputRequest
+        ? "input_request"
+        : turnDiagnostics.outcome === "round_limit"
+          ? "round_limit"
+          : "answered";
+    finishTurnDiagnostics();
+    return reply;
   } catch (err) {
+    if (err instanceof AiError && err.code === "ai_cancelled") turnDiagnostics.outcome = "cancelled";
+    else if (err instanceof AiError && err.code === "ai_turn_deadline") {
+      turnDiagnostics.deadlineHit = true;
+      turnDiagnostics.outcome = "failed";
+    } else turnDiagnostics.outcome = "failed";
+    finishTurnDiagnostics();
     if (usage.inputTokens > 0 || usage.outputTokens > 0 || costUsd !== null) {
       const accrual: AiTurnAccrual = { usage: { ...usage }, costUsd };
       if (err instanceof AiError) {
@@ -898,7 +1013,30 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
 
   async function runToolLoop(): Promise<AgentReply> {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const result = await callProvider(config, convo, tools, opts.stream, opts.requestId, opts.signal);
+    const remainingMs = turnDeadlineAt - Date.now();
+    if (remainingMs < 500) {
+      turnDiagnostics.deadlineHit = true;
+      throw new AiError(
+        "ai_turn_deadline",
+        "زمان مجاز این پاسخ تمام شد؛ آنچه آماده شد ارسال می‌شود و پاسخ کامل نیست.",
+      );
+    }
+    const result = await callProvider(config, convo, tools, opts.stream, opts.requestId, opts.signal, {
+      roundTimeoutMs: remainingMs,
+      turnDeadlineAt,
+    });
+    recordRound(turnDiagnostics, {
+      round,
+      ttftMs: result.timings.ttftMs,
+      generationMs:
+        result.timings.ttftMs === null ? 0 : Math.max(0, result.timings.totalMs - result.timings.ttftMs),
+      totalMs: result.timings.totalMs,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      // Tool names only — a diagnostic must never carry an argument.
+      tools: (result.message.tool_calls ?? []).map((call) => call.function.name),
+      protocolFallback: result.protocolFallback,
+    });
     usage.inputTokens += result.usage.inputTokens;
     usage.outputTokens += result.usage.outputTokens;
     if (result.costUsd !== null) costUsd = (costUsd ?? 0) + result.costUsd;
@@ -972,6 +1110,14 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     for (const call of toolCalls) {
       let result: ToolResult;
       const callArgs = parseArgs(call.function.arguments);
+      // Issue #1546 — the moment a tool starts, the member is told that work is
+      // happening and which approved tool it is. The event carries a label and
+      // never an argument, a result or a prompt.
+      const reportProgress =
+        call.function.name !== "propose_action" && call.function.name !== "request_input";
+      if (reportProgress) {
+        opts.stream?.onToolProgress?.(toolProgressEvent(call.function.name, "running", round + 1));
+      }
       if (call.function.name === "draft_expense_from_receipt" && allowedReadToolNames.has(call.function.name)) {
         // Images still go through the isolated vision call. A PDF's text was
         // already extracted by the route and travels here — the model reads
@@ -1081,6 +1227,11 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
       } else {
         result = { ok: false, data: { error: `ابزار ناشناخته: ${call.function.name}` } };
       }
+      if (reportProgress) {
+        opts.stream?.onToolProgress?.(
+          toolProgressEvent(call.function.name, result.ok ? "completed" : "failed", round + 1),
+        );
+      }
       if (call.function.name === "start_guided_tour" && result.ok && result.data && typeof result.data === "object") {
         const candidate = result.data as { status?: unknown; guideId?: unknown };
         if (candidate.status === "ready" && typeof candidate.guideId === "string") {
@@ -1108,6 +1259,7 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     }
     }
 
+    turnDiagnostics.outcome = "round_limit";
     return {
       content: "برای پاسخ به این درخواست به مراحل زیادی نیاز بود. لطفاً سؤال را ساده‌تر بپرسید.",
       proposedAction: null,

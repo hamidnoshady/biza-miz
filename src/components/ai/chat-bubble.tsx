@@ -221,6 +221,37 @@ export function ChatBubble({
           )}
         </div>
 
+        {/* Issue #1546 — while a multi-round turn is working, say what is
+            happening. Server-labelled, `role="status"` so a screen reader
+            announces each step, and RTL inherits from the page. Never shows an
+            argument or a record. */}
+        {!isUser && message.toolProgress ? (
+          <p
+            role="status"
+            aria-live="polite"
+            className={cn(
+              "flex items-center gap-1.5 px-1 text-[10px]",
+              message.toolProgress.status === "failed"
+                ? "text-amber-700 dark:text-amber-300"
+                : "text-muted-foreground",
+            )}
+          >
+            {message.toolProgress.status === "running" ? (
+              // The design system uses a busy indicator, not a spinner: a quiet
+              // pulsing dot beside the label.
+              <span aria-hidden="true" className="size-1.5 shrink-0 animate-pulse rounded-full bg-current" />
+            ) : null}
+            <span className="truncate">{message.toolProgress.label}</span>
+            <span aria-hidden="true">
+              {message.toolProgress.status === "running"
+                ? "…"
+                : message.toolProgress.status === "completed"
+                  ? "✓"
+                  : "⚠️"}
+            </span>
+          </p>
+        ) : null}
+
         {/* The charge, after the fact and in passing — never a gate in front
             of the reply. See sendMessage in use-ai-chat.ts. */}
         {!isUser &&
