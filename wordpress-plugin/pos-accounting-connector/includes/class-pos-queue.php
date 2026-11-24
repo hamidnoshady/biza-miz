@@ -246,9 +246,14 @@ class POS_Connector_Queue {
 		$now   = current_time( 'mysql', true );
 		return $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT * FROM {$table}
-					WHERE status = 'pending' AND available_at <= %s
-					ORDER BY id ASC LIMIT %d",
+				"SELECT candidate.* FROM {$table} candidate
+					WHERE candidate.status = 'pending' AND candidate.available_at <= %s
+						AND (candidate.topic <> 'product.updated' OR NOT EXISTS (
+							SELECT 1 FROM {$table} earlier
+							WHERE earlier.topic = candidate.topic AND earlier.remote_id = candidate.remote_id
+								AND earlier.status = 'pending' AND earlier.id < candidate.id
+						))
+					ORDER BY candidate.id ASC LIMIT %d",
 				$now,
 				$limit
 			),
