@@ -4,7 +4,7 @@
  *
  * `tour-studio.test.ts` pins the rules and the route tests pin the wire format;
  * this one holds what only a mounted panel shows: that a page's coverage
- * sentence follows the derived catalogue (authored tour / code tour / baseline),
+ * sentence follows the selected page's published Studio records,
  * that a new tour starts from the page it belongs to with a sane default key,
  * that saving sends the revision the editor opened (so a second session cannot
  * silently win), and that the revision list is honest about which version
@@ -16,7 +16,7 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { tourCoverage } from "@/lib/tour-coverage";
+import { KNOWLEDGE_PAGES } from "@/lib/knowledge-base";
 import { STUDIO_ERROR_TEXT, type StudioTour } from "@/lib/tour-studio";
 import { api, useCan } from "../ui";
 import { ToursPanel } from "./kb-tours-panel";
@@ -29,9 +29,8 @@ vi.mock("../ui", async (importOriginal) => {
 const apiMock = vi.mocked(api);
 const useCanMock = vi.mocked(useCan);
 
-const COVERAGE = tourCoverage();
-const BASELINE_PAGE = COVERAGE.pages.find((row) => row.kind === "baseline")!;
-const ADVANCED_PAGE = COVERAGE.pages.find((row) => row.kind === "advanced")!;
+const KNOWLEDGE_PAGE = KNOWLEDGE_PAGES.find((page) => page.route === "/knowledge")!;
+const POS_PAGE = KNOWLEDGE_PAGES.find((page) => page.route === "/accounting/pos")!;
 
 type Reply = { ok: boolean; status: number; data: unknown; aborted: boolean };
 const reply = (data: unknown, ok = true, status = 200): Reply => ({ ok, status, data, aborted: false });
@@ -42,8 +41,8 @@ function tour(overrides: Partial<StudioTour> = {}): StudioTour {
   return {
     id: "tour-1",
     tourKey: "studio.crm.audit",
-    pageKey: BASELINE_PAGE.pageKey,
-    route: BASELINE_PAGE.route,
+    pageKey: KNOWLEDGE_PAGE.key,
+    route: KNOWLEDGE_PAGE.route,
     title: "تور دست‌نویس",
     description: "",
     eligibility: {},
@@ -112,29 +111,27 @@ afterEach(() => {
 });
 
 describe("Tour Studio — what the console shows", () => {
-  it("derives a page's coverage sentence from the catalogue, not from a stored flag", async () => {
+  it("reports only published Studio records for the selected page", async () => {
+    tours = [
+      tour({ status: "draft", publishedVersion: null, publishedAt: null }),
+      tour({ id: "tour-pos", tourKey: "studio.accounting.pos", pageKey: POS_PAGE.key, route: POS_PAGE.route }),
+    ];
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
-    expect(
-      screen.getByText("این صفحه فعلاً فقط «معرفی خودکار» دارد؛ تور شما جای آن را می‌گیرد."),
-    ).toBeTruthy();
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
+    expect(await screen.findByText("برای این صفحه هنوز توری منتشر نشده است.")).toBeTruthy();
 
-    fireEvent.change(pagePicker(), { target: { value: ADVANCED_PAGE.pageKey } });
-    expect(
-      screen.getByText(
-        "این صفحه تور کدنویسی‌شده دارد؛ هر توری که اینجا منتشر کنید با همان شناسه جای آن می‌نشیند.",
-      ),
-    ).toBeTruthy();
+    fireEvent.change(pagePicker(), { target: { value: POS_PAGE.key } });
+    expect(screen.getByText("این صفحه در استودیو تور منتشرشده دارد.")).toBeTruthy();
   });
 
   it("opens a new tour on the selected page with a dotted key derived from its route", async () => {
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
 
     const keyInput = screen.getByPlaceholderText("studio.accounting.orders") as HTMLInputElement;
     expect(keyInput.value).toBe(
-      `studio.${BASELINE_PAGE.route.replace(/^\//, "").replace(/\//g, ".")}`,
+      `studio.${KNOWLEDGE_PAGE.route.replace(/^\//, "").replace(/\//g, ".")}`,
     );
     expect(keyInput.getAttribute("dir")).toBe("ltr");
 
@@ -171,7 +168,7 @@ describe("Tour Studio — what the console shows", () => {
 describe("Tour Studio — saving and publishing", () => {
   it("sends the whole draft, without a version, the first time", async () => {
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
     fireEvent.change(screen.getByPlaceholderText("studio.accounting.orders"), {
       target: { value: "studio.mine" },
@@ -184,7 +181,7 @@ describe("Tour Studio — saving and publishing", () => {
     );
     const posted = apiMock.mock.calls.find(([, init]) => init?.method === "POST");
     const body = JSON.parse(posted![1]!.body as string);
-    expect(body).toMatchObject({ tourKey: "studio.mine", pageKey: BASELINE_PAGE.pageKey });
+    expect(body).toMatchObject({ tourKey: "studio.mine", pageKey: KNOWLEDGE_PAGE.key });
     expect(body.expectedVersion).toBeUndefined();
     expect(body.steps).toHaveLength(1);
     expect(body.steps[0]).toMatchObject({ kind: "explain" });
@@ -193,7 +190,7 @@ describe("Tour Studio — saving and publishing", () => {
 
   it("edits an anyOf alternative and refuses an empty one", async () => {
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
     fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
 
@@ -217,19 +214,19 @@ describe("Tour Studio — saving and publishing", () => {
 
   it("offers the target page itself for a live check", async () => {
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
     fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
     fireEvent.click(screen.getByRole("button", { name: /پیش‌نمایش مراحل/ }));
 
     const link = screen.getByRole("link", { name: /باز کردن صفحهٔ هدف/ });
-    expect(link.getAttribute("href")).toBe(BASELINE_PAGE.route);
+    expect(link.getAttribute("href")).toBe(KNOWLEDGE_PAGE.route);
     expect(link.getAttribute("target")).toBe("_blank");
   });
 
   it("authors a conditional branch as step eligibility", async () => {
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
     fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
     fireEvent.change(screen.getByLabelText("دسترسی‌های لازم (با کاما)"), {
@@ -254,7 +251,7 @@ describe("Tour Studio — saving and publishing", () => {
       return reply({ tour: tours[0], revisions: [] }) as never;
     });
 
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     await waitFor(() => expect(screen.queryByText("تور دست‌نویس")).not.toBeNull());
     fireEvent.click(screen.getByText("تور دست‌نویس"));
     fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس/ }));
@@ -269,7 +266,7 @@ describe("Tour Studio — saving and publishing", () => {
   it("publishes the version the editor holds, and lists the revision it becomes", async () => {
     tours = [tour()];
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     await waitFor(() => expect(screen.queryByText("تور دست‌نویس")).not.toBeNull());
     fireEvent.click(screen.getByText("تور دست‌نویس"));
     fireEvent.click(screen.getByRole("button", { name: /انتشار/ }));
@@ -293,7 +290,7 @@ describe("Tour Studio — saving and publishing", () => {
       }) as never;
     });
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     await waitFor(() => expect(screen.queryByText("تور دست‌نویس")).not.toBeNull());
     fireEvent.click(screen.getByText("تور دست‌نویس"));
 
@@ -312,7 +309,7 @@ describe("Tour Studio — saving and publishing", () => {
 describe("Tour Studio — authoring a verified action step", () => {
   it("adds an action step with a verifier and sends it to the server", async () => {
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
     fireEvent.change(screen.getByPlaceholderText("studio.accounting.orders"), {
       target: { value: "studio.task" },
@@ -341,7 +338,7 @@ describe("Tour Studio — authoring a verified action step", () => {
 
   it("keeps an explanation's verifier out of the payload", async () => {
     await renderPanel();
-    fireEvent.change(pagePicker(), { target: { value: BASELINE_PAGE.pageKey } });
+    fireEvent.change(pagePicker(), { target: { value: KNOWLEDGE_PAGE.key } });
     fireEvent.click(screen.getByRole("button", { name: /تور تازه برای این صفحه/ }));
     fireEvent.click(screen.getByRole("button", { name: /^توضیح$/ }));
     fireEvent.click(screen.getByRole("button", { name: /ذخیرهٔ پیش‌نویس/ }));
