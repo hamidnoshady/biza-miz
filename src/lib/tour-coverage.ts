@@ -160,17 +160,15 @@ export function tourCoverage(
 
   const rows = KNOWLEDGE_PAGES.map((page): TourCoverageRow => {
     const publishedForPage = published.filter((tour) => tour.pageKey === page.key);
-    // A published console tour replaces a code tour with the same id and is
-    // otherwise added, exactly as the member lookup composes the catalogue.
-    const authored = mergePublishedTours(authoredByPage.get(page.key) ?? [], publishedForPage);
+    const studioOnly = STUDIO_ONLY_PAGE_KEYS.has(page.key);
+    // Studio-only pages ignore legacy code tours, matching member lookup:
+    // only a published Studio definition may provide guidance there.
+    const authored = studioOnly
+      ? publishedForPage
+      : mergePublishedTours(authoredByPage.get(page.key) ?? [], publishedForPage);
     const baseline = baselineTourForPage(page, regions);
-    // A console-published tour is the editorial head of the page; a code tour
-    // remains a valid fallback and is still offered beside it.
-    const studioRequired = authored.length === 0 && STUDIO_ONLY_PAGE_KEYS.has(page.key);
-    const primary =
-      authored.find((tour) => publishedForPage.some((entry) => entry.id === tour.id)) ??
-      authored[0] ??
-      (studioRequired ? null : baseline);
+    const studioRequired = studioOnly && authored.length === 0;
+    const primary = authored[0] ?? (studioRequired ? null : baseline);
     const pageIssues: string[] = [];
     if (authored.length === 0 && regionsForPage(page.key, regions).length === 0) {
       pageIssues.push("no declared region: the baseline is explanation-only");
@@ -215,10 +213,10 @@ export function tourCoverage(
   // overview); the button then offers both, so the totals count every tour it
   // can offer rather than only the row's primary one.
   const offered = KNOWLEDGE_PAGES.flatMap((page) => {
-    const authored = mergePublishedTours(
-      authoredByPage.get(page.key) ?? [],
-      published.filter((tour) => tour.pageKey === page.key),
-    );
+    const publishedForPage = published.filter((tour) => tour.pageKey === page.key);
+    const authored = STUDIO_ONLY_PAGE_KEYS.has(page.key)
+      ? publishedForPage
+      : mergePublishedTours(authoredByPage.get(page.key) ?? [], publishedForPage);
     return authored.length > 0
       ? authored
       : STUDIO_ONLY_PAGE_KEYS.has(page.key)
