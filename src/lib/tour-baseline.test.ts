@@ -267,10 +267,12 @@ describe("the coverage audit", () => {
   it("reports the authored pages as advanced and the rest as the editorial backlog", () => {
     const authoredPages = new Set(TOURS.map((tour) => tour.pageKey));
     for (const row of report.pages) {
-      const expectedKind = authoredPages.has(row.pageKey)
-        ? "advanced"
-        : STUDIO_ONLY_PAGE_KEYS.has(row.pageKey)
-          ? "studio-required"
+      const expectedKind = STUDIO_ONLY_PAGE_KEYS.has(row.pageKey)
+        ? publishedStudioPages.has(row.pageKey)
+          ? "advanced"
+          : "studio-required"
+        : authoredPages.has(row.pageKey)
+          ? "advanced"
           : "baseline";
       expect(row.kind).toBe(expectedKind);
       if (row.kind === "advanced") expect(row.tourIds.length).toBeGreaterThan(0);
