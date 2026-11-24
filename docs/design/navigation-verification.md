@@ -201,13 +201,13 @@ Run on this tree after the documentation and audit-note changes:
 | `npx tsc --noEmit` | **Passed** with `NODE_OPTIONS=--max-old-space-size=8192`. The default 4 GB heap OOMs on this 33 GB Windows machine; the type check itself reports no errors. |
 | `npm test` | **Not green on this Windows host for environment reasons.** 1,619 test files / 19,851 tests passed, 23 failed in 10 files, 1 worker error. The failures are Windows-environment failures, not assertions about this change: `ci/required-gate` and `desktop-installer-staging` need a working `bash`/WSL (this host's `bash.exe` is WSL without `/bin/bash`), and the desktop staging/update tests hit `EPERM` on `%TEMP%` copies (antivirus/OneDrive). Six files that failed on suite-load timeouts (`industry-coverage`, `desktop-runtime-posture`, `checkout-idempotency`, `brand-coverage`, `ledger-source-labels`, `cheques-section`) pass when rerun; `client-bundle-boundary` passes with `--testTimeout=120000` (it scans the whole tree and needs ~40 s on this host, against a 15 s default). No navigation or documentation test failed. CI's Linux run is the authoritative `npm test`. |
 | `npm run test:design` | **Passed** — 5 files / 47 tests (design lint, primitive lint, loading coverage, reference screenshots). |
-| `npm run build` | _pending_ |
+| `npm run build` | **Passed** — `✓ Compiled successfully in 4.1min`, 921 static pages generated, standalone output written. |
 | `npm run test:visual` | Not run: documentation-only change, no pixel change. A visual diff would mean the UI changed and must be reverted, not re-baselined. |
 
-The verification server used a production build of the same tree; the build
-result is recorded when the command completes. `npm run test:db` was not run
-(it is not one of this issue's gates, and the verification database is a
-throwaway seeded tenant).
+The verification server used a production build of the same tree. The build
+gate was re-run after the documentation changes and passed. `npm run test:db`
+was not run (it is not one of this issue's gates, and the verification database
+is a throwaway seeded tenant).
 
 ## Not covered
 
