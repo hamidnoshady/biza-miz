@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 const m = vi.hoisted(() => ({
   connection: vi.fn(),
+  query: vi.fn(),
   getContent: vi.fn(),
   enqueue: vi.fn(),
   findCreate: vi.fn(),
@@ -18,6 +19,7 @@ const m = vi.hoisted(() => ({
   getPost: vi.fn(),
 }));
 
+vi.mock("@/lib/db", () => ({ query: m.query }));
 vi.mock("@/lib/auth", () => ({
   requirePermission: async () => ({ session: { businessId: "tenant", sub: "user" }, error: null }),
   withTenantScope: (fn: unknown) => fn,
@@ -349,5 +351,34 @@ describe("on-demand REST editor content", () => {
     m.getContent.mockResolvedValue({ content: "legacy plugin body" });
     expect((await (await GET(detailRequest())).json()).row.content).toBe("legacy plugin body");
     expect(m.getPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("on-demand plugin editor content", () => {
+  const detail = () => new Request(`http://test/api?connectionId=${CONNECTION_ID}&type=post&id=42`);
+
+  beforeEach(() => {
+    m.connection.mockResolvedValue({ id: CONNECTION_ID, provider: "woocommerce", link_mode: "plugin",
+      status: "active", plugin_capabilities: { jobTypes: ["post_body_read"] } });
+    m.getContent.mockResolvedValue({ content: null, remoteUpdatedAt: "2026-11-20T12:00:00Z" });
+    m.query.mockReset().mockResolvedValue({ rows: [] });
+  });
+
+  it("queues one tenant-scoped read when there is no answer", async () => {
+    const response = await GET(detail());
+    expect(response.status).toBe(202);
+    expect(m.query.mock.calls[1]?.[1]).toEqual(["tenant", CONNECTION_ID, "post:42", "post", 42]);
+  });
+
+  it("consumes a fresh version-matched body without enqueuing again", async () => {
+    m.query.mockResolvedValueOnce({ rows: [{ answer: { content: "", modified: "2026-11-20T12:00:00Z" } }] });
+    const response = await GET(detail());
+    expect((await response.json()).row.content).toBe("");
+    expect(m.query).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the editor closed on a version mismatch", async () => {
+    m.query.mockResolvedValueOnce({ rows: [{ answer: { content: "fresh", modified: "2026-11-20T12:01:00Z" } }] });
+    expect((await GET(detail())).status).toBe(409);
   });
 });
