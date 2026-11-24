@@ -12,10 +12,12 @@ vi.mock("@/lib/auth", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/integrations/connection-access", () => ({ getAccessibleConnection: vi.fn() }));
+vi.mock("@/lib/integrations/wp-editor-body", () => ({ requestWpEditorBody: vi.fn() }));
 vi.mock("@/lib/integrations/woo-product-content", () => ({ wooProductContentFor: vi.fn() }));
 
 import * as connectionAccess from "@/lib/integrations/connection-access";
 import * as contentService from "@/lib/integrations/woo-product-content";
+import { requestWpEditorBody } from "@/lib/integrations/wp-editor-body";
 import { GET } from "./route";
 
 const SESSION = { businessId: "biz-1", sub: "user-1", role: "manager" };
@@ -110,5 +112,32 @@ describe("GET store/products/[remoteId] — the store's own storefront content",
     const res = await get();
     expect(res.status).toBe(403);
     expect(contentService.wooProductContentFor).not.toHaveBeenCalled();
+  });
+});
+
+describe("plugin-connected storefront text reads", () => {
+  beforeEach(() => {
+    vi.mocked(connectionAccess.getAccessibleConnection).mockResolvedValue(
+      wooConnection({ plugin_capabilities: { jobTypes: ["post_body_read"] } }) as never,
+    );
+  });
+
+  it("returns a pending response until WordPress supplies the descriptions", async () => {
+    vi.mocked(requestWpEditorBody).mockResolvedValue(null);
+    expect((await get()).status).toBe(202);
+    expect(requestWpEditorBody).toHaveBeenCalledWith(SESSION.businessId, CONNECTION_ID, "product", "55");
+  });
+
+  it("returns the live descriptions, including an intentionally empty field", async () => {
+    vi.mocked(requestWpEditorBody).mockResolvedValue({ content: "<p>live</p>", shortDescription: "" });
+    const body = await (await get()).json();
+    expect(body.product.description).toBe("<p>live</p>");
+    expect(body.product.shortDescription).toBe("");
+  });
+
+  it("does not enqueue reads for unmapped products", async () => {
+    vi.mocked(contentService.wooProductContentFor).mockResolvedValue(null);
+    expect((await get()).status).toBe(404);
+    expect(requestWpEditorBody).not.toHaveBeenCalled();
   });
 });
