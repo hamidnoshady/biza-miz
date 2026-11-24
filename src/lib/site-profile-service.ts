@@ -33,7 +33,16 @@ const SITE_PROFILE_SETTING_KEYS: Record<SiteProfileSettingField, string> = {
   tax: SETTING_KEYS.tax,
   pricing: SETTING_KEYS.pricing,
   orderControls: SETTING_KEYS.orderControls,
+  printDefaults: "printing.behavior",
+  printBranch: "printing.behavior",
 };
+
+/**
+ * Which fields are this branch's row rather than the business's. Only the
+ * branch's print override is scoped; everything else is a business setting
+ * (`location_id IS NULL`).
+ */
+const SITE_PROFILE_BRANCH_SCOPED: ReadonlySet<SiteProfileSettingField> = new Set(["printBranch"]);
 
 function settingRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -61,13 +70,19 @@ export async function buildSiteProfile(businessId: string, locationId: string): 
   const [features, availability, settingRows] = await Promise.all([
     effectiveFeatures(businessId),
     effectiveAppAvailability(businessId),
-    query<{ key: string; value: unknown }>(
-      `SELECT key, value FROM settings
-        WHERE business_id = $1 AND location_id IS NULL AND key = ANY($2::text[])`,
-      [businessId, Object.values(SITE_PROFILE_SETTING_KEYS)],
+    query<{ key: string; value: unknown; location_id: string | null }>(
+      `SELECT key, value, location_id FROM settings
+        WHERE business_id = $1 AND key = ANY($2::text[])
+          AND (location_id IS NULL OR location_id = $3)`,
+      [businessId, [...new Set(Object.values(SITE_PROFILE_SETTING_KEYS))], locationId],
     ),
   ]);
-  const stored = new Map(settingRows.rows.map((entry) => [entry.key, entry.value]));
+  const business = new Map(
+    settingRows.rows.filter((entry) => entry.location_id === null).map((entry) => [entry.key, entry.value]),
+  );
+  const branch = new Map(
+    settingRows.rows.filter((entry) => entry.location_id !== null).map((entry) => [entry.key, entry.value]),
+  );
   return {
     schemaVersion: 1,
     location: {
@@ -86,7 +101,9 @@ export async function buildSiteProfile(businessId: string, locationId: string): 
     settings: Object.fromEntries(
       SITE_PROFILE_SETTING_FIELDS.map((field) => [
         field,
-        settingRecord(stored.get(SITE_PROFILE_SETTING_KEYS[field])),
+        settingRecord(
+          (SITE_PROFILE_BRANCH_SCOPED.has(field) ? branch : business).get(SITE_PROFILE_SETTING_KEYS[field]),
+        ),
       ]),
     ),
   };
@@ -149,19 +166,27 @@ export async function applySiteProfile(businessId: string, locationId: string, p
         if (!(field in profile.settings)) continue;
         const value = profile.settings[field];
         const key = SITE_PROFILE_SETTING_KEYS[field];
+        const branchScoped = SITE_PROFILE_BRANCH_SCOPED.has(field);
         if (value === null) {
-          await client.query(
-            `DELETE FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2`,
-            [businessId, key],
-          );
+          if (branchScoped) {
+            await client.query(
+              `DELETE FROM settings WHERE business_id = $1 AND location_id = $2 AND key = $3`,
+              [businessId, locationId, key],
+            );
+          } else {
+            await client.query(
+              `DELETE FROM settings WHERE business_id = $1 AND location_id IS NULL AND key = $2`,
+              [businessId, key],
+            );
+          }
           continue;
         }
         await client.query(
           `INSERT INTO settings (business_id, location_id, key, value)
-           VALUES ($1, NULL, $2, $3::jsonb)
+           VALUES ($1, $2, $3, $4::jsonb)
            ON CONFLICT (business_id, location_id, key)
            DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-          [businessId, key, JSON.stringify(value)],
+          [businessId, branchScoped ? locationId : null, key, JSON.stringify(value)],
         );
       }
     }
@@ -189,15 +214,27 @@ export function resetSiteProfileGate(): void {
   lastAttemptAt.clear();
 }
 
-/** One desktop tick. Never throws for a cloud-side failure; it records it and backs off. */
-export async function runSiteProfileSync(businessId: string, now: Date = new Date()): Promise<SiteProfileState> {
+/**
+ * One desktop tick. Never throws for a cloud-side failure; it records it and
+ * backs off.
+ *
+ * `force` is the operator's «به‌روزرسانی»: it skips this process's 30-second
+ * interval and a pending failure backoff, so the click actually asks the cloud
+ * instead of being answered from the last tick.
+ */
+export async function runSiteProfileSync(
+  businessId: string,
+  now: Date = new Date(),
+  options: { force?: boolean } = {},
+): Promise<SiteProfileState> {
   const previous = (await getSetting<SiteProfileState>(businessId, SETTING_KEYS.siteProfileState)) ?? EMPTY_SITE_PROFILE_STATE;
   const config = await getSetting<ServerSyncConfig>(businessId, SETTING_KEYS.serverSyncConfig);
   if (!config?.enabled || !config.remoteUrl?.trim() || !config.token?.trim() || !config.locationId) return previous;
-  if (!attemptDue(previous.nextAttemptAt, now)) return previous;
+  const force = options.force === true;
+  if (!force && !attemptDue(previous.nextAttemptAt, now)) return previous;
   const last = lastAttemptAt.get(businessId);
   // A clock that went backwards (elapsed < 0) does not hold the next attempt hostage.
-  if (last !== undefined && now.getTime() - last >= 0 && now.getTime() - last < SITE_PROFILE_INTERVAL_MS) return previous;
+  if (!force && last !== undefined && now.getTime() - last >= 0 && now.getTime() - last < SITE_PROFILE_INTERVAL_MS) return previous;
   lastAttemptAt.set(businessId, now.getTime());
   let next: SiteProfileState;
   try {

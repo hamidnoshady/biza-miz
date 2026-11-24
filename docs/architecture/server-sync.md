@@ -57,7 +57,12 @@ the same tick land on the cloud's business day — the desktop also reads
 the branch row (name, address, phone, timezone, business-day start, active),
 the effective feature switches and app availability, and the business settings
 the till sells offline with — `tax.config` (VAT default), `pricing.config`
-(margin/overhead policy) and `orders.controls` (discount/void limits). It
+(margin/overhead policy), `orders.controls` (discount/void limits) and
+`printing.behavior`. Print behavior travels as two scopes, `printDefaults`
+(the business row) and `printBranch` (this branch's override), because the
+cloud's print screen edits either and the till's screen must show the same
+inheritance; a policy that is not a valid `PrintPolicy` is refused rather than
+landing a row that would silently change automatic printing. It
 applies the profile in one transaction on every successful fetch (the apply is
 idempotent; the hash only decides whether the state records a new `appliedAt`),
 writes each app's state as a per-business override so the desktop's global
@@ -68,7 +73,10 @@ till's copies. App keys, availability states and feature keys this desktop does
 not know yet (a newer cloud) are skipped rather than rejected. A failure is
 recorded in its own setting, `server_sync.site_profile_state`, backs off, and is
 shown as its own line («تنظیمات شعبه از ابر») on the sync panel; it never blocks
-push or pull and does not change the overall sync badge.
+push or pull and does not change the overall sync badge. The operator's
+«به‌روزرسانی» (`sync-now`) runs the same profile fetch first, forced past the
+30-second gate and a pending backoff, so a click is an answer from the cloud and
+not a replay of the last tick.
 
 **Rollout: deploy the cloud first.** The shift events (`shift.opened@1`,
 `shift.closed@1`) record on both sides. A desktop still on an older version
