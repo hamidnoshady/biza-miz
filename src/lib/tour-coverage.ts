@@ -33,7 +33,7 @@ import {
 import { mergePublishedTours } from "./tour-studio";
 import { TOURS, TOUR_ANCHORS, validateTours, type TourDefinition } from "./tours";
 
-export type TourCoverageKind = "advanced" | "baseline";
+export type TourCoverageKind = "advanced" | "baseline" | "studio-required";
 
 export interface TourCoverageRow {
   pageKey: string;
@@ -46,7 +46,7 @@ export interface TourCoverageRow {
   /** Of those, the ones the super-admin published from the console (migration 0288). */
   studioTourIds: string[];
   /** The tour a fully eligible member is offered, and the one progress is keyed on. */
-  primaryTourId: string;
+  primaryTourId: string | null;
   stepCount: number;
   /** How many steps of the primary tour point at a registered anchor. */
   spotlightCount: number;
@@ -70,6 +70,8 @@ export interface TourCoverageReport {
   advancedPages: number;
   /** Pages on the automatic baseline — i.e. the editorial backlog. */
   baselinePages: number;
+  /** Pages whose tours must be published in Tour Studio and have no code fallback. */
+  studioRequiredPages: string[];
   authoredTours: number;
   /** Published console tours included in this report. */
   studioTours: number;
@@ -103,6 +105,8 @@ function anchorsOf(tour: TourDefinition): string[] {
  * The report. Both parameters exist so a test can audit an injected catalogue
  * and region map — the defaults are the live registry and declarations.
  */
+const STUDIO_ONLY_PAGE_KEYS = new Set(["page:/crm/overview"]);
+
 export function tourCoverage(
   tours: readonly TourDefinition[] = TOURS,
   regions: Readonly<Record<string, readonly PageTourRegion[]>> = PAGE_TOUR_REGIONS,
@@ -163,10 +167,11 @@ export function tourCoverage(
     const baseline = baselineTourForPage(page, regions);
     // A console-published tour is the editorial head of the page; a code tour
     // remains a valid fallback and is still offered beside it.
+    const studioRequired = authored.length === 0 && STUDIO_ONLY_PAGE_KEYS.has(page.key);
     const primary =
       authored.find((tour) => publishedForPage.some((entry) => entry.id === tour.id)) ??
       authored[0] ??
-      baseline;
+      (studioRequired ? null : baseline);
     const pageIssues: string[] = [];
     if (authored.length === 0 && regionsForPage(page.key, regions).length === 0) {
       pageIssues.push("no declared region: the baseline is explanation-only");
@@ -176,20 +181,20 @@ export function tourCoverage(
       route: page.route,
       label: page.label,
       group: page.group,
-      kind: authored.length > 0 ? "advanced" : "baseline",
+      kind: authored.length > 0 ? "advanced" : studioRequired ? "studio-required" : "baseline",
       tourIds: authored.map((tour) => tour.id),
       studioTourIds: publishedForPage.map((tour) => tour.id),
-      primaryTourId: primary.id,
-      stepCount: primary.steps.length,
-      spotlightCount: anchorsOf(primary).length,
-      anchors: anchorsOf(primary),
-      explanationCount: primary.steps.filter((step) => step.kind === "explain").length,
-      actionCount: primary.steps.filter((step) => step.kind === "action").length,
-      navigateCount: primary.steps.filter((step) => step.kind === "navigate").length,
+      primaryTourId: primary?.id ?? null,
+      stepCount: primary?.steps.length ?? 0,
+      spotlightCount: primary ? anchorsOf(primary).length : 0,
+      anchors: primary ? anchorsOf(primary) : [],
+      explanationCount: primary?.steps.filter((step) => step.kind === "explain").length ?? 0,
+      actionCount: primary?.steps.filter((step) => step.kind === "action").length ?? 0,
+      navigateCount: primary?.steps.filter((step) => step.kind === "navigate").length ?? 0,
       // The shared page header is the universal fallback, not a meaningful
       // spotlight of the page's own work: a page that only points at it is
       // still an editorial gap, and the report says so.
-      hasSpotlight: anchorsOf(primary).some((anchor) => anchor !== TOUR_ANCHORS.pageHeader),
+      hasSpotlight: primary ? anchorsOf(primary).some((anchor) => anchor !== TOUR_ANCHORS.pageHeader) : false,
       issues: pageIssues,
     };
   });
@@ -215,7 +220,11 @@ export function tourCoverage(
       authoredByPage.get(page.key) ?? [],
       published.filter((tour) => tour.pageKey === page.key),
     );
-    return authored.length > 0 ? authored : [baselineTourForPage(page, regions)];
+    return authored.length > 0
+      ? authored
+      : STUDIO_ONLY_PAGE_KEYS.has(page.key)
+        ? []
+        : [baselineTourForPage(page, regions)];
   });
   const offeredSteps = offered.reduce((total, tour) => total + tour.steps.length, 0);
   const allOfferedSteps = offered.flatMap((tour) => [...tour.steps]);
@@ -224,6 +233,7 @@ export function tourCoverage(
     pages: rows,
     advancedPages: rows.filter((row) => row.kind === "advanced").length,
     baselinePages: rows.filter((row) => row.kind === "baseline").length,
+    studioRequiredPages: rows.filter((row) => row.kind === "studio-required").map((row) => row.pageKey),
     authoredTours: tours.length,
     studioTours: published.length,
     steps: offeredSteps,

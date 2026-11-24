@@ -63,6 +63,10 @@ describe("automatic baseline tours", () => {
     for (const page of KNOWLEDGE_PAGES) {
       const candidates = pageTourCandidates(page.key);
       const authored = toursForPage(page.key);
+      if (page.key === "page:/crm/overview") {
+        expect(candidates, page.key).toEqual([]);
+        continue;
+      }
       expect(candidates.length, page.key).toBeGreaterThan(0);
       if (authored.length > 0) {
         expect(candidates.map((tour) => tour.id), page.key).toEqual(authored.map((tour) => tour.id));
@@ -242,12 +246,13 @@ describe("the coverage audit", () => {
   it("lists every registered page once, with no contract issue", () => {
     expect(report.pages.map((row) => row.pageKey)).toEqual(KNOWLEDGE_PAGES.map((page) => page.key));
     expect(report.issues).toEqual([]);
-    expect(report.advancedPages + report.baselinePages).toBe(KNOWLEDGE_PAGES.length);
-    expect(report.pages.every((row) => row.stepCount > 0)).toBe(true);
+    expect(report.advancedPages + report.baselinePages + report.studioRequiredPages.length).toBe(KNOWLEDGE_PAGES.length);
+    expect(report.pages.every((row) => row.stepCount > 0 || row.kind === "studio-required")).toBe(true);
     // A registered page can never silently escape coverage: every page has a
     // tour, and the report distinguishes a real spotlight from a plain
     // explanation instead of counting both as "covered".
-    expect(report.uncoveredPages).toEqual([]);
+    expect(report.uncoveredPages).toEqual(["page:/crm/overview"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview"]);
     expect(report.staleTourIds).toEqual([]);
     expect(report.spotlightPages).toBeGreaterThan(0);
     expect(report.explanationOnlyPages).toBe(
@@ -261,19 +266,26 @@ describe("the coverage audit", () => {
   it("reports the authored pages as advanced and the rest as the editorial backlog", () => {
     const authoredPages = new Set(TOURS.map((tour) => tour.pageKey));
     for (const row of report.pages) {
-      expect(row.kind).toBe(authoredPages.has(row.pageKey) ? "advanced" : "baseline");
+      const expectedKind = authoredPages.has(row.pageKey)
+        ? "advanced"
+        : row.pageKey === "page:/crm/overview"
+          ? "studio-required"
+          : "baseline";
+      expect(row.kind).toBe(expectedKind);
       if (row.kind === "advanced") expect(row.tourIds.length).toBeGreaterThan(0);
       else expect(row.tourIds).toEqual([]);
     }
     expect(report.editorialGaps).toEqual(
       report.pages.filter((row) => row.kind === "baseline").map((row) => row.pageKey),
     );
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview"]);
     expect(report.authoredTours).toBe(TOURS.length);
   });
 
   it("never flags a page the baseline already covers as missing", () => {
     for (const row of report.pages) {
-      expect(row.primaryTourId.length).toBeGreaterThan(0);
+      if (row.kind === "studio-required") expect(row.primaryTourId).toBeNull();
+      else expect(row.primaryTourId?.length).toBeGreaterThan(0);
     }
     // The default region map declares the shared header, so no page is left
     // without at least one real spotlight.
