@@ -79,6 +79,13 @@ export const NOTIFICATION_EVENT_KEYS = [
   "business_day.closed",
   "order.voided",
   "payment.refunded",
+  // Issue #1047 — kitchen operations. Opt-in (no role default), branch-scoped
+  // and emitted through this same outbox so a KDS preference and a phone push
+  // cannot drift apart. `kitchen.ticket_aged` is produced by a scan; the other
+  // two are produced after the order mutation commits.
+  "kitchen.ticket_created",
+  "kitchen.items_added",
+  "kitchen.ticket_aged",
   "inventory.low_stock",
   "backup.failed",
   // Issue #903 §12 — the drill exists so a backup that cannot be opened is
@@ -257,6 +264,39 @@ export const NOTIFICATION_EVENTS: Record<NotificationEventKey, NotificationEvent
     defaultRoles: ["owner"],
     perLocation: true,
     hasAmount: true,
+  },
+  "kitchen.ticket_created": {
+    key: "kitchen.ticket_created",
+    group: "operations",
+    label: "سفارش تازه در آشپزخانه",
+    description:
+      "وقتی سفارشی با اقلام آماده‌سازی به صف آشپزخانه می‌رسد. برای این رویداد هیچ نقشی به‌صورت پیش‌فرض اعلان نمی‌گیرد؛ خودتان در تنظیمات اعلان‌ها روشن کنید.",
+    defaultSeverity: "important",
+    defaultRoles: [],
+    perLocation: true,
+    hasAmount: false,
+  },
+  "kitchen.items_added": {
+    key: "kitchen.items_added",
+    group: "operations",
+    label: "اقلام تازه به سفارش آشپزخانه",
+    description:
+      "وقتی به سفارشی که آشپزخانه از قبل می‌شناسد اقلام تازه اضافه می‌شود. هر دور تازه یک اعلان است، نه یک اعلان برای هر تغییر وضعیت.",
+    defaultSeverity: "important",
+    defaultRoles: [],
+    perLocation: true,
+    hasAmount: false,
+  },
+  "kitchen.ticket_aged": {
+    key: "kitchen.ticket_aged",
+    group: "operations",
+    label: "گذشتن سفارش از آستانهٔ آماده‌سازی",
+    description:
+      "وقتی سن سفارش از آستانهٔ نزدیک‌شدن یا آستانهٔ تأخیرِ تنظیم‌شدهٔ همین شعبه عبور می‌کند. سن از زمان ثبت‌شدهٔ ارسال به آشپزخانه محاسبه می‌شود.",
+    defaultSeverity: "important",
+    defaultRoles: [],
+    perLocation: true,
+    hasAmount: false,
   },
   "payment.refunded": {
     key: "payment.refunded",

@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { printKitchenTicket } from "@/lib/printing/client";
+import { emitKitchenPrintFailure } from "@/lib/kitchen-alert-events";
 
 interface KitchenDispatchJob {
   dispatchId: string;
@@ -58,6 +59,11 @@ export function KitchenDispatchAgent({ enabled }: { enabled: boolean }) {
                 : "ارسال پایدار سفارش به چاپگر آشپزخانه انجام نشد؛ پس از رفع مشکل دوباره تلاش می‌شود.",
               { duration: 12_000 },
             );
+            emitKitchenPrintFailure({
+              dispatchId: job.dispatchId,
+              ambiguous: result.ambiguous === true,
+              errorCode: result.error,
+            });
           }
           if (!ack.ok) console.error("kitchen dispatch acknowledgement failed", job.dispatchId);
         }

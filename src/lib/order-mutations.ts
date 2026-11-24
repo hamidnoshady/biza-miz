@@ -48,6 +48,7 @@ import { discountPercentForControl, normalizeVoidReason } from "./order-controls
 import { enforceOrderControl, recordOrderAudit, type OrderActor } from "./order-control-service";
 import { enqueueKitchenDispatch } from "./kitchen-dispatch";
 import { getKitchenWorkflow, scheduleKitchenTicket } from "./kitchen-workflow";
+import { recordKitchenItemsAdded, recordKitchenTicketCreated } from "./kitchen-alert-service";
 
 /**
  * Writes one line's add-on snapshots, quantities included. One INSERT per
@@ -752,7 +753,20 @@ export async function createOrder(
     // `*..*` signatures, any unbounded read), so cached answers covering the
     // current trading day are dropped. After COMMIT, never throws: a cached
     // answer is not worth a failed sale.
-    if (businessId) {
+    //
+    // #1047: queue the shared kitchen notification only after the sale is
+    // durable. `holdKitchenDispatch` means an unapproved website order is not
+    // visible to the kitchen yet, so it must not alert either. `recordNotification`
+    // also swallows its own failure, so a notification problem cannot undo a sale.
+    if (businessId && !input.holdKitchenDispatch) {
+      await recordKitchenTicketCreated({
+        businessId,
+        locationId: input.locationId,
+        orderId,
+        orderNumber,
+        items: preparedItems,
+        itemIds: lineIds,
+      });
     }
     return {
       ok: true,
@@ -907,6 +921,19 @@ export async function addItemsToOrder(
       await recordOrderState(client, { locationId: input.locationId, orderId: input.orderId, actor: input.actor });
     }
     await client.query("COMMIT");
+    // #1047 — this round is durable before the kitchen is told about it. The
+    // dedupe key covers the exact line-id set, so a retry of this request (or a
+    // sync replay of the same round) queues one notification, not one per device.
+    if (businessId) {
+      await recordKitchenItemsAdded({
+        businessId,
+        locationId: input.locationId,
+        orderId: input.orderId,
+        orderNumber: Number(locked.order.order_number),
+        items: preparedItems,
+        itemIds,
+      });
+    }
     return { ok: true, data: { totals, itemIds } };
   } catch (err) {
     await client.query("ROLLBACK");

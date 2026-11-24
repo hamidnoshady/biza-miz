@@ -207,7 +207,7 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
           if (normalized.startsWith("WITH Requirements AS") || normalized.startsWith("WITH requirements AS")) {
             return { rows: [] };
           }
-          if (normalized.startsWith("SELECT id, status, type, table_id, table_session_id, customer_id, guest_count")) {
+          if (normalized.startsWith("SELECT id, order_number::text AS order_number, status, type, table_id, table_session_id, customer_id, guest_count")) {
             const oid = String(params[0] ?? "");
             const rec = orders[oid];
             if (!rec) return { rows: [] };
@@ -215,6 +215,7 @@ describe("Multiple simultaneous orders on Table 5 (Issue #916 regression)", () =
               rows: [
                 {
                   id: rec.id,
+                  order_number: String(rec.orderNumber),
                   status: rec.status,
                   type: "dine_in",
                   table_id: rec.tableId,

@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { printKitchenTicket } from "@/lib/printing/client";
+import { KITCHEN_PRINT_FAILURE_EVENT } from "@/lib/kitchen-alert-events";
 import { KitchenDispatchAgent } from "./kitchen-dispatch-agent";
 
 vi.mock("@/lib/printing/client", () => ({ printKitchenTicket: vi.fn() }));
@@ -41,6 +42,37 @@ describe("KitchenDispatchAgent", () => {
       claimToken: "claim-1",
       handedOff: true,
     });
+  });
+
+  it("announces a failed dispatch to the open KDS without owning a second notification policy", async () => {
+    const job = {
+      dispatchId: "dispatch-failed",
+      claimToken: "claim-failed",
+      orderId: "order-9",
+      itemIds: ["line-9"],
+      requestId: "kitchen-dispatch:dispatch-failed",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ jobs: [job] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(printKitchenTicket).mockResolvedValue({
+      ok: false,
+      error: "printer_offline",
+      ambiguous: false,
+    });
+    const listener = vi.fn();
+    window.addEventListener(KITCHEN_PRINT_FAILURE_EVENT, listener);
+
+    render(<KitchenDispatchAgent enabled />);
+
+    await waitFor(() => expect(listener).toHaveBeenCalledTimes(1));
+    expect((listener.mock.calls[0][0] as CustomEvent).detail).toMatchObject({
+      dispatchId: "dispatch-failed",
+      ambiguous: false,
+      errorCode: "printer_offline",
+    });
+    window.removeEventListener(KITCHEN_PRINT_FAILURE_EVENT, listener);
   });
 
   it("does not poll on surfaces without print permission", async () => {
