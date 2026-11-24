@@ -20,6 +20,7 @@ import {
 import {
   getPlatformAiMode,
   isAiRuntimeModeAvailable,
+  modeAliasConfigured,
   resolveRequestedAiRuntimeMode,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes";
@@ -174,6 +175,25 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!modeRow.is_active || !isAiRuntimeModeAvailable(runtimeMode)) {
     return NextResponse.json(
       { error: "mode_unavailable", mode: runtimeMode, message: "حالت انتخاب‌شده توسط مدیر پلتفرم فعال نشده است." },
+      { status: 409 },
+    );
+  }
+  // Issue #1546 — Fast is only truthful when it names its own LiteLLM alias.
+  // A blank alias resolves to the gateway's default chat model, i.e. Auto with
+  // a different label, so the turn is refused with a clear reason instead of
+  // silently taking the slow route and still reporting «سریع».
+  if (runtimeMode === "instant" && !modeAliasConfigured(modeRow)) {
+    console.error("ai fast mode unavailable", {
+      businessId: session.businessId,
+      reason: "fast_alias_not_configured",
+    });
+    return NextResponse.json(
+      {
+        error: "mode_unavailable",
+        mode: runtimeMode,
+        reason: "fast_alias_not_configured",
+        message: "حالت «سریع» هنوز روی یک مدل تندپاسخ پیکربندی نشده است؛ فعلاً حالت «خودکار» را انتخاب کنید.",
+      },
       { status: 409 },
     );
   }
@@ -554,6 +574,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             messages: withAttachmentContext(messages, preparedAttachments),
             attachments: preparedAttachments,
             allowActions,
+            // Issue #1546 — the existing task lens is a tool-routing hint only.
+            task: typeof body.task === "string" ? body.task : null,
+            runtimeMode,
             // Phase D — when the turn runs as a system agent, restrict the read
             // tools to its allowlist and the proposable actions to its action
             // list. Both are re-checked in runAgentTurn, so a hand-crafted
@@ -574,6 +597,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             stream: {
               onDelta: (content) => emit("delta", { content }),
               onToolCalls: () => emit("reset", {}),
+              // Issue #1546 — safe, label-only progress while tools run. No
+              // arguments, results, prompts or records cross this boundary.
+              onToolProgress: (progress) => emit("tool", progress),
             },
             requestId,
             signal: request.signal,

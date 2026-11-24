@@ -21,6 +21,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { applyRuntimeModeAlias } from "./ai-runtime";
+import { modeAliasConfigured } from "./ai-runtime-modes";
 
 const BASE = { model: "gpt-4o-mini", embeddingModel: "text-embedding-3-small" };
 
@@ -73,6 +74,17 @@ describe("issue #812 §3/§7 — a mode's alias decides the model", () => {
       max_output_tokens: null,
     });
     expect(result).toEqual(config);
+  });
+
+  it("issue #1546 — Fast is only configured when it names its own alias", () => {
+    // A blank alias resolves to the gateway's default chat model, i.e. Auto
+    // with another label. The chat route refuses Fast in that state instead of
+    // claiming a faster route that was never configured.
+    expect(modeAliasConfigured({ model_alias: "pos-instant" })).toBe(true);
+    expect(modeAliasConfigured({ model_alias: "  pos-instant " })).toBe(true);
+    for (const blank of ["", "   ", null]) {
+      expect(modeAliasConfigured({ model_alias: blank })).toBe(false);
+    }
   });
 
   it("leaves the rest of the config untouched", () => {

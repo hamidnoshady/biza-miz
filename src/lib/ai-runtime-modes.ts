@@ -108,6 +108,18 @@ export async function getPlatformAiMode(mode: AiRuntimeMode): Promise<PlatformAi
   );
 }
 
+/**
+ * Issue #1546 — whether a mode names its own LiteLLM alias.
+ *
+ * A blank alias means "the gateway's default chat model". That is a fine
+ * definition for Auto, but it makes Fast a label on the same model, and it
+ * would let the product claim a faster mode that was never configured. The
+ * chat route therefore refuses Fast unless this is true.
+ */
+export function modeAliasConfigured(row: { model_alias?: string | null }): boolean {
+  return Boolean(row.model_alias?.trim());
+}
+
 /** What a turn actually goes out with, once the mode has been applied. */
 export interface ModeRuntime {
   mode: AiRuntimeMode;
