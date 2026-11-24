@@ -282,14 +282,21 @@ describe("the coverage audit", () => {
     expect(report.authoredTours).toBe(TOURS.length);
   });
 
-  it("never flags a page the baseline already covers as missing", () => {
+  it("marks CRM Overview as requiring Studio publication, with no fallback tour", () => {
+    const crm = report.pages.find((row) => row.pageKey === "page:/crm/overview")!;
+    expect(crm).toMatchObject({
+      kind: "studio-required",
+      tourIds: [],
+      studioTourIds: [],
+      primaryTourId: null,
+      stepCount: 0,
+    });
     for (const row of report.pages) {
-      if (row.kind === "studio-required") expect(row.primaryTourId).toBeNull();
-      else expect(row.primaryTourId?.length).toBeGreaterThan(0);
+      if (row.kind !== "studio-required") expect(row.primaryTourId?.length).toBeGreaterThan(0);
     }
-    // The default region map declares the shared header, so no page is left
-    // without at least one real spotlight.
-    expect(report.pages.every((row) => row.spotlightCount > 0)).toBe(true);
+    // The default region map declares the shared header for pages that do use
+    // the automatic baseline.
+    expect(report.pages.filter((row) => row.kind === "baseline").every((row) => row.spotlightCount > 0)).toBe(true);
     expect(PAGE_TOUR_REGIONS["*"]?.length).toBeGreaterThan(0);
   });
 
