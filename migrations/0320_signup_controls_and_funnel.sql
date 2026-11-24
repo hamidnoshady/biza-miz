@@ -18,8 +18,11 @@
 --      phone, email, name, code, token or provider payload columns, so an
 --      aggregate read for the console cannot become a PII or OTP store.
 --
--- Both are platform-only under FORCE RLS. Signup runs before any business
--- exists, so there is no tenant to scope these rows to.
+-- Both are under FORCE RLS. `platform_signup_settings` carries no tenant
+-- column, so it is platform-only. The ledger's optional `business_id` is an
+-- attribution, so the sweep in `integration/tenant-isolation.integration.test.ts`
+-- requires it to keep a `tenant_isolation` policy — migration 0228's rule that
+-- export ownership is not an exemption from the database isolation boundary.
 --
 -- Rollback: drop both tables. The service treats a missing settings table as
 -- "not configured" (environment fallback) and simply stops recording events.
@@ -118,7 +121,12 @@ CREATE POLICY platform_only ON platform_signup_settings FOR ALL
 
 ALTER TABLE platform_signup_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE platform_signup_events FORCE ROW LEVEL SECURITY;
+-- Same shape as platform_audit_log and platform_cms_sites (migration 0228):
+-- a tenant connection only reaches rows attributed to itself, while the console
+-- and the signup doors read through `app_rls_bypass()`. Rows with no business
+-- attribution stay reachable only through that bypass.
 DROP POLICY IF EXISTS platform_only ON platform_signup_events;
-CREATE POLICY platform_only ON platform_signup_events FOR ALL
-    USING (app_rls_bypass())
-    WITH CHECK (app_rls_bypass());
+DROP POLICY IF EXISTS tenant_isolation ON platform_signup_events;
+CREATE POLICY tenant_isolation ON platform_signup_events FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
+    WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
