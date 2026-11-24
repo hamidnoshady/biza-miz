@@ -153,6 +153,59 @@ session-authenticated diagnosis, and reports success, wrong-realm,
 expired/revoked/unknown, role-reduced, proxy-stripped-auth, and
 network/transport failures distinctly.
 
+## High-risk lifecycle tools: archive and restore
+
+Two tools cross the archive boundary and are deliberately stricter than a
+console click:
+
+| Tool | Transition | Capability | Confirmation phrase |
+| --- | --- | --- | --- |
+| `archive_business` | `active`/`suspended` -> `archived` | `business.archive` | `ARCHIVE <slug>` |
+| `restore_archived_business` | `archived` -> `active` | `business.archive` | `RESTORE <slug>` |
+
+Both are marked **step-up** and enforce, in this order:
+
+1. **Capability** — `business.archive` must be minted on the connection *and*
+   still held by the admin's current role. The general rule applies: an
+   engineer who holds `business.suspend` can suspend/reactivate but neither
+   archives nor restores.
+2. **One explicit target** — exactly one `businessId`. Batch `businessIds`,
+   empty targets and ids outside the credential's bridge list fail closed.
+   `platform_internal` tenants are refused.
+3. **Legal transition + stale state** — the tool asks
+   `platform-business-lifecycle.ts`; the caller's `expectedStatus` must equal
+   the current status or the call is rejected as stale. Invalid pairs (for
+   example restore of an active tenant) are rejected, never coerced.
+4. **Preview then confirmation** — a call without `confirm: true` returns a
+   preview (current state, target, staleness, transition validity and the exact
+   phrase) and writes nothing. To act, the caller must repeat the call with
+   `confirm: true` and the target-specific phrase. A phrase for the other
+   action or another tenant cannot authorize this one.
+5. **Idempotent retry** — a stable `idempotencyKey` is required. A retry by the
+   same admin for the same business/target returns the original recorded
+   outcome without a second mutation; reusing the key for a different business
+   or transition fails closed. The conditional `setBusinessStatus(...,
+   { expectFrom })` is still the concurrency boundary: only one writer can win.
+
+There is no interactive MFA channel on a bearer-authenticated MCP call, and the
+console's lifecycle PATCH is still a single confirmed click. For these two tools
+the step-up gate is therefore the intersection of owner-only capability, an
+explicit `confirm: true`, and a target-specific typed phrase — stricter than the
+console's confirmation. The console session's interactive step-up ceremony
+(`/api/platform/auth/step-up`) remains a separate facility; it is not claimed
+here as an MCP substitute.
+
+Every successful call writes a lifecycle audit row with the actor (admin id,
+name, role, connection id/name), the business, the before/after status and
+timestamps, the capability, the correlation id, the idempotency key and the
+optional reason. The generic `platform_mcp.call` row shares the correlation id,
+so the two records always join without relying on timestamps.
+
+`suspend`/`reactivate` keep their existing `set_business_status` behavior for
+`active` <-> `suspended`. That tool can no longer reactivate an archived
+tenant; the only authorized way out of the archive is
+`restore_archived_business` with `business.archive`.
+
 ## Business directory and owner-profile reads
 
 Two read-only tools cover the Business Control Center (issue #1430); both require

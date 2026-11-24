@@ -16,6 +16,11 @@
  * Every other pair is invalid and rejected explicitly, including
  * `X -> X` (a no-op is a stale screen, not a lifecycle change).
  *
+ * The two archive-boundary moves additionally carry a `confirmationAction`
+ * ("archive" / "restore") so the MCP surface can require an action-specific,
+ * target-specific typed phrase without re-deriving which direction a status
+ * request means.
+ *
  * It is pure — no database, no request — so the HTTP route, the overview
  * controls and the unit tests all ask the same question and get the same
  * answer instead of each re-deriving "who may un-archive?".
@@ -23,6 +28,14 @@
 import type { PlatformCapability } from "./platform-admin";
 
 export type BusinessLifecycleStatus = "active" | "suspended" | "archived";
+
+/**
+ * The two transitions that change the archive boundary. They are the only
+ * moves with a typed-confirmation phrase over MCP: suspension is a reversible
+ * operational pause an engineer may reverse, while archiving hides a tenant and
+ * restoring brings it back into service.
+ */
+export type BusinessLifecycleConfirmationAction = "archive" | "restore";
 
 export interface LifecycleTransition {
   from: BusinessLifecycleStatus;
@@ -33,6 +46,12 @@ export interface LifecycleTransition {
   label: string;
   /** The audit action recorded for the move. */
   auditAction: string;
+  /**
+   * Set only on the archive-boundary moves. A caller that mutates through MCP
+   * must present this action's typed confirmation phrase; a phrase for the
+   * other action (or a different tenant) can never authorize this one.
+   */
+  confirmationAction?: BusinessLifecycleConfirmationAction;
 }
 
 export type LifecycleError = "same_status" | "invalid_transition";
@@ -68,6 +87,7 @@ export const LIFECYCLE_TRANSITIONS: readonly LifecycleTransition[] = [
     capability: "business.archive",
     label: "بایگانی",
     auditAction: "business.archived",
+    confirmationAction: "archive",
   },
   {
     from: "suspended",
@@ -75,6 +95,7 @@ export const LIFECYCLE_TRANSITIONS: readonly LifecycleTransition[] = [
     capability: "business.archive",
     label: "بایگانی",
     auditAction: "business.archived",
+    confirmationAction: "archive",
   },
   {
     // Restoring is the inverse of archiving, so it is owner-level too: `suspend`
@@ -85,11 +106,30 @@ export const LIFECYCLE_TRANSITIONS: readonly LifecycleTransition[] = [
     capability: "business.archive",
     label: "بازگردانی از بایگانی",
     auditAction: "business.active",
+    confirmationAction: "restore",
   },
 ];
 
 export function isBusinessLifecycleStatus(value: unknown): value is BusinessLifecycleStatus {
   return value === "active" || value === "suspended" || value === "archived";
+}
+
+/**
+ * The exact phrase an operator types to confirm an archive-boundary move:
+ * `ARCHIVE {slug}` or `RESTORE {slug}`.
+ *
+ * The phrase is action-specific *and* target-specific — it names the verb and
+ * the exact tenant — so a phrase typed for the other action or another business
+ * can never authorize this one. It is deliberately a different vocabulary from
+ * `businessDestructivePhrase`: archiving is reversible and must not read as a
+ * reset or a hard delete. The MCP tools and the console can compare against
+ * this function instead of each carrying a literal.
+ */
+export function businessLifecycleConfirmationPhrase(
+  action: BusinessLifecycleConfirmationAction,
+  slug: string,
+): string {
+  return `${action === "archive" ? "ARCHIVE" : "RESTORE"} ${slug}`;
 }
 
 /** Resolve one transition, or say exactly why it is not allowed. */
