@@ -268,9 +268,7 @@ describe("the coverage audit", () => {
     const authoredPages = new Set(TOURS.map((tour) => tour.pageKey));
     for (const row of report.pages) {
       const expectedKind = STUDIO_ONLY_PAGE_KEYS.has(row.pageKey)
-        ? publishedStudioPages.has(row.pageKey)
-          ? "advanced"
-          : "studio-required"
+        ? "studio-required"
         : authoredPages.has(row.pageKey)
           ? "advanced"
           : "baseline";
