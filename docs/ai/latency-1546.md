@@ -163,10 +163,10 @@ server which modes this deployment actually configured.
 
 | Piece | Where |
 | --- | --- |
-| Availability decision | `modeAvailability(row, mode)` in `src/lib/ai-runtime-modes.ts`: retired or `is_active = false` → `disabled`; Fast with a blank alias → `fast_alias_not_configured`; otherwise ready. |
+| Availability decision | `modeAvailability(row, mode)` in `src/lib/ai-runtime-modes.ts`: retired or `is_active = false` → `disabled`; Fast with a blank alias → `fast_alias_not_configured`; otherwise ready. It returns the full `AiModeAvailability` row, and `aiModeAvailability(rows)` applies it to the three chat modes in picker order (a missing settings row is decided from the same default row the runtime read uses), so this is the only place the rule exists. |
 | Tenant read | `GET /api/ai/modes` (`src/app/api/ai/modes/route.ts`), on `ai.use` (using the assistant is not administering it). Returns `{ modes: [{ mode, available, reason }] }` with `Cache-Control: no-store`. No alias, deployment, temperature or credential is in the payload. |
 | Same decision both ways | The chat route refuses a turn on `modeAvailability` and this route renders it, so an offer and a refusal cannot disagree. The 409 stays the backstop for a crafted body or a picker that loaded before the platform changed the setting. |
-| Picker | `useAiModeAvailability` (`src/components/ai/use-ai-mode-availability.ts`) starts every mode available and replaces that with the server's answer; a failed or unreadable response keeps the optimistic default rather than hiding a working mode. `ChatComposer` renders an unavailable mode as a disabled option with the Persian reason; `AiChatHub` falls back to Auto when the selected or URL-restored mode is unavailable, and `AiWorkspaceContext`'s native select follows the same rule. |
+| Picker | `useAiModeAvailability` (`src/components/ai/use-ai-mode-availability.ts`) starts every mode available and replaces that with the server's answer; a failed or unreadable response keeps the optimistic default rather than hiding a working mode. `unavailableModeReason` is the one lookup the three surfaces share: `ChatComposer` renders an unavailable mode as a disabled option with the Persian reason, `AiChatHub` falls back to Auto when the selected or URL-restored mode is unavailable, and `AiWorkspaceContext`'s native select disables it. The chat route's 409 carries the same `reason`. |
 
 Checks for this follow-up: `tsc --noEmit` pass; focused suites
 (`api/ai/modes/route`, `ai-runtime-modes-shared`, `ai-runtime-mode-aliases`,

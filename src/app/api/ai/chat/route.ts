@@ -176,27 +176,24 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // route refuses the same mode here, as the backstop for a crafted body or a
   // picker that loaded before the platform changed the configuration.
   const availability = modeAvailability(modeRow, runtimeMode);
-  if (!availability.available && availability.reason === "disabled") {
-    return NextResponse.json(
-      { error: "mode_unavailable", mode: runtimeMode, message: "حالت انتخاب‌شده توسط مدیر پلتفرم فعال نشده است." },
-      { status: 409 },
-    );
-  }
-  // Fast is only truthful when it names its own LiteLLM alias. A blank alias
-  // resolves to the gateway's default chat model, i.e. Auto with a different
-  // label, so the turn is refused with a clear reason instead of silently taking
-  // the slow route and still reporting «سریع».
   if (!availability.available) {
-    console.error("ai fast mode unavailable", {
+    // Fast is only truthful when it names its own LiteLLM alias: a blank one
+    // resolves to the gateway's default chat model, i.e. Auto under a faster
+    // label. Both reasons are refused here rather than silently routed.
+    console.error("ai mode unavailable", {
       businessId: session.businessId,
-      reason: "fast_alias_not_configured",
+      mode: runtimeMode,
+      reason: availability.reason,
     });
     return NextResponse.json(
       {
         error: "mode_unavailable",
         mode: runtimeMode,
-        reason: "fast_alias_not_configured",
-        message: "حالت «سریع» هنوز روی یک مدل تندپاسخ پیکربندی نشده است؛ فعلاً حالت «خودکار» را انتخاب کنید.",
+        reason: availability.reason,
+        message:
+          availability.reason === "fast_alias_not_configured"
+            ? "حالت «سریع» هنوز روی یک مدل تندپاسخ پیکربندی نشده است؛ فعلاً حالت «خودکار» را انتخاب کنید."
+            : "حالت انتخاب‌شده توسط مدیر پلتفرم فعال نشده است.",
       },
       { status: 409 },
     );

@@ -126,6 +126,14 @@ export interface AiModeAvailability {
   reason: AiModeUnavailableReason | null;
 }
 
+/** The reason this mode cannot be offered, or null when it can. */
+export function unavailableModeReason(
+  availability: readonly AiModeAvailability[] | null | undefined,
+  mode: AiRuntimeMode,
+): AiModeUnavailableReason | null {
+  return availability?.find((entry) => entry.mode === mode && !entry.available)?.reason ?? null;
+}
+
 export function isAiChatMode(value: unknown): value is (typeof AI_CHAT_MODES)[number] {
   return typeof value === "string" && (AI_CHAT_MODES as readonly string[]).includes(value);
 }

@@ -6,7 +6,10 @@
  * and only trust an explicit `available: false` from the server.
  */
 import { describe, expect, it } from "vitest";
-import { normalizeAiModeAvailability } from "./ai-runtime-modes-shared";
+import {
+  normalizeAiModeAvailability,
+  unavailableModeReason,
+} from "./ai-runtime-modes-shared";
 
 describe("issue #1546 — normalizeAiModeAvailability", () => {
   it("carries the server's decision, defaulting unreported modes to available", () => {
@@ -42,6 +45,16 @@ describe("issue #1546 — normalizeAiModeAvailability", () => {
     expect(
       normalizeAiModeAvailability([{ mode: "instant", available: false, reason: "provider_down" }]),
     ).toContainEqual({ mode: "instant", available: false, reason: "disabled" });
+  });
+
+  it("reports a mode's reason only when the server said it is unavailable", () => {
+    const modes = normalizeAiModeAvailability([
+      { mode: "instant", available: false, reason: "fast_alias_not_configured" },
+    ]);
+    expect(unavailableModeReason(modes, "instant")).toBe("fast_alias_not_configured");
+    expect(unavailableModeReason(modes, "auto")).toBeNull();
+    // An unreadable payload fails open, so nothing is disabled.
+    expect(unavailableModeReason(undefined, "instant")).toBeNull();
   });
 
   it("returns null for a payload it cannot use, so the caller keeps the optimistic default", () => {

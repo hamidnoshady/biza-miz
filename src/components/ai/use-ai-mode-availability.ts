@@ -21,43 +21,26 @@ function allModesAvailable(): AiModeAvailability[] {
   return AI_CHAT_MODES.map((mode) => ({ mode, available: true, reason: null }));
 }
 
-export function useAiModeAvailability({
-  enabled = true,
-}: { enabled?: boolean } = {}): {
-  modes: AiModeAvailability[];
-  loading: boolean;
-} {
+export function useAiModeAvailability(): AiModeAvailability[] {
   const [modes, setModes] = useState<AiModeAvailability[]>(allModesAvailable);
-  const [loading, setLoading] = useState(enabled);
 
   useEffect(() => {
-    if (!enabled) {
-      setModes(allModesAvailable());
-      setLoading(false);
-      return;
-    }
     let cancelled = false;
-    setLoading(true);
     void (async () => {
       try {
-        const response = await fetch("/api/ai/modes", {
-          credentials: "same-origin",
-          cache: "no-store",
-        });
+        const response = await fetch("/api/ai/modes", { credentials: "same-origin" });
         if (!response.ok) return;
         const data = (await response.json()) as { modes?: unknown };
         const parsed = normalizeAiModeAvailability(data?.modes);
         if (!cancelled && parsed) setModes(parsed);
       } catch {
         // Keep the optimistic default; the server refusal still protects a turn.
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [enabled]);
+  }, []);
 
-  return { modes, loading };
+  return modes;
 }

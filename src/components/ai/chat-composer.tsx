@@ -6,7 +6,7 @@
  * Unified upload/library and project/focus controls live in `+`. The
  * expanded composer keeps task and response-mode controls beside Send.
  */
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
   AlertCircleIcon,
@@ -56,7 +56,7 @@ import {
   AI_CHAT_MODES,
   AI_MODE_LABELS,
   AI_MODE_UNAVAILABLE_HINTS,
-  type AiModeUnavailableReason,
+  unavailableModeReason,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
 import { AiCrossLibraryPicker } from "./ai-cross-library-picker";
@@ -164,16 +164,6 @@ export function ChatComposer({
   const availableTasks = resolveAvailablePresetTasks(mode, eligibleTaskIds);
   const currentTask = resolveCurrentTaskSummary(task, customTask);
   const activeRuntimeMode = workspaceContext?.runtimeMode ?? "auto";
-  // Issue #1546 — a mode this deployment has not configured is rendered
-  // disabled with the reason, instead of being selectable and then refused at
-  // send time. The chat route keeps refusing it as the backstop.
-  const unavailableModeReasons = useMemo(() => {
-    const reasons = new Map<AiRuntimeMode, AiModeUnavailableReason>();
-    for (const entry of workspaceContext?.modeAvailability ?? []) {
-      if (!entry.available) reasons.set(entry.mode, entry.reason ?? "disabled");
-    }
-    return reasons;
-  }, [workspaceContext?.modeAvailability]);
   // Issue #1367 — only the three chat modes are selectable, so only their icons
   // exist here. A retired stored value (if one ever reaches this component)
   // falls back to the Thinking glyph; it is never offered in the menu below.
@@ -889,7 +879,12 @@ export function ChatComposer({
                         : value === "instant"
                           ? ZapIcon
                           : BrainCircuitIcon;
-                    const unavailableReason = unavailableModeReasons.get(value) ?? null;
+                    // Issue #1546 — an unconfigured mode is disabled with its
+                    // reason, and the chat route still refuses it as the backstop.
+                    const unavailableReason = unavailableModeReason(
+                      workspaceContext?.modeAvailability,
+                      value,
+                    );
                     return (
                       <SelectItem
                         key={value}

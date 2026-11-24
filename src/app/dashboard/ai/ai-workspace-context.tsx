@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   AI_CHAT_MODES,
   AI_MODE_LABELS,
+  unavailableModeReason,
   type AiModeAvailability,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
@@ -195,9 +196,7 @@ export function AiWorkspaceContext({
           {AI_CHAT_MODES.map((mode) => {
             // Issue #1546 — an unconfigured mode is disabled with its reason
             // rather than offered and then refused at send time.
-            const unavailable = modeAvailability?.some(
-              (entry) => entry.mode === mode && !entry.available,
-            );
+            const unavailable = unavailableModeReason(modeAvailability, mode) !== null;
             return (
               <option key={mode} value={mode} disabled={unavailable}>
                 {unavailable

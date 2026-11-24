@@ -21,7 +21,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { applyRuntimeModeAlias } from "./ai-runtime";
-import { modeAliasConfigured, modeAvailability } from "./ai-runtime-modes";
+import { modeAvailability } from "./ai-runtime-modes";
 
 const BASE = { model: "gpt-4o-mini", embeddingModel: "text-embedding-3-small" };
 
@@ -76,39 +76,37 @@ describe("issue #812 §3/§7 — a mode's alias decides the model", () => {
     expect(result).toEqual(config);
   });
 
-  it("issue #1546 — Fast is only configured when it names its own alias", () => {
-    // A blank alias resolves to the gateway's default chat model, i.e. Auto
-    // with another label. The chat route refuses Fast in that state instead of
-    // claiming a faster route that was never configured.
-    expect(modeAliasConfigured({ model_alias: "pos-instant" })).toBe(true);
-    expect(modeAliasConfigured({ model_alias: "  pos-instant " })).toBe(true);
-    for (const blank of ["", "   ", null]) {
-      expect(modeAliasConfigured({ model_alias: blank })).toBe(false);
-    }
-  });
-
   it("issue #1546 — modeAvailability is the one offer/refusal decision", () => {
     // The picker disables a mode on this answer and the chat route refuses on
     // the same answer, so a deployment cannot offer what a turn would reject.
     expect(modeAvailability({ model_alias: "pos-instant", is_active: true }, "instant")).toEqual({
+      mode: "instant",
       available: true,
       reason: null,
     });
-    expect(modeAvailability({ model_alias: "", is_active: true }, "instant")).toEqual({
-      available: false,
-      reason: "fast_alias_not_configured",
-    });
+    // Fast must name its OWN alias: a blank or whitespace one resolves to the
+    // gateway's default chat model, i.e. Auto with a faster-sounding label.
+    for (const blank of ["", "   ", null]) {
+      expect(modeAvailability({ model_alias: blank, is_active: true }, "instant")).toEqual({
+        mode: "instant",
+        available: false,
+        reason: "fast_alias_not_configured",
+      });
+    }
     expect(modeAvailability({ model_alias: "pos-thinking", is_active: false }, "thinking")).toEqual({
+      mode: "thinking",
       available: false,
       reason: "disabled",
     });
     // Auto does not need an alias of its own: blank means the gateway default.
     expect(modeAvailability({ model_alias: "", is_active: true }, "auto")).toEqual({
+      mode: "auto",
       available: true,
       reason: null,
     });
     // A retired mode is never offered, whatever the console row says.
     expect(modeAvailability({ model_alias: "x", is_active: true }, "deep_research")).toEqual({
+      mode: "deep_research",
       available: false,
       reason: "disabled",
     });

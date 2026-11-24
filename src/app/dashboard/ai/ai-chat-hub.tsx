@@ -71,6 +71,7 @@ import {
 import {
   isAiRuntimeModeAvailable,
   normalizeAiRuntimeMode,
+  unavailableModeReason,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
 import { AiManagementSheet } from "./ai-management-sheet";
@@ -251,7 +252,7 @@ export function AiChatHub({
 
   // Issue #1546 — which modes this deployment actually configured. The composer
   // disables the rest instead of offering them and meeting a refusal at send.
-  const { modes: modeAvailability } = useAiModeAvailability();
+  const modeAvailability = useAiModeAvailability();
 
   const canOpenManagement =
     allowedPanelSections !== undefined
@@ -413,10 +414,9 @@ export function AiChatHub({
   // Fall back to Auto rather than leaving a disabled mode selected; the server
   // refusal still covers anything chosen before this arrives.
   useEffect(() => {
-    const unavailable = modeAvailability.some(
-      (entry) => entry.mode === runtimeMode && !entry.available,
-    );
-    if (unavailable) updateRuntimeMode("auto");
+    if (unavailableModeReason(modeAvailability, runtimeMode)) {
+      updateRuntimeMode("auto");
+    }
   }, [modeAvailability, runtimeMode, updateRuntimeMode]);
 
   // Normalize and sync URL parameters (`focus`, `mode`, `widgets`) when URL changes.
