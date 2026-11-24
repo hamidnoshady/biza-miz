@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePlatformCapability } from "@/lib/platform-auth";
-import { listPlatformAiModes, updatePlatformAiMode } from "@/lib/ai-control-plane";
+import { listPlatformAiModeSettings, updatePlatformAiMode } from "@/lib/ai-control-plane";
 import { getAiGatewayConfig, listGatewayModels } from "@/lib/ai-gateway-service";
 import { AI_RUNTIME_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-shared";
 
@@ -20,7 +20,7 @@ import { AI_RUNTIME_MODES, type AiRuntimeMode } from "@/lib/ai-runtime-modes-sha
 export const GET = async () => {
   const guard = await requirePlatformCapability("ai.read");
   if (guard.error) return guard.error;
-  const [modes, gateway] = await Promise.all([listPlatformAiModes(), getAiGatewayConfig()]);
+  const [modes, gateway] = await Promise.all([listPlatformAiModeSettings(), getAiGatewayConfig()]);
   // The model catalogue is advisory UI data, never a substitute for LiteLLM's
   // runtime checks. An unavailable proxy must not break the settings page.
   const availableModelAliases = gateway.masterKey ? await listGatewayModels(gateway) : [];

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { aiModeAvailability, listPlatformAiModes } from "@/lib/ai-runtime-modes";
+import { aiModeAvailability, listPlatformAiModeRows } from "@/lib/ai-runtime-modes";
 
 /**
  * Issue #1546 (Fast truthfulness) — which chat modes this tenant may actually
@@ -21,7 +21,7 @@ export const GET = withTenantScope(async () => {
   if (error) return error;
 
   return NextResponse.json(
-    { modes: aiModeAvailability(await listPlatformAiModes()) },
+    { modes: aiModeAvailability(await listPlatformAiModeRows()) },
     { headers: { "Cache-Control": "no-store" } },
   );
 });
