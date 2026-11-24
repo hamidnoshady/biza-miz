@@ -2651,9 +2651,14 @@ describe("one-shot WordPress editor reads", () => {
     const { requestWpEditorBody } = await import("../src/lib/integrations/wp-editor-body");
     const connectionId = await makeConnection("plugin", "Editor Reads Store");
     // The suite drops its disposable database, including append-only audit entries.
-    const stored = await connections.getConnection(biz.id, connectionId);
-    expect(stored).toBeTruthy();
-    const connection = { ...stored!, plugin_capabilities: { jobTypes: ["post_body_read"], leaseTokenAck: true } };
+    await db.query(
+      `UPDATE integration_connections
+          SET plugin_capabilities = '{"protocolVersion":3,"jobTypes":["post_body_read"]}'::jsonb
+        WHERE id = $1`,
+      [connectionId],
+    );
+    const connection = await connections.getConnection(biz.id, connectionId);
+    if (!connection) throw new Error("editor read connection missing");
     const read = () => requestWpEditorBody(biz.id, connectionId, "product", "55");
     await expect(read()).resolves.toBeNull();
     await expect(read()).resolves.toBeNull();
