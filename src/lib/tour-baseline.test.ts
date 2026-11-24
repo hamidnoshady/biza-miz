@@ -168,6 +168,28 @@ describe("automatic baseline tours", () => {
     expect(tourDefinitionById(baselineTourIdForRoute("/crm/deals"))).toBeUndefined();
   });
 
+  it("keeps CRM Briefs Studio-only, including direct playback by its legacy id", () => {
+    const pageKey = "page:/crm/briefs";
+    const studio: TourDefinition = {
+      id: "crm.briefs.list",
+      version: 2,
+      pageKey,
+      route: "/crm/briefs",
+      title: "بریف کارفرما",
+      description: "از استودیو",
+      eligibility: {},
+      steps: [{ id: "intro", kind: "explain", title: "شروع", body: "." }],
+    };
+
+    expect(STUDIO_ONLY_PAGE_KEYS.has(pageKey)).toBe(true);
+    expect(TOURS.some((tour) => tour.id === "crm.briefs.list")).toBe(false);
+    expect(pageTourCandidates(pageKey)).toEqual([]);
+    expect(pageTourCandidates(pageKey, [studio])).toEqual([studio]);
+    expect(tourDefinitionById("crm.briefs.list")).toBeUndefined();
+    expect(tourDefinitionById("crm.briefs.list", [studio])).toEqual(studio);
+    expect(tourDefinitionById(baselineTourIdForRoute("/crm/briefs"))).toBeUndefined();
+  });
+
   it("resolves a baseline id to its page for playback and progress writes", () => {
     const page = KNOWLEDGE_PAGES.find((candidate) => toursForPage(candidate.key).length === 0)!;
     const id = baselineTourIdForRoute(page.route);
