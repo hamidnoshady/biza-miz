@@ -117,6 +117,20 @@ describe("GET /api/knowledge/tours", () => {
     expect((await (await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(PAGE)}`))).json()).tours).toEqual([]);
   });
 
+  it("offers no CRM Overview tour when Tour Studio has no publication", async () => {
+    const pageKey = "page:/crm/overview";
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours).toEqual([]);
+    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", []);
+  });
+
+  it("offers no CRM Overview fallback when the Studio lookup fails", async () => {
+    const pageKey = "page:/crm/overview";
+    mocks.publishedForPage.mockRejectedValue(new Error("database unavailable"));
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours).toEqual([]);
+  });
+
   it("offers the automatic baseline tour on a page with no authored tour", async () => {
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(BASELINE_PAGE)}`));
     const body = await res.json();
@@ -147,6 +161,13 @@ describe("published Studio tours", () => {
       { id: "header", kind: "spotlight" as const, anchor: "page.header", title: "سرصفحه", body: "." },
     ],
   };
+
+  it("offers only the published CRM Overview Studio tour", async () => {
+    const pageKey = "page:/crm/overview";
+    mocks.publishedForPage.mockResolvedValue([{ ...studio, pageKey, route: "/crm/overview" }]);
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours.map((tour: { id: string }) => tour.id)).toEqual([STUDIO_ID]);
+  });
 
   it("offers the published tour instead of the automatic baseline", async () => {
     mocks.publishedForPage.mockResolvedValue([studio]);
