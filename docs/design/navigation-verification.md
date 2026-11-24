@@ -60,7 +60,7 @@ first defect. Four failed observations, two root causes, two follow-ups.
 | A1 | From the page, Tab through the rail | Header controls, then the six rail links in order: دستیار هوشمند → میز کار من → حسابداری → ارتباط با مشتری → رشد و بازاریابی → مدیریت وب‌سایت; every focused link has a visible ring | The six links were reached in that order; every one had the amber 2px focus ring (`box-shadow` = `oklab(0.828 … / 0.45) 0 0 0 2px`). Order: credit, theme, collapse, notifications, then the six rail links, then «ابر» | PASS |
 | A2 | Enter on «رشد و بازاریابی» | `/growth/overview`, the growth menu replaces the rail, one `aria-current="page"` row | URL `/growth/overview`; nav `بخش‌های رشد و بازاریابی`; active `/growth/overview` | PASS |
 | A3 | Read focus after A2 | `document.activeElement.id === "page-heading"` | `BODY`; the heading exists but mounts after the focus window (~1.5 s after the route commits) | **FAIL — #1553** |
-| A4 | Read focus after A2 again, at 0/500/1500/3000 ms | Focus on the destination heading | `BODY` at every sample; `main h1` is present from ~1500 ms for all four apps. The same-app case A6 does focus the heading | **FAIL — #1553** |
+| A4 | Enter each app in turn and sample focus at 0/500/1500/3000 ms | Focus on the destination heading | `BODY` at every sample; `main h1` is present from ~1500 ms for all four apps. The same-app case B2 does focus the heading | **FAIL - #1553** |
 
 The rail is the platform's app switcher: it is drawn on `/dashboard` and the
 shared platform surfaces, not inside an app. Switching apps is two hops (back to
