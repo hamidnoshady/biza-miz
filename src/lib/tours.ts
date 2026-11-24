@@ -2493,26 +2493,6 @@ export const TOURS: readonly TourDefinition[] = [  {
     ],
   },
   listPageTour({
-    id: "crm.proposals.list",
-    pageKey: "page:/crm/proposals",
-    title: "پیشنهاد قیمت",
-    description: "قیمت، حاشیه و وضعیت پیشنهاد تا پذیرش یا رد.",
-    introTitle: "پیشنهاد قیمت",
-    introBody:
-      "پیشنهاد، قیمت و حاشیهٔ یک بریف را ثبت می‌کند و تا پذیرش، رد یا انقضا پیش می‌رود. حاشیه داخلی است و در نمای مشتری دیده نمی‌شود.",
-    nextBody:
-      "پس از ارسال، پیشنهاد قفل می‌شود؛ اصلاح با «پیشنهاد تازه از روی این» انجام می‌شود تا عددی که مشتری دیده تغییر نکند.",
-    eligibility: {
-      permissions: [PERMISSIONS.crmView, PERMISSIONS.crmManage],
-      anyOf: [
-        { permissions: [PERMISSIONS.crmExport] },
-        { permissions: [PERMISSIONS.crmConfigure] },
-      ],
-    },
-    navAnchor: TOUR_ANCHORS.appSectionNav,
-    table: true,
-  }),
-  listPageTour({
     id: "crm.client-campaigns.list",
     pageKey: "page:/crm/client-campaigns",
     title: "کمپین کارفرما",
