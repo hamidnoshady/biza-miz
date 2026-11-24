@@ -41,8 +41,8 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const visible = tourForViewer(tour, viewer);
     return visible ? [visible] : [];
   });
-  // On Accounting workspaces and Studio-only CRM Overview, Directory, Deals and
-  // Briefs pages, an eligible Studio tour replaces built-in choices.
+  // On Accounting workspaces and Studio-only CRM Overview, Directory, Deals,
+  // Briefs and Proposals pages, an eligible Studio tour replaces built-in choices.
   // Keep those choices as the fallback when no published Studio tour applies.
   const preferStudio = page.route === "/accounting/overview" || page.route === "/accounting/pos" || page.route === "/accounting/products" || page.route === "/accounting/products/new" || page.route === "/accounting/products/prices" || page.route === "/accounting/products/attributes" || page.route === "/accounting/products/barcode-templates" || page.route === "/accounting/products/reports" || page.route === "/accounting/cosmetics" || page.route === "/accounting/directory" || page.route === "/accounting/ledger" || page.route === "/accounting/trial-balance" || page.route === "/accounting/entries" || page.route === "/accounting/vouchers" || page.route === "/accounting/manual" || page.route === "/accounting/multicurrency" || page.route === "/accounting/chart-of-accounts" || page.route === "/accounting/dimensions" || page.route === "/accounting/receivables" || page.route === "/accounting/installments" || page.route === "/accounting/cheques" || page.route === "/accounting/receipts" || page.route === "/accounting/financial-accounts" || page.route === "/accounting/transfers" || page.route === "/accounting/expenses" || page.route === "/accounting/reconciliation" || page.route === "/accounting/fixed-assets" || page.route === "/accounting/shareholders" || page.route === "/accounting/fiscal-periods" || page.route === "/accounting/vat" || page.route === "/accounting/payroll" || page.route === "/accounting/reports" || page.route === "/accounting/settings" || page.route === "/accounting/financial-reports" || STUDIO_ONLY_PAGE_KEYS.has(page.key);
   const studioTours = preferStudio
