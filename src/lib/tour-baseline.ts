@@ -308,9 +308,11 @@ export function tourDefinitionById(
   const studio = published.find((tour) => tour.id === id);
   if (studio) return studio;
   const authored = tourById(id);
-  // Studio-only pages must never fall back to a code-authored tour, including
-  // if a retired entry is accidentally reintroduced later.
-  if (authored && STUDIO_ONLY_PAGE_KEYS.has(authored.pageKey)) return undefined;
+  // CRM Deals and Briefs code-tour ids are retired; published Studio content
+  // may still use those ids, but the code catalogue must never serve them.
+  if (authored?.pageKey === "page:/crm/deals" || authored?.pageKey === "page:/crm/briefs") {
+    return undefined;
+  }
   if (authored) return authored;
   if (!isBaselineTourId(id)) return undefined;
   const page = baselinePageForId(id);
