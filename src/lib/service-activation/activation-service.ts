@@ -34,6 +34,8 @@ import {
   type PoolClient,
 } from "../db";
 import { appendUsageEvent } from "../billing/runtime";
+import { getBusinessIndustry } from "../industry-guard";
+import { resolveWorkspaceIndustryEligibility } from "../workspace-eligibility";
 import {
   postWalletEntryTx,
   WalletInsufficientFundsError,
@@ -272,6 +274,19 @@ export interface TenantServiceSummary {
   lastSettledAt: string | null;
 }
 
+/**
+ * Issue #1110 — industry applicability for the billable Workspace capabilities.
+ * A failed business read is a closed answer: never offer/activate Workspace on
+ * an unknown industry.
+ */
+async function workspaceServiceIndustryAllowed(businessId: string): Promise<boolean> {
+  try {
+    return resolveWorkspaceIndustryEligibility(await getBusinessIndustry(businessId)).eligible;
+  } catch {
+    return false;
+  }
+}
+
 export async function listBusinessServices(businessId: string): Promise<TenantServiceSummary[]> {
   const activations = await listBusinessServiceActivations(businessId);
   const wizard = await listWizardStates(businessId);
@@ -282,9 +297,14 @@ export async function listBusinessServices(businessId: string): Promise<TenantSe
     wizard.map((row) => [serviceIdentityKey(row.identity), row] as const),
   );
 
+  // Issue #1110 — a business type that does not have My Workspace must not be
+  // offered (or billed for) its capabilities. Existing activation history stays
+  // readable in the platform console; the tenant-facing list does not advertise
+  // a service this business cannot use.
+  const workspaceServiceAllowed = await workspaceServiceIndustryAllowed(businessId);
   const definitions: ServiceDefinition[] = [
     ...APP_SERVICE_DEFINITIONS,
-    ...WORKSPACE_SERVICE_DEFINITIONS,
+    ...(workspaceServiceAllowed ? WORKSPACE_SERVICE_DEFINITIONS : []),
   ];
   // Agent/routine activations are dynamic: they appear only once the business
   // has one (the Superadmin publishes the agent and its tariff).
@@ -622,6 +642,12 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
   const nowIso = now.toISOString();
   const businessId = input.businessId;
 
+  // Issue #1110 — a non-eligible business type can never start (or be billed
+  // for) a Workspace capability. The check is before any transaction or debit.
+  if (identity.kind === "workspace" && !(await workspaceServiceIndustryAllowed(businessId))) {
+    return { status: "unavailable", reason: "business_type_unsupported" };
+  }
+
   // Platform availability is a precondition, never a commercial switch: an app
   // that is «به‌زودی»/«در حال تعمیر» cannot be activated, and the refusal is
   // distinct from the tenant's own disable state (issue #1041 §B).
@@ -836,6 +862,7 @@ export type ReenableServiceResult =
   | { status: "not_found" }
   | { status: "not_configured" }
   | { status: "insufficient_credit"; requiredRial: number; balanceRial: number }
+  | { status: "unavailable"; reason: string }
   | { status: "conflict"; reason: "legal_hold" | "purge_in_progress" };
 
 async function reenableInTx(
@@ -941,6 +968,14 @@ export async function reenableService(input: {
 }): Promise<ReenableServiceResult> {
   const identity = identityOf(input.identity);
   const nowIso = (input.now ?? new Date()).toISOString();
+  // Issue #1110 — reactivation cannot restore a capability the business type
+  // does not have. Records are preserved; only the service stays unavailable.
+  if (
+    identity.kind === "workspace" &&
+    !(await workspaceServiceIndustryAllowed(input.businessId))
+  ) {
+    return { status: "unavailable", reason: "business_type_unsupported" };
+  }
   return withTenantTransaction(input.businessId, async (client) => {
     await lockIdentity(client, input.businessId, identity);
     const existing = await lockActivationRow(client, input.businessId, identity);
@@ -1176,6 +1211,14 @@ export async function settleServiceRuntime(input: {
 }): Promise<SettlementResult> {
   const identity = identityOf(input.identity);
   const nowIso = (input.now ?? new Date()).toISOString();
+  // Issue #1110 — an ineligible business type's Workspace clock is not
+  // settled: no debit can be produced by a read-triggered catch-up.
+  if (
+    identity.kind === "workspace" &&
+    !(await workspaceServiceIndustryAllowed(input.businessId))
+  ) {
+    return { status: "no_open_interval" };
+  }
   return withTenantTransaction(input.businessId, async (client) => {
     const activation = await lockActivationRow(client, input.businessId, identity);
     if (!activation) return { status: "no_open_interval" };
@@ -1421,6 +1464,72 @@ export async function suspendService(input: {
   });
 }
 
+/**
+ * Issue #1110 — apply a business-type eligibility change to the Workspace
+ * runtime clock without touching stored data or starting a retention countdown.
+ *
+ * - **Becoming ineligible:** every open Workspace interval is closed at the
+ *   change instant (the enabled time up to that instant is settled normally).
+ *   No interval keeps running, so nothing is billed for the ineligible period.
+ * - **Becoming eligible again:** an active Workspace capability with no open
+ *   interval starts a fresh interval at the current tariff. The activation state
+ *   is untouched, so no second setup fee is charged and no record is deleted.
+ *
+ * Runs on the caller's transaction client, after the `businesses.industry`
+ * update. A missing tariff on re-entry leaves the interval closed (fail closed
+ * rather than billing at an assumed rate); the tenant operator can re-enable the
+ * service through the normal activation screen.
+ */
+export async function applyWorkspaceEligibilityToRuntime(input: {
+  client: PoolClient;
+  businessId: string;
+  eligible: boolean;
+  atIso: string;
+}): Promise<void> {
+  const { rows: activations } = await input.client.query<{
+    id: string;
+    service_key: string;
+  }>(
+    `SELECT id, service_key
+       FROM business_service_activations
+      WHERE business_id = $1 AND service_kind = 'workspace' AND state = 'active'`,
+    [input.businessId],
+  );
+
+  for (const activation of activations) {
+    const { rows: open } = await input.client.query<{ id: string }>(
+      `SELECT id FROM service_activation_intervals
+        WHERE activation_id = $1 AND ended_at IS NULL
+        ORDER BY started_at DESC
+        LIMIT 1`,
+      [activation.id],
+    );
+
+    if (!input.eligible) {
+      if (open[0]) {
+        await closeIntervalTx(input.client, open[0].id, input.atIso, null);
+      }
+      continue;
+    }
+
+    if (open[0]) continue;
+    const identity: ServiceIdentity = { kind: "workspace", key: activation.service_key };
+    const context = await readServiceChargeContext({
+      businessId: input.businessId,
+      identity,
+      at: input.atIso,
+    });
+    if (!context.tariff) continue;
+    await openInterval(input.client, {
+      businessId: input.businessId,
+      activationId: activation.id,
+      atIso: input.atIso,
+      tariff: context.tariff,
+      trigger: "reenable",
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Settlement worker
 // ---------------------------------------------------------------------------
@@ -1455,8 +1564,13 @@ export async function settleDueServiceRuntime(
   // Enumerate under the documented platform bypass (the same shape as every
   // other background tick), then do each business's work inside withTenant.
   const { rows: due } = await withoutTenantScope("platform", () =>
-    query<{ id: string; business_id: string }>(
-      `SELECT i.id, i.business_id
+    query<{
+      id: string;
+      business_id: string;
+      service_kind: string;
+      service_key: string;
+    }>(
+      `SELECT i.id, i.business_id, a.service_kind, a.service_key
          FROM service_activation_intervals i
          JOIN business_service_activations a ON a.id = i.activation_id
         WHERE i.ended_at IS NULL
@@ -1480,6 +1594,25 @@ export async function settleDueServiceRuntime(
 
   for (const interval of due) {
     try {
+      // Issue #1110 — a workspace interval belonging to a business type that
+      // does not have My Workspace stops at its last settled cursor without a
+      // further debit. This protects legacy intervals created before the
+      // industry changed; `applyWorkspaceEligibilityToRuntime` closes new ones
+      // at the change instant.
+      if (interval.service_kind === "workspace") {
+        const eligible = await workspaceServiceIndustryAllowed(interval.business_id);
+        if (!eligible) {
+          await withTenantTransaction(interval.business_id, (client) =>
+            client.query(
+              `UPDATE service_activation_intervals
+                  SET ended_at = GREATEST(COALESCE(last_settled_at, started_at), started_at)
+                WHERE id = $1 AND ended_at IS NULL`,
+              [interval.id],
+            ),
+          );
+          continue;
+        }
+      }
       const outcome = await withTenantTransaction(interval.business_id, async (client) =>
         settleIntervalTx(client, interval.id, nowIso, false, null),
       );

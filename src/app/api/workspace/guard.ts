@@ -19,6 +19,10 @@ import { WorkspaceError, type WorkspaceOwner } from "@/lib/workspace";
 import { workspaceAccessFlags } from "@/lib/workspace-shared";
 import { workspaceServiceActivationState } from "@/lib/service-activation/app-gate-service";
 import { serviceGateBlocks } from "@/lib/service-activation/app-gate";
+import {
+  WORKSPACE_UNAVAILABLE_ERROR,
+  workspaceAccessFor,
+} from "@/lib/workspace-access";
 
 export { PERMISSIONS };
 
@@ -55,6 +59,26 @@ export async function workspaceOwner(
 ): Promise<{ owner: WorkspaceOwner; error: null } | { owner: null; error: NextResponse }> {
   const { session, membership, error } = await requirePermission(permission);
   if (error) return { owner: null, error };
+
+  // Issue #1110 — industry applicability, service activation, deployment and
+  // permission are one decision. It is checked for reads as well as writes: an
+  // ineligible business has no Workspace surface to read, and a hidden nav row
+  // is not authorization. A member with `workspace.view` in a restaurant is
+  // still refused here.
+  const access = await workspaceAccessFor(session.businessId, membership.permissions);
+  if (!access.available) {
+    return {
+      owner: null,
+      error: NextResponse.json(
+        {
+          error: WORKSPACE_UNAVAILABLE_ERROR,
+          reason: access.reason,
+          serviceKind: "workspace",
+        },
+        { status: 403 },
+      ),
+    };
+  }
 
   // The shell, dashboard, lookups, reads and exports remain usable after a
   // customer disable. Mutating Workspace endpoints are separately priced by

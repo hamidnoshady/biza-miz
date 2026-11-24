@@ -886,6 +886,9 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     browserNavigation: opts.browserNavigation === true,
     // Issue #808 §8 — the wizard surface follows the business's own step list.
     industry: promptContext.industry,
+    // Issue #1110 — the Workspace/AEC tools disappear when the area is not
+    // available to this business/member. Execution re-checks independently.
+    workspaceAiAvailable: promptContext.workspaceAiAvailable,
   }).filter((tool) => allowActions || tool.function.name !== "propose_action");
   /**
    * External MCP tools (issue #1473). Only the in-app assistant gets them: an

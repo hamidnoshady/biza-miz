@@ -96,6 +96,8 @@ export interface AiChatHubProps {
   accessibleFocuses?: readonly AiAppFocus[];
   /** Tenant's industry key for client-side contextual starter resolution. */
   industry?: string | null;
+  /** Issue #1110 — whether My Workspace exists for this business/member. */
+  workspaceAvailable?: boolean;
   /** Smaller composer/chat shown in the physical-left panel of other app pages. */
   compact?: boolean;
 }
@@ -108,6 +110,7 @@ export function AiChatHub({
   starterPrompts,
   accessibleFocuses,
   industry = null,
+  workspaceAvailable = true,
   compact = false,
 }: AiChatHubProps) {
   const locked = useFeatureLocked();
@@ -788,6 +791,7 @@ export function AiChatHub({
           section={panelSection}
           canAutoApply={canAutoApply}
           allowedSections={allowedPanelSections}
+          workspaceAvailable={workspaceAvailable}
           onSectionChange={openPanel}
           onClose={closePanel}
         />

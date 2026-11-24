@@ -3,6 +3,7 @@ import { requireMember, withTenantScope } from "@/lib/auth";
 import { tourPlayback, tourProgressView } from "@/lib/tours";
 import { eligibleTourById, loadTourProgress } from "@/lib/tours-service";
 import { tourSessionKey } from "@/lib/tour-session-key";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 
 /**
  * The steps of one tour plus the caller's resume point, fetched when the
@@ -18,6 +19,13 @@ export const GET = withTenantScope(
     const { tourId } = await context.params;
     const tour = await eligibleTourById(tourId, guard.session.businessId, guard.membership.permissions);
     if (!tour) return NextResponse.json({ error: "not_found" }, { status: 404 });
+    // Issue #1110 — a Workspace tour cannot be opened by id when unavailable.
+    if (
+      tour.route.startsWith("/workspace") &&
+      !(await workspaceAccessFor(guard.session.businessId, guard.membership.permissions)).available
+    ) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
 
     const progress = (await loadTourProgress(guard.session.businessId, guard.session.sub, [tour.id])).get(tour.id) ?? null;
     return NextResponse.json({

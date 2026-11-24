@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { knowledgePage } from "@/lib/knowledge-base";
 import { learningRecommendationsFor } from "@/lib/learning-recommendation-service";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 
 /**
  * Contextual learning recommendations (issue #972, Phase F).
@@ -24,6 +25,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     userId: guard.session.sub,
     permissions: guard.membership.permissions,
     route: page?.route ?? null,
+    // Issue #1110 — a workspace page/route is not recommended when unavailable.
+    excludeWorkspace: !(await workspaceAccessFor(
+      guard.session.businessId,
+      guard.membership.permissions,
+    )).available,
   });
 
   return NextResponse.json(

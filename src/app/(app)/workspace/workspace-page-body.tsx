@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
+import { requireWorkspacePageAccess } from "@/lib/workspace-access";
 import { WORKSPACE_MODULE_HOME } from "@/lib/app-routes";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
@@ -32,6 +33,10 @@ export async function WorkspacePageBody({ section }: { section?: WorkspaceSectio
 
   const member = await memberAccessFor(session);
   if (!member?.isActive) redirect("/dashboard");
+  // Issue #1110 — industry applicability, activation, deployment and
+  // permission are one server decision. A direct/canonical URL cannot render
+  // Workspace for a business that should not have it.
+  await requireWorkspacePageAccess(session.businessId, member.permissions);
   if (!member.permissions.has(PERMISSIONS.workspaceView)) redirect("/dashboard");
 
   const permissions = [...member.permissions] as string[];

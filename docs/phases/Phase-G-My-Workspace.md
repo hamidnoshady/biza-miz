@@ -105,6 +105,51 @@ dashboard that answers "what needs my attention today".
     `DataTable`/`FilterChip`/`StatusBadge`/`EmptyState` only — the Accounting
     reference language. No new UI primitive.
 
+## 2b. Business-type eligibility (#1110)
+
+My Workspace is not offered to every business. It is the operational centre of
+trades whose work is sold as projects — architecture/civil/construction
+(`architecture_construction`), service/SaaS (`service_saas`) and advertising
+agencies (`advertising_agency`) — and is **absent** for restaurants, shops,
+wholesalers and dealerships, whose work lives in Accounting, Growth and CRM.
+
+One policy answers it: `src/lib/workspace-eligibility.ts`
+(`WORKSPACE_INDUSTRY_DEFAULTS`, exhaustive over `INDUSTRIES`). Unknown values
+fail closed. `src/lib/workspace-access.ts` intersects that answer with:
+
+- the separately activated Workspace service (`projects`; #1041),
+- the deployment capability (`app.workspace`),
+- the member's current effective `workspace.view` permission.
+
+`canShowWorkspace = eligible && serviceEnabled && deploymentSupported &&
+permission`. The pages, `/workspace/**` and `/api/workspace/**`,
+`/api/aec/**`, `/api/ai/projects/**`, the AI prompt/tool catalogue and the MCP
+catalogue all use the same decision. A denial is the stable `403
+workspace_not_available` (with a `reason`), never a 404 or an empty page.
+Project membership (`workspace_members.role`) remains a second, independent
+gate — eligibility never grants a permission or a project role.
+
+An inconsistency notice: #1041 calls the separately priced Workspace items
+"capabilities" and the shell "never hidden from the customer". With #1110, the
+shell is hidden when the **business type** is ineligible; the capability
+activation state still only controls an eligible tenant, so a business that
+never activated `projects` keeps its grandfathered access exactly as before.
+
+No blanket business-level override is enabled: product policy has not approved
+one. The resolver accepts an `{ approved, eligible, rationale, approvedBy,
+approvedAt }` object for a future reviewed/audited surface, and an unapproved
+override is ignored in both directions. Prefer adding a reviewed industry
+default (with its matrix test) over a per-tenant exception.
+
+**Billing clock.** An industry change calls
+`applyWorkspaceEligibilityToRuntime` in the same transaction: becoming
+ineligible closes every open Workspace interval at the change instant (settling
+the enabled time up to it), and becoming eligible again opens a fresh interval
+at the current tariff without a second setup fee. The settlement worker also
+stops a legacy interval whose business is now ineligible at its last settled
+cursor, so no enabled time after the change is billed. Activation state,
+retention policy and all project rows are untouched.
+
 ## 3. Sections
 
 `overview`, `projects`, `tasks`, `calendar`, `documents`, `contracts`, `teams`,
@@ -164,7 +209,7 @@ make existing data fit would rewrite history — which the issue forbids.
 ## 5. What the module now does (new features)
 
 Ten sections, all built on the existing primitives and reachable from the
-sidebar rail entry «میز کار من».
+sidebar rail entry «میز کار من» for an eligible, active, authorized business.
 
 - **Overview** — the six figures the brief asked for (active projects, tasks
   today, my open tasks, pending approvals, upcoming deadlines, overdue tasks,
@@ -237,7 +282,8 @@ Stated plainly, because each is a decision rather than an oversight:
    not a fifth entry in `APP_KEYS`. Three guard tests assert the four-app shape
    (`app-availability.test.ts`, `apps.ts`, `workspace-rail-ai-launcher.test.ts`),
    and the brief called it a core module rather than a standalone app. The
-   consequence: no per-app availability switch for Workspace.
+   consequence: no per-app availability switch for Workspace. Its business-type
+   eligibility is a separate policy (§2b), not an `AppKey`.
 2. **Inventory and Website integration are read-only today.** A project can
    reference materials and website tasks through documents and tasks, but there
    is no `project_id` on stock movements or website jobs. Adding it is another

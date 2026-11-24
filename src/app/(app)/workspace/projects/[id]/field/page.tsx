@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
+import { requireWorkspacePageAccess } from "@/lib/workspace-access";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { FieldScreen } from "./field-screen";
 
@@ -29,6 +30,7 @@ export default async function WorkspaceProjectFieldPage({
 
   const member = await memberAccessFor(session);
   if (!member?.isActive) redirect("/dashboard");
+  await requireWorkspacePageAccess(session.businessId, member.permissions);
   if (!member.permissions.has(PERMISSIONS.workspaceView)) redirect("/dashboard");
 
   return (

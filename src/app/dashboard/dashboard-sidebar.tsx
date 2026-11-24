@@ -209,6 +209,12 @@ interface SidebarProps {
   industry?: Industry;
   /** Permission-filtered contextual Workspace entries from the server shell. */
   workspaceSections: readonly WorkspaceSidebarSection[];
+  /**
+   * Issue #1110 — false when this business type/service/deployment/permission
+   * has no My Workspace at all. The rail omits the row; it is not a disabled
+   * item and it advertises no activation.
+   */
+  workspaceAvailable: boolean;
   deploymentProfile: DeploymentProfile;
   notificationBranch?: string | null;
   siteInbox?: boolean;
@@ -238,7 +244,15 @@ function isActive(pathname: string, href: string, search?: ReadonlyURLSearchPara
  * collapsible panel on the physical left of the assistant window rather than
  * inside this right-side navigation rail.
  */
-function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: string }) {
+function WorkspaceRail({
+  navItems,
+  pathname,
+  workspaceAvailable,
+}: {
+  navItems: NavItem[];
+  pathname: string;
+  workspaceAvailable: boolean;
+}) {
   const stateByApp = new Map<AppKey, NonNullable<NavItem["appState"]>>();
   for (const item of navItems) {
     if (!item.appState) continue;
@@ -275,19 +289,21 @@ function WorkspaceRail({ navItems, pathname }: { navItems: NavItem[]; pathname: 
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              asChild
-              isActive={isWorkspacePathname(pathname)}
-              tooltip="میز کار من"
-              className={APP_NAV_BUTTON_CLASS}
-            >
-              <Link href={WORKSPACE_MODULE_HOME}>
-                <FolderIcon aria-hidden="true" className="size-4 shrink-0" />
-                <span className={NAV_LABEL_CLASS}>میز کار من</span>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
+          {workspaceAvailable ? (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                asChild
+                isActive={isWorkspacePathname(pathname)}
+                tooltip="میز کار من"
+                className={APP_NAV_BUTTON_CLASS}
+              >
+                <Link href={WORKSPACE_MODULE_HOME}>
+                  <FolderIcon aria-hidden="true" className="size-4 shrink-0" />
+                  <span className={NAV_LABEL_CLASS}>میز کار من</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          ) : null}
         </SidebarMenu>
 
         {launchers.length > 0 ? (
@@ -994,6 +1010,7 @@ export function DashboardSidebar({
   brandTitle,
   brandSubtitle,
   workspaceSections,
+  workspaceAvailable,
   deploymentProfile,
   notificationBranch,
   siteInbox,
@@ -1018,7 +1035,7 @@ export function DashboardSidebar({
   const availableHrefs = flattenNav(navItems).map((item) => item.href);
   // `/projects` is a legacy alias that middleware redirects before this shell
   // renders. The canonical Workspace prefix owns the contextual sidebar.
-  const workspaceRoute = isWorkspacePathname(pathname);
+  const workspaceRoute = workspaceAvailable && isWorkspacePathname(pathname);
   const appShell = appShellForSlot(pathname);
   // Platform home and shared utilities keep the intentionally small launcher;
   // an app or My Workspace replaces it with focused route navigation.
@@ -1150,7 +1167,7 @@ export function DashboardSidebar({
             navItems={navItems}
           />
         ) : (
-          <WorkspaceRail navItems={navItems} pathname={pathname} />
+          <WorkspaceRail navItems={navItems} pathname={pathname} workspaceAvailable={workspaceAvailable} />
         )}
         <DashboardSidebarFooter
           role={role}

@@ -25,6 +25,9 @@ import { setupReadiness } from "./setup-readiness";
 import type { Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
 import { wizardStepsForIndustry } from "./wizard-steps";
+import { clearLearningRecommendationCache } from "./learning-recommendation-service";
+import { isWorkspaceEligibleIndustry } from "./workspace-eligibility";
+import { applyWorkspaceEligibilityToRuntime } from "./service-activation/activation-service";
 import { clampImpersonationMinutes, platformCan } from "./platform-admin";
 import type { PlatformAdminRole } from "./platform-auth-edge";
 import { platformAudit, revokeAllPlatformAdminSessions } from "./platform-auth";
@@ -667,6 +670,18 @@ export async function changeBusinessIndustry(
         `UPDATE businesses SET industry = $2, updated_at = now() WHERE id = $1`,
         [businessId, industry],
       );
+
+      // Issue #1110 — stop or resume the Workspace enabled-time clock to match
+      // the new business type. Changing an industry is never a customer
+      // disable: activation rows, retention policy and project data are left
+      // exactly as they were.
+      await applyWorkspaceEligibilityToRuntime({
+        client,
+        businessId,
+        eligible: isWorkspaceEligibleIndustry(industry),
+        atIso: new Date().toISOString(),
+      });
+
       const seeded = await seedChartOfAccounts(client, businessId, industry);
 
       // Move the feature overrides across too, in both directions. Seeding the
@@ -721,6 +736,11 @@ export async function changeBusinessIndustry(
     }
   });
   if (seededAccountCodes === null) return null;
+
+  // Issue #1110 — eligibility and the learning feed both change with the
+  // business type. Drop the per-member recommendation cache so a switch to a
+  // non-eligible trade cannot keep offering a Workspace tour for the TTL.
+  clearLearningRecommendationCache();
 
   const business = await getBusiness(businessId);
   return business ? { business, seededAccountCodes } : null;

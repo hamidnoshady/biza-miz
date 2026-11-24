@@ -3,6 +3,8 @@ import { requireMember, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { knowledgePage, knowledgeSection } from "@/lib/knowledge-base";
 import { kbGuideForSection, kbRelatedGuidesForArticle } from "@/lib/knowledge-service";
+import { isWorkspaceKnowledgeSection } from "@/lib/workspace-eligibility";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 
 /**
  * The member-facing side of the knowledge base (migration 0117). A page's
@@ -18,7 +20,7 @@ import { kbGuideForSection, kbRelatedGuidesForArticle } from "@/lib/knowledge-se
  * business data.
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { error } = await requireMember();
+  const { session, membership, error } = await requireMember();
   if (error) return error;
 
   const section = (request.nextUrl.searchParams.get("section") ?? "").trim();
@@ -29,6 +31,19 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const page = knowledgePage(request.nextUrl.searchParams.get("page") ?? "");
   if (!known && !page) {
     return NextResponse.json({ error: "unknown_section" }, { status: 400 });
+  }
+
+  // Issue #1110 — no My Workspace guide or link for a business without it.
+  const workspaceUnavailable = !(await workspaceAccessFor(
+    session.businessId,
+    membership.permissions,
+  )).available;
+  if (
+    workspaceUnavailable &&
+    (known?.key === "projects" ||
+      (page && isWorkspaceKnowledgeSection(page.key)))
+  ) {
+    return NextResponse.json({ entry: null, guide: null, relatedGuides: [] });
   }
 
   const { rows } = known
@@ -51,10 +66,15 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const relatedGuides = guide
     ? await kbRelatedGuidesForArticle(guide.slug).catch(() => [])
     : [];
+  const visibleRelated = workspaceUnavailable
+    ? relatedGuides.filter(
+        (related) => !related.sectionKeys.some(isWorkspaceKnowledgeSection),
+      )
+    : relatedGuides;
 
   return NextResponse.json({
     entry: entry ? { section: entry.section, label: known?.label ?? page?.label ?? "", url: entry.url } : null,
     guide,
-    relatedGuides,
+    relatedGuides: visibleRelated,
   });
 });

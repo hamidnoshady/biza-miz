@@ -67,9 +67,12 @@ const WORKSPACE_TOP_ROUTES: readonly string[] = Object.values(WORKSPACE_TOP_HREF
  * table below (`/projects/42` → `/workspace/projects/42`). It is deliberately
  * NOT an entry in `APP_ROUTE_PREFIXES`: the four apps there are
  * availability-gated products a business can be without, while the workspace
- * is platform furniture like `/settings` — every business has it, and
- * `appForPagePath` must keep returning null for it so it can never be switched
- * off. See `docs/phases/Phase-G-My-Workspace.md`.
+ * is a platform work area rather than a fifth app. Issue #1110 makes it
+ * conditional on the business type (plus activation, deployment and
+ * permission), so `appForPagePath` must keep returning null for it: it is not
+ * switched off by app availability, it is absent when the business has no
+ * execution projects. See `src/lib/workspace-eligibility.ts` and
+ * `docs/phases/Phase-G-My-Workspace.md`.
  */
 export const WORKSPACE_MODULE_HOME = "/workspace";
 
@@ -204,8 +207,9 @@ export const PLATFORM_ROUTES = [
   // Technical connections are a platform utility, not an app section: every
   // connection surface inside an app links here rather than keeping a copy.
   "/settings/connections",
-  // Phase G — the workspace module's ten sections. Platform routes, not an
-  // app: available to every business, never availability-gated.
+  // Phase G - the workspace module's ten sections. Platform routes, not an
+  // app: a business type that sells projects gets them; issue #1110's
+  // eligibility policy (not app availability) decides whether the area exists.
   WORKSPACE_MODULE_HOME,
   ...WORKSPACE_SECTIONS.map((section) => `${WORKSPACE_MODULE_HOME}/${section}`),
 ] as const;

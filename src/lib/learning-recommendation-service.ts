@@ -29,6 +29,11 @@ export interface RecommendationInput {
   permissions: ReadonlySet<string>;
   /** Current pathname, when the caller knows it (the assistant does). */
   route?: string | null;
+  /**
+   * Issue #1110 — true when My Workspace is unavailable to this business/member.
+   * Removes Workspace tours from the feed even if the caller named the route.
+   */
+  excludeWorkspace?: boolean;
 }
 
 export async function learningRecommendationsFor({
@@ -36,12 +41,17 @@ export async function learningRecommendationsFor({
   userId,
   permissions,
   route,
+  excludeWorkspace = false,
 }: RecommendationInput): Promise<LearningRecommendation[]> {
-  const page = route ? knowledgePageForPathname(route) : undefined;
+  const requestedPage = route ? knowledgePageForPathname(route) : undefined;
+  const page =
+    excludeWorkspace && requestedPage?.route.startsWith("/workspace")
+      ? undefined
+      : requestedPage;
   // A permission change must invalidate the feed: two members with the same id
   // cannot happen, but a role edit within the TTL can.
   const permissionKey = [...permissions].sort().join(",");
-  const cacheKey = `${businessId}:${userId}:${page?.key ?? ""}:${permissionKey}`;
+  const cacheKey = `${businessId}:${userId}:${page?.key ?? ""}:${permissionKey}:${excludeWorkspace ? "no-workspace" : "all"}`;
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
 
@@ -75,7 +85,9 @@ export async function learningRecommendationsFor({
     return tour ? [tour] : [];
   });
 
-  const candidatesForViewer = [...pageTourCandidatesList, ...pathTours];
+  const candidatesForViewer = [...pageTourCandidatesList, ...pathTours].filter(
+    (tour) => !excludeWorkspace || !tour.route.startsWith("/workspace"),
+  );
   const viewer = await tourViewerFor(businessId, permissions, candidatesForViewer);
   const visibleTours = candidatesForViewer.flatMap((tour) => {
     const visible = tourForViewer(tour, viewer);

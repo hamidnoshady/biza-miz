@@ -38,6 +38,8 @@ import { partyWriteAudienceForActor } from "../member-access";
 import { serviceActivationState } from "../service-activation/app-gate-service";
 import { SERVICE_STATES, SERVICE_STATE_META } from "../service-activation/catalog";
 import { serviceGateBlocks } from "../service-activation/app-gate";
+import { getBusinessIndustry } from "../industry-guard";
+import { resolveWorkspaceIndustryEligibility } from "../workspace-eligibility";
 import { DATA_ENTITIES, findEntity, requireEntity } from "./registry";
 import { ensureAdaptersRegistered } from "./entities";
 import { RowRejection, requireAdapter, type AdapterContext, type WriteOptions } from "./adapters";
@@ -100,6 +102,20 @@ function importServiceForEntity(entity: EntityDefinition): { kind: "app" | "work
 
 async function assertImportServiceOperational(businessId: string, entity: EntityDefinition): Promise<void> {
   const service = importServiceForEntity(entity);
+  // Issue #1110 — a business type without My Workspace cannot create project,
+  // task, contract or document rows through an import either. Historical
+  // records are not deleted; a restore into an eligible business still works.
+  if (service.kind === "workspace") {
+    let industry: string | null;
+    try {
+      industry = await getBusinessIndustry(businessId);
+    } catch {
+      throw new ImportError("workspace_access_check_unavailable");
+    }
+    if (!resolveWorkspaceIndustryEligibility(industry).eligible) {
+      throw new ImportError("workspace_not_available");
+    }
+  }
   let state;
   try {
     state = await serviceActivationState(businessId, service.kind, service.key);
