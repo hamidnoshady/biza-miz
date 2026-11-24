@@ -624,7 +624,9 @@ class POS_Connector_Sync {
 		} else {
 			// Excerpt/content are delivered raw so the manager's editor can
 			// round-trip them; rendered HTML lives on the public site.
-			$payload['content']     = $post->post_content;
+			if ( empty( pos_connector_settings()['on_demand_post_body'] ) || ! in_array( $post->post_type, array( 'post', 'page' ), true ) ) {
+				$payload['content'] = $post->post_content;
+			}
 			$payload['excerpt']     = $post->post_excerpt;
 			// The publish instant in UTC, so the app can show a scheduled post's
 			// own time instead of guessing it from the modification date.
@@ -1851,6 +1853,7 @@ class POS_Connector_Sync {
 				'orders_export',
 				'content_export',
 				'post_upsert',
+				'post_body_read',
 				'media_create',
 				'media_update',
 				// Issue #939: re-send only the taxonomy tree.
@@ -2052,6 +2055,7 @@ class POS_Connector_Sync {
 					'sync_orders'    => ! empty( $connection['syncOrders'] ),
 					'sync_products'  => ! empty( $connection['syncProducts'] ),
 					'sync_customers' => ! empty( $connection['syncCustomers'] ),
+					'on_demand_post_body' => ! empty( $response['data']['protocol']['onDemandPostBody'] ),
 					'apply_stock'    => ! empty( $connection['pushStock'] ),
 					'apply_prices'   => ! empty( $connection['pushPrices'] ),
 				)
@@ -2269,7 +2273,15 @@ class POS_Connector_Sync {
 				if ( is_array( $outcome ) ) {
 					$ack['result'] = $outcome;
 				}
-				$results[]     = $ack;
+				if ( 'post_body_read' === $type ) {
+					// A large editor body must not make the other jobs' ACK batch fail.
+					$read_ack = $client->post( '/api/integrations/wordpress/jobs/ack', array( 'results' => array( $ack ) ) );
+					if ( ! $read_ack['ok'] ) {
+						throw new Exception( $read_ack['error'] );
+					}
+				} else {
+					$results[] = $ack;
+				}
 				++$applied;
 			} catch ( Throwable $e ) {
 				$ack['status'] = 'failed';
@@ -2780,6 +2792,17 @@ class POS_Connector_Sync {
 				// full catalogue sweep `catalogue_export` would run.
 				self::enqueue_taxonomy_snapshot();
 				return;
+
+			case 'post_body_read':
+				$post_type = $payload['postType'] ?? '';
+				$post = ! empty( $payload['postId'] ) ? get_post( (int) $payload['postId'] ) : null;
+				if ( ! in_array( $post_type, array( 'post', 'page' ), true ) || ! $post || $post_type !== $post->post_type ) {
+					return array( 'error' => 'post_not_found' );
+				}
+				$modified = $post->post_modified ? mysql2date( DATE_ATOM, $post->post_modified ) : null;
+				$answer = array( 'content' => (string) $post->post_content, 'modified' => $modified );
+				$encoded = wp_json_encode( $answer );
+				return false === $encoded || strlen( $encoded ) > 1500000 ? array( 'error' => 'post_body_too_large' ) : $answer;
 
 			case 'post_upsert':
 				self::apply_post_upsert( $payload );
