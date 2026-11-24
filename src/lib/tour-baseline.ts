@@ -305,7 +305,10 @@ export function tourDefinitionById(
   const studio = published.find((tour) => tour.id === id);
   if (studio) return studio;
   const authored = tourById(id);
-  if (authored) return STUDIO_ONLY_PAGE_KEYS.has(authored.pageKey) ? undefined : authored;
+  // CRM Deals no longer has a code-defined tour; refuse the retired id even if
+  // a future catalogue edit accidentally adds one back.
+  if (authored?.pageKey === "page:/crm/deals") return undefined;
+  if (authored) return authored;
   if (!isBaselineTourId(id)) return undefined;
   const page = baselinePageForId(id);
   if (!page || STUDIO_ONLY_PAGE_KEYS.has(page.key) || toursForPage(page.key).length > 0) return undefined;
