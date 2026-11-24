@@ -262,14 +262,19 @@ export function baselineTourForPage(
  * exists. Callers still narrow the result per viewer with `tourForViewer`; this
  * only decides which catalogue owns the page.
  */
+export const STUDIO_ONLY_PAGE_KEYS: ReadonlySet<string> = new Set([
+  "page:/crm/overview",
+  "page:/crm/directory",
+]);
+
 export function pageTourCandidates(
   pageKey: string,
   published: readonly TourDefinition[] = [],
 ): TourDefinition[] {
   const publishedForPage = published.filter((tour) => tour.pageKey === pageKey);
-  // CRM Overview is authored and served only by Tour Studio. An absent or
-  // ineligible publication intentionally leaves its help panel empty.
-  if (pageKey === "page:/crm/overview") return publishedForPage;
+  // These CRM pages are authored and served only by Tour Studio. An absent
+  // or ineligible publication intentionally leaves the help panel empty.
+  if (STUDIO_ONLY_PAGE_KEYS.has(pageKey)) return publishedForPage;
   const authored = mergePublishedTours(toursForPage(pageKey), publishedForPage);
   if (authored.length > 0) return authored;
   const page = knowledgePage(pageKey);
@@ -302,6 +307,6 @@ export function tourDefinitionById(
   if (authored) return authored;
   if (!isBaselineTourId(id)) return undefined;
   const page = baselinePageForId(id);
-  if (!page || page.key === "page:/crm/overview" || toursForPage(page.key).length > 0) return undefined;
+  if (!page || STUDIO_ONLY_PAGE_KEYS.has(page.key) || toursForPage(page.key).length > 0) return undefined;
   return baselineTourForPage(page);
 }
