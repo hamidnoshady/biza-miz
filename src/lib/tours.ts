@@ -1873,22 +1873,6 @@ export const TOURS: readonly TourDefinition[] = [  {
     table: true,
   }),
   listPageTour({
-    id: "crm.deals.list",
-    pageKey: "page:/crm/deals",
-    title: "فرصت‌های فروش",
-    description: "قیف فروش، مرحله و اقدام بعدی هر فرصت را ببینید.",
-    introTitle: "فرصت فروش چیست",
-    introBody:
-      "هر فرصت یک معاملهٔ احتمالی با یک شخص است: مرحله، مبلغ، تاریخ بسته‌شدن و اقدام بعدی. جابه‌جایی مرحله، پیشرفت واقعی کار را نشان می‌دهد.",
-    nextBody:
-      "برای ساخت فرصت تازه از دکمهٔ افزودن استفاده کنید و برای پیگیری، کار یا تماس را از همان ردیف ثبت کنید. تور چیزی را تغییر نمی‌دهد.",
-    eligibility: {
-      anyOf: [{ permissions: [PERMISSIONS.crmView] }, { permissions: [PERMISSIONS.crmManage] }],
-    },
-    navAnchor: TOUR_ANCHORS.appSectionNav,
-    filters: true,
-  }),
-  listPageTour({
     id: "crm.activities.list",
     pageKey: "page:/crm/activities",
     title: "کارها و پیگیری‌ها",
