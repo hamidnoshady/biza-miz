@@ -274,7 +274,7 @@ function pos_connector_maybe_upgrade_db() {
 
 	POS_Connector_Log::install_table();
 
-	$queue_ok = POS_Connector_Queue::maybe_install();
+	$queue_ok = POS_Connector_Queue::install_table();
 	if ( $queue_ok ) {
 		// Autoloaded on purpose: the guard above must not cost a query.
 		update_option( POS_CONNECTOR_DB_VERSION_OPTION, pos_connector_db_version(), true );
