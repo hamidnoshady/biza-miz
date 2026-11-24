@@ -1351,6 +1351,11 @@ class POS_Connector_Sync {
 				'images'           => $images,
 		);
 
+		if ( ! empty( pos_connector_settings()['on_demand_product_body'] ) ) {
+			unset( $payload['description'], $payload['short_description'] );
+			$payload['description_digest'] = hash( 'sha256', wp_json_encode( array( $description, $short_desc ) ) );
+		}
+
 		if ( $parent_id ) {
 			$payload['parent_id'] = $parent_id;
 		}
@@ -2056,6 +2061,7 @@ class POS_Connector_Sync {
 					'sync_products'  => ! empty( $connection['syncProducts'] ),
 					'sync_customers' => ! empty( $connection['syncCustomers'] ),
 					'on_demand_post_body' => ! empty( $response['data']['protocol']['onDemandPostBody'] ),
+					'on_demand_product_body' => ! empty( $response['data']['protocol']['onDemandProductBody'] ),
 					'apply_stock'    => ! empty( $connection['pushStock'] ),
 					'apply_prices'   => ! empty( $connection['pushPrices'] ),
 				)
@@ -2795,6 +2801,20 @@ class POS_Connector_Sync {
 
 			case 'post_body_read':
 				$post_type = $payload['postType'] ?? '';
+				if ( 'product' === $post_type ) {
+					$product = ! empty( $payload['postId'] ) ? wc_get_product( (int) $payload['postId'] ) : null;
+					if ( ! $product ) {
+						return array( 'error' => 'post_not_found' );
+					}
+					$modified = $product->get_date_modified();
+					$answer = array(
+						'content' => (string) $product->get_description(),
+						'shortDescription' => (string) $product->get_short_description(),
+						'modified' => $modified ? $modified->date( DATE_ATOM ) : null,
+					);
+					$encoded = wp_json_encode( $answer );
+					return false === $encoded || strlen( $encoded ) > 1500000 ? array( 'error' => 'post_body_too_large' ) : $answer;
+				}
 				$post = ! empty( $payload['postId'] ) ? get_post( (int) $payload['postId'] ) : null;
 				if ( ! in_array( $post_type, array( 'post', 'page' ), true ) || ! $post || $post_type !== $post->post_type ) {
 					return array( 'error' => 'post_not_found' );
