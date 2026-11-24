@@ -25,7 +25,12 @@ export interface PlatformAiModeRecord {
   updatedBy: string;
 }
 
-export async function listPlatformAiModes(): Promise<PlatformAiModeRecord[]> {
+/**
+ * The super-admin console's mode settings (camelCase, includes `updatedBy`).
+ * The runtime read a turn resolves against is `listPlatformAiModeRows` in
+ * `ai-runtime-modes.ts`; the two are deliberately named apart.
+ */
+export async function listPlatformAiModeSettings(): Promise<PlatformAiModeRecord[]> {
   const { rows } = await query<Record<string, unknown>>(
     `SELECT mode_key, model_alias, is_active, temperature, max_output_tokens, prompt_scope_key, updated_by
        FROM platform_ai_modes

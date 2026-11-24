@@ -80,8 +80,12 @@ function defaultPlatformAiModeRow(mode: AiRuntimeMode): PlatformAiModeRow {
  * The three configured modes. Falls back to sensible defaults when the table
  * has never been written, so a deployment that has not opened the console yet
  * behaves exactly as it did before.
+ *
+ * This is the RUNTIME read (snake_case rows, tolerant of a missing table). The
+ * super-admin console's read is `listPlatformAiModeSettings` in
+ * `ai-control-plane.ts`; the two are deliberately named apart.
  */
-export async function listPlatformAiModes(): Promise<PlatformAiModeRow[]> {
+export async function listPlatformAiModeRows(): Promise<PlatformAiModeRow[]> {
   try {
     const { rows } = await query<PlatformAiModeRowInput>(
       `SELECT mode_key, model_alias, is_active, temperature, max_output_tokens, prompt_scope_key
@@ -102,7 +106,7 @@ export async function listPlatformAiModes(): Promise<PlatformAiModeRow[]> {
 
 /** One mode's configuration, or the default when it is absent. */
 export async function getPlatformAiMode(mode: AiRuntimeMode): Promise<PlatformAiModeRow> {
-  const modes = await listPlatformAiModes();
+  const modes = await listPlatformAiModeRows();
   return modes.find((row) => row.mode_key === mode) ?? defaultPlatformAiModeRow(mode);
 }
 
