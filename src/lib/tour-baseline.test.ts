@@ -12,6 +12,7 @@ import { KNOWLEDGE_PAGES, type KnowledgePage } from "./knowledge-base";
 import {
   BASELINE_TOUR_PREFIX,
   PAGE_TOUR_REGIONS,
+  STUDIO_ONLY_PAGE_KEYS,
   baselinePageForId,
   baselineTourForPage,
   baselineTourIdForRoute,
@@ -63,7 +64,7 @@ describe("automatic baseline tours", () => {
     for (const page of KNOWLEDGE_PAGES) {
       const candidates = pageTourCandidates(page.key);
       const authored = toursForPage(page.key);
-      if (page.key === "page:/crm/overview") {
+      if (STUDIO_ONLY_PAGE_KEYS.has(page.key)) {
         expect(candidates, page.key).toEqual([]);
         continue;
       }
@@ -251,8 +252,8 @@ describe("the coverage audit", () => {
     // A registered page can never silently escape coverage: every page has a
     // tour, and the report distinguishes a real spotlight from a plain
     // explanation instead of counting both as "covered".
-    expect(report.uncoveredPages).toEqual(["page:/crm/overview"]);
-    expect(report.studioRequiredPages).toEqual(["page:/crm/overview"]);
+    expect(report.uncoveredPages).toEqual(["page:/crm/overview", "page:/crm/directory"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory"]);
     expect(report.staleTourIds).toEqual([]);
     expect(report.spotlightPages).toBeGreaterThan(0);
     expect(report.explanationOnlyPages).toBe(
@@ -268,7 +269,7 @@ describe("the coverage audit", () => {
     for (const row of report.pages) {
       const expectedKind = authoredPages.has(row.pageKey)
         ? "advanced"
-        : row.pageKey === "page:/crm/overview"
+        : STUDIO_ONLY_PAGE_KEYS.has(row.pageKey)
           ? "studio-required"
           : "baseline";
       expect(row.kind).toBe(expectedKind);
@@ -278,19 +279,21 @@ describe("the coverage audit", () => {
     expect(report.editorialGaps).toEqual(
       report.pages.filter((row) => row.kind === "baseline").map((row) => row.pageKey),
     );
-    expect(report.studioRequiredPages).toEqual(["page:/crm/overview"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory"]);
     expect(report.authoredTours).toBe(TOURS.length);
   });
 
-  it("marks CRM Overview as requiring Studio publication, with no fallback tour", () => {
-    const crm = report.pages.find((row) => row.pageKey === "page:/crm/overview")!;
-    expect(crm).toMatchObject({
-      kind: "studio-required",
-      tourIds: [],
-      studioTourIds: [],
-      primaryTourId: null,
-      stepCount: 0,
-    });
+  it("marks CRM Overview and Directory as requiring Studio publication, with no fallback tours", () => {
+    for (const pageKey of STUDIO_ONLY_PAGE_KEYS) {
+      const crm = report.pages.find((row) => row.pageKey === pageKey)!;
+      expect(crm).toMatchObject({
+        kind: "studio-required",
+        tourIds: [],
+        studioTourIds: [],
+        primaryTourId: null,
+        stepCount: 0,
+      });
+    }
     for (const row of report.pages) {
       if (row.kind !== "studio-required") expect(row.primaryTourId?.length).toBeGreaterThan(0);
     }
