@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   LIFECYCLE_TRANSITIONS,
   allowedLifecycleTransitions,
+  businessLifecycleConfirmationPhrase,
   businessLifecycleTransition,
   lifecycleTransitionsFrom,
   type BusinessLifecycleStatus,
@@ -11,14 +12,29 @@ import { CAPABILITIES_FOR, PLATFORM_ADMIN_ROLES } from "./platform-admin";
 const STATUSES: BusinessLifecycleStatus[] = ["active", "suspended", "archived"];
 
 /** The audited expectation, written out instead of derived from the table. */
-const EXPECTED: Record<string, { capability: string; auditAction: string } | "invalid"> = {
+const EXPECTED: Record<
+  string,
+  { capability: string; auditAction: string; confirmationAction?: "archive" | "restore" } | "invalid"
+> = {
   "active->active": "invalid",
   "active->suspended": { capability: "business.suspend", auditAction: "business.suspended" },
-  "active->archived": { capability: "business.archive", auditAction: "business.archived" },
+  "active->archived": {
+    capability: "business.archive",
+    auditAction: "business.archived",
+    confirmationAction: "archive",
+  },
   "suspended->active": { capability: "business.suspend", auditAction: "business.active" },
   "suspended->suspended": "invalid",
-  "suspended->archived": { capability: "business.archive", auditAction: "business.archived" },
-  "archived->active": { capability: "business.archive", auditAction: "business.active" },
+  "suspended->archived": {
+    capability: "business.archive",
+    auditAction: "business.archived",
+    confirmationAction: "archive",
+  },
+  "archived->active": {
+    capability: "business.archive",
+    auditAction: "business.active",
+    confirmationAction: "restore",
+  },
   "archived->suspended": "invalid",
   "archived->archived": "invalid",
 };
@@ -42,6 +58,7 @@ describe("businessLifecycleTransition", () => {
           if (decision.ok) {
             expect(decision.transition.capability).toBe(expected.capability);
             expect(decision.transition.auditAction).toBe(expected.auditAction);
+            expect(decision.transition.confirmationAction).toBe(expected.confirmationAction);
           }
         }
       }
@@ -65,6 +82,28 @@ describe("businessLifecycleTransition", () => {
     expect(lifecycleTransitionsFrom("active")).toHaveLength(2);
     expect(lifecycleTransitionsFrom("suspended")).toHaveLength(2);
     expect(lifecycleTransitionsFrom("archived")).toHaveLength(1);
+  });
+
+  it("gives only the archive-boundary moves a confirmation action", () => {
+    for (const t of LIFECYCLE_TRANSITIONS) {
+      const archiveBoundary =
+        (t.to === "archived" && (t.from === "active" || t.from === "suspended")) ||
+        (t.from === "archived" && t.to === "active");
+      expect(Boolean(t.confirmationAction), `${t.from}->${t.to}`).toBe(archiveBoundary);
+    }
+  });
+});
+
+describe("businessLifecycleConfirmationPhrase", () => {
+  it("is action-specific and target-specific", () => {
+    expect(businessLifecycleConfirmationPhrase("archive", "acme")).toBe("ARCHIVE acme");
+    expect(businessLifecycleConfirmationPhrase("restore", "acme")).toBe("RESTORE acme");
+    expect(businessLifecycleConfirmationPhrase("archive", "acme")).not.toBe(
+      businessLifecycleConfirmationPhrase("restore", "acme"),
+    );
+    expect(businessLifecycleConfirmationPhrase("archive", "acme")).not.toBe(
+      businessLifecycleConfirmationPhrase("archive", "other"),
+    );
   });
 });
 

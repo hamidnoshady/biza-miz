@@ -28,8 +28,8 @@ let route: typeof import("../src/app/api/platform/mcp/route");
 
 const owner = { id: "" };
 const supportAdmin = { id: "" };
-const biz = { id: "" };
-const otherBiz = { id: "" };
+const biz = { id: "", slug: "" };
+const otherBiz = { id: "", slug: "" };
 /**
  * Issue #1430 fixtures: one login-holding person on the first business, with a
  * safe MFA enrolment and a second membership on the other business so
@@ -134,6 +134,7 @@ beforeEach(async () => {
     subdomain: "cafe-one-mcptest",
   });
   biz.id = one.businessId;
+  biz.slug = one.businessSlug;
   const two = await provisionBusiness({
     businessName: "Cafe Two",
     ownerName: "Owner Two",
@@ -143,6 +144,7 @@ beforeEach(async () => {
     subdomain: "cafe-two-mcptest",
   });
   otherBiz.id = two.businessId;
+  otherBiz.slug = two.businessSlug;
 
   const owners = await db.query<{ id: string }>(
     `INSERT INTO platform_admins (email, password_hash, full_name, role)
@@ -198,6 +200,78 @@ async function callTool(
   } catch {
     return { text, data: text };
   }
+}
+
+/** The lifecycle tests assert on the payload alone; this keeps them readable. */
+async function callToolJson(
+  token: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return (await callTool(token, name, args)).data as Record<string, unknown>;
+}
+
+async function businessStatus(id: string): Promise<{
+  status: string;
+  archivedAt: string | null;
+  suspendedAt: string | null;
+}> {
+  const result = await db.query<{
+    status: string;
+    archived_at: string | null;
+    suspended_at: string | null;
+  }>(
+    `SELECT status::text AS status, archived_at, suspended_at FROM businesses WHERE id = $1`,
+    [id],
+  );
+  return {
+    status: result.rows[0].status,
+    archivedAt: result.rows[0].archived_at,
+    suspendedAt: result.rows[0].suspended_at,
+  };
+}
+
+async function lifecycleAuditRows(id: string) {
+  const result = await db.query<{
+    admin_id: string;
+    action: string;
+    from_state: string;
+    to_state: string;
+    before_status: string;
+    after_status: string;
+    correlation_id: string;
+    idempotency_key: string;
+    connection_id: string;
+    outcome: string;
+    audit_action: string;
+  }>(
+    `SELECT platform_admin_id::text AS admin_id,
+            action,
+            payload->>'action' AS audit_action,
+            payload->>'from' AS from_state,
+            payload->>'to' AS to_state,
+            payload->'before'->>'status' AS before_status,
+            payload->'after'->>'status' AS after_status,
+            payload->>'correlationId' AS correlation_id,
+            payload->>'idempotencyKey' AS idempotency_key,
+            payload->'actor'->>'connectionId' AS connection_id,
+            payload->>'outcome' AS outcome
+       FROM platform_audit_log
+      WHERE business_id = $1
+        AND action IN ('business.archived', 'business.active')
+      ORDER BY id`,
+    [id],
+  );
+  return result.rows;
+}
+
+async function connectionIdForToken(token: string): Promise<string> {
+  const hash = createHash("sha256").update(token).digest("hex");
+  const result = await db.query<{ id: string }>(
+    `SELECT id FROM platform_mcp_connections WHERE token_hash = $1`,
+    [hash],
+  );
+  return result.rows[0].id;
 }
 
 /**
@@ -469,6 +543,346 @@ describe("platform MCP tools", () => {
   });
 });
 
+
+describe("platform MCP business archive and restore (issue #1431)", () => {
+  it("previews, archives an active business, records before/after, and replays a retry", async () => {
+    const token = await mint({ adminId: owner.id, capabilities: ["business.archive"] });
+    const connectionId = await connectionIdForToken(token);
+
+    const preview = await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "archive-active-1",
+    });
+    expect(preview).toMatchObject({
+      ok: false,
+      preview: true,
+      stepUpRequired: true,
+      action: "archive",
+      from: "active",
+      to: "archived",
+      stale: false,
+      transitionValid: true,
+      confirmationPhrase: `ARCHIVE ${biz.slug}`,
+      requiredCapability: "business.archive",
+      correlationId: `mcp:${connectionId}:archive-active-1`,
+    });
+    expect(await businessStatus(biz.id)).toMatchObject({ status: "active", archivedAt: null });
+    expect(await lifecycleAuditRows(biz.id)).toHaveLength(0);
+
+    const applied = await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "archive-active-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+      correlationId: "corr-archive-active-1",
+      reason: "customer closed",
+    });
+    expect(applied).toMatchObject({
+      ok: true,
+      replayed: false,
+      action: "archive",
+      from: "active",
+      to: "archived",
+      status: "archived",
+      capability: "business.archive",
+      auditAction: "business.archived",
+      correlationId: "corr-archive-active-1",
+    });
+    expect(await businessStatus(biz.id)).toMatchObject({ status: "archived" });
+    expect((await businessStatus(biz.id)).archivedAt).toBeTruthy();
+
+    const audits = await lifecycleAuditRows(biz.id);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      admin_id: owner.id,
+      action: "business.archived",
+      audit_action: "archive",
+      from_state: "active",
+      to_state: "archived",
+      before_status: "active",
+      after_status: "archived",
+      correlation_id: "corr-archive-active-1",
+      idempotency_key: "archive-active-1",
+      connection_id: connectionId,
+      outcome: "succeeded",
+    });
+
+    const replayed = await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "archive-active-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+      correlationId: "corr-archive-active-1-retry",
+    });
+    expect(replayed).toMatchObject({
+      ok: true,
+      replayed: true,
+      from: "active",
+      to: "archived",
+      status: "archived",
+      correlationId: "corr-archive-active-1",
+      currentStatus: "archived",
+    });
+    expect(await lifecycleAuditRows(biz.id)).toHaveLength(1);
+  });
+
+  it("archives a suspended business and restores it only through business.archive", async () => {
+    const token = await mint({
+      adminId: owner.id,
+      capabilities: ["business.archive", "business.suspend"],
+    });
+
+    const suspended = await callToolJson(token, "set_business_status", {
+      businessId: biz.id,
+      status: "suspended",
+    });
+    expect(
+      (suspended.perBusiness as Record<string, unknown>)[biz.id],
+    ).toMatchObject({ ok: true, status: "suspended" });
+
+    const archived = await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "suspended",
+      idempotencyKey: "archive-suspended-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(archived).toMatchObject({
+      ok: true,
+      action: "archive",
+      from: "suspended",
+      to: "archived",
+      status: "archived",
+    });
+
+    const restored = await callToolJson(token, "restore_archived_business", {
+      businessId: biz.id,
+      expectedStatus: "archived",
+      idempotencyKey: "restore-1",
+      confirmation: `RESTORE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(restored).toMatchObject({
+      ok: true,
+      action: "restore",
+      from: "archived",
+      to: "active",
+      status: "active",
+      auditAction: "business.active",
+    });
+    const state = await businessStatus(biz.id);
+    expect(state.status).toBe("active");
+    expect(state.archivedAt).toBeNull();
+    expect(state.suspendedAt).toBeNull();
+
+    const audits = await lifecycleAuditRows(biz.id);
+    expect(audits.map((row) => row.action)).toEqual(["business.archived", "business.active"]);
+    expect(audits[1]).toMatchObject({
+      audit_action: "restore",
+      from_state: "archived",
+      to_state: "active",
+      before_status: "archived",
+      after_status: "active",
+      correlation_id: `mcp:${await connectionIdForToken(token)}:restore-1`,
+    });
+  });
+
+  it("fails closed on stale state, wrong phrases, invalid transitions and key reuse", async () => {
+    const token = await mint({ adminId: owner.id, capabilities: ["business.archive"] });
+
+    const stale = await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "suspended",
+      idempotencyKey: "stale-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(stale).toMatchObject({ ok: false, error: "stale_state", from: "active" });
+
+    const wrongPhrase = await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "wrong-phrase-1",
+      confirmation: `RESTORE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(wrongPhrase).toMatchObject({ ok: false, error: "confirmation_mismatch" });
+
+    const invalidRestore = await callToolJson(token, "restore_archived_business", {
+      businessId: biz.id,
+      expectedStatus: "archived",
+      idempotencyKey: "restore-invalid-1",
+      confirmation: `RESTORE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(invalidRestore).toMatchObject({ ok: false, error: "same_status" });
+
+    const batch = await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      businessIds: [biz.id],
+      expectedStatus: "active",
+      idempotencyKey: "batch-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(batch).toMatchObject({ ok: false, error: "batch_not_supported" });
+
+    // A key that already belongs to one business can never authorize another.
+    await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "shared-key-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+    });
+    const crossBusiness = await callToolJson(token, "archive_business", {
+      businessId: otherBiz.id,
+      expectedStatus: "active",
+      idempotencyKey: "shared-key-1",
+      confirmation: `ARCHIVE ${otherBiz.slug}`,
+      confirm: true,
+    });
+    expect(crossBusiness).toMatchObject({
+      ok: false,
+      error: "idempotency_conflict",
+      reason: "key_reused_across_businesses",
+    });
+    expect((await businessStatus(otherBiz.id)).status).toBe("active");
+
+    expect((await businessStatus(biz.id)).status).toBe("archived");
+  });
+
+  it("serialises concurrent archive attempts: exactly one mutation and one lifecycle row", async () => {
+    const token = await mint({ adminId: owner.id, capabilities: ["business.archive"] });
+    const attempt = (key: string) =>
+      callToolJson(token, "archive_business", {
+        businessId: biz.id,
+        expectedStatus: "active",
+        idempotencyKey: key,
+        confirmation: `ARCHIVE ${biz.slug}`,
+        confirm: true,
+      });
+
+    const [one, two] = await Promise.all([
+      attempt("concurrent-1"),
+      attempt("concurrent-2"),
+    ]);
+    const succeeded = [one, two].filter((result) => result.ok === true);
+    const failed = [one, two].filter((result) => result.ok === false);
+    expect(succeeded).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+    expect(["same_status", "transition_conflict"]).toContain(failed[0].error);
+    expect((await businessStatus(biz.id)).status).toBe("archived");
+    expect(await lifecycleAuditRows(biz.id)).toHaveLength(1);
+  });
+
+  it("keeps suspend/reactivate behavior and refuses the archived -> active bypass", async () => {
+    const token = await mint({ adminId: owner.id, capabilities: ["business.suspend"] });
+
+    const suspended = await callToolJson(token, "set_business_status", {
+      businessId: biz.id,
+      status: "suspended",
+    });
+    expect((suspended.perBusiness as Record<string, unknown>)[biz.id]).toMatchObject({
+      ok: true,
+      status: "suspended",
+    });
+    const reactivated = await callToolJson(token, "set_business_status", {
+      businessId: biz.id,
+      status: "active",
+    });
+    expect((reactivated.perBusiness as Record<string, unknown>)[biz.id]).toMatchObject({
+      ok: true,
+      status: "active",
+    });
+
+    const ownerToken = await mint({ adminId: owner.id, capabilities: ["business.archive"] });
+    await callToolJson(ownerToken, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "archive-for-bypass-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+    });
+
+    const bypass = await callToolJson(token, "set_business_status", {
+      businessId: biz.id,
+      status: "active",
+    });
+    expect((bypass.perBusiness as Record<string, unknown>)[biz.id]).toMatchObject({
+      ok: false,
+      error: "use_restore_archived_business",
+      requiredCapability: "business.archive",
+    });
+    expect((await businessStatus(biz.id)).status).toBe("archived");
+  });
+
+  it("denies archive/restore to a role that does not hold business.archive, and audits the denial", async () => {
+    const token = await mint({ adminId: supportAdmin.id, capabilities: ["business.archive"] });
+
+    const list = await platformRpc(token, { method: "tools/list" });
+    const body = await list.json();
+    const names = body.result.tools.map((tool: { name: string }) => tool.name);
+    expect(names).not.toContain("archive_business");
+    expect(names).not.toContain("restore_archived_business");
+
+    const denied = await callToolJson(token, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "denied-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(JSON.stringify(denied)).toContain("denied");
+    expect(await lifecycleAuditRows(biz.id)).toHaveLength(0);
+
+    const audit = await db.query<{ outcome: string }>(
+      `SELECT payload->>'outcome' AS outcome
+         FROM platform_audit_log
+        WHERE action = 'platform_mcp.call' AND payload->>'tool' = 'archive_business'
+        ORDER BY id DESC LIMIT 1`,
+    );
+    expect(audit.rows[0].outcome).toBe("denied_capability");
+  });
+
+  it("refuses a business outside the credential's bridge list and a protected internal tenant", async () => {
+    const scoped = await mint({
+      adminId: owner.id,
+      capabilities: ["business.archive"],
+      businessIds: [otherBiz.id],
+    });
+    const outside = await callToolJson(scoped, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "outside-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(JSON.stringify(outside)).toContain("outside this credential's bridge list");
+    expect((await businessStatus(biz.id)).status).toBe("active");
+
+    await db.query(`UPDATE businesses SET ownership_kind = 'platform_internal' WHERE id = $1`, [
+      biz.id,
+    ]);
+    const ownerToken = await mint({ adminId: owner.id, capabilities: ["business.archive"] });
+    const protectedResult = await callToolJson(ownerToken, "archive_business", {
+      businessId: biz.id,
+      expectedStatus: "active",
+      idempotencyKey: "protected-1",
+      confirmation: `ARCHIVE ${biz.slug}`,
+      confirm: true,
+    });
+    expect(protectedResult).toMatchObject({
+      ok: false,
+      error: "protected_internal_business",
+    });
+    expect((await businessStatus(biz.id)).status).toBe("active");
+  });
+});
+
 describe("platform MCP business directory (issue #1430)", () => {
   it("returns exactly what queryBusinesses returns for the console's filters", async () => {
     await prepareDirectoryFixtures();
@@ -647,6 +1061,7 @@ describe("platform MCP owner profile (issue #1430)", () => {
     const missingId = randomUUID();
     const missing = await callTool(unscoped, "get_business_owner_profile", { businessId: missingId });
     expect(missing.data).toEqual({ businessId: missingId, found: false, profiles: [] });
+
   });
 });
 

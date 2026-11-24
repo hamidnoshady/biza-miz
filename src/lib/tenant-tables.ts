@@ -309,7 +309,7 @@ export const EXEMPT_TABLES = new Set([
   // before any identity or business does, so it has no `business_id`; it is
   // `platform_only` under FORCE RLS and must never ride in a tenant export.
   "platform_signup_requests",
-  // Migration 0319 — issue #1388's runtime registration control and its
+  // Migration 0320 — issue #1388's runtime registration control and its
   // facts-only funnel ledger. Both are platform-only, carry no tenant data,
   // and are never part of a tenant export.
   "platform_signup_settings",

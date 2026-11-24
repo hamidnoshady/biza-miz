@@ -411,7 +411,7 @@ describe("every tenant table is protected", () => {
       // tenant export.
       "platform_signup_events",
       "platform_signup_requests",
-      // Migration 0319 — issue #1388: the runtime registration control and the
+      // Migration 0320 — issue #1388: the runtime registration control and the
       // facts-only signup/onboarding funnel ledger. Both are platform-only and
       // never ride in a tenant export.
       "platform_signup_settings",

@@ -104,6 +104,16 @@ import {
   updateBusiness,
   systemStatus,
 } from "../platform-service";
+import {
+  businessLifecycleConfirmationPhrase,
+  businessLifecycleTransition,
+  type BusinessLifecycleConfirmationAction,
+  type BusinessLifecycleStatus,
+} from "../platform-business-lifecycle";
+import {
+  applyBusinessLifecycleTransition,
+  BusinessLifecycleMutationError,
+} from "../platform-business-lifecycle-service";
 import { businessDestructivePhrase } from "../platform-admin";
 import { listPairingCodes, listPairingLocations } from "../pairing-service";
 import { listSiteDevices } from "../site-device-service";
@@ -410,6 +420,22 @@ function scopeAllowsBusiness(connection: PlatformMcpConnection, businessId: stri
   return connection.businessIds === null || connection.businessIds.includes(businessId);
 }
 
+/**
+ * The correlation id shared by the lifecycle audit row and the generic
+ * `platform_mcp.call` row. A caller-supplied id wins; otherwise the
+ * idempotency key makes the pair deterministic, so the two rows can always be
+ * joined without relying on timestamps.
+ */
+function lifecycleRequestCorrelationId(
+  connection: PlatformMcpConnection,
+  arg: PlatformToolInput,
+): string | undefined {
+  const supplied = typeof arg.correlationId === "string" ? arg.correlationId.trim() : "";
+  if (supplied) return supplied;
+  const key = typeof arg.idempotencyKey === "string" ? arg.idempotencyKey.trim() : "";
+  return key ? `mcp:${connection.id}:${key}` : undefined;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Tools                                                                     */
 /* ------------------------------------------------------------------------- */
@@ -510,6 +536,14 @@ interface PlatformToolInput {
   confirmExistingOwner?: boolean;
   timezone?: string;
   confirmation?: string;
+  // Issue #1431 — the archive-boundary tools. `expectedStatus` is the stale
+  // screen guard; `idempotencyKey` makes a retry a replay rather than a second
+  // mutation; `correlationId` joins the lifecycle audit row to the MCP call row.
+  expectedStatus?: string;
+  idempotencyKey?: string;
+  correlationId?: string;
+  confirm?: boolean;
+  reason?: string;
   // Batch BN — generic record-shaped writes (knowledge builder, CMS sites).
   record?: Record<string, unknown>;
   categoryId?: string;
@@ -1582,7 +1616,8 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
   },
   {
     name: "set_business_status",
-    description: "Suspend or reactivate a business. Uses the console lifecycle service; audited.",
+    description:
+      "Suspend or reactivate a business (active <-> suspended only). Uses the console lifecycle service; audited. An archived business cannot be reactivated here — use restore_archived_business, which needs business.archive.",
     capability: "business.suspend",
     bridged: true,
     inputSchema: {
@@ -1592,6 +1627,80 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
         status: { type: "string", enum: ["suspended", "active"] },
       },
       required: ["businessId", "status"],
+    },
+  },
+  {
+    name: "archive_business",
+    description:
+      "Archive ONE business through the console lifecycle policy (active or suspended -> archived). Owner-only business.archive, step-up. Call without confirm:true for a no-write preview; to act, pass confirm:true with the exact typed phrase 'ARCHIVE <slug>', expectedStatus = the status you last saw, and a stable idempotencyKey (a retry replays the original outcome). Batch businessIds are rejected. Audited with actor, connection, before/after state and correlation id. Reversible only through restore_archived_business.",
+    capability: "business.archive",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string", description: "Explicit target business id — exactly one." },
+        expectedStatus: {
+          type: "string",
+          enum: ["active", "suspended"],
+          description: "The status the caller last observed; a mismatch is rejected as stale.",
+        },
+        confirmation: {
+          type: "string",
+          description: "Required to act: the exact phrase 'ARCHIVE <slug>'.",
+        },
+        idempotencyKey: {
+          type: "string",
+          description: "Stable retry key; the same actor/key/business/target returns the original outcome.",
+        },
+        correlationId: {
+          type: "string",
+          description: "Optional audit correlation id; derived from the idempotency key when omitted.",
+        },
+        confirm: {
+          type: "boolean",
+          description: "Must be true to act. False/omitted returns a preview and makes no change.",
+        },
+        reason: { type: "string", description: "Optional operator reason recorded on the audit row." },
+      },
+      required: ["businessId", "expectedStatus", "idempotencyKey"],
+    },
+  },
+  {
+    name: "restore_archived_business",
+    description:
+      "Restore ONE archived business to active through the console lifecycle policy. Owner-only business.archive, step-up. Call without confirm:true for a no-write preview; to act, pass confirm:true with the exact typed phrase 'RESTORE <slug>', expectedStatus = 'archived', and a stable idempotencyKey. Batch businessIds are rejected. Audited with actor, connection, before/after state and correlation id. This is the only authorized way back out of archived state.",
+    capability: "business.archive",
+    bridged: true,
+    stepUp: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        businessId: { type: "string", description: "Explicit target business id — exactly one." },
+        expectedStatus: {
+          type: "string",
+          enum: ["archived"],
+          description: "Must be 'archived' — the status the caller last observed.",
+        },
+        confirmation: {
+          type: "string",
+          description: "Required to act: the exact phrase 'RESTORE <slug>'.",
+        },
+        idempotencyKey: {
+          type: "string",
+          description: "Stable retry key; the same actor/key/business/target returns the original outcome.",
+        },
+        correlationId: {
+          type: "string",
+          description: "Optional audit correlation id; derived from the idempotency key when omitted.",
+        },
+        confirm: {
+          type: "boolean",
+          description: "Must be true to act. False/omitted returns a preview and makes no change.",
+        },
+        reason: { type: "string", description: "Optional operator reason recorded on the audit row." },
+      },
+      required: ["businessId", "expectedStatus", "idempotencyKey"],
     },
   },
 ];
@@ -1637,11 +1746,25 @@ export async function callPlatformMcpTool(
 
   const results: Record<string, unknown> = {};
   const started = Date.now();
+  const correlationId = lifecycleRequestCorrelationId(connection, arg);
+  const requestAudit = {
+    correlationId,
+    idempotencyKey:
+      typeof arg.idempotencyKey === "string" ? arg.idempotencyKey : undefined,
+  };
   try {
     const data = await executePlatformTool(tool, arg, targets, results, connection);
-    await platformAuditSafe(connection, targets[0] ?? null, tool.name, "ok", {
+    // A step-up preview is deliberately not "ok": it performed no mutation.
+    // A structured refusal ({ok:false}) is a failed call, not a success.
+    const record =
+      data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+    const outcome =
+      record?.preview === true ? "preview" : record?.ok === false ? "failed" : "ok";
+    await platformAuditSafe(connection, targets[0] ?? null, tool.name, outcome, {
       targets: targets.length > 0 ? targets : undefined,
       elapsedMs: Date.now() - started,
+      ...requestAudit,
+      errorCode: typeof record?.error === "string" ? record.error : undefined,
     });
     return { text: JSON.stringify(data, null, 2), data };
   } catch (err) {
@@ -1661,6 +1784,7 @@ export async function callPlatformMcpTool(
     await platformAuditSafe(connection, targets[0] ?? null, tool.name, "failed", {
       message: err instanceof Error ? err.message : String(err),
       targets,
+      ...requestAudit,
     });
     throw err;
   }
@@ -1747,15 +1871,198 @@ async function executePlatformTool(
         if (arg.status !== "active" && arg.status !== "suspended") {
           throw new Error("status must be 'active' or 'suspended'");
         }
+        const targetStatus = arg.status;
         for (const id of targets) {
           try {
-            const result = await setBusinessStatus(id, arg.status);
-            results[id] = result ? { ok: true, status: arg.status } : { ok: false, error: "not_found" };
+            const business = await getBusiness(id);
+            if (!business) {
+              results[id] = { ok: false, error: "not_found" };
+              continue;
+            }
+            // The console PATCH refuses the platform's own company before any
+            // lifecycle write. The MCP lane mirrors it now that it reads the
+            // business to authorize the transition.
+            if (business.ownershipKind === "platform_internal") {
+              results[id] = { ok: false, error: "protected_internal_business" };
+              continue;
+            }
+
+            // Issue #1431 — preserve the historic idempotent no-op for
+            // active->active / suspended->suspended, but make it conditional
+            // too so a concurrent real transition is not overwritten by a
+            // retry that read the old state.
+            if (business.status === targetStatus) {
+              const unchanged = await setBusinessStatus(id, targetStatus, {
+                expectFrom: business.status,
+              });
+              results[id] = unchanged
+                ? { ok: true, status: targetStatus, unchanged: true }
+                : { ok: false, error: "transition_conflict", from: business.status };
+              continue;
+            }
+
+            // The archived boundary belongs to business.archive, not suspend.
+            // Before this, `set_business_status {status:'active'}` could
+            // reactivate an archived tenant with only business.suspend — the
+            // exact gap the console's transition table closes.
+            const decision = businessLifecycleTransition(business.status, targetStatus);
+            if (!decision.ok) {
+              results[id] = {
+                ok: false,
+                error: decision.error,
+                from: business.status,
+                to: targetStatus,
+              };
+              continue;
+            }
+            if (decision.transition.capability !== "business.suspend") {
+              results[id] = {
+                ok: false,
+                error: "use_restore_archived_business",
+                from: business.status,
+                to: targetStatus,
+                requiredCapability: decision.transition.capability,
+              };
+              continue;
+            }
+
+            const updated = await setBusinessStatus(id, targetStatus, {
+              expectFrom: business.status,
+            });
+            results[id] = updated
+              ? { ok: true, status: targetStatus }
+              : { ok: false, error: "transition_conflict", from: business.status };
           } catch (err) {
             results[id] = { ok: false, error: err instanceof Error ? err.message : String(err) };
           }
         }
         return { perBusiness: results };
+      }
+      // ── Issue #1431 — the archive boundary through the console lifecycle ──
+      case "archive_business":
+      case "restore_archived_business": {
+        const action: BusinessLifecycleConfirmationAction =
+          tool.name === "archive_business" ? "archive" : "restore";
+        const target = typeof arg.businessId === "string" ? arg.businessId.trim() : "";
+        if (!target) return { ok: false, error: "business_id_required" };
+        if (Array.isArray(arg.businessIds) && arg.businessIds.length > 0) {
+          return {
+            ok: false,
+            error: "batch_not_supported",
+            message: "These tools mutate one tenant's lifecycle; pass exactly one businessId.",
+          };
+        }
+        if (targets.length !== 1 || targets[0] !== target) {
+          return { ok: false, error: "exactly_one_business_required" };
+        }
+
+        const allowedExpected = action === "archive" ? ["active", "suspended"] : ["archived"];
+        const expectedStatus = typeof arg.expectedStatus === "string" ? arg.expectedStatus : "";
+        if (!allowedExpected.includes(expectedStatus)) {
+          return {
+            ok: false,
+            error: "invalid_expected_status",
+            allowed: allowedExpected,
+            expectedStatus: expectedStatus || null,
+          };
+        }
+
+        const idempotencyKey =
+          typeof arg.idempotencyKey === "string" ? arg.idempotencyKey.trim() : "";
+        if (!idempotencyKey) {
+          return {
+            ok: false,
+            error: "idempotency_key_required",
+            message: "A stable idempotencyKey is required so a retry cannot mutate twice.",
+          };
+        }
+        const correlationId = lifecycleRequestCorrelationId(connection, arg) ?? idempotencyKey;
+
+        const to: BusinessLifecycleStatus = action === "archive" ? "archived" : "active";
+        const expectedFrom = expectedStatus as BusinessLifecycleStatus;
+        const business = await getBusiness(target);
+        if (!business) return { ok: false, error: "not_found", businessId: target };
+        if (business.ownershipKind === "platform_internal") {
+          return {
+            ok: false,
+            error: "protected_internal_business",
+            businessId: target,
+          };
+        }
+
+        // The step-up contract: no confirm flag, no write. The preview names
+        // the exact phrase and reports staleness/transition validity, so the
+        // caller can stop before an irreversible-looking action.
+        if (arg.confirm !== true) {
+          const decision = businessLifecycleTransition(business.status, to);
+          const transition = decision.ok ? decision.transition : null;
+          return {
+            ok: false,
+            preview: true,
+            stepUpRequired: true,
+            action,
+            businessId: target,
+            business: {
+              id: business.id,
+              name: business.name,
+              slug: business.slug,
+              status: business.status,
+            },
+            from: business.status,
+            to,
+            expectedStatus,
+            stale: business.status !== expectedFrom,
+            transitionValid: decision.ok,
+            transitionError: decision.ok ? null : decision.error,
+            confirmationPhrase: transition?.confirmationAction
+              ? businessLifecycleConfirmationPhrase(transition.confirmationAction, business.slug)
+              : null,
+            requiredCapability: "business.archive",
+            correlationId,
+            idempotencyKey,
+            message:
+              "Preview only — no change was made. To act, call again with confirm:true, the confirmationPhrase shown here, and the same idempotencyKey.",
+          };
+        }
+
+        try {
+          return await applyBusinessLifecycleTransition({
+            businessId: target,
+            to,
+            expectedFrom,
+            action,
+            confirmation: typeof arg.confirmation === "string" ? arg.confirmation : "",
+            idempotencyKey,
+            correlationId,
+            actor: {
+              adminId: connection.adminId,
+              adminName: connection.adminName,
+              adminRole: connection.adminRole,
+              connectionId: connection.id,
+              connectionName: connection.name,
+              source: "platform_mcp",
+            },
+            effectiveCapabilities: connection.capabilities.filter((cap) =>
+              platformCan(connection.adminRole, cap),
+            ),
+            reason: typeof arg.reason === "string" ? arg.reason : undefined,
+          });
+        } catch (err) {
+          if (err instanceof BusinessLifecycleMutationError) {
+            // A structured refusal, not a 500: the caller gets the stable code,
+            // and the outer wrapper audits outcome=failed with that code.
+            return {
+              ...err.details,
+              ok: false,
+              error: err.code,
+              action,
+              businessId: target,
+              correlationId,
+              idempotencyKey,
+            };
+          }
+          throw err;
+        }
       }
       // ── Batch BK — security desk: audit + bug reports (audit.read) ────────
       case "list_audit_log": {

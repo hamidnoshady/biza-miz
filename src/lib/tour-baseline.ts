@@ -267,6 +267,9 @@ export function pageTourCandidates(
   published: readonly TourDefinition[] = [],
 ): TourDefinition[] {
   const publishedForPage = published.filter((tour) => tour.pageKey === pageKey);
+  // CRM Overview is authored and served only by Tour Studio. An absent or
+  // ineligible publication intentionally leaves its help panel empty.
+  if (pageKey === "page:/crm/overview") return publishedForPage;
   const authored = mergePublishedTours(toursForPage(pageKey), publishedForPage);
   if (authored.length > 0) return authored;
   const page = knowledgePage(pageKey);
@@ -299,6 +302,6 @@ export function tourDefinitionById(
   if (authored) return authored;
   if (!isBaselineTourId(id)) return undefined;
   const page = baselinePageForId(id);
-  if (!page || toursForPage(page.key).length > 0) return undefined;
+  if (!page || page.key === "page:/crm/overview" || toursForPage(page.key).length > 0) return undefined;
   return baselineTourForPage(page);
 }

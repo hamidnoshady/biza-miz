@@ -9,6 +9,7 @@ const offlineState = vi.hoisted(() => ({ isOnline: true, pendingCount: 0 }));
 const mocks = vi.hoisted(() => ({
   api: vi.fn(),
   apiOrQueue: vi.fn(),
+  enqueueAction: vi.fn(),
   toastInfo: vi.fn(),
   toastWarning: vi.fn(),
   toastSuccess: vi.fn(),
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../offline-queue", () => ({
   apiOrQueue: mocks.apiOrQueue,
+  enqueueAction: mocks.enqueueAction,
   useOfflineQueue: () => ({ isOnline: offlineState.isOnline, pendingCount: offlineState.pendingCount }),
 }));
 vi.mock("../use-realtime", () => ({ useRealtime: vi.fn() }));
@@ -135,6 +137,25 @@ function ticketCalls() {
   return mocks.api.mock.calls.filter(([url]) => url === "/api/kitchen/tickets").length;
 }
 
+/**
+ * Wraps the main harness so the ticket GET and alert/rules reads still work,
+ * while a batch POST returns the supplied result.
+ */
+function installBatchApi(
+  items: ReturnType<typeof line>[],
+  batchResponse: { ok: boolean; status: number; data: unknown },
+) {
+  installApi(items);
+  const base = mocks.api.getMockImplementation();
+  if (!base) throw new Error("installApi did not install a mock");
+  mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (String(url).includes("/batch")) {
+      return { ...batchResponse, aborted: false };
+    }
+    return base(url, init);
+  });
+}
+
 function realtimeCallbacks() {
   return vi.mocked(useRealtime).mock.calls.at(-1) as unknown as [
     (event: { type: string }) => void,
@@ -175,6 +196,7 @@ beforeEach(() => {
   offlineState.pendingCount = 0;
   mocks.api.mockReset();
   mocks.apiOrQueue.mockReset();
+  mocks.enqueueAction.mockReset();
   mocks.toastInfo.mockReset();
   mocks.toastWarning.mockReset();
   mocks.toastSuccess.mockReset();
@@ -182,6 +204,7 @@ beforeEach(() => {
   installApi();
   installAudioContext("running", "running");
   mocks.apiOrQueue.mockResolvedValue({ ok: true, queued: false, data: {} });
+  mocks.enqueueAction.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -226,25 +249,154 @@ describe("KdsBoard operational controls", () => {
     expect((await screen.findAllByText("دستور سفارش: بدون فلفل")).length).toBeGreaterThan(0);
   });
 
-  it("batch-advances only eligible lines and reports the applied count", async () => {
-    installApi([
+  it("confirms and posts one server-side batch for the selected eligible lines", async () => {
+    const items = [
       line("order-batch", "line-a", "sent", 7, "dine_in", 3),
       line("order-batch", "line-b", "sent", 7, "dine_in", 3),
       line("order-batch", "line-c", "ready", 7, "dine_in", 3),
-    ]);
+    ];
+    installBatchApi(items, {
+      ok: true,
+      status: 200,
+      data: {
+        ok: true,
+        orderId: "order-batch",
+        requestedStatus: "preparing",
+        items: [
+          { itemId: "line-a", outcome: "applied", currentStatus: "preparing", nameSnapshot: "خوراک line-a", quantity: 1 },
+          { itemId: "line-b", outcome: "applied", currentStatus: "preparing", nameSnapshot: "خوراک line-b", quantity: 1 },
+        ],
+        summary: { total: 2, applied: 2, alreadyApplied: 0, conflict: 0, ineligible: 0, missing: 0 },
+      },
+    });
     render(<KdsBoard />);
     await waitFor(() => expect(document.body.textContent).toContain("سفارش ۷"));
     fireEvent.click(screen.getByRole("button", { name: /انتخاب سفارش اولویت‌دار/ }));
     expect(document.body.textContent).toContain("خوراک line-a");
     fireEvent.click(screen.getAllByRole("button", { name: "شروع آماده‌سازی همهٔ اقلام جدید" })[0]);
 
-    await waitFor(() => expect(mocks.apiOrQueue).toHaveBeenCalledTimes(2));
-    expect(mocks.apiOrQueue).toHaveBeenCalledWith(
-      "/api/kitchen/items/line-a",
-      { method: "PATCH", body: { status: "preparing" } },
-      expect.objectContaining({ payload: { itemId: "line-a", status: "preparing" } }),
+    expect(screen.getByRole("dialog")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /شروع آماده‌سازی \(۲\)/ }));
+
+    await waitFor(() =>
+      expect(mocks.api).toHaveBeenCalledWith(
+        "/api/kitchen/tickets/order-batch/batch",
+        expect.objectContaining({ method: "POST" }),
+      ),
     );
-    expect(screen.getByText(/۲ اعمال شد/)).not.toBeNull();
+    const batchCall = mocks.api.mock.calls.find(([url]) => String(url).includes("/batch"));
+    expect(JSON.parse(String(batchCall?.[1]?.body))).toEqual({
+      status: "preparing",
+      itemIds: ["line-a", "line-b"],
+    });
+    await waitFor(() => expect(screen.getByText(/۲ قلم ثبت شد/)).not.toBeNull());
+    expect(mocks.apiOrQueue).not.toHaveBeenCalled();
+    expect(mocks.api.mock.calls.filter(([url]) => String(url) === "/api/kitchen/tickets").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("shows truthful per-line partial results and never claims the whole batch succeeded", async () => {
+    const items = [
+      line("order-partial", "line-a", "preparing", 8, "dine_in", 3),
+      line("order-partial", "line-b", "preparing", 8, "dine_in", 3),
+    ];
+    installBatchApi(items, {
+      ok: true,
+      status: 200,
+      data: {
+        ok: true,
+        orderId: "order-partial",
+        requestedStatus: "ready",
+        items: [
+          { itemId: "line-a", outcome: "applied", currentStatus: "ready", nameSnapshot: "خوراک line-a", quantity: 1 },
+          { itemId: "line-b", outcome: "conflict", currentStatus: "served", nameSnapshot: "خوراک line-b", quantity: 1 },
+        ],
+        summary: { total: 2, applied: 1, alreadyApplied: 0, conflict: 1, ineligible: 0, missing: 0 },
+      },
+    });
+    render(<KdsBoard />);
+    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۸"));
+    fireEvent.click(screen.getByRole("button", { name: /انتخاب سفارش اولویت‌دار/ }));
+    fireEvent.click(screen.getAllByRole("button", { name: /علامت‌گذاری همهٔ اقلام در حال آماده‌سازی/ })[0]);
+    fireEvent.click(screen.getByRole("button", { name: /علامت‌گذاری به‌عنوان آماده \(۲\)/ }));
+
+    const panel = await screen.findByLabelText("نتیجهٔ اقدام گروهی آشپزخانه");
+    expect(panel.textContent).toContain("۱ قلم ثبت شد.");
+    expect(panel.textContent).toContain("۱ قلم توسط همکار دیگر تغییر کرده بود.");
+    expect(panel.textContent).toContain("وضعیت فعلی: سرو شده");
+    expect(panel.textContent).not.toContain("۲ قلم ثبت شد");
+    expect(panel.getAttribute("role")).toBe("alert");
+  });
+
+  it("queues the canonical per-item events and reports queued, not applied, when offline", async () => {
+    const items = [
+      line("order-offline", "line-a", "sent", 9, "dine_in", 3),
+      line("order-offline", "line-b", "sent", 9, "dine_in", 3),
+    ];
+    installBatchApi(items, {
+      ok: false,
+      status: 0,
+      data: { error: "network_error" },
+    });
+    render(<KdsBoard />);
+    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۹"));
+    fireEvent.click(screen.getByRole("button", { name: /انتخاب سفارش اولویت‌دار/ }));
+    fireEvent.click(screen.getAllByRole("button", { name: "شروع آماده‌سازی همهٔ اقلام جدید" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: /شروع آماده‌سازی \(۲\)/ }));
+
+    await waitFor(() => expect(mocks.enqueueAction).toHaveBeenCalledTimes(2));
+    expect(mocks.enqueueAction).toHaveBeenCalledWith(expect.objectContaining({
+      type: "order_item.status",
+      payload: { itemId: "line-a", status: "preparing" },
+    }));
+    expect(screen.getByLabelText("نتیجهٔ اقدام گروهی آشپزخانه").textContent).toContain(
+      "۲ قلم در صف همگام‌سازی است و هنوز روی سرور اعمال نشده است.",
+    );
+    expect(screen.getByLabelText("نتیجهٔ اقدام گروهی آشپزخانه").textContent).not.toContain("ثبت شد.");
+    expect(mocks.api.mock.calls.filter(([url]) => String(url) === "/api/kitchen/tickets").length).toBe(1);
+  });
+
+  it("lets the operator exclude a line and sends only the selected ids", async () => {
+    const items = [
+      line("order-select", "line-a", "sent", 10, "dine_in", 3),
+      line("order-select", "line-b", "sent", 10, "dine_in", 3),
+    ];
+    installBatchApi(items, {
+      ok: true,
+      status: 200,
+      data: {
+        ok: true,
+        orderId: "order-select",
+        requestedStatus: "preparing",
+        items: [{ itemId: "line-a", outcome: "applied", currentStatus: "preparing", nameSnapshot: "خوراک line-a", quantity: 1 }],
+        summary: { total: 1, applied: 1, alreadyApplied: 0, conflict: 0, ineligible: 0, missing: 0 },
+      },
+    });
+    render(<KdsBoard />);
+    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۱۰"));
+    fireEvent.click(screen.getByRole("button", { name: /انتخاب سفارش اولویت‌دار/ }));
+    fireEvent.click(screen.getAllByRole("button", { name: "شروع آماده‌سازی همهٔ اقلام جدید" })[0]);
+    fireEvent.click(screen.getByRole("checkbox", { name: "انتخاب خوراک line-b" }));
+    fireEvent.click(screen.getByRole("button", { name: /شروع آماده‌سازی \(۱\)/ }));
+
+    await waitFor(() => expect(mocks.api).toHaveBeenCalledWith(
+      "/api/kitchen/tickets/order-select/batch",
+      expect.objectContaining({ method: "POST" }),
+    ));
+    const batchCall = mocks.api.mock.calls.find(([url]) => String(url).includes("/batch"));
+    expect(JSON.parse(String(batchCall?.[1]?.body)).itemIds).toEqual(["line-a"]);
+  });
+
+  it("cancelling the confirmation sends nothing", async () => {
+    const items = [line("order-cancel", "line-a", "sent", 11, "dine_in", 3)];
+    installBatchApi(items, { ok: true, status: 200, data: {} });
+    render(<KdsBoard />);
+    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۱۱"));
+    fireEvent.click(screen.getByRole("button", { name: /انتخاب سفارش اولویت‌دار/ }));
+    fireEvent.click(screen.getAllByRole("button", { name: "شروع آماده‌سازی همهٔ اقلام جدید" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "انصراف" }));
+
+    expect(mocks.api.mock.calls.filter(([url]) => String(url).includes("/batch"))).toHaveLength(0);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("keeps sound opt-in and persists a deliberate operator choice", async () => {

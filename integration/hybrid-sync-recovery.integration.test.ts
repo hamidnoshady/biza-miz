@@ -331,6 +331,65 @@ describe("issue #1446 — central cached event errors become retryable, exactly 
     expect(stored.rows[0].applied_at).not.toBeNull();
     expect(stored.rows[0].retry_requested_at).toBeNull();
   });
+
+  it("re-applies a server_pull dead letter with no actor and reopens its dead-lettered effect", async () => {
+    const shop = await makeShop("Pull Retry Shop");
+    const sessionId = randomUUID();
+    const clientEventId = randomUUID();
+    const payload = {
+      sessionId,
+      status: "open",
+      tables: [],
+      customers: [],
+      openedAt: new Date().toISOString(),
+      openedBy: null,
+      partySize: null,
+      guestName: null,
+      reservationId: null,
+      billRequestedAt: null,
+      closedAt: null,
+      note: null,
+    };
+    const deadLetter = await owner.query<{ id: string }>(
+      `INSERT INTO sync_event_dead_letters
+         (business_id, location_id, client_event_id, event_type, schema_version,
+          payload_sha256, error_code, source, payload, occurred_at, actor_user_id, actor_role)
+       VALUES ($1, $2, $3, 'table_session.state.synced', 1, $4, '22P02', 'server_pull', $5, now(), NULL, NULL)
+       RETURNING id`,
+      [shop.businessId, shop.locationId, clientEventId, "0".repeat(64), JSON.stringify(payload)],
+    );
+    await owner.query(
+      `INSERT INTO sync_domain_effects
+         (business_id, location_id, client_event_id, event_type, schema_version, status, error_code)
+       VALUES ($1, $2, $3, 'table_session.state.synced', 1, 'dead_lettered', '22P02')`,
+      [shop.businessId, shop.locationId, clientEventId],
+    );
+
+    // The stored row has no actor (a CMS-origin event). The owner pressing
+    // retry is the replay's actor; the dead-lettered effect is reopened first,
+    // so the apply is not answered as a duplicate.
+    const ok = await dbLib.withTenant(shop.businessId, () =>
+      serverSync.updateSyncDeadLetter(
+        shop.businessId,
+        Number(deadLetter.rows[0].id),
+        "retry",
+        shop.ownerId,
+        "retry with the owner actor",
+      ),
+    );
+    expect(ok).toBe(true);
+
+    const session = await owner.query("SELECT 1 FROM table_sessions WHERE id = $1 AND location_id = $2", [
+      sessionId,
+      shop.locationId,
+    ]);
+    expect(session.rowCount).toBe(1);
+    const resolved = await owner.query<{ status: string }>(
+      "SELECT status FROM sync_event_dead_letters WHERE id = $1",
+      [deadLetter.rows[0].id],
+    );
+    expect(resolved.rows[0].status).toBe("resolved");
+  });
 });
 
 describe("issue #1446 — push refusal reaches a terminal, retryable dead letter", () => {

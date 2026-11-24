@@ -841,7 +841,6 @@ describe("cross-page tours", () => {
   it("ships the platform and app navigation overviews as real multi-page tours", () => {
     const overviews = [
       "platform.learning-overview",
-      "crm.navigation.overview",
       "growth.navigation.overview",
       "websites.navigation.overview",
       "accounting.navigation.overview",

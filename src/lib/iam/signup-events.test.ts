@@ -138,7 +138,7 @@ describe("privacy invariants", () => {
 
   it("the funnel ledger cannot store PII, a code or a token", () => {
     const migration = readFileSync(
-      join(root, "migrations", "0319_signup_controls_and_funnel.sql"),
+      join(root, "migrations", "0320_signup_controls_and_funnel.sql"),
       "utf8",
     );
     const table = migration.slice(

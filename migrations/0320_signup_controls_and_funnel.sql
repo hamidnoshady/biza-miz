@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0319_signup_controls_and_funnel.sql — issue #1388.
+-- 0320_signup_controls_and_funnel.sql — issue #1388.
 --
 -- Two additive pieces for the public signup / authentication-SMS console:
 --
