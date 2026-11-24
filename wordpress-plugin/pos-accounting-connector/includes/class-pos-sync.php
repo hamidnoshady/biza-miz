@@ -572,6 +572,14 @@ class POS_Connector_Sync {
 		} finally { $wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) ); }
 	}
 
+	/** Media in the inbound connector is a source reference, never an inline file. */
+	public static function source_media_url( $url ) {
+		if ( ! is_string( $url ) || strlen( $url ) > 4096 || ! preg_match( '~\Ahttps?://~i', $url ) ) {
+			return '';
+		}
+		return esc_url_raw( $url, array( 'http', 'https' ) );
+	}
+
 	private static function build_content_payload( $post ) {
 		$payload = array(
 			'id'            => (int) $post->ID,
@@ -596,11 +604,11 @@ class POS_Connector_Sync {
 			$file = get_attached_file( $post->ID );
 			$payload['filename'] = $file ? wp_basename( $file ) : '';
 			$payload['filesize'] = $file && is_file( $file ) ? filesize( $file ) : null;
-			$payload['source_url'] = wp_get_attachment_url( $post->ID ) ?: '';
+			$payload['source_url'] = self::source_media_url( wp_get_attachment_url( $post->ID ) );
 			$payload['mime_type']  = $post->post_mime_type;
 			$metadata = wp_get_attachment_metadata( $post->ID );
 			$thumb = wp_get_attachment_image_src( $post->ID, 'thumbnail' );
-			$payload['media_details'] = array( 'width' => isset( $metadata['width'] ) ? (int) $metadata['width'] : null, 'height' => isset( $metadata['height'] ) ? (int) $metadata['height'] : null, 'sizes' => array( 'thumbnail' => array( 'source_url' => $thumb ? $thumb[0] : '' ) ) );
+			$payload['media_details'] = array( 'width' => isset( $metadata['width'] ) ? (int) $metadata['width'] : null, 'height' => isset( $metadata['height'] ) ? (int) $metadata['height'] : null, 'sizes' => array( 'thumbnail' => array( 'source_url' => $thumb ? self::source_media_url( $thumb[0] ) : '' ) ) );
 			$payload['media_type'] = strtok( (string) $post->post_mime_type, '/' ) ?: 'file';
 			$payload['alt_text']   = get_post_meta( $post->ID, '_wp_attachment_image_alt', true );
 			// Only present on the file this store received from a
@@ -1292,12 +1300,12 @@ class POS_Connector_Sync {
 			$images   = array();
 		$image_id = $product->get_image_id();
 		if ( $image_id ) {
-			$src      = wp_get_attachment_url( $image_id );
+			$src      = self::source_media_url( wp_get_attachment_url( $image_id ) );
 			$alt      = get_post_meta( $image_id, '_wp_attachment_image_alt', true );
 			$images[] = array( 'id' => $image_id, 'src' => $src ? $src : '', 'alt' => $alt ? $alt : '', 'position' => 0 );
 		}
 		foreach ( $product->get_gallery_image_ids() as $idx => $gallery_id ) {
-			$src    = wp_get_attachment_url( $gallery_id );
+			$src    = self::source_media_url( wp_get_attachment_url( $gallery_id ) );
 			$alt    = get_post_meta( $gallery_id, '_wp_attachment_image_alt', true );
 			$images[] = array( 'id' => $gallery_id, 'src' => $src ? $src : '', 'alt' => $alt ? $alt : '', 'position' => $idx + 1 );
 		}
