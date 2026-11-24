@@ -336,4 +336,26 @@ if ( function_exists( 'gzencode' ) && function_exists( 'gzdecode' ) ) {
 }
 check( $json === POS_Connector_Queue::unpack_payload( $packed ), 'packed delivery restores the exact original JSON' );
 
+// --- #1550: unchanged state is skipped only when it is already queued or sent ---
+//
+// A failed or dead row proves the state never arrived. Skipping it there would
+// leave a catalogue/customer/content change undelivered until an operator
+// pressed "retry", which is the durability bug this guards.
+$row = static function ( $status, $fingerprint ) {
+	return array( 'status' => $status, 'payload_fingerprint' => $fingerprint );
+};
+check( POS_Connector_Queue::unchanged_state_already_queued( $row( 'pending', 'abc' ), 'abc', false ), 'a pending row already carries the newest state' );
+check( POS_Connector_Queue::unchanged_state_already_queued( $row( 'sent', 'abc' ), 'abc', false ), 'a delivered non-financial state is skipped' );
+check( ! POS_Connector_Queue::unchanged_state_already_queued( $row( 'sent', 'abc' ), 'abc', true ), 'a delivered financial state keeps its own identity' );
+check( ! POS_Connector_Queue::unchanged_state_already_queued( $row( 'failed', 'abc' ), 'abc', false ), 'a failed row is queued again instead of skipped' );
+check( ! POS_Connector_Queue::unchanged_state_already_queued( $row( 'dead', 'abc' ), 'abc', false ), 'a dead row is queued again instead of skipped' );
+check( ! POS_Connector_Queue::unchanged_state_already_queued( $row( 'sent', 'abc' ), 'def', false ), 'a changed state is never skipped' );
+check( ! POS_Connector_Queue::unchanged_state_already_queued( $row( 'sent', '' ), '', false ), 'a topic without a fingerprint is never skipped' );
+check( false !== strpos( $queue, 'self::unchanged_state_already_queued( $existing, $fingerprint, $financial )' ), 'enqueue decides the skip through the tested helper' );
+check( false !== strpos( $queue, "SET payload = '' WHERE status = 'sent'" ), 'housekeeping clears delivered bodies left by the old schema' );
+check( false !== strpos( $queue, "topic NOT IN ('order.created', 'order.updated', 'refund.created', 'content.deleted', 'customer.deleted')" ), 'non-financial, non-tombstone failed rows expire; financial rows and deletions do not' );
+$cli = file_get_contents( dirname( __DIR__ ) . '/pos-accounting-connector/includes/class-pos-cli.php' );
+check( false !== strpos( $cli, "'tableStorageBytes'" ), 'doctor reports the physical queue-table size, not only live payload bytes' );
+check( false !== strpos( $queue, 'information_schema.tables' ), 'and that measurement reads the table size from information_schema' );
+
 echo $assertions . " reliability-policy assertions passed\n";

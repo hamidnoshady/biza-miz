@@ -2,10 +2,11 @@
  * Issue #1077 — the WP/Woo queue retention sweep, against a real database.
  *
  * Proven here: finished rows past 90 days and dead / failed rows past 180 days
- * are deleted; younger rows survive; and `pending`, `processing`, `deferred`,
- * `failed` (still retrying) and `needs_review` rows are NEVER deleted, however
- * old. Each sweep leaves one payload-free summary in the append-only audit log,
- * a second sweep is a no-op, and another business's rows are untouched.
+ * are deleted; one-shot editor answers past an hour are deleted; younger rows
+ * survive; and `pending`, `processing`, `deferred`, `failed` (still retrying)
+ * and `needs_review` rows are NEVER deleted, however old. Each sweep leaves one
+ * payload-free summary in the append-only audit log, a second sweep is a no-op,
+ * and another business's rows are untouched.
  */
 import { randomUUID } from "node:crypto";
 import { Client } from "pg";
@@ -71,6 +72,17 @@ async function outbox(biz: { id: string; connectionId: string }, remoteId: strin
   );
 }
 
+/** One-shot editor answers, measured in minutes rather than days. */
+async function editorAnswer(biz: { id: string; connectionId: string }, remoteId: string, ageMinutes: number) {
+  const at = new Date(NOW.getTime() - ageMinutes * 60 * 1000).toISOString();
+  await db.query(
+    `INSERT INTO integration_outbox_events
+       (business_id, connection_id, entity_type, remote_id, payload, status, sent_at, updated_at)
+     VALUES ($1, $2, 'post_body_read', $3, '{"answer":{"content":"body"}}'::jsonb, 'sent', $4, $4)`,
+    [biz.id, biz.connectionId, remoteId, at],
+  );
+}
+
 async function inbox(biz: { id: string; connectionId: string }, deliveryId: string, status: string, ageDays: number) {
   await db.query(
     `INSERT INTO integration_webhook_events
@@ -122,6 +134,9 @@ beforeAll(async () => {
   for (const status of ["pending", "processing", "failed", "needs_review"]) {
     await outbox(a, `${status}-ancient`, status, 400);
   }
+  // One-shot editor answers: consumed in minutes, swept after an hour.
+  await editorAnswer(a, "answer-stale", 121);
+  await editorAnswer(a, "answer-fresh", 5);
   // Inbox: done (90d), failed (180d), and the never-swept statuses.
   await inbox(a, "processed-old", "processed", 100);
   await inbox(a, "processed-new", "processed", 30);
@@ -155,6 +170,7 @@ describe("queue retention sweep", () => {
     await retention.runQueueRetentionTick(NOW);
 
     expect(await remaining("integration_outbox_events", a, "remote_id")).toEqual([
+      "answer-fresh",
       "dead-mid",
       "failed-ancient",
       "needs_review-ancient",
@@ -185,6 +201,7 @@ describe("queue retention sweep", () => {
     expect(rows[0].payload).toMatchObject({
       outboxDone: 2,
       outboxDead: 1,
+      outboxAnswers: 1,
       inboxDone: 2,
       inboxFailed: 1,
       doneRetentionDays: 90,
@@ -201,7 +218,7 @@ describe("queue retention sweep", () => {
       [a.connectionId],
     );
     expect(rows[0].n).toBe("1");
-    expect(await remaining("integration_outbox_events", a, "remote_id")).toHaveLength(7);
+    expect(await remaining("integration_outbox_events", a, "remote_id")).toHaveLength(8);
   });
 
   it("works through a backlog larger than one batch", async () => {

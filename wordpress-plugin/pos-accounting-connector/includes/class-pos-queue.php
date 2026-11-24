@@ -197,12 +197,12 @@ class POS_Connector_Queue {
 			ARRAY_A
 		);
 
-		if ( $existing && ! $force && '' !== $fingerprint
-			&& $fingerprint === $existing['payload_fingerprint'] ) {
+		$financial = in_array( $topic, array( 'order.created', 'order.updated', 'refund.created' ), true );
+		if ( $existing && ! $force
+			&& self::unchanged_state_already_queued( $existing, $fingerprint, $financial ) ) {
 			return (int) $existing['id'];
 		}
 
-		$financial = in_array( $topic, array( 'order.created', 'order.updated', 'refund.created' ), true );
 		if ( ! $financial && $existing && 'pending' === $existing['status'] && ! $existing['sealed'] && ! $existing['attempts'] ) {
 			$updated = $wpdb->update(
 				$table,
@@ -244,6 +244,28 @@ class POS_Connector_Queue {
 			array( '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s', '%s' )
 		);
 		return (int) $wpdb->insert_id;
+	}
+
+	/**
+	 * Whether the newest row for an entity already carries this exact state.
+	 *
+	 * A `pending` row will deliver that state anyway, and a `sent` row is the
+	 * proof it was delivered — so neither needs another row. A `failed` or
+	 * `dead` row proves the opposite: the state never arrived. Returning false
+	 * there makes the producer queue it again, with a fresh delivery id, which
+	 * is the retry the row itself can no longer perform. Financial topics are
+	 * never collapsed once delivered: each transition keeps its own identity
+	 * even when its snapshot happens to match an earlier one.
+	 */
+	public static function unchanged_state_already_queued( array $existing, $fingerprint, $financial ) {
+		$stored = isset( $existing['payload_fingerprint'] ) ? (string) $existing['payload_fingerprint'] : '';
+		if ( '' === (string) $fingerprint || (string) $fingerprint !== $stored ) {
+			return false;
+		}
+		if ( 'pending' === $existing['status'] ) {
+			return true;
+		}
+		return 'sent' === $existing['status'] && ! $financial;
 	}
 
 	/**
@@ -331,6 +353,81 @@ class POS_Connector_Queue {
 				);
 			},
 			$rows
+		);
+	}
+
+	/**
+	 * The physical size InnoDB reports for the queue table (data + indexes).
+	 *
+	 * `payload_storage_by_topic()` measures the bytes the payload column still
+	 * holds; after cleared bodies that can read near zero while the table file
+	 * has not been rebuilt yet. This is the number an operator compares against
+	 * the disk, and the one that shows a backlog is actually being reclaimed.
+	 * Some managed hosts deny `information_schema`; that is `null`, never an
+	 * error that breaks `doctor`.
+	 */
+	public static function table_storage_bytes() {
+		if ( ! self::table_exists() ) {
+			return null;
+		}
+		global $wpdb;
+		$bytes = $wpdb->get_var(
+			$wpdb->prepare(
+				'SELECT data_length + index_length FROM information_schema.tables
+				  WHERE table_schema = DATABASE() AND table_name = %s',
+				self::table_name()
+			)
+		);
+		return null === $bytes ? null : (int) $bytes;
+	}
+
+	/**
+	 * Housekeeping for delivered and long-abandoned rows.
+	 *
+	 * Three jobs, each bounded to 1000 rows so one cron run is never held by a
+	 * single large statement:
+	 *
+	 *  - a delivered row no longer needs its body. `mark_sent()` clears every
+	 *    new delivery, but a store upgraded from the old schema still carries
+	 *    the body in every historical `sent` row — that is where a multi-
+	 *    gigabyte queue comes from. Clearing them keeps the delivery record
+	 *    (id, delivery id, timestamps, status) and drops only the payload.
+	 *  - delivered rows older than a month are deleted: they have served
+	 *    their purpose once the app has them, and an e-commerce store
+	 *    generates enough of them that keeping every one forever turns a
+	 *    support table into the largest one in the database.
+	 *  - failed rows older than the platform's 180-day unresolved-failure
+	 *    retention are deleted, EXCEPT financial topics and deletion
+	 *    tombstones. A permanently rejected catalogue/customer/content
+	 *    snapshot is re-derivable by the next resync; a missed sale, or the
+	 *    only record that something was deleted, is not.
+	 */
+	public static function prune() {
+		global $wpdb;
+		$table = self::table_name();
+		// `updated_at < now - 1 day` keeps the scan on the (status, updated_at)
+		// index and off the rows mark_sent() just emptied.
+		$wpdb->query(
+			$wpdb->prepare(
+				"UPDATE {$table} SET payload = '' WHERE status = 'sent' AND payload <> '' AND updated_at < %s ORDER BY updated_at, id LIMIT 1000",
+				gmdate( 'Y-m-d H:i:s', time() - DAY_IN_SECONDS )
+			)
+		);
+		$wpdb->query(
+			$wpdb->prepare(
+				"DELETE FROM {$table} WHERE status = 'sent' AND updated_at < %s ORDER BY updated_at, id LIMIT 1000",
+				gmdate( 'Y-m-d H:i:s', time() - 30 * DAY_IN_SECONDS )
+			)
+		);
+		$wpdb->query(
+			$wpdb->prepare(
+				"DELETE FROM {$table}
+				  WHERE status = 'failed'
+				    AND topic NOT IN ('order.created', 'order.updated', 'refund.created', 'content.deleted', 'customer.deleted')
+				    AND updated_at < %s
+				  ORDER BY updated_at, id LIMIT 1000",
+				gmdate( 'Y-m-d H:i:s', time() - 180 * DAY_IN_SECONDS )
+			)
 		);
 	}
 
@@ -661,23 +758,5 @@ class POS_Connector_Queue {
 		);
 		set_transient( $cache_key, $out, 10 * MINUTE_IN_SECONDS );
 		return $out;
-	}
-
-	/**
-	 * Drop delivered rows older than a month.
-	 *
-	 * They have served their purpose once the app has them, and an e-commerce
-	 * store generates enough of them that keeping every one forever turns a
-	 * support table into the largest one in the database.
-	 */
-	public static function prune() {
-		global $wpdb;
-		$table = self::table_name();
-		$wpdb->query(
-			$wpdb->prepare(
-				"DELETE FROM {$table} WHERE status = 'sent' AND updated_at < %s ORDER BY updated_at, id LIMIT 1000",
-				gmdate( 'Y-m-d H:i:s', time() - 30 * DAY_IN_SECONDS )
-			)
-		);
 	}
 }
