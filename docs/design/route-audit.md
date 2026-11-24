@@ -128,6 +128,21 @@ registry. Any future coverage table should be keyed by nav entry, not by file.
 | N3 | P3 | Growth's 14 route files answer 10 rail destinations plus detail/supporting routes (`marketing-targets`, `marketing-assignments`, `marketing-touchpoints`, `torob/[shopId]`, `commission/runs`), reached from their parent sections. Worth stating in the design doc so a future agent does not read them as orphans. | `growth-nav.ts`, route tree |
 | N4 | P3 | Mobile bottom navigation and the app launcher resolve destinations from the flattened nav by href; a section added to an app menu but not to `tenant-navigation.ts` would be invisible to those two surfaces even though the page works. No such case exists today; the audit found none. | `nav-tree.ts`, `bottom-nav.ts` |
 
+> **Status (ESH-205 / #1541).** The shell map, the declared non-navs and the
+> operational exemptions are now documented in
+> [`docs/design-system.md`](../design-system.md) § "Navigation architecture — the
+> shell map". The manual keyboard and back/forward checks are recorded in
+> [`navigation-verification.md`](navigation-verification.md). N1–N4 are
+> documentation/verification notes, not defects; no route, permission or layout
+> changed.
+>
+> One wording correction from that pass: the `?view=` people-directory filter is
+> **Accounting's** (`/accounting/directory?view=customers|suppliers`). The CRM
+> directory has no `?view=` filter — its deep link is `?customer=<id>` (and
+> `/crm/persons/<id>`), and the «مشتریان» rail row stays active on both. The
+> child-1 wording in §9 should be read with that correction.
+
+
 ---
 
 ## 4. Workflow audit
