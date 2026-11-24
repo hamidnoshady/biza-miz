@@ -148,6 +148,26 @@ describe("automatic baseline tours", () => {
     expect(tourDefinitionById(baselineTourIdForRoute("/accounting/products"))).toBeUndefined();
   });
 
+  it("keeps CRM Deals Studio-only, including direct playback by its legacy id", () => {
+    const pageKey = "page:/crm/deals";
+    const studio: TourDefinition = {
+      id: "crm.deals",
+      version: 1,
+      pageKey,
+      route: "/crm/deals",
+      title: "فرصت‌ها",
+      description: "از استودیو",
+      eligibility: {},
+      steps: [{ id: "intro", kind: "explain", title: "شروع", body: "." }],
+    };
+
+    expect(pageTourCandidates(pageKey)).toEqual([]);
+    expect(pageTourCandidates(pageKey, [studio])).toEqual([studio]);
+    expect(tourDefinitionById("crm.deals.list")).toBeUndefined();
+    expect(tourDefinitionById("crm.deals.list", [studio])).toBeUndefined();
+    expect(tourDefinitionById(baselineTourIdForRoute("/crm/deals"))).toBeUndefined();
+  });
+
   it("resolves a baseline id to its page for playback and progress writes", () => {
     const page = KNOWLEDGE_PAGES.find((candidate) => toursForPage(candidate.key).length === 0)!;
     const id = baselineTourIdForRoute(page.route);
@@ -252,8 +272,8 @@ describe("the coverage audit", () => {
     // A registered page can never silently escape coverage: every page has a
     // tour, and the report distinguishes a real spotlight from a plain
     // explanation instead of counting both as "covered".
-    expect(report.uncoveredPages).toEqual(["page:/crm/overview", "page:/crm/directory"]);
-    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory"]);
+    expect(report.uncoveredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals"]);
     expect(report.staleTourIds).toEqual([]);
     expect(report.spotlightPages).toBeGreaterThan(0);
     expect(report.explanationOnlyPages).toBe(
@@ -279,7 +299,7 @@ describe("the coverage audit", () => {
     expect(report.editorialGaps).toEqual(
       report.pages.filter((row) => row.kind === "baseline").map((row) => row.pageKey),
     );
-    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory"]);
+    expect(report.studioRequiredPages).toEqual(["page:/crm/overview", "page:/crm/directory", "page:/crm/deals"]);
     expect(report.authoredTours).toBe(TOURS.length);
   });
 

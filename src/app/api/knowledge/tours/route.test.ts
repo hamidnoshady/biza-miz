@@ -130,6 +130,13 @@ describe("GET /api/knowledge/tours", () => {
     expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", []);
   });
 
+  it("offers no CRM Deals tour when Tour Studio has no publication", async () => {
+    const pageKey = "page:/crm/deals";
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours).toEqual([]);
+    expect(mocks.loadProgress).toHaveBeenCalledWith("biz-1", "user-1", []);
+  });
+
   it("offers no CRM Overview fallback when the Studio lookup fails", async () => {
     const pageKey = "page:/crm/overview";
     mocks.publishedForPage.mockRejectedValue(new Error("database unavailable"));
@@ -138,6 +145,13 @@ describe("GET /api/knowledge/tours", () => {
   });
   it("offers no CRM Directory fallback when the Studio lookup fails", async () => {
     const pageKey = "page:/crm/directory";
+    mocks.publishedForPage.mockRejectedValue(new Error("database unavailable"));
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours).toEqual([]);
+  });
+
+  it("offers no CRM Deals fallback when the Studio lookup fails", async () => {
+    const pageKey = "page:/crm/deals";
     mocks.publishedForPage.mockRejectedValue(new Error("database unavailable"));
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     expect((await res.json()).tours).toEqual([]);
@@ -180,6 +194,13 @@ describe("published Studio tours", () => {
     const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
     expect((await res.json()).tours.map((tour: { id: string }) => tour.id)).toEqual([STUDIO_ID]);
   });
+  it("offers only the published CRM Deals Studio tour", async () => {
+    const pageKey = "page:/crm/deals";
+    mocks.publishedForPage.mockResolvedValue([{ ...studio, pageKey, route: "/crm/deals" }]);
+    const res = await listTours(req(`/api/knowledge/tours?page=${encodeURIComponent(pageKey)}`));
+    expect((await res.json()).tours.map((tour: { id: string }) => tour.id)).toEqual([STUDIO_ID]);
+  });
+
   it("offers only the published CRM Directory Studio tour", async () => {
     const pageKey = "page:/crm/directory";
     mocks.publishedForPage.mockResolvedValue([{ ...studio, pageKey, route: "/crm/directory" }]);
@@ -860,6 +881,12 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
     const legacy = await getTour(req("/api/knowledge/tours/crm.navigation.overview"), ctx("crm.navigation.overview"));
     const baselineId = baselineTourIdForRoute("/crm/overview");
     const baseline = await getTour(req(`/api/knowledge/tours/${baselineId}`), ctx(baselineId));
+    const dealsLegacy = await getTour(req("/api/knowledge/tours/crm.deals.list"), ctx("crm.deals.list"));
+    const dealsBaselineId = baselineTourIdForRoute("/crm/deals");
+    const dealsBaseline = await getTour(
+      req(`/api/knowledge/tours/${dealsBaselineId}`),
+      ctx(dealsBaselineId),
+    );
     const directoryBaselineId = baselineTourIdForRoute("/crm/directory");
     const directoryBaseline = await getTour(
       req(`/api/knowledge/tours/${directoryBaselineId}`),
@@ -868,6 +895,8 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
     expect(legacy.status).toBe(404);
     expect(baseline.status).toBe(404);
     expect(directoryBaseline.status).toBe(404);
+    expect(dealsLegacy.status).toBe(404);
+    expect(dealsBaseline.status).toBe(404);
   });
 
   it("fails closed for CRM Overview playback when Tour Studio is unavailable", async () => {
@@ -878,6 +907,12 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
   it("fails closed for CRM Directory playback when Tour Studio is unavailable", async () => {
     mocks.publishedById.mockRejectedValue(new Error("database unavailable"));
     const res = await getTour(req("/api/knowledge/tours/crm.directory"), ctx("crm.directory"));
+    expect(res.status).toBe(404);
+  });
+
+  it("fails closed for CRM Deals playback when Tour Studio is unavailable", async () => {
+    mocks.publishedById.mockRejectedValue(new Error("database unavailable"));
+    const res = await getTour(req("/api/knowledge/tours/crm.deals"), ctx("crm.deals"));
     expect(res.status).toBe(404);
   });
 

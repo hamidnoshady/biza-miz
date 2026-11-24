@@ -265,6 +265,7 @@ export function baselineTourForPage(
 export const STUDIO_ONLY_PAGE_KEYS: ReadonlySet<string> = new Set([
   "page:/crm/overview",
   "page:/crm/directory",
+  "page:/crm/deals",
 ]);
 
 export function pageTourCandidates(
@@ -304,6 +305,9 @@ export function tourDefinitionById(
   const studio = published.find((tour) => tour.id === id);
   if (studio) return studio;
   const authored = tourById(id);
+  // CRM Deals no longer has a code-defined tour; refuse the retired id even if
+  // a future catalogue edit accidentally adds one back.
+  if (authored?.pageKey === "page:/crm/deals") return undefined;
   if (authored) return authored;
   if (!isBaselineTourId(id)) return undefined;
   const page = baselinePageForId(id);
