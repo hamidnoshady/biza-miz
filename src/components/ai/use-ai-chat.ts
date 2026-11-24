@@ -30,6 +30,7 @@ import { guardedNavigate } from "@/components/navigation/unsaved-changes-guard";
 import { AI_GUIDED_TOUR_EVENT } from "@/lib/ai-guided-tour-events";
 import { parseReceiptImageDataUrl } from "@/lib/ai-receipt";
 import { parseGenUiBlocks, type GenUiBlock } from "@/lib/ai-genui";
+import type { AiToolProgressEvent } from "@/lib/ai-tool-progress";
 
 export type AssistantMode = "wizard" | "dashboard" | "floor";
 export type AiAppFocus = "all" | "accounting" | "growth" | "crm" | "website" | "workspace";
@@ -96,6 +97,11 @@ export interface AiChatMessage {
   createdAt?: number;
   /** Snapshot of the attachments this turn carried (rendered in the bubble). */
   attachments?: ChatAttachment[];
+  /**
+   * Issue #1546 — the last safe tool-progress step of a live turn. Server-built
+   * label only; never an argument, a result or a record.
+   */
+  toolProgress?: AiToolProgressEvent | null;
 }
 
 /**
@@ -131,6 +137,9 @@ const CHAT_ERROR: Record<string, string> = {
   feature_disabled: "دستیار هوشمند برای این کسب‌وکار فعال نیست.",
   ai_auth: "اتصال سراسری سرویس هوش مصنوعی نیاز به بررسی مدیر پلتفرم دارد.",
   ai_timeout: "پاسخ سرویس دیر رسید. دوباره تلاش کنید.",
+  ai_turn_deadline: "زمان مجاز این پاسخ تمام شد؛ پاسخ کامل نیست.",
+  ai_cancelled: "پاسخ‌گویی متوقف شد.",
+  mode_unavailable: "این حالت پاسخ‌گویی در حال حاضر در دسترس نیست.",
   ai_network: "اتصال به سرویس هوش مصنوعی برقرار نشد.",
   ai_rate_limited: "سرویس هوش مصنوعی در حال حاضر پرکاربرد است؛ کمی بعد دوباره تلاش کنید.",
   ai_provider: "درخواست توسط سرویس هوش مصنوعی رد شد. مدیر پلتفرم می‌تواند جزئیات فنی را بررسی کند.",
@@ -525,6 +534,29 @@ export function useAiChat({
         setReply((current) => ({ ...current, content: "", status: "streaming" }));
         return false;
       }
+      if (event === "tool") {
+        // Only the three known states and a short server label are accepted, so
+        // a malformed or hostile event cannot paint arbitrary text as progress.
+        const status = payload.status;
+        const label = payload.label;
+        if (
+          (status === "running" || status === "completed" || status === "failed") &&
+          typeof label === "string" &&
+          label.trim().length > 0 &&
+          label.length <= 120
+        ) {
+          setReply((current) => ({
+            ...current,
+            toolProgress: {
+              status,
+              label,
+              tool: typeof payload.tool === "string" ? payload.tool.slice(0, 80) : "",
+              round: typeof payload.round === "number" ? payload.round : 1,
+            },
+          }));
+        }
+        return false;
+      }
       if (event === "done") {
         setReply((current) => ({
           ...current,
@@ -544,6 +576,7 @@ export function useAiChat({
           costRial: typeof payload.costRial === "number" ? payload.costRial : null,
           // §19 — the terminal event, so this reply is genuinely finished.
           status: "complete",
+          toolProgress: null,
         }));
         // A prior explicit session grant may execute ONLY the narrowly approved
         // action family, using the same audited/idempotent apply API as a click.
@@ -601,6 +634,7 @@ export function useAiChat({
           ...current,
           content: current.content ? `${current.content}\n\n⚠️ ${errorMessage(payload)}` : "⚠️ " + errorMessage(payload),
           status: "error",
+          toolProgress: null,
         }));
         return true;
       }

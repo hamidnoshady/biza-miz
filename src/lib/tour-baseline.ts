@@ -30,6 +30,8 @@
  *    A member who is eligible gets that tour; a member who is not gets
  *    nothing — a baseline "about" a screen whose instructions are gated would
  *    describe screens they may not be allowed to see.
+ *  - pages owned exclusively by Tour Studio get only their published tours;
+ *    absent or ineligible publications leave the help panel empty.
  *  - a page with **no** authored tour gets exactly one baseline tour: the same
  *    runtime, the same progress table, the same button.
  *
@@ -266,6 +268,9 @@ export const STUDIO_ONLY_PAGE_KEYS: ReadonlySet<string> = new Set([
   "page:/crm/overview",
   "page:/crm/directory",
   "page:/crm/deals",
+  "page:/crm/briefs",
+  "page:/crm/proposals",
+  "page:/crm/client-campaigns",
 ]);
 
 export function pageTourCandidates(
@@ -305,9 +310,16 @@ export function tourDefinitionById(
   const studio = published.find((tour) => tour.id === id);
   if (studio) return studio;
   const authored = tourById(id);
-  // CRM Deals no longer has a code-defined tour; refuse the retired id even if
-  // a future catalogue edit accidentally adds one back.
-  if (authored?.pageKey === "page:/crm/deals") return undefined;
+  // CRM Deals, Briefs, Proposals and Client Campaigns code-tour ids are retired;
+  // published Studio content may still use them, but code must never serve them.
+  if (
+    authored?.pageKey === "page:/crm/deals" ||
+    authored?.pageKey === "page:/crm/briefs" ||
+    authored?.pageKey === "page:/crm/proposals" ||
+    authored?.pageKey === "page:/crm/client-campaigns"
+  ) {
+    return undefined;
+  }
   if (authored) return authored;
   if (!isBaselineTourId(id)) return undefined;
   const page = baselinePageForId(id);

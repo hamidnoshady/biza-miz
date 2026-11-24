@@ -14,6 +14,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   AI_CHAT_MODES,
   AI_MODE_LABELS,
+  unavailableModeReason,
+  type AiModeAvailability,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes-shared";
 import { cn } from "@/lib/utils";
@@ -33,6 +35,8 @@ export interface AiWorkspaceContextProps {
   onProjectChange: (projectId: string | null) => void;
   onProjectNameChange?: (name: string | null) => void;
   canSelectProject?: boolean;
+  /** Issue #1546 — modes the deployment has not configured, from `/api/ai/modes`. */
+  modeAvailability?: readonly AiModeAvailability[];
   disabled?: boolean;
   compact?: boolean;
 }
@@ -124,6 +128,7 @@ export function AiWorkspaceContext({
   onProjectChange,
   onProjectNameChange,
   canSelectProject = true,
+  modeAvailability,
   disabled = false,
   compact = false,
 }: AiWorkspaceContextProps) {
@@ -188,11 +193,18 @@ export function AiWorkspaceContext({
             runtimeMode !== "auto" && "border-primary/40 bg-primary/10 text-primary",
           )}
         >
-          {AI_CHAT_MODES.map((mode) => (
-            <option key={mode} value={mode}>
-              {`حالت: ${RUNTIME_MODE_LABELS[mode]}`}
-            </option>
-          ))}
+          {AI_CHAT_MODES.map((mode) => {
+            // Issue #1546 — an unconfigured mode is disabled with its reason
+            // rather than offered and then refused at send time.
+            const unavailable = unavailableModeReason(modeAvailability, mode) !== null;
+            return (
+              <option key={mode} value={mode} disabled={unavailable}>
+                {unavailable
+                  ? `حالت: ${RUNTIME_MODE_LABELS[mode]} (در دسترس نیست)`
+                  : `حالت: ${RUNTIME_MODE_LABELS[mode]}`}
+              </option>
+            );
+          })}
         </select>
       </label>
 

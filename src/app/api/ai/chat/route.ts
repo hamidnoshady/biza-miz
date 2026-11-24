@@ -19,7 +19,7 @@ import {
 } from "@/lib/ai-prompt-resolver";
 import {
   getPlatformAiMode,
-  isAiRuntimeModeAvailable,
+  modeAvailability,
   resolveRequestedAiRuntimeMode,
   type AiRuntimeMode,
 } from "@/lib/ai-runtime-modes";
@@ -171,9 +171,30 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // `model_alias` decides which LiteLLM deployment the turn routes to. Reading
   // it once means the offer and the route can never disagree.
   const modeRow = await getPlatformAiMode(runtimeMode);
-  if (!modeRow.is_active || !isAiRuntimeModeAvailable(runtimeMode)) {
+  // Issue #1546 — one decision serves both surfaces: `/api/ai/modes` renders it
+  // in the picker (disabling an unusable mode before it is chosen) and this
+  // route refuses the same mode here, as the backstop for a crafted body or a
+  // picker that loaded before the platform changed the configuration.
+  const availability = modeAvailability(modeRow, runtimeMode);
+  if (!availability.available) {
+    // Fast is only truthful when it names its own LiteLLM alias: a blank one
+    // resolves to the gateway's default chat model, i.e. Auto under a faster
+    // label. Both reasons are refused here rather than silently routed.
+    console.error("ai mode unavailable", {
+      businessId: session.businessId,
+      mode: runtimeMode,
+      reason: availability.reason,
+    });
     return NextResponse.json(
-      { error: "mode_unavailable", mode: runtimeMode, message: "حالت انتخاب‌شده توسط مدیر پلتفرم فعال نشده است." },
+      {
+        error: "mode_unavailable",
+        mode: runtimeMode,
+        reason: availability.reason,
+        message:
+          availability.reason === "fast_alias_not_configured"
+            ? "حالت «سریع» هنوز روی یک مدل تندپاسخ پیکربندی نشده است؛ فعلاً حالت «خودکار» را انتخاب کنید."
+            : "حالت انتخاب‌شده توسط مدیر پلتفرم فعال نشده است.",
+      },
       { status: 409 },
     );
   }
@@ -554,6 +575,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             messages: withAttachmentContext(messages, preparedAttachments),
             attachments: preparedAttachments,
             allowActions,
+            // Issue #1546 — the existing task lens is a tool-routing hint only.
+            task: typeof body.task === "string" ? body.task : null,
+            runtimeMode,
             // Phase D — when the turn runs as a system agent, restrict the read
             // tools to its allowlist and the proposable actions to its action
             // list. Both are re-checked in runAgentTurn, so a hand-crafted
@@ -574,6 +598,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             stream: {
               onDelta: (content) => emit("delta", { content }),
               onToolCalls: () => emit("reset", {}),
+              // Issue #1546 — safe, label-only progress while tools run. No
+              // arguments, results, prompts or records cross this boundary.
+              onToolProgress: (progress) => emit("tool", progress),
             },
             requestId,
             signal: request.signal,

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getAccessibleConnection } from "@/lib/integrations/connection-access";
+import { requestWpEditorBody } from "@/lib/integrations/wp-editor-body";
+import { pluginSupportsJobType } from "@/lib/integrations/plugin-capabilities";
 import { wooProductContentFor } from "@/lib/integrations/woo-product-content";
 
 /**
@@ -35,6 +37,23 @@ export const GET = withTenantScope(async (_request: Request, context: { params: 
   try {
     const content = await wooProductContentFor(session.businessId, id, remoteId);
     if (!content) return NextResponse.json({ error: "product_not_mapped" }, { status: 404 });
+    if (connection.link_mode === "plugin" && connection.status !== "paused"
+      && pluginSupportsJobType(connection.plugin_capabilities, "post_body_read")) {
+      if (!Number.isSafeInteger(Number(remoteId)) || Number(remoteId) <= 0) {
+        return NextResponse.json({ error: "invalid_remote_id" }, { status: 400 });
+      }
+      const answer = await requestWpEditorBody(session.businessId, id, "product", remoteId);
+      if (!answer) return NextResponse.json({ pending: true }, { status: 202 });
+      if (answer.error === "post_not_found") return NextResponse.json({ error: "product_not_mapped" }, { status: 404 });
+      if (answer.error === "post_body_too_large") return NextResponse.json({ error: answer.error }, { status: 413 });
+      if (typeof answer.content !== "string" || typeof answer.shortDescription !== "string") {
+        return NextResponse.json({ error: "product_body_unavailable" }, { status: 502 });
+      }
+      return NextResponse.json({
+        product: { ...content, description: answer.content, shortDescription: answer.shortDescription },
+        canWrite: true,
+      });
+    }
     return NextResponse.json({
       product: content,
       // The write gate is the connection's, not the screen's: a paused

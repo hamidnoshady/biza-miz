@@ -2492,66 +2492,6 @@ export const TOURS: readonly TourDefinition[] = [  {
       },
     ],
   },
-  listPageTour({
-    id: "crm.briefs.list",
-    pageKey: "page:/crm/briefs",
-    title: "بریف کارفرما",
-    description: "خواستهٔ مشتری، بودجه و تصمیم‌گیرنده پیش از قیمت‌گذاری.",
-    introTitle: "بریف چیست",
-    introBody:
-      "بریف، خواستهٔ کارفرما را پیش از قیمت‌گذاری و اجرا ثبت می‌کند: دامنهٔ کار، بودجه و تصمیم‌گیرنده. تأیید بریف شکل آن را قطعی می‌کند و اصلاح بعدی با بریف جانشین انجام می‌شود.",
-    nextBody:
-      "پیشنهاد قیمت روی همین بریف ساخته می‌شود. حذف بریف فقط تا پیش از تأیید و با اجازهٔ حذف ممکن است؛ سابقهٔ خواستهٔ مشتری را نگه دارید.",
-    eligibility: {
-      permissions: [PERMISSIONS.crmView, PERMISSIONS.crmManage],
-      anyOf: [
-        { permissions: [PERMISSIONS.crmExport] },
-        { permissions: [PERMISSIONS.crmConfigure] },
-      ],
-    },
-    navAnchor: TOUR_ANCHORS.appSectionNav,
-    table: true,
-  }),
-  listPageTour({
-    id: "crm.proposals.list",
-    pageKey: "page:/crm/proposals",
-    title: "پیشنهاد قیمت",
-    description: "قیمت، حاشیه و وضعیت پیشنهاد تا پذیرش یا رد.",
-    introTitle: "پیشنهاد قیمت",
-    introBody:
-      "پیشنهاد، قیمت و حاشیهٔ یک بریف را ثبت می‌کند و تا پذیرش، رد یا انقضا پیش می‌رود. حاشیه داخلی است و در نمای مشتری دیده نمی‌شود.",
-    nextBody:
-      "پس از ارسال، پیشنهاد قفل می‌شود؛ اصلاح با «پیشنهاد تازه از روی این» انجام می‌شود تا عددی که مشتری دیده تغییر نکند.",
-    eligibility: {
-      permissions: [PERMISSIONS.crmView, PERMISSIONS.crmManage],
-      anyOf: [
-        { permissions: [PERMISSIONS.crmExport] },
-        { permissions: [PERMISSIONS.crmConfigure] },
-      ],
-    },
-    navAnchor: TOUR_ANCHORS.appSectionNav,
-    table: true,
-  }),
-  listPageTour({
-    id: "crm.client-campaigns.list",
-    pageKey: "page:/crm/client-campaigns",
-    title: "کمپین کارفرما",
-    description: "بازه، کانال‌ها، هزینهٔ رسانه و اعداد بازگشتی.",
-    introTitle: "کمپین کارفرما",
-    introBody:
-      "کمپین کارفرما ثبت می‌کند چه زمانی، در چه کانال‌هایی و با چه هزینهٔ رسانه‌ای اجرا شد و چه اعدادی برگشت. هیچ عددی حدس زده نمی‌شود؛ مخرج صفر «—» نشان می‌دهد.",
-    nextBody:
-      "کمپین تکمیل یا لغوشده قفل است و اصلاح آن یک کمپین تازه است. روش انتساب را کنار عدد درآمد ثبت کنید تا گزارش قابل دفاع باشد.",
-    eligibility: {
-      permissions: [PERMISSIONS.crmView, PERMISSIONS.crmManage],
-      anyOf: [
-        { permissions: [PERMISSIONS.crmExport] },
-        { permissions: [PERMISSIONS.crmConfigure] },
-      ],
-    },
-    navAnchor: TOUR_ANCHORS.appSectionNav,
-    table: true,
-  }),
   {
     id: "crm.persons.overview",
     version: 1,
