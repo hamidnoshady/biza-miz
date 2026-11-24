@@ -265,6 +265,7 @@ export function baselineTourForPage(
 export const STUDIO_ONLY_PAGE_KEYS: ReadonlySet<string> = new Set([
   "page:/crm/overview",
   "page:/crm/directory",
+  "page:/crm/deals",
 ]);
 
 export function pageTourCandidates(
@@ -304,7 +305,7 @@ export function tourDefinitionById(
   const studio = published.find((tour) => tour.id === id);
   if (studio) return studio;
   const authored = tourById(id);
-  if (authored) return authored;
+  if (authored) return STUDIO_ONLY_PAGE_KEYS.has(authored.pageKey) ? undefined : authored;
   if (!isBaselineTourId(id)) return undefined;
   const page = baselinePageForId(id);
   if (!page || STUDIO_ONLY_PAGE_KEYS.has(page.key) || toursForPage(page.key).length > 0) return undefined;
