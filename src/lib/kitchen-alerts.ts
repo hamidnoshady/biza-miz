@@ -280,3 +280,16 @@ export const KITCHEN_SOUND_EVENT_LABELS: Record<KitchenSoundEventKey, string> = 
   connection: "قطع و وصل اتصال زنده",
   printFailure: "خطای ارسال به چاپگر آشپزخانه",
 };
+
+/**
+ * One tone per event, in hertz — the board and the settings screen's test
+ * button must play the same tone for the same event, so the map is shared
+ * rather than defined next to whichever screen happened to need it first.
+ */
+export const KITCHEN_ALERT_TONE_FREQUENCY: Record<KitchenSoundEventKey, number> = {
+  newTicket: 880,
+  addedItems: 988,
+  aging: 660,
+  connection: 440,
+  printFailure: 330,
+};

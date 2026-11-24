@@ -141,8 +141,8 @@ export const SETTINGS_TABS: SettingsTab[] = [
   },
   {
     key: "orders",
-    label: "کنترل‌های سفارش",
-    description: "سقف تخفیف صندوق‌دار و تأیید مدیر برای ابطال یا تغییر سفارش",
+    label: "سفارش‌ها و آشپزخانه",
+    description: "سقف تخفیف صندوق‌دار، تأیید مدیر برای ابطال یا تغییر سفارش، و روش آماده‌سازی و بایگانی سفارش‌های آشپزخانه",
     requiredAnyPermission: [PERMISSIONS.settingsManage],
     module: "orders",
   },

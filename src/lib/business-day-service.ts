@@ -28,6 +28,7 @@ import { recordCoworkerEvent } from "./ai-coworker-events";
 import { recordNotification } from "./notification-events";
 import { notificationDedupeKey } from "./notifications";
 import { toPersianDigits } from "./digits";
+import { archiveKitchenTicketsPastBusinessDay } from "./kitchen-workflow";
 
 export class BusinessDayError extends Error {
   status: number;
@@ -334,6 +335,12 @@ export async function closeBusinessDay(
     );
     const updated = await readBusinessDayStatus(client, locationId);
     if (!updated) throw new BusinessDayError("location_not_found", 404);
+    // The board belongs to the day in progress: closing the day archives every
+    // kitchen ticket still on it from a previous business date, in the same
+    // transaction as the closure so the board and the closure cannot disagree
+    // (the queue's own read archives the rollovers nobody closed). Order and
+    // payment state are untouched.
+    await archiveKitchenTicketsPastBusinessDay(client, locationId);
     // Nothing that can fail remains before the commit, so a committed close can
     // never be reported as a failure (#933 item 1's shape, here too).
     await client.query("COMMIT");
