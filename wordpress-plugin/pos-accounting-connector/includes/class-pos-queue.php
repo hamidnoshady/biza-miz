@@ -168,12 +168,22 @@ class POS_Connector_Queue {
 		}
 
 		$fingerprint = '';
-		if ( 'product.updated' === $topic ) {
+		$is_content_state = 'content.updated' === $topic && ! isset( $payload['_snapshot_id'] )
+			&& ! isset( $payload['revision'] ) && ! isset( $payload['operation_id'] );
+		$is_taxonomy_state = 'catalogue.taxonomy_terms' === $topic && ! isset( $payload['snapshot_id'] );
+		if ( $is_content_state || $is_taxonomy_state || in_array( $topic, array( 'product.updated', 'customer.updated', 'order.updated' ), true ) ) {
 			// WooCommerce can advance its save timestamp without changing any
 			// catalogue data consumed by Bizamiz.
-			unset( $payload['date_modified'] );
+			if ( 'product.updated' === $topic || $is_content_state ) {
+				unset( $payload['date_modified'] );
+			}
+			if ( $is_taxonomy_state ) {
+				unset( $payload['generated_at'] );
+			}
 			$fingerprint = hash( 'sha256', wp_json_encode( $payload ) );
 		}
+ 
+		$encoded = self::pack_payload( $encoded );
 
 		$existing = $wpdb->get_row(
 			$wpdb->prepare(
@@ -185,12 +195,13 @@ class POS_Connector_Queue {
 			ARRAY_A
 		);
 
-		if ( $existing && ! $force && '' !== $fingerprint && 'failed' !== $existing['status']
+		if ( $existing && ! $force && '' !== $fingerprint
 			&& $fingerprint === $existing['payload_fingerprint'] ) {
 			return (int) $existing['id'];
 		}
 
-		if ( $existing && 'pending' === $existing['status'] && ! $existing['sealed'] && ! $existing['attempts'] ) {
+		$financial = in_array( $topic, array( 'order.created', 'order.updated', 'refund.created' ), true );
+		if ( ! $financial && $existing && 'pending' === $existing['status'] && ! $existing['sealed'] && ! $existing['attempts'] ) {
 			$updated = $wpdb->update(
 				$table,
 				array(
@@ -234,6 +245,34 @@ class POS_Connector_Queue {
 	}
 
 	/**
+	 * Store compressible text compactly while it is waiting for delivery.
+	 * A prefix outside JSON syntax makes the format backwards compatible.
+	 */
+	public static function pack_payload( $json ) {
+		if ( strlen( $json ) < 512 || ! function_exists( 'gzencode' ) ) {
+			return $json;
+		}
+		$compressed = gzencode( $json, 3 );
+		if ( false === $compressed ) {
+			return $json;
+		}
+		$packed = 'gzip:' . base64_encode( $compressed );
+		return strlen( $packed ) < strlen( $json ) ? $packed : $json;
+	}
+
+	/** Old queue rows already contain the plain JSON ready for delivery. */
+	public static function unpack_payload( $stored ) {
+		if ( 0 !== strpos( $stored, 'gzip:' ) ) {
+			return $stored;
+		}
+		if ( ! function_exists( 'gzdecode' ) ) {
+			return false;
+		}
+		$compressed = base64_decode( substr( $stored, 5 ), true );
+		return false === $compressed ? false : @gzdecode( $compressed );
+	}
+
+	/**
 	 * The next batch to send: pending rows whose backoff has expired, oldest
 	 * first, so events reach the app in the order they happened.
 	 */
@@ -248,9 +287,13 @@ class POS_Connector_Queue {
 			$wpdb->prepare(
 				"SELECT candidate.* FROM {$table} candidate
 					WHERE candidate.status = 'pending' AND candidate.available_at <= %s
-						AND (candidate.topic <> 'product.updated' OR NOT EXISTS (
+						AND (candidate.topic NOT IN ('product.updated', 'customer.updated', 'order.created', 'order.updated', 'content.updated', 'catalogue.taxonomy_terms') OR NOT EXISTS (
 							SELECT 1 FROM {$table} earlier
-							WHERE earlier.topic = candidate.topic AND earlier.remote_id = candidate.remote_id
+							WHERE earlier.remote_id = candidate.remote_id
+								AND (earlier.topic = candidate.topic OR (
+									earlier.topic IN ('order.created', 'order.updated')
+									AND candidate.topic IN ('order.created', 'order.updated')
+								))
 								AND earlier.status = 'pending' AND earlier.id < candidate.id
 						))
 					ORDER BY candidate.id ASC LIMIT %d",
