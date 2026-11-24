@@ -2493,26 +2493,6 @@ export const TOURS: readonly TourDefinition[] = [  {
     ],
   },
   listPageTour({
-    id: "crm.briefs.list",
-    pageKey: "page:/crm/briefs",
-    title: "بریف کارفرما",
-    description: "خواستهٔ مشتری، بودجه و تصمیم‌گیرنده پیش از قیمت‌گذاری.",
-    introTitle: "بریف چیست",
-    introBody:
-      "بریف، خواستهٔ کارفرما را پیش از قیمت‌گذاری و اجرا ثبت می‌کند: دامنهٔ کار، بودجه و تصمیم‌گیرنده. تأیید بریف شکل آن را قطعی می‌کند و اصلاح بعدی با بریف جانشین انجام می‌شود.",
-    nextBody:
-      "پیشنهاد قیمت روی همین بریف ساخته می‌شود. حذف بریف فقط تا پیش از تأیید و با اجازهٔ حذف ممکن است؛ سابقهٔ خواستهٔ مشتری را نگه دارید.",
-    eligibility: {
-      permissions: [PERMISSIONS.crmView, PERMISSIONS.crmManage],
-      anyOf: [
-        { permissions: [PERMISSIONS.crmExport] },
-        { permissions: [PERMISSIONS.crmConfigure] },
-      ],
-    },
-    navAnchor: TOUR_ANCHORS.appSectionNav,
-    table: true,
-  }),
-  listPageTour({
     id: "crm.proposals.list",
     pageKey: "page:/crm/proposals",
     title: "پیشنهاد قیمت",
