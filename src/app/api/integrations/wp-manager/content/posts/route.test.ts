@@ -29,10 +29,11 @@ vi.mock("@/lib/integrations/wp-content-service", () => ({
   enqueueWpPostUpsert: m.enqueue,
   findWpContentCreateRequest: m.findCreate,
   getWpContent: m.getContent,
+  mirroredContent: (field: { raw?: string } | undefined) => field?.raw ?? null,
   upsertWpContent: m.upsert,
 }));
 
-import { POST } from "./route";
+import { GET, POST } from "./route";
 
 const CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 const REQUEST_ID = "22222222-2222-4222-8222-222222222222";
@@ -321,5 +322,32 @@ describe("featured image", () => {
     const response = await POST(post({ id: "77", expectedRemoteUpdatedAt: VERSION, featuredMediaId: 501 }));
     expect(response.status).toBe(200);
     expect(m.client.mock.calls[0][1]).toMatchObject({ featured_media: 501 });
+  });
+});
+
+
+describe("on-demand REST editor content", () => {
+  const detailRequest = () => new Request(`http://test/api?connectionId=${CONNECTION_ID}&type=post&id=42`);
+
+  it("reads the raw body for a single version-matched post", async () => {
+    m.connection.mockResolvedValue({ provider: "woocommerce", link_mode: "rest_api" });
+    m.getContent.mockResolvedValue({ remoteUpdatedAt: "2026-11-20T12:00:00Z", content: null });
+    m.getPost.mockResolvedValue({ modified_gmt: "2026-11-20T12:00:00", content: { raw: "<!-- wp:paragraph -->" } });
+    const response = await GET(detailRequest());
+    expect(m.getPost).toHaveBeenCalledWith("posts", 42);
+    expect((await response.json()).row.content).toBe("<!-- wp:paragraph -->");
+  });
+
+  it("rejects a live body whose version differs from the mirrored fields", async () => {
+    m.connection.mockResolvedValue({ provider: "woocommerce", link_mode: "rest_api" });
+    m.getContent.mockResolvedValue({ remoteUpdatedAt: "2026-11-20T12:00:00Z", content: null });
+    m.getPost.mockResolvedValue({ modified_gmt: "2026-11-20T12:01:00", content: { raw: "newer body" } });
+    expect((await GET(detailRequest())).status).toBe(409);
+  });
+
+  it("preserves the plugin editor path", async () => {
+    m.getContent.mockResolvedValue({ content: "legacy plugin body" });
+    expect((await (await GET(detailRequest())).json()).row.content).toBe("legacy plugin body");
+    expect(m.getPost).not.toHaveBeenCalled();
   });
 });
