@@ -47,9 +47,10 @@ both filed as follow-ups, neither fixed here.
 | Phone drawer, app switcher, `SectionNav` | Pass except focus after Escape (#1553) |
 | Logged-in landing | Pass |
 
-**Result:** 22 of the 24 scripted assertions passed; two additional focus
-observations (heading-mount timing and drawer Escape) reproduced the same
-first defect. Four failed observations, two root causes, two follow-ups.
+**Result:** 26 checks (the 24 scripted assertions plus the CRM and Website
+history hops); 24 passed. The two failed checks are the rail→app focus (#1553)
+and `/accounting/directory?view=all` (#1554); the heading-timing and drawer-Escape
+observations reproduce the first. Two root causes, two follow-ups.
 
 ## A. App switcher — workspace rail (desktop)
 
@@ -79,6 +80,8 @@ shared platform surfaces, not inside an app. Switching apps is two hops (back to
 | --- | --- | --- | --- | --- |
 | C1 | After B2, browser Back, then Forward | Back `/growth/overview` with its row active; Forward `/growth/campaigns` with its row active; no double-active | Back: `/growth/overview`, active `/growth/overview`, focus `H1#page-heading`. Forward: `/growth/campaigns`, active `/growth/campaigns`, focus `H1#page-heading` | PASS |
 | C2 | Products hub → prices, then Back | Prices active on the child; hub active after Back | `toPrices`: `/accounting/products/prices`, active `/accounting/products/prices`, focus heading «بروزرسانی قیمت‌ها». Back: `/accounting/products`, active `/accounting/products`, focus heading «محصولات» | PASS |
+| C3 | CRM overview → «فرصت‌ها» (`/crm/deals`), Back, Forward | Deals active; Back restores the overview row; Forward restores deals; focus follows the committed navigation | Deals: `/crm/deals`, active `/crm/deals`, focus `page-heading`. Back: `/crm/overview`, active `/crm/overview`, focus `page-heading`. Forward: `/crm/deals`, active `/crm/deals`, focus `page-heading` | PASS |
+| C4 | Website overview ↔ CMS overview (`/websites/cms/overview`), Back, Forward | Both URLs survive the history hops; the overview row is active on `/websites/overview` | Overview: active `/websites/overview`. CMS overview: no rail row — a no-site tenant shows only the app overview (expected). Back: active `/websites/overview`. Forward: CMS URL restored, no rail row | PASS |
 
 There is no double-active row in any state exercised. The query string survives
 Back/Forward.
