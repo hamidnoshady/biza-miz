@@ -838,6 +838,20 @@ describe("GET /api/knowledge/tours/[tourId]", () => {
     expect(body.progress.status).toBe("not_started");
   });
 
+  it("refuses removed CRM Overview code and baseline tours without Studio publication", async () => {
+    const legacy = await getTour(req("/api/knowledge/tours/crm.navigation.overview"), ctx("crm.navigation.overview"));
+    const baselineId = baselineTourIdForRoute("/crm/overview");
+    const baseline = await getTour(req(`/api/knowledge/tours/${baselineId}`), ctx(baselineId));
+    expect(legacy.status).toBe(404);
+    expect(baseline.status).toBe(404);
+  });
+
+  it("fails closed for CRM Overview playback when Tour Studio is unavailable", async () => {
+    mocks.publishedById.mockRejectedValue(new Error("database unavailable"));
+    const res = await getTour(req("/api/knowledge/tours/crm.overview"), ctx("crm.overview"));
+    expect(res.status).toBe(404);
+  });
+
   it("plays back a baseline tour, and refuses one for a page the authored catalogue owns", async () => {
     const res = await getTour(req(`/api/knowledge/tours/${BASELINE_TOUR}`), ctx(BASELINE_TOUR));
     const body = await res.json();
