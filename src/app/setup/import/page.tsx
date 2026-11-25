@@ -52,6 +52,7 @@ import {
 import { api, ErrorBox, InfoBox, SetupDataSkeleton, StepShell } from "../ui";
 import { stepsFor } from "../steps";
 import { useSetupIndustry } from "../industry-context";
+import { SetupMenuManualEditor } from "./menu-manual-editor";
 
 type SourceMode = "file" | "provider" | "manual";
 
@@ -128,6 +129,7 @@ export default function ImportStepPage() {
 
   useEffect(() => {
     void load(true);
+    if (new URLSearchParams(window.location.search).get("source") === "manual") setMode("manual");
   }, [load]);
 
   const steps = useMemo(
@@ -163,15 +165,7 @@ export default function ImportStepPage() {
             },
           ]
         : []),
-      ...(industry === "food_service"
-        ? [
-            {
-              href: "/setup/menu",
-              label: "منوی غذا و نوشیدنی",
-              hint: "دسته‌ها و آیتم‌های منو در مرحلهٔ منو",
-            },
-          ]
-        : []),
+
       {
         href: "/settings/data-transfer",
         label: "اسناد و سابقهٔ مالی",
@@ -228,7 +222,7 @@ export default function ImportStepPage() {
 
       <SectionCard
         title="۱. منبع اطلاعات"
-        description="یکی از راه‌های زیر را انتخاب کنید. فقط فایل، ورود کامل داخل همین صفحه دارد؛ اتصال سرویس‌ها و ثبت دستی از صفحهٔ خودشان انجام می‌شود."
+        description="یکی از راه‌های زیر را انتخاب کنید. ورود فایل و ثبت دستی منوی کافه و رستوران در همین مرحله انجام می‌شود. سایر اتصال‌ها فعلاً از مسیر اصلی‌شان انجام می‌شوند."
       >
         <div className="grid gap-3 md:grid-cols-3">
           {[
@@ -251,7 +245,7 @@ export default function ImportStepPage() {
               icon: PencilIcon,
               title: "ثبت دستی",
               description:
-                "برای وقتی داده کم است یا فایل آماده نیست؛ فرم‌های خود هر بخش.",
+                "برای داده‌های کم؛ منوی کافه و رستوران را در همین مرحله ثبت کنید.",
             },
           ].map((source) => {
             const Icon = source.icon;
@@ -411,8 +405,13 @@ export default function ImportStepPage() {
       {mode === "manual" ? (
         <SectionCard
           title="۲. ثبت دستی"
-          description="فرم‌های اصلی هر بخش؛ مناسب وقتی داده کم است یا فایل آماده ندارید."
+          description="منوی کافه و رستوران همین‌جا ثبت می‌شود؛ سایر داده‌ها از فرم‌های اصلی هر بخش."
         >
+          {industry === "food_service" && (data.selectedApps === null || data.selectedApps.includes("accounting")) ? (
+            <div className="mb-5">
+              <SetupMenuManualEditor />
+            </div>
+          ) : null}
           <ul className="divide-y divide-border rounded-xl border border-border">
             {manualLinks.map((link) => (
               <li key={link.href}>
