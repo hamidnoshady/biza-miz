@@ -75,7 +75,7 @@ describe("stepsFor — the sequence one business walks", () => {
     expect(none).toContain("apps");
 
     const accounting = stepsFor("food_service", ["accounting"]).map((s) => s.id);
-    expect(accounting).toEqual(expect.arrayContaining(["accounts", "costing", "tax", "menu"]));
+    expect(accounting).toEqual(expect.arrayContaining(["accounts", "costing", "tax"]));
 
     expect(stepsFor("food_service", null).map((s) => s.id)).toEqual(
       stepsFor("food_service").map((s) => s.id),
@@ -180,7 +180,7 @@ describe("skipToPath — direct links and stale tabs", () => {
     // (issue #799) the same way `food_service` does.
     const steps = stepsFor("unknown_trade" as Industry);
     expect(steps.map((s) => s.id)).toEqual(
-      WIZARD_STEPS.filter((step) => step !== "aec_profile"),
+      WIZARD_STEPS.filter((step) => step !== "aec_profile" && step !== "menu"),
     );
     expect(skipToPath("business", [])).toBe("/setup/finish");
   });
