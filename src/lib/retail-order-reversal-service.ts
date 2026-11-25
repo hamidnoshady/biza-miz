@@ -34,6 +34,7 @@
  *   - a batch-tracked line with NO allocation (imported before migration
  *     0198) is refused rather than desynchronising the rollup.
  */
+import { lockFungibleStock, restoreFungibleStock } from "./item-stock-valuation";
 import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
@@ -254,11 +255,15 @@ export async function reverseRetailImportedOrder(
           cogsRial: fact.cogs_rial,
           restoredCogsRial: fact.restored_cogs_rial,
         }, String(line.quantity));
-        if (new Decimal(plan.restock).gt(0)) {
-          await client.query(
-            `UPDATE item_stock SET quantity = quantity + $2::numeric, updated_at = now() WHERE item_id = $1`,
-            [line.item_id, plan.restock],
-          );
+        if (new Decimal(plan.restock).gt(0) || BigInt(plan.cogsReversalRial) > 0n) {
+          // F1 (GH #1567): quantity and the exact COGS value reversed come
+          // back together (value only when a remote snapshot had already
+          // taken the quantity).
+          await restoreFungibleStock(client, {
+            itemId: line.item_id,
+            quantity: plan.restock,
+            value: plan.cogsReversalRial,
+          });
         }
         await client.query(
           `UPDATE online_sale_lines
@@ -275,21 +280,20 @@ export async function reverseRetailImportedOrder(
         ]);
         continue;
       }
-      await client.query(
-        `UPDATE item_stock SET quantity = quantity + $2, updated_at = now() WHERE item_id = $1`,
-        [line.item_id, line.quantity],
-      );
-      // Fungible stock: the reversal's cost value is the quantity at the
-      // current running cost, matching what the import's COGS entry used.
-      const { rows: stockRows } = await client.query<{ unit_cost: string | null }>(
-        `SELECT unit_cost::text FROM item_stock WHERE item_id = $1`,
-        [line.item_id],
-      );
-      if (stockRows[0]?.unit_cost) {
-        restockedValue += BigInt(
-          roundRial(new Decimal(line.quantity).times(stockRows[0].unit_cost)),
-        );
-      }
+      // Fungible stock without an online fact (legacy): the reversal's cost
+      // value is the quantity at the current running cost, matching what the
+      // import's COGS entry used — and that value goes back with the units.
+      const current = await lockFungibleStock(client, line.item_id);
+      const legacyValue = current?.unitCost
+        ? roundRial(new Decimal(line.quantity).times(current.unitCost))
+        : "0";
+      await restoreFungibleStock(client, {
+        itemId: line.item_id,
+        quantity: String(line.quantity),
+        value: legacyValue,
+        fallbackToAverage: true,
+      });
+      restockedValue += BigInt(legacyValue);
     }
     await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [
       line.id,

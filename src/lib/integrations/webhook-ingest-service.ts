@@ -9,6 +9,7 @@
  * (connection_id, entity_type, remote_id) means an `order.updated`/`restored`
  * that arrives after `order.created` is a no-op at the order level too.
  */
+import { restoreFungibleStock } from "../item-stock-valuation";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
@@ -1793,11 +1794,14 @@ async function ingestRetailRefund(
             cogsRial: fact.cogs_rial,
             restoredCogsRial: fact.restored_cogs_rial,
           }, String(take));
-          if (Number(plan.restock) > 0) {
-            await client.query(
-              `UPDATE item_stock SET quantity = quantity + $2::numeric, updated_at = now() WHERE item_id = $1`,
-              [itemId, plan.restock],
-            );
+          if (Number(plan.restock) > 0 || BigInt(plan.cogsReversalRial) > 0n) {
+            // F1 (GH #1567): quantity and the exact COGS value reversed come
+            // back together.
+            await restoreFungibleStock(client, {
+              itemId,
+              quantity: plan.restock,
+              value: plan.cogsReversalRial,
+            });
           }
           await client.query(
             `UPDATE online_sale_lines
@@ -1811,13 +1815,15 @@ async function ingestRetailRefund(
         } else {
           // Legacy (pre-0209) fungible line: add the returned quantity back and
           // reverse COGS at the running weighted-average cost.
-          await client.query(
-            `UPDATE item_stock SET quantity = quantity + $2, updated_at = now()
-              WHERE item_id = $1`,
-            [itemId, take],
-          );
-          if (unitCost != null && unitCost > 0n) {
-            recoveredCogsRial = (BigInt(recoveredCogsRial) + unitCost * BigInt(take)).toString();
+          const legacyValue = unitCost != null && unitCost > 0n ? unitCost * BigInt(take) : 0n;
+          await restoreFungibleStock(client, {
+            itemId,
+            quantity: String(take),
+            value: legacyValue.toString(),
+            fallbackToAverage: true,
+          });
+          if (legacyValue > 0n) {
+            recoveredCogsRial = (BigInt(recoveredCogsRial) + legacyValue).toString();
           }
         }
 

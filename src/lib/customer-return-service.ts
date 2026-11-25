@@ -18,6 +18,7 @@ import {
   type NormalizedCustomerReturnLine,
 } from "./customer-return-domain";
 import { isLotBased } from "./inventory-costing";
+import { restoreFungibleStock } from "./item-stock-valuation";
 import { getCostingMethod, getInventorySystem } from "./inventory-service";
 import { unitCostFromValue } from "./inventory-reversal";
 import { liveSaleInventoryEventId } from "./order-amendment-service";
@@ -357,15 +358,13 @@ export async function createCustomerReturn(
               sourceType: "customer_return",
               sourceId: returnId,
             });
-          } else {
-            // Exact symmetric inverse of the sale: it only ever decremented
-            // `quantity` (average cost moves on receipt, not sale), so adding
-            // the same quantity back needs no cost recomputation.
-            await client.query(
-              `UPDATE item_stock SET quantity = quantity + $2, updated_at = now() WHERE item_id = $1`,
-              [soldRow.item_id, line.quantity],
-            );
           }
+          // A fungible line restores further down, once the exact COGS value
+          // this return reverses is known (F1, GH #1567): quantity and value
+          // must come back together, or the next movement reads a stale
+          // carrying value.
+          const fungibleRestore = batchAllocation.length === 0;
+          let fungibleValue = 0n;
           const recomputed = await recomputeLastSoldAt(client, soldRow.item_id);
           await client.query(
             "UPDATE item_stock SET last_sold_at = $2::timestamptz WHERE item_id = $1",
@@ -414,8 +413,19 @@ export async function createCustomerReturn(
                 retailCogs.amount += amount;
                 retailCogs.cogsAccountId = debitLine.account_id;
                 retailCogs.inventoryAccountId = creditLine.account_id;
+                fungibleValue = amount;
               }
             }
+          }
+          if (fungibleRestore) {
+            // A legacy line with no live COGS entry to mirror comes back at
+            // the current average (fallbackToAverage).
+            await restoreFungibleStock(client, {
+              itemId: soldRow.item_id,
+              quantity: String(line.quantity),
+              value: fungibleValue.toString(),
+              fallbackToAverage: true,
+            });
           }
         }
       }

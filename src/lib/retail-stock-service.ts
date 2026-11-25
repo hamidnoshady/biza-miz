@@ -30,8 +30,15 @@ import { queryReportPage } from "./report-page-query";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { resolvePurchasePaymentAccount } from "./payment-financial-account";
-import { getStock, receiveStock, type ItemStock } from "./accessories-service";
+import { receiveStock, type ItemStock } from "./accessories-service";
 import { receiveBatch } from "./cosmetics-service";
+import {
+  lockFungibleStock,
+  planFungibleRelief,
+  relieveFungibleStock,
+  restoreFungibleStock,
+  type FungibleStockState,
+} from "./item-stock-valuation";
 import { RetailReturnError } from "./retail-return-errors";
 import { MAX_RETURN_LINES, returnRequestFingerprint } from "./retail-return-validation";
 import {
@@ -767,11 +774,11 @@ export async function createItemSupplierReturn(
   const noneItemIds = [...new Set(
     lines.filter((l) => items.get(l.itemId)!.tracking === "none").map((l) => l.itemId),
   )].sort();
-  const stockByItem = new Map<string, { quantity: string; unit_cost: string | null }>();
+  const stockByItem = new Map<string, { quantity: string; unit_cost: string | null; total_value_rial: string | null }>();
   if (noneItemIds.length > 0) {
-    const { rows: stockRows } = await client.query<{ item_id: string; quantity: string; unit_cost: string | null }>(
-      `SELECT item_id, quantity::text AS quantity, unit_cost::text AS unit_cost
-         FROM item_stock WHERE item_id = ANY($1::uuid[]) FOR UPDATE`,
+    const { rows: stockRows } = await client.query<{ item_id: string; quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
+      `SELECT item_id, quantity::text AS quantity, unit_cost::text AS unit_cost, total_value_rial::text AS total_value_rial
+         FROM item_stock WHERE item_id = ANY($1::uuid[]) ORDER BY item_id FOR UPDATE`,
       [noneItemIds],
     );
     for (const row of stockRows) stockByItem.set(row.item_id, row);
@@ -918,6 +925,10 @@ export async function createItemSupplierReturn(
   const noneRequested = new Map<string, Decimal>();
   const batchRequested = new Map<string, Decimal>();
   const batchValueRequested = new Map<string, bigint>();
+  // F1 (GH #1567): fungible lines are valued by the canonical relief plan,
+  // run line after line against the same item so several lines of one item
+  // never relieve the same carrying value twice.
+  const noneState = new Map<string, FungibleStockState>();
   lines.forEach((line, index) => {
     const tracking = items.get(line.itemId)!.tracking;
     const qty = new Decimal(line.quantity);
@@ -999,7 +1010,11 @@ export async function createItemSupplierReturn(
       const requested = (noneRequested.get(line.itemId) ?? new Decimal(0)).plus(qty);
       if (requested.gt(new Decimal(stock.quantity))) throw new RetailReturnError("stock_insufficient", 409);
       noneRequested.set(line.itemId, requested);
-      carrying = assertBoundedRial(roundRial(qty.times(new Decimal(stock.unit_cost))));
+      const state = noneState.get(line.itemId)
+        ?? { quantity: stock.quantity, unitCost: stock.unit_cost, totalValue: stock.total_value_rial };
+      const relief = planFungibleRelief(state, qty.toFixed());
+      noneState.set(line.itemId, { quantity: relief.nextQuantity, unitCost: state.unitCost, totalValue: relief.nextTotal });
+      carrying = assertBoundedRial(relief.value);
       if (purchase) {
         const purchaseLine = resolvePurchaseLine(line.itemId, line.purchaseItemId, null);
         purchaseItemId = purchaseLine.id;
@@ -1094,9 +1109,9 @@ export async function createItemSupplierReturn(
   // over-relieving between that read and this write. One row, or it raced.
   for (const [itemId, qty] of [...noneRequested].sort(([a], [b]) => (a < b ? -1 : 1))) {
     const updated = await client.query(
-      `UPDATE item_stock SET quantity = quantity - $2::numeric, updated_at = now()
+      `UPDATE item_stock SET quantity = quantity - $2::numeric, total_value_rial = $3::bigint, updated_at = now()
         WHERE item_id = $1 AND quantity >= $2::numeric`,
-      [itemId, qty.toFixed()],
+      [itemId, qty.toFixed(), noneState.get(itemId)!.totalValue],
     );
     if (updated.rowCount !== 1) throw new RetailReturnError("stock_insufficient", 409);
   }
@@ -1265,41 +1280,19 @@ export async function reverseItemSupplierReturn(
   // carrying value rather than today's moving average so stock value and the
   // exact mirrored inventory journal stay reconciled after intervening buys.
   const fungibleIds = [...fungible.keys()].sort();
-  const stockByItem = new Map<string, { quantity: string; unit_cost: string | null }>();
-  if (fungibleIds.length) {
-    const { rows } = await client.query<{ item_id: string; quantity: string; unit_cost: string | null }>(
-      `SELECT item_id, quantity::text AS quantity, unit_cost::text AS unit_cost
-         FROM item_stock WHERE item_id = ANY($1::uuid[]) ORDER BY item_id FOR UPDATE`,
-      [fungibleIds],
-    );
-    for (const row of rows) stockByItem.set(row.item_id, row);
-  }
   for (const itemId of fungibleIds) {
-    const current = stockByItem.get(itemId);
     const restored = fungible.get(itemId)!;
-    const currentQuantity = new Decimal(current?.quantity ?? "0");
-    if (currentQuantity.gt(0) && current?.unit_cost == null) {
+    const current = await lockFungibleStock(client, itemId);
+    if (current && new Decimal(current.quantity).gt(0) && current.unitCost == null) {
       throw new RetailReturnError("cost_missing", 409);
     }
-    const nextQuantity = currentQuantity.plus(restored.quantity);
-    const nextUnitCost = currentQuantity.isZero()
-      ? roundRial(new Decimal(restored.value.toString()).div(restored.quantity))
-      : roundRial(
-          currentQuantity
-            .times(current!.unit_cost!)
-            .plus(new Decimal(restored.value.toString()))
-            .div(nextQuantity),
-        );
-    await client.query(
-      `INSERT INTO item_stock (item_id, quantity, unit_cost)
-       VALUES ($1, $2::numeric, $3::bigint)
-       ON CONFLICT (item_id) DO UPDATE
-         SET quantity = item_stock.quantity + EXCLUDED.quantity,
-             unit_cost = ROUND((item_stock.quantity * COALESCE(item_stock.unit_cost, 0)
-                                + $4::numeric) / (item_stock.quantity + EXCLUDED.quantity)),
-             updated_at = now()`,
-      [itemId, restored.quantity.toFixed(), nextUnitCost, restored.value.toString()],
-    );
+    // F1 (GH #1567): quantity, average and carrying value restored together
+    // at the exact value the return relieved.
+    await restoreFungibleStock(client, {
+      itemId,
+      quantity: restored.quantity.toFixed(),
+      value: restored.value.toString(),
+    });
   }
 
   for (const [batchId, restored] of [...batchQuantity.entries()].sort(([a], [b]) => a.localeCompare(b))) {
@@ -1491,17 +1484,15 @@ export async function shipItemTransfer(
       });
       value = relieved.value;
     } else {
-      const stock = await getStock(line.source_item_id, client);
+      const stock = await lockFungibleStock(client, line.source_item_id);
       if (!stock || stock.unitCost == null) throw new RetailStockError("بهای تمام‌شده کالای مبدأ ثبت نشده است.");
       if (new Decimal(stock.quantity).lt(new Decimal(line.quantity))) {
         throw new RetailStockError("موجودی مبدأ کافی نیست.");
       }
-
-      value = roundRial(new Decimal(line.quantity).times(stock.unitCost));
-      await client.query(`UPDATE item_stock SET quantity = quantity - $2, updated_at = now() WHERE item_id = $1`, [
-        line.source_item_id,
-        line.quantity,
-      ]);
+      // F1 (GH #1567): the shipment carries the exact carrying value that
+      // leaves the source — quantity and value relieved in one locked write —
+      // and the destination receives that same value (receive/cancel below).
+      value = (await relieveFungibleStock(client, { itemId: line.source_item_id, quantity: line.quantity })).value;
     }
 
     await client.query(`UPDATE item_stock_transfer_items SET value_rial = $2 WHERE id = $1`, [line.id, value]);
@@ -1566,7 +1557,7 @@ export async function receiveItemTransfer(
     // total — a 3-unit line at 100,000 each became 300,000 per unit on the
     // destination shelf. The unit cost is the value divided by the quantity.
     const unitCost = Number(roundRial(new Decimal(value).div(new Decimal(line.quantity))));
-    await receiveStock(line.destination_item_id, { quantity: line.quantity, unitCost }, client);
+    await receiveStock(line.destination_item_id, { quantity: line.quantity, unitCost, totalValue: value }, client);
     total += BigInt(value);
   }
 
@@ -1630,7 +1621,7 @@ export async function cancelItemTransfer(
 
     // Same total-value-vs-unit-cost defect as the receive path above.
     const unitCost = Number(roundRial(new Decimal(value).div(new Decimal(line.quantity))));
-    await receiveStock(line.source_item_id, { quantity: line.quantity, unitCost }, client);
+    await receiveStock(line.source_item_id, { quantity: line.quantity, unitCost, totalValue: value }, client);
     total += BigInt(value);
   }
   await client.query(`UPDATE item_stock_transfers SET status = 'cancelled', cancelled_at = now() WHERE id = $1`, [input.transferId]);

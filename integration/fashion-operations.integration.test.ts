@@ -243,12 +243,9 @@ describe("3.1 per-variant stock across branches", () => {
       { code: "2100", debit: "0", credit: "800000" },
     ]);
 
-    // Damaged stock written off through a warehouse issue (حواله). Done right
-    // after the receipt on purpose: the issue values non-batch stock from
-    // `item_stock.total_value_rial`, which the sale/transfer/return writers do
-    // not maintain (pre-existing on main, all retail trades — reported on PR
-    // #1575, not fixed here per AGENTS.md rule 6), so after a transfer it would
-    // over-relieve.
+    // Damaged stock written off through a warehouse issue (حواله), relieved at
+    // the live carrying value (F1 fixed the stale-value defect; the full
+    // sale → transfer → write-off chain is item-stock-valuation.integration).
     const parsed = warehouse.parseRetailWarehouseDocumentLines("issue", [{ itemId: main.M, quantity: "1" }]);
     const issue = await tx((client) =>
       warehouse.createRetailWarehouseDocumentInTransaction(client, {

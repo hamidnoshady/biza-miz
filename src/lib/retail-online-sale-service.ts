@@ -26,7 +26,8 @@
  */
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
-import { rialText, type RialText } from "./inventory-exact";
+import { rialText, roundRial, type RialText } from "./inventory-exact";
+import { relieveFungibleStock, relieveFungibleValueOnly } from "./item-stock-valuation";
 import {
   decideOnlineLineCost,
   decideOnlineStockRelief,
@@ -175,11 +176,36 @@ export async function sellOnlineRetailLine(
   });
 
   if (stock) {
-    await client.query(
-      `UPDATE item_stock SET quantity = quantity - $2::numeric, last_sold_at = now(), updated_at = now()
-        WHERE item_id = $1`,
-      [input.itemId, relief.relieve],
-    );
+    // F1 (GH #1567): the units relieved here leave with their exact carrying
+    // value, and that value is the COGS. Units a remote stock snapshot had
+    // already taken off the shelf (`already_reflected`) left with no value
+    // then, so their cost is relieved from the carrying value now — the GL
+    // credits inventory for them either way.
+    let relievedValue = 0n;
+    if (new Decimal(relief.relieve).gt(0)) {
+      relievedValue = BigInt(
+        (await relieveFungibleStock(client, {
+          itemId: input.itemId,
+          quantity: relief.relieve,
+          markSold: true,
+          allowMissingCost: true,
+        })).value,
+      );
+    } else {
+      await client.query(`UPDATE item_stock SET last_sold_at = now(), updated_at = now() WHERE item_id = $1`, [
+        input.itemId,
+      ]);
+    }
+    if (cost.costStatus === "known" || cost.costStatus === "partial") {
+      const costed = new Decimal(input.quantity).minus(relief.short);
+      const unrelieved = costed.minus(relief.relieve);
+      let extraValue = 0n;
+      if (unrelieved.gt(0) && stock.unit_cost != null) {
+        extraValue = BigInt(roundRial(unrelieved.times(stock.unit_cost)));
+        await relieveFungibleValueOnly(client, { itemId: input.itemId, value: extraValue.toString() });
+      }
+      cost.cogsRial = (relievedValue + extraValue).toString();
+    }
   }
   await recordOnlineSaleLine(client, {
     ...input,

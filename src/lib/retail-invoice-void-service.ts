@@ -80,6 +80,7 @@
  * actionable Persian message *before* anything is written — a blocked void
  * never leaves the invoice half-reversed.
  */
+import { postedCogsValue, restoreFungibleStock } from "./item-stock-valuation";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { postExactMirrorEntry } from "./ledger-service";
@@ -394,10 +395,16 @@ export async function voidRetailInvoice(
         sourceId: params.orderId,
       });
     } else {
-      await client.query(
-        `UPDATE item_stock SET quantity = quantity + $2, updated_at = now() WHERE item_id = $1`,
-        [line.item_id, snapshot.quantity],
-      );
+      // F1 (GH #1567): put back the exact value the sale's COGS relieved,
+      // together with the quantity — not quantity alone, which left
+      // `total_value_rial` short for every later movement.
+      const value = await postedCogsValue(client, params.businessId, snapshot.ledgerEntryIds ?? []);
+      await restoreFungibleStock(client, {
+        itemId: line.item_id!,
+        quantity: String(snapshot.quantity),
+        value: value.toString(),
+        fallbackToAverage: true,
+      });
     }
 
     await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [

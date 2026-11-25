@@ -24,7 +24,7 @@ import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
 import type { ProductPublishStatus } from "./product-content";
 import { isWholeRialCost } from "./accessories";
 import { getStock, receiveStock, setUnitPrice, type ItemStock } from "./accessories-service";
-import { cosmeticCogs, computeCosmeticSalePrice, type CosmeticSalePriceBreakdown } from "./cosmetics";
+import { computeCosmeticSalePrice, type CosmeticSalePriceBreakdown } from "./cosmetics";
 import { isBatchExpired, sellableQuantity } from "./fefo";
 import {
   allocateBatchLots,
@@ -40,6 +40,7 @@ import {
 import { quantityText, rialText, roundRial, type RialText } from "./inventory-exact";
 import { getItem, type Item } from "./items-service";
 import { buildVariantMatrix, type MatrixAxis } from "./variant-matrix";
+import { relieveFungibleStock } from "./item-stock-valuation";
 import { emitDomainEvent } from "./posting-engine";
 import type { SettlementMethod } from "./ledger";
 import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
@@ -344,7 +345,8 @@ export async function sellCosmeticUnits(
     await consumeBatchAllocations(client, input.itemId, batchAllocations);
     cost = allocationCostValue(batchAllocations);
   } else {
-    cost = cosmeticCogs(input.quantity, stock.unitCost);
+    // F1 (GH #1567): exact carrying value relieved, quantity + value together.
+    cost = (await relieveFungibleStock(client, { itemId: input.itemId, quantity: input.quantity, markSold: true })).value;
   }
 
   // See the identical comment in accessories-service.ts's sellAccessoryUnits:
@@ -398,12 +400,8 @@ export async function sellCosmeticUnits(
     await client.query(`UPDATE item_stock SET last_sold_at = now(), updated_at = now() WHERE item_id = $1`, [
       input.itemId,
     ]);
-  } else {
-    await client.query(
-      `UPDATE item_stock SET quantity = quantity - $2, last_sold_at = now(), updated_at = now() WHERE item_id = $1`,
-      [input.itemId, input.quantity],
-    );
   }
+  // Non-batch stock was relieved (quantity, value and last_sold_at) above.
 
   return { breakdown, revenueEntryId, cogsEntryId, cost, batchNumbers, expiryDate, batchAllocations };
 }
@@ -708,7 +706,6 @@ export async function openTester(
   if (Number(stock.quantity) < 1) throw new Error("موجودی کافی نیست.");
 
   let cost: RialText;
-  let testerFromBatches = false;
   if (item.tracking === "batch") {
     // Opening a tester consumes a real sellable unit, so it goes through the
     // same canonical engine a sale does: FEFO across the sellable lots, the
@@ -721,9 +718,8 @@ export async function openTester(
     );
     await consumeBatchAllocations(client, input.itemId, allocations);
     cost = allocationCostValue(allocations);
-    testerFromBatches = true;
   } else {
-    cost = rialText(String(stock.unitCost));
+    cost = (await relieveFungibleStock(client, { itemId: input.itemId, quantity: "1" })).value;
   }
 
   // Same defect, same fix as sellCosmeticUnits above: `cosmetic_tester`'s
@@ -744,16 +740,8 @@ export async function openTester(
     createdBy: input.createdBy ?? null,
   });
 
-  if (!testerFromBatches) {
-    await client.query(
-      `UPDATE item_stock SET quantity = quantity - 1, updated_at = now() WHERE item_id = $1`,
-      [input.itemId],
-    );
-  } else {
-    // The batch consumption already rolled `item_stock` down; decrementing it
-    // again here would double-count the tester.
-    await client.query(`UPDATE item_stock SET updated_at = now() WHERE item_id = $1`, [input.itemId]);
-  }
+  // Batch consumption rolled `item_stock` down, and a non-batch tester was
+  // relieved (quantity + value) above — nothing more to write here.
 
   return { cost, entryId };
 }
