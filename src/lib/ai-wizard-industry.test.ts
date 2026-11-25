@@ -75,7 +75,8 @@ describe("wizardActionTypesForIndustry", () => {
     for (const industry of ENABLED_INDUSTRIES) {
       const walked = new Set(wizardStepsForIndustry(industry));
       for (const step of survivingSteps(industry)) {
-        expect(walked.has(step as never), `${industry} → ${step}`).toBe(true);
+        const effectiveStep = step === "menu" && industry === "food_service" ? "import" : step;
+        expect(walked.has(effectiveStep as never), `${industry} → ${step}`).toBe(true);
       }
       // The three steps every shape keeps are always proposable.
       expect(survivingSteps(industry).has("business")).toBe(true);
@@ -115,9 +116,9 @@ describe("wizard system prompt", () => {
     expect(prompt).not.toContain("setup.costing");
   });
 
-  it("lists all nine F&B steps — including the Backup destination", () => {
+  it("lists the consolidated F&B import step and Backup destination", () => {
     const prompt = buildSystemPrompt({ mode: "wizard", industry: "food_service" });
-    expect(prompt).toMatch(/مراحل راه‌اندازی[^\n]*ورود منو[^\n]*مقصد پشتیبان‌گیری/);
+    expect(prompt).toMatch(/مراحل راه‌اندازی[^\n]*ورود اطلاعات اولیه[^\n]*مقصد پشتیبان‌گیری/);
     expect(prompt).toContain("setup.menu.item");
     expect(prompt).toContain("setup.costing");
   });
