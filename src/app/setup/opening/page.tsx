@@ -3,7 +3,7 @@
 import { SetupDataSkeleton } from "../ui";
 
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
@@ -20,19 +20,55 @@ import {
 import { useSetupIndustry } from "../industry-context";
 import Link from "next/link";
 import { catalogueHrefFor } from "@/lib/wizard-steps";
+import { openingAccountLabel, SETUP_OPENING_STATE_MESSAGES, type SetupOpeningState } from "@/lib/setup-opening";
+import { FINANCIAL_ACCOUNT_KIND_META, type FinancialAccountKind } from "@/lib/financial-accounts";
+import {
+  FinancialAccountSheet,
+  GlAccountSheet,
+  type SetupFinancialAccountLink,
+} from "./setup-account-sheets";
 
 interface Account {
   id: string;
   code: string;
   name: string;
   type: string;
-  children: string | number;
+  parentId: string | null;
+  parentCode: string | null;
+  isActive: boolean;
+  hasChildren: boolean;
+  financialAccount: { id: string; name: string; kind: string } | null;
+}
+
+interface FinancialSummaryRow {
+  id: string;
+  kind: FinancialAccountKind;
+  name: string;
+  glAccountId: string;
+  glAccountCode: string;
+  glAccountName: string;
+  balance: string;
+  settlementAccountId: string | null;
+  settlementAccountName: string | null;
 }
 
 interface OpeningResponse {
-  accounts: Account[];
-  openingEntry: { id: string; entry_date: string; total: string } | null;
-  inventoryItems: { id: string; name: string; unit: string; quantity: string }[];
+  state?: SetupOpeningState;
+  message?: string;
+  accountingEnabled?: boolean;
+  chartAccountCount?: number;
+  accounts?: Account[];
+  eligibleAccounts?: Account[];
+  capabilities?: { canManageChart: boolean; canManageFinancialAccounts: boolean; canViewSensitive: boolean };
+  openingEntry?: { id: string; entryDate: string; total: string } | null;
+  openingSets?: { id: string; fiscalYearLabel: string; effectiveDate: string; status: string; source: string }[];
+  inventoryItems?: { id: string; name: string; unit: string; quantity: string }[];
+  financialAccounts?: FinancialSummaryRow[];
+  financialTotalsByKind?: Record<string, string>;
+  financialAccountsUnavailable?: boolean;
+  locations?: { id: string; name: string }[];
+  baseCurrencyCode?: string;
+  enabledCurrencies?: string[];
   error?: string;
 }
 
@@ -51,23 +87,48 @@ interface BalanceRow {
 
 const emptyInvRow: InvRow = { name: "", unit: "kg", quantity: "", unitCost: "" };
 
+const KIND_ORDER: FinancialAccountKind[] = ["bank", "cash", "petty_cash", "pos_psp"];
+
+const SET_STATUS_LABELS: Record<string, string> = {
+  draft: "پیش‌نویس",
+  review: "در بررسی",
+  approved: "تأییدشده",
+  posted: "ثبت‌شده",
+  reversed: "برگشت‌خورده",
+};
+
+function sumRial(rows: { balance: string }[]): string {
+  return rows.reduce((total, row) => total + BigInt(row.balance || "0"), 0n).toString();
+}
+
 export default function OpeningStep() {
   const industry = useSetupIndustry();
   // The inventory-count subsection posts to F&B's inventory_items/
   // stock_movements tables (Phase 6) and requires the costing step's
   // setting, which non-food_service businesses never set (costing isn't in
   // their step list) -- so it's hidden rather than left to fail with
-  // "costing_not_set". Jewelry's own stock is entered through
-  // /dashboard/jewelry, not here.
+  // "costing_not_set". Other trades' stock lives in their catalogue.
   const showInventorySection = industry === "food_service";
-  // Non-F&B trades keep their stock in the products workspace / their trade's
-  // items page (see catalogueHrefFor), reachable from here so the step still
-  // tells the owner where inventory goes instead of silently dropping it.
   const catalogueHref = showInventorySection ? null : catalogueHrefFor(industry);
   const money = useMoney();
-  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [eligibleAccounts, setEligibleAccounts] = useState<Account[]>([]);
   const [openingEntry, setOpeningEntry] = useState<OpeningResponse["openingEntry"]>(null);
-  const [existingInventory, setExistingInventory] = useState<OpeningResponse["inventoryItems"]>([]);
+  const [openingSets, setOpeningSets] = useState<NonNullable<OpeningResponse["openingSets"]>>([]);
+  const [existingInventory, setExistingInventory] = useState<NonNullable<OpeningResponse["inventoryItems"]>>([]);
+  const [financialAccounts, setFinancialAccounts] = useState<FinancialSummaryRow[]>([]);
+  const [financialTotalsByKind, setFinancialTotalsByKind] = useState<Record<string, string>>({});
+  const [financialUnavailable, setFinancialUnavailable] = useState(false);
+  const [capabilities, setCapabilities] = useState<NonNullable<OpeningResponse["capabilities"]>>({
+    canManageChart: false,
+    canManageFinancialAccounts: false,
+    canViewSensitive: false,
+  });
+  const [locations, setLocations] = useState<{ id: string; name: string }[]>([]);
+  const [currencies, setCurrencies] = useState<string[]>(["IRR"]);
+  const [baseCurrencyCode, setBaseCurrencyCode] = useState("IRR");
+  const [stepState, setStepState] = useState<SetupOpeningState>("ready");
+  const [stateMessage, setStateMessage] = useState("");
+  const [chartAccountCount, setChartAccountCount] = useState(0);
 
   const [invRows, setInvRows] = useState<InvRow[]>([{ ...emptyInvRow }]);
   const [balRows, setBalRows] = useState<BalanceRow[]>([{ accountId: "", side: "debit", amount: "" }]);
@@ -77,18 +138,72 @@ export default function OpeningStep() {
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [recovering, setRecovering] = useState(false);
+  const [sheet, setSheet] = useState<FinancialAccountKind | null>(null);
+  const [glSheet, setGlSheet] = useState(false);
+  const [glKind, setGlKind] = useState<FinancialAccountKind>("bank");
 
-  const load = useCallback(() => {
-    api<OpeningResponse>("/api/setup/opening").then(({ data }) => {
-      if (data.accounts) setAccounts(data.accounts);
-      setOpeningEntry(data.openingEntry ?? null);
-      setExistingInventory(data.inventoryItems ?? []);
-    }).finally(() => setLoaded(true));
+  const load = useCallback(async () => {
+    setLoadError("");
+    const { ok, data, status } = await api<OpeningResponse>("/api/setup/opening");
+    if (!ok) {
+      // Never render an empty picker for a failed read (issue #1583): the
+      // message names what happened and the retry button re-runs this load.
+      const state: SetupOpeningState =
+        status === 0 || status >= 500
+          ? "unavailable"
+          : data.error === "forbidden" || status === 403
+            ? "permission_denied"
+            : (data.state ?? "load_failed");
+      setStepState(state);
+      setStateMessage(
+        data.message ||
+          SETUP_OPENING_STATE_MESSAGES[state] ||
+          errorMessage(data.error, undefined, status),
+      );
+      setEligibleAccounts([]);
+      setFinancialAccounts([]);
+      setLoadError(SETUP_OPENING_STATE_MESSAGES[state] ?? SETUP_OPENING_STATE_MESSAGES.load_failed);
+      return;
+    }
+    setStepState(data.state ?? "ready");
+    setStateMessage(data.message ?? "");
+    setChartAccountCount(data.chartAccountCount ?? 0);
+    setEligibleAccounts(data.eligibleAccounts ?? []);
+    setOpeningEntry(data.openingEntry ?? null);
+    setOpeningSets(data.openingSets ?? []);
+    setExistingInventory(data.inventoryItems ?? []);
+    setFinancialAccounts((data.financialAccounts ?? []) as FinancialSummaryRow[]);
+    setFinancialTotalsByKind(data.financialTotalsByKind ?? {});
+    setFinancialUnavailable(data.financialAccountsUnavailable === true);
+    setCapabilities(
+      data.capabilities ?? { canManageChart: false, canManageFinancialAccounts: false, canViewSensitive: false },
+    );
+    setLocations(data.locations ?? []);
+    setCurrencies(data.enabledCurrencies?.length ? data.enabledCurrencies : ["IRR"]);
+    setBaseCurrencyCode(data.baseCurrencyCode ?? "IRR");
   }, []);
-  useEffect(load, [load]);
 
-  // Leaf accounts only — parents are grouping rows, not posting targets.
-  const leafAccounts = accounts.filter((a) => Number(a.children) === 0);
+  useEffect(() => {
+    load().finally(() => setLoaded(true));
+  }, [load]);
+
+  // The server decides eligibility; the client only renders its list.
+  const leafAccounts = eligibleAccounts;
+
+  const banks = useMemo<SetupFinancialAccountLink[]>(
+    () =>
+      financialAccounts
+        .filter((account) => account.kind === "bank")
+        .map((account) => ({
+          id: account.id,
+          name: account.name,
+          kind: account.kind,
+          glAccountId: account.glAccountId,
+        })),
+    [financialAccounts],
+  );
 
   function parseTomanSafe(s: string): number | null {
     if (!s.trim()) return 0;
@@ -97,6 +212,35 @@ export default function OpeningStep() {
       return v >= 0 ? v : null;
     } catch {
       return null;
+    }
+  }
+
+  async function recoverChart() {
+    setError("");
+    setNotice("");
+    setRecovering(true);
+    try {
+      const { ok, data, status } = await api<{ error?: string; created?: number; alreadyPresent?: boolean }>(
+        "/api/setup/opening/chart",
+        { method: "POST" },
+      );
+      if (!ok) {
+        const map: Record<string, string> = {
+          chart_exists: "سرفصل حساب‌ها از قبل وجود دارد و این عملیات آن را بازنویسی نمی‌کند.",
+          accounting_not_enabled: "برنامهٔ حسابداری برای این کسب‌وکار فعال نیست.",
+          permission_denied: "برای ساخت سرفصل، دسترسی «ویرایش کدینگ حساب‌ها» لازم است.",
+        };
+        setError(map[data.error ?? ""] ?? errorMessage(data.error, undefined, status));
+        return;
+      }
+      setNotice(
+        data.alreadyPresent
+          ? "سرفصل حساب‌ها از قبل آماده است."
+          : `سرفصل صنف ساخته شد (${toPersianDigits(data.created ?? 0)} حساب).`,
+      );
+      await load();
+    } finally {
+      setRecovering(false);
     }
   }
 
@@ -126,7 +270,7 @@ export default function OpeningStep() {
       }
       setNotice(`شمارش ثبت شد — ارزش کل: ${money.format(data.totalValue ?? 0)}.`);
       setInvRows([{ ...emptyInvRow }]);
-      load();
+      await load();
     } finally {
       setBusy(false);
     }
@@ -164,17 +308,47 @@ export default function OpeningStep() {
         body: JSON.stringify({ balances: { lines, autoOffset } }),
       });
       if (!ok) {
+        if (data.error === "opening_set_exists") {
+          setError("سند افتتاحیهٔ رسمی این سال قبلاً تأیید یا ثبت شده است؛ از صفحهٔ «مانده‌های افتتاحیه» حسابداری آن را ببینید.");
+          return;
+        }
         setError(errorMessage(data.error, data.messages, status));
         return;
       }
       setNotice("سند افتتاحیه با موفقیت ثبت شد (بدهکار = بستانکار).");
-      load();
+      await load();
     } finally {
       setBusy(false);
     }
   }
 
   if (!loaded) return <SetupDataSkeleton rows={4} />;
+
+  if (loadError) {
+    return (
+      <StepShell
+        step="opening"
+        description="مانده‌های افتتاحیه اختیاری است؛ اگر از صفر شروع می‌کنید می‌توانید این مرحله را رد کنید."
+        showSkip
+        showNext
+      >
+        <ErrorBox>{loadError}</ErrorBox>
+        <div className="mt-2">
+          <SecondaryButton
+            onClick={() => {
+              setLoaded(false);
+              load().finally(() => setLoaded(true));
+            }}
+          >
+            تلاش دوباره
+          </SecondaryButton>
+        </div>
+      </StepShell>
+    );
+  }
+
+  const accountingReady = stepState !== "accounting_not_enabled" && stepState !== "permission_denied";
+  const chartReady = stepState === "ready";
 
   return (
     <StepShell
@@ -198,11 +372,123 @@ export default function OpeningStep() {
           </Link>{" "}
           وارد کنید.
         </InfoBox>
+      ) : !showInventorySection ? (
+        <InfoBox>
+          این نوع کسب‌وکار موجودی کالای قابل شمارش ندارد؛ شمارش انبار برای آن معنا ندارد و نمایش داده نمی‌شود.
+        </InfoBox>
       ) : null}
 
-      {showInventorySection ? (
+      {/* ۱) chart readiness / recovery */}
+      <section className="mb-6 rounded-xl border border-border p-4">
+        <h2 className="mb-1 font-semibold">سرفصل حساب‌ها و آمادگی دفتر کل</h2>
+        {chartReady ? (
+          <>
+            <p className="text-sm text-muted-foreground">
+              {toPersianDigits(chartAccountCount)} سرفصل ثبت شده است و{" "}
+              {toPersianDigits(leafAccounts.length)} حساب قابل ثبت برای مانده‌های افتتاحیه آماده است.
+            </p>
+            {capabilities.canManageChart ? (
+              <div className="mt-3">
+                <SecondaryButton
+                  onClick={() => {
+                    setGlKind("bank");
+                    setGlSheet(true);
+                  }}
+                >
+                  افزودن حساب تفصیلی
+                </SecondaryButton>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-muted-foreground">{stateMessage || SETUP_OPENING_STATE_MESSAGES[stepState]}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {stepState === "chart_missing" && capabilities.canManageChart ? (
+                <PrimaryButton type="button" onClick={recoverChart} disabled={recovering}>
+                  {recovering ? "در حال ساخت…" : "ساخت سرفصل پیشنهادی صنف"}
+                </PrimaryButton>
+              ) : null}
+              {stepState === "no_eligible_leaf" && capabilities.canManageChart ? (
+                <PrimaryButton
+                  type="button"
+                  onClick={() => {
+                    setGlKind("bank");
+                    setGlSheet(true);
+                  }}
+                >
+                  افزودن حساب تفصیلی
+                </PrimaryButton>
+              ) : null}
+              {!capabilities.canManageChart && stepState !== "accounting_not_enabled" ? (
+                <p className="text-xs text-muted-foreground">
+                  برای ساخت یا اصلاح سرفصل، دسترسی «ویرایش کدینگ حساب‌ها» لازم است.
+                </p>
+              ) : null}
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* ۲) money containers */}
+      {accountingReady && chartReady ? (
+        <section className="mb-6 rounded-xl border border-border p-4">
+          <h2 className="mb-1 font-semibold">حساب‌های مالی کسب‌وکار</h2>
+          <p className="mb-3 text-sm text-muted-foreground">
+            بانک، صندوق، تنخواه و پایانه‌ها همین‌جا ثبت می‌شوند؛ هر حساب یک سرفصل اختصاصی در دفتر کل دارد.
+          </p>
+          {financialUnavailable ? (
+            <InfoBox>
+              فهرست حساب‌های مالی خوانده نشد. با «تلاش دوباره» بالا دوباره بارگذاری کنید؛ ثبت حساب تازه همچنان ممکن است.
+            </InfoBox>
+          ) : null}
+          <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {KIND_ORDER.map((kind) => {
+              const rows = financialAccounts.filter((account) => account.kind === kind);
+              return (
+                <div key={kind} className="rounded-lg border border-border px-3 py-2">
+                  <p className="text-xs text-muted-foreground">{FINANCIAL_ACCOUNT_KIND_META[kind].plural}</p>
+                  <p className="mt-1 text-sm font-semibold text-foreground">
+                    {toPersianDigits(rows.length)} مورد
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {money.formatText(financialTotalsByKind[kind] ?? sumRial(rows), { withUnit: true })}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+          {capabilities.canManageFinancialAccounts ? (
+            <div className="flex flex-wrap gap-2">
+              <SecondaryButton onClick={() => setSheet("bank")}>افزودن حساب بانکی</SecondaryButton>
+              <SecondaryButton onClick={() => setSheet("cash")}>افزودن صندوق</SecondaryButton>
+              <SecondaryButton onClick={() => setSheet("petty_cash")}>افزودن تنخواه</SecondaryButton>
+              <SecondaryButton onClick={() => setSheet("pos_psp")}>افزودن دستگاه کارتخوان</SecondaryButton>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              برای ثبت حساب مالی، دسترسی «مدیریت حساب‌های مالی» لازم است.
+            </p>
+          )}
+          {financialAccounts.length > 0 ? (
+            <ul className="mt-3 space-y-1 text-xs text-muted-foreground">
+              {financialAccounts.map((account) => (
+                <li key={account.id}>
+                  <span className="font-medium text-foreground">{account.name}</span> —{" "}
+                  {FINANCIAL_ACCOUNT_KIND_META[account.kind]?.label ?? account.kind} — سرفصل{" "}
+                  {account.glAccountCode} — {account.glAccountName}
+                  {account.settlementAccountName ? ` — تسویه به ${account.settlementAccountName}` : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
+
+      {/* ۳) opening inventory (F&B) */}
+      {showInventorySection && accountingReady && chartReady ? (
         <section className="mb-8 rounded-xl border border-border p-4">
-          <h2 className="mb-1 font-semibold">۱) شمارش اولیهٔ انبار</h2>
+          <h2 className="mb-1 font-semibold">شمارش اولیهٔ انبار</h2>
           <p className="mb-3 text-sm text-muted-foreground">
             هر قلم با مقدار شمارش‌شده و بهای هر واحد ({money.unitLabel}). با اولین ثبت، روش قیمت‌گذاری قفل می‌شود.
           </p>
@@ -270,18 +556,23 @@ export default function OpeningStep() {
         </section>
       ) : null}
 
+      {/* ۴) opening ledger balances */}
       <section className="rounded-xl border border-border p-4">
-        <h2 className="mb-1 font-semibold">
-          {showInventorySection ? "۲) مانده‌های افتتاحیهٔ دفاتر" : "مانده‌های افتتاحیهٔ دفاتر"}
-        </h2>
+        <h2 className="mb-1 font-semibold">مانده‌های افتتاحیهٔ دفاتر</h2>
         <p className="mb-3 text-sm text-muted-foreground">
-          مانده‌ها به تومان. سند فقط وقتی ثبت می‌شود که بدهکار و بستانکار برابر باشند.
+          مانده‌ها به {money.unitLabel}. سند فقط وقتی ثبت می‌شود که بدهکار و بستانکار برابر باشند.
         </p>
 
-        {openingEntry ? (
+        {!accountingReady ? (
+          <p className="text-sm text-muted-foreground">{stateMessage || SETUP_OPENING_STATE_MESSAGES[stepState]}</p>
+        ) : openingEntry ? (
           <InfoBox>
-            سند افتتاحیه قبلاً ثبت شده است (جمع: {money.format(Number(openingEntry.total))}).
+            سند افتتاحیه قبلاً ثبت شده است (جمع: {money.formatText(openingEntry.total, { withUnit: true })}).
           </InfoBox>
+        ) : !chartReady ? (
+          <p className="text-sm text-muted-foreground">
+            تا سرفصل حساب‌ها آماده نشود، انتخاب حساب ممکن نیست. ابتدا بخش «سرفصل حساب‌ها» را کامل کنید.
+          </p>
         ) : (
           <>
             <div className="space-y-2">
@@ -294,7 +585,10 @@ export default function OpeningStep() {
                     ariaLabel="حساب"
                     options={[
                       { value: "", label: "حساب…" },
-                      ...leafAccounts.map((a) => ({ value: a.id, label: `${a.code} — ${a.name}` })),
+                      ...leafAccounts.map((a) => ({
+                        value: a.id,
+                        label: openingAccountLabel(a, a.financialAccount?.name),
+                      })),
                     ]}
                   />
                   <SearchableSelect
@@ -347,7 +641,7 @@ export default function OpeningStep() {
               اختلاف به‌طور خودکار به حساب «تراز افتتاحیه» (کد ۳۹۰۰) منظور شود
             </label>
 
-            <div className="mt-4 flex gap-2">
+            <div className="mt-4 flex flex-wrap gap-2">
               <SecondaryButton onClick={() => setBalRows((rs) => [...rs, { accountId: "", side: "debit", amount: "" }])}>
                 افزودن سطر
               </SecondaryButton>
@@ -357,7 +651,50 @@ export default function OpeningStep() {
             </div>
           </>
         )}
+
+        {openingSets.length > 0 ? (
+          <div className="mt-4 border-t border-border pt-3">
+            <p className="mb-1 text-xs font-medium text-foreground">مانده‌های افتتاحیهٔ رسمی</p>
+            <ul className="space-y-1 text-xs text-muted-foreground">
+              {openingSets.map((set) => (
+                <li key={set.id}>
+                  سال {toPersianDigits(Number(set.fiscalYearLabel))} — {SET_STATUS_LABELS[set.status] ?? set.status}
+                  {set.source === "carry_forward" ? " (انتقال از سال قبل)" : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </section>
+
+      <FinancialAccountSheet
+        key={sheet ?? "closed"}
+        open={sheet !== null}
+        kind={sheet ?? "bank"}
+        locations={locations}
+        currencies={currencies}
+        baseCurrencyCode={baseCurrencyCode}
+        banks={banks}
+        canManageChart={capabilities.canManageChart}
+        onClose={() => setSheet(null)}
+        onSaved={() => {
+          void load();
+        }}
+        onAddGl={() => {
+          setGlKind(sheet ?? "bank");
+          setSheet(null);
+          setGlSheet(true);
+        }}
+        onAddBank={() => setSheet("bank")}
+      />
+      <GlAccountSheet
+        open={glSheet}
+        kind={glKind}
+        onClose={() => setGlSheet(false)}
+        onSaved={() => {
+          void load();
+        }}
+      />
     </StepShell>
   );
 }
