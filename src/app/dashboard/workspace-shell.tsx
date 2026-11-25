@@ -4,7 +4,10 @@ import { redirect } from "next/navigation";
 import { endedSupportSessionClaims, getSession } from "@/lib/auth";
 import { appForModule } from "@/lib/apps";
 import { effectiveAppAvailability } from "@/lib/app-availability-service";
-import { appServiceActivationStates } from "@/lib/service-activation/app-gate-service";
+import {
+  appServiceActivationStates,
+  isWorkspaceServiceOperational,
+} from "@/lib/service-activation/app-gate-service";
 import { query, withTenant } from "@/lib/db";
 import { effectiveFeatures, featureLockedForPage } from "@/lib/features";
 import type { Industry } from "@/lib/industries";
@@ -36,6 +39,7 @@ import { HeadingFocusManager } from "@/components/navigation/heading-focus";
 import { KitchenDispatchAgentLoader } from "./kitchen/kitchen-dispatch-agent-loader";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { resolveCapability, type CapabilityKey } from "@/lib/capabilities";
+import { resolveWorkspaceAccessDecision } from "@/lib/workspace-access";
 import { deploymentRole } from "@/lib/deployment-role";
 import { getServerSyncConfig } from "@/lib/server-sync";
 import { isHybridSite } from "@/lib/site-routes";
@@ -96,6 +100,7 @@ export async function WorkspaceShell({
           // a capability, this says whether the app it lives in is working.
           effectiveAppAvailability(session.businessId),
           appServiceActivationStates(session.businessId).catch(() => ({})),
+          isWorkspaceServiceOperational(session.businessId, "projects").catch(() => false),
           effectiveFeatures(session.businessId),
           readDeploymentProfile(session.businessId),
           getServerSyncConfig(session.businessId),
@@ -104,7 +109,7 @@ export async function WorkspaceShell({
     ),
   ]);
   if (!member?.isActive) redirect("/login");
-  const [industryResult, prefs, appAvailability, appActivationStates, features, deployment, serverSyncConfig] = tenantReads;
+  const [industryResult, prefs, appAvailability, appActivationStates, workspaceServiceEnabled, features, deployment, serverSyncConfig] = tenantReads;
   const runtimeRole = deploymentRole();
   // Phase 46: a Hybrid desktop shows the full menu; cloud screens open in its
   // content area (DeploymentCapabilityGate → CloudPane).
@@ -129,14 +134,28 @@ export async function WorkspaceShell({
   const currencyDisplay = prefs?.currencyDisplay === "rial" ? "rial" : "toman";
   const permissions = member.permissions;
   const settingsTabs = visibleSettingsTabs(permissions, { role: member.role, features, industry });
+  // Issue #1110 — one decision for the whole area: industry applicability,
+  // Workspace service activation, this deployment's capability and the
+  // member's current permission. `workspaceSections` is empty and the rail row
+  // is omitted when it is false; the pages and APIs re-check on every request.
+  const workspaceAccess = resolveWorkspaceAccessDecision({
+    industry,
+    deploymentProfile: deployment.profile,
+    runtimeRole,
+    serviceEnabled: workspaceServiceEnabled,
+    permissions,
+  });
+  const workspaceAvailable = workspaceAccess.available;
   // My Workspace is shared platform functionality, but its contextual
   // navigation must still be permission-honest. Pass only serializable route
   // data to the client sidebar; the client imports the matching icon registry.
-  const workspaceSections = visibleWorkspaceSections(permissions).map(({ key, label, description }) => ({
-    key,
-    label,
-    description,
-  }));
+  const workspaceSections = workspaceAvailable
+    ? visibleWorkspaceSections(permissions).map(({ key, label, description }) => ({
+        key,
+        label,
+        description,
+      }))
+    : [];
   const profile = industryProfile(industry);
   const navItems = accessibleNavItemsFor(
     industry,
@@ -176,6 +195,9 @@ export async function WorkspaceShell({
   // readable through the assistant's management panel.
   const taskFeatures = resolveTenantTaskFeatures(features, {
     industry,
+    // Issue #1110 — the assistant's task/focus catalogue is capability-aware:
+    // no Workspace focus, task or starter prompt when the area is unavailable.
+    workspaceAvailable,
     usableApps: {
       accounting: isAppUsable(appAvailability, "accounting"),
       crm: isAppUsable(appAvailability, "crm"),
@@ -198,6 +220,7 @@ export async function WorkspaceShell({
     }) : [],
     accessibleFocuses,
     industry,
+    workspaceAvailable,
   };
 
   return (
@@ -269,6 +292,7 @@ export async function WorkspaceShell({
           brandSubtitle={profile.brandSubtitle}
           industry={industry}
           workspaceSections={workspaceSections}
+          workspaceAvailable={workspaceAvailable}
           deploymentProfile={deployment.profile}
           notificationBranch={session.locationId ?? null}
           siteInbox={runtimeRole === "site"}

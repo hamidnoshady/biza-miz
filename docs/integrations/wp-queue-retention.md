@@ -7,6 +7,7 @@ The numbers were agreed with the owner on 2026-10-25 and are constants in
 | Table | Status | Kept |
 |---|---|---|
 | `integration_outbox_events` | `sent`, `skipped` | 90 days since `updated_at` |
+| `integration_outbox_events` | `sent` + `post_body_read` | 1 hour since `sent_at` (one-shot editor answers) |
 | `integration_outbox_events` | `dead` | 180 days since `updated_at` |
 | `integration_webhook_events` | `processed`, `duplicate` | 90 days since `processed_at` (else `created_at`) |
 | `integration_webhook_events` | `failed` | 180 days |
@@ -25,6 +26,7 @@ The numbers were agreed with the owner on 2026-10-25 and are constants in
 - **Where it runs.** `runQueueRetentionTick()` in `server.ts` (central only, every
   6 hours), batched 1000 rows per statement with a per-sweep cap. Migration 0256
   adds the two partial indexes it scans.
-- **Plugin side.** The plugin's own on-site table already prunes `sent` rows after
-  30 days (`POS_Connector_Queue::prune`), so no plugin change or release is needed.
+- **Plugin side.** The plugin's own on-site table clears the body of every delivered row
+  (including the pre-upgrade backlog), deletes `sent` rows after 30 days, and deletes
+  non-financial `failed` rows after 180 days; order and refund failures are never deleted.
 - **UI.** The queue page states the retention under the connection picker.

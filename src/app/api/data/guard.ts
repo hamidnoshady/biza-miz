@@ -30,6 +30,7 @@ import { NextResponse } from "next/server";
 import { requirePermission, type SessionPayload } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 import { findEntity } from "@/lib/data-transfer/registry";
 import { ExportError } from "@/lib/data-transfer/export-service";
 import { ImportError } from "@/lib/data-transfer/import-service";
@@ -111,6 +112,24 @@ export async function entityAccess(
       error: NextResponse.json({ error: "forbidden", requires: required }, { status: 403 }),
     };
   }
+
+  // Issue #1110 — the Workspace entities (projects, tasks, contracts,
+  // documents, BOQ) are not readable/writable through data transfer for a
+  // business type that does not have My Workspace. The rows themselves stay in
+  // storage.
+  if (entity.module === "workspace") {
+    const workspace = await workspaceAccessFor(owner.session.businessId, access.permissions);
+    if (!workspace.available) {
+      return {
+        entity: null,
+        error: NextResponse.json(
+          { error: "workspace_not_available", reason: workspace.reason },
+          { status: 403 },
+        ),
+      };
+    }
+  }
+
   return { entity, error: null };
 }
 
@@ -152,6 +171,10 @@ const ERROR_STATUS: Record<string, number> = {
   export_requires_regeneration: 403,
   service_disabled: 403,
   service_activation_check_unavailable: 503,
+  // Issue #1110 — My Workspace data entities are not importable for a business
+  // type that does not have the feature.
+  workspace_not_available: 403,
+  workspace_access_check_unavailable: 503,
 };
 
 /** Maps a thrown engine error onto a response; rethrows anything else. */

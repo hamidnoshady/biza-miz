@@ -56,7 +56,7 @@ interface ProjectOption {
   name: string;
 }
 
-export function AiMemoryPanel() {
+export function AiMemoryPanel({ workspaceAvailable = true }: { workspaceAvailable?: boolean }) {
   const [scope, setScope] = useState<MemoryScope>("tenant");
   const [appKey, setAppKey] = useState(APP_OPTIONS[0].key);
   const [projectId, setProjectId] = useState("");
@@ -90,6 +90,7 @@ export function AiMemoryPanel() {
   }, [load]);
 
   useEffect(() => {
+    if (!workspaceAvailable) return;
     void api<{ projects: ProjectOption[] }>("/api/ai/projects").then(({ ok, data }) => {
       if (ok) {
         setProjects(data.projects ?? []);
@@ -98,7 +99,7 @@ export function AiMemoryPanel() {
     });
     // `projectId` is read only to avoid clobbering a member's own choice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [workspaceAvailable]);
 
   async function create() {
     if (!draft.trim()) {
@@ -150,11 +151,14 @@ export function AiMemoryPanel() {
       <InfoBox>
         آنچه اینجا ثبت کنید، در همهٔ گفت‌وگوهای بعدی دستیار به‌کار می‌رود: قواعد مالی کسب‌وکار، ترجیح‌های
         گزارش و نکاتی که همیشه باید رعایت شود. این بخش جای گذاشتن اسناد یا فایل نیست — فایل‌ها و مستندات را
-        در بخش «اسناد» در میز کار من یا «کتابخانهٔ رسانه» نگه دارید.
+        {workspaceAvailable ? " در بخش «اسناد» در میز کار من یا «کتابخانهٔ رسانه» نگه دارید." : " در «کتابخانهٔ رسانه» نگه دارید."}
       </InfoBox>
 
       <div className="flex flex-wrap gap-2">
-        {(["tenant", "app", "project"] as MemoryScope[]).map((key) => (
+        {(workspaceAvailable
+          ? (["tenant", "app", "project"] as MemoryScope[])
+          : (["tenant", "app"] as MemoryScope[])
+        ).map((key) => (
           <Button
             key={key}
             type="button"

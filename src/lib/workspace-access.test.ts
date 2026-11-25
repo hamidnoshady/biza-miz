@@ -1,0 +1,141 @@
+import { describe, expect, it } from "vitest";
+import { CAPABILITY_REGISTRY } from "@/lib/capabilities";
+import { PERMISSIONS } from "@/lib/permissions";
+import { SERVICE_STATES, SERVICE_STATE_META } from "@/lib/service-activation/catalog";
+import {
+  WORKSPACE_CUSTOMER_DISABLED_STATES,
+  resolveWorkspaceAccessDecision,
+} from "@/lib/workspace-access";
+
+const VIEW = [PERMISSIONS.workspaceView] as const;
+
+function decide(overrides: Partial<Parameters<typeof resolveWorkspaceAccessDecision>[0]> = {}) {
+  return resolveWorkspaceAccessDecision({
+    industry: "architecture_construction",
+    deploymentProfile: "cloud",
+    serviceEnabled: true,
+    permissions: VIEW,
+    ...overrides,
+  });
+}
+
+/**
+ * Issue #1110 — industry, service activation, deployment and permission are
+ * intersected, never substituted. Every axis alone must be able to deny.
+ */
+describe("workspace access decision", () => {
+  it("is available for an eligible, active, deployed, authorized business", () => {
+    expect(decide()).toMatchObject({
+      available: true,
+      eligible: true,
+      serviceEnabled: true,
+      deploymentSupported: true,
+      permitted: true,
+      reason: null,
+    });
+  });
+
+  it("denies a retail business even when the member holds workspace.view", () => {
+    expect(
+      decide({ industry: "food_service" }),
+    ).toMatchObject({
+      available: false,
+      eligible: false,
+      reason: "BUSINESS_TYPE_UNSUPPORTED",
+    });
+    expect(decide({ industry: "jewelry" }).available).toBe(false);
+    expect(decide({ industry: "automotive" }).available).toBe(false);
+  });
+
+  it("denies an unknown industry (fail closed)", () => {
+    for (const industry of [null, undefined, "unknown_trade"]) {
+      expect(decide({ industry: industry as never })).toMatchObject({
+        available: false,
+        reason: "BUSINESS_TYPE_UNSUPPORTED",
+      });
+    }
+  });
+
+  it("hides an eligible business whose Workspace service is inactive", () => {
+    expect(decide({ serviceEnabled: false })).toMatchObject({
+      available: false,
+      eligible: true,
+      serviceEnabled: false,
+      reason: "WORKSPACE_SERVICE_DISABLED",
+    });
+  });
+
+  it("hides an eligible business on a deployment that cannot run it", () => {
+    expect(decide({ deploymentProfile: "local" })).toMatchObject({
+      available: false,
+      eligible: true,
+      deploymentSupported: false,
+      reason: "DEPLOYMENT_UNSUPPORTED",
+    });
+  });
+
+  it("hides an eligible business from a member without workspace.view", () => {
+    expect(decide({ permissions: [] })).toMatchObject({
+      available: false,
+      eligible: true,
+      permitted: false,
+      reason: "INSUFFICIENT_PERMISSION",
+    });
+    expect(
+      decide({ permissions: [PERMISSIONS.ledgerView] }).available,
+    ).toBe(false);
+  });
+
+  it("reports the most fundamental blocking reason first", () => {
+    expect(
+      decide({
+        industry: "food_service",
+        serviceEnabled: false,
+        deploymentProfile: "local",
+        permissions: [],
+      }).reason,
+    ).toBe("BUSINESS_TYPE_UNSUPPORTED");
+    expect(
+      decide({ serviceEnabled: false, deploymentProfile: "local", permissions: [] })
+        .reason,
+    ).toBe("WORKSPACE_SERVICE_DISABLED");
+    expect(decide({ deploymentProfile: "local", permissions: [] }).reason).toBe(
+      "DEPLOYMENT_UNSUPPORTED",
+    );
+  });
+
+  it("treats the deployment profiles exactly as `app.workspace` declares them", () => {
+    expect([...CAPABILITY_REGISTRY["app.workspace"].profiles].sort()).toEqual([
+      "cloud",
+      "hybrid",
+    ]);
+    for (const profile of ["cloud", "hybrid"] as const) {
+      expect(decide({ deploymentProfile: profile }).deploymentSupported, profile).toBe(true);
+    }
+    expect(decide({ deploymentProfile: "local" }).deploymentSupported).toBe(false);
+  });
+
+  it("does not grant a cloud capability to a Hybrid site runtime", () => {
+    expect(
+      decide({ deploymentProfile: "hybrid", runtimeRole: "site" }),
+    ).toMatchObject({
+      available: false,
+      deploymentSupported: false,
+      reason: "DEPLOYMENT_UNSUPPORTED",
+    });
+    expect(
+      decide({ deploymentProfile: "hybrid", runtimeRole: "central" }).available,
+    ).toBe(true);
+  });
+
+  it("pins the local customer-disabled state set to the #1041 catalogue", () => {
+    const fromCatalogue = SERVICE_STATES.filter(
+      (state) => SERVICE_STATE_META[state].customerDisabled,
+    ).sort();
+    expect([...WORKSPACE_CUSTOMER_DISABLED_STATES].sort()).toEqual(fromCatalogue);
+  });
+
+  it("accepts a Set as well as a readonly array of permissions", () => {
+    expect(decide({ permissions: new Set(VIEW) }).permitted).toBe(true);
+  });
+});

@@ -48,6 +48,7 @@ import {
 import { findMcpWriteStatus, performMcpWrite } from "./write-service";
 import { mcpWriteRegistryEntry } from "./registry";
 import { appServiceActivationState, appServiceCommercialRestriction } from "../service-activation/app-gate-service";
+import { workspaceAccessFor } from "../workspace-access";
 import { SERVICE_UNPAID_ERROR, serviceGateDecision } from "../service-activation/app-gate";
 
 async function resolveTenantIndustry(businessId: string): Promise<Industry> {
@@ -254,9 +255,13 @@ async function callTool(
   }
 
   const industry = await resolveTenantIndustry(auth.businessId);
+  const workspaceAvailable = (
+    await workspaceAccessFor(auth.businessId, auth.permissions)
+  ).available;
   const tool = findMcpTool(name, auth.scopes, auth.permissions, auth.grants, {
     industry,
     writeMode: auth.writeMode,
+    workspaceAvailable,
   });
   if (!tool) {
     // "You may not" and "no such thing" are different answers and a model
@@ -499,11 +504,14 @@ export async function dispatchMcpMessage(
 
     case "tools/list": {
       const industry = await resolveTenantIndustry(auth.businessId);
+      const workspaceAvailable = (
+        await workspaceAccessFor(auth.businessId, auth.permissions)
+      ).available;
       const allTools = mcpToolCatalogue(
         auth.scopes,
         auth.permissions,
         auth.grants,
-        { industry, writeMode: auth.writeMode },
+        { industry, writeMode: auth.writeMode, workspaceAvailable },
       ).map((tool) => tool.descriptor);
       const page = paginateMcpTools(allTools, params.cursor);
       if (!page.ok) {

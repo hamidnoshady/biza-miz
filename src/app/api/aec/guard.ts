@@ -15,6 +15,10 @@ import { AecError } from "@/lib/aec-service";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import type { WorkspaceOwner } from "@/lib/workspace";
 import { handleWorkspaceError } from "../workspace/guard";
+import {
+  WORKSPACE_UNAVAILABLE_ERROR,
+  workspaceAccessFor,
+} from "@/lib/workspace-access";
 
 export { PERMISSIONS };
 
@@ -22,8 +26,26 @@ export { PERMISSIONS };
 export async function aecOwner(
   permission: Permission,
 ): Promise<{ owner: WorkspaceOwner; error: null } | { owner: null; error: NextResponse }> {
-  const { session, error } = await requirePermission(permission);
+  const { session, membership, error } = await requirePermission(permission);
   if (error) return { owner: null, error };
+  // Issue #1110 — the AEC registers are My Workspace records. The same
+  // industry/service/deployment/permission decision refuses them for a
+  // business whose Workspace is not available, without relying on the page or
+  // the navigation having hidden the link.
+  const access = await workspaceAccessFor(session.businessId, membership.permissions);
+  if (!access.available) {
+    return {
+      owner: null,
+      error: NextResponse.json(
+        {
+          error: WORKSPACE_UNAVAILABLE_ERROR,
+          reason: access.reason,
+          serviceKind: "workspace",
+        },
+        { status: 403 },
+      ),
+    };
+  }
   return {
     owner: {
       businessId: session.businessId,

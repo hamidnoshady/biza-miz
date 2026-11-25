@@ -31,6 +31,7 @@ import {
   type OpenAiTool,
 } from "../ai";
 import { aiActionPermission, canUseAiTool } from "../ai-capabilities";
+import { isWorkspaceAiActionEndpoint, isWorkspaceScopedReadTool } from "../ai-action-service";
 import type { Industry } from "../industries";
 import type { Permission } from "../permissions";
 import {
@@ -5443,6 +5444,13 @@ export interface McpCatalogueOptions {
   enabledModules?: ReadonlySet<McpModuleKey>;
   /** Connection's write mode (`approve` vs `apply`) for accurate write descriptions/annotations. */
   writeMode?: McpWriteMode;
+  /**
+   * Issue #1110 — false when this business/member has no My Workspace. Removes
+   * the Workspace and AEC reads and the Workspace write actions from
+   * `tools/list`; `tools/call` re-checks through the same catalogue and the
+   * executor re-checks again.
+   */
+  workspaceAvailable?: boolean;
 }
 
 function resolveEnabledModules(
@@ -5493,6 +5501,19 @@ export function mcpToolCatalogue(
   return all.filter((tool) => {
     if (!scopes.includes(tool.scope)) return false;
     if (tool.binding.kind === "status") return true; // gated by mcpNativeTools itself
+    // Issue #1110 — no Workspace surface for an ineligible/inactive tenant.
+    if (options?.workspaceAvailable === false) {
+      if (
+        tool.binding.kind === "read" &&
+        isWorkspaceScopedReadTool(tool.binding.readToolName)
+      ) {
+        return false;
+      }
+      if (tool.binding.kind === "write") {
+        const meta = ACTION_CATALOG[tool.binding.actionType];
+        if (meta && isWorkspaceAiActionEndpoint(meta.endpoint)) return false;
+      }
+    }
     if (tool.binding.kind === "read") {
       const entry = mcpReadRegistryEntry(tool.binding.readToolName);
       if (!entry || !mcpCanReadApp(grants, entry.app)) return false;

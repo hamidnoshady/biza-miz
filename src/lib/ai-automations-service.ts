@@ -556,7 +556,7 @@ async function executeAutomationRun(input: {
     const serviceGate = await aiActionServiceGate(businessId, automation.actionType);
     if (!serviceGate.allowed) {
       const summary =
-        serviceGate.error === "service_disabled"
+        serviceGate.error === "service_disabled" || serviceGate.error === "workspace_not_available"
           ? `«${automation.name}»: سرویس مقصد غیرفعال است؛ اقدام برای تأیید دستی نگه داشته شد.`
           : `«${automation.name}»: بررسی سرویس مقصد در دسترس نیست؛ اقدام برای تلاش دوباره نگه داشته شد.`;
       await query(

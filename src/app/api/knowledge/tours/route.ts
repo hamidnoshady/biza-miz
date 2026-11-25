@@ -4,6 +4,7 @@ import { knowledgePage } from "@/lib/knowledge-base";
 import { publishedToursForPage } from "@/lib/tour-studio-service";
 import { tourForViewer, tourSummary } from "@/lib/tours";
 import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 
 /**
  * The tours a member may start from the «آموزش» button of one page (issue
@@ -26,6 +27,13 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
   const page = knowledgePage((request.nextUrl.searchParams.get("page") ?? "").trim());
   if (!page) return NextResponse.json({ error: "unknown_page" }, { status: 400 });
+  // Issue #1110 — no Workspace tour for an unavailable Workspace.
+  if (
+    page.route.startsWith("/workspace") &&
+    !(await workspaceAccessFor(guard.session.businessId, guard.membership.permissions)).available
+  ) {
+    return NextResponse.json({ tours: [] });
+  }
 
   const published = await publishedToursForPage(page.key).catch(() => []);
   const viewer = await tourViewerFor(guard.session.businessId, guard.membership.permissions, published);
