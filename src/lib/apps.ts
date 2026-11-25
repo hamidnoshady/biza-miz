@@ -7,7 +7,9 @@
  * The assistant, settings and connections are shared platform
  * utilities; they do not have their own app availability state. (No
  * `workspace` entry either: the rail around these four apps is the product's
- * one shell, not a gated app of its own.)
+ * one shell, not a gated app of its own. My Workspace is a conditional work
+ * area whose business-type eligibility lives in `workspace-eligibility.ts` —
+ * never a fifth app key.)
  */
 import { MODULE_KEYS, type ModuleKey } from "./industry-profile";
 import type { CapabilityKey, ExecutionTarget } from "./capabilities";

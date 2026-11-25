@@ -43,6 +43,7 @@
 import { createHash } from "crypto";
 import { query } from "../db";
 import { ACTION_CATALOG, type ActionType, type AutopilotExecutorKey, type ProposedAction } from "../ai";
+import { aiActionServiceGate } from "../ai-service-activation";
 import { aiActionPermission } from "../ai-capabilities";
 import { AUTOPILOT_EXECUTORS, executorTargetLocation } from "../ai-autopilot-executors";
 import { verifyUnattendedAuthority } from "../ai-unattended-authority";
@@ -432,6 +433,24 @@ export async function performMcpWrite(input: {
   }
 
   const meta = ACTION_CATALOG[input.actionType];
+
+  // Issue #1110 — an MCP write into My Workspace revalidates the same
+  // availability decision at execution time. A connection granted before the
+  // business became ineligible cannot create or modify project records.
+  const serviceGate = await aiActionServiceGate(input.auth.businessId, input.actionType);
+  if (!serviceGate.allowed) {
+    return {
+      status: "failed",
+      auditId: "",
+      actionType: input.actionType,
+      error: serviceGate.error,
+      message:
+        serviceGate.error === "workspace_not_available"
+          ? "«میز کار من» برای این کسب‌وکار در دسترس نیست؛ تغییری ثبت نشد."
+          : "سرویس مقصد در دسترس نیست؛ تغییری ثبت نشد.",
+    };
+  }
+
   const proposal: ProposedAction = {
     type: input.actionType,
     title: meta.label,

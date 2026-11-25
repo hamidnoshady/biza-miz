@@ -487,6 +487,16 @@ jobs:
           # reason as the moves above: restoring working headroom for real API
           # surface, not relaxing the gate — a leak still shows up as tens of
           # MiB and still trips it.
+          # 2026-11-25 — #1110's My Workspace business-type eligibility added one
+          # server decision module plus guards on `/workspace`, `/api/workspace`,
+          # `/api/aec`, `/api/ai/projects`, `/api/data` and the knowledge routes.
+          # The desktop-shell run measured 328,010,365 B = 312.815 MiB (run
+          # 45524159217) against the 309.912 MiB main base. node_modules is
+          # unchanged at 50.56 MiB and the client-reference manifests are
+          # byte-identical, so the growth is server route/guard bundles, not a
+          # leak, cache or source-map. Budget moves 312 -> 316 MiB on owner
+          # instruction for this PR with ~3.1 MiB headroom, the same reviewed
+          # reason as the moves above.
           if ($bytes -gt 316MB) { throw "Staged runtime $mib MiB exceeds 316 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the

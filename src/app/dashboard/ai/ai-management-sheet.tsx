@@ -69,13 +69,15 @@ const ICONS: Record<AiPanelIconName, LucideIcon> = {
 function AiPanelBody({
   section,
   canAutoApply,
+  workspaceAvailable,
 }: {
   section: AiPanelSectionKey;
   canAutoApply: boolean;
+  workspaceAvailable: boolean;
 }) {
   switch (section) {
     case "memory":
-      return <AiMemoryPanel />;
+      return <AiMemoryPanel workspaceAvailable={workspaceAvailable} />;
     case "coworkers":
       // Only an owner may hand a job the authority to act unattended — the
       // server-side `owner_required` checks mirror this prop.
@@ -96,6 +98,7 @@ export function AiManagementSheet({
   section,
   canAutoApply,
   allowedSections,
+  workspaceAvailable = true,
   onSectionChange,
   onClose,
 }: {
@@ -105,6 +108,8 @@ export function AiManagementSheet({
   canAutoApply: boolean;
   /** Per-section permission filter; defaults to all sections when omitted. */
   allowedSections?: readonly AiPanelSectionKey[];
+  /** Issue #1110 — hide Workspace-scoped memory suggestions when it is absent. */
+  workspaceAvailable?: boolean;
   onSectionChange: (key: AiPanelSectionKey) => void;
   onClose: () => void;
 }) {
@@ -169,6 +174,7 @@ export function AiManagementSheet({
             <AiPanelBody
               section={active.key}
               canAutoApply={canAutoApply}
+              workspaceAvailable={workspaceAvailable}
             />
           </div>
         </div>

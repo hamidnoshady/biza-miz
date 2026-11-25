@@ -8,6 +8,7 @@ import {
   type PromptContext,
 } from "@/lib/ai";
 import { getBusinessIndustry } from "@/lib/industry-guard";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 import { APP_KEYS, type AppKey } from "@/lib/apps";
 import { eligibleAgentCards, type EligibleAgentCard } from "@/lib/ai-system-agents";
 import {
@@ -383,9 +384,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const { rows } = await query<{ name: string }>("SELECT name FROM businesses WHERE id = $1", [
     session.businessId,
   ]);
+  // Issue #1110 — resolved once from trusted server context. `false` for
+  // non-dashboard turns, whose prompt has no Workspace inventory anyway.
+  const workspaceAiAvailable =
+    mode === "dashboard"
+      ? (await workspaceAccessFor(session.businessId, effectivePermissions)).available
+      : false;
   const promptContext: PromptContext = {
     mode,
     businessName: rows[0]?.name ?? null,
+    // Issue #1110 — the assistant must not mention, advertise or expose
+    // My Workspace for a business that does not have it. One trusted decision
+    // (industry + activation + deployment + effective permission) removes the
+    // Workspace prompt inventory and tools.
+    workspaceAiAvailable,
     // Issue #812 §15 — the tenant's own display unit. Storage stays integer
     // Rial; only the unit the business chose is spoken and written, so a
     // «ریال» business is never told «تومان».
@@ -425,6 +437,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       ? body.projectId.trim()
       : null;
   if (requestedProjectId && (mode === "dashboard" || mode === "wizard")) {
+    if (!workspaceAiAvailable) {
+      return NextResponse.json(
+        { error: "workspace_not_available", message: "«میز کار من» برای این کسب‌وکار در دسترس نیست." },
+        { status: 403 },
+      );
+    }
     const project = await getProject({
       businessId: session.businessId,
       actorUserId: session.sub,
@@ -469,7 +487,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // offered and their resolved id is injected into any proposal payload — the
   // model never names a project id (Phase F pt.2).
   let activeProjectId: string | null = null;
-  if (conversationId && (mode === "dashboard" || mode === "wizard")) {
+  if (workspaceAiAvailable && conversationId && (mode === "dashboard" || mode === "wizard")) {
     try {
       const projectId = await getConversationProjectId(session.businessId, conversationId);
       if (projectId) {

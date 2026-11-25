@@ -138,6 +138,8 @@ import {
   type SegmentPurpose,
 } from "./segments";
 import { getBusinessIndustry } from "./industry-guard";
+import { workspaceAccessFor } from "./workspace-access";
+import { WORKSPACE_KNOWLEDGE_SECTION_KEYS } from "./workspace-eligibility";
 import { runAccountingReview } from "./accounting-review-service";
 import { summarizeFindings } from "./accounting-review";
 import { countPendingCoworkerRuns, listCoworkerJobs } from "./ai-coworker-service";
@@ -164,6 +166,21 @@ import { normalizeOptionalIsoDate } from "./iso-date";
 export interface ToolResult {
   ok: boolean;
   data: unknown;
+}
+
+/**
+ * Knowledge article section keys that describe My Workspace — shared with the
+ * learning-centre routes, so both surfaces hide the same guides.
+ */
+async function workspaceUnavailableFor(
+  businessId: string,
+  permissions: ReadonlySet<Permission> | undefined,
+): Promise<boolean> {
+  try {
+    return !(await workspaceAccessFor(businessId, permissions ?? new Set())).available;
+  } catch {
+    return true;
+  }
 }
 
 /** The business's primary (oldest active) location — the same shape businessTimezone uses for a per-tenant default. */
@@ -1631,6 +1648,19 @@ export async function runReadTool(
     if (!actorUserId) {
       return { ok: false, data: { error: "این ابزار به کاربر وارد‌شده نیاز دارد." } };
     }
+    // Issue #1110 — every AEC read rechecks the same Workspace availability at
+    // execution time. Tool-list filtering is never the authorization.
+    const access = await workspaceAccessFor(businessId, permissions ?? new Set());
+    if (!access.available) {
+      return {
+        ok: false,
+        data: {
+          error: "workspace_not_available",
+          reason: access.reason,
+          message: "«میز کار من» برای این کسب‌وکار در دسترس نیست.",
+        },
+      };
+    }
     const industry = await getBusinessIndustry(businessId);
     const result = await runAecReadTool(
       name,
@@ -1648,6 +1678,20 @@ export async function runReadTool(
   if (isWorkspaceToolName(name)) {
     if (!actorUserId) {
       return { ok: false, data: { error: "این ابزار به کاربر وارد‌شده نیاز دارد." } };
+    }
+    // Issue #1110 — execution-time revalidation: an ineligible/inactive/
+    // unauthorized tenant cannot read project data through the assistant even if
+    // an old conversation or a hand-crafted prompt names the tool.
+    const access = await workspaceAccessFor(businessId, permissions ?? new Set());
+    if (!access.available) {
+      return {
+        ok: false,
+        data: {
+          error: "workspace_not_available",
+          reason: access.reason,
+          message: "«میز کار من» برای این کسب‌وکار در دسترس نیست.",
+        },
+      };
     }
     const result = await runWorkspaceReadTool(name, args, {
       businessId,
@@ -1778,11 +1822,14 @@ export async function runReadTool(
       // button), which is the only thing that starts a tour.
       if (!actorUserId) return { ok: false, data: { error: "no_authenticated_actor" } };
       const route = typeof args.route === "string" ? args.route.trim().slice(0, 200) : "";
+      // Issue #1110 — no Workspace tour or path when the feature is unavailable.
+      const excludeWorkspace = await workspaceUnavailableFor(businessId, permissions);
       const recommendations = await learningRecommendationsFor({
         businessId,
         userId: actorUserId,
         permissions: permissions ?? new Set(),
         route: route || null,
+        excludeWorkspace,
       });
       return {
         ok: true,
@@ -2350,13 +2397,31 @@ export async function runReadTool(
       return { ok: true, data: { media: result.data.media, totalDocs: result.data.totalDocs, page } };
     }
     case "list_kb_catalogue": {
-      return { ok: true, data: await listKbCatalogue() };
+      const catalogue = await listKbCatalogue();
+      if (!(await workspaceUnavailableFor(businessId, permissions))) return { ok: true, data: catalogue };
+      // Issue #1110 — no Workspace guides in the assistant's knowledge
+      // catalogue for a business that does not have the feature.
+      const hidden = new Set<string>(WORKSPACE_KNOWLEDGE_SECTION_KEYS);
+      return {
+        ok: true,
+        data: {
+          ...catalogue,
+          articles: catalogue.articles.filter(
+            (article) => !article.sectionKeys.some((key) => hidden.has(key)),
+          ),
+        },
+      };
     }
     case "search_kb_articles": {
       const q = String(args.q ?? "").trim();
       if (!q) return { ok: false, data: { error: "invalid_arguments" } };
       const limit = typeof args.limit === "number" ? Math.min(Math.max(args.limit, 1), 20) : 6;
-      const hits = await searchKbArticles(q, limit);
+      const unavailable = await workspaceUnavailableFor(businessId, permissions);
+      const hits = await searchKbArticles(
+        q,
+        limit,
+        unavailable ? { excludeSections: WORKSPACE_KNOWLEDGE_SECTION_KEYS } : undefined,
+      );
       return { ok: true, data: { count: hits.length, hits } };
     }
     case "list_media_assets": {

@@ -402,11 +402,26 @@ export async function getKbArticleBySlug(slug: string): Promise<KbArticleDetail 
  * `rawQuery` is clamped to `KB_SEARCH_MAX_LENGTH`; the route rejects longer
  * input with a 400, and this clamp keeps direct service callers safe too.
  */
-export async function searchKbArticles(rawQuery: string, limit = 20): Promise<KbSearchHit[]> {
+export async function searchKbArticles(
+  rawQuery: string,
+  limit = 20,
+  options?: {
+    /**
+     * Issue #1110 — sections whose guides must not surface (for example My
+     * Workspace for an ineligible business). Applies to the article's stored
+     * `section_keys`, so a query can never retrieve a guide for a feature the
+     * business does not have.
+     */
+    excludeSections?: readonly string[];
+  },
+): Promise<KbSearchHit[]> {
   const q = normalizeKbSearchText(rawQuery).slice(0, KB_SEARCH_MAX_LENGTH);
   if (!q) return [];
   const like = `%${escapeLike(q)}%`;
   const cappedLimit = Math.min(Math.max(Math.trunc(limit) || 1, 1), 50);
+  const excluded = (options?.excludeSections ?? []).filter((key) => key.trim().length > 0);
+  const exclusion = excluded.length > 0 ? "AND NOT (a.section_keys && $4::text[])" : "";
+  const params: unknown[] = excluded.length > 0 ? [q, cappedLimit, like, excluded] : [q, cappedLimit, like];
   const { rows } = await query<
     ArticleRow & { category_title: string | null; tag_slugs: string[] | null; rank: number }
   >(
@@ -431,6 +446,7 @@ export async function searchKbArticles(rawQuery: string, limit = 20): Promise<Kb
        CROSS JOIN terms
       WHERE a.status = 'published'
         AND ${ARTICLE_IN_VISIBLE_CATEGORY}
+        ${exclusion}
         AND (a.search_tsv @@ terms.tq
              OR kb_normalize_search(a.title) LIKE $3 ESCAPE '\\'
              OR kb_normalize_search(a.summary) LIKE $3 ESCAPE '\\'
@@ -438,7 +454,7 @@ export async function searchKbArticles(rawQuery: string, limit = 20): Promise<Kb
              OR a.slug ILIKE $3 ESCAPE '\\')
       ORDER BY rank DESC, a.updated_at DESC
       LIMIT $2`,
-    [q, cappedLimit, like],
+    params,
   );
 
   return rows.map((row) => {

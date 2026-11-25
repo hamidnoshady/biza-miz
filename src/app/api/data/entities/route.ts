@@ -4,6 +4,7 @@ import { memberAccessFor } from "@/lib/member-access";
 import { defaultExportFields, entitiesForIndustry, isImportable } from "@/lib/data-transfer/registry";
 import { DATA_MODULE_LABELS } from "@/lib/data-transfer/types";
 import { getBusinessIndustry } from "@/lib/industry-guard";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 import { dataOwner, handleDataError, PERMISSIONS } from "../guard";
 
 /**
@@ -31,7 +32,14 @@ export const GET = withTenantScope(async () => {
     // rows belong to construction and to no other trade); the member's
     // permissions then decide which of those they may move.
     const industry = await getBusinessIndustry(owner.session.businessId);
+    const workspaceAvailable = (await workspaceAccessFor(
+      owner.session.businessId,
+      granted,
+    )).available;
     const entities = entitiesForIndustry(industry)
+      // Issue #1110 — no Workspace entity in the catalogue of a business that
+      // does not have the feature.
+      .filter((entity) => workspaceAvailable || entity.module !== "workspace")
       .filter((entity) => granted.has(entity.exportPermission))
       .map((entity) => ({
         key: entity.key,

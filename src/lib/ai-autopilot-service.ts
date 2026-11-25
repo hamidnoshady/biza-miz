@@ -534,7 +534,7 @@ export async function applyOrDeferProposal(input: {
   const serviceGate = await aiActionServiceGate(businessId, proposal.type);
   if (!serviceGate.allowed) {
     const reasonFa =
-      serviceGate.error === "service_disabled"
+      serviceGate.error === "service_disabled" || serviceGate.error === "workspace_not_available"
         ? "سرویس مقصد غیرفعال است؛ پیشنهاد تا فعال‌شدن دوبارهٔ سرویس اجرا نمی‌شود."
         : "بررسی وضعیت سرویس ممکن نشد؛ پیشنهاد برای تلاش دوباره نگه داشته شد.";
     await query(

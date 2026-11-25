@@ -281,7 +281,14 @@ export function ReviewPanel({ canManage }: { canManage: boolean }) {
     if (lookups) return;
     const res = await api<Record<string, unknown>>("/api/workspace/lookups");
     if (!res.ok) {
-      setError(errorMessage((res.data as { error?: string })?.error));
+      const code = (res.data as { error?: string })?.error;
+      // Issue #1110 — a business without My Workspace still uses the media
+      // library's review rounds; it simply has no project/client pickers.
+      if (code === "workspace_not_available") {
+        setLookups({ projects: [], parties: [] });
+        return;
+      }
+      setError(errorMessage(code));
       return;
     }
     const projects = Array.isArray(res.data.projects) ? (res.data.projects as { id: string; name: string }[]) : [];

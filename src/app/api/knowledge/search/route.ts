@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { KB_SEARCH_MAX_LENGTH } from "@/lib/knowledge";
 import { searchKbArticles } from "@/lib/knowledge-service";
+import { workspaceAccessFor } from "@/lib/workspace-access";
+import { WORKSPACE_KNOWLEDGE_SECTION_KEYS } from "@/lib/workspace-eligibility";
 
 /**
  * Knowledge-centre search (migration 0131): ranked full-text search over
@@ -13,7 +15,7 @@ import { searchKbArticles } from "@/lib/knowledge-service";
  * optional `limit` is clamped by the service (1…50).
  */
 export const GET = withTenantScope(async (request: NextRequest) => {
-  const { error } = await requireMember();
+  const { session, membership, error } = await requireMember();
   if (error) return error;
 
   const q = (request.nextUrl.searchParams.get("q") ?? "").trim();
@@ -22,6 +24,15 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   }
   const rawLimit = Number(request.nextUrl.searchParams.get("limit") ?? "");
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.trunc(rawLimit) : 20;
-  const results = await searchKbArticles(q, limit);
+  // Issue #1110 — no My Workspace guides in search for a business without it.
+  const workspaceUnavailable = !(await workspaceAccessFor(
+    session.businessId,
+    membership.permissions,
+  )).available;
+  const results = await searchKbArticles(
+    q,
+    limit,
+    workspaceUnavailable ? { excludeSections: WORKSPACE_KNOWLEDGE_SECTION_KEYS } : undefined,
+  );
   return NextResponse.json({ q, results });
 });

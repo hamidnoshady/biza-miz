@@ -105,7 +105,7 @@ function tomanInputToRial(value: string): { ok: true; rial: number | null } | { 
  * notifications already work, rather than presenting an empty form that implies
  * nothing is happening.
  */
-export function NotificationSettings() {
+export function NotificationSettings({ workspaceAvailable = true }: { workspaceAvailable?: boolean }) {
   const [events, setEvents] = useState<EventMeta[]>([]);
   const [preferences, setPreferences] = useState<Preference[]>([]);
   const [stats, setStats] = useState<{ status: string; count: number; throttled: number }[]>([]);
@@ -393,6 +393,10 @@ export function NotificationSettings() {
 
   const grouped = new Map<NotificationGroup, EventMeta[]>();
   for (const event of events) {
+    // Issue #1110 — no project/Workspace notification group for a business that
+    // does not have My Workspace. Its producers are gated too, so these
+    // preferences would be switches for something that can never fire.
+    if (!workspaceAvailable && event.group === "projects") continue;
     grouped.set(event.group, [...(grouped.get(event.group) ?? []), event]);
   }
   const preferenceFor = (key: NotificationEventKey) =>

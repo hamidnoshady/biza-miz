@@ -84,6 +84,8 @@ interface SettingsManagerProps {
    * `member-access.ts` and the section's own `permissions` prop).
    */
   permissions?: readonly string[];
+  /** Issue #1110 — whether My Workspace exists for this business/member. */
+  workspaceAvailable?: boolean;
 }
 
 const TAB_ICONS: Record<SettingsTabKey, LucideIcon> = {
@@ -150,6 +152,7 @@ export function SettingsManager({
   industry,
   role,
   permissions,
+  workspaceAvailable = true,
 }: SettingsManagerProps) {
   const router = useRouter();
   const firstTab = tabs[0]?.key;
@@ -292,7 +295,9 @@ export function SettingsManager({
         </div>
       ) : null}
       {activeTab === "desktop" ? <DesktopUpdateSettings /> : null}
-      {activeTab === "notifications" ? <NotificationSettings /> : null}
+      {activeTab === "notifications" ? (
+        <NotificationSettings workspaceAvailable={workspaceAvailable} />
+      ) : null}
       {activeTab === "shifts" ? (
         <div className="space-y-6">
           <BusinessDaySettings />
