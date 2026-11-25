@@ -32,7 +32,10 @@ vi.mock("@/lib/db", () => ({
 }));
 vi.mock("@/lib/industry-guard", () => ({ getBusinessIndustry: async () => "café" }));
 vi.mock("@/lib/features", () => ({ effectiveFeatures: async () => ({}) }));
-vi.mock("@/lib/tour-studio-service", () => ({ publishedTourById: async () => null }));
+vi.mock("@/lib/tour-studio-service", async () => {
+  const { tourById } = await import("@/lib/tours");
+  return { publishedTourById: async (id: string) => id === "crm.directory.first-customer" ? tourById(id) : null };
+});
 vi.mock("@/lib/tour-evidence-service", () => ({ hasTourEvidence: mocks.evidence }));
 
 import { POST as verify } from "./route";

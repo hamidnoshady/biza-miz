@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { tourDefinitionById } from "@/lib/tour-baseline";
 import { publishedTours } from "@/lib/tour-studio-service";
 import { loadTourAnalyticsForBusiness } from "@/lib/tours-service";
 
@@ -24,7 +23,7 @@ export const GET = withTenantScope(async () => {
   ]);
 
   const tours = rows.map((row) => {
-    const definition = tourDefinitionById(row.tourId, published);
+    const definition = published.find((tour) => tour.id === row.tourId);
     const stepTitle = row.topStuckStep
       ? definition?.steps.find((step) => step.id === row.topStuckStep!.stepId)?.title ?? null
       : null;

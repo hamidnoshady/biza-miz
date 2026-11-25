@@ -12,13 +12,11 @@ import { query, withTenantTransaction } from "./db";
 import { effectiveFeatures } from "./features";
 import { getBusinessIndustry } from "./industry-guard";
 import { getInventorySystem } from "./inventory-service";
-import { tourDefinitionById } from "./tour-baseline";
 import { publishedTourById, publishedTours } from "./tour-studio-service";
 import { hasTourEvidence } from "./tour-evidence-service";
 import {
   applyTourEvent,
   migrateTourProgress,
-  tourById,
   tourFactsNeeded,
   tourForViewer,
   tourProgressView,
@@ -78,24 +76,13 @@ export async function tourViewerFor(
   return { permissions, industry, features, inventorySystem };
 }
 
-/**
- * The tour with this id as this viewer sees it (narrowed to their steps), only
- * if they may be told it exists. Reads the viewer's facts for that one tour.
- *
- * The id may be a code tour, a tour the super-admin published from the console
- * (migration 0288) or the automatic baseline tour of a page with no authored
- * one; `tour-baseline.ts` owns which catalogue answers, so the lookup, the
- * playback and the progress writes all agree. A published-lookup failure (no
- * database, a transient error) degrades to the code catalogue rather than
- * breaking a tour that ships in source.
- */
+/** Resolve a published Studio revision and apply the caller’s eligibility. */
 export async function eligibleTourById(
   id: string,
   businessId: string,
   permissions: ReadonlySet<string>,
 ): Promise<TourDefinition | null> {
-  const published = await publishedTourById(id).catch(() => null);
-  const tour = tourDefinitionById(id, published ? [published] : []);
+  const tour = await publishedTourById(id).catch(() => null);
   if (!tour) return null;
   const viewer = await tourViewerFor(businessId, permissions, [tour]);
   return tourForViewer(tour, viewer);
@@ -426,12 +413,12 @@ export async function listStaffTourAssignments(
       ORDER BY a.assigned_at DESC, a.tour_id`,
     [businessId, userId],
   );
+  if (rows.length === 0) return [];
+  const published = await publishedTours().catch(() => []);
+  const titles = new Map(published.map((tour) => [tour.id, tour.title]));
   return rows.map((row) => ({
     tourId: row.tour_id,
-    // Tours are code or console definitions, not a table to join; a published
-    // tour whose id is not in this build falls back to its id rather than
-    // dropping the assignment.
-    title: tourById(row.tour_id)?.title ?? row.tour_id,
+    title: titles.get(row.tour_id) ?? row.tour_id,
     assignedAt: iso(row.assigned_at),
   }));
 }
@@ -480,6 +467,7 @@ export async function loadTourAnalyticsForBusiness(
     publishedTours().catch(() => []),
   ]);
 
+  const definitions = new Map(published.map((tour) => [tour.id, tour]));
   const abandonedBefore = Date.now() - TOUR_ABANDONED_AFTER_MS;
   type Bucket = {
     started: number;
@@ -492,7 +480,7 @@ export async function loadTourAnalyticsForBusiness(
 
   for (const tours of progressByUser.values()) {
     for (const [tourId, stored] of tours) {
-      const definition = tourDefinitionById(tourId, published);
+      const definition = definitions.get(tourId);
       const view = definition ? tourProgressView(definition, stored) : null;
       // A tour this build no longer defines cannot be reconciled; its stored
       // row is reported as it stands rather than dropped.

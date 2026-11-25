@@ -7,6 +7,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PERMISSIONS } from "@/lib/permissions";
+import { tourById } from "@/lib/tours";
 
 const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
@@ -88,6 +89,7 @@ describe("GET /api/knowledge/learning-assignments", () => {
   });
 
   it("reports a completed tour assignment from the member's own progress", async () => {
+    mocks.published.mockResolvedValue([tourById("accounting.products.list")]);
     mocks.tourAssignments.mockResolvedValue([
       {
         tourId: "accounting.products.list",

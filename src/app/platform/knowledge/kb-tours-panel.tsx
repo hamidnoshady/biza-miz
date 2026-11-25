@@ -7,8 +7,7 @@
  * The tab answers three questions at once:
  *
  *  - **which pages have what** — every page in the canonical Knowledge registry
- *    with its current coverage: a tour authored here, a tour that ships in code,
- *    or only the automatic baseline introduction;
+ *    with its published Tour Studio coverage;
  *  - **what a page's tour says** — a page, a title, a description, eligibility
  *    and an ordered list of steps. A step is either an explanation (no anchor)
  *    or a spotlight of an anchor that a component really renders; the anchor
@@ -38,7 +37,6 @@ import {
 import { INDUSTRIES, INDUSTRY_LABELS } from "@/lib/industries";
 import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { KNOWLEDGE_PAGES } from "@/lib/knowledge-base";
-import { tourCoverage } from "@/lib/tour-coverage";
 import { TOUR_ANCHORS } from "@/lib/tours";
 import { STUDIO_ERROR_TEXT, TOUR_STUDIO_TEMPLATES, type StudioTour, type StudioTourTemplate, type StudioTourRevision } from "@/lib/tour-studio";
 import {
@@ -98,11 +96,7 @@ const ANCHORS = [...new Set(Object.values(TOUR_ANCHORS))].sort();
 // never offer a permission the runtime does not know.
 const PERMISSION_KEYS = [...new Set(Object.values(PERMISSIONS))].sort() as Permission[];
 
-const COVERAGE = tourCoverage();
-const PAGES = KNOWLEDGE_PAGES.map((page) => ({
-  ...page,
-  coverage: COVERAGE.pages.find((row) => row.pageKey === page.key),
-}));
+const PAGES = KNOWLEDGE_PAGES;
 
 function emptyForm(pageKey: string): Form {
   return {
@@ -436,7 +430,7 @@ export function ToursPanel() {
             onChange={(event) => selectPage(event.target.value)}
           >
             {Object.entries(
-              PAGES.reduce<Record<string, typeof PAGES>>((groups, entry) => {
+              PAGES.reduce<Record<string, (typeof PAGES)[number][]>>((groups, entry) => {
                 (groups[entry.group] ??= []).push(entry);
                 return groups;
               }, {}),
@@ -502,9 +496,11 @@ export function ToursPanel() {
                 {page?.label} <span className="text-xs font-normal text-muted-foreground">— {page?.route}</span>
               </h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                {page?.coverage?.kind === "advanced"
-                  ? "این صفحه تور کدنویسی‌شده دارد؛ هر توری که اینجا منتشر کنید با همان شناسه جای آن می‌نشیند."
-                  : "این صفحه فعلاً فقط «معرفی خودکار» دارد؛ تور شما جای آن را می‌گیرد."}
+                {tours === null
+                  ? "وضعیت انتشار در حال بررسی است."
+                  : pageTours.some((tour) => tour.status === "published" && tour.publishedVersion !== null)
+                    ? "این صفحه در استودیو تور منتشرشده دارد."
+                    : "برای این صفحه هنوز توری منتشر نشده است."}
               </p>
             </div>
             {form.id ? (

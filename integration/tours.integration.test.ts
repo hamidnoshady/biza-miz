@@ -172,7 +172,15 @@ describe("tour progress storage", () => {
 
   it("resolves the industry that gates eligibility from the business, not the request", async () => {
     const inventory = new Set<string>(["inventory.view"]);
-    const id = tour().id;
+    const { id, pageKey, route, title, description, eligibility, steps } = tour();
+    const studio = await import("../src/lib/tour-studio-service");
+    expect(await service.eligibleTourById(id, alpha.businessId, inventory)).toBeNull();
+    const saved = await studio.saveStudioTour(
+      { tourKey: id, pageKey, route, title, description, eligibility, steps },
+      "integration-admin",
+    );
+    expect(await service.eligibleTourById(id, alpha.businessId, inventory)).toBeNull();
+    await studio.publishStudioTour(saved.id, "integration-admin", saved.version);
     expect((await service.eligibleTourById(id, alpha.businessId, inventory))?.id).toBe(id);
     expect(await service.eligibleTourById(id, beta.businessId, inventory)).toBeNull();
     expect(await service.eligibleTourById(id, alpha.businessId, new Set())).toBeNull();
