@@ -1,6 +1,6 @@
 import { ACTION_CATALOG, type ActionType } from "./ai";
 import { appForApiPath } from "./app-availability";
-import { getBusinessIndustry } from "./industry-guard";
+import { readBusinessIndustry } from "./business-industry";
 import { resolveWorkspaceIndustryEligibility } from "./workspace-eligibility";
 import { serviceActivationState } from "./service-activation/app-gate-service";
 import { serviceGateBlocks } from "./service-activation/app-gate";
@@ -62,7 +62,7 @@ export async function aiActionServiceGate(
   if (service.kind === "workspace") {
     let industry: string | null;
     try {
-      industry = await getBusinessIndustry(businessId);
+      industry = await readBusinessIndustry(businessId);
     } catch {
       return { allowed: false, error: "workspace_access_check_unavailable", service };
     }

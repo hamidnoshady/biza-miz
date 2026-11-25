@@ -34,7 +34,7 @@ import {
   type PoolClient,
 } from "../db";
 import { appendUsageEvent } from "../billing/runtime";
-import { getBusinessIndustry } from "../industry-guard";
+import { readBusinessIndustry } from "../business-industry";
 import { resolveWorkspaceIndustryEligibility } from "../workspace-eligibility";
 import {
   postWalletEntryTx,
@@ -281,7 +281,7 @@ export interface TenantServiceSummary {
  */
 async function workspaceServiceIndustryAllowed(businessId: string): Promise<boolean> {
   try {
-    return resolveWorkspaceIndustryEligibility(await getBusinessIndustry(businessId)).eligible;
+    return resolveWorkspaceIndustryEligibility(await readBusinessIndustry(businessId)).eligible;
   } catch {
     return false;
   }

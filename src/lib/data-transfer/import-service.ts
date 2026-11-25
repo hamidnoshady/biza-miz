@@ -38,7 +38,7 @@ import { partyWriteAudienceForActor } from "../member-access";
 import { serviceActivationState } from "../service-activation/app-gate-service";
 import { SERVICE_STATES, SERVICE_STATE_META } from "../service-activation/catalog";
 import { serviceGateBlocks } from "../service-activation/app-gate";
-import { getBusinessIndustry } from "../industry-guard";
+import { readBusinessIndustry } from "../business-industry";
 import { resolveWorkspaceIndustryEligibility } from "../workspace-eligibility";
 import { DATA_ENTITIES, findEntity, requireEntity } from "./registry";
 import { ensureAdaptersRegistered } from "./entities";
@@ -108,7 +108,7 @@ async function assertImportServiceOperational(businessId: string, entity: Entity
   if (service.kind === "workspace") {
     let industry: string | null;
     try {
-      industry = await getBusinessIndustry(businessId);
+      industry = await readBusinessIndustry(businessId);
     } catch {
       throw new ImportError("workspace_access_check_unavailable");
     }

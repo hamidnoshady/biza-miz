@@ -20,11 +20,10 @@
  * `workspace.ts` (`requireProjectCapability`), which every service call runs.
  * Eligibility never grants a permission or a project role.
  */
-import { query, withTenant } from "./db";
 import { readDeploymentProfile } from "./deployment-mode";
 import { deploymentRole } from "./deployment-role";
 import type { DeploymentProfile } from "./deployment-mode";
-import type { Industry } from "./industries";
+import { readBusinessIndustry } from "./business-industry";
 import { PERMISSIONS } from "./permissions";
 import { isWorkspaceServiceOperational } from "./service-activation/app-gate-service";
 import {
@@ -108,21 +107,6 @@ export function resolveWorkspaceAccessDecision(input: {
 }
 
 /**
- * The tenant's industry, read under an explicit tenant scope.
- *
- * A local read rather than `industry-guard.getBusinessIndustry` on purpose: the
- * guard module pulls the module/profile registry and `app-routes`, and this
- * function runs in every Workspace/AEC API bundle. The query is the same one
- * the guard uses, scoped to the session's business — never a client value.
- */
-async function readTrustedIndustry(businessId: string): Promise<Industry | null> {
-  const { rows } = await withTenant(businessId, () =>
-    query<{ industry: Industry }>("SELECT industry FROM businesses WHERE id = $1", [businessId]),
-  );
-  return rows[0]?.industry ?? null;
-}
-
-/**
  * Load the trusted business context once and decide.
  *
  * Every read is scoped to `businessId` (the session's tenant), never to a
@@ -134,7 +118,7 @@ export async function workspaceAccessFor(
   permissions: ReadonlySet<string> | readonly string[],
 ): Promise<WorkspaceAccessDecision> {
   const [industry, deployment, serviceEnabled] = await Promise.all([
-    readTrustedIndustry(businessId).catch(() => null),
+    readBusinessIndustry(businessId).catch(() => null),
     readDeploymentProfile(businessId).catch(() => null),
     isWorkspaceServiceOperational(businessId, WORKSPACE_ACCESS_SERVICE_KEY).catch(() => false),
   ]);
