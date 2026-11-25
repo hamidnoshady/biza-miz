@@ -3617,6 +3617,9 @@ export function wizardActionTypesForIndustry(
   const steps = new Set<string>(wizardStepsForIndustry(industry));
   return types.filter((type) => {
     const step = ACTION_CATALOG[type]?.wizardStep;
+    // #1580: menu creation moved into /setup/import; the old AI action IDs
+    // remain usable for F&B without reintroducing a duplicate wizard step.
+    if (step === "menu") return industry === "food_service" && steps.has("import");
     return !step || steps.has(step);
   });
 }
