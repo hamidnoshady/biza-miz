@@ -29,8 +29,9 @@ import {
   type WorkspaceTemplateChoice,
 } from "@/lib/workspace-shared";
 import {
+  FormActions,
   workspaceError,
-  WorkspaceFormDialog,
+  WorkspaceFormPanel,
 } from "./workspace-ui";
 
 const BUILTIN_KEYS = new Set(BUILTIN_TEMPLATES.map((t) => t.key));
@@ -220,7 +221,7 @@ function TemplateDialog({
   }
 
   return (
-    <WorkspaceFormDialog title={template ? (builtin ? "نسخهٔ اختصاصی از قالب" : "ویرایش قالب") : "قالب جدید"} width="xl" onClose={onClose}>
+    <WorkspaceFormPanel title={template ? (builtin ? "نسخهٔ اختصاصی از قالب" : "ویرایش قالب") : "قالب جدید"} width="xl" onClose={onClose}>
       <div className="grid gap-3 p-4 sm:grid-cols-2">
         <Field label="نام قالب">
           <input
@@ -266,21 +267,19 @@ function TemplateDialog({
           </Field>
         </div>
       </div>
-      <div className="flex items-center justify-between gap-2 border-t border-border/80 p-4">
-        <span className="text-xs text-muted-foreground">
+      <FormActions>
+        <span className="self-center text-xs text-muted-foreground sm:me-auto">
           {toPersianDigits(String(phaseNames.length))} فاز
         </span>
-        <div className="flex gap-2">
-          <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
-          <PrimaryButton
-            type="button"
-            onClick={submit}
-            disabled={!name.trim() || !phaseNames.length || saving}
-          >
-            {saving ? "در حال ذخیره" : "ذخیرهٔ قالب"}
-          </PrimaryButton>
-        </div>
-      </div>
-    </WorkspaceFormDialog>
+        <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
+        <PrimaryButton
+          type="button"
+          onClick={submit}
+          disabled={!name.trim() || !phaseNames.length || saving}
+        >
+          {saving ? "در حال ذخیره" : "ذخیرهٔ قالب"}
+        </PrimaryButton>
+      </FormActions>
+    </WorkspaceFormPanel>
   );
 }

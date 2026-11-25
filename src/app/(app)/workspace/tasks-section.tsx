@@ -64,16 +64,18 @@ import {
 import {
   DateCell,
   DateField,
+  FormActions,
   PickerField,
   PriorityBadge,
   SelectField,
   TaskStatusBadge,
   workspaceError,
   LoadMoreFooter,
-  WorkspaceFormDialog,
+  WorkspaceFormPanel,
   stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import { useWorkspaceUrlState } from "./use-workspace-url-state";
 import type { WorkspaceIntent } from "./workspace-routes";
 import { WorkspaceEntityDrawer } from "./workspace-entity-drawer";
 
@@ -139,9 +141,21 @@ export function TasksSection({
   projectId?: string;
 }) {
   const [error, setError] = useState("");
-  const [view, setView] = useState<View>(projectId ? "list" : "work");
-  const [mine, setMine] = useState(initialMine);
-  const [openOnly, setOpenOnly] = useState(true);
+  // Issue #907 F11 — the view and its filters are the URL's, not a value
+  // captured at mount: a shortcut link, a reload, a shared address and the
+  // back button all have to land on the rows they name.
+  const defaultView: View = projectId ? "list" : "work";
+  const [viewParam, setViewParam] = useWorkspaceUrlState("view", "");
+  const view: View = VIEW_TABS.some((tab) => tab.key === viewParam)
+    ? (viewParam as View)
+    : defaultView;
+  const setView = (next: View) => setViewParam(next === defaultView ? "" : next);
+  const [mineParam, setMineParam] = useWorkspaceUrlState("mine", initialMine ? "true" : "");
+  const mine = mineParam === "true";
+  const setMine = (next: boolean) => setMineParam(next ? "true" : "");
+  const [openParam, setOpenParam] = useWorkspaceUrlState("openTasks", "");
+  const openOnly = openParam !== "all";
+  const setOpenOnly = (next: boolean) => setOpenParam(next ? "" : "all");
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
   const [drawer, setDrawer] = useState<string | null>(null);
@@ -260,10 +274,10 @@ export function TasksSection({
               other views. */}
           {view !== "work" ? (
             <FilterChipRow label="فیلتر وظایف">
-              <FilterChip selected={mine} onClick={() => setMine((prev) => !prev)}>
+              <FilterChip selected={mine} onClick={() => setMine(!mine)}>
                 واگذارشده به من
               </FilterChip>
-              <FilterChip selected={openOnly} onClick={() => setOpenOnly((prev) => !prev)}>
+              <FilterChip selected={openOnly} onClick={() => setOpenOnly(!openOnly)}>
                 فقط باز
               </FilterChip>
             </FilterChipRow>
@@ -589,6 +603,10 @@ function TaskDialog({
   const [assignee, setAssignee] = useState(task?.assigneeUserId ?? "");
   const [dueDate, setDueDate] = useState(task?.dueDate ?? "");
   const [saving, setSaving] = useState(false);
+  // Issue #907 F09 — the failure belongs inside the open form. Handing it to
+  // the section's banner put the sentence behind the panel: the save looked
+  // like it did nothing. Values stay, and the next attempt clears it.
+  const [formError, setFormError] = useState("");
   const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
   const [newItem, setNewItem] = useState("");
 
@@ -605,6 +623,7 @@ function TaskDialog({
 
   async function submit() {
     if (!title.trim() || saving) return;
+    setFormError("");
     setSaving(true);
     // A contributor only works the task: send the status alone, which is all
     // the server lets them change.
@@ -622,7 +641,11 @@ function TaskDialog({
       : await api("/api/workspace/tasks", { method: "POST", body: JSON.stringify(payload) });
     setSaving(false);
     if (ok) onSaved();
-    else onError(workspaceError((data as unknown as { error?: string }).error));
+    else {
+      const message = workspaceError((data as unknown as { error?: string }).error);
+      setFormError(message);
+      onError(message);
+    }
   }
 
   async function addItem() {
@@ -634,7 +657,11 @@ function TaskDialog({
     if (ok) {
       setChecklist(data.checklist);
       setNewItem("");
-    } else onError(workspaceError((data as unknown as { error?: string }).error));
+    } else {
+      const message = workspaceError((data as unknown as { error?: string }).error);
+      setFormError(message);
+      onError(message);
+    }
   }
 
   async function toggleItem(item: ChecklistItem) {
@@ -647,8 +674,13 @@ function TaskDialog({
   }
 
   return (
-    <WorkspaceFormDialog title={taskId ? "ویرایش وظیفه" : "وظیفهٔ جدید"} width="2xl" onClose={onClose}>
+    <WorkspaceFormPanel title={taskId ? "ویرایش وظیفه" : "وظیفهٔ جدید"} width="2xl" onClose={onClose}>
       <div className="grid gap-3 p-4 sm:grid-cols-2">
+        {formError ? (
+          <div className="sm:col-span-2" role="alert">
+            <ErrorBox>{formError}</ErrorBox>
+          </div>
+        ) : null}
         <div className="sm:col-span-2">
           <Field label="عنوان">
             <input
@@ -670,6 +702,8 @@ function TaskDialog({
           value={assignee}
           onChange={setAssignee}
           options={lookups.members.map((m) => ({ id: m.id, label: m.fullName }))}
+          searchable
+          searchPlaceholder="جست‌وجوی همکار…"
         />
         <SelectField
           label="وضعیت"
@@ -739,7 +773,7 @@ function TaskDialog({
           </div>
         ) : null}
       </div>
-      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+      <FormActions>
         <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
         {canManage || (canContribute && taskId) ? (
           <PrimaryButton
@@ -750,7 +784,7 @@ function TaskDialog({
             {saving ? "در حال ذخیره" : "ذخیره"}
           </PrimaryButton>
         ) : null}
-      </div>
-    </WorkspaceFormDialog>
+      </FormActions>
+    </WorkspaceFormPanel>
   );
 }

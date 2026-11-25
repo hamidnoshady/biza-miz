@@ -52,7 +52,39 @@ interface DashboardEntry {
   date: string;
   projectId: string | null;
   projectName: string | null;
+  /** The row this entry points at — see `deadlineHref`. */
+  refId: string;
 }
+
+/**
+ * Issue #907 F13 — an attention row is a door, not a label.
+ *
+ * A deadline used to be an inert `<span>`: the overview told the reader that a
+ * contract expires today and gave them no way to open it. Each source now links
+ * to the record it belongs to; a stored meeting has no record page, so it lands
+ * on the calendar.
+ */
+function deadlineHref(entry: DashboardEntry): string {
+  switch (entry.source) {
+    case "task_due":
+      return `${workspaceSectionHref("tasks")}?open=${encodeURIComponent(entry.refId)}`;
+    case "contract_expiry":
+      return `${workspaceSectionHref("contracts")}?open=${encodeURIComponent(entry.refId)}`;
+    case "project_deadline":
+      return entry.projectId ? workspaceProjectHref(entry.projectId) : workspaceSectionHref("projects");
+    case "approval_due":
+      return `${workspaceSectionHref("approvals")}?mine=true`;
+    default:
+      return workspaceSectionHref("calendar");
+  }
+}
+
+/** A time-of-day label; the date is already in the row. Shamsi locale. */
+const TIME_FORMAT = new Intl.DateTimeFormat("fa-IR", {
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZone: "Asia/Tehran",
+});
 
 interface DashboardApproval {
   id: string;
@@ -364,12 +396,17 @@ export function OverviewSection() {
           ) : (
             <ul className="divide-y divide-border/80">
               {data.deadlines.map((entry) => (
-                <li key={entry.id} className="flex flex-wrap items-center gap-2 px-4 py-2.5 text-sm">
-                  <span className="min-w-0 flex-1 truncate font-medium">{entry.title}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {CALENDAR_SOURCE_LABELS[entry.source]}
-                  </span>
-                  <DateCell date={entry.date} className="text-xs" />
+                <li key={entry.id}>
+                  <Link
+                    href={deadlineHref(entry)}
+                    className="flex flex-wrap items-center gap-2 px-4 py-2.5 text-sm hover:bg-muted/40"
+                  >
+                    <span className="min-w-0 flex-1 truncate font-medium">{entry.title}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {CALENDAR_SOURCE_LABELS[entry.source]}
+                    </span>
+                    <DateCell date={entry.date} className="text-xs" />
+                  </Link>
                 </li>
               ))}
             </ul>
@@ -398,14 +435,21 @@ export function OverviewSection() {
           ) : (
             <ul className="divide-y divide-border/80">
               {data.approvals.map((approval) => (
-                <li key={approval.id} className="flex flex-wrap items-center gap-2 px-4 py-2.5 text-sm">
-                  <span className="min-w-0 flex-1 truncate font-medium">{approval.subjectTitle}</span>
-                  {approval.requestedByName ? (
-                    <span className="text-xs text-muted-foreground">
-                      درخواست: {approval.requestedByName}
+                <li key={approval.id}>
+                  <Link
+                    href={`${workspaceSectionHref("approvals")}?mine=true`}
+                    className="flex flex-wrap items-center gap-2 px-4 py-2.5 text-sm hover:bg-muted/40"
+                  >
+                    <span className="min-w-0 flex-1 truncate font-medium">
+                      {approval.subjectTitle}
                     </span>
-                  ) : null}
-                  <DateCell date={approval.dueDate} className="text-xs" />
+                    {approval.requestedByName ? (
+                      <span className="text-xs text-muted-foreground">
+                        درخواست: {approval.requestedByName}
+                      </span>
+                    ) : null}
+                    <DateCell date={approval.dueDate} className="text-xs" />
+                  </Link>
                 </li>
               ))}
             </ul>
@@ -432,6 +476,11 @@ export function OverviewSection() {
                   {entry.projectName ? (
                     <span className="text-xs text-muted-foreground">در {entry.projectName}</span>
                   ) : null}
+                  {/* Issue #907 F13 — «فعالیت اخیر» claimed today and showed
+                      no time; the hour is what tells «امروز» from «دیروز». */}
+                  <span className="ms-auto text-xs tabular-nums text-muted-foreground">
+                    {TIME_FORMAT.format(new Date(entry.createdAt))}
+                  </span>
                 </li>
               ))}
             </ul>
