@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
-import { requireWorkspacePageAccess } from "@/lib/workspace-access";
+import { requireWorkspacePageAccess } from "@/lib/workspace-page-access";
 import { WORKSPACE_MODULE_HOME } from "@/lib/app-routes";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";

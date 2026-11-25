@@ -20,7 +20,6 @@
  * `workspace.ts` (`requireProjectCapability`), which every service call runs.
  * Eligibility never grants a permission or a project role.
  */
-import { redirect } from "next/navigation";
 import { query, withTenant } from "./db";
 import { readDeploymentProfile } from "./deployment-mode";
 import { deploymentRole } from "./deployment-role";
@@ -149,18 +148,4 @@ export async function workspaceAccessFor(
     serviceEnabled,
     permissions,
   });
-}
-
-/**
- * Page gate for every `/workspace` surface. Redirects an unavailable business to
- * the assistant home — the platform's accessible home — rather than rendering
- * an empty or padlocked Workspace.
- */
-export async function requireWorkspacePageAccess(
-  businessId: string,
-  permissions: ReadonlySet<string> | readonly string[],
-): Promise<WorkspaceAccessDecision> {
-  const access = await workspaceAccessFor(businessId, permissions);
-  if (!access.available) redirect("/dashboard");
-  return access;
 }

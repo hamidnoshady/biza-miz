@@ -132,6 +132,12 @@ describe("My Workspace eligibility at every entry point", () => {
     );
   });
 
+  it("keeps the API-side decision free of the page redirect layer", () => {
+    expect(read("src/lib/workspace-access.ts")).not.toContain("next/navigation");
+    expect(read("src/lib/workspace-page-access.ts")).toContain("next/navigation");
+    expect(read("src/lib/workspace-page-access.ts")).toContain("requireWorkspacePageAccess");
+  });
+
   it("stops and resumes the Workspace billing clock on an industry change", () => {
     const activation = read("src/lib/service-activation/activation-service.ts");
     expect(activation).toContain("applyWorkspaceEligibilityToRuntime");
