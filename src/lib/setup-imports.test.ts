@@ -115,6 +115,29 @@ describe("setupImportCandidates", () => {
     expect(candidates[0].reason).toBe("not_importable");
     expect(candidates[0].reasonLabel).toContain("پشتیبانی");
   });
+
+  it("hides a data type the business type has no module for (issue #1239)", () => {
+    // Menu categories/items/modifiers are F&B's. A jewellery shop that
+    // selected Accounting must not be offered them, even though pos.* belongs
+    // to that app and the member may hold menu.edit.
+    const candidates = setupImportCandidates(
+      [{ ...PRODUCTS, industryEligible: false }],
+      ["accounting"],
+    );
+    expect(candidates[0].available).toBe(false);
+    expect(candidates[0].reason).toBe("industry_module");
+    expect(candidates[0].reasonLabel).toContain("نوع کسب‌وکار");
+  });
+
+  it("reports a missing module before a missing permission", () => {
+    // Selecting an app or granting a permission still would not make a menu
+    // import meaningful for this trade, so the trade reason comes first.
+    const candidates = setupImportCandidates(
+      [{ ...PRODUCTS, industryEligible: false, granted: false }],
+      ["accounting"],
+    );
+    expect(candidates[0].reason).toBe("industry_module");
+  });
 });
 
 describe("truthful job states", () => {

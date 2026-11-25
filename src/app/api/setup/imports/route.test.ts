@@ -180,4 +180,30 @@ describe("/api/setup/imports", () => {
     // the upload, mapping, preview, reconcile and apply routes are untouched.
     expect(imports.listImportJobs).toHaveBeenCalledWith("biz-1", { limit: 50 });
   });
+
+  it("offers menu-only data types to F&B and hides them from a trade with no menu", async () => {
+    // Issue #1239 / ESH-90 — the registry's `requiresModule` is applied to the
+    // wizard's list, so a jewellery shop is not offered «دسته‌های منو».
+    const MENU = definition({
+      key: "pos.categories",
+      module: "pos",
+      label: "دسته‌های منو",
+      exportPermission: "menu.view",
+      importPermission: "menu.edit",
+      requiresModule: "menu",
+    });
+    vi.mocked(registry.entitiesForIndustry).mockReturnValue([MENU] as never);
+    vi.mocked(settings.getSetting).mockResolvedValue({ apps: ["accounting"] });
+
+    vi.mocked(industry.getBusinessIndustry).mockResolvedValue("food_service");
+    let body = await (await GET()).json();
+    expect(body.candidates[0].available).toBe(true);
+    expect(body.entities.map((entity: { key: string }) => entity.key)).toContain("pos.categories");
+
+    vi.mocked(industry.getBusinessIndustry).mockResolvedValue("jewelry");
+    body = await (await GET()).json();
+    expect(body.candidates[0].available).toBe(false);
+    expect(body.candidates[0].reason).toBe("industry_module");
+    expect(body.entities.map((entity: { key: string }) => entity.key)).not.toContain("pos.categories");
+  });
 });

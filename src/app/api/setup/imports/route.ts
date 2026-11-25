@@ -5,6 +5,8 @@ import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
 import { requireManager } from "@/lib/setup-state";
 import { getBusinessIndustry } from "@/lib/industry-guard";
+import { industryProfile } from "@/lib/industry-profile";
+import type { Industry } from "@/lib/industries";
 import { getSetting, SETTING_KEYS } from "@/lib/settings";
 import { normalizeSelectedApps } from "@/lib/setup-apps";
 import {
@@ -54,6 +56,12 @@ export const GET = withTenantScope(async () => {
   const canImport = granted.has(PERMISSIONS.dataImport);
 
   const definitions = entitiesForIndustry(industry ?? null);
+  // Issue #1239 / ESH-90 — "do not show restaurant configuration to unrelated
+  // industries". `requiresModule` is the registry's own declaration (menu
+  // categories/items/modifiers); it is applied here, for the wizard's list,
+  // rather than globally, so the settings transfer catalogue is unchanged.
+  const industryKey = (industry ?? "food_service") as Industry;
+  const industryModules = new Set<string>(industryProfile(industryKey).modules);
   const candidates = setupImportCandidates(
     definitions.map((entity) => ({
       key: entity.key,
@@ -65,6 +73,8 @@ export const GET = withTenantScope(async () => {
         canImport &&
         Boolean(entity.importPermission) &&
         granted.has(entity.importPermission!),
+      industryEligible:
+        entity.requiresModule ? industryModules.has(entity.requiresModule) : true,
     })),
     selectedApps,
   );

@@ -47,6 +47,7 @@ import {
   inputClass,
 } from "@/app/dashboard/ui";
 import { toPersianDigits } from "@/lib/digits";
+import { useMoney } from "@/components/money/money-context";
 import { TRANSFORM_LABELS, TRANSFORM_RULES } from "@/lib/data-transfer/types";
 import { CatalogueSection } from "./catalogue-section";
 import { ReconciliationWizard } from "./reconciliation-wizard";
@@ -115,6 +116,10 @@ export function ImportSection({
     [entities],
   );
   const groups = useMemo(() => groupByModule(importable), [importable]);
+  // The business's chosen display unit, not a hard-coded Toman: an uploaded
+  // price list is read in the unit the owner actually sees (issue #1239's
+  // import audit; a Rial business's Toman default was a silent ×10).
+  const money = useMoney();
 
   const fileInput = useRef<HTMLInputElement>(null);
   const [entityKey, setEntityKey] = useState(initialEntityKey);
@@ -130,7 +135,7 @@ export function ImportSection({
   const [duplicateStrategy, setDuplicateStrategy] = useState("skip");
   const [relationStrategy, setRelationStrategy] = useState<Record<string, string>>({});
   const [validOnly, setValidOnly] = useState(true);
-  const [moneyUnit, setMoneyUnit] = useState("toman");
+  const [moneyUnit, setMoneyUnit] = useState<string>(money.unit);
   const [fieldSearch, setFieldSearch] = useState("");
   const [busy, setBusy] = useState<"upload" | "preview" | "run" | "template" | null>(null);
   const [error, setError] = useState("");
