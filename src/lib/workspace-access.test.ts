@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CAPABILITY_REGISTRY } from "@/lib/capabilities";
 import { PERMISSIONS } from "@/lib/permissions";
 import { resolveWorkspaceAccessDecision } from "@/lib/workspace-access";
 
@@ -97,6 +98,30 @@ describe("workspace access decision", () => {
     expect(decide({ deploymentProfile: "local", permissions: [] }).reason).toBe(
       "DEPLOYMENT_UNSUPPORTED",
     );
+  });
+
+  it("treats the deployment profiles exactly as `app.workspace` declares them", () => {
+    expect([...CAPABILITY_REGISTRY["app.workspace"].profiles].sort()).toEqual([
+      "cloud",
+      "hybrid",
+    ]);
+    for (const profile of ["cloud", "hybrid"] as const) {
+      expect(decide({ deploymentProfile: profile }).deploymentSupported, profile).toBe(true);
+    }
+    expect(decide({ deploymentProfile: "local" }).deploymentSupported).toBe(false);
+  });
+
+  it("does not grant a cloud capability to a Hybrid site runtime", () => {
+    expect(
+      decide({ deploymentProfile: "hybrid", runtimeRole: "site" }),
+    ).toMatchObject({
+      available: false,
+      deploymentSupported: false,
+      reason: "DEPLOYMENT_UNSUPPORTED",
+    });
+    expect(
+      decide({ deploymentProfile: "hybrid", runtimeRole: "central" }).available,
+    ).toBe(true);
   });
 
   it("accepts a Set as well as a readonly array of permissions", () => {

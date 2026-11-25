@@ -21,11 +21,11 @@
  * Eligibility never grants a permission or a project role.
  */
 import { redirect } from "next/navigation";
-import { resolveCapability } from "./capabilities";
+import { query, withTenant } from "./db";
 import { readDeploymentProfile } from "./deployment-mode";
 import { deploymentRole } from "./deployment-role";
 import type { DeploymentProfile } from "./deployment-mode";
-import { getBusinessIndustry } from "./industry-guard";
+import type { Industry } from "./industries";
 import { PERMISSIONS } from "./permissions";
 import { isWorkspaceServiceOperational } from "./service-activation/app-gate-service";
 import {
@@ -81,10 +81,13 @@ export function resolveWorkspaceAccessDecision(input: {
   const industry = resolveWorkspaceIndustryEligibility(input.industry, input.override);
   const held = input.permissions instanceof Set ? input.permissions : new Set(input.permissions);
   const permitted = held.has(PERMISSIONS.workspaceView);
-  const deploymentSupported = resolveCapability("app.workspace", {
-    deployment: input.deploymentProfile,
-    runtimeRole: input.runtimeRole,
-  }).available;
+  // `app.workspace` is a cloud/hybrid capability in `capabilities.ts`. Kept as
+  // a local predicate here so the route guards do not pull the whole app
+  // registry into every API bundle; `workspace-access.test.ts` pins it against
+  // the registry's profile list.
+  const deploymentSupported =
+    (input.deploymentProfile === "cloud" || input.deploymentProfile === "hybrid") &&
+    input.runtimeRole !== "site";
   const serviceEnabled = input.serviceEnabled === true;
 
   let reason: WorkspaceUnavailableReason | null = null;
@@ -106,6 +109,21 @@ export function resolveWorkspaceAccessDecision(input: {
 }
 
 /**
+ * The tenant's industry, read under an explicit tenant scope.
+ *
+ * A local read rather than `industry-guard.getBusinessIndustry` on purpose: the
+ * guard module pulls the module/profile registry and `app-routes`, and this
+ * function runs in every Workspace/AEC API bundle. The query is the same one
+ * the guard uses, scoped to the session's business — never a client value.
+ */
+async function readTrustedIndustry(businessId: string): Promise<Industry | null> {
+  const { rows } = await withTenant(businessId, () =>
+    query<{ industry: Industry }>("SELECT industry FROM businesses WHERE id = $1", [businessId]),
+  );
+  return rows[0]?.industry ?? null;
+}
+
+/**
  * Load the trusted business context once and decide.
  *
  * Every read is scoped to `businessId` (the session's tenant), never to a
@@ -117,7 +135,7 @@ export async function workspaceAccessFor(
   permissions: ReadonlySet<string> | readonly string[],
 ): Promise<WorkspaceAccessDecision> {
   const [industry, deployment, serviceEnabled] = await Promise.all([
-    getBusinessIndustry(businessId).catch(() => null),
+    readTrustedIndustry(businessId).catch(() => null),
     readDeploymentProfile(businessId).catch(() => null),
     isWorkspaceServiceOperational(businessId, WORKSPACE_ACCESS_SERVICE_KEY).catch(() => false),
   ]);
