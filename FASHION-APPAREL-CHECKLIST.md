@@ -59,8 +59,8 @@ Phase-2 evidence: scoped `tsc` (14 files, `tsconfig.fashion-check.json`) exit 0 
 |---|---|---|---|---|
 | 3.1 | Per-variant stock, multi-branch, receiving/opening/transfers/stocktake/valuation/damaged | canonical `retail-stock-service.ts`, warehouse docs | `retail-stock.test.ts`, integration | [~] shared engine; fashion inherits via 1.10 |
 | 3.2 | POS scan/search/size-color/mixed carts/discounts/tenders | `retail-invoice-screen.tsx` (`variantApiFor` + stocked line form) | POS tests | [~] wiring done in Phase 1; scenario verification pending |
-| 3.3 | Refunds, partial returns, size exchange M→L with price difference + GL | `retail-return-*`, `retail-order-reversal-service.ts` | `retail-return-validation.test.ts` | [ ] verify scenario for fashion |
-| 3.4 | Concurrency/idempotency/offline/bad-barcode/tenant isolation | existing engine | integration tests | [ ] run for fashion |
+| 3.3 | Refunds, partial returns, size exchange M→L with price difference + GL | `customer-return-service.ts` (items-model branch), migration `0323_customer_return_retail_quantity.sql`, `order-read-service.ts` `returnable_quantity`, `customer-return-panel.tsx` (`retail-return-*` is the supplier contract, not this flow) | `integration/fashion-returns.integration.test.ts` (5 ✓: partial restock + proportional COGS reversal Dr1374/Cr5184, cap regression sold 3, damaged/discarded return, M→L exchange, retry+race) | [~] code complete in `f59cfc6`; exchange test uses equal M/L prices — a differing-price exchange (difference settled via the refund amount + new sale) is not yet asserted |
+| 3.4 | Concurrency/idempotency/offline/bad-barcode/tenant isolation | existing engine + return advisory lock / `findDuplicateReturn` | `fashion-returns` retry + concurrent-race test (one return, one restock, one posting each) | [~] returns idempotency/race verified (`f59cfc6`); offline, bad-barcode and tenant isolation still to run for fashion |
 | 3.5 | Category/style change never reassigns sold inventory/history | invariant in items model | — | [ ] verify |
 
 ## Phase 4 — Omnichannel (P1)
