@@ -497,10 +497,18 @@ function stopProcessTree(child, logger) {
 }
 
 class BackendManager {
-  constructor({ app, logger, safeStorage }) {
+  /**
+   * `profileDataDir` is the multi-business seam (issue #1571): one saved
+   * business profile owns a whole `Configuration/Data/Backup/Logs` root, and this
+   * manager serves exactly one such root at a time. Omitted (tests, and any
+   * legacy caller), it falls back to `app.getPath("userData")` — the historical
+   * single-business layout — so nothing about the old behaviour changes.
+   */
+  constructor({ app, logger, safeStorage, profileDataDir }) {
     this.app = app;
     this.logger = logger;
     this.safeStorage = safeStorage;
+    this.profileDataDir = typeof profileDataDir === "string" && profileDataDir ? path.resolve(profileDataDir) : null;
     this.pg = null;
     this.server = null;
     this.config = null;
@@ -659,6 +667,11 @@ class BackendManager {
     if (this.stopRequested) throw new BackendStoppedError();
   }
 
+  /** The data root this manager owns: one business profile, or the install root. */
+  dataRoot() {
+    return this.profileDataDir || this.app.getPath("userData");
+  }
+
   // Last-resort, synchronous `pg_ctl stop` at process exit. Installed before
   // PostgreSQL can start, so it also covers a quit during first-run initdb,
   // migrations, or a start that is cancelled halfway: the postmaster cannot
@@ -673,7 +686,7 @@ class BackendManager {
   }
 
   serverPidPath() {
-    return path.join(computePaths(this.app.getPath("userData")).configDir, "server.pid");
+    return path.join(computePaths(this.dataRoot()).configDir, "server.pid");
   }
 
   // A crashed or force-killed shell leaves pg_ctl's detached PostgreSQL and
@@ -741,7 +754,7 @@ class BackendManager {
   }
 
   async start() {
-    const userDataDir = this.app.getPath("userData");
+    const userDataDir = this.dataRoot();
     const runtimeDir = this.resolveRuntimeDir();
     if (!fs.existsSync(path.join(runtimeDir, "bin", "server.cjs"))) {
       throw new StartupError("runtime", `Desktop runtime is missing at ${runtimeDir}.`);
@@ -910,7 +923,7 @@ class BackendManager {
       dumpPath: backupPath,
       source: path.basename(backupPath),
       apply: false,
-      emergencyDir: computePaths(this.app.getPath("userData")).emergencyBackupDir,
+      emergencyDir: computePaths(this.dataRoot()).emergencyBackupDir,
     });
   }
 
@@ -947,7 +960,7 @@ class BackendManager {
 
   async stopPostgresGracefully(instance = this.pg) {
     if (!instance) return;
-    const dataDir = computePaths(this.app.getPath("userData")).pgDataDir;
+    const dataDir = computePaths(this.dataRoot()).pgDataDir;
     try {
       const pgCtl = await this.pgControlPath();
       await new Promise((resolve, reject) => {

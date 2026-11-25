@@ -19,6 +19,23 @@
  */
 
 const CLOUD_PARTITION = "persist:cloud";
+
+/**
+ * The session partition for one saved business (issue #1571).
+ *
+ * A profile gets its own persistent partition so the cloud's cookies, storage and
+ * service worker for business A are not the ones business B's pane loads. The
+ * partition is derived from the profile UUID, reduced to `[a-z0-9]` because
+ * Electron's partition string is not a path and must not be allowed to become
+ * one. Without an id this is the historical single-business partition, so a
+ * caller that has not been taught about profiles keeps working unchanged.
+ */
+function cloudPartition(profileId) {
+  const safe = String(profileId ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  return safe ? `${CLOUD_PARTITION}-${safe}` : CLOUD_PARTITION;
+}
 // Must equal CLOUD_EMBED_UA_TOKEN in src/lib/cloud-embed.ts (a unit test compares them).
 const EMBED_UA_TOKEN = "BusinessSuiteEmbed/1";
 
@@ -56,7 +73,7 @@ function opensInBrowser(raw) {
  * preload, no Node, a sandbox and the cloud partition. Returns the origin the
  * guest is pinned to, or null to refuse the attach (not an https address).
  */
-function hardenCloudPane(webPreferences, params) {
+function hardenCloudPane(webPreferences, params, options = {}) {
   const target = cloudTarget(params?.src);
   if (!target) return null;
   delete webPreferences.preload;
@@ -66,7 +83,9 @@ function hardenCloudPane(webPreferences, params) {
   webPreferences.contextIsolation = true;
   webPreferences.sandbox = true;
   webPreferences.webSecurity = true;
-  params.partition = CLOUD_PARTITION;
+  // The page's own requested partition is always replaced; a profile only chooses
+  // *which* of the app's partitions, never whether the guest gets one.
+  params.partition = options.partition || CLOUD_PARTITION;
   delete params.allowpopups;
   return target.origin;
 }
@@ -160,6 +179,7 @@ function hideCloudSidebar(contents) {
 
 module.exports = {
   CLOUD_PARTITION,
+  cloudPartition,
   EMBED_UA_TOKEN,
   cloudTarget,
   sameOrigin,
