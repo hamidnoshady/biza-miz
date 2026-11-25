@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { CAPABILITY_REGISTRY } from "@/lib/capabilities";
 import { PERMISSIONS } from "@/lib/permissions";
-import { resolveWorkspaceAccessDecision } from "@/lib/workspace-access";
+import { SERVICE_STATES, SERVICE_STATE_META } from "@/lib/service-activation/catalog";
+import {
+  WORKSPACE_CUSTOMER_DISABLED_STATES,
+  resolveWorkspaceAccessDecision,
+} from "@/lib/workspace-access";
 
 const VIEW = [PERMISSIONS.workspaceView] as const;
 
@@ -122,6 +126,13 @@ describe("workspace access decision", () => {
     expect(
       decide({ deploymentProfile: "hybrid", runtimeRole: "central" }).available,
     ).toBe(true);
+  });
+
+  it("pins the local customer-disabled state set to the #1041 catalogue", () => {
+    const fromCatalogue = SERVICE_STATES.filter(
+      (state) => SERVICE_STATE_META[state].customerDisabled,
+    ).sort();
+    expect([...WORKSPACE_CUSTOMER_DISABLED_STATES].sort()).toEqual(fromCatalogue);
   });
 
   it("accepts a Set as well as a readonly array of permissions", () => {

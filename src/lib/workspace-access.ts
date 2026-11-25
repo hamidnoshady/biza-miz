@@ -20,12 +20,12 @@
  * `workspace.ts` (`requireProjectCapability`), which every service call runs.
  * Eligibility never grants a permission or a project role.
  */
+import { query, withTenant } from "./db";
 import { readDeploymentProfile } from "./deployment-mode";
 import { deploymentRole } from "./deployment-role";
 import type { DeploymentProfile } from "./deployment-mode";
 import { readBusinessIndustry } from "./business-industry";
 import { PERMISSIONS } from "./permissions";
-import { isWorkspaceServiceOperational } from "./service-activation/app-gate-service";
 import {
   resolveWorkspaceIndustryEligibility,
   type WorkspaceEligibilityOverride,
@@ -42,6 +42,43 @@ import {
  * remains separately gated for its own mutating routes by the existing guard.
  */
 export const WORKSPACE_ACCESS_SERVICE_KEY = "projects";
+
+/**
+ * The activation states a customer's own disable can produce (#1041's
+ * `customerDisabled` set). Kept as a tiny constant here rather than importing
+ * `catalog.ts` / `app-gate-service.ts`: this module is on every Workspace/AEC API
+ * route, and the 35 KB service catalogue would be duplicated into the server
+ * common chunk (caught by the desktop size gate). `workspace-access.test.ts`
+ * pins this set against `SERVICE_STATE_META`.
+ */
+export const WORKSPACE_CUSTOMER_DISABLED_STATES = [
+  "disabled_retained",
+  "eligible_for_purge",
+  "purging",
+  "data_purged",
+  "purge_failed",
+] as const;
+
+const CUSTOMER_DISABLED = new Set<string>(WORKSPACE_CUSTOMER_DISABLED_STATES);
+
+/**
+ * Has the business deliberately disabled the Workspace `projects` capability?
+ * No row means "never activated" and stays available (grandfathered, #1041).
+ */
+async function workspaceServiceEnabled(businessId: string): Promise<boolean> {
+  const { rows } = await withTenant(businessId, () =>
+    query<{ state: string }>(
+      `SELECT state
+         FROM business_service_activations
+        WHERE business_id = $1 AND service_kind = 'workspace' AND service_key = $2
+        ORDER BY (state = 'active') DESC, updated_at DESC
+        LIMIT 1`,
+      [businessId, WORKSPACE_ACCESS_SERVICE_KEY],
+    ),
+  );
+  const state = rows[0]?.state;
+  return !state || !CUSTOMER_DISABLED.has(state);
+}
 
 /** The stable, client-safe refusal code. */
 export const WORKSPACE_UNAVAILABLE_ERROR = "workspace_not_available";
@@ -120,7 +157,7 @@ export async function workspaceAccessFor(
   const [industry, deployment, serviceEnabled] = await Promise.all([
     readBusinessIndustry(businessId).catch(() => null),
     readDeploymentProfile(businessId).catch(() => null),
-    isWorkspaceServiceOperational(businessId, WORKSPACE_ACCESS_SERVICE_KEY).catch(() => false),
+    workspaceServiceEnabled(businessId).catch(() => false),
   ]);
 
   return resolveWorkspaceAccessDecision({

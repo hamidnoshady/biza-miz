@@ -12,7 +12,7 @@
 import { redirect } from "next/navigation";
 import { NextResponse } from "next/server";
 import type { SessionPayload } from "./auth";
-import { readBusinessIndustry } from "./business-industry";
+import { query, withTenant } from "./db";
 import type { Industry } from "./industries";
 import { hasCapability, hasModule, type CapabilityKey, type ModuleKey } from "./industry-profile";
 import { isProductWorkspaceIndustry } from "./product-workspace";
@@ -28,7 +28,10 @@ import { isProductWorkspaceIndustry } from "./product-workspace";
  * reason to depend on what is ambient.
  */
 export async function getBusinessIndustry(businessId: string): Promise<Industry | null> {
-  return readBusinessIndustry(businessId);
+  const { rows } = await withTenant(businessId, () =>
+    query<{ industry: Industry }>("SELECT industry FROM businesses WHERE id = $1", [businessId]),
+  );
+  return rows[0]?.industry ?? null;
 }
 
 /** Called from a gated dashboard page's server component; redirects away if this business isn't the required industry. */
