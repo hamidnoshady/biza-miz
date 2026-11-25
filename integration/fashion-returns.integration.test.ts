@@ -131,7 +131,7 @@ async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promi
   }
 }
 
-async function variant(name: string, quantity = "10"): Promise<string> {
+async function variant(name: string, quantity = "10", unitCost = 50_000): Promise<string> {
   const parent = await itemsService.createItem({
     locationId: biz.locationId,
     name: `پیراهن ${name}`,
@@ -140,18 +140,22 @@ async function variant(name: string, quantity = "10"): Promise<string> {
   const child = await itemsService.createVariantChild(parent.id, biz.locationId, `سایز ${name}`, null, [
     { name: "سایز", value: name },
   ]);
-  await tradeGoods.receiveTradeGoodsStock(child.id, { quantity, unitCost: 50_000 });
+  await tradeGoods.receiveTradeGoodsStock(child.id, { quantity, unitCost });
   await tradeGoods.setTradeGoodsUnitPrice(child.id, 100_000);
   return child.id;
 }
 
-async function sell(itemId: string, quantity: string): Promise<{ orderId: string; orderItemId: string }> {
+async function sell(
+  itemId: string,
+  quantity: string,
+  unitPrice = 100_000,
+): Promise<{ orderId: string; orderItemId: string }> {
   const invoice = await withTransaction((client) =>
     retailInvoice.createRetailInvoice(client, {
       businessId: biz.id,
       locationId: biz.locationId,
       industry: "fashion_apparel",
-      lines: [{ kind: "stocked", itemId, quantity, unitPrice: 100_000, discount: 0, vatPercent: 9 }],
+      lines: [{ kind: "stocked", itemId, quantity, unitPrice, discount: 0, vatPercent: 9 }],
       tenders: [{ method: "cash" }],
     }),
   );
@@ -294,6 +298,48 @@ describe("fashion (items-model) customer returns", () => {
     expect(all.get("5184")).toBe(50_000n);
     expect(all.get("4584")! + all.get("4400")!).toBe(-100_000n);
     expect(all.get("1100")).toBe(109_000n);
+    await expectBalancedLedger();
+  });
+
+  it("exchange M→L with a price difference: the customer pays only the difference and GL reconciles", async () => {
+    // M sells at 100,000 (cost 50,000); the L replacement is a dearer cut at
+    // 120,000 (cost 60,000). The till nets the refund against the new sale.
+    const m = await variant("M");
+    const l = await variant("L", "10", 60_000);
+    const sale = await sell(m, "1", 100_000);
+    await returnLine({ ...sale, quantity: "1", disposition: "restockable", refund: "109000", key: "exch-diff" });
+    await sell(l, "1", 120_000);
+
+    expect(await stockOf(m)).toBe(10);
+    expect(await stockOf(l)).toBe(9);
+    const all = await net();
+    // Cash: +109,000 sale − 109,000 refund + 130,800 replacement = the 21,800
+    // difference on top of the original 109,000.
+    expect(all.get("1100")).toBe(130_800n);
+    expect(all.get("1100")! - 109_000n).toBe(21_800n);
+    // Net revenue is the L's 120,000: 220,000 credited, 100,000 returned.
+    expect(all.get("4584")).toBe(-220_000n);
+    expect(all.get("4400")).toBe(100_000n);
+    expect(all.get("2200")).toBe(-10_800n);
+    // Only the L's own cost stays expensed.
+    expect(all.get("5184")).toBe(60_000n);
+    await expectBalancedLedger();
+  });
+
+  it("a partial refund on a restocked unit refunds less than the sale without changing the COGS reversal", async () => {
+    const itemId = await variant("P");
+    const sale = await sell(itemId, "1");
+    // Goodwill deduction: 109,000 sold, 80,000 refunded.
+    const result = await returnLine({ ...sale, quantity: "1", disposition: "restockable", refund: "80000", key: "partial" });
+    expect(result.refundAmount).toBe("80000");
+    expect(result.recoveredValue).toBe("50000");
+    expect(await stockOf(itemId)).toBe(10);
+    const refund = await net("customer_refund");
+    expect(refund.get("1100")).toBe(-80_000n);
+    // The refund's VAT share is prorated: 80,000 × 9,000/109,000 = 6,606.
+    expect(refund.get("2200")).toBe(6_606n);
+    expect(refund.get("4400")).toBe(73_394n);
+    expect((await net()).get("5184")).toBe(0n);
     await expectBalancedLedger();
   });
 
