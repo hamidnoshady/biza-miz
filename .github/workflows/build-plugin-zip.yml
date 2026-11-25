@@ -359,8 +359,22 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($notes)) { $notes = "Plugin release v$env:NEXT." }
 
           # A version that was already shipped is never republished.
+          #
+          # The probe must not decide this step, and it has to tolerate stderr.
+          # `gh release view` prints "release not found" there for the normal,
+          # healthy case, and with `$ErrorActionPreference = "Stop"` Windows
+          # PowerShell 5.1 turns a native command's stderr into a terminating
+          # NativeCommandError - so the probe aborted the step before the `if`
+          # below could create the release (run 45647744369: bump, zip and tag
+          # all landed, then no release and a skipped artifact upload).
+          # Same lesson as "Refuse to shadow a shipped version": ask with a
+          # probe whose failure means "all clear", read its exit code, and keep
+          # errors non-terminating while asking.
+          $ErrorActionPreference = "Continue"
           gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $releaseExists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = "Stop"
+          if ($releaseExists) {
             Write-Host "::error::Release $tag already exists - a shipped version is not published twice."
             exit 1
           }
