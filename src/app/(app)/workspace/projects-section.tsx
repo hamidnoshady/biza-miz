@@ -78,7 +78,11 @@ interface ProjectSummary {
   budgetRial: number;
   tasks: number;
 }
-import type { WorkspaceLookups } from "./use-workspace-lookups";
+import {
+  partyPickerOptions,
+  useWorkspacePartySearch,
+  type WorkspaceLookups,
+} from "./use-workspace-lookups";
 
 export interface ProjectRow {
   id: string;
@@ -366,6 +370,15 @@ function NewProjectDialog({
   const [priority, setPriority] = useState<WorkspacePriority | "">("normal");
   const [templateKey, setTemplateKey] = useState("");
   const [partyId, setPartyId] = useState("");
+  // Issue #907 F10 — «مشتری / طرف حساب» searches the directory on the server
+  // instead of filtering the page the lookups happen to carry.
+  const [partyTerm, setPartyTerm] = useState("");
+  const partyMatches = useWorkspacePartySearch(partyTerm, partyId);
+  const partyNote = partyMatches.error
+    ? partyMatches.error
+    : partyMatches.hasMore
+      ? `${toPersianDigits(String(partyMatches.parties.length))} مورد از ${toPersianDigits(String(partyMatches.total))} مورد نمایش داده شد؛ نام را دقیق‌تر کنید.`
+      : undefined;
   const [ownerUserId, setOwnerUserId] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -461,9 +474,12 @@ function NewProjectDialog({
           label="مشتری / طرف حساب"
           value={partyId}
           onChange={setPartyId}
-          options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+          options={partyPickerOptions(lookups.parties, partyMatches, partyId)}
           searchable
           searchPlaceholder="جست‌وجوی طرف حساب…"
+          onSearch={setPartyTerm}
+          searching={partyMatches.loading}
+          searchNote={partyNote}
         />
         <PickerField
           label="مسئول پروژه"
