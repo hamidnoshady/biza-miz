@@ -157,9 +157,12 @@ import {
   adminCreateKbTag,
   adminUpdateKbTag,
   adminDeleteKbTag,
+  parseCategoryInput,
+  parseTagInput,
+  parseArticleInput,
 } from "../knowledge-service";
 import { parseStudioTourInput, TOUR_STUDIO_TEMPLATES } from "../tour-studio";
-import { KNOWLEDGE_PAGES } from "../knowledge-base";
+import { KNOWLEDGE_PAGES, KNOWLEDGE_SECTIONS } from "../knowledge-base";
 import { TOUR_ANCHORS } from "../tours";
 import { ALL_PERMISSIONS } from "../permissions";
 import { INDUSTRIES } from "../industries";
@@ -615,6 +618,12 @@ async function tenantBackupServiceHealthSafe(): Promise<Record<string, unknown> 
     return null;
   }
 }
+
+/** The console editor's accepted section keys — the article parser's registry. */
+const KNOWN_SECTION_KEYS = new Set([
+  ...KNOWLEDGE_SECTIONS.map((s) => s.key),
+  ...KNOWLEDGE_PAGES.map((p) => p.key),
+]);
 
 export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
   {
@@ -2569,17 +2578,21 @@ async function executePlatformTool(
         return { articles };
       }
       case "save_kb_category": {
-        const input = (arg.record?.input ?? {}) as Record<string, unknown>;
+        // The console's own parser: trims, bounds and defaults `sortOrder`, so a
+        // partial record is a clear `invalid_arguments` instead of a NOT NULL
+        // violation or a `sort_order` out-of-range 500.
+        const parsed = parseCategoryInput(arg.record?.input ?? {});
+        if (!parsed.ok) throw new PlatformMcpInputError(parsed.error);
         const existingId = (arg.record?.id as string | undefined) ?? arg.id;
         if (existingId) {
-          await adminUpdateKbCategory(existingId, input as never, connection.adminId);
+          await adminUpdateKbCategory(existingId, parsed.input, connection.adminId);
           await platformAuditSafe(connection, null, tool.name, "ok", {
             action: "knowledge_category.update",
             categoryId: existingId,
           });
           return { ok: true, id: existingId };
         }
-        const id = await adminCreateKbCategory(input as never, connection.adminId);
+        const id = await adminCreateKbCategory(parsed.input, connection.adminId);
         await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_category.create", categoryId: id });
         return { ok: true, id };
       }
@@ -2590,14 +2603,15 @@ async function executePlatformTool(
         return { ok: true, id: arg.id };
       }
       case "save_kb_tag": {
-        const input = (arg.record?.input ?? {}) as Record<string, unknown>;
+        const parsed = parseTagInput(arg.record?.input ?? {});
+        if (!parsed.ok) throw new PlatformMcpInputError(parsed.error);
         const existingId = (arg.record?.id as string | undefined) ?? arg.id;
         if (existingId) {
-          await adminUpdateKbTag(existingId, input as never, connection.adminId);
+          await adminUpdateKbTag(existingId, parsed.input, connection.adminId);
           await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_tag.update", tagId: existingId });
           return { ok: true, id: existingId };
         }
-        const id = await adminCreateKbTag(input as never, connection.adminId);
+        const id = await adminCreateKbTag(parsed.input, connection.adminId);
         await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_tag.create", tagId: id });
         return { ok: true, id };
       }
@@ -2608,17 +2622,18 @@ async function executePlatformTool(
         return { ok: true, id: arg.id };
       }
       case "save_kb_article": {
-        const input = (arg.record?.input ?? {}) as Record<string, unknown>;
+        const parsed = parseArticleInput(arg.record?.input ?? {}, KNOWN_SECTION_KEYS);
+        if (!parsed.ok) throw new PlatformMcpInputError(parsed.error);
         const existingId = (arg.record?.id as string | undefined) ?? arg.id;
         if (existingId) {
-          await adminUpdateKbArticle(existingId, input as never, connection.adminId);
+          await adminUpdateKbArticle(existingId, parsed.input, connection.adminId);
           await platformAuditSafe(connection, null, tool.name, "ok", {
             action: "knowledge_article.update",
             articleId: existingId,
           });
           return { ok: true, id: existingId };
         }
-        const id = await adminCreateKbArticle(input as never, connection.adminId);
+        const id = await adminCreateKbArticle(parsed.input, connection.adminId);
         await platformAuditSafe(connection, null, tool.name, "ok", { action: "knowledge_article.create", articleId: id });
         return { ok: true, id };
       }
