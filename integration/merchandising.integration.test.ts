@@ -191,7 +191,7 @@ describe("matrix bulk editor", () => {
 });
 
 describe("markdown planner", () => {
-  it("classifies never-sold stock as dead, and an accepted markdown posts a write-down and changes the price", async () => {
+  it("classifies never-sold stock as dead, and an accepted markdown changes the price without posting (GH #1567 F3)", async () => {
     const variant = await makeVariant("قرمز");
 
     const candidates = await merch.listMarkdownCandidates(biz.id, biz.locationId, "2026-08-16");
@@ -207,8 +207,9 @@ describe("markdown planner", () => {
         inventoryAccountCode: "1350",
       }),
     );
-    // old 100,000 → new 80,000, quantity 5 → 100,000 write-down
-    expect(result.writeDownRial).toBe(100_000);
+    // GH #1567 F3: a selling-price markdown is not a write-down. Cost 20,000
+    // is still below the new 80,000 price, so nothing is posted or flagged.
+    expect(result).toMatchObject({ oldPrice: 100_000, newPrice: 80_000, writeDownRial: 0, entryId: null, belowCost: false });
 
     const price = await db.query<{ unit_price: string }>(
       "SELECT unit_price::text FROM item_stock WHERE item_id = $1",
@@ -216,14 +217,11 @@ describe("markdown planner", () => {
     );
     expect(price.rows[0].unit_price).toBe("80000");
 
-    const { rows: lines } = await db.query<{ account_id: string; debit: string; credit: string }>(
-      "SELECT account_id, debit, credit FROM journal_lines WHERE entry_id = $1 ORDER BY debit DESC",
-      [result.entryId],
+    const { rows: writeDowns } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM journal_lines WHERE account_id = $1",
+      [acct.writeDownExpense],
     );
-    expect(lines).toEqual([
-      { account_id: acct.writeDownExpense, debit: "100000", credit: "0" },
-      { account_id: acct.inventory, debit: "0", credit: "100000" },
-    ]);
+    expect(writeDowns[0].n).toBe("0");
   });
 
   it("refuses a markdown that is not a price reduction", async () => {

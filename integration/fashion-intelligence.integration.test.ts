@@ -126,17 +126,6 @@ async function tx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   }
 }
 
-/** Debit/credit of one journal entry, by account code. */
-async function entryLines(entryId: string): Promise<Array<{ code: string; debit: string; credit: string }>> {
-  const { rows } = await db.query<{ code: string; debit: string; credit: string }>(
-    `SELECT a.code, jl.debit::text, jl.credit::text
-       FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
-      WHERE jl.entry_id = $1 ORDER BY jl.debit DESC, a.code`,
-    [entryId],
-  );
-  return rows;
-}
-
 /** Net debit−credit by account code for the business, optionally one event type's entries. */
 async function net(businessId = biz.id): Promise<Map<string, bigint>> {
   const { rows } = await db.query<{ code: string; net: string }>(
@@ -310,7 +299,7 @@ describe("5.1 collections, seasons and markdowns", () => {
     expect(await merch.sellThroughByCollection(biz.id, biz.branch, { eventPrefix: "fashion_apparel" })).toEqual([]);
   });
 
-  it("lists a slow size as a markdown candidate and posts its write-down against fashion inventory 1374", async () => {
+  it("lists a slow size as a markdown candidate; the markdown is a price change only (GH #1567 F3)", async () => {
     const style = await grid(biz.main, ["XL"], ["سرمه‌ای"], "کت رسمی");
     const xl = style["XL/سرمه‌ای"];
     await purchase(biz.main, [{ itemId: xl, quantity: "4", unitCost: 300_000 }]);
@@ -331,16 +320,11 @@ describe("5.1 collections, seasons and markdowns", () => {
         createdBy: biz.ownerId,
       }),
     );
-    expect(applied.entryId).toBeTruthy();
-    // Account routing only: Dr write-down expense 5170 / Cr fashion inventory 1374,
-    // equal and opposite. (The amount rule itself is shared merchandising code —
-    // see the checklist's "Noticed" section.)
-    const lines = await entryLines(applied.entryId!);
-    const dr = lines.filter((l) => l.debit !== "0");
-    const cr = lines.filter((l) => l.credit !== "0");
-    expect(dr.map((l) => l.code)).toEqual(["5170"]);
-    expect(cr.map((l) => l.code)).toEqual(["1374"]);
-    expect(dr[0].debit).toBe(cr[0].credit);
+    // GH #1567 F3: a selling-price markdown is not a write-down. 600,000 is
+    // still above the 300,000 cost, so nothing posts and nothing is flagged;
+    // the NRV write-down is the separate reviewed act (item-nrv-write-down
+    // suite covers the 5170 / 1374 routing).
+    expect(applied).toMatchObject({ writeDownRial: 0, entryId: null, belowCost: false });
     const price = await db.query<{ unit_price: string }>("SELECT unit_price::text FROM item_stock WHERE item_id=$1", [xl]);
     expect(Number(price.rows[0].unit_price)).toBe(600_000);
     await expectBalanced();

@@ -72,6 +72,10 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   item_stock_count: "شمارش موجودی کالا",
   item_stock_transfer: "انتقال موجودی کالا",
   item_audit: "بازبینی کالا",
+  // GH #1567 F2/F3 — reviewed opening stock and items-model NRV write-downs.
+  item_opening_stock: "موجودی افتتاحیه کالا",
+  item_nrv_write_down: "کاهش ارزش موجودی کالا (خالص ارزش فروش)",
+  item_nrv_write_down_reversal: "برگشت کاهش ارزش موجودی کالا",
   item: "کالا",
   inventory_transfer: "انتقال بین انبار",
   inventory_transfer_cancel: "لغو انتقال انبار",
