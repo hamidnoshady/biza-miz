@@ -63,10 +63,12 @@ describe("resolveRootLanding — no host routing (the desktop, a single café)",
     ).toEqual({ kind: "redirect", location: "/welcome" });
   });
 
-  it("holds an owner or manager in setup until it is finished, and sends everyone else to the dashboard", async () => {
+  it("holds an owner, manager or admin in setup until it is finished, and sends everyone else to the dashboard", async () => {
     vi.stubEnv("ROOT_DOMAIN", "");
     const unfinished = { isSetupComplete: async () => false };
-    for (const role of ["owner", "manager"]) {
+    // `admin` is included because its preset holds `settings.manage`, so it can
+    // finish the wizard (issue #1239). A cashier cannot, and is not trapped.
+    for (const role of ["owner", "manager", "admin"]) {
       const result = await resolveRootLanding(
         headers({ host: "127.0.0.1:3000" }),
         deps({ ...unfinished, getSession: async () => ({ role, businessId: "biz-1" }) }),

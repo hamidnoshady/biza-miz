@@ -117,9 +117,16 @@ export async function resolveRootLanding(
     // Empty install → first-run wizard; otherwise normal login.
     return { kind: "redirect", location: (await deps.hasAnyUser()) ? "/login" : "/welcome" };
   }
-  // Owner/Manager land in the wizard until setup is finished.
+  // Owner/Manager/Admin land in the wizard until setup is finished.
+  //
+  // `admin` belongs here for the same reason the guards below use permissions
+  // rather than a role list: the admin preset holds `settings.manage` (it is
+  // every non-owner-only capability), so an admin CAN finish the wizard and
+  // must be shown it. Issue #1239 / ESH-90.
   if (
-    (session.role === "owner" || session.role === "manager") &&
+    (session.role === "owner" ||
+      session.role === "manager" ||
+      session.role === "admin") &&
     !(await deps.isSetupComplete(session.businessId))
   ) {
     return { kind: "redirect", location: "/setup" };
