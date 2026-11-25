@@ -8,8 +8,9 @@
  * (connection, provider, remote id, remote parent id); the newest product
  * payload the store sent for that remote id (the source snapshot); and a
  * verdict — a variant family is legitimate, an unmapped twin created moments
- * after a mapped one is the creation race fixed with this script, and so on
- * (see src/lib/duplicate-items.ts).
+ * after a mapped one is the creation race fixed with this script, an unmapped
+ * twin created weeks or months after a mapped one is a historical duplicate
+ * (issue #1592), and so on (see src/lib/duplicate-items.ts).
  *
  * It writes nothing. The work runs inside withTenant (RLS confines it to the
  * named business) on a READ ONLY transaction that is rolled back. Decide on any
@@ -82,8 +83,19 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const actionable = groups.filter((g) => verdictNeedsAction(g.verdict)).length;
-  console.log(`${groups.length} duplicate SKU group(s); ${actionable} need a person's decision.\n`);
+  const actionable = groups.filter((g) => verdictNeedsAction(g.verdict));
+  const historical = groups.filter((g) => g.verdict === "historical_duplicate_candidate").length;
+  const race = groups.filter((g) => g.verdict === "race_orphan").length;
+  const stocked = groups.filter(
+    (g) => verdictNeedsAction(g.verdict) && g.members.some((m) => m.mappings.length === 0 && Number(m.quantity ?? 0) !== 0),
+  ).length;
+  console.log(
+    `${groups.length} duplicate SKU group(s); ${actionable.length} need a person's decision.` +
+      (race ? ` ${race} creation-race,` : "") +
+      (historical ? ` ${historical} historical (weeks apart),` : "") +
+      (stocked ? ` ${stocked} carry stock on an unmapped row.` : ""),
+  );
+  console.log("");
   for (const group of groups) {
     const flag = verdictNeedsAction(group.verdict) ? "!" : " ";
     console.log(`${flag} SKU ${group.sku} — ${DUPLICATE_VERDICT_LABEL[group.verdict]}`);

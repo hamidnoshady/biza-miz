@@ -22,7 +22,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *
  *  - `keep_separate` — «نگهداری جداگانه»: an audited "these are different rows";
  *  - `archive_orphan` — the existing guarded, reversible archive of a proven
- *    creation-race twin that nothing references.
+ *    duplicate twin (the ten-minute creation race or the weeks-apart historical
+ *    duplicate) that nothing references and that holds no inventory.
  *
  * Both echo the `reviewToken` the screen was shown, so a plan that changed in
  * the meantime is refused rather than acted on. Nothing here merges two items,

@@ -207,6 +207,16 @@ export function ProductDuplicatePanel({
               </div>
             ) : null}
 
+            {group.plan ? (
+              <p className="text-[11px] text-muted-foreground">
+                {group.plan.kind === "historical_duplicate_candidate"
+                  ? "ردیف تکراری تاریخی"
+                  : "نسخهٔ بازندهٔ تلاقی ایجاد"}
+                {group.plan.daysApart == null ? "" : ` · فاصلهٔ دو ردیف: ${toPersianDigits(group.plan.daysApart)} روز`}
+                {group.plan.twinName ? ` · ردیف نگه‌داشته‌شده: ${group.plan.twinName}` : ""}
+              </p>
+            ) : null}
+
             {pending === null ? (
               <div className="flex flex-wrap gap-2">
                 {group.plan?.status === "archive" ? (
@@ -331,6 +341,11 @@ function MemberCard({
       <p className="break-all text-muted-foreground">
         منبع: {member.provenance || "بدون پیوند"}
       </p>
+      {member.attributes.length > 0 ? (
+        <p className="text-muted-foreground">
+          ویژگی‌ها: {member.attributes.map((attribute) => `${attribute.name}: ${attribute.value}`).join("، ")}
+        </p>
+      ) : null}
       {member.snapshots.map((snapshot) => (
         <p key={`${snapshot.connectionId}:${snapshot.remoteId}`} className="text-muted-foreground">
           آخرین دریافت از فروشگاه: {shamsi(snapshot.receivedAt)} · موجودی اعلامی فروشگاه:{" "}

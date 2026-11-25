@@ -6,9 +6,11 @@
  * legitimate (a variable product's parent and variations, which WooCommerce
  * reports under the parent's SKU when a variation has none of its own); some
  * are the creation race fixed alongside this file (one remote product, two
- * local items, only one of them still mapped); some are two remote records
- * with the same SKU, which only the store owner can resolve. Nothing here
- * decides to merge or delete — the verdict is evidence for a person.
+ * local items, only one of them still mapped); some are the same product
+ * imported again weeks later through a reconnected store (issue #1592); some
+ * are two remote records with the same SKU, which only the store owner can
+ * resolve. Nothing here decides to merge or delete — the verdict is evidence
+ * for a person.
  */
 
 export type DuplicateItemKind = "simple" | "variant_parent" | "variant_child";
@@ -41,6 +43,7 @@ export interface DuplicateItemMember {
 export type DuplicateVerdict =
   | "same_remote_mapped_twice"
   | "race_orphan"
+  | "historical_duplicate_candidate"
   | "unmapped_duplicate"
   | "distinct_remote_records"
   | "per_branch_copies"
@@ -49,6 +52,8 @@ export type DuplicateVerdict =
 export const DUPLICATE_VERDICT_LABEL: Record<DuplicateVerdict, string> = {
   same_remote_mapped_twice: "same remote product mapped twice (re-linked store or second connection)",
   race_orphan: "creation race: one item is mapped, its twin is an unmapped orphan",
+  historical_duplicate_candidate:
+    "historical duplicate: an unmapped row and a mapped row of the same product, created weeks apart",
   unmapped_duplicate: "unmapped duplicate (no integration owns at least one row)",
   distinct_remote_records: "different remote records share this SKU (fix the SKU at the source)",
   per_branch_copies: "one copy per branch (items are per location)",
@@ -70,6 +75,16 @@ export const RACE_WINDOW_MS = 10 * 60 * 1000;
 export function normaliseSku(sku: string | null | undefined): string | null {
   const trimmed = (sku ?? "").trim().toLowerCase();
   return trimmed ? trimmed : null;
+}
+
+/**
+ * Normalise a product name for a comparison an owner can defend: case,
+ * surrounding and repeated whitespace must not decide whether two rows are the
+ * same product. Nothing else is stripped — punctuation and digits are meaning.
+ */
+export function normaliseName(name: string | null | undefined): string | null {
+  const text = (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  return text ? text : null;
 }
 
 /** Normalise a store URL so two connections to one store compare equal. */
@@ -102,6 +117,40 @@ export function raceTwinsOf(orphan: DuplicateItemMember, mapped: DuplicateItemMe
 }
 
 /**
+ * The mapped rows an unmapped row looks like an older twin of: same kind,
+ * branch, parent and product name, created *outside* {@link RACE_WINDOW_MS} of
+ * it. This is the August-beside-September shape issue #1592 reports, and it is
+ * deliberately a different fingerprint from the race — the race needs the
+ * timestamps to be seconds apart, which weeks-apart rows never are.
+ *
+ * A shared SKU is not enough on its own: two unrelated products may carry one
+ * code at the source. The name must agree as well, and the caller still has to
+ * find zero inventory and no historical reference before anything is archived.
+ */
+export function historicalTwinsOf(
+  orphan: DuplicateItemMember,
+  mapped: DuplicateItemMember[],
+): DuplicateItemMember[] {
+  const orphanName = normaliseName(orphan.name);
+  if (!orphanName) return [];
+  const orphanAt = Date.parse(orphan.createdAt);
+  return mapped.filter(
+    (m) =>
+      m.kind === orphan.kind &&
+      m.locationId === orphan.locationId &&
+      m.parentItemId === orphan.parentItemId &&
+      normaliseName(m.name) === orphanName &&
+      Math.abs(Date.parse(m.createdAt) - orphanAt) > RACE_WINDOW_MS,
+  );
+}
+
+/** True when the unmapped row and the mapped row carry the same product name. */
+export function namesMatch(a: DuplicateItemMember, b: DuplicateItemMember): boolean {
+  const left = normaliseName(a.name);
+  return left !== null && left === normaliseName(b.name);
+}
+
+/**
  * Classify one SKU group. Checks run from the most to the least alarming, so
  * a group that is both a variant family and holds a race orphan is reported
  * as the orphan.
@@ -128,7 +177,9 @@ export function classifyDuplicateGroup(members: DuplicateItemMember[]): Duplicat
   }
 
   // 3. A legitimate family: one parent and its own children, each child a
-  //    distinct remote record (or none at all, when built in the app).
+  //    distinct remote record (or none at all, when built in the app). Checked
+  //    before the historical shape because sibling variations legitimately
+  //    carry the parent's SKU and often its name.
   const parents = members.filter((m) => m.kind === "variant_parent");
   const children = members.filter((m) => m.kind === "variant_child");
   const simples = members.filter((m) => m.kind === "simple");
@@ -139,14 +190,21 @@ export function classifyDuplicateGroup(members: DuplicateItemMember[]): Duplicat
     if (sameParent && parentMatches) return "variant_family";
   }
 
-  // 4. Rows that no integration owns.
+  // 4. An unmapped twin of a mapped row of the same product, outside the race
+  //    window (issue #1592's weeks-apart pairs). Reported separately so no
+  //    caller can mistake it for the ten-minute race.
+  for (const orphan of unmapped) {
+    if (historicalTwinsOf(orphan, mapped).length > 0) return "historical_duplicate_candidate";
+  }
+
+  // 5. Rows that no integration owns.
   if (unmapped.length > 0) {
     const branches = new Set(members.map((m) => m.locationId));
     if (branches.size === members.length && mapped.length === 0) return "per_branch_copies";
     return "unmapped_duplicate";
   }
 
-  // 5. Everything is mapped, to different remote records.
+  // 6. Everything is mapped, to different remote records.
   const branches = new Set(members.map((m) => m.locationId));
   if (branches.size === members.length) return "per_branch_copies";
   return "distinct_remote_records";

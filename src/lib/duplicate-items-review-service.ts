@@ -71,8 +71,9 @@ function memberKey(members: readonly { itemId: string }[]): string {
 
 /**
  * The token covers the verdict, every row in the group and the plan's own
- * shape — so a new twin, an archived twin or a newly-blocking reference each
- * invalidate a review a reader confirmed a moment ago.
+ * shape — so a new twin, an archived twin, a row that gained stock or a
+ * newly-blocking reference each invalidate a review a reader confirmed a
+ * moment ago.
  */
 function reviewTokenFor(group: {
   sku: string;
@@ -88,8 +89,10 @@ function reviewTokenFor(group: {
         members: memberKey(group.members),
         plan: group.plan
           ? {
+              kind: group.plan.kind,
               orphanItemId: group.plan.orphanItemId,
               twinItemId: group.plan.twinItemId,
+              daysApart: group.plan.daysApart,
               status: group.plan.status,
               blockers: [...group.plan.blockers].sort(),
               references: group.plan.references.map((reference) => `${reference.table}.${reference.column}:${reference.count}`).sort(),
@@ -134,9 +137,10 @@ export async function loadDuplicateReviewGroups(
   const decisions = await keepSeparateDecisions(businessId, groups.map((group) => group.sku));
 
   return groups.map((group) => {
-    const plan = group.verdict === "race_orphan"
-      ? plans.find((candidate) => group.members.some((member) => member.itemId === candidate.orphanItemId)) ?? null
-      : null;
+    const plan =
+      group.verdict === "race_orphan" || group.verdict === "historical_duplicate_candidate"
+        ? plans.find((candidate) => group.members.some((member) => member.itemId === candidate.orphanItemId)) ?? null
+        : null;
     const key = memberKey(group.members);
     const decision = decisions.find((row) => row.sku === group.sku && [...(row.item_ids ?? [])].sort().join(",") === key);
     const shaped = { sku: group.sku, verdict: group.verdict, members: group.members, plan };
@@ -224,9 +228,10 @@ export async function recordDuplicateKeepSeparate(
 }
 
 /**
- * Archive one proven race orphan, through the existing guarded archive.
- * A plan that is not `archive` (blocked, already archived) refuses here too —
- * the screen never widens what the script allows.
+ * Archive one proven duplicate — the ten-minute race twin or the weeks-apart
+ * historical twin — through the existing guarded archive. A plan that is not
+ * `archive` (blocked, already archived) refuses here too: the screen never
+ * widens what the script allows.
  */
 export async function archiveDuplicateOrphanFromReview(
   businessId: string,

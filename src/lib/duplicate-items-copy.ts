@@ -32,7 +32,11 @@ export const DUPLICATE_VERDICT_COPY: Record<DuplicateVerdict, DuplicateVerdictCo
   },
   race_orphan: {
     label: "نسخهٔ تکراری از تلاقی ایجاد محصول",
-    action: "ردیف بدون پیوند، نسخهٔ بازندهٔ ساختن هم‌زمان یک محصول فروشگاه است. اگر هیچ سابقه‌ای به آن ارجاع نمی‌دهد، بایگانی می‌شود؛ در غیر این صورت تصمیم با شماست.",
+    action: "ردیف بدون پیوند، نسخهٔ بازندهٔ ساختن هم‌زمان یک محصول فروشگاه است. اگر هیچ سابقه‌ای به آن ارجاع نمی‌دهد و موجودی صفر دارد، بایگانی می‌شود؛ در غیر این صورت تصمیم با شماست.",
+  },
+  historical_duplicate_candidate: {
+    label: "ردیف تکراری تاریخی (دو تاریخ متفاوت)",
+    action: "یک ردیف بدون پیوند و یک ردیف متصل، با همان کد کالا و همان نام، هفته‌ها یا ماه‌ها فاصله دارند. ردیفی که موجودی یا سابقه دارد بایگانی نمی‌شود؛ ابتدا باید تصمیم مالک و برنامهٔ اصلاح موجودی/حسابداری ثبت شود.",
   },
   same_remote_mapped_twice: {
     label: "یک محصول فروشگاه، دو ردیف محلی",
@@ -52,6 +56,9 @@ export const ORPHAN_BLOCKER_COPY: Record<OrphanBlocker, string> = {
   twin_not_woo_product: "ردیف همتای متصل، محصول ووکامرس نیست.",
   twin_inactive: "ردیف همتای متصل، بایگانی شده است.",
   ambiguous_twin: "بیش از یک ردیف متصل می‌تواند همتای آن باشد.",
+  different_name: "نام دو ردیف یکسان نیست؛ مدرک کافی برای بایگانی وجود ندارد.",
+  nonzero_stock: "این ردیف هنوز موجودی روی دست دارد؛ بایگانی آن، موجودی واقعی را از فهرست فعال خارج می‌کند.",
+  inventory_unchecked: "موجودی این ردیف خوانده نشد؛ تا زمانی که صفر بودن آن اثبات نشود، بایگانی مجاز نیست.",
   has_references: "سابقه، موجودی یا رکورد دیگری به آن ارجاع می‌دهد.",
 };
 
@@ -65,6 +72,10 @@ const REFERENCE_TABLE_COPY: Record<string, string> = {
   item_serials: "شماره سریال",
   item_barcodes: "بارکد",
   product_price_history: "تاریخچهٔ قیمت",
+  price_list_entries: "قیمت در فهرست قیمت",
+  item_stock_counts: "شمارش موجودی",
+  item_stock_count_lines: "ردیف شمارش موجودی",
+  item_stock_transfers: "انتقال موجودی",
   recipe_items: "دستور پخت",
   purchase_order_items: "ردیف خرید",
 };
@@ -91,6 +102,9 @@ export function duplicateAmbiguityNotes(
   const branches = new Set(members.map((member) => member.locationId));
   const mapped = members.filter((member) => member.mappings.length > 0);
   const unmapped = members.filter((member) => member.mappings.length === 0);
+  if (verdict === "historical_duplicate_candidate") {
+    notes.push("تاریخ ایجاد این ردیف‌ها فاصلهٔ زیادی دارد؛ این شکل، حلقهٔ ایجاد هم‌زمان (چند دقیقه‌ای) نیست.");
+  }
   if (branches.size > 1) notes.push("ردیف‌ها به شعبه‌های مختلف تعلق دارند.");
   if (mapped.length > 0 && unmapped.length > 0) notes.push("یک ردیف پیوند فروشگاه دارد و دیگری ندارد.");
   if (mapped.length > 1) {

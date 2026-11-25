@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   classifyDuplicateGroup,
   describeProvenance,
+  historicalTwinsOf,
+  namesMatch,
+  normaliseName,
   normaliseSku,
   normaliseStoreKey,
   verdictNeedsAction,
@@ -79,11 +82,20 @@ describe("classifyDuplicateGroup", () => {
     ).toBe("race_orphan");
   });
 
-  it("calls an unmapped twin created long after an unmapped duplicate, not a race", () => {
+  it("calls an unmapped twin of the same name created long after a mapped row a historical duplicate", () => {
     expect(
       classifyDuplicateGroup([
         member("a", { mappings: [woo("501")] }),
         member("b", { createdAt: "2026-09-05T10:00:00.000Z" }),
+      ]),
+    ).toBe("historical_duplicate_candidate");
+  });
+
+  it("does not call two different products with one code a historical duplicate", () => {
+    expect(
+      classifyDuplicateGroup([
+        member("a", { mappings: [woo("501")], name: "کرم مرطوب‌کننده" }),
+        member("b", { createdAt: "2026-09-05T10:00:00.000Z", name: "کرم ضدآفتاب" }),
       ]),
     ).toBe("unmapped_duplicate");
   });
@@ -116,17 +128,29 @@ describe("classifyDuplicateGroup", () => {
     expect(verdictNeedsAction("variant_family")).toBe(false);
     expect(verdictNeedsAction("per_branch_copies")).toBe(false);
     expect(verdictNeedsAction("race_orphan")).toBe(true);
+    expect(verdictNeedsAction("historical_duplicate_candidate")).toBe(true);
     expect(verdictNeedsAction("same_remote_mapped_twice")).toBe(true);
   });
 });
 
 describe("helpers", () => {
-  it("normalises SKUs and store URLs", () => {
+  it("normalises SKUs, names and store URLs", () => {
     expect(normaliseSku("  ZZA05023 ")).toBe("zza05023");
     expect(normaliseSku("   ")).toBeNull();
+    expect(normaliseName("  کرم   مرطوب‌کننده ")).toBe("کرم مرطوب‌کننده");
+    expect(normaliseName("")).toBeNull();
     expect(normaliseStoreKey("https://www.Shop.example.com/")).toBe("shop.example.com");
     expect(normaliseStoreKey("http://shop.example.com")).toBe("shop.example.com");
     expect(normaliseStoreKey(null)).toBeNull();
+  });
+
+  it("pairs a historical twin only outside the race window and only on the same name", () => {
+    const orphan = member("old", { createdAt: "2026-08-26T08:00:00.000Z" });
+    const mapped = member("kept", { mappings: [woo("501")] });
+    expect(historicalTwinsOf(orphan, [mapped])).toHaveLength(1);
+    expect(historicalTwinsOf(orphan, [member("kept", { mappings: [woo("501")], name: "کرم دیگر" })])).toEqual([]);
+    expect(historicalTwinsOf(orphan, [member("kept", { mappings: [woo("501")], createdAt: "2026-08-26T08:02:00.000Z" })])).toEqual([]);
+    expect(namesMatch(orphan, mapped)).toBe(true);
   });
 
   it("describes provenance", () => {

@@ -430,7 +430,7 @@ export async function createConnection(
   // new row has no mappings. Record which earlier links pointed at this same
   // store (including a disconnected one) so the owner can see the provenance;
   // its mappings stay with the old row and are never copied or re-pointed.
-  const reconnectOf = await reconnectProvenance(businessId, baseUrl);
+  const reconnectOf = await reconnectProvenance(businessId, baseUrl).catch(() => []);
   const { rows } = await query<ConnectionRow>(
     `INSERT INTO integration_connections
        (business_id, location_id, name, base_url, link_mode,

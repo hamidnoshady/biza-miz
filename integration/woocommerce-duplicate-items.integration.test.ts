@@ -252,13 +252,14 @@ describe("one remote product is one local item, however many deliveries race", (
     await dbLib.withTenant(biz.id, () =>
       sync.upsertProductFromWoo(original, biz.locationId, simpleProduct(800, "RECONNECT-1", 2)),
     );
+    const webhookSecret = "relink-webhook-secret";
     const second = await db.query<{ id: string }>(
       `INSERT INTO integration_connections
          (business_id, location_id, name, base_url, link_mode, link_token_hash, link_token_ciphertext,
           webhook_secret_ciphertext, currency_unit)
-       VALUES ($1, $2, 'Store (plugin)', 'https://www.beauty.example.com/', 'plugin', $3, 'x', 'x', 'toman')
+       VALUES ($1, $2, 'Store (plugin)', 'https://www.beauty.example.com/', 'plugin', $3, 'x', $4, 'toman')
        RETURNING id::text AS id`,
-      [biz.id, biz.locationId, `hash-${randomUUID()}`],
+      [biz.id, biz.locationId, `hash-${randomUUID()}`, encryptSecret(webhookSecret, Buffer.from(KEY, "hex"))],
     );
     const relinked = (await connections.getConnection(biz.id, second.rows[0].id))!;
 
@@ -318,6 +319,26 @@ describe("one remote product is one local item, however many deliveries race", (
         )
       ).rows[0].n,
     ).toBe(1);
+
+    // The plugin/webhook delivery of the same product takes the same gate: the
+    // event is parked `deferred` for the open run instead of creating a twin.
+    const body = JSON.stringify(simpleProduct(800, "RECONNECT-1", 2));
+    const response = await ingest.handleWooCommerceWebhook(
+      second.rows[0].id,
+      body,
+      new Headers({
+        "x-wc-webhook-signature": wooWebhookSignature(body, webhookSecret),
+        "x-wc-webhook-delivery-id": `relink-${randomUUID()}`,
+        "x-wc-webhook-topic": "product.created",
+      }),
+    );
+    expect(response.status).toBeLessThan(300);
+    const inbox = await db.query<{ status: string }>(
+      `SELECT status FROM integration_webhook_events WHERE connection_id = $1 AND remote_id = '800'`,
+      [second.rows[0].id],
+    );
+    expect(inbox.rows[0]?.status).toBe("deferred");
+    expect(await itemsWithSku("RECONNECT-1")).toHaveLength(1);
   });
 
   it("keeps the source's own shared SKU between two remote records", async () => {

@@ -38,6 +38,8 @@ export interface DuplicateSourceSnapshot {
 export interface DuplicateReportMember extends DuplicateItemMember {
   provenance: string;
   snapshots: DuplicateSourceSnapshot[];
+  /** The row's own variant attributes, for a side-by-side comparison. */
+  attributes: Array<{ name: string; value: string }>;
 }
 
 export interface DuplicateSkuGroup {
@@ -170,6 +172,22 @@ export async function findDuplicateItemGroups(
         mappingsByItem.set(m.local_id, list);
       }
 
+      // The rows' own variant attributes, so a comparison shows what differs
+      // beyond the SKU (issue #1592).
+      const { rows: attributeRows } = await client.query<{ item_id: string; name: string; value: string }>(
+        `SELECT item_id::text, name, value
+           FROM item_variant_attributes
+          WHERE item_id = ANY($1::uuid[])
+          ORDER BY name, value`,
+        [ids],
+      );
+      const attributesByItem = new Map<string, Array<{ name: string; value: string }>>();
+      for (const attribute of attributeRows) {
+        const list = attributesByItem.get(attribute.item_id) ?? [];
+        list.push({ name: attribute.name, value: attribute.value });
+        attributesByItem.set(attribute.item_id, list);
+      }
+
       const groups = new Map<string, DuplicateReportMember[]>();
       for (const row of items) {
         const rowMappings = mappingsByItem.get(row.id) ?? [];
@@ -212,7 +230,12 @@ export async function findDuplicateItemGroups(
           );
         const key = normaliseSku(row.sku)!;
         const list = groups.get(key) ?? [];
-        list.push({ ...member, provenance: describeProvenance(member), snapshots: memberSnapshots });
+        list.push({
+          ...member,
+          provenance: describeProvenance(member),
+          snapshots: memberSnapshots,
+          attributes: attributesByItem.get(row.id) ?? [],
+        });
         groups.set(key, list);
       }
 
