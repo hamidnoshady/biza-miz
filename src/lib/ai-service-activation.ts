@@ -1,16 +1,31 @@
 import { ACTION_CATALOG, type ActionType } from "./ai";
+import { appForApiPath } from "./app-availability";
 import { getBusinessIndustry } from "./industry-guard";
 import { resolveWorkspaceIndustryEligibility } from "./workspace-eligibility";
 import { serviceActivationState } from "./service-activation/app-gate-service";
 import { serviceGateBlocks } from "./service-activation/app-gate";
 import type { ServiceKind, ServiceState } from "./service-activation/catalog";
 import {
-  aiActionServiceForEndpoint,
+  workspaceActionServiceForEndpoint,
   type AiActionServiceIdentity,
 } from "./ai-action-service";
 
 export type { AiActionServiceIdentity };
-export { aiActionServiceForEndpoint };
+
+/**
+ * Resolve the paid service owning an action's canonical endpoint. The app half
+ * lives here (and pulls the app registry); the Workspace half is the pure
+ * mapping in `ai-action-service.ts`, which the client-safe prompt module also
+ * imports.
+ */
+export function aiActionServiceForEndpoint(
+  endpoint: string,
+): AiActionServiceIdentity | null {
+  const pathname = endpoint.split(/[?#]/, 1)[0];
+  const app = appForApiPath(pathname);
+  if (app) return { kind: "app", key: app };
+  return workspaceActionServiceForEndpoint(endpoint);
+}
 
 export type AiActionServiceGate =
   | { allowed: true; service: AiActionServiceIdentity | null }

@@ -3,7 +3,7 @@ import { AEC_AI_TOOL_NAMES } from "@/lib/aec";
 import { WORKSPACE_TOOL_NAMES } from "@/lib/workspace-shared";
 import {
   WORKSPACE_SCOPED_READ_TOOL_NAMES,
-  aiActionServiceForEndpoint,
+  workspaceActionServiceForEndpoint as aiActionServiceForEndpoint,
   isWorkspaceAiActionEndpoint,
   isWorkspaceScopedReadTool,
 } from "@/lib/ai-action-service";

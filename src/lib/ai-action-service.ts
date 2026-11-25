@@ -1,15 +1,14 @@
 /**
- * The assistant/action → paid-service identity, as a PURE module.
+ * The assistant/action → My Workspace identity, as a PURE, dependency-free
+ * module.
  *
  * Issue #1110 needs both `ai.ts` (framework-free, bundled into client
  * components) and `ai-service-activation.ts` (DB-backed) to answer "does this
- * action belong to My Workspace?". Keeping the mapping here — with no `db` and
- * no `next` import — lets both import one table instead of copying the rule.
- *
- * `appForApiPath` is the canonical module registry; Workspace is deliberately
- * not an app there, so it is named explicitly.
+ * action belong to My Workspace?". Keeping the Workspace prefix and the read
+ * tool list here — with no `db`, `next` or app-registry import — lets both
+ * import one table without dragging the industry/app registry into the client
+ * bundle. The app-service mapping stays in `ai-service-activation.ts`.
  */
-import { appForApiPath } from "./app-availability";
 
 export type AiActionServiceKind = "app" | "workspace";
 
@@ -18,23 +17,31 @@ export interface AiActionServiceIdentity {
   key: string;
 }
 
-/** Resolve the paid service owning an action's canonical endpoint, or null. */
-export function aiActionServiceForEndpoint(endpoint: string): AiActionServiceIdentity | null {
+/** Is this endpoint a My Workspace (or AEC project-register) endpoint? */
+export function isWorkspaceAiActionEndpoint(endpoint: string): boolean {
   const pathname = endpoint.split(/[?#]/, 1)[0];
-  const app = appForApiPath(pathname);
-  if (app) return { kind: "app", key: app };
-  if (
+  return (
     pathname === "/api/workspace" ||
     pathname.startsWith("/api/workspace/") ||
     pathname === "/api/aec" ||
     pathname.startsWith("/api/aec/")
-  ) {
-    return {
-      kind: "workspace",
-      key: /(?:^|\/)documents(?:\/|$)/.test(pathname) ? "documents" : "projects",
-    };
-  }
-  return null;
+  );
+}
+
+/**
+ * Resolve a Workspace endpoint's priced capability. The app half of the
+ * mapping is supplied by `ai-service-activation.ts`, which is the only caller
+ * that needs it.
+ */
+export function workspaceActionServiceForEndpoint(
+  endpoint: string,
+): AiActionServiceIdentity | null {
+  if (!isWorkspaceAiActionEndpoint(endpoint)) return null;
+  const pathname = endpoint.split(/[?#]/, 1)[0];
+  return {
+    kind: "workspace",
+    key: /(?:^|\/)documents(?:\/|$)/.test(pathname) ? "documents" : "projects",
+  };
 }
 
 /**
@@ -83,9 +90,4 @@ const WORKSPACE_SCOPED_READ_TOOL_SET = new Set<string>(WORKSPACE_SCOPED_READ_TOO
 /** Is this read tool's subject the My Workspace domain? */
 export function isWorkspaceScopedReadTool(name: string): boolean {
   return WORKSPACE_SCOPED_READ_TOOL_SET.has(name);
-}
-
-/** Does this action type write into My Workspace (project, task, document…)? */
-export function isWorkspaceAiActionEndpoint(endpoint: string): boolean {
-  return aiActionServiceForEndpoint(endpoint)?.kind === "workspace";
 }
